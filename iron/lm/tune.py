@@ -8,8 +8,8 @@ python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors
 python -m iron.lm.tune embedding_gemma2
 ```
 
-The application's ``Runner`` names the calls its operators are timed in
-(``tune_calls``), and the fastest settings found rewrite its model's
+The application's model class names the calls its operators are timed in
+(``tune_calls``), and the fastest settings found rewrite its
 ``profiles/<device>.json`` (``iron.tune.autotune``): review the change with
 ``git diff`` and commit it. Times the cost cache holds are kept unless
 ``--remeasure``; an operator a per-call value moves is also timed at
@@ -25,40 +25,46 @@ from pathlib import Path
 
 from iron.tune import cli as tune_cli
 
-from .runner import Runner
+from .model import Model
 
 
-def application_runner(name: str) -> type[Runner]:
-    """``name``'s ``Runner``, read from its ``model`` module: ``name``
-    dotted under ``iron.applications``.
+def application_model(name: str) -> type[Model]:
+    """``name``'s model class: of those its package exports, the one that
+    plans tuning calls (``tune_calls``), ``name`` dotted under
+    ``iron.applications``.
 
     Raises:
-        ValueError: ``name`` names no such application, or its ``model``
-            module exports no ``Runner``.
+        ValueError: ``name`` names no such application, or its package
+            exports other than one such class.
     """
     try:
-        module = importlib.import_module(f"iron.applications.{name}.model")
+        package = importlib.import_module(f"iron.applications.{name}")
     except ImportError as e:
         raise ValueError(f"no application {name!r}: {e}") from e
-    if "Runner" not in vars(module):
-        raise ValueError(f"iron.applications.{name}.model exports no Runner")
-    return vars(module)["Runner"]
+    exported = [getattr(package, n) for n in getattr(package, "__all__", ())]
+    found = [m for m in exported if hasattr(m, "tune_calls")]
+    if len(found) != 1:
+        raise ValueError(
+            f"iron.applications.{name} exports {len(found)} models with "
+            "tune_calls, not one"
+        )
+    return found[0]
 
 
-def main(name: str, runner: type[Runner], argv: Sequence[str] | None = None) -> None:
-    """The command line that tunes ``name``'s profile: the calls ``runner``
-    plans (``Runner.tune_calls``, on the flags ``Runner.tune_arguments``
-    adds), into its model's profiles directory.
+def main(name: str, model: type[Model], argv: Sequence[str] | None = None) -> None:
+    """The command line that tunes ``name``'s profile: the calls ``model``
+    plans (``tune_calls``, on the flags ``tune_arguments`` adds), into its
+    profiles directory.
     """
     parser = tune_cli.parser(f"Tune {name}'s profile")
-    runner.tune_arguments(parser)
+    model.tune_arguments(parser)
     args = parser.parse_args(argv)
-    tune_cli.tune(args, runner.tune_calls(parser, args), Path(runner.model.profile))
+    tune_cli.tune(args, model.tune_calls(parser, args), Path(model.profile))
 
 
 def cli() -> None:
     """``python -m iron.lm.tune <application>``: tune ``<application>``'s
-    profile (``main``), its ``Runner`` found by ``application_runner``.
+    profile (``main``), its model found by ``application_model``.
     ``--help`` after ``<application>`` lists the rest of its flags; without
     one, only ``application`` is required, since the flags follow from it.
     """
@@ -68,14 +74,14 @@ def cli() -> None:
     parser.add_argument(
         "application",
         help="dotted under iron.applications (e.g. llama, embedding_gemma2); "
-        "its model module's Runner is tuned",
+        "the model its package exports is tuned",
     )
     args, rest = parser.parse_known_args()
     try:
-        runner = application_runner(args.application)
+        model = application_model(args.application)
     except ValueError as e:
         parser.error(str(e))
-    main(args.application, runner, rest)
+    main(args.application, model, rest)
 
 
 if __name__ == "__main__":

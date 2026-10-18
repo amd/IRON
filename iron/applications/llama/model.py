@@ -82,12 +82,6 @@ class LlamaConfig(DecoderConfig):
     )
 
 
-class Llama(CausalLM):
-    """Llama 3 on ``config``'s shape and a checkpoint's ``weights``."""
-
-    profile = Path(__file__).with_name("profiles")
-
-
 SPECIAL_TOKENS = {
     name: 128000 + i
     for i, name in enumerate(
@@ -126,14 +120,16 @@ def tokenizer(path) -> tiktoken.Encoding:
     )
 
 
-class Runner(lm.Runner):
-    """Llama 3.2 1B, from its checkpoint and ``tokenizer.model``."""
+class Llama(CausalLM):
+    """Llama 3 on ``config``'s shape and a checkpoint's ``weights``, from its
+    checkpoint and ``tokenizer.model``.
+    """
 
     config = LlamaConfig
-    model = Llama
+    profile = Path(__file__).with_name("profiles")
     open_tokenizer = staticmethod(tokenizer)
     tokenizer_file = "original/tokenizer.model"
 
 
 if __name__ == "__main__":
-    lm.main(Runner, "Llama 3.2 1B on the NPU")
+    lm.main(Llama)

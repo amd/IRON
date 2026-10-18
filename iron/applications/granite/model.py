@@ -64,10 +64,12 @@ class Granite(CausalLM):
     """Granite on ``config``'s shape and a checkpoint's ``weights``, by its
     names: the (untied) output head is ``lm_head``. Every matrix is read
     ``(out, in)``, as the checkpoint ships it: GEMV's ``(M, K)`` and GEMM's
-    column-major B.
+    column-major B. From its sharded checkpoint and ``tokenizer.json``.
     """
 
+    config = GraniteConfig
     profile = Path(__file__).with_name("profiles")
+    bos = 100283  # "<s>"; eos/pad is "<|im_end|>" = 100257
 
     def __init__(self, config: GraniteConfig, weights):
         super().__init__(config, weights)
@@ -88,13 +90,5 @@ class Granite(CausalLM):
         return x * self.embed_scale
 
 
-class Runner(lm.Runner):
-    """Granite 4.2 3B, from its sharded checkpoint and ``tokenizer.json``."""
-
-    config = GraniteConfig
-    model = Granite
-    bos = 100283  # "<s>"; eos/pad is "<|im_end|>" = 100257
-
-
 if __name__ == "__main__":
-    lm.main(Runner, "Granite 4.2 3B on the NPU")
+    lm.main(Granite)

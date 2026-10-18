@@ -6,7 +6,7 @@
 """SmolVLM-256M-Instruct over ``iron.lm``: its text model (``SmolVLMText``,
 a ``CausalLM`` of Llama's ``DecoderLayer``, 9 heads over 3 KV groups, with an untied
 ``lm_head``), its vision tower (``vision/``, an ``iron.lm.Tower``), and the
-two as one ``iron.lm.Multimodal`` (``VLMRunner.build``), whose image
+two as one ``iron.lm.Multimodal`` (``SmolVLM``), whose image
 placeholders take the tower's soft tokens, judged by transformers' own
 SmolVLM's logits (``hugging_face.py``). Its shape is read from the
 checkpoint's own nested ``config.json``. ``python -m
@@ -61,31 +61,24 @@ class SmolVLMTextConfig(DecoderConfig):
     )
 
 
-class SmolVLMText(CausalLM):
-    """SmolVLM's text backbone on ``config``'s shape and a checkpoint's
-    ``weights``, by its names: the decoder under ``model.text_model``, the
-    untied ``lm_head`` at the root. Every matrix is read ``(out, in)``, as
-    the checkpoint ships it.
-    """
-
-    profile = Path(__file__).with_name("profiles")
-
-    def __init__(self, config, weights):
-        super().__init__(config, weights, decoder=weights.model.text_model)
-
-
 #: ``<|im_start|>``, the turn marker every prompt starts with.
 BOS = 1
 
 
-class Runner(lm.Runner):
-    """SmolVLM-256M-Instruct's text backbone, from its checkpoint and
-    ``tokenizer.json`` (text-only: no image input yet).
+class SmolVLMText(CausalLM):
+    """SmolVLM's text backbone on ``config``'s shape and a checkpoint's
+    ``weights``, by its names: the decoder under ``model.text_model``, the
+    untied ``lm_head`` at the root. Every matrix is read ``(out, in)``, as
+    the checkpoint ships it. From its checkpoint and ``tokenizer.json``
+    (text-only: no image input).
     """
 
     config = SmolVLMTextConfig
-    model = SmolVLMText
+    profile = Path(__file__).with_name("profiles")
     bos = BOS
+
+    def __init__(self, config, weights):
+        super().__init__(config, weights, decoder=weights.model.text_model)
 
     @property
     def hugging_face(self):
@@ -112,31 +105,45 @@ def build_prompt(question: list[int], vision: VisionConfig) -> list[int]:
     return _PREAMBLE_IDS + image + _SUFFIX_IDS + question + _TAIL_IDS
 
 
-class VLMRunner(Runner):
+@dataclasses.dataclass(frozen=True)
+class SmolVLMConfig(SmolVLMTextConfig):
+    """``SmolVLMTextConfig`` and the vision tower's shape, ``vision``."""
+
+    vision: VisionConfig | None = dataclasses.field(default=None, kw_only=True)
+
+    @classmethod
+    def from_checkpoint(cls, path) -> "SmolVLMConfig":
+        text = super().from_checkpoint(path)
+        return dataclasses.replace(text, vision=VisionConfig.from_checkpoint(path))
+
+
+class SmolVLM(Multimodal):
     """SmolVLM-256M-Instruct, its text model and vision tower as one
     ``iron.lm.Multimodal``, from its checkpoint and ``tokenizer.json``.
     """
 
-    def __init__(self, weights_path, tokenizer_path=None, config=None, seed=None):
-        super().__init__(weights_path, tokenizer_path, config, seed)
-        self.vision_config = VisionConfig.from_checkpoint(weights_path)
+    config = SmolVLMConfig
+    bos = BOS
+    hugging_face = SmolVLMText.hugging_face
 
-    def build(self) -> Multimodal:
-        text = SmolVLMText(self.config, self.weights)
-        tower = VisionTower(self.vision_config, self.weights)
-        return Multimodal(text, {self.vision_config.image_token: tower})
+    def __init__(self, config: SmolVLMConfig, weights):
+        self.config = config
+        tower = VisionTower(config.vision, weights)
+        super().__init__(
+            SmolVLMText(config, weights), {config.vision.image_token: tower}
+        )
 
-    def reference(self):
+    def cpu_reference(self):
         """What the model is judged by, its ``logits`` taking the tokens and
         the image: transformers' own SmolVLM, over the drawn weights, else
         its logits recorded beside the checkpoint.
         """
         if self.seed is None:
-            return super().reference()
+            return super().cpu_reference()
         return self.hugging_face.build(
-            "idefics3", self.vision_config, self.weights, **self.config.to_json()
+            "idefics3", self.config.vision, self.text.weights, **self.config.to_json()
         )
 
 
 if __name__ == "__main__":
-    lm.main(Runner, "SmolVLM-256M-Instruct's text backbone on the NPU")
+    lm.main(SmolVLMText)

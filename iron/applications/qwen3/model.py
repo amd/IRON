@@ -35,24 +35,19 @@ class Qwen3Config(DecoderConfig):
 
 
 class Qwen3(CausalLM):
-    """Qwen3 on ``config``'s shape and a checkpoint's ``weights``."""
-
-    profile = Path(__file__).with_name("profiles")
-
-
-class Runner(lm.Runner):
-    """Qwen3 1.7B, from its checkpoint and ``tokenizer.json``.
+    """Qwen3 on ``config``'s shape and a checkpoint's ``weights``, from its
+    checkpoint and ``tokenizer.json``.
 
     Qwen3's ``tokenizer_config.json`` names no ``bos_token``; its
     ``generation_config.json`` names ``<|endoftext|>`` (151643) as both
     ``bos_token_id`` and ``pad_token_id``, which is used here as every
-    prompt's leading token, as ``lm.Runner`` requires one.
+    prompt's leading token, as ``lm.Model`` requires one.
     """
 
     config = Qwen3Config
-    model = Qwen3
+    profile = Path(__file__).with_name("profiles")
     bos = 151643
 
 
 if __name__ == "__main__":
-    lm.main(Runner, "Qwen3 1.7B on the NPU")
+    lm.main(Qwen3)

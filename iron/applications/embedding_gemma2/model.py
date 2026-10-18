@@ -281,18 +281,6 @@ class Multimodal(lm.Multimodal):
         tokens = self.tokenizer.encode(text, task, audio_tokens, image_tokens)
         return self.encode(tokens, dims, audio, image)
 
-
-class Runner(lm.Runner):
-    """EmbeddingGemma 2 as ``iron.lm.tune`` tunes it: every version of
-    ``Multimodal`` (the text encoder, each tower and the merge) at its
-    longest call, on weights it never reads, unread from the shapes the
-    checkpoint's header gives. The towers' graphs alone run designs these
-    hold, so the one profile in ``profiles/`` serves them.
-    """
-
-    config = Config()
-    model = Multimodal
-
     @classmethod
     def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
         """The checkpoint whose header gives the weights' shapes; every
@@ -310,8 +298,13 @@ class Runner(lm.Runner):
     def tune_calls(
         cls, parser: argparse.ArgumentParser, args: argparse.Namespace
     ) -> list[Call]:
+        """Every version (the text encoder, each tower and the merge) at its
+        longest call, on weights it never reads, unread from the shapes the
+        checkpoint's header gives. The towers' graphs alone run designs
+        these hold, so the one profile in ``profiles/`` serves them.
+        """
         weights = Checkpoint(args.checkpoint / "model.safetensors").tree("unread")
-        graph = cls.model(cls.config, weights)
+        graph = cls(Config(), weights)
         return [
             Call(graph.trace(**shapes), graph.longest()) for shapes in graph.shapes()
         ]

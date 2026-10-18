@@ -12,9 +12,11 @@ in-process.
 a host without the checkpoint, and ``--max-seq-len`` at another context.
 """
 
+import functools
+
 import pytest
 
-from iron.applications.lfm2.model import Runner
+from iron.applications.lfm2 import Lfm2
 from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
@@ -32,28 +34,25 @@ pytestmark = pytest.mark.supported_devices("npu2")
 
 
 @pytest.fixture(scope="module")
-def runner(request):
-    """``Runner.from_options``, the same way the CLI builds one: the
+def load(request):
+    """``Lfm2.load`` of the checkpoint, as the CLI loads it: at the
     options pytest's own ``--random-weights``/``--max-seq-len`` flags
-    (``conftest.py``'s, ``Runner.FLAGS``) were given, as option strings.
+    (``conftest.py``'s, ``iron.lm.cli.FLAGS``) were given.
     """
     seed = request.config.getoption("--random-weights")
     max_seq_len = request.config.getoption("--max-seq-len")
-    options = [str(WEIGHTS)]
     if seed is not None:
         require(WEIGHTS, CONFIG)
-        options += ["--random-weights", str(seed)]
     else:
         require(WEIGHTS, TOKENIZER, CONFIG)
-        options.append(str(TOKENIZER))
-    if max_seq_len is not None:
-        options += ["--max-seq-len", str(max_seq_len)]
-    return Runner.from_options(options)
+    return functools.partial(
+        Lfm2.load, WEIGHTS.parent, seed=seed, max_seq_len=max_seq_len
+    )
 
 
 @pytest.fixture(scope="module")
-def model(runner):
-    yield runner.npu()
+def model(load):
+    yield load()
 
 
 # KL(fp32 CPU || NPU), teacher-forced: test_lfm2_1_2b_accuracy measures a
@@ -72,16 +71,16 @@ MAX_KL = {"Mean": 0.02, "P90": 0.03, "Max": 0.05}
     [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
     ids=[f"lfm2_1_2b_prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
 )
-def test_lfm2_1_2b(runner, model, prompt_len, num_tokens, record_property):
-    check_generation(runner, model, prompt_len, num_tokens, record=record_property)
+def test_lfm2_1_2b(model, prompt_len, num_tokens, record_property):
+    check_generation(model, prompt_len, num_tokens, record=record_property)
 
 
-def test_lfm2_1_2b_accuracy(runner, model, record_property):
-    check_accuracy(runner, model, MAX_KL, record=record_property)
+def test_lfm2_1_2b_accuracy(model, record_property):
+    check_accuracy(model, MAX_KL, record=record_property)
 
 
-def test_lfm2_1_2b_determinism(runner, model, record_property):
-    check_determinism(runner, model, record=record_property)
+def test_lfm2_1_2b_determinism(model, record_property):
+    check_determinism(model, record=record_property)
 
 
 # 12000 characters of prompt.txt are a full chunk and most of a second,
@@ -89,15 +88,15 @@ def test_lfm2_1_2b_determinism(runner, model, record_property):
 LONG = 12000
 
 
-def test_lfm2_1_2b_accuracy_across_chunks(runner, model, record_property):
+def test_lfm2_1_2b_accuracy_across_chunks(model, record_property):
     """The prompt's two chunks and two decode steps after them, against the
     float32 reference over the whole prompt (each step a forward over 3k
     tokens on the host, so only a few).
     """
-    assert len(runner.prompt(LONG)) > runner.config.prefill_chunk
-    check_accuracy(runner, model, MAX_KL, 3, LONG, record=record_property)
+    assert len(model.prompt(LONG)) > model.config.prefill_chunk
+    check_accuracy(model, MAX_KL, 3, LONG, record=record_property)
 
 
-def test_lfm2_1_2b_chat_turn(runner, model, record_property):
+def test_lfm2_1_2b_chat_turn(model, record_property):
     """A turn of 1000 tokens reruns the second chunk alone."""
-    check_chat_turn(runner, model, LONG, 1000, record=record_property)
+    check_chat_turn(model, LONG, 1000, record=record_property)

@@ -15,7 +15,6 @@ the checkpoint's shapes.
 
 import dataclasses
 import importlib
-import importlib.util
 import pkgutil
 from pathlib import Path
 
@@ -23,15 +22,15 @@ import aie.utils as aie_utils
 import pytest
 
 import iron.applications
-from iron.applications.granite.model import Runner as Granite
-from iron.applications.idefics3.model import Runner as SmolVLM
-from iron.applications.lfm2.model import Runner as Lfm2
-from iron.applications.llama.model import Runner as Llama
-from iron.applications.phi3.model import Runner as Phi4
-from iron.applications.qwen2.model import Runner as Qwen2
-from iron.applications.qwen3.model import Runner as Qwen3
-from iron.applications.smollm2.model import Runner as SmolLM2
-from iron.lm import CausalLM, Checkpoint, EncoderDecoder, Runner
+from iron.applications.granite import Granite
+from iron.applications.idefics3 import SmolVLMText
+from iron.applications.lfm2 import Lfm2
+from iron.applications.llama import Llama
+from iron.applications.phi3 import Phi4
+from iron.applications.qwen2 import Qwen2
+from iron.applications.qwen3 import Qwen3
+from iron.applications.smollm2 import SmolLM2
+from iron.lm import CausalLM, Checkpoint, EncoderDecoder
 from iron.lm.testing import (
     check_deep_decode,
     check_deep_prompt,
@@ -57,7 +56,7 @@ class Application:
     checkpoint, so its absence fails there rather than skips.
     """
 
-    runner: type[Runner]
+    model: type[CausalLM]
     directory: str
     weights: str
     tokenizer: str
@@ -125,41 +124,25 @@ APPLICATIONS = {
     ),
     "lfm2_1.2b": Application(Lfm2, "lfm2-1.2b", "model.safetensors", "tokenizer.json"),
     "smolvlm_256m": Application(
-        SmolVLM, "smolvlm-256m-instruct", "model.safetensors", "tokenizer.json"
+        SmolVLMText, "smolvlm-256m-instruct", "model.safetensors", "tokenizer.json"
     ),
 }
 
 
 def test_every_decoder_application_is_held_to_its_context():
-    """Each application whose ``Runner`` runs a ``CausalLM`` has a
+    """Each application whose package exports a ``CausalLM`` has a
     checkpoint here; an encoder-decoder's context follows the clip it
     encodes, not a text prompt's.
     """
     found = set()
     for package in pkgutil.iter_modules(iron.applications.__path__):
-        name = f"iron.applications.{package.name}.model"
-        if importlib.util.find_spec(name) is None:
-            continue
-        runner = vars(importlib.import_module(name)).get("Runner")
-        if not isinstance(runner, type):
-            continue
-        if issubclass(runner.model, CausalLM) and not issubclass(
-            runner.model, EncoderDecoder
-        ):
-            found.add(package.name)
-    held = {a.runner.__module__.split(".")[2] for a in APPLICATIONS.values()}
+        module = importlib.import_module(f"iron.applications.{package.name}")
+        for name in getattr(module, "__all__", ()):
+            model = getattr(module, name)
+            if issubclass(model, CausalLM) and not issubclass(model, EncoderDecoder):
+                found.add(package.name)
+    held = {a.model.__module__.split(".")[2] for a in APPLICATIONS.values()}
     assert found == held
-
-
-def test_every_application_s_model_loads_through_its_runner():
-    """``Model.load`` builds the ``Runner`` that names the model."""
-    for package in pkgutil.iter_modules(iron.applications.__path__):
-        name = f"iron.applications.{package.name}.model"
-        if importlib.util.find_spec(name) is None:
-            continue
-        runner = vars(importlib.import_module(name)).get("Runner")
-        if isinstance(runner, type):
-            assert runner.model.runner is runner, name
 
 
 @pytest.mark.parametrize("version", ["decode", "prompt"])
@@ -171,14 +154,12 @@ def test_nothing_grows_with_the_context(application, version):
     """
     app = APPLICATIONS[application]
     app.require(app.path, app.path.with_name("config.json"))
-    config = app.runner.default_config(app.path)
+    config = app.model.default_config(app.path)
     weights = Checkpoint(app.path).tree("unread")
     C = config.prefill_chunk
     traces = []
     for chunks in (1, 2, 4):
-        model = app.runner.model(
-            dataclasses.replace(config, max_seq_len=chunks * C), weights
-        )
+        model = app.model(dataclasses.replace(config, max_seq_len=chunks * C), weights)
         traces.append(model.trace(**model.shapes()[0 if version == "decode" else 1]))
 
     def activations(t):
@@ -219,46 +200,45 @@ FORMS = [
 
 @pytest.fixture(scope="module", params=FORMS)
 def loaded(request):
-    """An application's checkpoint, runner and model, compiled and loaded once:
+    """An application's checkpoint and model, compiled and loaded once:
     a full ELF, or with ``_each_step`` an xclbin a step, the host starting
     each on the token the last one drew.
     """
     app = APPLICATIONS[request.param.removesuffix("_each_step")]
     seed = request.config.getoption("--random-weights")
     max_seq_len = request.config.getoption("--max-seq-len")
-    options = [str(app.path)]
     if seed is not None:
         app.require(app.path, app.path.with_name("config.json"))
-        options += ["--random-weights", str(seed)]
     else:
         tokenizer = weights_dir(app.directory) / app.tokenizer
         app.require(app.path, tokenizer, app.path.with_name("config.json"))
-        options.append(str(tokenizer))
-    if max_seq_len is not None:
-        options += ["--max-seq-len", str(max_seq_len)]
-    runner = app.runner.from_options(options)
     each_step = request.param.endswith("_each_step")
-    model = runner.npu(full_elf=False if each_step else None)
+    model = app.model.load(
+        app.path.parent,
+        seed=seed,
+        max_seq_len=max_seq_len,
+        full_elf=False if each_step else None,
+    )
     assert model.device_loop is not each_step
-    yield app, runner, model
+    yield app, model
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 
 
 def test_decode_deep_in_the_cache(loaded, record_property):
     """The deepest step the caches hold, at ``max_seq_len - 1``."""
-    app, runner, model = loaded
-    position = runner.config.max_seq_len - 1
-    check_deep_decode(runner, model, position, app.deep_kl, record=record_property)
+    app, model = loaded
+    position = model.config.max_seq_len - 1
+    check_deep_decode(model, position, app.deep_kl, record=record_property)
 
 
 def test_prompt_deep_in_the_cache(loaded, record_property):
     """The chunk holding ``max_seq_len - 1``, its rows: the longest
     dispatch a prompt makes, over the whole context.
     """
-    app, runner, model = loaded
-    rows = runner.config.prefill_chunk
-    check_deep_prompt(runner, model, rows, app.deep_kl, record=record_property)
+    app, model = loaded
+    rows = model.config.prefill_chunk
+    check_deep_prompt(model, rows, app.deep_kl, record=record_property)
 
 
 @pytest.mark.bench
@@ -266,10 +246,10 @@ def test_prompt_time_at_8k(loaded, record_property):
     """Time to the first token after an 8192-token prompt, four whole
     chunks, each timed run a fresh prompt.
     """
-    app, runner, model = loaded
-    if runner.config.max_seq_len < 8192:
-        pytest.skip(f"the context served here is {runner.config.max_seq_len}")
-    check_prompt_time(runner, model, 8192, record=record_property)
+    app, model = loaded
+    if model.config.max_seq_len < 8192:
+        pytest.skip(f"the context served here is {model.config.max_seq_len}")
+    check_prompt_time(model, 8192, record=record_property)
 
 
 @pytest.mark.extensive
@@ -277,7 +257,5 @@ def test_prompt_time_at_the_whole_context(loaded, record_property):
     """Time to the first token after a prompt filling the whole context
     served, once: the longest a prompt takes.
     """
-    app, runner, model = loaded
-    check_prompt_time(
-        runner, model, runner.config.max_seq_len, 1, record=record_property
-    )
+    app, model = loaded
+    check_prompt_time(model, model.config.max_seq_len, 1, record=record_property)

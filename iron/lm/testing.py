@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """What a model's device test checks: speed, accuracy against the
-CPU reference, and determinism, each over a ``Runner`` and the model it
-loaded, its figures through the test's ``record_property``; and where it
-finds the model's files.
+CPU reference, and determinism, each over a model ``Model.load`` loaded,
+its figures through the test's ``record_property``; and where it finds the
+model's files.
 """
 
 import dataclasses
@@ -100,28 +100,28 @@ def require(*files: Path) -> None:
     pytest.skip(f"not found outside CI: {missing}")
 
 
-def prompt(runner, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
-    tokens = runner.prompt(chars, skip=skip)
-    assert len(tokens) + num_tokens <= runner.config.max_seq_len
+def prompt(model, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
+    tokens = model.prompt(chars, skip=skip)
+    assert len(tokens) + num_tokens <= model.config.max_seq_len
     return tokens
 
 
-def check_generation(runner, model, prompt_len: int, num_tokens: int, *, record):
+def check_generation(model, prompt_len: int, num_tokens: int, *, record):
     """Sample ``num_tokens`` on the device after a prompt of ``prompt_len``
     characters (``CausalLM.generate``); record the time to the first token
     and the tokens per second after it. Returns the prompt and the tokens
     drawn.
     """
-    tokens = prompt(runner, prompt_len, num_tokens)
+    tokens = prompt(model, prompt_len, num_tokens)
     drawn, first, later = model.generate(tokens, num_tokens, Sampler())
-    print(runner.decode(drawn))
+    print(drawn if model.tokenizer is None else model.tokenizer.decode(drawn))
     record("TTFT", first)
     if num_tokens > 1:
         record("TPS", 1 / later)
     return tokens, drawn
 
 
-def check_prompt_time(runner, model, length: int, runs: int = 3, *, record):
+def check_prompt_time(model, length: int, runs: int = 3, *, record):
     """Record the median seconds to the first token after a prompt of
     ``length`` tokens over ``runs`` timed runs, each a fresh prompt (random
     ids after BOS: a prompt's time does not follow its ids), so no run
@@ -130,22 +130,20 @@ def check_prompt_time(runner, model, length: int, runs: int = 3, *, record):
     rng = np.random.default_rng(SEED)
     seconds = []
     for _ in range(runs):
-        tokens = [runner.bos, *rng.integers(0, runner.config.vocab_size, length - 1)]
+        tokens = [model.bos, *rng.integers(0, model.config.vocab_size, length - 1)]
         _, first, _ = model.generate(tokens, 1, Sampler())
         seconds.append(first)
     record("TTFT", float(np.median(seconds)))
     record("Tokens", length)
 
 
-def check_device_sampling(runner, model, prompt_len: int, num_tokens: int, *, record):
+def check_device_sampling(model, prompt_len: int, num_tokens: int, *, record):
     """Sample ``num_tokens`` on the device after a prompt of ``prompt_len``
     characters (``CausalLM.generate``); record its time to the first token
     and tokens per second, then sample again on the host from each step's
     logits from the same seed: the text is the same, token for token.
     """
-    tokens, drawn = check_generation(
-        runner, model, prompt_len, num_tokens, record=record
-    )
+    tokens, drawn = check_generation(model, prompt_len, num_tokens, record=record)
     host, _, _ = generate_on_host(model, tokens, num_tokens, Sampler())
     differing = [i for i, (a, b) in enumerate(zip(drawn, host)) if a != b]
     record("DifferingTokens", len(differing))
@@ -179,7 +177,6 @@ def assert_close(got, want: np.ndarray, what: str = "the logits") -> None:
 
 
 def check_accuracy(
-    runner,
     model,
     bounds: dict[str, float],
     num_tokens: int = 40,
@@ -192,8 +189,8 @@ def check_accuracy(
     ``bounds`` (``{"Mean": .., "P90": .., "Max": ..}``). The mean and p90
     bound a drift across many steps, the max a single broken step.
     """
-    tokens = prompt(runner, chars, num_tokens)
-    results = accuracy(model, runner.reference(), tokens, num_tokens)
+    tokens = prompt(model, chars, num_tokens)
+    results = accuracy(model, model.cpu_reference(), tokens, num_tokens)
     stats = kl_stats(results)
     for stat, value in stats.items():
         record(f"{stat}KL", float(value))
@@ -236,7 +233,6 @@ def check_embedding(
 
 
 def check_determinism(
-    runner,
     model,
     num_tokens: int = 4,
     rounds: int = 5,
@@ -251,8 +247,8 @@ def check_determinism(
     flush fails every run rather than some.
     """
     prompts = [
-        prompt(runner, chars, num_tokens),
-        prompt(runner, chars, num_tokens, skip=chars),
+        prompt(model, chars, num_tokens),
+        prompt(model, chars, num_tokens, skip=chars),
     ]
     differing = determinism(model, prompts, num_tokens, rounds)
     record("DifferingRuns", differing)
@@ -260,9 +256,7 @@ def check_determinism(
     assert differing == 0, f"{differing}/{total} runs' logits differ bitwise"
 
 
-def check_chat_turn(
-    runner, model, chars: int, turn: int, num_tokens: int = 2, *, record
-):
+def check_chat_turn(model, chars: int, turn: int, num_tokens: int = 2, *, record):
     """A prompt extended by a turn, as a chat's next message extends it:
     the model runs from the turn's first token (``CausalLM.resume``) over
     the caches the prompt left, and its logits, and those of the greedy
@@ -272,10 +266,10 @@ def check_chat_turn(
     Before the run from scratch a prompt of other text overwrites the
     caches, so it reuses nothing of the turn's. Records both runs' seconds.
     """
-    whole = prompt(runner, chars, num_tokens)
-    C = runner.config.prefill_chunk
+    whole = prompt(model, chars, num_tokens)
+    C = model.config.prefill_chunk
     assert (len(whole) - turn) // C, "the turn reuses no chunk"
-    other = prompt(runner, chars, 0, skip=1)
+    other = prompt(model, chars, 0, skip=1)
     runs = []
     for name, before in (("Turn", whole[:-turn]), ("Scratch", other)):
         model.logits(before)
@@ -286,9 +280,7 @@ def check_chat_turn(
     assert not steps, f"the turn's logits differ from scratch's at steps {steps}"
 
 
-def check_deep_decode(
-    runner, model, position: int, bound: float, chars: int = 1024, *, record
-):
+def check_deep_decode(model, position: int, bound: float, chars: int = 1024, *, record):
     """A decode step at ``position``, deep in the caches, against the
     graph's own reference (``Graph.reference``: each operator's
     ``reference()`` on host tensors, the caches as state), for a context
@@ -299,7 +291,7 @@ def check_deep_decode(
     The caches hold a real prompt, ``chars`` characters of it, repeated up
     to ``position`` (``_fill_caches``).
     """
-    tokens = prompt(runner, chars, 1)
+    tokens = prompt(model, chars, 1)
     token = greedy(model.logits(tokens))
     # A decode step takes the token; the device gathers its embedding row.
     values = dict(token=token, position=position, start=0, rows=1, rope_start=0)
@@ -313,9 +305,7 @@ def check_deep_decode(
     assert kl <= bound, f"at {position}: KL {kl} > {bound}"
 
 
-def check_deep_prompt(
-    runner, model, rows: int, bound: float, chars: int = 1024, *, record
-):
+def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, record):
     """The deepest prompt chunk, the one holding position ``max_seq_len -
     1``, at most ``rows`` rows of it, against the graph's own reference
     within ``bound`` of its KL, every position before it filled as
@@ -323,9 +313,9 @@ def check_deep_prompt(
     context. Records its seconds, the longest a prompt chunk takes, which
     the driver's watchdog bounds where a chunk is one dispatch.
     """
-    tokens = prompt(runner, chars, 1)
+    tokens = prompt(model, chars, 1)
     model.logits(tokens)
-    C, L = runner.config.prefill_chunk, runner.config.max_seq_len
+    C, L = model.config.prefill_chunk, model.config.max_seq_len
     deepest = (L - 1) // C
     rows = min(rows, L - deepest * C)
     chunk = np.resize(tokens, rows)

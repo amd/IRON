@@ -24,17 +24,13 @@ from iron.lm import CausalLM, DecoderConfig
 
 
 class Qwen2(CausalLM):
-    """Qwen 2.5 on ``config``'s shape and a checkpoint's ``weights``."""
+    """Qwen 2.5 on ``config``'s shape and a checkpoint's ``weights``, from
+    its checkpoint and ``tokenizer.json``.
+    """
 
+    config = DecoderConfig
     profile = Path(__file__).with_name("profiles")
 
 
-class Runner(lm.Runner):
-    """Qwen 2.5 1.5B Instruct, from its checkpoint and ``tokenizer.json``."""
-
-    config = DecoderConfig
-    model = Qwen2
-
-
 if __name__ == "__main__":
-    lm.main(Runner, "Qwen 2.5 1.5B Instruct on the NPU")
+    lm.main(Qwen2)

@@ -132,8 +132,12 @@ class Phi4Config(DecoderConfig):
 
 
 class Phi4(CausalLM):
-    """Phi-4-mini-instruct on ``config``'s shape and a checkpoint's ``weights``."""
+    """Phi-4-mini-instruct on ``config``'s shape and a checkpoint's
+    ``weights``, from its checkpoint (one file, or a sharded index) and
+    ``tokenizer.json``.
+    """
 
+    config = Phi4Config
     profile = Path(__file__).with_name("profiles")
 
     def sanitize(self, w):
@@ -158,14 +162,5 @@ class Phi4(CausalLM):
         )
 
 
-class Runner(lm.Runner):
-    """Phi-4-mini-instruct, from its checkpoint (one file, or a sharded
-    index) and ``tokenizer.json``.
-    """
-
-    config = Phi4Config
-    model = Phi4
-
-
 if __name__ == "__main__":
-    lm.main(Runner, "Phi-4-mini-instruct on the NPU")
+    lm.main(Phi4)

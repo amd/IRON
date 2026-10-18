@@ -12,10 +12,12 @@ and every test calls it in-process.
 a host without the checkpoint, and ``--max-seq-len`` at another context.
 """
 
+import functools
+
 import aie.utils as aie_utils
 import pytest
 
-from iron.applications.granite.model import Runner
+from iron.applications.granite import Granite
 from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
@@ -35,33 +37,30 @@ pytestmark = pytest.mark.supported_devices("npu2")
 
 
 @pytest.fixture(scope="module")
-def runner(request):
-    """``Runner.from_options``, the same way the CLI builds one: the
+def load(request):
+    """``Granite.load`` of the checkpoint, as the CLI loads it: at the
     options pytest's own ``--random-weights``/``--max-seq-len`` flags
-    (``conftest.py``'s, ``Runner.FLAGS``) were given, as option strings.
+    (``conftest.py``'s, ``iron.lm.cli.FLAGS``) were given.
     """
     seed = request.config.getoption("--random-weights")
     max_seq_len = request.config.getoption("--max-seq-len")
-    options = [str(WEIGHTS)]
     if seed is not None:
         require(WEIGHTS, CONFIG)
-        options += ["--random-weights", str(seed)]
     else:
         require(WEIGHTS, TOKENIZER, CONFIG)
-        options.append(str(TOKENIZER))
-    if max_seq_len is not None:
-        options += ["--max-seq-len", str(max_seq_len)]
-    return Runner.from_options(options)
+    return functools.partial(
+        Granite.load, WEIGHTS.parent, seed=seed, max_seq_len=max_seq_len
+    )
 
 
 @pytest.fixture(scope="module")
-def model(runner):
+def model(load):
     """The model, compiled and loaded once (a full ELF: the arena's banks
     hold its ~10 GB of weights and caches within aiebu's 32-bit
     relocation addend, past which Granite's decode step did not link
     before).
     """
-    loaded = runner.npu()
+    loaded = load()
     assert loaded.device_loop
     yield loaded
 
@@ -86,18 +85,18 @@ class TestEachStep:
     """
 
     @pytest.fixture(scope="class")
-    def model(self, runner):
-        model = runner.npu(full_elf=False)
+    def model(self, load):
+        model = load(full_elf=False)
         assert not model.device_loop
         yield model
         if aie_utils.DefaultNPURuntime is not None:
             aie_utils.DefaultNPURuntime.cleanup()
 
-    def test_granite_4_2_3b_each_step_accuracy(self, runner, model, record_property):
-        check_accuracy(runner, model, MAX_KL, 20, 512, record=record_property)
+    def test_granite_4_2_3b_each_step_accuracy(self, model, record_property):
+        check_accuracy(model, MAX_KL, 20, 512, record=record_property)
 
-    def test_granite_4_2_3b_each_step_determinism(self, runner, model, record_property):
-        check_determinism(runner, model, 4, 3, 128, record=record_property)
+    def test_granite_4_2_3b_each_step_determinism(self, model, record_property):
+        check_determinism(model, 4, 3, 128, record=record_property)
 
 
 @pytest.mark.parametrize(
@@ -105,23 +104,23 @@ class TestEachStep:
     [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
     ids=[f"granite_4_2_3b_prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
 )
-def test_granite_4_2_3b(runner, model, prompt_len, num_tokens, record_property):
-    check_generation(runner, model, prompt_len, num_tokens, record=record_property)
+def test_granite_4_2_3b(model, prompt_len, num_tokens, record_property):
+    check_generation(model, prompt_len, num_tokens, record=record_property)
 
 
 # The device draws every token and starts every decode step itself; from the
 # same seed its text is the host loop's. The figures are the device loop's.
 @pytest.mark.bench
-def test_granite_4_2_3b_device_loop(runner, model, record_property):
-    check_device_sampling(runner, model, 1024, 100, record=record_property)
+def test_granite_4_2_3b_device_loop(model, record_property):
+    check_device_sampling(model, 1024, 100, record=record_property)
 
 
-def test_granite_4_2_3b_accuracy(runner, model, record_property):
-    check_accuracy(runner, model, MAX_KL, record=record_property)
+def test_granite_4_2_3b_accuracy(model, record_property):
+    check_accuracy(model, MAX_KL, record=record_property)
 
 
-def test_granite_4_2_3b_determinism(runner, model, record_property):
-    check_determinism(runner, model, record=record_property)
+def test_granite_4_2_3b_determinism(model, record_property):
+    check_determinism(model, record=record_property)
 
 
 # 12000 characters of prompt.txt are a full chunk and most of a second for
@@ -129,15 +128,15 @@ def test_granite_4_2_3b_determinism(runner, model, record_property):
 LONG = 12000
 
 
-def test_granite_4_2_3b_accuracy_across_chunks(runner, model, record_property):
+def test_granite_4_2_3b_accuracy_across_chunks(model, record_property):
     """The prompt's two chunks and two decode steps after them, against the
     float32 reference over the whole prompt (each step a forward over the
     chunks on the host, so only a few).
     """
-    assert len(runner.prompt(LONG)) > runner.config.prefill_chunk
-    check_accuracy(runner, model, MAX_KL, 3, LONG, record=record_property)
+    assert len(model.prompt(LONG)) > model.config.prefill_chunk
+    check_accuracy(model, MAX_KL, 3, LONG, record=record_property)
 
 
-def test_granite_4_2_3b_chat_turn(runner, model, record_property):
+def test_granite_4_2_3b_chat_turn(model, record_property):
     """A turn of 1000 tokens reruns the second chunk alone."""
-    check_chat_turn(runner, model, LONG, 1000, record=record_property)
+    check_chat_turn(model, LONG, 1000, record=record_property)

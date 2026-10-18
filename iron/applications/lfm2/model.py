@@ -88,9 +88,11 @@ class Lfm2(CausalLM):
     """LFM2-1.2B on ``config``'s shape and a checkpoint's ``weights``, by
     its names: each layer either an attention layer's weights or a conv
     layer's, distinguished by which the checkpoint gives it. Every matrix
-    is read ``(out, in)``, as the checkpoint ships it.
+    is read ``(out, in)``, as the checkpoint ships it. From its checkpoint
+    and ``tokenizer.json``.
     """
 
+    config = Lfm2Config
     profile = Path(__file__).with_name("profiles")
 
     def __init__(self, config: Lfm2Config, weights):
@@ -172,12 +174,5 @@ class Lfm2(CausalLM):
         return F.linear(cc * total, w.out_proj.weight)
 
 
-class Runner(lm.Runner):
-    """LFM2-1.2B, from its checkpoint and ``tokenizer.json``."""
-
-    config = Lfm2Config
-    model = Lfm2
-
-
 if __name__ == "__main__":
-    lm.main(Runner, "LFM2-1.2B on the NPU")
+    lm.main(Lfm2)

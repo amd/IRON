@@ -9,8 +9,8 @@ themselves are applications over it, each a package of
 
 from .checkpoint import Checkpoint
 from .config import Config, DecoderConfig, rope_angles
-from .model import Model, OnHost
-from .runner import Runner, Tokenizer, main, prompt_text
+from .model import Model, OnHost, Tokenizer, prompt_text
+from .cli import main
 from .blocks import (
     MLP,
     Attention,
@@ -58,7 +58,6 @@ __all__ = [
     "Model",
     "Multimodal",
     "OnHost",
-    "Runner",
     "Sampler",
     "Tokenizer",
     "Tower",

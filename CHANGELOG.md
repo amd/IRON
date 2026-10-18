@@ -27,9 +27,9 @@ public API adds its entry under Unreleased.
 - `Model.sanitize(w)`, which renames a checkpoint's modules to the names the
   parts read, once at load.
 - `iron.lm.Tokenizer(encoding, bos)`, a prompt's tokenizer: called on text
-  it gives the ids with `bos` first, and `decode` gives text back. Every
-  runner's `tokenizer` is one, over `tokenizer.json` unless the runner
-  opens another.
+  it gives the ids with `bos` first, and `decode` gives text back. A
+  loaded model's `tokenizer` is one, over `tokenizer.json` unless the
+  model class opens another.
 - Goldens recorded from transformers, with a fingerprint of the config and
   weights they came from. `pytest --record-goldens` (or `IRON_RECORD_GOLDENS`)
   records them.
@@ -71,14 +71,19 @@ public API adds its entry under Unreleased.
   its reference: within `LOGITS` (5%) of the largest, and the same argmax
   where the reference's top two lie further apart than that.
 - `Model.loaded()`, the hook `Model.load_versions` hands the compiled
-  versions to; `Runner.build()` makes the model `npu()` loads.
+  versions to.
 - `BuiltArray.program()`, a built array alone with its operator's own
   sequence, as a `Program`.
-- `CausalLM.load(path)`: the model of a Hugging Face repository's files, a
-  local directory or a repository id downloaded once, fitted, compiled and
-  loaded, its tokenizer as `model.tokenizer`; `Llama.load` is the first,
-  and `iron.applications.llama` exports `Llama`. `Runner.tokenizer_file`
-  names the tokenizer's file in the repository.
+- `Model.load(path, seed=, max_seq_len=, full_elf=)`: the model of a
+  Hugging Face repository's files, a local directory or a repository id
+  downloaded once, fitted, compiled and loaded, its tokenizer as
+  `model.tokenizer`; `Model.from_checkpoint` is the same, not yet loaded.
+  The model class names its `config`, `tokenizer_file`, `open_tokenizer`
+  and `hugging_face`; `fit`, `default_config`, `tune_arguments` and
+  `tune_calls` are its classmethods, and `prompt` and `cpu_reference` its
+  methods. Each application's package exports its model class.
+- `lm.main(Model)`, a model's command line, whose positional argument is
+  the path or repository id `load` takes.
 - `OnHost.generate`, which draws on the host (`generate_on_host`).
 
 ### Changed
@@ -103,8 +108,7 @@ public API adds its entry under Unreleased.
   inputs, packaging and build directory; of a `Profile`, its operators; of
   a model, its config, `max_seq_len` and whether it is loaded.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
-  `runner`; `iron.lm`'s own names are unchanged.
-- A `Runner` subclass is its model's `runner`, which `CausalLM.load` builds.
+  `cli`.
 - An operator declares with aie.iron's markers: `In`, `Out` and `InOut`
   come from `aie.iron` (`x = In(M, K, obj_shape=...)`), and every field is
   annotated `CompileTime[T]` or `DispatchTime[T]` from `aie.iron`, which
@@ -125,7 +129,7 @@ public API adds its entry under Unreleased.
   classmethod above.
 - `Sampler(temperature, top_k, rng=None)` is `Sampler(temperature, top_k,
   seed=SEED)`.
-- `Runner.encode(text)` is `runner.tokenizer(text)`.
+- `Runner.encode(text)` is `model.tokenizer(text)`.
 - GEMM's `dtype_in` and `dtype_out` are `input_dtype` and `output_dtype`,
   the names its kernel factory (`aie.iron.kernels.linalg.mm`) takes.
 - An operator's nested `Array` annotates only the library's views it reads
@@ -159,11 +163,10 @@ public API adds its entry under Unreleased.
 - A missing golden fails `check_accuracy` instead of skipping it, and a golden
   whose fingerprint no longer matches is refused.
 - `CausalLM.generate` times the first token from the call.
-- `Sampler` defaults to temperature 0.7 and top-k 50, a runner's
+- `Sampler` defaults to temperature 0.7 and top-k 50, a model CLI's
   `--temperature` and `--top-k` take those defaults, and with no `rng` it
   draws from one seeded at `SEED`.
 - `Checkpoint.tree("random")` draws a bias about zero, not one.
-- `Runner.npu()` takes only `full_elf`.
 
 - `Operand.count`, `Operator.device()` and `Operator.configuration()` are
   `Operand.lanes`, `Operator.array_device()` and
@@ -178,8 +181,9 @@ public API adds its entry under Unreleased.
   Sigmoid finish applied before.
 - IRON requires Python 3.11.
 - An `Encoder`'s per-call row count is `rows`, as a causal model's is.
-- `Runner.bos` is read from the checkpoint's `config.json` unless a runner
-  names one; a file without `bos_token_id` raises a `KeyError` naming it.
+- `Model.bos` is read from the checkpoint's `config.json`, else its
+  `generation_config.json`, unless the model class names one; with neither
+  naming `bos_token_id` it raises a `KeyError`.
 - `HuggingFace.build` refuses a weight the model does not hold, as it
   refuses one the model lacks.
 - `Golden.logits` keys on the tokens and any clip or image array beside
@@ -228,6 +232,10 @@ public API adds its entry under Unreleased.
 - `Derived`; computed weights live in `sanitize`'s output or on the model.
 - `CausalLM.head` and `Encoder.norm()` overrides, replaced by `final_norm`;
   `CausalLM.embed`.
+- `Runner`, its `runner` back-pointer and `VLMRunner`: the model class is
+  what loads (`Model.load`); idefics3's whole model is `SmolVLM`. A model's
+  command line takes the checkpoint's directory or repository id, not
+  the weights' and tokenizer's paths.
 - `Runner.sizes` and `--size`, `F.linear`'s `k_tile` and `tile_n`, and
   Whisper's `Runner`.
 - `Operand.runtime`; an operand finds the running sequence itself.

@@ -14,13 +14,14 @@ Both attend with ``MHA``. Where the decode step is not a full ELF (NPU1, or
 on the token the last one drew.
 """
 
+import argparse
 import dataclasses
 import logging
 import time
 from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 from aie.iron.kernels.sample import ROW_WORDS
@@ -36,10 +37,10 @@ from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
-from .checkpoint import renamed
+from .checkpoint import Checkpoint, renamed
 from .config import DecoderConfig
 from .model import Model
-from .runner import Runner, Tokenizer
+from .cli import sampling_arguments
 from .generation import Sampler
 
 logger = logging.getLogger(__name__)
@@ -149,36 +150,6 @@ class CausalLM(Model):
     """
 
     layers: list
-    # What reads the model's checkpoint and tokenizer (``load``).
-    runner: ClassVar[type[Runner]]
-    # The checkpoint's tokenizer, where ``load`` read one.
-    tokenizer: Tokenizer | None = None
-
-    @classmethod
-    def load(cls, path) -> "CausalLM":
-        """The model of a Hugging Face repository's files, its context fitted
-        to this host (``Runner.fit``), compiled and loaded, and its
-        tokenizer.
-
-        Args:
-            path: A directory holding ``config.json``, ``model.safetensors``
-                or a sharded one's ``model.safetensors.index.json``, and
-                ``runner.tokenizer_file``; or a repository's id, those files
-                downloaded to Hugging Face's cache.
-        """
-        directory = Path(path)
-        if not directory.is_dir():
-            from huggingface_hub import snapshot_download
-
-            files = ["config.json", "model.safetensors*", cls.runner.tokenizer_file]
-            directory = Path(snapshot_download(str(path), allow_patterns=files))
-        weights = directory / "model.safetensors.index.json"
-        if not weights.exists():
-            weights = directory / "model.safetensors"
-        run = cls.runner(weights, directory / cls.runner.tokenizer_file)
-        model = cls(run.config, run.weights)
-        model.tokenizer = run.tokenizer
-        return model.load_versions(release=run.checkpoint.release)
 
     def __init__(self, config: DecoderConfig, weights, decoder=None):
         self.config = config
@@ -466,29 +437,77 @@ class CausalLM(Model):
             raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         return self._decode.emit is not None
 
-    def tune_calls(
-        self,
-        sample: Sampler,
-        position: int,
-        token: int,
-        context: int,
-        count: int,
-    ) -> list[Call]:
-        """The calls the model's designs are timed in: the decode step at
-        ``position`` and ``token``, and the prompt chunk at a whole first
-        chunk, Sample on the draw rows ``sample`` gives. Each is timed over
-        ``contexts`` up to ``context``, ``count`` of them: the decode step at
-        their last position, the prompt chunk as the whole chunk ending there.
+    @classmethod
+    def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
+        """The flags ``tune_calls`` follows from: the checkpoint whose header
+        gives the weights' shapes, the decode step's position and token, the
+        contexts attention over the cache is timed at, and the sampling
+        Sample is timed at.
         """
-        C = self.config.prefill_chunk
-        decode_shapes, prompt_shapes = self.shapes()
+        parser.add_argument(
+            "--checkpoint",
+            type=Path,
+            required=True,
+            help="the .safetensors checkpoint, or a sharded one's "
+            "model.safetensors.index.json, of which only the header is read",
+        )
+        parser.add_argument(
+            "--position",
+            type=int,
+            default=256,
+            help="the decode position the decode step's designs are timed at: "
+            "what their per-call values follow from (default: 256)",
+        )
+        parser.add_argument(
+            "--token",
+            type=int,
+            default=0,
+            help="the token the step embeds (default: 0)",
+        )
+        parser.add_argument(
+            "--context",
+            type=int,
+            default=8192,
+            help="the longest context a design whose work follows it is timed "
+            "at, a multiple of the prompt chunk (default: 8192)",
+        )
+        parser.add_argument(
+            "--points",
+            type=int,
+            default=6,
+            help="how many contexts up to --context it is timed at, each "
+            "timed per setting: their cost grows with it (default: 6)",
+        )
+        sampling_arguments(parser)
+
+    @classmethod
+    def tune_calls(
+        cls, parser: argparse.ArgumentParser, args: argparse.Namespace
+    ) -> list[Call]:
+        """The calls the model's designs are timed in, on weights it never
+        reads (``tune_arguments``'s flags): the decode step at ``--position``
+        and ``--token``, and the prompt chunk at a whole first chunk, Sample
+        on the draw rows the sampling gives. Each is timed over ``contexts``
+        up to ``--context``, ``--points`` of them: the decode step at their
+        last position, the prompt chunk as the whole chunk ending there.
+        """
+        config = cls.default_config(args.checkpoint)
+        if args.context > config.max_seq_len:
+            parser.error(
+                f"--context {args.context} is past max_seq_len {config.max_seq_len}"
+            )
+        model = cls(config, Checkpoint(args.checkpoint).tree("unread"))
+        sample = Sampler(args.temperature, args.top_k)
+        position, token = args.position, args.token
+        C = model.config.prefill_chunk
+        decode_shapes, prompt_shapes = model.shapes()
         versions = [
             (
                 decode_shapes,
                 dict(position=position, token=token),
                 [
                     Point(w, dict(position=c - 1, token=token))
-                    for w, c in contexts(context, count, 1)
+                    for w, c in contexts(args.context, args.points, 1)
                 ],
             ),
             (
@@ -505,18 +524,18 @@ class CausalLM(Model):
                             rope_start=c - C,
                         ),
                     )
-                    for w, c in contexts(context, count, C)
+                    for w, c in contexts(args.context, args.points, C)
                 ],
             ),
         ]
         out = []
         for shapes, values, points in versions:
-            traced = self.trace(**shapes)
+            traced = model.trace(**shapes)
             # Sample's work follows its draw row's temperature and top-k: measure
             # it at the rows generation writes, not at random words.
             [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
-            _, draws = traced.states[id(self.draws)]
-            rows = sample.rows(self.config.max_seq_len, k_max)
+            _, draws = traced.states[id(model.draws)]
+            rows = sample.rows(model.config.max_seq_len, k_max)
             out.append(Call(traced, values, {draws.name: rows}, points))
         return out
 

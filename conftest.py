@@ -15,7 +15,7 @@ import aie.utils as aie_utils
 from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
 
-from iron.lm.runner import FLAGS
+from iron.lm.cli import FLAGS
 from iron.lm.golden import RECORD, Golden
 from iron.tests.toolchain.tools import DEVICES
 

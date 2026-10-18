@@ -14,9 +14,11 @@ much faster packaged ``--each-step`` than as a full ELF at this model's
 depth (32 layers); this module's ``model`` fixture requests it explicitly.
 """
 
+import functools
+
 import pytest
 
-from iron.applications.phi3.model import Runner
+from iron.applications.phi3 import Phi4
 from iron.lm.testing import (
     check_accuracy,
     check_determinism,
@@ -35,32 +37,29 @@ pytestmark = pytest.mark.supported_devices("npu2")
 
 
 @pytest.fixture(scope="module")
-def runner(request):
-    """``Runner.from_options``, the same way the CLI builds one: the
+def load(request):
+    """``Phi4.load`` of the checkpoint, as the CLI loads it: at the
     options pytest's own ``--random-weights``/``--max-seq-len`` flags
-    (``conftest.py``'s, ``Runner.FLAGS``) were given, as option strings.
+    (``conftest.py``'s, ``iron.lm.cli.FLAGS``) were given.
     """
     seed = request.config.getoption("--random-weights")
     max_seq_len = request.config.getoption("--max-seq-len")
-    options = [str(WEIGHTS)]
     if seed is not None:
         require(WEIGHTS, CONFIG)
-        options += ["--random-weights", str(seed)]
     else:
         require(WEIGHTS, TOKENIZER, CONFIG)
-        options.append(str(TOKENIZER))
-    if max_seq_len is not None:
-        options += ["--max-seq-len", str(max_seq_len)]
-    return Runner.from_options(options)
+    return functools.partial(
+        Phi4.load, WEIGHTS.parent, seed=seed, max_seq_len=max_seq_len
+    )
 
 
 @pytest.fixture(scope="module")
-def model(runner):
+def model(load):
     """The model, compiled and loaded once, packaged ``--each-step`` (the
     full-ELF link is impractically slow at this model's depth, the same
     finding Qwen 2.5 1.5B Instruct's own port made).
     """
-    yield runner.npu(full_elf=False)
+    yield load(full_elf=False)
 
 
 # KL(fp32 CPU || NPU), teacher-forced over 10 steps (not Llama/Qwen2.5's
@@ -85,17 +84,17 @@ GENERATION = pytest.mark.parametrize(
 
 
 @GENERATION
-def test_phi_4_mini_instruct(runner, model, prompt_len, num_tokens, record_property):
-    check_generation(runner, model, prompt_len, num_tokens, record=record_property)
+def test_phi_4_mini_instruct(model, prompt_len, num_tokens, record_property):
+    check_generation(model, prompt_len, num_tokens, record=record_property)
 
 
-def test_phi_4_mini_instruct_sampling(runner, model, record_property):
-    check_device_sampling(runner, model, 256, 20, record=record_property)
+def test_phi_4_mini_instruct_sampling(model, record_property):
+    check_device_sampling(model, 256, 20, record=record_property)
 
 
-def test_phi_4_mini_instruct_accuracy(runner, model, record_property):
-    check_accuracy(runner, model, MAX_KL, 10, 1024, record=record_property)
+def test_phi_4_mini_instruct_accuracy(model, record_property):
+    check_accuracy(model, MAX_KL, 10, 1024, record=record_property)
 
 
-def test_phi_4_mini_instruct_determinism(runner, model, record_property):
-    check_determinism(runner, model, record=record_property)
+def test_phi_4_mini_instruct_determinism(model, record_property):
+    check_determinism(model, record=record_property)

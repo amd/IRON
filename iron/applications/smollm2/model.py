@@ -14,21 +14,18 @@ Run it with ``python -m iron.applications.smollm2.model``.
 from pathlib import Path
 
 from iron import lm
-from iron.applications.llama.model import Llama, LlamaConfig
+from iron.applications.llama.model import Llama
 
 
 class SmolLM2(Llama):
-    """Llama 3 at SmolLM2's shape, with SmolLM2's tunables."""
+    """Llama 3 at SmolLM2's shape, with SmolLM2's tunables, from its
+    checkpoint and ``tokenizer.json``.
+    """
 
     profile = Path(__file__).with_name("profiles")
-
-
-class Runner(lm.Runner):
-    """SmolLM2 1.7B Instruct, from its checkpoint and ``tokenizer.json``."""
-
-    config = LlamaConfig
-    model = SmolLM2
+    open_tokenizer = staticmethod(lm.Model.open_tokenizer)
+    tokenizer_file = "tokenizer.json"
 
 
 if __name__ == "__main__":
-    lm.main(Runner, "SmolLM2 1.7B Instruct on the NPU")
+    lm.main(SmolLM2)
