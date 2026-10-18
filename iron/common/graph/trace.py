@@ -644,7 +644,33 @@ class Tracer:
         """Record ``target(*args, **kwargs)``: inputs, optionally followed by
         outputs; keywords are optional inputs, per-call value handles, or
         construction arguments when ``target`` is a class.
+
+        Raises:
+            TypeError, ValueError, IndexError: The call is refused; the
+                message starts with the graph, the operator and the
+                operands as the body named them.
         """
+        try:
+            return self._call(target, args, kwargs)
+        except (TypeError, ValueError, IndexError) as e:
+            cls = target if isinstance(target, type) else type(target)
+            given = ", ".join(self._describe(a) for a in args)
+            e.args = (f"{self.name}: {cls.__name__}({given}): {e}", *e.args[1:])
+            raise
+
+    def _describe(self, x) -> str:
+        """``x`` in the body's terms: a handle's buffer, a held tensor's
+        path, else its kind and shape.
+        """
+        if isinstance(x, Handle):
+            return str(x.ref())
+        if isinstance(x, State) and x.name:
+            return x.name
+        array = x.array if isinstance(x, Weight) else x
+        name = self._names.get(id(x)) or self._names.get(id(array))
+        return name or f"{type(x).__name__} {list(getattr(x, 'shape', ()))}"
+
+    def _call(self, target, args, kwargs):
         cls = target if isinstance(target, type) else type(target)
         inputs, outputs, kwargs = cls.declaration.call_operands(args, kwargs)
         self.check_outputs(cls, outputs)

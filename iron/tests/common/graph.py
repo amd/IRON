@@ -2971,3 +2971,28 @@ def test_an_assignment_into_a_view_is_the_copy_into_it():
     y = Store().reference(x, pos=3)
     np.testing.assert_array_equal(cache.host[3], x)
     np.testing.assert_array_equal(np.asarray(y)[1], x[:32])
+
+
+def test_a_refused_step_names_the_graph_the_operator_and_the_held_path():
+    class Project(iron.Graph):
+        def __init__(self):
+            self.layers = [SimpleNamespace(w=z(256, 512))]
+
+        def body(self, x):
+            return GEMV.step(self.layers[0].w, x)
+
+    with pytest.raises(ValueError, match=r"^Project: GEMV\(layers\.0\.w, x\): GEMV"):
+        Project().trace(x=(256,))
+
+
+def test_the_reference_refuses_the_values_a_call_refuses():
+    """An index past its view raises before any step runs, as a call does."""
+
+    class Window(iron.Graph):
+        def body(self, x, *, pos: Scratchpad[np.int32]):
+            return Copy.step(x[pos : pos + 4])
+
+    x = np.zeros((16, 64), bfloat16)
+    Window().reference(x, pos=12)
+    with pytest.raises(IndexError, match=r"^Window: pos \+ 4 is 17, outside \[0, 17\)"):
+        Window().reference(x, pos=13)
