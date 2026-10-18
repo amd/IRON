@@ -133,7 +133,7 @@ class Sample(Operator):
         domain=Divisors(of=lambda op, dev: op.slice_size, step=2, cap=_CHUNK_LIMIT)
     )
 
-    logits = In(vocab, obj_type=(chunk,), per=(cores,), depth=2)
+    logits = In(vocab, obj_type=(chunk,), per=(cores,))
     draws = In(
         steps, sample.ROW_WORDS, dtype=np.int32, obj_type=(sample.ROW_WORDS,), depth=1
     )
@@ -210,11 +210,11 @@ class Sample(Operator):
             selects = {run: self.select(*run) for run in set(runs)}
             words = sample.summary_words(self.slice_size, self.k_max)
             # Every core reads the draw row.
-            of_draw = ObjectFifo(self.draws.obj_type, depth=1)
+            of_draw = ObjectFifo(self.draws.obj_type, depth=self.draws.depth)
             self.draws.bind(of_draw.prod())
-            of_token = ObjectFifo(self.token.obj_type, depth=1)
+            of_token = ObjectFifo(self.token.obj_type, depth=self.token.depth)
             self.token.bind(of_token.cons())
-            of_record = ObjectFifo(self.tokens.obj_type, depth=1)
+            of_record = ObjectFifo(self.tokens.obj_type, depth=self.tokens.depth)
             self.tokens.bind(of_record.cons())
             # The summaries meet in a memtile, column 0 first; combine reads a
             # shorter last one's ties no further than its count.
@@ -257,7 +257,8 @@ class Sample(Operator):
             workers, logits = [], []
             for c, (run, chunk) in enumerate(runs):
                 of_x = ObjectFifo(
-                    np.ndarray[(chunk,), np.dtype[self.logits.dtype]], depth=2
+                    np.ndarray[(chunk,), np.dtype[self.logits.dtype]],
+                    depth=self.logits.depth,
                 )
                 logits.append(of_x.prod())
                 state = Buffer(

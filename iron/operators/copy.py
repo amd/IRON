@@ -445,7 +445,7 @@ class GatherWords(Operator):
                 low_bits=GatherWords.low_bits,
                 aperture=APERTURE,
             )
-            ids = ObjectFifo(self.ids.obj_type, depth=1)
+            ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
             self.ids.bind(ids.prod())
             lengths = lengths_kernel = None
             if self.bounded:
@@ -465,7 +465,7 @@ class GatherWords(Operator):
                     ),
                 )
                 # A core has two output channels: a memtile joins its two records.
-                control = ObjectFifo(self.control.obj_type, depth=1)
+                control = ObjectFifo(self.control.obj_type, depth=self.control.depth)
                 addresses, lengths = control.prod().join(
                     [0, self.pairs],
                     obj_types=[
@@ -476,7 +476,7 @@ class GatherWords(Operator):
                 )
                 self.control.bind(control.cons())
             else:
-                addresses = ObjectFifo(self.control.obj_type, depth=1)
+                addresses = ObjectFifo(self.control.obj_type, depth=self.control.depth)
                 self.control.bind(addresses.cons())
             read = [self.base_lo, self.base_hi]
             rtp = Rtp(read + ([self.valid] if self.bounded else []))
@@ -768,8 +768,8 @@ class Copy(Operator):
 
             ins, outs = [], []
             for c in range(self.num_channels):
-                fifo_in = ObjectFifo(self.x.obj_type, depth=1)
-                fifo_out = fifo_in.cons().forward(depth=1)
+                fifo_in = ObjectFifo(self.x.obj_type, depth=self.x.depth)
+                fifo_out = fifo_in.cons().forward(depth=self.y.depth)
                 ins.append(fifo_in.prod())
                 outs.append(fifo_out.cons())
             self.x.bind(ins)

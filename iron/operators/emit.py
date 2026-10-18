@@ -112,10 +112,10 @@ class Emit(Operator):
 
         def build(self) -> Built:
             slots, carried = self.slots, self.carried
-            of_program = ObjectFifo(self.program.obj_type, depth=1)
-            of_planes = ObjectFifo(self.planes.obj_type, depth=1)
-            of_image = ObjectFifo(self.image.obj_type, depth=1)
-            of_state = ObjectFifo(self.state.obj_type, depth=1)
+            of_program = ObjectFifo(self.program.obj_type, depth=self.program.depth)
+            of_planes = ObjectFifo(self.planes.obj_type, depth=self.planes.depth)
+            of_image = ObjectFifo(self.image.obj_type, depth=self.image.depth)
+            of_state = ObjectFifo(self.state.obj_type, depth=self.state.depth)
             self.program.bind(of_program.prod())
             self.planes.bind(of_planes.prod())
             self.image.bind(of_image.cons())

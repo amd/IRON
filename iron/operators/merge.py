@@ -162,11 +162,11 @@ class Merge(Operator):
                     + ("_offset" if self.offset else "")
                 ),
             )
-            of_ids = ObjectFifo(self.ids.obj_type, depth=2)
-            of_merge = ObjectFifo(self.merge.obj_type, depth=2)
+            of_ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
+            of_merge = ObjectFifo(self.merge.obj_type, depth=self.merge.depth)
             of_before = None
             if self.offset:
-                of_before = ObjectFifo(self.before.obj_type, depth=1)
+                of_before = ObjectFifo(self.before.obj_type, depth=self.before.depth)
                 self.before.bind(of_before.prod())
             rtp = Rtp([self.count])
 

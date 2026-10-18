@@ -66,9 +66,9 @@ class TopKRouter(Operator):
     weights_width: int = Param(derive=lambda op: 2 * op.top_k, repr=False)
     pairs: int = Auto()
 
-    logits = In(rows, experts, obj_type=(experts,), per=(pairs,), depth=2)
-    ids = Out(rows, top_k, dtype=np.int32, obj_type=(top_k,), per=(pairs,), depth=2)
-    weights = Out(rows, weights_width, obj_type=(weights_width,), per=(pairs,), depth=2)
+    logits = In(rows, experts, obj_type=(experts,), per=(pairs,))
+    ids = Out(rows, top_k, dtype=np.int32, obj_type=(top_k,), per=(pairs,))
+    weights = Out(rows, weights_width, obj_type=(weights_width,), per=(pairs,))
     valid = Extent(rows)
     count = Value(derive=lambda op: ceildiv(op.valid, op.pairs))
 
@@ -138,9 +138,9 @@ class TopKRouter(Operator):
 
             workers, rtps, lanes = [], [], ([], [], [])
             for _ in range(self.pairs):
-                of_x = ObjectFifo(self.logits.obj_type, depth=2)
-                of_ids = ObjectFifo(self.ids.obj_type, depth=2)
-                of_weights = ObjectFifo(self.weights.obj_type, depth=2)
+                of_x = ObjectFifo(self.logits.obj_type, depth=self.logits.depth)
+                of_ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
+                of_weights = ObjectFifo(self.weights.obj_type, depth=self.weights.depth)
                 of_sum = ObjectFifo(summary_ty, depth=2)
                 for lane, end in zip(
                     lanes, (of_x.prod(), of_ids.cons(), of_weights.cons())

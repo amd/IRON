@@ -94,9 +94,9 @@ class DepthwiseConv1d(Operator):
             cols, C = self.num_aie_columns, self.channels
             plane = self.x.obj_type
             kernel = self.kernel()
-            of_ins = [ObjectFifo(plane, depth=TAPS + 1) for k in range(cols)]
+            of_ins = [ObjectFifo(plane, depth=self.x.depth) for k in range(cols)]
             of_outs = [ObjectFifo(plane) for k in range(cols)]
-            of_w = ObjectFifo(plane, depth=TAPS)
+            of_w = ObjectFifo(plane, depth=self.weight.depth)
             zero = Buffer(plane, initial_value=np.zeros(C, bfloat16))
             limit = np.ndarray[(1,), np.dtype[np.float32]]
             rtps = [Rtp([self.steps]) for _ in range(cols)]
