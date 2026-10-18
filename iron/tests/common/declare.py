@@ -11,6 +11,7 @@ toolchain.
 """
 
 import dataclasses
+from types import SimpleNamespace
 
 import aie.iron
 import aie.utils as aie_utils
@@ -41,6 +42,7 @@ from iron.common import (
     Built,
 )
 from iron.common.declare.field import AutoSpec, ParamSpec
+from iron.common.declare.operand import active_runtime
 from iron.common.design import OperatorDesign
 from iron.operators import ReLU as LibraryReLU
 from iron.operators import Tanh
@@ -427,6 +429,13 @@ def test_an_operand_fills_only_inside_its_operators_sequence():
     op = MV(M=1024, K=256, columns=2)
     with pytest.raises(ValueError, match="run in the operator's sequence"):
         op.A.fill(lane=0)
+    # Nor inside another operator's.
+    token = active_runtime.set(SimpleNamespace(op=MV(M=1024, K=256, columns=2)))
+    try:
+        with pytest.raises(ValueError, match="run in the operator's sequence"):
+            op.A.fill(lane=0)
+    finally:
+        active_runtime.reset(token)
 
 
 def test_per_call_values_bind_on_the_operator():
