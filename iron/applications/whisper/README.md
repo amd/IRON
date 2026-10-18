@@ -6,8 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Whisper on the NPU
 
 OpenAI's Whisper (large-v3-turbo's shape: a 32-layer audio encoder, a
-4-layer text decoder), an `iron.lm.EncoderDecoder`. Everything is in
-`model.py`:
+4-layer text decoder), an `iron.lm.EncoderDecoder`, in `model.py`:
 
 - `WhisperEncoder`: an `iron.lm.Tower` over a clip's log-mel features.
   Two convolutions run first (`iron.lm.Conv1d`, kernel 3, the second at
@@ -21,10 +20,6 @@ OpenAI's Whisper (large-v3-turbo's shape: a 32-layer audio encoder, a
   over the encoder's output (`encoder_attn`). It adds a learned position table
   after the embedding, and its head is the final LayerNorm and the
   embedding.
-- `HuggingFaceWhisper`: what the model is judged by, Hugging Face's
-  `WhisperForConditionalGeneration` in float32, its logits after the
-  decoder's tokens over a clip's features recorded once to a file
-  (`iron.lm.Golden`).
 - `WhisperConfig`: both shapes, read from the checkpoint's own
   `config.json`, and each layer's parts.
 - `RENAMES`: renames Whisper's modules (`self_attn_layer_norm`/
@@ -32,6 +27,12 @@ OpenAI's Whisper (large-v3-turbo's shape: a 32-layer audio encoder, a
   read.
 - `bf16()`: the checkpoint ships float16; the graphs hold each weight
   rounded once to bf16, and the reference reads the float16 itself.
+
+What the model is judged by is in `hugging_face.py`, which only the tests
+import: `HuggingFaceWhisper`, Hugging Face's
+`WhisperForConditionalGeneration` in float32, its logits after the
+decoder's tokens over a clip's features recorded once to a file
+(`iron.lm.Golden`).
 
 Nothing rotates (`rope_theta` None).
 

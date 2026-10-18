@@ -8,7 +8,7 @@ a ``CausalLM`` of Llama's ``DecoderLayer``, 9 heads over 3 KV groups, with an un
 ``lm_head``), its vision tower (``vision/``, an ``iron.lm.Tower``), and the
 two as one ``iron.lm.Multimodal`` (``VLMRunner.build``), whose image
 placeholders take the tower's soft tokens, judged by transformers' own
-SmolVLM's logits (``HuggingFaceVLM``). Its shape is read from the
+SmolVLM's logits (``hugging_face.py``). Its shape is read from the
 checkpoint's own nested ``config.json``. ``python -m
 iron.applications.idefics3.model`` runs the text model alone.
 
@@ -20,12 +20,9 @@ step's residual ``ElementwiseAdd``'s ``tile_size`` 192.
 import dataclasses
 from pathlib import Path
 
-import numpy as np
-from ml_dtypes import bfloat16
 
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal
-from iron.lm.golden import HuggingFace
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 
 
@@ -81,38 +78,6 @@ class SmolVLMText(CausalLM):
 BOS = 1
 
 
-class HuggingFaceVLM(HuggingFace):
-    """transformers' own SmolVLM (``Idefics3ForConditionalGeneration``) in
-    float32, built over both configs as ``HuggingFace.build("idefics3",
-    vision, weights, **text.to_json())``.
-    """
-
-    model_class = "AutoModelForImageTextToText"
-
-    def pixels(self, image):
-        """The ``pixel_values`` of ``image``, as ``VisionTower.inputs``
-        takes it, rounded to bfloat16 as the device holds it.
-        """
-        import torch
-
-        image = np.asarray(image).astype(bfloat16).astype(np.float32)
-        return torch.from_numpy(image.transpose(2, 0, 1).copy())[None, None]
-
-    def logits(self, tokens, *image) -> np.ndarray:
-        """The logits after ``tokens``, ``image``, if given, at its
-        placeholders.
-        """
-        import torch
-
-        with torch.no_grad():
-            out = self.model(
-                input_ids=torch.from_numpy(np.asarray(tokens, np.int64)[None]),
-                pixel_values=self.pixels(*image) if image else None,
-                use_cache=False,
-            )
-        return out.logits[0, -1].numpy()
-
-
 class Runner(lm.Runner):
     """SmolVLM-256M-Instruct's text backbone, from its checkpoint and
     ``tokenizer.json`` (text-only: no image input yet).
@@ -121,7 +86,13 @@ class Runner(lm.Runner):
     config = SmolVLMTextConfig
     model = SmolVLMText
     bos = BOS
-    hugging_face = HuggingFaceVLM
+
+    @property
+    def hugging_face(self):
+        """transformers' SmolVLM, imported only where a golden is recorded."""
+        from .hugging_face import HuggingFaceVLM
+
+        return HuggingFaceVLM
 
 
 # The real processor's own ids either side of an image and its question
@@ -162,7 +133,7 @@ class VLMRunner(Runner):
         """
         if self.seed is None:
             return super().reference()
-        return HuggingFaceVLM.build(
+        return self.hugging_face.build(
             "idefics3", self.vision_config, self.weights, **self.config.to_json()
         )
 

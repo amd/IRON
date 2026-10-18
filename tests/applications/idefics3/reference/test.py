@@ -13,11 +13,8 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.applications.idefics3.model import (
-    HuggingFaceVLM,
-    SmolVLMText,
-    SmolVLMTextConfig,
-)
+from iron.applications.idefics3.hugging_face import HuggingFaceVLM
+from iron.applications.idefics3.model import SmolVLMText, SmolVLMTextConfig
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.lm import Multimodal
 from iron.tests.common.llama_model import drawn, shapes

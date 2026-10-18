@@ -6,7 +6,7 @@
 """Whisper over ``iron.lm``: a bidirectional audio encoder (``WhisperEncoder``,
 an ``iron.lm.Tower``) feeding a causal text decoder through cross attention
 (``Whisper``, an ``iron.lm.EncoderDecoder``), judged by Hugging Face's own
-model in float32 (``HuggingFaceWhisper``). Both are ``iron.lm``'s layer parts over
+model in float32 (``hugging_face.py``). Both are ``iron.lm``'s layer parts over
 Whisper's modules renamed once at load (``RENAMES``); nothing rotates:
 the encoder adds a fixed position table after its two convolutions, the
 decoder a learned one after its embedding. The shape is read from the
@@ -37,7 +37,6 @@ from iron.lm import (
     Tower,
 )
 from iron.lm.base import _nest, leaves
-from iron.lm.golden import HuggingFace
 from iron.operators.copy import Copy
 
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.
@@ -280,23 +279,3 @@ class Whisper(EncoderDecoder):
         return x + rows
 
     renames = RENAMES
-
-
-class HuggingFaceWhisper(HuggingFace):
-    """transformers' ``WhisperForConditionalGeneration`` in float32, what
-    records Whisper's goldens: the logits after the decoder's tokens over a
-    clip's features, ``(num_mel_bins, frames)``.
-    """
-
-    model_class = "AutoModelForSpeechSeq2Seq"
-
-    def logits(self, tokens, features) -> np.ndarray:
-        import torch
-
-        with torch.no_grad():
-            out = self.model(
-                input_features=torch.from_numpy(np.asarray(features, np.float32))[None],
-                decoder_input_ids=torch.tensor([list(tokens)]),
-                use_cache=False,
-            )
-        return out.logits[0, -1].numpy()

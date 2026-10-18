@@ -72,6 +72,9 @@ public API adds its entry under Unreleased.
   or by `Graph.precision`; one row, a GEMV that rounds once, takes any
   precision.
   `Attention` and `MLP` take `precision` in place of `accurate`.
+- `HuggingFaceWhisper` and `HuggingFaceVLM` move to their applications'
+  `hugging_face.py`, as EmbeddingGemma 2's builders are, which only tests
+  and golden recording import.
 - Config fields use `config.json`'s names: `hidden_size`,
   `num_hidden_layers`, `num_attention_heads`, `num_key_value_heads`,
   `intermediate_size`, `rope_theta`, `num_experts_per_tok` and

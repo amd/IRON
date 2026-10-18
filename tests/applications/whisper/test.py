@@ -17,12 +17,8 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.applications.whisper.model import (
-    HuggingFaceWhisper,
-    Whisper,
-    WhisperConfig,
-    WhisperEncoder,
-)
+from iron.applications.whisper.hugging_face import HuggingFaceWhisper
+from iron.applications.whisper.model import Whisper, WhisperConfig, WhisperEncoder
 from iron.tests.common.llama_model import drawn
 
 #: Whisper's proportions at toy size: 200 source positions, padded to 256,

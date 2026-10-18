@@ -28,8 +28,6 @@ What is SmolVLM's own is in `iron/applications/idefics3/`:
     `model`. Its tunables at 576 wide are its profile's.
   - `VLMRunner.build()`: the text model and the tower as one `Multimodal`,
     keyed by the checkpoint's `image_token_id`.
-  - `HuggingFaceVLM`: transformers' SmolVLM, its logits after a
-    sequence's tokens and the image.
   - `build_prompt()`: the real processor's token layout around one image
     and a question's ids, the ids either side read off
     `Idefics3Processor`'s output.
@@ -42,6 +40,9 @@ What is SmolVLM's own is in `iron/applications/idefics3/`:
   projection into the text model's space (`head`). Its LayerNorms run at
   the kernel's epsilon, 1e-5, until the pinned mlir-aie takes the
   checkpoint's 1e-6 (`layer_norm_eps`), which transformers uses.
+- `hugging_face.py`: `HuggingFaceVLM`, transformers' SmolVLM, its logits
+  after a sequence's tokens and the image, what the goldens are recorded
+  from; only the tests and golden recording import it.
 
 ## Scope: one 512x512 image, no splitting
 
