@@ -7,7 +7,7 @@
 its ``Idefics3Connector`` (pixel-shuffle, then a bias-free projection into
 the text model's space), an ``iron.lm.Tower`` on ``Layer``'s SigLIP names
 (``layer_norm1``/``layer_norm2``, biased attention, a GELU-tanh ``fc1``/
-``fc2``), and ``VisionOracle``, its float32 forward pass on the host.
+``fc2``).
 
 One 512x512 image, no splitting (``do_image_splitting=False``), resized and
 normalized on the host. The patch grid is then whole (32x32), so a patch's
@@ -22,7 +22,7 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
-from iron.lm import Config, Conv2d, Layer, Oracle, Tower, widen
+from iron.lm import Config, Conv2d, Layer, Tower
 from iron.functional import ACCURATE, LAYER_NORM_EPS
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
@@ -78,20 +78,9 @@ class VisionConfig(Config):
 
     def layer(self, i: int) -> Layer:
         # TODO(pin group): LayerNorm at the checkpoint's eps (layer_norm_eps)
-        # once the pin carries the kernel option; the oracle uses it now.
+        # once the pin carries the kernel option; transformers' uses it now.
         H, D = self.num_attention_heads, self.head_dim
         return Layer(H, H, D, LAYER_NORM_EPS, self.hidden_act)
-
-
-def pixel_shuffle(x: np.ndarray, side: int, scale: int) -> np.ndarray:
-    """``x`` ``(side * side, hidden)`` patches, row-major, each ``scale x
-    scale`` block of neighbours' channels merged into one row:
-    ``((side // scale) ** 2, hidden * scale ** 2)``, the connector's own
-    ``pixel_shuffle``.
-    """
-    h = x.reshape(side, side // scale, -1).transpose(1, 0, 2)
-    h = h.reshape(side // scale, side // scale, -1).transpose(1, 0, 2)
-    return h.reshape((side // scale) ** 2, -1)
 
 
 class VisionTower(Tower):
@@ -162,33 +151,3 @@ class VisionTower(Tower):
         """
         c = self.config
         return np.asarray(image).astype(bfloat16).reshape(c.image_size, -1), {}
-
-
-class VisionOracle(Oracle):
-    """The vision tower and connector's forward pass in float32, on the
-    host, from ``Layer``'s twin.
-
-    Args:
-        config: The tower's shape.
-        weights: The checkpoint's tree, as ``VisionTower`` takes it.
-    """
-
-    def __init__(self, config: VisionConfig, weights):
-        super().__init__(config)
-        self.vision_model = widen(weights.model.vision_model)
-        self.projection = widen(weights.model.connector.modality_projection.proj.weight)
-
-    def soft_tokens(self, image: np.ndarray) -> np.ndarray:
-        """The ``(64, text_dim)`` soft tokens of ``image``, as
-        ``VisionTower.inputs`` takes it.
-        """
-        c, v = self.config, self.vision_model
-        e = v.embeddings
-        conv = Conv2d(e.patch_embedding.weight, c.image_size, stride=c.patch)
-        pixels = np.asarray(image, np.float32).reshape(c.image_size, -1)
-        x = conv.oracle(pixels, e.patch_embedding.weight).reshape(c.side**2, c.hidden)
-        x = x + e.patch_embedding.bias + e.position_embedding.weight
-        for i, w in enumerate(v.encoder.layers):
-            x = c.layer(i).oracle(self, w, x, self.attend, None)
-        x = self.normed(x, v.post_layernorm)
-        return pixel_shuffle(x, c.side, c.scale_factor) @ self.projection.T

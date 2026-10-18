@@ -3,8 +3,8 @@
 
 """``iron.lm.Multimodal``, device-free: its signature from its text model's
 and towers', the versions a mixed call runs, and their references in turn,
-a tower's soft tokens at their placeholders, against numpy, over an encoder
-and over a causal model's chunks.
+a tower's soft tokens at their placeholders, against numpy over an encoder
+and against Hugging Face's Llama (``goldens/``) over a causal model's chunks.
 """
 
 import dataclasses
@@ -16,7 +16,8 @@ from ml_dtypes import bfloat16
 
 from iron import Scratchpad
 from iron.applications.llama.model import Llama
-from iron.lm import Multimodal, Tower, widen
+from iron.lm import Multimodal, Tower
+from iron.lm.golden import HuggingFace
 from iron.operators.copy import Copy
 from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint
 from iron.tests.common.llama_reference import _assert_close
@@ -136,11 +137,32 @@ class Features(Tower):
 IMAGE = SMALL.vocab_size - 1
 
 
+class Placed:
+    """Hugging Face's Llama with ``soft`` at its image placeholders: the
+    logits after a sequence's tokens, from a key of the tokens followed by
+    ``soft``'s bfloat16 bits.
+    """
+
+    def __init__(self, hf: HuggingFace, soft):
+        self.model, self.soft = hf.model, soft
+
+    def logits(self, key) -> np.ndarray:
+        import torch
+
+        tokens = torch.from_numpy(key[: key.size - self.soft.size])
+        with torch.no_grad():
+            x = self.model.model.embed_tokens(tokens)
+            x[tokens == IMAGE] = torch.from_numpy(self.soft.astype(np.float32))
+            out = self.model(inputs_embeds=x[None], use_cache=False)
+        return out.logits[0, -1].numpy()
+
+
 @pytest.fixture(scope="module")
-def causal():
+def causal(golden):
     """A small Llama over chunks of 256 of 1024 positions, a tower on its
-    image placeholder, its oracle, and a prompt whose run of 16 soft tokens
-    crosses its first chunk's end.
+    image placeholder, Hugging Face's logits for it (``reference(tokens,
+    soft)``, from ``goldens/multimodal.npz``), and a prompt whose run of 16
+    soft tokens crosses its first chunk's end.
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
     weights = checkpoint(config).tree("random")
@@ -152,17 +174,16 @@ def causal():
     tokens = rng.integers(0, IMAGE, 300)
     tokens[250:266] = IMAGE
     soft = (rng.standard_normal((16, config.hidden_size)) / 8).astype(bfloat16)
-    return model, Llama.oracle(config, weights), tokens, soft
 
+    def reference(tokens, soft):
+        key = np.concatenate([tokens, soft.view(np.uint16).ravel()])
+        hf = golden(
+            "multimodal",
+            lambda: Placed(HuggingFace.build("llama", config, weights), soft),
+        )
+        return hf.logits(key)
 
-def oracle_logits(oracle, tokens, soft) -> np.ndarray:
-    """The oracle's logits after ``tokens``, the soft tokens at their placeholders."""
-    x = oracle.embedding[tokens].copy()
-    x[tokens == IMAGE] = soft.astype(np.float32)
-    angles = oracle.angles[: tokens.size]
-    for i, w in enumerate(oracle.layers):
-        x = oracle.layer(i, angles, widen(w), x)
-    return oracle.head(x[-1])
+    return model, reference, tokens, soft
 
 
 def test_a_causal_model_s_versions_and_signature(causal):
@@ -193,7 +214,7 @@ def test_a_run_of_soft_tokens_crossing_a_chunk_is_placed_on_both_sides(causal):
     next: the tower, then each chunk, one holding a placeholder through
     ``placed`` with the count before it, then a decode step.
     """
-    model, oracle, tokens, soft = causal
+    model, reference, tokens, soft = causal
     C = model.text.config.prefill_chunk
     calls, towers = model.tower_calls(tokens, {IMAGE: (soft,)})
     zero = dict(token=0, position=0, start=0, rows=1, rope_start=0)
@@ -218,11 +239,7 @@ def test_a_run_of_soft_tokens_crossing_a_chunk_is_placed_on_both_sides(causal):
         else:
             logits, carry = model.reference(ids, **values)
     assert placed == [0, 6]
-    _assert_close(
-        [np.asarray(logits).reshape(-1)], [oracle_logits(oracle, tokens, soft)]
-    )
+    _assert_close([np.asarray(logits).reshape(-1)], [reference(tokens, soft)])
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)
-    _assert_close(
-        [np.asarray(logits).reshape(-1)], [oracle_logits(oracle, tokens, soft)]
-    )
+    _assert_close([np.asarray(logits).reshape(-1)], [reference(tokens, soft)])

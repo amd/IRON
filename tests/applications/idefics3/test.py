@@ -4,8 +4,9 @@
 
 """SmolVLM-256M-Instruct on the NPU, from the real checkpoint: its text
 model and vision tower as one ``iron.lm.Multimodal``, against
-``SmolVLMOracle``, over a few (image, question) pairs, one unsplit image
-each: the prompt's logits and a decode step's after it.
+transformers' own SmolVLM (``VLMRunner.reference``), over a few (image,
+question) pairs, one unsplit image each: the prompt's logits and a decode
+step's after it.
 
 ``--random-weights SEED`` runs it on drawn weights and random questions,
 on a host without the checkpoint.
@@ -25,7 +26,7 @@ CONFIG = weights_dir("smolvlm-256m-instruct") / "config.json"
 
 pytestmark = pytest.mark.supported_devices("npu2")
 
-# Mean KL(oracle || device) measured 0.0061-0.0094 over these questions on
+# Mean KL(float32 forward || device) measured 0.0061-0.0094 over these questions on
 # the earlier splice of the same tower; not yet measured on Multimodal.
 MAX_KL = 0.05
 
@@ -62,17 +63,17 @@ def model(runner, request):
 
 
 @pytest.fixture(scope="module")
-def oracle(runner):
-    return runner.oracle()
+def reference(runner):
+    return runner.reference()
 
 
 @pytest.mark.parametrize("seed,question", list(enumerate(QUESTIONS)))
-def test_smolvlm_accuracy(runner, model, oracle, seed, question, record_property):
+def test_smolvlm_accuracy(runner, model, reference, seed, question, record_property):
     """One image (a distinct synthetic one a seed) and one question: the
     device's next-token distribution after the prompt and after one decode
-    step against the oracle's, teacher-forced. KL is held to its bound and
+    step against transformers', teacher-forced. KL is held to its bound and
     a top-1 mismatch recorded, as ``check_accuracy`` does: on a synthetic
-    image the oracle's top two can be near tied.
+    image the reference's top two can be near tied.
     """
     vision = runner.vision_config
     rng = np.random.default_rng(seed + 10)
@@ -88,7 +89,7 @@ def test_smolvlm_accuracy(runner, model, oracle, seed, question, record_property
     raw = {vision.image_token: (image,)}
     results = []
     for _ in range(2):
-        want = oracle.logits(tokens, raw)
+        want = reference.logits(tokens, raw)
         results.append(divergence(want, model.logits(tokens, raw)))
         tokens.append(int(want.argmax()))
     worst = max(kl for kl, _ in results)

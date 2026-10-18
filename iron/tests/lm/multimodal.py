@@ -4,7 +4,8 @@
 """``iron.lm.Multimodal`` over a causal model on the device: a small Llama
 whose prompt holds a run of soft tokens crossing a chunk's end, run through
 its own host loop (``CausalLM.use``) on the multimodal graph's versions,
-against the oracle with the soft tokens at their placeholders.
+against Hugging Face's Llama with the soft tokens at their placeholders
+(``goldens/multimodal.npz``).
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from ml_dtypes import bfloat16
 
 from iron.lm import Sampler
 from iron.tests.common.llama_reference import _assert_close
-from iron.tests.common.multimodal import IMAGE, oracle_logits
+from iron.tests.common.multimodal import IMAGE
 from iron.tests.common.multimodal import causal  # noqa: F401 (a fixture)
 
 # The relative top-2 gap each step's argmax is checked at: past
@@ -30,35 +31,35 @@ def gapped(logits: np.ndarray) -> np.ndarray:
 
 @pytest.fixture(scope="module")
 def loaded(causal):
-    model, oracle, tokens, soft = causal
-    yield model.load(), oracle, tokens, soft
+    model, reference, tokens, soft = causal
+    yield model.load(), reference, tokens, soft
 
 
 @pytest.mark.supported_devices("npu2")
 def test_a_causal_model_places_soft_tokens_across_its_chunks(loaded):
-    model, oracle, tokens, first = loaded
+    model, reference, tokens, first = loaded
     soft = (np.random.default_rng(9).standard_normal(first.shape) / 8).astype(bfloat16)
-    want = gapped(oracle_logits(oracle, tokens, soft))
+    want = gapped(reference(tokens, soft))
     _assert_close([model.logits(tokens, {IMAGE: (soft,)})], [want])
     # One more token with the same image: a decode step on the caches.
     more = np.append(tokens, want.argmax())
-    want = gapped(oracle_logits(oracle, more, soft))
+    want = gapped(reference(more, soft))
     _assert_close([model.logits(more, {IMAGE: (soft,)})], [want])
     # Another image: the towers rerun, and the chunks from its first
     # placeholder on.
     _assert_close(
         [model.logits(tokens, {IMAGE: (first,)})],
-        [gapped(oracle_logits(oracle, tokens, first))],
+        [gapped(reference(tokens, first))],
     )
 
 
 @pytest.mark.supported_devices("npu2")
 def test_a_causal_model_draws_after_its_soft_tokens(loaded):
-    model, oracle, tokens, first = loaded
+    model, reference, tokens, first = loaded
     soft = (np.random.default_rng(9).standard_normal(first.shape) / 8).astype(bfloat16)
     expected, history = [], tokens
     for _ in range(3):
-        token = int(gapped(oracle_logits(oracle, history, soft)).argmax())
+        token = int(gapped(reference(history, soft)).argmax())
         expected.append(token)
         history = np.append(history, token)
     sample = Sampler(0.0, 40, np.random.default_rng(0))

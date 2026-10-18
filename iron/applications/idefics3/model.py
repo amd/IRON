@@ -7,8 +7,8 @@
 a ``CausalLM`` on ``Layer``, 9 heads over 3 KV groups, with an untied
 ``lm_head``), its vision tower (``vision/``, an ``iron.lm.Tower``), and the
 two as one ``iron.lm.Multimodal`` (``VLMRunner.npu``), whose image
-placeholders take the tower's soft tokens. ``SmolVLMOracle`` is the
-float32 forward pass it is judged by. Its shape is read from the
+placeholders take the tower's soft tokens, judged by transformers' own
+SmolVLM's logits (``Reference``). Its shape is read from the
 checkpoint's own nested ``config.json``. ``python -m
 iron.applications.idefics3.model`` runs the text model alone.
 
@@ -21,14 +21,12 @@ import dataclasses
 from pathlib import Path
 
 import numpy as np
+from ml_dtypes import bfloat16
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig, Multimodal, Oracle, widen
-from iron.applications.idefics3.vision.model import (
-    VisionConfig,
-    VisionOracle,
-    VisionTower,
-)
+from iron.lm import CausalLM, DecoderConfig, Golden, Multimodal
+from iron.lm.golden import _flat, config_json
+from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
 
 
@@ -67,13 +65,6 @@ class SmolVLMTextConfig(DecoderConfig):
     )
 
 
-class SmolVLMTextOracle(Oracle):
-    """SmolVLM's text backbone's forward pass in float32, on the host."""
-
-    def __init__(self, config, weights):
-        super().__init__(config, weights, decoder=weights.model.text_model)
-
-
 class SmolVLMText(CausalLM):
     """SmolVLM's text backbone on ``config``'s shape and a checkpoint's
     ``weights``, by its names: the decoder under ``model.text_model``, the
@@ -82,7 +73,6 @@ class SmolVLMText(CausalLM):
     """
 
     profile = Path(__file__).with_name("profiles")
-    oracle = SmolVLMTextOracle
 
     def __init__(self, config, weights):
         super().__init__(config, weights, decoder=weights.model.text_model)
@@ -100,6 +90,19 @@ class Runner(lm.Runner):
     config = SmolVLMTextConfig
     model = SmolVLMText
     bos = BOS
+
+    def reference(self):
+        """``lm.Runner.reference``, transformers' model a ``HuggingFaceVLM``:
+        no ``AutoModelForCausalLM`` loads SmolVLM's checkpoint.
+        """
+        if self.seed is not None:
+            return super().reference()
+        directory = Path(self.checkpoint.path).parent
+        try:
+            import transformers  # noqa: F401
+        except ImportError:
+            return Golden(directory / "golden.npz")
+        return Golden(directory / "golden.npz", lambda: HuggingFaceVLM.load(directory))
 
 
 # The real processor's own ids either side of an image and its question
@@ -119,32 +122,88 @@ def build_prompt(question: list[int], vision: VisionConfig) -> list[int]:
     return _PREAMBLE_IDS + image + _SUFFIX_IDS + question + _TAIL_IDS
 
 
-class SmolVLMOracle(SmolVLMTextOracle):
-    """SmolVLM's forward pass in float32, on the host: the vision tower's
-    soft tokens at their placeholders, as ``iron.lm.Multimodal`` places
-    them.
+class HuggingFaceVLM:
+    """transformers' own SmolVLM (``Idefics3ForConditionalGeneration``) in
+    float32: a checkpoint directory's (``load``) or one built from IRON's
+    configs over a weights tree (``build``). It takes what a ``Golden`` is
+    keyed by: a sequence's tokens, then, if they hold image placeholders,
+    the image's bfloat16 bits (``Reference``).
     """
 
-    def __init__(self, config, weights, vision: VisionConfig):
-        super().__init__(config, weights)
-        self.vision = VisionOracle(vision, weights)
-        self.image_token = vision.image_token
+    def __init__(self, model):
+        self.model = model.eval()
 
-    def logits(self, tokens, raw: dict[int, tuple] | None = None) -> np.ndarray:
-        """The logits after ``tokens``, the image ``raw`` holds (by
-        placeholder token, as ``Multimodal.logits`` takes it) at its
-        placeholders.
+    @classmethod
+    def load(cls, directory) -> "HuggingFaceVLM":
+        import torch
+        import transformers
+
+        return cls(
+            transformers.Idefics3ForConditionalGeneration.from_pretrained(
+                directory, dtype=torch.float32
+            )
+        )
+
+    @classmethod
+    def build(cls, text, vision: VisionConfig, weights) -> "HuggingFaceVLM":
+        """The model of ``text``'s and ``vision``'s fields as ``config.json``
+        names them, over ``weights``, every parameter of which it holds.
         """
-        tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        x = self.embedding[tokens]
-        if raw:
-            (image,) = raw[self.image_token]
-            x = x.copy()
-            x[tokens == self.image_token] = self.vision.soft_tokens(image)
-        angles = self.angles[: tokens.size]
-        for i, w in enumerate(self.layers):
-            x = self.layer(i, angles, widen(w), x)
-        return self.head(x[-1])
+        import torch
+        import transformers
+
+        hf = transformers.Idefics3Config(**(config_json(vision) | config_json(text)))
+        model = transformers.Idefics3ForConditionalGeneration(hf).float()
+        model.load_state_dict({k: torch.from_numpy(v) for k, v in _flat(weights)})
+        return cls(model)
+
+    def pixels(self, bits):
+        """The ``pixel_values`` of one image's bfloat16 ``bits``, laid out
+        as ``VisionTower.inputs`` takes the image, ``(side, side, 3)``.
+        """
+        import torch
+
+        S = self.model.config.vision_config.image_size
+        image = np.asarray(bits, np.uint16).view(bfloat16).astype(np.float32)
+        image = image.reshape(S, S, 3).transpose(2, 0, 1)
+        return torch.from_numpy(image.copy())[None, None]
+
+    def logits(self, key) -> np.ndarray:
+        """The logits after a sequence's last token, its image at its
+        placeholders, from ``key``.
+        """
+        import torch
+
+        config, n, pixels = self.model.config, key.size, None
+        if (key == config.image_token_id).any():
+            n -= 3 * config.vision_config.image_size**2
+            pixels = self.pixels(key[n:])
+        with torch.no_grad():
+            out = self.model(
+                input_ids=torch.from_numpy(key[None, :n]),
+                pixel_values=pixels,
+                use_cache=False,
+            )
+        return out.logits[0, -1].numpy()
+
+
+class Reference:
+    """SmolVLM's logits as ``model`` gives them for a key of the tokens and
+    the image's bfloat16 bits (a ``Golden`` or a ``HuggingFaceVLM``), taken
+    as ``Multimodal.logits`` takes them.
+    """
+
+    def __init__(self, model, image_token: int):
+        self.model = model
+        self.image_token = image_token
+
+    def logits(self, tokens, raw: dict[int, tuple]) -> np.ndarray:
+        """The logits after ``tokens``, the one image ``raw`` holds (by
+        placeholder token) at its placeholders.
+        """
+        (image,) = raw[self.image_token]
+        bits = np.asarray(image).astype(bfloat16).view(np.uint16)
+        return self.model.logits(np.concatenate([np.ravel(tokens), bits.ravel()]))
 
 
 class VLMRunner(Runner):
@@ -169,8 +228,16 @@ class VLMRunner(Runner):
             release=self.checkpoint.release, tuner=tuner, full_elf=full_elf
         )
 
-    def oracle(self) -> SmolVLMOracle:
-        return SmolVLMOracle(self.config, self.weights, self.vision_config)
+    def reference(self) -> Reference:
+        """What the model is judged by: transformers' own SmolVLM, over the
+        drawn weights, else its logits recorded beside the checkpoint.
+        """
+        vision = self.vision_config
+        if self.seed is not None:
+            model = HuggingFaceVLM.build(self.config, vision, self.weights)
+        else:
+            model = super().reference()
+        return Reference(model, vision.image_token)
 
 
 if __name__ == "__main__":

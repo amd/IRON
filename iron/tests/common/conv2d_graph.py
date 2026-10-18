@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""iron.lm.Conv2d device-free: its reference, its operators', is the
-convolution in each of its forms, a caller's per-call rows bound it, and
-it refuses padding gathered patches do not hold.
+"""iron.lm.Conv2d device-free: its reference, its operators', is torch's
+convolution in each of its forms (recorded in ``goldens/conv2d.npz``), a
+caller's per-call rows bound it, and it refuses padding gathered patches do
+not hold.
 """
 
 import numpy as np
@@ -19,12 +20,13 @@ from iron.operators.relu import ReLU
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
-# EmbeddingGemma 2's subsampling convolutions at a tenth of their rows:
-# one channel to 128 as a band, padded and bordered, and 128 to 32 by
-# gathered patches; and a depthwise one, every output channel its own
-# input channel, at stride 2, its 13 output rows not whole GEMM row blocks.
+# EmbeddingGemma 2's subsampling convolutions at a few of their rows:
+# one channel to 128 as a band over half the width, padded and bordered,
+# and 128 to 32 by gathered patches; and a depthwise one, every output
+# channel its own input channel, at stride 2, its 13 output rows not whole
+# GEMM row blocks.
 CASES = {
-    "band": ((128, 1), 130, 128, dict(stride=2, padding=1, border=1)),
+    "band": ((128, 1), 34, 64, dict(stride=2, padding=1, border=1)),
     "patches": ((32, 128), 66, 18, dict(stride=2)),
     "depthwise": ((16, 1), 34, 16, dict(stride=2, groups=16)),
     "depthwise_13_rows": ((64, 1), 27, 26, dict(stride=2, padding=1, groups=64)),
@@ -40,13 +42,45 @@ def draw(case):
     return Conv2d(weight, width, **kwargs), weight, x
 
 
+class Convolution:
+    """torch's convolution of ``x`` by ``weight`` in float32, bordered, as
+    ``conv`` lays its output out, rounded once to bfloat16 as the graph
+    rounds it: ``logits``, as ``Golden`` reads it.
+    """
+
+    def __init__(self, conv: Conv2d, x, weight, groups: int):
+        self.conv, self.x, self.weight, self.groups = conv, x, weight, groups
+
+    def logits(self, _):
+        import torch
+
+        c = self.conv
+        image = np.asarray(self.x, np.float32).reshape(-1, c.width, c.channels)
+        out = torch.nn.functional.conv2d(
+            torch.from_numpy(image.transpose(2, 0, 1).copy())[None],
+            torch.from_numpy(self.weight),
+            stride=c.stride,
+            padding=(0, c.padding),
+            groups=self.groups,
+        )
+        out = out[0].numpy().transpose(1, 2, 0)
+        out = np.pad(out, ((0, 0), (c.border, c.border), (0, 0)))
+        return out.reshape(out.shape[0], c.out_line).astype(bfloat16)
+
+
 @pytest.mark.parametrize("case", list(CASES))
-def test_the_reference_is_the_convolution(case):
+def test_the_reference_is_the_convolution(case, golden):
+    """Keyed in ``goldens/conv2d.npz`` by the input's and weight's bits."""
     conv, weight, x = draw(case)
     rows = (x.shape[0] - 3) // 2 + 1
     got = np.asarray(conv.reference(x, rows=rows), np.float32)
-    w = weight.astype(bfloat16).astype(np.float32)
-    want = conv.oracle(x, w).astype(bfloat16).astype(np.float32)
+    w = weight.astype(bfloat16)
+    key = np.concatenate([x.view(np.uint16).ravel(), w.view(np.uint16).ravel()])
+    groups = CASES[case][3].get("groups", 1)
+    reference = golden(
+        "conv2d", lambda: Convolution(conv, x, w.astype(np.float32), groups)
+    )
+    want = reference.logits(key)
     ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)
     assert (np.abs(got - want) <= ulp).all()
 

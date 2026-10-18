@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""SmolVLM's graphs against their own float32 forward passes, device-free
-(no checkpoint, no NPU), at a toy shape: the vision tower on ``Layer``'s
+"""SmolVLM's graphs against transformers' own SmolVLM in float32 over the
+same random weights, its outputs recorded in ``goldens/``, device-free (no
+checkpoint, no NPU), at a toy shape: the vision tower on ``Layer``'s
 SigLIP names, and the tower and the text model as one
 ``iron.lm.Multimodal``, its soft tokens placed across a chunk boundary.
 """
@@ -13,15 +14,12 @@ import pytest
 from ml_dtypes import bfloat16
 
 from iron.applications.idefics3.model import (
-    SmolVLMOracle,
+    HuggingFaceVLM,
+    Reference,
     SmolVLMText,
     SmolVLMTextConfig,
 )
-from iron.applications.idefics3.vision.model import (
-    VisionConfig,
-    VisionOracle,
-    VisionTower,
-)
+from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.lm import Multimodal
 from iron.tests.common.llama_model import drawn, shapes
 
@@ -98,19 +96,43 @@ def text_names(c: SmolVLMTextConfig) -> dict[str, tuple[int, ...]]:
     return text | {"lm_head.weight": (c.vocab_size, c.hidden_size)}
 
 
-def test_the_vision_tower_s_soft_tokens_match_its_oracle():
-    """The tower's reference against ``VisionOracle``: bf16 against float32,
-    LayerNorm at the kernel's 1e-5 against the checkpoint's 1e-6, so within
-    5% of the largest soft token's magnitude, as a decoder's logits are held
-    (three seeds measure 0.7-0.8%).
+@pytest.fixture(scope="module")
+def weights():
+    return drawn(TEXT, text_names(TEXT) | vision_names(VISION), 0)
+
+
+class SoftTokens:
+    """transformers' soft tokens of an image, from its bfloat16 bits:
+    ``logits``, as ``Golden`` reads them.
     """
-    weights = drawn(TEXT, vision_names(VISION), 0)
+
+    def __init__(self, hf: HuggingFaceVLM):
+        self.hf = hf
+
+    def logits(self, bits):
+        import torch
+
+        with torch.no_grad():
+            out = self.hf.model.model.get_image_features(self.hf.pixels(bits))
+        return out.pooler_output[0].numpy()
+
+
+def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
+    """The tower's reference against transformers' soft tokens: bf16
+    against float32, LayerNorm at the kernel's 1e-5 against the
+    checkpoint's 1e-6, so within 5% of the largest soft token's magnitude,
+    as a decoder's logits are held.
+    """
     tower = VisionTower(VISION, weights)
     rng = np.random.default_rng(1)
     image = rng.uniform(-1, 1, (VISION.image_size, VISION.image_size, 3))
     buffer, values = tower.inputs(image)
     got = np.asarray(tower.reference(buffer, **values), np.float32)
-    want = VisionOracle(VISION, weights).soft_tokens(buffer.astype(np.float32))
+    reference = golden(
+        "soft_tokens",
+        lambda: SoftTokens(HuggingFaceVLM.build(TEXT, VISION, weights)),
+    )
+    want = reference.logits(buffer.view(np.uint16))
     assert got.shape == (tower.soft_rows, VISION.text_dim)
     err, scale = np.abs(got - want).max(), np.abs(want).max()
     assert err <= 0.05 * scale, f"|diff| {err:.4f} against |soft tokens| {scale:.3f}"
@@ -126,17 +148,17 @@ def _assert_close(got, want):
     assert got.argmax() == want.argmax()
 
 
-def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk():
+def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, weights):
     """Each version's reference in turn, its states carried from one to the
     next: the tower, then each chunk, both holding some of the run of
     placeholders that crosses their boundary, through ``placed``, then a
-    decode step, against ``SmolVLMOracle``.
+    decode step, against transformers' logits (``Reference``).
     """
-    weights = drawn(TEXT, text_names(TEXT) | vision_names(VISION), 0)
     model = Multimodal(
         SmolVLMText(TEXT, weights), {IMAGE: VisionTower(VISION, weights)}
     )
-    oracle = SmolVLMOracle(TEXT, weights, VISION)
+    hf = golden("small", lambda: HuggingFaceVLM.build(TEXT, VISION, weights))
+    reference = Reference(hf, IMAGE)
     rng = np.random.default_rng(2)
     tokens = rng.integers(0, IMAGE, 300)
     tokens[250 : 250 + VISION.tokens] = IMAGE
@@ -165,7 +187,7 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk():
             logits, carry = model.reference(None, None, ids, before, **values)
         else:
             logits, carry = model.reference(ids, **values)
-    _assert_close(logits, oracle.logits(tokens, raw))
+    _assert_close(logits, reference.logits(tokens, raw))
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)
-    _assert_close(logits, oracle.logits(tokens, raw))
+    _assert_close(logits, reference.logits(tokens, raw))
