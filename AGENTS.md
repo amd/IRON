@@ -35,7 +35,7 @@ python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 ```
 
-**Note:** `requirements.txt` pins an mlir-aie nightly wheel, which brings the
+**Note:** `requirements.txt` pins an mlir-aie release wheel, which brings the
 kernel library (`aie_kernels/`) and finds the Peano wheel by itself.
 
 **Note:** XRT must be sourced before running any tests or operators.
@@ -106,17 +106,7 @@ black .
 ### C++ (clang-format)
 
 ```bash
-# Check C++ formatting
-python scripts/clang-format-wrapper.py --check
-
-# Show differences
-python scripts/clang-format-wrapper.py --diff
-
-# Auto-format all
 python scripts/clang-format-wrapper.py --fix
-
-# Format specific directory
-python scripts/clang-format-wrapper.py --fix --path iron/
 ```
 
 ### License Compliance (REUSE)
@@ -588,26 +578,26 @@ device-resident state what the instance holds, named by attribute path
 
 ```python
 import iron
+import iron.functional as F
 from iron import Scratchpad
+from iron.operators import Copy
 
 class Decode(iron.Graph):
     def __init__(self, weights, angles):
         self.weights = weights                   # a namespace of arrays: weights
         self.rope = iron.weight(angles)          # (max_len, head_dim)
-        self.kv = iron.state((num_key_value_heads, max_len, head_dim))
+        self.k = iron.state((max_len, head_dim)) # positions first, as iron.lm's caches
 
     def body(self, x, *, pos: Scratchpad[np.int32]):
         w = self.weights
-        h = RMSNorm.step(x, weight=w.norm)       # .step() infers the extents
-        k = RoPE.step(
-            GEMV.step(w.wk, h), Copy.step(self.rope[pos]).reshape(1, head_dim)
-        )  # gathered on the NPU
-        Copy.step(k, self.kv[:, pos])            # a state passed as an output is written
-        return GEMV.step(w.wo, h)
+        h = F.rms_norm(x, w.norm)                # each function infers the extents
+        angles = Copy.step(self.rope[pos]).reshape(1, head_dim)  # gathered on the NPU
+        self.k[pos] = F.rope(F.linear(h, w.wk), angles)  # a copy into the state
+        return x + F.linear(h, w.wo)             # + - * / @ on handles are steps too
 
 graph = Decode(weights, angles)
 graph.compile(x=(1, emb))                        # or on the first call
-logits = graph(x_tok, pos=n)
+y = graph(x_tok, pos=n)
 ```
 
 A body reads a held array where it is held, with no alias: a numpy slice,
@@ -824,17 +814,8 @@ Distribute work across NPU columns using TensorAccessPattern:
 
 ```python
 num_columns = 4
-chunk = total_elements // num_columns
-
-taps = [
-    TensorAccessPattern(
-        (1, total_elements),
-        chunk * i,  # offset for column i
-        [1, 1, 1, chunk], # sizes
-        [0, 0, 0, 1], # strides
-    )
-    for i in range(num_columns)
-]
+parts = TensorAccessPattern.full((total_elements,)).partition(num_columns)
+taps = [parts[i] for i in range(num_columns)]  # column i's contiguous chunk
 ```
 
 ### ObjectFIFO Acquire/Release Pattern
@@ -952,9 +933,9 @@ logging.basicConfig(level=logging.DEBUG)
 
 ### GitHub Actions Workflows
 
-- **small.yml**: Operator and library tests, `iron/operators/` and `iron/tests/` (non-extensive, runs on every PR)
-- **extensive.yml**: Full test suite (the same, with extensive tests)
-- **test-examples.yml**: Application tests (Llama inference, EmbeddingGemma 2, Gemma 4 on FastFlowLM)
+- **phoenix-small.yml**, **krackan-small.yml**: Operator and library tests, `iron/operators/` and `iron/tests/` (non-extensive, runs on every PR), on NPU1 and NPU2
+- **phoenix-extensive.yml**, **krackan-extensive.yml**: Full test suite (the same, with extensive tests), nightly and on pushes to `main` and `devel`
+- **phoenix-test-examples.yml**, **krackan-examples.yml**: Application tests, `tests/applications/`
 - **ci-lint.yml**: Linting checks (black, clang-format, reuse)
 - **pr-comment.yml**: Posts the performance trends of a PR as a comment
 - **publish-pages.yml**: Rebuilds the benchmark history site on GitHub Pages
@@ -992,24 +973,9 @@ of its own that carries the mark.
 
 ### Common Issues
 
-**"No XRT device found"**
-
-- Ensure `source /opt/xilinx/xrt/setup.sh` was run
-- Check XDNA driver is installed: `lsmod | grep amdxdna`
-
-**"Kernel not found" or "Symbol not defined"**
-
-- Verify the kernel `.cc` exists under the installed mlir-aie package's
-  `include/aie_kernels/<family>/` (`aie.utils.config.aie_kernels_dir()`,
-  overridden by `MLIR_AIE_KERNEL_SOURCES`)
-- Ensure the kernel's C++ signature matches the factory from
-  `aie.iron.kernels` (or `bind()`'s argument types), or the
-  `ExternalFunction` declaration, that the operator's `Array.build()` names
-
 **Compilation hangs or fails**
 
 - Check MLIR-AIE is installed: `python -c "import aie.iron"`
-- Verify `llvm-aie` is available: `which aie-opt`
 - Look for errors in the operator's `Array.build()` (common: using `range` instead of `range_()`)
 
 **Test failures with numerical differences**
@@ -1025,12 +991,6 @@ of its own that carries the mark.
 - Check operator constraints (e.g., `M % (tile_m * 4) == 0` for GEMM)
 - Verify `tile_size`, `num_aie_columns`, and total size are compatible
 - Ensure tensor dimensions are multiples of required alignment
-
-**"Invalid configuration: NPU2 has 8 columns"**
-
-- NPU1 supports 1-4 columns only
-- NPU2 supports up to 8 columns
-- Device type is auto-detected via XRT
 
 **Kernel compilation failures**
 

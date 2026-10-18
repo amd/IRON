@@ -4,7 +4,7 @@
 
 """Infrastructure tests for ``OperatorSequence``.
 
-This is the first test module under ``iron/tests/`` and exercises the
+It exercises the
 sequencing infrastructure itself (dispatch-mode selection, fused-MLIR
 generation, cross-packaging output parity and the check mode's self-check)
 rather than any single operator.

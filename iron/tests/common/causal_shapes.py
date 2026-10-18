@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``CausalLM.shapes()``'s one-list convention (``Model``'s own, S22):
+"""``CausalLM.shapes()``'s one-list convention (``Model``'s own):
 the decode step's (none) then the prompt chunk's token ids. Device-free.
 """
 

@@ -148,65 +148,17 @@ black .
 - Use meaningful variable and function names
 
 ### C++ Code Style
-We use **clang-format** with a custom configuration based on LLVM style:
-
-**Style Rules:**
-- **Line length**: 120 characters maximum
-- **Indentation**: 4 spaces (no tabs)
-- **Braces**: Linux style (opening brace on new line for functions/classes)
-- **Spacing**: Space before parentheses in control statements
-- **Include sorting**: Automatic sorting and grouping of includes
-
-**Formatting Commands:**
-```bash
-# Check C++ formatting
-python scripts/clang-format-wrapper.py --check
-
-# Show formatting differences
-python scripts/clang-format-wrapper.py --diff
-
-# Auto-format all C++ files
-python scripts/clang-format-wrapper.py --fix
-
-# Format specific directory only
-python scripts/clang-format-wrapper.py --fix --path src/
-```
+The few C++ files here follow `.clang-format`; `python scripts/clang-format-wrapper.py --fix` applies it.
 
 ## Licensing
 
 ### License Headers
 All source files must include the Apache 2.0 license header. We use the **REUSE** tool to ensure compliance:
 
-**Required Headers:**
-```cpp
-// For C++ files
-// Licensed under the Apache License, Version 2.0 (the License); you may
-// not use this file except in compliance with the License.
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an AS IS BASIS, WITHOUT
-// WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// SPDX-FileCopyrightText: Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-//
-// SPDX-License-Identifier: Apache-2.0
-```
-
+**Required Headers:** two SPDX lines, as `reuse annotate` below writes them
+(`//` in place of `#` for C++):
 ```python
-# For Python files
-# Licensed under the Apache License, Version 2.0 (the License); you may
-# not use this file except in compliance with the License.
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an AS IS BASIS, WITHOUT
-# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-FileCopyrightText: Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 ```
 

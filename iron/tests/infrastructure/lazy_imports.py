@@ -6,7 +6,7 @@
 ``iron.operators`` re-exports lazily (PEP 562), so ``from iron.operators import
 GEMM`` should pull in ``iron.operators.gemm`` (or, for a small operator,
 its single file) and nothing else. What that
-saves is importing all fourteen operator modules and their designs, not the
+saves is importing every other operator module and its design, not the
 cost of any one of them -- MHA, long named here as a witness, actually imports
 slightly faster than ReLU.
 

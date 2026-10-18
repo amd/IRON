@@ -12,7 +12,7 @@ SPDX-License-Identifier: Apache-2.0
 <a href="https://tooomm.github.io/github-release-stats/?username=amd&repository=iron">
    <img src="https://img.shields.io/github/downloads/amd/iron/total.svg" alt="GitHub downloads" /></a>
 <a href="https://github.com/amd/iron/actions" title="Check out our tests">
-   <img src="https://github.com/amd/iron/actions/workflows/small.yml/badge.svg" alt="Iron Tests" /></a>
+   <img src="https://github.com/amd/iron/actions/workflows/krackan-small.yml/badge.svg" alt="Iron Tests" /></a>
 <a href="https://github.com/amd/iron/blob/main/CONTRIBUTING.md" title="Contribution Guide">
     <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
 <a href="https://github.com/amd/iron/blob/main/LICENSE">
@@ -38,46 +38,12 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 
 > E. Hunhoff, J. Melber, K. Denolf, A. Bisca, S. Bayliss, S. Neuendorffer, J. Fifield, J. Lo, P. Vasireddy, P. James-Roxby, E. Keller. "[Efficiency, Expressivity, and Extensibility in a Close-to-Metal NPU Programming Interface](https://arxiv.org/abs/2504.18430)". In 33rd IEEE International Symposium On Field-Programmable Custom Computing Machines, May 2025.
 
-#### 🎯 Operator Dashboard
+#### Operators
 
-| Section | Description | Datatype | AIE2 | AIE2P | Status | Design Example |
-|:--------|:------------|:---------|:-----|:------|:-------|:-------------|
-| [Element-wise Add](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/eltwise/add.cc) | Element-wise addition kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_add.py](./iron/operators/elementwise_add.py) |
-| [Element-wise Mul](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/eltwise/mul.cc) | Element-wise multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_mul.py](./iron/operators/elementwise_mul.py) |
-| [GEMM](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/linalg/mm.cc) | General Matrix Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemm.py](./iron/operators/gemm.py) |
-| [Alternative GEMM](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/fused/mm_fused.h) | General Matrix Multiplication with a fused activation epilogue, specialised for transformer projection shapes. M, K and N are runtime parameters, so one xclbin serves every shape. B is stored as bfp16 on AIE2P | bfloat16, bfp16 | ✓ | ✓ | 🟢 | [iron/operators/flm/gemm/](./iron/operators/flm/gemm/) |
-| [GEMV](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/linalg/mv_bf16.cc) | General Matrix-Vector Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemv.py](./iron/operators/gemv.py) |
-| [GQA](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/linalg/mha.cc) | Grouped Query Attention kernel (Single pipeline) | bfloat16 | | ✓ | 🟢 | [iron/operators/mha.py](./iron/operators/mha.py) |
-| [MHA](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/linalg/mha.cc) | Multi-Head Attention kernel & Grouped Query Attention | bfloat16 | | ✓ | 🟢 | [iron/operators/mha.py](./iron/operators/mha.py) |
-| [RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/norm/rms_norm.cc) | RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm.py](./iron/operators/rms_norm.py) |
-| [RoPE](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/rope.cc) | Rotary Positional Embedding kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rope.py](./iron/operators/rope.py) |
-| [SiLU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/silu.py](./iron/operators/silu.py) |
-| [Softmax](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/softmax.cc) | Softmax kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/softmax.py](./iron/operators/softmax.py) |
-| [Weighted RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/norm/rms_norm.cc) | Weighted RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm.py](./iron/operators/rms_norm.py) |
-| Copy | A copy between two views, moved by the DMAs alone (no kernel) | any | ✓ | ✓ | 🟢 | [iron/operators/copy.py](./iron/operators/copy.py) |
-| [Transpose](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/transpose.py](./iron/operators/transpose.py) |
-| [AXPY](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/axpy.cc) | AXPY | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/axpy.py](./iron/operators/axpy.py) |
-| [Reduction]() | Reduction | bfloat16 | | | 🟡 |  |
-| [Dequant to bfp16](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/quant/q4nx_dequant.cc) | Dequant Q4NX to bfp16, laid out for the B operand of the [alternative GEMM](./iron/operators/flm/gemm/) | q4nx → bfp16 | | ✓ | 🟢 | [iron/operators/flm/dequant/](./iron/operators/flm/dequant/) |
-| [RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/eltwise/relu.cc) | RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/relu.py](./iron/operators/relu.py) |
-| [GELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/gelu.cc) | GELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gelu.py](./iron/operators/gelu.py) |
-| [LayerNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/norm/layer_norm.cc) | LayerNorm | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/layer_norm.py](./iron/operators/layer_norm.py) |
-| [Convolution]() | Convolution | bfloat16 | | | 🟡 |  |
-| [MaxPool]() | MaxPool | bfloat16 | | | ⚪ |  |
-| [AveragePool]() | AveragePool | bfloat16 | | | ⚪ |  |
-| [Tanh](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/tanh.cc) | Tanh kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/tanh.py](./iron/operators/tanh.py) |
-| [Sigmoid](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/sigmoid.cc) | Sigmoid kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/sigmoid.py](./iron/operators/sigmoid.py) |
-
-> Use this dashboard to quickly check the status of each kernel and locate relevant setup, build, and usage information.
-
-#### 📌 Legend
-
-| Status | Meaning            |
-|--------|--------------------|
-| 🟢     | **Done**           |
-| 🟡     | **In Development** |
-| ⚪     | **Not Assigned**   |
-
+Every operator is one class under [iron/operators/](./iron/operators/), listed
+by name in `_OPERATOR_MODULES` in
+[iron/operators/\_\_init\_\_.py](./iron/operators/__init__.py); its
+docstring says what it computes.
 
 ## Installation (Linux)
 
@@ -119,8 +85,8 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    source /opt/xilinx/xrt/setup.sh
    ```
 
-1. Install required Python packages (from requirements.txt), mlir-aie's
-   nightly wheel among them:
+1. Install required Python packages (from requirements.txt), the mlir-aie
+   release wheel it pins among them:
    ```bash
    pip install -r requirements.txt
    ```
