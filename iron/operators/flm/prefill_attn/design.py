@@ -84,9 +84,10 @@ class Variant:
     num_cu: int  # column groups, one query head each per pass
     # Core stack bytes: the FastFlowLM overlay's, which ends at its lowest buffer.
     stack_size: int
-    # The memtile that splits the q fifos of column pair p.
+    # The memtile, of MT, that splits the q fifos of column pair p; it shares
+    # no memtile with k and v, whose channels o's join already half spends.
     q_memtile: Callable[[int], int]
-    # The memtile that stages k and v.
+    # The memtile, of MT, that stages k and v.
     kv_memtile: int
     # True: the variant takes a window. attn_blocks then takes the window_size
     # RTP as an argument, and _stage_kv_sliding stages k and v.
@@ -299,13 +300,17 @@ def prefill_attn(
     )
     blocks_per_round = ROUND // lq_mt
 
-    # Shim row 0, memtile row 1. The memtiles' S2MM channels are all spent
-    # (o's joins, q's halves, k and v) in a layout the placer would have to
-    # rediscover, so the shims and memtiles stay placed. Every core is used
-    # and alike, so the cores are not: core (j, i) is the logical column and
-    # row the kernel and the q and o fifos index.
-    IT = [Tile(j, 0, tile_type=dev.get_tile_type(j, 0)) for j in range(dev.cols)]
-    MT = [Tile(j, 1, tile_type=dev.get_tile_type(j, 1)) for j in range(dev.cols)]
+    # One logical shim, memtile and core per physical one, unplaced: IT[j]
+    # and MT[j] say which streams share a tile, core (j, i) is the logical
+    # column and row the kernel and the q and o fifos index, and the placer
+    # picks where each lands. The causal k/v memtile reads the buffers of
+    # the memtile to its left, which needs the two adjacent, so that pair
+    # alone is placed.
+    IT = [Tile(tile_type=dev.get_tile_type(j, 0)) for j in range(dev.cols)]
+    MT = [Tile(tile_type=AIETileType.MemTile) for _ in range(dev.cols)]
+    if not v.windowed:
+        for j in (v.kv_memtile - 1, v.kv_memtile):
+            MT[j] = Tile(j, 1, tile_type=AIETileType.MemTile)
     CT = {
         (j, i): Tile(tile_type=AIETileType.CoreTile)
         for j in range(dev.cols)
@@ -403,7 +408,7 @@ def prefill_attn(
     o_shim, o_prod = [], {}
     for m in range(dev.cols):
         of_o = ObjectFifo(o_col_ty, depth=2)
-        o_shim.append(of_o.cons(tile=IT[m], channel=0))
+        o_shim.append(of_o.cons(tile=IT[m]))
         sub = of_o.prod().join(
             [g.lq * g.dh * i for i in range(4)],
             obj_types=[o_ty] * 4,
@@ -424,7 +429,7 @@ def prefill_attn(
         mt_idx = v.q_memtile(p)
         for half, rows in ((0, (0, 1)), (1, (2, 3))):
             of_q = ObjectFifo(q_half_ty, depth=2)
-            q_shim[(p, half)] = of_q.prod(tile=IT[mt_idx], channel=half)
+            q_shim[(p, half)] = of_q.prod(tile=IT[mt_idx])
             slices = of_q.cons().split(
                 [lq_ct * g.dh * t for t in range(2)],
                 obj_types=[q_ty] * 2,
