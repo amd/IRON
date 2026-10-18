@@ -1122,3 +1122,35 @@ def test_an_axis_is_found_through_the_branch_a_select_takes():
     assert Laid.x.dims.axis_of("rows", Laid(rows=4, cols=8)) == 0
     assert Laid.x.dims.axis_of("rows", Laid(rows=4, cols=8, flip=True)) == 1
     assert Laid(rows=4, cols=8, flip=True).x.shape == (8, 4)
+
+
+class Doubled(Operator):
+    """Doubles its input, with a reference and no kernel."""
+
+    reference_only = True
+    rows: CompileTime[int] = field()
+    x = In(rows, 8)
+    y = Out(rows, 8)
+
+    def reference(self, x):
+        return x * 2
+
+
+def test_a_reference_only_operator_runs_its_reference_and_does_not_compile(npu2):
+    class Twice(iron.Graph):
+        def body(self, x):
+            return Doubled.step(x)
+
+    x = np.arange(32).reshape(4, 8).astype(bfloat16)
+    np.testing.assert_array_equal(np.asarray(Twice().reference(x)), x * 2)
+    with pytest.raises(TypeError, match="Doubled is reference-only: it has no kernel"):
+        Doubled(rows=4).compile()
+
+
+def test_a_reference_only_operator_takes_no_build():
+    with pytest.raises(TypeError, match="Builds is reference-only, so it takes no"):
+
+        class Builds(Doubled):
+            class Array(Operator.Array):
+                def build(self) -> Built:
+                    return Built([])

@@ -12,6 +12,9 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `Operator.reference_only = True`: an operator that is a declaration plus
+  `reference()`, with no kernel. Graphs trace it and references run it;
+  compiling it raises, and the device catalog skips it.
 - `iron.param(*shape, dtype=bfloat16)`, a weight a graph declares by shape,
   and `Graph.load(tree, path="")`, which binds each one to the tensor at its
   dotted path, cast to its dtype, and raises once, naming every missing,

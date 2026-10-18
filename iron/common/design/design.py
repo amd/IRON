@@ -45,6 +45,8 @@ class OperatorDesign:
     _ADDRESS = re.compile(r"0x[0-9a-f]{6,}")
 
     def __init__(self, op: Operator, full_elf: bool = True):
+        if op.reference_only:
+            raise TypeError(f"{type(op).__name__} is reference-only: it has no kernel")
         self.op = op
         self.full_elf = full_elf
         P = inspect.Parameter

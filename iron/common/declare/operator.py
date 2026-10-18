@@ -128,6 +128,9 @@ class Operator:
     test: ClassVar[Testing | None] = None
     # True when sequence() calls rt.preamble() itself, behind its first fills.
     own_preamble: ClassVar[bool] = False
+    # A declaration and a reference() with no kernel yet: graphs trace it and
+    # references run it, but nothing compiles it and the device catalog skips it.
+    reference_only: ClassVar[bool] = False
     # A fused image lowers every operator's sequence under the union.
     aiecc_flags: ClassVar[tuple[str, ...]] = ()
     # Per leading operand that may be a view: the param holding its pattern
@@ -159,6 +162,16 @@ class Operator:
         super().__init_subclass__(**kwargs)
         if image is not None:
             cls._external = image
+        if cls.reference_only and (
+            image is not None
+            or cls.Array.build is not Array.build
+            or cls.sequence is not Operator.sequence
+            or cls.exported_design is not Operator.exported_design
+        ):
+            raise TypeError(
+                f"{cls.__name__} is reference-only, so it takes no image=, "
+                "build(), sequence() or exported_design()"
+            )
         cls.declaration = Declaration(cls, Operator, shipped=image is not None)
 
     @classmethod
