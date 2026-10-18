@@ -26,11 +26,11 @@ public API adds its entry under Unreleased.
   decoder, on drawn weights) and `qwen3_moe` (Qwen3-30B-A3B, on the host),
   each judged by a device-free toy golden.
 - `iron.param(*shape, dtype=bfloat16)`, a weight a graph declares by shape,
-  and `Graph.load(tree, path="")`, which binds each one to the tensor at its
+  and `Graph.load_state_dict(tree, path="")`, which binds each one to the tensor at its
   dotted path, cast to its dtype, and raises once, naming every missing,
   extra and wrong-shaped tensor; a param held at two paths is tied, bound
-  from its first. A param never loaded is named when the graph is traced,
-  and a second load is refused. `Graph.draw(seed)` and `Graph.unread()` load
+  from its first. A param never bound is named when the graph is traced,
+  and a second load is refused. `Graph.draw(seed)` and `Graph.unread()` bind
   them drawn or unwritten.
 - Leaf modules in `iron.lm`, graphs that declare their weights as
   transformers names them: `Linear`, `Embedding`, `RMSNorm` and `LayerNorm`.
@@ -151,7 +151,7 @@ public API adds its entry under Unreleased.
   `chat_template.jinja` when `tokenizer_config.json` has none.
 - `CausalLM` builds its modules, `model` (a `Decoder` of `layer_class`
   layers, `DecoderLayer` by default) and `lm_head` (the embedding where
-  tied), and loads them from the checkpoint's tree with `Graph.load`. A
+  tied), and binds them to the checkpoint's tree with `Graph.load_state_dict`. A
   model with `layer_class = None` reads `config.layer(i)` as before, its
   caches in `caches`, a `KVCache` per attention layer, in place of `keys`
   and `values`. The RoPE table is `CausalLM.rope`, a `Rope`, whose `rows`

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Modules that own their weights, device-free: ``Graph.load`` binding each
+"""Modules that own their weights, device-free: ``Graph.load_state_dict`` binding each
 ``param`` or naming every tensor it cannot, ``draw`` and ``unread``, and
 the leaf modules' references against numpy.
 """
@@ -48,11 +48,11 @@ def tensors(under: str = "") -> dict[str, np.ndarray]:
     return {under + n: np.zeros(s, bfloat16) for n, s in shapes.items()}
 
 
-def test_load_binds_each_param_to_its_tensor():
+def test_bind_binds_each_param_to_its_tensor():
     named = {n: t.shape for n, t in tensors("model.").items()}
     tree = checkpoint(SMALL, named | {"lm_head.weight": (512, 256)}).tree()
     block = Block()
-    block.load(tree, "model.")
+    block.load_state_dict(tree, "model.")
     assert block.layers[0].bias is tree.model.layers[0].bias and block.held()
 
 
@@ -67,31 +67,31 @@ def test_an_index_a_checkpoint_skips_is_none_and_no_leaf():
     assert tree.classifier[0] is None
     assert [n for n, _ in leaves(tree)] == ["classifier.1.weight"]
     head = Head()
-    head.load(tree)
+    head.load_state_dict(tree)
     assert head.classifier[1].weight is tree.classifier[1].weight
 
 
-def test_load_names_every_missing_tensor():
+def test_bind_names_every_missing_tensor():
     named = tensors()
     del named["norm.weight"], named["layers.1.weight"]
     with pytest.raises(ValueError, match=r"missing layers\.1\.weight, norm\.weight$"):
-        Block().load(named)
+        Block().load_state_dict(named)
 
 
-def test_load_names_each_kind_in_one_error():
+def test_bind_names_each_kind_in_one_error():
     named = tensors("model.") | {"model.norm.weight": np.zeros(4, bfloat16)}
     del named["model.out.bias"]
     named["model.extra"] = np.zeros(1, bfloat16)
     with pytest.raises(ValueError) as error:
-        Block().load(named, "model.")
+        Block().load_state_dict(named, "model.")
     assert str(error.value) == (
         "Block: cannot load: missing model.out.bias; extra model.extra; "
         "wrong shape model.norm.weight (4,), not (256,)"
     )
 
 
-def test_a_param_never_loaded_is_named_at_trace():
-    with pytest.raises(TypeError, match=r"embed\.weight was never loaded"):
+def test_a_param_never_bound_is_named_at_trace():
+    with pytest.raises(TypeError, match=r"embed\.weight was never bound"):
         Block().trace(ids=((4,), np.int32))
 
 
@@ -134,14 +134,14 @@ class Tied(iron.Graph):
 def test_a_tied_param_needs_only_its_first_path():
     table = np.ones((512, 256), bfloat16)
     tied = Tied()
-    tied.load({"embed.weight": table})
+    tied.load_state_dict({"embed.weight": table})
     assert tied.head.weight is tied.embed.weight is table
 
 
 def test_a_tied_param_ignores_a_tensor_at_its_other_path():
     first, second = np.ones((512, 256), bfloat16), np.zeros((512, 256), bfloat16)
     tied = Tied()
-    tied.load({"embed.weight": first, "head.weight": second})
+    tied.load_state_dict({"embed.weight": first, "head.weight": second})
     assert tied.head.weight is tied.embed.weight is first
 
 
@@ -155,11 +155,11 @@ def test_a_graph_held_at_two_paths_skips_the_second_paths_tensors():
         n: np.zeros(s, bfloat16) for n, s in [("a.weight", (4, 4)), ("c.0", (2,))]
     }
     shared = Shared()
-    shared.load(tensors | {"b.weight": np.ones((4, 4), bfloat16)})
+    shared.load_state_dict(tensors | {"b.weight": np.ones((4, 4), bfloat16)})
     assert shared.b.weight is tensors["a.weight"] and shared.d[0] is tensors["c.0"]
 
 
-def test_load_binds_params_in_lists_dicts_and_namespaces():
+def test_bind_binds_params_in_lists_dicts_and_namespaces():
     class Held(iron.Graph):
         def __init__(self):
             self.items = [iron.param(2)]
@@ -171,7 +171,7 @@ def test_load_binds_params_in_lists_dicts_and_namespaces():
     assert len(held.held()) == 3
 
 
-def test_load_refuses_a_param_in_a_tuple():
+def test_bind_refuses_a_param_in_a_tuple():
     class Held(iron.Graph):
         def __init__(self):
             self.pair = (iron.param(2), iron.param(2))
@@ -180,7 +180,7 @@ def test_load_refuses_a_param_in_a_tuple():
         Held().unread()
 
 
-def test_load_refuses_a_param_in_a_frozen_dataclass():
+def test_bind_refuses_a_param_in_a_frozen_dataclass():
     @dataclasses.dataclass(frozen=True)
     class Pair:
         first: np.ndarray
@@ -194,31 +194,38 @@ def test_load_refuses_a_param_in_a_frozen_dataclass():
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float16])
-def test_load_casts_to_the_params_dtype(dtype):
+def test_bind_casts_to_the_params_dtype(dtype):
     named = {n: t.astype(dtype) for n, t in tensors().items()}
     block = Block()
-    block.load(named)
+    block.load_state_dict(named)
     assert block.norm.weight.dtype == bfloat16
 
 
-def test_load_refuses_a_change_of_kind():
+def test_bind_keeps_a_tensor_of_the_params_dtype_as_the_view_it_is():
+    named = tensors()
+    block = Block()
+    block.load_state_dict(named)
+    assert block.norm.weight is named["norm.weight"]
+
+
+def test_bind_refuses_a_change_of_kind():
     named = tensors() | {"norm.weight": np.ones(256, np.int32)}
     with pytest.raises(
         ValueError, match=r"wrong kind norm\.weight int32, not bfloat16"
     ):
-        Block().load(named)
+        Block().load_state_dict(named)
 
 
-def test_a_second_load_is_refused():
+def test_a_second_bind_is_refused():
     block = Block()
     block.draw(0)
-    with pytest.raises(ValueError, match="already loaded"):
-        block.load(tensors())
+    with pytest.raises(ValueError, match="already bound"):
+        block.load_state_dict(tensors())
 
 
 def test_a_path_without_its_trailing_dot_is_refused():
     with pytest.raises(ValueError, match="'model' must end in a dot"):
-        Block().load(tensors("model."), "model")
+        Block().load_state_dict(tensors("model."), "model")
 
 
 def test_leaf_modules_match_numpy():

@@ -141,8 +141,8 @@ class Decoder(iron.Graph):
 class CausalLM(Model):
     """A decoder on ``config``'s shape: ``model``, a ``Decoder`` of
     ``layer_class`` layers, each holding its own ``KVCache`` and the
-    model's ``rope``, and ``lm_head``, the embedding where tied, loaded
-    from ``weights``.
+    model's ``rope``, and ``lm_head``, the embedding where tied, bound
+    to ``weights``.
 
     Args:
         config: The decoder's shape.
@@ -185,8 +185,7 @@ class CausalLM(Model):
             self.lm_head = Linear(config.hidden_size, config.vocab_size)
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
-            # Graph's, not Model.load, which builds a model from its files.
-            iron.Graph.load(self, weights)
+            self.load_state_dict(weights)
             self.layers = self.model.layers
             return
         self.decoder = weights.model if decoder is None else decoder

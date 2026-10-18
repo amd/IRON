@@ -70,8 +70,8 @@ class SparseMoE(iron.Graph):
         self.experts = [GatedMLP(expert) for _ in range(c.num_experts)]
         self.top_k = c.num_experts_per_tok
 
-    def load(self, tree, path: str = "") -> None:
-        super().load(tree, path)
+    def load_state_dict(self, tree, path: str = "") -> None:
+        super().load_state_dict(tree, path)
         # As transformers stacks them: each expert's gate over its up.
         self.gate_up = np.stack(
             [

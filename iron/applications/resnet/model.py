@@ -98,8 +98,8 @@ class ConvLayer(iron.Graph):
         self.normalization = BatchNorm(cout)
         self.stride, self.relu = stride, relu
 
-    def load(self, tree, path: str = "") -> None:
-        super().load(tree, path)
+    def load_state_dict(self, tree, path: str = "") -> None:
+        super().load_state_dict(tree, path)
         bn = self.normalization
         scale = bn.weight / np.sqrt(bn.running_var + np.float32(BN_EPS))
         weight = self.convolution.weight.astype(np.float32)
@@ -162,8 +162,8 @@ class Stem(ConvLayer):
     def __init__(self, c: ResNetConfig):
         super().__init__(c.num_channels, c.embedding_size, 7, 2)
 
-    def load(self, tree, path: str = "") -> None:
-        super().load(tree, path)
+    def load_state_dict(self, tree, path: str = "") -> None:
+        super().load_state_dict(tree, path)
         out, channels = self.weight.shape[:2]
         w = np.zeros((out, PIXEL, 8, 8), np.float32)
         w[:, :channels, 1:, 1:] = self.weight
@@ -241,7 +241,7 @@ class ResNet(iron.Graph):
             None,
             Linear(config.hidden_sizes[-1], config.num_labels, bias=True),
         ]
-        iron.Graph.load(self, weights)
+        self.load_state_dict(weights)
 
     def inputs(self, image: np.ndarray) -> np.ndarray:
         """An ImageNet-normalized ``(size, size, 3)`` image as the graph

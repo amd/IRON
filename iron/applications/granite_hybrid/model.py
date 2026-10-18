@@ -107,8 +107,8 @@ class Mamba(iron.Graph):
         self.window = iron.state((2, chunk, self.channels))
         self.tail = iron.state((K - 1, self.channels))
 
-    def load(self, tree, path: str = "") -> None:
-        super().load(tree, path)
+    def load_state_dict(self, tree, path: str = "") -> None:
+        super().load_state_dict(tree, path)
         # A row per tap; the scan's per-head constants in float32.
         taps = self.conv1d.weight.reshape(self.channels, -1).T
         self.taps = np.ascontiguousarray(taps)

@@ -166,7 +166,7 @@ class _Param(np.ndarray):
 
 def param(*shape: int, dtype=bfloat16) -> np.ndarray:
     """A weight a graph declares by shape, typed as the array
-    ``Graph.load`` binds in its place.
+    ``Graph.load_state_dict`` binds in its place.
     """
     return np.broadcast_to(np.zeros((), dtype), shape).view(_Param)
 
@@ -310,16 +310,16 @@ class Graph:
         path name.
 
         Raises:
-            TypeError: A ``param`` was never loaded.
+            TypeError: A ``param`` was never bound.
         """
         held: dict[int, tuple[str, Any]] = {}
         for path, x, _, _ in _leaves(self):
             if isinstance(x, _Param):
-                raise TypeError(f"{self.name}: {path} was never loaded")
+                raise TypeError(f"{self.name}: {path} was never bound")
             held.setdefault(id(x), (path, x))
         return held
 
-    def load(self, tree, path: str = "") -> None:
+    def load_state_dict(self, tree, path: str = "") -> None:
         """Bind each ``param`` of this graph and of what it holds to the
         tensor at its dotted path in ``tree`` (a ``Checkpoint.tree()``, or
         tensors by dotted path) under ``path``, this graph's own prefix
@@ -328,12 +328,12 @@ class Graph:
         at several paths is tied: its first path, in attribute order, binds
         every holder, and a tensor at another is ignored; so is any tensor
         under a graph or container held again at a second path. Each graph
-        it holds loads through its own ``load``, so a subclass derives a
-        tensor after ``super().load()``.
+        it holds binds through its own ``load_state_dict``, so a subclass derives a
+        tensor after ``super().load_state_dict()``.
 
         Raises:
             ValueError: ``path`` does not end in a dot; the graph is
-                already loaded; or a param's tensor is missing, of another
+                already bound; or a param's tensor is missing, of another
                 shape or of another kind (float for int), or ``tree`` holds
                 a tensor under ``path`` that no param declares, one error
                 naming every such path.
@@ -341,9 +341,11 @@ class Graph:
                 cannot be rebound.
         """
         if path and not path.endswith("."):
-            raise ValueError(f"{self.name}: load's path {path!r} must end in a dot")
-        if self.__dict__.get("_loaded"):
-            raise ValueError(f"{self.name}: already loaded")
+            raise ValueError(
+                f"{self.name}: load_state_dict's path {path!r} must end in a dot"
+            )
+        if self.__dict__.get("_bound"):
+            raise ValueError(f"{self.name}: already bound")
         tensors = {n: t for n, t, _, _ in _leaves(tree) if n.startswith(path)}
         tied: dict[int, list[str]] = {}
         params: dict[str, _Param] = {}
@@ -356,7 +358,7 @@ class Graph:
             ):
                 raise TypeError(
                     f"{self.name}: {path}{n} is in a tuple or a frozen "
-                    f"dataclass, which load cannot rebind; hold it in a list"
+                    f"dataclass, which load_state_dict cannot rebind; hold it in a list"
                 )
             tied.setdefault(id(p), []).append(path + n)
             params.setdefault(tied[id(p)][0], p)
@@ -396,25 +398,25 @@ class Graph:
             tensors.update(dict.fromkeys(others, tensors[first]))
         for n, x, parent, key in _leaves(self, graphs=False):
             if isinstance(x, Graph):
-                if not x.__dict__.get("_loaded"):
-                    x.load(tensors, f"{path}{n}.")
+                if not x.__dict__.get("_bound"):
+                    x.load_state_dict(tensors, f"{path}{n}.")
             elif not isinstance(x, _Param):
                 continue
             elif isinstance(parent, (list, dict)):
                 parent[key] = tensors[path + n]
             else:
                 setattr(parent, key, tensors[path + n])
-        self._loaded = True
+        self._bound = True
 
     def draw(self, seed: int) -> None:
-        """Load each ``param`` drawn at ``seed`` in the order the graph
+        """Bind each ``param`` drawn at ``seed`` in the order the graph
         holds them (``filled``).
         """
-        self.load(filled("random", self._shapes(), seed))
+        self.load_state_dict(filled("random", self._shapes(), seed))
 
     def unread(self) -> None:
-        """Load each ``param`` allocated and never written (``filled``)."""
-        self.load(filled("unread", self._shapes()))
+        """Bind each ``param`` allocated and never written (``filled``)."""
+        self.load_state_dict(filled("unread", self._shapes()))
 
     def _shapes(self) -> dict[str, tuple[tuple[int, ...], Any]]:
         """Each param's shape and dtype at its first path."""
