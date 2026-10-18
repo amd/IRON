@@ -114,10 +114,7 @@ public API adds its entry under Unreleased.
   saying how to compile without one, not an `AttributeError` on `None`.
 - `Golden.logits` raises `FileNotFoundError` naming the file when there is
   none to read, and `LookupError` only for a file that lacks the sequence.
-- `F.linear` no longer reads the graph's `precision`: a graph raising
-  `flm.ProjectionGEMM` to `highest`, which it cannot reach, gets the GEMM that
-  rounds once from `Operator.at_precision`. `F.linear` refuses an `x` that is
-  neither `(in,)` nor `(rows, in)`.
+- `F.linear` refuses an `x` that is neither `(in,)` nor `(rows, in)`.
 - `MHA.COLUMNS` and `iron.operators.mha.Columns` are `MHA.PACKED_PIPELINES`,
   the most pipelines one query packed takes by array width: the build placed
   nothing by the other columns.
@@ -157,8 +154,9 @@ public API adds its entry under Unreleased.
   axis is refused.
 - `F.linear(precision=)` is the one way to ask for an accurate projection: at
   `Precision.HIGHEST` several rows run core GEMM, whose float32 sums round
-  once, where they ran flm.ProjectionGEMM before, whether asked for by the
-  call or by `Graph.precision`; one row, a GEMV that rounds once, takes any
+  once, where they ran flm.ProjectionGEMM before, asked for by the call or by
+  a graph's `precision` raising flm.ProjectionGEMM to it, which hands over
+  (`Operator.at_precision`); one row, a GEMV that rounds once, takes any
   precision. `Attention` and `MLP` take `precision` in place of `accurate`.
 - `HuggingFaceWhisper` and `HuggingFaceVLM` move to their applications'
   `hugging_face.py`, as EmbeddingGemma 2's builders are, which only tests
