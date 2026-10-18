@@ -11,6 +11,7 @@ import copy
 import math
 from dataclasses import Field
 from collections.abc import Sequence
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import aie.iron
@@ -27,7 +28,13 @@ from .member import Member
 from .value import Extent, Value
 
 if TYPE_CHECKING:
+    from ..design import OperatorRuntime
     from .operator import Operator
+
+# The OperatorRuntime whose sequence body is running, which fill/drain emit through.
+active_runtime: ContextVar[OperatorRuntime | None] = ContextVar(
+    "active_runtime", default=None
+)
 
 
 def slots(sizes: Sequence[Any], strides: Sequence[Any]) -> tuple[list, list]:
@@ -160,15 +167,12 @@ class Operand(Member["Operand"]):
         self.feed = feed
         self.op: Operator | None = None
         self.lane_handles: list[Any] = []
-        # The OperatorRuntime whose sequence body is running, which fill/drain emit through.
-        self.runtime = None
 
     def of(self, op: Operator) -> Self:
         """This operand on ``op``: its shape resolved there, its lanes unbound."""
         bound = copy.copy(self)
         bound.op = op
         bound.lane_handles = []
-        bound.runtime = None
         return bound
 
     def _resolve(self, shape: Shape) -> tuple[int, ...]:
@@ -443,11 +447,12 @@ class Operand(Member["Operand"]):
         )
 
     def _runtime(self):
-        if self.runtime is None:
+        runtime = active_runtime.get()
+        if runtime is None or runtime.op is not self.op:
             raise ValueError(
                 f"{self.name}.fill/drain run in the operator's sequence(rt)"
             )
-        return self.runtime
+        return runtime
 
     @property
     def batch_axes(self) -> int:

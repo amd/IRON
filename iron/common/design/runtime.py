@@ -30,7 +30,7 @@ from aie.iron import (
 from aie.iron.runtime.dmatask import emit_shim_transfer
 
 from ..declare import Built, DispatchTime, Operator, Value
-from ..declare.operand import Operand, slots
+from ..declare.operand import Operand, active_runtime, slots
 from ..declare.value import PlaceWord
 
 
@@ -110,14 +110,16 @@ class OperatorRuntime(Runtime):
         """
         buffers = self.op.buffers
         self._tensors = {b.name: a for b, a in zip(buffers, args)}
-        for b in buffers:
-            b.runtime = self
         for value, arg in zip(self.op.values, args[len(buffers) + 1 :]):
             if not value.in_scratchpad:
                 value.ssa = arg
-        if not self.op.own_preamble:
-            self.preamble()
-        self.run()
+        token = active_runtime.set(self)
+        try:
+            if not self.op.own_preamble:
+                self.preamble()
+            self.run()
+        finally:
+            active_runtime.reset(token)
         for queue in self._queues.values():
             for task in queue:
                 task.await_()

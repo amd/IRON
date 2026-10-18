@@ -428,6 +428,12 @@ def test_a_stream_binds_a_handle_per_lane():
         NoObjType(n=4).x.obj_type
 
 
+def test_an_operand_fills_only_inside_its_operators_sequence():
+    op = MV(M=1024, K=256, columns=2)
+    with pytest.raises(ValueError, match="run in the operator's sequence"):
+        op.A.fill(lane=0)
+
+
 def test_per_call_values_bind_on_the_operator():
     class Copy(Operator):
         n: int = Param()
