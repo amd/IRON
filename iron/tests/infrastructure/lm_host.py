@@ -318,8 +318,24 @@ def test_tree_rejects_a_skipped_layer(tmp_path):
         k: v for k, v in toy_checkpoint().items() if not k.startswith("model.layers.0.")
     }
     save_file(ckpt, tmp_path / "skipped.safetensors")
-    with pytest.raises(ValueError, match=re.escape("[1] skip [0]")):
+    with pytest.raises(ValueError, match=r"model\.layers in .*\[1\] skip \[0\]"):
         Checkpoint(tmp_path / "skipped.safetensors").tree()
+
+
+def test_tree_names_a_missing_tensor_by_its_path_and_file(toy_path):
+    """Read directly or through ``renamed``, as a model reads a layer."""
+    layer = Checkpoint(toy_path).tree("unread").model.layers[1]
+    message = f"model.layers.1.self_attn.x_proj is not in {toy_path} (it has "
+    for module in (layer, renamed(layer, {})):
+        with pytest.raises(AttributeError, match=re.escape(message) + ".*q_proj"):
+            module.self_attn.x_proj
+
+
+def test_tree_names_a_layer_past_the_last(toy_path):
+    layers = Checkpoint(toy_path).tree("unread").model.layers
+    message = f"model.layers.2 is not in {toy_path} (it has 2)"
+    with pytest.raises(IndexError, match=re.escape(message)):
+        layers[2]
 
 
 YOLOX = weights_dir("yolox-nano") / "yolox_nano.pth"

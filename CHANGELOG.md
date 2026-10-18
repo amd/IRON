@@ -88,6 +88,8 @@ public API adds its entry under Unreleased.
   disagrees raises `ValueError`, and `Operator.check_derived` is removed. A
   field a caller may override takes a function default instead,
   `field(lambda op: op.num_heads)`.
+- A name or layer missing from a `Checkpoint.tree()` raises an error naming
+  its dotted path, the checkpoint file and what the module does have.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `runner`; `iron.lm`'s own names are unchanged.
 - A `Runner` subclass is its model's `runner`, which `CausalLM.load` builds.

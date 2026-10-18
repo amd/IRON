@@ -279,7 +279,7 @@ class Checkpoint:
             }
         else:
             raise ValueError(f"fill is read, random or unread, not {fill!r}")
-        return _nest(tensors)
+        return _nest(tensors, file=self.path)
 
 
 def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:
@@ -294,8 +294,13 @@ def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:
         yield prefix[:-1], tree
 
 
-def _nest(named: Mapping[str, Any]) -> SimpleNamespace:
-    """Values by dotted name, nested as ``Checkpoint.tree()`` nests them."""
+def _nest(
+    named: Mapping[str, Any], path: str = "", file="the checkpoint"
+) -> SimpleNamespace:
+    """Values by dotted name, nested as ``Checkpoint.tree()`` nests them,
+    under ``path`` (a dotted prefix) of ``file``, which a missing name
+    names.
+    """
     nested: dict = {}
     for name, value in named.items():
         *parents, leaf = name.split(".")
@@ -303,25 +308,65 @@ def _nest(named: Mapping[str, Any]) -> SimpleNamespace:
         for key in parents:
             node = node.setdefault(key, {})
         node[leaf] = value
-    return _tree(nested)
+    return _tree(nested, path, file)
 
 
-def _tree(node) -> Any:
-    """Nested dicts as namespaces, those keyed by indices as lists.
+def _tree(node, path: str, file) -> Any:
+    """Nested dicts as ``_Module``s, those keyed by indices as ``_Layers``.
 
     Raises:
         ValueError: A run of indices skips one.
     """
     if not isinstance(node, dict):
         return node
-    items = {key: _tree(child) for key, child in node.items()}
+    items = {key: _tree(child, f"{path}{key}.", file) for key, child in node.items()}
     if items and all(key.isdigit() for key in items):
         indices = range(max(map(int, items)) + 1)
         missing = sorted(set(indices) - {int(key) for key in items})
         if missing:
-            raise ValueError(f"indices {sorted(map(int, items))} skip {missing}")
-        return [items[str(i)] for i in indices]
-    return SimpleNamespace(**items)
+            raise ValueError(
+                f"{path[:-1]} in {file}: indices {sorted(map(int, items))} "
+                f"skip {missing}"
+            )
+        tree = _Layers(items[str(i)] for i in indices)
+    else:
+        tree = _Module(**items)
+    tree._path, tree._file = path, file
+    return tree
+
+
+class _Module(SimpleNamespace):
+    """A module of a ``Checkpoint.tree()``, its tensors and submodules by
+    name; a name it lacks raises an ``AttributeError`` naming its dotted
+    path, the file and the names it has.
+    """
+
+    __slots__ = ("_path", "_file")
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise AttributeError(
+            f"{self._path}{name} is not in {self._file} "
+            f"(it has {', '.join(vars(self))})"
+        )
+
+
+class _Layers(list):
+    """A run of a ``Checkpoint.tree()``'s modules by index; an index past
+    the end raises an ``IndexError`` naming its dotted path, the file and
+    how many there are.
+    """
+
+    __slots__ = ("_path", "_file")
+
+    def __getitem__(self, index):
+        try:
+            return super().__getitem__(index)
+        except IndexError:
+            raise IndexError(
+                f"{self._path}{index} is not in {self._file} (it has {len(self)})"
+            ) from None
 
 
 def renamed(tree, renames: Mapping[str, str]):
@@ -336,4 +381,8 @@ def renamed(tree, renames: Mapping[str, str]):
                 return new + path[len(old) :]
         return path
 
-    return _nest({moved(path): value for path, value in leaves(tree)})
+    return _nest(
+        {moved(path): value for path, value in leaves(tree)},
+        getattr(tree, "_path", ""),
+        getattr(tree, "_file", "the checkpoint"),
+    )
