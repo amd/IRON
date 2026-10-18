@@ -155,7 +155,7 @@ def test_log_mel_holds_to_the_extractor(golden):
     wave = (0.5 * np.sin(2 * np.pi * (200 * t + 300 * t**2))).astype(np.float32)
     wave += 0.05 * np.random.default_rng(0).standard_normal(n).astype(np.float32)
     got = np.asarray(log_mel.reference(wave, frames=frames), np.float32)[::EVERY]
-    want = golden("log_mel", Extractor).logits(wave.view(np.int32))
+    want = golden("log_mel", Extractor).logits((), wave)
     ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)
     # Measured: 0.99951 exact.
     assert np.mean(got == want) >= 0.999

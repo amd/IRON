@@ -30,17 +30,17 @@ EVERY = 8
 
 class Extractor:
     """transformers' ``Gemma4AudioFeatureExtractor``, what records a
-    golden: every ``EVERY``th frame's features of a wave given as its
-    float32 bits, rounded once to bf16.
+    golden: every ``EVERY``th frame's features of a float32 wave, rounded
+    once to bf16.
     """
 
-    def logits(self, bits):
+    def logits(self, tokens, wave):
         import transformers
 
         # The extractor's first frame is centred on the wave's start, a half
         # frame of zeros before it, so its frame f + 1 is LogMel's f; the
         # zero after completes the last.
-        wave = np.append(np.asarray(bits, np.int32).view(np.float32), np.float32(0))
+        wave = np.append(wave, np.float32(0))
         extractor = transformers.Gemma4AudioFeatureExtractor()
         features, _ = extractor._extract_spectrogram(wave, np.ones(wave.size, bool))
         return features[1::EVERY].astype(bfloat16).astype(np.float32)
@@ -62,7 +62,7 @@ def test_log_mel(log_mel, frames, golden, record_property):
     wave += 0.05 * rng.standard_normal(n).astype(np.float32)
     got = log_mel(wave, frames=frames).numpy().reshape(FRAMES, log_mel.mels)
     got = got[:frames:EVERY].astype(np.float32)
-    want = golden("log_mel", Extractor).logits(wave.view(np.int32))[: len(got)]
+    want = golden("log_mel", Extractor).logits((), wave)[: len(got)]
     ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)
     exact = float(np.mean(got == want))
     record_property("Exact", exact)

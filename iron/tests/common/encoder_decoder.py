@@ -10,7 +10,6 @@ against Hugging Face's own Whisper decoder in float32 over the same
 weights and encoder rows, its logits recorded in ``goldens/``.
 """
 
-import dataclasses
 from types import SimpleNamespace
 
 import aie.utils as aie_utils
@@ -20,16 +19,9 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron.applications.whisper.model import RENAMES
-from iron.lm import (
-    MLP,
-    Attention,
-    CrossDecoderLayer,
-    DecoderConfig,
-    EncoderDecoder,
-    Norm,
-)
-from iron.lm.golden import flat
+from iron.applications.whisper.model import RENAMES, WhisperConfig
+from iron.lm import EncoderDecoder
+from iron.lm.golden import HuggingFace
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
@@ -42,35 +34,24 @@ from iron.tests.common.multimodal import Features
 pytestmark = pytest.mark.usefixtures("npu2")
 
 
-@dataclasses.dataclass(frozen=True)
-class Shape(DecoderConfig):
-    """Whisper's decoder layer: affine LayerNorms, a plain feed-forward."""
-
-    def layer(self, i: int) -> CrossDecoderLayer:
-        H = self.num_attention_heads
-        return CrossDecoderLayer(
-            Attention(H, H, self.head_dim),
-            MLP(self.hidden_act, gated=False),
-            Norm(self.eps, bias=True),
-        )
-
-
-CONFIG = Shape(
+# The encoder's rows: as many as a prompt chunk's, the fewest its MHA takes.
+SOURCE = 256
+# Whisper's decoder; the encoder's fields only fill transformers' config.
+CONFIG = WhisperConfig(
     vocab_size=1024,
     hidden_size=512,
     num_hidden_layers=2,
     num_attention_heads=8,
     num_key_value_heads=8,
-    head_dim=64,
     intermediate_size=1024,
-    rope_theta=None,
     max_seq_len=512,
-    prefill_chunk=256,
     hidden_act="gelu_pytorch_tanh",
-    eps=1e-5,
+    encoder_layers=0,
+    encoder_attention_heads=8,
+    encoder_ffn_dim=1024,
+    num_mel_bins=80,
+    max_source_positions=SOURCE,
 )
-# The encoder's rows: as many as a prompt chunk's, the fewest its MHA takes.
-SOURCE = 256
 
 
 class Whisper(EncoderDecoder):
@@ -96,40 +77,19 @@ class Whisper(EncoderDecoder):
         return GEMV.step(self.decoder.embed_tokens.weight, h)
 
 
-class HuggingFaceDecoder:
-    """transformers' Whisper decoder in float32 on ``CONFIG``'s shape over
-    ``weights``, attending over the encoder's output ``rows``: what
-    records a golden, the logits after a sequence of tokens.
+class HuggingFaceDecoder(HuggingFace):
+    """transformers' Whisper decoder alone (``WhisperForCausalLM``), what
+    records a golden: the logits after the tokens, attending over the
+    encoder's output rows given beside them.
     """
 
-    def __init__(self, weights, rows):
-        import torch
-        import transformers
-
-        c = CONFIG
-        hf = transformers.WhisperConfig(
-            vocab_size=c.vocab_size,
-            d_model=c.hidden_size,
-            decoder_layers=c.num_hidden_layers,
-            decoder_attention_heads=c.num_attention_heads,
-            decoder_ffn_dim=c.intermediate_size,
-            max_target_positions=c.max_seq_len,
-            activation_function=c.hidden_act,
-            encoder_layers=0,
-            pad_token_id=None,
-        )
-        self.model = transformers.WhisperForConditionalGeneration(hf).eval()
-        state = {k: torch.from_numpy(v) for k, v in flat(weights)}
-        self.model.load_state_dict(state, strict=False)
-        self.rows = torch.from_numpy(np.asarray(rows, np.float32))[None]
-
-    def logits(self, tokens):
+    def logits(self, tokens, rows) -> np.ndarray:
         import torch
 
         with torch.no_grad():
             out = self.model(
-                encoder_outputs=(self.rows,),
-                decoder_input_ids=torch.tensor([list(tokens)]),
+                torch.tensor([list(tokens)]),
+                encoder_outputs=(torch.from_numpy(np.asarray(rows, np.float32))[None],),
                 use_cache=False,
             )
         return out.logits[0, -1].numpy()
@@ -165,10 +125,21 @@ def tree(seed: int):
 
 
 @pytest.fixture(scope="module")
-def whisper(golden):
+def reference(golden):
+    """Hugging Face's logits over ``tree(0)`` after tokens and encoder rows."""
+    weights = tree(0)
+    return golden(
+        "encoder_decoder",
+        lambda: HuggingFaceDecoder.build("whisper", CONFIG, weights, pad_token_id=None),
+        CONFIG,
+        weights,
+    )
+
+
+@pytest.fixture(scope="module")
+def whisper(reference):
     """The model over a ``Features`` tower of ``SOURCE`` rows, a clip of 200
-    encoder rows, Hugging Face's logits after it and after its first half,
-    and 300 tokens, two prompt chunks.
+    encoder rows, Hugging Face's logits, and 300 tokens, two prompt chunks.
     """
     weights = tree(0)
     encoder = Features(CONFIG.hidden_size, SOURCE)
@@ -176,16 +147,7 @@ def whisper(golden):
     rng = np.random.default_rng(1)
     clip = (rng.standard_normal((200, CONFIG.hidden_size)) / 2).astype(bfloat16)
     tokens = rng.integers(0, CONFIG.vocab_size, 300)
-    reference = golden(
-        "encoder_decoder", lambda: HuggingFaceDecoder(weights, clip), CONFIG, weights
-    )
-    half = golden(
-        "encoder_decoder_half",
-        lambda: HuggingFaceDecoder(weights, clip[:100]),
-        CONFIG,
-        weights,
-    )
-    return model, clip, reference, half, tokens
+    return model, clip, reference, tokens
 
 
 def test_its_signature_and_versions_are_the_decoder_s_and_the_encoder_s(whisper):
@@ -234,14 +196,15 @@ def test_each_version_s_reference_in_turn_is_hugging_face_s(whisper):
     the same clip and tokens, and not after another clip's; and the
     source rows bound the cross attention.
     """
-    model, clip, reference, half, tokens = whisper
+    model, clip, reference, tokens = whisper
     buffer, own = model.encoder.inputs(clip)
     source = model.encoder.soft(own)
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_rows=own["rows"])
     logits, carry = prompt(model, tokens, source)
     assert carry["source"] == source
-    got, want = np.asarray(logits, np.float32).reshape(-1), reference.logits(tokens)
+    got = np.asarray(logits, np.float32).reshape(-1)
+    want = reference.logits(tokens, clip)
     _assert_close([got], [want])
     # Rows past the source move the logits further than the model's own
     # error does.
@@ -253,9 +216,10 @@ def test_each_version_s_reference_in_turn_is_hugging_face_s(whisper):
     logits, carry = prompt(model, tokens, source)
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_rows=0, **carry)
-    _assert_close([np.asarray(logits).reshape(-1)], [reference.logits(tokens)])
+    got = np.asarray(logits).reshape(-1)
+    _assert_close([got], [reference.logits(tokens, clip)])
     with pytest.raises(AssertionError):
-        _assert_close([np.asarray(logits).reshape(-1)], [half.logits(tokens)])
+        _assert_close([got], [reference.logits(tokens, clip[:100])])
 
 
 def prompt(model, tokens, source: int):
@@ -322,7 +286,7 @@ def run(model, buffer, n: int, source: int, tokens) -> np.ndarray:
     return np.asarray(logits, np.float32).reshape(-1)
 
 
-def test_padded_encoder_rows_reach_neither_attention(golden):
+def test_padded_encoder_rows_reach_neither_attention(reference):
     """A clip of 200 rows padded to 256 with rows far from any real one, and
     a longer clip's rows left in the cross states past them: the encoder's
     self-attention (bounded by its ``rows``) and the decoder's cross attention
@@ -355,12 +319,7 @@ def test_padded_encoder_rows_reach_neither_attention(golden):
     padded[n:] = garbage[n:]
     np.testing.assert_array_equal(run(stale, padded, n, n, tokens), clean)
 
-    want = golden(
-        "encoder_decoder_padded",
-        lambda: HuggingFaceDecoder(weights, attended(clip)),
-        CONFIG,
-        weights,
-    ).logits(tokens)
+    want = reference.logits(tokens, attended(clip))
     _assert_close([clean], [want])
     leaked = run(model(), padded, SOURCE, SOURCE, tokens)
     assert np.abs(leaked - clean).max() > np.abs(clean - want).max()

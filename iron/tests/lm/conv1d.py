@@ -5,8 +5,8 @@
 """iron.lm.Conv1d on a device, at Whisper-large-v3-turbo's own encoder
 front-end shapes: one compile each, called at two row counts, every 64th
 output row the call computes held to torch's float32 convolution within
-its GEMM's bound, 2 units of 2^-8 of the convolution of |x| by |weight|,
-both recorded in ``goldens/`` (every row would take megabytes).
+2^-6 of the convolution of |x| by |weight|, both recorded in ``goldens/``
+(every row would take megabytes).
 """
 
 import numpy as np
@@ -33,17 +33,16 @@ EVERY = 64
 class Torch:
     """``torch.nn.functional.conv1d`` by ``weight`` and ``bias`` at
     ``stride``, what records a golden: every ``EVERY``th output row of an
-    input given as its bf16 bits, then of its magnitude by theirs.
+    input ``x``, then of its magnitude by theirs.
     """
 
     def __init__(self, weight, bias, stride: int):
         self.weight, self.bias, self.stride = weight, bias, stride
 
-    def logits(self, bits):
+    def logits(self, tokens, x):
         import torch
 
-        x = np.asarray(bits, np.int16).view(bfloat16).astype(np.float32)
-        x = x.reshape(-1, self.weight.shape[1])
+        x = x.astype(np.float32)
         out = [
             torch.nn.functional.conv1d(
                 torch.from_numpy(a.T[None]),
@@ -69,8 +68,14 @@ def case(request, golden):
     conv.compile(x=((rows, channels), bfloat16))
     x = rng.standard_normal((rows, channels)).astype(bfloat16)
     weight, bias = weight.astype(np.float32), bias.astype(np.float32)
-    reference = golden(f"conv1d_{request.param}", lambda: Torch(weight, bias, stride))
-    yield conv, reference.logits(x.view(np.int16)), x
+    reference = golden(
+        f"conv1d_{request.param}",
+        lambda: Torch(weight, bias, stride),
+        weight,
+        bias,
+        stride,
+    )
+    yield conv, reference.logits((), x), x
 
 
 @pytest.mark.parametrize("share", [0.25, 1.0])

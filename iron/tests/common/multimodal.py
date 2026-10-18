@@ -134,22 +134,18 @@ class Features(Tower):
 IMAGE = SMALL.vocab_size - 1
 
 
-class Placed:
+class Placed(HuggingFace):
     """Hugging Face's Llama with ``soft`` at its image placeholders: the
-    logits after a sequence's tokens, from a key of the tokens followed by
-    ``soft``'s bfloat16 bits.
+    logits after a sequence's tokens.
     """
 
-    def __init__(self, hf: HuggingFace, soft):
-        self.model, self.soft = hf.model, soft
-
-    def logits(self, key) -> np.ndarray:
+    def logits(self, tokens, soft) -> np.ndarray:
         import torch
 
-        tokens = torch.from_numpy(key[: key.size - self.soft.size])
+        tokens = torch.from_numpy(np.asarray(tokens))
         with torch.no_grad():
             x = self.model.model.embed_tokens(tokens)
-            x[tokens == IMAGE] = torch.from_numpy(self.soft.astype(np.float32))
+            x[tokens == IMAGE] = torch.from_numpy(soft.astype(np.float32))
             out = self.model(inputs_embeds=x[None], use_cache=False)
         return out.logits[0, -1].numpy()
 
@@ -172,17 +168,10 @@ def causal(golden):
     tokens[250:266] = IMAGE
     soft = (rng.standard_normal((16, config.hidden_size)) / 8).astype(bfloat16)
 
-    def reference(tokens, soft):
-        key = np.concatenate([tokens, soft.view(np.uint16).ravel()])
-        hf = golden(
-            "multimodal",
-            lambda: Placed(HuggingFace.build("llama", config, weights), soft),
-            config,
-            weights,
-        )
-        return hf.logits(key)
-
-    return model, reference, tokens, soft
+    hf = golden(
+        "multimodal", lambda: Placed.build("llama", config, weights), config, weights
+    )
+    return model, hf.logits, tokens, soft
 
 
 def test_a_causal_model_s_versions_and_signature(causal):

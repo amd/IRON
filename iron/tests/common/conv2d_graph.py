@@ -48,17 +48,17 @@ class Convolution:
     rounds it: ``logits``, as ``Golden`` reads it.
     """
 
-    def __init__(self, conv: Conv2d, x, weight, groups: int):
-        self.conv, self.x, self.weight, self.groups = conv, x, weight, groups
+    def __init__(self, conv: Conv2d, groups: int):
+        self.conv, self.groups = conv, groups
 
-    def logits(self, _):
+    def logits(self, tokens, x, weight):
         import torch
 
         c = self.conv
-        image = np.asarray(self.x, np.float32).reshape(-1, c.width, c.channels)
+        image = np.asarray(x, np.float32).reshape(-1, c.width, c.channels)
         out = torch.nn.functional.conv2d(
             torch.from_numpy(image.transpose(2, 0, 1).copy())[None],
-            torch.from_numpy(self.weight),
+            torch.from_numpy(weight.astype(np.float32)),
             stride=c.stride,
             padding=(0, c.padding),
             groups=self.groups,
@@ -70,17 +70,13 @@ class Convolution:
 
 @pytest.mark.parametrize("case", list(CASES))
 def test_the_reference_is_the_convolution(case, golden):
-    """Keyed in ``goldens/conv2d.npz`` by the input's and weight's bits."""
+    """Keyed in ``goldens/conv2d.npz`` by the input and the weight."""
     conv, weight, x = draw(case)
     rows = (x.shape[0] - 3) // 2 + 1
     got = np.asarray(conv.reference(x, rows=rows), np.float32)
-    w = weight.astype(bfloat16)
-    key = np.concatenate([x.view(np.uint16).ravel(), w.view(np.uint16).ravel()])
     groups = CASES[case][3].get("groups", 1)
-    reference = golden(
-        "conv2d", lambda: Convolution(conv, x, w.astype(np.float32), groups), CASES
-    )
-    want = reference.logits(key)
+    reference = golden("conv2d", lambda: Convolution(conv, groups), CASES)
+    want = reference.logits((), x, weight.astype(bfloat16))
     ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)
     assert (np.abs(got - want) <= ulp).all()
 
