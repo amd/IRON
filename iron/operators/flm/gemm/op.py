@@ -145,6 +145,10 @@ class ProjectionGEMM(Operator):
 
     The grid is as wide as the device. ``tile_n`` defaults to 64;
     ``tile_ma`` and ``m_chunk`` are filled from the device's L1.
+
+    It is ``F.linear``'s GEMM for a weight operand over two or more rows at
+    MEDIUM or HIGH; every other GEMM is ``iron.operators.GEMM``, which
+    ``at_precision(Precision.HIGHEST)`` hands over to.
     """
 
     M: CompileTime[int] = field()
