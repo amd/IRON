@@ -94,8 +94,6 @@ def rms_norm(x, normalized_shape, weight=None, eps: float | None = None):
     _last_axis("rms_norm", x, normalized_shape)
     if eps is None:
         eps = float(ml_dtypes.finfo(x.dtype).eps)
-    if weight is None:
-        return RMSNorm.step(x, epsilon=eps)
     return RMSNorm.step(x, weight=weight, epsilon=eps)
 
 
