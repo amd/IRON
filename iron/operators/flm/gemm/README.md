@@ -22,9 +22,11 @@ parameters (and which a graph folds into it). The gelu stays
 `epilogue`, `rounding` and `gelu` are `StrEnum`s, so the bare strings `"gelu"` /
 `"conv_even"` / `"bf16_steps"` are accepted too.
 
-A second GEMM implementation alongside [`iron.operators.GEMM`](../../gemm),
-specialised for transformer projection shapes and ported from FastFlowLM's `mm`
-overlay.
+This is the GEMM `F.linear` runs for any input of more than one row. It reads
+the checkpoint's weight as stored, `(N, K)`, with `b_col_maj=True`; a
+dequantized weight comes as bfp16 B packed once by `pack_B`. It was ported from
+FastFlowLM's `mm` overlay. [`iron.operators.GEMM`](../../gemm) is the GEMM of
+`F.linear(..., accurate=True)` and of integer types.
 
 **M, K, N and the activation are runtime parameters**, so one xclbin serves
 every shape and only the instruction stream is rebuilt per shape. The
@@ -38,17 +40,14 @@ memtile — so those are *not* what distinguishes it. What does:
 
 | | `iron.operators.GEMM` | `flm.GEMM` |
 |---|---|---|
-| tiling | parameterized tiles, 1–8 columns | fixed m=64 k=512, r/s/t 8/8/8; `n` selectable |
-| epilogue | none (separate `convert_copy`) | fused f32→bf16 + activation + clamp |
-| B layout | plain `(K, N)` | **pre-packed by the caller**, see below |
+| tiling | parameterized tiles, 1–8 columns | m=64, r/s/t 8/8/8; `k_tile` and `tile_n` tunable |
+| after the product | a finish chain | fused f32→bf16 + activation + clamp |
+| B layout | `(K, N)`, or `(N, K)` with `b_col_maj` | `(N, K)` with `b_col_maj`, or packed by `pack_B` |
 | A tile height | tied to the accumulator | decoupled (asymmetric tile buffering) |
 
-Pick this one for a projection-shaped GEMM that wants an activation folded in
-and can pack its weights once. Pick `iron.operators.GEMM` when you need tiling
-control or cannot pre-pack B.
-
-The shipped overlay itself is a test fixture, `Shipped(...)` ([the shipped
-overlay](#the-shipped-overlay)), that `test.py` compares the port against.
+The shipped overlay itself is a test fixture, `iron/tests/common/shipped.py`
+([Matching the shipped FastFlowLM overlay](#matching-the-shipped-fastflowlm-overlay)),
+that `test.py` compares the port against.
 
 ## Architectures
 
@@ -61,7 +60,6 @@ two lowering details differ.
 | grid | 4 x 8 | 4 x 4 |
 | A forwarded through | every other memtile | every memtile |
 | 8x8x8 mmul lowers to | 2 bfp16-emulated macs | 4 native 4x8x4 bf16 macs |
-| `tile_n` default | 128 at K=512, else 64 | always 64 |
 | epilogue `tanh` | native `aie::tanh` | `getTanhBf16` LUT |
 
 The mmul shape is **not** specific to the bfp16 path, despite needing
@@ -100,9 +98,9 @@ floor that is most of a short-prefill dispatch, so `Array.build()` lists only th
 words a configuration's cores read (`Rtp(...)`), and the buffer is sized
 to them. Two groups are therefore conditional or gone:
 
-* `n_chunks` / `n_units` are sent **only when `m_chunk > 1`**. They are
-  `m_row_blocks // M_CHUNK` and each other, so at the shipped `M_CHUNK = 1`
-  the core just reads `m_row_blocks`.
+* `n_units` is sent **only when `m_chunk > 1`**. It is
+  `m_row_blocks // m_chunk`, so at the default `m_chunk = 1` the core just
+  reads `m_row_blocks`.
 * `units_valid`, the 256-row units a per-call row bound reaches, is a word
   **only for a bounded design on an xclbin**; elsewhere the cores run
   `m_row_blocks`. See "A row bound per call" below.
@@ -254,7 +252,7 @@ GEMM(M=M, K=K, N=N)                           # conv_even, default
 ```
 
 Verified against the shipped overlay on identical inputs, driven through
-`Shipped(...)`, which runs that xclbin unmodified: with
+the test fixture `iron/tests/common/shipped.py`, which runs that xclbin unmodified: with
 `floor` and no activation, output is **bit-identical across all 6291456
 elements**. With the `conv_even` default it differs everywhere, and is far more
 accurate — see [Accuracy](#accuracy).

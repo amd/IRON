@@ -108,6 +108,7 @@ that engine from source in place of FastFlowLM's prebuilt one.
 | `pli_weights.py` | Repacks the per-layer-input weights for IRON's GEMM. |
 | `overrides.hpp` | Redirects the engine's operator dispatches to the IRON operators. |
 | `Makefile` | Builds FastFlowLM's engine with `overrides.hpp` compiled in. |
+| `gemm_dequant_overrides.hpp`, `dequantize.py` | Replace only the GEMM and dequant operators, optionally with offline-dequantized weights: [README_gemm_dequant.md](README_gemm_dequant.md). |
 
 `tests/applications/gemma4_flm/test.py` compares the IRON engine's tokens with the stock engine's.
 
@@ -144,18 +145,16 @@ buffer descriptors by hand:
 - `DecodeLayer` runs one token through one whole layer: norms, projections,
   attention over the KV cache and the MLP.
 
-Each of these operators is an IRON operator. Each operator consists of:
-
-- `op.py` defines the operator class, an `MLIROperator`. Its fields describe
-  one problem, for example a GEMM's `M`, `K` and `N`. The class declares the
-  buffers the operator takes and the artifacts that `op.compile()` builds.
-- `design.py` is the IRON program. Workers run kernels on the compute tiles.
-  ObjectFifos move data between tiles. The runtime sequence moves data
-  between DRAM and the array.
-- The kernels are the C++ that runs on one compute tile. These operators take
-  their kernels from mlir-aie's kernel factories (`aie.iron.kernels`).
-- `reference.py` computes the result on the CPU. `test.py` runs the operator
-  on the NPU and compares it with the reference.
+Each of these operators is an IRON operator, laid out as
+[Adding a New Operator](../../../AGENTS.md#adding-a-new-operator) describes.
+`op.py` defines the `Operator` subclass. Its fields describe one problem, for
+example a GEMM's `M`, `K` and `N`, and declare the buffers the operator takes.
+`GEMM` and `DequantBFP` build their array in `Array.build()` and their runtime
+sequence in `sequence()`, both in `op.py`. The others return their program, a
+function in `design.py`, from `exported_design()`. The kernels are the C++ that
+runs on one compute tile, from mlir-aie's kernel factories
+(`aie.iron.kernels`). `reference()`, or `reference.py`, computes the result on
+the CPU, and `test.py` compares the NPU's output with it.
 
 `op.compile()` generates the operator's artifacts: an xclbin and an
 instruction sequence. `build.py` overwrites the engine's xclbins with IRON's

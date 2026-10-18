@@ -3,10 +3,10 @@
 
 """bf16 GEMM over a 4-row compute-tile grid, as wide as the device.
 
-A second GEMM design alongside ``iron.operators.gemm``, specialised for
-transformer projection shapes. Same dataflow -- A broadcast along each compute
-row, B down each column, C joined through the memtile -- but with a fixed tile
-shape, B quantized to bfp16ebs8 and pre-packed into consumption order, an
+The GEMM ``F.linear`` runs for more than one row. Same dataflow as
+``iron.operators.gemm`` -- A broadcast along each compute row, B down each
+column, C joined through the memtile -- but with a fixed m tile, B read as
+stored or quantized to bfp16ebs8 and pre-packed into consumption order, an
 activation and clamp fused into the C drain, and asymmetric tile buffering so
 the A tile and the accumulator need not share a height.
 
@@ -16,7 +16,7 @@ overlay and ``iron.operators.GEMM``.
 The constants below are the single source of truth: ``op.py`` passes them to
 the ``fused_mm`` kernel factory, so the C++ and the dataflow cannot drift apart.
 
-The array itself is ``GEMM.array`` and the runtime sequence is
+The array itself is ``GEMM.Array.build`` and the runtime sequence is
 ``GEMM.sequence`` in ``op.py``; this module keeps the geometry, the L1 and
 memtile budget helpers and the parameter-buffer layout they and
 the shipped overlay (``iron/tests/common/shipped.py``) share.
