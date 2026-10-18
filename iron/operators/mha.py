@@ -1128,21 +1128,24 @@ class MHA(Operator):
         rows = max(s_q - start, 0)
         q = Q[:, :rows].astype(np.float32)
         k, v = (t.astype(np.float32) for t in (K, V))
-        position = offset + np.arange(q.shape[1])[:, None]
         key = np.arange(k.shape[1])
-        masked = np.zeros((q.shape[1], k.shape[1]), dtype=bool)
-        if self.causal or self.window:
-            masked |= key > position + (0 if self.causal else self.window)
-        if self.window:
-            masked |= key < position - self.window
-        mask = np.where(masked, -np.inf, 0).astype(np.float32)
         scale = np.float32(self.scale)
         out = np.zeros(Q.shape, dtype=Q.dtype)
-        # A head at a time: at 16K rows one head's scores are 1 GiB of float32.
-        for h in range(q.shape[0]):
-            scores = q[h] @ k[h // groups].T * scale + mask
-            e = np.exp(scores - scores.max(axis=-1, keepdims=True))
-            out[h, :rows] = (e / e.sum(axis=-1, keepdims=True)) @ v[h // groups]
+        # A block of query rows at a time: at 16K keys a block's scores, mask
+        # and exponentials are 64 MiB each, where all rows' are 1 GiB.
+        for first in range(0, rows, 1024):
+            block = slice(first, min(first + 1024, rows))
+            position = offset + np.arange(block.start, block.stop)[:, None]
+            masked = np.zeros((len(position), k.shape[1]), dtype=bool)
+            if self.causal or self.window:
+                masked |= key > position + (0 if self.causal else self.window)
+            if self.window:
+                masked |= key < position - self.window
+            mask = np.where(masked, -np.inf, 0).astype(np.float32)
+            for h in range(q.shape[0]):
+                scores = q[h, block] @ k[h // groups].T * scale + mask
+                e = np.exp(scores - scores.max(axis=-1, keepdims=True))
+                out[h, block] = (e / e.sum(axis=-1, keepdims=True)) @ v[h // groups]
         if self.heads_interleaved:
             return np.ascontiguousarray(np.swapaxes(out, 0, 1))
         return out
