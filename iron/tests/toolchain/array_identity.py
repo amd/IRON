@@ -31,9 +31,9 @@ from iron.tests.toolchain.tools import requires
 pytestmark = requires("aiecc")
 
 # (module, class, tunables, the extent doubled). Every tunable the array could
-# resolve from the extent is given, so only the extent differs. Repeat and
-# Copy are memtile pass-throughs with no core, so nothing of theirs is
-# compiled per extent.
+# resolve from the extent is given, so only the extent differs. Copy is a
+# memtile pass-through with no core, so nothing of its is compiled per
+# extent.
 PAIRS = [
     (
         "relu",

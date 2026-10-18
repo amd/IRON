@@ -50,7 +50,6 @@ from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
-from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
@@ -2009,40 +2008,30 @@ def test_words_that_always_hold_one_number_share_it(npu2):
             assert mine[shared.get(w.symbol, w.symbol)] == w({"n": n})
 
 
-def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
+def test_a_bound_reaches_a_copy_through_its_views(npu2):
     """``x[:n]`` reshaped and transposed lands on axis 1 of the copy's source
-    walk; ``keys[:, :n]`` on axis 1 of its destination; ``keys[:, :c]`` on the
-    stack axis of a Repeat, whose output carries the bound on.
+    walk; ``keys[:, :n]`` on axis 1 of its destination.
     """
     G, D, L = 4, 8, 32  # traced at the cache's full length, as a prompt is
     keys = iron.state((G, L, D), name="keys")
 
     class Cached(iron.Graph):
-        def body(self, x, *, n: Scratchpad[np.int32], c: Scratchpad[np.int32]):
+        def body(self, x, *, n: Scratchpad[np.int32]):
             k = x[:n].reshape(L, G, D).transpose(1, 0, 2)
             Copy.step(k, keys[:, :n])
-            return Repeat.step(keys[:, :c], repeat=2)
 
-    g = Cached()
-
-    t = g.trace(x=(L, G * D))
-    copy, rep = t.operators
+    t = Cached().trace(x=(L, G * D))
+    (copy,) = t.operators
     assert copy.src_bound == 1 and copy.dst_bound == 1
     assert {k: e.name for k, e in copy.bound_values.items()} == {
         "src_valid": "n",
         "dst_valid": "n",
     }
-    assert {k: e.name for k, e in rep.bound_extents.items()} == {"valid_seq": "c"}
-    n, c = t.values
+    (n,) = t.values
     assert [(b.member.name, b.expression) for b in t.bindings] == [
         ("src_valid", n.affine()),
         ("dst_valid", n.affine()),
-        ("valid_seq", c.affine()),
     ]
-    (out,) = t.outputs
-    assert out.shape == (2 * G, L, D) and out.bounds == {1: t.values[1].affine()}
-    rep = rep.resolved(aie_utils.get_current_device())
-    assert rep.derived_at("valid_seq_x", valid_seq=12) == 12  # the stack axis itself
 
 
 def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):

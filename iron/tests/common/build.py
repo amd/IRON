@@ -55,7 +55,6 @@ from iron.operators.flm.gemm.shipped import Shipped
 from iron.operators.gelu import GELU
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
-from iron.operators.repeat import Repeat
 from iron.operators.rope import RoPE
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
@@ -429,17 +428,6 @@ def test_on_an_xclbin_a_copy_bounded_on_its_innermost_axis_sizes_it(npu2):
     ]
 
 
-def test_a_stack_and_its_flat_spelling_move_the_same_descriptors():
-    """``Repeat`` on the cache ``(G, L, D)`` is the repeat on ``(G, L * D)``:
-    the same rows, the same row length, the same transfers.
-    """
-    flat = Repeat(rows=8, cols=2048 * 64, repeat=4, tile_size=64)
-    stack = Repeat(rows=8, seq=2048, cols=64, repeat=4)
-    assert stack.x.shape == (8, 2048, 64) and stack.y.shape == (32, 2048, 64)
-    assert generated_sequence(flat) == generated_sequence(stack)
-    assert stack.resolved().tile_size == 64  # the row's last axis
-
-
 @pytest.mark.parametrize(
     "length, error, match",
     [
@@ -465,19 +453,6 @@ def test_a_per_call_length_counts_a_dimension_by_a_word(length, error, match):
     op.use_value("valid", N)
     with pytest.raises(error, match=match):
         OperatorDesign(op).module()
-
-
-def test_a_bounded_repeat_patches_the_stack_axis():
-    # The stack axis is on D2 with its patched count, rows and repeats around it.
-    op = Repeat(rows=4, cols=8, seq=32, repeat=2).resolved(NPU2_4COL)
-    op.use_value("valid_seq", PerCall("c", Kind.SCRATCHPAD, np.int32).affine())
-    _, tasks, op = built(op)
-    (in_name,) = (h.name for h in op.x.handles)
-    (out_name,) = (h.name for h in op.y.handles)
-    assert [(t.lane, t.sizes, t.strides, t.length_parameter[-11:]) for t in tasks] == [
-        (in_name, "2, 32, 4, 8", "0, 8, 256, 1", "valid_seq_x"),
-        (out_name, "2, 32, 4, 8", "256, 8, 512, 1", "valid_seq_y"),
-    ]
 
 
 # --------------------------------------------------------------------------

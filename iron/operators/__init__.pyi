@@ -8,7 +8,6 @@ from .axpy import AXPY
 from .clamp import Clamp
 from .copy import Copy
 from .depthwise_conv1d import DepthwiseConv1d
-from .dequant import Dequant
 from .elementwise_add import ElementwiseAdd, RowwiseAdd
 from .elementwise_max import ElementwiseMax
 from .elementwise_mul import ElementwiseMul, RowwiseMul
@@ -17,15 +16,12 @@ from .gelu import GELU
 from .gemm import GEMM
 from .gemv import GEMV
 from .layer_norm import LayerNorm
-from .leaky_relu import LeakyReLU
 from .limbs import Limbs
 from .log import Log
 from .magnitude import Magnitude
 from .merge import Merge
 from .mha import MHA
-from .reduce_max import ReduceMax
 from .relu import ReLU
-from .repeat import Repeat
 from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm
 from .rope import RoPE

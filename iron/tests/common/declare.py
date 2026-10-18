@@ -359,12 +359,12 @@ def test_buffers_carry_the_declared_dtype_and_size(npu2):
     """The sizing contract: the sequence layout and the test harness allocate
     from ``b.dtype`` and ``b.nbytes`` of a declared buffer.
     """
-    from iron.operators.repeat import Repeat
+    from iron.operators.copy import Copy
 
-    x, y = Repeat(rows=8, cols=64, repeat=4, dtype=np.int32).buffers
+    x, y = Copy(input_buffer_size=512, dtype=np.int32).buffers
     assert x.dtype == np.int32 and y.dtype == np.int32
     assert (type(x), type(y)) == (In, Out)
-    assert y.nbytes == 8 * 64 * 4 * 4
+    assert y.nbytes == 512 * 4
 
 
 def test_instance_values_shadow_the_fields():

@@ -467,9 +467,9 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    the symbol, the source, the argument types, aie2's LUT tables and the
    contract: the reference, the tolerance and the scalar bindings. The
    factory binds the line length; a scalar the kernel takes at run time is
-   its `Array`'s `scalars()`, in the kernel's order (`LeakyReLU` returns
-   `(self.alpha,)`, `AXPY` `(self.scalar_factor,)`, `RMSNorm`
-   `(self.epsilon,)`; the factories take no `alpha=`, `a=` or `epsilon=`),
+   its `Array`'s `scalars()`, in the kernel's order (`AXPY` returns
+   `(self.scalar_factor,)`, `RMSNorm` `(self.epsilon,)`; the factories take
+   no `a=` or `epsilon=`),
    so the operator declares no `kernel_call` or `reference` of its own; a
    field it passes is one its `Array` lists. An elementwise operator
    whose core makes more than one call over a line lists them in `chain()`,

@@ -40,7 +40,6 @@ from iron.operators.limbs import Limbs
 from iron.operators.magnitude import Magnitude
 from iron.operators.merge import Merge
 from iron.operators.mha import MHA
-from iron.operators.repeat import Repeat
 from iron.operators.resample.op import PatchPositions
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.router import TopKRouter
@@ -48,27 +47,6 @@ from iron.operators.sample import Sample
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
 from iron.operators.transpose import Transpose
-
-
-@pytest.mark.parametrize(
-    "cols,why",
-    [
-        (513, "odd: every divisor is odd, so no chunk is a whole 32-bit word"),
-        (1031, "prime > 1023: the only divisors are 1 and cols, neither legal"),
-        (2062, "2 x 1031: the only word-aligned chunk leaves a 1031-wide chunk count"),
-    ],
-)
-def test_repeat_cols_without_a_legal_split_is_rejected(cols, why):
-    """A split has to satisfy the innermost dim AND the dim holding the chunk
-    count. Both land on a 10-bit wrap field, and the innermost is denominated
-    in 32-bit words, so bounding the chunk length alone lets through taps the
-    BD verifier then rejects with a much less legible error.
-
-    Refused when resolved for a device, against its shim's descriptor
-    limits, not when it is built.
-    """
-    with pytest.raises(Unresolvable, match="Cannot split cols"):
-        Repeat(rows=8, cols=cols, repeat=4).resolved(from_name("npu2"))
 
 
 def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():

@@ -58,10 +58,8 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [Transpose](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/transpose.py](./iron/operators/transpose.py) |
 | [AXPY](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/axpy.cc) | AXPY | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/axpy.py](./iron/operators/axpy.py) |
 | [Reduction]() | Reduction | bfloat16 | | | 🟡 |  |
-| [Dequant](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/expand.cc) | Dequant Q4NX from [AWQ](https://github.com/mit-han-lab/llm-awq) to bfloat16 | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/dequant.py](./iron/operators/dequant.py) |
 | [Dequant to bfp16](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/quant/q4nx_dequant.cc) | Dequant Q4NX to bfp16, laid out for the B operand of the [alternative GEMM](./iron/operators/flm/gemm/) | q4nx → bfp16 | | ✓ | 🟢 | [iron/operators/flm/dequant/](./iron/operators/flm/dequant/) |
 | [RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/eltwise/relu.cc) | RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/relu.py](./iron/operators/relu.py) |
-| [Leaky RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/leaky_relu.cc) | Leaky RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/leaky_relu.py](./iron/operators/leaky_relu.py) |
 | [GELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/gelu.cc) | GELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gelu.py](./iron/operators/gelu.py) |
 | [LayerNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/norm/layer_norm.cc) | LayerNorm | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/layer_norm.py](./iron/operators/layer_norm.py) |
 | [Convolution]() | Convolution | bfloat16 | | | 🟡 |  |
