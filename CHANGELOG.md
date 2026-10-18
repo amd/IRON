@@ -37,6 +37,9 @@ public API adds its entry under Unreleased.
   workflow and actionlint in the lint job, following mlir-aie's CI
   security baseline.
 
+- Autotune skips GEMM settings whose matmul kernel alone, by mlir-aie's
+  nightly cycles, is slower than the fastest setting timed.
+
 ### Changed
 
 - Config fields use `config.json`'s names: `hidden_size`,

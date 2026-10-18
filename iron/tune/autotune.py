@@ -79,12 +79,13 @@ def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
 def least_us(op: GEMM, values: Mapping[str, int], cycles, dev) -> float | None:
     """A step time ``op`` cannot beat at per-call ``values``: its busiest
     core's matmul calls at ``cycles`` per call. None where ``cycles`` does
-    not hold its matmul or ``dev``'s core clock is unknown.
+    not hold its matmul, ``dev``'s core clock is unknown, or the pinned
+    mlir-aie predates ``ExternalFunction.build_key``.
     """
     mhz = CORE_MHZ.get(dev.name)
     if mhz is None:
         return None
-    per_call = cycles.get(op.array_config().matmul().build_key)
+    per_call = cycles.get(getattr(op.array_config().matmul(), "build_key", None))
     if per_call is None:
         return None
     return op.matmul_calls(values) * per_call / mhz
