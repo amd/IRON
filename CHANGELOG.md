@@ -64,6 +64,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- gemma4_flm's GEMM and dequant exploration and `build.py --only`; the
+  application is one example.
 - `Layer`, the numpy `Oracle`, `EncoderDecoderOracle` and `widen`. Models are
   judged by transformers' goldens or the graph's reference.
 - Mamba-2 and mixture-of-experts layers, which only the Oracle ran.

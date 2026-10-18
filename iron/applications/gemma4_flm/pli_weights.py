@@ -30,8 +30,7 @@ def read_bf16(q4nx, header, data_start, name):
     start, end = header[name]["data_offsets"]
     with open(q4nx, "rb") as f:
         f.seek(data_start + start)
-        words = np.frombuffer(f.read(end - start), dtype=np.uint16)
-    return (words.astype(np.uint32) << 16).view(np.float32)
+        return np.frombuffer(f.read(end - start), dtype=bfloat16).astype(np.float32)
 
 
 def write(model_dir, config, op, out_dir):
