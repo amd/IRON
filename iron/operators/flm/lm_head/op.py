@@ -8,12 +8,43 @@ import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron import CompileTime, In, Out
 from aie.iron.kernels import flm_gemma4
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Auto, Operator, Unresolvable, field
+from iron.common.testing import Case, Testing
 from iron.operators.flm.lm_head import reference
 from iron.operators.flm.lm_head.design import lm_head
 from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE, packed_bytes
+
+# Error bounds from README.md's Numerics section.
+PROJECTION_ERROR = 0.025
+TANH_ERROR = 0.04
+
+GEMMA4_SOFTCAP = 30.0
+
+
+def _draw(op):
+    """A q4nx vocabulary and a token with its RMS weight.
+
+    Negative minima and small scales keep the logits in the range a softcap
+    of 30 bends.
+    """
+    rng = np.random.default_rng(1)
+    groups = K_TILE // GROUP
+    n_blocks = op.vocab * op.dim // (M_TILE * K_TILE)
+    params = np.concatenate(
+        [
+            rng.uniform(0, 0.02, (n_blocks, groups * M_TILE)),
+            rng.uniform(-0.15, 0, (n_blocks, groups * M_TILE)),
+        ],
+        axis=1,
+    )
+    params = params.astype(bfloat16).view(np.uint8)
+    codes = rng.integers(0, 256, (n_blocks, M_TILE * K_TILE // 2), dtype=np.uint8)
+    w = np.concatenate([params, codes], axis=1).view(np.uint32).reshape(-1)
+    x = np.concatenate([rng.standard_normal(op.dim), rng.uniform(0.5, 1.5, op.dim)])
+    return dict(given={op.w: w, op.x: x.astype(bfloat16)})
 
 
 class LMHead(Operator):
@@ -23,6 +54,24 @@ class LMHead(Operator):
     X holds the token followed by its RMS weight. W holds the q4nx vocabulary.
     Y receives the logits. See README.md.
     """
+
+    test = Testing(
+        [
+            # Gemma 4 E2B's and E4B's hidden sizes.
+            Case(dict(dim=1536, vocab=4096, softcap=GEMMA4_SOFTCAP)),
+            Case(dict(dim=2560, vocab=4096, softcap=GEMMA4_SOFTCAP)),
+            # A softcap of 5 saturates most logits.
+            Case(dict(dim=1536, vocab=1024, softcap=5.0)),
+            # Gemma 4's whole vocabulary.
+            Case(
+                dict(dim=1536, vocab=262144, softcap=GEMMA4_SOFTCAP),
+                extensive=True,
+                bench=True,
+            ),
+            Case(dict(dim=2560, vocab=262144, softcap=GEMMA4_SOFTCAP), extensive=True),
+        ],
+        draw=_draw,
+    )
 
     dim: CompileTime[int] = field()
     vocab: CompileTime[int] = field()
@@ -84,8 +133,20 @@ class LMHead(Operator):
             lm_head_kernel=kernel,
         )
 
+    def tolerance(self) -> Tolerance:
+        return Tolerance(
+            bound=lambda w, x: self.projection_error(w, x) + TANH_ERROR * self.softcap,
+            note="README.md's Numerics section",
+        )
+
+    def projection_error(self, w, x) -> float:
+        """The bound on the projection's error: a share of the largest logit
+        before the softcap.
+        """
+        uncapped = type(self)(dim=self.dim, vocab=self.vocab, softcap=1e30)
+        return PROJECTION_ERROR * np.abs(uncapped.reference(w, x)).max()
+
     def reference(self, w, x):
         """The softcapped logits of X for W, in float64."""
-        op = self.resolved()
-        weights = reference.dequantize(w, self.dim, self.vocab, op.cols, op.rows)
+        weights = reference.dequantize(w, self.dim, self.vocab, self.resolved().rows)
         return reference.reference(weights, np.asarray(x, np.float64), self.softcap)

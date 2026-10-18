@@ -38,3 +38,28 @@ def parts(blocks):
     codes[:, 0::2], codes[:, 1::2] = packed & 15, packed >> 4
     codes = codes.reshape(-1, M_TILE // 16, K_TILE, 16).transpose(0, 1, 3, 2)
     return codes.reshape(-1, M_TILE, K_TILE), scales, mins
+
+
+def unpack(grid):
+    """A weight's codes ``(rows, cols)`` and its scales and minima
+    ``(rows, cols // GROUP)``, from its blocks laid out as a
+    ``(rows // M_TILE, cols // K_TILE)`` grid.
+    """
+    grid = np.asarray(grid, np.uint8)
+    nb_r, nb_c = grid.shape[:2]
+    return tuple(
+        part.reshape(nb_r, nb_c, M_TILE, -1)
+        .transpose(0, 2, 1, 3)
+        .reshape(nb_r * M_TILE, -1)
+        for part in parts(grid)
+    )
+
+
+def dequantize(grid):
+    """The ``(rows, cols)`` float64 weights of a grid of blocks, as ``unpack``'s."""
+    codes, scales, mins = unpack(grid)
+    group = np.arange(codes.shape[1]) // GROUP
+    w = scales.astype(np.float64)[:, group]
+    w *= codes
+    w += mins[:, group]
+    return w

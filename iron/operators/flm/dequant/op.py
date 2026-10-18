@@ -10,8 +10,12 @@ from aie.helpers.util import v8bfp16ebs8
 from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.kernels import quant
 from aie.utils import bfp
+from aie.utils.verify import Tolerance
 
 from iron.common import Auto, Built, Operator, Unresolvable, field
+from iron.common.testing import Case, Testing
+from iron.operators.flm import q4nx
+from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
 
 # flm.ProjectionGEMM's B tiling, imported rather than restated: this design has to write
 # the buffer in the order that one reads it, and two copies would drift.
@@ -24,7 +28,6 @@ from iron.operators.flm.q4nx import (
     K_TILE,
     M_TILE,
     packed_bytes,
-    parts,
 )
 
 CT_K = CT_MAX_K_FOR_N[N_TILE]
@@ -86,50 +89,23 @@ def run_geometry(run_out_features, run_period_out_features, n_blocks):
     return run_out_features // N_TILE, run_period_out_features // N_TILE
 
 
-def qw_bytes_for(K, N, run_out_features=None, run_period_out_features=None):
-    """Bytes the operator reads, counting any gap it strides over."""
-    n_blocks = N // N_TILE
-    run_blocks, period_blocks = run_geometry(
-        run_out_features, run_period_out_features, n_blocks
-    )
-    last = n_blocks - 1
-    cb = (last // run_blocks) * period_blocks + last % run_blocks + 1
-    return packed_bytes(cb * N_TILE * K)
-
-
-def _blocks(qw):
-    """The q4nx blob as rows of BLOCK_BYTES."""
-    qw = np.asarray(qw, dtype=np.uint8).ravel()
-    if qw.size % BLOCK_BYTES:
-        raise ValueError(
-            f"DequantBFP: a q4nx blob of {qw.size} bytes is not a whole number of blocks"
-        )
-    return qw.reshape(-1, BLOCK_BYTES)
-
-
-def _block_origins(n_blocks, K):
-    """(first out-feature, first in-feature) of each block of the blob.
-
-    Block i of the blob is the i'th block that the cores consume: README.md
-    layers 6-9.
+def _draw(op):
+    """A random q4nx blob for ``op``, with noise in any interleave gap, so an
+    operator that reads one fails. Scales and mins are bf16 in the file, so
+    they are drawn there.
     """
-    k_tiles = K // K_TILE_B
-    for i in range(n_blocks):
-        cb, rest = divmod(i, 4 * k_tiles)
-        kb, rest = divmod(rest, 4)
-        k_half, n_half = divmod(rest, 2)
-        yield (2 * cb + n_half) * M_TILE, (2 * kb + k_half) * K_TILE
-
-
-def dequantize(qw, K, N):
-    """q4nx blob to f32, shaped (N out-features, K in-features)."""
-    codes, scales, mins = parts(_blocks(qw))
-    grp = np.arange(K_TILE) // GROUP
-    vals = mins[..., grp] + scales[..., grp] * codes
-    out = np.empty((N, K), dtype=np.float32)
-    for i, (r0, c0) in enumerate(_block_origins(len(vals), K)):
-        out[r0 : r0 + M_TILE, c0 : c0 + K_TILE] = vals[i]
-    return out
+    rng = np.random.default_rng(0)
+    n_blocks = op.K * op.N // (M_TILE * K_TILE)
+    sm = (K_TILE // GROUP) * M_TILE
+    scales = f32_to_bf16_floor(rng.uniform(0.002, 0.05, (n_blocks, sm)))
+    mins = f32_to_bf16_floor(rng.uniform(-0.4, 0.4, (n_blocks, sm)))
+    codes = rng.integers(0, 256, (n_blocks, M_TILE * K_TILE // 2), dtype=np.uint8)
+    qw = np.concatenate(
+        [scales.view(np.uint8), mins.view(np.uint8), codes], axis=1
+    ).reshape(op.N // N_TILE, -1)
+    blob = rng.integers(0, 256, op.quantized_bytes, np.uint8).reshape(-1, qw.shape[1])
+    blob[op.column_blocks] = qw
+    return dict(given={op.qw: blob.ravel()})
 
 
 class DequantBFP(Operator):
@@ -141,6 +117,50 @@ class DequantBFP(Operator):
     K, N and the interleave move offsets inside the instruction stream only.
     See README.md for the layout, the parameters and the constraints.
     """
+
+    test = Testing(
+        [
+            # K = 512 is one k-tile, where flm.ProjectionGEMM at tile_n = 128
+            # wins on NPU2. It defaults to 64 regardless, which is the order
+            # this operator emits.
+            *(
+                Case(dict(K=K, N=N))
+                for K, N in (
+                    (512, 128),
+                    (1024, 128),
+                    (1024, 512),
+                    (1536, 640),
+                    (2048, 256),
+                )
+            ),
+            # Gate and up share one blob, ``run`` out-features each in a period.
+            Case(
+                dict(K=1024, N=1024, run_out_features=512, run_period_out_features=1024)
+            ),
+            # E4B's gate/up blob.
+            Case(
+                dict(
+                    K=2560,
+                    N=10240,
+                    run_out_features=5120,
+                    run_period_out_features=10240,
+                ),
+                extensive=True,
+            ),
+            # Gemma 4's tall projections, whose k-tiles outnumber a shim tile's
+            # buffer descriptors. K = 12288 is 24 k-tiles, the deepest E2B reaches.
+            Case(dict(K=4096, N=1536)),
+            # E2B's MLP down projection.
+            Case(dict(K=6144, N=1536), bench=True),
+            Case(dict(K=12288, N=1536), extensive=True),
+            # E4B's o, down and gate/up projections, as flm.ProjectionGEMM's extensive set.
+            *(
+                Case(dict(K=K, N=N), extensive=True)
+                for K, N in ((2560, 2560), (10240, 2560), (2560, 10240))
+            ),
+        ],
+        draw=_draw,
+    )
 
     K: CompileTime[int] = field()
     N: CompileTime[int] = field()
@@ -282,11 +302,21 @@ class DequantBFP(Operator):
             self.out.bind(outs)
             return Built(workers)
 
+    @property
+    def column_blocks(self) -> list[int]:
+        """Where each of the weight's column blocks sits in the blob, counted
+        in column blocks: ``run_out_features`` of every
+        ``run_period_out_features``.
+        """
+        n_blocks = self.N // N_TILE
+        run, period = run_geometry(
+            self.run_out_features, self.run_period_out_features, n_blocks
+        )
+        return [cb // run * period + cb % run for cb in range(n_blocks)]
+
     def quantized_size(self) -> int:
         """Bytes of q4nx input, counting any interleave gap it strides over."""
-        return qw_bytes_for(
-            self.K, self.N, self.run_out_features, self.run_period_out_features
-        )
+        return packed_bytes((self.column_blocks[-1] + 1) * N_TILE * self.K)
 
     def sequence(self, rt):
         cols = self.cols
@@ -296,9 +326,7 @@ class DequantBFP(Operator):
         out_blocks = self.K * self.N // bfp.BLOCK
         cb_bytes = packed_bytes(N_TILE * self.K)
         qw_bytes = self.quantized_size()
-        run_blocks, period_blocks = run_geometry(
-            self.run_out_features, self.run_period_out_features, n_blocks
-        )
+        column_blocks = self.column_blocks
 
         # A column block is read straight through. The block is split 10 x 512
         # so the innermost size stays inside the BD's field.
@@ -312,8 +340,7 @@ class DequantBFP(Operator):
 
             tg_fill = TaskGroup()
             for c, cb in columns:
-                at = (cb // run_blocks) * period_blocks + cb % run_blocks
-                self.qw.fill(qw[at], lane=c, group=tg_fill)
+                self.qw.fill(qw[column_blocks[cb]], lane=c, group=tg_fill)
 
             # Each k-tile's drains are awaited while the next one's run.
             for kb, tg in TaskGroup.pipelined(k_tiles, depth=2):
@@ -353,25 +380,52 @@ class DequantBFP(Operator):
             packed_blocks=None,
         )
 
+    def tolerance(self) -> Tolerance:
+        # Every rounding on the device is reproducible on the host, so a
+        # tolerance would hide a value landing in the wrong block.
+        return Tolerance.exact()
+
+    def _grid(self, qw):
+        """The weight's q4nx blocks in the blob ``qw``, as ``q4nx.unpack``'s grid.
+
+        A column block is its k-tiles in order, each k-tile its two k-halves,
+        each of those its two n-halves: README.md layers 6-9.
+        """
+        cb_bytes = packed_bytes(N_TILE * self.K)
+        qw = np.asarray(qw, np.uint8).reshape(-1, cb_bytes)[self.column_blocks]
+        qw = qw.reshape(self.N // N_TILE, self.K // K_TILE_B, 2, 2, BLOCK_BYTES)
+        return qw.transpose(0, 3, 1, 2, 4).reshape(
+            self.N // M_TILE, self.K // K_TILE, BLOCK_BYTES
+        )
+
+    def weights(self, qw):
+        """The (N, K) float64 weights the blob ``qw`` holds."""
+        return q4nx.dequantize(self._grid(qw))
+
     def reference(self, qw):
-        """The bytes the operator must produce from the compact q4nx blob
-        ``qw``, as a flat uint8 array: bit-exact against the device, as the
-        cores round to bf16 toward negative infinity. See README.md for the
-        layout and the rounding.
+        """The bytes the operator must produce from the blob ``qw``, as a flat
+        uint8 array: bit-exact against the device, as the cores round to bf16
+        toward negative infinity. See README.md for the layout and the
+        rounding.
         """
         K, N = self.K, self.N
-        b = _blocks(qw)
+        grid = self._grid(qw)
         enc = quant.q4nx_dequant_ref(
-            b, m_tile=M_TILE, k_tile=K_TILE, group=GROUP, ct_k=CT_K, s=S, t=T
+            grid.reshape(-1, BLOCK_BYTES),
+            m_tile=M_TILE,
+            k_tile=K_TILE,
+            group=GROUP,
+            ct_k=CT_K,
+            s=S,
+            t=T,
         )
         # Each block's bytes are indexed [k slice, n // T, k // S in the slice,
-        # n % T, 9]. Place the blocks in one such array for the whole matrix.
-        enc = enc.reshape(len(b), K_TILE // CT_K, M_TILE // T, CT_K // S, T, 9)
-        out = np.empty((K // CT_K, N // T, CT_K // S, T, 9), dtype=np.uint8)
-        for i, (r0, c0) in enumerate(_block_origins(len(b), K)):
-            out[c0 // CT_K : (c0 + K_TILE) // CT_K, r0 // T : (r0 + M_TILE) // T] = enc[
-                i
-            ]
+        # n % T, 9]. Lay the grid's blocks out as one such array for the whole
+        # matrix.
+        enc = enc.reshape(
+            N // M_TILE, K // K_TILE, K_TILE // CT_K, M_TILE // T, CT_K // S, T, 9
+        )
+        out = enc.transpose(1, 2, 0, 3, 4, 5, 6)
         # pack_b's order: (cb, kb, k slice, n // T in cb, k // S in the slice,
         # n % T).
         out = out.reshape(

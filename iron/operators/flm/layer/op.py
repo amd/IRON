@@ -11,6 +11,7 @@ from aie.iron.kernels import FlmGemma4DecodeGeometry
 from ml_dtypes import bfloat16
 
 from iron.common import Operator, Unresolvable, field
+from iron.operators.flm.layer import reference
 from iron.operators.flm.layer.design import (
     RTP_ADDRESSES,
     LayerType,
@@ -86,4 +87,20 @@ class DecodeLayer(Operator):
             RTP_ADDRESSES[self.geometry],
             self.layer_type,
             kernels=layer_kernels(self.geometry),
+        )
+
+    def reference(self, x, proj, rms, rope_rms, kv, context_len, max_l):
+        """x and kv as the dispatch leaves them, as uint16 bf16 bit patterns;
+        see reference.py.
+        """
+        return reference.reference(
+            self.geometry,
+            self.layer_type,
+            x,
+            proj,
+            rms,
+            rope_rms,
+            kv,
+            context_len,
+            max_l,
         )

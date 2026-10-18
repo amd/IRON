@@ -6,33 +6,23 @@
 import numpy as np
 
 from iron.operators.flm import q4nx
-from iron.operators.flm.q4nx import BLOCK_BYTES, GROUP, K_TILE, M_TILE
+from iron.operators.flm.q4nx import BLOCK_BYTES, K_TILE, M_TILE
 
 
-def dequantize(w, dim, vocab, cols, rows):
+def dequantize(w, dim, vocab, rows):
     """The whole q4nx vocabulary buffer to its (vocab, dim) weights.
 
-    Out-feature ``n`` is ``((round * cols + col) * rows + row) * M_TILE + m``.
-    Its k-th block has block index
-    ``((round * cols + col) * k_blocks + k) * rows + row``.
+    Out-feature ``n`` is ``(slice * rows + row) * M_TILE + m``, where slice
+    ``round * cols + col`` is one core column's share of a round. Its k-th
+    block has block index
+    ``(slice * k_blocks + k) * rows + row``.
     """
     k_blocks = dim // K_TILE
-    n_blocks = vocab // M_TILE * k_blocks
-    codes, scales, mins = q4nx.parts(
-        np.asarray(w).view(np.uint8)[: n_blocks * BLOCK_BYTES]
-    )
-    k_group = np.arange(K_TILE) // GROUP
-    blocks = (
-        mins.astype(np.float64)[..., k_group]
-        + scales.astype(np.float64)[..., k_group] * codes
-    )
-    out = np.empty((vocab, dim), np.float64)
-    for index, block in enumerate(blocks):
-        rows_k, row = divmod(index, rows)
-        slice_, k = divmod(rows_k, k_blocks)
-        n0 = (slice_ * rows + row) * M_TILE
-        out[n0 : n0 + M_TILE, k * K_TILE : (k + 1) * K_TILE] = block
-    return out
+    blocks = np.asarray(w).view(np.uint8)[
+        : vocab * dim // (M_TILE * K_TILE) * BLOCK_BYTES
+    ]
+    grid = blocks.reshape(-1, k_blocks, rows, BLOCK_BYTES).transpose(0, 2, 1, 3)
+    return q4nx.dequantize(grid.reshape(vocab // M_TILE, k_blocks, BLOCK_BYTES))
 
 
 def reference(weights, x, softcap, eps=1e-6):

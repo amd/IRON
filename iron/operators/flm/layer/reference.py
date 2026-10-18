@@ -47,7 +47,7 @@ from iron.operators.flm.q4nx import (
     K_TILE,
     M_TILE,
     packed_bytes,
-    parts,
+    unpack,
 )
 
 # The epsilon of aie_kernels/flm_gemma4/rms_norm.h.
@@ -142,15 +142,15 @@ _SM_BYTES = 2 * 2 * M_TILE * K_TILE // GROUP
 
 def parse_q4nx(proj_u8, offset, rows, cols):
     """A q4nx weight in natural order: (codes [rows, cols], scales and mins
-    [rows, cols / 32]) (``q4nx.parts``). Blocks go by pairs of 32-row bands:
+    [rows, cols / 32]) (``q4nx.unpack``). Blocks go by pairs of 32-row bands:
     column block c of band 2p, then of band 2p + 1.
     """
     nb_r, nb_c = rows // M_TILE, cols // K_TILE
     blk = proj_u8[offset : offset + nb_r * nb_c * BLOCK_BYTES]
-    blk = blk.reshape(nb_r // 2, nb_c, 2, BLOCK_BYTES).transpose(0, 2, 1, 3)
-    return tuple(
-        part.reshape(nb_r, nb_c, M_TILE, -1).transpose(0, 2, 1, 3).reshape(rows, -1)
-        for part in parts(blk)
+    return unpack(
+        blk.reshape(nb_r // 2, nb_c, 2, BLOCK_BYTES)
+        .transpose(0, 2, 1, 3)
+        .reshape(nb_r, nb_c, BLOCK_BYTES)
     )
 
 

@@ -35,12 +35,7 @@ from iron.operators.flm.layer.design import (
     weight_layout,
 )
 from iron.operators.flm.layer.op import DecodeLayer
-from iron.operators.flm.layer.reference import (
-    generate_inputs,
-    kv_row,
-    kv_rows,
-    reference,
-)
+from iron.operators.flm.layer.reference import generate_inputs, kv_row, kv_rows
 
 GEOMETRIES = (FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE)
 
@@ -135,17 +130,15 @@ def _rel_l2(got, want):
     return np.linalg.norm(got - want) / max(np.linalg.norm(want), 1e-30)
 
 
-def check_outputs(geometry, layer_type, context_len, max_l, inputs, x_out, kv_out):
-    """Compare x_out and kv_out (bf16) with the reference on inputs.
+def check_outputs(op, context_len, max_l, inputs, x_out, kv_out):
+    """Compare x_out and kv_out (bf16) with op's reference on inputs.
 
     Returns the relative L2 errors. Asserts that they are at most RTOL_X and
     RTOL_KV, and that the rest of x and of the kv cache equals the input bit for
     bit.
     """
-    x, proj, rms, rope_rms, kv = inputs
-    ref_x, ref_kv = reference(
-        geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max_l
-    )
+    ref_x, ref_kv = op.reference(*inputs, context_len, max_l)
+    geometry, layer_type = op.geometry, op.layer_type
     g = layer_dims(geometry, layer_type)
     D, dk = g["model_dim"], g["dk"]
     got_x = np.asarray(x_out).view(np.uint16).reshape(-1)
@@ -196,9 +189,7 @@ def test_matches_reference(geometry, layer_type, context_len, record_property):
     bufs = _tensors(op, inputs)
     full = [b.numpy().copy() for b in bufs]
     op(*bufs, context_len=context_len, max_l=MAX_L)
-    check_outputs(
-        geometry, layer_type, context_len, MAX_L, full, bufs[0].numpy(), bufs[4].numpy()
-    )
+    check_outputs(op, context_len, MAX_L, full, bufs[0].numpy(), bufs[4].numpy())
     _record_metrics(record_property, op, bufs, geometry, layer_type, context_len, MAX_L)
 
 
@@ -254,9 +245,7 @@ def test_captured_case(case, record_property):
     bufs = _tensors(op, [np.fromfile(files[k], np.uint8) for k in names])
     full = [b.numpy().copy() for b in bufs]
     op(*bufs, context_len=ctx, max_l=max_l)
-    check_outputs(
-        geometry, layer_type, ctx, max_l, full, bufs[0].numpy(), bufs[4].numpy()
-    )
+    check_outputs(op, ctx, max_l, full, bufs[0].numpy(), bufs[4].numpy())
     for buf, key in ((bufs[0], "x_out"), (bufs[4], "kv_cache_out")):
         if key in files:
             want = np.fromfile(files[key], np.uint8)

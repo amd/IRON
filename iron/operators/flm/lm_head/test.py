@@ -5,108 +5,38 @@
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
+from aie.utils.verify import Tolerance
 
-from iron.common.testing import time_call
+from iron.common.testing import run_test, vectors
 from iron.operators.flm.lm_head.op import LMHead
-from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE
 
 pytestmark = pytest.mark.supported_devices("npu2")
-
-# The initial value of y. No logit of the test inputs reaches it, so an
-# unwritten output fails the check.
-SENTINEL = 99.0
-
-# Error bounds from README.md's Numerics section.
-PROJECTION_ERROR = 0.025
-TANH_ERROR = 0.04
-
-GEMMA4_SOFTCAP = 30.0
-
-
-def _inputs(dim, vocab, seed):
-    """A q4nx vocabulary and a token with its RMS weight.
-
-    Negative minima and small scales keep the logits in the range a softcap
-    of 30 bends.
-    """
-    rng = np.random.default_rng(seed)
-    groups = K_TILE // GROUP
-    n_blocks = vocab * dim // (M_TILE * K_TILE)
-    params = np.concatenate(
-        [
-            rng.uniform(0, 0.02, (n_blocks, groups * M_TILE)),
-            rng.uniform(-0.15, 0, (n_blocks, groups * M_TILE)),
-        ],
-        axis=1,
-    )
-    params = params.astype(bfloat16).view(np.uint16).astype("<u2").view(np.uint8)
-    codes = rng.integers(0, 256, (n_blocks, M_TILE * K_TILE // 2), dtype=np.uint8)
-    w = np.concatenate([params, codes], axis=1).reshape(-1)
-    x = np.concatenate([rng.standard_normal(dim), rng.uniform(0.5, 1.5, dim)])
-    return w, x.astype(bfloat16)
-
-
-def _check(dim, vocab, softcap, seed=0, tanh_error=True, record=None):
-    """Compare the device's logits for seed's inputs with the reference."""
-    op = LMHead(dim=dim, vocab=vocab, softcap=softcap)
-    w, x = _inputs(dim, vocab, seed)
-    tensor = aie_utils.DEFAULT_TENSOR_CLASS
-    bufs = (
-        tensor(np.full(vocab, SENTINEL, dtype=bfloat16)),
-        tensor(w.view(np.uint32)),
-        tensor(x),
-    )
-    op(*bufs)
-    got = bufs[0].numpy().astype(np.float64)
-    if record is not None:
-        time_call(
-            op,
-            *bufs,
-            bytes_moved=sum(b.numpy().nbytes for b in bufs),
-            ops=op.ops(),
-            warmup=1,
-            iters=1,
-            record=record,
-        )
-    expected = op.reference(w, x)
-    # The logits before the softcap set the projection's error scale.
-    uncapped = LMHead(dim=dim, vocab=vocab, softcap=1e30).reference(w, x)
-    bound = PROJECTION_ERROR * np.abs(uncapped).max()
-    if tanh_error:
-        bound += TANH_ERROR * softcap
-    error = np.abs(got - expected)
-    label = f"dim={dim} vocab={vocab} softcap={softcap}"
-    assert error.max() <= bound, f"{label}: max |error| {error.max():.3f} > {bound:.3f}"
-    return got
 
 
 @pytest.mark.parametrize("dim", [1536, 2560])
 def test_projection_matches_reference(dim):
-    """A softcap of 1000 keeps each tanh argument near zero.
-
-    The test therefore checks the projection alone.
+    """A softcap of 1000 keeps each tanh argument near zero, so the
+    projection's bound alone holds.
 
     1536 and 2560 are Gemma 4 E2B's and E4B's hidden sizes.
     """
-    _check(dim, 4096, 1000.0, tanh_error=False)
-
-
-@pytest.mark.parametrize(
-    "dim, vocab",
-    [
-        (1536, 4096),
-        (2560, 4096),
-        # Gemma 4's whole vocabulary.
-        pytest.param(1536, 262144, marks=[pytest.mark.extensive, pytest.mark.bench]),
-        pytest.param(2560, 262144, marks=pytest.mark.extensive),
-    ],
-)
-def test_gemma4_softcap(dim, vocab, record_property):
-    _check(dim, vocab, GEMMA4_SOFTCAP, seed=1, record=record_property)
+    op = LMHead(dim=dim, vocab=4096, softcap=1000.0)
+    errors = run_test(
+        op,
+        vectors(op, **op.test.draw(op)),
+        tolerance=Tolerance(bound=op.projection_error),
+    )
+    assert not errors, errors
 
 
 def test_softcap_bounds_the_logits():
     """A softcap of 5 saturates most logits. No logit may exceed the softcap."""
-    got = _check(1536, 1024, 5.0, seed=2)
-    assert np.abs(got).max() <= 5.0
+    op = LMHead(dim=1536, vocab=1024, softcap=5.0)
+    v = vectors(op, **op.test.draw(op))
+    tensor = aie_utils.DEFAULT_TENSOR_CLASS
+    y, w, x = (
+        tensor(v[b.name]) if b.fills else tensor(b.host_shape, dtype=b.host_dtype)
+        for b in op.buffers
+    )
+    op(y, w, x)
+    assert np.abs(y.numpy().astype(np.float64)).max() <= 5.0

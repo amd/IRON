@@ -5,81 +5,18 @@
 import os
 from typing import Any
 
-import numpy as np
 import pytest
 from aie.utils.verify import Tolerance
 
-from iron.common.testing import run_test
-from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor, rb
-from iron.operators.flm.dequant.op import N_TILE, DequantBFP, dequantize, qw_bytes_for
+from iron.common.testing import run_test, vectors
+from iron.operators.flm.aie2p_math_emulation import rb
+from iron.operators.flm.dequant.op import DequantBFP
 from iron.operators.flm.gemm.op import ProjectionGEMM
-from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE, packed_bytes
-
-# K = 512 is one k-tile, where flm.ProjectionGEMM at tile_n = 128 wins on NPU2. It
-# defaults to 64 regardless, which is the order this operator emits.
-SHAPES = [(512, 128), (1024, 128), (1024, 512), (1536, 640), (2048, 256)]
 
 
-def scatter_runs(qw, K, N, run_out_features, run_period_out_features, seed=0):
-    """Place a matrix's column blocks at their offsets in an interleaved
-    buffer. The gaps hold noise, so an operator that reads them fails.
-    """
-    cb_bytes = packed_bytes(N_TILE * K)
-    run_blocks = run_out_features // N_TILE
-    period_blocks = run_period_out_features // N_TILE
-
-    total = qw_bytes_for(K, N, run_out_features, run_period_out_features)
-    out = np.random.default_rng(seed + 1).integers(0, 256, total, dtype=np.uint8)
-    src = np.asarray(qw, dtype=np.uint8).reshape(-1, cb_bytes)
-    for cb in range(N // N_TILE):
-        at = ((cb // run_blocks) * period_blocks + cb % run_blocks) * cb_bytes
-        out[at : at + cb_bytes] = src[cb]
-    return out
-
-
-def random_q4nx(K, N, seed=0):
-    """A random q4nx blob. Scales and mins are bf16 in the file, so they are
-    generated there and widened.
-    """
-    rng = np.random.default_rng(seed)
-    n_blocks = (K // K_TILE) * (N // M_TILE)
-    sm = (K_TILE // GROUP) * M_TILE
-
-    scales = f32_to_bf16_floor(
-        rng.uniform(0.002, 0.05, (n_blocks, sm)).astype(np.float32)
-    )
-    mins = f32_to_bf16_floor(rng.uniform(-0.4, 0.4, (n_blocks, sm)).astype(np.float32))
-    codes = rng.integers(0, 256, (n_blocks, M_TILE * K_TILE // 2), dtype=np.uint8)
-    return np.concatenate(
-        [
-            scales.view(np.uint8).reshape(n_blocks, -1),
-            mins.view(np.uint8).reshape(n_blocks, -1),
-            codes,
-        ],
-        axis=1,
-    ).ravel()
-
-
-def _check(op, blob, expected, label, record=None):
-    errors = run_test(
-        op,
-        {"qw": blob},
-        {"out": expected},
-        tolerance=Tolerance.exact(),
-        record=record,
-    )
-    assert not errors, f"{label}: {errors}"
-
-
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("K, N", SHAPES)
-def test_matches_reference(K, N, record_property):
-    """Byte-exact. Every rounding on the device is reproducible on the host, so
-    a tolerance would hide a value landing in the wrong block.
-    """
-    qw = random_q4nx(K, N, seed=0)
-    op = DequantBFP(K=K, N=N)
-    _check(op, qw, op.reference(qw), f"K={K} N={N}", record_property)
+def _check(op, inputs, outputs=None):
+    errors = run_test(op, inputs, outputs, tolerance=Tolerance.exact())
+    assert not errors, f"{op.name}: {errors}"
 
 
 @pytest.mark.supported_devices("npu2")
@@ -88,61 +25,11 @@ def test_output_feeds_gemm_unchanged():
     that makes it a drop-in. Comparing against pack_B catches a drift in either
     operator's tiling that a self-consistent reference would not.
     """
-    K, N = 1024, 128
-    qw = random_q4nx(K, N, seed=3)
-    w = dequantize(qw, K, N)
-    w = rb(w)
-    gemm = ProjectionGEMM(M=256, K=K, N=N, tile_n=64, rounding="floor")
-    packed = gemm.pack_B(np.ascontiguousarray(w.T))
-
-    _check(DequantBFP(K=K, N=N), qw, packed, "vs pack_B")
-
-
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize(
-    "K, N, run, period",
-    [
-        (1024, 1024, 512, 1024),
-        # E4B's gate/up blob.
-        pytest.param(2560, 10240, 5120, 10240, marks=pytest.mark.extensive),
-    ],
-)
-def test_gate_up_interleaved_blob(K, N, run, period):
-    """Gate and up share one blob, ``run`` out-features each in a ``period``."""
-    qw = random_q4nx(K, N, seed=12)
-    blob = scatter_runs(qw, K, N, run, period, seed=12)
-
-    op = DequantBFP(
-        K=K,
-        N=N,
-        run_out_features=run,
-        run_period_out_features=period,
-    )
-    assert op.quantized_size() == blob.size
-    _check(op, blob, op.reference(qw), "gate/up interleave")
-
-
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize(
-    "K, N",
-    [
-        (4096, 1536),
-        # Gemma 4 E2B's MLP down projection.
-        pytest.param(6144, 1536, marks=pytest.mark.bench),
-        pytest.param(12288, 1536, marks=pytest.mark.extensive),
-        # E4B's o, down and gate/up projections, as flm.ProjectionGEMM's extensive set.
-        pytest.param(2560, 2560, marks=pytest.mark.extensive),
-        pytest.param(10240, 2560, marks=pytest.mark.extensive),
-        pytest.param(2560, 10240, marks=pytest.mark.extensive),
-    ],
-)
-def test_large_k_shapes(K, N, record_property):
-    """Gemma 4's tall projections, whose k-tiles outnumber a shim tile's buffer
-    descriptors. K = 12288 is 24 k-tiles, the deepest E2B reaches.
-    """
-    qw = random_q4nx(K, N, seed=21)
-    op = DequantBFP(K=K, N=N)
-    _check(op, qw, op.reference(qw), f"K={K} N={N}", record_property)
+    op = DequantBFP(K=1024, N=128)
+    v = vectors(op, **op.test.draw(op))
+    gemm = ProjectionGEMM(M=256, K=op.K, N=op.N, tile_n=64, rounding="floor")
+    packed = gemm.pack_B(rb(op.weights(v["qw"])).T.copy())
+    _check(op, v.inputs, {"out": packed})
 
 
 @pytest.mark.supported_devices("npu2")
@@ -150,7 +37,7 @@ def test_one_xclbin_serves_every_shape():
     """Several shapes and parameter sets back to back on one loaded xclbin.
 
     A model dispatches ten weight shapes against a budget of 16 hardware
-    contexts. The parametrised tests cannot catch a regression here: each gets
+    contexts. The catalog's cases cannot catch a regression here: each gets
     a fresh context, so the array is reconfigured between cases anyway. One
     case leaves three of the eight columns without work.
     """
@@ -168,15 +55,8 @@ def test_one_xclbin_serves_every_shape():
     ]
     xclbin = None
     for case in cases:
-        K, N = case["K"], case["N"]
         op = DequantBFP(**case)
-        qw = random_q4nx(K, N, seed=7)
-        blob = qw
-        if case.get("run_out_features"):
-            blob = scatter_runs(
-                blob, K, N, case["run_out_features"], case["run_period_out_features"], 7
-            )
-        _check(op, blob, op.reference(qw), str(case))
+        _check(op, vectors(op, **op.test.draw(op)))
 
         # A cache hit: the image _check built and ran.
         image = op.compile().image
