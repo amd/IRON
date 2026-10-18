@@ -42,7 +42,6 @@ from .carried import CARRY, EmitSite, attach_emit, compose
 from .fold import Folding, folded
 from .handle import Affine, Carry, Handle, PerCall, State, Weight, is_operand
 from .trace import TracedGraph, Tracer, _ReferenceTracer
-from .visualize import Dataflow
 
 logger = logging.getLogger(__name__)
 
@@ -639,30 +638,6 @@ class CompiledGraph:
         if self._callable is None:
             self._callable = self.sequence.get_callable(self.arena)
         return self._callable
-
-    def picture(
-        self,
-        title: str = "",
-        layers: set[int] | None = None,
-        weights: bool = True,
-    ) -> Dataflow:
-        """This version drawn (``visualize.Dataflow``): each step's design and
-        the steps folded into it; its ``dot()``, ``svg()`` and ``html()``.
-
-        Args:
-            title: The caption; the graph's name if empty.
-            layers: The layers drawn, or None for every step.
-            weights: Draw each weight as its own node.
-        """
-        return Dataflow(self.traced, title, layers, weights, version=self)
-
-    def dot(self) -> str:
-        """This version drawn as Graphviz text (``picture``)."""
-        return self.picture().dot()
-
-    def html(self) -> str:
-        """This version drawn as one self-contained page (``picture``)."""
-        return self.picture().html()
 
     @property
     def parameters(self) -> list[Parameter]:

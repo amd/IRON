@@ -32,7 +32,6 @@ from .handle import (
     _rescale_bounds,
     is_operand,
 )
-from .visualize import Dataflow
 
 
 @dataclasses.dataclass
@@ -329,29 +328,11 @@ class TracedGraph:
             bindings.append(Binding(new, member, b.expression))
         return dataclasses.replace(self, steps=steps, bindings=bindings)
 
-    def picture(
-        self,
-        title: str = "",
-        layers: set[int] | None = None,
-        weights: bool = True,
-    ) -> Dataflow:
-        """This graph drawn (``visualize.Dataflow``): its ``dot()``, ``svg()``
-        and ``html()``.
-
-        Args:
-            title: The caption; the graph's name if empty.
-            layers: The layers drawn, or None for every step.
-            weights: Draw each weight as its own node.
-        """
-        return Dataflow(self, title, layers, weights)
-
     def dot(self) -> str:
-        """This graph drawn as Graphviz text (``picture``)."""
-        return self.picture().dot()
+        """This graph drawn as Graphviz text (``visualize.dot``)."""
+        from .visualize import dot
 
-    def html(self) -> str:
-        """This graph drawn as one self-contained page (``picture``)."""
-        return self.picture().html()
+        return dot(self)
 
     @property
     def operators(self) -> list:
