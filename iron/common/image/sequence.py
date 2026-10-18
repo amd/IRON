@@ -240,13 +240,13 @@ class OperatorSequence:
                     parts.append(ref)
                     continue
                 seen = declared.setdefault(ref.root, b)
-                if seen.held_nbytes != b.held_nbytes:
+                if seen.nbytes != b.nbytes:
                     raise ValueError(
                         f"Buffer {ref.root!r} has conflicting sizes between "
                         f"operators: {seen.shape} {bfp.dtype_name(seen.dtype)} vs "
                         f"{b.shape} {bfp.dtype_name(b.dtype)}"
                     )
-                sizes.setdefault(ref.root, self.pinned.get(ref.root, b.held_nbytes))
+                sizes.setdefault(ref.root, self.pinned.get(ref.root, b.nbytes))
         for root, nbytes in self.pinned.items():
             sizes.setdefault(root, nbytes)
         for ref in parts:

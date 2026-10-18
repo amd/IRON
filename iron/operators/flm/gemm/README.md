@@ -6,21 +6,16 @@ SPDX-License-Identifier: Apache-2.0
 # `iron.operators.flm.GEMM` — bf16 GEMM with a fused epilogue
 
 ```python
-from iron.common import Chain, Link
-from iron.operators import SiLU
 from iron.operators.flm import GEMM
 
-op = GEMM(M=1024, K=1536, N=6144, finish=Chain((Link(SiLU(size=1024 * 6144)),)))
+op = GEMM(M=1024, K=1536, N=6144, epilogue="silu")
 op(A, op.pack_B(B), C_out)  # compiles once, then runs
 ```
 
-What follows the product is its finish, as for `iron.operators.GEMM`: a SiLU
-or a Sigmoid, then a Clamp, which the epilogue applies from its runtime
-parameters (and which a graph folds into it). The gelu stays
-`epilogue="gelu"`: it is the port's own arithmetic, FastFlowLM's
-`x * sigmoid(1.702x)`, which no IRON operator computes.
-`epilogue`, `rounding` and `gelu` are `StrEnum`s, so the bare strings `"gelu"` /
-`"conv_even"` / `"bf16_steps"` are accepted too.
+The epilogue applies the activation that follows the product, a SiLU, a
+Sigmoid or the port's own gelu, FastFlowLM's `x * sigmoid(1.702x)`, from its
+runtime parameters. `epilogue`, `rounding` and `gelu` are `StrEnum`s, so the
+bare strings `"gelu"` / `"conv_even"` / `"bf16_steps"` are accepted too.
 
 This is the GEMM `F.linear` runs for any input of more than one row. It reads
 the checkpoint's weight as stored, `(N, K)`, with `b_col_maj=True`; a
@@ -41,7 +36,7 @@ memtile — so those are *not* what distinguishes it. What does:
 | | `iron.operators.GEMM` | `flm.GEMM` |
 |---|---|---|
 | tiling | parameterized tiles, 1–8 columns | m=64, r/s/t 8/8/8; `k_tile` and `tile_n` tunable |
-| after the product | a finish chain | fused f32→bf16 + activation + clamp |
+| after the product | nothing | fused f32→bf16 + activation |
 | B layout | `(K, N)`, or `(N, K)` with `b_col_maj` | `(N, K)` with `b_col_maj`, or packed by `pack_B` |
 | A tile height | tied to the accumulator | decoupled (asymmetric tile buffering) |
 
@@ -89,7 +84,7 @@ read by the core once its barrier opens:
 | `m_row_blocks` | `M / 256` |
 | `k_iters` | `K / 512` |
 | epilogue | the `Epilogue` mode |
-| `clamp_min` / `clamp_max` | the bounds, as raw `int32` bit patterns |
+| `clamp_min` / `clamp_max` | the kernel's clamp bounds, `(-inf, +inf)` as raw `int32` bit patterns |
 
 A word is not free: each costs ~66 ns per core and the sequence writes
 `ROWS * COLS` = 32 of them, so **every word is ~2 us of dispatch latency**
@@ -113,12 +108,9 @@ to them. Two groups are therefore conditional or gone:
       n_work  = (n_tiles - my_col + COLS - 1) // COLS
       n_drain = ((n_tiles + COLS - 1) // COLS) - n_work
 
-The clamp bounds are the one group that is unconditional despite most callers
-not clamping. The kernel has no unclamped instantiation to compile out: an
-unclamped dispatch sends `(-inf, +inf)`, which leaves every finite value
-bit-identical. Two always-sent words buy one xclbin for clamped and unclamped
-callers alike, which is the whole point of the runtime parameters, and a
-clamping caller now sends one word fewer than the old `clamp_enabled` trio did.
+The clamp bounds are the one group that is unconditional though no caller
+clamps. The kernel has no unclamped instantiation to compile out, so every
+dispatch sends `(-inf, +inf)`, which leaves every finite value bit-identical.
 The bounds stay raw `int32` because `npu_write_rtp` writes i32 only; the kernel
 casts back with `__builtin_bit_cast`, since `memcpy` leaves an unresolved
 external call rather than folding to a register move.
@@ -141,15 +133,14 @@ release an A object until every consumer has taken it.
 
 The two artifacts therefore carry different stems: the xclbin's `config_name`
 covers tile_n, ct_max_k, tile_ma, the compiled activation set, rounding and the
-device, while `name` adds every runtime parameter -- M, K, N, the activation
-and the clamp bounds -- so two instruction streams never share a name. The
+device, while `name` adds every runtime parameter -- M, K, N and the
+activation -- so two instruction streams never share a name. The
 xclbin is built from a module emitted at a reference shape, whose runtime
 sequence is discarded.
 
 One thing stays build-time, because it costs program memory: which activations
 the epilogue can *select between* (`epilogue_modes`). It lands in the xclbin's
-name. The clamp does not -- every build compiles it, so a Clamp finish of
-(-2, 2), one of (-4, 4) and no clamp at all share one xclbin.
+name.
 
 The core releases its barrier straight after reading the parameters.
 `wait_for_value` emits `LockAction.Acquire`, which does not leave the lock
@@ -293,10 +284,6 @@ parameters, one overlay serving every projection. This operator does the same
 [Runtime parameters](#runtime-parameters). Which activations the epilogue can
 *select between* is still a build-time choice, because each one compiled in
 costs program memory.
-
-`clamp` has no counterpart in the shipped overlay to compare against — its
-`generate_seq` never writes the clamp RTP words, so clamping is always off
-there.
 
 ## Accuracy
 
@@ -570,11 +557,9 @@ unit. A bound needs `m_chunk = 1` and M in one slab.
 ## The shipped overlay
 
 ```python
-from iron.common import Chain, Link
-from iron.operators import SiLU
 from iron.tests.common.shipped import Shipped
 
-op = Shipped(M=1024, K=1536, N=6144, finish=Chain((Link(SiLU(size=1024 * 6144)),)))
+op = Shipped(M=1024, K=1536, N=6144, epilogue="silu")
 op(A, op.pack_B(B), C_out)
 ```
 
@@ -606,7 +591,7 @@ host-side half of a dispatch, and `GEMM`'s own `pack_B`, `reference` and
 packaging serve it:
 
 * **The runtime parameters.** One overlay serves every projection in a model, so
-  the shape, the activation and the clamp arrive as words in each core's data
+  the shape and the activation arrive as words in each core's data
   memory. A core blocks on a lock until the sequence releases it, so a dispatch
   that writes no parameters hangs.
 * **The shim DMA transfers**, reproducing the overlay's fixed channel map.

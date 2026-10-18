@@ -34,8 +34,7 @@ def test_the_cases_judge_by_every_kind_of_tolerance(npu2):
     ops = [cls(**case.kwargs).resolved(npu2) for cls, case in (p.values for p in CASES)]
     assert {op.tolerance().kind for op in ops} >= {"exact", "ulps", "relative", "bound"}
     assert any(
-        isinstance(op, Elementwise) and not op.finish and len(op.chain()) == 1
-        for op in ops
+        isinstance(op, Elementwise) and len(op.chain()) == 1 for op in ops
     ), "no case is judged by its elementwise kernel's own judge"
 
 

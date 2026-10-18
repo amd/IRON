@@ -160,8 +160,7 @@ reuse lint
      - `tolerance()`, what every output is judged by, in tests, a graph's
        check mode (`compile(check=True)`) and autotuning alike: the contract of the kernel it runs unless
        it overrides it (a data mover returns `Tolerance.exact()`: any other
-       accepts a wrong permutation). A finish or a prologue carries it
-       through its steps' own. A tolerance with a number names in its
+       accepts a wrong permutation). A tolerance with a number names in its
        `note` where the number comes from (`iron/tests/common/judging.py`).
      - `test = Testing(cases, ...)` on the operator class
        (`iron/common/testing.py`): the shapes it is checked at on a device
@@ -416,7 +415,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - `class Array(Operator.Array)`: the array tier, a frozen dataclass the
      class generates with every field a stream names, every field declared
      `array=True` and every operand and value; it annotates only the
-     library's views it reads (`dev: Any`, `finishing: Finish`, ...), and
+     library's views it reads (`dev: Any`, `buffers: list[Operand]`), and
      `op.array_config()` makes it from the operator. `build() -> Built` builds ObjectFIFOs and Workers
      (`self.kernel()` or a factory's `ExternalFunction`), `range_()` for
      loops, and `self.x.bind([f.prod() for f in fifos])` (a handle per lane)
@@ -503,8 +502,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    `run_test(..., record=record_property)` records throughput from it.
    Override `tolerance()` where the contract of the kernel it runs is not
    what its output is held to, returning an `aie.utils.verify.Tolerance`
-   (`Tolerance.exact()` for a data mover); an override that may have a
-   finish returns `super().tolerance()` there
+   (`Tolerance.exact()` for a data mover)
 6. Declare how it is tested: `test = Testing(cases)` on the operator class,
    from `iron.common.testing`
    - the cases are `Case(kwargs, extensive=...)`, plain kwarg dicts, and
@@ -550,7 +548,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 | `validate()` | no (a no-op) | at construction, before `array_key`/`design_key` can be taken |
 | `compatible()` | no (a no-op) | once every tunable is resolved, device-free |
 | `sequence(rt)` | no (the derived one serves most operators) | building the array's runtime sequence |
-| `tolerance()` | no (the kernel's contract, or `None` through a finish/prologue) | judging a device run or a check-mode step |
+| `tolerance()` | no (the kernel's contract, else `None`) | judging a device run or a check-mode step |
 | `ops()` | no (one op per output element) | a device test's throughput figure |
 | `extent_unit(buffer)` | no (`None`: the stream tile's own rows) | splitting a bounded call's rows across a round-robin stream |
 | `array_device()` | no (the bound device) | building the array, when it covers only part of the bound device (GEMM's row subset) |
@@ -796,15 +794,6 @@ code before relying on a line here; it is the authority.
   core are known here, and only on npu2, the one NPU whose core clock was
   measured. A GEMM with a column-major B (`b_col_maj`) is never skipped:
   the nightly times no such tile.
-- A fold whose cores would read more streams than a core tile's two input
-  channels is refused (`Chain.at_finish`, at `resolved()`). So EmbeddingGemma 2's
-  residual `ElementwiseAdd` does not fold into a weighted `RMSNorm` (its
-  multiplying core would read the normalized line, the weight and the
-  residual), its layer scale (`RowwiseMul` by a held row) does not fold
-  into the `ElementwiseAdd` before it, and a prompt SwiGLU's `* up` does
-  not fold into flm.GEMM's gate, whose cores read A and B. Pinning a
-  weighted RMSNorm's two cores adjacent, so the line between them is
-  shared memory, would free the first.
 - Open upstream asks in mlir-aie: an accessor for L1 banking. aiecc's split memory (a whole-module clone per split item) is
   mlir-aie #3689's, which shares one clone per split.
 

@@ -52,14 +52,8 @@ class Clamp(UnaryElementwise):
         )
 
     def chain(self) -> tuple[KernelCall, ...]:
-        # The bounds are words a core reads, not part of the array: a step's own.
-        extra = {b.name for b in self.finish_inputs}
-        operands = tuple(b for b in self.inputs if b.name not in extra)
-        return (KernelCall(self.array_config().kernel(), self.bits(), operands),)
-
-    def at_line(self, line: int, dtype, dev, ordered: bool = True, at: int = 0):
-        # A step's chain is baked into its producer's array; the bounds are not array-tier.
-        raise ValueError("Clamp: its cores run an array of their own")
+        # The bounds are words a core reads, not part of the array.
+        return (KernelCall(self.array_config().kernel(), self.bits(), (self.x,)),)
 
     class Array(UnaryElementwise.Array):
         x: Operand

@@ -21,12 +21,10 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common import Chain, Precision, Unresolvable
+from iron.common import Precision, Unresolvable
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy, Gather
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
-from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.emit import Emit
 from iron.operators.flm.dequant.op import DequantBFP
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
@@ -37,7 +35,6 @@ from iron.operators.flm.prefill_attn.op import (
     PrefillSlidingAttention,
 )
 from iron.operators.gemm import GEMM
-from iron.operators.gemv import GEMV
 from iron.operators.limbs import Limbs
 from iron.operators.magnitude import Magnitude
 from iron.operators.merge import Merge
@@ -47,7 +44,6 @@ from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.router import TopKRouter
 from iron.operators.sample import Sample
-from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
 from iron.operators.transpose import Transpose
 
@@ -392,59 +388,6 @@ def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision, request):
 def test_flm_gemm_at_medium_takes_bf16_macs_on_aie2(npu1):
     op = FLMGEMM(M=256, K=512, N=256, precision=Precision.MEDIUM).resolved(npu1)
     assert not op.emulate_bf16_mmul_with_bfp16 and not op.bfp16_b
-
-
-def test_a_finish_input_past_the_cores_input_channels_is_refused(npu2):
-    """A sum's cores read two streams, neither declared for a finish step's
-    own input to ride; past them the design fails to place. A one-stream
-    core takes it, and so does a matvec's, on its matrix.
-    """
-    finish = Chain.of(ElementwiseMul(size=2048), at=1)
-    with pytest.raises(Unresolvable, match="input channels"):
-        ElementwiseAdd(size=2048, num_aie_columns=4, finish=finish).resolved(npu2)
-    SiLU(size=2048, num_aie_columns=4, finish=finish).resolved(npu2)
-    fed = GEMV(M=2048, K=2048, finish=finish).resolved(npu2)
-    assert [b.streamed for b in fed.finish_inputs] == [False]
-
-
-def test_a_step_that_needs_the_order_of_a_gemm_block_is_refused(npu2):
-    """GEMM's cores hold their block of C in the matmul kernel's own layout:
-    a step independent of that order finishes it; a norm over rows, or a
-    product whose other input streams in row order, does not.
-    """
-    kwargs = dict(M=2048, K=2048, N=2048, b_col_maj=True)
-    with pytest.raises(ValueError, match="reduces over rows"):
-        GEMM(**kwargs, finish=Chain.of(RMSNorm(rows=1024, tile_size=4096))).resolved(
-            npu2
-        )
-    with pytest.raises(Unresolvable, match="order of their own"):
-        GEMM(
-            **kwargs, finish=Chain.of(ElementwiseMul(size=2048 * 2048), at=1)
-        ).resolved(npu2)
-    GEMM(**kwargs, finish=Chain.of(SiLU(size=2048 * 2048))).resolved(npu2)
-
-
-def test_a_finish_a_core_does_not_hold_beside_its_tiles_is_refused_or_narrowed(
-    npu1, npu2
-):
-    """On AIE2 a SiLU finish links 5 KB of LUT tables beside its scratch
-    line, past what a core holding 64-row GEMM tiles or a 2048-row GEMV
-    tile at K = 8192 has left: an open tile_m narrows until it fits, and a
-    given tile is refused at resolution rather than failing to place.
-    """
-    kwargs = dict(M=2048, K=2048, N=2048, b_col_maj=True)
-    silu = Chain.of(SiLU(size=2048 * 2048))
-    assert GEMM(**kwargs, finish=silu).resolved(npu1).tile_m == 32
-    assert GEMM(**kwargs, finish=silu).resolved(npu2).tile_m == 64
-    assert GEMM(**kwargs).resolved(npu1).tile_m == 64
-    with pytest.raises(ValueError, match="a core holds 65920 bytes, past its 65536"):
-        GEMM(**kwargs, tile_m=64, finish=silu).resolved(npu1)
-    gemv = dict(M=2048, K=8192, num_aie_columns=1, tile_size_input=1)
-    silu = Chain.of(SiLU(size=2048))
-    GEMV(**gemv, tile_size_output=2048, finish=silu).resolved(npu2)
-    GEMV(**gemv, tile_size_output=1024, finish=silu).resolved(npu1)
-    with pytest.raises(ValueError, match="a core holds 67712 bytes, past its 65536"):
-        GEMV(**gemv, tile_size_output=2048, finish=silu).resolved(npu1)
 
 
 @pytest.mark.parametrize(

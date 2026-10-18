@@ -34,7 +34,7 @@ from aie.utils import bfp
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.declare import Operand, Operator, Out
-from iron.common.declare.value import PlaceWord, Value
+from iron.common.declare.value import Value
 from iron.common.design import OperatorDesign
 from iron.common.graph.trace import TracedGraph
 from iron.common.image.callable import FullELFCallable, StepCallable
@@ -328,8 +328,7 @@ class Standalone:
                     self._bytes(name_)[: buf.nbytes] = content.view(np.uint8)
                 elif buf.fills:
                     content = self._content(buf, inputs.get(op, {}), rng)
-                    at = buf.placement[1] * bfp.itemsize(buf.dtype)
-                    self._bytes(name_)[at : at + buf.nbytes] = content
+                    self._bytes(name_)[: buf.nbytes] = content
                     if buf.drains:
                         self._before[name_] = content.copy()
         ops = {id(op): op for op in self.steps}.values()
@@ -354,9 +353,6 @@ class Standalone:
 
     @staticmethod
     def _value(op: Operator, values: Mapping[str, int], v: Value) -> int:
-        # Each operand here is a buffer of its own: a placed one at its run.
-        if isinstance(v, PlaceWord):
-            return 0
         if v.name in values:
             return values[v.name]
         extents = op.bound_extents
@@ -411,8 +407,7 @@ class Standalone:
         out = {}
         for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
             if buf.fills:
-                at = buf.placement[1] * bfp.itemsize(buf.dtype)
-                data = self._before.get(name, self._bytes(name)[at : at + buf.nbytes])
+                data = self._before.get(name, self._bytes(name)[: buf.nbytes])
                 out[buf.name] = data.view(buf.host_dtype).reshape(buf.host_shape)
         return out
 
@@ -430,9 +425,8 @@ class Standalone:
                 axis = buf.extent_axis(op.value(extent))
                 if axis is not None:
                     under[axis] = slice(0, self._values[op][extent])
-            at = buf.placement[1] * bfp.itemsize(buf.dtype)
             data = self.callable.get_storage(name).numpy().view(np.uint8)
-            data = data[at : at + buf.nbytes].reshape(*buf.shape, -1)
+            data = data[: buf.nbytes].reshape(*buf.shape, -1)
             # A block-float buffer stays its blocks' bytes, as its host shape is.
             data = np.ascontiguousarray(data[tuple(under)]).view(buf.host_dtype)
             out[buf.name] = data if bfp.is_bfp(buf.dtype) else data[..., 0]

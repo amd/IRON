@@ -314,23 +314,6 @@ class TracedGraph:
         found.update((h.name, key) for key, (_, h) in self.states.items())
         return found
 
-    def with_operators(self, replace: Mapping[int, Operator]) -> TracedGraph:
-        """This graph with operators swapped, keyed by ``id`` of the one each
-        replaces; a binding moves to the replacement's same-named value.
-        """
-        steps = [
-            dataclasses.replace(s, op=replace.get(id(s.op), s.op)) for s in self.steps
-        ]
-        bindings = []
-        for b in self.bindings:
-            new = replace.get(id(b.op))
-            if new is None:
-                bindings.append(b)
-                continue
-            member = next(v for v in new.values if v.name == b.member.name)
-            bindings.append(Binding(new, member, b.expression))
-        return dataclasses.replace(self, steps=steps, bindings=bindings)
-
     def dot(self) -> str:
         """This graph drawn as Graphviz text (``visualize.dot``)."""
         from .visualize import dot

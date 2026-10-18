@@ -15,7 +15,7 @@ import dataclasses
 import functools
 import inspect
 import logging
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,7 +39,6 @@ from ..image.packaging import Kind, Plan, plan
 from ..image.sequence import ALIGNMENT, OperatorSequence
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
-from .fold import Folding, folded
 from .handle import Affine, Carry, Handle, PerCall, State, Weight, is_operand
 from .trace import TracedGraph, Tracer
 
@@ -388,7 +387,6 @@ class Graph:
         check: bool = False,
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | None = None,
-        fold: bool | Collection[Folding] = False,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -409,10 +407,6 @@ class Graph:
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
             coresident: Packs designs into shared configurations.
-            fold: Fold every step its readers or its producer can apply
-                in their own cores into them, and every copy its producer
-                can write in its place (``iron.common.graph.fold``),
-                whatever it costs; or those folds alone.
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
         with (
@@ -425,19 +419,7 @@ class Graph:
                 self.precision = Precision(precision)
             try:
                 traced = self.trace(**shapes)
-                if fold:
-                    traced, count = folded(
-                        traced,
-                        aie_utils.ensure_current_device(),
-                        None if fold is True else fold,
-                    )
-                    logger.info(
-                        "%s: %d step(s) folded into their readers or producers",
-                        self.name,
-                        count.total(),
-                    )
                 current = aie_utils.ensure_current_device()
-                # Folding changes nothing the packaging follows from.
                 chosen = plan(current, traced, full_elf, check)
                 logger.info("%s", chosen.report(self.name))
                 signature = self._signature(

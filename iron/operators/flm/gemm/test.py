@@ -12,10 +12,9 @@ from aie.utils import bfp
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Chain, Precision
+from iron.common import Precision
 from iron.common.design import OperatorDesign
 from iron.common.testing import run_test, vectors
-from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (
     CT_MAX_K_FOR_N,
     M_TILE,
@@ -29,8 +28,6 @@ from iron.operators.flm.gemm.design import (
 )
 from iron.operators.flm.gemm.op import GEMM
 from iron.tests.common.shipped import Shipped
-from iron.operators.sigmoid import Sigmoid
-from iron.operators.silu import SiLU
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue
@@ -58,65 +55,61 @@ def get_params():
     # there. At K = 512 tile_n defaults to 128, halving at K >= 1024.
     # fmt: off
     if dev.arch is AIEArch.AIE2p:
-        #      M,    K,     N, epilogue,    clamp,     rounding
+        #      M,    K,     N, epilogue, rounding
         regular_params = [
-            (  256,  512,  1024, NONE,     None,       CONV_EVEN),  # smallest full sweep
-            (  512, 1024,  2048, NONE,     None,       CONV_EVEN),
-            (  256,  512,  1536, NONE,     None,       CONV_EVEN),  # remainder: 4 of 8 cols
-            (  256,  512,   128, NONE,     None,       CONV_EVEN),  # remainder only: 1 col
-            (  256,  512,  1024, SILU,     None,       CONV_EVEN),
-            (  256,  512,  1024, GELU,     None,       CONV_EVEN),
-            (  256,  512,  1024, NONE, (-2.0, 2.0),    CONV_EVEN),
+            (  256,  512,  1024, NONE,     CONV_EVEN),  # smallest full sweep
+            (  512, 1024,  2048, NONE,     CONV_EVEN),
+            (  256,  512,  1536, NONE,     CONV_EVEN),  # remainder: 4 of 8 cols
+            (  256,  512,   128, NONE,     CONV_EVEN),  # remainder only: 1 col
+            (  256,  512,  1024, SILU,     CONV_EVEN),
+            (  256,  512,  1024, GELU,     CONV_EVEN),
             # floor reproduces the shipped FastFlowLM overlay's rounding mode
             # (bit for bit on NPU2; NPU1 sums the K reduction in a different
             # order). It is much less accurate, so it gets its own bound below.
-            (  256,  512,  1024, NONE,     None,       FLOOR),
+            (  256,  512,  1024, NONE,     FLOOR),
         ]
         extensive_params = [
-            ( 1024, 2048,  2048, NONE,     None,       CONV_EVEN),
-            ( 2048, 2048,  2048, NONE,     None,       CONV_EVEN),
-            ( 1024, 2560,  2560, NONE,     None,       CONV_EVEN),  # E4B o-proj
-            (  512, 1536,  1536, SILU,     None,       CONV_EVEN),  # E2B down-proj
-            (  256,  512,  1024, SIGMOID,  None,       CONV_EVEN),
-            (  512, 1024,  2048, SILU, (-4.0, 4.0),    CONV_EVEN),
-            (  256,  512,  1024, SILU,     None,       FLOOR),
+            ( 1024, 2048,  2048, NONE,     CONV_EVEN),
+            ( 2048, 2048,  2048, NONE,     CONV_EVEN),
+            ( 1024, 2560,  2560, NONE,     CONV_EVEN),  # E4B o-proj
+            (  512, 1536,  1536, SILU,     CONV_EVEN),  # E2B down-proj
+            (  256,  512,  1024, SIGMOID,  CONV_EVEN),
+            (  256,  512,  1024, SILU,     FLOOR),
             # K or N = 10240 at M > 256 overflows the shim BD's 20-bit
             # mega_row iteration step, so the compiler cuts that leg into
             # pieces, bounded by its queue polls and BD reclaim. These are the
             # real E4B FFN projections, and M=2048 doubles the pieces.
-            ( 1024, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down
-            ( 1024,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup
-            ( 2048, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down, 2x
-            ( 2048,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup, 2x
+            ( 1024, 10240,  2560, NONE,     CONV_EVEN),  # E4B down
+            ( 1024,  2560, 10240, NONE,     CONV_EVEN),  # E4B gateup
+            ( 2048, 10240,  2560, NONE,     CONV_EVEN),  # E4B down, 2x
+            ( 2048,  2560, 10240, NONE,     CONV_EVEN),  # E4B gateup, 2x
             # 64 row-block units, past the 63 a lock can count, so B is armed
             # twice: two slabs, each resident.
-            (16384,  512,  1024, NONE,     None,       CONV_EVEN),
+            (16384,  512,  1024, NONE,     CONV_EVEN),
         ]
     else:  # npu1: _default_tile_n always returns 64 here, so with 4 columns
         # every sweep is N_TILE*COLS = 256 wide, not the 128*4=512 an
         # NPU2-shaped sweep would give.
-        #      M,    K,     N, epilogue,    clamp,     rounding
+        #      M,    K,     N, epilogue, rounding
         regular_params = [
-            (  256,  512,   256, NONE,     None,       CONV_EVEN),  # smallest full sweep
-            (  512, 1024,   512, NONE,     None,       CONV_EVEN),
-            (  256,  512,   128, NONE,     None,       CONV_EVEN),  # remainder: 2 of 4 cols
-            (  256,  512,    64, NONE,     None,       CONV_EVEN),  # remainder only: 1 col
-            (  256,  512,   320, NONE,     None,       CONV_EVEN),  # full sweep + 1 col
-            (  256,  512,   512, SILU,     None,       CONV_EVEN),
-            (  256,  512,   512, GELU,     None,       CONV_EVEN),
-            (  256,  512,   512, NONE, (-2.0, 2.0),    CONV_EVEN),
-            (  256,  512,   512, NONE,     None,       FLOOR),
+            (  256,  512,   256, NONE,     CONV_EVEN),  # smallest full sweep
+            (  512, 1024,   512, NONE,     CONV_EVEN),
+            (  256,  512,   128, NONE,     CONV_EVEN),  # remainder: 2 of 4 cols
+            (  256,  512,    64, NONE,     CONV_EVEN),  # remainder only: 1 col
+            (  256,  512,   320, NONE,     CONV_EVEN),  # full sweep + 1 col
+            (  256,  512,   512, SILU,     CONV_EVEN),
+            (  256,  512,   512, GELU,     CONV_EVEN),
+            (  256,  512,   512, NONE,     FLOOR),
         ]
         extensive_params = [
-            ( 1024, 2048,  1024, NONE,     None,       CONV_EVEN),
-            ( 2048, 2048,  1024, NONE,     None,       CONV_EVEN),
-            ( 1024, 2560,  2560, NONE,     None,       CONV_EVEN),  # E4B o-proj
-            (  512, 1536,  1536, SILU,     None,       CONV_EVEN),  # E2B down-proj
-            (  256,  512,   512, SIGMOID,  None,       CONV_EVEN),
-            (  512, 1024,  1024, SILU, (-4.0, 4.0),    CONV_EVEN),
-            (  256,  512,   512, SILU,     None,       FLOOR),
+            ( 1024, 2048,  1024, NONE,     CONV_EVEN),
+            ( 2048, 2048,  1024, NONE,     CONV_EVEN),
+            ( 1024, 2560,  2560, NONE,     CONV_EVEN),  # E4B o-proj
+            (  512, 1536,  1536, SILU,     CONV_EVEN),  # E2B down-proj
+            (  256,  512,   512, SIGMOID,  CONV_EVEN),
+            (  256,  512,   512, SILU,     FLOOR),
             # Two slabs, as on NPU2.
-            (16384,  512,   256, NONE,     None,       CONV_EVEN),
+            (16384,  512,   256, NONE,     CONV_EVEN),
         ]
     # fmt: on
 
@@ -130,8 +123,8 @@ def get_params():
 
     def marks_for(p, extensive):
         marks = [pytest.mark.extensive] if extensive else []
-        M, K, N, epilogue, clamp, rounding = p
-        if (M, K, N) in bench_shapes and epilogue is NONE and clamp is None:
+        M, K, N, epilogue, rounding = p
+        if (M, K, N) in bench_shapes and epilogue is NONE:
             marks.append(pytest.mark.bench)
         return marks
 
@@ -141,19 +134,6 @@ def get_params():
     for p in extensive_params:
         params.append(pytest.param(*p, marks=marks_for(p, extensive=True)))
     return params
-
-
-def finished(M, N, epilogue, clamp) -> dict:
-    """The keywords that apply ``epilogue`` then ``clamp`` to an (M, N)
-    product: the gelu as flm.GEMM's own, a SiLU, a Sigmoid and a Clamp as
-    its finish.
-    """
-    activation = {SILU: SiLU, SIGMOID: Sigmoid}.get(epilogue)
-    ops = [] if activation is None else [activation(size=M * N)]
-    if clamp is not None:
-        ops.append(Clamp(size=M * N, low=clamp[0], high=clamp[1]))
-    own = epilogue if epilogue is GELU else NONE
-    return dict(epilogue=own, finish=Chain.of(*ops))
 
 
 def flm_vectors(operator, scale=4.0):
@@ -213,15 +193,15 @@ def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("M,K,N,epilogue,clamp,rounding", get_params())
-def test_gemm(M, K, N, epilogue, clamp, rounding, record_property):
+@pytest.mark.parametrize("M,K,N,epilogue,rounding", get_params())
+def test_gemm(M, K, N, epilogue, rounding, record_property):
     scale = INPUT_SCALE if epilogue is NONE else ACTIVATION_INPUT_SCALE
     operator = GEMM(
         M=M,
         K=K,
         N=N,
         rounding=rounding,
-        **finished(M, N, epilogue, clamp),
+        epilogue=epilogue,
     )
 
     errors = check_on_device(
@@ -299,24 +279,6 @@ def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, precision, record_prope
         precision=precision,
     )
     errors = check_on_device(operator, flm_vectors(operator), record=record_property)
-    assert not errors, "Test failed"
-
-
-@pytest.mark.supported_devices("npu1", "npu2")
-def test_folded_silu_and_clamp_compute_what_their_operators_do():
-    """SiLU then Clamp folded into the epilogue, against those operators'
-    own references applied to the product.
-    """
-    dev = aie_utils.get_current_device()
-    M, K, N = 256, 512, (1024 if dev.arch is AIEArch.AIE2p else 512)
-    plain = GEMM(M=M, K=K, N=N)
-    silu = SiLU(size=M * N)
-    clamp = Clamp(size=M * N, low=-0.25, high=1.5)
-    operator = plain.fold(silu).fold(clamp)
-    assert (operator.activation, operator.clamp) == (SILU, (-0.25, 1.5))
-    data = flm_vectors(plain, ACTIVATION_INPUT_SCALE)
-    C = clamp.reference(silu.reference(data["C"].reshape(-1)))
-    errors = check_on_device(operator, {"A": data["A"], "B": data["B"], "C": C})
     assert not errors, "Test failed"
 
 
@@ -503,41 +465,6 @@ def test_one_xclbin_serves_every_shape():
         assert stamp == xclbin, f"{M}x{K}x{N} rebuilt the xclbin"
 
 
-@pytest.mark.supported_devices("npu1", "npu2")
-def test_one_xclbin_serves_every_clamp_bound():
-    """Different clamp bounds back to back on one loaded xclbin.
-
-    The bounds are runtime parameters, so they must not rebuild anything.
-    Separate from test_one_xclbin_serves_every_shape, which never clamps and so
-    cannot catch bounds leaking back into the configuration.
-    """
-    M, K, N = 256, 512, 1024
-    bounds = [(-2.0, 2.0), (-4.0, 4.0), (-0.5, 0.5)]
-    xclbin = None
-    for clamp in bounds:
-        operator = GEMM(M=M, K=K, N=N, **finished(M, N, NONE, clamp))
-        errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
-        assert not errors, f"clamp={clamp} produced wrong output"
-
-        # A cache hit: the image run_test built and ran.
-        image = operator.compile().image
-        stamp = (str(image), os.path.getmtime(image))
-        if xclbin is None:
-            xclbin = stamp
-        assert stamp == xclbin, f"clamp={clamp} rebuilt the xclbin"
-
-    # ...and neither does dropping the clamp: the kernel always clamps, and an
-    # unclamped caller neutralises it with (-inf, +inf) rather than compiling
-    # a second build. config_name rather than the image, which only exists
-    # once compile() has run.
-    clamped = GEMM(M=M, K=K, N=N, **finished(M, N, NONE, bounds[0]))
-    unclamped = GEMM(M=M, K=K, N=N)
-    assert unclamped.config_name == clamped.config_name
-    # The bounds do reach the instruction stream, and so its name.
-    assert unclamped.name != clamped.name
-    assert clamped.name != GEMM(M=M, K=K, N=N, **finished(M, N, NONE, bounds[1])).name
-
-
 # The shipped overlay, the port's second reference: extensive (a download)
 # and NPU2 only.
 
@@ -571,25 +498,23 @@ BUDGET_FLOOR = 2e-2
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
-    "M,K,N,epilogue,clamp",
+    "M,K,N,epilogue",
     [
         pytest.param(
-            256, 512, 1024, NONE, None, marks=SHIPPED
+            256, 512, 1024, NONE, marks=SHIPPED
         ),  # exactly one full 8-column sweep
-        pytest.param(512, 1024, 2048, NONE, None, marks=SHIPPED),  # two full sweeps
+        pytest.param(512, 1024, 2048, NONE, marks=SHIPPED),  # two full sweeps
+        pytest.param(256, 512, 640, NONE, marks=SHIPPED),  # remainder only: 5 of 8 cols
         pytest.param(
-            256, 512, 640, NONE, None, marks=SHIPPED
-        ),  # remainder only: 5 of 8 cols
-        pytest.param(
-            256, 512, 1280, NONE, None, marks=SHIPPED
+            256, 512, 1280, NONE, marks=SHIPPED
         ),  # full sweep + remainder: 1 of 8 cols
-        pytest.param(256, 512, 1024, SILU, None, marks=SHIPPED),
-        pytest.param(256, 512, 1024, GELU, None, marks=SHIPPED),
+        pytest.param(256, 512, 1024, SILU, marks=SHIPPED),
+        pytest.param(256, 512, 1024, GELU, marks=SHIPPED),
     ],
 )
-def test_shipped_overlay(M, K, N, epilogue, clamp, record_property):
+def test_shipped_overlay(M, K, N, epilogue, record_property):
     """The shipped binary through the same operator: the second reference."""
-    operator = Shipped(M=M, K=K, N=N, **finished(M, N, epilogue, clamp))
+    operator = Shipped(M=M, K=K, N=N, epilogue=epilogue)
     # B drawn row-major (K, N); the operator consumes it packed (pack_B).
     data = vectors(operator, normal=(operator.A,), given={operator.B: (K, N)})
 
@@ -603,8 +528,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, record_property):
     # |f(x+e) - f(x)| <= max|f'| * |e|, rather than a tolerance invented in the
     # output domain.
     #
-    # Only the unbounded epilogues are checked this way. For sigmoid and clamp
-    # no bound over this reference can be both correct and useful -- the
+    # Only the unbounded epilogues are checked this way. For sigmoid no bound over this reference can be both correct and useful -- the
     # accumulator error alone exceeds their whole output range -- so they are
     # covered functionally by test_shipped_epilogue_matches_accumulator.
     mass = accumulated_mass(K, data["A"], data["B"])
@@ -621,27 +545,26 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, record_property):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
-    "epilogue,clamp",
+    "epilogue",
     [
-        pytest.param(SIGMOID, None, marks=SHIPPED),
-        pytest.param(NONE, (-2.0, 2.0), marks=SHIPPED),
-        pytest.param(SILU, None, marks=SHIPPED),
-        pytest.param(GELU, None, marks=SHIPPED),
+        pytest.param(SIGMOID, marks=SHIPPED),
+        pytest.param(SILU, marks=SHIPPED),
+        pytest.param(GELU, marks=SHIPPED),
     ],
 )
-def test_shipped_epilogue_matches_accumulator(epilogue, clamp):
+def test_shipped_epilogue_matches_accumulator(epilogue):
     """The epilogue is the right function of the accumulator the device produced.
 
     Checking a bounded epilogue against the idealized CPU reference cannot work.
     The overlay accumulates in the core's power-up floor rounding, worth ~2% of
     the accumulated mass, which here is ~65 -- larger than sigmoid's entire (0,1)
-    range and than this clamp's (-2, 2). Any bound wide enough to admit that
+    range. Any bound wide enough to admit that
     accumulator error also admits an all-zero result, and any bound tight enough
     to reject all-zeros also rejects correct hardware. That is why the earlier
     flat tolerance failed on working arithmetic.
 
     So compare the epilogue against the device's OWN accumulator instead: run
-    the same inputs with no epilogue, apply the activation and clamp to that on
+    the same inputs with no epilogue, apply the activation to that on
     the host, and require the epilogue build to agree. The accumulator error is
     then common to both sides and cancels, leaving only the epilogue under test.
     An all-zero result still fails, because the reference side is not zero.
@@ -654,20 +577,20 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp):
     data = vectors(probe, normal=(probe.A,), scale=0.5, given={probe.B: (K, N)})
     A, B = data["A"], data["B"]
 
-    def run(epi, clm):
-        op = Shipped(M=M, K=K, N=N, **finished(M, N, epi, clm))
+    def run(epi):
+        op = Shipped(M=M, K=K, N=N, epilogue=epi)
         tensor = aie_utils.DEFAULT_TENSOR_CLASS
         out = tensor((M, N), dtype=np.dtype("bfloat16"))
         op(tensor(A.flatten()), tensor(op.pack_B(B)), out)
         return out.numpy().reshape(M, N).astype(np.float32)
 
-    acc = run(NONE, None)
-    got = run(epilogue, clamp)
-    expected = Epilogue(epilogue).apply(acc, clamp)
+    acc = run(NONE)
+    got = run(epilogue)
+    expected = Epilogue(epilogue).apply(acc)
 
     # Both sides see the same accumulator, so what is left is the epilogue.
     # The bf16 term is per element (the read-back accumulator is good to 2^-8
-    # relatively; one global bound would be wider than a clamp's range). The
+    # relatively; one global bound would be wider than sigmoid's range). The
     # activation term is the overlay's own approximation, a LUT or native
     # instruction: up to 0.018 past the bf16 interval, so 0.05, ~20x below
     # where the bound would go vacuous (the last assertion).
@@ -676,7 +599,7 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp):
     err = np.abs(got - expected)
     over = err > tol
     assert not over.any(), (
-        f"{epilogue} clamp={clamp}: {int(over.sum())} of {over.size} elements "
+        f"{epilogue}: {int(over.sum())} of {over.size} elements "
         f"differ from epilogue(device accumulator) by more than the bf16 bound; "
         f"worst {float((err - tol).max()):.4f} over"
     )

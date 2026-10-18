@@ -14,7 +14,7 @@ import dataclasses
 import functools
 import hashlib
 import inspect
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from contextvars import ContextVar
 from enum import Enum
 from typing import (
@@ -28,32 +28,24 @@ from typing import (
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
-from aie.utils import bfp
 from aie.utils.hostruntime.tensor_class import NpuTensor
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
-from .chain import Chain, Link
 from .declaration import Declaration
 from .domain import Domain, Width
 from .field import Auto, Param, ParamSpec, Unresolvable
-from .operand import In, Operand
+from .operand import Operand
 from .precision import Precision
 from .rtp import Rtp
-from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
+from .value import Extent, ExtentWord, Value
 
 if TYPE_CHECKING:
-    from ..elementwise import Finish, Prepare
     from ..graph.handle import Affine, Handle
     from ..image.artifacts import Artifacts
     from ..image.standalone import OperatorImage
-
-# The tables an AIE2 kernel gathering through lut_based_ops links, pinned to
-# banks of core memory; AIE2P computes its activations and links none.
-LUT_BYTES = 5248
 
 graph_tracer: ContextVar[Any] = ContextVar("graph_tracer", default=None)
 # False while a graph's reference is traced: a reference runs shapes no
@@ -106,12 +98,9 @@ class Array:
     operator's ``Declaration`` adds every field a stream names, every field
     declared ``array=True`` and every member.
 
-    Besides those, an ``Array`` may annotate
-    its ``finish`` and ``prepare`` chains, its operands (``buffers``,
-    ``inputs``, ``outputs``, ``finish_inputs``, ``prepare_inputs``), the
-    chains as its cores apply them (``finishing``, ``preparing``) and
-    ``dev``; a property of the operator it may not, since what it reads
-    would be outside the array's identity.
+    Besides those, an ``Array`` may annotate its operands (``buffers``,
+    ``inputs``, ``outputs``) and ``dev``; a property of the operator it may
+    not, since what it reads would be outside the array's identity.
     """
 
     def __init_subclass__(cls, **kwargs) -> None:
@@ -127,19 +116,6 @@ class Array:
         raise NotImplementedError(
             f"{type(self).__qualname__}.build() is not implemented"
         )
-
-
-@dataclasses.dataclass(frozen=True)
-class CopyRun:
-    """Where an operator writes its one input verbatim, as one contiguous
-    run of its one output (``Operator.copies_to``).
-    """
-
-    # The elements of the output, and the one the run starts at.
-    into: int
-    start: int
-    # The per-call value adding to ``start``, if any.
-    offset: str | None = None
 
 
 @dataclass_transform(kw_only_default=True, field_specifiers=(Param, Auto))
@@ -162,10 +138,6 @@ class Operator:
     # becomes: the class, built with ``rows``, ``table_rows``, ``row`` and
     # ``dtype``, and ``control_words(ids, address)`` encoding each call's ids.
     per_call_gather: ClassVar[type[Operator] | None] = None
-    # An instance's operands beside the declared ones: its prologue's and
-    # its finish's other inputs.
-    _prepare_inputs: ClassVar[tuple[Operand, ...]] = ()
-    _finish_inputs: ClassVar[tuple[Operand, ...]] = ()
 
     trace: TraceConfig | None = dataclasses.field(
         default=None, repr=False, kw_only=True
@@ -182,23 +154,6 @@ class Operator:
     # from its own pre-merge kwargs and passed it here itself.
     pinned: frozenset[str] | None = dataclasses.field(
         default=None, repr=False, compare=False, kw_only=True
-    )
-    # The steps each core applies to a tile of the output declared
-    # Out(finish=True) before releasing it, and the finishes its array
-    # applies; resolved, each step at that tile. The keys add them, since
-    # operators compare by identity.
-    finish: Chain = dataclasses.field(
-        default=Chain(), repr=False, compare=False, kw_only=True
-    )
-    # The steps each core applies to a tile of the input declared
-    # In(prepare=True) after acquiring it, and the prologues its array applies.
-    prepare: Chain = dataclasses.field(
-        default=Chain(), repr=False, compare=False, kw_only=True
-    )
-    # Per output a graph placed in a larger buffer (``placed``): its name,
-    # that buffer's elements and the one it starts at; design_key adds them.
-    placements: tuple[tuple[str, int, int], ...] = dataclasses.field(
-        default=(), repr=False, compare=False, kw_only=True
     )
 
     def __init_subclass__(cls, image=None, **kwargs) -> None:
@@ -341,199 +296,15 @@ class Operator:
             }
         )
 
-    @property
-    def finishing(self) -> Finish:
-        """The finish as this operator's cores apply it (``Finish.on``)."""
-        # elementwise.py builds on this module.
-        from ..elementwise import Finish
-
-        return Finish(self)
-
-    @property
-    def preparing(self) -> Prepare:
-        """The prologue as this operator's cores apply it (``Prepare.on``)."""
-        # elementwise.py builds on this module.
-        from ..elementwise import Prepare
-
-        return Prepare(self)
-
     def tolerance(self) -> Tolerance | None:
         """What each output of the resolved operator is judged by; None where
         nothing bounds it, which check mode refuses.
-
-        An override returns the operator's own; this one carries it through a
-        finish or a prologue, so an override that may have one returns
-        ``super().tolerance()`` there.
         """
-        # elementwise.py builds on this module.
-        from ..elementwise import Finish, Prepare
-
-        if self.finish:
-            return Finish(self).tolerance()
-        if self.prepare:
-            return Prepare(self).tolerance()
         return None
 
     def ops(self) -> int:
         """The arithmetic operations one call performs, for its throughput."""
         return sum(b.elements for b in self.outputs)
-
-    def fold(self, consumer: Operator, at: int = 0) -> Self | None:
-        """This operator applying ``consumer`` to its output in its own cores:
-        ``consumer`` appended to its ``finish``. The array keeps the
-        finishes it had, unless a step of the chain takes inputs of its own,
-        which stream into this array alone. Whether ``consumer`` runs on one
-        of its tiles is asked when the result resolves (``at_line``).
-
-        Args:
-            consumer: The operator whose input ``at`` is this one's one output.
-            at: The input of ``consumer`` the output enters; its others
-                become this operator's ``finish_inputs``.
-
-        Returns:
-            The folded operator, or None where this one's one output is not
-            declared ``finish=True``.
-        """
-        if len(self.outputs) != 1 or not self.outputs[0].finish:
-            return None
-        return dataclasses.replace(self, finish=self.finish.then(consumer, at))
-
-    def prefold(self, producer: Operator, at: int = 0) -> Self | None:
-        """This operator applying ``producer`` to its prepared input in its
-        own cores: ``producer`` prepended to its ``prepare``, as ``fold``
-        appends to a finish. Whether ``producer`` runs on one of its tiles
-        is asked when the result resolves (``at_line``).
-
-        Args:
-            producer: The operator whose one output is this one's input
-                declared ``In(prepare=True)``.
-            at: The input of ``producer`` that tile takes the place of; its
-                others become this operator's ``prepare_inputs``.
-
-        Returns:
-            The folded operator, or None where this one declares no
-            prepared input.
-        """
-        if not any(m.prepare for m in self._members_io()):
-            return None
-        return dataclasses.replace(self, prepare=self.prepare.after(producer, at))
-
-    def on_array(self, other: Operator) -> Self | None:
-        """This operator declared to run on ``other``'s array, or None:
-        one of its type, given its finishes and prologues.
-
-        A graph's fold calls it after folding ``other``; the replacement is
-        taken only where it resolves to ``other``'s array.
-        """
-        if type(other) is not type(self) or not (
-            other.finish.shared or other.prepare.shared
-        ):
-            return None
-        return dataclasses.replace(
-            self,
-            finish=Chain(self.finish.steps, other.finish.shared),
-            prepare=Chain(self.prepare.steps, other.prepare.shared),
-        )
-
-    def copies_to(self) -> CopyRun | None:
-        """Where this operator writes its one input verbatim, as one run of
-        its one output; None where it does not, the default.
-        """
-        return None
-
-    def placed(self, copy: Operator, operand: str) -> Self | None:
-        """This operator writing its output ``operand`` where ``copy``
-        writes it (``copies_to``), so a graph drops the copy: the operand is
-        ``copy``'s output at runtime, every transfer of it moved to the run,
-        and by the per-call value moving the run.
-
-        Returns:
-            The placed operator, or None where its transfers cannot move:
-            a shipped image's, or one whose sequence moves them itself.
-        """
-        if self.external is not None:
-            return None
-        run = copy.copies_to()
-        if run is None:
-            return None
-        values = dict(self.bound_values)
-        if run.offset is not None:
-            values[f"{operand}_offset"] = copy.bound_values[run.offset]
-        return dataclasses.replace(
-            self,
-            bound_values=values,
-            placements=(*self.placements, (operand, run.into, run.start)),
-        )
-
-    def at_line(self, line: int, dtype, dev, ordered: bool = True, at: int = 0) -> Self:
-        """This operator applied by another's core to one tile of its output,
-        a run of ``line`` elements of ``dtype``, resolved for ``dev``.
-        ``ordered`` is False where the core holds the run in an order of its
-        own (``Out(finish=block)``); the tile enters as its input ``at``.
-
-        Raises:
-            ValueError: It runs on cores of its own, or not at this line, in
-                this order or with the tile at this input.
-        """
-        raise ValueError(f"{type(self).__name__} runs on cores of its own")
-
-    def finish_step(self, link: Link, line: int, dtype, dev, ordered: bool) -> Link:
-        """``link`` as this operator's cores apply it to a ``line``-element
-        tile of its output: the step's own kernels, run at the tile
-        (``Link.at_line``), unless the operator applies its finish another way.
-
-        Raises:
-            ValueError: The cores do not apply the step at the tile.
-        """
-        return link.at_line(line, dtype, dev, ordered)
-
-    def finish_line(self, dev, lines: Iterable[int]) -> int:
-        """The first of ``lines`` each chain of this operator's array
-        finishes a tile of, for a ``resolve`` choosing its output's tile.
-
-        Raises:
-            Unresolvable: None of them.
-        """
-        links = [link for c in self.finish.chains for link in c]
-        out = self.outputs[0]
-        ordered = out.finish_block is None
-        tried = []
-        for line in lines:
-            try:
-                for link in links:
-                    link.at_line(line, out.dtype, dev, ordered)
-            except ValueError as e:
-                tried.append(f"{line}: {e}")
-                continue
-            return line
-        raise Unresolvable(
-            f"{type(self).__name__}: no output tile its finish runs at; "
-            + "; ".join(tried)
-        )
-
-    def finish_bytes(self, dev, line: int) -> int:
-        """Core memory a core spends on this operator's finish at a
-        ``line``-element output tile, beside its own buffers: the scratch
-        line its chains alternate with and, on AIE2, the tables of each LUT
-        kernel they link.
-
-        Raises:
-            ValueError: A step does not run at the line.
-        """
-        chains = self.finish.chains
-        if not any(chains):
-            return 0
-        out = self.outputs[0]
-        ordered = out.finish_block is None
-        luts = {
-            call.kernel.object_file_name
-            for chain in chains
-            for link in chain
-            for call in link.at_line(line, out.dtype, dev, ordered).op.chain()
-            if call.kernel.contract is not None and call.kernel.contract.uses_lut
-        }
-        tables = LUT_BYTES * len(luts) if dev.arch is AIEArch.AIE2 else 0
-        return line * bfp.itemsize(out.dtype) + tables
 
     def array_device(self):
         """The device the array's Program is built for: the bound device
@@ -554,9 +325,7 @@ class Operator:
         return None
 
     def check_shim_columns(self, dev, cols: int, num_channels: int = 1) -> None:
-        allowed = self.declaration.shim_columns(
-            dev, num_channels, vars(self), self._finish_inputs
-        )
+        allowed = self.declaration.shim_columns(dev, num_channels, vars(self))
         if cols > allowed:
             raise Unresolvable(
                 f"{type(self).__name__} with {cols} columns x {num_channels} "
@@ -585,9 +354,7 @@ class Operator:
                 f"{type(self).__name__}: the column count defaults from the "
                 f"device; none is bound and none was given"
             )
-        budget = self.declaration.shim_columns(
-            dev, num_channels, vars(self), self._finish_inputs
-        )
+        budget = self.declaration.shim_columns(dev, num_channels, vars(self))
         return next((c for c in range(budget, 0, -1) if fits is None or fits(c)), 1)
 
     def addressed_inputs(
@@ -620,9 +387,8 @@ class Operator:
         values: Mapping[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
         """Run `reference` on buffers by name, returning each written one's
-        result by name: the inputs positional, in declaration order, a
-        prologue and a finish around it on the host, and an output or a
-        per-call value it names a parameter after given to it.
+        result by name: the inputs positional, in declaration order, and an
+        output or a per-call value it names a parameter after given to it.
 
         Raises:
             ValueError: `inputs` are not this operator's, `outputs` name a
@@ -640,25 +406,12 @@ class Operator:
         unknown = set(outputs) - {b.name for b in self.outputs}
         if unknown:
             raise ValueError(f"{name} has no output {sorted(unknown)}")
-        # elementwise.py builds on this module.
-        from ..elementwise import Finish, Prepare
-
-        args = [inputs[n] for n in declared]
-        own = len(args) - len(self.prepare_inputs) - len(self.finish_inputs)
-        prologue = args[own : own + len(self.prepare_inputs)]
-        finishing = args[own + len(self.prepare_inputs) :]
-        args = args[:own]
-        if self.prepare:
-            at = next(i for i, b in enumerate(self.inputs) if b.prepare)
-            args[at] = Prepare(self.resolved()).reference(args[at], *prologue)
         named = inspect.signature(self.reference).parameters
         result = self.reference(
-            *args,
+            *(inputs[n] for n in declared),
             **{k: v for k, v in outputs.items() if k in named},
             **{k: v for k, v in (values or {}).items() if k in named and v is not None},
         )
-        if self.finish:
-            result = Finish(self.resolved()).reference(result, *finishing)
         results = result if isinstance(result, tuple) else (result,)
         written = [b.name for b in self.outputs]
         if len(results) != len(written) or any(r is None for r in results):
@@ -744,16 +497,6 @@ class Operator:
                 k: None if v is None else v.name for k, v in self.bound_values.items()
             }
             own += (("values", tuple(sorted(names.items()))),)
-        if self.placements:
-            own += (("placements", self.placements),)
-        if self.finish:
-            own += (("finish", self.finish.array_key()),)
-        if any(self.finish.shared):
-            own += (("finishes", self.finish.keys()),)
-        if self.prepare:
-            own += (("prepare", self.prepare.array_key()),)
-        if any(self.prepare.shared):
-            own += (("prepares", self.prepare.keys()),)
         return (type(self), own)
 
     def _probed(self) -> Self:
@@ -772,10 +515,6 @@ class Operator:
         )
         if self.trace is not None:
             key += (("trace", self.trace),)
-        if any(self.finish.chains):
-            key += (("finishes", self.finish.keys()),)
-        if any(self.prepare.chains):
-            key += (("prepares", self.prepare.keys()),)
         return key
 
     def resolved(self, dev=None) -> Self:
@@ -803,20 +542,6 @@ class Operator:
                 raise Unresolvable(
                     f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
                 )
-            if any(new.prepare.chains) or any(new.finish.chains):
-                new = new.replace(
-                    prepare=(
-                        new.prepare.at_prepare(new, dev)
-                        if any(new.prepare.chains)
-                        else new.prepare
-                    ),
-                    finish=(
-                        new.finish.at_finish(new, dev)
-                        if any(new.finish.chains)
-                        else new.finish
-                    ),
-                )
-                new._bind()
             new.validate()
             new.compatible()
             new._resolved = True
@@ -918,22 +643,6 @@ class Operator:
         return [b for b in self.buffers if b.drains]
 
     @property
-    def prepare_inputs(self) -> list[Operand]:
-        """The inputs of ``prepare``'s steps other than the tile, in order,
-        each a tile filled into the prepared input's stream after it (an
-        untiled one's ``feed=True`` input): the inputs after the declared
-        ones.
-        """
-        return [self._bound[m.name] for m in self._prepare_inputs]
-
-    @property
-    def finish_inputs(self) -> list[Operand]:
-        """The inputs of ``finish``'s steps other than the tile, in order,
-        each streamed as the finished output is: the last of ``inputs``.
-        """
-        return [self._bound[m.name] for m in self._finish_inputs]
-
-    @property
     def values(self) -> list[Value]:
         """The per-call values: each gets a device parameter."""
         values = [self._bound[m.name] for m in self._value_members]
@@ -945,10 +654,7 @@ class Operator:
         fixed = self._derived_under_bound
         return {
             m.name: m.derive(self) if fixed.get(m.name) is None else fixed[m.name]
-            for m in (
-                *self.declaration.members,
-                *(w for w in self._library_values if isinstance(w, ChainWord)),
-            )
+            for m in self.declaration.members
             if isinstance(m, Value)
             and m.derive is not None
             and not self._bound[m.name].per_call
@@ -1081,39 +787,6 @@ class Operator:
 
     def _bind(self) -> None:
         vars(self).pop("_derived_under_bound", None)
-        self._prepare_inputs = ()
-        self._finish_inputs = ()
-        prepared = next((m for m in self._members_io() if m.prepare), None)
-        extras = []
-        for i, link in enumerate(self.prepare if prepared is not None else ()):
-            line = (prepared.obj_dims or prepared.dims).dims[-1:]
-            for k, b in enumerate(link.op.inputs):
-                if k == link.at:
-                    continue
-                extra = In(*line, dtype=prepared.declared_dtype)
-                extra.__set_name__(type(self), f"prepare{i}_{b.name}")
-                extras.append(extra)
-        self._prepare_inputs = tuple(extras)
-        outs = [m for m in self._members_io() if m.drains]
-        extras = []
-        if len(outs) == 1 and outs[0].finish:
-            (out,) = outs
-            # Riding a feed, an input is no stream of its own (OperatorRuntime.fill).
-            fed = any(m.feed for m in self._members_io())
-            for i, link in enumerate(self.finish):
-                for k, b in enumerate(link.op.inputs):
-                    if k == link.at:
-                        continue
-                    extra = In(
-                        *out.dims.dims,
-                        dtype=out.declared_dtype,
-                        obj_type=None if fed else out.obj_dims.dims,
-                        per=None if fed or out.per is None else out.per.dims,
-                        depth=out.depth,
-                    )
-                    extra.__set_name__(type(self), f"finish{i}_{b.name}")
-                    extras.append(extra)
-        self._finish_inputs = tuple(extras)
         bound: dict[str, Any] = {}
         for m in self._members_io():
             bound[m.name] = m.of(self)
@@ -1121,8 +794,7 @@ class Operator:
             if isinstance(m, Value):
                 bound[m.name] = m.of(self)
         self._bound = bound
-        # The values the library adds: tiles per bound operand, the chain a
-        # design selects, the offset an operand is placed at.
+        # The values the library adds: tiles per bound operand.
         words: list[Value] = []
         for e in self.declaration.members:
             if not isinstance(e, Extent):
@@ -1133,10 +805,6 @@ class Operator:
                     axis = bound[b.name].extent_axis(e)
                     if axis is not None:
                         words.append(ExtentWord(type(self), e, b.name, axis))
-        for finish, chain in ((False, self.prepare), (True, self.finish)):
-            if len(chain.shared) > 1:
-                words.append(ChainWord(type(self), finish))
-        words += [PlaceWord(type(self), m.name) for m in self._members_io()]
         for word in words:
             bound[word.name] = word.of(self)
         self._library_values = tuple(words)
@@ -1164,32 +832,14 @@ class Operator:
             for f in dataclasses.fields(op)
             if f.repr and vars(op)[f.name] is not None
         ]
-        if any(op.finish.chains):
-            # A step's scalars and the array's other finishes change the build too.
-            keys = (op.finish.array_key(), op.finish.keys())
-            digest = hashlib.sha256(repr(keys).encode()).hexdigest()[:8]
-            names = "".join(type(link.op).__name__ for link in op.finish)
-            own.append(f"finish{names}{digest}")
-        if any(op.prepare.chains):
-            keys = (op.prepare.array_key(), op.prepare.keys())
-            digest = hashlib.sha256(repr(keys).encode()).hexdigest()[:8]
-            names = "".join(type(link.op).__name__ for link in op.prepare)
-            own.append(f"prepare{names}{digest}")
         return "_".join([type(self).__name__, *own, dev.name])
 
-    def _declared_io(self) -> list[Operand]:
-        """This operator's own declared operands, by its class: not a
-        bind's synthetic finish or prepare extras, which a resolve rebuilds
-        from the chain as it stands, not as a previous bind left it.
-        """
+    def _members_io(self) -> list[Operand]:
         return [
             m
             for m in self.declaration.members
             if isinstance(m, Operand) and (m.when is None or vars(self)[m.when.name])
         ]
-
-    def _members_io(self) -> list[Operand]:
-        return self._declared_io() + [*self._prepare_inputs, *self._finish_inputs]
 
     def __repr__(self) -> str:
         own = ", ".join(

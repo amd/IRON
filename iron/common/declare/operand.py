@@ -81,24 +81,6 @@ class Operand(Member["Operand"]):
         broadcast: One fifo every worker consumes.
         when: A bool `Param()`; the operand and its stream exist only where
             it is true, and a call giving the operand by keyword sets it.
-        finish: The cores apply the operator's `finish` to each tile of
-            this output before releasing it (`Finish`), so a consumer folds
-            into them. `True`, or the block of the output one core fills
-            of a tile, in an order of its own (GEMM's C, joined from a
-            column's cores): a step there must not depend on the order.
-        prepare: The cores apply the operator's `prepare` to each tile of
-            this input after acquiring it (`Prepare`), so the step that
-            produced it folds into them. The operator's output must be
-            linear in it, which its tolerance relies on. Without a tile, a
-            hand-written sequence carries it, a line its innermost
-            dimension, and the prologue's inputs ride the `feed=True` input.
-        feed: The finish's inputs ride this input's stream rather than
-            streams of their own: after the tiles a core reads for one
-            output tile, the next tile of this stream holds that output
-            tile's input of each (`Finish.apply`), so the finish takes no
-            input channel of the core's and no shim channel. An untiled
-            prepared input's prologue inputs ride it too, a tile each,
-            where the operator's cores take them (`Prepare.apply`).
     """
 
     fills: ClassVar[bool]
@@ -114,9 +96,6 @@ class Operand(Member["Operand"]):
         replicate: bool = False,
         broadcast: bool = False,
         when: _DimSpec | None = None,
-        finish: bool | tuple[_DimSpec, ...] = False,
-        prepare: bool = False,
-        feed: bool = False,
     ) -> None:
         if per is not None and broadcast:
             raise TypeError("a stream is either per=<dim> or broadcast, not both")
@@ -124,26 +103,6 @@ class Operand(Member["Operand"]):
             raise TypeError(
                 "replicate=True needs per=<dim>: every slot receives the whole buffer"
             )
-        # A step over a line sees a tile as a run of the output's elements.
-        if finish and (
-            isinstance(obj_type, (tuple, list))
-            and len(obj_type) != 1
-            or obj_type is None
-            or not self.drains
-        ):
-            raise TypeError(
-                "finish=True names a streamed output of one-dimensional tiles, "
-                "which a core finishes"
-            )
-        if prepare and (
-            isinstance(obj_type, (tuple, list)) and len(obj_type) != 1 or self.drains
-        ):
-            raise TypeError(
-                "prepare=True names an input of one-dimensional tiles, or of "
-                "none, which a core prepares"
-            )
-        if feed and (obj_type is None or self.drains):
-            raise TypeError("feed=True names a streamed input, which a finish rides")
         self.dims = Shape(tuple(dims))
         self.declared_dtype = dtype
         self.when = when
@@ -160,10 +119,6 @@ class Operand(Member["Operand"]):
         self.depth = depth
         self.replicate = replicate
         self.broadcast = broadcast
-        self.finish = bool(finish)
-        self.finish_block = None if isinstance(finish, bool) else Shape(finish)
-        self.prepare = prepare
-        self.feed = feed
         self.op: Operator | None = None
         self.lane_handles: list[Any] = []
 
@@ -215,32 +170,11 @@ class Operand(Member["Operand"]):
         return np.uint8 if bfp.is_bfp(self.dtype) else self.dtype
 
     @property
-    def placement(self) -> tuple[int, int]:
-        """The elements of the runtime tensor this buffer is, and the one it
-        starts at: a larger buffer's, where a graph placed it in one
-        (``Operator.placed``).
-        """
-        return next(
-            (
-                (into, start)
-                for name, into, start in self.op.placements
-                if name == self.name
-            ),
-            (self.elements, 0),
-        )
-
-    @property
-    def held_nbytes(self) -> int:
-        """The bytes of the runtime tensor this buffer is (``placement``)."""
-        return self.placement[0] * bfp.itemsize(self.dtype)
-
-    @property
     def flat_type(self):
-        """The runtime-sequence argument type: the runtime tensor
-        (``placement``) flattened to 1-D, in its own element units (blocks,
-        for block float).
+        """The runtime-sequence argument type: this buffer flattened to 1-D,
+        in its own element units (blocks, for block float).
         """
-        return np.ndarray[(self.placement[0],), np.dtype[self.dtype]]
+        return np.ndarray[(self.elements,), np.dtype[self.dtype]]
 
     @property
     def streamed(self) -> bool:
@@ -268,12 +202,6 @@ class Operand(Member["Operand"]):
         bank = dev.core_memory_bytes // (2 * dev.core_memory_banks)
         obj_bytes = math.prod(self.obj_shape) * bfp.itemsize(self.dtype)
         return 1 if obj_bytes > bank else 2
-
-    @property
-    def finish_line(self) -> int:
-        """The elements a core finishes at once: its block of a tile, or the tile."""
-        block = self.finish_block
-        return math.prod(self.obj_shape if block is None else self._resolve(block))
 
     @property
     def lanes(self) -> int:
@@ -349,17 +277,10 @@ class Operand(Member["Operand"]):
         length_unit: int | None = None,
         repeat_parameter: Value | None = None,
         managed: bool = True,
-        finishing: TensorAccessPattern | None = None,
     ):
         """Fill lane ``lane`` of this operand's stream from the host, in a
         ``sequence(rt)``: mlir-aie's ``ObjectFifoHandle.fill`` on the lane's
         fifo, or a shim DMA task on a pinned lane.
-
-        A prepared input's lane is then filled with each of the operator's
-        ``prepare_inputs``, which its cores acquire with the tile. A fill of
-        a fed input's lane from that input takes its whole share, an output
-        tile's worth at a time, each followed by that output tile of each
-        finish input riding it.
 
         A per-call parameter is a ``Value`` of the operator: on a full ELF its
         scratchpad word, patched into the descriptor; on an xclbin a
@@ -372,7 +293,7 @@ class Operand(Member["Operand"]):
             group: The ``TaskGroup`` the transfer joins.
             wait: The transfer concludes with an await rather than a free.
             source: The operand whose data moves through this one's lane,
-                where it is not this one (a prologue input riding it).
+                where it is not this one (another input riding it).
             offset_parameter: A per-call element offset of ``tap``.
             length_parameter: A per-call count of ``length_unit`` elements:
                 one descriptor's length, its outermost dimension below the
@@ -384,19 +305,13 @@ class Operand(Member["Operand"]):
             managed: False hands the queue slot and descriptors to the
                 compiler, which frees them after a later wait; joins no
                 group.
-            finishing: For a fill of a fed input, the part of the lane's
-                share of the output it computes (a pattern over the
-                output), where it is not the whole: a hand-written sequence
-                filling a lane in pieces.
 
         Returns:
             The transfer's ``Task``.
 
         Raises:
-            ValueError: ``lane`` is left out of a multi-lane operand, a fed
-                input's lane is filled with a per-call parameter or with other
-                than its share and no ``finishing``, or a per-call length's
-                pattern does not fit one descriptor.
+            ValueError: ``lane`` is left out of a multi-lane operand, or a
+                per-call length's pattern does not fit one descriptor.
         """
         return self._runtime().transfer(
             "fill",
@@ -411,7 +326,6 @@ class Operand(Member["Operand"]):
             length_unit=length_unit,
             repeat_parameter=repeat_parameter,
             managed=managed,
-            finishing=finishing,
         )
 
     def drain(

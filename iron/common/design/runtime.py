@@ -9,7 +9,6 @@ import functools
 from math import prod
 from typing import Any
 
-import numpy as np
 from aie.dialects.aie import shim_dma_allocation
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
@@ -31,7 +30,6 @@ from aie.iron.runtime.dmatask import emit_shim_transfer
 
 from ..declare import Built, DispatchTime, Operator, Value
 from ..declare.operand import Operand, active_runtime, slots
-from ..declare.value import PlaceWord
 
 
 class OperatorRuntime(Runtime):
@@ -141,12 +139,7 @@ class OperatorRuntime(Runtime):
             self.op.sequence(self)
             return
         tg = TaskGroup()
-        riders = {b.name for b in self.op.prepare_inputs} | {
-            b.name for b in self.op.finish_inputs if not b.streamed
-        }
         for buf in self.op.inputs:
-            if buf.name in riders:
-                continue  # filled into the stream it prepares or rides (transfer)
             for lane, tap, word, unit in buf.transfers():
                 buf.fill(
                     tap, lane=lane, group=tg, length_parameter=word, length_unit=unit
@@ -178,113 +171,19 @@ class OperatorRuntime(Runtime):
         length_unit: int | None = None,
         repeat_parameter: Value | None = None,
         managed: bool = True,
-        finishing: TensorAccessPattern | None = None,
     ):
-        """``operand.fill``/``operand.drain`` (``verb``): see ``Operand.fill``."""
+        """``operand.fill``/``operand.drain`` (``verb``): one transfer of
+        ``source``'s (else ``operand``'s) ``tap`` through lane ``lane`` of
+        ``operand``'s stream, its per-call words lowered for the image: a
+        scratchpad parameter on a full ELF, the pattern's sizes and offset
+        on an xclbin. See ``Operand.fill``.
+        """
         if lane is None:
             if operand.lanes != 1:
                 raise ValueError(f"{operand.name} is per-{operand.lanes}; name a lane")
             lane = 0
         buffer = operand if source is None else source
         tap = buffer.tap if tap is None else tap
-        per_call = (offset_parameter, length_parameter, repeat_parameter)
-        riding = [e for e in self.op.finish_inputs if not e.streamed]
-        if verb == "fill" and operand.feed and riding and buffer is operand:
-            name = f"{type(self.op).__name__}.{buffer.name}"
-            if any(v is not None for v in per_call):
-                raise ValueError(
-                    f"{name}: the finish's inputs ride it an output tile at a "
-                    f"time, so it moves by no per-call offset or size"
-                )
-            if finishing is None and tap != buffer.transfers()[lane][1]:
-                raise ValueError(
-                    f"{name}: the finish's inputs ride it an output tile at a "
-                    f"time, so a fill of lane {lane} is its whole share"
-                )
-            (out,) = self.op.outputs
-            line = prod(out.obj_shape)
-            share = finishing or out.transfers()[lane][1]
-            tiles = prod(share.sizes) // line
-            reads = prod(buffer.obj_shape) // line
-            task = None
-            for held, finished in zip(
-                self._chunks(tap, tiles), self._chunks(share, tiles)
-            ):
-                task = self._emit(
-                    verb, operand, lane, buffer, held, group, wait, managed
-                )
-                for e in riding:
-                    self._emit(
-                        verb,
-                        operand,
-                        lane,
-                        e,
-                        finished.repeat(reads),
-                        group,
-                        wait,
-                        managed,
-                    )
-            return task
-        task = self._emit(
-            verb,
-            operand,
-            lane,
-            buffer,
-            tap,
-            group,
-            wait,
-            managed,
-            offset_parameter,
-            length_parameter,
-            length_unit,
-            repeat_parameter,
-        )
-        if verb == "fill" and operand.prepare:
-            for extra in self.op.prepare_inputs:
-                self._emit(verb, operand, lane, extra, extra.tap, group, wait, managed)
-        return task
-
-    @staticmethod
-    def _chunks(tap: TensorAccessPattern, n: int) -> list[TensorAccessPattern]:
-        """``tap`` as ``n`` consecutive walks of equal length, in order.
-
-        Raises:
-            ValueError: No dimension of ``tap`` splits into them.
-        """
-        tap = tap.coalesce()
-        size = prod(tap.sizes) // n
-        for d in reversed(range(tap.rank) if size * n == prod(tap.sizes) else ()):
-            inner = prod(tap.sizes[d + 1 :])
-            if size % inner == 0 and tap.sizes[d] % (size // inner) == 0:
-                split = tap.split(d, size // inner)
-                return [
-                    split[
-                        tuple(int(i) for i in np.unravel_index(k, split.sizes[: d + 1]))
-                    ]
-                    for k in range(n)
-                ]
-        raise ValueError(f"{tap} does not split into {n} walks of {size} elements")
-
-    def _emit(
-        self,
-        verb: str,
-        operand: Operand,
-        lane: int,
-        buffer: Operand,
-        tap: TensorAccessPattern,
-        group,
-        wait: bool,
-        managed: bool,
-        offset_parameter: Value | None = None,
-        length_parameter: Value | None = None,
-        length_unit: int | None = None,
-        repeat_parameter: Value | None = None,
-    ):
-        """One transfer of ``buffer``'s ``tap`` through lane ``lane`` of
-        ``operand``'s stream, its per-call words lowered for the image: a
-        scratchpad parameter on a full ELF, the pattern's sizes and offset
-        on an xclbin.
-        """
         handle = operand.handles[lane]
         pinned = isinstance(handle, DmaEndpoint)
         symbol = f"{operand.name}_{lane}"
@@ -293,26 +192,6 @@ class OperatorRuntime(Runtime):
             if pinned
             else getattr(handle, verb)
         )
-        placed = next(
-            (
-                v
-                for v in self.op.values
-                if isinstance(v, PlaceWord) and v.buffer == buffer.name
-            ),
-            None,
-        )
-        if placed is not None and offset_parameter is not None:
-            raise ValueError(
-                f"{type(self.op).__name__}.{buffer.name} is placed in a larger "
-                f"buffer, {placed.name} moving its transfers; a transfer of it "
-                f"takes no per-call offset of its own"
-            )
-        offset_parameter = placed or offset_parameter
-        into, start = buffer.placement
-        if (into, start) != (buffer.elements, 0):
-            tap = TensorAccessPattern(
-                (into,), tap.offset + start, tap.sizes, tap.strides
-            )
         for value in (offset_parameter, length_parameter, repeat_parameter):
             if value is None:
                 continue

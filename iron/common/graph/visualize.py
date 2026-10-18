@@ -61,18 +61,12 @@ def _shape(h: Handle) -> str:
 
 
 def _box(traced: TracedGraph, i: int, values: dict[int, list[str]]) -> str:
-    """Step ``i``'s label: its operator, what it folded, its outputs' shapes
-    and its per-call values.
+    """Step ``i``'s label: its operator, its outputs' shapes and its
+    per-call values.
     """
     s = traced.steps[i]
     op = s.op
     lines = [f"<b>{html.escape(type(op).__name__)}</b>"]
-    for kind, links in (("prepares", op.prepare), ("finishes", op.finish)):
-        if links:
-            folded = ", ".join(type(link.op).__name__ for link in links)
-            lines.append(f"<i>{kind} {html.escape(folded)}</i>")
-    for buffer, _, _ in op.placements:
-        lines.append(f"<i>writes {html.escape(buffer)} in place</i>")
     shapes = ", ".join(_shape(h) for h in s.outputs if h.root.role != "state")
     if shapes:
         lines.append(shapes)

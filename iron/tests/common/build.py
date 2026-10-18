@@ -27,7 +27,6 @@ from aie.iron import DmaEndpoint, ObjectFifo, Program, Worker
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
 from aie.utils.trace import TraceConfig
-from ml_dtypes import bfloat16
 
 import iron
 import iron.operators.flm.gemm.op as flm_gemm
@@ -35,7 +34,6 @@ from iron import Scratchpad
 from iron.common import (
     Auto,
     Built,
-    Chain,
     Extent,
     In,
     Operand,
@@ -51,9 +49,7 @@ from iron.common.design.design import configuration
 from iron.common.graph.compiled import _words
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
-from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
-from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.packing import packed_b_size
 from iron.operators.gelu import GELU
@@ -61,7 +57,6 @@ from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.operators.sigmoid import Sigmoid
-from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
 from iron.tests.common.declare import Rows
 from iron.tests.common.graphs import ProjectAsStored
@@ -542,37 +537,11 @@ def test_flm_gemm_layout_of_b_follows_the_device():
     assert untuned.resolved(from_name("npu2", n_cols=8)).B.shape == (512 * 512 // 8,)
 
 
-def test_flm_gemm_finishes_with_an_activation_then_a_clamp_in_its_epilogue():
+def test_flm_gemm_selects_its_activation_by_a_word():
     op = flm_gemm.GEMM(M=256, K=512, N=512)
-    size = 256 * 512
-    silu = op.fold(SiLU(size=size))
-    assert silu.activation is Epilogue.SILU and silu.clamp is None
-    clamped = silu.fold(Clamp(size=size, low=-0.7, high=2.0))
-    assert clamped.clamp == (float(bfloat16(-0.7)), 2.0)
-    assert clamped.config_name == op.config_name
-    assert clamped.resolved().residents["mode"] == Epilogue.SILU.mode
-    # Its gelu is not the GELU operator's, nothing follows its clamp, it
-    # applies one activation, and a step finishes nothing of its own.
-    finished = SiLU(size=size, finish=Chain.of(ElementwiseMul(size=size)))
-    for refused in (
-        op.fold(GELU(size=size)),
-        clamped.fold(Clamp(size=size, low=0.0, high=1.0)),
-        silu.fold(Sigmoid(size=size)),
-        op.fold(finished),
-        flm_gemm.GEMM(M=256, K=512, N=512, epilogue="gelu").fold(SiLU(size=size)),
-    ):
-        with pytest.raises(ValueError, match="epilogue applies|two activations"):
-            refused.resolved()
-    with pytest.raises(ValueError, match="as a finish step"):
-        flm_gemm.GEMM(M=256, K=512, N=512, epilogue="silu")
-    assert silu.epilogue_modes == op.epilogue_modes
-    plain = flm_gemm.GEMM(M=256, K=512, N=512, epilogue_modes=("none",))
-    compiled_in = plain.fold(SiLU(size=size))
-    assert compiled_in.compiled_modes == (Epilogue.NONE, Epilogue.SILU)
-    assert plain.compiled_modes == (Epilogue.NONE,)
-    # The xclbin is the configuration's, which compiles in what the finish needs.
-    config = compiled_in.resolved().xclbin_operator()
-    assert config.epilogue_modes == compiled_in.compiled_modes
+    silu = flm_gemm.GEMM(M=256, K=512, N=512, epilogue="silu")
+    assert silu.config_name == op.config_name
+    assert silu.resolved().residents["mode"] == Epilogue.SILU.mode
 
 
 def _flm_gemm_moves(op, full_elf, rows):

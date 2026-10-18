@@ -28,16 +28,13 @@ from aie.dialects.aie import DMAChannelDir, shim_dma_allocation
 from aie.iron import DeviceConfiguration, Flow, ObjectFifo, Program, Runtime
 from aie.iron.device import NPU2, AnyShimTile, Tile
 from aie.utils.compile.jit._hash import _python_identity
-from ml_dtypes import bfloat16
 
 from iron.common.image import AdjacentPacking, coresidence, fusion
 from iron.common.image.coresidence import Packing
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
-from iron.common.graph.fold import folded
 from iron.common.graph.trace import TracedGraph
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
-from iron.tests.common.graphs import FeedForward
 from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tests.common.graphs import Chain
 from iron.tests.common import sequences
@@ -303,29 +300,6 @@ def test_designs_of_one_array_share_its_device():
     assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, _ in fused.steps]
     assert text.count("aie.core(") == 8
     assert fits(fused.designs) is None
-
-
-def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
-    # The feed-forward's gate and up are one array before the fold; the SiLU fold
-    # gives the up projection the gate's finishes, so they stay one. The
-    # product riding the gate's matrix would make them two.
-    hidden, embedding = 8192, 2048
-    weights = (np.zeros((hidden, embedding), bfloat16),) * 2
-    ffn = FeedForward(*weights, np.zeros((embedding, hidden), bfloat16))
-    _, every = folded(ffn.trace(x=(1, embedding)), npu2)
-    silu = [fold for fold in every if str(fold) == "SiLU into GEMV"]
-    traced, count = folded(ffn.trace(x=(1, embedding)), npu2, only=silu)
-    assert count.total() == 1
-    seq = OperatorSequence(traced, full_elf=True)
-    seq.prepare()
-    fused = Fusion(seq)
-    text = fused.text()
-    gate, up, mul, down = (name for name, _ in fused.steps)
-    assert gate != up
-    pack = Packing.device_name([gate, up])
-    assert _devices(text) == [pack, mul, down, Fusion.EMPTY]
-    assert re.findall(r"aiex\.configure @(\w+)", text) == _devices(text)
-    assert re.findall(r"aiex\.run @(\w+)", text)[:2] == [gate, up]
 
 
 def test_two_arrays_of_one_class_pack():

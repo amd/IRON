@@ -5,31 +5,11 @@ from typing import ClassVar
 
 from aie.iron.kernels import eltwise
 
-from iron import operators as catalog
-from iron.common import BinaryElementwise, Chain, RowBroadcast
-from iron.common.elementwise import Sweep
-from iron.common.testing import Case, Testing
+from iron.common import BinaryElementwise, RowBroadcast
 
 
 class ElementwiseAdd(BinaryElementwise):
     """AIE-accelerated element-wise addition."""
-
-    # A sum finished by silu in its own cores.
-    test = Testing(
-        [
-            Sweep(channels=None),
-            lambda cls, dev: [
-                Case(
-                    dict(
-                        size=2048,
-                        num_aie_columns=4,
-                        finish=Chain.of(catalog.SiLU(size=2048)),
-                    ),
-                    id="finish_SiLU",
-                )
-            ],
-        ]
-    )
 
     class Array(BinaryElementwise.Array):
         def kernel(self):

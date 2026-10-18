@@ -26,8 +26,6 @@ from pathlib import Path
 
 import pytest
 
-from iron.common import Chain
-from iron.operators.clamp import Clamp
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.tests.common.llama_model import llama_1b
@@ -101,13 +99,7 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
 
 
 def test_shipped_builds_its_instructions_for_the_external_image(npu2):
-    op = shipped(
-        M=256,
-        K=1024,
-        N=1152,
-        epilogue="gelu",
-        finish=Chain.of(Clamp(size=256 * 1152, low=-2.0, high=2.0)),
-    )
+    op = shipped(M=256, K=1024, N=1152, epilogue="gelu")
     insts = op.compile().insts
     assert insts is not None and insts.stat().st_size > 0
 

@@ -7,7 +7,7 @@ The GEMM ``F.linear`` runs for more than one row. Same dataflow as
 ``iron.operators.gemm`` -- A broadcast along each compute row, B down each
 column, C joined through the memtile -- but with a fixed m tile, B read as
 stored or quantized to bfp16ebs8 and pre-packed into consumption order, an
-activation and clamp fused into the C drain, and asymmetric tile buffering so
+activation fused into the C drain, and asymmetric tile buffering so
 the A tile and the accumulator need not share a height.
 
 README.md has the per-choice breakdown against both the shipped FastFlowLM
@@ -121,7 +121,7 @@ class Epilogue(StrEnum):
         """The integer the kernel and the shipped overlay both select on."""
         return list(Epilogue).index(self)
 
-    def apply(self, C, clamp=None):
+    def apply(self, C):
         """This output stage alone, on an already-accumulated ``C``: what a
         test of the epilogue without the accumulation compares against
         (test.py's, on the shipped image's own accumulator).
@@ -137,7 +137,7 @@ class Epilogue(StrEnum):
                 C = C * _sigmoid(C)
             case Epilogue.SIGMOID:
                 C = _sigmoid(C)
-        return C if clamp is None else np.clip(C, clamp[0], clamp[1])
+        return C
 
 
 def _sigmoid(x):

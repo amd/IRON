@@ -2,32 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Pictures of a graph, drawn device-free from its trace: every step is a
-node, every buffer a step reads an edge into it from its producer, and a
-folded step names what it folded.
+node, and every buffer a step reads an edge into it from its producer.
 """
 
 import re
 
-import numpy as np
 import pytest
-from ml_dtypes import bfloat16
 
-from iron.common.graph.fold import folded
 from iron.common.graph.visualize import layers
 from iron.applications.embedding_gemma2.config import Config
 from iron.applications.embedding_gemma2.model import Multimodal
 from iron.lm import Checkpoint
-from iron.tests.common.graphs import FeedForward
 from iron.lm.testing import require, weights_dir
 from iron.tests.common.llama_model import small
 
-E, H = 2048, 8192
-
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
-
-
-def z(*shape):
-    return np.zeros(shape, dtype=bfloat16)
 
 
 def edges(dot: str) -> set[tuple[str, str]]:
@@ -113,12 +102,3 @@ def test_a_per_layer_slice_is_drawn_in_its_layer():
     projection, norm = sliced[1], sliced[1] + 1
     assert {projection, norm} <= drawn
     assert sliced[0] not in drawn and sliced[2] not in drawn
-
-
-def test_a_folded_step_names_what_it_folded(npu2):
-    t = FeedForward(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
-    f, _ = folded(t, npu2)
-    dot = f.dot()
-    assert "finishes SiLU, ElementwiseMul" in dot
-    up, gate, down = (f"s{i}" for i in range(3))
-    assert {(up, gate), (gate, down)} <= edges(dot)

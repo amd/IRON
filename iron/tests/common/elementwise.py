@@ -117,9 +117,9 @@ def _bound(x):
         "exact",
     ],
 )
-def test_a_chains_interval_is_what_compare_admits(tol):
-    """A chain's gate carries each step's admitted outputs as an interval:
-    its edges pass ``compare``, and the next value past either fails.
+def test_an_interval_is_what_compare_admits(tol):
+    """The outputs a tolerance admits, as an interval: its edges pass
+    ``compare``, and the next value past either fails.
     """
     rng = np.random.default_rng(0)
     x = rng.standard_normal(4096) * np.exp(rng.uniform(-8, 8, 4096))

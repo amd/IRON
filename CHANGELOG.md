@@ -99,6 +99,8 @@ public API adds its entry under Unreleased.
 - `resolved(dev)` resolves for the device given instead of probing for an
   NPU, and an unresolved `Auto()` tile raises instead of becoming a 0-d fifo.
 - RoPE's `method_type` is `two_halves`, a flag.
+- flm.GEMM takes `epilogue="silu"` and `"sigmoid"`, which a SiLU or Sigmoid
+  finish applied before.
 - IRON requires Python 3.11.
 - An `Encoder`'s per-call row count is `rows`, as a causal model's is.
 - `Runner.bos` is read from the checkpoint's `config.json` unless a runner
@@ -133,9 +135,8 @@ public API adds its entry under Unreleased.
   interfaces.
 - `Auto(derived=True)`, replaced by `Auto(init=False)`; a caller can no
   longer give MHA's `B_kv`.
-- `Profile.lookup`, `Operator.from_operands`, `Operator.value_buffer`,
-  `Chain.at_tile` and its `Side` enum, and the `AutoSpec` and `ParamSpec`
-  exports from `iron.common`.
+- `Profile.lookup`, `Operator.from_operands`, `Operator.value_buffer`, and
+  the `AutoSpec` and `ParamSpec` exports from `iron.common`.
 - The `ReduceMax`, `LeakyReLU`, `Repeat` and `Dequant` operators and
   `swiglu_prefill_stream`; flm's `Shipped` overlay is a test helper, not a
   catalog operator.
@@ -147,3 +148,10 @@ public API adds its entry under Unreleased.
   `CausalLM.embed`.
 - `Runner.sizes` and `--size`, `F.linear`'s `k_tile` and `tile_n`, and
   Whisper's `Runner`.
+- Operator fusion, one operator's step run in another's cores, until it is
+  done as dataflow: `compile(fold=)` and `iron.common.graph.fold`; `Chain`,
+  `Link`, `Finish` and `Prepare`; `Operator`'s `finish`, `prepare` and
+  `placements` fields, `fold`, `prefold`, `on_array`, `placed`, `copies_to`,
+  `at_line`, `finish_inputs` and `prepare_inputs`; an operand's `finish=`,
+  `prepare=` and `feed=`; and flm.GEMM's clamp. Image fusion, several
+  operators' arrays in one full ELF, stays.

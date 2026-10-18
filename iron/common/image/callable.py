@@ -612,13 +612,6 @@ class StepCallable:
             self._storage[root].to("npu")
         t0 = time.perf_counter()
         for index, (step_op, kernel, refs, args) in enumerate(self._steps):
-            # A placed buffer starts at its place in the tensor that holds it.
-            at = {}
-            for spec in step_op.buffers:
-                at[spec.name] = spec.placement[1]
-                if f"{spec.name}_offset" in step_op.bound_values:
-                    word = step_op.value(f"{spec.name}_offset")
-                    at[spec.name] += int(self.dispatch_values[word.symbol])
             checked = self.check and not step_op.bound_extents
             if self.check and not checked:
                 logger.warning(
@@ -628,14 +621,14 @@ class StepCallable:
                     sorted(step_op.bound_extents),
                 )
             if checked:
-                inputs, expected = self._reference(step_op, args, at)
+                inputs, expected = self._reference(step_op, args)
             kernel(
                 *args,
                 **{name: self.dispatch_values[name] for name in kernel.dispatch_params},
             )
             if checked:
                 written = {
-                    spec.name: buf.numpy()[at[spec.name] :][: spec.elements]
+                    spec.name: buf.numpy()[: spec.elements]
                     for buf, spec in zip(args, step_op.buffers)
                     if spec.drains
                 }
@@ -648,15 +641,13 @@ class StepCallable:
                 self._storage[root].device = "npu"
 
     def _reference(
-        self, step_op: Operator, args, at: Mapping[str, int]
+        self, step_op: Operator, args
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-        """``step_op``'s inputs as its buffers hold them, each from element
-        ``at`` its name, and its reference on them, by buffer name.
+        """``step_op``'s inputs as its buffers hold them, and its reference
+        on them, by buffer name.
         """
         held = {
-            spec.name: buf.numpy()[at[spec.name] :][: spec.elements]
-            .reshape(spec.shape)
-            .copy()
+            spec.name: buf.numpy()[: spec.elements].reshape(spec.shape).copy()
             for buf, spec in zip(args, step_op.buffers)
         }
         inputs = {b.name: held[b.name] for b in step_op.inputs}

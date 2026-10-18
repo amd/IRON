@@ -16,20 +16,15 @@ from aie.iron.kernels import eltwise, linalg
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron import operators as catalog
 from iron.common import (
     Auto,
     Built,
-    Chain,
     Divisors,
     Extent,
-    Finish,
     In,
-    Link,
     Operator,
     Out,
     Param,
-    Prepare,
     Rtp,
     Value,
 )
@@ -67,7 +62,6 @@ def _cases(cls, dev: Device):
     # ... and two lanes a column.
     laned = [
         (2048, 8192, 1, 1, 1024),
-        (8192, 2048, 4, 4, 1024),
         (8192, 2048, 8, 4, 512),
     ]
 
@@ -75,32 +69,6 @@ def _cases(cls, dev: Device):
         kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)
         kwargs.update(tile_size_output=tso, **extra)
         return Case(kwargs, bench=bench, lower=lower)
-
-    def finished(M, K, cols, tsi, tso, *chains, **extra):
-        # The first chain is the case's own; more share one array.
-        steps = [tuple(Link(step(size=M)) for step in c) for c in chains]
-        plain = case(M, K, cols, tsi, tso, **extra)
-        shared = tuple(steps) if len(steps) > 1 else ()
-        names = ["".join(step.__name__ for step in c) or "none" for c in chains]
-        label = f"{plain.label}-finish_{names[0]}" + "".join(
-            f"-shares_{n}" for n in names[1:]
-        )
-        return Case(dict(plain.kwargs, finish=Chain(steps[0], shared)), id=label)
-
-    def prepared(M, K, cols, tsi, tso, *chains, **extra):
-        # The first chain is the case's own; more share one array.
-        steps = [tuple(Link(op) for _, op in c) for c in chains]
-        plain = case(M, K, cols, tsi, tso, **extra)
-        shared = tuple(steps) if len(steps) > 1 else ()
-        names = ["".join(name for name, _ in c) or "none" for c in chains]
-        label = f"{plain.label}-prepare_{names[0]}" + "".join(
-            f"-shares_{n}" for n in names[1:]
-        )
-        return Case(dict(plain.kwargs, prepare=Chain(steps[0], shared)), id=label)
-
-    def norm(K, weighted=False):
-        name = "RMSNormWeighted" if weighted else "RMSNorm"
-        return name, catalog.RMSNorm(rows=1, tile_size=K, weighted=weighted)
 
     widest = dev.cols
 
@@ -114,36 +82,10 @@ def _cases(cls, dev: Device):
             for i, (*p, batches) in enumerate(batched)
         ]
         + [case(*p, num_batches=batches, repeat=r) for *p, batches, r in repeated]
-        + [case(*p, bench=bench(*p), num_channels=2) for p in (laned[0], laned[2])]
+        + [case(*p, bench=bench(*p), num_channels=2) for p in laned]
         + [
             case(256, 128, 2, 1, 32, num_channels=2, num_batches=8),
             case(2048, 64, 4, 4, 256, num_channels=2, num_batches=32, repeat=4),
-        ]
-        # K = 8192: the 1024-row tile a core holds beside an AIE2 finish's LUTs.
-        + [
-            finished(2048, 8192, 1, 1, 1024, (step,))
-            for step in (catalog.GELU, catalog.SiLU)
-        ]
-        + [finished(*laned[1], (catalog.SiLU,), num_channels=2)]
-        # One array serving both.
-        + [
-            finished(*plain[2], (), (catalog.SiLU,)),
-            finished(*plain[2], (catalog.SiLU,), ()),
-        ]
-        # K = 8192 leaves no L1 for the prepared line; 4096 weighted the least.
-        + [
-            prepared(*p, (norm(p[1], weighted),))
-            for p in (plain[2], (2048, 4096, 8, 2, 256))
-            for weighted in (False, True)
-        ]
-        + [prepared(*plain[0], (norm(plain[0][1]),))]
-        + [
-            prepared(*laned[1], (norm(2048, weighted),), num_channels=2)
-            for weighted in (False, True)
-        ]
-        + [
-            prepared(*plain[2], (), (norm(2048),)),
-            prepared(*plain[2], (norm(2048),), ()),
         ]
     )
 
@@ -187,7 +129,6 @@ class GEMV(Operator):
     )
     kernel_vector_size: int = Auto(repr=False, array=True)
 
-    # B, a prologue's and a finish's inputs ride A's stream.
     A = In(
         num_matrices,
         M,
@@ -195,16 +136,14 @@ class GEMV(Operator):
         obj_type=(tile_size_input, K),
         per=(num_aie_columns, num_channels),
         depth=2,
-        feed=True,
     )
-    B = In(num_batches, K, prepare=True)
+    B = In(num_batches, K)
     C = Out(
         num_batches,
         M,
         obj_type=(tile_size_output,),
         per=(num_aie_columns, num_channels),
         depth=2,
-        finish=True,
     )
     valid = Extent(M)
     tiles = Value(
@@ -283,35 +222,14 @@ class GEMV(Operator):
         fits = dev is None or two_rows <= dev.core_memory_bank_bytes
         rows = self.tile_size_input or (2 if fits else 1)
         channels = self.num_channels or 1
-        if self.tile_size_output is None and self.finish_inputs:
-            # A finish input's tile, re-read per A tile, is cheaper the more rows.
-            cols = self.resolve_columns(
-                dev,
-                self.num_aie_columns,
-                channels,
-                fits=lambda c: self.M % (c * channels * rows) == 0,
-            )
-            share, carried = self.M // (cols * channels), rows * self.K
-            reads = 1 << dev.get_dma_bd_iter_bits(0, 0)
-            tile = self.finish_line(
-                dev,
-                [
-                    n
-                    for n in range(share, 0, -rows)
-                    if share % n == 0 and carried % n == 0 and carried // n <= reads
-                ],
-            )
-        else:
-            tile = self.tile_size_output or self.finish_line(
-                dev, (max(rows, 2), *(math.lcm(rows, 2**i) for i in range(2, 8)))
-            )
-            unit = math.lcm(tile, rows)
-            cols = self.resolve_columns(
-                dev,
-                self.num_aie_columns,
-                channels,
-                fits=lambda c: self.M % (c * channels * unit) == 0,
-            )
+        tile = self.tile_size_output or max(rows, 2)
+        unit = math.lcm(tile, rows)
+        cols = self.resolve_columns(
+            dev,
+            self.num_aie_columns,
+            channels,
+            fits=lambda c: self.M % (c * channels * unit) == 0,
+        )
         new = dataclasses.replace(
             self,
             num_aie_columns=cols,
@@ -328,8 +246,6 @@ class GEMV(Operator):
             new.A.depth * new.tile_size_input * line
             + line
             + new.C.depth * out
-            + line * any(new.prepare.chains)
-            + new.finish_bytes(dev, new.tile_size_output)
             + dev.default_core_stack_bytes
         )
         if held > dev.core_memory_bytes:
@@ -355,9 +271,6 @@ class GEMV(Operator):
                 raise ValueError(f"GEMV: {name} ({tile}) must divide M/lanes ({rows})")
 
     class Array(Operator.Array):
-        finishing: Finish
-        preparing: Prepare
-
         def build(self) -> Built:
             K, lanes = self.K, self.num_aie_columns * self.num_channels
             tile_size_input, tile_size_output = (
@@ -380,9 +293,6 @@ class GEMV(Operator):
             copy = eltwise.passthrough(K, np.int16).object_file.bind(
                 "passThroughLine", [self.A.obj_type, vector, np.int32]
             )
-            # Over the whole C tile: one call's rows can be narrower than a vector.
-            finish = self.finishing.on(lanes)
-            prepare = self.preparing.on(lanes)
 
             A_fifos = [
                 ObjectFifo(self.A.obj_type, depth=self.A.depth) for i in range(lanes)
@@ -391,34 +301,25 @@ class GEMV(Operator):
                 ObjectFifo(self.C.obj_type, depth=self.C.depth) for i in range(lanes)
             ]
             vectors = [Buffer(vector) for _ in range(lanes)]
-            rtps = [
-                Rtp([self.tiles, self.batches, *prepare.values, *finish.values])
-                for _ in range(lanes)
-            ]
+            rtps = [Rtp([self.tiles, self.batches]) for _ in range(lanes)]
 
-            def core_body(A_fifo, C_fifo, b, matvec, copy, rtp, *rest):
+            def core_body(A_fifo, C_fifo, b, matvec, copy, rtp):
                 words = rtp.read()
                 n = words[self.tiles]
-                prepared, rest = rest[: prepare.arity], rest[prepare.arity :]
                 batches = words[self.batches]
-                mode_p = prepare.mode(words)
-                mode = finish.mode(words)
                 for _ in range_(batches):
                     # The batch's head tile carries B.
                     head = A_fifo.acquire(1)
                     copy(head, b, K)
                     A_fifo.release(1)
-                    line = prepare.apply(prepared, mode_p, b, A_fifo)
                     for _ in range_(n):
                         c = C_fifo.acquire(1)
-                        out = finish.target(rest, mode, c)
                         for j_idx in range_(tile_size_output // tile_size_input):
                             j_i32: Any = index.casts(T.i32(), j_idx)
                             output_row_offset = j_i32 * tile_size_input
                             a = A_fifo.acquire(1)
-                            matvec(tile_size_input, output_row_offset, a, line, out)
+                            matvec(tile_size_input, output_row_offset, a, b, c)
                             A_fifo.release(1)
-                        finish.apply(rest, mode, c, A_fifo)
                         C_fifo.release(1)
 
             workers = [
@@ -431,20 +332,17 @@ class GEMV(Operator):
                         matvec,
                         copy,
                         rtps[i],
-                        *prepare.args(i),
-                        *finish.args(i),
                     ],
                 )
                 for i in range(lanes)
             ]
             self.A.bind([f.prod() for f in A_fifos])
             self.C.bind([f.cons() for f in C_fifos])
-            finish.bind()
             return Built(workers, rtps)
 
     def sequence(self, rt):
-        """Per batch and lane: B's head tile, each prologue input's, then A's
-        rows. C drains are issued first: an undrained C would stop A.
+        """Per batch and lane: B's head tile, then A's rows. C drains are
+        issued first: an undrained C would stop A.
         """
         if self.repeat > 1:
             for buf in (self.A, self.C):
@@ -494,39 +392,25 @@ class GEMV(Operator):
                 )
                 for k, tap, word, unit in rows
             ]
-        share = M // len(rows)
-        output = TensorAccessPattern.full(self.C.shape)
         for b in range(self.num_batches or 1):
             # B's row repeated over an A tile in the iteration dim (stride 0).
             head = TensorAccessPattern(
                 self.B.shape, b * K, [tsi, 1, 1, K], [0, 0, 0, 1]
             )
-            line = TensorAccessPattern((K,), 0, [tsi, 1, 1, K], [0, 0, 0, 1])
             for k, tap, word, unit in rows:
                 self.A.fill(head, lane=k, source=self.B, managed=False)
-                for extra in self.prepare_inputs:
-                    self.A.fill(line, lane=k, source=extra, managed=False)
                 matrix = TensorAccessPattern(
                     tap.tensor_dims,
                     tap.offset + b // self.repeat * M * K,
                     tap.sizes,
                     tap.strides,
                 )
-                finishing = None
-                if self.finish_inputs:
-                    lane_rows = slice(k * share, (k + 1) * share)
-                    finishing = (
-                        output[b, lane_rows]
-                        if self.num_batches is not None
-                        else output[lane_rows]
-                    )
                 self.A.fill(
                     matrix,
                     lane=k,
                     length_parameter=word,
                     length_unit=unit,
                     managed=False,
-                    finishing=finishing,
                 )
         for task in drains:
             task.await_()
@@ -547,6 +431,4 @@ class GEMV(Operator):
 
     def tolerance(self) -> Tolerance:
         """C accumulates in f32 and rounds once; tighter than linalg.mv's contract."""
-        if self.finish or self.prepare:
-            return super().tolerance()
         return Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")

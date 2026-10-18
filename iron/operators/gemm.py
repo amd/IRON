@@ -32,16 +32,12 @@ from aie.iron.device import (
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron import operators as catalog
 from iron.common import (
     Auto,
     Built,
-    Chain,
     Divisors,
     Extent,
-    Finish,
     In,
-    Link,
     Operand,
     Operator,
     Out,
@@ -105,30 +101,6 @@ def _cases(cls, dev: Device):
     # The placement the tuner tries beside the default.
     kwargs = dict(M=2048, K=2048, N=2048, num_aie_columns=2, b_col_maj=True)
     out.append(Case(dict(kwargs, placement=GEMMPlacement.TILES), extensive=True))
-
-    def finished(kwargs, *chains):
-        # The first chain is the case's own; more share one array.
-        size = kwargs["M"] * kwargs["N"]
-        steps = [tuple(Link(step(size=size)) for step in c) for c in chains]
-        names = ["".join(step.__name__ for step in c) or "none" for c in chains]
-        label = f"{Case(kwargs).label}-finish_{names[0]}" + "".join(
-            f"-shares_{n}" for n in names[1:]
-        )
-        shared = tuple(steps) if len(steps) > 1 else ()
-        return Case(dict(kwargs, finish=Chain(steps[0], shared)), id=label)
-
-    # A projection, the f32 accumulator, and one array serving two designs.
-    default = dict(M=2048, K=2048, N=2048, b_col_maj=True)
-    M, K, N, cols, b_col_maj, c_col_maj, m, k, n = _REGULAR[3]
-    exact = dict(M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k)
-    exact.update(tile_n=n, b_col_maj=b_col_maj, precision=Precision.HIGHEST)
-    out += [
-        finished(default, (catalog.SiLU,)),
-        finished(default, (catalog.GELU,)),
-        finished(exact, (catalog.SiLU,)),
-        finished(default, (), (catalog.SiLU,)),
-        finished(default, (catalog.SiLU,), ()),
-    ]
     return out
 
 
@@ -209,7 +181,6 @@ class GEMM(Operator):
         dtype=dtype_out,
         obj_type=(c_l2,),
         per=(num_aie_columns,),
-        finish=(tile_m, tile_n),
     )
     # A bound limits the compute, not the DMAs: A's pattern fills all four BD dims.
     valid = Extent(M)
@@ -326,12 +297,7 @@ class GEMM(Operator):
         dout = np.dtype(self.dtype_out).itemsize
         wider = dataclasses.replace(self, tile_m=m).array_config().wider_accumulator
         c = m * n * (dout + 4 if wider else FIFO_DEPTH * dout)
-        return (
-            FIFO_DEPTH * (m * k + k * n) * din
-            + c
-            + self.finish_bytes(dev, m * n)
-            + STACK_BYTES
-        )
+        return FIFO_DEPTH * (m * k + k * n) * din + c + STACK_BYTES
 
     def resolve(self, dev):
         if dev is None:
@@ -347,7 +313,7 @@ class GEMM(Operator):
         )
         rows, tile_m = self._auto_tiling(dev)
         block, _, _ = self.mac_block(dev)
-        # An open tile_m narrows until a core holds its tiles and finish.
+        # An open tile_m narrows until a core holds its tiles.
         while (
             self.tile_m is None
             and tile_m // 2 % block == 0
@@ -418,7 +384,6 @@ class GEMM(Operator):
         row_blocks_valid: Value
         col_tiles: Value
         k_valid: Value
-        finishing: Finish
 
         @property
         def wider_accumulator(self) -> bool:
@@ -461,7 +426,6 @@ class GEMM(Operator):
             C_l2_ty = self.C.obj_type
             A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
             B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
-            # Flat, as the finish's scratch is: a core selects between them.
             C_l1_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
 
             dtype_acc = np.float32 if wider else dtype_out
@@ -474,7 +438,6 @@ class GEMM(Operator):
                 convert_copy_kernel = kernels.datamovement.convert_copy(m * n)
             else:
                 fifo_depth_out = FIFO_DEPTH
-            finish = self.finishing.on(n_aie_rows * n_aie_cols)
 
             A_l3l2_fifos: list[Any] = [None] * self.n_shim_mem_a
             A_l2l1_fifos: list[Any] = [None] * n_aie_rows
@@ -492,9 +455,7 @@ class GEMM(Operator):
                 read += [self.row_blocks_valid, self.col_tiles]
             if k_bounded:
                 read.append(self.k_valid)
-            rtps = [
-                Rtp([*read, *finish.values]) for _ in range(n_aie_rows * n_aie_cols)
-            ]
+            rtps = [Rtp(read) for _ in range(n_aie_rows * n_aie_cols)]
 
             for i in range(self.n_shim_mem_a):
                 A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, depth=FIFO_DEPTH)
@@ -555,7 +516,6 @@ class GEMM(Operator):
                 k_tail_zero,
                 rtp,
                 elem_out_internal,
-                *rest,
             ):
                 words = rtp.read()
                 rtp_K_div_k = words[self.k_div_k]
@@ -571,14 +531,12 @@ class GEMM(Operator):
                     last = k_compute - 1
                     kept = k_bound - last * k
                     spans = [(k_compute, True), (rtp_K_div_k - k_compute, False)]
-                mode = finish.mode(words)
 
                 def tile(compute: bool):
                     if wider:
                         acc = elem_out_internal
                     else:
-                        c = out_c.acquire(1)
-                        acc = finish.target(rest, mode, c)
+                        acc = c = out_c.acquire(1)
                     if compute:
                         zero(acc)
                     for count, multiply in spans:
@@ -597,9 +555,7 @@ class GEMM(Operator):
                     if wider:
                         c = out_c.acquire(1)
                         if compute:
-                            convert_copy(acc, finish.target(rest, mode, c), m * n)
-                    if compute:
-                        finish.apply(rest, mode, c)
+                            convert_copy(acc, c, m * n)
                     out_c.release(1)
 
                 if bounded:
@@ -633,7 +589,6 @@ class GEMM(Operator):
                                 matmul_kernel.k_tail if k_bounded else None,
                                 rtps[row * n_aie_cols + col],
                                 acc_buffer,
-                                *finish.args(row * n_aie_cols + col),
                             ],
                             stack_size=STACK_BYTES,
                             tile=Tile(col, 2 + row) if pinned else AnyComputeTile,
@@ -645,7 +600,6 @@ class GEMM(Operator):
             )
             self.B.bind([f.prod(tile=Tile(c, 0)) for c, f in enumerate(B_l3l2_fifos)])
             self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in enumerate(C_l2l3_fifos)])
-            finish.bind()
             return Built(workers, rtps)
 
     def sequence(self, rt):
@@ -761,8 +715,6 @@ class GEMM(Operator):
         bf16, and 2 more for bfp16 inputs. Measured on npu2 at no more than
         0.83 of it over K = 256 to 8192.
         """
-        if self.finish:
-            return super().tolerance()
         if np.issubdtype(np.dtype(self.dtype_in), np.integer):
             return Tolerance.exact(note="integer matmul")
         units = 4.0 if self.precision == Precision.MEDIUM else 2.0

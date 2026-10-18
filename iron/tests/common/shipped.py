@@ -8,7 +8,7 @@ this is the binary it was ported from, downloaded and pinned by digest, and
 driven by the same declaration:
 
 ```python
-Shipped(M=1024, K=1536, N=6144, finish=Chain.of(SiLU(size=1024 * 6144)))
+Shipped(M=1024, K=1536, N=6144, epilogue="silu")
 ```
 
 It exists so the port can be measured against what it was ported from, on
@@ -51,7 +51,6 @@ from iron.common import (
     Xclbin,
 )
 from iron.operators.flm.gemm.design import (
-    CT_OUT_LEN,
     K_TILE,
     M_TILE,
     Gelu,
@@ -95,16 +94,15 @@ def _parameter_words(op) -> list[int]:
     """The image's block of eight words: k_iters, M, N, bias, epilogue mode,
     clamp on, clamp min, clamp max.
     """
-    clamp_min, clamp_max = op.clamp if op.clamp is not None else (0.0, 0.0)
     return [
         op.K // K_TILE,
         op.M,
         op.N,
         0,  # bias, which the operator does not expose
-        op.activation.mode,
-        1 if op.clamp is not None else 0,
-        int(np.float32(clamp_min).view(np.int32)),
-        int(np.float32(clamp_max).view(np.int32)),
+        op.epilogue.mode,
+        0,  # clamp, which the operator does not expose
+        0,
+        0,
     ]
 
 
@@ -158,15 +156,13 @@ class Shipped(
         per=(GEMM.cols,),
         depth=QUEUE_DEPTH,
     )
-    # The joined (ROWS*M_TILE x N_TILE) block, which the image's epilogue
-    # finishes as the port's does.
+    # The joined (ROWS*M_TILE x N_TILE) block.
     C = Out(
         GEMM.M,
         GEMM.N,
         obj_type=(ROWS * M_TILE * N_TILE,),
         per=(GEMM.cols,),
         depth=QUEUE_DEPTH,
-        finish=(CT_OUT_LEN,),
     )
     # The port's named values are not this image's: it reads one block of
     # eight words behind a lock, written once per shape.

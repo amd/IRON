@@ -9,7 +9,7 @@ import dataclasses
 import enum
 import inspect
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any, get_args
 
 from .domain import Domain
@@ -20,19 +20,8 @@ from .shape import Select, Shape
 from .value import Extent, Value
 
 # What an Array may list besides the operator's fields and members: its
-# operands, the chains as its cores apply them, and the device.
-LIBRARY_VIEWS = frozenset(
-    {
-        "buffers",
-        "inputs",
-        "outputs",
-        "finish_inputs",
-        "prepare_inputs",
-        "finishing",
-        "preparing",
-        "dev",
-    }
-)
+# operands and the device.
+LIBRARY_VIEWS = frozenset({"buffers", "inputs", "outputs", "dev"})
 
 
 class Declaration:
@@ -60,8 +49,8 @@ class Declaration:
         tunables: The `Auto` fields a caller, a profile or the tuner sets.
         domains: Each tunable's declared `Domain`, by name.
         array: The fields the array reads, which its generated ``Array``
-            holds: what a stream's tile, a core's block of it, its dtype, its
-            replication or its presence names, those declared
+            holds: what a stream's tile, its dtype, its replication or its
+            presence names, those declared
             ``array=True``, and any its ``Array`` annotates itself.
         probes: Each `Param(probe=)` field's probe, by name.
     """
@@ -157,10 +146,6 @@ class Declaration:
                 m.dims.check(cls, m, "dimension", allow_tunable=False)
                 if m.obj_dims is not None:
                     m.obj_dims.check(cls, m, "obj_type dimension", allow_tunable=True)
-                if m.finish_block is not None:
-                    m.finish_block.check(
-                        cls, m, "finish block dimension", allow_tunable=True
-                    )
                 optional = [
                     d.name
                     for d in m.dims.dims
@@ -193,18 +178,6 @@ class Declaration:
                             f"a Param() or Auto() field"
                         )
 
-        prepared = [m.name for m in members if isinstance(m, Operand) and m.prepare]
-        if len(prepared) > 1:
-            raise TypeError(
-                f"{cls.__name__}: {prepared} are each prepare=True; a core prepares "
-                f"one input, the one its operator's prepare names"
-            )
-        fed = [m.name for m in members if isinstance(m, Operand) and m.feed]
-        if len(fed) > 1:
-            raise TypeError(
-                f"{cls.__name__}: {fed} are each feed=True; a finish's inputs ride "
-                f"one stream"
-            )
         self.members = tuple(members)
 
         specs = {
@@ -238,14 +211,12 @@ class Declaration:
                     f"{cls.__name__}.{n}: when={when!r} must be a callable of "
                     f"(op, dev), the flag the tunable is searched under"
                 )
-        # The array tier: what a stream's tile, a core's block of it, its
-        # dtype, its replication or its presence names, and array=True fields.
+        # The array tier: what a stream's tile, its dtype, its replication
+        # or its presence names, and array=True fields.
         named: set[str] = set()
         for m in members:
             if isinstance(m, Operand) and m.obj_dims is not None:
                 named |= m.obj_dims.names()
-                if m.finish_block is not None:
-                    named |= m.finish_block.names()
                 if m.per is not None:
                     named |= m.per.names()
                 if isinstance(m.declared_dtype, dataclasses.Field):
@@ -327,18 +298,15 @@ class Declaration:
         dev,
         num_channels: int = 1,
         flags: Mapping[str, Any] | None = None,
-        operands: Iterable[Operand] = (),
     ) -> int:
         """How many of ``dev``'s columns fit the class's streams in the shim DMA budget.
 
         A ``replicate`` stream is paid once per channel rather than per column,
         and a stream with no ``per=`` (one lane, or a ``broadcast``) once.
-        ``operands`` are an instance's streams beside the declared ones
-        (``finish_inputs``; a prologue's inputs share the stream they prepare).
         """
         streams = [
             m
-            for m in (*self.members, *operands)
+            for m in self.members
             if isinstance(m, Operand)
             and m.obj_dims is not None
             and m.present(flags or {})

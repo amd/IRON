@@ -12,7 +12,6 @@ from .domain import Divisors, Width
 from .field import Auto, Param, Unresolvable
 from .shape import Select
 from .operand import In, InOut, Operand, Out
-from .chain import Chain, Link
 from .operator import Built, Operator
 from .precision import Precision
 from .profile import Profile
@@ -22,13 +21,11 @@ from .xclbin import Xclbin
 
 __all__ = [
     "Built",
-    "Chain",
     "Divisors",
     "DispatchTime",
     "Extent",
     "In",
     "InOut",
-    "Link",
     "Operand",
     "Operator",
     "Out",
