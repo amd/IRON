@@ -26,11 +26,9 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
-import aie.utils as aie_utils
-
 from iron import operators
 from iron.common.declare import Profile
-from iron.common.image.packaging import dispatches_full_elf
+from iron.common.image.packaging import dispatches_full_elf, require_device
 from .autotune import Call, Shape, autotune, kernel_cycles, time_shape
 from .measure import Cache, Timing, pmode
 
@@ -80,7 +78,7 @@ def tune(args: argparse.Namespace, calls: Sequence[Call], profiles: Path) -> Pat
     fastest at (``autotune``), timed as ``args`` says; return its path.
     """
     print(f"power mode: {pmode()}", flush=True)
-    dev = aie_utils.ensure_current_device()
+    dev = require_device()
     path = profiles / f"{dev.name}.json"
     profile = Profile.load(path) if path.exists() else None
     tuned = autotune(
@@ -127,7 +125,7 @@ def main() -> None:
         name: int(text) for name, _, text in (v.partition("=") for v in args.value)
     }
 
-    dev = aie_utils.ensure_current_device()
+    dev = require_device()
     op = getattr(operators, args.operator)(**fields)
     shape = Shape(op)
     shape.members.append((op, [(1.0, values)], {}))

@@ -28,7 +28,6 @@ so a model built without it detects umbrellas in a photo of two cats.
 from pathlib import Path
 from types import SimpleNamespace
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
@@ -36,6 +35,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 import iron
 import iron.functional as F
+from iron.common.image.packaging import require_device
 from iron.lm import ConcatChannels, Conv2d, MaxPool2d
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -228,7 +228,7 @@ class Pointwise(iron.Graph):
 
     def __init__(self, weight, bias, size: int, act: bool = True):
         self.weight, self.bias, self.size, self.act = weight, bias, size, act
-        unit = M_TILE * compute_rows(aie_utils.ensure_current_device())
+        unit = M_TILE * compute_rows(require_device())
         pixels = size * size
         self.padded = None
         if pixels % unit:
