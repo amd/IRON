@@ -75,6 +75,7 @@ public API adds its entry under Unreleased.
   markers.
 - `resolved(dev)` resolves for the device given instead of probing for an
   NPU, and an unresolved `Auto()` tile raises instead of becoming a 0-d fifo.
+- RoPE's `method_type` is `two_halves`, a flag.
 
 ### Removed
 
@@ -94,3 +95,9 @@ public API adds its entry under Unreleased.
 - `Profile.lookup`, `Operator.from_operands`, `Operator.value_buffer`,
   `Chain.at_tile` and its `Side` enum, and the `AutoSpec` and `ParamSpec`
   exports from `iron.common`.
+- The `ReduceMax`, `LeakyReLU`, `Repeat` and `Dequant` operators and
+  `swiglu_prefill_stream`; flm's `Shipped` overlay is a test helper, not a
+  catalog operator.
+- GEMM's `round_conv_even` and `use_scalar`, `DequantBFP`'s `tile_n`,
+  `decode_layer`'s `sliding_window`, and `lm_head`'s and `prefill_attn`'s
+  `trace_size`.
