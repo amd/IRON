@@ -59,9 +59,10 @@ class Declaration:
         autos: The `Auto` fields.
         tunables: The `Auto` fields a caller, a profile or the tuner sets.
         domains: Each tunable's declared `Domain`, by name.
-        array: The fields the array reads, which its ``Array`` lists: at
-            least what a stream's tile, a core's block of it, its dtype, its
-            replication or its presence names.
+        array: The fields the array reads, which its generated ``Array``
+            holds: what a stream's tile, a core's block of it, its dtype, its
+            replication or its presence names, those declared
+            ``array=True``, and any its ``Array`` annotates itself.
         probes: Each `Param(probe=)` field's probe, by name.
     """
 
@@ -237,8 +238,8 @@ class Declaration:
                     f"{cls.__name__}.{n}: when={when!r} must be a callable of "
                     f"(op, dev), the flag the tunable is searched under"
                 )
-        # The array tier: what the Array lists, which must hold what a stream's
-        # tile, a core's block of it, its dtype, its replication or its presence names.
+        # The array tier: what a stream's tile, a core's block of it, its
+        # dtype, its replication or its presence names, and array=True fields.
         named: set[str] = set()
         for m in members:
             if isinstance(m, Operand) and m.obj_dims is not None:
@@ -264,13 +265,25 @@ class Declaration:
                 f"{cls.__name__}.Array lists {stray}, which are neither fields nor "
                 f"members of {cls.__name__}; compute them in the Array"
             )
-        unlisted = sorted(named - listed)
-        if unlisted:
-            raise TypeError(
-                f"{cls.__name__}: {unlisted} configure the array (a stream's tile, "
-                f"lanes, dtype or presence names them), but {cls.__name__}.Array "
-                f"does not list them"
+        # The Array is generated: it gains every field a stream names or that
+        # is declared array=True, and every member, it does not list yet.
+        named |= {n for n, s in specs.items() if s.array}
+        missing = [
+            n
+            for n in [*fields, *(m.name for m in members)]
+            if n not in listed and (n in named or n not in fields)
+        ]
+        if missing:
+            cls.Array = type(
+                cls.Array.__name__,
+                (cls.Array,),
+                {
+                    "__module__": cls.Array.__module__,
+                    "__qualname__": cls.Array.__qualname__,
+                    "__annotations__": {n: Any for n in missing},
+                },
             )
+            listed |= set(missing)
         own = fields.keys() - {f.name for f in dataclasses.fields(library)}
         self.array = tuple(n for n in fields if n in listed and n in own)
         self.probes = {

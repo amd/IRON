@@ -21,11 +21,9 @@ class AXPY(BinaryElementwise):
         ]
     )
 
-    scalar_factor: float = Param(default=3.0)
+    scalar_factor: float = Param(default=3.0, array=True)
 
     class Array(BinaryElementwise.Array):
-        scalar_factor: float
-
         def kernel(self):
             return datamovement.axpy(self.tile_size)
 

@@ -142,10 +142,10 @@ reuse lint
        whose `build()` builds ObjectFIFOs and Workers and binds each
        operand's lane to a fifo's shim end, and optionally `sequence(rt)`
        when the runtime sequence is not the derived one. The array tier is
-       the fields the `Array` lists, which must include what an `obj_type=`
-       names; one array serves every extent. A shipped binary
+       the fields the `Array` reads: what an `obj_type=` names and what is
+       declared `array=True`; one array serves every extent. A shipped binary
        is a subclass declared with `image=Xclbin(...)`, its operands pinned
-       by its `Array.build()` (`operand.pin([DmaEndpoint(...), ...])`, each lane on a shim channel of the image). Two hooks change what is built: `configuration()`, the
+       by its `Array.build()` (`operand.pin([DmaEndpoint(...), ...])`, each lane on a shim channel of the image). Two hooks change what is built: `xclbin_operator()`, the
        operator whose xclbin this one runs (itself by default; flm's GEMM
        returns its shape-free half, so one xclbin serves every shape), and
        `exported_design()`, a callable returning the module (an
@@ -217,7 +217,7 @@ reuse lint
      module, a `DeviceConfiguration` per array or pack composed by
      mlir-aie's `Program.compose`),
      `FusedImage`/`XclbinChain` (the full ELF or the chain of xclbins it
-     links; a design whose `configuration()` is another operator, or a
+     links; a design whose `xclbin_operator()` is another operator, or a
      shipped image, runs that xclbin rather than a link of its own), an
      operator's own image (what an operator called outside a graph runs,
      the one-step sequence `TracedGraph.of_step(op)` as an xclbin chain:
@@ -403,7 +403,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      which sets the flag (`RMSNorm.step(x, weight=w)` is `weighted=True`)
    - a `Value(derive=...)` for every trip count the core reads, so the
      array never depends on the extent; what else the array bakes is a
-     field its `Array` lists
+     field declared `Param(array=True)` (or `Auto(array=True)`)
    - which of these computes a quantity from other fields depends on who
      reads it:
 
@@ -413,11 +413,11 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      | A compile-time field a caller may still override (`check_derived` catches disagreement) | `Param(derive=lambda op: ...)` |
      | A tunable `resolve(dev)` always fills, never a caller's | `Auto(init=False)`, given by `resolve`'s `self.replace(...)` |
      | A core, as a trip count or scalar | `Value(derive=lambda op: ...)` |
-   - `class Array(Operator.Array)`: a frozen dataclass naming, as
-     annotated fields, the operator's fields, operands (`x: Operand`) and
-     values (`count: Value`) its `build()` reads, plus `dev`, `finish`,
-     `finishing` and the like where it reads them; `op.array_config()` makes
-     it from the operator. `build() -> Built` builds ObjectFIFOs and Workers
+   - `class Array(Operator.Array)`: the array tier, a frozen dataclass the
+     class generates with every field a stream names, every field declared
+     `array=True` and every operand and value; it annotates only the
+     library's views it reads (`dev: Any`, `finishing: Finish`, ...), and
+     `op.array_config()` makes it from the operator. `build() -> Built` builds ObjectFIFOs and Workers
      (`self.kernel()` or a factory's `ExternalFunction`), `range_()` for
      loops, and `self.x.bind([f.prod() for f in fifos])` (a handle per lane)
      for every streamed operand. The values the cores read are their
@@ -461,7 +461,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    `(self.scalar_factor,)`, `RMSNorm` `(self.epsilon,)`; the factories take
    no `a=` or `epsilon=`),
    so the operator declares no `kernel_call` or `reference` of its own; a
-   field it passes is one its `Array` lists. An elementwise operator
+   field it passes is declared `array=True`. An elementwise operator
    whose core makes more than one call over a line lists them in `chain()`,
    each a `KernelCall(kernel, scalars, operands)` naming its input tiles by
    operand (`(self.x,)`, or `None` for the line the call before it wrote).
@@ -694,7 +694,7 @@ code before relying on a line here; it is the authority.
 ### Rationale
 
 - **One class per operator, tiers by declaration.** The array tier is
-  the fields the operator's `Array` lists, which must hold what an
+  the fields the operator's `Array` reads, at least what an
   `obj_type=`/`per=` names; `Array.build()` sees that tier alone, so an
   extent cannot leak into a core program. Trip
   counts are `Value`s the sequence writes, so one array serves every
@@ -757,7 +757,7 @@ code before relying on a line here; it is the authority.
   tiles an `Array.build()` names are a choice, the choice can be a tunable:
   `gemm.py` declares its own `Enum` of named placements (`GEMMPlacement`)
   and a field `placement: GEMMPlacement = Auto(default=GEMMPlacement.SHIMS)`
-  its `Array` lists, left out of a domain since an `Enum`-annotated tunable
+  its `Array` reads, left out of a domain since an `Enum`-annotated tunable
   is searched over its own members. `Array.build()` writes mlir-aie's
   `Tile(c, r)`, `Tile(col=c)` or `Any*Tile` (`AnyComputeTile`, `AnyMemTile`,
   `AnyShimTile`) by the resolved member, the hand-found one the default.

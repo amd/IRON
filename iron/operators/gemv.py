@@ -26,7 +26,6 @@ from iron.common import (
     Finish,
     In,
     Link,
-    Operand,
     Operator,
     Out,
     Param,
@@ -186,7 +185,7 @@ class GEMV(Operator):
             of=lambda op, dev: op.M, step=lambda op, dev: op.tile_size_input, span=3
         )
     )
-    kernel_vector_size: int = Auto(repr=False)
+    kernel_vector_size: int = Auto(repr=False, array=True)
 
     # B, a prologue's and a finish's inputs ride A's stream.
     A = In(
@@ -356,16 +355,6 @@ class GEMV(Operator):
                 )
 
     class Array(Operator.Array):
-        K: int
-        num_aie_columns: int
-        num_channels: int
-        tile_size_input: int
-        tile_size_output: int
-        kernel_vector_size: int
-        A: Operand
-        C: Operand
-        tiles: Value
-        batches: Value
         finishing: Finish
         preparing: Prepare
 

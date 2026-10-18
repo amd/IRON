@@ -81,12 +81,12 @@ class Built:
 
 @dataclass_transform(kw_only_default=True, frozen_default=True)
 class Array:
-    """The array tier of an operator, which its array is built from alone:
-    an operator's ``Array`` names the fields, operands, values and chains
-    its ``build`` reads. Each subclass is a frozen dataclass, made so as
-    its body finishes.
+    """The array tier of an operator, which its array is built from alone.
+    Each subclass is a frozen dataclass, made so as its body finishes; the
+    operator's ``Declaration`` adds every field a stream names, every field
+    declared ``array=True`` and every member.
 
-    Besides the operator's own fields and members, an ``Array`` may name
+    Besides those, an ``Array`` may annotate
     its ``finish`` and ``prepare`` chains, its operands (``buffers``,
     ``inputs``, ``outputs``, ``finish_inputs``, ``prepare_inputs``), the
     chains as its cores apply them (``finishing``, ``preparing``) and

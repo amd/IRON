@@ -6,7 +6,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
 
-from iron.common import Built, In, KernelCall, Operand, Out, Param, Rowwise, Rtp
+from iron.common import Built, In, KernelCall, Out, Param, Rowwise, Rtp
 from iron.common.elementwise import Sweep
 from iron.common.testing import Testing
 
@@ -30,7 +30,7 @@ class RMSNorm(Rowwise):
     )
 
     # The epsilon under the root: 1e-5 by default; a model states its own.
-    epsilon: float = Param(default=1e-5)
+    epsilon: float = Param(default=1e-5, array=True)
     weighted: bool = Param(default=False)
 
     x = In(
@@ -91,12 +91,6 @@ class RMSNorm(Rowwise):
         )
 
     class Array(Rowwise.Array):
-        epsilon: float
-        weighted: bool
-        x: Operand
-        weight: Operand | None
-        y: Operand
-
         def kernel(self):
             return norm.rms_norm_eps(self.tile_size)
 

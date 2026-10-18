@@ -33,10 +33,13 @@ class ParamSpec:
     Attributes:
         derive: The field's computing default, or None.
         probe: The value the tuner measures the field at, or ``MISSING``.
+        array: The operator's ``Array`` reads the field though no stream
+            names it.
     """
 
     derive: Callable[[Any], Any] | None
     probe: Any
+    array: bool
 
     @staticmethod
     def of(field: object) -> ParamSpec | None:
@@ -71,11 +74,12 @@ def Param(
     repr: bool = True,
     init: bool = True,
     probe: Any = MISSING,
+    array: bool = False,
 ) -> Any:
     """A compile-time parameter: given by the caller or inferred from the
     operands.
 
-    A field the operator's ``Array`` lists configures the array; any other
+    A field the operator's ``Array`` reads configures the array; any other
     rebuilds only the instruction stream.
 
     Args:
@@ -96,6 +100,9 @@ def Param(
             the value that leaves the output most informative (the
             identity), since a setting judged exact there is taken as exact
             at every value. `None` is a probe like any other.
+        array: The operator's ``Array`` reads the field (a scalar its
+            kernel takes, a flag its build branches on), though no stream's
+            tile, lanes, dtype or presence names it.
 
     Returns:
         The field.
@@ -110,7 +117,7 @@ def Param(
         init=init,
         repr=repr,
         kw_only=True,
-        metadata={SPEC: ParamSpec(derive=derive, probe=probe)},
+        metadata={SPEC: ParamSpec(derive=derive, probe=probe, array=array)},
     )
 
 
@@ -120,6 +127,7 @@ def Auto(
     domain: Domain | tuple[Any, ...] | None = None,
     repr: bool = True,
     init: bool = True,
+    array: bool = False,
 ) -> Any:
     """A tunable ``Operator.resolve`` fills for the device when the caller
     does not.
@@ -144,6 +152,7 @@ def Auto(
             is not searched.
         repr: The field is in the operator's repr.
         init: The field is a constructor argument.
+        array: As ``Param``'s.
 
     Returns:
         The field.
@@ -157,6 +166,7 @@ def Auto(
             SPEC: AutoSpec(
                 derive=None,
                 probe=MISSING,
+                array=array,
                 default=default,
                 domain=domain,
             ),

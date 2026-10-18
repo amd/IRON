@@ -64,7 +64,7 @@ class MV(Operator):
     columns: int | None = Auto()
     tile_out: int = Auto(default=64)
     vec: int | None = Auto(repr=False)
-    epilogue: str = Param(default="none")
+    epilogue: str = Param(default="none", array=True)
 
     A = In(num_batches, M, K, obj_type=(tile_out, K), per=columns)
     B = In(num_batches, K, obj_type=(K,), broadcast=True)
@@ -86,11 +86,6 @@ class MV(Operator):
             raise ValueError(f"M={self.M} is not a multiple of {unit}")
 
     class Array(Operator.Array):
-        K: int
-        columns: int
-        tile_out: int
-        epilogue: str
-
         def build(self) -> Built:
             return Built([self.K, self.columns, self.tile_out, self.epilogue])
 
@@ -640,14 +635,28 @@ def test_array_sees_the_array_tier_alone():
         Leaky(M=1024, K=128).resolved(NPU2).array_config().build()
 
 
-def test_an_array_lists_what_names_its_streams_and_nothing_else():
-    with pytest.raises(TypeError, match=r"\['tile_out'\] configure the array"):
+def test_an_array_reads_what_names_its_streams_and_nothing_else():
+    # Generated: the fields a stream names, those declared array=True, and
+    # every member, with no annotation of its own.
+    fields = [f.name for f in dataclasses.fields(MV.Array)]
+    assert fields == [
+        "K",
+        "columns",
+        "tile_out",
+        "epilogue",
+        "A",
+        "B",
+        "C",
+        "count",
+        "start",
+    ]
 
-        class Untiled(MV):
-            class Array(Operator.Array):
-                K: int
-                columns: int
+    class Listed(MV):
+        class Array(Operator.Array):
+            K: int  # an annotation of its own is kept, not repeated
 
+    assert [f.name for f in dataclasses.fields(Listed.Array)].count("K") == 1
+    assert Listed.declaration.array == MV.declaration.array
     with pytest.raises(TypeError, match=r"lists \['work'\], which are neither"):
 
         class Stray(MV):
