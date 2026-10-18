@@ -19,7 +19,7 @@ class ReLU(UnaryElementwise):
 
 A core calls the kernel in its contract's argument order, with the scalars
 the factory binds and those ``scalars()`` supplies. A field either reads is
-one the ``Array`` lists.
+declared ``array=True`` unless a stream names it.
 """
 
 from __future__ import annotations

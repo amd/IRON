@@ -71,6 +71,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- An operator's nested `Array` annotates only the library's views it reads
+  (`dev`, `buffers`, `inputs`, `outputs`); an annotation of a field or member
+  is refused. A field the array reads that no stream names is declared
+  `Param(array=True)` or `Auto(array=True)`.
 - `F.rms_norm(input, normalized_shape, weight=None, eps=None)` and
   `F.layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-5)`
   take torch's arguments in torch's order; `eps=None` is the input dtype's

@@ -254,11 +254,8 @@ def test_a_probe_may_not_be_on_a_field_the_array_reads():
 
         class Baked(Operator):
             n: int = Param()
-            alpha: float = Param(probe=1.0)
+            alpha: float = Param(probe=1.0, array=True)
             x = In(n)
-
-            class Array(Operator.Array):
-                alpha: float
 
     with pytest.raises(TypeError, match="probe= on an array field"):
 
@@ -266,9 +263,6 @@ def test_a_probe_may_not_be_on_a_field_the_array_reads():
             n: int = Param()
             t: int = Param(probe=16)
             x = In(n, obj_type=(t,))
-
-            class Array(Operator.Array):
-                t: int
 
 
 def test_a_probe_may_not_be_on_a_field_the_transfers_follow():
@@ -367,9 +361,6 @@ def test_an_unresolved_tile_dimension_refuses_to_resolve():
         t: int = Auto()
         x = In(n, obj_type=(t,))
 
-        class Array(Operator.Array):
-            t: int
-
     with pytest.raises(ValueError, match="t is None.*Resolve the operator first"):
         Tiled(n=64).x.obj_type
 
@@ -378,9 +369,6 @@ def test_a_block_float_tile_is_sized_by_its_blocks(npu2):
     class Blocks(Operator):
         n: int = Param()
         x = In(n, dtype=bfp.v8bfp16ebs8, obj_type=(4096,))
-
-        class Array(Operator.Array):
-            pass
 
     # 4096 blocks of 9 bytes: past half a core memory bank, so one deep.
     assert Blocks(n=4096).x.l1_depth == 1
@@ -444,9 +432,6 @@ def test_per_call_values_bind_on_the_operator():
         src = In(n, obj_type=(n,))
         off = Value()
         live = DispatchTime()
-
-        class Array(Operator.Array):
-            n: int
 
     op = Copy(n=256)
     assert [v.name for v in op.values] == ["off", "live"]
@@ -520,9 +505,6 @@ class Scaled(Operator):
     y = Out(N, obj_type=(N,))
 
     class Array(Operator.Array):
-        N: int
-        scaled: bool
-
         def build(self) -> Built:
             return Built([self.scaled])
 
@@ -660,17 +642,15 @@ def test_an_array_reads_what_names_its_streams_and_nothing_else():
         "start",
     ]
 
-    class Listed(MV):
-        class Array(Operator.Array):
-            K: int  # an annotation of its own is kept, not repeated
-
-    assert [f.name for f in dataclasses.fields(Listed.Array)].count("K") == 1
-    assert Listed.declaration.array == MV.declaration.array
-    with pytest.raises(TypeError, match=r"lists \['work'\], which are neither"):
-
-        class Stray(MV):
-            class Array(MV.Array):
-                work: int
+    # By hand it annotates only the library's views: a field, a member or
+    # anything else is refused.
+    for name in ("K", "A", "work"):
+        with pytest.raises(TypeError, match=rf"annotates \['{name}'\], but"):
+            type(
+                "Listed",
+                (MV,),
+                {"Array": type("Array", (MV.Array,), {"__annotations__": {name: int}})},
+            )
 
 
 def test_resolution_fills_every_tunable_or_says_which_it_left():
@@ -950,9 +930,6 @@ class Rows(Operator):
         return dataclasses.replace(self)
 
     class Array(Operator.Array):
-        cols: int
-        lanes: int
-
         def build(self) -> Built:
             return Built([])
 

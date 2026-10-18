@@ -18,7 +18,7 @@ from aie.utils.compile.jit.markers import In, Out
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import BinaryElementwise, Operand
+from iron.common import BinaryElementwise
 from iron.tests.toolchain.lowering import lower
 from iron.tests.toolchain.tools import requires
 
@@ -38,10 +38,6 @@ class VectorAdd(BinaryElementwise):
     """y = a + b."""
 
     class Array(BinaryElementwise.Array):
-        a: Operand
-        b: Operand
-        y: Operand
-
         def kernel(self):
             tiles = [self.a.obj_type, self.b.obj_type, self.y.obj_type, np.int32]
             contract = KernelContract(

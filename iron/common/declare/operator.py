@@ -3,8 +3,9 @@
 
 """The operator: one class declaring the array, the buffers and the sequence.
 
-The fields its ``Array`` lists, which hold those a tile names, configure the
-array, which serves every extent; the rest reach only the runtime sequence.
+The fields its ``Array`` reads, those a tile names and those declared
+``array=True``, configure the array, which serves every extent; the rest
+reach only the runtime sequence.
 """
 
 from __future__ import annotations
@@ -98,7 +99,7 @@ class Array:
     operator's ``Declaration`` adds every field a stream names, every field
     declared ``array=True`` and every member.
 
-    Besides those, an ``Array`` may annotate its operands (``buffers``,
+    Besides those, an ``Array`` annotates only its operands (``buffers``,
     ``inputs``, ``outputs``) and ``dev``; a property of the operator it may
     not, since what it reads would be outside the array's identity.
     """

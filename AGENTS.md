@@ -414,8 +414,9 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      | A core, as a trip count or scalar | `Value(derive=lambda op: ...)` |
    - `class Array(Operator.Array)`: the array tier, a frozen dataclass the
      class generates with every field a stream names, every field declared
-     `array=True` and every operand and value; it annotates only the
-     library's views it reads (`dev: Any`, `buffers: list[Operand]`), and
+     `array=True` and every operand and value; by hand it annotates only
+     the library's views it reads (`dev: Any`, `buffers: list[Operand]`),
+     and any other annotation is refused, and
      `op.array_config()` makes it from the operator. `build() -> Built` builds ObjectFIFOs and Workers
      (`self.kernel()` or a factory's `ExternalFunction`), `range_()` for
      loops, and `self.x.bind([f.prod() for f in fifos])` (a handle per lane)
@@ -692,8 +693,8 @@ code before relying on a line here; it is the authority.
 ### Rationale
 
 - **One class per operator, tiers by declaration.** The array tier is
-  the fields the operator's `Array` reads, at least what an
-  `obj_type=`/`per=` names; `Array.build()` sees that tier alone, so an
+  the fields the operator's `Array` reads, what an `obj_type=`/`per=`
+  names and what is declared `array=True`; `Array.build()` sees that tier alone, so an
   extent cannot leak into a core program. Trip
   counts are `Value`s the sequence writes, so one array serves every
   extent and one build serves many shapes.

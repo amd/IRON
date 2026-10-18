@@ -36,7 +36,6 @@ from iron.common import (
     Built,
     Extent,
     In,
-    Operand,
     Operator,
     Out,
     Param,
@@ -78,11 +77,6 @@ class MV(Operator):
     B = In(num_batches, K, obj_type=(K,), broadcast=True)
     C = Out(num_batches, M, obj_type=(tile_out,), per=(cols,))
     valid = Extent(M)
-
-    class Array(Operator.Array):
-        K: int
-        cols: int
-        tile_out: int
 
 
 class Task(NamedTuple):
@@ -263,13 +257,6 @@ class Words(Operator):
     pos = Value()
 
     class Array(Operator.Array):
-        tile: int
-        A: Operand
-        first: Value
-        block: Value
-        last: Value
-        pos: Value
-
         def build(self) -> Built:
             fifo = ObjectFifo(self.A.obj_type)
             self.A.bind(fifo.prod())
@@ -684,10 +671,6 @@ def test_a_lane_pins_to_a_channel_moving_its_way():
         c: int = Auto(default=2)
         x = In(n, obj_type=(n,))
         y = Out(n, obj_type=(n,), per=(c,))
-
-        class Array(Operator.Array):
-            n: int
-            c: int
 
     op = Pinned(n=2)
     shims = [Tile(c, 0) for c in range(2)]

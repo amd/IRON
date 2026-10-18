@@ -41,7 +41,6 @@ from iron.common import (
     Auto,
     Built,
     In,
-    Operand,
     Operator,
     Out,
     Precision,
@@ -53,8 +52,6 @@ from iron.common import (
 from iron.operators.flm.gemm.design import (
     K_TILE,
     M_TILE,
-    Gelu,
-    Rounding,
     S,
     T,
 )
@@ -171,16 +168,6 @@ class Shipped(
     parameters = Value(derive=_parameter_words, words=PARAMETER_WORDS)
 
     class Array(Operator.Array):
-        rows: int
-        cols: int
-        b_dtype: object
-        b_col_maj: bool
-        epilogue_modes: tuple
-        rounding: Rounding | str
-        gelu: Gelu | str
-        A: Operand
-        B: Operand
-        C: Operand
         dev: Device
 
         def build(self) -> Built:

@@ -19,8 +19,8 @@ from .operand import Operand
 from .shape import Select, Shape
 from .value import Extent, Value
 
-# What an Array may list besides the operator's fields and members: its
-# operands and the device.
+# What an Array annotates by hand, besides what it is given: its operands
+# and the device.
 LIBRARY_VIEWS = frozenset({"buffers", "inputs", "outputs", "dev"})
 
 
@@ -50,8 +50,7 @@ class Declaration:
         domains: Each tunable's declared `Domain`, by name.
         array: The fields the array reads, which its generated ``Array``
             holds: what a stream's tile, its dtype, its replication or its
-            presence names, those declared
-            ``array=True``, and any its ``Array`` annotates itself.
+            presence names, and those declared ``array=True``.
         probes: Each `Param(probe=)` field's probe, by name.
     """
 
@@ -223,22 +222,24 @@ class Declaration:
                     named.add(m.declared_dtype.name)
                 if m.when is not None:
                     named.add(m.when.name)
+        named |= {n for n, s in specs.items() if s.array}
+        # The Array is generated with those fields and every member; by hand
+        # it annotates only the library's views it reads.
+        if "Array" in vars(cls):
+            hand = sorted(inspect.get_annotations(cls.Array).keys() - LIBRARY_VIEWS)
+            if hand:
+                raise TypeError(
+                    f"{cls.__name__}.Array annotates {hand}, but an Array annotates "
+                    f"only {sorted(LIBRARY_VIEWS)}: it is given every member and "
+                    f"every field a stream names; declare another field it reads "
+                    f"Param(array=True) or Auto(array=True), and compute anything "
+                    f"else in the Array"
+                )
         listed = (
             {f.name for f in dataclasses.fields(cls.Array)}
             if dataclasses.is_dataclass(cls.Array)
             else set()
         )
-        stray = sorted(
-            listed - fields.keys() - {m.name for m in members} - LIBRARY_VIEWS
-        )
-        if stray:
-            raise TypeError(
-                f"{cls.__name__}.Array lists {stray}, which are neither fields nor "
-                f"members of {cls.__name__}; compute them in the Array"
-            )
-        # The Array is generated: it gains every field a stream names or that
-        # is declared array=True, and every member, it does not list yet.
-        named |= {n for n, s in specs.items() if s.array}
         missing = [
             n
             for n in [*fields, *(m.name for m in members)]

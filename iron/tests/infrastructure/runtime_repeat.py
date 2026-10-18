@@ -24,7 +24,7 @@ from aie.utils.txn_trace import trace
 
 import iron
 from iron import Scratchpad
-from iron.common import Built, Extent, In, Operand, Operator, Out, Param, Value
+from iron.common import Built, Extent, In, Operator, Out, Param, Value
 from iron.common.design import OperatorDesign
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
@@ -51,10 +51,6 @@ class RepeatTile(Operator):
         return dataclasses.replace(self)
 
     class Array(Operator.Array):
-        width: int
-        x: Operand
-        y: Operand
-
         def build(self) -> Built:
             fifo_in = ObjectFifo(self.x.obj_type, depth=2)
             fifo_out = fifo_in.cons().forward(depth=2)
