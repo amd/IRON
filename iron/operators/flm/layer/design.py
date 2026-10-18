@@ -164,8 +164,6 @@ PLE_LOCKS = dict(
     y_prod_lock=(6, 1),
     y_cons_lock=(7, 0),
 )
-# The lock of the DMA's second norm_w BD. No kernel takes it.
-PLE_NORM_W_P2_LOCK = 8
 # final_x_* are locks of the RMS tile, to the left of the gate tile.
 GLE_LOCKS = dict(
     x_prod_lock=(0, 1),
@@ -532,11 +530,17 @@ class _Array:
         return buf
 
     def add_locks(self, tile: Tile, ids_inits) -> list[Lock]:
-        """The tile's locks, one per (lock id, init) pair."""
+        """The tile's locks, one per (lock id, init) pair: a kernel takes
+        them by id. A lock id of None is the compiler's to assign.
+        """
         out = [Lock(tile=tile, lock_id=i, init=init) for i, init in ids_inits]
         for lock in out:
             self.rt.add_lock(lock)
         return out
+
+    def dma_locks(self, tile: Tile, *inits: int) -> list[Lock]:
+        """Locks only DMAs take, one per init, their ids the compiler's."""
+        return self.add_locks(tile, [(None, init) for init in inits])
 
     def locks(self, tile: Tile, table: dict, **inits: int) -> dict[str, Lock]:
         """The tile's locks in ``table``, by name; ``inits`` sets those it leaves."""
@@ -685,7 +689,7 @@ class _Array:
         ple_w0 = Buffer(type=w_ty, name=f"proj_w_0_{ple_name}", tile=ple_tile)
         ple_w1 = Buffer(type=w_ty, name=f"proj_w_1_{ple_name}", tile=ple_tile)
         pl = self.locks(ple_tile, PLE_LOCKS)
-        (ple_norm_w_p2,) = self.add_locks(ple_tile, [(PLE_NORM_W_P2_LOCK, 0)])
+        (ple_norm_w_p2,) = self.dma_locks(ple_tile, 0)
         norm_w = TensorAccessPattern.full(ple_norm_w.shape)
         # x0_per_layer, the two halves of norm_w, then x0, in one ring of BDs.
         ring = (
@@ -766,9 +770,7 @@ class _Array:
         plm_y = Buffer(
             type=plm_dual_y_ty, name=f"y_{plm_tile.row}_{plm_tile.col}", tile=plm_tile
         )
-        plm_norm_i_prod, plm_res_gate_prod, plm_cons = self.add_locks(
-            plm_tile, [(0, 1), (1, 0), (2, 0)]
-        )
+        plm_norm_i_prod, plm_res_gate_prod, plm_cons = self.dma_locks(plm_tile, 1, 0, 0)
         self.rt.add_tile_dma(
             TileDma(
                 plm_tile,
@@ -963,12 +965,12 @@ class _Array:
         y1 = Buffer(type=m_col_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
         w0, w1 = _proj_weight_buffers(mt)
         # A lock per sending core, each releasing the next; the last, yc, the send.
-        y_locks = self.add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 0), (4, 0)])
+        y_locks = self.dma_locks(mt, 2, 0, 0, 0, 0)
         yc = y_locks[-1]
         y = TensorAccessPattern.full(y0.shape)
         # The first slot carries the packet header's 2 words.
         ends = [0] + [2 * m * (j + 1) + 2 for j in range(4)]
-        wc = _proj_weight_channels(w0, w1, *self.add_locks(mt, _PROJ_MEM_W_LOCKS))
+        wc = _proj_weight_channels(w0, w1, *self.dma_locks(mt, *_PROJ_MEM_W_INITS))
         self.rt.add_tile_dma(
             TileDma(
                 mt,
@@ -996,7 +998,7 @@ class _Array:
     def proj_weight_mem(self, mt: Tile) -> None:
         """A projection memtile that carries weights only."""
         w0, w1 = _proj_weight_buffers(mt)
-        wc = _proj_weight_channels(w0, w1, *self.add_locks(mt, _PROJ_MEM_W_LOCKS))
+        wc = _proj_weight_channels(w0, w1, *self.dma_locks(mt, *_PROJ_MEM_W_INITS))
         self.rt.add_tile_dma(TileDma(mt, [wc["in0"], *wc["out"], wc["in1"]]))
 
     def proj_x_mem(self, mt: Tile) -> None:
@@ -1009,12 +1011,10 @@ class _Array:
         y1 = Buffer(type=m_full_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
         x0 = Buffer(type=x_chunk_ty, name=f"x_buffer_0_{r}_{c}", tile=mt)
         x1 = Buffer(type=x_chunk_ty, name=f"x_buffer_1_{r}_{c}", tile=mt)
-        mp0, mp1, mc, xp, xc = self.add_locks(
-            mt, [(0, 2), (1, 0), (2, 0), (3, 2), (4, 0)]
-        )
+        mp0, mp1, mc, xp, xc = self.dma_locks(mt, 2, 0, 0, 2, 0)
         y = TensorAccessPattern.full(y0.shape)
         w0, w1 = _proj_weight_buffers(mt)
-        wc = _proj_weight_channels(w0, w1, *self.add_locks(mt, _PROJ_MEM_W_LOCKS))
+        wc = _proj_weight_channels(w0, w1, *self.dma_locks(mt, *_PROJ_MEM_W_INITS))
         self.rt.add_tile_dma(
             TileDma(
                 mt,
@@ -1190,12 +1190,12 @@ class _Array:
         k_order = k.tile((LK, 8))[0]
         v_order = k_order if two_kv else k.tile((8, 8))
         amt_chans = []
-        for ch, (key, row, order, lock_ids) in enumerate(
+        for ch, (key, row, order) in enumerate(
             (
-                ("k", k_row, k_order, (0, 1)),
-                ("v", k_row, v_order, (3, 4)),
-                ("swa_k", sk_row, sk.tile((LK, 8))[0], (5, 6)),
-                ("swa_v", sk_row, sk.tile((8, 8)), (7, 8)),
+                ("k", k_row, k_order),
+                ("v", k_row, v_order),
+                ("swa_k", sk_row, sk.tile((LK, 8))[0]),
+                ("swa_v", sk_row, sk.tile((8, 8))),
             )
         ):
             b0, b1 = (
@@ -1206,7 +1206,7 @@ class _Array:
                 )
                 for i in (0, 1)
             )
-            prod, cons = self.add_locks(amt, [(lock_ids[0], 2), (lock_ids[1], 0)])
+            prod, cons = self.dma_locks(amt, 2, 0)
             amt_chans += [
                 _ping_pong(DMAChannelDir.S2MM, ch, b0, b1, prod, cons),
                 _ping_pong(DMAChannelDir.MM2S, ch, b0, b1, cons, prod, tap=order),
@@ -1494,8 +1494,8 @@ def _sequence(
 
 
 _LINEAR_4W_TY = np.ndarray[(4 * W_BLOCK,), _BF16]
-# (lock id, init) of a projection memtile's weight locks.
-_PROJ_MEM_W_LOCKS = [(5, 2), (6, 0), (7, 0), (8, 2), (9, 0), (10, 0)]
+# The inits of a projection memtile's weight locks.
+_PROJ_MEM_W_INITS = (2, 0, 0, 2, 0, 0)
 
 
 def _proj_weight_channels(w0, w1, *locks):
