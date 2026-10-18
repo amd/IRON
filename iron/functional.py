@@ -24,8 +24,8 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 
 import iron
-import iron.lm.blocks as blocks
 from iron.common import Precision
+from iron.common.feature_map import ConcatChannels, Conv2d, MaxPool2d
 from iron.common.image.packaging import require_device
 from iron.operators.copy import Copy
 from iron.operators.flm.gemm.design import M_TILE, Epilogue, compute_rows
@@ -187,8 +187,19 @@ def causal_conv1d(x, taps, state):
     return y
 
 
-def conv2d(x, weight, bias=None, stride=1, padding=0, groups=1):
-    """The feature map ``x`` convolved by ``weight`` ``(out, in / groups,
+def _feature_map(name: str, x) -> tuple[int, int, int]:
+    """``x``'s ``(H, W, C)``.
+
+    Raises:
+        ValueError: ``x`` is not of three axes.
+    """
+    if len(x.shape) != 3:
+        raise ValueError(f"{name}(): x {tuple(x.shape)} is not a map (H, W, C)")
+    return x.shape
+
+
+def conv2d(x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+    """The feature map ``x`` convolved by ``weight`` ``(out, C / groups,
     k, k)`` at ``stride``, inside ``padding`` zero pixels a side, plus
     ``bias`` per output channel if given.
 
@@ -197,9 +208,24 @@ def conv2d(x, weight, bias=None, stride=1, padding=0, groups=1):
     if they are not, the rows past them computed and dropped. Any other is
     ``Conv2d``, its input copied into a held zero border. ``groups`` is
     ``1`` or depthwise, as ``Conv2d`` builds.
+
+    Raises:
+        ValueError: ``x`` is not a map, its channels are not the weight's
+            times ``groups``, the kernel is not square, or ``dilation`` is
+            not 1.
     """
-    H, W, C = x.shape
-    out, per_group, k, _ = weight.shape
+    H, W, C = _feature_map("conv2d", x)
+    out, per_group, k, kw = weight.shape
+    if C != per_group * groups:
+        raise ValueError(
+            f"conv2d(): x has {C} channels, the weight reads {per_group} "
+            f"times {groups} groups"
+        )
+    if k != kw or dilation != 1:
+        raise ValueError(
+            f"conv2d(): only a square kernel at dilation 1 has an operator, not "
+            f"{k}x{kw} at dilation {dilation}"
+        )
     if k == 1 and stride == 1 and groups == 1 and not padding:
         n = H * W
         pixels = x.reshape(n, C)
@@ -219,9 +245,9 @@ def conv2d(x, weight, bias=None, stride=1, padding=0, groups=1):
     # One channel a group pads its width in the band; patches read it held.
     banded = per_group == 1
     if banded:
-        conv = blocks.Conv2d(weight, W, stride, padding=padding, groups=groups)
+        conv = Conv2d(weight, W, stride, padding=padding, groups=groups)
     else:
-        conv = blocks.Conv2d(weight, W + 2 * padding, stride, groups=groups)
+        conv = Conv2d(weight, W + 2 * padding, stride, groups=groups)
     if padding:
         line = (W if banded else W + 2 * padding) * C
         shape = (H + 2 * padding, line)
@@ -244,32 +270,44 @@ def max_pool2d(x, kernel_size, stride=None, padding=0):
     ``-inf`` padding of half the window, so the map keeps its shape.
 
     Raises:
-        ValueError: Another ``stride`` or ``padding``.
+        ValueError: ``x`` is not a map, or another ``stride`` or ``padding``.
     """
+    H, W, C = _feature_map("max_pool2d", x)
     if stride != 1 or padding != kernel_size // 2:
         raise ValueError(
             f"max_pool2d(): only stride=1, padding={kernel_size // 2} has an "
             f"operator, not stride={stride}, padding={padding}"
         )
-    H, W, C = x.shape
-    y = blocks.MaxPool2d(H, W, C, kernel_size)(x.reshape(H, W * C))
+    y = MaxPool2d(H, W, C, kernel_size)(x.reshape(H, W * C))
     return y.reshape(H, W, C)
 
 
-def interpolate(x, *, scale_factor, mode="nearest"):
+def interpolate(x, size=None, scale_factor=None, mode="nearest", align_corners=None):
     """The feature map ``x`` upsampled 2x, each pixel a 2x2 block: each row
     read twice into a held map, which is then written twice, into the even
     and the odd pixels of another.
 
     Raises:
-        ValueError: Another ``scale_factor`` or ``mode``.
+        ValueError: ``x`` is not a map, or the result is not its exact 2x
+            nearest upsampling.
     """
-    if scale_factor != 2 or mode != "nearest":
+    H, W, C = _feature_map("interpolate", x)
+
+    def pair(v):
+        return tuple(v) if isinstance(v, (tuple, list)) else (v, v)
+
+    if (size is None) == (scale_factor is None):
+        doubles = False
+    elif size is not None:
+        doubles = pair(size) == (2 * H, 2 * W)
+    else:
+        doubles = pair(scale_factor) == (2, 2)
+    if not doubles or mode != "nearest" or align_corners is not None:
         raise ValueError(
-            f"interpolate(): only scale_factor=2, mode='nearest' has an "
-            f"operator, not {scale_factor}, {mode!r}"
+            f"interpolate(): only the exact 2x nearest upsampling has an operator, "
+            f"not size={size}, scale_factor={scale_factor}, mode={mode!r}, "
+            f"align_corners={align_corners}"
         )
-    H, W, C = x.shape
     doubled, out = iron.state((2 * H, W * C)), iron.state((2 * H, 2 * W * C))
     twice = TensorAccessPattern((H, W * C), 0, [H, 2, W * C], [W * C, 0, 1])
     Copy.step(x.reshape(H, W * C), doubled, src=twice)
@@ -281,47 +319,19 @@ def interpolate(x, *, scale_factor, mode="nearest"):
     return Copy.step(out[:]).reshape(2 * H, 2 * W, C)
 
 
-def cat(tensors, dim=-1):
+def cat(tensors, dim=0):
     """Two to four feature maps of one height and width joined along their
-    channels: ``ConcatChannels``.
+    channels, ``dim`` -1: ``ConcatChannels``.
 
     Raises:
-        ValueError: ``dim`` is not the channels'.
+        ValueError: A tensor is not a map, or ``dim`` is not the channels'.
     """
+    maps = [_feature_map("cat", t) for t in tensors]
     if dim not in (-1, 2):
         raise ValueError(f"cat(): only the channels, dim -1, are joined, not {dim}")
-    H, W, _ = tensors[0].shape
-    channels = tuple(t.shape[2] for t in tensors)
-    y = blocks.ConcatChannels(H, W, channels)(
-        *(t.reshape(H, W * t.shape[2]) for t in tensors)
+    H, W, _ = maps[0]
+    channels = tuple(c for _, _, c in maps)
+    y = ConcatChannels(H, W, channels)(
+        *(t.reshape(H, W * c) for t, c in zip(tensors, channels))
     )
     return y.reshape(H, W, sum(channels))
-
-
-def adaptive_avg_pool2d(x, output_size):
-    """The feature map ``x``'s mean over its pixels, each channel its own,
-    ``(1, 1, C)``: one GEMM of rows of ``1 / (H * W)`` by the pixels,
-    copied first into a held map of whole 64-pixel blocks (the GEMM's
-    ``tile_k``) between zero rows if they are not.
-
-    Raises:
-        ValueError: An ``output_size`` other than 1.
-    """
-    if output_size not in (1, (1, 1)):
-        raise ValueError(
-            f"adaptive_avg_pool2d(): only output_size=1 has an operator, not "
-            f"{output_size}"
-        )
-    H, W, C = x.shape
-    n = H * W
-    k = -(-n // 64) * 64
-    pixels = x.reshape(n, C)
-    if k != n:
-        held = iron.state((k, C))
-        held[n:] = np.zeros((k - n, C), ml_dtypes.bfloat16)
-        held[:n] = pixels
-        pixels = held
-    mean = np.zeros((blocks.GEMM_ROWS, k), ml_dtypes.bfloat16)
-    mean[:, :n] = 1 / n
-    y = GEMM.step(mean, pixels, precision=Precision.HIGHEST)
-    return y[:1].reshape(1, 1, C)

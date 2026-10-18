@@ -69,3 +69,5 @@ def test_functional_max_pool2d_is_the_max_pooling_at_stride_1_only():
     assert np.array_equal(got, want)
     with pytest.raises(ValueError, match="only stride=1"):
         Pool(None).trace(x=(x.shape, bfloat16))
+    with pytest.raises(ValueError, match="not a map"):
+        Pool(1).trace(x=((rows, width * channels), bfloat16))

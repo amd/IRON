@@ -15,7 +15,7 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, Scratchpad
-from iron.lm import Tower, blocks
+from iron.lm import Conv2d, Tower, blocks
 from iron.operators.copy import Copy
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
 from iron.operators.gemm import GEMM
@@ -77,10 +77,8 @@ class AudioTower(Tower):
             np.asarray(layer.conv.weight, np.float32)
             for layer in (sub.layer0, sub.layer1)
         )
-        self.conv0 = blocks.Conv2d(
-            w0 - w0.mean(axis=0), c.mels, stride=2, padding=1, border=1
-        )
-        self.conv1 = blocks.Conv2d(w1 - w1.mean(axis=0), F0 + 2, stride=2)
+        self.conv0 = Conv2d(w0 - w0.mean(axis=0), c.mels, stride=2, padding=1, border=1)
+        self.conv1 = Conv2d(w1 - w1.mean(axis=0), F0 + 2, stride=2)
         self.log_mel = blocks.LogMel(
             frame=c.frame,
             hop=c.hop,

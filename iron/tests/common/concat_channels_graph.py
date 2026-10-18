@@ -62,3 +62,5 @@ def test_functional_cat_joins_feature_maps_along_their_channels_only():
     assert np.array_equal(got, np.concatenate([a, b], -1))
     with pytest.raises(ValueError, match="only the channels"):
         Cat(0).trace(a=(a.shape, bfloat16), b=(b.shape, bfloat16))
+    with pytest.raises(ValueError, match="not a map"):
+        Cat(-1).trace(a=(a.shape, bfloat16), b=((ROWS, WIDTH * 2), bfloat16))

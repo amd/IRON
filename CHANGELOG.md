@@ -32,10 +32,10 @@ public API adds its entry under Unreleased.
 - `iron.functional` with torch's names: `linear`, `rms_norm`, `layer_norm`,
   `silu`, `gelu(x, approximate=)` and `rope`. `linear` replaces
   `iron.lm.blocks.project`.
-- `iron.functional` for CNNs, on channels-last `(H, W, C)` feature maps:
-  `conv2d(x, weight, bias, stride, padding, groups)`, `max_pool2d`,
-  `interpolate(x, scale_factor=2)`, `cat` and `adaptive_avg_pool2d(x, 1)`.
-  Each pads the map and its rows as its steps need.
+- `iron.functional` for CNNs, on channels-last `(H, W, C)` feature maps,
+  with torch's signatures: `conv2d`, `max_pool2d`, `interpolate` (2x
+  nearest) and `cat` (`dim=-1`). Each pads the map and its rows as its
+  steps need, and refuses what it does not compute.
 - `iron.functional.causal_conv1d(x, taps, state)`, a depth-wise causal FIR
   over a prompt chunk or a decode step that stages and carries the rows
   before the call itself; LFM2's short conv calls it.

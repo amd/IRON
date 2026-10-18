@@ -119,7 +119,7 @@ def base_conv(x, weight, bias, stride: int = 1):
     """
     out, per_group, k, _ = weight.shape
     groups = out if per_group == 1 else 1
-    y = F.conv2d(x, weight, bias.astype(bfloat16), stride, k // 2, groups)
+    y = F.conv2d(x, weight, bias.astype(bfloat16), stride, k // 2, groups=groups)
     return SiLU.step(y, tile_size=_row(y))
 
 
@@ -165,7 +165,7 @@ class YOLOXNano(iron.Graph):
         for b in m.m:
             z = self.dwconv(b.conv2, self.conv(b.conv1, y))
             y = ElementwiseAdd.step(z, y, tile_size=_row(y)) if shortcut else z
-        return self.conv(m.conv3, F.cat([y, self.conv(m.conv2, x)]))
+        return self.conv(m.conv3, F.cat([y, self.conv(m.conv2, x)], dim=-1))
 
     def backbone(self, image):
         b = self.weights.model.backbone.backbone
@@ -184,27 +184,27 @@ class YOLOXNano(iron.Graph):
         weight = np.pad(
             weight.reshape(-1, 4, 3, 3, 3), ((0, 0), (0, 0), (0, 1), (0, 0), (0, 0))
         )
-        x = base_conv(F.cat(corners), weight.reshape(-1, 16, 3, 3), bias)
+        x = base_conv(F.cat(corners, dim=-1), weight.reshape(-1, 16, 3, 3), bias)
         x = self.csp(b.dark2[1], self.dwconv(b.dark2[0], x, 2), True)
         dark3 = self.csp(b.dark3[1], self.dwconv(b.dark3[0], x, 2), True)
         dark4 = self.csp(b.dark4[1], self.dwconv(b.dark4[0], dark3, 2), True)
         spp = b.dark5[1]
         x = self.conv(spp.conv1, self.dwconv(b.dark5[0], dark4, 2))
         pooled = [F.max_pool2d(x, k, 1, k // 2) for k in POOLS]
-        x = self.conv(spp.conv2, F.cat([x, *pooled]))
+        x = self.conv(spp.conv2, F.cat([x, *pooled], dim=-1))
         return dark3, dark4, self.csp(b.dark5[2], x, False)
 
     def neck(self, dark3, dark4, dark5):
         n = self.weights.model.backbone
         top0 = self.conv(n.lateral_conv0, dark5)
-        x = F.cat([F.interpolate(top0, scale_factor=2), dark4])
+        x = F.cat([F.interpolate(top0, scale_factor=2), dark4], dim=-1)
         x = self.csp(n.C3_p4, x, False)
         top1 = self.conv(n.reduce_conv1, x)
-        x = F.cat([F.interpolate(top1, scale_factor=2), dark3])
+        x = F.cat([F.interpolate(top1, scale_factor=2), dark3], dim=-1)
         out3 = self.csp(n.C3_p3, x, False)
-        x = F.cat([self.dwconv(n.bu_conv2, out3, 2), top1])
+        x = F.cat([self.dwconv(n.bu_conv2, out3, 2), top1], dim=-1)
         out4 = self.csp(n.C3_n3, x, False)
-        x = F.cat([self.dwconv(n.bu_conv1, out4, 2), top0])
+        x = F.cat([self.dwconv(n.bu_conv1, out4, 2), top0], dim=-1)
         return out3, out4, self.csp(n.C3_n4, x, False)
 
     def head(self, i, x):
@@ -226,7 +226,7 @@ class YOLOXNano(iron.Graph):
             Sigmoid.step(y, tile_size=_row(y) // (2 if _row(y) > 4096 else 1))
             for y in (obj, scores)
         )
-        return F.cat([box, obj, scores])
+        return F.cat([box, obj, scores], dim=-1)
 
     def body(self, image):
         scales = self.neck(*self.backbone(image))
@@ -241,12 +241,12 @@ class YOLOXNano(iron.Graph):
     @staticmethod
     def predictions(scales) -> list[np.ndarray]:
         """The graph's outputs as the oracle's: each scale ``(H, W, 85)``
-        float32, its padding dropped.
+        float32, its padding dropped. A device returns each flat.
         """
         out = []
-        for y in scales:
-            y = np.asarray(y, np.float32)
-            y = y.reshape(y.shape[0], y.shape[0], BOX + OBJECTNESS + CLASSES)
+        for y, stride in zip(scales, STRIDES):
+            size = INPUT_SIZE // stride
+            y = np.asarray(y, np.float32).reshape(size, size, -1)
             box, obj = y[..., :4], y[..., BOX : BOX + 1]
             scores = y[..., BOX + OBJECTNESS : BOX + OBJECTNESS + 80]
             out.append(np.concatenate([box, obj, scores], -1))

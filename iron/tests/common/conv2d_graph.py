@@ -166,3 +166,28 @@ def test_functional_conv2d_is_the_convolution(case):
     bound = 2.0**-7 * convolution(*(np.abs(a) for a in f))
     got = np.asarray(Map().reference(x), np.float32).reshape(want.shape)
     assert (np.abs(got - want) <= bound).all()
+
+
+class Apply(iron.Graph):
+    def __init__(self, f):
+        self.f = f
+
+    def body(self, x):
+        return self.f(x)
+
+
+# A map's shape, the weight's, the keywords, and what the refusal says.
+REFUSED = {
+    "rank": ((6, 80), (16, 8, 3, 3), {}, "not a map"),
+    "channels": ((6, 10, 8), (16, 4, 3, 3), {}, "8 channels"),
+    "kernel": ((6, 10, 8), (16, 8, 1, 3), {}, "1x3"),
+    "dilation": ((6, 10, 8), (16, 8, 3, 3), dict(dilation=2), "dilation 2"),
+}
+
+
+@pytest.mark.parametrize("case", list(REFUSED))
+def test_functional_conv2d_refuses_what_it_does_not_compute(case):
+    x, shape, kwargs, match = REFUSED[case]
+    weight = np.zeros(shape, bfloat16)
+    with pytest.raises(ValueError, match=match):
+        Apply(lambda x: F.conv2d(x, weight, **kwargs)).trace(x=(x, bfloat16))

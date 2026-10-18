@@ -73,6 +73,8 @@ Formatting and licence checks are in CONTRIBUTING.md.
 - `iron/common/image/`: what a graph lowers onto: the step sequence, the
   buffer allocator, image fusion (several designs in one image),
   packaging, and an operator called on its own. All internal.
+- `iron/common/feature_map.py`: `Conv2d`, `MaxPool2d` and `ConcatChannels`,
+  the graphs `iron.functional`'s CNN functions are built on.
 - `iron/common/elementwise.py`: the shared elementwise array, its families
   and `Sweep`.
 - `iron/common/testing.py`: `Testing`, `Case`, `vectors`, `run_test`,
@@ -193,7 +195,7 @@ called per token. Its docstring and `compile`'s say how inputs, per-call
 values, weights, state and profiles are named. The rules:
 
 - A capability a model needs is an operator when it is new compute, and a
-  graph when it composes operators the library has (`iron.lm.blocks`'s
+  graph when it composes operators the library has (`iron.lm`'s
   `LogMel`, `Conv2d`, `ImagePatches`). A model calls such a graph in its
   body rather than copying its steps.
 - Tunables come from the graph's `profile`, not keywords at every call: a

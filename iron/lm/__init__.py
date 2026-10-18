@@ -14,9 +14,7 @@ from .cli import main
 from .blocks import (
     MLP,
     Attention,
-    ConcatChannels,
     Conv1d,
-    Conv2d,
     CrossDecoderLayer,
     DecoderLayer,
     Embedding,
@@ -24,11 +22,11 @@ from .blocks import (
     LayerNorm,
     Linear,
     LogMel,
-    MaxPool2d,
     Norm,
     RMSNorm,
     filterbank,
 )
+from iron.common.feature_map import ConcatChannels, Conv2d, MaxPool2d
 from .causal import CausalLM, Checkpoints, DecodeStep
 from .encoder import EncodeStep, Encoder, Tower
 from .encoder_decoder import EncoderDecoder
