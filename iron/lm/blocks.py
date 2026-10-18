@@ -611,8 +611,8 @@ class Norm:
 
     def __call__(self, w, x):
         if self.bias:
-            return F.layer_norm(x, w.weight, w.bias, self.eps)
-        return F.rms_norm(x, w.weight, self.eps)
+            return F.layer_norm(x, x.shape[-1:], w.weight, w.bias, self.eps)
+        return F.rms_norm(x, x.shape[-1:], w.weight, self.eps)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -664,10 +664,10 @@ class Attention:
         )
         q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
         if self.qk_norm:
-            q = F.rms_norm(q, w.q_norm.weight, self.eps)
-            k = F.rms_norm(k, w.k_norm.weight, self.eps)
+            q = F.rms_norm(q, (D,), w.q_norm.weight, self.eps)
+            k = F.rms_norm(k, (D,), w.k_norm.weight, self.eps)
         if self.v_norm:
-            v = F.rms_norm(v, eps=self.eps)
+            v = F.rms_norm(v, (D,), eps=self.eps)
         if angles is not None:
             q, k = self.rotate(q, angles), self.rotate(k, angles)
         o = attend(

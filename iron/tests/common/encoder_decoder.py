@@ -92,7 +92,7 @@ class Whisper(EncoderDecoder):
 
     def head(self, x):
         n = self.decoder.layer_norm
-        h = F.layer_norm(x, n.weight, n.bias, self.config.eps)
+        h = F.layer_norm(x, x.shape[-1:], n.weight, n.bias, self.config.eps)
         return GEMV.step(self.decoder.embed_tokens.weight, h)
 
 

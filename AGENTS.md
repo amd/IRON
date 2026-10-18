@@ -592,7 +592,7 @@ class Decode(iron.Graph):
 
     def body(self, x, *, pos: Scratchpad[np.int32]):
         w = self.weights
-        h = F.rms_norm(x, w.norm)                # each function infers the extents
+        h = F.rms_norm(x, (emb,), w.norm)        # each function infers the extents
         angles = Copy.step(self.rope[pos]).reshape(1, head_dim)  # gathered on the NPU
         self.k[pos] = F.rope(F.linear(h, w.wk), angles)  # a copy into the state
         return x + F.linear(h, w.wo)             # + - * / @ on handles are steps too

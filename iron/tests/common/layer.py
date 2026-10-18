@@ -228,7 +228,16 @@ def test_an_activation_with_no_operator_is_refused():
 def test_a_layer_norm_at_another_epsilon_than_its_kernels_is_refused():
     norm = SimpleNamespace(weight=np.ones(WIDTH), bias=np.zeros(WIDTH))
     with pytest.raises(ValueError, match="the kernel takes no epsilon but"):
-        Norm(1e-6, bias=True)(norm, None)
+        Norm(1e-6, bias=True)(norm, SimpleNamespace(shape=(1, WIDTH)))
+
+
+@pytest.mark.parametrize("norm", [F.rms_norm, F.layer_norm], ids=["rms", "layer"])
+def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
+    x = SimpleNamespace(shape=(4, WIDTH))
+    with pytest.raises(
+        ValueError, match=rf"\[4\] is not the last axis of input \[4, {WIDTH}\]"
+    ):
+        norm(x, 4)
 
 
 def test_a_q_k_or_v_norm_needs_its_epsilon():

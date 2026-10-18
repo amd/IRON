@@ -7,7 +7,7 @@ Each records the operator steps that compute it and returns their handle::
 
     import iron.functional as F
 
-    h = F.rms_norm(x, w.input_layernorm.weight, eps)
+    h = F.rms_norm(x, x.shape[-1:], w.input_layernorm.weight, eps)
     y = F.silu(F.linear(h, w.mlp.gate_proj.weight)) * F.linear(h, w.mlp.up_proj.weight)
 
 Weights are a checkpoint's ``(out, in)``, as ``torch.nn.Linear`` stores them.
@@ -15,6 +15,8 @@ A handle's own ``+ - * /`` and ``@`` are steps too (``Handle``).
 """
 
 import math
+
+import ml_dtypes
 
 from iron.common import Precision
 from iron.operators.flm.gemm.design import Epilogue
@@ -62,24 +64,54 @@ def linear(x, weight, bias=None, *, precision=None, **gemv):
     return (y.reshape(rows, bias.shape[0]) + bias).reshape(y.shape)
 
 
-def rms_norm(x, weight=None, eps: float = 1e-6):
-    """``x`` over the RMS of its last axis, times ``weight`` if given."""
+def _last_axis(name: str, x, normalized_shape) -> None:
+    """Refuse a ``normalized_shape`` other than ``x``'s last axis."""
+    given = (
+        (normalized_shape,)
+        if isinstance(normalized_shape, int)
+        else tuple(normalized_shape)
+    )
+    if given != tuple(x.shape[-1:]):
+        raise ValueError(
+            f"{name}(): normalized_shape {list(given)} is not the last axis of "
+            f"input {list(x.shape)}; only ({x.shape[-1]},) is normalized"
+        )
+
+
+def rms_norm(x, normalized_shape, weight=None, eps: float | None = None):
+    """``x`` over the RMS of its last axis, times ``weight`` if given.
+    ``eps`` None is ``x``'s dtype's machine epsilon, as torch's.
+
+    Raises:
+        ValueError: ``normalized_shape`` is not ``x``'s last axis.
+    """
+    _last_axis("rms_norm", x, normalized_shape)
+    if eps is None:
+        eps = float(ml_dtypes.finfo(x.dtype).eps)
     if weight is None:
         return RMSNorm.step(x, epsilon=eps)
     return RMSNorm.step(x, weight=weight, epsilon=eps)
 
 
-def layer_norm(x, weight, bias, eps: float = LAYER_NORM_EPS):
-    """``x`` less its mean over the RMS of that, times ``weight``, plus ``bias``.
+def layer_norm(
+    x, normalized_shape, weight=None, bias=None, eps: float = LAYER_NORM_EPS
+):
+    """``x`` less its mean over the RMS of that, times ``weight`` and plus
+    ``bias`` where given.
 
     Raises:
-        ValueError: ``eps`` is not the kernel's own, ``LAYER_NORM_EPS``.
+        ValueError: ``normalized_shape`` is not ``x``'s last axis, or
+            ``eps`` is not the kernel's own, ``LAYER_NORM_EPS``.
     """
+    _last_axis("layer_norm", x, normalized_shape)
     if eps != LAYER_NORM_EPS:
         raise ValueError(
             f"layer_norm(): the kernel takes no epsilon but {LAYER_NORM_EPS}, not {eps}"
         )
-    return LayerNorm.step(x) * weight + bias
+    y = LayerNorm.step(x)
+    if weight is not None:
+        y = y * weight
+    return y if bias is None else y + bias
 
 
 def silu(x):

@@ -61,6 +61,11 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `F.rms_norm(input, normalized_shape, weight=None, eps=None)` and
+  `F.layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-5)`
+  take torch's arguments in torch's order; `eps=None` is the input dtype's
+  epsilon, as torch's. A `normalized_shape` other than the input's last
+  axis is refused.
 - `F.linear(precision=)` is the one way to ask for an accurate projection:
   at `Precision.HIGHEST` several rows run the GEMM whose float32 sums round
   once, and one row, a GEMV that rounds once, takes any precision.
