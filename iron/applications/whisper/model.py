@@ -22,7 +22,6 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
-import iron.functional as F
 from iron import Scratchpad
 from iron.lm import (
     MLP,
@@ -199,6 +198,8 @@ class WhisperEncoder(Tower):
         self.final_norm = e.layer_norm
         self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.num_mel_bins)
         self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
+        # The convolutions' GELU is the layers' hidden_act.
+        self.act = MLP(c.hidden_act).act
         # The second convolution's input: a zero row, then the first's output.
         self.convolved = iron.state((2 * c.rows + 1, c.hidden_size))
         # The position table padded to the rows.
@@ -212,9 +213,9 @@ class WhisperEncoder(Tower):
         position embeddings.
         """
         c = self.config
-        h = F.gelu(self.conv1(features, rows=c.conv_rows), approximate="tanh")
+        h = self.act(self.conv1(features, rows=c.conv_rows))
         self.convolved[1 : c.frames + 1] = h[: c.frames]
-        h = F.gelu(self.conv2(self.convolved, rows=rows), approximate="tanh")
+        h = self.act(self.conv2(self.convolved, rows=rows))
         table = iron.weight(self.embed_positions)
         return h + table[:rows], None
 

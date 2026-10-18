@@ -304,6 +304,13 @@ under `iron/applications/` over it, and nothing in the library imports a
 model. This is the one description of that structure; the model READMEs
 link here.
 
+The model layer is JAX-shaped and torch-named. A model is a pure function,
+traced into a graph, over an explicit tree of weights; it keeps torch's and
+transformers' names so checkpoints load and references compare by name.
+`iron.functional` gets a function only once a kernel computes it. Per-tile
+programs and their autotuning live at the operator and kernel layer, where
+tunables and profiles already do that job.
+
 - `config.py`: `DecoderConfig`, a model's shape from the checkpoint's
   `config.json`, with `attention(i)` and `layer(i)` giving layer `i`'s parts.
 - `checkpoint.py`: `Checkpoint`, a mapped `.safetensors` (sharded through
