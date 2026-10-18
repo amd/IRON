@@ -350,7 +350,6 @@ class ProjectionGEMM(Operator):
             tile_n=tile_n,
             k_tile=k_tile,
             tile_ma=tile_ma,
-            m_chunk=m_chunk,
             rows=rows,
             cols=cols,
             emulate_bf16_mmul_with_bfp16=emulate,
