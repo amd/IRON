@@ -11,7 +11,7 @@ Each records the operator steps that compute it and returns their handle::
     y = F.silu(F.linear(h, w.mlp.gate_proj.weight)) * F.linear(h, w.mlp.up_proj.weight)
 
 Weights are a checkpoint's ``(out, in)``, as ``torch.nn.Linear`` stores them.
-A handle's own ``+`` and ``*`` are elementwise steps too (``Handle``).
+A handle's own ``+ - * /`` and ``@`` are steps too (``Handle``).
 """
 
 import math

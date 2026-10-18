@@ -504,6 +504,7 @@ class Tracer:
         self._controls: dict[str, Handle] = {}
         self.addresses: dict[str, tuple[str, Callable, str]] = {}
         self._counter = itertools.count()
+        self._constants: dict[tuple, np.ndarray] = {}
         self._names: dict[int, str] = {}
         for key, (path, x) in held.items():
             self._names.setdefault(key, path)
@@ -522,6 +523,15 @@ class Tracer:
         )
         self._taken.add(free)
         return free
+
+    def constant(self, value, width: int, dtype) -> np.ndarray:
+        """A row of ``width`` ``value``s in ``dtype``: one array, so one
+        weight buffer, per number, width and dtype.
+        """
+        key = (float(value), width, bfp.dtype_name(dtype))
+        if key not in self._constants:
+            self._constants[key] = np.full(width, value, dtype)
+        return self._constants[key]
 
     def __enter__(self):
         self._token = graph_tracer.set(self)

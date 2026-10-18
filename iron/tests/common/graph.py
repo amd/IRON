@@ -215,8 +215,10 @@ def test_slices_are_views_into_the_parent_in_bytes():
     part = h[2:4]
     assert part.shape == (2, 64) and part.ref() == BufferRef("acts", 256, 256)
     assert h[3].shape == (64,) and h[3].ref() == BufferRef("acts", 384, 128)
-    with pytest.raises(TypeError, match="slicing a slice"):
-        part[0]
+    assert part[1].ref() == BufferRef("acts", 384, 128)
+    assert part[1, 2:6].ref() == BufferRef("acts", 388, 8)
+    with pytest.raises(TypeError, match="a view, which only a copy takes"):
+        h.transpose(1, 0)[0]
     with pytest.raises(ValueError, match="unit steps"):
         h[::2]
     assert h.reshape(512).shape == (512,) and h.reshape(512).ref() == BufferRef("acts")
@@ -2835,3 +2837,108 @@ def test_the_reference_runs_the_trace_so_held_state_takes_arithmetic():
     got = np.asarray(Scaled().reference(x), np.float32)
     np.testing.assert_array_equal(got, 3 * x.astype(np.float32))
     np.testing.assert_array_equal(held.host[:4], x)
+
+
+def _steps(t) -> list[str]:
+    return [type(s.op).__name__ for s in t.steps]
+
+
+def test_a_number_on_either_side_is_a_row_of_it():
+    """``x * c``, ``c * x``, ``x + c``, ``-x``, ``x / c``: a rowwise step on
+    one constant row per number, the same in the reference.
+    """
+
+    class Scalars(iron.Graph):
+        def body(self, x):
+            return 0.5 * x + 1, x * 0.5, -x, x / 4
+
+    t = Scalars().trace(x=(2, 64))
+    assert _steps(t) == ["RowwiseMul", "RowwiseAdd"] + ["RowwiseMul"] * 3
+    assert len(t.weights) == 4  # 0.5, 1, -1, 0.25: 0.5 once
+    x = (np.arange(128) % 8).reshape(2, 64).astype(bfloat16)
+    got = [np.asarray(y, np.float32) for y in Scalars().reference(x)]
+    f = x.astype(np.float32)
+    for y, want in zip(got, (0.5 * f + 1, 0.5 * f, -f, f / 4)):
+        np.testing.assert_array_equal(y, want)
+
+
+def test_a_difference_is_one_axpy_and_a_number_less_a_handle_two_steps():
+    class Differences(iron.Graph):
+        def body(self, x, y):
+            return x - y, 3 - x
+
+    t = Differences().trace(x=(2, 64), y=(2, 64))
+    assert _steps(t) == ["AXPY", "RowwiseMul", "RowwiseAdd"]
+    x = (np.arange(128) % 8).reshape(2, 64).astype(bfloat16)
+    y = np.ones((2, 64), bfloat16)
+    d, r = (np.asarray(v, np.float32) for v in Differences().reference(x, y))
+    np.testing.assert_array_equal(d, x.astype(np.float32) - 1)
+    np.testing.assert_array_equal(r, 3 - x.astype(np.float32))
+
+
+def test_a_handle_is_divided_by_a_number_alone():
+    class Divide(iron.Graph):
+        def body(self, x, y):
+            return x / y
+
+    with pytest.raises(TypeError, match="divided by a number"):
+        Divide().trace(x=(64,), y=(64,))
+
+
+@pytest.mark.parametrize("rows, op", [(1, "GEMV"), (256, "GEMM")])
+def test_matmul_by_a_weight_s_transpose_is_linear(rows, op):
+    w = z(128, E)
+
+    class Project(iron.Graph):
+        def __init__(self):
+            self.w = w
+
+        def body(self, x):
+            return x @ self.w.T
+
+    t = Project().trace(x=(rows, E))
+    assert _steps(t) == [op] and t.weights[id(w)][1].name == "w"
+
+
+def test_a_weight_times_a_row_is_linear_and_a_plain_matrix_is_refused():
+    w = z(128, E)
+
+    class Left(iron.Graph):
+        def __init__(self):
+            self.w = w
+
+        def body(self, x):
+            return self.w @ x
+
+    class Plain(iron.Graph):
+        def __init__(self):
+            self.w = w
+
+        def body(self, x):
+            return x @ self.w
+
+    assert _steps(Left().trace(x=(E,))) == ["GEMV"]
+    with pytest.raises(TypeError, match=r"x @ W.T with W \(out, in\)"):
+        Plain().trace(x=(1, 128))
+
+
+def test_a_numpy_function_on_a_handle_says_what_to_call():
+    class Exp(iron.Graph):
+        def body(self, x):
+            return np.exp(x)
+
+    with pytest.raises(TypeError, match="numpy's exp cannot compute"):
+        Exp().trace(x=(64,))
+
+
+def test_a_row_times_a_held_matrix_is_rowwise():
+    m = z(4, E)
+
+    class Scale(iron.Graph):
+        def __init__(self):
+            self.m = m
+
+        def body(self, x):
+            return x[0] * self.m
+
+    assert _steps(Scale().trace(x=(2, E))) == ["RowwiseMul"]

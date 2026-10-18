@@ -205,8 +205,16 @@ class Handle:
     def __getitem__(self, key) -> "Handle":
         if self.window is not None:
             return self._bound(key)
-        if self.tap is not None or self.parent is not None:
-            raise TypeError("slicing a slice is not supported; slice the parent")
+        if self.tap is not None:
+            raise TypeError(
+                f"{self!r} is a view, which only a copy takes; index what it views"
+            )
+        if self.parent is not None:
+            # A slice: indexed as a buffer of its own, then placed in its parent.
+            whole = Handle(
+                self.shape, self.dtype, self.name, "slice", bounds=self.bounds
+            )
+            return whole[key]._placed(self.parent, self.start)
         entries = list(key) if isinstance(key, tuple) else [key]
         rank = len(self.shape)
         # By identity: an array entry compares elementwise.
@@ -360,6 +368,34 @@ class Handle:
         view.window = window
         return view
 
+    def _placed(self, parent: Handle, start: int) -> Handle:
+        """This handle of a buffer of its own, as the run of ``parent``
+        from its element ``start``.
+        """
+        tap = None
+        if self.parent is not None and self.tap is None:
+            start += self.start
+        elif self.tap is not None:
+            taps = self.tap if isinstance(self.tap, tuple) else (self.tap,)
+            moved = tuple(
+                TensorAccessPattern(parent.shape, t.offset + start, t.sizes, t.strides)
+                for t in taps
+            )
+            start, tap = 0, moved if isinstance(self.tap, tuple) else moved[0]
+        placed = Handle(
+            self.shape,
+            self.dtype,
+            parent.name,
+            "slice" if tap is None else "view",
+            parent,
+            start,
+            tap,
+            self.index_by,
+            self.bounds,
+        )
+        placed.window = self.window
+        return placed
+
     def at(
         self,
         tap: TensorAccessPattern | tuple[TensorAccessPattern, ...],
@@ -455,17 +491,35 @@ class Handle:
             shape, self.dtype, self.name, "view", self, 0, tap, index_by, bounds=bounds
         )
 
-    # A held array on the left of ``+`` or ``*`` defers to the handle.
-    __array_ufunc__ = None
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        """A held array on the left of an operator defers to the handle;
+        any other numpy function on a handle is refused.
+        """
+        name = _OPERATORS.get(ufunc)
+        if method == "__call__" and name and len(inputs) == 2 and not kwargs:
+            a, b = inputs
+            if a is self:
+                return getattr(self, f"__{name}__")(b)
+            if hasattr(self, f"__r{name}__"):
+                return getattr(self, f"__r{name}__")(a)
+        raise TypeError(
+            f"numpy's {ufunc.__name__} cannot compute {self!r}: a handle is a "
+            f"buffer of a traced graph. Use + - * / @ on it, iron.functional, "
+            f"or an operator's step()"
+        )
 
     def __add__(self, other) -> "Handle":
-        """``self + other``, elementwise, or ``other`` a row added to every row."""
+        """``self + other``, elementwise, or ``other`` a row added to every
+        row, or a number added to every element.
+        """
         from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 
         return _broadcast(ElementwiseAdd, RowwiseAdd, self, other)
 
     def __mul__(self, other) -> "Handle":
-        """``self * other``, elementwise, or every row times the row ``other``."""
+        """``self * other``, elementwise, or every row times the row
+        ``other``, or every element times a number.
+        """
         from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
 
         return _broadcast(ElementwiseMul, RowwiseMul, self, other)
@@ -473,22 +527,110 @@ class Handle:
     __radd__ = __add__
     __rmul__ = __mul__
 
+    def __neg__(self) -> "Handle":
+        return self * -1
+
+    def __sub__(self, other) -> "Handle":
+        """``self - other``: one AXPY step for a handle of this shape."""
+        from iron.operators.axpy import AXPY
+
+        if isinstance(other, Handle) and other.shape == self.shape:
+            return AXPY.step(other, self, scalar_factor=-1.0)
+        return self + (-other)
+
+    def __rsub__(self, other) -> "Handle":
+        return -self + other
+
+    def __truediv__(self, other) -> "Handle":
+        """``self`` over a number, as ``self`` times its reciprocal."""
+        if not _is_number(other):
+            raise TypeError(f"{self!r} is divided by a number, not {other!r}")
+        return self * (1 / other)
+
+    def __matmul__(self, other) -> "Handle":
+        """``self @ W.T``, ``W`` a weight as ``torch.nn.Linear`` stores it
+        ``(out, in)``: ``iron.functional.linear(self, W)``.
+        """
+        import iron.functional as F
+
+        return F.linear(self, _untransposed(self, other))
+
+    def __rmatmul__(self, other) -> "Handle":
+        """``W @ self``, ``self`` one row: ``iron.functional.linear(self, W)``."""
+        import iron.functional as F
+
+        if len(self.shape) != 1:
+            raise TypeError(
+                f"W @ {self!r} takes one row; for rows write x @ W.T, W (out, in)"
+            )
+        return F.linear(self, other)
+
     def __repr__(self) -> str:
         return f"Handle({str(self.ref())!r}, {list(self.shape)}, {bfp.dtype_name(self.dtype)})"
+
+
+_OPERATORS = {
+    np.add: "add",
+    np.multiply: "mul",
+    np.subtract: "sub",
+    np.matmul: "matmul",
+    np.true_divide: "truediv",
+}
+
+
+def _is_number(x) -> bool:
+    return isinstance(x, (int, float, np.integer, np.floating)) and not isinstance(
+        x, bool
+    )
+
+
+def _untransposed(x: Handle, w) -> Handle | np.ndarray:
+    """``W``, given ``w`` its transpose ``W.T``: a held array's numpy
+    transpose, or a weight handle's ``transpose()``.
+
+    Raises:
+        TypeError: ``w`` is not a 2-D weight's transpose.
+    """
+    if isinstance(w, np.ndarray) and w.ndim == 2 and w.T.flags.c_contiguous:
+        return w.T
+    if isinstance(w, _Viewed):
+        w = w._as_operand()
+    if (
+        isinstance(w, Handle)
+        and w.parent is not None
+        and w.tap is not None
+        and len(w.shape) == 2
+        and w.parent.shape == w.shape[::-1]
+    ):
+        flipped = TensorAccessPattern.full(w.parent.shape).permute((1, 0))
+        if (w.tap.offset, w.tap.sizes, w.tap.strides) == (
+            flipped.offset,
+            flipped.sizes,
+            flipped.strides,
+        ):
+            return w.parent
+    raise TypeError(
+        f"{x!r} @ w takes w a weight's transpose, x @ W.T with W (out, in) as "
+        f"torch.nn.Linear stores it; got {w!r:.80}"
+    )
 
 
 def _broadcast(whole, rowwise, x: Handle, y) -> Handle:
     """``whole`` of ``x`` and ``y`` of its shape, or, ``x`` of two axes or
     more, ``rowwise`` of ``x`` and ``y`` a row as wide as its last axis.
 
-    Both are commutative, so a row handle times a matrix handle is the
-    matrix's ``rowwise``.
+    Both are commutative, so a row handle times a matrix is the matrix's
+    ``rowwise``. A number ``y`` is a row of it, one constant buffer per
+    number, width and dtype (rounded to ``x``'s dtype).
 
     Raises:
         TypeError: ``y`` is neither.
     """
-    if isinstance(y, Handle) and len(x.shape) == 1 and len(y.shape) > 1:
-        x, y = y, x
+    if _is_number(y):
+        tracer = graph_tracer.get()
+        y = tracer.constant(y, x.shape[-1] if x.shape else 1, x.dtype)
+    if len(x.shape) == 1 and len(getattr(y, "shape", ())) > 1:
+        x, y = (y if isinstance(y, Handle) else graph_tracer.get().operand(y)), x
     shape = tuple(getattr(y, "shape", ()))
     if len(x.shape) > 1 and shape == x.shape[-1:]:
         rows = x.elements // shape[0]
