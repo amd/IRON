@@ -217,7 +217,6 @@ class DecoderConfig(Config):
             self.num_key_value_heads,
             self.head_dim,
             self.eps,
-            rotary=self.rotary_dim,
         )
 
     def layer(self, i: int) -> DecoderLayerSpec:

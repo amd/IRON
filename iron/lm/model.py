@@ -171,8 +171,9 @@ class Model(iron.Graph):
     generation's timings.
     """
 
-    # Each checkpoint layer's dotted paths that its config's ``layer``
-    # reads under another name, by that name.
+    # The checkpoint's runs of dotted names, matched anywhere in a path, that
+    # the model's modules (or its config's ``layer``, in a layer) read under
+    # another name, by that name.
     renames: ClassVar[dict[str, str]] = {}
     # What loads the checkpoint into transformers to record its goldens.
     hugging_face: type = HuggingFace

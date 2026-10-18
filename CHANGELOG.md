@@ -52,7 +52,10 @@ public API adds its entry under Unreleased.
 - Decoder blocks as modules in `iron.lm.blocks`, each built from a config
   and a layer index: `Attention(c, i, norms="", bias=False)`, `GatedMLP(c)`
   and `DecoderLayer(c, i)`, which holds its own `KVCache(c)` and the
-  model's `Rope(c)`. `iron.lm` exports `Attention` and `DecoderLayer`.
+  model's `Rope(c)`. `iron.lm` exports `Attention`, `GatedMLP` and
+  `DecoderLayer`.
+- `Linear.split(x, *rows)`, a fused projection's outputs: one `F.linear`
+  per run of the weight's rows.
 - `Graph.trace(precision=)`, which `compile(precision=)` passes on instead of
   setting `Graph.precision` while it compiles.
 - `iron.lm.testing.load_from_flags`, a model test's `Model.load` at the
@@ -177,6 +180,16 @@ public API adds its entry under Unreleased.
   and `values`. The RoPE table is `CausalLM.rope`, a `Rope`, whose `rows`
   replaces `CausalLM.angles` and whose `long_past` replaces
   `CausalLM.long_past`.
+- Phi-4 and LFM2 are built from modules: `Phi4Layer`, whose fused
+  `qkv_proj` and `gate_up_proj` are one `Linear` each, and `Lfm2Layer`,
+  whose conv layers hold a `ShortConv` that owns its `Checkpoints` state
+  and derives its taps when it loads, in place of `Phi4.sanitize`,
+  `Lfm2.sanitize` and `Lfm2Config.attention`. `CausalLM.recurrent` is
+  the list of `Checkpoints` the model's modules hold. `Model.renames`
+  keys match a run of names anywhere in a path, and a model with a
+  `layer_class` renames its whole tree before loading. `Attention` turns
+  only the config's `rotary_dim` columns, and `AttentionSpec` loses
+  `rotary`.
 - Qwen 2, Qwen3 and Granite name their layers, `Qwen2Layer`, `Qwen3Layer`
   and `GraniteLayer`, in place of `Qwen3Config.attention` and
   `GraniteConfig.attention` and `layer`.

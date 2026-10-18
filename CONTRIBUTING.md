@@ -54,12 +54,15 @@ Hugging Face decoders need a config and a model class; see
 
    Its modules declare their weights by shape under the checkpoint's own
    names (`input_layernorm`, `self_attn.q_proj`, ...), and loading names
-   any tensor missing, extra or of another shape. A model still on
-   `config.layer(i)` (`layer_class = None`) reads the checkpoint's modules
-   as they are; when the checkpoint names them differently, override
-   `sanitize(w)` to map one layer's modules to those names at load time
-   (`iron/applications/lfm2/model.py`); a fused projection is cut into
-   views, not copied (`iron/applications/phi3/model.py`). Write the model
+   any tensor missing, extra or of another shape. Where the checkpoint
+   names a module otherwise, `renames` maps its names to the modules'
+   before they load, and a tensor derived from loaded ones is computed in
+   the module's `load_state_dict` after `super().load_state_dict()`
+   (`iron/applications/lfm2/model.py`); a fused projection is one `Linear`
+   whose rows `Linear.split` projects by in turn
+   (`iron/applications/phi3/model.py`). A model still on `config.layer(i)`
+   (`layer_class = None`) reads each layer's modules after `renames` and
+   `sanitize(w)`. Write the model
    body with `iron.functional as F` and handle arithmetic (`x + y`), the
    way you would with `torch.nn.functional`. End the file with
    `lm.main(Qwen3)` on your class, its command line, and export it from the

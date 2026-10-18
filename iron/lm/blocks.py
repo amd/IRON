@@ -330,6 +330,23 @@ class Linear(iron.Graph):
     def body(self, x):
         return F.linear(x, self.weight, self.bias)
 
+    def split(self, x, *rows: int, **gemv) -> list:
+        """``x`` through each run of ``rows`` of the weight in turn, one
+        ``F.linear`` each: a fused projection's outputs. Each reads its rows
+        in place, where one projection's columns would be a strided view no
+        descriptor of a bounded row count fits.
+        """
+        ends = np.cumsum(rows)
+        return [
+            F.linear(
+                x,
+                self.weight[end - n : end],
+                None if self.bias is None else self.bias[end - n : end],
+                **gemv,
+            )
+            for n, end in zip(rows, ends)
+        ]
+
 
 class Embedding(iron.Graph):
     """``torch.nn.Embedding``: the rows of ``weight`` that ``ids`` name."""
@@ -477,7 +494,8 @@ class KVCache(iron.Graph):
 class Attention(iron.Graph):
     """Layer ``i``'s self-attention on ``c``'s shape: ``q_proj``, ``k_proj``
     and ``v_proj`` of the layer's input, q and k turned by the call's RoPE
-    angles where given, attended over the layer's ``KVCache``, then
+    angles where given, only their first ``rotary`` columns where the config
+    gives a ``rotary_dim``, attended over the layer's ``KVCache``, then
     ``o_proj``. ``scale`` is the logits' scale; None is ``head_dim **
     -0.5``.
 
@@ -504,23 +522,37 @@ class Attention(iron.Graph):
         self.q_norm = RMSNorm(D, c.eps) if "q" in norms else None
         self.k_norm = RMSNorm(D, c.eps) if "k" in norms else None
         self.scale = None
+        self.rotary = c.rotary_dim
+
+    def project(self, x, **tiles) -> list:
+        """q, k and v of ``x``, each projection given the GEMV ``tiles``."""
+        return [
+            F.linear(x, p.weight, p.bias, **tiles)
+            for p in (self.q_proj, self.k_proj, self.v_proj)
+        ]
+
+    def rotate(self, x, angles):
+        """``x`` ``(rows, head_dim)`` turned by RoPE, only its first
+        ``rotary`` columns where given.
+        """
+        if self.rotary is None:
+            return F.rope(x, angles)
+        x[:, : self.rotary] = F.rope(Copy.step(x[:, : self.rotary]), angles)
+        return x
 
     def body(self, x, cache, step, angles=None):
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         # One row's GEMV tiles half a head. Given here, not by the profile:
         # q's shape is o's when heads * head_dim is the width.
         tiles = dict(tile_size_output=D // 2) if n == 1 else {}
-        q, k, v = (
-            F.linear(x, p.weight, p.bias, **tiles)
-            for p in (self.q_proj, self.k_proj, self.v_proj)
-        )
+        q, k, v = self.project(x, **tiles)
         q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
         if self.q_norm is not None:
             q = self.q_norm(q)
         if self.k_norm is not None:
             k = self.k_norm(k)
         if angles is not None:
-            q, k = F.rope(q, angles), F.rope(k, angles)
+            q, k = self.rotate(q, angles), self.rotate(k, angles)
         o = cache.attend(
             step,
             q.reshape(n, H, D),
@@ -614,8 +646,6 @@ class AttentionSpec:
         v_norm: Whether each head of v is RMS-normed, unweighted.
         scale: The logits' scale; None is ``head_dim ** -0.5``.
         window: The positions a query reaches either side; None is all.
-        rotary: The leading columns of a head RoPE turns, the rest passed
-            through; None is all.
         precision: Every projection's ``Precision``; None is ``F.linear``'s.
     """
 
@@ -627,7 +657,6 @@ class AttentionSpec:
     v_norm: bool = False
     scale: float | None = None
     window: int | None = None
-    rotary: int | None = None
     precision: Precision | None = None
 
     def __post_init__(self):
@@ -650,7 +679,7 @@ class AttentionSpec:
         if self.v_norm:
             v = F.rms_norm(v, (D,), eps=self.eps)
         if angles is not None:
-            q, k = self.rotate(q, angles), self.rotate(k, angles)
+            q, k = F.rope(q, angles), F.rope(k, angles)
         o = attend(
             q.reshape(n, H, D),
             k.reshape(n, G, D),
@@ -666,15 +695,6 @@ class AttentionSpec:
         the profile cannot tell them apart.
         """
         return dict(tile_size_output=self.head_dim // 2) if rows == 1 else {}
-
-    def rotate(self, x, angles):
-        """``x`` ``(rows, head_dim)`` turned by RoPE, only its first
-        ``rotary`` columns where given.
-        """
-        if self.rotary is None:
-            return F.rope(x, angles)
-        x[:, : self.rotary] = F.rope(Copy.step(x[:, : self.rotary]), angles)
-        return x
 
     def keys_values(self, w, memory) -> tuple:
         """The keys and values ``w`` projects from an encoder's output

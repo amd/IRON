@@ -240,8 +240,6 @@ class GraniteHybrid(Granite):
             window=iron.state((2, config.prefill_chunk, channels)),
             tail=iron.state((config.mamba_d_conv - 1, channels)),
         )
-        for i, layer in enumerate(self.layers):
+        for layer in self.layers:
             if layer.mamba is not None:
-                m = layer.mamba
-                m.scratch = scratch
-                self.recurrent[i] = {"conv": m.conv_state, "ssm": m.ssm_state}
+                layer.mamba.scratch = scratch

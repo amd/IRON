@@ -27,6 +27,7 @@ import iron
 import iron.functional as F
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
+from iron.common.graph.compiled import _leaves
 from iron.common.graph.handle import State
 from iron.tune.autotune import Call, Point
 from iron.operators.copy import Copy
@@ -175,9 +176,6 @@ class CausalLM(Model):
         self._placeholders: tuple[int, ...] = ()
         # By the version a device loop starts from, its loop.
         self._loops: dict[int, CarriedLoop] = {}
-        # By layer, the states a recurrent mixer carries position to position,
-        # by name.
-        self.recurrent: dict[int, dict[str, Checkpoints]] = {}
         if self.layer_class is not None:
             self.model = Decoder(config, self.layer_class)
             for layer in self.model.layers:
@@ -185,7 +183,7 @@ class CausalLM(Model):
             self.lm_head = Linear(config.hidden_size, config.vocab_size, bias=False)
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
-            self.load_state_dict(weights)
+            self.load_state_dict(renamed(weights, self.renames))
             self.layers = self.model.layers
             return
         self.decoder = weights.model if decoder is None else decoder
@@ -203,6 +201,11 @@ class CausalLM(Model):
             for i, w in enumerate(self.layers)
             if "self_attn" in vars(w)
         }
+
+    @property
+    def recurrent(self) -> list[Checkpoints]:
+        """Each state a layer carries from position to position."""
+        return [p for _, _, p, _ in _leaves(self) if isinstance(p, Checkpoints)]
 
     def layer(self, step: DecodeStep, i: int, w, x):
         """Layer ``i`` on ``x``: the module ``w`` itself, or with no
@@ -648,8 +651,7 @@ class CausalLM(Model):
         (``Checkpoints.restart``), the earliest one of them can.
         """
         ran = self._seen.size
-        states = [c for layer in self.recurrent.values() for c in layer.values()]
-        return min([held, *(c.restart(held, ran) for c in states)])
+        return min([held, *(c.restart(held, ran) for c in self.recurrent)])
 
     def prompt_ids(self, tokens) -> np.ndarray:
         """A prompt call's ``ids`` for a chunk of ``tokens``, padded to

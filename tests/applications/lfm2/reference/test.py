@@ -122,11 +122,12 @@ def ran(toy):
 def test_attention_layers_hold_caches_and_conv_layers_a_checkpointed_tail(ran):
     model, _, _ = ran
     C, K, E = TOY.prefill_chunk, TOY.conv_kernel, TOY.hidden_size
-    assert list(model.caches) == [1, 3]
-    assert list(model.recurrent) == [0, 2]
+    layers = model.layers
+    assert [i for i, w in enumerate(layers) if "cache" in vars(w)] == [1, 3]
+    assert model.recurrent == [layers[0].conv.state, layers[2].conv.state]
     slots = (TOY.max_seq_len - 1) // C + 2
-    for states in model.recurrent.values():
-        assert states["conv"].slots.shape == (slots, K - 1, E)
+    for state in model.recurrent:
+        assert state.slots.shape == (slots, K - 1, E)
 
 
 def test_a_turn_resumes_from_a_boundary(ran):

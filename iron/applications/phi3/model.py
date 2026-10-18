@@ -10,10 +10,10 @@ iron.applications.phi3.model``.
 Phi-4-mini is Llama's layer with three differences:
 
 * **Fused projections.** Its checkpoint holds one ``qkv_proj`` and one
-  ``mlp.gate_up_proj``, which ``Phi4.sanitize`` cuts by rows at load, each
-  piece a view of the checkpoint's own array.
+  ``mlp.gate_up_proj``, each one ``Linear`` whose rows a call projects by
+  in turn (``Linear.split``).
 * **Partial rotary.** Only the first ``rotary_dim`` (96 of 128) columns of
-  each head rotate (``partial_rotary_factor``); ``AttentionSpec`` turns that
+  each head rotate (``partial_rotary_factor``); ``Attention`` turns that
   prefix alone.
 * **LongRoPE.** A forward call whose sequence passes
   ``original_max_position_embeddings`` (4096) rotates by the
@@ -28,12 +28,19 @@ Phi-4-mini is Llama's layer with three differences:
 import dataclasses
 import math
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig, rope_angles
+from iron.lm import (
+    Attention,
+    CausalLM,
+    DecoderConfig,
+    DecoderLayer,
+    GatedMLP,
+    Linear,
+    rope_angles,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -127,6 +134,43 @@ class Phi4Config(DecoderConfig):
         return self.original_max_position_embeddings, self._table(self.longrope.long)
 
 
+class Phi4Attention(Attention):
+    """``Attention`` with q, k and v the rows of one ``qkv_proj``."""
+
+    def __init__(self, c: Phi4Config, i: int):
+        super().__init__(c, i)
+        del self.q_proj, self.k_proj, self.v_proj
+        H, G, D = self.heads, self.groups, self.head_dim
+        self.qkv_proj = Linear(c.hidden_size, (H + 2 * G) * D, bias=False)
+
+    def project(self, x, **tiles) -> list:
+        H, G, D = self.heads, self.groups, self.head_dim
+        return self.qkv_proj.split(x, H * D, G * D, G * D, **tiles)
+
+
+class Phi4MLP(GatedMLP):
+    """``GatedMLP`` with gate and up the rows of one ``gate_up_proj``."""
+
+    def __init__(self, c: Phi4Config):
+        super().__init__(c)
+        del self.gate_proj, self.up_proj
+        self.gate_up_proj = Linear(c.hidden_size, 2 * c.intermediate_size, bias=False)
+
+    def body(self, x):
+        M = self.down_proj.weight.shape[1]
+        gate, up = self.gate_up_proj.split(x, M, M)
+        return self.down_proj(self.act(gate) * up)
+
+
+class Phi4Layer(DecoderLayer):
+    """Llama's layer on Phi-4's fused projections."""
+
+    def __init__(self, c: Phi4Config, i: int):
+        super().__init__(c, i)
+        self.self_attn = Phi4Attention(c, i)
+        self.mlp = Phi4MLP(c)
+
+
 class Phi4(CausalLM):
     """Phi-4-mini-instruct on ``config``'s shape and a checkpoint's
     ``weights``, from its checkpoint (one file, or a sharded index) and
@@ -135,28 +179,7 @@ class Phi4(CausalLM):
 
     config = Phi4Config
     profile = Path(__file__).with_name("profiles")
-    layer_class = None
-
-    def sanitize(self, w):
-        c, a, m = self.config, w.self_attn, w.mlp
-        Q, KV = c.num_attention_heads * c.head_dim, c.num_key_value_heads * c.head_dim
-        qkv, gate_up = a.qkv_proj.weight, m.gate_up_proj.weight
-        F = gate_up.shape[0] // 2
-        return SimpleNamespace(
-            input_layernorm=w.input_layernorm,
-            self_attn=SimpleNamespace(
-                q_proj=SimpleNamespace(weight=qkv[:Q]),
-                k_proj=SimpleNamespace(weight=qkv[Q : Q + KV]),
-                v_proj=SimpleNamespace(weight=qkv[Q + KV :]),
-                o_proj=a.o_proj,
-            ),
-            post_attention_layernorm=w.post_attention_layernorm,
-            mlp=SimpleNamespace(
-                gate_proj=SimpleNamespace(weight=gate_up[:F]),
-                up_proj=SimpleNamespace(weight=gate_up[F:]),
-                down_proj=m.down_proj,
-            ),
-        )
+    layer_class = Phi4Layer
 
 
 if __name__ == "__main__":

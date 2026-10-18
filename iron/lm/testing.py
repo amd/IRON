@@ -19,6 +19,9 @@ from pathlib import Path
 import numpy as np
 from aie.utils.compile import NPU_CACHE_HOME
 
+from iron.common.graph.compiled import _leaves
+
+from .blocks import KVCache
 from .generation import (
     SEED,
     Sampler,
@@ -372,14 +375,14 @@ def _fill_caches(model, n: int, position: int):
     ``position`` reads, the state the prompt left.
     """
     version = next(iter(model.versions.values()))
-    caches = [*model.keys.values(), *model.values.values()]
+    caches = [x for _, x, p, _ in _leaves(model) if isinstance(p, KVCache)]
     for cache in caches:
         rows = version.read(cache)
         for start in range(n, position, n):
             rows[start : min(start + n, position)] = rows[: min(n, position - start)]
         version.push(cache)
         cache.host = rows
-    checkpoints = [c for states in model.recurrent.values() for c in states.values()]
+    checkpoints = model.recurrent
     for c in checkpoints:
         slots = version.read(c.slots)
         slots[c.slot(position)] = slots[c.slot(n)]

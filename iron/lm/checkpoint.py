@@ -346,15 +346,17 @@ class _Layers(list):
 
 
 def renamed(tree, renames: Mapping[str, str]):
-    """A copy of ``tree`` with each leaf under a dotted path among
-    ``renames``' keys moved to the path its value names, the rest where
-    they are: its namespaces new, so a ``sanitize`` may change them.
+    """A copy of ``tree`` with each leaf under a run of whole dotted names
+    among ``renames``' keys, anywhere in its path, moved to the run its value
+    names, the rest where they are: its namespaces new, so a ``sanitize``
+    may change them.
     """
 
     def moved(path):
         for old, new in renames.items():
-            if path == old or path.startswith(old + "."):
-                return new + path[len(old) :]
+            at = f".{path}.".find(f".{old}.")
+            if at >= 0:
+                return path[:at] + new + path[at + len(old) :]
         return path
 
     return _nest(

@@ -9,17 +9,15 @@ checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.lfm2.model``.
 
 Sixteen layers, only six of them full attention (``full_attn_idxs``),
-each a ``DecoderLayerSpec`` with per-head q/k norms (Qwen3's shape); the rest
-are a gated short causal depthwise convolution (``conv_L_cache=3`` taps)
-in place of attention, then the same feed-forward block. ``renames``
-moves LFM2's modules to the names the parts read once at load; a conv
-layer holds no ``self_attn``, so ``layer()`` takes the whole
-``DecoderLayerSpec`` where the checkpoint holds one.
+each with per-head q/k norms (Qwen3's shape); the rest are a gated short
+causal depthwise convolution (``conv_L_cache=3`` taps) in place of
+attention, then the same feed-forward block (``Lfm2Layer``). ``renames``
+moves LFM2's modules to the names the layers give them before they load.
 
-A conv layer's three per-channel taps, a row each (``sanitize``, once at
-load), read a window that spans the current call and the
-``conv_kernel - 1`` gated rows before it. Those rows are the layer's
-``Checkpoints`` state (``iron.lm``), a slot per chunk boundary, so a
+A conv layer's three per-channel taps, a row each (derived once it loads),
+read a window that spans the current call and the ``conv_kernel - 1``
+gated rows before it. Those rows are its ``ShortConv``'s ``Checkpoints``
+state (``iron.lm``), a slot per chunk boundary, so a
 prompt may resume from any chunk (a chat turn), after positions a decode
 step wrote; slot 0, never written, is zero, "before the sequence".
 
@@ -27,15 +25,24 @@ The operators' tunables are the graph's profile, ``profiles/<device>.json``.
 """
 
 import dataclasses
-from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 import iron
 import iron.functional as F
 from iron import lm
-from iron.lm import AttentionSpec, CausalLM, Checkpoints, DecoderConfig, not_json
+from iron.lm import (
+    Attention,
+    CausalLM,
+    Checkpoints,
+    DecoderConfig,
+    DecoderLayer,
+    Linear,
+    not_json,
+)
+from iron.lm.blocks import _add
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,35 +84,70 @@ class Lfm2Config(DecoderConfig):
             ff = self.multiple_of * -(-ff // self.multiple_of)
         object.__setattr__(self, "intermediate_size", ff)
 
-    def attention(self, i: int) -> AttentionSpec:
-        return dataclasses.replace(super().attention(i), qk_norm=True)
+
+class ShortConv(iron.Graph):
+    """The gated short conv in place of attention: a depth-wise causal FIR
+    of ``conv_kernel`` taps over a call's rows, each channel its own tap
+    weights, gated on both sides by rows of ``in_proj``, then ``out_proj``.
+    The ``conv_kernel - 1`` gated rows before a call are its ``state``, a
+    slot per prompt-chunk boundary; ``window`` and ``tail`` are the scratch
+    the model's conv layers share.
+    """
+
+    def __init__(self, c: Lfm2Config):
+        E, K = c.hidden_size, c.conv_kernel
+        self.in_proj = Linear(E, 3 * E, bias=False)
+        self.conv = SimpleNamespace(weight=iron.param(E, 1, K))
+        self.out_proj = Linear(E, E, bias=False)
+        self.state = Checkpoints.of((K - 1, E), c.max_seq_len, c.prefill_chunk)
+        self.window = self.tail = None
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        # A row per tap, each the row RowwiseMul takes.
+        E, _, K = self.conv.weight.shape
+        self.taps = np.ascontiguousarray(self.conv.weight.reshape(E, K).T)
+
+    def body(self, h, step):
+        n, E = h.shape[0], self.out_proj.weight.shape[0]
+        b, c, x = (y.reshape(n, E) for y in self.in_proj.split(h, E, E, E))
+        read, write = self.state.at(step)
+        state = F.ConvState(read, write, self.window, self.tail)
+        return self.out_proj(c * F.causal_conv1d(b * x, self.taps, state))
+
+
+class Lfm2Layer(DecoderLayer):
+    """Layer ``i``: where ``full_attn_idxs`` names it, Llama's, its q and k
+    normed per head; else a ``ShortConv`` in attention's place.
+    """
+
+    def __init__(self, c: Lfm2Config, i: int):
+        super().__init__(c, i)
+        if i in c.full_attn_idxs:
+            self.self_attn = Attention(c, i, norms="qk")
+            return
+        del self.self_attn, self.cache
+        self.conv = ShortConv(c)
+
+    def body(self, x, step):
+        if "conv" not in vars(self):
+            return super().body(x, step)
+        x = _add(x, self.conv(self.input_layernorm(x), step), self.residual)
+        return _add(x, self.mlp(self.post_attention_layernorm(x)), self.residual)
 
 
 class Lfm2(CausalLM):
-    """LFM2-1.2B on ``config``'s shape and a checkpoint's ``weights``, by
-    its names: each layer either an attention layer's weights or a conv
-    layer's, distinguished by which the checkpoint gives it. Every matrix
-    is read ``(out, in)``, as the checkpoint ships it. From its checkpoint
-    and ``tokenizer.json``.
+    """LFM2-1.2B on ``config``'s shape and a checkpoint's ``weights``,
+    renamed as ``Lfm2Layer`` names them. Every matrix is read ``(out,
+    in)``, as the checkpoint ships it. From its checkpoint and
+    ``tokenizer.json``.
     """
 
     config = Lfm2Config
     profile = Path(__file__).with_name("profiles")
-    layer_class = None
-
-    def __init__(self, config: Lfm2Config, weights):
-        super().__init__(config, weights)
-        self.final_norm = self.decoder.embedding_norm
-        E, K, C = config.hidden_size, config.conv_kernel, config.prefill_chunk
-        for i, w in enumerate(self.layers):
-            if "conv" in vars(w):
-                tail = Checkpoints.of((K - 1, E), config.max_seq_len, C)
-                self.recurrent[i] = {"conv": tail}
-        # Scratch F.causal_conv1d stages a call's window and tail in.
-        self.conv_window = iron.state((2, C, E))
-        self.conv_tail = iron.state((K - 1, E))
-
+    layer_class = Lfm2Layer
     renames = {
+        "model.embedding_norm": "model.norm",
         "operator_norm": "input_layernorm",
         "ffn_norm": "post_attention_layernorm",
         "feed_forward.w1": "mlp.gate_proj",
@@ -116,40 +158,13 @@ class Lfm2(CausalLM):
         "self_attn.k_layernorm": "self_attn.k_norm",
     }
 
-    def sanitize(self, w):
-        if "conv" in vars(w):
-            # A row per tap, each the row RowwiseMul takes.
-            c = self.config
-            taps = w.conv.conv.weight.reshape(c.hidden_size, c.conv_kernel).T
-            w.conv.taps = np.ascontiguousarray(taps)
-        return w
-
-    def layer(self, step, i, w, x):
-        """Layer ``i``: an attention layer is ``DecoderLayerSpec``'s; a conv
-        layer its short conv in attention's place, then the feed-forward.
-        """
-        if "self_attn" in vars(w):
-            return super().layer(step, i, w, x)
-        layer = self.config.layer(i)
-        x = layer.block(x, w.input_layernorm, partial(self.conv, step, i, w.conv))
-        return layer.block(x, w.post_attention_layernorm, partial(layer.mlp, w.mlp))
-
-    def conv(self, step, i, w, h):
-        """The gated short conv in place of attention: a depth-wise causal
-        FIR of ``conv_kernel`` taps over ``h``'s rows, each channel its own
-        tap weights, gated on both sides by a projection of ``h``.
-        """
-        n, E = h.shape[0], self.config.hidden_size
-        # Three projections, not one split three ways: a bounded row count's
-        # column range of a combined projection is a strided view no single
-        # descriptor fits, where three plain projections need none.
-        b, cc, x = (
-            F.linear(h, w.in_proj.weight[k * E : (k + 1) * E]).reshape(n, E)
-            for k in range(3)
-        )
-        read, write = self.recurrent[i]["conv"].at(step)
-        state = F.ConvState(read, write, self.conv_window, self.conv_tail)
-        return F.linear(cc * F.causal_conv1d(b * x, w.taps, state), w.out_proj.weight)
+    def __init__(self, config: Lfm2Config, weights):
+        super().__init__(config, weights)
+        E, K, C = config.hidden_size, config.conv_kernel, config.prefill_chunk
+        window, tail = iron.state((2, C, E)), iron.state((K - 1, E))
+        for layer in self.layers:
+            if "conv" in vars(layer):
+                layer.conv.window, layer.conv.tail = window, tail
 
 
 if __name__ == "__main__":
