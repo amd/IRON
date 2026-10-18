@@ -57,6 +57,6 @@ def swiglu():
 
 
 def shipped(**kwargs):
-    from iron.operators.flm.gemm.shipped import Shipped
+    from iron.tests.common.shipped import Shipped
 
     return Shipped(**kwargs)

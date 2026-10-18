@@ -224,9 +224,6 @@ class GEMM(Operator):
     b_l2: int = Auto(repr=False, derived=True)
     c_l2: int = Auto(repr=False, derived=True)
 
-    # The k order pack_B writes within a block: the port's kernel's, or the
-    # shipped binary's own (see shipped.py).
-    b_overlay_order: ClassVar[bool] = False
     # The sequence writes the cores' parameters itself, behind the first
     # block's fills and once per slab; see sequence().
     own_preamble: ClassVar[bool] = True
@@ -1278,7 +1275,6 @@ class GEMM(Operator):
             ct_k=t.ct_max_k,
             bfp16=bool(t.bfp16_b),
             round_conv_even=t.rounding is Rounding.CONV_EVEN,
-            overlay_order=t.b_overlay_order,
         )
 
     def ops(self) -> int:

@@ -5,7 +5,6 @@
 
 from .dequant.op import DequantBFP
 from .gemm.op import GEMM
-from .gemm.shipped import Shipped
 from .layer.op import DecodeLayer
 from .lm_head.op import LMHead
 from .prefill_attn.op import PrefillAttention, PrefillSlidingAttention

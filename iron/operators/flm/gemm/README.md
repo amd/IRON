@@ -47,9 +47,8 @@ Pick this one for a projection-shaped GEMM that wants an activation folded in
 and can pack its weights once. Pick `iron.operators.GEMM` when you need tiling
 control or cannot pre-pack B.
 
-The shipped overlay itself is available as
-`Shipped(...)` ([the shipped overlay](#the-shipped-overlay)) for comparison; `benchmark.py`
-measures the two against each other and against `iron.operators.GEMM`.
+The shipped overlay itself is a test fixture, `Shipped(...)` ([the shipped
+overlay](#the-shipped-overlay)), that `test.py` compares the port against.
 
 ## Architectures
 
@@ -354,9 +353,6 @@ the per-tile bf16 mac throughput, so it stays compute-bound at every K, and
 `n=128` also costs it a much larger f32 accumulator. `n=64` wins at every
 `k_iters`, by 1.2-1.8x.
 
-`benchmark.py` measures both settings across the full shape sweep; prefer its
-CSV output to any table reproduced here.
-
 ## Performance
 
 ### NPU2
@@ -371,7 +367,6 @@ M=1024 K=1536 N=6144, min of per-run medians:
 
 **1.90x the shipped overlay, and 41x more accurate than it** — the accuracy
 comes from `conv_even` rounding, which the overlay does not set (see above).
-`benchmark.py` reproduces this table, and covers 30 shapes rather than one.
 
 Three choices account for most of the gap, and none of them helps alone:
 
@@ -393,7 +388,7 @@ call. It does have to reproduce the core's rounding *mode* to be free — see
 > wholly in one mode turns min-of-medians into a mode selector rather than a
 > measurement. Compare configurations **interleaved** round-robin rather than
 > one after the other, use at least 8 rounds each, and believe a difference only
-> when the min and the median agree on it. `benchmark.py` does this.
+> when the min and the median agree on it.
 
 ### NPU1
 
@@ -579,18 +574,18 @@ unit. A bound needs `m_chunk = 1` and M in one slab.
 ```python
 from iron.common import Chain, Link
 from iron.operators import SiLU
-from iron.operators.flm import Shipped
+from iron.tests.common.shipped import Shipped
 
 op = Shipped(M=1024, K=1536, N=6144, finish=Chain((Link(SiLU(size=1024 * 6144)),)))
 op(A, op.pack_B(B), C_out)
 ```
 
-`Shipped` (`shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a
+`Shipped` (`iron/tests/common/shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a
 second overlay for the same operator: the binary the port was ported from,
 driven by the same `GEMM`, its reference and its packing, so the two can be
 measured against each other on identical inputs through one host path.
-`benchmark.py` does exactly that, and `test.py` checks the shipped overlay's
-epilogues against its own accumulator.
+`test.py` does exactly that, and checks the shipped overlay's epilogues
+against its own accumulator.
 
 **NPU2 only** — the overlay is an 8-column NPU2 binary. Tuning it for
 anything else raises.
@@ -602,8 +597,8 @@ The xclbin is not checked in. It is an `Xclbin`: downloaded on first use into
 so the fetch is reproducible and a substituted file is rejected.
 
 Because this is the only thing in the tree that touches the network, the
-benchmark that uses it is marked `extensive` and is not reached by the default
-`-m "not extensive"` run.
+device tests that use it are marked `extensive` and are not reached by the
+default `-m "not extensive"` run.
 
 ### What the overlay supplies
 

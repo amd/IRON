@@ -28,7 +28,7 @@ from iron.operators.flm.gemm.design import (
     l1_budget,
 )
 from iron.operators.flm.gemm.op import GEMM
-from iron.operators.flm.gemm.shipped import Shipped
+from iron.tests.common.shipped import Shipped
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
 
@@ -565,7 +565,7 @@ def _shipped_marks():
 SHIPPED = _shipped_marks()
 
 # The overlay never calls set_rounding, so it runs in the core's power-up floor
-# mode and carries a ~1% truncation bias -- not a bug. See gemm/benchmark.py.
+# mode and carries a ~1% truncation bias -- not a bug. See README.md.
 BUDGET_FLOOR = 2e-2
 
 

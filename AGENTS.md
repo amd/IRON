@@ -134,8 +134,8 @@ reuse lint
    - One operator is one module: `relu.py` for a small one, a directory with
      `op.py` for one that also has a design, a reference, a README or a
      device test of its own (`flm/gemm/`). `flm/` holds the
-     FastFlowLM ports (`flm.GEMM`, `flm.DequantBFP`), the binary they are
-     measured against and their weight packing, exported from its own
+     FastFlowLM ports (`flm.GEMM`, `flm.DequantBFP`) and their weight
+     packing, exported from its own
      package (`from iron.operators.flm import GEMM`) as well as
      `iron.operators`'s one catalog, dotted (`_OPERATOR_MODULES["flm.GEMM"]`,
      what a `Profile` names it by); flm's GEMM is not `iron.operators.GEMM`.

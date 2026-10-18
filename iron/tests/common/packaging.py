@@ -12,7 +12,7 @@ from iron import Carried, Scratchpad
 from iron.common.graph.trace import TracedGraph
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind, dispatches_full_elf, plan
-from iron.operators.flm.gemm.shipped import Shipped
+from iron.tests.common.shipped import Shipped
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.tests.common.llama_model import small

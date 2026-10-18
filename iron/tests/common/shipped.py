@@ -24,12 +24,11 @@ selects its epilogue at build time (a branch-free inner loop, one build per
 activation), this binary at run time; the port rounds ``conv_even``, this
 binary runs in the core's power-up floor mode and carries a ~1% truncation
 bias; the port packs B in ``mm_fused_mmul_2x2``'s k order, this binary in
-its own (``overlay_order``). ``GEMM(rounding=Rounding.FLOOR)`` on the port
+its own (``pack_B``). ``GEMM(rounding=Rounding.FLOOR)`` on the port
 reproduces this overlay bit for bit without an activation.
 """
 
 import dataclasses
-from typing import ClassVar
 
 import numpy as np
 from aie.dialects.aie import AIEArch, DMAChannelDir
@@ -51,7 +50,15 @@ from iron.common import (
     Value,
     Xclbin,
 )
-from iron.operators.flm.gemm.design import CT_OUT_LEN, K_TILE, M_TILE, Gelu, Rounding
+from iron.operators.flm.gemm.design import (
+    CT_OUT_LEN,
+    K_TILE,
+    M_TILE,
+    Gelu,
+    Rounding,
+    S,
+    T,
+)
 from iron.operators.flm.gemm.op import GEMM
 
 # The FastFlowLM revision the overlay is taken from. A commit SHA rather than
@@ -135,7 +142,6 @@ class Shipped(
     a_l2: int = Auto(default=M_TILE * K_TILE, repr=False, init=False)
     b_l2: int = Auto(default=K_TILE * N_TILE, repr=False, init=False)
     c_l2: int = Auto(default=ROWS * M_TILE * N_TILE, repr=False, init=False)
-    b_overlay_order: ClassVar[bool] = True
 
     # One (M_TILE x K_TILE) block per object, broadcast along a compute row.
     A = In(
@@ -220,6 +226,17 @@ class Shipped(
                 f"{dev.cols} columns"
             )
         return dataclasses.replace(self)
+
+    def pack_B(self, B):
+        """A row-major ``(K, N)`` B in the overlay's own order: bf16, a whole
+        k tile a slice, and within a block the ``s`` rows outer and the
+        ``K_TILE // s`` columns inner, the reverse of ``pack_b``'s.
+        """
+        K, N = B.shape
+        blocked = B.reshape(K // K_TILE, K_TILE // S, S, N // N_TILE, N_TILE // T, T)
+        # (kb, i, s_in, cb, tb, t_in) -> (cb, kb, tb, s_in, i, t_in)
+        out = blocked.transpose(3, 0, 4, 2, 1, 5)
+        return np.ascontiguousarray(out).reshape(-1).astype(bfloat16)
 
     @property
     def ct_max_k(self) -> int:

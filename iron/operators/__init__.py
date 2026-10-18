@@ -17,7 +17,6 @@ _FLM_OPERATOR_MODULES = {
     "PrefillAttention": "prefill_attn.op",
     "PrefillSlidingAttention": "prefill_attn.op",
     "LMHead": "lm_head.op",
-    "Shipped": "gemm.shipped",
 }
 
 # Operator name -> its module, relative to this package; flm's dotted.

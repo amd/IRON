@@ -14,6 +14,7 @@ import pytest
 import iron.operators as ops
 from iron.common import Operator
 from iron.common.declare import Operand
+from iron.tests.common.shipped import Shipped
 
 
 @pytest.mark.parametrize("name", sorted(ops._OPERATOR_MODULES))
@@ -23,9 +24,9 @@ def test_exported_operator_is_declared(name):
     assert [b.name for b in cls.declaration.members if isinstance(b, Operand)], name
 
 
-def test_flm_declares_one_operator_and_its_shipped_form():
+def test_flm_gemm_is_declared_and_its_shipped_form_runs_an_image():
     module = importlib.import_module("iron.operators.flm")
-    cls, shipped = module.GEMM, module.Shipped
+    cls = module.GEMM
     assert issubclass(cls, Operator)
-    assert issubclass(shipped, cls) and shipped._external is not None
+    assert issubclass(Shipped, cls) and Shipped._external is not None
     assert cls._external is None

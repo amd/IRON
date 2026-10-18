@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Weight packing shared by the FastFlowLM-derived operators.
+"""Weight packing for flm.GEMM.
 
-Both flm.GEMM overlays, the port and the shipped image, consume B pre-packed into the order
-the compute tiles read it, so their B transfers are plain linear descriptors.
+flm.GEMM consumes B pre-packed into the order the compute tiles read it, so
+its B transfers are plain linear descriptors.
 The reorder is deliberately the caller's job: expressing it as a strided
 descriptor over an unpacked B leaves an innermost run of ``t`` bf16 values, so
 each transfer becomes thousands of scattered bursts -- measured 5.4x slower end
@@ -26,7 +26,6 @@ def pack_b(
     ct_k,
     bfp16=False,
     round_conv_even=True,
-    overlay_order=False,
 ):
     """Reorder a row-major ``(K, N)`` weight matrix into consumption order.
 
@@ -40,18 +39,7 @@ def pack_b(
     loss this adds: the AIE2P mmul only multiplies bfp16, so the bf16 path would
     convert B inside every mac anyway. Doing it here hoists a rounding that
     already happened, and makes B 9 bytes per 8 values instead of 16.
-
-    ``overlay_order`` swaps the two within-block k axes (``i`` and ``s_in``
-    below). It exists solely for the shipped image (``iron.operators.flm.gemm.shipped``), whose
-    B stream is read by FastFlowLM's shipped ``mm.xclbin``, not by a kernel
-    built here: that overlay's own loop nest sweeps ``s_in`` outer and ``i``
-    inner, the reverse of ``mm_fused_mmul_2x2``'s ``i``-outer loop. The
-    now-deleted ``flm_pack_B`` (see ``bench_vs_flm.py`` history) verified this
-    ordering against the overlay via ``tile.reshape(...).transpose(2, 1, 0,
-    3)``; incompatible with ``bfp16``, which only the IRON-built kernel uses.
     """
-    if overlay_order and bfp16:
-        raise ValueError("overlay_order is bf16-only; the overlay never takes bfp16 B")
     K, N = B.shape
     if K % k_tile or N % n_tile:
         raise ValueError(f"B ({K}, {N}) must tile to ({k_tile}, {n_tile}) to be packed")
@@ -61,18 +49,10 @@ def pack_b(
     )
     # (kb, kslice, i, s_in, cb, tb, t_in)
     if not bfp16:
-        if overlay_order:
-            #   -> (cb, kb, kslice, tb, s_in, i, t_in)
-            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 3, 2, 6)).reshape(
-                -1
-            )
-        else:
-            #   -> (cb, kb, kslice, tb, i, s_in, t_in)
-            # Row-major s x t within the block, which is what the plain mmul
-            # loads.
-            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 3, 6)).reshape(
-                -1
-            )
+        #   -> (cb, kb, kslice, tb, i, s_in, t_in)
+        # Row-major s x t within the block, which is what the plain mmul
+        # loads.
+        out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 3, 6)).reshape(-1)
         # Callers may pass B in whatever dtype they have it in (e.g. a model's
         # native f32 weight); the kernels and the declared buffers assume the result
         # is bf16, so guarantee that here rather than silently returning

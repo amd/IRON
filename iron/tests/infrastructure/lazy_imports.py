@@ -59,10 +59,10 @@ def _modules_after_importing(name):
     return set(result.stdout.split())
 
 
-#: flm's GEMM (and Shipped, which subclasses it) names Clamp, Sigmoid and
+#: flm's GEMM names Clamp, Sigmoid and
 #: SiLU directly, by module, to recognize a fused epilogue's consumer
 #: (isinstance checks): eager by design, not a lazy-catalog regression.
-_NAMES_OTHER_OPERATOR_TYPES = {"flm.GEMM", "flm.Shipped"}
+_NAMES_OTHER_OPERATOR_TYPES = {"flm.GEMM"}
 
 
 def _is_composite(name):

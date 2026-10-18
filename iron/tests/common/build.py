@@ -51,7 +51,7 @@ from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
-from iron.operators.flm.gemm.shipped import Shipped
+from iron.tests.common.shipped import Shipped
 from iron.operators.gelu import GELU
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
