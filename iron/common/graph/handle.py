@@ -364,7 +364,7 @@ class Handle:
                 self.start,
                 bounds=bounds,
             )
-        view = self.at(tap, shape, index_by, bounds)
+        view = self._view(tap, shape, index_by, bounds)
         view.window = window
         return view
 
@@ -404,9 +404,8 @@ class Handle:
         self,
         tap: TensorAccessPattern | tuple[TensorAccessPattern, ...],
         shape,
-        index_by=None,
-        bounds=None,
         *,
+        bounds=None,
         repeat=None,
         length=None,
     ):
@@ -438,8 +437,7 @@ class Handle:
                     walk.tensor_dims, walk.offset, sizes, strides
                 )
                 if (
-                    index_by is not None
-                    or walk.rank != 4
+                    walk.rank != 4
                     or dev is None
                     or not dev.dma_bd_fits(0, 0, padded, self.dtype)
                 ):
@@ -480,6 +478,12 @@ class Handle:
                 repeat=repeats,
                 length=length,
             )
+        return self._view(tap, shape, None, bounds)
+
+    def _view(self, tap: TensorAccessPattern, shape, index_by, bounds) -> Handle:
+        """What ``tap`` walks from the per-call element offset ``index_by``:
+        a slice if contiguous and not offset per call, else a view.
+        """
         dense = tap.coalesce()
         offset = tap.offset
         if (
@@ -679,7 +683,7 @@ class _Viewed:
     def transpose(self, *axes):
         return self._as_operand().transpose(*axes)
 
-    def at(self, tap, shape, bounds=None, *, repeat=None, length=None):
+    def at(self, tap, shape, *, bounds=None, repeat=None, length=None):
         """``Handle.at`` of the tensor as the tracer views it."""
         return self._as_operand().at(
             tap, shape, bounds=bounds, repeat=repeat, length=length

@@ -2694,7 +2694,7 @@ class _StateRows(iron.Graph):
 
     def body(self, x, *, n: Scratchpad[np.int32]):
         Copy.step(x[:n], self.rows[:n])
-        rows = self.rows.at(TensorAccessPattern.full((64, 64)), (64, 64), {0: n})
+        rows = self.rows.at(TensorAccessPattern.full((64, 64)), (64, 64), bounds={0: n})
         return ElementwiseAdd.step(x[:n], rows)
 
 
