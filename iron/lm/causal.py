@@ -27,6 +27,7 @@ from aie.iron.kernels.sample import ROW_WORDS
 from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.handle import State
@@ -144,7 +145,7 @@ class CausalLM(Model):
     """
 
     layers: list
-    oracle: "type[Oracle]"
+    oracle: "type[Oracle]" = Oracle
     # The per-call value bounding a prompt chunk's rows.
     bound: ClassVar[str] = "rows"
 
@@ -202,7 +203,12 @@ class CausalLM(Model):
         return self.config.layer(i).step(weights, x, attend, step.angles)
 
     def head(self, x):
-        raise NotImplementedError(f"{type(self).__name__} defines no head()")
+        """The final norm, then the output head (the embedding, if tied)."""
+        c = self.config
+        x = F.rms_norm(x, self.decoder.norm.weight, c.eps)
+        if c.tie_word_embeddings:
+            return F.linear(x, self.decoder.embed_tokens.weight)
+        return F.linear(x, self.weights.lm_head.weight)
 
     def embed(self, x):
         return x

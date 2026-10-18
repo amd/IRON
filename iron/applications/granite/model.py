@@ -5,8 +5,7 @@
 
 """Granite 4.2 3B over the shared decoder and layer (``iron.lm``): its
 embedding and head on the NPU (``Granite``) and on the CPU in float32
-(``GraniteOracle``, the reference it is judged by), its tokenizer, and its
-shape, read from its checkpoint's ``config.json``. Run it with ``python -m
+(``GraniteOracle``, the reference it is judged by), and its shape, read from its checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.granite.model``.
 
 Granite is Llama's layer with four scalars of its own config's: the
@@ -28,7 +27,6 @@ from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
-from tokenizers import Tokenizer
 
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig, Derived, Layer, Oracle, widen
@@ -113,22 +111,12 @@ class Granite(CausalLM):
         )
 
 
-def tokenizer(path) -> Tokenizer:
-    """Granite's tokenizer, from its ``tokenizer.json``; its own ``encode``
-    adds no special tokens (``Runner.encode`` prepends BOS itself)."""
-    return Tokenizer.from_file(str(path))
-
-
 class Runner(lm.Runner):
     """Granite 4.2 3B, from its sharded checkpoint and ``tokenizer.json``."""
 
     config = GraniteConfig
     model = Granite
-    open_tokenizer = staticmethod(tokenizer)
     bos = 100283  # "<s>"; eos/pad is "<|im_end|>" = 100257
-
-    def encode(self, text: str) -> list[int]:
-        return [self.bos, *self.tokenizer.encode(text, add_special_tokens=False).ids]
 
 
 if __name__ == "__main__":

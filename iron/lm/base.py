@@ -189,6 +189,10 @@ class DecoderConfig(Config):
     normalize_top_k: bool = dataclasses.field(
         default=True, metadata={"json": "norm_topk_prob"}
     )
+    # Whether the output head is the input embedding.
+    tie_word_embeddings: bool = dataclasses.field(
+        default=True, metadata={"json": "tie_word_embeddings"}
+    )
 
     def __post_init__(self):
         if self.head_dim is None:
@@ -630,7 +634,11 @@ class Oracle:
         return c.layer(i).oracle(self, w, x, attend, angles, ple=ple)
 
     def head(self, x):
-        raise NotImplementedError(f"{type(self).__name__} defines no head()")
+        """The final norm, then the output head (the embedding, if tied)."""
+        x = self.rms_norm(x, widen(self.decoder.norm.weight))
+        if self.config.tie_word_embeddings:
+            return x @ self.embedding.T
+        return x @ widen(self.weights.lm_head.weight).T
 
     def embed(self, x):
         return x
@@ -923,6 +931,24 @@ FLAGS = (
 )
 
 
+class Tokenizer:
+    """A Hugging Face ``tokenizer.json``, over ``tokenizers`` (not
+    ``transformers``): text to token ids without the special tokens its
+    post-processor adds, since ``Runner.encode`` puts the BOS first, and back.
+    """
+
+    def __init__(self, path):
+        import tokenizers
+
+        self._tokenizer = tokenizers.Tokenizer.from_file(str(path))
+
+    def encode(self, text: str) -> list[int]:
+        return self._tokenizer.encode(text, add_special_tokens=False).ids
+
+    def decode(self, tokens) -> str:
+        return self._tokenizer.decode(list(tokens))
+
+
 class Runner:
     """A checkpoint, its tokenizer and ``config``, and the models on them.
 
@@ -948,7 +974,8 @@ class Runner:
 
     @staticmethod
     def open_tokenizer(path):
-        raise NotImplementedError
+        """The tokenizer at ``path``: a Hugging Face ``tokenizer.json``."""
+        return Tokenizer(path)
 
     @classmethod
     def default_config(cls, weights_path) -> Config:

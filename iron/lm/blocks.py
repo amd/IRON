@@ -27,11 +27,8 @@ from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 from iron.operators.elementwise_max import ElementwiseMax
 from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
-from iron.operators.flm.gemm.design import Epilogue
-from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
-from iron.operators.gemv import GEMV
 from iron.operators.layer_norm import LayerNorm
 from iron.operators.limbs import Limbs, stacked
 from iron.operators.log import Log

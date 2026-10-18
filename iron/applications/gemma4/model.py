@@ -5,7 +5,7 @@
 
 """Gemma 4's text model over the shared decoder and layer (``iron.lm``):
 its shape (``Gemma4Config``), its float32 forward pass on the host
-(``Gemma4Oracle``, the reference it is judged by) and its tokenizer.
+(``Gemma4Oracle``, the reference it is judged by).
 
 Each layer is ``Layer``: sandwich norms, q, k and v norms, GeGLU, a layer
 scalar and a per-layer input, the sum of the embedding projected for the
@@ -20,7 +20,6 @@ import dataclasses
 import math
 
 import numpy as np
-import tokenizers
 
 from iron.lm import DecoderConfig, Layer, Oracle, rope_angles, widen
 
@@ -215,18 +214,3 @@ class Gemma4Oracle(Oracle):
         norm = widen(self.decoder.norm.weight)
         cap = np.float32(c.logit_cap)
         return np.tanh((self.rms_norm(x, norm) @ self.embedding.T) / cap) * cap
-
-
-class Tokenizer:
-    """Gemma 4's ``tokenizer.json``: text to ids without the BOS a caller
-    puts first, and back.
-    """
-
-    def __init__(self, path):
-        self.tokenizer = tokenizers.Tokenizer.from_file(str(path))
-
-    def encode(self, text: str) -> list[int]:
-        return self.tokenizer.encode(text, add_special_tokens=False).ids
-
-    def decode(self, ids) -> str:
-        return self.tokenizer.decode(list(ids))

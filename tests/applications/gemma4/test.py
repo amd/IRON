@@ -10,7 +10,8 @@ where torch and transformers are installed (hugging_face.py).
 import numpy as np
 import pytest
 
-from iron.applications.gemma4.model import Gemma4Config, Gemma4Oracle, Tokenizer
+from iron.applications.gemma4.model import Gemma4Config, Gemma4Oracle
+from iron.lm import Tokenizer
 from iron.lm import Checkpoint, rope_angles
 from iron.lm.base import prompt_text
 from iron.lm.testing import require, weights_dir

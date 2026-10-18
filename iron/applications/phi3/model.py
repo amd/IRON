@@ -3,10 +3,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Phi-4-mini-instruct over the shared decoder and layer (``iron.lm``): its
-head on the NPU (``Phi4``) and on the CPU in float32 (``Phi4Oracle``, the
-reference it is judged by), its tokenizer and its shape, read from its
-checkpoint's ``config.json``. Run it with ``python -m
+"""Phi-4-mini-instruct on the shared decoder (``iron.lm``), its shape read
+from its checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.phi3.model``.
 
 Phi-4-mini is Llama's layer with three differences, each ``Layer``'s or
@@ -33,12 +31,9 @@ import math
 from pathlib import Path
 
 import numpy as np
-from tokenizers import Tokenizer
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig, Oracle, rope_angles, widen
-from iron.operators.gemv import GEMV
-from iron.operators.rms_norm import RMSNorm
+from iron.lm import CausalLM, DecoderConfig, rope_angles
 
 
 @dataclasses.dataclass(frozen=True)
@@ -133,49 +128,10 @@ class Phi4Config(DecoderConfig):
         return self.original_max_position_embeddings, self._table(self.longrope.long)
 
 
-class Phi4Oracle(Oracle):
-    """Phi-4-mini-instruct's forward pass in float32, on the host."""
-
-    def head(self, x):
-        norm = widen(self.weights.model.norm.weight)
-        return self.rms_norm(x, norm) @ self.embedding.T
-
-
 class Phi4(CausalLM):
-    """Phi-4-mini-instruct on ``config``'s shape and a checkpoint's
-    ``weights``, by its names. The embedding is the output head too. Every
-    matrix is read ``(out, in)``, as the checkpoint ships it: GEMV's ``(M,
-    K)`` and GEMM's column-major B.
-    """
+    """Phi-4-mini-instruct on ``config``'s shape and a checkpoint's ``weights``."""
 
     profile = Path(__file__).with_name("profiles")
-    oracle = Phi4Oracle
-
-    def head(self, x):
-        return GEMV.step(
-            self.weights.model.embed_tokens.weight,
-            RMSNorm.step(
-                x, weight=self.weights.model.norm.weight, epsilon=self.config.eps
-            ),
-        )
-
-
-class Phi4Tokenizer:
-    """Phi-4-mini-instruct's tokenizer, Hugging Face's ``tokenizers`` over
-    its ``tokenizer.json`` (an auto-converted GPT-4o-style BPE, not a
-    tiktoken ``.model`` file: no chat template or added-token handling
-    beyond plain encode/decode, enough for a teacher-forced oracle check
-    and a raw continuation).
-    """
-
-    def __init__(self, path):
-        self._tokenizer = Tokenizer.from_file(str(path))
-
-    def encode(self, text: str) -> list[int]:
-        return self._tokenizer.encode(text).ids
-
-    def decode(self, tokens) -> str:
-        return self._tokenizer.decode(list(tokens))
 
 
 #: ``<|endoftext|>``, the checkpoint's bos_token, eos_token and pad_token alike.
@@ -189,7 +145,6 @@ class Runner(lm.Runner):
 
     config = Phi4Config
     model = Phi4
-    open_tokenizer = Phi4Tokenizer
     bos = BOS
 
 

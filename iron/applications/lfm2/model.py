@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """LFM2-1.2B over the shared decoder and layer (``iron.lm``): its short
-convolution on the NPU (``Lfm2``) and in float32 (``Lfm2Oracle``), its
-tokenizer, and LFM2-1.2B's shape, read from its checkpoint's
+convolution on the NPU (``Lfm2``) and in float32 (``Lfm2Oracle``), and
+LFM2-1.2B's shape, read from its checkpoint's
 ``config.json``. Run it with ``python -m iron.applications.lfm2.model``.
 
 Sixteen layers, only six of them full attention (``full_attn_idxs``),
@@ -29,7 +29,6 @@ import dataclasses
 from pathlib import Path
 
 import numpy as np
-from tokenizers import Tokenizer
 
 import iron
 import iron.functional as F
@@ -208,32 +207,11 @@ class Lfm2(CausalLM):
         )
 
 
-class _Tokenizer:
-    """``tokenizers.Tokenizer``, wrapped to ``encode``/``decode`` plain
-    token id lists: its own post-processor already adds BOS, which
-    ``lm.Runner.encode`` adds again, so it is dropped here once.
-    """
-
-    def __init__(self, tok: Tokenizer):
-        self._tok = tok
-
-    def encode(self, text: str) -> list[int]:
-        return self._tok.encode(text).ids[1:]
-
-    def decode(self, tokens) -> str:
-        return self._tok.decode(tokens)
-
-
-def tokenizer(path) -> _Tokenizer:
-    return _Tokenizer(Tokenizer.from_file(str(path)))
-
-
 class Runner(lm.Runner):
     """LFM2-1.2B, from its checkpoint and ``tokenizer.json``."""
 
     config = Lfm2Config
     model = Lfm2
-    open_tokenizer = staticmethod(tokenizer)
     bos = 1
 
 

@@ -3,10 +3,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3 over the shared decoder and layer (``iron.lm``): its
-head on the NPU (``Llama``) and on the CPU in float32 (``LlamaOracle``,
-the reference it is judged by), its tokenizer, and Llama 3.2 1B's shape.
-Run it with ``python -m iron.applications.llama.model``.
+"""Llama 3 on the shared decoder (``iron.lm``): Llama 3's RoPE scaling, its
+tokenizer, and Llama 3.2 1B's shape. Run it with ``python -m
+iron.applications.llama.model``.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,
 keyed by operator shape at Llama 3.2 1B's shape: a decode step's and a
@@ -23,9 +22,7 @@ import tiktoken
 import tiktoken.load
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig, Oracle, widen
-from iron.operators.gemv import GEMV
-from iron.operators.rms_norm import RMSNorm
+from iron.lm import CausalLM, DecoderConfig
 
 
 @dataclasses.dataclass(frozen=True)
@@ -81,30 +78,10 @@ class LlamaConfig(DecoderConfig):
     )
 
 
-class LlamaOracle(Oracle):
-    """Llama 3's forward pass in float32, on the host."""
-
-    def head(self, x):
-        norm = widen(self.weights.model.norm.weight)
-        return self.rms_norm(x, norm) @ self.embedding.T
-
-
 class Llama(CausalLM):
-    """Llama 3 on ``config``'s shape and a checkpoint's ``weights``, by its
-    names. The embedding is the output head too. Every matrix is read
-    ``(out, in)``, as the checkpoint ships it: GEMV's ``(M, K)`` and GEMM's
-    column-major B.
-    """
+    """Llama 3 on ``config``'s shape and a checkpoint's ``weights``."""
 
     profile = Path(__file__).with_name("profiles")
-    oracle = LlamaOracle
-
-    def head(self, x):
-        norm = self.weights.model.norm.weight
-        return GEMV.step(
-            self.weights.model.embed_tokens.weight,
-            RMSNorm.step(x, weight=norm, epsilon=self.config.eps),
-        )
 
 
 SPECIAL_TOKENS = {

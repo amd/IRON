@@ -20,7 +20,6 @@ from types import SimpleNamespace
 
 import numpy as np
 from ml_dtypes import bfloat16
-from tokenizers import Tokenizer as HFTokenizer
 
 import iron
 from iron import Scratchpad, lm
@@ -307,16 +306,10 @@ class Whisper(EncoderDecoder):
         return GEMV.step(self.decoder.embed_tokens.weight, h)
 
 
-def tokenizer(path) -> HFTokenizer:
-    """Whisper's tokenizer, from its ``tokenizer.json``."""
-    return HFTokenizer.from_file(str(path))
-
-
 class Runner(lm.Runner):
     """Whisper, from its checkpoint and ``tokenizer.json``."""
 
     config = WhisperConfig
     model = Whisper
-    open_tokenizer = staticmethod(tokenizer)
     #: ``<|startoftranscript|>``, every transcript's first token.
     bos = 50258

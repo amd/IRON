@@ -21,7 +21,6 @@ import dataclasses
 from pathlib import Path
 
 import numpy as np
-from tokenizers import Tokenizer as HFTokenizer
 
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal, Oracle, widen
@@ -30,8 +29,6 @@ from iron.applications.idefics3.vision.model import (
     VisionOracle,
     VisionTower,
 )
-from iron.operators.gemv import GEMV
-from iron.operators.rms_norm import RMSNorm
 from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
 
 
@@ -65,6 +62,9 @@ class SmolVLMTextConfig(DecoderConfig):
     max_seq_len: int = dataclasses.field(
         metadata={"json": "text_config.max_position_embeddings"}
     )
+    tie_word_embeddings: bool = dataclasses.field(
+        default=False, metadata={"json": "tie_word_embeddings"}
+    )
 
 
 class SmolVLMTextOracle(Oracle):
@@ -72,11 +72,6 @@ class SmolVLMTextOracle(Oracle):
 
     def __init__(self, config, weights):
         super().__init__(config, weights, decoder=weights.model.text_model)
-        self.lm_head = widen(weights.lm_head.weight)
-
-    def head(self, x):
-        norm = widen(self.decoder.norm.weight)
-        return self.rms_norm(x, norm) @ self.lm_head.T
 
 
 class SmolVLMText(CausalLM):
@@ -91,31 +86,6 @@ class SmolVLMText(CausalLM):
 
     def __init__(self, config, weights):
         super().__init__(config, weights, decoder=weights.model.text_model)
-        self.lm_head = weights.lm_head.weight
-
-    def head(self, x):
-        return GEMV.step(
-            self.lm_head,
-            RMSNorm.step(x, weight=self.decoder.norm.weight, epsilon=self.config.eps),
-        )
-
-
-class Tokenizer:
-    """SmolVLM's BPE tokenizer (its ``tokenizer.json``)."""
-
-    def __init__(self, hf):
-        self.hf = hf
-
-    def encode(self, text: str) -> list[int]:
-        return self.hf.encode(text).ids
-
-    def decode(self, tokens: list[int]) -> str:
-        return self.hf.decode(tokens)
-
-
-def tokenizer(path) -> Tokenizer:
-    """SmolVLM's tokenizer, from its ``tokenizer.json``."""
-    return Tokenizer(HFTokenizer.from_file(str(path)))
 
 
 #: ``<|im_start|>``, the turn marker every prompt starts with.
@@ -129,7 +99,6 @@ class Runner(lm.Runner):
 
     config = SmolVLMTextConfig
     model = SmolVLMText
-    open_tokenizer = staticmethod(tokenizer)
     bos = BOS
 
 

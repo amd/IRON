@@ -3,7 +3,7 @@
 
 """The graph's reference against the model's plain forward pass.
 
-``Llama.oracle`` (``LlamaOracle``) is a stateless causal pass in float32
+``Llama.oracle`` (``Oracle``) is a stateless causal pass in float32
 numpy, the oracle the NPU application is judged against. ``Llama`` is the same
 computation as one graph, called at a prompt's shape and at one token's,
 and ``Graph.reference`` runs it operator by operator through each
@@ -40,7 +40,7 @@ from iron.lm import (
     generate_on_host,
 )
 from iron.lm.generation import greedy
-from iron.applications.llama.model import Llama, LlamaConfig, LlamaOracle
+from iron.applications.llama.model import Llama, LlamaConfig
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE
@@ -325,7 +325,7 @@ class Placed(OnHost):
         return ElementwiseAdd.step(x, rows)
 
 
-class PlacedOracle(LlamaOracle):
+class PlacedOracle(Oracle):
     """``Placed``'s oracle."""
 
     def __init__(self, config, weights, table):
@@ -363,26 +363,24 @@ def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
     _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
     with pytest.raises(AssertionError):
         _assert_close(
-            [model.logits(tokens)], [LlamaOracle(config, cpu.weights).logits(tokens)]
+            [model.logits(tokens)], [Oracle(config, cpu.weights).logits(tokens)]
         )
 
 
 def test_a_decoder_nested_in_its_checkpoint_is_read_where_it_is(cpu):
-    """A checkpoint holding its decoder's embedding and layers under
-    ``model.decoder``: ``decoder=`` reads them there, in the model and its
+    """A checkpoint holding its decoder's embedding, layers and final norm
+    under ``model.decoder``: ``decoder=`` reads them there, in the model and its
     oracle, and both give the flat checkpoint's logits bit for bit.
     """
     m = cpu.weights.model
-    decoder = SimpleNamespace(embed_tokens=m.embed_tokens, layers=m.layers)
-    nested = SimpleNamespace(
-        model=SimpleNamespace(norm=m.norm, embed_tokens=m.embed_tokens, decoder=decoder)
-    )
+    decoder = SimpleNamespace(embed_tokens=m.embed_tokens, layers=m.layers, norm=m.norm)
+    nested = SimpleNamespace(model=SimpleNamespace(decoder=decoder))
     model = OnHost(cpu.config, nested, decoder)
     assert model.layers is m.layers and model.decoder is decoder
     np.testing.assert_array_equal(
         model.logits(cpu.prompt), OnHost(cpu.config, cpu.weights).logits(cpu.prompt)
     )
-    oracle = LlamaOracle(cpu.config, nested, decoder)
+    oracle = Oracle(cpu.config, nested, decoder)
     np.testing.assert_array_equal(oracle.logits(cpu.prompt), cpu.first)
 
 
