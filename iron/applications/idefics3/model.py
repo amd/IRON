@@ -25,7 +25,7 @@ from ml_dtypes import bfloat16
 
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal
-from iron.lm.golden import flat, config_json
+from iron.lm.golden import HuggingFace, config_json
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 
 
@@ -81,72 +81,15 @@ class SmolVLMText(CausalLM):
 BOS = 1
 
 
-class Runner(lm.Runner):
-    """SmolVLM-256M-Instruct's text backbone, from its checkpoint and
-    ``tokenizer.json`` (text-only: no image input yet).
-    """
-
-    config = SmolVLMTextConfig
-    model = SmolVLMText
-    bos = BOS
-
-    @property
-    def hugging_face(self):
-        # No AutoModelForCausalLM loads SmolVLM's checkpoint.
-        return HuggingFaceVLM
-
-
-# The real processor's own ids either side of an image and its question
-# ("<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:", one
-# image, no splitting), read off Idefics3Processor's output.
-_PREAMBLE_IDS = [1, 11126, 42, 49189, 49152]
-_SUFFIX_IDS = [49189]
-_TAIL_IDS = [49279, 198, 9519, 9531, 42]
-
-
-def build_prompt(question: list[int], vision: VisionConfig) -> list[int]:
-    """The token ids of one unsplit image, first in the turn, then the
-    ``question``'s ids, as the real processor lays them out: the image a run
-    of ``vision.image_token`` placeholders, one per soft token.
-    """
-    image = [vision.image_token] * vision.tokens
-    return _PREAMBLE_IDS + image + _SUFFIX_IDS + question + _TAIL_IDS
-
-
-class HuggingFaceVLM:
+class HuggingFaceVLM(HuggingFace):
     """transformers' own SmolVLM (``Idefics3ForConditionalGeneration``) in
-    float32: a checkpoint directory's (``load``) or one built from IRON's
-    configs over a weights tree (``build``). It takes what a ``Golden`` is
+    float32, built over both configs as ``HuggingFace.build("idefics3",
+    vision, weights, **config_json(text))``. It takes what a ``Golden`` is
     keyed by: a sequence's tokens, then, if they hold image placeholders,
     the image's bfloat16 bits (``Reference``).
     """
 
-    def __init__(self, model):
-        self.model = model.eval()
-
-    @classmethod
-    def load(cls, directory) -> "HuggingFaceVLM":
-        import torch
-        import transformers
-
-        return cls(
-            transformers.Idefics3ForConditionalGeneration.from_pretrained(
-                directory, dtype=torch.float32
-            )
-        )
-
-    @classmethod
-    def build(cls, text, vision: VisionConfig, weights) -> "HuggingFaceVLM":
-        """The model of ``text``'s and ``vision``'s fields as ``config.json``
-        names them, over ``weights``, every parameter of which it holds.
-        """
-        import torch
-        import transformers
-
-        hf = transformers.Idefics3Config(**(config_json(vision) | config_json(text)))
-        model = transformers.Idefics3ForConditionalGeneration(hf).float()
-        model.load_state_dict({k: torch.from_numpy(v) for k, v in flat(weights)})
-        return cls(model)
+    model_class = "AutoModelForImageTextToText"
 
     def pixels(self, bits):
         """The ``pixel_values`` of one image's bfloat16 ``bits``, laid out
@@ -176,6 +119,34 @@ class HuggingFaceVLM:
                 use_cache=False,
             )
         return out.logits[0, -1].numpy()
+
+
+class Runner(lm.Runner):
+    """SmolVLM-256M-Instruct's text backbone, from its checkpoint and
+    ``tokenizer.json`` (text-only: no image input yet).
+    """
+
+    config = SmolVLMTextConfig
+    model = SmolVLMText
+    bos = BOS
+    hugging_face = HuggingFaceVLM
+
+
+# The real processor's own ids either side of an image and its question
+# ("<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:", one
+# image, no splitting), read off Idefics3Processor's output.
+_PREAMBLE_IDS = [1, 11126, 42, 49189, 49152]
+_SUFFIX_IDS = [49189]
+_TAIL_IDS = [49279, 198, 9519, 9531, 42]
+
+
+def build_prompt(question: list[int], vision: VisionConfig) -> list[int]:
+    """The token ids of one unsplit image, first in the turn, then the
+    ``question``'s ids, as the real processor lays them out: the image a run
+    of ``vision.image_token`` placeholders, one per soft token.
+    """
+    image = [vision.image_token] * vision.tokens
+    return _PREAMBLE_IDS + image + _SUFFIX_IDS + question + _TAIL_IDS
 
 
 class Reference:
@@ -218,7 +189,9 @@ class VLMRunner(Runner):
         """
         vision = self.vision_config
         if self.seed is not None:
-            model = HuggingFaceVLM.build(self.config, vision, self.weights)
+            model = HuggingFaceVLM.build(
+                "idefics3", vision, self.weights, **config_json(self.config)
+            )
         else:
             model = super().reference()
         return Reference(model, vision.image_token)

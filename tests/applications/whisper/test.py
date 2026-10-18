@@ -115,7 +115,14 @@ def reference(clip, golden):
     """Hugging Face's logits over the toy's weights after the clip."""
     weights, features = clip
     toy = Reference(
-        golden("toy", lambda: HuggingFaceWhisper.build(TOY, weights), TOY, weights)
+        golden(
+            "toy",
+            lambda: HuggingFaceWhisper.build(
+                "whisper", TOY, weights, pad_token_id=None
+            ),
+            TOY,
+            weights,
+        )
     )
     toy.encode(features)
     return toy
@@ -137,7 +144,9 @@ class Encoder:
     """
 
     def __init__(self, weights):
-        self.encoder = HuggingFaceWhisper.build(TOY, weights).model.model.encoder
+        self.encoder = HuggingFaceWhisper.build(
+            "whisper", TOY, weights, pad_token_id=None
+        ).model.model.encoder
 
     def logits(self, bits):
         import torch
@@ -230,7 +239,14 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
     assert weights.model.decoder.embed_tokens.weight.dtype == np.float16
     model = Whisper(TOY, weights)
     reference = Reference(
-        golden("toy_f16", lambda: HuggingFaceWhisper.build(TOY, weights), TOY, weights)
+        golden(
+            "toy_f16",
+            lambda: HuggingFaceWhisper.build(
+                "whisper", TOY, weights, pad_token_id=None
+            ),
+            TOY,
+            weights,
+        )
     )
     assert model.decoder.embed_tokens.weight.dtype == bfloat16
     features = np.random.default_rng(1).uniform(

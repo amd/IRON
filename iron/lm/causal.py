@@ -367,24 +367,11 @@ class CausalLM(Model):
         """
         return [{}, dict(ids=((self.config.prefill_chunk,), np.int32))]
 
-    def load(
-        self,
-        *,
-        release=None,
-        full_elf: bool | None = None,
-        dev=None,
-    ) -> "CausalLM":
-        """Compile and load both versions before the first call, so the arena is made once.
-
-        Args:
-            release: Given each piece of each weight once it is on the device.
-            full_elf: Both versions' packaging (``Graph.compile``).
-            dev: The device both versions are compiled for, else the current
-                one.
+    def loaded(self, versions: list) -> None:
+        """Run ``logits`` and ``generate`` on the decode step and the
+        prompt chunk (``use``).
         """
-        super().load(release=release, full_elf=full_elf, dev=dev)
-        self.use(*self.versions.values())
-        return self
+        self.use(*versions)
 
     def use(
         self,

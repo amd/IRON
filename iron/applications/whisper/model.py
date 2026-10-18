@@ -37,7 +37,7 @@ from iron.lm import (
     Tower,
 )
 from iron.lm.base import _nest, leaves
-from iron.lm.golden import Golden, flat, config_json
+from iron.lm.golden import Golden, HuggingFace
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gelu import GELU
@@ -312,38 +312,13 @@ class Reference:
         return self.golden.logits(np.append(self.features, tokens))
 
 
-class HuggingFaceWhisper:
+class HuggingFaceWhisper(HuggingFace):
     """transformers' ``WhisperForConditionalGeneration`` in float32, what
     records a ``Reference``'s golden: the logits after a key of a clip's
     features (their float32 bits), then the decoder's tokens.
     """
 
-    def __init__(self, model):
-        self.model = model.eval()
-
-    @classmethod
-    def load(cls, directory) -> "HuggingFaceWhisper":
-        import torch
-        import transformers
-
-        return cls(
-            transformers.WhisperForConditionalGeneration.from_pretrained(
-                directory, dtype=torch.float32
-            )
-        )
-
-    @classmethod
-    def build(cls, config: WhisperConfig, weights) -> "HuggingFaceWhisper":
-        """The model on ``config``'s shape over ``weights``."""
-        import torch
-        import transformers
-
-        # A toy vocabulary holds no Whisper padding token.
-        hf = transformers.WhisperConfig(**config_json(config), pad_token_id=None)
-        model = transformers.WhisperForConditionalGeneration(hf)
-        state = {k: torch.from_numpy(v) for k, v in flat(weights)}
-        model.load_state_dict(state, strict=False)
-        return cls(model)
+    model_class = "AutoModelForSpeechSeq2Seq"
 
     def logits(self, key) -> np.ndarray:
         import torch

@@ -542,8 +542,9 @@ def _tree(node) -> Any:
 class Model(iron.Graph):
     """A model's graph, every version ``shapes()`` names compiled and
     loaded by ``load()`` before the first call, so the arena is made once:
-    a version after the first feeds off the one before it, a full ELF's
-    Emit starting there. ``versions`` (``Graph``'s own), in ``shapes()``'s
+    a version on token ids (``ids`` or ``placed``) feeds off the decode
+    step, the version with no input, where that is a full ELF, its Emit
+    starting there. ``versions`` (``Graph``'s own), in ``shapes()``'s
     order, is every version ``load()`` compiled.
     """
 
@@ -565,7 +566,8 @@ class Model(iron.Graph):
         full_elf: bool | None = None,
         dev=None,
     ) -> "Model":
-        """Compile and load every version before the first call.
+        """Compile and load every version before the first call, in one
+        arena, then hand them to ``loaded``.
 
         Args:
             release: Given each piece of each weight once it is on the device.
@@ -574,12 +576,23 @@ class Model(iron.Graph):
         """
         if dev is None:
             dev = aie_utils.ensure_current_device()
-        feeds = None
+        compiled, decode = [], None
         for shapes in self.shapes():
-            version = self.compile(dev=dev, feeds=feeds, full_elf=full_elf, **shapes)
+            prompt = "ids" in shapes or "placed" in shapes
+            version = self.compile(
+                dev=dev, feeds=decode if prompt else None, full_elf=full_elf, **shapes
+            )
             version.load(release=release)
-            feeds = version if version.emit is not None else None
+            if not shapes and version.emit is not None:
+                decode = version
+            compiled.append(version)
+        self.loaded(compiled)
         return self
+
+    def loaded(self, versions: list) -> None:
+        """What runs on ``versions``, in ``shapes()``'s order, once
+        ``load`` has them: nothing by default.
+        """
 
 
 #: The flags a runner's CLI and pytest's fixtures read alike

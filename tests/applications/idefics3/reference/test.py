@@ -21,6 +21,7 @@ from iron.applications.idefics3.model import (
 )
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.lm import Multimodal
+from iron.lm.golden import config_json
 from iron.tests.common.llama_model import drawn, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -130,7 +131,9 @@ def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
     got = np.asarray(tower.reference(buffer, **values), np.float32)
     reference = golden(
         "soft_tokens",
-        lambda: SoftTokens(HuggingFaceVLM.build(TEXT, VISION, weights)),
+        lambda: SoftTokens(
+            HuggingFaceVLM.build("idefics3", VISION, weights, **config_json(TEXT))
+        ),
         TEXT,
         VISION,
         weights,
@@ -162,7 +165,7 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
     )
     hf = golden(
         "small",
-        lambda: HuggingFaceVLM.build(TEXT, VISION, weights),
+        lambda: HuggingFaceVLM.build("idefics3", VISION, weights, **config_json(TEXT)),
         TEXT,
         VISION,
         weights,

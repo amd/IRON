@@ -103,10 +103,14 @@ def fingerprint(*values) -> str:
 
 
 class HuggingFace:
-    """transformers' own causal model in float32: a checkpoint directory's
-    (``load``) or one built from an IRON config and a weights tree
-    (``build``).
+    """transformers' own model in float32, of the auto class
+    ``model_class`` names (a causal model's by default): a checkpoint
+    directory's (``load``) or one built from an IRON config and a weights
+    tree (``build``). A model of another kind subclasses it for its class
+    and its ``logits``.
     """
+
+    model_class = "AutoModelForCausalLM"
 
     def __init__(self, model):
         self.model = model.eval()
@@ -116,11 +120,8 @@ class HuggingFace:
         import torch
         import transformers
 
-        return cls(
-            transformers.AutoModelForCausalLM.from_pretrained(
-                directory, dtype=torch.float32
-            )
-        )
+        auto = getattr(transformers, cls.model_class)
+        return cls(auto.from_pretrained(directory, dtype=torch.float32))
 
     @classmethod
     def build(cls, model_type: str, config, weights, **json) -> "HuggingFace":
@@ -128,7 +129,8 @@ class HuggingFace:
         ``config.json`` names them, and ``json``'s, over ``weights``.
 
         Raises:
-            ValueError: ``weights`` lacks a parameter the model holds.
+            ValueError: ``weights`` lacks a parameter the model holds, other
+                than one tied to another.
         """
         import torch
         import transformers
@@ -136,11 +138,12 @@ class HuggingFace:
         hf = transformers.AutoConfig.for_model(
             model_type, **(config_json(config) | json)
         )
-        model = transformers.AutoModelForCausalLM.from_config(hf, dtype=torch.float32)
+        auto = getattr(transformers, cls.model_class)
+        model = auto.from_config(hf, dtype=torch.float32)
         state = {k: torch.from_numpy(v) for k, v in flat(weights)}
         missing, _ = model.load_state_dict(state, strict=False)
-        if model.config.tie_word_embeddings:
-            missing = [k for k in missing if k != "lm_head.weight"]
+        # A tied parameter is named once, by the first of its names.
+        missing = [k for k in missing if k in dict(model.named_parameters())]
         if missing:
             raise ValueError(f"the weights lack {missing}")
         return cls(model)

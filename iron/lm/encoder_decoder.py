@@ -12,7 +12,6 @@ call's ``source`` rows.
 import inspect
 from functools import partial
 
-import aie.utils as aie_utils
 import numpy as np
 
 import iron
@@ -151,40 +150,12 @@ class EncoderDecoder(CausalLM):
         ]
         return [*super().shapes(), *encoded]
 
-    def load(
-        self,
-        *,
-        release=None,
-        full_elf: bool | None = None,
-        dev=None,
-    ) -> "EncoderDecoder":
-        """Compile and load every version before the first call, in one
-        arena, the prompt chunk feeding off the decode step, and run the
-        decoder's on them (``use``).
-
-        Args:
-            release: Given each piece of each weight once it is on the device.
-            full_elf: Each version's packaging (``Graph.compile``).
-            dev: The device every version compiles for, else the current one.
+    def loaded(self, versions: list) -> None:
+        """Run the decoder's versions (``use``) and hold the encode
+        version.
         """
-        if dev is None:
-            dev = aie_utils.ensure_current_device()
-        compiled, decode = [], None
-        for shapes in self.shapes():
-            version = self.compile(
-                dev=dev,
-                feeds=decode if "ids" in shapes else None,
-                full_elf=full_elf,
-                **shapes,
-            )
-            version.load(release=release)
-            if not shapes and version.emit is not None:
-                decode = version
-            compiled.append(version)
-        decode_step, prompt_chunk, *encoded = compiled
+        decode_step, prompt_chunk, self._encode = versions
         self.use(decode_step, prompt_chunk)
-        (self._encode,) = encoded
-        return self
 
     def encode(self, *raw) -> None:
         """Run the encoder on ``raw``, as its ``inputs`` takes it, and hold

@@ -8,7 +8,6 @@ placeholders takes its tower's j-th soft token.
 
 import inspect
 
-import aie.utils as aie_utils
 import numpy as np
 
 import iron
@@ -139,41 +138,11 @@ class Multimodal(Model):
             placed["before"] = ((len(self.towers),), np.int32)
         return [*text, *towers, placed]
 
-    def load(
-        self,
-        *,
-        release=None,
-        full_elf: bool | None = None,
-        dev=None,
-    ) -> "Multimodal":
-        """Compile and load every version before the first call, in one
-        arena, each version taking ids feeding the decode step a causal text
-        model has, and hand a causal text model its versions (``use``).
-
-        Args:
-            release: Given each piece of each weight once it is on the device.
-            full_elf: Each version's packaging (``Graph.compile``).
-            dev: The device every version compiles for, else the current one.
-        """
-        if dev is None:
-            dev = aie_utils.ensure_current_device()
-        compiled, decode = [], None
-        for shapes in self.shapes():
-            prompt = "ids" in shapes or "placed" in shapes
-            version = self.compile(
-                dev=dev,
-                feeds=decode if prompt else None,
-                full_elf=full_elf,
-                **shapes,
-            )
-            version.load(release=release)
-            if not shapes and version.emit is not None:
-                decode = version
-            compiled.append(version)
+    def loaded(self, versions: list) -> None:
+        """Hand a causal text model its versions (``use``)."""
         if isinstance(self.text, CausalLM):
-            decode_step, prompt_chunk, *_, placed = compiled
+            decode_step, prompt_chunk, *_, placed = versions
             self.text.use(decode_step, prompt_chunk, placed, tuple(self.at))
-        return self
 
     def longest(self) -> dict:
         """The per-call values of the longest call: the text model's and each
