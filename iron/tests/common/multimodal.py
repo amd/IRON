@@ -20,7 +20,7 @@ from iron.lm import Multimodal, Tower
 from iron.lm.golden import HuggingFace
 from iron.operators.copy import Copy
 from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint
-from iron.tests.common.llama_reference import _assert_close
+from iron.lm.testing import assert_close
 from iron.tests.common.encoder import (
     HEAD_DIM,
     HEADS,
@@ -227,7 +227,7 @@ def test_a_run_of_soft_tokens_crossing_a_chunk_is_placed_on_both_sides(causal):
         else:
             logits, carry = model.reference(ids, **values)
     assert placed == [0, 6]
-    _assert_close([np.asarray(logits).reshape(-1)], [reference(tokens, soft)])
+    assert_close(np.asarray(logits).reshape(-1), reference(tokens, soft))
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)
-    _assert_close([np.asarray(logits).reshape(-1)], [reference(tokens, soft)])
+    assert_close(np.asarray(logits).reshape(-1), reference(tokens, soft))

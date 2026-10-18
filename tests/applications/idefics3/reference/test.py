@@ -17,6 +17,7 @@ from iron.applications.idefics3.hugging_face import HuggingFaceVLM
 from iron.applications.idefics3.model import SmolVLMText, SmolVLMTextConfig
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.lm import Multimodal
+from iron.lm.testing import assert_close
 from iron.tests.common.llama_model import checkpoint, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -139,16 +140,6 @@ def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
     assert err <= 0.05 * scale, f"|diff| {err:.4f} against |soft tokens| {scale:.3f}"
 
 
-def _assert_close(got, want):
-    """bf16 against float32, so within 5% of the largest logit, and the
-    same argmax.
-    """
-    got = np.asarray(got, np.float32).reshape(-1)
-    err, scale = np.abs(got - want).max(), np.abs(want).max()
-    assert err <= 0.05 * scale, f"|diff| {err:.4f} against |logits| {scale:.3f}"
-    assert got.argmax() == want.argmax()
-
-
 def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, weights):
     """Each version's reference in turn, its states carried from one to the
     next: the tower, then each chunk, both holding some of the run of
@@ -193,7 +184,7 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
             logits, carry = model.reference(None, None, ids, before, **values)
         else:
             logits, carry = model.reference(ids, **values)
-    _assert_close(logits, reference.logits(tokens, image))
+    assert_close(logits, reference.logits(tokens, image))
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)
-    _assert_close(logits, reference.logits(tokens, image))
+    assert_close(logits, reference.logits(tokens, image))

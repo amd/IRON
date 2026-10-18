@@ -19,6 +19,7 @@ from ml_dtypes import bfloat16
 
 from iron.applications.whisper.hugging_face import HuggingFaceWhisper
 from iron.applications.whisper.model import Whisper, WhisperConfig, WhisperEncoder
+from iron.lm.testing import LOGITS, assert_close
 from iron.tests.common.llama_model import checkpoint
 
 #: Whisper's proportions at toy size: 200 source positions, padded to 256,
@@ -86,15 +87,6 @@ def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
     return out
 
 
-def _assert_close(got, want, what: str):
-    """bf16 against float32, so within 5% of the largest value, as a
-    decoder's logits are held.
-    """
-    got = np.asarray(got, np.float32).reshape(want.shape)
-    err, scale = np.abs(got - want).max(), np.abs(want).max()
-    assert err <= 0.05 * scale, f"{what}: |diff| {err:.4f} against {scale:.3f}"
-
-
 @pytest.fixture(scope="module")
 def clip():
     """The toy's weights and a clip's features, ``(num_mel_bins, frames)``."""
@@ -159,7 +151,9 @@ def test_the_encoder_s_output_is_hugging_face_s(clip, golden):
     )
     # 200 positions of the 256 rows the layers take.
     assert got.shape == want.shape == (TOY.max_source_positions, TOY.hidden_size)
-    _assert_close(got, want, "the encoder's output")
+    # bf16 against float32, held as a decoder's logits are.
+    err, scale = np.abs(got - want).max(), np.abs(want).max()
+    assert err <= LOGITS * scale, f"|diff| {err:.4f} against {scale:.3f}"
 
 
 @pytest.mark.usefixtures("npu2")
@@ -188,11 +182,11 @@ def test_the_decoder_attends_over_the_encoded_clip(clip, reference):
             encoder_rows=0,
         )
         logits, carry = model.reference(model.prompt_ids(chunk), **values)
-    _assert_close(logits, reference.logits(tokens, features), "the prompt's logits")
+    assert_close(logits, reference.logits(tokens, features), "the prompt's logits")
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_rows=0, **carry)
     want = reference.logits(tokens, features)
-    _assert_close(logits, want, "a decode step's logits")
+    assert_close(logits, want, "a decode step's logits")
 
 
 def test_whisper_s_exact_gelu_is_refused_until_its_kernel():
@@ -213,7 +207,7 @@ def test_whisper_toy_on_the_device(clip, reference):
     tokens = list(np.random.default_rng(2).integers(0, TOY.vocab_size, 300))
     for _ in range(3):
         want = reference.logits(tokens, features)
-        _assert_close(model.logits(tokens), want, f"{len(tokens)} tokens")
+        assert_close(model.logits(tokens), want, f"{len(tokens)} tokens")
         tokens.append(int(want.argmax()))
 
 
@@ -253,4 +247,4 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
         source=source,
         encoder_rows=0,
     )
-    _assert_close(logits, reference.logits(tokens, features), "the prompt's logits")
+    assert_close(logits, reference.logits(tokens, features), "the prompt's logits")

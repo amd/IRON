@@ -24,6 +24,7 @@ from ml_dtypes import bfloat16
 from iron.applications.phi3.model import LongRope, Phi4, Phi4Config
 from iron.lm import Checkpoint, OnHost as Host, accuracy, determinism
 from iron.lm.golden import HuggingFace
+from iron.lm.testing import assert_close
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -100,19 +101,6 @@ def _hugging_face(config, weights):
     return HuggingFace.build("phi3", config, weights, pad_token_id=None)
 
 
-def _assert_close(got, expected):
-    for step, (a, b) in enumerate(zip(got, expected)):
-        a = np.asarray(a, dtype=np.float32)
-        scale = np.abs(b).max()
-        err = np.abs(a - b).max()
-        assert (
-            err <= 0.05 * scale
-        ), f"step {step}: |diff| {err:.4f} vs |logits| {scale:.3f}"
-        assert (
-            a.argmax() == b.argmax()
-        ), f"step {step}: argmax {a.argmax()} != {b.argmax()}"
-
-
 @pytest.fixture(scope="module")
 def cpu(golden):
     config = TOY
@@ -134,14 +122,14 @@ def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(cpu):
     last = model.logits(prompt[:1])
     for n in range(2, len(prompt) + 1):
         last = model.logits(prompt[:n])
-    _assert_close([last], [first])
+    assert_close(last, first)
 
 
 def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
     config, weights, reference, prompt, first, expected = cpu
     model = OnHost(config, weights)
     got = model.logits(prompt)
-    _assert_close([got], [first])
+    assert_close(got, first)
     history = list(prompt)
     out = []
     logits = got
@@ -149,7 +137,8 @@ def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
         history.append(int(logits.argmax()))
         logits = model.logits(history)
         out.append(logits)
-    _assert_close(out, expected)
+    for step, (a, b) in enumerate(zip(out, expected)):
+        assert_close(a, b, f"step {step}")
 
 
 def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
@@ -158,11 +147,11 @@ def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
     model = OnHost(config, weights)
     tokens = np.random.default_rng(3).integers(0, config.vocab_size, 150)
     first = reference.logits(tokens)
-    _assert_close([model.logits(tokens)], [first])
+    assert_close(model.logits(tokens), first)
     tokens = np.append(tokens, first.argmax())
-    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
+    assert_close(model.logits(tokens), reference.logits(tokens))
     tokens = np.append(tokens, np.random.default_rng(4).integers(0, 1024, 30))
-    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
+    assert_close(model.logits(tokens), reference.logits(tokens))
 
 
 def test_the_accuracy_check_scores_the_model_against_the_reference(cpu):
@@ -205,11 +194,11 @@ def test_a_turn_past_the_original_context_rotates_only_its_own_rows_long(golden)
     reference = golden("long", lambda: _hugging_face(LONG, weights), LONG, weights)
     model = OnHost(LONG, weights)
     tokens = np.random.default_rng(5).integers(0, LONG.vocab_size, 301)
-    _assert_close([model.logits(tokens[:100])], [reference.logits(tokens[:100])])
+    assert_close(model.logits(tokens[:100]), reference.logits(tokens[:100]))
     got = np.asarray(model.logits(tokens[:300]), np.float32)
     whole = reference.logits(tokens[:300])
     assert np.abs(got - whole).max() > 0.1 * np.abs(whole).max()
     turned = OnHost(LONG, weights)
     turned.logits(tokens[:100])
-    _assert_close([model.logits(tokens)], [turned.logits(tokens)])
-    _assert_close([OnHost(LONG, weights).logits(tokens)], [reference.logits(tokens)])
+    assert_close(model.logits(tokens), turned.logits(tokens))
+    assert_close(OnHost(LONG, weights).logits(tokens), reference.logits(tokens))

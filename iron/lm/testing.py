@@ -152,6 +152,27 @@ def check_device_sampling(runner, model, prompt_len: int, num_tokens: int, *, re
     assert not differing, f"tokens {differing} of {num_tokens} differ from the host's"
 
 
+#: How far a bf16 graph's logits may lie from float32 transformers' on the
+#: same weights: a share of the largest logit.
+LOGITS = 0.05
+
+
+def assert_close(got, want: np.ndarray, what: str = "the logits") -> None:
+    """``got`` within ``LOGITS`` of ``want``, the reference's logits, at
+    their largest magnitude; and where the reference's top two lie further
+    apart than that, the same argmax. A nearer pair may go either way.
+    """
+    got = np.asarray(got, np.float32).reshape(want.shape)
+    scale = np.abs(want).max()
+    bound, err = LOGITS * scale, np.abs(got - want).max()
+    assert err <= bound, f"{what}: max |diff| {err:.4f} against |logits| {scale:.3f}"
+    second, first = np.sort(want)[-2:]
+    if first - second > bound:
+        assert (
+            got.argmax() == want.argmax()
+        ), f"{what}: argmax {got.argmax()} != {want.argmax()}"
+
+
 def check_accuracy(
     runner,
     model,

@@ -16,6 +16,7 @@ import pytest
 from iron.applications.lfm2.model import Lfm2, Lfm2Config
 from iron.lm import OnHost as Host
 from iron.lm.golden import HuggingFace
+from iron.lm.testing import assert_close
 from iron.tests.common.llama_model import checkpoint
 from iron.tests.toolchain.tools import DEVICES
 
@@ -79,15 +80,12 @@ class OnHost(Host, Lfm2):
 
 
 def _assert_close(model, reference, tokens):
-    """The model's logits after ``tokens`` against the reference's: bf16 against
-    float32, so within 5% of the largest logit (this toy measures at most
-    2.2%; a turn reading a stale slot, 124%), and the same argmax.
+    """The model's logits after ``tokens`` against the reference's
+    (``assert_close``; this toy measures at most 2.2%, a turn reading a
+    stale slot 124%): the reference's.
     """
-    got = np.asarray(model.logits(tokens), dtype=np.float32)
     want = reference.logits(tokens)
-    err, scale = np.abs(got - want).max(), np.abs(want).max()
-    assert err <= 0.05 * scale, f"{len(tokens)}: |diff| {err:.4f}, |logits| {scale:.3f}"
-    assert got.argmax() == want.argmax(), f"{len(tokens)} tokens"
+    assert_close(model.logits(tokens), want, f"{len(tokens)} tokens")
     return want
 
 

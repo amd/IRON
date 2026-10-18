@@ -56,6 +56,9 @@ public API adds its entry under Unreleased.
 - `Model.renames`, a class-level table of checkpoint module renames applied
   before `sanitize`, and `leaves(tree)`, each weight of a tree by its dotted
   name.
+- `iron.lm.testing.assert_close`, the one check of a model's logits against
+  its reference: within `LOGITS` (5%) of the largest, and the same argmax
+  where the reference's top two lie further apart than that.
 - `Model.loaded()`, the hook `Model.load` hands the compiled versions to;
   `Runner.build()` makes the model `npu()` loads.
 - `BuiltArray.program()`, a built array alone with its operator's own

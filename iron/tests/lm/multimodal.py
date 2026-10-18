@@ -13,13 +13,12 @@ import pytest
 from ml_dtypes import bfloat16
 
 from iron.lm import Sampler
-from iron.tests.common.llama_reference import _assert_close
+from iron.lm.testing import assert_close
 from iron.tests.common.multimodal import IMAGE
 from iron.tests.common.multimodal import causal  # noqa: F401 (a fixture)
 
 # The relative top-2 gap each step's argmax is checked at: past
-# _assert_close's 5% of the logits' scale, so the device's error cannot
-# swap them.
+# assert_close's 5% of the logits' scale, where it checks the argmax.
 GAP = 0.05
 
 
@@ -40,16 +39,15 @@ def test_a_causal_model_places_soft_tokens_across_its_chunks(loaded):
     model, reference, tokens, first = loaded
     soft = (np.random.default_rng(9).standard_normal(first.shape) / 8).astype(bfloat16)
     want = gapped(reference(tokens, soft))
-    _assert_close([model.logits(tokens, {IMAGE: (soft,)})], [want])
+    assert_close(model.logits(tokens, {IMAGE: (soft,)}), want)
     # One more token with the same image: a decode step on the caches.
     more = np.append(tokens, want.argmax())
     want = gapped(reference(more, soft))
-    _assert_close([model.logits(more, {IMAGE: (soft,)})], [want])
+    assert_close(model.logits(more, {IMAGE: (soft,)}), want)
     # Another image: the towers rerun, and the chunks from its first
     # placeholder on.
-    _assert_close(
-        [model.logits(tokens, {IMAGE: (first,)})],
-        [gapped(reference(tokens, first))],
+    assert_close(
+        model.logits(tokens, {IMAGE: (first,)}), gapped(reference(tokens, first))
     )
 
 

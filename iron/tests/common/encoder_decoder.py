@@ -28,7 +28,7 @@ from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.tests.common.layer import decoder, shapes
-from iron.tests.common.llama_reference import _assert_close
+from iron.lm.testing import assert_close
 from iron.tests.common.multimodal import Features
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -205,7 +205,7 @@ def test_each_version_s_reference_in_turn_is_hugging_face_s(whisper):
     assert carry["source"] == source
     got = np.asarray(logits, np.float32).reshape(-1)
     want = reference.logits(tokens, clip)
-    _assert_close([got], [want])
+    assert_close(got, want)
     # Rows past the source move the logits further than the model's own
     # error does.
     past, _ = prompt(model, tokens, SOURCE)
@@ -217,9 +217,9 @@ def test_each_version_s_reference_in_turn_is_hugging_face_s(whisper):
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_rows=0, **carry)
     got = np.asarray(logits).reshape(-1)
-    _assert_close([got], [reference.logits(tokens, clip)])
+    assert_close(got, reference.logits(tokens, clip))
     with pytest.raises(AssertionError):
-        _assert_close([got], [reference.logits(tokens, clip[:100])])
+        assert_close(got, reference.logits(tokens, clip[:100]))
 
 
 def prompt(model, tokens, source: int):
@@ -320,7 +320,7 @@ def test_padded_encoder_rows_reach_neither_attention(reference):
     np.testing.assert_array_equal(run(stale, padded, n, n, tokens), clean)
 
     want = reference.logits(tokens, attended(clip))
-    _assert_close([clean], [want])
+    assert_close(clean, want)
     leaked = run(model(), padded, SOURCE, SOURCE, tokens)
     assert np.abs(leaked - clean).max() > np.abs(clean - want).max()
 

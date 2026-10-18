@@ -41,6 +41,7 @@ from iron.lm import (
 )
 from iron.lm.generation import greedy
 from iron.lm.golden import Golden, HuggingFace
+from iron.lm.testing import assert_close
 from iron.applications.llama.model import Llama
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -97,21 +98,6 @@ def _greedy(model, tokens, logits, n):
     return out
 
 
-def _assert_close(got, expected):
-    for step, (a, b) in enumerate(zip(got, expected)):
-        a = np.asarray(a, dtype=np.float32)
-        scale = np.abs(b).max()
-        err = np.abs(a - b).max()
-        assert (
-            err <= 0.05 * scale
-        ), f"step {step}: max |diff| {err:.4f} against |logits| {scale:.3f}"
-        # A near-tie may pick either, so the pick is judged by the golden's
-        # own logit, within the error.
-        assert (
-            b.max() - b[a.argmax()] <= err
-        ), f"step {step}: argmax {a.argmax()} != {b.argmax()}"
-
-
 def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(cpu):
     """One token at a time only: the prompt fed a token at a time from an
     empty cache, then the generated tokens.
@@ -120,9 +106,10 @@ def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(cpu):
     last = model.logits(cpu.prompt[:1])
     for n in range(2, len(cpu.prompt) + 1):
         last = model.logits(cpu.prompt[:n])
-    _assert_close([last], [cpu.first])
+    assert_close(last, cpu.first)
     got = _greedy(model, cpu.prompt, last, len(cpu.expected))
-    _assert_close(got, cpu.expected)
+    for step, (a, b) in enumerate(zip(got, cpu.expected)):
+        assert_close(a, b, f"step {step}")
 
 
 def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
@@ -131,9 +118,10 @@ def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
     """
     model = OnHost(cpu.config, cpu.weights)
     first = model.logits(cpu.prompt)
-    _assert_close([first], [cpu.first])
+    assert_close(first, cpu.first)
     got = _greedy(model, cpu.prompt, first, len(cpu.expected))
-    _assert_close(got, cpu.expected)
+    for step, (a, b) in enumerate(zip(got, cpu.expected)):
+        assert_close(a, b, f"step {step}")
 
 
 def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
@@ -145,11 +133,11 @@ def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
     model, reference = OnHost(config, cpu.weights), cpu.golden
     tokens = np.random.default_rng(3).integers(0, config.vocab_size, 150)
     first = reference.logits(tokens)
-    _assert_close([model.logits(tokens)], [first])
+    assert_close(model.logits(tokens), first)
     tokens = np.append(tokens, first.argmax())
-    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
+    assert_close(model.logits(tokens), reference.logits(tokens))
     tokens = np.append(tokens, np.random.default_rng(4).integers(0, 1024, 30))
-    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
+    assert_close(model.logits(tokens), reference.logits(tokens))
 
 
 def _decoded(model, tokens, steps):
@@ -227,9 +215,9 @@ def test_a_short_prompt_runs_at_its_own_rows(cpu):
     model, reference = OnHost(config, cpu.weights), cpu.golden
     prompt = np.random.default_rng(2).integers(0, config.vocab_size, 8)
     first = reference.logits(prompt)
-    _assert_close([model.logits(prompt)], [first])
+    assert_close(model.logits(prompt), first)
     tokens = np.append(prompt, first.argmax())
-    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
+    assert_close(model.logits(tokens), reference.logits(tokens))
 
 
 @pytest.mark.parametrize("temperature", [0.0, 0.7])
@@ -300,9 +288,9 @@ def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
     tokens = np.random.default_rng(10).integers(0, config.vocab_size, 300)
     prompted = model.logits(tokens)
     decoded = _decoded(Placed(config, cpu.weights, table), tokens, 4)
-    _assert_close([decoded], [prompted])
+    assert_close(decoded, prompted)
     with pytest.raises(AssertionError):
-        _assert_close([prompted], [cpu.golden.logits(tokens)])
+        assert_close(prompted, cpu.golden.logits(tokens))
 
 
 def test_a_decoder_nested_in_its_checkpoint_is_read_where_it_is(cpu):
@@ -335,7 +323,7 @@ def test_a_turn_runs_from_its_first_new_token(cpu):
     turn = np.concatenate([tokens[:270], rng.integers(0, config.vocab_size, 40)])
     assert model.resume(model._held(turn)) == 270
     assert [(v["start"], v["rows"]) for _, v in model._chunks(turn, 270)] == [(270, 40)]
-    _assert_close([model.logits(turn)], [reference.logits(turn)])
+    assert_close(model.logits(turn), reference.logits(turn))
     np.testing.assert_array_equal(model.keys[0].host[:270], before[:270])
 
 
@@ -347,8 +335,8 @@ def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):
     config = dataclasses.replace(SMALL, max_seq_len=300)
     model, reference = OnHost(config, cpu.weights), cpu.golden
     tokens = np.random.default_rng(8).integers(0, config.vocab_size, 300)
-    _assert_close([model.logits(tokens[:299])], [reference.logits(tokens[:299])])
-    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
+    assert_close(model.logits(tokens[:299]), reference.logits(tokens[:299]))
+    assert_close(model.logits(tokens), reference.logits(tokens))
     with pytest.raises(IndexError, match=r"start \+ rows is 301, outside \[0, 301\)"):
         model(
             model.prompt_ids(tokens[256:]),
