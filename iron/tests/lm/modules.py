@@ -321,3 +321,13 @@ def test_a_q_table_scaled_by_two_doubles_the_logits_scale():
         layer.self_attn.scaling = 2 / np.sqrt(config.head_dim)
     tokens = np.random.default_rng(1).integers(0, config.vocab_size, 20)
     np.testing.assert_array_equal(scaled.logits(tokens), doubled.logits(tokens))
+
+
+def test_attention_turns_only_the_rotary_columns():
+    """Under partial rotary, as Phi-4's, RoPE turns the first ``rotary_dim``
+    columns of each head of q and k alone.
+    """
+    model = small(rotary_dim=32)
+    t = model.trace(**model.shapes()[1])
+    turned = [s.op.cols for s in t.steps if type(s.op) is RoPE]
+    assert turned == [32] * 4 and model.config.head_dim == 64
