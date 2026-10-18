@@ -26,9 +26,9 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+from iron.lm.model import TokenizerJson
 from iron.lm import (
     DecoderConfig,
-    Model,
     OnHost as Host,
     Sampler,
     Tokenizer,
@@ -450,7 +450,7 @@ def _tokenizer_json(path, size=256, specials=()):
     hf.decoder = tokenizers.decoders.ByteLevel()
     hf.add_special_tokens(list(specials))
     hf.save(str(path))
-    return Model.open_tokenizer(path)
+    return TokenizerJson(path)
 
 
 QUESTION = "The capital of France is"

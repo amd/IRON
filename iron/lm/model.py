@@ -53,7 +53,7 @@ def prompt_text(chars: int, skip: int = 0) -> str:
 class Tokenizer:
     """Text to a prompt's token ids, ``bos`` first, and token ids back to
     text, over ``encoding``: anything with ``encode`` and ``decode``, as
-    ``Model.open_tokenizer`` gives. ``chat_template`` is the checkpoint's
+    ``TokenizerJson`` gives. ``chat_template`` is the checkpoint's
     own, from its ``tokenizer_config.json``, if it has one.
     """
 
@@ -108,7 +108,7 @@ class Tokenizer:
         return ids if ids[:1] == [self.bos] else [self.bos, *ids]
 
 
-class _TokenizerJson:
+class TokenizerJson:
     """A Hugging Face ``tokenizer.json``, over ``tokenizers`` (not
     ``transformers``): text to token ids without the special tokens its
     post-processor adds, since ``Tokenizer`` puts the BOS first, and back.
@@ -158,8 +158,6 @@ class Model(iron.Graph):
     # Each checkpoint layer's dotted paths that its config's ``layer``
     # reads under another name, by that name.
     renames: ClassVar[dict[str, str]] = {}
-    # The tokenizer's file in the model's Hugging Face repository.
-    tokenizer_file = "tokenizer.json"
     # What loads the checkpoint into transformers to record its goldens.
     hugging_face: type = HuggingFace
     checkpoint: Checkpoint | None = None
@@ -192,7 +190,7 @@ class Model(iron.Graph):
         Args:
             path: A directory holding ``config.json``, ``model.safetensors``
                 or a sharded one's ``model.safetensors.index.json``, and
-                ``tokenizer_file``; or a repository's id, those files
+                ``tokenizer.json``; or a repository's id, those files
                 downloaded to Hugging Face's cache.
             seed: In place of the checkpoint's weights and the tokenizer,
                 weights drawn at ``seed`` in its shapes (only its header is
@@ -207,7 +205,7 @@ class Model(iron.Graph):
         if not directory.is_dir():
             from huggingface_hub import snapshot_download
 
-            files = ["*config.json", "model.safetensors*", cls.tokenizer_file]
+            files = ["*config.json", "model.safetensors*", "tokenizer.json"]
             directory = Path(snapshot_download(str(path), allow_patterns=files))
         weights = directory / "model.safetensors.index.json"
         if not weights.exists():
@@ -230,7 +228,7 @@ class Model(iron.Graph):
             template = None
             if settings.exists():
                 template = json.loads(settings.read_text()).get("chat_template")
-            encoding = cls.open_tokenizer(directory / cls.tokenizer_file)
+            encoding = TokenizerJson(directory / "tokenizer.json")
             model.tokenizer = Tokenizer(encoding, model.bos, template)
         return model
 
@@ -248,11 +246,6 @@ class Model(iron.Graph):
                 if bos is not None:
                     return bos
         raise KeyError(f"{directory} names no bos_token_id: name the model's bos")
-
-    @staticmethod
-    def open_tokenizer(path):
-        """The tokenizer at ``path``: a Hugging Face ``tokenizer.json``."""
-        return _TokenizerJson(path)
 
     @classmethod
     def default_config(cls, weights_path) -> Config:

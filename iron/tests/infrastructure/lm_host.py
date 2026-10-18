@@ -30,7 +30,8 @@ import pytest
 from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
-from iron.lm import Checkpoint, Model, Sampler
+from iron.lm.model import TokenizerJson
+from iron.lm import Checkpoint, Sampler
 from iron.applications.llama.model import LlamaConfig
 from iron.lm import testing
 from iron.lm.checkpoint import renamed
@@ -608,7 +609,7 @@ def test_real_tokenizer_s_added_tokens_are_their_ids():
     require(path)
     tokenizers = pytest.importorskip("tokenizers")
     added = tokenizers.Tokenizer.from_file(str(path)).get_added_tokens_decoder()
-    encoding = Model.open_tokenizer(path)
+    encoding = TokenizerJson(path)
     for token, added_token in added.items():
         assert encoding.encode(added_token.content) == [token]
 

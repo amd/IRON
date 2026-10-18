@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 from iron.applications.llama.model import Llama
+from iron.lm.model import TokenizerJson
 from iron.lm import Checkpoint, Model, main
 from iron.lm.cli import parse_args
 from iron.lm.golden import RECORD
@@ -97,7 +98,7 @@ def test_from_checkpoint_opens_the_tokenizer_beside_it(tmp_path):
     (directory / "tokenizer.json").symlink_to(TOKENIZER)
     model = Small.from_checkpoint(directory)
     assert model.seed is None
-    want = [model.bos, *Model.open_tokenizer(TOKENIZER).encode("hello")]
+    want = [model.bos, *TokenizerJson(TOKENIZER).encode("hello")]
     assert model.tokenizer("hello") == want
 
 

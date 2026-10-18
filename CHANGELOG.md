@@ -84,8 +84,7 @@ public API adds its entry under Unreleased.
   Hugging Face repository's files, a local directory or a repository id
   downloaded once, fitted, compiled and loaded, its tokenizer as
   `model.tokenizer`; `Model.from_checkpoint` is the same, not yet loaded.
-  The model class names its `config`, `tokenizer_file`, `open_tokenizer`
-  and `hugging_face`; `fit`, `default_config`, `tune_arguments` and
+  The model class names its `config` and `hugging_face`; `fit`, `default_config`, `tune_arguments` and
   `tune_calls` are its classmethods, and `prompt` and `cpu_reference` its
   methods. Each application's package exports its model class.
 - `lm.main(Model)`, a model's command line, whose positional argument is
