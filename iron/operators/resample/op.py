@@ -864,8 +864,8 @@ class Resample(Operator):
     out_rows = Extent(out_height)
     out_columns = Extent(out_width)
 
-    image = In(image_chunks, chunk, dtype=np.uint8, obj_shape=(chunk,), broadcast=True)
-    taps_w = In(width_chunks, words, dtype=np.int32, obj_shape=(words,), broadcast=True)
+    image = In(image_chunks, chunk, dtype=np.uint8, obj_shape=(chunk,))
+    taps_w = In(width_chunks, words, dtype=np.int32, obj_shape=(words,))
     # Through taps_w's stream, after it.
     taps_h = In(height_chunks, words, dtype=np.int32)
     patches = Out(

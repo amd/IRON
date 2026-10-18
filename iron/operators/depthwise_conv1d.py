@@ -41,7 +41,7 @@ class DepthwiseConv1d(Operator):
     x = In(
         rows, channels, obj_shape=(channels,), per=(num_aie_columns,), depth=TAPS + 1
     )
-    weight = In(TAPS, channels, obj_shape=(channels,), broadcast=True, depth=TAPS)
+    weight = In(TAPS, channels, obj_shape=(channels,), depth=TAPS)
     y = Out(rows, channels, obj_shape=(channels,), per=(num_aie_columns,))
     # Every row is still computed under a bound: a row reads only those before it.
     valid = Extent(rows)
