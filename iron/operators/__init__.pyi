@@ -10,6 +10,7 @@ from .copy import Copy
 from .depthwise_conv1d import DepthwiseConv1d
 from .dequant import Dequant
 from .elementwise_add import ElementwiseAdd, RowwiseAdd
+from .elementwise_max import ElementwiseMax
 from .elementwise_mul import ElementwiseMul, RowwiseMul
 from .emit import Emit
 from .gelu import GELU

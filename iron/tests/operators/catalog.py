@@ -14,6 +14,10 @@ An operator whose device test is more than that (a shipped binary checked
 against its own accumulator, say) has its own ``test.py`` beside it.
 """
 
+import ast
+import importlib
+from pathlib import Path
+
 import aie.utils as aie_utils
 import pytest
 
@@ -62,3 +66,12 @@ def test_operator(
     )
     failed = {name: verdict.detail for name, verdict in errors.items()}
     assert not failed, f"{cls.__name__}({case.label}) failed: {failed}"
+
+
+@pytest.mark.parametrize("package", ["iron.operators", "iron.operators.flm"])
+def test_the_stub_names_every_catalog_entry(package):
+    """A checker reads ``__init__.pyi``; the runtime reads the catalog."""
+    module = importlib.import_module(package)
+    stub = ast.parse(Path(module.__file__).with_suffix(".pyi").read_text())
+    names = {a.name for node in stub.body for a in getattr(node, "names", ())}
+    assert names == {n for n in module.__all__ if "." not in n}
