@@ -91,7 +91,7 @@ class LMHead(Operator):
     )
 
     dim: CompileTime[int] = field(array=True)
-    vocab: CompileTime[int] = field()
+    vocab: CompileTime[int] = field(array=True)
     softcap: CompileTime[float] = field()
     w_words: CompileTime[int] = field(
         derive=lambda op: packed_bytes(op.vocab * op.dim) // 4, repr=False
