@@ -32,7 +32,6 @@ from iron.lm import (
     CrossDecoderLayer,
     DecoderConfig,
     DecoderLayer,
-    Derived,
     EncoderDecoder,
     Norm,
     Tower,
@@ -205,18 +204,18 @@ class WhisperEncoder(Tower):
 
     def __init__(self, config: WhisperEncoderConfig, weights):
         c, weights = config, bf16(weights)
-        self.whisper_encoder = e = weights.model.encoder
+        e = weights.model.encoder
         super().__init__(c, e.layers, c.rows, c.rows)
         self.final_norm = e.layer_norm
         self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.mels)
         self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
         # The second convolution's input: a zero row, then the first's output.
         self.convolved = iron.state((2 * c.rows + 1, c.hidden_size))
-        derived = Derived(weights)
-        table = np.zeros((c.rows, c.hidden_size), e.embed_positions.weight.dtype)
-        table[: c.positions] = e.embed_positions.weight
-        derived.put(e.embed_positions, padded=table)
-        self.derived = derived.tree()
+        # The position table padded to the rows.
+        self.embed_positions = np.zeros(
+            (c.rows, c.hidden_size), e.embed_positions.weight.dtype
+        )
+        self.embed_positions[: c.positions] = e.embed_positions.weight
 
     def front(self, features, *, n):
         """The clip's ``n`` positions after the convolutions, with their
@@ -226,8 +225,8 @@ class WhisperEncoder(Tower):
         h = GELU.step(self.conv1(features, rows=c.conv_rows))
         Copy.step(h[: c.frames], self.convolved[1 : c.frames + 1])
         h = GELU.step(self.conv2(self.convolved, rows=n))
-        table = self.derived.model.encoder.embed_positions.padded
-        return ElementwiseAdd.step(h, iron.weight(table)[:n]), None
+        table = iron.weight(self.embed_positions)
+        return ElementwiseAdd.step(h, table[:n]), None
 
     def sanitize(self, w):
         return sanitize(w)

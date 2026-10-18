@@ -4,8 +4,8 @@
 """What every model on IRON's operators shares: its shape, its weights
 (``Checkpoint.tree()``, the tensors by their own names:
 ``model.layers.3.self_attn.q_proj.weight`` is
-``weights.model.layers[3].self_attn.q_proj.weight``; ``Derived``, those
-computed from them), ``Model``, and ``Runner`` and ``main``.
+``weights.model.layers[3].self_attn.q_proj.weight``), ``Model``, and
+``Runner`` and ``main``.
 """
 
 import argparse
@@ -497,57 +497,7 @@ class Checkpoint:
         return _nest(tensors)
 
 
-class Derived:
-    """Weights a model computes once from its checkpoint, each put on the
-    module it belongs to. Held as ``self.derived = derived.tree()``, a
-    leaf's graph path is ``derived.<module>.<leaf>``.
-
-    Args:
-        weights: The checkpoint tree (``Checkpoint.tree()``).
-    """
-
-    def __init__(self, weights: SimpleNamespace) -> None:
-        self._paths: dict[int, str] = {}
-        pending: list[tuple[Any, str]] = [(weights, "")]
-        while pending:
-            node, path = pending.pop()
-            if isinstance(node, SimpleNamespace):
-                self._paths[id(node)] = path
-                pending += [
-                    (child, f"{path}.{key}" if path else key)
-                    for key, child in vars(node).items()
-                ]
-            elif isinstance(node, list):
-                pending += [(child, f"{path}.{i}") for i, child in enumerate(node)]
-        self._tensors: dict[str, np.ndarray] = {}
-
-    def put(self, module: SimpleNamespace, **tensors: np.ndarray) -> None:
-        """Put ``tensors`` on ``module``, each under its keyword.
-
-        Raises:
-            ValueError: ``module`` is not in the tree, or a leaf is a
-                checkpoint name or already put.
-        """
-        path = self._paths.get(id(module))
-        if path is None:
-            raise ValueError("Derived.put: the module is not in the checkpoint tree")
-        for leaf, tensor in tensors.items():
-            name = f"{path}.{leaf}" if path else leaf
-            if leaf in vars(module) or name in self._tensors:
-                raise ValueError(
-                    f"Derived.put: {name} is a checkpoint name or derived already"
-                )
-            self._tensors[name] = tensor
-
-    def tree(self) -> SimpleNamespace:
-        """The derived weights, nested as the checkpoint tree is; a list's
-        module that nothing was put on, as on a layer of a kind only some
-        layers are, is an empty namespace.
-        """
-        return _nest(self._tensors, sparse=True)
-
-
-def _nest(named: Mapping[str, Any], sparse: bool = False) -> SimpleNamespace:
+def _nest(named: Mapping[str, Any]) -> SimpleNamespace:
     """Values by dotted name, nested as ``Checkpoint.tree()`` nests them."""
     nested: dict = {}
     for name, value in named.items():
@@ -556,25 +506,24 @@ def _nest(named: Mapping[str, Any], sparse: bool = False) -> SimpleNamespace:
         for key in parents:
             node = node.setdefault(key, {})
         node[leaf] = value
-    return _tree(nested, sparse)
+    return _tree(nested)
 
 
-def _tree(node, sparse: bool) -> Any:
-    """Nested dicts as namespaces, those keyed by indices as lists up to
-    the largest; with ``sparse`` an index none holds is an empty namespace.
+def _tree(node) -> Any:
+    """Nested dicts as namespaces, those keyed by indices as lists.
 
     Raises:
-        ValueError: A run of indices skips one, not ``sparse``.
+        ValueError: A run of indices skips one.
     """
     if not isinstance(node, dict):
         return node
-    items = {key: _tree(child, sparse) for key, child in node.items()}
+    items = {key: _tree(child) for key, child in node.items()}
     if items and all(key.isdigit() for key in items):
         indices = range(max(map(int, items)) + 1)
         missing = sorted(set(indices) - {int(key) for key in items})
-        if missing and not sparse:
+        if missing:
             raise ValueError(f"indices {sorted(map(int, items))} skip {missing}")
-        return [items.get(str(i), SimpleNamespace()) for i in indices]
+        return [items[str(i)] for i in indices]
     return SimpleNamespace(**items)
 
 

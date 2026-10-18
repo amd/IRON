@@ -6,7 +6,6 @@ into patches, the tower and its projection into the text model's space, as
 one graph.
 """
 
-from functools import partial
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,7 +14,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.lm import Derived, ImagePatches, Tower, rope_angles
+from iron.lm import ImagePatches, Tower, rope_angles
 from iron.functional import ACCURATE
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
@@ -63,7 +62,6 @@ class VisionTower(Tower):
         window = c.pool**2
         tokens = -(-(c.patches // window) // c.rows) * c.rows
         super().__init__(config, tree.encoder.layers, c.patches, tokens)
-        derived = Derived(weights)
         self.processor = ImagePatches(
             c.patches,
             c.largest,
@@ -73,25 +71,6 @@ class VisionTower(Tower):
             chunk=c.chunk,
         )
         half = c.head_dim // 2
-        quarter = np.arange(half // 2)
-        # The x half's first and second quarters, then the y half's.
-        order = np.concatenate(
-            [quarter, quarter + half, quarter + half // 2, quarter + 3 * half // 2]
-        )
-        heads = (c.num_attention_heads, c.head_dim, c.hidden_size)
-        for layer in tree.encoder.layers:
-            a = layer.self_attn
-            derived.put(
-                a,
-                q_reordered=a.q_proj.linear.weight.reshape(heads)[:, order].reshape(
-                    c.hidden_size, c.hidden_size
-                ),
-                k_reordered=a.k_proj.linear.weight.reshape(heads)[:, order].reshape(
-                    c.hidden_size, c.hidden_size
-                ),
-                q_norm_reordered=a.q_norm.weight[order],
-                k_norm_reordered=a.k_norm.weight[order],
-            )
         k, windows, across = c.pool, c.patches // window, self.processor.across
         # Window rows in groups a descriptor walks, at most 64, doubling from
         # 8 so each group's y blocks are about as wide as the widest image
@@ -113,10 +92,7 @@ class VisionTower(Tower):
         ]
         y_ids = [k * ty + wy for ty in blocks for wy in range(k) for _ in range(k)]
         table = tree.patch_embedder.position_embedding_table
-        derived.put(
-            tree.patch_embedder, x_windows=table[0][x_ids], y_windows=table[1][y_ids]
-        )
-        self.derived = derived.tree()
+        self.x_windows, self.y_windows = table[0][x_ids], table[1][y_ids]
         rope = rope_angles(half, c.positions, c.rope_theta).astype(bfloat16)
         self.x_angles, self.y_angles = rope[x_ids], rope[y_ids]
         self.capacity = max(
@@ -158,12 +134,12 @@ class VisionTower(Tower):
         """``h`` plus each patch's x and y position embeddings, and its
         angles, for an image of ``hk`` by ``wk`` windows, ``n`` patches.
         """
-        c, d = self.config, self.derived.vision_tower
+        c = self.config
         T = c.patches
         repeat = tuple(
             iron.clamp(hk - first, lo=1, hi=rows) for first, rows, *_ in self.groups
         )
-        sides = d.patch_embedder.x_windows, d.patch_embedder.y_windows
+        sides = self.x_windows, self.y_windows
         for table, x_side in zip(sides, (True, False)):
             walk = self.walk(table, x_side, repeat=repeat, wk=wk, walked=walked)
             Copy.step(walk, self.window_rows[:walked])
@@ -204,30 +180,34 @@ class VisionTower(Tower):
         )
 
     def sanitize(self, w):
-        """``w`` with each projection read through its ``linear`` wrapper."""
+        """``w`` with each projection read through its ``linear`` wrapper,
+        and each head's channels of q and k reordered: RoPE turns halves,
+        not each half of a head.
+        """
+        c = self.config
+        half, E = c.head_dim // 2, c.hidden_size
+        quarter = np.arange(half // 2)
+        # The x half's first and second quarters, then the y half's.
+        order = np.concatenate(
+            [quarter, quarter + half, quarter + half // 2, quarter + 3 * half // 2]
+        )
+        heads = (c.num_attention_heads, c.head_dim, E)
 
         def unwrapped(m):
             return SimpleNamespace(
                 **{k: vars(v).get("linear", v) for k, v in vars(m).items()}
             )
 
-        return SimpleNamespace(
-            **{**vars(w), "self_attn": unwrapped(w.self_attn), "mlp": unwrapped(w.mlp)}
-        )
+        def reordered(p):
+            return SimpleNamespace(
+                weight=p.weight.reshape(heads)[:, order].reshape(E, E)
+            )
 
-    def layer(self, step, i, w, x):
-        a = self.derived.vision_tower.encoder.layers[i].self_attn
-        # q and k reordered: RoPE turns halves, not each half of a head.
-        reordered = {
-            "q_proj": SimpleNamespace(weight=a.q_reordered),
-            "k_proj": SimpleNamespace(weight=a.k_reordered),
-            "q_norm": SimpleNamespace(weight=a.q_norm_reordered),
-            "k_norm": SimpleNamespace(weight=a.k_norm_reordered),
-        }
-        self_attn = SimpleNamespace(**{**vars(w.self_attn), **reordered})
-        w = SimpleNamespace(**{**vars(w), "self_attn": self_attn})
-        attend = partial(self.attend, step, i)
-        return self.config.layer(i)(w, x, attend, step.angles)
+        a = unwrapped(w.self_attn)
+        a.q_proj, a.k_proj = reordered(a.q_proj), reordered(a.k_proj)
+        a.q_norm = SimpleNamespace(weight=a.q_norm.weight[order])
+        a.k_norm = SimpleNamespace(weight=a.k_norm.weight[order])
+        return SimpleNamespace(**{**vars(w), "self_attn": a, "mlp": unwrapped(w.mlp)})
 
     def pool(self, x, n):
         return GEMM.step(self.pooling[:, :n], x, **ACCURATE)

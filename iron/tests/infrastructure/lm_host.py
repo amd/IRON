@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A language model's host side: the checkpoint, its tree by its own names,
-derived weights and sampling (``iron.lm``'s ``Checkpoint``,
-``Checkpoint.tree``, ``Derived`` and ``Sampler``), on a checkpoint of
-Llama's names.
+"""A language model's host side: the checkpoint, its tree by its own names
+and sampling (``iron.lm``'s ``Checkpoint``, ``Checkpoint.tree`` and
+``Sampler``), on a checkpoint of Llama's names.
 
 The oracle is the safetensors library itself: tier 1 writes small
 checkpoints with ``safetensors.numpy`` to ``tmp_path`` and compares every
@@ -26,14 +25,13 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
-from iron.lm import Checkpoint, Derived, Sampler
+from iron.lm import Checkpoint, Sampler
 from iron.applications.llama.model import SPECIAL_TOKENS, LlamaConfig, tokenizer
 from iron.lm import testing
 from iron.lm.testing import require, weights_dir
@@ -461,49 +459,6 @@ def test_a_pytorch_tensor_outside_its_storage_is_refused(tmp_path, tensor, match
     )
     with pytest.raises(pickle.UnpicklingError, match=match):
         Checkpoint(path)
-
-
-def test_derived_weights_nest_beside_their_modules_names(toy_path):
-    tree = Checkpoint(toy_path).tree()
-    derived = Derived(tree)
-    for layer in tree.model.layers:
-        a = layer.self_attn
-        derived.put(a, q_rows=a.q_proj.weight[:2], k_scaled=a.k_proj.weight * 2)
-    derived.put(tree.model, norm_half=tree.model.norm.weight * 0.5)
-    got = derived.tree()
-    assert len(got.model.layers) == TOY.num_hidden_layers
-    a = tree.model.layers[1].self_attn
-    d = got.model.layers[1].self_attn
-    assert bitwise_equal(d.q_rows, a.q_proj.weight[:2])
-    assert bitwise_equal(d.k_scaled, a.k_proj.weight * 2)
-    assert list(vars(got.model)) == ["layers", "norm_half"]
-
-
-def test_derived_weights_on_some_layers_leave_the_others_empty(toy_path):
-    """A module only some layers hold (a hybrid model's convolution): the
-    layers before the last one put on are empty namespaces, kept in place.
-    """
-    tree = Checkpoint(toy_path).tree()
-    derived = Derived(tree)
-    assert derived.tree() == SimpleNamespace()
-    a = tree.model.layers[1].self_attn
-    derived.put(a, q_rows=a.q_proj.weight[:2])
-    got = derived.tree()
-    assert got.model.layers[0] == SimpleNamespace()
-    assert bitwise_equal(got.model.layers[1].self_attn.q_rows, a.q_proj.weight[:2])
-
-
-def test_derived_weights_refuse_a_checkpoint_name_and_a_foreign_module(toy_path):
-    tree = Checkpoint(toy_path).tree()
-    derived = Derived(tree)
-    a = tree.model.layers[0].self_attn
-    with pytest.raises(ValueError, match="model.layers.0.self_attn.q_proj"):
-        derived.put(a, q_proj=a.q_proj.weight)
-    derived.put(a, q_rows=a.q_proj.weight[:2])
-    with pytest.raises(ValueError, match="derived already"):
-        derived.put(a, q_rows=a.q_proj.weight[:2])
-    with pytest.raises(ValueError, match="not in the checkpoint tree"):
-        derived.put(Checkpoint(toy_path).tree().model, norm=a.q_proj.weight)
 
 
 @pytest.mark.parametrize("fill", ["random", "unread"])

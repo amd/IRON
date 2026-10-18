@@ -31,7 +31,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron import lm
-from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer, Derived
+from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
 from iron.operators.elementwise_mul import RowwiseMul
 
 
@@ -72,17 +72,12 @@ class Granite(CausalLM):
 
     def __init__(self, config: GraniteConfig, weights):
         super().__init__(config, weights)
-        derived = Derived(weights)
-        model = weights.model
-        if config.embedding_multiplier != 1:
-            m = config.embedding_multiplier
-            derived.put(
-                model.embed_tokens, scale=np.full(config.hidden_size, m, bfloat16)
-            )
-        self.derived = derived.tree()
+        # The embedding's multiplier as the row RowwiseMul takes.
+        m = config.embedding_multiplier
+        self.embed_scale = np.full(config.hidden_size, m, bfloat16)
         if config.logits_scaling != 1:
             # The logits' divisor folded into the final norm's weight.
-            divided = model.norm.weight / bfloat16(config.logits_scaling)
+            divided = self.decoder.norm.weight / bfloat16(config.logits_scaling)
             self.final_norm = SimpleNamespace(weight=divided)
 
     def lookup(self, ids):
@@ -91,7 +86,7 @@ class Granite(CausalLM):
             return x
         E = self.config.hidden_size
         x = x.reshape(math.prod(x.shape) // E, E)
-        return RowwiseMul.step(x, self.derived.model.embed_tokens.scale)
+        return RowwiseMul.step(x, self.embed_scale)
 
 
 class Runner(lm.Runner):

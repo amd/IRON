@@ -16,8 +16,8 @@ renames LFM2's modules to the names the parts read once at load; a conv
 layer holds no ``self_attn``, so ``layer()`` takes the whole
 ``DecoderLayer`` where the checkpoint holds one.
 
-A conv layer's three per-channel taps, a row each (``iron.lm.Derived``,
-once at load), read a window that spans the current call and the
+A conv layer's three per-channel taps, a row each (``sanitize``, once at
+load), read a window that spans the current call and the
 ``conv_kernel - 1`` gated rows before it. Those rows are the layer's
 ``Checkpoints`` state (``iron.lm``), a slot per chunk boundary, so a
 prompt may resume from any chunk (a chat turn), after positions a decode
@@ -36,7 +36,7 @@ import numpy as np
 import iron
 import iron.functional as F
 from iron import lm
-from iron.lm import Attention, CausalLM, Checkpoints, DecoderConfig, Derived
+from iron.lm import Attention, CausalLM, Checkpoints, DecoderConfig
 from iron.operators.copy import Copy
 from iron.operators.elementwise_mul import RowwiseMul
 
@@ -99,16 +99,10 @@ class Lfm2(CausalLM):
         super().__init__(config, weights)
         self.final_norm = self.decoder.embedding_norm
         E, K, C = config.hidden_size, config.conv_kernel, config.prefill_chunk
-        derived = Derived(weights)
         for i, w in enumerate(self.layers):
             if "conv" in vars(w):
                 tail = Checkpoints.of((K - 1, E), config.max_seq_len, C)
                 self.recurrent[i] = {"conv": tail}
-                # A row per tap, each the row RowwiseMul takes.
-                conv = w.conv.conv
-                taps = conv.weight.reshape(E, K).T
-                derived.put(conv, taps=np.ascontiguousarray(taps))
-        self.derived = derived.tree()
         # The rows before a call end block 0; a chunk's rows are block 1.
         self.conv_window = iron.state((2, C, E))
         self.conv_tail = iron.state((K - 1, E))
@@ -121,7 +115,10 @@ class Lfm2(CausalLM):
             mlp=SimpleNamespace(gate_proj=f.w1, up_proj=f.w3, down_proj=f.w2),
         )
         if "conv" in vars(w):
-            out.conv = w.conv
+            # A row per tap, each the row RowwiseMul takes.
+            c, conv = self.config, w.conv
+            taps = conv.conv.weight.reshape(c.hidden_size, c.conv_kernel).T
+            out.conv = SimpleNamespace(**vars(conv), taps=np.ascontiguousarray(taps))
         else:
             a = w.self_attn
             out.self_attn = SimpleNamespace(
@@ -159,7 +156,7 @@ class Lfm2(CausalLM):
             for k in range(3)
         )
         gated = b * x
-        tap = self.derived.model.layers[i].conv.conv.taps
+        tap = w.taps
         read, write = self.recurrent[i]["conv"].at(step)
         flat = self.conv_window.reshape(2 * C, E)
         first = C - (K - 1)

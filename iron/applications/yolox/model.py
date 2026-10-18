@@ -26,6 +26,7 @@ so a model built without it detects umbrellas in a photo of two cats.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import aie.utils as aie_utils
 import numpy as np
@@ -35,7 +36,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 import iron
 import iron.functional as F
-from iron.lm import ConcatChannels, Conv2d, Derived, MaxPool2d
+from iron.lm import ConcatChannels, Conv2d, MaxPool2d
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 from iron.operators.flm.gemm.design import M_TILE, compute_rows
@@ -314,8 +315,8 @@ class YOLOXNano(iron.Graph):
     box, objectness and class scores, each zero-padded (``BOX``,
     ``OBJECTNESS``, ``CLASSES``), the last two through their sigmoid.
 
-    Every ``BaseConv``'s BatchNorm folds into its weight and bias once, as
-    ``iron.lm.Derived``, and so do the predictions' zero padding. The
+    Every ``BaseConv``'s BatchNorm folds into its weight and bias once, and
+    so do the predictions' zero padding, each by its module's path. The
     blocks are built along the forward pass, each keyed by its module's
     checkpoint path.
 
@@ -343,12 +344,14 @@ class YOLOXNano(iron.Graph):
                 for k, c in vars(node).items()
                 if not isinstance(c, np.ndarray)
             ]
-        derived, self._spatial = Derived(weights), {}
+        self.derived, self._spatial = {}, {}
         for node in convs:
             weight, bias = folded(node)
-            derived.put(node, bias=bias.astype(bfloat16))
+            d = self.derived[self._paths[id(node)]] = SimpleNamespace(
+                bias=bias.astype(bfloat16)
+            )
             if weight.shape[-1] == 1:
-                derived.put(node, weight=weight[:, :, 0, 0].astype(bfloat16))
+                d.weight = weight[:, :, 0, 0].astype(bfloat16)
             else:
                 self._spatial[id(node)] = weight
         # The stem's four corners each take a zero channel after BGR's three.
@@ -368,17 +371,15 @@ class YOLOXNano(iron.Graph):
                 w = np.zeros((width, channels), bfloat16)
                 b = np.zeros(width, bfloat16)
                 w[:out], b[:out] = p.weight[:, :, 0, 0], p.bias
-                derived.put(p, padded_weight=w, padded_bias=b)
-        self.derived = derived.tree()
+                self.derived[self._paths[id(p)]] = SimpleNamespace(
+                    padded_weight=w, padded_bias=b
+                )
         self.blocks = {}
         self.build(m)
 
     def derive(self, m):
-        """``m``'s module of the derived tree."""
-        node = self.derived
-        for key in self._paths[id(m)].split("."):
-            node = node[int(key)] if isinstance(node, list) else vars(node)[key]
-        return node
+        """What ``m`` folds into."""
+        return self.derived[self._paths[id(m)]]
 
     def build_conv(self, m, size: int, stride: int = 1) -> int:
         """The block of ``BaseConv`` ``m`` on a ``size``-square map; returns

@@ -29,7 +29,7 @@ import tokenizers
 import iron
 from iron import lm
 from iron.tune.autotune import Call
-from iron.lm import Checkpoint, Derived, Encoder, rope_angles
+from iron.lm import Checkpoint, Encoder, rope_angles
 from iron.functional import ACCURATE
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
@@ -129,16 +129,9 @@ class EmbeddingGemma(Encoder):
         w = self.language_model = weights.language_model
         super().__init__(config, w.layers, c.max_tokens)
         self.final_norm = w.norm
-        derived = Derived(weights)
         scale = np.sqrt(np.float32(c.hidden_size))
-        derived.put(
-            w.embed_tokens,
-            scaled=(w.embed_tokens.weight.astype(np.float32) * scale).astype(bfloat16),
-        )
-        for layer in w.layers:
-            # layer_scalar as the row RowwiseMul takes.
-            scalar = layer.layer_scalar
-            derived.put(layer, scale=np.full(c.hidden_size, scalar[0], scalar.dtype))
+        embedding = w.embed_tokens.weight.astype(np.float32) * scale
+        self.embed_scaled = embedding.astype(bfloat16)
         self.rope = {
             D: iron.weight(rope_angles(D, c.max_tokens, base).astype(bfloat16))
             for _, D, base in {c.heads(i) for i in range(c.num_hidden_layers)}
@@ -149,12 +142,18 @@ class EmbeddingGemma(Encoder):
         mrl = np.zeros((len(c.mrl_dims), width, c.hidden_size), bfloat16)
         for j, d in enumerate(c.mrl_dims):
             mrl[j, :d] = w.embedding_projection.weight[:d]
-        derived.put(w.embedding_projection, mrl=mrl.reshape(-1, c.hidden_size))
-        self.derived = derived.tree()
+        # Each truncation's rows of the projection, a power of four apart.
+        self.mrl = mrl.reshape(-1, c.hidden_size)
         self.unit = np.full(width, 1 / np.sqrt(width), bfloat16)
 
+    def sanitize(self, w):
+        """``w`` and its ``layer_scalar`` as the row RowwiseMul takes."""
+        scalar = w.layer_scalar
+        row = np.full(self.config.hidden_size, scalar[0], scalar.dtype)
+        return SimpleNamespace(**vars(w), scale=row)
+
     def lookup(self, ids):
-        table = iron.weight(self.derived.language_model.embed_tokens.scaled)
+        table = iron.weight(self.embed_scaled)
         return Copy.step(table[ids])
 
     def angles(self, n):
@@ -179,7 +178,7 @@ class EmbeddingGemma(Encoder):
             partial(self.attend, step, i),
             step.angles[layer.attention.head_dim],
             ple=ple,
-            scale=self.derived.language_model.layers[i].scale,
+            scale=w.scale,
         )
 
     def pool(self, x, n):
@@ -203,7 +202,7 @@ class EmbeddingGemma(Encoder):
 
     def head(self, x):
         c = self.config
-        y = GEMV.step(self.derived.language_model.embedding_projection.mrl, x)
+        y = GEMV.step(self.mrl, x)
         return RMSNorm.step(
             y.reshape(len(c.mrl_dims), self.unit.size), weight=self.unit, epsilon=0.0
         )
