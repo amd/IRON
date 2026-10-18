@@ -44,7 +44,7 @@ pytestmark = pytest.mark.supported_devices("npu2")
 def load(request):
     directory, name = CHECKPOINTS[request.param]
     weights = weights_dir(directory) / name
-    return load_from_flags(request, Llama, weights, "tokenizer.model")
+    return load_from_flags(request, Llama, weights)
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +78,7 @@ def test_the_readme_quick_start(record_property):
     require(
         directory / "config.json",
         directory / "model.safetensors",
-        directory / "original" / "tokenizer.model",
+        directory / "tokenizer.json",
     )
     try:
         model = Llama.load(directory)

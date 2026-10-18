@@ -3,8 +3,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3 on the shared decoder (``iron.lm``): Llama 3's RoPE scaling, its
-tokenizer, and Llama 3.2 1B's shape. Run it with ``python -m
+"""Llama 3 on the shared decoder (``iron.lm``): Llama 3's RoPE scaling and
+Llama 3.2 1B's shape. Run it with ``python -m
 iron.applications.llama.model``.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,
@@ -18,8 +18,6 @@ import dataclasses
 from pathlib import Path
 
 import numpy as np
-import tiktoken
-import tiktoken.load
 
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig
@@ -82,53 +80,11 @@ class LlamaConfig(DecoderConfig):
     )
 
 
-SPECIAL_TOKENS = {
-    name: 128000 + i
-    for i, name in enumerate(
-        [
-            "<|begin_of_text|>",
-            "<|end_of_text|>",
-            "<|reserved_special_token_0|>",
-            "<|reserved_special_token_1|>",
-            "<|finetune_right_pad_id|>",
-            "<|step_id|>",
-            "<|start_header_id|>",
-            "<|end_header_id|>",
-            "<|eom_id|>",
-            "<|eot_id|>",
-            "<|python_tag|>",
-            "<|image|>",
-            *(f"<|reserved_special_token_{i}|>" for i in range(2, 246)),
-        ]
-    )
-}
-
-
-def tokenizer(path) -> tiktoken.Encoding:
-    """Llama 3's tokenizer, from its ``tokenizer.model``."""
-    return tiktoken.Encoding(
-        name="llama3.2-1b",
-        pat_str=r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
-        r"|[^\r\n\p{L}\p{N}]?\p{L}+"
-        r"|\p{N}{1,3}"
-        r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
-        r"|\s*[\r\n]+"
-        r"|\s+(?!\S)"
-        r"|\s+",
-        mergeable_ranks=tiktoken.load.load_tiktoken_bpe(str(path)),
-        special_tokens=SPECIAL_TOKENS,
-    )
-
-
 class Llama(CausalLM):
-    """Llama 3 on ``config``'s shape and a checkpoint's ``weights``, from its
-    checkpoint and ``tokenizer.model``.
-    """
+    """Llama 3 on ``config``'s shape and a checkpoint's ``weights``."""
 
     config = LlamaConfig
     profile = Path(__file__).with_name("profiles")
-    open_tokenizer = staticmethod(tokenizer)
-    tokenizer_file = "original/tokenizer.model"
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ computes in bfloat16 and the reference in float32, so the logits agree to
 bf16 tolerance and the argmax exactly.
 """
 
-import base64
 import dataclasses
 import itertools
 import json
@@ -42,7 +41,6 @@ from iron.lm.checkpoint import leaves
 from iron.lm.golden import Golden, HuggingFace
 from iron.lm.testing import assert_close
 from iron.applications.llama import Llama
-from iron.applications.llama.model import SPECIAL_TOKENS, tokenizer
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE
@@ -435,13 +433,24 @@ def _repository(directory, weights):
         f.write(struct.pack("<Q", len(blob)) + blob)
         for _, t in leaves(weights):
             f.write(t.tobytes())
-    pairs = itertools.product(range(ord("a"), ord("z") + 1), range(32, 127))
-    pieces = [bytes([b]) for b in range(256)] + [bytes(p) for p in pairs][: V - 256]
-    ranks = "".join(
-        f"{base64.b64encode(p).decode()} {i}\n" for i, p in enumerate(pieces)
-    )
-    (directory / "original").mkdir()
-    (directory / "original" / "tokenizer.model").write_text(ranks)
+    _tokenizer_json(directory / "tokenizer.json", V)
+
+
+def _tokenizer_json(path, size=256, specials=()):
+    """A byte-level ``tokenizer.json`` at ``path``: every byte, two-letter
+    pieces up to ``size`` ids, then ``specials``; its encoding.
+    """
+    tokenizers = pytest.importorskip("tokenizers")
+    alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
+    letters = [chr(c) for c in range(33, 127)]
+    pairs = list(itertools.product(letters[64:90], letters))[: size - 256]
+    vocab = {c: i for i, c in enumerate(alphabet + [a + b for a, b in pairs])}
+    hf = tokenizers.Tokenizer(tokenizers.models.BPE(vocab, pairs))
+    hf.pre_tokenizer = tokenizers.pre_tokenizers.ByteLevel(add_prefix_space=False)
+    hf.decoder = tokenizers.decoders.ByteLevel()
+    hf.add_special_tokens(list(specials))
+    hf.save(str(path))
+    return Model.open_tokenizer(path)
 
 
 QUESTION = "The capital of France is"
@@ -524,29 +533,28 @@ def test_a_chat_template_s_raise_exception_raises_its_message():
         Tokenizer(None, 0, template).chat(HI)
 
 
-# Llama 3's chat turns, after a BOS the template writes as given.
-LLAMA3_CHAT = (
-    "{% for m in messages %}<|start_header_id|>{{ m['role'] }}<|end_header_id|>"
-    "\n\n{{ m['content'] }}<|eot_id|>{% endfor %}"
-    "{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}"
+# Chat turns opened and closed by added tokens, after a BOS the template
+# writes as given.
+TURNS = (
+    "{% for m in messages %}<|turn|>{{ m['role'] }}<|role_end|>"
+    "\n\n{{ m['content'] }}<|turn_end|>{% endfor %}"
+    "{{ '<|turn|>assistant<|role_end|>\\n\\n' }}"
 )
 
 
-@pytest.mark.parametrize("bos", ["{{ bos_token }}", "<|begin_of_text|>"])
-def test_a_chat_s_special_tokens_are_their_ids_and_its_bos_comes_once(tmp_path, bos):
-    """Llama 3's tiktoken encoding: each ``<|...|>`` the template writes is
-    its special token, and the BOS is first once, whether the template
-    writes it or not.
+@pytest.mark.parametrize("bos", ["{{ bos_token }}", "<|bos|>"])
+def test_a_chat_s_added_tokens_are_their_ids_and_its_bos_comes_once(tmp_path, bos):
+    """Each added token the template writes is its id in the
+    ``tokenizer.json``, not split into bytes, and the BOS is first once,
+    whether the template writes it or not.
     """
     pytest.importorskip("jinja2")
-    path = tmp_path / "tokenizer.model"
-    ranks = (f"{base64.b64encode(bytes([b])).decode()} {b}\n" for b in range(256))
-    path.write_text("".join(ranks))
-    encoding, S = tokenizer(path), SPECIAL_TOKENS
-    begin, start, end = (
-        S[f"<|{t}|>"] for t in ("begin_of_text", "start_header_id", "end_header_id")
-    )
-    got = Tokenizer(encoding, begin, bos + LLAMA3_CHAT).chat(HI)
+    path = tmp_path / "tokenizer.json"
+    specials = ["<|bos|>", "<|turn|>", "<|role_end|>", "<|turn_end|>"]
+    encoding = _tokenizer_json(path, specials=specials)
+    hf = pytest.importorskip("tokenizers").Tokenizer.from_file(str(path))
+    begin, start, end, eot = (hf.token_to_id(t) for t in specials)
+    got = Tokenizer(encoding, begin, bos + TURNS).chat(HI)
     text = encoding.encode
     assert got == [
         begin,
@@ -554,39 +562,9 @@ def test_a_chat_s_special_tokens_are_their_ids_and_its_bos_comes_once(tmp_path, 
         *text("user"),
         end,
         *text("\n\nHi"),
-        S["<|eot_id|>"],
+        eot,
         start,
         *text("assistant"),
         end,
         *text("\n\n"),
-    ]
-
-
-def test_a_chat_s_added_tokens_are_their_ids_in_a_tokenizer_json(tmp_path):
-    """A ``tokenizer.json``'s added tokens the template writes are their
-    ids, not split into bytes.
-    """
-    pytest.importorskip("jinja2")
-    tokenizers = pytest.importorskip("tokenizers")
-    alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
-    hf = tokenizers.Tokenizer(
-        tokenizers.models.BPE({c: i for i, c in enumerate(alphabet)}, [])
-    )
-    hf.pre_tokenizer = tokenizers.pre_tokenizers.ByteLevel(add_prefix_space=False)
-    hf.decoder = tokenizers.decoders.ByteLevel()
-    specials = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
-    hf.add_special_tokens(specials)
-    hf.save(str(tmp_path / "tokenizer.json"))
-    encoding = Model.open_tokenizer(tmp_path / "tokenizer.json")
-    eot, start, end = (hf.token_to_id(t) for t in specials)
-    got = Tokenizer(encoding, eot, CHATML).chat(HI)
-    text = encoding.encode
-    assert got == [
-        eot,
-        start,
-        *text("user\nHi"),
-        end,
-        *text("\n"),
-        start,
-        *text("assistant\n"),
     ]

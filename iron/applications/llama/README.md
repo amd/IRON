@@ -12,8 +12,8 @@ transformers' float32 logits for the same checkpoint, recorded once to
 `golden.npz` beside it (`Model.cpu_reference`), so running and testing need
 no torch.
 
-What is Llama's own, its shape (Llama 3's RoPE scaling) and its
-tokenizer, is in [`model.py`](model.py); its tunables are in
+Llama's own part, Llama 3's RoPE scaling, is in
+[`model.py`](model.py); its tunables are in
 [`profiles/`](profiles). How to run, test and tune a model is the README's
 [Models](../../../README.md#models); the shared library is
 [AGENTS.md](../../../AGENTS.md#language-models).
@@ -25,13 +25,13 @@ and pass a Hugging Face token to download any of these), in one directory,
 or downloaded by the repository's id, `meta-llama/Llama-3.2-1B`:
 
 - [`model.safetensors`](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main)
-- [`tokenizer.model`](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main/original)
+- [`tokenizer.json`](https://huggingface.co/meta-llama/Llama-3.2-1B/blob/main/tokenizer.json)
 - [`config.json`](https://huggingface.co/meta-llama/Llama-3.2-1B/blob/main/config.json):
   the model's shape (`LlamaConfig.from_checkpoint`), read from beside the
   checkpoint rather than hand-copied
 
 Llama 3.2 3B is the same model at another shape: its two shards, their
-`model.safetensors.index.json`, `config.json` and `tokenizer.model` from
+`model.safetensors.index.json`, `config.json` and `tokenizer.json` from
 [`meta-llama/Llama-3.2-3B`](https://huggingface.co/meta-llama/Llama-3.2-3B),
 in its own directory. On NPU2 its projections take
 flm.ProjectionGEMM's bf16 macs rather than bfp16's (its profile), which its accuracy
@@ -49,8 +49,7 @@ python -m iron.applications.llama.model meta-llama/Llama-3.2-1B \
 ```
 
 The positional argument is the repository's id or a directory holding
-`config.json`, the checkpoint and `original/tokenizer.model` (or
-`tokenizer.model` at its top).
+`config.json`, the checkpoint and `tokenizer.json`.
 
 The NPU draws every token and writes the next decode step's values itself;
 the host only restarts each step and reads the tokens back at the end. The

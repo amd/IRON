@@ -104,7 +104,7 @@ class Tokenizer:
             bos_token="",
             raise_exception=raise_exception,
         )
-        ids = self.encoding.encode(text, allowed_special="all")
+        ids = self.encoding.encode(text)
         return ids if ids[:1] == [self.bos] else [self.bos, *ids]
 
 
@@ -119,10 +119,8 @@ class _TokenizerJson:
 
         self._tokenizer = tokenizers.Tokenizer.from_file(str(path))
 
-    def encode(self, text: str, allowed_special="all") -> list[int]:
-        """``text``'s ids, each added token it names its own id, which
-        ``allowed_special`` (tiktoken's keyword) cannot turn off.
-        """
+    def encode(self, text: str) -> list[int]:
+        """``text``'s ids, each added token it names its own id."""
         return self._tokenizer.encode(text, add_special_tokens=False).ids
 
     def decode(self, tokens) -> str:
@@ -228,15 +226,11 @@ class Model(iron.Graph):
         model = cls(config, tree)
         model.checkpoint, model.seed = checkpoint, seed
         if seed is None:
-            tokenizer = directory / cls.tokenizer_file
-            # A directory laid out by hand may hold it at its top.
-            if not tokenizer.exists():
-                tokenizer = directory / tokenizer.name
             settings = directory / "tokenizer_config.json"
             template = None
             if settings.exists():
                 template = json.loads(settings.read_text()).get("chat_template")
-            encoding = cls.open_tokenizer(tokenizer)
+            encoding = cls.open_tokenizer(directory / cls.tokenizer_file)
             model.tokenizer = Tokenizer(encoding, model.bos, template)
         return model
 

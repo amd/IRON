@@ -44,7 +44,7 @@ model = Llama.load("meta-llama/Llama-3.2-1B")   # downloads, fits, compiles once
 print(model.generate("The capital of France is", 8))   # greedy; pass an iron.lm.Sampler to sample
 ```
 
-`Llama.load` also takes a local directory holding `config.json`, the checkpoint and `original/tokenizer.model`.
+`Llama.load` also takes a local directory holding `config.json`, the checkpoint and `tokenizer.json`.
 
 The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 

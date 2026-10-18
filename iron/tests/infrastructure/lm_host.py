@@ -12,7 +12,6 @@ view with what ``load_file`` reads; tier 2 reads the actual Llama-3.2-1B
 file and skips when it is absent. No NPU.
 """
 
-import base64
 import dataclasses
 import hashlib
 import io
@@ -31,8 +30,8 @@ import pytest
 from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
-from iron.lm import Checkpoint, Sampler
-from iron.applications.llama.model import SPECIAL_TOKENS, LlamaConfig, tokenizer
+from iron.lm import Checkpoint, Model, Sampler
+from iron.applications.llama.model import LlamaConfig
 from iron.lm import testing
 from iron.lm.checkpoint import renamed
 from iron.lm.testing import require, weights_dir
@@ -590,23 +589,6 @@ def test_draws_follow_the_distribution():
     np.testing.assert_allclose(counts / counts.sum(), [0.5, 0.3, 0.2], atol=0.015)
 
 
-def test_every_special_token_decodes_once(tmp_path):
-    """Each id from 128000 to 128255 is one special token, as Meta's
-    llama-models numbers them, over a byte-level toy ``tokenizer.model``.
-    """
-    path = tmp_path / "tokenizer.model"
-    path.write_text(
-        "".join(f"{base64.b64encode(bytes([b])).decode()} {b}\n" for b in range(256))
-    )
-    enc = tokenizer(path)
-    assert sorted(SPECIAL_TOKENS.values()) == list(range(128000, 128256))
-    names = [enc.decode([i]) for i in range(128000, 128256)]
-    assert names == list(SPECIAL_TOKENS)
-    for name, token in [("<|eom_id|>", 128008), ("<|eot_id|>", 128009)]:
-        assert enc.encode(name, allowed_special="all") == [token]
-        assert enc.decode([token]) == name
-
-
 # Tier 2 -- the real checkpoint (no NPU), gated on its presence
 # ##########################################################################
 
@@ -615,6 +597,20 @@ requires_checkpoint = pytest.mark.skipif(
     not real_checkpoint.exists(),
     reason=f"llama3.2-1b checkpoint not found at {real_checkpoint}",
 )
+
+
+@requires_checkpoint
+def test_real_tokenizer_s_added_tokens_are_their_ids():
+    """Each added token in the checkpoint's ``tokenizer.json`` (the BOS, the
+    chat turns' markers) encodes to its own id, read from that file.
+    """
+    path = real_checkpoint.with_name("tokenizer.json")
+    require(path)
+    tokenizers = pytest.importorskip("tokenizers")
+    added = tokenizers.Tokenizer.from_file(str(path)).get_added_tokens_decoder()
+    encoding = Model.open_tokenizer(path)
+    for token, added_token in added.items():
+        assert encoding.encode(added_token.content) == [token]
 
 
 @requires_checkpoint

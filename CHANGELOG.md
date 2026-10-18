@@ -224,6 +224,9 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- Llama's tiktoken tokenizer, `SPECIAL_TOKENS` and `tokenizer()`: Llama
+  reads its checkpoint's `tokenizer.json` like every model, and tiktoken is
+  no longer a dependency.
 - `iron.common`'s `In`, `Out`, `InOut` and `DispatchTime`; import the
   markers from `aie.iron`.
 - `F.linear(accurate=)`, `Attention(accurate=)`, `MLP(accurate=)` and

@@ -22,14 +22,14 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 
-from iron.applications.llama.model import Llama, SPECIAL_TOKENS, tokenizer
+from iron.applications.llama.model import Llama
 from iron.lm import Checkpoint, Model, main
 from iron.lm.cli import parse_args
 from iron.lm.golden import RECORD
 from iron.lm.testing import require, weights_dir
 from iron.tests.common.llama_model import SMALL, checkpoint
 
-TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.model"
+TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.json"
 
 
 class Small(Llama):
@@ -38,7 +38,7 @@ class Small(Llama):
     """
 
     config = SMALL
-    bos = SPECIAL_TOKENS["<|begin_of_text|>"]
+    bos = 1
 
 
 def _directory(path, config=SMALL):
@@ -94,10 +94,10 @@ def test_from_checkpoint_draws_its_weights_at_a_seed(tmp_path):
 def test_from_checkpoint_opens_the_tokenizer_beside_it(tmp_path):
     require(TOKENIZER)
     directory = _directory(tmp_path)
-    (directory / "tokenizer.model").symlink_to(TOKENIZER)
+    (directory / "tokenizer.json").symlink_to(TOKENIZER)
     model = Small.from_checkpoint(directory)
     assert model.seed is None
-    want = [model.bos, *tokenizer(TOKENIZER).encode("hello")]
+    want = [model.bos, *Model.open_tokenizer(TOKENIZER).encode("hello")]
     assert model.tokenizer("hello") == want
 
 
@@ -175,7 +175,7 @@ def test_a_model_s_bos_is_its_checkpoint_s_unless_it_names_one(tmp_path):
     with pytest.raises(KeyError, match="names no bos_token_id"):
         FromCheckpoint.from_checkpoint(directory, seed=1).bos
     bos = Small.from_checkpoint(directory, seed=1).bos
-    assert bos == SPECIAL_TOKENS["<|begin_of_text|>"]
+    assert bos == 1
 
 
 def _golden(path):

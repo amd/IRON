@@ -23,8 +23,6 @@ class SmolLM2(Llama):
     """
 
     profile = Path(__file__).with_name("profiles")
-    open_tokenizer = staticmethod(lm.Model.open_tokenizer)
-    tokenizer_file = "tokenizer.json"
 
 
 if __name__ == "__main__":
