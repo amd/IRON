@@ -108,17 +108,15 @@ class ReLU(UnaryElementwise):
 3. **Test.** Declare `test = Testing(...)` on the class;
    `iron/tests/operators/catalog.py` runs every operator's cases. Every
    operator needs a `bench=True` case and a `lower=True` case per layout
-   (`Sweep` adds both); a shape it must refuse goes in
-   `iron/tests/operators/rejected_shapes.py`. The size rules a tile must
-   meet are AGENTS.md's "Hardware Constraints".
+   (`Sweep` adds the first, and the second with `lower=True`); a shape it
+   must refuse goes in `iron/tests/operators/rejected_shapes.py`.
 4. **Register.** Add the name to `_OPERATOR_MODULES` in
    `iron/operators/__init__.py` and to `__init__.pyi`.
 5. **Use it.** Inside a graph's `body()`, `ReLU.step(x)` records a step.
    If models will call it, add a function to `iron/functional.py`.
 
-The full reference (operand declarations, tunables, shipped binaries,
-the hooks an operator may override) is "Adding a New Operator" in
-[AGENTS.md](AGENTS.md).
+The rules (operand declarations, tunables, shipped binaries, the hooks an
+operator may override) are "Adding an operator" in [AGENTS.md](AGENTS.md).
 
 ## Style Guide
 

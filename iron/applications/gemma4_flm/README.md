@@ -142,7 +142,7 @@ buffer descriptors by hand:
   attention over the KV cache and the MLP.
 
 Each of these operators is an IRON operator, laid out as
-[Adding a New Operator](../../../AGENTS.md#adding-a-new-operator) describes.
+[Adding an operator](../../../AGENTS.md#adding-an-operator) describes.
 `op.py` defines the `Operator` subclass. Its fields describe one problem, for
 example a GEMM's `M`, `K` and `N`, and declare the buffers the operator takes.
 `ProjectionGEMM` and `DequantBFP` build their array in `Array.build()` and their runtime
