@@ -19,7 +19,6 @@ import math
 import ml_dtypes
 
 from iron.common import Precision
-from iron.common.declare.operator import graph_tracer
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gelu import GELU
@@ -37,26 +36,27 @@ LAYER_NORM_EPS = 1e-5
 def linear(x, weight, bias=None, *, precision=None, **gemv):
     """``x @ weight.T``, plus ``bias`` on every row if given.
 
-    One row is a GEMV, its float32 sum rounded once, which every
-    ``precision`` (``Precision``) allows. More rows are flm.ProjectionGEMM
-    reading ``weight`` column-major at ``precision``; ``HIGHEST``, asked for
-    here or by the graph's ``precision``, is instead the GEMM whose float32
-    sums round once, which also tiles row counts flm.ProjectionGEMM cannot.
-    Nothing is padded: a row count neither tiles is an error at trace time.
-    ``gemv`` is the GEMV's tunables, for a call the profile cannot tell from
-    another of its shape.
+    ``x`` is one row (``(in,)`` or ``(1, in)``) or several (``(rows, in)``).
+    One row is a GEMV, whose float32 sum rounds once, as every
+    ``precision`` (``Precision``) allows. Several are flm.ProjectionGEMM
+    reading ``weight`` column-major at ``precision``; at ``HIGHEST``, asked
+    for here or by the graph raising flm.ProjectionGEMM, they are the GEMM
+    whose float32 sums round once, which also tiles row counts
+    flm.ProjectionGEMM cannot. Nothing is padded: a row count neither tiles
+    is an error at trace time. ``gemv`` is the GEMV's tunables, for a call
+    the profile cannot tell from another of its shape.
 
     Raises:
-        ValueError: GEMV tunables for more than one row.
+        ValueError: ``x`` of another rank, or GEMV tunables for several rows.
     """
-    if len(x.shape) != 2 or x.shape[0] == 1:
+    one_row = len(x.shape) == 1 or (len(x.shape) == 2 and x.shape[0] == 1)
+    if len(x.shape) not in (1, 2):
+        raise ValueError(f"linear(): x {tuple(x.shape)} is not (in,) or (rows, in)")
+    if one_row:
         y = GEMV.step(weight, x, **gemv)
     elif gemv:
         raise ValueError(f"linear(): {x.shape[0]} rows take no GEMV {sorted(gemv)}")
-    elif Precision.HIGHEST in (
-        precision,
-        getattr(graph_tracer.get(), "precision", None),
-    ):
+    elif precision == Precision.HIGHEST:
         y = GEMM.step(x, weight, b_col_maj=True, precision=Precision.HIGHEST)
     else:
         tiled = {} if precision is None else dict(precision=precision)

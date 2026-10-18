@@ -114,6 +114,10 @@ public API adds its entry under Unreleased.
   saying how to compile without one, not an `AttributeError` on `None`.
 - `Golden.logits` raises `FileNotFoundError` naming the file when there is
   none to read, and `LookupError` only for a file that lacks the sequence.
+- `F.linear` no longer reads the graph's `precision`: a graph raising
+  `flm.ProjectionGEMM` to `highest`, which it cannot reach, gets the GEMM that
+  rounds once from `Operator.at_precision`. `F.linear` refuses an `x` that is
+  neither `(in,)` nor `(rows, in)`.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `cli`.
 - An operator declares with aie.iron's markers: `In`, `Out` and `InOut`

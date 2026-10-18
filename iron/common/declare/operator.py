@@ -566,6 +566,10 @@ class Operator:
         new._check_complete()
         return new
 
+    def at_precision(self, level: Precision) -> Operator:
+        """This operator rounding at ``level``."""
+        return self._with_tunables(precision=level)
+
     def _with_tunables(self, **tunables: Any) -> Self:
         unknown = [n for n in tunables if n not in self.declaration.tunables]
         if unknown:

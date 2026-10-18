@@ -2214,7 +2214,7 @@ def test_linear_takes_a_precision_for_any_rows_and_gemv_tunables_for_one(
         assert [type(s.op).__name__ for s in t.steps] == steps
 
 
-def test_highest_picks_one_gemm_asked_for_by_call_or_by_graph():
+def test_highest_runs_the_gemm_that_rounds_once_asked_for_by_call_or_by_graph():
     class Asked(iron.Graph):
         def body(self, x, w):
             return F.linear(x, w, precision=Precision.HIGHEST)
@@ -2227,8 +2227,25 @@ def test_highest_picks_one_gemm_asked_for_by_call_or_by_graph():
 
     shapes = dict(x=((128, 256), bfloat16), w=((256, 256), bfloat16))
     asked, floored = (g().trace(**shapes).steps for g in (Asked, Floored))
+    # flm.ProjectionGEMM, raised past what it reaches, hands over.
     assert [repr(s.op) for s in asked] == [repr(s.op) for s in floored]
     assert [type(s.op) for s in asked] == [GEMM]
+    # The handed-over GEMM takes its own profile entry.
+    tuned = Floored()
+    tuned.profile = Profile()
+    tuned.profile.add(GEMM, tile_n=32)
+    assert [s.op.tile_n for s in tuned.trace(**shapes).steps] == [32]
+
+
+def test_linear_takes_one_row_or_several():
+    class Batched(iron.Graph):
+        def body(self, x, w):
+            return F.linear(x, w)
+
+    with pytest.raises(
+        ValueError, match=r"x \(2, 4, 256\) is not \(in,\) or \(rows, in\)"
+    ):
+        Batched().trace(x=((2, 4, 256), bfloat16), w=((256, 256), bfloat16))
 
 
 def test_the_reference_runs_the_trace_so_held_state_takes_arithmetic():

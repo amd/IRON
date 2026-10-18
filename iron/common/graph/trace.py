@@ -794,7 +794,15 @@ class Tracer:
         if self.precision is None or "precision" not in op.declaration.tunables:
             return op
         level = op.precision.at_least(self.precision)
-        return op if level == op.precision else op._with_tunables(precision=level)
+        if level == op.precision:
+            return op
+        raised = op.at_precision(level)
+        if type(raised) is type(op) or self.profile is None:
+            return raised
+        # An operator handed over to another takes that one's profile entry.
+        cls = type(raised)
+        given = {n: getattr(raised, n) for n in cls.declaration.params}
+        return self.profile.make(cls, **given, precision=level)
 
     def _output_bounds(self, op, buffer, rank: int) -> dict:
         bounds = {}
