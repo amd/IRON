@@ -208,7 +208,7 @@ class Model(iron.Graph):
         model.checkpoint, model.seed = checkpoint, seed
         if seed is None:
             tokenizer = directory / cls.tokenizer_file
-            # A directory of its own may hold it at the top.
+            # A directory laid out by hand may hold it at its top.
             if not tokenizer.exists():
                 tokenizer = directory / tokenizer.name
             settings = directory / "tokenizer_config.json"
