@@ -110,8 +110,17 @@ def silu(x):
     return SiLU.step(x)
 
 
-def gelu(x):
-    """GELU, its tanh approximation (``gelu_pytorch_tanh``)."""
+def gelu(x, approximate: str = "none"):
+    """GELU by its tanh approximation (``gelu_pytorch_tanh``).
+
+    Raises:
+        ValueError: ``approximate`` is not ``"tanh"``: no operator computes
+            the exact GELU.
+    """
+    if approximate != "tanh":
+        raise ValueError(
+            f"gelu(): only approximate='tanh' has an operator, not {approximate!r}"
+        )
     return GELU.step(x)
 
 

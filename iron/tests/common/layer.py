@@ -15,6 +15,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron.lm import MLP, Attention, DecoderLayer, Norm
 from iron.applications.embedding_gemma2.blocks import SandwichLayer, TextLayer
 from iron.operators.mha import MHA
@@ -180,7 +181,7 @@ def test_the_parts_decide_the_steps():
         GEMM=7, RMSNorm=2, RoPE=2, MHA=1, ElementwiseAdd=2, SiLU=1, ElementwiseMul=1
     )
     gemma = SandwichLayer(
-        Attention(HEADS, GROUPS, HEAD, qk_norm=True, v_norm=True, accurate=True),
+        Attention(HEADS, GROUPS, HEAD, 1e-6, qk_norm=True, v_norm=True, accurate=True),
         MLP(accurate=True),
         Norm(1e-6),
     )
@@ -218,7 +219,17 @@ def test_an_activation_with_no_operator_is_refused():
 def test_a_layer_norm_at_another_epsilon_than_its_kernels_is_refused():
     norm = SimpleNamespace(weight=np.ones(WIDTH), bias=np.zeros(WIDTH))
     with pytest.raises(ValueError, match="the kernel takes no epsilon but"):
-        Norm(1e-6, bias=True)(None, norm)
+        Norm(1e-6, bias=True)(norm, None)
+
+
+def test_a_q_k_or_v_norm_needs_its_epsilon():
+    with pytest.raises(ValueError, match="needs its eps"):
+        Attention(HEADS, GROUPS, HEAD, qk_norm=True)
+
+
+def test_gelu_refuses_the_exact_form_it_has_no_operator_for():
+    with pytest.raises(ValueError, match="only approximate='tanh'"):
+        F.gelu(None)
 
 
 def test_causal_attention_refuses_a_window():
@@ -240,7 +251,7 @@ class HuggingFaceGemma:
         import torch
         from transformers.models.gemma4 import modeling_gemma4 as gemma4
 
-        from iron.lm.golden import _flat
+        from iron.lm.golden import flat
 
         config = gemma4.Gemma4TextConfig(
             hidden_size=WIDTH,
@@ -257,7 +268,7 @@ class HuggingFaceGemma:
         )
         config._attn_implementation = "eager"
         layer = gemma4.Gemma4TextDecoderLayer(config, 0).eval()
-        state = {k: torch.from_numpy(v) for k, v in _flat(w)}
+        state = {k: torch.from_numpy(v) for k, v in flat(w)}
         missing, _ = layer.load_state_dict(state, strict=False)
         assert not missing, missing
         self.layer, self.x, self.ple = layer, x, ple
@@ -298,7 +309,14 @@ def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
     ple = rng.standard_normal((ROWS, PLE)).astype(bfloat16)
     layer = TextLayer(
         Attention(
-            HEADS, GROUPS, HEAD, qk_norm=True, v_norm=True, scale=1.0, accurate=True
+            HEADS,
+            GROUPS,
+            HEAD,
+            1e-6,
+            qk_norm=True,
+            v_norm=True,
+            scale=1.0,
+            accurate=True,
         ),
         MLP("gelu_pytorch_tanh", accurate=True),
         Norm(1e-6),

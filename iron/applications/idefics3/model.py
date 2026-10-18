@@ -25,7 +25,7 @@ from ml_dtypes import bfloat16
 
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal
-from iron.lm.golden import _flat, config_json
+from iron.lm.golden import flat, config_json
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
 
@@ -146,7 +146,7 @@ class HuggingFaceVLM:
 
         hf = transformers.Idefics3Config(**(config_json(vision) | config_json(text)))
         model = transformers.Idefics3ForConditionalGeneration(hf).float()
-        model.load_state_dict({k: torch.from_numpy(v) for k, v in _flat(weights)})
+        model.load_state_dict({k: torch.from_numpy(v) for k, v in flat(weights)})
         return cls(model)
 
     def pixels(self, bits):

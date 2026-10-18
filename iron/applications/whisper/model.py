@@ -39,7 +39,7 @@ from iron.lm import (
     Norm,
     Tower,
 )
-from iron.lm.golden import Golden, _flat, config_json
+from iron.lm.golden import Golden, flat, config_json
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gelu import GELU
@@ -373,7 +373,7 @@ class HuggingFaceWhisper:
         # A toy vocabulary holds no Whisper padding token.
         hf = transformers.WhisperConfig(**config_json(config), pad_token_id=None)
         model = transformers.WhisperForConditionalGeneration(hf)
-        state = {k: torch.from_numpy(v) for k, v in _flat(weights)}
+        state = {k: torch.from_numpy(v) for k, v in flat(weights)}
         model.load_state_dict(state, strict=False)
         return cls(model)
 

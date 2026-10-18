@@ -597,7 +597,7 @@ class Norm:
     eps: float
     bias: bool = False
 
-    def __call__(self, x, w):
+    def __call__(self, w, x):
         if self.bias:
             return F.layer_norm(x, w.weight, w.bias, self.eps)
         return F.rms_norm(x, w.weight, self.eps)
@@ -615,7 +615,7 @@ class Attention:
         heads: The query heads.
         groups: The key and value heads.
         head_dim: A head's width.
-        eps: The q, k and v norms' epsilon.
+        eps: The q, k and v norms' epsilon, needed where one is set.
         qk_norm: Whether each head of q and k is RMS-normed by the module's
             ``q_norm`` and ``k_norm``.
         v_norm: Whether each head of v is RMS-normed, unweighted.
@@ -629,13 +629,17 @@ class Attention:
     heads: int
     groups: int
     head_dim: int
-    eps: float = 1e-6
+    eps: float | None = None
     qk_norm: bool = False
     v_norm: bool = False
     scale: float | None = None
     window: int | None = None
     rotary: int | None = None
     accurate: bool = False
+
+    def __post_init__(self):
+        if (self.qk_norm or self.v_norm) and self.eps is None:
+            raise ValueError("Attention: a q, k or v norm needs its eps")
 
     def __call__(self, w, x, attend, angles):
         """The block on ``x`` ``(rows, width)``; ``angles``, a row per
@@ -722,8 +726,14 @@ class MLP:
                 "silu and gelu_pytorch_tanh have one"
             )
 
+    def act(self, x):
+        """The activation on ``x``."""
+        if self.activation == "silu":
+            return F.silu(x)
+        return F.gelu(x, approximate="tanh")
+
     def __call__(self, w, x):
-        act = F.silu if self.activation == "silu" else F.gelu
+        act = self.act
         if not self.gated:
             h = act(_linear(x, w.fc1, accurate=self.accurate))
             return _linear(h, w.fc2, accurate=self.accurate)
@@ -745,9 +755,9 @@ class DecoderLayer:
     residual: float = 1.0
 
     def __call__(self, w, x, attend, angles):
-        h = self.attention(w.self_attn, self.norm(x, w.input_layernorm), attend, angles)
+        h = self.attention(w.self_attn, self.norm(w.input_layernorm, x), attend, angles)
         x = self.add(x, h)
-        return self.add(x, self.mlp(w.mlp, self.norm(x, w.post_attention_layernorm)))
+        return self.add(x, self.mlp(w.mlp, self.norm(w.post_attention_layernorm, x)))
 
     def add(self, x, y):
         """``x`` plus ``y`` times ``residual``, in ``x``'s shape."""
@@ -764,11 +774,11 @@ class CrossDecoderLayer(DecoderLayer):
     """
 
     def __call__(self, w, x, attend, angles, cross):
-        h = self.attention(w.self_attn, self.norm(x, w.input_layernorm), attend, angles)
+        h = self.attention(w.self_attn, self.norm(w.input_layernorm, x), attend, angles)
         x = self.add(x, h)
-        h = self.norm(x, w.encoder_attn_layer_norm)
+        h = self.norm(w.encoder_attn_layer_norm, x)
         x = self.add(x, self.attention.cross(w.encoder_attn, h, cross))
-        return self.add(x, self.mlp(w.mlp, self.norm(x, w.post_attention_layernorm)))
+        return self.add(x, self.mlp(w.mlp, self.norm(w.post_attention_layernorm, x)))
 
     def keys_values(self, w, memory) -> tuple:
         """The keys and values ``encoder_attn`` projects from ``memory``."""

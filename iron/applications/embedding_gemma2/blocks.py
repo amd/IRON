@@ -28,10 +28,10 @@ class SandwichLayer(DecoderLayer):
     """
 
     def __call__(self, w, x, attend, angles):
-        h = self.attention(w.self_attn, self.norm(x, w.input_layernorm), attend, angles)
-        x = self.add(x, self.norm(h, w.post_attention_layernorm))
-        h = self.mlp(w.mlp, self.norm(x, w.pre_feedforward_layernorm))
-        return self.add(x, self.norm(h, w.post_feedforward_layernorm))
+        h = self.attention(w.self_attn, self.norm(w.input_layernorm, x), attend, angles)
+        x = self.add(x, self.norm(w.post_attention_layernorm, h))
+        h = self.mlp(w.mlp, self.norm(w.pre_feedforward_layernorm, x))
+        return self.add(x, self.norm(w.post_feedforward_layernorm, h))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -46,7 +46,7 @@ class TextLayer(SandwichLayer):
         ple_dim)``, ``scale`` its ``layer_scalar`` as a row.
         """
         x = super().__call__(w, x, attend, angles)
-        act = F.silu if self.mlp.activation == "silu" else F.gelu
+        act = self.mlp.act
         accurate = self.mlp.accurate
         g = act(F.linear(x, w.per_layer_input_gate.weight, accurate=accurate)) * ple
         g = F.linear(g, w.per_layer_projection.weight, accurate=accurate)

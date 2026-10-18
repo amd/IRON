@@ -478,9 +478,14 @@ def _broadcast(whole, rowwise, x: Handle, y) -> Handle:
     """``whole`` of ``x`` and ``y`` of its shape, or, ``x`` of two axes or
     more, ``rowwise`` of ``x`` and ``y`` a row as wide as its last axis.
 
+    Both are commutative, so a row handle times a matrix handle is the
+    matrix's ``rowwise``.
+
     Raises:
         TypeError: ``y`` is neither.
     """
+    if isinstance(y, Handle) and len(x.shape) == 1 and len(y.shape) > 1:
+        x, y = y, x
     shape = tuple(getattr(y, "shape", ()))
     if len(x.shape) > 1 and shape == x.shape[-1:]:
         rows = x.elements // shape[0]

@@ -29,7 +29,7 @@ from iron.lm import (
     EncoderDecoder,
     Norm,
 )
-from iron.lm.golden import _flat
+from iron.lm.golden import flat
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
@@ -120,7 +120,7 @@ class HuggingFaceDecoder:
             pad_token_id=None,
         )
         self.model = transformers.WhisperForConditionalGeneration(hf).eval()
-        state = {k: torch.from_numpy(v) for k, v in _flat(weights)}
+        state = {k: torch.from_numpy(v) for k, v in flat(weights)}
         self.model.load_state_dict(state, strict=False)
         self.rows = torch.from_numpy(np.asarray(rows, np.float32))[None]
 

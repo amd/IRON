@@ -147,7 +147,7 @@ class HuggingFace:
             model_type, **(config_json(config) | json)
         )
         model = transformers.AutoModelForCausalLM.from_config(hf, dtype=torch.float32)
-        state = {k: torch.from_numpy(v) for k, v in _flat(weights)}
+        state = {k: torch.from_numpy(v) for k, v in flat(weights)}
         missing, _ = model.load_state_dict(state, strict=False)
         if model.config.tie_word_embeddings:
             missing = [k for k in missing if k != "lm_head.weight"]
@@ -182,11 +182,11 @@ def config_json(config) -> dict:
     return out
 
 
-def _flat(tree, prefix=""):
+def flat(tree, prefix=""):
     """``tree``'s arrays by their dotted names, in float32."""
     items = enumerate(tree) if isinstance(tree, list) else vars(tree).items()
     for name, value in items:
         if isinstance(value, np.ndarray):
             yield f"{prefix}{name}", value.astype(np.float32)
         else:
-            yield from _flat(value, f"{prefix}{name}.")
+            yield from flat(value, f"{prefix}{name}.")

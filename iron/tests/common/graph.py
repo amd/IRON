@@ -2746,3 +2746,21 @@ def test_linear_refuses_a_tunable_its_rows_do_not_choose(rows, keywords):
 
     with pytest.raises(ValueError, match="no (GEMV|flm.GEMM)"):
         Linear().trace(x=(rows, E))
+
+
+def test_a_row_times_a_matrix_is_rowwise_either_way_round():
+    class Scale(iron.Graph):
+        def body(self, x, row):
+            return row * x, x * row
+
+    t = Scale().trace(x=(4, E), row=(E,))
+    assert [type(s.op).__name__ for s in t.steps] == ["RowwiseMul", "RowwiseMul"]
+
+
+def test_an_operand_neither_of_its_shape_nor_a_row_is_refused():
+    class Add(iron.Graph):
+        def body(self, x, y):
+            return x + y
+
+    with pytest.raises(TypeError, match="takes an operand of its shape or a row"):
+        Add().trace(x=(4, E), y=(4, E // 2))

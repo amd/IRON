@@ -37,10 +37,7 @@ import iron.functional as F
 from iron import lm
 from iron.lm import Attention, CausalLM, Checkpoints, DecoderConfig, Derived
 from iron.operators.copy import Copy
-from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
-from iron.operators.gemv import GEMV
-from iron.operators.rms_norm import RMSNorm
+from iron.operators.elementwise_mul import RowwiseMul
 
 
 @dataclasses.dataclass(frozen=True)
@@ -76,13 +73,13 @@ class Lfm2Config(DecoderConfig):
 
     def __post_init__(self):
         super().__post_init__()
-        F = self.block_ff_dim
+        ff = self.block_ff_dim
         if self.auto_adjust_ff_dim:
-            F = int(2 * F / 3)
+            ff = int(2 * ff / 3)
             if self.ffn_dim_multiplier is not None:
-                F = int(self.ffn_dim_multiplier * F)
-            F = self.multiple_of * -(-F // self.multiple_of)
-        object.__setattr__(self, "intermediate_size", F)
+                ff = int(self.ffn_dim_multiplier * ff)
+            ff = self.multiple_of * -(-ff // self.multiple_of)
+        object.__setattr__(self, "intermediate_size", ff)
 
     def attention(self, i: int) -> Attention:
         return dataclasses.replace(super().attention(i), qk_norm=True)
@@ -142,9 +139,9 @@ class Lfm2(CausalLM):
         if "self_attn" in vars(w):
             return super().layer(step, i, w, x)
         layer = self.config.layer(i)
-        h = self.conv(step, i, w.conv, layer.norm(x, w.input_layernorm))
+        h = self.conv(step, i, w.conv, layer.norm(w.input_layernorm, x))
         x = layer.add(x, h)
-        return layer.add(x, layer.mlp(w.mlp, layer.norm(x, w.post_attention_layernorm)))
+        return layer.add(x, layer.mlp(w.mlp, layer.norm(w.post_attention_layernorm, x)))
 
     def conv(self, step, i, w, h):
         """The gated short conv in place of attention: a depth-wise causal
@@ -160,7 +157,7 @@ class Lfm2(CausalLM):
             F.linear(h, w.in_proj.weight[k * E : (k + 1) * E]).reshape(n, E)
             for k in range(3)
         )
-        gated = ElementwiseMul.step(b, x)
+        gated = b * x
         tap = self.derived.model.layers[i].conv.conv.taps
         read, write = self.recurrent[i]["conv"].at(step)
         flat = self.conv_window.reshape(2 * C, E)
@@ -170,9 +167,7 @@ class Lfm2(CausalLM):
             Copy.step(gated, self.conv_window[1, : step.rows])
             total = RowwiseMul.step(flat[first : first + C], tap[0])
             for k in range(1, K):
-                total = ElementwiseAdd.step(
-                    total, RowwiseMul.step(flat[first + k : first + k + C], tap[k])
-                )
+                total = total + RowwiseMul.step(flat[first + k : first + k + C], tap[k])
             total = total[: step.rows]
             for j in range(K - 1):
                 Copy.step(flat[first + step.rows + j], self.conv_tail[j])
@@ -181,20 +176,15 @@ class Lfm2(CausalLM):
             Copy.step(gated.reshape(E), flat[C])
             total = RowwiseMul.step(gated, tap[K - 1])
             for k in range(K - 1):
-                prior = RowwiseMul.step(flat[first + k : first + k + 1], tap[k])
-                total = ElementwiseAdd.step(total, prior)
+                total = total + RowwiseMul.step(flat[first + k : first + k + 1], tap[k])
             Copy.step(flat[first + 1 : C + 1], write)
-        y = ElementwiseMul.step(cc, total)
-        return F.linear(y, w.out_proj.weight)
+        return F.linear(cc * total, w.out_proj.weight)
 
     def head(self, x):
-        return GEMV.step(
-            self.weights.model.embed_tokens.weight,
-            RMSNorm.step(
-                x,
-                weight=self.weights.model.embedding_norm.weight,
-                epsilon=self.config.eps,
-            ),
+        m = self.weights.model
+        return F.linear(
+            F.rms_norm(x, m.embedding_norm.weight, self.config.eps),
+            m.embed_tokens.weight,
         )
 
 
