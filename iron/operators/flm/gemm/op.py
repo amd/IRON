@@ -12,9 +12,7 @@ from typing import Any, ClassVar, NamedTuple
 
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch, AIETileType, DMAChannelDir
-from aie.dialects.aie import (
-    get_target_model,
-)
+from aie.dialects.aie import get_target_model
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron import (
@@ -258,12 +256,11 @@ class ProjectionGEMM(Operator):
         return 0  # nothing is shortened
 
     def validate(self) -> None:
-        if self.tile_n is not None:
-            if self.tile_n not in CT_MAX_K_FOR_N:
-                raise ValueError(
-                    f"flm.ProjectionGEMM: tile_n ({self.tile_n}) must be one of "
-                    f"{sorted(CT_MAX_K_FOR_N)}"
-                )
+        if self.tile_n is not None and self.tile_n not in CT_MAX_K_FOR_N:
+            raise ValueError(
+                f"flm.ProjectionGEMM: tile_n ({self.tile_n}) must be one of "
+                f"{sorted(CT_MAX_K_FOR_N)}"
+            )
         if self.tile_ma is not None and (
             M_TILE % self.tile_ma or self.tile_ma % (2 * R)
         ):
@@ -345,7 +342,7 @@ class ProjectionGEMM(Operator):
             c_l2=M_TILE * tile_n * rows,
         )
 
-    def _check_shape(self) -> None:
+    def compatible(self) -> None:
         # B_ITERS = k_tile // ct_max_k counts the B chunks one k step
         # consumes, so a k tile the compute tile's slice does not divide is
         # inexpressible.
@@ -365,7 +362,7 @@ class ProjectionGEMM(Operator):
                 raise ValueError(
                     f"flm.ProjectionGEMM: {name} ({value}) must be a multiple of {unit}"
                 )
-        m_row_blocks = self.M // (M_TILE * self.rows)
+        m_row_blocks = self._m_row_blocks
         if m_row_blocks % self.m_chunk:
             # A partial group is inexpressible: the object is m_chunk tiles
             # wide and the forward always drains that much.
@@ -380,9 +377,6 @@ class ProjectionGEMM(Operator):
                 f"flm.ProjectionGEMM: m_chunk ({self.m_chunk}) must be 1 under a per-call "
                 f"row bound"
             )
-
-    def compatible(self) -> None:
-        self._check_shape()
 
     @property
     def compiled_modes(self) -> tuple[Epilogue, ...]:
@@ -452,7 +446,6 @@ class ProjectionGEMM(Operator):
             B_GROUP = bfp.BLOCK if self.bfp16_b else 1  # B values per element
             L1_B_DEPTH, K_TILE = self.l1_b_depth, self.k_tile
             RHO = M_TILE // T_MA
-            K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
             CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
             CT_A_OBJ = CT_A_LEN * (T_MA // R // 2)  # every z slice of one mmul
             C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
@@ -518,7 +511,7 @@ class ProjectionGEMM(Operator):
             a_lo = max(d for d in range(1, min(run, wrap) + 1) if run % d == 0)
             a_hi = run // a_lo
             a_send_dims = TensorAccessPattern.full(
-                (a_bands, K_DIV_CT_K_MAX, R * CT_MAX_K)
+                (a_bands, B_ITERS, R * CT_MAX_K)
             ).permute((1, 0, 2))
             if a_hi > 1:
                 a_send_dims = a_send_dims.split(2, a_lo)
