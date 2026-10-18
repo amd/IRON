@@ -27,49 +27,34 @@ from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
-# Each product's float32 sum rounded once.
-ACCURATE = dict(precision=Precision.HIGHEST)
 # The epsilon mlir-aie's layer_norm kernel fixes.
 LAYER_NORM_EPS = 1e-5
 
 
-def linear(
-    x,
-    weight,
-    bias=None,
-    *,
-    accurate: bool = False,
-    precision=None,
-    **gemv,
-):
+def linear(x, weight, bias=None, *, precision=None, **gemv):
     """``x @ weight.T``, plus ``bias`` on every row if given.
 
-    One row is a GEMV, which ``accurate`` leaves as it is; more are flm.GEMM
-    reading ``weight`` column-major, or with ``accurate`` the GEMM whose
-    float32 sums round once (``ACCURATE``). ``precision`` is flm.GEMM's and
-    ``gemv`` the GEMV's tunables, for a call the profile cannot tell from
-    another of its shape.
+    One row is a GEMV, whose float32 sum rounds once, as every
+    ``precision`` (``Precision``) allows. More are flm.GEMM reading
+    ``weight`` column-major at ``precision``, or at ``HIGHEST`` the GEMM
+    whose float32 sums round once, which tiles row counts flm.GEMM does
+    not. ``gemv`` is the GEMV's tunables, for a call the profile cannot
+    tell from another of its shape.
 
     Raises:
-        ValueError: A tunable of the operator the rows do not choose, or
-            ``accurate`` with one of flm.GEMM's.
+        ValueError: GEMV tunables for more than one row.
     """
-    tiled = {} if precision is None else dict(precision=precision)
-    if len(x.shape) == 2 and x.shape[0] > 1:
-        if gemv:
-            raise ValueError(f"linear(): {x.shape[0]} rows take no GEMV {sorted(gemv)}")
-        if accurate and tiled:
-            raise ValueError(f"linear(): accurate takes no flm.GEMM {sorted(tiled)}")
-        if accurate:
-            y = GEMM.step(x, weight, b_col_maj=True, **ACCURATE)
-        else:
-            y = FLMGEMM.step(
-                x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
-            )
-    elif tiled:
-        raise ValueError(f"linear(): one row takes no flm.GEMM {sorted(tiled)}")
-    else:
+    if len(x.shape) != 2 or x.shape[0] == 1:
         y = GEMV.step(weight, x, **gemv)
+    elif gemv:
+        raise ValueError(f"linear(): {x.shape[0]} rows take no GEMV {sorted(gemv)}")
+    elif precision == Precision.HIGHEST:
+        y = GEMM.step(x, weight, b_col_maj=True, precision=precision)
+    else:
+        tiled = {} if precision is None else dict(precision=precision)
+        y = FLMGEMM.step(
+            x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
+        )
     if bias is None:
         return y
     # A row added to every row, also for GEMV's one-dimensional output.

@@ -13,9 +13,8 @@ from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Scratchpad
+from iron import Precision, Scratchpad
 from iron.lm import ImagePatches, Tower, rope_angles
-from iron.functional import ACCURATE
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -127,7 +126,7 @@ class VisionTower(Tower):
         v = self.vision_tower
         x = AXPY.step(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
         patch = v.patch_embedder.input_proj.weight
-        h = GEMM.step(x, patch, b_col_maj=True, **ACCURATE)
+        h = GEMM.step(x, patch, b_col_maj=True, precision=Precision.HIGHEST)
         return self.window_positions(h, n=n, hk=hk, wk=wk, walked=walked)
 
     def window_positions(self, h, *, n, hk, wk, walked):
@@ -210,7 +209,7 @@ class VisionTower(Tower):
         return w
 
     def pool(self, x, n):
-        return GEMM.step(self.pooling[:, :n], x, **ACCURATE)
+        return GEMM.step(self.pooling[:, :n], x, precision=Precision.HIGHEST)
 
     def head(self, x):
         c = self.config
@@ -219,7 +218,7 @@ class VisionTower(Tower):
         s2 = c.hidden_size / c.pool**4
         x = RMSNorm.step(x, epsilon=c.eps / s2)
         projection = self.embed_vision.embedding_projection.weight
-        return GEMM.step(x, projection, b_col_maj=True, **ACCURATE)
+        return GEMM.step(x, projection, b_col_maj=True, precision=Precision.HIGHEST)
 
     def body(
         self,

@@ -18,17 +18,16 @@ from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Scratchpad
-from iron.functional import ACCURATE
+from iron import Precision, Scratchpad
 from iron.operators.gemm import GEMM
 from iron.operators.softmax import Softmax
 
 ROWS, SEQ, D = 128, 2048, 128
 POSITIONS = (SEQ, 300, 1, 63, 64, 65, 1024, 1025, 2047, 1000)
 MODES = {
-    "accurate": ACCURATE,
+    "accurate": dict(precision=Precision.HIGHEST),
     "default": dict(),
-    "b_col_maj": dict(ACCURATE, b_col_maj=True),
+    "b_col_maj": dict(precision=Precision.HIGHEST, b_col_maj=True),
 }
 
 pytestmark = [
@@ -88,10 +87,10 @@ def test_attention_reduces_over_the_valid_keys():
     class Attend(iron.Graph):
         def body(self, s, v, *, n: Scratchpad[np.int32]):
             weights = Softmax.step(s[:, :n])
-            return weights, GEMM.step(weights, v[:n], **ACCURATE)
+            return weights, GEMM.step(weights, v[:n], precision=Precision.HIGHEST)
 
     net = Attend().compile(s=(ROWS, SEQ), v=(SEQ, D))
-    tile_k = GEMM(M=ROWS, K=SEQ, N=D, **ACCURATE).tile_k
+    tile_k = GEMM(M=ROWS, K=SEQ, N=D, precision=Precision.HIGHEST).tile_k
 
     rng = np.random.default_rng(0)
     for n in POSITIONS:
@@ -104,7 +103,7 @@ def test_attention_reduces_over_the_valid_keys():
         got = np.asarray(got).reshape(ROWS, D)
         v_k = np.zeros_like(v[:k])
         v_k[:n] = v[:n]
-        gemm = GEMM(M=ROWS, K=k, N=D, **ACCURATE)
+        gemm = GEMM(M=ROWS, K=k, N=D, precision=Precision.HIGHEST)
         tolerance = gemm.tolerance()
         bound = tolerance.bound(weights, v_k)
         want = gemm.reference(weights, v_k)

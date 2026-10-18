@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from iron import lm
+from iron import Precision, lm
 
 from .blocks import SandwichLayer, TextLayer
 
@@ -141,9 +141,9 @@ class Config(lm.Config):
                 v_norm=True,
                 scale=1.0,
                 window=window,
-                accurate=True,
+                precision=Precision.HIGHEST,
             ),
-            lm.MLP(self.hidden_act, accurate=True),
+            lm.MLP(self.hidden_act, precision=Precision.HIGHEST),
             self.norm(),
         )
 
@@ -297,9 +297,9 @@ class VisionConfig(lm.Config):
                 qk_norm=True,
                 v_norm=True,
                 scale=1.0,
-                accurate=True,
+                precision=Precision.HIGHEST,
             ),
-            lm.MLP(self.hidden_act, accurate=True),
+            lm.MLP(self.hidden_act, precision=Precision.HIGHEST),
             self.norm(),
         )
 

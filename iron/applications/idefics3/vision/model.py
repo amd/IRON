@@ -22,7 +22,8 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
-from iron.functional import ACCURATE, LAYER_NORM_EPS
+from iron import Precision
+from iron.functional import LAYER_NORM_EPS
 from iron.lm import MLP, Attention, Config, Conv2d, DecoderLayer, Norm, Tower
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
@@ -142,7 +143,7 @@ class VisionTower(Tower):
 
     def head(self, x):
         projection = self.connector.modality_projection.proj.weight
-        return GEMM.step(x, projection, b_col_maj=True, **ACCURATE)
+        return GEMM.step(x, projection, b_col_maj=True, precision=Precision.HIGHEST)
 
     def body(self, rgb):
         """The soft tokens of the image ``rgb``, ``(512, 512 * 3)``."""

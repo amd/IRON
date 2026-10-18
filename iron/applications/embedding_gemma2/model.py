@@ -27,10 +27,9 @@ from ml_dtypes import bfloat16
 import tokenizers
 
 import iron
-from iron import lm
+from iron import Precision, lm
 from iron.tune.autotune import Call
 from iron.lm import Checkpoint, Encoder, rope_angles
-from iron.functional import ACCURATE
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
@@ -168,7 +167,9 @@ class EmbeddingGemma(Encoder):
         # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         P, tree = c.ple_dim, self.language_model.ple
         projection = tree.per_layer_model_projection.weight[i * P : (i + 1) * P]
-        ple = GEMM.step(step.embeddings, projection, b_col_maj=True, **ACCURATE)
+        ple = GEMM.step(
+            step.embeddings, projection, b_col_maj=True, precision=Precision.HIGHEST
+        )
         norm = tree.per_layer_projection_norm.weight
         ple = RMSNorm.step(ple, weight=norm, epsilon=c.eps * c.hidden_size)
         layer = c.layer(i)

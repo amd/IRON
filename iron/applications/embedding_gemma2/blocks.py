@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import numpy as np
 
 import iron.functional as F
-from iron.functional import ACCURATE
+from iron import Precision
 from iron.lm import DecoderLayer
 from iron.operators.clamp import Clamp
 from iron.operators.elementwise_mul import RowwiseMul
@@ -50,9 +50,9 @@ class TextLayer(SandwichLayer):
         """
         x = super().__call__(w, x, attend, angles)
         act = self.mlp.act
-        accurate = self.mlp.accurate
-        g = act(F.linear(x, w.per_layer_input_gate.weight, accurate=accurate)) * ple
-        g = F.linear(g, w.per_layer_projection.weight, accurate=accurate)
+        precision = self.mlp.precision
+        g = act(F.linear(x, w.per_layer_input_gate.weight, precision=precision)) * ple
+        g = F.linear(g, w.per_layer_projection.weight, precision=precision)
         x = self.add(x, self.norm(w.post_per_layer_input_norm, g))
         return RowwiseMul.step(x, scale)
 
@@ -71,7 +71,7 @@ class Clipped:
         """``x``, already clamped, projected and clamped."""
         w = self.linear
         weight = w.linear.weight if weight is None else weight
-        y = GEMM.step(x, weight, b_col_maj=True, **ACCURATE)
+        y = GEMM.step(x, weight, b_col_maj=True, precision=Precision.HIGHEST)
         return Clamp.step(y, low=float(w.output_min), high=float(w.output_max))
 
     def __call__(self, x):

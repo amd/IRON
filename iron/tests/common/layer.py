@@ -16,6 +16,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
+from iron import Precision
 from iron.lm import MLP, Attention, DecoderLayer, Norm
 from iron.applications.embedding_gemma2.blocks import SandwichLayer, TextLayer
 from iron.operators.mha import MHA
@@ -168,8 +169,8 @@ def ops(layer, names, **parts) -> Counter:
 
 def llama(residual=1.0) -> DecoderLayer:
     return DecoderLayer(
-        Attention(HEADS, GROUPS, HEAD, accurate=True),
-        MLP(accurate=True),
+        Attention(HEADS, GROUPS, HEAD, precision=Precision.HIGHEST),
+        MLP(precision=Precision.HIGHEST),
         Norm(1e-6),
         residual,
     )
@@ -181,8 +182,16 @@ def test_the_parts_decide_the_steps():
         GEMM=7, RMSNorm=2, RoPE=2, MHA=1, ElementwiseAdd=2, SiLU=1, ElementwiseMul=1
     )
     gemma = SandwichLayer(
-        Attention(HEADS, GROUPS, HEAD, 1e-6, qk_norm=True, v_norm=True, accurate=True),
-        MLP(accurate=True),
+        Attention(
+            HEADS,
+            GROUPS,
+            HEAD,
+            1e-6,
+            qk_norm=True,
+            v_norm=True,
+            precision=Precision.HIGHEST,
+        ),
+        MLP(precision=Precision.HIGHEST),
         Norm(1e-6),
     )
     # Sandwich norms, q and k norms and the v norm.
@@ -316,9 +325,9 @@ def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
             qk_norm=True,
             v_norm=True,
             scale=1.0,
-            accurate=True,
+            precision=Precision.HIGHEST,
         ),
-        MLP("gelu_pytorch_tanh", accurate=True),
+        MLP("gelu_pytorch_tanh", precision=Precision.HIGHEST),
         Norm(1e-6),
     )
 

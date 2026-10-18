@@ -13,9 +13,8 @@ from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Scratchpad
+from iron import Precision, Scratchpad
 from iron.lm import Tower, blocks
-from iron.functional import ACCURATE
 from iron.operators.copy import Copy
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
@@ -200,17 +199,17 @@ class AudioTower(Tower):
             h.reshape(T, F1 * C1),
             sub.input_proj_linear.weight,
             b_col_maj=True,
-            **ACCURATE,
+            precision=Precision.HIGHEST,
         )
         return x, None
 
     def head(self, x):
         c = self.config
         out = self.audio_tower.output_proj
-        x = GEMM.step(x, out.weight, b_col_maj=True, **ACCURATE)
+        x = GEMM.step(x, out.weight, b_col_maj=True, precision=Precision.HIGHEST)
         x = RMSNorm.step(RowwiseAdd.step(x, out.bias), epsilon=c.eps)
         projection = self.embed_audio.embedding_projection.weight
-        return GEMM.step(x, projection, b_col_maj=True, **ACCURATE)
+        return GEMM.step(x, projection, b_col_maj=True, precision=Precision.HIGHEST)
 
     def body(
         self,
@@ -286,7 +285,7 @@ class AudioTower(Tower):
                 scores[i],
                 b_col_maj=True,
                 dtype_out=np.float32,
-                **ACCURATE,
+                precision=Precision.HIGHEST,
             )
         # Query t's band starts at the even column of t and t - 1, its
         # relative terms at R or R + band.
@@ -305,7 +304,7 @@ class AudioTower(Tower):
         )
         Copy.step(probabilities, probs, dst=band)
         for i in range(H):
-            GEMM.step(probs[i, :tokens], values[i], q[i], **ACCURATE)
+            GEMM.step(probs[i, :tokens], values[i], q[i], precision=Precision.HIGHEST)
         o = Copy.step(q.transpose(1, 0, 2)).reshape(T, H * D)
         return Clipped(a.post)(o)
 

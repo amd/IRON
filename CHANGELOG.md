@@ -61,6 +61,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `F.linear(precision=)` is the one way to ask for an accurate projection:
+  at `Precision.HIGHEST` several rows run the GEMM whose float32 sums round
+  once, and one row, a GEMV that rounds once, takes any precision.
+  `Attention` and `MLP` take `precision` in place of `accurate`.
 - Config fields use `config.json`'s names: `hidden_size`,
   `num_hidden_layers`, `num_attention_heads`, `num_key_value_heads`,
   `intermediate_size`, `rope_theta`, `num_experts_per_tok` and
@@ -101,6 +105,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `F.linear(accurate=)`, `Attention(accurate=)`, `MLP(accurate=)` and
+  `iron.functional.ACCURATE`; pass `precision=Precision.HIGHEST`.
 - gemma4_flm's GEMM and dequant exploration and `build.py --only`; the
   application is one example.
 - `Layer`, the numpy `Oracle`, `EncoderDecoderOracle` and `widen`. Models are

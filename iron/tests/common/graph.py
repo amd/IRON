@@ -2794,11 +2794,16 @@ def test_a_handle_adds_and_multiplies_by_elementwise_and_rowwise_steps():
 
 
 @pytest.mark.parametrize(
-    "rows, keywords",
-    [(1, dict(precision=Precision.HIGH)), (4, dict(tile_size_output=32))],
+    "rows, keywords, steps",
+    [
+        (1, dict(precision=Precision.MEDIUM), ["GEMV"]),
+        (4, dict(tile_size_output=32), None),
+    ],
     ids=["gemv", "gemm"],
 )
-def test_linear_refuses_a_tunable_its_rows_do_not_choose(rows, keywords):
+def test_linear_takes_a_precision_for_any_rows_and_gemv_tunables_for_one(
+    rows, keywords, steps
+):
     class Linear(iron.Graph):
         def __init__(self):
             self.w = iron.weight(z(E, E))
@@ -2806,8 +2811,12 @@ def test_linear_refuses_a_tunable_its_rows_do_not_choose(rows, keywords):
         def body(self, x):
             return F.linear(x, self.w, **keywords)
 
-    with pytest.raises(ValueError, match="no (GEMV|flm.GEMM)"):
-        Linear().trace(x=(rows, E))
+    if steps is None:
+        with pytest.raises(ValueError, match="take no GEMV"):
+            Linear().trace(x=(rows, E))
+    else:
+        t = Linear().trace(x=(rows, E))
+        assert [type(s.op).__name__ for s in t.steps] == steps
 
 
 def test_a_row_times_a_matrix_is_rowwise_either_way_round():

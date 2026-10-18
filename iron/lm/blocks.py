@@ -22,7 +22,6 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, Scratchpad
-from iron.functional import ACCURATE
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import RowwiseAdd
@@ -238,7 +237,10 @@ class Conv2d(iron.Graph):
             if not spare:
                 a = Copy.step(x, src=gathered).reshape(out_rows, k * line)[:rows]
                 return GEMM.step(
-                    a, self.matrix, *([] if y is None else [y]), **ACCURATE
+                    a,
+                    self.matrix,
+                    *([] if y is None else [y]),
+                    precision=Precision.HIGHEST,
                 )
             if y is not None:
                 raise ValueError(
@@ -249,7 +251,9 @@ class Conv2d(iron.Graph):
             first = TensorAccessPattern((R, line), 0, [1, k * line], [s * line, 1])
             a = Copy.step(x, src=(gathered, *[first] * spare))
             out = GEMM.step(
-                a.reshape(out_rows + spare, k * line), self.matrix, **ACCURATE
+                a.reshape(out_rows + spare, k * line),
+                self.matrix,
+                precision=Precision.HIGHEST,
             )
             return out[:rows]
         n = out_rows * self.out_width
@@ -263,7 +267,14 @@ class Conv2d(iron.Graph):
         # The few output channels as M, so that the patches span every
         # column; every row, as a GEMM bounds no N, and the output after.
         out = [] if y is None else [y.reshape(n, self.out_channels)]
-        h = GEMM.step(self.matrix, a, *out, b_col_maj=True, c_col_maj=True, **ACCURATE)
+        h = GEMM.step(
+            self.matrix,
+            a,
+            *out,
+            b_col_maj=True,
+            c_col_maj=True,
+            precision=Precision.HIGHEST,
+        )
         h = h if y is not None else h[: rows * self.out_width]
         return None if y is not None else h.reshape(out_rows, self.out_line)
 
@@ -306,7 +317,9 @@ class Conv1d(iron.Graph):
         out_rows = (R - k) // s + 1
         pattern = TensorAccessPattern((R, line), 0, [out_rows, k * line], [s * line, 1])
         a = Copy.step(x, src=pattern).reshape(out_rows, k * line)[:rows]
-        h = RowwiseAdd.step(GEMM.step(a, self.matrix, **ACCURATE), self.bias)
+        h = RowwiseAdd.step(
+            GEMM.step(a, self.matrix, precision=Precision.HIGHEST), self.bias
+        )
         return Copy.step(h, y) if y is not None else h
 
 
@@ -622,7 +635,7 @@ class Attention:
         window: The positions a query reaches either side; None is all.
         rotary: The leading columns of a head RoPE turns, the rest passed
             through; None is all.
-        accurate: Whether every projection sums in float32 and rounds once.
+        precision: Every projection's ``Precision``; None is ``F.linear``'s.
     """
 
     heads: int
@@ -634,7 +647,7 @@ class Attention:
     scale: float | None = None
     window: int | None = None
     rotary: int | None = None
-    accurate: bool = False
+    precision: Precision | None = None
 
     def __post_init__(self):
         if (self.qk_norm or self.v_norm) and self.eps is None:
@@ -646,7 +659,7 @@ class Attention:
         """
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         q, k, v = (
-            _linear(x, p, accurate=self.accurate, **self.head_tiles(n))
+            _linear(x, p, precision=self.precision, **self.head_tiles(n))
             for p in (w.q_proj, w.k_proj, w.v_proj)
         )
         q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
@@ -664,7 +677,7 @@ class Attention:
             scale=self.scale,
             window=self.window,
         )
-        return _linear(o, w.o_proj, accurate=self.accurate)
+        return _linear(o, w.o_proj, precision=self.precision)
 
     def head_tiles(self, rows: int) -> dict:
         """Half a head per GEMV tile for one row: q's shape is o's when
@@ -689,7 +702,7 @@ class Attention:
         """
         n, G, D = memory.shape[0], self.groups, self.head_dim
         return tuple(
-            _linear(memory, p, accurate=self.accurate).reshape(n, G, D)
+            _linear(memory, p, precision=self.precision).reshape(n, G, D)
             for p in (w.k_proj, w.v_proj)
         )
 
@@ -698,9 +711,9 @@ class Attention:
         ``cross(q, scale=)`` on ``(rows, heads, head_dim)``.
         """
         n, H, D = x.shape[0], self.heads, self.head_dim
-        q = _linear(x, w.q_proj, accurate=self.accurate, **self.head_tiles(n))
+        q = _linear(x, w.q_proj, precision=self.precision, **self.head_tiles(n))
         o = cross(q.reshape(n, H, D), scale=self.scale)
-        return _linear(o, w.o_proj, accurate=self.accurate)
+        return _linear(o, w.o_proj, precision=self.precision)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -711,12 +724,12 @@ class MLP:
     Args:
         activation: ``hidden_act``, ``"silu"`` or ``"gelu_pytorch_tanh"``.
         gated: Whether it is gated.
-        accurate: Whether every projection sums in float32 and rounds once.
+        precision: Every projection's ``Precision``; None is ``F.linear``'s.
     """
 
     activation: str = "silu"
     gated: bool = True
-    accurate: bool = False
+    precision: Precision | None = None
 
     def __post_init__(self):
         if self.activation not in ("silu", "gelu_pytorch_tanh"):
@@ -734,11 +747,11 @@ class MLP:
     def __call__(self, w, x):
         act = self.act
         if not self.gated:
-            h = act(_linear(x, w.fc1, accurate=self.accurate))
-            return _linear(h, w.fc2, accurate=self.accurate)
-        gate = _linear(x, w.gate_proj, accurate=self.accurate)
-        up = _linear(x, w.up_proj, accurate=self.accurate)
-        return _linear(act(gate) * up, w.down_proj, accurate=self.accurate)
+            h = act(_linear(x, w.fc1, precision=self.precision))
+            return _linear(h, w.fc2, precision=self.precision)
+        gate = _linear(x, w.gate_proj, precision=self.precision)
+        up = _linear(x, w.up_proj, precision=self.precision)
+        return _linear(act(gate) * up, w.down_proj, precision=self.precision)
 
 
 @dataclasses.dataclass(frozen=True)

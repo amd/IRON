@@ -15,7 +15,7 @@ from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Scratchpad
+from iron import Precision, Scratchpad
 from iron.lm import MLP, Attention, DecoderLayer, Encoder, Norm, Tower, rope_angles
 from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -40,7 +40,7 @@ class Shape:
 
 @dataclasses.dataclass(frozen=True)
 class Windowed(Shape):
-    """A Llama-shaped layer each, accurate, the first unscaled within 64
+    """A Llama-shaped layer each, at HIGHEST precision, the first unscaled within 64
     positions."""
 
     def layer(self, i: int) -> DecoderLayer:
@@ -51,9 +51,9 @@ class Windowed(Shape):
             HEAD_DIM,
             scale=1.0 if first else None,
             window=64 if first else None,
-            accurate=True,
+            precision=Precision.HIGHEST,
         )
-        return DecoderLayer(attention, MLP(accurate=True), Norm(1e-6))
+        return DecoderLayer(attention, MLP(precision=Precision.HIGHEST), Norm(1e-6))
 
 
 class Layers(Encoder):
