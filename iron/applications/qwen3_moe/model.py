@@ -61,16 +61,20 @@ class SparseMoE(iron.Graph):
 
     def load(self, tree, path: str = "") -> None:
         super().load(tree, path)
-        self.stacked = [
-            np.stack([getattr(e, name).weight for e in self.experts])
-            for name in ("gate_proj", "up_proj", "down_proj")
-        ]
+        # As transformers stacks them: each expert's gate over its up.
+        self.gate_up = np.stack(
+            [
+                np.concatenate([e.gate_proj.weight, e.up_proj.weight])
+                for e in self.experts
+            ]
+        )
+        self.down = np.stack([e.down_proj.weight for e in self.experts])
 
     def body(self, x):
         n, experts = x.shape[0], self.gate.weight.shape[0]
         logits = F.linear(x, self.gate.weight).reshape(n, experts)
         ids, weights = TopKRouter.step(logits, top_k=self.top_k)
-        return Experts.step(x, ids, weights, *self.stacked)
+        return Experts.step(x, ids, weights, self.gate_up, self.down)
 
 
 class Qwen3MoeLayer(Qwen3Layer):

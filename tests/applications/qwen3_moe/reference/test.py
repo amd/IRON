@@ -5,15 +5,13 @@
 """Qwen3-MoE's graph against Hugging Face's Qwen3MoE in float32 over the
 same random weights at a toy shape, its logits recorded in ``goldens/``,
 device-free: the shared decoder's tests (``Decoder``). The checkpoint names
-each expert's projections; transformers holds them stacked, so the golden
-is recorded from the same weights stacked.
+each expert's projections, which transformers stacks as it loads them
+(``HuggingFace.converted``).
 """
 
-import numpy as np
 import pytest
 
 from iron.applications.qwen3_moe.model import Qwen3Moe, Qwen3MoeConfig
-from iron.lm.checkpoint import _nest, leaves
 from iron.lm.golden import HuggingFace
 from iron.tests.common.llama_model import shapes
 from iron.tests.common.llama_reference import Decoder
@@ -37,31 +35,11 @@ TOY = Qwen3MoeConfig(
 )
 
 
-def stacked(weights):
-    """``weights``, each layer's experts as transformers stacks them."""
-    out = {}
-    for name, value in leaves(weights):
-        head, sep, rest = name.partition(".mlp.experts.")
-        if not sep:
-            out[name] = value
-            continue
-        j, proj, _ = rest.split(".")
-        out.setdefault(f"{head}{sep}{proj}", {})[int(j)] = value
-    for name in [n for n in out if n.endswith(("gate_proj", "up_proj", "down_proj"))]:
-        experts = out.pop(name)
-        out[name] = np.stack([experts[j] for j in sorted(experts)])
-    for prefix in {n.rsplit(".", 1)[0] for n in out if n.endswith(".gate_proj")}:
-        gate, up = out.pop(f"{prefix}.gate_proj"), out.pop(f"{prefix}.up_proj")
-        out[f"{prefix}.gate_up_proj"] = np.concatenate([gate, up], axis=1)
-    return _nest(out)
-
-
 @pytest.fixture(scope="module")
 def golden(golden):
     def recorded(name, reference, config, weights):
         def build():
-            json = TestQwen3Moe.json
-            return HuggingFace.build("qwen3_moe", config, stacked(weights), **json)
+            return HuggingFace.converted("qwen3_moe", config, weights)
 
         return golden(name, build, config, weights)
 

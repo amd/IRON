@@ -163,6 +163,38 @@ class HuggingFace:
             )
         return cls(model)
 
+    @classmethod
+    def converted(cls, model_type: str, config, weights, **json) -> "HuggingFace":
+        """``build``'s model over ``weights`` named as the model's own
+        checkpoints name them, which transformers renames (and stacks) as it
+        loads them: written to a checkpoint and loaded.
+
+        Raises:
+            ValueError: As ``build``.
+        """
+        import tempfile
+
+        import torch
+        import transformers
+        from safetensors.torch import save_file
+
+        hf = transformers.AutoConfig.for_model(model_type, **(config.to_json() | json))
+        auto = getattr(transformers, cls.model_class)
+        with tempfile.TemporaryDirectory() as directory:
+            hf.save_pretrained(directory)
+            state = {k: torch.from_numpy(v) for k, v in flat(weights)}
+            save_file(state, f"{directory}/model.safetensors")
+            model, info = auto.from_pretrained(
+                directory, dtype=torch.float32, output_loading_info=True
+            )
+        missing, unexpected = info["missing_keys"], info["unexpected_keys"]
+        if missing or unexpected:
+            raise ValueError(
+                f"{model_type}: the weights lack {sorted(missing)} and hold "
+                f"{sorted(unexpected)}, which the model does not"
+            )
+        return cls(model)
+
     def logits(self, tokens) -> np.ndarray:
         """The logits after the last of ``tokens``, float32."""
         import torch
