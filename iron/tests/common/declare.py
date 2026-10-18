@@ -202,19 +202,19 @@ def test_a_marker_inside_a_union_is_rejected():
 
 
 @pytest.mark.parametrize(
-    "options",
+    "default, options",
     [
-        {},
-        {"init": False, "default": 1},
-        {"init": False, "array": True},
-        {"init": False, "probe": 0},
+        ((), {}),
+        ((1,), {"init": False}),
+        ((), {"init": False, "array": True}),
+        ((), {"init": False, "probe": 0}),
     ],
 )
-def test_a_dispatch_value_takes_no_field_option(options):
+def test_a_dispatch_value_takes_no_field_option(default, options):
     with pytest.raises(TypeError, match="Bad.n: declare a DispatchTime value"):
 
         class Bad(Operator):
-            n: DispatchTime[np.int32] = field(**options)
+            n: DispatchTime[np.int32] = field(*default, **options)
 
 
 def test_expression_in_a_shape_is_rejected():
