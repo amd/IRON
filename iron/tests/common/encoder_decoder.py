@@ -20,7 +20,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron.applications.whisper.model import sanitize
+from iron.applications.whisper.model import RENAMES
 from iron.lm import (
     MLP,
     Attention,
@@ -88,8 +88,7 @@ class Whisper(EncoderDecoder):
             rows = Copy.step(table[step.position]).reshape(1, E)
         return ElementwiseAdd.step(x, rows)
 
-    def sanitize(self, w):
-        return sanitize(w)
+    renames = RENAMES
 
     def head(self, x):
         n = self.decoder.layer_norm

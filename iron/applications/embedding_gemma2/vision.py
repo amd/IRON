@@ -179,10 +179,15 @@ class VisionTower(Tower):
             length=wk,
         )
 
+    renames = {
+        f"{module}.{p}_proj.linear": f"{module}.{p}_proj"
+        for module, ps in (("self_attn", "qkvo"), ("mlp", ("gate", "up", "down")))
+        for p in ps
+    }
+
     def sanitize(self, w):
-        """``w`` with each projection read through its ``linear`` wrapper,
-        and each head's channels of q and k reordered: RoPE turns halves,
-        not each half of a head.
+        """``w`` with each head's channels of q and k reordered: RoPE turns
+        halves, not each half of a head.
         """
         c = self.config
         half, E = c.head_dim // 2, c.hidden_size
@@ -193,21 +198,16 @@ class VisionTower(Tower):
         )
         heads = (c.num_attention_heads, c.head_dim, E)
 
-        def unwrapped(m):
-            return SimpleNamespace(
-                **{k: vars(v).get("linear", v) for k, v in vars(m).items()}
-            )
-
         def reordered(p):
             return SimpleNamespace(
                 weight=p.weight.reshape(heads)[:, order].reshape(E, E)
             )
 
-        a = unwrapped(w.self_attn)
+        a = w.self_attn
         a.q_proj, a.k_proj = reordered(a.q_proj), reordered(a.k_proj)
         a.q_norm = SimpleNamespace(weight=a.q_norm.weight[order])
         a.k_norm = SimpleNamespace(weight=a.k_norm.weight[order])
-        return SimpleNamespace(**{**vars(w), "self_attn": a, "mlp": unwrapped(w.mlp)})
+        return w
 
     def pool(self, x, n):
         return GEMM.step(self.pooling[:, :n], x, **ACCURATE)

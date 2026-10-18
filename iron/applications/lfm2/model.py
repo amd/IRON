@@ -11,8 +11,8 @@ iron.applications.lfm2.model``.
 Sixteen layers, only six of them full attention (``full_attn_idxs``),
 each a ``DecoderLayer`` with per-head q/k norms (Qwen3's shape); the rest
 are a gated short causal depthwise convolution (``conv_L_cache=3`` taps)
-in place of attention, then the same feed-forward block. ``sanitize``
-renames LFM2's modules to the names the parts read once at load; a conv
+in place of attention, then the same feed-forward block. ``renames``
+moves LFM2's modules to the names the parts read once at load; a conv
 layer holds no ``self_attn``, so ``layer()`` takes the whole
 ``DecoderLayer`` where the checkpoint holds one.
 
@@ -29,7 +29,6 @@ The operators' tunables are the graph's profile, ``profiles/<device>.json``.
 import dataclasses
 from functools import partial
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 
@@ -107,29 +106,24 @@ class Lfm2(CausalLM):
         self.conv_window = iron.state((2, C, E))
         self.conv_tail = iron.state((K - 1, E))
 
+    renames = {
+        "operator_norm": "input_layernorm",
+        "ffn_norm": "post_attention_layernorm",
+        "feed_forward.w1": "mlp.gate_proj",
+        "feed_forward.w3": "mlp.up_proj",
+        "feed_forward.w2": "mlp.down_proj",
+        "self_attn.out_proj": "self_attn.o_proj",
+        "self_attn.q_layernorm": "self_attn.q_norm",
+        "self_attn.k_layernorm": "self_attn.k_norm",
+    }
+
     def sanitize(self, w):
-        f = w.feed_forward
-        out = SimpleNamespace(
-            input_layernorm=w.operator_norm,
-            post_attention_layernorm=w.ffn_norm,
-            mlp=SimpleNamespace(gate_proj=f.w1, up_proj=f.w3, down_proj=f.w2),
-        )
         if "conv" in vars(w):
             # A row per tap, each the row RowwiseMul takes.
-            c, conv = self.config, w.conv
-            taps = conv.conv.weight.reshape(c.hidden_size, c.conv_kernel).T
-            out.conv = SimpleNamespace(**vars(conv), taps=np.ascontiguousarray(taps))
-        else:
-            a = w.self_attn
-            out.self_attn = SimpleNamespace(
-                q_proj=a.q_proj,
-                k_proj=a.k_proj,
-                v_proj=a.v_proj,
-                o_proj=a.out_proj,
-                q_norm=a.q_layernorm,
-                k_norm=a.k_layernorm,
-            )
-        return out
+            c = self.config
+            taps = w.conv.conv.weight.reshape(c.hidden_size, c.conv_kernel).T
+            w.conv.taps = np.ascontiguousarray(taps)
+        return w
 
     def layer(self, step, i, w, x):
         """Layer ``i``: an attention layer is ``DecoderLayer``'s; a conv

@@ -27,7 +27,7 @@ OpenAI's Whisper (large-v3-turbo's shape: a 32-layer audio encoder, a
   a file (`iron.lm.Golden`).
 - `WhisperConfig`: both shapes, read from the checkpoint's own
   `config.json`, and each layer's parts.
-- `sanitize()`: renames Whisper's modules (`self_attn_layer_norm`/
+- `RENAMES`: renames Whisper's modules (`self_attn_layer_norm`/
   `final_layer_norm`, `out_proj`) at load to the names the shared parts
   read.
 - `bf16()`: the checkpoint ships float16; the graphs hold each weight

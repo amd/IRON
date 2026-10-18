@@ -13,7 +13,7 @@ attention. Every layer still ends in the same SwiGLU feed-forward. `Lfm2`
 in `model.py` is the NPU graph over the shared decoder (`iron.lm`), judged
 against transformers as Llama is (see `iron/applications/llama/README.md`).
 
-At load, `Lfm2.sanitize` renames LFM2's modules (`operator_norm`/
+At load, `Lfm2.renames` renames LFM2's modules (`operator_norm`/
 `ffn_norm`, `q_layernorm`/`k_layernorm`, `out_proj`,
 `feed_forward.w1`/`w3`/`w2`) to the names the shared parts read. A layer
 whose checkpoint holds `self_attn` is a `DecoderLayer`; a conv layer is its

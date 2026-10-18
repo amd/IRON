@@ -7,7 +7,7 @@
 an ``iron.lm.Tower``) feeding a causal text decoder through cross attention
 (``Whisper``, an ``iron.lm.EncoderDecoder``), judged by Hugging Face's own
 model in float32 (``Reference``). Both are ``iron.lm``'s layer parts over
-Whisper's modules renamed once at load (``sanitize``); nothing rotates:
+Whisper's modules renamed once at load (``RENAMES``); nothing rotates:
 the encoder adds a fixed position table after its two convolutions, the
 decoder a learned one after its embedding. The shape is read from the
 checkpoint's ``config.json``.
@@ -17,7 +17,6 @@ a zero row before them, as its convolutions' padding.
 """
 
 import dataclasses
-from types import SimpleNamespace
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -59,24 +58,15 @@ def bf16(weights):
     )
 
 
-def sanitize(w):
-    """A Whisper layer module under the names ``iron.lm``'s parts read."""
-
-    def attention(a):
-        return SimpleNamespace(
-            q_proj=a.q_proj, k_proj=a.k_proj, v_proj=a.v_proj, o_proj=a.out_proj
-        )
-
-    out = SimpleNamespace(
-        input_layernorm=w.self_attn_layer_norm,
-        self_attn=attention(w.self_attn),
-        post_attention_layernorm=w.final_layer_norm,
-        mlp=SimpleNamespace(fc1=w.fc1, fc2=w.fc2),
-    )
-    if "encoder_attn" in vars(w):
-        out.encoder_attn = attention(w.encoder_attn)
-        out.encoder_attn_layer_norm = w.encoder_attn_layer_norm
-    return out
+#: A Whisper layer's paths under the names ``iron.lm``'s parts read.
+RENAMES = {
+    "self_attn_layer_norm": "input_layernorm",
+    "self_attn.out_proj": "self_attn.o_proj",
+    "encoder_attn.out_proj": "encoder_attn.o_proj",
+    "final_layer_norm": "post_attention_layernorm",
+    "fc1": "mlp.fc1",
+    "fc2": "mlp.fc2",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -228,8 +218,7 @@ class WhisperEncoder(Tower):
         table = iron.weight(self.embed_positions)
         return ElementwiseAdd.step(h, table[:rows]), None
 
-    def sanitize(self, w):
-        return sanitize(w)
+    renames = RENAMES
 
     def head(self, x):
         return x
@@ -289,8 +278,7 @@ class Whisper(EncoderDecoder):
             rows = Copy.step(table[step.position]).reshape(1, c.hidden_size)
         return ElementwiseAdd.step(x, rows)
 
-    def sanitize(self, w):
-        return sanitize(w)
+    renames = RENAMES
 
 
 class Reference:

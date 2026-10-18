@@ -36,7 +36,7 @@ What is SmolVLM's own is in `iron/applications/idefics3/`:
 - `vision/model.py`: the vision tower and connector, an `iron.lm.Tower`
   (`VisionTower`), a 12-layer ViT of `DecoderLayer`s (biased attention, a
   GELU-tanh `fc1`/`fc2`; nothing rotates) whose SigLIP names
-  (`layer_norm1`/`layer_norm2`, `out_proj`) `VisionTower.sanitize` renames
+  (`layer_norm1`/`layer_norm2`, `out_proj`) `VisionTower.renames` renames
   at load. It has a learned absolute position embedding, then the
   connector's pixel-shuffle (`pool`, one `Copy`) and its bias-free
   projection into the text model's space (`head`). Its LayerNorms run at

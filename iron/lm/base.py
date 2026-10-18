@@ -23,7 +23,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import aie.utils as aie_utils
 import numpy as np
@@ -539,6 +539,22 @@ def _tree(node) -> Any:
     return SimpleNamespace(**items)
 
 
+def renamed(tree, renames: Mapping[str, str]):
+    """``tree`` with each leaf under a dotted path among ``renames``' keys
+    moved to the path its value names, the rest where they are.
+    """
+    if not renames:
+        return tree
+
+    def moved(path):
+        for old, new in renames.items():
+            if path == old or path.startswith(old + "."):
+                return new + path[len(old) :]
+        return path
+
+    return _nest({moved(path): value for path, value in leaves(tree)})
+
+
 class Model(iron.Graph):
     """A model's graph, every version ``shapes()`` names compiled and
     loaded by ``load()`` before the first call, so the arena is made once:
@@ -548,10 +564,14 @@ class Model(iron.Graph):
     order, is every version ``load()`` compiled.
     """
 
+    # Each checkpoint layer's dotted paths that its config's ``layer``
+    # reads under another name, by that name.
+    renames: ClassVar[dict[str, str]] = {}
+
     def sanitize(self, w):
-        """The checkpoint's layer module ``w`` under the names its config's
-        ``layer`` reads (mlx-lm's ``sanitize``); ``w`` itself where they are
-        its own.
+        """The checkpoint's layer module ``w``, after ``renames``, as its
+        config's ``layer`` reads it (mlx-lm's ``sanitize``); ``w`` itself by
+        default.
         """
         return w
 

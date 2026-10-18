@@ -20,7 +20,7 @@ import numpy as np
 from iron import Scratchpad
 from iron.operators.mha import MHA
 
-from .base import Model
+from .base import Model, renamed
 
 
 @dataclasses.dataclass
@@ -53,7 +53,7 @@ class Encoder(Model):
 
     def __init__(self, config, layers: list, max_tokens: int):
         self.config = config
-        self.layers = [self.sanitize(w) for w in layers]
+        self.layers = [self.sanitize(renamed(w, self.renames)) for w in layers]
         self.max_tokens = max_tokens
         # The rows a call gives, the first ``soft(values)`` of them valid.
         self.soft_rows = max_tokens

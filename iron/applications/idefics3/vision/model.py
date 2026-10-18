@@ -17,7 +17,6 @@ are for a whole square grid. Nothing rotates (``angles`` None).
 
 import dataclasses
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -119,16 +118,11 @@ class VisionTower(Tower):
         h = RowwiseAdd.step(h, e.patch_embedding.bias)
         return ElementwiseAdd.step(h, e.position_embedding.weight), None
 
-    def sanitize(self, w):
-        a = w.self_attn
-        return SimpleNamespace(
-            input_layernorm=w.layer_norm1,
-            self_attn=SimpleNamespace(
-                q_proj=a.q_proj, k_proj=a.k_proj, v_proj=a.v_proj, o_proj=a.out_proj
-            ),
-            post_attention_layernorm=w.layer_norm2,
-            mlp=w.mlp,
-        )
+    renames = {
+        "layer_norm1": "input_layernorm",
+        "self_attn.out_proj": "self_attn.o_proj",
+        "layer_norm2": "post_attention_layernorm",
+    }
 
     def pool(self, x, n):
         c = self.config

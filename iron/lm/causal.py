@@ -35,7 +35,7 @@ from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
-from .base import DecoderConfig, Model
+from .base import DecoderConfig, Model, renamed
 from .generation import Sampler
 
 logger = logging.getLogger(__name__)
@@ -150,7 +150,9 @@ class CausalLM(Model):
         self.config = config
         self.weights = weights
         self.decoder = weights.model if decoder is None else decoder
-        self.layers = [self.sanitize(w) for w in self.decoder.layers]
+        self.layers = [
+            self.sanitize(renamed(w, self.renames)) for w in self.decoder.layers
+        ]
         self.final_norm = getattr(self.decoder, "norm", None)
         if len(self.layers) != config.num_hidden_layers:
             raise ValueError(
