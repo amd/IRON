@@ -48,6 +48,16 @@ _STATE = 64
 _STREAMED_ROWS = 48
 
 
+def _kernel(op, n: int):
+    """The softmax factory over rows of ``n``, with ``op``'s (a Softmax's or
+    its Array's) float32 options: banded, or with a pre-cap addend.
+    """
+    options = dict(input_dtype=op.input_dtype, soft_cap=op.soft_cap)
+    if op.window is not None:
+        return activation.softmax(n, window=op.window, period=op.period, **options)
+    return activation.softmax(n, addend=op.has_addend, **options)
+
+
 def _draw(op) -> dict:
     """``vectors()``'s keywords: the float32 path's logits and addend
     centred. The bf16 path draws its default, ``[0, 1)``.
@@ -282,7 +292,7 @@ class Softmax(Operator):
                     return self._build_f32_banded(n_cores, rows_per_core, block)
                 return self._build_f32(n_cores, rows_per_core, block)
             tile_ty = self.x.obj_type
-            softmax_k = activation.softmax(block)
+            softmax_k = _kernel(self, block)
             # The blocked passes and mask_bf16 are exported by the same softmax.cc.
             obj = softmax_k.object_file
             mask_k = obj.bind("mask_bf16", [tile_ty, np.int32, np.int32])
@@ -385,12 +395,7 @@ class Softmax(Operator):
             """The float32 input path: a row held whole, one call to
             ``softmax_f32_bf16`` a row, its ``n`` bound to ``block`` at build time.
             """
-            softmax_k = activation.softmax(
-                block,
-                input_dtype=self.input_dtype,
-                soft_cap=self.soft_cap,
-                addend=self.has_addend,
-            )
+            softmax_k = _kernel(self, block)
             of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
             of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
             of_addends = (
@@ -437,13 +442,7 @@ class Softmax(Operator):
             position (the core's ``row_offset`` plus the loop index) computed
             in the kernel, so there is no mask operand.
             """
-            banded_k = activation.softmax(
-                block,
-                input_dtype=self.input_dtype,
-                soft_cap=self.soft_cap,
-                window=self.window,
-                period=self.period,
-            )
+            banded_k = _kernel(self, block)
             of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
             of_addends = [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
             of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
@@ -535,14 +534,8 @@ class Softmax(Operator):
         tg.finish()
 
     def tolerance(self) -> Tolerance | None:
+        base = _kernel(self, self.cols).contract.tolerance
         if self.window is not None:
-            base = activation.softmax(
-                self.cols,
-                input_dtype=self.input_dtype,
-                soft_cap=self.soft_cap,
-                window=self.window,
-                period=self.period,
-            ).contract.tolerance
             # judge() calls bound() with this operator's own operands (x,
             # addend): row_offset is not one, so every row's own query
             # position (its index) is closed over instead of taken
@@ -553,12 +546,7 @@ class Softmax(Operator):
                 max_mismatch_frac=base.max_mismatch_frac,
                 note=base.note,
             )
-        return activation.softmax(
-            self.cols,
-            input_dtype=self.input_dtype,
-            soft_cap=self.soft_cap,
-            addend=self.has_addend,
-        ).contract.tolerance
+        return base
 
     def reference(self, x, *rest):
         """The softmax kernel's contract reference, a row at a time.
@@ -574,13 +562,7 @@ class Softmax(Operator):
         x = x[..., :n]
         addend = None if addend is None else addend[..., :n]
         if self.window is not None:
-            y = activation.softmax(
-                n,
-                input_dtype=self.input_dtype,
-                soft_cap=self.soft_cap,
-                window=self.window,
-                period=self.period,
-            ).contract.reference(x, addend, np.arange(self.rows))
+            y = _kernel(self, n).contract.reference(x, addend, np.arange(self.rows))
         else:
             y = activation.softmax_ref(
                 x, addend, None, tile_size=n, soft_cap=self.soft_cap
