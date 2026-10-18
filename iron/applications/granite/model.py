@@ -11,7 +11,7 @@ iron.applications.granite.model``.
 Granite is Llama's layer with four scalars of its own config's: the
 attention logits scale by ``attention_multiplier`` rather than ``1 /
 sqrt(head_dim)``, each block's output joins its residual times
-``residual_multiplier`` (both ``Layer``'s), the embedding rows are scaled
+``residual_multiplier`` (``GraniteConfig.attention`` and ``layer``), the embedding rows are scaled
 by ``embedding_multiplier`` and the logits divided by ``logits_scaling``.
 Its output head is untied (``lm_head``). Its checkpoint is sharded;
 ``Checkpoint`` reads the index.
@@ -29,7 +29,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig, Derived, Layer
+from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer, Derived
 from iron.operators.elementwise_mul import RowwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
@@ -52,12 +52,13 @@ class GraniteConfig(DecoderConfig):
         default=1.0, kw_only=True, metadata={"json": "logits_scaling"}
     )
 
-    def layer(self, i: int) -> Layer:
+    def attention(self, i: int) -> Attention:
         return dataclasses.replace(
-            super().layer(i),
-            scale=self.attention_multiplier,
-            residual=self.residual_multiplier,
+            super().attention(i), scale=self.attention_multiplier
         )
+
+    def layer(self, i: int) -> DecoderLayer:
+        return dataclasses.replace(super().layer(i), residual=self.residual_multiplier)
 
 
 class Granite(CausalLM):

@@ -9,11 +9,12 @@ checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.lfm2.model``.
 
 Sixteen layers, only six of them full attention (``full_attn_idxs``),
-each ``Layer``'s on LFM2's own names (per-head q/k norms, Qwen3's shape);
-the rest are a gated short causal depthwise convolution
-(``conv_L_cache=3`` taps) in place of attention, then ``Layer``'s
-feed-forward block. A conv layer holds no ``self_attn``, so ``layer()``
-takes ``Layer``'s whole layer where the checkpoint holds one.
+each a ``DecoderLayer`` with per-head q/k norms (Qwen3's shape); the rest
+are a gated short causal depthwise convolution (``conv_L_cache=3`` taps)
+in place of attention, then the same feed-forward block. ``sanitize``
+renames LFM2's modules to the names the parts read once at load; a conv
+layer holds no ``self_attn``, so ``layer()`` takes the whole
+``DecoderLayer`` where the checkpoint holds one.
 
 A conv layer's three per-channel taps, a row each (``iron.lm.Derived``,
 once at load), read a window that spans the current call and the
@@ -27,13 +28,14 @@ The operators' tunables are the graph's profile, ``profiles/<device>.json``.
 
 import dataclasses
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 import iron
 import iron.functional as F
 from iron import lm
-from iron.lm import CausalLM, Checkpoints, DecoderConfig, Derived, Layer
+from iron.lm import Attention, CausalLM, Checkpoints, DecoderConfig, Derived
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
@@ -82,6 +84,9 @@ class Lfm2Config(DecoderConfig):
             F = self.multiple_of * -(-F // self.multiple_of)
         object.__setattr__(self, "intermediate_size", F)
 
+    def attention(self, i: int) -> Attention:
+        return dataclasses.replace(super().attention(i), qk_norm=True)
+
 
 class Lfm2(CausalLM):
     """LFM2-1.2B on ``config``'s shape and a checkpoint's ``weights``, by
@@ -109,15 +114,37 @@ class Lfm2(CausalLM):
         self.conv_window = iron.state((2, C, E))
         self.conv_tail = iron.state((K - 1, E))
 
+    def sanitize(self, w):
+        f = w.feed_forward
+        out = SimpleNamespace(
+            input_layernorm=w.operator_norm,
+            post_attention_layernorm=w.ffn_norm,
+            mlp=SimpleNamespace(gate_proj=f.w1, up_proj=f.w3, down_proj=f.w2),
+        )
+        if "conv" in vars(w):
+            out.conv = w.conv
+        else:
+            a = w.self_attn
+            out.self_attn = SimpleNamespace(
+                q_proj=a.q_proj,
+                k_proj=a.k_proj,
+                v_proj=a.v_proj,
+                o_proj=a.out_proj,
+                q_norm=a.q_layernorm,
+                k_norm=a.k_layernorm,
+            )
+        return out
+
     def layer(self, step, i, w, x):
-        """Layer ``i``: an attention layer is ``Layer``'s; a conv layer its
-        short conv in attention's place, then ``Layer``'s feed-forward.
+        """Layer ``i``: an attention layer is ``DecoderLayer``'s; a conv
+        layer its short conv in attention's place, then the feed-forward.
         """
         if "self_attn" in vars(w):
             return super().layer(step, i, w, x)
         layer = self.config.layer(i)
-        x = layer.add(x, self.conv(step, i, w.conv, layer.norm(x, w.operator_norm)))
-        return layer.feed_forward(w, x)
+        h = self.conv(step, i, w.conv, layer.norm(x, w.input_layernorm))
+        x = layer.add(x, h)
+        return layer.add(x, layer.mlp(w.mlp, layer.norm(x, w.post_attention_layernorm)))
 
     def conv(self, step, i, w, h):
         """The gated short conv in place of attention: a depth-wise causal
@@ -130,8 +157,8 @@ class Lfm2(CausalLM):
         # column range of a combined projection is a strided view no single
         # descriptor fits, where three plain projections need none.
         b, cc, x = (
-            F.linear(h, *part).reshape(n, E)
-            for part in Layer.cut(w.in_proj, (0, E, 2 * E, 3 * E))
+            F.linear(h, w.in_proj.weight[k * E : (k + 1) * E]).reshape(n, E)
+            for k in range(3)
         )
         gated = ElementwiseMul.step(b, x)
         tap = self.derived.model.layers[i].conv.conv.taps

@@ -58,8 +58,10 @@ class EncoderDecoder(CausalLM):
                 f"{config.prefill_chunk}-row prompt chunk's queries"
             )
         shapes = [
-            (rows, config.layer(i).groups, config.layer(i).head_dim)
-            for i in range(config.num_hidden_layers)
+            (rows, a.groups, a.head_dim)
+            for a in (
+                config.layer(i).attention for i in range(config.num_hidden_layers)
+            )
         ]
         self.cross_keys = [iron.state(shape) for shape in shapes]
         self.cross_values = [iron.state(shape) for shape in shapes]
@@ -94,7 +96,7 @@ class EncoderDecoder(CausalLM):
             own = {v: values[f"encoder_{v}"] for v in self.encoder_values}
             memory = self.encoder.inline(self.encoder.body, encoded, **own)
             for i, w in enumerate(self.layers):
-                k, v = self.config.layer(i).cross_kv(w, memory)
+                k, v = self.config.layer(i).keys_values(w, memory)
                 Copy.step(k, self.cross_keys[i][: k.shape[0]])
                 Copy.step(v, self.cross_values[i][: v.shape[0]])
             return iron.carry(**{n: values[n] for n in self._carried})
@@ -121,7 +123,7 @@ class EncoderDecoder(CausalLM):
         """
         attend = partial(self.attend, step, i)
         cross = partial(self.cross, step, i)
-        return self.config.layer(i).step(weights, x, attend, step.angles, cross=cross)
+        return self.config.layer(i)(weights, x, attend, step.angles, cross)
 
     def cross(self, step: DecodeStep, i: int, q, *, scale: float | None = None):
         """``q`` ``(rows, heads, head_dim)`` over the first ``step.source``

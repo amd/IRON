@@ -5,9 +5,9 @@
 
 """SmolVLM's vision tower: a SigLIP ViT (``Idefics3VisionTransformer``) and
 its ``Idefics3Connector`` (pixel-shuffle, then a bias-free projection into
-the text model's space), an ``iron.lm.Tower`` on ``Layer``'s SigLIP names
-(``layer_norm1``/``layer_norm2``, biased attention, a GELU-tanh ``fc1``/
-``fc2``).
+the text model's space), an ``iron.lm.Tower`` of ``DecoderLayer``s over
+SigLIP's modules (``layer_norm1``/``layer_norm2``, biased attention, a
+GELU-tanh ``fc1``/``fc2``).
 
 One 512x512 image, no splitting (``do_image_splitting=False``), resized and
 normalized on the host. The patch grid is then whole (32x32), so a patch's
@@ -17,13 +17,15 @@ are for a whole square grid. Nothing rotates (``angles`` None).
 
 import dataclasses
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
-from iron.lm import Config, Conv2d, Layer, Tower
+import iron.functional as F
 from iron.functional import ACCURATE, LAYER_NORM_EPS
+from iron.lm import MLP, Attention, Config, Conv2d, DecoderLayer, Norm, Tower
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 from iron.operators.gemm import GEMM
@@ -76,11 +78,15 @@ class VisionConfig(Config):
         """The soft tokens an image gives."""
         return (self.side // self.scale_factor) ** 2
 
-    def layer(self, i: int) -> Layer:
+    def layer(self, i: int) -> DecoderLayer:
         # TODO(pin group): LayerNorm at the checkpoint's eps (layer_norm_eps)
         # once the pin carries the kernel option; transformers' uses it now.
         H, D = self.num_attention_heads, self.head_dim
-        return Layer(H, H, D, LAYER_NORM_EPS, self.hidden_act)
+        return DecoderLayer(
+            Attention(H, H, D),
+            MLP(self.hidden_act, gated=False),
+            Norm(LAYER_NORM_EPS, bias=True),
+        )
 
 
 class VisionTower(Tower):
@@ -112,8 +118,20 @@ class VisionTower(Tower):
         h = RowwiseAdd.step(h, e.patch_embedding.bias)
         return ElementwiseAdd.step(h, e.position_embedding.weight), None
 
+    def sanitize(self, w):
+        a = w.self_attn
+        return SimpleNamespace(
+            input_layernorm=w.layer_norm1,
+            self_attn=SimpleNamespace(
+                q_proj=a.q_proj, k_proj=a.k_proj, v_proj=a.v_proj, o_proj=a.out_proj
+            ),
+            post_attention_layernorm=w.layer_norm2,
+            mlp=w.mlp,
+        )
+
     def norm(self, x):
-        return self.config.layer(0).norm(x, self.vision_model.post_layernorm)
+        n = self.vision_model.post_layernorm
+        return F.layer_norm(x, n.weight, n.bias, LAYER_NORM_EPS)
 
     def pool(self, x, n):
         c = self.config

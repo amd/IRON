@@ -203,6 +203,18 @@ class VisionTower(Tower):
             length=wk,
         )
 
+    def sanitize(self, w):
+        """``w`` with each projection read through its ``linear`` wrapper."""
+
+        def unwrapped(m):
+            return SimpleNamespace(
+                **{k: vars(v).get("linear", v) for k, v in vars(m).items()}
+            )
+
+        return SimpleNamespace(
+            **{**vars(w), "self_attn": unwrapped(w.self_attn), "mlp": unwrapped(w.mlp)}
+        )
+
     def layer(self, step, i, w, x):
         a = self.derived.vision_tower.encoder.layers[i].self_attn
         # q and k reordered, until RoPE turns each half of a head itself.
@@ -215,7 +227,7 @@ class VisionTower(Tower):
         self_attn = SimpleNamespace(**{**vars(w.self_attn), **reordered})
         w = SimpleNamespace(**{**vars(w), "self_attn": self_attn})
         attend = partial(self.attend, step, i)
-        return self.config.layer(i).step(w, x, attend, step.angles)
+        return self.config.layer(i)(w, x, attend, step.angles)
 
     def pool(self, x, n):
         return GEMM.step(self.pooling[:, :n], x, **ACCURATE)

@@ -23,6 +23,7 @@ import struct
 import zipfile
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -37,7 +38,7 @@ from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
 from iron.tune.probe import Call
 
-from .blocks import Layer
+from .blocks import Attention, DecoderLayer, Layer, MLP, Norm
 from .golden import Golden, HuggingFace
 from .generation import (
     SEED,
@@ -223,22 +224,21 @@ class DecoderConfig(Config):
             angles = angles * np.float32(self.rope_attention_scaling)
         return angles
 
-    def kv_source(self, i: int) -> int:
-        """The layer whose key and value caches layer ``i`` attends over: its
-        own.
-        """
-        return i
-
-    def layer(self, i: int) -> Layer:
-        """Layer ``i``: every layer of a decoder is alike."""
-        return Layer(
-            heads=self.num_attention_heads,
-            groups=self.num_key_value_heads,
-            head_dim=self.head_dim,
-            eps=self.eps,
-            activation=self.hidden_act,
+    def attention(self, i: int) -> Attention:
+        """Layer ``i``'s attention: Llama's."""
+        return Attention(
+            self.num_attention_heads,
+            self.num_key_value_heads,
+            self.head_dim,
+            self.eps,
             rotary=self.rotary_dim,
         )
+
+    def layer(self, i: int) -> DecoderLayer:
+        """Layer ``i``: Llama's, ``attention(i)`` and a gated feed-forward,
+        each after its RMS norm.
+        """
+        return DecoderLayer(self.attention(i), MLP(self.hidden_act), Norm(self.eps))
 
 
 def prompt_text(chars: int, skip: int = 0) -> str:
@@ -616,18 +616,8 @@ class Oracle:
         causally; over an earlier layer's keys and values where it shares them
         (``kv_source``); ``ple`` is its per-layer input.
         """
-        c = self.config
-        source = c.kv_source(i)
-        readers = any(c.kv_source(j) == i != j for j in range(c.num_hidden_layers))
-
-        def attend(q, k, v, **kw):
-            if k is None:
-                k, v = self.shared[source]
-            elif readers:
-                self.shared[i] = (k, v)
-            return self.attend(q, k, v, causal=True, **kw)
-
-        return c.layer(i).oracle(self, w, x, attend, angles, ple=ple)
+        attend = partial(self.attend, causal=True)
+        return self.config.layer(i).oracle(self, w, x, attend, angles, ple=ple)
 
     def head(self, x):
         """The final norm, then the output head (the embedding, if tied)."""
@@ -867,6 +857,13 @@ class Model(iron.Graph):
     Emit starting there. ``versions`` (``Graph``'s own), in ``shapes()``'s
     order, is every version ``load()`` compiled.
     """
+
+    def sanitize(self, w):
+        """The checkpoint's layer module ``w`` under the names its config's
+        ``layer`` reads (mlx-lm's ``sanitize``); ``w`` itself where they are
+        its own.
+        """
+        return w
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version."""

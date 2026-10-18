@@ -8,7 +8,7 @@ from its checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.qwen2.model``.
 
 Qwen 2 is Llama's layer with a bias on each of its q, k and v projections,
-which ``Layer`` reads from the checkpoint. It ties its embedding and output
+which ``Attention`` adds wherever the checkpoint holds one. It ties its embedding and output
 head, as Llama does, and takes no RoPE frequency scaling.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,

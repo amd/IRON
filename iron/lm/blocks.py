@@ -1104,3 +1104,192 @@ class Layer:
         if after is not None:
             f = o.normed(f, after)
         return x + f * np.float32(self.residual)
+
+
+def _linear(x, p, **kw):
+    """``x`` through the linear module ``p``: its ``weight``, and its
+    ``bias`` where it holds one.
+    """
+    return F.linear(x, p.weight, vars(p).get("bias"), **kw)
+
+
+@dataclasses.dataclass(frozen=True)
+class Norm:
+    """A norm module's: an RMS norm by its ``weight``, or with ``bias`` an
+    affine LayerNorm.
+    """
+
+    eps: float
+    bias: bool = False
+
+    def __call__(self, x, w):
+        if self.bias:
+            return F.layer_norm(x, w.weight, w.bias, self.eps)
+        return F.rms_norm(x, w.weight, self.eps)
+
+
+@dataclasses.dataclass(frozen=True)
+class Attention:
+    """Self-attention over an attention module's ``q_proj``, ``k_proj``,
+    ``v_proj`` and ``o_proj``, each with its bias where it holds one. A
+    model kind gives the attention itself: ``attend(q, k, v, scale=,
+    window=)`` on ``(rows, heads, head_dim)`` returns ``(rows, heads *
+    head_dim)``.
+
+    Args:
+        heads: The query heads.
+        groups: The key and value heads.
+        head_dim: A head's width.
+        eps: The q, k and v norms' epsilon.
+        qk_norm: Whether each head of q and k is RMS-normed by the module's
+            ``q_norm`` and ``k_norm``.
+        v_norm: Whether each head of v is RMS-normed, unweighted.
+        scale: The logits' scale; None is ``head_dim ** -0.5``.
+        window: The positions a query reaches either side; None is all.
+        rotary: The leading columns of a head RoPE turns, the rest passed
+            through; None is all.
+        accurate: Whether every projection sums in float32 and rounds once.
+    """
+
+    heads: int
+    groups: int
+    head_dim: int
+    eps: float = 1e-6
+    qk_norm: bool = False
+    v_norm: bool = False
+    scale: float | None = None
+    window: int | None = None
+    rotary: int | None = None
+    accurate: bool = False
+
+    def __call__(self, w, x, attend, angles):
+        """The block on ``x`` ``(rows, width)``; ``angles``, a row per
+        position, turns q and k, or None nothing.
+        """
+        n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
+        # Half a head per tile for one row; q's shape is o's when H * D is
+        # the width, so it is given here rather than by the profile.
+        q, k, v = (
+            _linear(x, p, accurate=self.accurate, tile_size_output=D // 2)
+            for p in (w.q_proj, w.k_proj, w.v_proj)
+        )
+        q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
+        if self.qk_norm:
+            q = F.rms_norm(q, w.q_norm.weight, self.eps)
+            k = F.rms_norm(k, w.k_norm.weight, self.eps)
+        if self.v_norm:
+            v = F.rms_norm(v, eps=self.eps)
+        if angles is not None:
+            q, k = self.rotate(q, angles), self.rotate(k, angles)
+        o = attend(
+            q.reshape(n, H, D),
+            k.reshape(n, G, D),
+            v.reshape(n, G, D),
+            scale=self.scale,
+            window=self.window,
+        )
+        return _linear(o, w.o_proj, accurate=self.accurate)
+
+    def rotate(self, x, angles):
+        """``x`` ``(rows, head_dim)`` turned by RoPE, only its first
+        ``rotary`` columns where given.
+        """
+        if self.rotary is None:
+            return F.rope(x, angles)
+        prefix = x[:, : self.rotary]
+        Copy.step(F.rope(Copy.step(prefix), angles), prefix)
+        return x
+
+    def keys_values(self, w, memory) -> tuple:
+        """The keys and values ``w`` projects from an encoder's output
+        ``memory`` ``(rows, width)``, each ``(rows, groups, head_dim)``.
+        """
+        n, G, D = memory.shape[0], self.groups, self.head_dim
+        return tuple(
+            _linear(memory, p, accurate=self.accurate).reshape(n, G, D)
+            for p in (w.k_proj, w.v_proj)
+        )
+
+    def cross(self, w, x, cross):
+        """The block on ``x`` attending over an encoder's keys and values:
+        ``cross(q, scale=)`` on ``(rows, heads, head_dim)``.
+        """
+        n, H, D = x.shape[0], self.heads, self.head_dim
+        q = _linear(x, w.q_proj, accurate=self.accurate, tile_size_output=D // 2)
+        o = cross(q.reshape(n, H, D), scale=self.scale)
+        return _linear(o, w.o_proj, accurate=self.accurate)
+
+
+@dataclasses.dataclass(frozen=True)
+class MLP:
+    """A feed-forward module's: ``down_proj(act(gate_proj(x)) * up_proj(x))``,
+    or plain, ``fc2(act(fc1(x)))``.
+
+    Args:
+        activation: ``hidden_act``, ``"silu"`` or ``"gelu_pytorch_tanh"``.
+        gated: Whether it is gated.
+        accurate: Whether every projection sums in float32 and rounds once.
+    """
+
+    activation: str = "silu"
+    gated: bool = True
+    accurate: bool = False
+
+    def __post_init__(self):
+        if self.activation not in ("silu", "gelu_pytorch_tanh"):
+            raise ValueError(
+                f"MLP: no operator for hidden_act {self.activation!r}; "
+                "silu and gelu_pytorch_tanh have one"
+            )
+
+    def __call__(self, w, x):
+        act = F.silu if self.activation == "silu" else F.gelu
+        if not self.gated:
+            h = act(_linear(x, w.fc1, accurate=self.accurate))
+            return _linear(h, w.fc2, accurate=self.accurate)
+        gate = _linear(x, w.gate_proj, accurate=self.accurate)
+        up = _linear(x, w.up_proj, accurate=self.accurate)
+        return _linear(act(gate) * up, w.down_proj, accurate=self.accurate)
+
+
+@dataclasses.dataclass(frozen=True)
+class DecoderLayer:
+    """A pre-norm transformer layer module's: ``self_attn`` after
+    ``input_layernorm``, then ``mlp`` after ``post_attention_layernorm``,
+    each block's output added to its residual times ``residual``.
+    """
+
+    attention: Attention
+    mlp: MLP
+    norm: Norm
+    residual: float = 1.0
+
+    def __call__(self, w, x, attend, angles):
+        h = self.attention(w.self_attn, self.norm(x, w.input_layernorm), attend, angles)
+        x = self.add(x, h)
+        return self.add(x, self.mlp(w.mlp, self.norm(x, w.post_attention_layernorm)))
+
+    def add(self, x, y):
+        """``x`` plus ``y`` times ``residual``, in ``x``'s shape."""
+        y = y if y.shape == x.shape else y.reshape(x.shape)
+        if self.residual == 1:
+            return x + y
+        return AXPY.step(y, x, scalar_factor=self.residual)
+
+
+@dataclasses.dataclass(frozen=True)
+class CrossDecoderLayer(DecoderLayer):
+    """``DecoderLayer`` with a third block between its two: ``encoder_attn``
+    after ``encoder_attn_layer_norm``, attending over an encoder's output.
+    """
+
+    def __call__(self, w, x, attend, angles, cross):
+        h = self.attention(w.self_attn, self.norm(x, w.input_layernorm), attend, angles)
+        x = self.add(x, h)
+        h = self.norm(x, w.encoder_attn_layer_norm)
+        x = self.add(x, self.attention.cross(w.encoder_attn, h, cross))
+        return self.add(x, self.mlp(w.mlp, self.norm(x, w.post_attention_layernorm)))
+
+    def keys_values(self, w, memory) -> tuple:
+        """The keys and values ``encoder_attn`` projects from ``memory``."""
+        return self.attention.keys_values(w.encoder_attn, memory)

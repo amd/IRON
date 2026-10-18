@@ -16,7 +16,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.lm import Encoder, Layer, Tower, rope_angles
+from iron.lm import MLP, Attention, DecoderLayer, Encoder, Norm, Tower, rope_angles
 from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.mha import MHA
@@ -43,17 +43,17 @@ class Windowed(Shape):
     """A Llama-shaped layer each, accurate, the first unscaled within 64
     positions."""
 
-    def layer(self, i: int) -> Layer:
+    def layer(self, i: int) -> DecoderLayer:
         first = i == 0
-        return Layer(
-            heads=HEADS,
-            groups=1,
-            head_dim=HEAD_DIM,
-            eps=1e-6,
+        attention = Attention(
+            HEADS,
+            1,
+            HEAD_DIM,
             scale=1.0 if first else None,
             window=64 if first else None,
             accurate=True,
         )
+        return DecoderLayer(attention, MLP(accurate=True), Norm(1e-6))
 
 
 class Layers(Encoder):

@@ -17,6 +17,8 @@ import numpy as np
 
 from iron import lm
 
+from .blocks import SandwichLayer, TextLayer
+
 PROFILES = Path(__file__).with_name("profiles")
 
 
@@ -123,21 +125,26 @@ class Config(lm.Config):
             return self.global_kv_groups, self.global_head_dim, self.global_rope_base
         return self.num_key_value_heads, self.head_dim, self.rope_theta
 
-    def layer(self, i: int) -> lm.Layer:
+    def layer(self, i: int) -> TextLayer:
         """Layer ``i``: unscaled attention over RMS-normed values, a sliding
         layer's within ``sliding_window`` positions.
         """
         G, D, _ = self.heads(i)
-        return lm.Layer(
-            heads=self.num_attention_heads,
-            groups=G,
-            head_dim=D,
-            eps=self.eps,
-            activation=self.hidden_act,
-            scale=1.0,
-            window=None if i in self.global_layers else self.sliding_window,
-            v_norm=True,
-            accurate=True,
+        window = None if i in self.global_layers else self.sliding_window
+        return TextLayer(
+            lm.Attention(
+                self.num_attention_heads,
+                G,
+                D,
+                self.eps,
+                qk_norm=True,
+                v_norm=True,
+                scale=1.0,
+                window=window,
+                accurate=True,
+            ),
+            lm.MLP(self.hidden_act, accurate=True),
+            lm.Norm(self.eps),
         )
 
 
@@ -278,17 +285,22 @@ class VisionConfig(lm.Config):
     chunk: int = 4096
     patch_columns: int = 8
 
-    def layer(self, i: int) -> lm.Layer:
+    def layer(self, i: int) -> SandwichLayer:
         """Layer ``i``: unscaled attention over RMS-normed values."""
-        return lm.Layer(
-            heads=self.num_attention_heads,
-            groups=self.num_attention_heads,
-            head_dim=self.head_dim,
-            eps=self.eps,
-            activation=self.hidden_act,
-            scale=1.0,
-            v_norm=True,
-            accurate=True,
+        H = self.num_attention_heads
+        return SandwichLayer(
+            lm.Attention(
+                H,
+                H,
+                self.head_dim,
+                self.eps,
+                qk_norm=True,
+                v_norm=True,
+                scale=1.0,
+                accurate=True,
+            ),
+            lm.MLP(self.hidden_act, accurate=True),
+            lm.Norm(self.eps),
         )
 
     def size(self, height: int, width: int, max_tokens: int) -> tuple[int, int]:

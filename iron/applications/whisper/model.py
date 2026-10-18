@@ -6,8 +6,8 @@
 """Whisper over ``iron.lm``: a bidirectional audio encoder (``WhisperEncoder``,
 an ``iron.lm.Tower``) feeding a causal text decoder through cross attention
 (``Whisper``, an ``iron.lm.EncoderDecoder``), judged by Hugging Face's own
-model in float32 (``Reference``). Both are ``Layer``s on Whisper's names;
-nothing rotates:
+model in float32 (``Reference``). Both are ``iron.lm``'s layer parts over
+Whisper's modules renamed once at load (``sanitize``); nothing rotates:
 the encoder adds a fixed position table after its two convolutions, the
 decoder a learned one after its embedding. The shape is read from the
 checkpoint's ``config.json``.
@@ -26,13 +26,18 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad, lm
+import iron.functional as F
 from iron.lm import (
+    MLP,
+    Attention,
     Config,
     Conv1d,
+    CrossDecoderLayer,
     DecoderConfig,
+    DecoderLayer,
     Derived,
     EncoderDecoder,
-    Layer,
+    Norm,
     Tower,
 )
 from iron.lm.golden import Golden, _flat, config_json
@@ -57,6 +62,26 @@ def bf16(weights):
     if isinstance(weights, SimpleNamespace):
         return SimpleNamespace(**{k: bf16(w) for k, w in vars(weights).items()})
     return weights
+
+
+def sanitize(w):
+    """A Whisper layer module under the names ``iron.lm``'s parts read."""
+
+    def attention(a):
+        return SimpleNamespace(
+            q_proj=a.q_proj, k_proj=a.k_proj, v_proj=a.v_proj, o_proj=a.out_proj
+        )
+
+    out = SimpleNamespace(
+        input_layernorm=w.self_attn_layer_norm,
+        self_attn=attention(w.self_attn),
+        post_attention_layernorm=w.final_layer_norm,
+        mlp=SimpleNamespace(fc1=w.fc1, fc2=w.fc2),
+    )
+    if "encoder_attn" in vars(w):
+        out.encoder_attn = attention(w.encoder_attn)
+        out.encoder_attn_layer_norm = w.encoder_attn_layer_norm
+    return out
 
 
 @dataclasses.dataclass(frozen=True)
@@ -96,9 +121,13 @@ class WhisperEncoderConfig(Config):
         """
         return -(-self.frames // BLOCK) * BLOCK
 
-    def layer(self, i: int) -> Layer:
+    def layer(self, i: int) -> DecoderLayer:
         H = self.num_attention_heads
-        return Layer(H, H, self.hidden_size // H, self.eps, self.hidden_act)
+        return DecoderLayer(
+            Attention(H, H, self.hidden_size // H),
+            MLP(self.hidden_act, gated=False),
+            Norm(self.eps, bias=True),
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -119,7 +148,7 @@ class WhisperConfig(DecoderConfig):
     rope_theta: float | None = dataclasses.field(default=None, kw_only=True)
     max_seq_len: int = dataclasses.field(metadata={"json": "max_target_positions"})
     prefill_chunk: int = 256
-    # Whisper's own "gelu" is exact, which Layer refuses until the pin group
+    # Whisper's own "gelu" is exact, which MLP refuses until the pin group
     # brings the kernel; a checkpoint at "gelu_pytorch_tanh" runs.
     hidden_act: str = dataclasses.field(
         default="gelu", metadata={"json": "activation_function"}
@@ -139,6 +168,14 @@ class WhisperConfig(DecoderConfig):
         kw_only=True, metadata={"json": "max_source_positions"}
     )
 
+    def layer(self, i: int) -> CrossDecoderLayer:
+        H = self.num_attention_heads
+        return CrossDecoderLayer(
+            Attention(H, H, self.head_dim),
+            MLP(self.hidden_act, gated=False),
+            Norm(self.eps, bias=True),
+        )
+
     def encoder(self) -> WhisperEncoderConfig:
         """The encoder's shape."""
         return WhisperEncoderConfig(
@@ -156,7 +193,7 @@ class WhisperConfig(DecoderConfig):
 class WhisperEncoder(Tower):
     """Whisper's audio encoder over one clip's log-mel features: two
     convolutions, each then a GELU, the second at stride 2, the position
-    table added, then each ``Layer`` and the final LayerNorm. Its rows are
+    table added, then each layer and the final LayerNorm. Its rows are
     ``rows``, bounded per call to ``n``, the clip's positions.
 
     Args:
@@ -194,8 +231,12 @@ class WhisperEncoder(Tower):
         table = self.derived.model.encoder.embed_positions.padded
         return ElementwiseAdd.step(h, iron.weight(table)[:n]), None
 
+    def sanitize(self, w):
+        return sanitize(w)
+
     def norm(self, x):
-        return self.config.layer(0).norm(x, self.whisper_encoder.layer_norm)
+        n = self.whisper_encoder.layer_norm
+        return F.layer_norm(x, n.weight, n.bias, self.config.eps)
 
     def head(self, x):
         return x
@@ -259,8 +300,12 @@ class Whisper(EncoderDecoder):
             rows = Copy.step(table[step.position]).reshape(1, c.hidden_size)
         return ElementwiseAdd.step(x, rows)
 
+    def sanitize(self, w):
+        return sanitize(w)
+
     def head(self, x):
-        h = self.config.layer(0).norm(x, self.decoder.layer_norm)
+        n = self.decoder.layer_norm
+        h = F.layer_norm(x, n.weight, n.bias, self.config.eps)
         return GEMV.step(self.decoder.embed_tokens.weight, h)
 
 

@@ -7,14 +7,13 @@
 from its checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.phi3.model``.
 
-Phi-4-mini is Llama's layer with three differences, each ``Layer``'s or
-``DecoderConfig``'s:
+Phi-4-mini is Llama's layer with three differences:
 
 * **Fused projections.** Its checkpoint holds one ``qkv_proj`` and one
-  ``mlp.gate_up_proj``, which ``Layer`` cuts by rows, each piece a view of
-  the checkpoint's own array.
+  ``mlp.gate_up_proj``, which ``Phi4.sanitize`` cuts by rows at load, each
+  piece a view of the checkpoint's own array.
 * **Partial rotary.** Only the first ``rotary_dim`` (96 of 128) columns of
-  each head rotate (``partial_rotary_factor``); ``Layer`` turns that
+  each head rotate (``partial_rotary_factor``); ``Attention`` turns that
   prefix alone.
 * **LongRoPE.** A forward call whose sequence passes
   ``original_max_position_embeddings`` (4096) rotates by the
@@ -29,6 +28,7 @@ Phi-4-mini is Llama's layer with three differences, each ``Layer``'s or
 import dataclasses
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -134,6 +134,27 @@ class Phi4(CausalLM):
     """Phi-4-mini-instruct on ``config``'s shape and a checkpoint's ``weights``."""
 
     profile = Path(__file__).with_name("profiles")
+
+    def sanitize(self, w):
+        c, a, m = self.config, w.self_attn, w.mlp
+        Q, KV = c.num_attention_heads * c.head_dim, c.num_key_value_heads * c.head_dim
+        qkv, gate_up = a.qkv_proj.weight, m.gate_up_proj.weight
+        F = gate_up.shape[0] // 2
+        return SimpleNamespace(
+            input_layernorm=w.input_layernorm,
+            self_attn=SimpleNamespace(
+                q_proj=SimpleNamespace(weight=qkv[:Q]),
+                k_proj=SimpleNamespace(weight=qkv[Q : Q + KV]),
+                v_proj=SimpleNamespace(weight=qkv[Q + KV :]),
+                o_proj=a.o_proj,
+            ),
+            post_attention_layernorm=w.post_attention_layernorm,
+            mlp=SimpleNamespace(
+                gate_proj=SimpleNamespace(weight=gate_up[:F]),
+                up_proj=SimpleNamespace(weight=gate_up[F:]),
+                down_proj=m.down_proj,
+            ),
+        )
 
 
 #: ``<|endoftext|>``, the checkpoint's bos_token, eos_token and pad_token alike.

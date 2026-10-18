@@ -10,6 +10,7 @@ against Hugging Face's own Whisper decoder in float32 over the same
 weights and encoder rows, its logits recorded in ``goldens/``.
 """
 
+import dataclasses
 from types import SimpleNamespace
 
 import aie.utils as aie_utils
@@ -18,7 +19,16 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.lm import DecoderConfig, EncoderDecoder
+import iron.functional as F
+from iron.applications.whisper.model import sanitize
+from iron.lm import (
+    MLP,
+    Attention,
+    CrossDecoderLayer,
+    DecoderConfig,
+    EncoderDecoder,
+    Norm,
+)
 from iron.lm.golden import _flat
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -31,7 +41,21 @@ from iron.tests.common.multimodal import Features
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
-CONFIG = DecoderConfig(
+
+@dataclasses.dataclass(frozen=True)
+class Shape(DecoderConfig):
+    """Whisper's decoder layer: affine LayerNorms, a plain feed-forward."""
+
+    def layer(self, i: int) -> CrossDecoderLayer:
+        H = self.num_attention_heads
+        return CrossDecoderLayer(
+            Attention(H, H, self.head_dim),
+            MLP(self.hidden_act, gated=False),
+            Norm(self.eps, bias=True),
+        )
+
+
+CONFIG = Shape(
     vocab_size=1024,
     hidden_size=512,
     num_hidden_layers=2,
@@ -64,8 +88,12 @@ class Whisper(EncoderDecoder):
             rows = Copy.step(table[step.position]).reshape(1, E)
         return ElementwiseAdd.step(x, rows)
 
+    def sanitize(self, w):
+        return sanitize(w)
+
     def head(self, x):
-        h = self.config.layer(0).norm(x, self.decoder.layer_norm)
+        n = self.decoder.layer_norm
+        h = F.layer_norm(x, n.weight, n.bias, self.config.eps)
         return GEMV.step(self.decoder.embed_tokens.weight, h)
 
 

@@ -23,13 +23,18 @@ from .base import (
     widen,
 )
 from .blocks import (
+    MLP,
+    Attention,
     ConcatChannels,
     Conv1d,
     Conv2d,
+    CrossDecoderLayer,
+    DecoderLayer,
     ImagePatches,
     Layer,
     LogMel,
     MaxPool2d,
+    Norm,
     filterbank,
 )
 from .causal import CausalLM, Checkpoints, DecodeStep
@@ -40,6 +45,11 @@ from .generation import Sampler, accuracy, determinism, generate_on_host
 from .multimodal import Multimodal
 
 __all__ = [
+    "Attention",
+    "CrossDecoderLayer",
+    "DecoderLayer",
+    "MLP",
+    "Norm",
     "CausalLM",
     "Checkpoint",
     "Checkpoints",

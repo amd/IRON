@@ -55,7 +55,7 @@ class Encoder(Model):
 
     def __init__(self, config, layers: list, max_tokens: int):
         self.config = config
-        self.layers = layers
+        self.layers = [self.sanitize(w) for w in layers]
         self.max_tokens = max_tokens
 
     def lookup(self, ids):
@@ -77,7 +77,7 @@ class Encoder(Model):
     def layer(self, step: EncodeStep, i: int, weights, x):
         """Layer ``i`` on ``x``: ``config.layer(i)``, attending bidirectionally."""
         attend = partial(self.attend, step, i)
-        return self.config.layer(i).step(weights, x, attend, step.angles)
+        return self.config.layer(i)(weights, x, attend, step.angles)
 
     def attend(
         self,

@@ -135,8 +135,10 @@ class EmbeddingGemma(Encoder):
             w.embed_tokens,
             scaled=(w.embed_tokens.weight.astype(np.float32) * scale).astype(bfloat16),
         )
-        for i, layer in enumerate(w.layers):
-            c.layer(i).derive(derived, layer)
+        for layer in w.layers:
+            # layer_scalar as the row RowwiseMul takes.
+            scalar = layer.layer_scalar
+            derived.put(layer, scale=np.full(c.hidden_size, scalar[0], scalar.dtype))
         self.rope = {
             D: iron.weight(rope_angles(D, c.max_tokens, base).astype(bfloat16))
             for _, D, base in {c.heads(i) for i in range(c.num_hidden_layers)}
@@ -171,13 +173,13 @@ class EmbeddingGemma(Encoder):
         norm = tree.per_layer_projection_norm.weight
         ple = RMSNorm.step(ple, weight=norm, epsilon=c.eps * c.hidden_size)
         layer = c.layer(i)
-        return layer.step(
+        return layer(
             w,
             x,
             partial(self.attend, step, i),
-            step.angles[layer.head_dim],
+            step.angles[layer.attention.head_dim],
             ple=ple,
-            derived=self.derived.language_model.layers[i],
+            scale=self.derived.language_model.layers[i].scale,
         )
 
     def norm(self, x):

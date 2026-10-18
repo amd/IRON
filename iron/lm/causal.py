@@ -153,7 +153,7 @@ class CausalLM(Model):
         self.config = config
         self.weights = weights
         self.decoder = weights.model if decoder is None else decoder
-        self.layers = self.decoder.layers
+        self.layers = [self.sanitize(w) for w in self.decoder.layers]
         if len(self.layers) != config.num_hidden_layers:
             raise ValueError(
                 f"the checkpoint has {len(self.layers)} layers, the config "
@@ -167,10 +167,10 @@ class CausalLM(Model):
         self.values: dict[int, State] = {}
         self.recurrent: dict[int, dict[str, Checkpoints]] = {}
         for i, w in enumerate(self.layers):
-            if "self_attn" in vars(w) and config.kv_source(i) == i:
-                layer = config.layer(i)
-                self.keys[i] = iron.state((L, layer.groups, layer.head_dim))
-                self.values[i] = iron.state((L, layer.groups, layer.head_dim))
+            if "self_attn" in vars(w):
+                a = config.layer(i).attention
+                self.keys[i] = iron.state((L, a.groups, a.head_dim))
+                self.values[i] = iron.state((L, a.groups, a.head_dim))
         angles = config.angles()
         long = config.long_angles()
         # LongRoPE's: a prompt passing it reads the second table, stacked after.
@@ -192,7 +192,7 @@ class CausalLM(Model):
     def layer(self, step: DecodeStep, i: int, weights, x):
         """Layer ``i`` on ``x``: ``config.layer(i)``, attending over the caches."""
         attend = partial(self.attend, step, i)
-        return self.config.layer(i).step(weights, x, attend, step.angles)
+        return self.config.layer(i)(weights, x, attend, step.angles)
 
     def head(self, x):
         """The final norm, then the output head (the embedding, if tied)."""
@@ -337,8 +337,7 @@ class CausalLM(Model):
         """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` into layer
         ``i``'s caches and attend ``q`` ``(rows, heads, head_dim)`` over them
         causally, the logits scaled by ``scale`` (MHA's ``1 / sqrt(head_dim)``
-        if None); a layer sharing another's caches (``kv_source``) writes none,
-        its ``k`` and ``v`` None.
+        if None).
 
         Raises:
             ValueError: A ``window`` is given: none is built over the caches.
@@ -347,16 +346,14 @@ class CausalLM(Model):
             raise ValueError(f"CausalLM.attend: no {window}-position window")
         c = self.config
         C = c.prefill_chunk
-        source = c.kv_source(i)
-        keys, values = self.keys[source], self.values[source]
+        keys, values = self.keys[i], self.values[i]
         _, G, D = keys.shape
         n, H, _ = q.shape
-        if source == i:
-            for x, cache in ((k, keys), (v, values)):
-                if step.prompt:
-                    Copy.step(x, cache[step.start : step.start + C][: step.rows])
-                else:
-                    Copy.step(x.reshape(G, D), cache[step.position])
+        for x, cache in ((k, keys), (v, values)):
+            if step.prompt:
+                Copy.step(x, cache[step.start : step.start + C][: step.rows])
+            else:
+                Copy.step(x.reshape(G, D), cache[step.position])
         span = np.s_[: step.position + 1]
         o = MHA.step(
             q,
