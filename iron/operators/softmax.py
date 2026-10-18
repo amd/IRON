@@ -175,9 +175,9 @@ class Softmax(Operator):
 
     def validate(self) -> None:
         if self.rows % 16 != 0:
-            raise ValueError(f"rows ({self.rows}) must be a multiple of 16")
+            raise ValueError(f"Softmax: rows ({self.rows}) must be a multiple of 16")
         if self.cols % 16 != 0:
-            raise ValueError(f"cols ({self.cols}) must be a multiple of 16")
+            raise ValueError(f"Softmax: cols ({self.cols}) must be a multiple of 16")
         if np.dtype(self.input_dtype) != np.dtype(np.float32) and (
             self.soft_cap is not None
             or self.has_addend
@@ -185,14 +185,14 @@ class Softmax(Operator):
             or self.period is not None
         ):
             raise ValueError(
-                "softmax: soft_cap, addend, window and period are options "
+                "Softmax: soft_cap, addend, window and period are options "
                 "of the float32 input path; pass input_dtype=np.float32"
             )
         if (self.window is None) != (self.period is None):
-            raise ValueError("softmax: window and period are given together")
+            raise ValueError("Softmax: window and period are given together")
         if self.window is not None and not self.has_addend:
             raise ValueError(
-                "softmax: the banded path (window, period) always takes a "
+                "Softmax: the banded path (window, period) always takes a "
                 "pre-cap addend; pass has_addend=True"
             )
 
@@ -205,7 +205,7 @@ class Softmax(Operator):
         )
         if np.dtype(self.input_dtype) == np.dtype(np.float32):
             if self.streamed:
-                raise ValueError("softmax: the float32 input path does not stream")
+                raise ValueError("Softmax: the float32 input path does not stream")
             return dataclasses.replace(
                 self, num_aie_columns=cols, block=self.cols, streamed=False
             )
@@ -245,21 +245,21 @@ class Softmax(Operator):
             )
         if self.rows % self.cores:
             raise ValueError(
-                f"rows ({self.rows}) must be a multiple of the {self.cores} cores"
+                f"Softmax: rows ({self.rows}) must be a multiple of the {self.cores} cores"
             )
         if self.block % _VECTOR_STEP or self.cols % self.block:
             raise ValueError(
-                f"block ({self.block}) must be a multiple of {_VECTOR_STEP} "
+                f"Softmax: block ({self.block}) must be a multiple of {_VECTOR_STEP} "
                 f"dividing cols ({self.cols})"
             )
         if not self.streamed and self.block != self.cols:
             raise ValueError(
-                f"a row a core holds whole is one block: block ({self.block}) "
+                f"Softmax: a row a core holds whole is one block: block ({self.block}) "
                 f"must be cols ({self.cols}) unless streamed"
             )
         if self.streamed and self.rows // self.cores > _STREAMED_ROWS:
             raise ValueError(
-                f"a streamed core holds at most {_STREAMED_ROWS} rows, not "
+                f"Softmax: a streamed core holds at most {_STREAMED_ROWS} rows, not "
                 f"{self.rows // self.cores}"
             )
 

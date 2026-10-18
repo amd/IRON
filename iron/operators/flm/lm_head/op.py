@@ -47,18 +47,20 @@ class LMHead(Operator):
 
     def validate(self) -> None:
         if self.dim % K_TILE:
-            raise ValueError(f"dim ({self.dim}) must be a multiple of {K_TILE}")
+            raise ValueError(f"LMHead: dim ({self.dim}) must be a multiple of {K_TILE}")
         if not (np.isfinite(self.softcap) and self.softcap > 0):
-            raise ValueError(f"softcap ({self.softcap}) must be finite and positive")
+            raise ValueError(
+                f"LMHead: softcap ({self.softcap}) must be finite and positive"
+            )
         self.check_derived("w_words", "x_len")
 
     def resolve(self, dev):
         if dev is None:
             raise Unresolvable(
-                "the LM head's grid defaults from the device; none given"
+                "LMHead: the LM head's grid defaults from the device; none given"
             )
         if dev.arch != AIEArch.AIE2p:
-            raise Unresolvable("the q4nx_lm_head kernel is AIE2P only")
+            raise Unresolvable("LMHead: the q4nx_lm_head kernel is AIE2P only")
         return dataclasses.replace(
             self,
             cols=dev.cols if self.cols is None else self.cols,
@@ -69,7 +71,7 @@ class LMHead(Operator):
         per_round = self.cols * self.rows * M_TILE
         if self.vocab % per_round:
             raise ValueError(
-                f"vocab ({self.vocab}) must be a multiple of {per_round}, "
+                f"LMHead: vocab ({self.vocab}) must be a multiple of {per_round}, "
                 "the out-features one round produces"
             )
 

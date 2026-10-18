@@ -97,7 +97,7 @@ class Emit(Operator):
     def validate(self) -> None:
         if self.rows != self.slots + self.carried:
             raise ValueError(
-                f"rows ({self.rows}) must be slots + carried "
+                f"Emit: rows ({self.rows}) must be slots + carried "
                 f"({self.slots} + {self.carried})"
             )
 

@@ -46,18 +46,20 @@ class DecodeLayer(Operator):
     def validate(self) -> None:
         if self.geometry not in RTP_ADDRESSES:
             raise ValueError(
-                "geometry must be aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or "
+                "DecodeLayer: geometry must be aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or "
                 f"FLM_GEMMA4_E4B_DECODE, not {self.geometry!r}"
             )
         if self.layer_type not in LAYER_TYPES:
             raise ValueError(
-                f"layer_type must be one of {LAYER_TYPES}, not {self.layer_type!r}"
+                f"DecodeLayer: layer_type must be one of {LAYER_TYPES}, not {self.layer_type!r}"
             )
         self.check_derived("x_len", "proj_len", "rms_len", "rope_rms_len", "kv_len")
 
     def resolve(self, dev):
         if dev is None or dev.arch != AIEArch.AIE2p:
-            raise Unresolvable("the flm_gemma4_decode kernels are AIE2P only")
+            raise Unresolvable(
+                "DecodeLayer: the flm_gemma4_decode kernels are AIE2P only"
+            )
         return dataclasses.replace(self)
 
     def configuration(self):

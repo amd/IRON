@@ -341,44 +341,53 @@ class MHA(Operator):
 
     def validate(self) -> None:
         if self.d <= 0 or self.d % 64:
-            raise ValueError(f"d must be a positive multiple of 64, got d={self.d}")
+            raise ValueError(
+                f"MHA: d must be a positive multiple of 64, got d={self.d}"
+            )
         if self.window is not None and self.window <= 0:
-            raise ValueError(f"window must be positive or None, got {self.window}")
+            raise ValueError(f"MHA: window must be positive or None, got {self.window}")
         # partial_softmax scales a row's maximum in place of every element.
         if not 0 <= self.scale < np.inf:
-            raise ValueError(f"scale must be finite and not negative, got {self.scale}")
+            raise ValueError(
+                f"MHA: scale must be finite and not negative, got {self.scale}"
+            )
         if self.num_pipelines < 1:
-            raise ValueError("num_pipelines must be at least 1")
+            raise ValueError(
+                f"MHA: num_pipelines ({self.num_pipelines}) must be at least 1"
+            )
         if self.num_pipelines > 6 and self.num_pipelines % 2:
             raise ValueError(
-                f"num_pipelines ({self.num_pipelines}) above 6 must be even: "
+                f"MHA: num_pipelines ({self.num_pipelines}) above 6 must be even: "
                 f"the pipelines are split over two shims"
             )
         if self.num_heads <= 0:
-            raise ValueError("Number of num_heads must be greater than 0")
+            raise ValueError(f"MHA: num_heads ({self.num_heads}) must be at least 1")
         if self.num_KV_heads <= 0:
-            raise ValueError("Number of KV num_heads must be greater than 0")
+            raise ValueError(
+                f"MHA: num_KV_heads ({self.num_KV_heads}) must be at least 1"
+            )
         if self.num_KV_heads > self.num_heads:
             raise ValueError(
-                "Number of KV num_heads must be less than or equal to number of num_heads"
+                f"MHA: num_KV_heads ({self.num_KV_heads}) must be at most "
+                f"num_heads ({self.num_heads})"
             )
         if self.num_heads % self.num_KV_heads:
             raise ValueError(
-                f"Number of num_heads ({self.num_heads}) must be divisible by "
-                f"number of KV num_heads ({self.num_KV_heads})"
+                f"MHA: num_heads ({self.num_heads}) must be a multiple of "
+                f"num_KV_heads ({self.num_KV_heads})"
             )
         if self.seq_len <= 0:
-            raise ValueError("seq_len must be greater than 0")
+            raise ValueError(f"MHA: seq_len ({self.seq_len}) must be at least 1")
         self.check_derived("seq_pad")
 
     def compatible(self) -> None:
         if 64 % self.B_q:
             raise ValueError(
-                f"B_q ({self.B_q}) must divide 64, the block seq_pad is whole of"
+                f"MHA: B_q ({self.B_q}) must divide 64, the block seq_pad is whole of"
             )
         if self.pv_cores not in (1, 2) or self.pv_width * self.pv_cores != self.d:
             raise ValueError(
-                f"P*V takes one core or two, each a pv_width ({self.pv_width}) "
+                f"MHA: P*V takes one core or two, each a pv_width ({self.pv_width}) "
                 f"share of d ({self.d}); got pv_cores={self.pv_cores}"
             )
         for pv, dims in (
@@ -392,62 +401,62 @@ class MHA(Operator):
             for name, m in zip(dims, mac):
                 if vars(self)[name] % m:
                     raise ValueError(
-                        f"{name}={vars(self)[name]} must be a multiple of "
+                        f"MHA: {name}={vars(self)[name]} must be a multiple of "
                         f"{'P*V' if pv else 'QK^T'}'s micro-tile {mac}"
                     )
         # A row whose window misses a key block another row of its query
         # block keeps would weigh its masked keys 1 (mha.cc).
         if self.window and self.window % self.B_q:
             raise ValueError(
-                f"window ({self.window}) must be whole {self.B_q}-row blocks"
+                f"MHA: window ({self.window}) must be whole {self.B_q}-row blocks"
             )
         if not self.packed and self.seq_pad % (64 * self.num_pipelines):
             raise ValueError(
-                f"seq_pad ({self.seq_pad}) must be whole rounds of 64 rows on "
+                f"MHA: seq_pad ({self.seq_pad}) must be whole rounds of 64 rows on "
                 f"each of num_pipelines ({self.num_pipelines})"
             )
         if self.kv_len % self.B_kv or self.kv_len < self.seq_pad:
             raise ValueError(
-                f"kv_len ({self.kv_len}) must be whole {self.B_kv}-row blocks and "
+                f"MHA: kv_len ({self.kv_len}) must be whole {self.B_kv}-row blocks and "
                 f"at least seq_pad ({self.seq_pad}): the queries are its last rows"
             )
         if self.kv_lanes != (self.num_pipelines if self.packed else 1):
             raise ValueError(
-                f"kv_lanes ({self.kv_lanes}) is one per pipeline for one query, "
+                f"MHA: kv_lanes ({self.kv_lanes}) is one per pipeline for one query, "
                 f"else one; resolve() sets it"
             )
         if self.num_pipelines > self.width:
             raise ValueError(
-                f"num_pipelines ({self.num_pipelines}) is at most the "
+                f"MHA: num_pipelines ({self.num_pipelines}) is at most the "
                 f"{self.width} columns it is placed on, one pipeline a column"
             )
         if self.pv_cores > 1 and self.num_pipelines // self.q_shims > 4:
             raise ValueError(
-                f"with P*V split, an O join serves at most 4 pipelines, not "
+                f"MHA: with P*V split, an O join serves at most 4 pipelines, not "
                 f"{self.num_pipelines // self.q_shims}: its memtile also forwards "
                 f"a pipeline's scores and P"
             )
         if self.packed:
             if self.window:
                 raise ValueError(
-                    "one query packed sits past every key block, where a "
+                    "MHA: one query packed sits past every key block, where a "
                     "window would mask them"
                 )
             if self.pv_cores > 1:
                 raise ValueError(
-                    "one query packed reads K and V over its pipeline's own "
+                    "MHA: one query packed reads K and V over its pipeline's own "
                     "shim, whose two channels leave V one lane: P*V takes one core"
                 )
             group = self.num_heads // self.num_KV_heads
             if group > self.B_q:
                 raise ValueError(
-                    f"one query packs a KV group's {group} heads into a block's "
+                    f"MHA: one query packs a KV group's {group} heads into a block's "
                     f"B_q ({self.B_q}) rows, which must hold them"
                 )
             q = self.COLUMNS[self.width].q
             if self.num_pipelines > q or self.num_KV_heads % self.num_pipelines:
                 raise ValueError(
-                    f"one query takes num_pipelines ({self.num_pipelines}) at most "
+                    f"MHA: one query takes num_pipelines ({self.num_pipelines}) at most "
                     f"{q} dividing num_KV_heads ({self.num_KV_heads}): each pipeline "
                     f"has its own K and V lanes, through its own column's memtile"
                 )
@@ -493,7 +502,7 @@ class MHA(Operator):
         B_kv = self.key_block(B_q, mem)
         if self.B_kv not in (None, B_kv):
             raise ValueError(
-                f"B_kv ({self.B_kv}) is {B_kv}: "
+                f"MHA: B_kv ({self.B_kv}) is {B_kv}: "
                 + (
                     "one query packed takes the widest key block that fits"
                     if self.packed

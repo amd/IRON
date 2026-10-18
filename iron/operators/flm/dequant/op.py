@@ -127,7 +127,7 @@ class DequantBFP(Operator):
     def validate(self) -> None:
         if self.tile_n is not None and self.tile_n != N_TILE:
             raise ValueError(
-                f"tile_n must be {N_TILE}; this operator emits that order only. "
+                f"DequantBFP: tile_n must be {N_TILE}; this operator emits that order only. "
                 f"flm.GEMM picks {self.tile_n} for some shapes, and the two must "
                 "agree or the GEMM reads B in the wrong order"
             )
@@ -140,10 +140,10 @@ class DequantBFP(Operator):
     def resolve(self, dev):
         if dev is None:
             raise Unresolvable(
-                "the q4nx dequant grid defaults from the device; none given"
+                "DequantBFP: the q4nx dequant grid defaults from the device; none given"
             )
         if dev.arch != AIEArch.AIE2p:
-            raise Unresolvable("bfp16ebs8 exists only on AIE2P")
+            raise Unresolvable("DequantBFP: bfp16ebs8 exists only on AIE2P")
         return dataclasses.replace(
             self,
             tile_n=N_TILE if self.tile_n is None else self.tile_n,
@@ -152,9 +152,11 @@ class DequantBFP(Operator):
 
     def compatible(self) -> None:
         if self.K % K_TILE_B:
-            raise ValueError(f"K ({self.K}) must be a multiple of {K_TILE_B}")
+            raise ValueError(
+                f"DequantBFP: K ({self.K}) must be a multiple of {K_TILE_B}"
+            )
         if self.N % N_TILE:
-            raise ValueError(f"N ({self.N}) must be a multiple of {N_TILE}")
+            raise ValueError(f"DequantBFP: N ({self.N}) must be a multiple of {N_TILE}")
 
     @property
     def config_name(self) -> str:
@@ -162,7 +164,7 @@ class DequantBFP(Operator):
         dev = self.dev
         if dev is None:
             raise Unresolvable(
-                "FLM dequant: the xclbin is named for a device; none is bound"
+                "DequantBFP: the xclbin is named for a device; none is bound"
             )
         t = self if self._resolved else self.resolved(dev)
         return f"FLM_DequantBFP_tn{t.tile_n}_c{t.cols}_{dev.name}"

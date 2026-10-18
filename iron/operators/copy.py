@@ -148,10 +148,12 @@ class Gather(Operator):
 
     def validate(self) -> None:
         if self.rows < 1:
-            raise ValueError(f"a gather takes one row at least, not {self.rows}")
+            raise ValueError(
+                f"Gather: a gather takes one row at least, not {self.rows}"
+            )
         if self.row * np.dtype(self.dtype).itemsize % 4:
             raise ValueError(
-                f"a row of {self.row} {np.dtype(self.dtype).name} is not whole "
+                f"Gather: a row of {self.row} {np.dtype(self.dtype).name} is not whole "
                 f"32-bit words, which a descriptor's length counts"
             )
 
@@ -162,7 +164,7 @@ class Gather(Operator):
             feeds = min(self.max_feeds, dev.cols // 2, pairs)
         if not 1 <= feeds <= dev.cols // 2:
             raise Unresolvable(
-                f"a gather feeds from 1 to {dev.cols // 2} pairs of shim "
+                f"Gather: a gather feeds from 1 to {dev.cols // 2} pairs of shim "
                 f"columns on a device of {dev.cols}, not {feeds}"
             )
         return dataclasses.replace(self, feeds=feeds)
@@ -173,13 +175,13 @@ class Gather(Operator):
             and self.row * np.dtype(self.dtype).itemsize % 16
         ):
             raise ValueError(
-                f"a row of {self.row} {np.dtype(self.dtype).name} is not whole "
+                f"Gather: a row of {self.row} {np.dtype(self.dtype).name} is not whole "
                 f"16-byte units, which a bounded drain's length counts"
             )
         pairs = -(-len(self.batches) // 2)
         if self.feeds > pairs:
             raise ValueError(
-                f"{self.rows} rows are {pairs} pairs of batches of {self.chain}, "
+                f"Gather: {self.rows} rows are {pairs} pairs of batches of {self.chain}, "
                 f"and a feed streams whole pairs, so {self.feeds} feeds leave "
                 f"{self.feeds - pairs} idle"
             )
@@ -352,15 +354,17 @@ class Gather(Operator):
         ids = np.asarray(ids).astype(np.int64)
         if ids.shape != (self.rows,):
             raise ValueError(
-                f"a gather of {self.rows} rows takes {self.rows} ids, got {ids.shape}"
+                f"Gather: a gather of {self.rows} rows takes {self.rows} ids, got {ids.shape}"
             )
         valid = self.rows if valid is None else int(valid)
         if not 0 <= valid <= self.rows:
-            raise IndexError(f"{valid} valid rows of a gather of {self.rows}")
+            raise IndexError(f"Gather: {valid} valid rows of a gather of {self.rows}")
         ids = ids[:valid]
         n = self.table_rows
         if ((ids < -n) | (ids >= n)).any():
-            raise IndexError(f"gathering {ids[(ids < -n) | (ids >= n)]} from {n} rows")
+            raise IndexError(
+                f"Gather: gathering {ids[(ids < -n) | (ids >= n)]} from {n} rows"
+            )
         template, slots = self.template
         stride = self.row * np.dtype(self.dtype).itemsize
         rows = np.full(self.rows, address + APERTURE, dtype=np.uint64)
@@ -687,13 +691,13 @@ class Copy(Operator):
             or isinstance(self.dst, tuple)
         ):
             raise ValueError(
-                f"a repeated source walks at most {self.max_walks} patterns, a "
+                f"Copy: a repeated source walks at most {self.max_walks} patterns, a "
                 f"descriptor each, on one channel into one pattern; got {walks}"
             )
         src, dst = (sum(prod(p.sizes) for p in w) for w in self.walks())
         if src != dst and not self.src_repeat:
             raise ValueError(
-                f"a copy moves the same element count both ways: src has {src} "
+                f"Copy: a copy moves the same element count both ways: src has {src} "
                 f"elements, dst {dst}"
             )
         for side, tap, bound in (
@@ -702,7 +706,7 @@ class Copy(Operator):
         ):
             if isinstance(tap, tuple) and bound is not None and not self.src_repeat:
                 raise ValueError(
-                    f"{side} walks {len(tap)} patterns in turn; a per-call bound "
+                    f"Copy: {side} walks {len(tap)} patterns in turn; a per-call bound "
                     f"takes one pattern"
                 )
 
@@ -781,7 +785,7 @@ class Copy(Operator):
         step = gcd(*(tap.sizes[-1] for walk in self.walks() for tap in walk))
         if step % channels:
             raise ValueError(
-                f"the innermost axes of {self.src} and {self.dst} have a common "
+                f"Copy: the innermost axes of {self.src} and {self.dst} have a common "
                 f"run of {step} elements, which num_channels ({channels}) must divide"
             )
         for walk in self.walks():
@@ -789,14 +793,14 @@ class Copy(Operator):
                 per_channel = prod(tap.sizes) // channels
                 if per_channel % self.tile_size:
                     raise ValueError(
-                        f"tile_size {self.tile_size} must divide the per-channel "
+                        f"Copy: tile_size {self.tile_size} must divide the per-channel "
                         f"transfer {per_channel} (= {prod(tap.sizes)} / {channels} "
                         f"channels)"
                     )
         for row in self._row_shares():
             if row % self.tile_size:
                 raise ValueError(
-                    f"tile_size {self.tile_size} must divide the {row} elements "
+                    f"Copy: tile_size {self.tile_size} must divide the {row} elements "
                     f"per channel one row of the bounded axis moves: a call "
                     f"moves any number of rows"
                 )
@@ -839,7 +843,7 @@ class Copy(Operator):
             return [(share, None) for share in shares]
         if bound == tap.rank - 1 and self.num_channels > 1:
             raise ValueError(
-                f"{tap} is bounded on the axis the {self.num_channels} channels "
+                f"Copy: {tap} is bounded on the axis the {self.num_channels} channels "
                 f"split; bound another axis or copy on one channel"
             )
         rank = shares[0].rank
@@ -876,7 +880,7 @@ class Copy(Operator):
                     placed = halves
             if not operand.fits(placed):
                 raise ValueError(
-                    f"{tap} does not fit one descriptor per channel, which a "
+                    f"Copy: {tap} does not fit one descriptor per channel, which a "
                     f"bounded axis needs (its size is patched in place)"
                 )
             sizes, _ = slots(placed.sizes, placed.strides)
@@ -939,7 +943,7 @@ class Copy(Operator):
         )
         if len(gather) != len(scatter):
             raise ValueError(
-                f"pattern element counts differ ({len(gather)} vs {len(scatter)}); "
+                f"Copy: pattern element counts differ ({len(gather)} vs {len(scatter)}); "
                 "src and dst must move the same number of elements"
             )
         out = (

@@ -100,9 +100,13 @@ class RoPE(Operator):
 
     def validate(self) -> None:
         if not (self.cols % 32 == 0 and self.cols >= 32):
-            raise ValueError("cols must be multiple of 32 and >= 32")
+            raise ValueError(
+                f"RoPE: cols ({self.cols}) must be a positive multiple of 32"
+            )
         if not (self.angle_rows <= self.rows and self.rows % self.angle_rows == 0):
-            raise ValueError("angle_rows must divide rows")
+            raise ValueError(
+                f"RoPE: angle_rows ({self.angle_rows}) must divide rows ({self.rows})"
+            )
 
     def resolve(self, dev):
         cols = self.resolve_columns(
@@ -115,9 +119,14 @@ class RoPE(Operator):
     def compatible(self) -> None:
         n = self.num_aie_columns
         if self.rows % n:
-            raise ValueError("rows must be divisible by num_aie_columns")
+            raise ValueError(
+                f"RoPE: rows ({self.rows}) must be a multiple of num_aie_columns ({n})"
+            )
         if not (self.angle_rows >= n and self.angle_rows % n == 0):
-            raise ValueError("angle_rows must be divisible by num_aie_columns")
+            raise ValueError(
+                f"RoPE: angle_rows ({self.angle_rows}) must be a multiple of "
+                f"num_aie_columns ({n})"
+            )
 
     def extent_unit(self, buffer: str) -> int | None:
         """A position's rows at a time, so each core gets its angle row."""

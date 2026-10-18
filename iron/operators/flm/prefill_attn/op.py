@@ -66,26 +66,30 @@ class _PrefillAttentionBase(Operator):
     def validate(self) -> None:
         for name in ("max_context", "num_heads", "num_kv_heads"):
             if vars(self)[name] <= 0:
-                raise ValueError(f"{name} ({vars(self)[name]}) must be positive")
+                raise ValueError(
+                    f"{type(self).__name__}: {name} ({vars(self)[name]}) must be positive"
+                )
         if self.num_heads % self.num_kv_heads:
             raise ValueError(
-                f"num_heads ({self.num_heads}) must be a multiple of "
+                f"{type(self).__name__}: num_heads ({self.num_heads}) must be a multiple of "
                 f"num_kv_heads ({self.num_kv_heads})"
             )
         num_cu = self.variant.num_cu
         if (self.num_heads // self.num_kv_heads) % num_cu:
             raise ValueError(
-                f"each KV head must serve a multiple of {num_cu} query heads"
+                f"{type(self).__name__}: each KV head must serve a multiple of {num_cu} query heads"
             )
         for name, value in (("max_context", self.max_context), ("window", self.window)):
             if value is not None and value % 128:
-                raise ValueError(f"{name} ({value}) must be a multiple of 128")
+                raise ValueError(
+                    f"{type(self).__name__}: {name} ({value}) must be a multiple of 128"
+                )
         self.check_derived("head_dim", "qo_len", "kv_len")
 
     def resolve(self, dev):
         if dev is None or dev.arch != AIEArch.AIE2p:
             raise Unresolvable(
-                f"the {self.variant.factory.__name__} kernel is AIE2P only"
+                f"{type(self).__name__}: the {self.variant.factory.__name__} kernel is AIE2P only"
             )
         return dataclasses.replace(self)
 

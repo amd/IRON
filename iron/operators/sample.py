@@ -150,7 +150,7 @@ class Sample(Operator):
     def validate(self) -> None:
         if self.vocab % 2:
             raise ValueError(
-                f"vocab ({self.vocab}) must be even: the logits move in 4-byte words"
+                f"Sample: vocab ({self.vocab}) must be even: the logits move in 4-byte words"
             )
 
     def resolve(self, dev):
@@ -168,13 +168,10 @@ class Sample(Operator):
 
     def compatible(self) -> None:
         # The factories' own checks: chunk divides the slice, k_max fits.
-        try:
-            config = self.array_config()
-            for run in config.runs:
-                config.select(*run)
-            config.combine()
-        except ValueError as e:
-            raise ValueError(str(e)) from e
+        config = self.array_config()
+        for run in config.runs:
+            config.select(*run)
+        config.combine()
 
     class Array(Operator.Array):
         vocab: int

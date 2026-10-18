@@ -268,38 +268,39 @@ class GEMM(Operator):
         min_tile_m, min_tile_k, min_tile_n = self.mac_block(None)
         if self.tile_m is not None and self.tile_m % min_tile_m != 0:
             raise ValueError(
-                f"tile_m ({self.tile_m}) must be a multiple of {min_tile_m} "
+                f"GEMM: tile_m ({self.tile_m}) must be a multiple of {min_tile_m} "
                 f"(aie_kernels/linalg/mm_aie2p.h requires m % (2*r) == 0)"
             )
         if self.tile_k % min_tile_k != 0:
             raise ValueError(
-                f"tile_k ({self.tile_k}) must be a multiple of {min_tile_k} "
+                f"GEMM: tile_k ({self.tile_k}) must be a multiple of {min_tile_k} "
                 f"(aie_kernels/linalg/mm_aie2p.h requires k % s == 0)"
             )
         if self.tile_n % min_tile_n != 0:
             raise ValueError(
-                f"tile_n ({self.tile_n}) must be a multiple of {min_tile_n} "
+                f"GEMM: tile_n ({self.tile_n}) must be a multiple of {min_tile_n} "
                 f"(aie_kernels/linalg/mm_aie2p.h requires n % (2*t) == 0)"
             )
         din, dout = np.dtype(self.dtype_in), np.dtype(self.dtype_out)
         if np.issubdtype(din, np.integer) != np.issubdtype(dout, np.integer):
             raise ValueError(
-                f"Input dtype ({din}) and output dtype ({dout}) must either both be integral or both be float"
+                f"GEMM: dtype_in ({din}) and dtype_out ({dout}) must both be "
+                "integer or both be float"
             )
         if dout.itemsize < din.itemsize:
             raise ValueError(
-                f"Output dtype ({dout}) must be equal or larger to input dtype ({din})"
+                f"GEMM: dtype_out ({dout}) must be at least as wide as dtype_in ({din})"
             )
         # Checked at construction where no tunable is needed; N waits for the columns.
         if self.K % self.tile_k != 0:
-            raise ValueError(f"K ({self.K}) must be a multiple of {self.tile_k}")
+            raise ValueError(f"GEMM: K ({self.K}) must be a multiple of {self.tile_k}")
         rows, tile_m = self.n_aie_rows, self.tile_m
         if not rows and self.dev:
             rows, tile_m = self._auto_tiling(self.dev)
         tile_m = tile_m or min_tile_m
         if rows and self.M % (tile_m * rows) != 0:
             raise ValueError(
-                f"M ({self.M}) must be a multiple of {tile_m * rows}: C is "
+                f"GEMM: M ({self.M}) must be a multiple of {tile_m * rows}: C is "
                 f"tiled into (m * n_aie_rows, n)-sized blocks"
             )
 
@@ -374,12 +375,13 @@ class GEMM(Operator):
     def compatible(self) -> None:
         if self.N % self.mem_tile_n != 0:
             raise ValueError(
-                f"N ({self.N}) must be a multiple of {self.mem_tile_n}: B is "
+                f"GEMM: N ({self.N}) must be a multiple of {self.mem_tile_n}: B is "
                 f"tiled into (k, n * num_aie_columns)-sized blocks"
             )
         if self.M % self.mem_tile_m_a != 0:
             raise ValueError(
-                "A must be tileable into (m * n_A_tiles_per_shim, k)-sized blocks"
+                f"GEMM: M ({self.M}) must be a multiple of {self.mem_tile_m_a}: A is "
+                "tiled into (tile_m * n_a_tiles_per_shim, k)-sized blocks"
             )
         cols, rows = self.num_aie_columns, self.n_aie_rows
         if cols < rows and rows % cols:

@@ -112,22 +112,24 @@ class Transpose(Operator):
 
     def validate(self) -> None:
         if self.m % self.s != 0:
-            raise ValueError(f"AIE tile rows ({self.m}) must be a multiple of {self.s}")
+            raise ValueError(
+                f"Transpose: AIE tile rows ({self.m}) must be a multiple of {self.s}"
+            )
         if self.n % self.s != 0:
             raise ValueError(
-                f"AIE tile columns ({self.n}) must be a multiple of {self.s}"
+                f"Transpose: AIE tile columns ({self.n}) must be a multiple of {self.s}"
             )
         if self.m * self.n > 8192:
             raise ValueError(
-                f"Kernel tile size {self.m * self.n} needs to be below 8192 to fit within data memory."
+                f"Transpose: Kernel tile size {self.m * self.n} needs to be below 8192 to fit within data memory."
             )
         if self.s == 4 and (self.m <= 4 or self.n <= 4):
             raise ValueError(
-                f"Kernel tile {self.s} needs AIE tile rows > 4 and columns > 4."
+                f"Transpose: Kernel tile {self.s} needs AIE tile rows > 4 and columns > 4."
             )
         if self.s == 8 and (self.m <= 16 or self.n <= 16):
             raise ValueError(
-                f"Kernel tile {self.s} needs AIE tile rows > 16 and columns > 16."
+                f"Transpose: Kernel tile {self.s} needs AIE tile rows > 16 and columns > 16."
             )
 
     def resolve(self, dev):
@@ -142,29 +144,31 @@ class Transpose(Operator):
     def compatible(self) -> None:
         cols, chans = self.num_aie_columns, self.num_channels
         if self.M % self.m != 0:
-            raise ValueError(f"Matrix rows ({self.M}) must be a multiple of {self.m}")
+            raise ValueError(
+                f"Transpose: Matrix rows ({self.M}) must be a multiple of {self.m}"
+            )
         if self.N % self.n != 0:
             raise ValueError(
-                f"Matrix columns ({self.N}) must be a multiple of {self.n}"
+                f"Transpose: Matrix columns ({self.N}) must be a multiple of {self.n}"
             )
         # Each split on its own: a partial tile would be silently dropped.
         if (self.N // cols) % self.n:
             raise ValueError(
-                f"num_aie_columns ({cols}) does not split N={self.N} "
+                f"Transpose: num_aie_columns ({cols}) does not split N={self.N} "
                 f"into whole n-wide tiles: each column gets "
                 f"{self.N // cols} columns, which is not a multiple "
                 f"of n={self.n}"
             )
         if (self.M // chans) % self.m:
             raise ValueError(
-                f"num_channels ({chans}) does not split M={self.M} "
+                f"Transpose: num_channels ({chans}) does not split M={self.M} "
                 f"into whole m-tall tiles: each channel gets "
                 f"{self.M // chans} rows, which is not a multiple "
                 f"of m={self.m}"
             )
         if self.M * self.N % (self.m * self.n * cols * chans) != 0:
             raise ValueError(
-                f"M x N ({self.M} x {self.N}) is not whole {self.m} x {self.n} tiles "
+                f"Transpose: M x N ({self.M} x {self.N}) is not whole {self.m} x {self.n} tiles "
                 f"over {cols} columns x {chans} channels"
             )
 

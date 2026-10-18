@@ -280,13 +280,13 @@ class GEMM(Operator):
         if self.tile_n is not None:
             if self.tile_n not in CT_MAX_K_FOR_N:
                 raise ValueError(
-                    f"tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {self.tile_n}"
+                    f"flm.GEMM: tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {self.tile_n}"
                 )
         if self.tile_ma is not None and (
             M_TILE % self.tile_ma or self.tile_ma % (2 * R)
         ):
             raise ValueError(
-                f"tile_ma ({self.tile_ma}) must divide {M_TILE} and be a multiple "
+                f"flm.GEMM: tile_ma ({self.tile_ma}) must divide {M_TILE} and be a multiple "
                 f"of {2 * R}"
             )
         # Coerce so callers may pass bare strings; deduplicate, since the mask
@@ -304,7 +304,7 @@ class GEMM(Operator):
             )
         if self.k_tile is not None and self.K % self.k_tile:
             raise ValueError(
-                f"K ({self.K}) must be a multiple of k_tile ({self.k_tile})"
+                f"flm.GEMM: K ({self.K}) must be a multiple of k_tile ({self.k_tile})"
             )
         self.check_derived("packed_blocks")
         # A mode the mask leaves out reaches the kernel's default arm, which
@@ -314,7 +314,7 @@ class GEMM(Operator):
             and self.epilogue not in self.epilogue_modes
         ):
             raise ValueError(
-                f"epilogue {self.epilogue} is not in epilogue_modes "
+                f"flm.GEMM: epilogue {self.epilogue} is not in epilogue_modes "
                 f"{tuple(str(m) for m in self.epilogue_modes)}, so it would "
                 "not be compiled in and the kernel would silently apply none"
             )
@@ -373,7 +373,7 @@ class GEMM(Operator):
         # inexpressible.
         if self.k_tile % self.ct_max_k:
             raise ValueError(
-                f"k_tile ({self.k_tile}) must be a multiple of ct_max_k "
+                f"flm.GEMM: k_tile ({self.k_tile}) must be a multiple of ct_max_k "
                 f"({self.ct_max_k}) for tile_n={self.tile_n}"
             )
         # N only needs to tile to tile_n: a trailing group of fewer than
@@ -384,20 +384,22 @@ class GEMM(Operator):
             ("N", self.N, self.tile_n),
         ):
             if value % unit != 0:
-                raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
+                raise ValueError(
+                    f"flm.GEMM: {name} ({value}) must be a multiple of {unit}"
+                )
         m_row_blocks = self.M // (M_TILE * self.rows)
         if m_row_blocks % self.m_chunk:
             # A partial group is inexpressible: the object is m_chunk tiles
             # wide and the forward always drains that much.
             raise ValueError(
-                f"m_row_blocks ({m_row_blocks}) must be a multiple of m_chunk "
+                f"flm.GEMM: m_row_blocks ({m_row_blocks}) must be a multiple of m_chunk "
                 f"({self.m_chunk}); pass m_chunk=1 for this shape"
             )
         # A bound's A transfer is one unit's row block a descriptor
         # dimension long; a unit of m_chunk blocks has no dimension left.
         if "valid" in self.bound_extents and self.m_chunk != 1:
             raise ValueError(
-                f"a per-call row bound needs m_chunk=1, got m_chunk={self.m_chunk}"
+                f"flm.GEMM: a per-call row bound needs m_chunk=1, got m_chunk={self.m_chunk}"
             )
 
     def compatible(self) -> None:
@@ -494,7 +496,7 @@ class GEMM(Operator):
         dev = self.dev
         if dev is None:
             raise Unresolvable(
-                "FLM GEMM: the xclbin is named for a device; none is bound"
+                "flm.GEMM: the xclbin is named for a device; none is bound"
             )
         return (
             f"FLM_GEMM_tn{t.tile_n}_kt{t.k_tile}_ck{t.ct_max_k}"
@@ -705,7 +707,7 @@ class GEMM(Operator):
             B_SLOTS = min(B_MAX_SLOTS, mt_free // b_slot_bytes)
             if B_SLOTS < 1:
                 raise ValueError(
-                    f"no room for a {b_slot_bytes}-byte B slot in the memtile at "
+                    f"flm.GEMM: no room for a {b_slot_bytes}-byte B slot in the memtile at "
                     f"tile_n={N_TILE}; {mt_free} bytes remain after A and C"
                 )
             b_mt_ty = np.ndarray[(B_SLOTS * b_slot_elems,), b_elem_ty]
@@ -1038,7 +1040,7 @@ class GEMM(Operator):
                 break
         else:
             raise ValueError(
-                f"M={M} K={K} N={N}: even one unit per slab needs more passes "
+                f"flm.GEMM: M={M} K={K} N={N}: even one unit per slab needs more passes "
                 f"over a B pool per column-block than the {pool.queue} x "
                 f"{pool.passes} one memtile channel can queue"
             )
@@ -1047,7 +1049,7 @@ class GEMM(Operator):
         bounded = "valid" in self.bound_extents
         if bounded and len(slabs) > 1:
             raise ValueError(
-                f"M={M} K={K} N={N}: a per-call row bound needs M in one slab, "
+                f"flm.GEMM: M={M} K={K} N={N}: a per-call row bound needs M in one slab, "
                 f"and this shape takes {len(slabs)}"
             )
 
@@ -1265,7 +1267,7 @@ class GEMM(Operator):
         """
         t = self.resolved()
         if t.b_col_maj:
-            raise ValueError("flm.GEMM(b_col_maj=True) reads B as stored (N, K)")
+            raise ValueError("flm.GEMM: b_col_maj=True reads B as stored (N, K)")
         return pack_b(
             B,
             k_tile=t.k_tile,
