@@ -32,6 +32,7 @@ from .elementwise import (
     RowBroadcast,
     Rowwise,
     UnaryElementwise,
+    WeightedRowwise,
 )
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "Precision",
     "Unresolvable",
     "Value",
+    "WeightedRowwise",
     "Width",
     "Xclbin",
     "Auto",

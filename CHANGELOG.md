@@ -107,6 +107,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `LayerNorm` takes an optional `weight=` row, as `RMSNorm` does: weighted,
+  a second core per (column, channel) multiplies each normalized row by it.
+  Both share `iron.common.WeightedRowwise`, and `F.layer_norm` passes its
+  weight to the one `LayerNorm` step, leaving the bias a `RowwiseAdd` step.
 - An operand of an `Elementwise` or `Rowwise` operator that gives no `per=`
   is split over every core, `per=(num_aie_columns, num_channels)`.
 - A `field(derive=...)` field is held to its formula: a value given that

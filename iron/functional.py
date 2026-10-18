@@ -112,9 +112,7 @@ def layer_norm(
         raise ValueError(
             f"layer_norm(): the kernel takes no epsilon but {LAYER_NORM_EPS}, not {eps}"
         )
-    y = LayerNorm.step(x)
-    if weight is not None:
-        y = y * weight
+    y = LayerNorm.step(x, weight=weight)
     return y if bias is None else y + bias
 
 

@@ -34,6 +34,7 @@ from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
 from aie.iron import kernels
+from aie.iron.kernels import eltwise
 from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance, Verdict, round_to
 from ml_dtypes import bfloat16
@@ -697,6 +698,172 @@ class Rowwise(Elementwise):
             if n in self.declaration.tunables
         }
         return dataclasses.replace(self, rows=elements // line, bound_values={}, **one)
+
+
+class WeightedRowwise(Rowwise):
+    """A ``Rowwise`` kernel's rows, optionally times a learned ``weight`` row.
+
+    Weighted, two cores per (column, channel) are pipelined: one calls the
+    kernel, the next multiplies by the weight row, which halves the line a
+    core holds.
+    """
+
+    # The longest weighted row: the weight row beside each line halves it.
+    weighted_cap: ClassVar[int] = 4096
+
+    test = Testing(
+        [
+            Sweep(rows=True),
+            Sweep(rows=True, tile_cap=weighted_cap, lower=True, weighted=True),
+        ]
+    )
+
+    weighted: CompileTime[bool] = field(default=False)
+
+    x = In(
+        Rowwise.rows,
+        Rowwise.tile_size,
+        obj_shape=(Rowwise.tile_size,),
+    )
+    # Shared by every column of a channel: counted once per channel.
+    weight = In(
+        Rowwise.tile_size,
+        obj_shape=(Rowwise.tile_size,),
+        per=(Elementwise.num_channels,),
+        replicate=True,
+        when=weighted,
+    )
+    y = Out(
+        Rowwise.rows,
+        Rowwise.tile_size,
+        obj_shape=(Rowwise.tile_size,),
+    )
+
+    def validate(self) -> None:
+        if self.weighted and self.tile_size > self.weighted_cap:
+            raise ValueError(
+                f"{type(self).__name__}: tile_size ({self.tile_size}) must be at "
+                f"most {self.weighted_cap} when weighted, since the multiplying "
+                f"core holds the weight row beside each line"
+            )
+
+    def chain(self) -> tuple[KernelCall, ...]:
+        if not self.weighted:
+            return super().chain()
+        config = self.array_config()
+        return (
+            KernelCall(config.kernel(), config.scalars(), (self.x,)),
+            KernelCall(eltwise.mul_sized(self.tile_size), (), (None, self.weight)),
+        )
+
+    def reference(self, x, weight=None):
+        """The kernels' references in turn, the kernel's row rounded to bf16."""
+        normed = super().reference(x)
+        if weight is None:
+            return normed
+        y = eltwise.mul_sized(self.tile_size).contract.reference(normed, weight)
+        return y.astype(normed.dtype)
+
+    def tolerance(self) -> Tolerance | None:
+        own = super().tolerance()
+        if not self.weighted:
+            return own
+        # Each kernel's ulp, and the product's of a row one ulp off.
+        return Tolerance.bf16_ulps(
+            2,
+            atol=own.atol,
+            note="the row's kernel then mul_sized, one ulp each; atol is the "
+            "first kernel's",
+        )
+
+    class Array(Rowwise.Array):
+        def build(self) -> Built:
+            if not self.weighted:
+                return super().build()
+            tile_ty = self.x.obj_type
+            weights_ty = self.weight.obj_type
+            cols, chans = self.num_aie_columns, self.num_channels
+            depth = self.x.l1_depth
+            kernel = self.kernel()
+            positions, scalars = self.arguments(kernel, self.scalars(), 1, 1)
+            n_args = len(positions) + len(scalars)
+            eltwise_mul = eltwise.mul_sized(self.tile_size)
+            of_ins = [
+                ObjectFifo(tile_ty, depth=depth)
+                for i in range(cols)
+                for j in range(chans)
+            ]
+            of_ws = [ObjectFifo(weights_ty, depth=depth) for j in range(chans)]
+            of_mid = [
+                ObjectFifo(tile_ty, depth=depth)
+                for i in range(cols)
+                for j in range(chans)
+            ]
+            of_outs = [
+                ObjectFifo(tile_ty, depth=depth)
+                for i in range(cols)
+                for j in range(chans)
+            ]
+            n_cores = cols * chans
+            rtps = [Rtp([self.count]) for _ in range(2 * n_cores)]
+
+            def core_kernel(of_in, of_out, kernel_fn, rtp):
+                n = rtp.read()[self.count]
+                for _ in range_(n):
+                    elem_in = of_in.acquire(1)
+                    elem_out = of_out.acquire(1)
+                    tiles = dict(zip(positions, (elem_in, elem_out)))
+                    kernel_fn(
+                        *(tiles[i] if i in tiles else scalars[i] for i in range(n_args))
+                    )
+                    of_in.release(1)
+                    of_out.release(1)
+
+            def core_mul(of_in, of_w, of_out, mul, rtp):
+                n = rtp.read()[self.count]
+                elem_w = of_w.acquire(1)
+                for _ in range_(n):
+                    elem_in = of_in.acquire(1)
+                    elem_out = of_out.acquire(1)
+                    mul(elem_in, elem_w, elem_out, self.tile_size)
+                    of_in.release(1)
+                    of_out.release(1)
+                of_w.release(1)
+
+            workers = []
+            for i in range(cols):
+                for j in range(chans):
+                    k = i * chans + j
+                    workers.append(
+                        Worker(
+                            core_kernel,
+                            [
+                                of_ins[k].cons(),
+                                of_mid[k].prod(),
+                                kernel,
+                                rtps[k],
+                            ],
+                        )
+                    )
+            for i in range(cols):
+                for j in range(chans):
+                    k = i * chans + j
+                    workers.append(
+                        Worker(
+                            core_mul,
+                            [
+                                of_mid[k].cons(),
+                                of_ws[j].cons(),
+                                of_outs[k].prod(),
+                                eltwise_mul,
+                                rtps[n_cores + k],
+                            ],
+                        )
+                    )
+            self.x.bind([f.prod() for f in of_ins])
+            self.y.bind([f.cons() for f in of_outs])
+            self.weight.bind([f.prod() for f in of_ws])
+            return Built(workers, rtps)
 
 
 class RowBroadcast(Rowwise):
