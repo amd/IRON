@@ -19,7 +19,7 @@ from iron.tests.common.llama_model import small
 
 
 def _traced(*values):
-    return TracedGraph("g", [], [], [], list(values), {}, {}, {}, [])
+    return TracedGraph("g", [], [], [], values=list(values))
 
 
 def test_default_is_a_full_elf_on_npu2():

@@ -185,15 +185,16 @@ class TracedGraph:
     """
 
     name: str
-    steps: list
-    inputs: list
-    outputs: list  # returned, then carried handles not returned
-    values: list
-    pinned: dict  # buffer name -> nbytes, for weights, states and slice parents
-    weights: dict[int, tuple[object, Handle]]
-    states: dict[int, tuple[State, Handle]]
-    bindings: list[Binding]
-    returned: list = dataclasses.field(default_factory=list)
+    steps: list[TracedStep]
+    inputs: list[Handle]
+    outputs: list[Handle]  # returned, then carried handles not returned
+    # buffer name -> nbytes, for weights, states and slice parents
+    pinned: dict[str, int] = dataclasses.field(default_factory=dict)
+    values: list[PerCall] = dataclasses.field(default_factory=list)
+    weights: dict[int, tuple[object, Handle]] = dataclasses.field(default_factory=dict)
+    states: dict[int, tuple[State, Handle]] = dataclasses.field(default_factory=dict)
+    bindings: list[Binding] = dataclasses.field(default_factory=list)
+    returned: list[Handle] = dataclasses.field(default_factory=list)
     carry: dict[str, Handle | Affine] = dataclasses.field(default_factory=dict)
     feedback: list[str] = dataclasses.field(default_factory=list)
     # An input the device reads as words the host encodes from it and a
@@ -286,11 +287,7 @@ class TracedGraph:
             traced,
             [Handle((), np.uint8, n, "input") for n in inputs],
             [Handle((), np.uint8, n, "output") for n in outputs],
-            [],
             pinned,
-            {},
-            {},
-            [],
             feedback=list(feedback),
         )
 
@@ -984,13 +981,13 @@ class Tracer:
             self.steps,
             inputs,
             outputs,
-            values,
             pinned,
-            self.weights,
-            self.states,
-            self.bindings,
-            returned,
-            next_values,
+            values=values,
+            weights=self.weights,
+            states=self.states,
+            bindings=self.bindings,
+            returned=returned,
+            carry=next_values,
             encoders=self.encoders,
             addresses=self.addresses,
             limits=self.limits,

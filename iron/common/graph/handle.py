@@ -1034,21 +1034,10 @@ class Affine:
 
     def __eq__(self, other) -> bool:
         if isinstance(other, Affine):
-            terms = (self.scale, self.bias, self.down, self.mul, self.add)
-            return self.value is other.value and (
-                *terms,
-                self.lo,
-                self.hi,
-                self.mod,
-            ) == (
-                other.scale,
-                other.bias,
-                other.down,
-                other.mul,
-                other.add,
-                other.lo,
-                other.hi,
-                other.mod,
+            # The value by identity: PerCall has no value to compare.
+            terms = [f.name for f in dataclasses.fields(self)[1:]]
+            return self.value is other.value and all(
+                getattr(self, n) == getattr(other, n) for n in terms
             )
         if isinstance(other, (int, float, np.integer, np.floating)):
             raise TypeError(f"{self} has no value to compare: it is computed per call")

@@ -209,9 +209,9 @@ class CarriedLoop:
         self._first.bind_feedback(self._runs[0].scratchpad_alias())
 
     def run(self, steps: int, /, *tensors, **values) -> Iterator[int]:
-        """``start``, then ``steps``."""
+        """``start`` now, then ``steps``, each index yielded once complete."""
         self.start(*tensors, **values)
-        yield from self.steps(steps)
+        return self.steps(steps)
 
     def start(self, *tensors, **values) -> None:
         """Run ``first`` on ``tensors`` and ``values``, and wait for it."""

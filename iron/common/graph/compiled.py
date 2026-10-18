@@ -688,7 +688,7 @@ class CompiledGraph:
     def push(self, x) -> None:
         """Send to the device what the host wrote into ``read(x)``'s view."""
         buf = self._storage(x)
-        buf.numpy_view()
+        buf.numpy_view()  # marks the host copy the newer, so to() sends it
         buf.to("npu")
 
     def _copy_in(
