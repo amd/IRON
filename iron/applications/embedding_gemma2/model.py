@@ -27,15 +27,14 @@ from ml_dtypes import bfloat16
 import tokenizers
 
 import iron
+import iron.functional as F
 from iron import Precision, lm
 from iron.tune.autotune import Call
 from iron.lm import Checkpoint, Encoder, rope_angles
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
-from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
-from iron.operators.rms_norm import RMSNorm
 
 from .audio import AudioTower
 from .config import PROFILES, AudioConfig, Config, VisionConfig
@@ -171,7 +170,7 @@ class EmbeddingGemma(Encoder):
             step.embeddings, projection, b_col_maj=True, precision=Precision.HIGHEST
         )
         norm = tree.per_layer_projection_norm.weight
-        ple = RMSNorm.step(ple, weight=norm, epsilon=c.eps * c.hidden_size)
+        ple = F.rms_norm(ple, ple.shape[-1:], norm, c.eps * c.hidden_size)
         layer = c.layer(i)
         return layer(
             w,
@@ -203,9 +202,9 @@ class EmbeddingGemma(Encoder):
 
     def head(self, x):
         c = self.config
-        y = GEMV.step(self.mrl, x)
-        return RMSNorm.step(
-            y.reshape(len(c.mrl_dims), self.unit.size), weight=self.unit, epsilon=0.0
+        y = F.linear(x, self.mrl)
+        return F.rms_norm(
+            y.reshape(len(c.mrl_dims), self.unit.size), self.unit.shape, self.unit, 0.0
         )
 
     def encode(self, tokens, dims: int = 768) -> np.ndarray:

@@ -13,17 +13,14 @@ from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron import Precision, Scratchpad
 from iron.lm import Tower, blocks
 from iron.operators.copy import Copy
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
-from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
-from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
 from iron.operators.gemm import GEMM
 from iron.operators.relu import ReLU
-from iron.operators.rms_norm import RMSNorm
 from iron.operators.sigmoid import Sigmoid
-from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
 
 from .blocks import Clipped
@@ -168,7 +165,7 @@ class AudioTower(Tower):
         """
         F = wave.shape[0] // self.config.hop - 1
         self.log_mel(wave, self.features[1 : F + 1], frames=frames)
-        Copy.step(self.zero_mel, self.features[frames + 1])
+        self.features[frames + 1] = self.zero_mel
 
     def front(self, wave, *, n, frames, tokens):
         """The rows of `wave`'s `tokens` soft tokens before the first layer;
@@ -182,18 +179,17 @@ class AudioTower(Tower):
         self.logmel(wave, frames)
         sub = self.audio_tower.subsample_conv_projection
         h = self.conv0(self.features, rows=n)
-        h = RMSNorm.step(
+        h = F.rms_norm(
             h.reshape(2 * T * self.slots // C0, C0),
-            weight=sub.layer0.norm.weight,
-            epsilon=c.eps,
+            (C0,),
+            sub.layer0.norm.weight,
+            c.eps,
         )
         ReLU.step(h.reshape(2 * T, self.slots), self.subsampled[1 : 2 * T + 1])
-        Copy.step(self.zero, self.subsampled[n + 1])
+        self.subsampled[n + 1] = self.zero
         h = self.conv1(self.subsampled, rows=tokens)
         h = ReLU.step(
-            RMSNorm.step(
-                h.reshape(T * F1, C1), weight=sub.layer1.norm.weight, epsilon=c.eps
-            )
+            F.rms_norm(h.reshape(T * F1, C1), (C1,), sub.layer1.norm.weight, c.eps)
         )
         x = GEMM.step(
             h.reshape(T, F1 * C1),
@@ -207,7 +203,7 @@ class AudioTower(Tower):
         c = self.config
         out = self.audio_tower.output_proj
         x = GEMM.step(x, out.weight, b_col_maj=True, precision=Precision.HIGHEST)
-        x = RMSNorm.step(RowwiseAdd.step(x, out.bias), epsilon=c.eps)
+        x = F.rms_norm(x + out.bias, out.bias.shape, eps=c.eps)
         projection = self.embed_audio.embedding_projection.weight
         return GEMM.step(x, projection, b_col_maj=True, precision=Precision.HIGHEST)
 
@@ -238,15 +234,16 @@ class AudioTower(Tower):
         """
         c = self.config
         x = self.feed_forward(w.feed_forward1, x)
-        h = RMSNorm.step(x, weight=w.norm_pre_attn.weight, epsilon=c.eps)
-        a = RMSNorm.step(
+        h = F.rms_norm(x, x.shape[-1:], w.norm_pre_attn.weight, c.eps)
+        a = F.rms_norm(
             self.attention(w.self_attn, h, step.rows),
-            weight=w.norm_post_attn.weight,
-            epsilon=c.eps,
+            x.shape[-1:],
+            w.norm_post_attn.weight,
+            c.eps,
         )
-        h = self.light_conv(w.lconv1d, ElementwiseAdd.step(x, a))
+        h = self.light_conv(w.lconv1d, x + a)
         x = self.feed_forward(w.feed_forward2, h)
-        return RMSNorm.step(x, weight=w.norm_out.weight, epsilon=c.eps)
+        return F.rms_norm(x, x.shape[-1:], w.norm_out.weight, c.eps)
 
     def soft(self, values: dict) -> int:
         return values["tokens"]
@@ -254,12 +251,10 @@ class AudioTower(Tower):
     def feed_forward(self, f, x):
         c = self.config
         h = Clipped(f.ffw_layer_1)(
-            RMSNorm.step(x, weight=f.pre_layer_norm.weight, epsilon=c.eps)
+            F.rms_norm(x, x.shape[-1:], f.pre_layer_norm.weight, c.eps)
         )
-        h = Clipped(f.ffw_layer_2)(SiLU.step(h))
-        return ElementwiseAdd.step(
-            x, RMSNorm.step(h, weight=f.post_norm, epsilon=c.eps)
-        )
+        h = Clipped(f.ffw_layer_2)(F.silu(h))
+        return x + F.rms_norm(h, h.shape[-1:], f.post_norm, c.eps)
 
     def attention(self, a, h, tokens):
         c = self.config
@@ -269,12 +264,12 @@ class AudioTower(Tower):
         scores, probs = self.scores, self.probs
         q_proj = Clipped(a.q_proj)
         h = q_proj.clamp(h)
-        q = RowwiseMul.step(q_proj.project(h), a.q_scale)
+        q = q_proj.project(h) * a.q_scale
         k, val = Clipped(a.k_proj).project(h), Clipped(a.v_proj).project(h)
-        Copy.step(k.reshape(T, H, D).transpose(1, 0, 2), keys[:, W - 1 : W - 1 + T])
+        keys[:, W - 1 : W - 1 + T] = k.reshape(T, H, D).transpose(1, 0, 2)
         R = T + W - 1 + (T + W - 1) % 2
-        Copy.step(a.relative, keys[:, R : R + 2 * B])
-        Copy.step(val.reshape(T, H, D).transpose(1, 0, 2), values[:, W - 1 : W - 1 + T])
+        keys[:, R : R + 2 * B] = a.relative
+        values[:, W - 1 : W - 1 + T] = val.reshape(T, H, D).transpose(1, 0, 2)
         q = Copy.step(q.reshape(T, H, D).transpose(1, 0, 2))
         # Over every key: those past the valid ones are stale but finite, as
         # only bounded copies write them.
@@ -311,14 +306,12 @@ class AudioTower(Tower):
     def light_conv(self, conv, x):
         c = self.config
         start = Clipped(conv.linear_start)
-        h = start.clamp(
-            RMSNorm.step(x, weight=conv.pre_layer_norm.weight, epsilon=c.eps)
-        )
+        h = start.clamp(F.rms_norm(x, x.shape[-1:], conv.pre_layer_norm.weight, c.eps))
         glu, E = conv.linear_start.linear.weight, c.hidden_size
         a, b = start.project(h, glu[:E]), start.project(h, glu[E:])
-        h = DepthwiseConv1d.step(ElementwiseMul.step(a, Sigmoid.step(b)), conv.planes)
-        h = SiLU.step(RMSNorm.step(h, weight=conv.conv_norm.weight, epsilon=c.eps))
-        return ElementwiseAdd.step(x, Clipped(conv.linear_end)(h))
+        h = DepthwiseConv1d.step(a * Sigmoid.step(b), conv.planes)
+        h = F.silu(F.rms_norm(h, h.shape[-1:], conv.conv_norm.weight, c.eps))
+        return x + Clipped(conv.linear_end)(h)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, `max_tokens` soft tokens."""

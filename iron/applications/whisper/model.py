@@ -22,6 +22,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron import Scratchpad
 from iron.lm import (
     MLP,
@@ -38,8 +39,6 @@ from iron.lm import (
 from iron.lm.base import _nest, leaves
 from iron.lm.golden import HuggingFace
 from iron.operators.copy import Copy
-from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.gelu import GELU
 
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.
 BLOCK = 64
@@ -214,11 +213,11 @@ class WhisperEncoder(Tower):
         position embeddings.
         """
         c = self.config
-        h = GELU.step(self.conv1(features, rows=c.conv_rows))
-        Copy.step(h[: c.frames], self.convolved[1 : c.frames + 1])
-        h = GELU.step(self.conv2(self.convolved, rows=rows))
+        h = F.gelu(self.conv1(features, rows=c.conv_rows), approximate="tanh")
+        self.convolved[1 : c.frames + 1] = h[: c.frames]
+        h = F.gelu(self.conv2(self.convolved, rows=rows), approximate="tanh")
         table = iron.weight(self.embed_positions)
-        return ElementwiseAdd.step(h, table[:rows]), None
+        return h + table[:rows], None
 
     renames = RENAMES
 
@@ -278,7 +277,7 @@ class Whisper(EncoderDecoder):
             rows = Copy.step(table[step.start : step.start + C][: step.rows])
         else:
             rows = Copy.step(table[step.position]).reshape(1, c.hidden_size)
-        return ElementwiseAdd.step(x, rows)
+        return x + rows
 
     renames = RENAMES
 

@@ -16,7 +16,6 @@ import iron.functional as F
 from iron import Precision
 from iron.lm import DecoderLayer
 from iron.operators.clamp import Clamp
-from iron.operators.elementwise_mul import RowwiseMul
 from iron.operators.gemm import GEMM
 
 
@@ -54,7 +53,7 @@ class TextLayer(SandwichLayer):
         g = act(F.linear(x, w.per_layer_input_gate.weight, precision=precision)) * ple
         g = F.linear(g, w.per_layer_projection.weight, precision=precision)
         x = self.add(x, self.norm(w.post_per_layer_input_norm, g))
-        return RowwiseMul.step(x, scale)
+        return x * scale
 
 
 @dataclasses.dataclass(frozen=True)

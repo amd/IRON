@@ -37,7 +37,6 @@ import iron.functional as F
 from iron import lm
 from iron.lm import Attention, CausalLM, Checkpoints, DecoderConfig
 from iron.operators.copy import Copy
-from iron.operators.elementwise_mul import RowwiseMul
 
 
 @dataclasses.dataclass(frozen=True)
@@ -154,21 +153,21 @@ class Lfm2(CausalLM):
         read, write = self.recurrent[i]["conv"].at(step)
         flat = self.conv_window.reshape(2 * C, E)
         first = C - (K - 1)
-        Copy.step(read, flat[first:C])
+        flat[first:C] = read
         if step.prompt:
-            Copy.step(gated, self.conv_window[1, : step.rows])
-            total = RowwiseMul.step(flat[first : first + C], tap[0])
+            self.conv_window[1, : step.rows] = gated
+            total = flat[first : first + C] * tap[0]
             for k in range(1, K):
-                total = total + RowwiseMul.step(flat[first + k : first + k + C], tap[k])
+                total = total + flat[first + k : first + k + C] * tap[k]
             total = total[: step.rows]
             for j in range(K - 1):
-                Copy.step(flat[first + step.rows + j], self.conv_tail[j])
+                self.conv_tail[j] = flat[first + step.rows + j]
             Copy.step(self.conv_tail, write)
         else:
-            Copy.step(gated.reshape(E), flat[C])
-            total = RowwiseMul.step(gated, tap[K - 1])
+            flat[C] = gated.reshape(E)
+            total = gated * tap[K - 1]
             for k in range(K - 1):
-                total = total + RowwiseMul.step(flat[first + k : first + k + 1], tap[k])
+                total = total + flat[first + k : first + k + 1] * tap[k]
             Copy.step(flat[first + 1 : C + 1], write)
         return F.linear(cc * total, w.out_proj.weight)
 

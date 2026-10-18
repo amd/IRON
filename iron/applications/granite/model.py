@@ -32,7 +32,6 @@ from ml_dtypes import bfloat16
 
 from iron import lm
 from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
-from iron.operators.elementwise_mul import RowwiseMul
 
 
 @dataclasses.dataclass(frozen=True)
@@ -72,7 +71,7 @@ class Granite(CausalLM):
 
     def __init__(self, config: GraniteConfig, weights):
         super().__init__(config, weights)
-        # The embedding's multiplier as the row RowwiseMul takes.
+        # The embedding's multiplier as a row every row is multiplied by.
         m = config.embedding_multiplier
         self.embed_scale = np.full(config.hidden_size, m, bfloat16)
         if config.logits_scaling != 1:
@@ -86,7 +85,7 @@ class Granite(CausalLM):
             return x
         E = self.config.hidden_size
         x = x.reshape(math.prod(x.shape) // E, E)
-        return RowwiseMul.step(x, self.embed_scale)
+        return x * self.embed_scale
 
 
 class Runner(lm.Runner):

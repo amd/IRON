@@ -347,9 +347,9 @@ class CausalLM(Model):
         n, H, _ = q.shape
         for x, cache in ((k, keys), (v, values)):
             if step.prompt:
-                Copy.step(x, cache[step.start : step.start + C][: step.rows])
+                cache[step.start : step.start + C][: step.rows] = x
             else:
-                Copy.step(x.reshape(G, D), cache[step.position])
+                cache[step.position] = x.reshape(G, D)
         span = np.s_[: step.position + 1]
         o = MHA.step(
             q,

@@ -26,7 +26,6 @@ from iron import Precision
 from iron.functional import LAYER_NORM_EPS
 from iron.lm import MLP, Attention, Config, Conv2d, DecoderLayer, Norm, Tower
 from iron.operators.copy import Copy
-from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 from iron.operators.gemm import GEMM
 
 
@@ -116,8 +115,7 @@ class VisionTower(Tower):
         """The patches of the image ``rgb`` embedded, with their positions."""
         c, e = self.config, self.vision_model.embeddings
         h = self.patch_embed(rgb, rows=c.side).reshape(c.side**2, c.hidden_size)
-        h = RowwiseAdd.step(h, e.patch_embedding.bias)
-        return ElementwiseAdd.step(h, e.position_embedding.weight), None
+        return h + e.patch_embedding.bias + e.position_embedding.weight, None
 
     renames = {
         "layer_norm1": "input_layernorm",

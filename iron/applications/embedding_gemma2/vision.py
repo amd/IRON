@@ -13,13 +13,11 @@ from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron import Precision, Scratchpad
 from iron.lm import ImagePatches, Tower, rope_angles
 from iron.operators.axpy import AXPY
-from iron.operators.copy import Copy
-from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
-from iron.operators.rms_norm import RMSNorm
 
 from .config import PROFILES, VisionConfig
 
@@ -141,17 +139,17 @@ class VisionTower(Tower):
         sides = self.x_windows, self.y_windows
         for table, x_side in zip(sides, (True, False)):
             walk = self.walk(table, x_side, repeat=repeat, wk=wk, walked=walked)
-            Copy.step(walk, self.window_rows[:walked])
+            self.window_rows[:walked] = walk
             side = TensorAccessPattern.full(self.window_rows.shape)[:T]
             side = self.window_rows.at(side, (T, c.hidden_size), bounds={0: n})
-            h = ElementwiseAdd.step(h, side)
+            h = h + side
         half = c.head_dim // 2
         for table, x_side, cut in (
             (self.x_angles, True, slice(None, half)),
             (self.y_angles, False, slice(half, None)),
         ):
             walk = self.walk(table, x_side, repeat=repeat, wk=wk, walked=walked)
-            Copy.step(walk, self.angle_rows[:walked, cut])
+            self.angle_rows[:walked, cut] = walk
         angles = TensorAccessPattern.full(self.angle_rows.shape)[:T]
         return h, self.angle_rows.at(angles, (T, c.head_dim), bounds={0: n})
 
@@ -216,7 +214,7 @@ class VisionTower(Tower):
         # The mean's 1 / pool ** 2 and the sqrt(hidden_size) scale folded into
         # the norm's epsilon: RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         s2 = c.hidden_size / c.pool**4
-        x = RMSNorm.step(x, epsilon=c.eps / s2)
+        x = F.rms_norm(x, x.shape[-1:], eps=c.eps / s2)
         projection = self.embed_vision.embedding_projection.weight
         return GEMM.step(x, projection, b_col_maj=True, precision=Precision.HIGHEST)
 

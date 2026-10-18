@@ -38,7 +38,7 @@ import iron
 import iron.functional as F
 from iron.lm import ConcatChannels, Conv2d, MaxPool2d
 from iron.operators.copy import Copy
-from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
+from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.flm.gemm.design import M_TILE, compute_rows
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
@@ -239,7 +239,7 @@ class Pointwise(iron.Graph):
         n = self.size * self.size
         pixels = x.reshape(n, channels)
         if self.padded is not None:
-            Copy.step(pixels, self.padded[:n])
+            self.padded[:n] = pixels
             pixels = self.padded
         y = F.linear(pixels, self.weight, self.bias, precision=iron.Precision.HIGH)[:n]
         if self.act:
@@ -280,7 +280,7 @@ class Spatial(iron.Graph):
         Copy.step(x, self.padded, dst=interior)
         y = self.conv(self.padded, rows=self.out_rows)
         out, width = self.conv.out_channels, self.conv.out_width
-        y = RowwiseAdd.step(y.reshape(self.out_rows * width, out), self.bias)
+        y = y.reshape(self.out_rows * width, out) + self.bias
         y = SiLU.step(y, tile_size=width * out)
         return y.reshape(self.out_rows, width * out)
 

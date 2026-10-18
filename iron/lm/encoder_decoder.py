@@ -16,7 +16,6 @@ import numpy as np
 
 import iron
 from iron import Carried
-from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 
 from .base import DecoderConfig
@@ -94,8 +93,8 @@ class EncoderDecoder(CausalLM):
             memory = self.encoder.inline(self.encoder.body, encoded, **own)
             for i, w in enumerate(self.layers):
                 k, v = self.config.layer(i).keys_values(w, memory)
-                Copy.step(k, self.cross_keys[i][: k.shape[0]])
-                Copy.step(v, self.cross_values[i][: v.shape[0]])
+                self.cross_keys[i][: k.shape[0]] = k
+                self.cross_values[i][: v.shape[0]] = v
             return iron.carry(**{n: values[n] for n in self._parameters.carried})
         ids, rows, source = given["ids"], values["rows"], values["source"]
         prompt = ids is not None

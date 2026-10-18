@@ -105,7 +105,7 @@ class Multimodal(Model):
                 own = {v: values[f"{name}_{v}"] for v in self.tower_values[token]}
                 soft = tower(given[name], **own)
                 at = self.at[token]
-                Copy.step(soft, self.merged[at : at + soft.shape[0]])
+                self.merged[at : at + soft.shape[0]] = soft
                 # A text model's carried values pass through unchanged.
                 if self._parameters.carried:
                     return iron.carry(
@@ -122,7 +122,7 @@ class Multimodal(Model):
         x = self.text.inline(self.text.lookup, ids)
         counted = {"before": given["before"]} if "before" in given else {}
         merge = Merge.step(placed, placeholders=tuple(self.at.items()), **counted)
-        Copy.step(x, self.merged[: x.shape[0]])
+        self.merged[: x.shape[0]] = x
         rows = Copy.step(self.merged[merge])[:n]
         return self.text.inline(self.text.from_rows, rows, **text)
 
