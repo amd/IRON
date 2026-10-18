@@ -168,7 +168,8 @@ RENAMED_PATHS = {
 #   (dim, vocab);
 # - a decoder application's tests became one per family, its size the first id
 #   (Llama 3.2 1B, Qwen3 1.7B);
-# - Merge's placeholders became one parameter.
+# - Merge's placeholders became one parameter;
+# - RoPE's method_type=0 became the default two_halves=True.
 RENAMED_TESTS = {
     **{
         (f"{LM_HEAD}test_gemma4_vocabulary", f"dim_{dim}"): (
@@ -209,6 +210,10 @@ RENAMED_TESTS = {
         "Merge-rows_2048-audio_token_258881-image_token_258880-audio_at_2048-"
         "vision_at_2560",
     ): (CATALOG, "Merge-rows_2048-placeholders_((258881, 2048), (258880, 2560))"),
+    (CATALOG, "RoPE-rows_4096-cols_512-angle_rows_8-method_type_0"): (
+        CATALOG,
+        "RoPE-rows_4096-cols_512-angle_rows_8",
+    ),
 }
 
 
