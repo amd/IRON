@@ -13,7 +13,7 @@ sequence writes the layer type into RTPs. It then streams the weights, the KV
 cache and the hidden state.
 """
 
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
 from functools import partial
 from typing import NamedTuple
@@ -44,7 +44,7 @@ from aie.iron import (
 )
 from aie.iron.controlflow import range_
 from aie.iron.dataflow import Flow, PacketFlow
-from aie.iron.device import Device, Tile
+from aie.iron.device import Tile
 from aie.iron.kernels import (
     FLM_GEMMA4_E2B_DECODE,
     FLM_GEMMA4_E4B_DECODE,
@@ -95,33 +95,31 @@ X_SLICE = 256
 LK = 16
 # The padding in the engine's per-layer-input stream (gemma4e_npu_sequence.hpp).
 MIN_BF16_PAD = 32
-# The memtile that feeds each column of projection cores its weights, with
-# the column. Each column holds four cores in rows 2 to 5, and a shim of its
-# own feeds the memtile.
-PROJ_MEMS = {"proj_gather_0": 0, "proj_x": 1, "proj_gather_1": 6, "proj_weight": 7}
-PROJ_COLS = tuple(PROJ_MEMS.values())
+# The memtiles of the projection engine's four groups. Group i's memtile
+# feeds its cores proj_{i}_0 to proj_{i}_3 their weights, and proj_shim_{i}
+# feeds the memtile.
+PROJ_MEMS = ("proj_gather_0", "proj_x", "proj_gather_1", "proj_weight")
 
 _CORE, _MEM, _SHIM = AIETileType.CoreTile, AIETileType.MemTile, AIETileType.ShimNOCTile
-# The tile of each stage: its (column, row) where a kernel takes a
-# neighbour's locks by direction, else a tile type for the placer. The gate
-# kernel takes the RMS tile's locks on its left, and each projection core
-# that does not send y the locks of the one below.
+# The tile type of each stage. The placer chooses every tile, and keeps two
+# cores that share a buffer next to each other.
 STAGES = {
     "attn_qk": _CORE,
     "attn_kv": _CORE,
     "swa_attn_qk": _CORE,
     "swa_attn_kv": _CORE,
-    "rms": (3, 2),
+    "rms": _CORE,
     "glu": _CORE,
     "rope": _CORE,
     "swa_rope": _CORE,
-    "pl_gate": (4, 2),
+    "pl_gate": _CORE,
     "pl_embedding": _CORE,
     "pl_up": _CORE,
     "pl_merge": _CORE,
+    **{f"proj_{i}_{j}": _CORE for i in range(len(PROJ_MEMS)) for j in range(4)},
     **dict.fromkeys(PROJ_MEMS, _MEM),
     "attn_mem": _MEM,
-    **{f"proj_shim_{col}": _SHIM for col in PROJ_COLS},
+    **{f"proj_shim_{i}": _SHIM for i in range(len(PROJ_MEMS))},
     "kv_shim": _SHIM,
     "x_shim": _SHIM,
     "pl_shim_0": _SHIM,
@@ -439,47 +437,35 @@ class _Array:
     """The decode layer's array as its stages build it: each stage adds its
     cores, locks and DMA channels to ``rt`` and ``workers``.
 
-    ``grid`` holds every tile by (column, row), ``t`` the tile of each
-    stage, ``flows`` each circuit-switched flow by name. ``rtps`` holds each
-    RTP buffer by (key, stage), a projection core's stage being its
-    "row_column", and ``sync_locks`` each sync lock by stage. The RMS, GLU,
-    attention kv and projection cores acquire their sync lock before they
-    read their RTPs; the sequence sets it after it writes them. The RoPE and
-    attention qk cores read their RTPs after data from the projection cores
-    arrives.
+    ``t`` holds the tile of each stage, ``flows`` each circuit-switched flow
+    by name, ``rtps`` each RTP buffer by (key, stage) and ``sync_locks``
+    each sync lock by stage. The RMS, GLU, attention kv and projection cores
+    acquire their sync lock before they read their RTPs; the sequence sets
+    it after it writes them. The RoPE and attention qk cores read their RTPs
+    after data from the projection cores arrives.
     """
 
-    dev: InitVar[Device]
     rt: Runtime
     g: FlmGemma4DecodeGeometry
     kernels: dict[str, ExternalFunction]
     workers: list[Worker] = field(default_factory=list, init=False)
     rtps: dict[tuple[str, str], Buffer] = field(default_factory=dict, init=False)
     sync_locks: dict[str, Lock] = field(default_factory=dict, init=False)
-    grid: dict[tuple[int, int], Tile] = field(init=False)
     t: dict[str, Tile] = field(init=False)
     flows: dict[str, Flow] = field(init=False)
 
-    def __post_init__(self, dev: Device) -> None:
-        self.grid = {
-            (c, r): Tile(c, r, tile_type=dev.get_tile_type(c, r))
-            for r in range(dev.rows)
-            for c in range(dev.cols)
-        }
-        self.t = {
-            stage: self.grid[at] if isinstance(at, tuple) else Tile(tile_type=at)
-            for stage, at in STAGES.items()
-        }
+    def __post_init__(self) -> None:
+        self.t = {stage: Tile(tile_type=kind) for stage, kind in STAGES.items()}
         # The circuit-switched flows. The compiler assigns their channels, and
         # each stage's DMA reaches them by endpoint.
-        grid, t = self.grid, self.t
+        t = self.t
         ends = {}
-        for mem, col in PROJ_MEMS.items():
+        for i, mem in enumerate(PROJ_MEMS):
             for h in (0, 1):
-                ends[f"proj_w{h}_{col}"] = t[f"proj_shim_{col}"], t[mem]
+                ends[f"proj_w{h}_{i}"] = t[f"proj_shim_{i}"], t[mem]
             for j in range(4):
-                ends[f"w{j}_{col}"] = t[mem], grid[col, 2 + j]
-        proj = [grid[col, 2 + j] for col in PROJ_COLS for j in range(4)]
+                ends[f"w{j}_{i}"] = t[mem], t[f"proj_{i}_{j}"]
+        proj = [t[f"proj_{i}_{j}"] for i in range(len(PROJ_MEMS)) for j in range(4)]
         ends["proj_x"] = t["proj_x"], proj
         ends["recv_k"] = t["rope"], t["kv_shim"]
         ends["recv_v"] = t["swa_rope"], t["kv_shim"]
@@ -501,11 +487,8 @@ class _Array:
         }
 
     def label(self, tile: Tile) -> str:
-        """``tile``'s stage, or its coordinates if it has none."""
-        return next(
-            (stage for stage, at in self.t.items() if at is tile),
-            f"{tile.row}_{tile.col}",
-        )
+        """``tile``'s stage."""
+        return next(stage for stage, at in self.t.items() if at is tile)
 
     def end(self, flow: str, tile: Tile):
         """The end of the circuit ``flow`` on ``tile``, for its DMA channel."""
@@ -938,7 +921,8 @@ class _Array:
 
     def proj_core(
         self,
-        pt: Tile,
+        group: int,
+        j: int,
         kern,
         send_x_out: bool,
         main_y0: Buffer | None = None,
@@ -946,24 +930,26 @@ class _Array:
     ) -> tuple[Buffer, Buffer]:
         """One q4nx projection core. Returns its y buffers (y0, y1).
 
-        A core that does not send y fills the second slot of main_y0 and main_y1,
-        the y buffers of the sending core in the row below.
+        Core ``j`` of projection group ``group``. A core that does not send y
+        fills the second slot of main_y0 and main_y1, the y buffers of the
+        sending core before it.
         """
-        r, c = pt.row, pt.col
+        n = f"proj_{group}_{j}"
+        pt = self.t[n]
         y_ty, w_ty, x_ty = kern.arg_types()[:3]
         is_swa = self.rtp_buffer(pt, "proj_swa")
         skip_kv = self.rtp_buffer(pt, "proj_skip")
-        x0 = Buffer(type=x_ty, name=f"x_0_{r}_{c}", tile=pt)
-        w0 = Buffer(type=w_ty, name=f"w_0_{r}_{c}", tile=pt)
-        x1 = Buffer(type=x_ty, name=f"x_1_{r}_{c}", tile=pt)
-        w1 = Buffer(type=w_ty, name=f"w_1_{r}_{c}", tile=pt)
+        x0 = Buffer(type=x_ty, name=f"x_0_{n}", tile=pt)
+        w0 = Buffer(type=w_ty, name=f"w_0_{n}", tile=pt)
+        x1 = Buffer(type=x_ty, name=f"x_1_{n}", tile=pt)
+        w1 = Buffer(type=w_ty, name=f"w_1_{n}", tile=pt)
         if send_x_out:
-            y0 = Buffer(type=y_ty, name=f"y_0_{r}_{c}", tile=pt)
-            y1 = Buffer(type=y_ty, name=f"y_1_{r}_{c}", tile=pt)
+            y0 = Buffer(type=y_ty, name=f"y_0_{n}", tile=pt)
+            y1 = Buffer(type=y_ty, name=f"y_1_{n}", tile=pt)
         else:
             y0, y1 = main_y0, main_y1
         pk = self.locks(pt, PROJ_LOCKS)
-        self.sync_locks[self.label(pt)] = pk["rtp_available_lock"]
+        self.sync_locks[n] = pk["rtp_available_lock"]
 
         def proj_body(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, kern):
             kern(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, constant(int(send_x_out)))
@@ -979,7 +965,7 @@ class _Array:
             ),
             _ping_pong(
                 DMAChannelDir.S2MM,
-                self.end(f"w{r - 2}_{c}", pt),
+                self.end(f"w{j}_{group}", pt),
                 w0,
                 w1,
                 pk["w_prod_lock"],
@@ -1013,10 +999,10 @@ class _Array:
         return y0, y1
 
     def proj_cores(self) -> list[list[Tile]]:
-        """The q4nx projection engine: 16 cores in PROJ_COLS.
+        """The q4nx projection engine: 16 cores, four per group.
 
-        The cores in rows 2 and 4 send y. Returns the sending cores of each group
-        of two columns.
+        Cores 0 and 2 of each group send y. Returns the sending cores of each
+        gather memtile's two groups.
         """
         proj_k = self.entry("proj_main", "proj_main")
 
@@ -1024,21 +1010,19 @@ class _Array:
         for grp in range(2):
             group_send = []
             for csub in (0, 1):
-                col = PROJ_COLS[2 * grp + csub]
-                for row_pair in range(2):
-                    send_t = self.grid[col, 2 + row_pair * 2]
-                    nosend_t = self.grid[col, 3 + row_pair * 2]
-                    y0, y1 = self.proj_core(send_t, proj_k, send_x_out=True)
+                group = 2 * grp + csub
+                for j in (0, 2):
+                    y0, y1 = self.proj_core(group, j, proj_k, send_x_out=True)
                     self.proj_core(
-                        nosend_t, proj_k, send_x_out=False, main_y0=y0, main_y1=y1
+                        group, j + 1, proj_k, send_x_out=False, main_y0=y0, main_y1=y1
                     )
-                    group_send.append(send_t)
+                    group_send.append(self.t[f"proj_{group}_{j}"])
             proj_send_tiles.append(group_send)
         return proj_send_tiles
 
     def weight_channels(self, mt: Tile, w0: Buffer, w1: Buffer) -> dict:
         """The weight channels of the projection memtile ``mt``."""
-        col = PROJ_MEMS[self.label(mt)]
+        col = PROJ_MEMS.index(self.label(mt))
         return _proj_weight_channels(
             w0,
             w1,
@@ -1351,8 +1335,9 @@ class _Array:
             shim[name] = _connect(rt, x_shim, ch, dst, dst_ch, pkt_id=pkt, name=name)
         _connect(rt, t["rms"], 0, proj_x, 3, pkt_id=_X_FROM_RMS)
 
-        add(*(f"proj_w{h}_{col}" for col in PROJ_COLS for h in (0, 1)))
-        add(*(f"w{j}_{col}" for col in PROJ_COLS for j in range(4)))
+        groups = range(len(PROJ_MEMS))
+        add(*(f"proj_w{h}_{i}" for i in groups for h in (0, 1)))
+        add(*(f"w{j}_{i}" for i in groups for j in range(4)))
         add("proj_x")
         # y from each group's sending cores to its memtile. The first keeps the
         # packet header, which carries the consumer's id to proj_x.
@@ -1456,11 +1441,11 @@ def _sequence(
     if not dims.swa:
         require(L <= MAX_L_v, "context_len must be below max_l")
 
-    for c in PROJ_COLS:
-        for r in (2, 3, 4, 5):
-            rtps["proj_swa", f"{r}_{c}"][0] = int(dims.swa)
-            rtps["proj_skip", f"{r}_{c}"][0] = int(dims.skip)
-            sync_locks[f"{r}_{c}"].set(1)
+    for i in range(len(PROJ_MEMS)):
+        for j in range(4):
+            rtps["proj_swa", f"proj_{i}_{j}"][0] = int(dims.swa)
+            rtps["proj_skip", f"proj_{i}_{j}"][0] = int(dims.skip)
+            sync_locks[f"proj_{i}_{j}"].set(1)
 
     def write(stage, key, value):
         rtps[key, stage][0] = value
@@ -1516,17 +1501,17 @@ def _sequence(
     recv_y = shim["recv_y"].drain(x_arg, tap=x_arg[:D], wait=True, managed=False)
 
     def move_weights(w):
-        """The engine's _move_weights: a round is 2 legs to each proj column."""
+        """The engine's _move_weights: a round is 2 legs to each proj group."""
         bpr = w.din // q4nx.K_TILE
         # One core's M_TILE output rows, in bf16 elements.
         stripe = bpr * W_BLOCK
-        cores = len(PROJ_COLS) * 4
+        cores = len(PROJ_MEMS) * 4
         for rnd in range(w.dout // q4nx.M_TILE // cores):
             legs = []
-            for ci, col in enumerate(PROJ_COLS):
+            for i in range(len(PROJ_MEMS)):
                 for half in (0, 1):
-                    off = w.offset + (rnd * cores + ci * 4 + 2 * half) * stripe
-                    legs.append(leg(f"proj_w{half}_{col}", proj_arg, off, 2 * stripe))
+                    off = w.offset + (rnd * cores + i * 4 + 2 * half) * stripe
+                    legs.append(leg(f"proj_w{half}_{i}", proj_arg, off, 2 * stripe))
             emit(*legs)
 
     def pli_leg(name):
@@ -1669,7 +1654,7 @@ def decode_layer(
             max_l,
         ],
     )
-    array = _Array(dev, rt, g, kernels)
+    array = _Array(rt, g, kernels)
     shim.update(array.build())
     rtps.update(array.rtps)
     sync_locks.update(array.sync_locks)

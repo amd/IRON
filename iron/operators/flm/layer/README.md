@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.DecodeLayer`
 
-> Note: This operator uses hand-placed and hand-allocated components.
+> Note: This operator uses hand-written DMA programs, packet routes and kernel lock ids.
 > As a result it is less portable and less idiomatic than most of the other operators 
 > in this repository. If your goal is to learn IRON operator programming,
 > other operators are likely better examples.
