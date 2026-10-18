@@ -31,6 +31,8 @@ def pytest_generate_tests(metafunc):
     cases at the current device: read as the test is collected, not as the
     module is imported, so importing it opens no NPU.
     """
+    if "case" not in metafunc.fixturenames:
+        return
     dev = aie_utils.get_current_device()
     metafunc.parametrize(
         "cls,declaration,case",
