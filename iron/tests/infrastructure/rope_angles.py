@@ -61,7 +61,7 @@ def _llama3_scaling(freqs, factor, low, high, original):
     return (1 - smooth) * freqs / factor + smooth * freqs
 
 
-def test_llama3_scaling_is_the_published_formula():
+def test_llama3_scaling_matches_the_formula_in_every_band():
     """Every frequency of Llama 3.2 1B's (head_dim 64, base 500000) matches
     the formula, and all three bands are exercised: the fastest fifteen
     kept, three interpolated, the slowest fourteen divided by 32.

@@ -69,7 +69,10 @@ RENAMES = {
 
 @dataclasses.dataclass(frozen=True)
 class WhisperEncoderConfig(Config):
-    """The audio encoder's shape (``WhisperConfig.encoder``)."""
+    """The audio encoder's shape, built by ``WhisperConfig.encoder`` from
+    the checkpoint's ``encoder_*`` keys; never read from or written to a
+    ``config.json`` by itself.
+    """
 
     hidden_size: int
     num_hidden_layers: int

@@ -30,8 +30,7 @@ import pytest
 from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
-from iron.lm.model import TokenizerJson
-from iron.lm import Checkpoint, Sampler
+from iron.lm import Checkpoint, Sampler, TokenizerJson
 from iron.applications.llama.model import LlamaConfig
 from iron.lm import testing
 from iron.lm.checkpoint import renamed

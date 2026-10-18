@@ -9,7 +9,7 @@ themselves are applications over it, each a package of
 
 from .checkpoint import Checkpoint
 from .config import Config, DecoderConfig, not_json, rope_angles
-from .model import Model, OnHost, Tokenizer, prompt_text
+from .model import Model, OnHost, Tokenizer, TokenizerJson, prompt_text
 from .cli import main
 from .blocks import (
     MLP,
@@ -60,6 +60,7 @@ __all__ = [
     "OnHost",
     "Sampler",
     "Tokenizer",
+    "TokenizerJson",
     "Tower",
     "accuracy",
     "determinism",

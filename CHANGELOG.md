@@ -32,6 +32,8 @@ public API adds its entry under Unreleased.
   its weights first, as in `Norm(w, x)`.
 - `Model.sanitize(w)`, which renames a checkpoint's modules to the names the
   parts read, once at load.
+- `iron.lm.TokenizerJson(path)`, a Hugging Face `tokenizer.json` read
+  through `tokenizers`: the encoding every loaded model's `Tokenizer` wraps.
 - `iron.lm.Tokenizer(encoding, bos)`, a prompt's tokenizer: called on text
   it gives the ids with `bos` first, and `decode` gives text back. A
   loaded model's `tokenizer` is one, over `tokenizer.json` unless the
@@ -84,9 +86,9 @@ public API adds its entry under Unreleased.
   Hugging Face repository's files, a local directory or a repository id
   downloaded once, fitted, compiled and loaded, its tokenizer as
   `model.tokenizer`; `Model.from_checkpoint` is the same, not yet loaded.
-  The model class names its `config` and `hugging_face`; `fit`, `default_config`, `tune_arguments` and
-  `tune_calls` are its classmethods, and `prompt` and `cpu_reference` its
-  methods. Each application's package exports its model class.
+  The model class names its `config` and `hugging_face`; `fit`,
+  `default_config`, `tune_arguments` and `tune_calls` are its classmethods,
+  and `prompt` and `cpu_reference` its methods. Each application's package exports its model class.
 - `lm.main(Model)`, a model's command line, whose positional argument is
   the path or repository id `load` takes.
 - `OnHost.generate`, which draws on the host.
@@ -113,6 +115,9 @@ public API adds its entry under Unreleased.
   a second core per (column, channel) multiplies each normalized row by it.
   Both share `iron.common.WeightedRowwise`, and `F.layer_norm` passes its
   weight to the one `LayerNorm` step, leaving the bias a `RowwiseAdd` step.
+  A weighted `LayerNorm`'s row is at most 4096 elements (8192 before), since
+  the multiplying core holds the weight row beside each line; its tolerance
+  scales the first kernel's atol by the weight.
 - An operand of an `Elementwise` or `Rowwise` operator that gives no `per=`
   is split over every core, `per=(num_aie_columns, num_channels)`.
 - A `field(derive=...)` field is held to its formula: a value given that

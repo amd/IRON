@@ -2267,9 +2267,10 @@ def test_the_reference_runs_the_trace_so_held_state_takes_arithmetic():
     np.testing.assert_array_equal(held.host[:4], x)
 
 
-def test_causal_conv1d_carries_its_tail_from_a_prompt_chunk_to_a_decode_step():
-    """A bounded chunk then one row, each row the taps over it and the rows
-    before it, the first chunk's from zeros, the step's from the chunk's tail.
+def test_causal_conv1d_carries_its_tail_from_a_prompt_chunk_to_decode_steps():
+    """A bounded chunk then two single rows, each row the taps over it and
+    the rows before it, the first chunk's from zeros, each step's from the
+    tail before it.
     """
     K, C, n = 3, 8, 5
     carried, tail = iron.state((K - 1, 64)), iron.state((K - 1, 64))
@@ -2285,13 +2286,18 @@ def test_causal_conv1d_carries_its_tail_from_a_prompt_chunk_to_a_decode_step():
         def body(self, x):
             return F.causal_conv1d(x, taps, state)
 
-    x = (np.arange((C + 1) * 64) % 7).reshape(C + 1, 64).astype(bfloat16)
+    x = (np.arange((C + 2) * 64) % 7).reshape(C + 2, 64).astype(bfloat16)
+    decode = Decode()
     got = np.concatenate(
-        [Prompt().reference(x[:C], rows=n), Decode().reference(x[C:])]
+        [
+            Prompt().reference(x[:C], rows=n),
+            decode.reference(x[C : C + 1]),
+            decode.reference(x[C + 1 :]),
+        ]
     ).astype(np.float32)
     rows = np.concatenate([np.zeros((K - 1, 64)), x[:n], x[C:]])
     t = taps.astype(np.float32)
-    want = [sum(t[k] * rows[i + k] for k in range(K)) for i in range(n + 1)]
+    want = [sum(t[k] * rows[i + k] for k in range(K)) for i in range(n + 2)]
     np.testing.assert_array_equal(got, want)
 
 

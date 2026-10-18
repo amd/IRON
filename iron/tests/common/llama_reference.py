@@ -26,12 +26,12 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.lm.model import TokenizerJson
 from iron.lm import (
     DecoderConfig,
     OnHost as Host,
     Sampler,
     Tokenizer,
+    TokenizerJson,
     accuracy,
     determinism,
     generate_on_host,
