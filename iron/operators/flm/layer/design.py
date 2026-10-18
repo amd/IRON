@@ -103,14 +103,15 @@ PROJ_COLS = tuple(PROJ_MEMS.values())
 
 _CORE, _MEM, _SHIM = AIETileType.CoreTile, AIETileType.MemTile, AIETileType.ShimNOCTile
 # The tile of each stage: its (column, row) where a kernel takes a
-# neighbour's locks by direction, else a tile type for the placer. The gate
-# kernel takes the RMS tile's locks on its left, and each projection core
-# that does not send y the locks of the one below.
+# neighbour's locks by direction, else a tile type for the placer. Each kv
+# kernel takes its qk tile's handshake lock below it, the gate kernel the
+# RMS tile's locks on its left, and each projection core that does not send
+# y the locks of the one below.
 STAGES = {
-    "attn_qk": _CORE,
-    "attn_kv": _CORE,
-    "swa_attn_qk": _CORE,
-    "swa_attn_kv": _CORE,
+    "attn_qk": (2, 2),
+    "attn_kv": (2, 3),
+    "swa_attn_qk": (2, 4),
+    "swa_attn_kv": (2, 5),
     "rms": (3, 2),
     "glu": _CORE,
     "rope": _CORE,
