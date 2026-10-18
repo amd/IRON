@@ -88,7 +88,8 @@ public API adds its entry under Unreleased.
 - `Model.generate(prompt, max_tokens, sampler=None)`: text in gives text
   out, token ids give ids, and a list of `{"role", "content"}` messages is
   rendered by the checkpoint's `chat_template` (`Tokenizer.chat`, with
-  jinja2 from the `models` extra); `sampler=None` is greedy.
+  jinja2 from the `models` extra), each special token it writes its id and
+  the BOS first once; `sampler=None` is greedy.
   `Model.stream` yields the same pieces as they are drawn, and
   `model.stats` holds the last call's `ttft` and `tokens_per_s`.
 - `--prompt TEXT` on a model's command line.

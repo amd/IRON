@@ -38,8 +38,10 @@ from ml_dtypes import bfloat16
 import iron
 from iron.lm import (
     DecoderConfig,
+    Model,
     OnHost as Host,
     Sampler,
+    Tokenizer,
     accuracy,
     determinism,
     generate_on_host,
@@ -49,6 +51,7 @@ from iron.lm.checkpoint import leaves
 from iron.lm.golden import Golden, HuggingFace
 from iron.lm.testing import assert_close
 from iron.applications.llama import Llama
+from iron.applications.llama.model import SPECIAL_TOKENS, tokenizer
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE
@@ -539,9 +542,79 @@ def test_a_generation_s_timings_are_the_model_s_stats(toy):
     assert math.isnan(toy.stats.tokens_per_s)
 
 
+HI = [{"role": "user", "content": "Hi"}]
+
+
 def test_chat_messages_are_rendered_by_the_checkpoint_s_template(toy):
     pytest.importorskip("jinja2")
-    messages = [{"role": "user", "content": "Hi"}]
     text = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
-    assert toy.tokenizer.chat(messages) == text
-    assert toy.generate(messages, 4) == toy.generate(text, 4)
+    assert toy.tokenizer.chat(HI) == toy.tokenizer(text)
+    assert toy.generate(HI, 4) == toy.generate(text, 4)
+
+
+# Llama 3's chat turns, after a BOS the template writes as given.
+LLAMA3_CHAT = (
+    "{% for m in messages %}<|start_header_id|>{{ m['role'] }}<|end_header_id|>"
+    "\n\n{{ m['content'] }}<|eot_id|>{% endfor %}"
+    "{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}"
+)
+
+
+@pytest.mark.parametrize("bos", ["{{ bos_token }}", "<|begin_of_text|>"])
+def test_a_chat_s_special_tokens_are_their_ids_and_its_bos_comes_once(tmp_path, bos):
+    """Llama 3's tiktoken encoding: each ``<|...|>`` the template writes is
+    its special token, and the BOS is first once, whether the template
+    writes it or not.
+    """
+    pytest.importorskip("jinja2")
+    path = tmp_path / "tokenizer.model"
+    ranks = (f"{base64.b64encode(bytes([b])).decode()} {b}\n" for b in range(256))
+    path.write_text("".join(ranks))
+    encoding, S = tokenizer(path), SPECIAL_TOKENS
+    begin, start, end = (
+        S[f"<|{t}|>"] for t in ("begin_of_text", "start_header_id", "end_header_id")
+    )
+    got = Tokenizer(encoding, begin, bos + LLAMA3_CHAT).chat(HI)
+    text = encoding.encode
+    assert got == [
+        begin,
+        start,
+        *text("user"),
+        end,
+        *text("\n\nHi"),
+        S["<|eot_id|>"],
+        start,
+        *text("assistant"),
+        end,
+        *text("\n\n"),
+    ]
+
+
+def test_a_chat_s_added_tokens_are_their_ids_in_a_tokenizer_json(tmp_path):
+    """A ``tokenizer.json``'s added tokens the template writes are their
+    ids, not split into bytes.
+    """
+    pytest.importorskip("jinja2")
+    tokenizers = pytest.importorskip("tokenizers")
+    alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
+    hf = tokenizers.Tokenizer(
+        tokenizers.models.BPE({c: i for i, c in enumerate(alphabet)}, [])
+    )
+    hf.pre_tokenizer = tokenizers.pre_tokenizers.ByteLevel(add_prefix_space=False)
+    hf.decoder = tokenizers.decoders.ByteLevel()
+    specials = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
+    hf.add_special_tokens(specials)
+    hf.save(str(tmp_path / "tokenizer.json"))
+    encoding = Model.open_tokenizer(tmp_path / "tokenizer.json")
+    eot, start, end = (hf.token_to_id(t) for t in specials)
+    got = Tokenizer(encoding, eot, CHATML).chat(HI)
+    text = encoding.encode
+    assert got == [
+        eot,
+        start,
+        *text("user\nHi"),
+        end,
+        *text("\n"),
+        start,
+        *text("assistant\n"),
+    ]

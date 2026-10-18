@@ -16,7 +16,6 @@ on the token the last one drew.
 
 import argparse
 import dataclasses
-import itertools
 import logging
 from collections.abc import Iterator
 from functools import partial
@@ -569,12 +568,15 @@ class CausalLM(Model):
         logits = out.numpy()
         return np.array(logits).reshape(-1)
 
-    def _draw(self, tokens, max_tokens: int, sampler: Sampler) -> Iterator[int]:
+    def _draw(
+        self, tokens, max_tokens: int, sampler: Sampler, each: bool = True
+    ) -> Iterator[int]:
         """Draw ``max_tokens`` after ``tokens`` on the device, each yielded
         as it is drawn (``Model.stream``).
 
         Where the decode step is a full ELF each step starts the next
-        (``device_loop``), and each token is read once its step completes;
+        (``device_loop``): with ``each``, each token is read once its step
+        completes, else the first alone and the rest once the last has;
         elsewhere the host starts each step on the token the last one drew,
         which it reads alone. The draws match ``generate_on_host`` with the
         same seed.
@@ -613,10 +615,16 @@ class CausalLM(Model):
                 started.start(*inputs, **values)
         drawn = []
         if loop:
-            steps = itertools.chain([None], started.steps(max_tokens - 1))
-            for k, _ in enumerate(steps):
-                drawn.append(int(self._decode.read(self.drawn)[n - 1 + k]))
-                yield drawn[-1]
+            read = partial(self._decode.read, self.drawn)
+            drawn.append(int(read()[n - 1]))
+            yield drawn[-1]
+            for k, _ in enumerate(started.steps(max_tokens - 1), start=1):
+                if each:
+                    drawn.append(int(read()[n - 1 + k]))
+                    yield drawn[-1]
+            if not each:
+                drawn += [int(t) for t in read()[n : n - 1 + max_tokens]]
+                yield from drawn[1:]
         else:
             drawn.append(int(carry["token"]))
             yield drawn[-1]

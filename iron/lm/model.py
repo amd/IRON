@@ -67,10 +67,11 @@ class Tokenizer:
     def decode(self, tokens) -> str:
         return self.encoding.decode(list(tokens))
 
-    def chat(self, messages: list[dict]) -> str:
-        """``messages``, each ``{"role": ..., "content": ...}``, as
-        ``chat_template`` renders them (with jinja2, the ``models`` extra),
-        the assistant's turn opened after them; the BOS is ``__call__``'s.
+    def chat(self, messages: list[dict]) -> list[int]:
+        """The ids of ``messages``, each ``{"role": ..., "content": ...}``,
+        as ``chat_template`` renders them (with jinja2, the ``models``
+        extra), the assistant's turn opened after them. The special tokens
+        the text names are their ids, and ``bos`` is first, once.
 
         Raises:
             ValueError: The checkpoint has no chat template.
@@ -85,9 +86,11 @@ class Tokenizer:
             trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"]
         )
         template = env.from_string(self.chat_template)
-        return template.render(
+        text = template.render(
             messages=messages, add_generation_prompt=True, bos_token=""
         )
+        ids = self.encoding.encode(text, allowed_special="all")
+        return ids if ids[:1] == [self.bos] else [self.bos, *ids]
 
 
 class _TokenizerJson:
@@ -101,7 +104,10 @@ class _TokenizerJson:
 
         self._tokenizer = tokenizers.Tokenizer.from_file(str(path))
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, allowed_special="all") -> list[int]:
+        """``text``'s ids, each added token it names its own id, which
+        ``allowed_special`` (tiktoken's keyword) cannot turn off.
+        """
         return self._tokenizer.encode(text, add_special_tokens=False).ids
 
     def decode(self, tokens) -> str:
@@ -343,7 +349,7 @@ class Model(iron.Graph):
         """``stream``'s pieces joined: the text drawn after a text prompt or
         chat messages, else the token ids drawn.
         """
-        pieces = list(self.stream(prompt, max_tokens, sampler, **inputs))
+        pieces = list(self._stream(prompt, max_tokens, sampler, inputs, False))
         return "".join(pieces) if _is_text(prompt) else pieces
 
     def stream(
@@ -366,16 +372,25 @@ class Model(iron.Graph):
         Raises:
             RuntimeError: Text or messages, and no tokenizer.
         """
+        return self._stream(prompt, max_tokens, sampler, inputs, True)
+
+    def _stream(self, prompt, max_tokens, sampler, inputs, each: bool) -> Iterator:
+        """``stream``'s pieces; with ``each`` False, ``generate``'s, which
+        may come all at once, after the last is drawn (``_draw``).
+        """
         text = _is_text(prompt)
         if text and self.tokenizer is None:
             raise RuntimeError(f"{type(self).__name__}: no tokenizer; give token ids")
-        if text and not isinstance(prompt, str):
-            prompt = self.tokenizer.chat(prompt)
-        tokens = self.tokenizer(prompt) if text else prompt
+        if not text:
+            tokens = prompt
+        elif isinstance(prompt, str):
+            tokens = self.tokenizer(prompt)
+        else:
+            tokens = self.tokenizer.chat(prompt)
         sampler = Sampler(temperature=0) if sampler is None else sampler
         drawn, shown = [], ""
         began = first = last = time.perf_counter()
-        for token in self._draw(tokens, max_tokens, sampler, **inputs):
+        for token in self._draw(tokens, max_tokens, sampler, each, **inputs):
             last = time.perf_counter()
             if not drawn:
                 first = last
@@ -465,7 +480,7 @@ class OnHost:
     compiles nothing, and ``generate`` draws on the host.
     """
 
-    def _draw(self, tokens, max_tokens: int, sampler: Sampler) -> Iterator[int]:
+    def _draw(self, tokens, max_tokens: int, sampler: Sampler, each=True):
         history = [int(t) for t in tokens]
         for _ in range(max_tokens):
             history.append(sampler(self.logits(history)))

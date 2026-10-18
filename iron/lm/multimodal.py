@@ -247,6 +247,7 @@ class Multimodal(Model):
         tokens,
         max_tokens: int,
         sampler: Sampler,
+        each: bool = True,
         raw: dict[int, tuple] | None = None,
     ) -> Iterator[int]:
         """A causal text model's draws after ``tokens``, ``raw`` at their
@@ -254,4 +255,4 @@ class Multimodal(Model):
         ``stream(..., raw=)``.
         """
         self.place(tokens, raw or {})
-        return self.text._draw(tokens, max_tokens, sampler)
+        return self.text._draw(tokens, max_tokens, sampler, each)
