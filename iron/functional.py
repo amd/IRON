@@ -41,8 +41,8 @@ def linear(x, weight, bias=None, *, precision=None, **gemv):
     ``precision`` (``Precision``) allows. More are flm.GEMM reading
     ``weight`` column-major at ``precision``, or at ``HIGHEST``, asked for
     here or by the graph's ``precision``, the GEMM whose float32 sums round
-    once, which tiles row counts flm.GEMM does not. ``gemv`` is the GEMV's tunables, for a call the profile cannot
-    tell from another of its shape.
+    once, which tiles row counts flm.GEMM does not. ``gemv`` is the GEMV's
+    tunables, for a call the profile cannot tell from another of its shape.
 
     Raises:
         ValueError: GEMV tunables for more than one row.

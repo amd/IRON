@@ -124,7 +124,7 @@ class VisionTower(Tower):
         v = self.vision_tower
         x = AXPY.step(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
         patch = v.patch_embedder.input_proj.weight
-        h = GEMM.step(x, patch, b_col_maj=True, precision=Precision.HIGHEST)
+        h = F.linear(x, patch, precision=Precision.HIGHEST)
         return self.window_positions(h, n=n, hk=hk, wk=wk, walked=walked)
 
     def window_positions(self, h, *, n, hk, wk, walked):
@@ -216,7 +216,7 @@ class VisionTower(Tower):
         s2 = c.hidden_size / c.pool**4
         x = F.rms_norm(x, x.shape[-1:], eps=c.eps / s2)
         projection = self.embed_vision.embedding_projection.weight
-        return GEMM.step(x, projection, b_col_maj=True, precision=Precision.HIGHEST)
+        return F.linear(x, projection, precision=Precision.HIGHEST)
 
     def body(
         self,

@@ -32,7 +32,6 @@ from iron.tune.autotune import Call
 from iron.lm import Checkpoint, Encoder, rope_angles
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
-from iron.operators.gemm import GEMM
 from iron.operators.mha import MHA
 
 from .audio import AudioTower
@@ -167,9 +166,7 @@ class EmbeddingGemma(Encoder):
         # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         P, tree = c.ple_dim, self.language_model.ple
         projection = tree.per_layer_model_projection.weight[i * P : (i + 1) * P]
-        ple = GEMM.step(
-            step.embeddings, projection, b_col_maj=True, precision=Precision.HIGHEST
-        )
+        ple = F.linear(step.embeddings, projection, precision=Precision.HIGHEST)
         norm = tree.per_layer_projection_norm.weight
         ple = F.rms_norm(ple, ple.shape[-1:], norm, c.eps * c.hidden_size)
         layer = c.layer(i)
@@ -204,9 +201,8 @@ class EmbeddingGemma(Encoder):
     def head(self, x):
         c = self.config
         y = F.linear(x, self.mrl)
-        return F.rms_norm(
-            y.reshape(len(c.mrl_dims), self.unit.size), self.unit.shape, self.unit, 0.0
-        )
+        y = y.reshape(len(c.mrl_dims), self.unit.size)
+        return F.rms_norm(y, y.shape[-1:], self.unit, 0.0)
 
     def encode(self, tokens, dims: int = 768) -> np.ndarray:
         """The unit-length embedding of ``tokens`` truncated to ``dims``, one

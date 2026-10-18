@@ -16,7 +16,6 @@ import iron.functional as F
 from iron import Precision
 from iron.lm import DecoderLayer
 from iron.operators.clamp import Clamp
-from iron.operators.gemm import GEMM
 
 
 @dataclasses.dataclass(frozen=True)
@@ -70,7 +69,7 @@ class Clipped:
         """``x``, already clamped, projected and clamped."""
         w = self.linear
         weight = w.linear.weight if weight is None else weight
-        y = GEMM.step(x, weight, b_col_maj=True, precision=Precision.HIGHEST)
+        y = F.linear(x, weight, precision=Precision.HIGHEST)
         return Clamp.step(y, low=float(w.output_min), high=float(w.output_max))
 
     def __call__(self, x):

@@ -191,10 +191,9 @@ class AudioTower(Tower):
         h = ReLU.step(
             F.rms_norm(h.reshape(T * F1, C1), (C1,), sub.layer1.norm.weight, c.eps)
         )
-        x = GEMM.step(
+        x = F.linear(
             h.reshape(T, F1 * C1),
             sub.input_proj_linear.weight,
-            b_col_maj=True,
             precision=Precision.HIGHEST,
         )
         return x, None
@@ -202,10 +201,10 @@ class AudioTower(Tower):
     def head(self, x):
         c = self.config
         out = self.audio_tower.output_proj
-        x = GEMM.step(x, out.weight, b_col_maj=True, precision=Precision.HIGHEST)
-        x = F.rms_norm(x + out.bias, out.bias.shape, eps=c.eps)
+        x = F.linear(x, out.weight, out.bias, precision=Precision.HIGHEST)
+        x = F.rms_norm(x, x.shape[-1:], eps=c.eps)
         projection = self.embed_audio.embedding_projection.weight
-        return GEMM.step(x, projection, b_col_maj=True, precision=Precision.HIGHEST)
+        return F.linear(x, projection, precision=Precision.HIGHEST)
 
     def body(
         self,
