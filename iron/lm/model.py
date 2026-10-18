@@ -8,6 +8,7 @@ prompt's text to its ids.
 """
 
 import dataclasses
+import datetime
 import functools
 import json
 import logging
@@ -54,7 +55,8 @@ class Tokenizer:
     """Text to a prompt's token ids, ``bos`` first, and token ids back to
     text, over ``encoding``: anything with ``encode`` and ``decode``, as
     ``TokenizerJson`` gives. ``chat_template`` is the checkpoint's
-    own, from its ``tokenizer_config.json``, if it has one.
+    own, from its ``tokenizer_config.json`` or ``chat_template.jinja``, if
+    it has one.
     """
 
     def __init__(self, encoding, bos: int, chat_template: str | None = None):
@@ -71,7 +73,8 @@ class Tokenizer:
         """The ids of ``messages``, each ``{"role": ..., "content": ...}``,
         as ``chat_template`` renders them (with jinja2, the ``models``
         extra), the assistant's turn opened after them. The special tokens
-        the text names are their ids, and ``bos`` is first, once.
+        the text names are their ids; ``bos`` is there only where the
+        template writes it, as transformers' ``apply_chat_template`` has it.
 
         Raises:
             ValueError: The checkpoint has no chat template.
@@ -80,9 +83,7 @@ class Tokenizer:
                 (its ``raise_exception``).
         """
         if self.chat_template is None:
-            raise ValueError(
-                "the checkpoint's tokenizer_config.json has no chat_template"
-            )
+            raise ValueError("the checkpoint has no chat template")
         try:
             from jinja2 import TemplateError
             from jinja2.sandbox import ImmutableSandboxedEnvironment
@@ -101,11 +102,11 @@ class Tokenizer:
         text = template.render(
             messages=messages,
             add_generation_prompt=True,
-            bos_token="",
+            bos_token=self.encoding.token(self.bos),
             raise_exception=raise_exception,
+            strftime_now=lambda f: datetime.datetime.now().strftime(f),
         )
-        ids = self.encoding.encode(text)
-        return ids if ids[:1] == [self.bos] else [self.bos, *ids]
+        return self.encoding.encode(text)
 
 
 class TokenizerJson:
@@ -125,6 +126,10 @@ class TokenizerJson:
 
     def decode(self, tokens) -> str:
         return self._tokenizer.decode(tokens)
+
+    def token(self, id: int) -> str:
+        """The text of token ``id``."""
+        return self._tokenizer.id_to_token(id)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,9 +230,12 @@ class Model(iron.Graph):
         model.checkpoint, model.seed = checkpoint, seed
         if seed is None:
             settings = directory / "tokenizer_config.json"
+            jinja = directory / "chat_template.jinja"
             template = None
             if settings.exists():
                 template = json.loads(settings.read_text()).get("chat_template")
+            if template is None and jinja.exists():
+                template = jinja.read_text()
             encoding = TokenizerJson(directory / "tokenizer.json")
             model.tokenizer = Tokenizer(encoding, model.bos, template)
         return model

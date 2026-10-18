@@ -15,6 +15,7 @@ bf16 tolerance and the argmax exactly.
 """
 
 import dataclasses
+import datetime
 import itertools
 import json
 import math
@@ -204,7 +205,7 @@ class Decoder:
         C = cpu.config.prefill_chunk
         config = dataclasses.replace(cpu.config, max_seq_len=4 * C)
         model, reference = self.host(config, cpu.weights), cpu.golden
-        tokens = np.random.default_rng(3).integers(0, config.vocab_size, 150)
+        tokens = np.random.default_rng(3).integers(0, config.vocab_size, C + 150)
         first = reference.logits(tokens)
         assert_close(model.logits(tokens), first)
         tokens = np.append(tokens, first.argmax())
@@ -559,17 +560,30 @@ HI = [{"role": "user", "content": "Hi"}]
 
 
 def test_chat_messages_are_rendered_by_the_checkpoint_s_template(toy):
+    """ChatML writes no BOS, so the chat has none."""
     pytest.importorskip("jinja2")
     text = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
-    assert toy.tokenizer.chat(HI) == toy.tokenizer(text)
-    assert toy.generate(HI, 4) == toy.generate(text, 4)
+    assert toy.tokenizer.chat(HI) == toy.tokenizer.encoding.encode(text)
+    drawn = toy.generate(toy.tokenizer.chat(HI), 4)
+    assert toy.generate(HI, 4) == toy.tokenizer.decode(drawn)
 
 
-def test_a_chat_template_s_raise_exception_raises_its_message():
+def test_a_chat_template_jinja_file_is_read_and_may_call_strftime_now(cpu, tmp_path):
+    pytest.importorskip("jinja2")
+    _repository(tmp_path, cpu.weights)
+    template = "{{ strftime_now('%Y') }}" + CHATML
+    (tmp_path / "chat_template.jinja").write_text(template)
+    tokenizer = OnHost.load(tmp_path).tokenizer
+    year = datetime.date.today().strftime("%Y")
+    assert tokenizer.decode(tokenizer.chat(HI)).startswith(year + "<|im_start|>")
+
+
+def test_a_chat_template_s_raise_exception_raises_its_message(tmp_path):
     jinja2 = pytest.importorskip("jinja2")
     template = "{{ raise_exception('roles must alternate') }}"
+    encoding = _tokenizer_json(tmp_path / "tokenizer.json")
     with pytest.raises(jinja2.TemplateError, match="roles must alternate"):
-        Tokenizer(None, 0, template).chat(HI)
+        Tokenizer(encoding, 0, template).chat(HI)
 
 
 # Chat turns opened and closed by added tokens, after a BOS the template
@@ -581,11 +595,13 @@ TURNS = (
 )
 
 
-@pytest.mark.parametrize("bos", ["{{ bos_token }}", "<|bos|>"])
-def test_a_chat_s_added_tokens_are_their_ids_and_its_bos_comes_once(tmp_path, bos):
+@pytest.mark.parametrize("bos", ["{{ bos_token }}", "<|bos|>", ""])
+def test_a_chat_s_added_tokens_are_their_ids_and_its_bos_is_the_template_s(
+    tmp_path, bos
+):
     """Each added token the template writes is its id in the
-    ``tokenizer.json``, not split into bytes, and the BOS is first once,
-    whether the template writes it or not.
+    ``tokenizer.json``, not split into bytes, and the BOS is there only
+    where the template writes it.
     """
     pytest.importorskip("jinja2")
     path = tmp_path / "tokenizer.json"
@@ -595,8 +611,7 @@ def test_a_chat_s_added_tokens_are_their_ids_and_its_bos_comes_once(tmp_path, bo
     begin, start, end, eot = (hf.token_to_id(t) for t in specials)
     got = Tokenizer(encoding, begin, bos + TURNS).chat(HI)
     text = encoding.encode
-    assert got == [
-        begin,
+    assert got == [begin] * bool(bos) + [
         start,
         *text("user"),
         end,
