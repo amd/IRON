@@ -37,7 +37,7 @@ from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
-from .base import DecoderConfig, Model, Oracle
+from .base import DecoderConfig, Model
 from .generation import Sampler
 
 logger = logging.getLogger(__name__)
@@ -128,7 +128,7 @@ class Checkpoints:
 
 
 class CausalLM(Model):
-    """A decoder on ``config``'s shape; a subclass gives ``head`` and ``oracle``.
+    """A decoder on ``config``'s shape; a subclass gives ``head``.
 
     The caches are ``(max_seq_len, num_key_value_heads, head_dim)`` so no descriptor
     steps by the context; a prompt chunk is a run of them
@@ -145,7 +145,6 @@ class CausalLM(Model):
     """
 
     layers: list
-    oracle: "type[Oracle]" = Oracle
     # The per-call value bounding a prompt chunk's rows.
     bound: ClassVar[str] = "rows"
 

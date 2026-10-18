@@ -275,7 +275,7 @@ def check_deep_decode(
     """A decode step at ``position``, deep in the caches, against the
     graph's own reference (``Graph.reference``: each operator's
     ``reference()`` on host tensors, the caches as state), for a context
-    the float32 oracle would take too long over, within ``bound`` of its
+    transformers would take too long over, within ``bound`` of its
     KL. Whether both rank the same token first is recorded, not required:
     at a near-tie a step can differ in it at a KL of 0.014.
 

@@ -5,8 +5,7 @@
 (``Checkpoint.tree()``, the tensors by their own names:
 ``model.layers.3.self_attn.q_proj.weight`` is
 ``weights.model.layers[3].self_attn.q_proj.weight``; ``Derived``, those
-computed from them), the float32 ``Oracle`` it is judged by, ``Model``,
-and ``Runner`` and ``main``.
+computed from them), ``Model``, and ``Runner`` and ``main``.
 """
 
 import argparse
@@ -23,7 +22,6 @@ import struct
 import zipfile
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -38,7 +36,7 @@ from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
 from iron.tune.probe import Call
 
-from .blocks import Attention, DecoderLayer, Layer, MLP, Norm
+from .blocks import Attention, DecoderLayer, MLP, Norm
 from .golden import Golden, HuggingFace
 from .generation import (
     SEED,
@@ -148,7 +146,7 @@ class Config:
             kwargs[f.name] = convert(value) if convert else value
         return cls(**kwargs)
 
-    def layer(self, i: int) -> Layer:
+    def layer(self, i: int) -> DecoderLayer:
         """Layer ``i`` as the config describes it."""
         raise NotImplementedError(f"{type(self).__name__} describes no layer")
 
@@ -576,280 +574,6 @@ def _tree(node, sparse: bool) -> Any:
     return SimpleNamespace(**items)
 
 
-class Oracle:
-    """A model's float32 forward pass on the host, the oracle it is judged
-    by: a decoder's (``weights`` given) or EmbeddingGemma 2's own (built
-    from its own weights tree by the subclass, ``weights`` left out).
-
-    It is numpy, not composed from the operators' references, so it catches
-    a wiring mistake the graph's own reference would repeat. A decoder's
-    weights are widened to float32 as the pass reaches them, so beside the
-    checkpoint it holds in float32 one layer's and the embedding, not all
-    of them.
-
-    Args:
-        config: The model's shape; its ``eps`` is every RMS norm's.
-        weights: A decoder's checkpoint tree (``Checkpoint.tree``). Left
-            out, the subclass builds its own state from its own weights
-            tree.
-        decoder: The decoder's module of ``weights``, whose
-            ``embed_tokens`` and ``layers`` are read here, the rest by the
-            subclass; None is ``weights.model``.
-    """
-
-    def __init__(self, config: Config, weights=None, decoder=None):
-        self.config = config
-        self.buffers: dict[str, np.ndarray] = {}
-        if weights is None:
-            return
-        self.weights = weights
-        self.decoder = weights.model if decoder is None else decoder
-        self.embedding = widen(self.decoder.embed_tokens.weight)
-        self.layers = self.decoder.layers
-        self.angles = config.angles()
-        self.long_angles = config.long_angles()
-        # The keys and values of each layer another attends over, by layer.
-        self.shared: dict[int, tuple] = {}
-
-    def layer(self, i: int, angles, w, x, *, ple=None):
-        """Layer ``i`` on ``x``, ``config.layer(i)``'s twin, attending
-        causally; over an earlier layer's keys and values where it shares them
-        (``kv_source``); ``ple`` is its per-layer input.
-        """
-        attend = partial(self.attend, causal=True)
-        return self.config.layer(i).oracle(self, w, x, attend, angles, ple=ple)
-
-    def head(self, x):
-        """The final norm, then the output head (the embedding, if tied)."""
-        x = self.rms_norm(x, widen(self.decoder.norm.weight))
-        if self.config.tie_word_embeddings:
-            return x @ self.embedding.T
-        return x @ widen(self.weights.lm_head.weight).T
-
-    def embed(self, x):
-        return x
-
-    def positions(self, x):
-        """``x``, its rows at positions from 0, with the model's absolute
-        positions placed; unchanged by default.
-        """
-        return x
-
-    def logits(self, tokens, ends=None) -> np.ndarray:
-        """The logits after the last of ``tokens``, run in turns ending at
-        each of ``ends`` (one by default), as cached forward calls are: a
-        turn passing ``long_angles``'s position takes its table.
-        """
-        tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        angles = None if self.angles is None else self.angles[: tokens.size]
-        if self.long_angles is not None:
-            past, table = self.long_angles
-            angles, begin = angles.copy(), 0
-            for end in ends or (tokens.size,):
-                if end > past:
-                    angles[begin:end] = table[begin:end]
-                begin = end
-        x = self.positions(self.embed(self.embedding[tokens]))
-        for i, w in enumerate(self.layers):
-            x = self.layer(i, angles, widen(w), x)
-        return self.head(x[-1])
-
-    def rms_norm(self, x, w=np.float32(1)):
-        """`x` over the RMS of its last axis, times `w`, by `config.eps`."""
-        eps = np.float32(self.config.eps)
-        mean = np.mean(x * x, axis=-1, keepdims=True)
-        return x * np.power(mean + eps, np.float32(-0.5)) * w
-
-    def layer_norm(self, x, w, b):
-        """`x` less its mean over the RMS of that, by `config.eps`, times `w`, plus `b`."""
-        x = x - np.mean(x, axis=-1, keepdims=True)
-        return self.rms_norm(x, w) + b
-
-    def normed(self, x, n):
-        """`x` normed by the norm module `n`: an affine LayerNorm where it holds
-        a bias, else its RMS norm.
-        """
-        if "bias" in vars(n):
-            return self.layer_norm(x, n.weight, n.bias)
-        return self.rms_norm(x, n.weight)
-
-    @staticmethod
-    def linear(x, weight, bias=None):
-        """``x @ weight.T``, plus ``bias`` if given."""
-        y = x @ weight.T
-        return y if bias is None else y + bias
-
-    @staticmethod
-    def silu(x):
-        """SiLU, with the sigmoid as a tanh, which does not overflow."""
-        half = x * np.float32(0.5)
-        return (np.tanh(half) + 1) * half
-
-    @staticmethod
-    def gelu_tanh(x):
-        c = np.float32(np.sqrt(2 / np.pi))
-        return (
-            np.float32(0.5) * x * (1 + np.tanh(c * (x + np.float32(0.044715) * x**3)))
-        )
-
-    @staticmethod
-    def softplus(x):
-        """``log(1 + exp(x))``, which does not overflow."""
-        return np.logaddexp(np.float32(0), x)
-
-    @staticmethod
-    def causal_conv(x, weight, bias):
-        """Each channel of ``x`` ``(n, channels)`` convolved over its rows by
-        its own taps, ``weight`` ``(channels, taps)``, from zero rows before
-        the first, plus ``bias`` if given.
-        """
-        n, taps = x.shape[0], weight.shape[1]
-        padded = np.concatenate([np.zeros((taps - 1, x.shape[1]), np.float32), x])
-        out = np.zeros_like(x, dtype=np.float32)
-        if bias is not None:
-            out += bias
-        for k in range(taps):
-            out += weight[:, k] * padded[k : k + n]
-        return out
-
-    @staticmethod
-    def ssd(x, dt, A, B, C, block: int, state=None) -> tuple[np.ndarray, np.ndarray]:
-        """Mamba-2's chunked scan, as Hugging Face's ``mamba2_chunk_scan``
-        computes it: blocks of ``block`` positions, each a decay-masked
-        product within it and its incoming state's share, the state carried
-        block to block.
-
-        Args:
-            x: ``(n, heads, head_dim)``.
-            dt: ``(n, heads)``, after its softplus.
-            A: ``(heads,)``, negative.
-            B: ``(n, groups, state)``.
-            C: ``(n, groups, state)``.
-            block: The positions a block holds.
-            state: ``(heads, head_dim, state)`` before the first position;
-                None is zero.
-
-        Returns:
-            ``y`` ``(n, heads, head_dim)``, without the skip ``D * x``, and
-            the state after the last position.
-        """
-        n, H, P = x.shape
-        B, C = (np.repeat(t, H // t.shape[1], axis=1) for t in (B, C))
-        N = B.shape[-1]
-        S = np.zeros((H, P, N), np.float32) if state is None else state
-        y = np.empty((n, H, P), np.float32)
-        later = np.tril(np.ones((block, block), bool), -1)[..., None]
-        for start in range(0, n, block):
-            s = slice(start, min(start + block, n))
-            q = s.stop - start
-            xd = x[s] * dt[s][..., None]
-            a = A * dt[s]
-            acs = np.cumsum(a, axis=0)
-            # Each segment's sum from its own cumulative sum, as Hugging Face's
-            # segment_sum: the decay from s to l, for s <= l.
-            segments = np.cumsum(np.where(later[:q, :q], a[:, None], 0), axis=0)
-            segments[~np.tril(np.ones((q, q), bool))] = -np.inf
-            mask = np.exp(segments)
-            G = np.einsum("lhn,shn->lsh", C[s], B[s])
-            y[s] = np.einsum("lsh,shp->lhp", G * mask, xd)
-            y[s] += np.einsum("lhn,hpn->lhp", C[s], S) * np.exp(acs)[..., None]
-            decay = np.exp(acs[-1] - acs)
-            S = S * np.exp(acs[-1])[:, None, None] + np.einsum(
-                "lhn,lhp->hpn", B[s] * decay[..., None], xd
-            )
-        return y, S
-
-    @staticmethod
-    def rotate(x, angles):
-        """`x` `(n, heads, D)` under RoPE, one table (`angles`, a row a
-        position) or, a list of tables, `D` split evenly across them
-        (Gemma's partial multi-band rotation), each part its own table.
-        """
-        if isinstance(angles, list):
-            parts = np.split(x, len(angles), axis=-1)
-            return np.concatenate(
-                [Oracle.rotate(p, a) for p, a in zip(parts, angles)], axis=-1
-            )
-        cos, sin = angles[:, None, ::2], angles[:, None, 1::2]
-        x1, x2 = np.split(x, 2, axis=-1)
-        return np.concatenate([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1)
-
-    def buffer(self, name: str, shape: tuple[int, ...]) -> np.ndarray:
-        """A float32 array of `shape` that `name` reuses from call to call.
-
-        A temporary past glibc's mmap threshold is mapped afresh and faulted
-        in page by page, which under memory pressure costs more than the
-        arithmetic.
-
-        Args:
-            name: What the array holds; one array per name.
-            shape: Its shape this time.
-
-        Returns:
-            A view of the array, its contents undefined.
-        """
-        size = math.prod(shape)
-        held = self.buffers.get(name)
-        if held is None or held.size < size:
-            # Headroom, so a history growing a token a step seldom reallocates.
-            held = np.empty(
-                size if held is None else max(size, held.size * 5 // 4), np.float32
-            )
-            self.buffers[name] = held
-        return held[:size].reshape(shape)
-
-    def attend(
-        self,
-        q,
-        k,
-        v,
-        *,
-        causal: bool = False,
-        window: int | None = None,
-        scale: float | None = None,
-    ):
-        """Attention of `q` `(n, H, D)` over `k`, `v` `(n, G, D)`, each KV
-        group's rows repeated to its heads, the logits scaled by `scale`
-        (`1 / sqrt(D)` if None): bidirectional by default, with `window` a
-        key at most that many positions away; `causal` masks a key past its
-        query and reuses one buffer for the growing decode length.
-        """
-        n, H, D = q.shape
-        k, v = (np.repeat(a, H // a.shape[1], axis=1) for a in (k, v))
-        if causal:
-            # Batched matmuls, not einsum: BLAS is 10x faster at 3k.
-            p = np.matmul(
-                q.transpose(1, 0, 2),
-                k.transpose(1, 2, 0),
-                out=self.buffer("scores", (H, n, n)),
-            )
-            p *= np.float32(1 / np.sqrt(D) if scale is None else scale)
-            p += np.triu(np.full((n, n), -np.inf, dtype=np.float32), k=1)
-            if window is not None:
-                p += np.tril(np.full((n, n), -np.inf, dtype=np.float32), k=-window - 1)
-        else:
-            p = q.transpose(1, 0, 2) @ k.transpose(1, 2, 0)
-            p *= np.float32(1 / np.sqrt(D) if scale is None else scale)
-            if window is not None:
-                pos = np.arange(n)
-                p[:, np.abs(pos[:, None] - pos[None, :]) > window] = -np.inf
-        p -= p.max(axis=-1, keepdims=True)
-        np.exp(p, out=p)
-        p /= p.sum(axis=-1, keepdims=True)
-        return (p @ v.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(n, H * D)
-
-
-def widen(value):
-    """``value``, an array or a weight tree of namespaces and lists, in float32."""
-    if isinstance(value, np.ndarray):
-        return value.astype(np.float32)
-    if isinstance(value, list):
-        return [widen(v) for v in value]
-    if isinstance(value, SimpleNamespace):
-        return SimpleNamespace(**{k: widen(v) for k, v in vars(value).items()})
-    return value
-
-
 class Model(iron.Graph):
     """A model's graph, every version ``shapes()`` names compiled and
     loaded by ``load()`` before the first call, so the arena is made once:
@@ -967,8 +691,8 @@ class Runner:
     """A checkpoint, its tokenizer and ``config``, and the models on them.
 
     A subclass names its ``config`` (a ``Config`` class read from the
-    checkpoint's ``config.json``), ``model`` (the ``CausalLM``, whose
-    ``oracle`` it is checked against), ``open_tokenizer`` and ``bos``, and
+    checkpoint's ``config.json``), ``model`` (the ``CausalLM``),
+    ``open_tokenizer`` and ``bos``, and
     any ``sizes`` ``--size`` picks among; ``tune_arguments``,
     ``tune_calls``, ``calibration_triangle`` and ``tables`` are what
     ``iron.lm.tune`` measures it by. Given a ``seed``, the weights are drawn

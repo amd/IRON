@@ -14,13 +14,11 @@ from .base import (
     Derived,
     Model,
     OnHost,
-    Oracle,
     Runner,
     Tokenizer,
     main,
     prompt_text,
     rope_angles,
-    widen,
 )
 from .blocks import (
     MLP,
@@ -31,7 +29,6 @@ from .blocks import (
     CrossDecoderLayer,
     DecoderLayer,
     ImagePatches,
-    Layer,
     LogMel,
     MaxPool2d,
     Norm,
@@ -39,7 +36,7 @@ from .blocks import (
 )
 from .causal import CausalLM, Checkpoints, DecodeStep
 from .encoder import EncodeStep, Encoder, Tower
-from .encoder_decoder import EncoderDecoder, EncoderDecoderOracle
+from .encoder_decoder import EncoderDecoder
 from .golden import Golden, HuggingFace
 from .generation import Sampler, accuracy, determinism, generate_on_host
 from .multimodal import Multimodal
@@ -63,17 +60,14 @@ __all__ = [
     "EncodeStep",
     "Encoder",
     "EncoderDecoder",
-    "EncoderDecoderOracle",
     "Golden",
     "HuggingFace",
     "ImagePatches",
-    "Layer",
     "LogMel",
     "MaxPool2d",
     "Model",
     "Multimodal",
     "OnHost",
-    "Oracle",
     "Runner",
     "Sampler",
     "Tokenizer",
@@ -85,5 +79,4 @@ __all__ = [
     "main",
     "prompt_text",
     "rope_angles",
-    "widen",
 ]

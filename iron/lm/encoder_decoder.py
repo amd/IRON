@@ -20,14 +20,14 @@ from iron import Carried
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 
-from .base import DecoderConfig, Oracle, widen
+from .base import DecoderConfig
 from .causal import CausalLM, DecodeStep
 from .encoder import Encoder, Tower
 
 
 class EncoderDecoder(CausalLM):
     """A decoder on ``config``'s shape over the output of ``encoder``; a
-    subclass gives ``head`` and ``oracle`` as a ``CausalLM``'s does.
+    subclass gives ``head`` as a ``CausalLM``'s does.
 
     Its versions are the decoder's own and the encode version, which takes
     the encoder's input and per-call values, each named with ``encoder_``
@@ -44,8 +44,6 @@ class EncoderDecoder(CausalLM):
         TypeError: The encoder takes other than one input.
         ValueError: The encoder's rows are fewer than a prompt chunk's.
     """
-
-    oracle: "type[EncoderDecoderOracle]"
 
     def __init__(self, config: DecoderConfig, weights, encoder: Encoder, decoder=None):
         super().__init__(config, weights, decoder)
@@ -222,34 +220,3 @@ class EncoderDecoder(CausalLM):
         if self._source is None:
             raise RuntimeError(f"{type(self).__name__}: encode() first")
         return dict(source=self._source)
-
-
-class EncoderDecoderOracle(Oracle):
-    """An ``EncoderDecoder``'s float32 forward pass on the host: ``encode``
-    projects an encoder's output into each layer's keys and values once,
-    which every ``logits`` after attends over.
-    """
-
-    def encode(self, memory) -> None:
-        """Hold each layer's keys and values of the encoder's output
-        ``memory`` ``(rows, width)``.
-        """
-        memory = np.asarray(memory, np.float32)
-        self.memory = [
-            self.config.layer(i).cross_kv_oracle(self, widen(w), memory)
-            for i, w in enumerate(self.layers)
-        ]
-
-    def layer(self, i: int, angles, w, x):
-        """Layer ``i`` on ``x``, ``config.layer(i)``'s twin, attending
-        causally and over the encoder's output.
-        """
-        keys, values = self.memory[i]
-        return self.config.layer(i).oracle(
-            self,
-            w,
-            x,
-            partial(self.attend, causal=True),
-            angles,
-            cross=partial(self.attend, k=keys, v=values),
-        )

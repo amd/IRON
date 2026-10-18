@@ -4,7 +4,7 @@
 
 """SmolVLM's graphs against transformers' own SmolVLM in float32 over the
 same random weights, its outputs recorded in ``goldens/``, device-free (no
-checkpoint, no NPU), at a toy shape: the vision tower on ``Layer``'s
+checkpoint, no NPU), at a toy shape: the vision tower on ``DecoderLayer``'s
 SigLIP names, and the tower and the text model as one
 ``iron.lm.Multimodal``, its soft tokens placed across a chunk boundary.
 """

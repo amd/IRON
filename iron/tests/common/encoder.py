@@ -4,7 +4,7 @@
 """``iron.lm``'s ``Encoder`` and ``Tower``, device-free: a call's inputs, the
 bounded gather a body traces, each kind's reference, the operators' own,
 against numpy attention over the valid rows, and the default layer, its
-config's ``Layer`` attending both ways.
+config's ``DecoderLayer`` attending both ways.
 """
 
 import dataclasses
