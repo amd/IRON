@@ -17,7 +17,7 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.declare import Profile
+from iron.common.declare import Precision, Profile
 from iron.common.testing import vectors
 from iron.operators import GEMM, GEMV, MHA, ElementwiseAdd, ReLU, RoPE, Sample, SiLU
 from iron.operators import Softmax
@@ -159,7 +159,7 @@ def test_gemm_searches_tile_k_only_where_c_accumulates_in_f32(npu2):
         "tile_n",
         "placement",
     }
-    exact = GEMM(M=2048, K=2048, N=2048, prio_accuracy=True).resolved(npu2)
+    exact = GEMM(M=2048, K=2048, N=2048, precision=Precision.HIGHEST).resolved(npu2)
     assert set(exact._domains(npu2)) == {
         "num_aie_columns",
         "tile_m",
@@ -172,9 +172,7 @@ def test_gemm_searches_tile_k_only_where_c_accumulates_in_f32(npu2):
 @pytest.mark.parametrize("name", ["npu1", "npu2"])
 def test_gemm_tiles_are_whole_kernel_blocks(name):
     dev = from_name(name, n_cols=4 if name == "npu1" else 8)
-    gemm = GEMM(
-        M=2048, K=2048, N=2048, prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False
-    ).resolved(dev)
+    gemm = GEMM(M=2048, K=2048, N=2048, precision=Precision.HIGHEST).resolved(dev)
     # aie2's kernel blocks m by four of its r = 4, aie2p's by two.
     assert gemm.mac_block(dev)[0] == (16 if name == "npu1" else 8)
     domains = gemm._domains(dev)

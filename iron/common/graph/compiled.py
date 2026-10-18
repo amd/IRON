@@ -29,6 +29,7 @@ from ml_dtypes import bfloat16
 from ..declare import Operator
 from ..declare.operator import graph_tracer
 from ..declare.value import Extent, ExtentWord
+from ..declare.precision import Precision
 from ..declare.profile import Profile
 from ..image.allocator import ArenaPlan
 from ..image.artifacts import Parameter
@@ -165,7 +166,9 @@ class Graph:
     the instance holds, named by attribute path (``self.layers[3].q`` is
     ``layers.3.q``). ``profile`` is a ``Profile`` or a directory of
     ``<device>.json`` ones, the one way a step's tunables come from one:
-    ``compile(profile=)`` overrides it for one compile.
+    ``compile(profile=)`` overrides it for one compile. ``precision`` is the
+    most any step may round (``Precision``): a step that would round more
+    is raised to it, and ``compile(precision=)`` overrides it in turn.
 
     Called in another graph's body, on its handles and per-call values, a
     graph's body traces into that graph: its steps are the caller's, its
@@ -174,6 +177,7 @@ class Graph:
     """
 
     profile: Profile | Path | None = None
+    precision: Precision | None = None
 
     def body(self, *inputs: Any, **values: Any) -> Any:
         raise NotImplementedError(f"{type(self).__name__} defines no body()")
@@ -304,7 +308,9 @@ class Graph:
             inputs.append(Handle(shape, dtype, name, "input"))
             args.append(inputs[-1])
         values = [PerCall(n, kind, dtype) for n, (kind, dtype) in self._values.items()]
-        with Tracer(self.name, self._profile(), self.held(), self._inputs) as tracer:
+        with Tracer(
+            self.name, self._profile(), self.held(), self._inputs, self.precision
+        ) as tracer:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
         outputs = self._outputs(items, tracer)
@@ -389,6 +395,7 @@ class Graph:
         *,
         dev=None,
         profile: Profile | Path | None = None,
+        precision: Precision | str | None = None,
         full_elf: bool | None = None,
         check: bool = False,
         verbose=False,
@@ -407,6 +414,8 @@ class Graph:
                 else the current one.
             profile: The profile to trace with, bound for this compile
                 alone; else ``self.profile``.
+            precision: The most any step may round, bound for this
+                compile alone; else ``self.precision``.
             full_elf: One full ELF, else an xclbin per step; ``None``
                 derives it (``iron.common.image.packaging``).
             check: Run each step on its own dispatch and hold its outputs to
@@ -427,9 +436,11 @@ class Graph:
             if dev is not None
             else contextlib.nullcontext()
         ):
-            previous_profile = self.profile
+            previous = self.profile, self.precision
             if profile is not None:
                 self.profile = profile
+            if precision is not None:
+                self.precision = Precision(precision)
             try:
                 traced = self.trace(**shapes)
                 if fold:
@@ -494,8 +505,7 @@ class Graph:
                 self._versions[signature] = version
                 return version
             finally:
-                if profile is not None:
-                    self.profile = previous_profile
+                self.profile, self.precision = previous
 
     def _given(self, tensors) -> dict[str, Any]:
         if len(tensors) > len(self._inputs):

@@ -14,6 +14,7 @@ from .shape import Select
 from .operand import In, InOut, Operand, Out
 from .chain import Chain, Link
 from .operator import Built, Operator
+from .precision import Precision
 from .profile import Profile
 from .rtp import Rtp
 from .value import DispatchTime, Extent, Value
@@ -31,6 +32,7 @@ __all__ = [
     "Operand",
     "Operator",
     "Out",
+    "Precision",
     "Profile",
     "Rtp",
     "Unresolvable",

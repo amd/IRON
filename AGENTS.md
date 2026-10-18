@@ -216,7 +216,7 @@ reuse lint
      `sequence(rt)` receives; the derived sequence, each operand's
      `transfers()`, a pinned lane's shim DMA tasks)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
-     `compile(dev=, full_elf=, coresident=, profile=)`
+     `compile(dev=, full_elf=, coresident=, profile=, precision=)`
    - `image/`: what a graph lowers onto, all of it internal:
      `OperatorSequence(traced)`, what a `TracedGraph` becomes (its steps
      as `SequenceStep(op, buffers)`, each buffer a `BufferRef(root, start,
@@ -372,9 +372,9 @@ Common operator parameters and their constraints:
 **GEMM-specific**:
 
 - `tile_m`, `tile_k`, `tile_n`: Matrix tile dimensions (typically 64)
-- Minimum tile sizes depend on `emulate_bf16_mmul_with_bfp16` flag:
-  - `True` (default): 8×8×8 minimum
-  - `False`: 4×8×8 minimum
+- Minimum tile sizes depend on `precision` (`iron.Precision`):
+  - `MEDIUM` (default, bfp16 macs): 8×8×8 minimum
+  - `HIGH` and `HIGHEST`: 4×8×8 minimum
 - Matrix dimensions must be multiples of `tile × num_rows/columns`
   - `M % (tile_m * n_aie_rows) == 0`, the rows the bound device's
     `core_rows` names (4 on NPU1 and NPU2)
@@ -678,7 +678,9 @@ and `verbose=True` prints why. `check=True` debugs a graph a step at a
 time: each step is its own dispatch, held to its reference on the inputs
 the NPU gave it by its `tolerance()`, and the first step outside it raises,
 naming the step and its buffers. `coresident=AdjacentPacking()` packs
-designs into shared device configurations. It links the image (`version.image`) and stops
+designs into shared device configurations. `precision=` (`iron.Precision`,
+torch's matmul precision levels) is the most any step may round: a step
+whose own `precision` rounds more is raised to it. It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
 `iron/applications/llama/model.py` is the worked example

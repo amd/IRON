@@ -16,6 +16,7 @@ A handle's own ``+`` and ``*`` are elementwise steps too (``Handle``).
 
 import math
 
+from iron.common import Precision
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.gelu import GELU
@@ -27,7 +28,7 @@ from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
 # Each product's float32 sum rounded once.
-ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
+ACCURATE = dict(precision=Precision.HIGHEST)
 # The epsilon mlir-aie's layer_norm kernel fixes.
 LAYER_NORM_EPS = 1e-5
 
@@ -40,7 +41,7 @@ def linear(
     accurate: bool = False,
     k_tile=None,
     tile_n=None,
-    emulate_bf16_mmul_with_bfp16=None,
+    precision=None,
     **gemv,
 ):
     """``x @ weight.T``, plus ``bias`` on every row if given.
@@ -48,7 +49,7 @@ def linear(
     One row is a GEMV, which ``accurate`` leaves as it is; more are flm.GEMM
     reading ``weight`` column-major, or with ``accurate`` the GEMM whose
     float32 sums round once (``ACCURATE``). ``k_tile``, ``tile_n`` and
-    ``emulate_bf16_mmul_with_bfp16`` are flm.GEMM's tunables and ``gemv``
+    ``precision`` are flm.GEMM's tunables and ``gemv``
     the GEMV's, for a call the profile cannot tell from another of its shape.
 
     Raises:
@@ -60,7 +61,7 @@ def linear(
         for k, v in dict(
             k_tile=k_tile,
             tile_n=tile_n,
-            emulate_bf16_mmul_with_bfp16=emulate_bf16_mmul_with_bfp16,
+            precision=precision,
         ).items()
         if v is not None
     }

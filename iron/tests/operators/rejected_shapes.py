@@ -22,7 +22,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common import Chain, Unresolvable
+from iron.common import Chain, Precision, Unresolvable
 from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -403,24 +403,24 @@ def test_a_streamed_softmax_core_with_more_rows_than_it_unrolls_is_refused():
 
 
 @pytest.mark.parametrize(
-    "device,emulate",
-    [(("npu1", 4), None), (("npu2", 8), None), (("npu2", 8), False)],
+    "device,precision",
+    [(("npu1", 4), None), (("npu2", 8), None), (("npu2", 8), Precision.HIGH)],
 )
-def test_flm_gemm_reads_b_as_stored_in_bf16(device, emulate):
-    op = FLMGEMM(
-        M=256, K=512, N=256, b_col_maj=True, emulate_bf16_mmul_with_bfp16=emulate
-    ).resolved(from_name(device[0], n_cols=device[1]))
+def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision):
+    op = FLMGEMM(M=256, K=512, N=256, b_col_maj=True, precision=precision).resolved(
+        from_name(device[0], n_cols=device[1])
+    )
     assert op.B.shape == (256, 512) and op.b_dtype is bfloat16
     assert not op.bfp16_b
     with pytest.raises(ValueError, match="reads B as stored"):
         op.pack_B(None)
 
 
-def test_flm_gemm_bfp16_macs_are_aie2p_only():
-    with pytest.raises(ValueError, match="bfp16 macs are AIE2P's"):
-        FLMGEMM(M=256, K=512, N=256, emulate_bf16_mmul_with_bfp16=True).resolved(
-            from_name("npu1", n_cols=4)
-        )
+def test_flm_gemm_at_medium_takes_bf16_macs_on_aie2():
+    op = FLMGEMM(M=256, K=512, N=256, precision=Precision.MEDIUM).resolved(
+        from_name("npu1", n_cols=4)
+    )
+    assert not op.emulate_bf16_mmul_with_bfp16 and not op.bfp16_b
 
 
 def test_a_finish_input_past_the_cores_input_channels_is_refused():
@@ -543,18 +543,48 @@ def test_gemm_on_columns_that_do_not_divide_its_rows_is_refused(device, n_cols):
 
 @pytest.mark.usefixtures("npu2")
 @pytest.mark.parametrize(
-    "tile_m, tile_k, tile_n, emulate, expectation",
+    "tile_m, tile_k, tile_n, precision, expectation",
     [
-        (8, 64, 64, True, pytest.raises(ValueError, match="tile_m .* multiple of 16")),
-        (16, 64, 64, True, contextlib.nullcontext()),
-        (64, 64, 64, True, contextlib.nullcontext()),
-        (8, 64, 64, False, contextlib.nullcontext()),
-        (4, 64, 64, False, pytest.raises(ValueError, match="tile_m .* multiple of 8")),
-        (64, 64, 8, False, pytest.raises(ValueError, match="tile_n .* multiple of 16")),
-        (64, 64, 8, True, pytest.raises(ValueError, match="tile_n .* multiple of 16")),
+        (
+            8,
+            64,
+            64,
+            Precision.MEDIUM,
+            pytest.raises(ValueError, match="tile_m .* multiple of 16"),
+        ),
+        (16, 64, 64, Precision.MEDIUM, contextlib.nullcontext()),
+        (64, 64, 64, Precision.MEDIUM, contextlib.nullcontext()),
+        (8, 64, 64, Precision.HIGH, contextlib.nullcontext()),
+        (
+            4,
+            64,
+            64,
+            Precision.HIGH,
+            pytest.raises(ValueError, match="tile_m .* multiple of 8"),
+        ),
+        (
+            64,
+            64,
+            8,
+            Precision.HIGH,
+            pytest.raises(ValueError, match="tile_n .* multiple of 16"),
+        ),
+        (
+            64,
+            64,
+            8,
+            Precision.MEDIUM,
+            pytest.raises(ValueError, match="tile_n .* multiple of 16"),
+        ),
         # tile_k=4 still divides K=512 evenly (the outer K % tile_k check),
         # so this exercises the s-divisibility check rather than that one.
-        (64, 4, 64, True, pytest.raises(ValueError, match="tile_k .* multiple of 8")),
+        (
+            64,
+            4,
+            64,
+            Precision.MEDIUM,
+            pytest.raises(ValueError, match="tile_k .* multiple of 8"),
+        ),
     ],
     ids=[
         "m8_emulated",
@@ -568,14 +598,14 @@ def test_gemm_on_columns_that_do_not_divide_its_rows_is_refused(device, n_cols):
     ],
 )
 def test_gemm_tile_the_kernel_cannot_build_is_rejected(
-    tile_m, tile_k, tile_n, emulate, expectation
+    tile_m, tile_k, tile_n, precision, expectation
 ):
     """GEMM must reject tile sizes the kernel cannot build.
 
     aie_kernels/linalg/mm_aie2p.h's matmul_vectorized_*x*x*_bf16_* wrappers
     static_assert m % (2*r) == 0, k % s == 0 and n % (2*t) == 0 for the (r,
-    s, t) triple selected by emulate_bf16_mmul_with_bfp16 (r=t=8 when
-    enabled, the default; r=4, t=8 otherwise). A tile size that meets a
+    s, t) triple MEDIUM's bfp16 macs select (r=t=8, the default; r=4, t=8
+    otherwise). A tile size that meets a
     lower bound without dividing evenly would construct without error and
     then fail that static_assert at kernel compile time, from a file this
     class never names.
@@ -588,56 +618,58 @@ def test_gemm_tile_the_kernel_cannot_build_is_rejected(
             tile_m=tile_m,
             tile_k=tile_k,
             tile_n=tile_n,
-            emulate_bf16_mmul_with_bfp16=emulate,
+            precision=precision,
         )
 
 
 @pytest.mark.parametrize(
-    "device, emulate, M, tile_m",
+    "device, precision, M, tile_m",
     [
-        ("npu2", True, 2048, 64),
-        ("npu2", True, 128, 32),
-        ("npu2", True, 64, 16),
-        ("npu2", False, 32, 8),
-        ("npu1", False, 64, 16),
+        ("npu2", Precision.MEDIUM, 2048, 64),
+        ("npu2", Precision.MEDIUM, 128, 32),
+        ("npu2", Precision.MEDIUM, 64, 16),
+        ("npu2", Precision.HIGH, 32, 8),
+        ("npu1", Precision.HIGH, 64, 16),
     ],
 )
 def test_an_open_tile_m_is_the_widest_that_splits_m(
-    device, emulate, M, tile_m, request
+    device, precision, M, tile_m, request
 ):
     """Four rows of cores each take tile_m of M's rows, so a short M takes a
     short tile rather than padding to 256 rows: down to the kernel's m block,
     16 under emulation (2 r, r=8) and on aie2 (4 r, r=4), else 8.
     """
     dev = request.getfixturevalue(device)
-    op = GEMM(M=M, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
+    op = GEMM(M=M, K=64, N=512, precision=precision)
     assert op.resolved(dev).tile_m == tile_m
 
 
 @pytest.mark.parametrize(
-    "device, emulate, M, rows, tile_m",
+    "device, precision, M, rows, tile_m",
     [
-        ("npu2", True, 32, 2, 16),
-        ("npu2", False, 16, 2, 8),
-        ("npu1", False, 32, 2, 16),
-        ("npu1", False, 16, 1, 16),
+        ("npu2", Precision.MEDIUM, 32, 2, 16),
+        ("npu2", Precision.HIGH, 16, 2, 8),
+        ("npu1", Precision.HIGH, 32, 2, 16),
+        ("npu1", Precision.HIGH, 16, 1, 16),
     ],
 )
-def test_a_short_m_takes_fewer_rows_of_cores(device, emulate, M, rows, tile_m):
+def test_a_short_m_takes_fewer_rows_of_cores(device, precision, M, rows, tile_m):
     """An M shorter than every row of cores at the kernel's m block is split
     over half as many, down to one.
     """
-    op = GEMM(M=M, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
+    op = GEMM(M=M, K=64, N=512, precision=precision)
     resolved = op.resolved(from_name(device))
     assert (resolved.n_aie_rows, resolved.tile_m) == (rows, tile_m)
 
 
-@pytest.mark.parametrize("device, emulate", [("npu2", True), ("npu1", False)])
-def test_an_m_no_tile_splits_is_rejected(device, emulate, request):
+@pytest.mark.parametrize(
+    "device, precision", [("npu2", Precision.MEDIUM), ("npu1", Precision.HIGH)]
+)
+def test_an_m_no_tile_splits_is_rejected(device, precision, request):
     """Refused when constructed for the bound device, which has no such tile."""
     request.getfixturevalue(device)
     with pytest.raises(ValueError, match=r"M \(8\) must be a multiple of 64"):
-        GEMM(M=8, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
+        GEMM(M=8, K=64, N=512, precision=precision)
 
 
 @pytest.mark.parametrize(

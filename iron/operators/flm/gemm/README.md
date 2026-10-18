@@ -215,8 +215,8 @@ reads each `(tile_n, k_tile)` block as `tile_n` runs of `k_tile` elements
 (1 KB each), the memtile hands the core one 8-deep k panel at a time, and the
 kernel transposes it (`fused_mm(..., b_col_maj=True)`). The short runs are
 between the memtile and the core, not in DDR. On NPU2 the core converts the
-bf16 B to bfp16 for the bfp16 macs (`emulate_bf16_mmul_with_bfp16=True`, the
-default), so its arithmetic is the packed path's; `False` multiplies in bf16.
+bf16 B to bfp16 for the bfp16 macs (`precision="medium"`, the default), so
+its arithmetic is the packed path's; `"high"` multiplies in bf16.
 
 At Llama 3.2 1B's prompt projections (M = 2048, `epilogue_modes=("none",)`)
 on Strix, the times below are the fastest of 8 interleaved rounds, each the
@@ -328,11 +328,9 @@ direction, so the error accumulates over the K reduction instead of cancelling:
 ~41x more error for no measured speed difference. Use `floor` only to reproduce
 the shipped overlay (see [below](#matching-the-shipped-fastflowlm-overlay)).
 
-On NPU2 this operator and `iron.operators.GEMM` in its comparable mode
-(`emulate=True, prio_accuracy=True`) are numerically **indistinguishable** —
-identical mean error, signed bias and maximum, at both `tile_n` values. Do not
-compare against `iron.operators.GEMM`'s own test tolerances, though: those assert
-on its exact `r=4` path, which this operator does not offer.
+Do not hold this operator to `iron.operators.GEMM`'s test tolerances: those
+assert on its `r=4` path at `precision="highest"`, which this operator does
+not offer.
 
 ## Choosing `tile_n`
 

@@ -178,7 +178,6 @@ _CASES = [
             causal=False,
             window=512,
             num_pipelines=8,
-            emulate_bf16_mmul_with_bfp16=False,
         )
     ),
     # Its global layer: P*V split over two cores.
@@ -190,7 +189,6 @@ _CASES = [
             d=512,
             causal=False,
             num_pipelines=8,
-            emulate_bf16_mmul_with_bfp16=False,
         ),
         lower=True,
     ),
@@ -238,8 +236,6 @@ class MHA(Operator):
     B_q: int = Auto(domain=BLOCK_SIZES)
     B_kv: int = Auto(repr=False, derived=True)
     num_pipelines: int = Auto(default=1, domain=Width())
-    # bfp16 shares an exponent over 8 keys of P*V, and the softmax bounds the time.
-    emulate_bf16_mmul_with_bfp16: bool = Param(default=False, repr=False)
     # Filled by resolve.
     q_shims: int = Auto(repr=False, derived=True)
     join_rows: int = Auto(repr=False, derived=True)
@@ -392,7 +388,6 @@ class MHA(Operator):
             mac = kernels.linalg.mha.mac_dims(
                 pv=pv,
                 device=self.dev,
-                emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
             )
             for name, m in zip(dims, mac):
                 if vars(self)[name] % m:
@@ -573,7 +568,6 @@ class MHA(Operator):
         window: int | None
         scale: float
         num_pipelines: int
-        emulate_bf16_mmul_with_bfp16: bool
         kv_lanes: int
         width: int
         pv_cores: int
@@ -626,13 +620,14 @@ class MHA(Operator):
             acc_ty = np.ndarray[(B_q, pv_width), np.dtype[np.float32]]
             joined_ty = self.Q.obj_type  # (n_join * B_q, d)
 
-            # The rest bind from mha.cc's object: declared apart, each would redefine it.
+            # The rest bind from mha.cc's object: declared apart, each would
+            # redefine it. Never on bfp16 macs: bfp16 shares an exponent over 8
+            # keys of P*V, and the softmax bounds the time.
             matmul_QK = kernels.linalg.mha(
                 B_q,
                 d,
                 B_kv,
                 b_col_maj=True,
-                emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
                 accurate_exp2=accurate_exp2,
                 causal=self.causal,
                 window=self.window or 0,
@@ -670,7 +665,6 @@ class MHA(Operator):
                     pv_width,
                     B_kv,
                     b_col_maj=True,
-                    emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
                     causal=self.causal,
                     window=self.window or 0,
                 ).object_file

@@ -39,6 +39,7 @@ from .declaration import Declaration
 from .domain import Domain, Width
 from .field import Auto, Param, ParamSpec, Unresolvable
 from .operand import In, Operand
+from .precision import Precision
 from .rtp import Rtp
 from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
 
@@ -842,7 +843,9 @@ class Operator:
             domain = self.declaration.domains.get(
                 name, Width() if name in widths else None
             )
-            if name in self.pinned or domain is None:
+            # A precision is the model's to choose (Graph.precision), not a
+            # step's timing: its output is judged against the model's own.
+            if name in self.pinned or domain is None or domain is Precision:
                 continue
             when = domain.when if isinstance(domain, Domain) else None
             if when is not None and not when(self, dev):

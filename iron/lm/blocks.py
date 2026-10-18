@@ -20,7 +20,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron import Scratchpad
+from iron import Precision, Scratchpad
 from iron.functional import ACCURATE
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
@@ -118,9 +118,7 @@ class LogMel(iron.Graph):
         a = Copy.step(wave, src=windows, dtype=np.float32).reshape(F, self.frame)[
             :frames
         ]
-        exact = dict(
-            tile_m=32, dtype_out=np.float32, emulate_bf16_mmul_with_bfp16=False
-        )
+        exact = dict(tile_m=32, dtype_out=np.float32, precision=Precision.HIGHEST)
         spectrum = GEMM.step(Limbs.step(a), self.dft, **exact)
         energy = GEMM.step(
             Limbs.step(Magnitude.step(spectrum)), self.filterbank, **exact

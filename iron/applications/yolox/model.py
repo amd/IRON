@@ -240,9 +240,7 @@ class Pointwise(iron.Graph):
         if self.padded is not None:
             Copy.step(pixels, self.padded[:n])
             pixels = self.padded
-        y = F.linear(
-            pixels, self.weight, self.bias, emulate_bf16_mmul_with_bfp16=False
-        )[:n]
+        y = F.linear(pixels, self.weight, self.bias, precision=iron.Precision.HIGH)[:n]
         if self.act:
             y = SiLU.step(y, tile_size=self.size * out)
         return y.reshape(self.size, self.size * out)

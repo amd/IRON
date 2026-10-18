@@ -203,7 +203,7 @@ def test_a_field_the_repr_leaves_out_still_keys_the_build():
     back un-GELU'd with nothing reporting it.
     """
     plain = GEMM(M=256, K=256, N=256)
-    other = GEMM(M=256, K=256, N=256, prio_accuracy=True)
+    other = GEMM(M=256, K=256, N=256, round_conv_even=False)
     assert repr(plain) == repr(other), "the case no longer exercises a hidden field"
     assert (
         OperatorDesign(plain).compilable().recipe_hash

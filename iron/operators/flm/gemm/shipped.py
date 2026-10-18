@@ -41,6 +41,7 @@ from ml_dtypes import bfloat16
 from iron.common import (
     In,
     Out,
+    Precision,
     Unresolvable,
     Value,
     Xclbin,
@@ -126,6 +127,7 @@ class Shipped(
     m_chunk: int = Auto(default=1, repr=False, init=False)
     rows: int = Auto(default=ROWS, repr=False, init=False)
     cols: int = Auto(default=COLS, repr=False, init=False)
+    precision: Precision = Auto(default=Precision.MEDIUM, repr=False, init=False)
     emulate_bf16_mmul_with_bfp16: bool = Auto(default=True, repr=False, init=False)
     bfp16_b: bool = Auto(default=False, repr=False, init=False)
     b_dtype: object = Auto(default=bfloat16, repr=False, init=False)

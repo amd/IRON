@@ -18,6 +18,7 @@ from .. import declare
 from ..declare import In, InOut, Operand, Operator, Out
 from ..declare.value import Extent
 from ..declare.operator import graph_tracer
+from ..declare.precision import Precision
 from ..declare.profile import Profile
 from ..image.packaging import Kind
 from ..image.step import BufferRef, SequenceStep
@@ -384,9 +385,13 @@ class Tracer:
         profile: Profile | None = None,
         held: Mapping[int, tuple[str, object]] | None = None,
         inputs: Iterable[str] = (),
+        precision: Precision | None = None,
     ) -> None:
         self.name = name
         self.profile = profile
+        self.precision = precision
+        # Each instance applied below the precision, as raised to it.
+        self._raised: dict[int, Operator] = {}
         held = held or {}
         self._held_arrays = [
             x.array if isinstance(x, Weight) else x
@@ -566,7 +571,7 @@ class Tracer:
                 kwargs,
             )
         else:
-            op = target
+            op = self._raised.setdefault(id(target), self._at_precision(target))
             own = self._split_values(type(op), values)
             operands = _take_views(type(op), operands, {}, own)
             if kwargs or values:
@@ -682,13 +687,20 @@ class Tracer:
         )
         given = {**kwargs, **inferred}
         if self.profile is not None:
-            return self.profile.make(cls, **given)
+            return self._at_precision(self.profile.make(cls, **given))
         pinned = frozenset(
             name
             for name, value in given.items()
             if name in cls.declaration.tunables and value is not None
         )
-        return cls(**given, pinned=pinned)
+        return self._at_precision(cls(**given, pinned=pinned))
+
+    def _at_precision(self, op: Operator) -> Operator:
+        """``op``, its precision raised to the graph's where it rounds more."""
+        if self.precision is None or "precision" not in op.declaration.tunables:
+            return op
+        level = op.precision.at_least(self.precision)
+        return op if level == op.precision else op._with_tunables(precision=level)
 
     def _output_bounds(self, op, buffer, rank: int) -> dict:
         bounds = {}

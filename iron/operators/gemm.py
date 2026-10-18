@@ -41,6 +41,7 @@ from iron.common import (
     Link,
     Operator,
     Out,
+    Precision,
     Unresolvable,
     Value,
     Auto,
@@ -90,10 +91,10 @@ def _cases(cls, dev: Device):
                 continue
             kwargs = dict(M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k)
             kwargs.update(tile_n=n, b_col_maj=b_col_maj, c_col_maj=c_col_maj)
-            kwargs.update(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
+            kwargs.update(precision=Precision.HIGHEST)
             lower = c_col_maj and not extensive
             out.append(Case(kwargs, extensive=extensive, lower=lower))
-    # The defaults: bfp16 inputs, C rounded to bf16 between K tiles.
+    # MEDIUM's bfp16 inputs, C rounded to bf16 between K tiles.
     out.append(
         Case(dict(M=2048, K=2048, N=2048, b_col_maj=True), bench=True, lower=True)
     )
@@ -119,8 +120,7 @@ def _cases(cls, dev: Device):
     default = dict(M=2048, K=2048, N=2048, b_col_maj=True)
     M, K, N, cols, b_col_maj, c_col_maj, m, k, n = _REGULAR[3]
     exact = dict(M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k)
-    exact.update(tile_n=n, b_col_maj=b_col_maj, prio_accuracy=True)
-    exact.update(emulate_bf16_mmul_with_bfp16=False)
+    exact.update(tile_n=n, b_col_maj=b_col_maj, precision=Precision.HIGHEST)
     out += [
         finished(default, (catalog.SiLU,)),
         finished(default, (catalog.GELU,)),
@@ -172,13 +172,13 @@ class GEMM(Operator):
             step=lambda op, dev: op.mac_block(dev)[0],
         ),
     )
-    # Without prio_accuracy C rounds to bf16 per K tile: tile_k changes it.
+    # Below HIGHEST C rounds to bf16 per K tile: tile_k changes it.
     tile_k: int = Auto(
         default=64,
         domain=Divisors(
             of=K,
             step=lambda op, dev: op.mac_block(dev)[1],
-            when=lambda op, dev: op.prio_accuracy,
+            when=lambda op, dev: op.precision == Precision.HIGHEST,
         ),
     )
     tile_n: int = Auto(
@@ -190,8 +190,9 @@ class GEMM(Operator):
     placement: GEMMPlacement = Auto(default=GEMMPlacement.SHIMS)
     b_col_maj: bool = Param(default=False)
     c_col_maj: bool = Param(default=False)
-    emulate_bf16_mmul_with_bfp16: bool = Param(default=True, repr=False)
-    prio_accuracy: bool = Param(default=False, repr=False)
+    # MEDIUM multiplies on bfp16 macs; HIGHEST keeps a bf16 C's partial
+    # sums f32 across K tiles.
+    precision: Precision = Auto(default=Precision.MEDIUM)
     round_conv_even: bool = Param(default=True, repr=False)
     dtype_in: Any = Param(default=bfloat16, repr=False)
     dtype_out: Any = Param(default=bfloat16, repr=False)
@@ -264,7 +265,7 @@ class GEMM(Operator):
             self.dtype_out,
             device=dev,
             arch=None if dev is not None else "aie2p",
-            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+            emulate_bf16_mmul_with_bfp16=self.precision == Precision.MEDIUM,
             vectorized=not self.use_scalar,
         )
         aie2 = dev is not None and dev.arch is AIEArch.AIE2
@@ -289,14 +290,6 @@ class GEMM(Operator):
                 f"(aie_kernels/linalg/mm_aie2p.h requires n % (2*t) == 0)"
             )
         din, dout = np.dtype(self.dtype_in), np.dtype(self.dtype_out)
-        if self.prio_accuracy and dout not in (
-            np.dtype(bfloat16),
-            np.dtype(np.float32),
-        ):
-            raise ValueError(
-                "prio_accuracy flag is a feature only for bfloat16 or "
-                "float32 output data types"
-            )
         if np.issubdtype(din, np.integer) != np.issubdtype(dout, np.integer):
             raise ValueError(
                 f"Input dtype ({din}) and output dtype ({dout}) must either both be integral or both be float"
@@ -418,8 +411,7 @@ class GEMM(Operator):
         placement: GEMMPlacement
         b_col_maj: bool
         c_col_maj: bool
-        emulate_bf16_mmul_with_bfp16: bool
-        prio_accuracy: bool
+        precision: Precision
         round_conv_even: bool
         dtype_in: Any
         dtype_out: Any
@@ -441,11 +433,11 @@ class GEMM(Operator):
 
         @property
         def wider_accumulator(self) -> bool:
-            """Whether ``build()`` and ``GEMM.held()`` build ``prio_accuracy``'s
-            internal f32 buffer, beside C's own: moot where C is already f32.
+            """Whether ``build()`` and ``GEMM.held()`` build HIGHEST's f32
+            buffer for a bf16 C's partial sums, beside C's own.
             """
-            return self.prio_accuracy and (
-                np.dtype(self.dtype_out) != np.dtype(np.float32)
+            return self.precision == Precision.HIGHEST and (
+                np.dtype(self.dtype_out) == np.dtype(bfloat16)
             )
 
         def build(self) -> Built:
@@ -473,7 +465,7 @@ class GEMM(Operator):
             # Flat, as the finish's scratch is: a core selects between them.
             C_l1_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
 
-            # prio_accuracy accumulates in f32 in L1, so the matmul's C is f32.
+            # HIGHEST accumulates in f32 in L1, so the matmul's C is f32.
             dtype_acc = dtype_out_internal if use_larger_internal_buffer else dtype_out
             matmul_kernel = kernels.linalg.mm(
                 m,
@@ -484,7 +476,7 @@ class GEMM(Operator):
                 vectorized=not use_scalar,
                 b_col_maj=b_col_maj,
                 c_col_maj=c_col_maj,
-                emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+                emulate_bf16_mmul_with_bfp16=self.precision == Precision.MEDIUM,
                 round_conv_even=self.round_conv_even,
             )
             r, s, t = matmul_kernel.mac_dims
@@ -782,9 +774,10 @@ class GEMM(Operator):
             return super().tolerance()
         if np.issubdtype(np.dtype(self.dtype_in), np.integer):
             return Tolerance.exact(note="integer matmul")
-        units = 4.0 if self.emulate_bf16_mmul_with_bfp16 else 2.0
+        units = 4.0 if self.precision == Precision.MEDIUM else 2.0
         per_tile = (
-            np.dtype(self.dtype_out) == np.dtype(bfloat16) and not self.prio_accuracy
+            np.dtype(self.dtype_out) == np.dtype(bfloat16)
+            and self.precision != Precision.HIGHEST
         )
 
         def bound(A, B):

@@ -23,7 +23,7 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Carried, Profile, Scratchpad
+from iron import Carried, Precision, Profile, Scratchpad
 from iron.common import Chain
 from iron.common.graph import Handle
 from iron.common.graph.trace import TracedGraph, Tracer
@@ -1139,20 +1139,58 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
 class Pointwise(iron.Graph):
     """A 1x1 convolution's pixels projected, K and N of 16."""
 
-    def __init__(self, emulate: bool | None):
-        self.emulate = emulate
+    def __init__(self, precision: Precision | None):
+        self.precision = precision
 
     def body(self, x, w):
-        return F.linear(
-            x, w, k_tile=16, tile_n=16, emulate_bf16_mmul_with_bfp16=self.emulate
-        )
+        return F.linear(x, w, k_tile=16, tile_n=16, precision=self.precision)
 
 
-@pytest.mark.parametrize("emulate,macs", [(None, True), (False, False)])
-def test_project_asks_flm_gemm_for_bf16_macs(emulate, macs, npu2):
-    t = Pointwise(emulate).trace(x=((256, 16), bfloat16), w=((16, 16), bfloat16))
+@pytest.mark.parametrize("precision,macs", [(None, True), (Precision.HIGH, False)])
+def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
+    t = Pointwise(precision).trace(x=((256, 16), bfloat16), w=((16, 16), bfloat16))
     (op,) = [op for op in t.operators if type(op) is FLMGEMM]
     assert op.resolved(npu2).emulate_bf16_mmul_with_bfp16 is macs
+
+
+class Projections(iron.Graph):
+    """A projection at the profile's precision, one held at HIGHEST, and
+    one instance applied."""
+
+    def __init__(self):
+        self.gemm = GEMM(M=256, K=256, N=256)
+
+    def body(self, x, w):
+        y = GEMM.step(x, w)
+        y = GEMM.step(y, w, precision=Precision.HIGHEST)
+        return self.gemm.apply(y, w)
+
+
+@pytest.mark.parametrize(
+    "floor, levels",
+    [
+        (None, ["medium", "highest", "medium"]),
+        ("high", ["high", "highest", "high"]),
+        ("highest", ["highest"] * 3),
+    ],
+)
+def test_a_graph_s_precision_raises_every_step_that_rounds_more(floor, levels):
+    graph = Projections()
+    graph.precision = floor
+    t = graph.trace(x=((256, 256), bfloat16), w=((256, 256), bfloat16))
+    assert [s.op.precision for s in t.steps] == levels
+    assert graph.gemm.precision == Precision.MEDIUM
+
+
+def test_a_profile_gives_a_precision_the_tuner_does_not_search(tmp_path, npu2):
+    path = tmp_path / "npu2.json"
+    path.write_text(
+        '{"entries": [{"operator": "flm.GEMM", "K": 512, "precision": "high"}]}'
+    )
+    op = Profile.load(path).make(FLMGEMM, M=256, K=512, N=256)
+    assert op.precision is Precision.HIGH
+    assert not op.resolved(npu2).emulate_bf16_mmul_with_bfp16
+    assert "precision" not in op.resolved(npu2)._domains(npu2)
 
 
 def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):

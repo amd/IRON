@@ -45,6 +45,7 @@ from iron.common import (
     Link,
     Operator,
     Out,
+    Precision,
     Unresolvable,
     Value,
     Auto,
@@ -203,10 +204,12 @@ class GEMM(Operator):
     # B as stored (N, K), a checkpoint's layout, read as is: the memtile lays
     # out the k panels the kernel reads as B^T blocks, so no packed copy.
     b_col_maj: bool = Param(default=False)
-    # Multiply on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8 (the
-    # port's arithmetic, and AIE2P's default), or on its bf16 macs.
-    emulate_bf16_mmul_with_bfp16: bool = Auto()
-    # Filled by resolve, from the device: the grid, B's storage, the L2 tiles.
+    # MEDIUM multiplies on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8
+    # (the port's arithmetic); above it, or on AIE2, on bf16 macs.
+    precision: Precision = Auto(default=Precision.MEDIUM)
+    # Filled by resolve, from the device: the macs, the grid, B's storage,
+    # the L2 tiles.
+    emulate_bf16_mmul_with_bfp16: bool = Auto(repr=False, derived=True)
     rows: int = Auto(repr=False, derived=True)
     cols: int = Auto(repr=False, derived=True)
     bfp16_b: bool = Auto(repr=False, derived=True)
@@ -335,11 +338,7 @@ class GEMM(Operator):
         # as stored; otherwise it is bf16. AIE2 has no BFP types, so its mmul
         # lowers onto four native bf16 macs.
         aie2p = dev.arch == AIEArch.AIE2p
-        emulate = self.emulate_bf16_mmul_with_bfp16
-        if emulate is None:
-            emulate = aie2p
-        if emulate and not aie2p:
-            raise ValueError("flm.GEMM: bfp16 macs are AIE2P's")
+        emulate = aie2p and self.precision == Precision.MEDIUM
         bfp16_b = emulate and not self.b_col_maj
         b_elem_bytes = bfp.BLOCK_BYTES / bfp.BLOCK if bfp16_b else 2
         b_group = bfp.BLOCK if bfp16_b else 1

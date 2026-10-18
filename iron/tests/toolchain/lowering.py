@@ -143,7 +143,6 @@ def test_operator_lowers_to_instructions(device, cls, case, tmp_path):
                 d=512,
                 causal=False,
                 num_pipelines=4,
-                emulate_bf16_mmul_with_bfp16=False,
             ),
             "kv_valid",
         ),

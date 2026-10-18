@@ -103,7 +103,6 @@ class Encoder(Model):
             heads_interleaved=True,
             kv_interleaved=True,
             causal=False,
-            emulate_bf16_mmul_with_bfp16=False,
             window=window,
             scale=scale,
         )

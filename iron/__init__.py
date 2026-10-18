@@ -4,7 +4,7 @@
 """IRON: operators for the NPU, and graphs over them.
 
 ``iron.Graph``, ``iron.state``, ``iron.weight``, ``iron.carry``, ``iron.clamp``,
-``iron.CarriedLoop``, the per-call value annotations and ``Profile`` are
+``iron.CarriedLoop``, the per-call value annotations, ``Precision`` and ``Profile`` are
 imported on first use, so ``import iron`` stays light.
 """
 
@@ -12,7 +12,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # the same names, for a checker; the runtime loads them lazily
-    from .common.declare import Profile
+    from .common.declare import Precision, Profile
     from .common.graph import (
         Carried,
         CarriedLoop,
@@ -35,6 +35,7 @@ _LAZY = {
     "CompiledGraph": "iron.common.graph",
     "Scratchpad": "iron.common.graph",
     "Carried": "iron.common.graph",
+    "Precision": "iron.common.declare",
     "Profile": "iron.common.declare",
 }
 
@@ -43,6 +44,7 @@ __all__ = [
     "CarriedLoop",
     "CompiledGraph",
     "Graph",
+    "Precision",
     "Profile",
     "Scratchpad",
     "carry",

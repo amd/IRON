@@ -12,7 +12,7 @@ from aie.utils.verify import Tolerance
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from iron.common import Chain
+from iron.common import Chain, Precision
 from iron.common.design import OperatorDesign
 from iron.common.testing import run_test, vectors
 from iron.operators.clamp import Clamp
@@ -275,22 +275,21 @@ def b_col_maj_params():
             id="slabs",
         )
     )
-    macs = (True, False) if dev.arch is AIEArch.AIE2p else (False,)
+    levels = (
+        (Precision.MEDIUM, Precision.HIGH)
+        if dev.arch is AIEArch.AIE2p
+        else (Precision.HIGH,)
+    )
     return [
-        pytest.param(
-            *p.values,
-            emulate,
-            marks=p.marks,
-            id=f"{p.id}-{'bfp16' if emulate else 'bf16'}",
-        )
-        for emulate in macs
+        pytest.param(*p.values, precision, marks=p.marks, id=f"{p.id}-{precision}")
+        for precision in levels
         for p in params
     ]
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("M,K,N,tile_n,epilogue_modes,emulate", b_col_maj_params())
-def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, emulate, record_property):
+@pytest.mark.parametrize("M,K,N,tile_n,epilogue_modes,precision", b_col_maj_params())
+def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, precision, record_property):
     operator = GEMM(
         M=M,
         K=K,
@@ -298,7 +297,7 @@ def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, emulate, record_propert
         tile_n=tile_n,
         epilogue_modes=epilogue_modes,
         b_col_maj=True,
-        emulate_bf16_mmul_with_bfp16=emulate,
+        precision=precision,
     )
     errors = check_on_device(operator, flm_vectors(operator), record=record_property)
     assert not errors, "Test failed"
@@ -430,11 +429,13 @@ def test_gemm_k_tile(K):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("emulate", [None, False], ids=["default_macs", "bf16_macs"])
+@pytest.mark.parametrize(
+    "precision", [None, Precision.HIGH], ids=["default_macs", "bf16_macs"]
+)
 @pytest.mark.parametrize(
     "K,tile_n,k_tile", [(512, 64, 128), (16, 16, 16), (64, 32, 64), (96, 32, 96)]
 )
-def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, emulate):
+def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, precision):
     """A k step of one B chunk (k_tile the compute tile's k slice), or of an
     odd number of them, walks every chunk: small integers, exact in bfp16
     and bf16 and in every sum, give the product exactly. check_on_device's
@@ -451,7 +452,7 @@ def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, emulate):
         N=N,
         tile_n=tile_n,
         k_tile=k_tile,
-        emulate_bf16_mmul_with_bfp16=emulate,
+        precision=precision,
     )
     rng = np.random.default_rng(0)
     A = rng.integers(-3, 4, (256, K)).astype(bfloat16)
