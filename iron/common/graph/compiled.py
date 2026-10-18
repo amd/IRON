@@ -720,21 +720,10 @@ class CompiledGraph:
         piece_bytes: int = UPLOAD_PIECE,
     ) -> None:
         """Copy every closed-over weight into its buffer, once per storage."""
-        static_addresses = self.traced.static_addresses
         for key, (tensor, handle) in self.traced.weights.items():
-            if key not in self._loaded and handle.name not in static_addresses:
+            if key not in self._loaded:
                 self._copy_in(handle.name, tensor, release, piece_bytes)
                 self._loaded.add(key)
-        # A GatherWords(static_base=True)'s table address: not known at
-        # trace time like an ordinary weight's bytes are, only once its own
-        # table buffer is placed -- computed and copied in here instead,
-        # same once-per-storage contract as every other weight.
-        for name, (buffer, address_words) in static_addresses.items():
-            if name not in self._loaded:
-                words = address_words(self._address(buffer))
-                value = np.array([words["base_lo"], words["base_hi"]], dtype=np.int32)
-                self._copy_in(name, value, release, piece_bytes)
-                self._loaded.add(name)
 
     def load(
         self,

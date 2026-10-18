@@ -110,8 +110,6 @@ class Gather(Operator):
         repr=False,
     )
     feeds: int = Auto()
-    # The table is one buffer at every call: its address is a resident operand.
-    static_base: bool = Param(default=False)
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
@@ -196,7 +194,6 @@ class Gather(Operator):
         dtype: Any
         feeds: int
         row: int
-        static_base: bool
         y: Operand
 
         def build(self) -> Built:
@@ -300,7 +297,6 @@ class Gather(Operator):
             table_rows=self.table_rows,
             row_bytes=self.row * np.dtype(self.dtype).itemsize,
             words=self.words,
-            static_base=self.static_base,
             bounded="valid_rows" in self.bound_extents,
         )
 
@@ -392,9 +388,7 @@ class GatherWords(Operator):
 
     A core turns each id, clipped to the table, into its row's address
     words in their slots of ``control``. The table's address is split at
-    ``low_bits`` (a core reads 30 bits of a value); with ``static_base`` it
-    is a resident operand, since a full ELF's 32-word scratchpad has no room
-    for one entry per table. ``bounded``, the ids bounded per call to their
+    ``low_bits`` (a core reads 30 bits of a value). ``bounded``, the ids bounded per call to their
     first ``valid_rows``, it also writes each row's length: a whole row's
     for those, ``Gather.pad_bytes`` for the rest, as a bounded ``Gather``
     drains them.
@@ -407,7 +401,6 @@ class GatherWords(Operator):
     row_bytes: int = Param()
     words: int = Param()
     pairs: int = Param(derive=lambda op: 2 * op.rows, repr=False)
-    static_base: bool = Param(default=False)
     bounded: bool = Param(default=False)
     # The words a call writes: the address pairs, then if bounded the lengths.
     record: int = Param(
@@ -420,8 +413,6 @@ class GatherWords(Operator):
     base_hi = Value()
     valid_rows = Extent(rows)
     valid = Value(derive=lambda op: op.valid_rows)
-    # base_lo and base_hi, in address_words()'s order.
-    base = In(2, dtype=np.int32, obj_type=(2,), depth=1, when=static_base)
 
     def ops(self) -> int:
         return 0
@@ -439,11 +430,9 @@ class GatherWords(Operator):
         row_bytes: int
         pairs: int
         record: int
-        static_base: bool
         bounded: bool
         ids: Operand
         control: Operand
-        base: Operand | None
         base_lo: Value
         base_hi: Value
         valid: Value
@@ -489,22 +478,13 @@ class GatherWords(Operator):
             else:
                 addresses = ObjectFifo(self.control.obj_type, depth=1)
                 self.control.bind(addresses.cons())
-            base_stream = None
-            if self.static_base:
-                base_stream = ObjectFifo(self.base.obj_type, depth=1)
-                self.base.bind(base_stream.prod())
-            read = [] if self.static_base else [self.base_lo, self.base_hi]
+            read = [self.base_lo, self.base_hi]
             rtp = Rtp(read + ([self.valid] if self.bounded else []))
 
-            def core(ids, addresses, kernel, rtp, base_stream, lengths, lengths_kernel):
+            def core(ids, addresses, kernel, rtp, lengths, lengths_kernel):
                 words = rtp.read()
                 i, a = ids.acquire(1), addresses.acquire(1)
-                if base_stream is not None:
-                    base = base_stream.acquire(1)
-                    kernel(i, a, base[0], base[1])
-                    base_stream.release(1)
-                else:
-                    kernel(i, a, words[self.base_lo], words[self.base_hi])
+                kernel(i, a, words[self.base_lo], words[self.base_hi])
                 ids.release(1)
                 addresses.release(1)
                 if lengths is not None:
@@ -518,7 +498,6 @@ class GatherWords(Operator):
                     addresses.prod(),
                     kernel,
                     rtp,
-                    None if base_stream is None else base_stream.cons(),
                     None if lengths is None else lengths.prod(),
                     lengths_kernel,
                 ],
@@ -528,8 +507,6 @@ class GatherWords(Operator):
     def sequence(self, rt) -> None:
         tg = TaskGroup()
         self.ids.fill(group=tg)
-        if self.static_base:
-            self.base.fill(group=tg)
         for tap in self.taps():
             self.control.drain(tap, group=tg, wait=True)
         tg.finish()
