@@ -36,7 +36,10 @@ from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
-from .base import DecoderConfig, Model, Runner, Tokenizer, renamed
+from .checkpoint import renamed
+from .config import DecoderConfig
+from .model import Model
+from .runner import Runner, Tokenizer
 from .generation import Sampler
 
 logger = logging.getLogger(__name__)

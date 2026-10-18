@@ -95,7 +95,7 @@ def fingerprint(*values) -> str:
     """A digest of ``values``, a weights tree's leaves by name (``leaves``):
     arrays by their bytes, shapes and types, anything else by ``repr``.
     """
-    from .base import leaves
+    from .checkpoint import leaves
 
     digest = hashlib.sha256()
     for name, value in leaves(list(values)):
@@ -167,6 +167,6 @@ class HuggingFace:
 
 def flat(tree):
     """``tree``'s arrays by their dotted names, in float32."""
-    from .base import leaves
+    from .checkpoint import leaves
 
     return ((name, value.astype(np.float32)) for name, value in leaves(tree))

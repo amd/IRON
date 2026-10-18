@@ -1001,19 +1001,22 @@ application over it, a package under `iron/applications/`. How to add one
 is "Add a model" in [CONTRIBUTING.md](CONTRIBUTING.md). Nothing in the
 library imports a model. The modules:
 
-- `base.py`: `Config` and `DecoderConfig`, a model's shape read from the
+- `config.py`: `Config` and `DecoderConfig`, a model's shape read from the
   checkpoint's `config.json` (a field with no `metadata={"json": ...}` is
   IRON's choice and keeps its default), whose `attention(i)` and
-  `layer(i)` give layer `i`'s parts; `rope_angles`; `Checkpoint`, the
+  `layer(i)` give layer `i`'s parts; `rope_angles`
+- `checkpoint.py`: `Checkpoint`, the
   mapped `.safetensors` (sharded, or a PyTorch checkpoint read without
   torch), whose `tree(fill=)` is the weights by the checkpoint's own names
   (`weights.model.layers[3].self_attn.q_proj.weight`): `"read"`, views of
   the file; `"random"`, drawn at a seed; `"unread"`, allocated and never
   written, for tracing and building; `Derived`, weights a model computes
-  from that tree; `Model`, a graph whose versions `load_versions()` compiles before
+  from that tree
+- `model.py`: `Model`, a graph whose versions `load_versions()` compiles before
   the first call, with `sanitize(w)`, which renames one layer's modules to
-  the names the parts read; `OnHost`, a model mixin that runs the graph's
-  own reference (`Graph.reference`) in place of the device; and `Runner`
+  the names the parts read; and `OnHost`, a model mixin that runs the graph's
+  own reference (`Graph.reference`) in place of the device
+- `runner.py`: `Runner`
   and `main`, a checkpoint, tokenizer and model and the command line.
   `Runner.reference()` is what a model is judged by: transformers' logits
   recorded beside the checkpoint, or with `--random-weights SEED` the

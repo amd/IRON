@@ -34,7 +34,7 @@ from safetensors.numpy import load_file, save_file
 from iron.lm import Checkpoint, Sampler
 from iron.applications.llama.model import SPECIAL_TOKENS, LlamaConfig, tokenizer
 from iron.lm import testing
-from iron.lm.base import renamed
+from iron.lm.checkpoint import renamed
 from iron.lm.testing import require, weights_dir
 from iron.operators import sample
 from iron.tests.common.llama_model import REAL_1B

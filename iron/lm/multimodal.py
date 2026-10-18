@@ -14,7 +14,7 @@ import iron
 from iron.operators.copy import Copy
 from iron.operators.merge import Merge
 
-from .base import Model
+from .model import Model
 from .causal import CausalLM
 from .encoder import Encoder, Tower
 from .generation import Sampler

@@ -20,7 +20,8 @@ import numpy as np
 from iron import Scratchpad
 from iron.operators.mha import MHA
 
-from .base import Model, renamed
+from .checkpoint import renamed
+from .model import Model
 
 
 @dataclasses.dataclass

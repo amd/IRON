@@ -22,7 +22,7 @@ import pytest
 
 from iron.applications.llama.model import Llama, SPECIAL_TOKENS, tokenizer
 from iron.lm import Runner as BaseRunner
-from iron.lm.base import FLAGS
+from iron.lm.runner import FLAGS
 from iron.lm.golden import RECORD
 from iron.lm.testing import require, weights_dir
 from iron.tests.common.llama_model import SMALL, checkpoint
@@ -139,7 +139,7 @@ def test_a_runner_fits_its_context_with_no_device_bound():
 def test_fit_says_what_it_chose_and_how_to_ask_for_more(caplog):
     config = dataclasses.replace(SMALL, max_seq_len=1024)
     path = checkpoint(config).path
-    with caplog.at_level(logging.INFO, logger="iron.lm.base"):
+    with caplog.at_level(logging.INFO, logger="iron.lm.runner"):
         SmallRunner.fit(config, path, budget=_held(config, 1024))
         SmallRunner.fit(config, path, budget=_held(config, 512))
     native, short = caplog.records

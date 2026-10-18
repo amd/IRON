@@ -36,7 +36,7 @@ from iron.lm import (
     Norm,
     Tower,
 )
-from iron.lm.base import _nest, leaves
+from iron.lm.checkpoint import _nest, leaves
 from iron.operators.copy import Copy
 
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.

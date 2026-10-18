@@ -44,7 +44,7 @@ from iron.lm import (
     generate_on_host,
 )
 from iron.lm.generation import greedy
-from iron.lm.base import leaves
+from iron.lm.checkpoint import leaves
 from iron.lm.golden import Golden, HuggingFace
 from iron.lm.testing import assert_close
 from iron.applications.llama import Llama

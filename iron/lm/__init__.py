@@ -7,18 +7,10 @@ themselves are applications over it, each a package of
 ``generation`` and ``testing`` need nothing of one but ``logits(tokens)``.
 """
 
-from .base import (
-    Checkpoint,
-    Config,
-    DecoderConfig,
-    Model,
-    OnHost,
-    Runner,
-    Tokenizer,
-    main,
-    prompt_text,
-    rope_angles,
-)
+from .checkpoint import Checkpoint
+from .config import Config, DecoderConfig, rope_angles
+from .model import Model, OnHost
+from .runner import Runner, Tokenizer, main, prompt_text
 from .blocks import (
     MLP,
     Attention,

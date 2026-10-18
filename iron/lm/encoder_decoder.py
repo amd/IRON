@@ -18,7 +18,7 @@ import iron
 from iron import Carried
 from iron.operators.mha import MHA
 
-from .base import DecoderConfig
+from .config import DecoderConfig
 from .causal import CausalLM, DecodeStep
 from .encoder import Encoder
 

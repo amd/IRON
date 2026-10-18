@@ -25,7 +25,7 @@ from pathlib import Path
 
 from iron.tune import cli as tune_cli
 
-from .base import Runner
+from .runner import Runner
 
 
 def application_runner(name: str) -> type[Runner]:
