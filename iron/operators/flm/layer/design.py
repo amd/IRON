@@ -102,12 +102,7 @@ PROJ_MEMS = ("proj_gather_0", "proj_x", "proj_gather_1", "proj_weight")
 PROJ_COLS = (0, 1, 6, 7)
 
 _CORE, _MEM, _SHIM = AIETileType.CoreTile, AIETileType.MemTile, AIETileType.ShimNOCTile
-# The tile of each stage: a tile type for the placer, or (column, row) for a
-# core the compiler cannot place yet. mlir-aie verifies the sequence's
-# set_lock only on a placed tile, which pins the cores with a sync lock;
-# the placer ignores an ObjectFifo's delegate tile, which pins the qk cores
-# beside their kv cores; and the gate and the projection cores that do not
-# send y share a neighbour's buffer and its locks.
+# Tile type, or (col, row) where set_lock, delegates or shared buffers block placing.
 STAGES = {
     "attn_qk": (2, 2),
     "attn_kv": (2, 3),
@@ -1038,12 +1033,12 @@ class _Array:
 
     def weight_channels(self, mt: Tile, w0: Buffer, w1: Buffer) -> dict:
         """The weight channels of the projection memtile ``mt``."""
-        col = PROJ_MEMS.index(self.label(mt))
+        group = PROJ_MEMS.index(self.label(mt))
         return _proj_weight_channels(
             w0,
             w1,
-            [self.end(f"proj_w{h}_{col}", mt) for h in (0, 1)],
-            [self.end(f"w{j}_{col}", mt) for j in range(4)],
+            [self.end(f"proj_w{h}_{group}", mt) for h in (0, 1)],
+            [self.end(f"w{j}_{group}", mt) for j in range(4)],
             *self.dma_locks(mt, *_PROJ_MEM_W_INITS),
         )
 
