@@ -6,7 +6,7 @@
 
 from .axpy import AXPY
 from .clamp import Clamp
-from .copy import Copy
+from .copy import Copy, Gather, GatherWords
 from .depthwise_conv1d import DepthwiseConv1d
 from .elementwise_add import ElementwiseAdd, RowwiseAdd
 from .elementwise_max import ElementwiseMax

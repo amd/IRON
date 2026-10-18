@@ -12,6 +12,9 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `Gather` and `GatherWords`, `Copy`'s gather steps, in `iron.operators`'
+  catalog, so a profile that tunes them saves and loads; a test fails on
+  any public operator the catalog leaves out.
 - `iron.functional` with torch's names: `linear`, `rms_norm`, `layer_norm`,
   `silu`, `gelu(x, approximate=)` and `rope`. `linear` replaces
   `iron.lm.blocks.project`.

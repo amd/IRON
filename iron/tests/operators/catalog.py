@@ -21,6 +21,7 @@ from pathlib import Path
 import aie.utils as aie_utils
 import pytest
 
+import iron.operators as catalog
 from iron.common import Operator
 from iron.common.testing import Case, Testing, run_test, vectors
 from iron.tests.common.declared import declared
@@ -75,3 +76,30 @@ def test_the_stub_names_every_catalog_entry(package):
     stub = ast.parse(Path(module.__file__).with_suffix(".pyi").read_text())
     names = {a.name for node in stub.body for a in getattr(node, "names", ())}
     assert names == {n for n in module.__all__ if "." not in n}
+
+
+def test_every_operator_is_in_the_catalog():
+    """Every class at the top of a module under ``iron/operators``, named
+    without a leading underscore, that subclasses ``Operator`` is a catalog
+    entry: one left out is never built by the tests above.
+    """
+    root = Path(catalog.__file__).parent
+    catalogued = {getattr(catalog, name) for name in catalog.__all__}
+    missing = []
+    for path in sorted(root.rglob("*.py")):
+        names = [
+            node.name
+            for node in ast.parse(path.read_text()).body
+            if isinstance(node, ast.ClassDef) and not node.name.startswith("_")
+        ]
+        if not names:
+            continue
+        parts = path.relative_to(root).with_suffix("").parts
+        module = importlib.import_module(".".join((catalog.__name__, *parts)))
+        missing += [
+            f"{module.__name__}.{name}"
+            for name in names
+            if issubclass(getattr(module, name), Operator)
+            and getattr(module, name) not in catalogued
+        ]
+    assert not missing, f"not in iron.operators._OPERATOR_MODULES: {missing}"

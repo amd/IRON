@@ -29,6 +29,8 @@ _OPERATOR_MODULES = {
     "ElementwiseMax": "elementwise_max",
     "ElementwiseMul": "elementwise_mul",
     "Emit": "emit",
+    "Gather": "copy",
+    "GatherWords": "copy",
     "GELU": "gelu",
     "GEMM": "gemm",
     "GEMV": "gemv",
