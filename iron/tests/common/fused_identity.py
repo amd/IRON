@@ -1,16 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A fused image names its kernels, its devices and itself by content.
-
-Each is what lets one build reuse another's work: a kernel object shared by
-the designs (and graphs) whose recipes agree, a device aiecc has placed
-before, a whole image found without fusing it again. A name derived from a
-position instead (which step a design is, where a kernel's design sits)
-compiles once per position and moves when a graph gains a step.
-
-No toolchain and no NPU: the fused text and the key are generated in
-process, and the one cross-process check runs a second interpreter.
+"""A fused image names its kernels, its devices and itself by content, not
+by position, so one build reuses another's work. No toolchain and no NPU.
 """
 
 import re

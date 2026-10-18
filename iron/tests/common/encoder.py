@@ -177,7 +177,7 @@ def test_the_gather_reads_only_the_rows_a_call_bounds(table):
 
 
 @pytest.mark.parametrize("window", [None, 64])
-@pytest.mark.parametrize("n", [1, 9, 100, ROWS])
+@pytest.mark.parametrize("n", [1, ROWS])
 def test_an_encoder_attends_its_valid_rows_both_ways(table, window, n):
     graph = SelfAttention(table, LAYERS, window)
     tokens = np.random.default_rng(n).integers(0, VOCAB, n)

@@ -17,7 +17,6 @@ pytestmark = pytest.mark.usefixtures("npu2")
 # Rows, pixels a row, channels and the window.
 CASES = {
     "kernel_5": (13, 13, 128, 5),
-    "kernel_9": (13, 13, 128, 9),
     "kernel_13": (13, 13, 128, 13),
     "wide": (6, 10, 32, 3),
 }

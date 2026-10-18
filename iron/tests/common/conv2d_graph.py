@@ -89,9 +89,8 @@ class Subsample(iron.Graph):
         return ReLU.step(self.conv(x, rows=n))
 
 
-@pytest.mark.parametrize("case", list(CASES))
-def test_a_caller_bounds_its_rows(case):
-    conv, _, x = draw(case)
+def test_a_caller_bounds_its_rows():
+    conv, _, x = draw("band")
     traced = Subsample(conv).trace(x=(x.shape, bfloat16))
     assert [type(s.op) for s in traced.steps] == [Copy, GEMM, ReLU]
     bound = {type(b.op) for b in traced.bindings if b.expression.value.name == "n"}

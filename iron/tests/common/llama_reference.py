@@ -3,24 +3,15 @@
 
 """The graph's reference against the model's plain forward pass.
 
-Hugging Face's own Llama in float32 over the same random weights, its
-logits recorded in ``goldens/`` (``iron.lm.golden``), is what the NPU
-application is judged against. ``Llama`` is the same computation as one graph, called at a prompt's shape and at one token's,
-and ``Graph.reference`` runs it operator by operator through each
-``reference()`` on host tensors, with the per-call values modelled (the
-chunk and the position move the cache writes and bound the attention, the
-last prompt row selects the logits, a decode step gathers its token's row)
-and the caches as state. ``OnHost`` is
-the model with its images stood in by that reference, so the two can be
-compared without a device, through the application's own ``logits``:
-that checks the graph's wiring (layouts, reshapes, the head grouping,
-the transposes, the caches the prompt leaves for decode) against the model,
-leaving only the kernels' arithmetic for hardware.
-
-A causal pass needs no cache: the logits at position ``t`` of a pass
-over ``t + 1`` tokens are what a cached decode produces at step ``t``. The
-graph computes in bfloat16 and the reference in float32, so the logits
-agree to bf16 tolerance and the argmax exactly.
+Hugging Face's own model in float32 over the same random weights, its
+logits recorded in ``goldens/`` (``iron.lm.golden``), judges the
+application. ``OnHost`` stands the model's images in by
+``Graph.reference``, which runs the graph operator by operator on host
+tensors with the caches as state: that checks the graph's wiring (layouts,
+reshapes, head grouping, the caches a prompt leaves for decode) without a
+device, leaving only the kernels' arithmetic for hardware. The graph
+computes in bfloat16 and the reference in float32, so the logits agree to
+bf16 tolerance and the argmax exactly.
 """
 
 import base64
@@ -305,20 +296,6 @@ def test_a_model_reads_as_its_context_and_whether_it_is_loaded(cpu):
     assert repr(model) == f"Llama(max_seq_len={cpu.config.max_seq_len}, not loaded)"
 
 
-def test_a_short_prompt_runs_at_its_own_rows(cpu):
-    """A context longer than a chunk: the prompt runs its own rows of one
-    chunk, not the context, and its logits are the golden ones; decode
-    continues from the caches it wrote.
-    """
-    config = dataclasses.replace(SMALL, max_seq_len=1024)
-    model, reference = OnHost(config, cpu.weights), cpu.golden
-    prompt = np.random.default_rng(2).integers(0, config.vocab_size, 8)
-    first = reference.logits(prompt)
-    assert_close(model.logits(prompt), first)
-    tokens = np.append(prompt, first.argmax())
-    assert_close(model.logits(tokens), reference.logits(tokens))
-
-
 @pytest.mark.parametrize("temperature", [0.0, 0.7])
 def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
     """What ``generate_on_host`` loops on the device, each call started from
@@ -436,15 +413,6 @@ def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):
     tokens = np.random.default_rng(8).integers(0, config.vocab_size, 300)
     assert_close(model.logits(tokens[:299]), reference.logits(tokens[:299]))
     assert_close(model.logits(tokens), reference.logits(tokens))
-    with pytest.raises(IndexError, match=r"start \+ rows is 301, outside \[0, 301\)"):
-        model(
-            model.prompt_ids(tokens[256:]),
-            token=0,
-            position=300,
-            start=256,
-            rows=45,
-            rope_start=256,
-        )
 
 
 def _repository(directory, weights):

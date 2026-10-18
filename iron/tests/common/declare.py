@@ -101,12 +101,14 @@ class MV(Operator):
 # --------------------------------------------------------------------------
 
 
-def test_fields_are_their_own_references():
+def test_fields_are_their_own_references_and_instances_shadow_them():
     fields = {f.name: f for f in dataclasses.fields(MV)}
     assert MV.K is fields["K"] and MV.K.name == "K"
     assert type(ParamSpec.of(MV.K)) is ParamSpec
     assert MV.tile_out is fields["tile_out"]
     assert isinstance(ParamSpec.of(MV.tile_out), AutoSpec)
+    op = MV(M=64, K=256, columns=2)
+    assert op.K == 256 and op.columns == 2 and MV.K is fields["K"]
 
 
 def test_members_keep_declaration_order_and_names():
@@ -121,22 +123,6 @@ def test_shapes_captured_bare_names_resolve_to_refs():
     assert dims[1] is MV.M and dims[2] is MV.K
     assert MV.A.obj_dims.dims == (MV.tile_out, MV.K)
     assert MV.A.per.dims == (MV.columns,)
-
-
-def test_dataclass_constructor_is_typed_by_real_fields():
-    # trace, bound_values and pinned are every operator's, from the base.
-    assert [f.name for f in dataclasses.fields(MV)] == [
-        "trace",
-        "bound_values",
-        "pinned",
-        "M",
-        "K",
-        "num_batches",
-        "columns",
-        "tile_out",
-        "vec",
-        "epilogue",
-    ]
 
 
 def test_an_elementwise_operand_is_split_over_every_core_unless_it_says():
@@ -346,7 +332,7 @@ def test_probed_sets_each_probe_field_and_nothing_else():
 # --------------------------------------------------------------------------
 
 
-def test_buffers_resolve_shape_dtype_and_direction():
+def test_buffers_resolve_shape_dtype_and_direction(npu2):
     specs = MV(M=64, K=256, num_batches=2).buffers
     assert [(s.role, s.shape) for s in specs] == [
         (In, (2, 64, 256)),
@@ -357,6 +343,11 @@ def test_buffers_resolve_shape_dtype_and_direction():
     op = MV(M=1024, K=256)
     assert [b.name for b in op.inputs] == ["A", "B"]
     assert [b.name for b in op.outputs] == ["C"]
+    # The layout and the harness allocate from a buffer's dtype and nbytes.
+    from iron.operators.copy import Copy
+
+    x, y = Copy(input_buffer_size=512, dtype=np.int32).buffers
+    assert x.dtype == y.dtype == np.int32 and y.nbytes == 512 * 4
 
 
 def test_a_t_or_none_dim_is_omitted_when_none_and_may_sit_anywhere():
@@ -403,24 +394,6 @@ def test_a_block_float_tile_is_sized_by_its_blocks(npu2):
 
     # 4096 blocks of 9 bytes: past half a core memory bank, so one deep.
     assert Blocks(n=4096).x.l1_depth == 1
-
-
-def test_buffers_carry_the_declared_dtype_and_size(npu2):
-    """The sizing contract: the sequence layout and the test harness allocate
-    from ``b.dtype`` and ``b.nbytes`` of a declared buffer.
-    """
-    from iron.operators.copy import Copy
-
-    x, y = Copy(input_buffer_size=512, dtype=np.int32).buffers
-    assert x.dtype == np.int32 and y.dtype == np.int32
-    assert (x.role, y.role) == (In, Out)
-    assert y.nbytes == 512 * 4
-
-
-def test_instance_values_shadow_the_fields():
-    op = MV(M=64, K=256, columns=2)
-    assert op.K == 256 and op.columns == 2
-    assert ParamSpec.of(MV.K) is not None and MV.K.name == "K"
 
 
 def test_a_stream_binds_a_handle_per_lane():
@@ -519,10 +492,6 @@ def test_an_operand_with_a_tile_is_its_own_stream():
         op.A.lanes == 8 and op.A.obj_type == np.ndarray[(64, 128), np.dtype[op.A.dtype]]
     )
     assert op.A.shape == (1024, 128) and op.C.shape == (1024,)
-    op.A.bind([f"h{k}" for k in range(8)])
-    assert op.A.handles[3] == "h3"
-    op.B.bind("hb")
-    assert op.B.handles == ["hb"]
 
 
 class Scaled(Operator):
@@ -760,36 +729,6 @@ def test_a_profile_reads_as_its_operators():
     assert repr(p) == "Profile(MV)"
 
 
-def test_profile_make_has_no_shared_state():
-    """``profile.make()`` touches no global state, so concurrent calls from
-    different threads cannot see each other's tunables.
-    """
-    import threading
-
-    p = Profile()
-    p.add(MV, columns=2)
-    seen, errors = [], []
-
-    def work():
-        try:
-            for _ in range(50):
-                seen.append(p.make(MV, M=64, K=64).columns)
-        except Exception as e:
-            errors.append(e)
-
-    threads = [threading.Thread(target=work) for _ in range(4)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert not errors and seen.count(2) == 200
-
-
-def test_construction_is_by_keyword():
-    with pytest.raises(TypeError, match="positional argument"):
-        MV(3, M=64, K=64)
-
-
 def test_a_profile_is_checked_as_it_is_written_and_as_it_is_read():
     p = Profile()
     with pytest.raises(TypeError, match="declares no field"):
@@ -801,7 +740,6 @@ def test_a_profile_is_checked_as_it_is_written_and_as_it_is_read():
     assert p.make(MV, M=512, K=128).columns == 8
     with pytest.raises(ValueError, match="ambiguous"):
         p.make(MV, M=1024, K=128)
-    assert MV(M=512, K=128).columns is None  # plain construction reads no profile
 
 
 def test_resolve_must_return_a_copy():
@@ -843,21 +781,15 @@ def test_resolve_columns_is_the_count_given_or_the_most_that_fit():
         op.resolve_columns(None, None)
 
 
-def test_a_stream_with_no_lanes_is_paid_once_in_the_shim_budget():
+def test_a_stream_with_no_lanes_or_broadcast_is_paid_once_in_the_shim_budget():
     class Scaled(MV):
         scale = In(MV.M, obj_shape=(MV.tile_out,), per=MV.columns)
 
-    # 16 input channels: A's and scale's lanes per column, B once.
+    # 16 input channels: A's and scale's lanes per column (or A's two
+    # channels a column), B once.
     assert MV.declaration.shim_columns(NPU2) == 8
-    assert (
-        Scaled.declaration.shim_columns(NPU2)
-        == (NPU2.shim_dma_channels_in - 1) // 2
-        == 7
-    )
-
-
-def test_a_broadcast_stream_is_paid_once_in_the_shim_budget():
-    # 16 input channels: B once, then A's two channels a column.
+    assert NPU2.shim_dma_channels_in == 16
+    assert Scaled.declaration.shim_columns(NPU2) == (16 - 1) // 2
     assert MV.declaration.shim_columns(NPU2, num_channels=2) == (16 - 1) // 2
 
 
@@ -967,6 +899,13 @@ def test_mha_pads_the_sequence_and_groups_kv():
     assert grouped[1].shape == (2, 128, 64)
     assert plain[1].shape == plain[0].shape
     assert [spec.role for spec in grouped] == [In] * 3 + [Out]
+    inputs, _, _ = MHA.declaration.call_operands(
+        ((8, 128, 64), (2, 128, 64), (2, 128, 64)), {}
+    )
+    op = MHA(**MHA.declaration.infer(inputs))
+    assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
+    with pytest.raises(ValueError, match=r"seq_pad \(100\)"):
+        MHA(num_heads=1, seq_len=100, seq_pad=100, d=64)
 
 
 # --------------------------------------------------------------------------

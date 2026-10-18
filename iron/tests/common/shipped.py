@@ -5,27 +5,14 @@
 
 The port (``iron.operators.flm.gemm.op.ProjectionGEMM``) is built from source;
 this is the binary it was ported from, downloaded and pinned by digest, and
-driven by the same declaration:
+driven by the same declaration, so the port can be measured against it:
 
 ```python
 Shipped(M=1024, K=1536, N=6144, epilogue="silu")
 ```
 
-It exists so the port can be measured against what it was ported from, on
-identical inputs and through the same host path. NPU2 only: the image is
-an 8-column binary.
-
-Its cores and routes are the image's: ``Array.build()`` pins the operands to the
-image's shim channels and places its parameter blocks, and ``sequence()``
-moves data in the order the memtiles consume it.
-
-What differs from the port, and why the port is the default: the port
-selects its epilogue at build time (a branch-free inner loop, one build per
-activation), this binary at run time; the port rounds ``conv_even``, this
-binary runs in the core's power-up floor mode and carries a ~1% truncation
-bias; the port packs B in ``mm_fused_mmul_2x2``'s k order, this binary in
-its own (``pack_B``). ``ProjectionGEMM(rounding=Rounding.FLOOR)`` on the port
-reproduces this overlay bit for bit without an activation.
+NPU2 only: its cores and routes are the 8-column image's. It rounds in the
+core's floor mode, as ``ProjectionGEMM(rounding=Rounding.FLOOR)`` does.
 """
 
 import dataclasses

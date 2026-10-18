@@ -1,21 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``DecoderConfig``'s partial rotary (``rotary_dim``) and global RoPE amplitude
-scale (``rope_attention_scaling``), device-free: the angle table's own
-shape and values, and that a traced decoder reads it at that width rather
-than ``head_dim`` -- Phi-4-mini-instruct's need, exercised here without a
-model of its own. Also ``head_dim``'s own fallback (``hidden_size // num_attention_heads``)
-for a checkpoint whose ``config.json`` has none (Qwen 2.5, Granite, LFM2,
-Phi-4-mini-instruct all omit it), and ``max_seq_len``, the checkpoint's
-native context, served where no prompt chunk divides it.
+"""``DecoderConfig``'s partial rotary (``rotary_dim``) and RoPE amplitude
+scale (``rope_attention_scaling``), device-free, and a ``max_seq_len`` no
+prompt chunk divides.
 """
 
 import dataclasses
-import hashlib
-import json
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -23,7 +14,7 @@ from ml_dtypes import bfloat16
 
 from iron.common.graph.handle import Affine
 import iron.functional as F
-from iron.lm import DecoderConfig, rope_angles
+from iron.lm import rope_angles
 from iron.applications.llama.model import Llama
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
@@ -33,12 +24,7 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
 class _PartialRotaryLlama(Llama):
-    """Llama's shape, but ``q``'s rotary prefix alone goes through RoPE: a
-    plain numpy weight slice (free at trace time) stands in for the real
-    per-head ``q_rot``/``q_pass`` split a partial-rotary model's own layer
-    makes, enough to exercise the shared decoder's narrower angle table
-    without a whole model package of its own.
-    """
+    """Llama's shape, but only ``q``'s rotary prefix goes through RoPE."""
 
     def layer(self, step, i, w, x):
         c, n = self.config, x.shape[0]
@@ -58,13 +44,6 @@ def _partial_rotary_small(**config):
     model = _PartialRotaryLlama(cfg, checkpoint(cfg).tree("random"))
     model.profile = PROFILE
     return model
-
-
-def test_rope_width_defaults_to_head_dim():
-    cfg = small().config
-    assert cfg.rotary_dim is None
-    assert cfg.rope_width == cfg.head_dim
-    assert cfg.angles().shape == (cfg.max_seq_len, cfg.head_dim)
 
 
 def test_rope_width_is_the_rotary_dim_when_given():
@@ -89,10 +68,9 @@ def test_attention_scaling_multiplies_the_whole_table_once():
     np.testing.assert_allclose(cfg.angles(), unscaled * np.float32(1.25), rtol=1e-6)
 
 
-def test_attention_scaling_of_one_leaves_llama_unchanged():
-    # Every existing full-rotary model takes this path: rope_width ==
-    # head_dim and the table is bitwise what rope_angles alone gives.
+def test_by_default_the_table_is_rope_angles_at_head_dim():
     cfg = small().config
+    assert cfg.rotary_dim is None and cfg.rope_width == cfg.head_dim
     assert cfg.rope_attention_scaling == 1.0
     np.testing.assert_array_equal(
         cfg.angles(),
@@ -117,67 +95,6 @@ def test_prompt_chunk_reads_the_rope_table_at_its_own_width():
     angle_copy = next(c for c in copies if c.dst.sizes[-1] == 32)
     assert list(angle_copy.dst.sizes) == [256, 32]
     assert t.pinned["rope"] == 256 * 32 * np.dtype(bfloat16).itemsize
-
-
-# A run's checkpoints' config.json files, removed when the process exits.
-_CONFIGS = tempfile.TemporaryDirectory(prefix="iron-decoder-config-")
-
-
-def _config_json(**fields) -> Path:
-    blob = json.dumps(fields)
-    digest = hashlib.sha256(blob.encode()).hexdigest()[:16]
-    directory = Path(_CONFIGS.name) / digest
-    directory.mkdir(exist_ok=True)
-    path = directory / "config.json"
-    path.write_text(blob)
-    return path
-
-
-def test_head_dim_falls_back_to_emb_dim_over_n_heads_when_absent():
-    # Qwen 2.5, Granite, LFM2 and Phi-4-mini-instruct's config.json alike.
-    path = _config_json(
-        vocab_size=32,
-        hidden_size=1536,
-        num_hidden_layers=1,
-        num_attention_heads=12,
-        num_key_value_heads=2,
-        intermediate_size=64,
-        rope_theta=1.0,
-        max_position_embeddings=4096,
-    )
-    cfg = DecoderConfig.from_checkpoint(path)
-    assert cfg.head_dim == 1536 // 12
-
-
-def test_head_dim_from_the_checkpoint_is_kept_as_given():
-    path = _config_json(
-        vocab_size=32,
-        hidden_size=2048,
-        num_hidden_layers=1,
-        num_attention_heads=16,
-        num_key_value_heads=8,
-        head_dim=128,
-        intermediate_size=64,
-        rope_theta=1.0,
-        max_position_embeddings=4096,
-    )
-    cfg = DecoderConfig.from_checkpoint(path)
-    assert cfg.head_dim == 128
-
-
-def test_max_seq_len_is_the_checkpoints_native_context():
-    path = _config_json(
-        vocab_size=32,
-        hidden_size=2048,
-        num_hidden_layers=1,
-        num_attention_heads=16,
-        num_key_value_heads=8,
-        intermediate_size=64,
-        rope_theta=1.0,
-        max_position_embeddings=40960,
-    )
-    cfg = DecoderConfig.from_checkpoint(path)
-    assert cfg.max_seq_len == 40960
 
 
 def test_a_context_no_chunk_divides_is_allocated_exactly():

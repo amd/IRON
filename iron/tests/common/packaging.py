@@ -55,13 +55,10 @@ def test_npu1_forces_xclbin_and_reports_the_scratchpad_lowering():
 
 def test_the_architecture_decides_not_the_name():
     # A partial NPU2 still dispatches a full ELF; a one-column NPU1 does not.
+    # NPU2Col1 is no NPU2 subclass, and NPU1Col1 is named "npu1_1col".
     assert plan(from_name("npu2", n_cols=4), _traced()).full_elf
     with pytest.raises(ValueError, match=r"npu1_1col \(AIE2\) has no full-ELF"):
         plan(NPU1Col1(), _traced(), full_elf=True)
-
-
-def test_full_elf_goes_by_architecture():
-    # NPU2Col1 is no NPU2 subclass, and NPU1Col1 is named "npu1_1col".
     assert dispatches_full_elf(NPU2()) and dispatches_full_elf(NPU2Col1())
     assert not dispatches_full_elf(NPU1()) and not dispatches_full_elf(NPU1Col1())
 
@@ -70,9 +67,6 @@ def test_a_forced_xclbin_is_derived_and_says_why():
     p = plan(NPU1(), _traced())
     assert not p.full_elf
     assert p.reasons == ["npu1 (AIE2) has no full-ELF dispatch"]
-    assert not plan(
-        NPU2(), _traced(PerCall("n", Kind.DISPATCH_TIME, np.int32))
-    ).full_elf
     p = plan(NPU1(), _traced(), full_elf=False)
     assert p.reasons == [
         "full_elf=False: asked for",

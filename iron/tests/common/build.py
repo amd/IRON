@@ -69,7 +69,10 @@ class MV(Operator):
 
 
 class Task(NamedTuple):
-    """One shim task of a generated sequence, as its text gives it."""
+    """One shim task of a generated sequence, as its text gives it. The fifos
+    are unnamed (mlir-aie's DeviceConfiguration names them), so a test finds
+    a task by the handle it was built from, or by its argument and offset.
+    """
 
     ssa: int
     lane: str
@@ -93,6 +96,16 @@ _TASK = re.compile(
 N = PerCall("n", Kind.SCRATCHPAD, np.int32).affine()
 
 
+def _tasks(module) -> tuple[str, list[Task]]:
+    """``module``'s runtime sequence and its shim tasks in order."""
+    text = str(module)
+    text = text[text.index("aie.runtime_sequence") :]
+    return text, [
+        Task(int(ssa), lane, int(arg), int(offset), *rest)
+        for ssa, lane, arg, offset, *rest in _TASK.findall(text)
+    ]
+
+
 def generated_sequence(op, full_elf=True) -> tuple[str, list[Task]]:
     """The runtime sequence ``op`` builds to, and its shim tasks in order.
 
@@ -100,23 +113,14 @@ def generated_sequence(op, full_elf=True) -> tuple[str, list[Task]]:
     design's generator declares, so it is generated as it would be compiled.
     """
     if full_elf:
-        module = OperatorDesign(op).module()
-    else:
-        module = OperatorDesign(op, full_elf=False).compilable().generate_mlir()
-    text = str(module)
-    text = text[text.index("aie.runtime_sequence") :]
-    tasks = [
-        Task(int(ssa), lane, int(arg), int(offset), *rest)
-        for ssa, lane, arg, offset, *rest in _TASK.findall(text)
-    ]
-    return text, tasks
+        return _tasks(OperatorDesign(op).module())
+    return _tasks(OperatorDesign(op, full_elf=False).compilable().generate_mlir())
 
 
 def built(op) -> tuple[str, list[Task], Operator]:
     """``generated_sequence``'s full ELF build, alongside the resolved copy
-    of ``op`` whose operands' lanes were bound to build it: a task's
-    ``lane`` (an unnamed fifo's mlir-aie-assigned name) is matched back to
-    the handle that moved it through this copy.
+    of ``op`` whose operands' lanes were bound to build it, to match a
+    task's ``lane`` back to the handle that moved it.
     """
     array = BuiltArray(OperatorDesign(op))
     prog = Program(
@@ -124,13 +128,7 @@ def built(op) -> tuple[str, list[Task], Operator]:
         OperatorRuntime(array.op, array.built),
         workers=array.workers,
     )
-    text = str(prog.resolve_program())
-    text = text[text.index("aie.runtime_sequence") :]
-    tasks = [
-        Task(int(ssa), lane, int(arg), int(offset), *rest)
-        for ssa, lane, arg, offset, *rest in _TASK.findall(text)
-    ]
-    return text, tasks, array.op
+    return *_tasks(prog.resolve_program()), array.op
 
 
 # --------------------------------------------------------------------------
@@ -294,16 +292,6 @@ def test_the_slots_after_a_multi_word_value_follow_its_words(npu2):
     assert rtp_writes(xclbin)[-2:] == [(4, 1), (5, "%arg1")]
 
 
-def test_mha_infers_the_padded_length_and_the_kv_head_count():
-    inputs, _, _ = MHA.declaration.call_operands(
-        ((8, 128, 64), (2, 128, 64), (2, 128, 64)), {}
-    )
-    op = MHA(**MHA.declaration.infer(inputs))
-    assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
-    with pytest.raises(ValueError, match=r"seq_pad \(100\)"):
-        MHA(num_heads=1, seq_len=100, seq_pad=100, d=64)
-
-
 def test_mha_binds_p_times_v_at_its_own_shape():
     """Away from B_kv = d, P*V's operands are not QK^T's: P is (B_q, B_kv), V
     (B_kv, d) and O (B_q, d), each streamed as P*V takes it, O accumulated
@@ -340,8 +328,6 @@ def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin():
     assert op.derived_at("tiles", valid=64) == 64 // (2 * 8)
     assert op.derived_at("valid_A", valid=64) == 64 // (2 * 8)  # unit: output tiles
     text, tasks, op = built(op)
-    # The fifos are unnamed (mlir-aie's DeviceConfiguration names them), so a
-    # task is identified by the handle it was built from, not a literal name.
     c0, c1 = (h.name for h in op.C.handles)
     a0, a1 = (h.name for h in op.A.handles)
     assert [
@@ -373,9 +359,7 @@ def test_on_an_xclbin_the_size_is_the_dispatch_scalar():
     # per-call scalar standing in for the size itself.
     text, tasks = generated_sequence(_bounded_gemv(), full_elf=False)
     assert "scratchpad_parameter" not in text
-    # %arg1 is B, the head of each A stream, whose size no call bounds; the
-    # fifos are unnamed (mlir-aie's DeviceConfiguration names them), so a
-    # lane is identified by its argument and offset, not a literal name.
+    # %arg1 is B, the head of each A stream, whose size no call bounds.
     bounded = [t for t in tasks if t.arg != 1]
     assert [(t.arg, t.offset, t.length_parameter) for t in bounded] == [
         (2, 0, ""),
@@ -444,7 +428,10 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     # Keyword construction leaves every tunable to resolution, which reads the
     # device alone; the operator's extent is checked against the resolved
     # tunables by compatible(), not folded into its defaults.
-    assert flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024).tile_n is None
+    untuned = flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024)
+    assert untuned.tile_n is None
+    with pytest.raises(ValueError):
+        [b.shape for b in untuned.buffers]  # B's layout follows the device
     op = flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024).resolved(
         from_name("npu2", n_cols=8)
     )
@@ -512,13 +499,6 @@ def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
         dev
     )
     assert static(op) == static(op.xclbin_operator())
-
-
-def test_flm_gemm_layout_of_b_follows_the_device():
-    untuned = flm_gemm.ProjectionGEMM(M=256, K=512, N=512)
-    with pytest.raises(ValueError):
-        [b.shape for b in untuned.buffers]  # B's layout follows the device
-    assert untuned.resolved(from_name("npu2", n_cols=8)).B.shape == (512 * 512 // 8,)
 
 
 def test_flm_gemm_selects_its_activation_by_a_word():

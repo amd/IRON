@@ -73,6 +73,28 @@ def test_from_checkpoint_reads_null_as_the_fields_default(tmp_path):
     assert LlamaConfig.from_checkpoint(tmp_path).rope_scaling is None
 
 
+def test_head_dim_falls_back_and_max_seq_len_is_the_native_context(tmp_path):
+    """No ``head_dim`` (Qwen 2.5, Granite, LFM2, Phi-4-mini-instruct) is
+    ``hidden_size // num_attention_heads``; one given is kept.
+    """
+    fields = dict(
+        vocab_size=32,
+        hidden_size=1536,
+        num_hidden_layers=1,
+        num_attention_heads=12,
+        num_key_value_heads=2,
+        intermediate_size=64,
+        rope_theta=1.0,
+        max_position_embeddings=40960,
+    )
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(fields))
+    cfg = DecoderConfig.from_checkpoint(path)
+    assert (cfg.head_dim, cfg.max_seq_len) == (1536 // 12, 40960)
+    path.write_text(json.dumps(fields | {"head_dim": 64}))
+    assert DecoderConfig.from_checkpoint(path).head_dim == 64
+
+
 def test_from_checkpoint_raises_with_no_config_json_beside_the_path(tmp_path):
     with pytest.raises(FileNotFoundError):
         LlamaConfig.from_checkpoint(tmp_path / "model.safetensors")

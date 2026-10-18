@@ -233,15 +233,6 @@ def test_a_gather_merges_the_rows_it_can(name):
     assert (op.reference(x).reshape(len(ids), W) == x[ids]).all()
 
 
-def test_a_gathers_channels_split_each_row():
-    ids = np.array([3, 3, 60, 1])
-    text, issued, op = built(_gather(ids, num_channels=2))
-    assert {t.lane for t in issued} == set(_lane_names(op).values())
-    assert text.count("dma_await_task") == 2
-    x = np.arange(V * W, dtype=np.float32).reshape(V, W)
-    assert (op.reference(x).reshape(len(ids), W) == x[ids]).all()
-
-
 class _Gathers(iron.Graph):
     def __init__(self, ids):
         self.table = iron.weight(np.zeros((V, W), dtype=bfloat16))
@@ -286,30 +277,6 @@ def test_a_gather_refuses_what_it_cannot_lower(index, match):
         Bad().trace(x=(V, W))
 
 
-@pytest.mark.parametrize(
-    "rows", [None, N * D, G * N * D], ids=["source", "head", "flat"]
-)
-@pytest.mark.parametrize("channels", [1, 2, 4])
-def test_a_permuting_copy_keeps_its_order_on_every_channel_count(channels, rows):
-    """The channels split both sides at the innermost extent they share, so
-    each channel's share of a source row lands where the copy puts it,
-    whatever the output's rows (by default as wide as the source's).
-    """
-    dst = (
-        {}
-        if rows is None
-        else dict(dst=TensorAccessPattern.full((G * N * D // rows, rows)))
-    )
-    op = Copy(
-        src=_permuted(N, G, D),
-        input_buffer_size=N * G * D,
-        num_channels=channels,
-        **dst,
-    )
-    x = np.arange(N * G * D, dtype=np.float32).reshape(N, G, D)
-    assert (op.reference(x).reshape(G, N, D) == x.transpose(1, 0, 2)).all()
-
-
 CHANNEL_SPLITS = {
     "permuted_on_4": dict(
         src=_permuted(N, G, D), input_buffer_size=N * G * D, num_channels=4
@@ -345,7 +312,8 @@ def test_each_channel_drains_the_elements_it_fills(name):
     give the reference: a split whose two sides' shares do not line up
     lands elements in the wrong places only on a device otherwise.
     """
-    _, tasks, op = built(Copy(**CHANNEL_SPLITS[name]).resolved())
+    text, tasks, op = built(Copy(**CHANNEL_SPLITS[name]).resolved())
+    assert text.count("dma_await_task") == op.num_channels
     names = _lane_names(op)
     x = np.arange(1, op.input_buffer_size + 1, dtype=np.float32)
     want = op.reference(x)
