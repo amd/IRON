@@ -12,21 +12,12 @@ from aie.iron.kernels import quant
 from aie.utils import bfp
 
 from iron.common import Auto, Built, In, Operand, Operator, Out, Param, Unresolvable
-from iron.operators.flm.dequant.design import (
-    CORE_BLOCKS,
-    CORE_JOIN_OFFSETS,
-    CT_K,
-    HALF_BLOCKS,
-    HALVES,
-    K_TILE_B,
-    N_TILE,
-    ROWS,
-    S,
-    T,
-    drain_halves,
-    qw_bytes_for,
-    run_geometry,
-)
+
+# flm.GEMM's B tiling, imported rather than restated: this design has to write
+# the buffer in the order that one reads it, and two copies would drift.
+from iron.operators.flm.gemm.design import CT_MAX_K_FOR_N, S, T
+from iron.operators.flm.gemm.design import K_TILE as K_TILE_B
+from iron.operators.flm.gemm.design import N_TILE_DEFAULT as N_TILE
 from iron.operators.flm.q4nx import (
     BLOCK_BYTES,
     GROUP,
@@ -36,13 +27,82 @@ from iron.operators.flm.q4nx import (
     parts,
 )
 
+CT_K = CT_MAX_K_FOR_N[N_TILE]
+
+# Four cores per column: each takes one n-half and one k-half of the column
+# block. The column count is the device's, so it lives on the overlay.
+ROWS = 4
+
+CORE_BLOCKS = M_TILE * K_TILE // bfp.BLOCK
+SLAB_BLOCKS = N_TILE * K_TILE_B // bfp.BLOCK
+HALF_BLOCKS = SLAB_BLOCKS // 2
+
+# One core's contiguous run: every n it owns over one k slice.
+RUN = (M_TILE // T) * (CT_K // S) * T
+SPLIT = 2
+
+
+# Core i takes n-half i % 2 and k-half i // 2, so cores 0/1 form the k-half 0
+# object and cores 2/3 the k-half 1 object.
+CORE_JOIN_OFFSETS = [0, CORE_BLOCKS]
+HALVES = 2
+
+
+def drain_halves(out_blocks):
+    """The output's drain, per half slab.
+
+    Args:
+        out_blocks: The output's size, in bfp16 blocks.
+
+    Returns:
+        The walk over the output's half slabs, indexed by half: each one's
+        n-half, k slice, then the core's run, split so the innermost size
+        stays inside the BD's field.
+    """
+    halves = TensorAccessPattern.full(
+        (out_blocks // HALF_BLOCKS, K_TILE // CT_K, N_TILE // M_TILE, RUN)
+    )
+    return halves.permute((0, 2, 1, 3)).split(3, RUN // SPLIT)
+
+
+def run_geometry(run_out_features, run_period_out_features, n_blocks):
+    if run_out_features is None and run_period_out_features is None:
+        return n_blocks, n_blocks
+    if run_out_features is None or run_period_out_features is None:
+        raise ValueError(
+            "DequantBFP: run_out_features and run_period_out_features go together"
+        )
+    for name, v in (
+        ("run_out_features", run_out_features),
+        ("run_period_out_features", run_period_out_features),
+    ):
+        if v % N_TILE:
+            raise ValueError(f"DequantBFP: {name} ({v}) must be a multiple of {N_TILE}")
+    if run_period_out_features < run_out_features:
+        raise ValueError(
+            f"DequantBFP: run_period_out_features ({run_period_out_features}) "
+            f"must be at least run_out_features ({run_out_features})"
+        )
+    return run_out_features // N_TILE, run_period_out_features // N_TILE
+
+
+def qw_bytes_for(K, N, run_out_features=None, run_period_out_features=None):
+    """Bytes the operator reads, counting any gap it strides over."""
+    n_blocks = N // N_TILE
+    run_blocks, period_blocks = run_geometry(
+        run_out_features, run_period_out_features, n_blocks
+    )
+    last = n_blocks - 1
+    cb = (last // run_blocks) * period_blocks + last % run_blocks + 1
+    return packed_bytes(cb * N_TILE * K)
+
 
 def _blocks(qw):
     """The q4nx blob as rows of BLOCK_BYTES."""
     qw = np.asarray(qw, dtype=np.uint8).ravel()
     if qw.size % BLOCK_BYTES:
         raise ValueError(
-            f"q4nx blob of {qw.size} bytes is not a whole number of blocks"
+            f"DequantBFP: a q4nx blob of {qw.size} bytes is not a whole number of blocks"
         )
     return qw.reshape(-1, BLOCK_BYTES)
 
@@ -96,10 +156,6 @@ class DequantBFP(Operator):
     # Filled by validate() from K, N and the interleave.
     quantized_bytes: int = Param(derive=lambda op: op.quantized_size(), repr=False)
     packed_blocks: int = Param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
-    # The n tile width the packed output is written for. It has to match the
-    # tile_n flm.GEMM reads B at, or the GEMM reads the right bytes in the
-    # wrong order.
-    tile_n: int = Auto()
     # cols follows the device. ROWS is baked into the split offsets and the
     # join, so it is not a field; halves is, because a stream's replication
     # count must be declared to be indexed, but the join bakes it too.
@@ -125,12 +181,6 @@ class DequantBFP(Operator):
     )
 
     def validate(self) -> None:
-        if self.tile_n is not None and self.tile_n != N_TILE:
-            raise ValueError(
-                f"DequantBFP: tile_n must be {N_TILE}; this operator emits that order only. "
-                f"flm.GEMM picks {self.tile_n} for some shapes, and the two must "
-                "agree or the GEMM reads B in the wrong order"
-            )
         self.check_derived("quantized_bytes", "packed_blocks")
         # Validates the pair and the multiples.
         run_geometry(
@@ -146,7 +196,6 @@ class DequantBFP(Operator):
             raise Unresolvable("DequantBFP: bfp16ebs8 exists only on AIE2P")
         return dataclasses.replace(
             self,
-            tile_n=N_TILE if self.tile_n is None else self.tile_n,
             cols=dev.cols if self.cols is None else self.cols,
         )
 
@@ -167,7 +216,7 @@ class DequantBFP(Operator):
                 "DequantBFP: the xclbin is named for a device; none is bound"
             )
         t = self if self._resolved else self.resolved(dev)
-        return f"FLM_DequantBFP_tn{t.tile_n}_c{t.cols}_{dev.name}"
+        return f"FLM_DequantBFP_tn{N_TILE}_c{t.cols}_{dev.name}"
 
     @property
     def name(self) -> str:

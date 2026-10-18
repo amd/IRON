@@ -80,7 +80,7 @@ memtile objects per slab, one per k-half, and the half rides in the offset.
 
 No K or N reaches the device configuration: every descriptor comes from the
 layout above, and the cores loop over identical per-block work. `config_name`
-keys the xclbin on `tile_n` and the device; `name` keys the instruction stream
+keys the xclbin on the device and its column count; `name` keys the instruction stream
 on the shape. A clean build of the test suite emits one xclbin and ten
 instruction streams.
 
@@ -103,9 +103,8 @@ the matrix's own start, with `Tensor.subview` on the containing buffer.
 
 `K % 512 == 0`, `N % 64 == 0`, AIE2P only.
 
-`K == 512` raises. `flm.GEMM` picks `tile_n = 128` at a single k iteration,
-which packs B in a different order, and a mismatch there yields a buffer of the
-right size that the GEMM reads wrongly.
+The output is in the order `flm.GEMM` reads B at `tile_n = 64`, its default.
+A GEMM at another `tile_n` reads a buffer of the right size in the wrong order.
 
 ## Rounding
 

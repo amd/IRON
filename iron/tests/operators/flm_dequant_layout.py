@@ -15,7 +15,7 @@ import pytest
 from aie.utils import bfp
 
 from iron.operators.flm.aie2p_math_emulation import rb
-from iron.operators.flm.dequant.design import (
+from iron.operators.flm.dequant.op import (
     CORE_JOIN_OFFSETS,
     CT_K,
     HALF_BLOCKS,

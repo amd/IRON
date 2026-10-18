@@ -665,20 +665,11 @@ def test_an_m_no_tile_splits_is_rejected(device, precision, request):
         GEMM(M=8, K=64, N=512, precision=precision)
 
 
-@pytest.mark.parametrize(
-    "K, N, extra, exc, match",
-    [
-        # flm.GEMM may be asked for tile_n=128, the NPU2 winner at K = 512;
-        # this operator does not emit that order and must say so.
-        (512, 128, dict(tile_n=128), ValueError, "tile_n"),
-        # Extents the grid does not divide: refused once the grid is known.
-        (1000, 128, {}, ValueError, "multiple of"),
-        (1024, 100, {}, ValueError, "multiple of"),
-    ],
-)
-def test_flm_dequant_rejects_unservable_shapes(K, N, extra, exc, match):
-    with pytest.raises(exc, match=match):
-        DequantBFP(K=K, N=N, **extra).resolved(from_name("npu2", n_cols=8))
+# Extents the grid does not divide: refused once the grid is known.
+@pytest.mark.parametrize("K, N", [(1000, 128), (1024, 100)])
+def test_flm_dequant_rejects_unservable_shapes(K, N):
+    with pytest.raises(ValueError, match="multiple of"):
+        DequantBFP(K=K, N=N).resolved(from_name("npu2", n_cols=8))
 
 
 @pytest.mark.parametrize(
