@@ -110,7 +110,9 @@ public API adds its entry under Unreleased.
   names one.
 - `Golden.logits` keys on the tokens and any clip or image array beside
   them, and a checkpoint's `golden.npz` is fingerprinted with its
-  `config.json`; one recorded before must be recorded again.
+  `config.json` and `Checkpoint.fingerprint()`, each tensor's name, type,
+  shape and the bytes at either end; one recorded before must be recorded
+  again.
 - `Config.from_checkpoint` names the missing `config.json` keys, and an
   encoder refuses a token outside its vocabulary.
 - idefics3 vision, Whisper and Phi-4 config fields take `config.json`'s

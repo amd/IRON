@@ -34,7 +34,7 @@ import iron
 from iron.tune.autotune import Call
 
 from .blocks import Attention, DecoderLayer, MLP, Norm
-from .golden import Golden, HuggingFace
+from .golden import Golden, HuggingFace, fingerprint
 from .generation import (
     Sampler,
     accuracy,
@@ -467,6 +467,17 @@ class Checkpoint:
         for shard in self._shards:
             if shard.release(array):
                 return
+
+    def fingerprint(self) -> str:
+        """A digest of each tensor's name, type and shape and of the first
+        and last 4 KiB of its bytes: what tells a fine-tune from its base
+        without reading either whole.
+        """
+        ends = []
+        for name, t in self.tensors.items():
+            n = 4096 // t.itemsize
+            ends.append([name, f"{t.dtype}{t.shape}", t.flat[:n], t.flat[-n:]])
+        return fingerprint(ends)
 
     def tree(
         self, fill: Literal["read", "random", "unread"] = "read", seed: int = 0
@@ -960,7 +971,7 @@ class Runner:
         """What the model is judged by: with drawn weights, its own graph on
         the host (``OnHost``); else ``hugging_face``'s logits, recorded
         beside the checkpoint (``golden.npz``) from its ``config.json`` and
-        its tensors' names, types and shapes.
+        its tensors (``Checkpoint.fingerprint``).
         """
         if self.seed is not None:
 
@@ -969,11 +980,10 @@ class Runner:
 
             return Host(self.config, self.weights)
         directory = Path(self.checkpoint.path).parent
-        header = {n: f"{t.dtype}{t.shape}" for n, t in self.checkpoint.tensors.items()}
         return Golden(
             directory / "golden.npz",
             lambda: self.hugging_face.load(directory),
-            ((directory / "config.json").read_text(), header),
+            ((directory / "config.json").read_text(), self.checkpoint.fingerprint()),
         )
 
     def encode(self, text: str) -> list[int]:

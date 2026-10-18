@@ -254,7 +254,8 @@ def reference():
     """``reference(key, compute)``: ``compute(model)`` on Hugging Face's own
     EmbeddingGemma 2 (hugging_face.py), an array kept under ``key`` in
     ``golden.npz`` beside the checkpoint, recorded under ``pytest
-    --record-goldens`` (torch, torchvision and transformers installed).
+    --record-goldens`` (torch, torchvision and transformers installed) and
+    refused once the checkpoint's ``config.json`` or tensors change.
     """
 
     @functools.cache
@@ -263,11 +264,16 @@ def reference():
 
         return HuggingFace(DIRECTORY)
 
+    @functools.cache
+    def inputs():
+        checkpoint = Checkpoint(DIRECTORY / "model.safetensors")
+        return (DIRECTORY / "config.json").read_text(), checkpoint.fingerprint()
+
     def recorded(key, compute):
         record = lambda: SimpleNamespace(
             logits=lambda _: compute(model())
         )  # noqa: E731
-        golden = Golden(DIRECTORY / "golden.npz", record)
+        golden = Golden(DIRECTORY / "golden.npz", record, inputs())
         return golden.logits(np.frombuffer(key.encode(), np.uint8))
 
     return recorded

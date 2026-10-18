@@ -13,6 +13,8 @@ instance so no config.json is read.
 import argparse
 import dataclasses
 import logging
+import shutil
+import struct
 
 import aie.utils as aie_utils
 import numpy as np
@@ -21,6 +23,7 @@ import pytest
 from iron.applications.llama.model import Llama, SPECIAL_TOKENS, tokenizer
 from iron.lm import Runner as BaseRunner
 from iron.lm.base import FLAGS
+from iron.lm.golden import RECORD
 from iron.lm.testing import require, weights_dir
 from iron.tests.common.llama_model import SMALL, checkpoint
 
@@ -157,14 +160,27 @@ def test_a_runner_s_bos_is_its_checkpoint_s_unless_it_names_one(tmp_path):
     assert SmallRunner(path, seed=1).bos == SPECIAL_TOKENS["<|begin_of_text|>"]
 
 
-def test_a_checkpoint_s_golden_is_refused_once_its_config_changes(tmp_path):
+@pytest.mark.parametrize("change", ["config", "first weight", "last weight"])
+def test_a_checkpoint_s_golden_is_refused_once_it_changes(
+    tmp_path, monkeypatch, change
+):
+    """A fine-tune keeps every name and shape: the bytes at either end of a
+    tensor tell it from its base.
+    """
+    monkeypatch.delenv(RECORD, raising=False)
     path = tmp_path / "model.safetensors"
-    path.symlink_to(checkpoint(SMALL).path)
+    shutil.copy(checkpoint(SMALL).path, path)
     (tmp_path / "config.json").write_text('{"bos_token_id": 7}')
     golden = SmallRunner(path).reference()
     golden.rows = {"key": np.zeros(1, np.float32)}
     golden.write()
     assert SmallRunner(path).reference().rows.keys() == {"key"}
-    (tmp_path / "config.json").write_text('{"bos_token_id": 8}')
+    if change == "config":
+        (tmp_path / "config.json").write_text('{"bos_token_id": 8}')
+    else:
+        with open(path, "r+b") as f:
+            (length,) = struct.unpack("<Q", f.read(8))
+            f.seek(8 + length if change == "first weight" else path.stat().st_size - 1)
+            f.write(b"\x01")
     with pytest.raises(ValueError, match="other inputs"):
         SmallRunner(path).reference()
