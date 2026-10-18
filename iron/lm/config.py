@@ -52,6 +52,13 @@ def _dotted(data: dict, path: str):
     return node
 
 
+def not_json(default, **kwargs) -> dataclasses.Field:
+    """A field ``config.json`` does not set, an IRON choice: kept at
+    ``default`` by ``from_checkpoint`` and left out by ``to_json``.
+    """
+    return dataclasses.field(default=default, metadata={"json": None}, **kwargs)
+
+
 @dataclasses.dataclass(frozen=True)
 class Config:
     """A model's shape, built from a checkpoint's ``config.json``
@@ -65,12 +72,11 @@ class Config:
 
     @classmethod
     def from_checkpoint(cls, path) -> "Config":
-        """``cls``'s fields named in ``path``'s own ``config.json``: each
-        field's own ``metadata["json"]``, a dot-separated path from the
-        file's root, converted by its ``metadata["convert"]`` if it names
-        one; a field with no ``"json"`` entry is an IRON choice, not the
-        checkpoint's, and keeps its default, as does one the file leaves
-        null.
+        """``cls``'s fields read from ``path``'s own ``config.json``: each
+        at its ``metadata["json"]``, a dot-separated path from the file's
+        root (its own name if unset), converted by its
+        ``metadata["convert"]`` if it names one; a ``not_json`` field keeps
+        its default, as does one the file leaves out or null.
 
         Args:
             path: A ``config.json``, or a checkpoint's directory or file
@@ -86,7 +92,7 @@ class Config:
         data = json.loads(path.read_text())
         kwargs, missing = {}, []
         for f in dataclasses.fields(cls):
-            key = f.metadata.get("json")
+            key = f.metadata.get("json", f.name)
             if key is None:
                 continue
             value = _dotted(data, key)
@@ -105,11 +111,11 @@ class Config:
     def to_json(self) -> dict:
         """The fields as ``config.json`` names them, ``from_checkpoint``'s
         inverse: a value its ``convert`` built gives its own ``to_json()``.
-        A field that is None or not JSON is left out.
+        A ``not_json`` field, or one that is None or not JSON, is left out.
         """
         out = {}
         for f in dataclasses.fields(self):
-            key, value = f.metadata.get("json"), getattr(self, f.name)
+            key, value = f.metadata.get("json", f.name), getattr(self, f.name)
             if hasattr(value, "to_json"):
                 value = value.to_json()
             if key is None or not isinstance(
@@ -141,37 +147,29 @@ class DecoderConfig(Config):
     chunking.
     """
 
-    vocab_size: int = dataclasses.field(metadata={"json": "vocab_size"})
-    hidden_size: int = dataclasses.field(metadata={"json": "hidden_size"})
-    num_hidden_layers: int = dataclasses.field(metadata={"json": "num_hidden_layers"})
-    num_attention_heads: int = dataclasses.field(
-        metadata={"json": "num_attention_heads"}
-    )
-    num_key_value_heads: int = dataclasses.field(
-        metadata={"json": "num_key_value_heads"}
-    )
+    vocab_size: int
+    hidden_size: int
+    num_hidden_layers: int
+    num_attention_heads: int
+    num_key_value_heads: int
     # None where the checkpoint's config.json has no head_dim: __post_init__
     # derives it.
-    head_dim: int | None = dataclasses.field(
-        default=None, kw_only=True, metadata={"json": "head_dim"}
-    )
-    intermediate_size: int = dataclasses.field(metadata={"json": "intermediate_size"})
+    head_dim: int | None = dataclasses.field(default=None, kw_only=True)
+    intermediate_size: int
     # None: no RoPE, a decoder of absolute positions (``positions``).
-    rope_theta: float | None = dataclasses.field(metadata={"json": "rope_theta"})
+    rope_theta: float | None
     max_seq_len: int = dataclasses.field(metadata={"json": "max_position_embeddings"})
-    rope_scaling: RopeScaling | None = None
+    rope_scaling: RopeScaling | None = not_json(None)
     # The rotated prefix of head_dim (partial rotary, e.g. Phi's 0.75): None
     # rotates the whole head, as every full-rotary model does.
-    rotary_dim: int | None = None
+    rotary_dim: int | None = not_json(None)
     # A post-trig scalar the whole angle table is multiplied by once at
     # build time (LongRoPE/YaRN's "mscale"): 1.0 leaves cos/sin as rotations.
-    rope_attention_scaling: float = 1.0
-    prefill_chunk: int = 2048
-    hidden_act: str = dataclasses.field(default="silu", metadata={"json": "hidden_act"})
+    rope_attention_scaling: float = not_json(1.0)
+    prefill_chunk: int = not_json(2048)
+    hidden_act: str = "silu"
     # Whether the output head is the input embedding.
-    tie_word_embeddings: bool = dataclasses.field(
-        default=True, metadata={"json": "tie_word_embeddings"}
-    )
+    tie_word_embeddings: bool = True
 
     def __post_init__(self):
         if self.head_dim is None:

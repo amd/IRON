@@ -35,7 +35,7 @@ import numpy as np
 import iron
 import iron.functional as F
 from iron import lm
-from iron.lm import Attention, CausalLM, Checkpoints, DecoderConfig
+from iron.lm import Attention, CausalLM, Checkpoints, DecoderConfig, not_json
 from iron.operators.copy import Copy
 
 
@@ -45,14 +45,12 @@ class Lfm2Config(DecoderConfig):
     keys, and which layers are full attention.
     """
 
-    intermediate_size: int = dataclasses.field(default=0, init=False)
+    intermediate_size: int = not_json(0, init=False)
     eps: float = dataclasses.field(
         default=1e-5, kw_only=True, metadata={"json": "norm_eps"}
     )
     # Hugging Face's Lfm2MLP narrows block_ff_dim by the three after it.
-    block_ff_dim: int = dataclasses.field(
-        kw_only=True, metadata={"json": "block_ff_dim"}
-    )
+    block_ff_dim: int = dataclasses.field(kw_only=True)
     auto_adjust_ff_dim: bool = dataclasses.field(
         default=False, kw_only=True, metadata={"json": "block_auto_adjust_ff_dim"}
     )
@@ -65,7 +63,7 @@ class Lfm2Config(DecoderConfig):
     #: Layer indices that are full attention; every other layer is a
     #: gated short conv.
     full_attn_idxs: tuple[int, ...] = dataclasses.field(
-        default=(), metadata={"json": "full_attn_idxs", "convert": tuple}
+        default=(), metadata={"convert": tuple}
     )
     #: The short conv's kernel width.
     conv_kernel: int = dataclasses.field(default=3, metadata={"json": "conv_L_cache"})

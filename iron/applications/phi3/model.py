@@ -84,13 +84,9 @@ class Phi4Config(DecoderConfig):
         kw_only=True,
         metadata={"json": "rope_scaling", "convert": LongRope.from_dict},
     )
-    partial_rotary_factor: float = dataclasses.field(
-        default=1.0, kw_only=True, metadata={"json": "partial_rotary_factor"}
-    )
+    partial_rotary_factor: float = dataclasses.field(default=1.0, kw_only=True)
     original_max_position_embeddings: int | None = dataclasses.field(
-        default=None,
-        kw_only=True,
-        metadata={"json": "original_max_position_embeddings"},
+        default=None, kw_only=True
     )
 
     def __post_init__(self):

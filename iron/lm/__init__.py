@@ -8,7 +8,7 @@ themselves are applications over it, each a package of
 """
 
 from .checkpoint import Checkpoint
-from .config import Config, DecoderConfig, rope_angles
+from .config import Config, DecoderConfig, not_json, rope_angles
 from .model import Model, OnHost, Tokenizer, prompt_text
 from .cli import main
 from .blocks import (
@@ -66,6 +66,7 @@ __all__ = [
     "filterbank",
     "generate_on_host",
     "main",
+    "not_json",
     "prompt_text",
     "rope_angles",
 ]

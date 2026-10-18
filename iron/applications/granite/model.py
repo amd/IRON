@@ -38,18 +38,10 @@ from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
 class GraniteConfig(DecoderConfig):
     """``DecoderConfig`` and Granite's own four scalars."""
 
-    attention_multiplier: float = dataclasses.field(
-        kw_only=True, metadata={"json": "attention_multiplier"}
-    )
-    residual_multiplier: float = dataclasses.field(
-        default=1.0, kw_only=True, metadata={"json": "residual_multiplier"}
-    )
-    embedding_multiplier: float = dataclasses.field(
-        default=1.0, kw_only=True, metadata={"json": "embedding_multiplier"}
-    )
-    logits_scaling: float = dataclasses.field(
-        default=1.0, kw_only=True, metadata={"json": "logits_scaling"}
-    )
+    attention_multiplier: float = dataclasses.field(kw_only=True)
+    residual_multiplier: float = dataclasses.field(default=1.0, kw_only=True)
+    embedding_multiplier: float = dataclasses.field(default=1.0, kw_only=True)
+    logits_scaling: float = dataclasses.field(default=1.0, kw_only=True)
 
     def attention(self, i: int) -> Attention:
         return dataclasses.replace(

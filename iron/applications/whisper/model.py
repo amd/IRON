@@ -34,6 +34,7 @@ from iron.lm import (
     EncoderDecoder,
     Norm,
     Tower,
+    not_json,
 )
 from iron.lm.checkpoint import _nest, leaves
 from iron.operators.copy import Copy
@@ -130,30 +131,20 @@ class WhisperConfig(DecoderConfig):
         metadata={"json": "decoder_attention_heads"}
     )
     intermediate_size: int = dataclasses.field(metadata={"json": "decoder_ffn_dim"})
-    rope_theta: float | None = dataclasses.field(default=None, kw_only=True)
+    rope_theta: float | None = not_json(None, kw_only=True)
     max_seq_len: int = dataclasses.field(metadata={"json": "max_target_positions"})
-    prefill_chunk: int = 256
+    prefill_chunk: int = not_json(256)
     # Whisper's own "gelu" is exact, which MLP refuses: no operator computes
     # it. A checkpoint at "gelu_pytorch_tanh" runs.
     hidden_act: str = dataclasses.field(
         default="gelu", metadata={"json": "activation_function"}
     )
-    eps: float = dataclasses.field(default=1e-5, kw_only=True)
-    encoder_layers: int = dataclasses.field(
-        kw_only=True, metadata={"json": "encoder_layers"}
-    )
-    encoder_attention_heads: int = dataclasses.field(
-        kw_only=True, metadata={"json": "encoder_attention_heads"}
-    )
-    encoder_ffn_dim: int = dataclasses.field(
-        kw_only=True, metadata={"json": "encoder_ffn_dim"}
-    )
-    num_mel_bins: int = dataclasses.field(
-        kw_only=True, metadata={"json": "num_mel_bins"}
-    )
-    max_source_positions: int = dataclasses.field(
-        kw_only=True, metadata={"json": "max_source_positions"}
-    )
+    eps: float = not_json(1e-5, kw_only=True)
+    encoder_layers: int = dataclasses.field(kw_only=True)
+    encoder_attention_heads: int = dataclasses.field(kw_only=True)
+    encoder_ffn_dim: int = dataclasses.field(kw_only=True)
+    num_mel_bins: int = dataclasses.field(kw_only=True)
+    max_source_positions: int = dataclasses.field(kw_only=True)
 
     def norm(self) -> Norm:
         return Norm(self.eps, bias=True)

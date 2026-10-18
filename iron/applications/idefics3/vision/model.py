@@ -25,7 +25,7 @@ from ml_dtypes import bfloat16
 import iron.functional as F
 from iron import Precision
 from iron.functional import LAYER_NORM_EPS
-from iron.lm import MLP, Attention, Config, Conv2d, DecoderLayer, Norm, Tower
+from iron.lm import MLP, Attention, Config, Conv2d, DecoderLayer, Norm, Tower, not_json
 from iron.operators.copy import Copy
 
 
@@ -50,7 +50,7 @@ class VisionConfig(Config):
     scale_factor: int = dataclasses.field(metadata={"json": "scale_factor"})
     text_dim: int = dataclasses.field(metadata={"json": "text_config.hidden_size"})
     image_token: int = dataclasses.field(metadata={"json": "image_token_id"})
-    head_dim: int | None = dataclasses.field(default=None, kw_only=True)
+    head_dim: int | None = not_json(None, kw_only=True)
     eps: float = dataclasses.field(
         default=1e-6, kw_only=True, metadata={"json": "vision_config.layer_norm_eps"}
     )

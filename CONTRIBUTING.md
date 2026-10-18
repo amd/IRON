@@ -35,7 +35,8 @@ Hugging Face decoders need a config and a model class; see
 `iron/applications/qwen3/model.py`, which is the whole of Qwen3.
 
 1. **Config.** Subclass `DecoderConfig`. Its fields are read from the
-   checkpoint's `config.json` by `metadata={"json": ...}`. Override
+   checkpoint's `config.json` by name, or at `metadata={"json": ...}`;
+   `not_json(default)` marks an IRON choice. Override
    `attention(i)` or `layer(i)` to pick the parts that differ from Llama's
    (`Norm`, `Attention`, `MLP`, `DecoderLayer` in `iron/lm/blocks.py`):
 

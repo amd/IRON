@@ -75,8 +75,7 @@ class LlamaConfig(DecoderConfig):
     """``DecoderConfig`` and Llama 3's own ``rope_scaling``."""
 
     rope_scaling: Llama3RopeScaling | None = dataclasses.field(
-        default=None,
-        metadata={"json": "rope_scaling", "convert": Llama3RopeScaling.from_dict},
+        default=None, metadata={"convert": Llama3RopeScaling.from_dict}
     )
 
 

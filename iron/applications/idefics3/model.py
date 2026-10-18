@@ -22,7 +22,7 @@ from pathlib import Path
 
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig, Multimodal
+from iron.lm import CausalLM, DecoderConfig, Multimodal, not_json
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 
 
@@ -56,9 +56,7 @@ class SmolVLMTextConfig(DecoderConfig):
     max_seq_len: int = dataclasses.field(
         metadata={"json": "text_config.max_position_embeddings"}
     )
-    tie_word_embeddings: bool = dataclasses.field(
-        default=False, metadata={"json": "tie_word_embeddings"}
-    )
+    tie_word_embeddings: bool = False
 
 
 #: ``<|im_start|>``, the turn marker every prompt starts with.
@@ -109,7 +107,7 @@ def build_prompt(question: list[int], vision: VisionConfig) -> list[int]:
 class SmolVLMConfig(SmolVLMTextConfig):
     """``SmolVLMTextConfig`` and the vision tower's shape, ``vision``."""
 
-    vision: VisionConfig | None = dataclasses.field(default=None, kw_only=True)
+    vision: VisionConfig | None = not_json(None, kw_only=True)
 
     @classmethod
     def from_checkpoint(cls, path) -> "SmolVLMConfig":

@@ -221,6 +221,9 @@ public API adds its entry under Unreleased.
   again.
 - `Config.from_checkpoint` names the missing `config.json` keys, and an
   encoder refuses a token outside its vocabulary.
+- A config field is read from and written to `config.json` at its own name
+  unless its `metadata["json"]` names another key; `iron.lm.not_json(default)`
+  declares one `config.json` does not set.
 - idefics3 vision, Whisper and Phi-4 config fields take `config.json`'s
   names: `hidden_size`, `patch_size`, `encoder_attention_heads`,
   `encoder_ffn_dim`, `num_mel_bins`, `max_source_positions` and
