@@ -19,6 +19,7 @@ We actively welcome community involvement in this project! If you have a questio
   - **Added**: New features or functionality
   - **Changed**: Modifications to existing behavior
   - **Removed**: Deprecated or deleted functionality
+- **Changelog**: A PR that changes the public API adds an entry under Unreleased in [CHANGELOG.md](CHANGELOG.md)
 - **Issue References**: Always reference related Issues in your PR description using `#issue-number`
 
 ### Issue Management
