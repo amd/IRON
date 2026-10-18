@@ -516,7 +516,7 @@ def test_a_filled_tree_has_the_checkpoints_names_shapes_and_dtypes(toy_path, fil
 
 
 def test_random_fill_draws_at_its_seed(toy_path):
-    """Each matrix at a deviation of 1/sqrt(in), every norm one."""
+    """Each matrix at a deviation of 1/sqrt(in), every norm about one."""
     checkpoint = Checkpoint(toy_path)
     a, b, c = (checkpoint.tree("random", seed) for seed in (3, 3, 4))
     for name in checkpoint.tensors:
@@ -526,7 +526,7 @@ def test_random_fill_draws_at_its_seed(toy_path):
     for name, tensor in checkpoint.tensors.items():
         x = at(a, name).astype(np.float32)
         if tensor.ndim == 1:
-            assert (x == 1).all(), name
+            assert abs(x.mean() - 1) < 0.1 and 0 < x.std() < 0.2, name
         else:
             assert abs(x.std() * np.sqrt(tensor.shape[1]) - 1) < 0.1, name
 

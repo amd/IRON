@@ -573,7 +573,7 @@ class CausalLM(Model):
             )
         loop = self.device_loop
         assert self._prompt is not None and self._decode is not None
-        start = time.perf_counter()
+        began = time.perf_counter()
         # The prompt draws at its last position, n - 1; decode step k at n + k.
         draws = np.zeros((L, ROW_WORDS), dtype=np.int32)
         draws[n - 1 : n - 1 + num_tokens] = sample.rows(num_tokens, self._k_max())
@@ -607,7 +607,7 @@ class CausalLM(Model):
             drawn = self._decode.read(self.drawn)[n - 1 : n - 1 + num_tokens]
         # The caches hold every token but the last drawn, which no step read.
         self._seen = np.concatenate([tokens, drawn[:-1]]).astype(np.int64)
-        return [int(t) for t in drawn], first - start, later
+        return [int(t) for t in drawn], first - began, later
 
     def forget(self, position: int) -> None:
         """Hold nothing the caches have from ``position`` on: the next call
