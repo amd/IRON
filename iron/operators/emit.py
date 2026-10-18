@@ -95,11 +95,7 @@ class Emit(Operator):
     state = Out(carried, dtype=np.int32, obj_type=(carried,), depth=1)
 
     def validate(self) -> None:
-        if self.rows != self.slots + self.carried:
-            raise ValueError(
-                f"Emit: rows ({self.rows}) must be slots + carried "
-                f"({self.slots} + {self.carried})"
-            )
+        self.check_derived("rows")
 
     class Array(Operator.Array):
         carried: int

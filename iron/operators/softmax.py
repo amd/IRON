@@ -449,11 +449,11 @@ class Softmax(Operator):
 
             def _whole(core_offset):
                 def whole(of_in, of_addend, of_out, fn):
+                    i32 = np_dtype_to_mlir_type(np.int32)
                     for r in range_(rows_per_core):
                         elem_in = of_in.acquire(1)
                         elem_addend = of_addend.acquire(1)
                         elem_out = of_out.acquire(1)
-                        i32 = np_dtype_to_mlir_type(np.int32)
                         r32 = arith.index_cast(r, to=i32)
                         row_offset = arith.addi(r32, arith.constant(core_offset, i32))
                         fn(

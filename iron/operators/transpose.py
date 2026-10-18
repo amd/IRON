@@ -56,15 +56,7 @@ def _cases(cls, dev: Device):
     ]
     out.append(
         Case(
-            dict(
-                M=8192,
-                N=512,
-                num_aie_columns=dev.cols,
-                num_channels=2,
-                m=m,
-                n=n,
-                s=8,
-            ),
+            dict(M=8192, N=512, num_aie_columns=dev.cols, num_channels=2, **tiles),
             bench=True,
         )
     )

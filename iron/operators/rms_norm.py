@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
 from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm

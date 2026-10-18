@@ -23,9 +23,12 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Scratchpad
 from iron.common import Chain, Precision, Unresolvable
+from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy, Gather
+from iron.operators.depthwise_conv1d import DepthwiseConv1d
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.emit import Emit
 from iron.operators.flm.dequant.op import DequantBFP
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.flm.layer.op import DecodeLayer
@@ -42,6 +45,7 @@ from iron.operators.merge import Merge
 from iron.operators.mha import MHA
 from iron.operators.resample.op import PatchPositions
 from iron.operators.rms_norm import RMSNorm
+from iron.operators.rope import RoPE
 from iron.operators.router import TopKRouter
 from iron.operators.sample import Sample
 from iron.operators.silu import SiLU
@@ -753,3 +757,54 @@ def test_top_k_router_refuses_rows_its_pairs_do_not_split(rows, pairs):
         TopKRouter(experts=32, top_k=8, rows=rows, pairs=pairs).resolved(
             from_name("npu2", n_cols=8)
         )
+
+
+@pytest.mark.parametrize(
+    "make, match",
+    [
+        (lambda: DepthwiseConv1d(rows=64, channels=48), "32-lane vectors"),
+        (
+            lambda: DepthwiseConv1d(rows=6, channels=64, num_aie_columns=2),
+            r"rows \(6\) must split into 2 runs",
+        ),
+        (lambda: Emit(slots=4, carried=2, rows=5), "Emit.rows=5"),
+        (lambda: Clamp(size=2048, tile_size=2048, low=1.0, high=0.5), "exceeds high"),
+        (lambda: RoPE(rows=64, cols=48), r"cols \(48\) must be a positive multiple"),
+        (lambda: RoPE(rows=64, cols=64, angle_rows=48), "must divide rows"),
+        (
+            lambda: RoPE(rows=60, cols=64, angle_rows=4, num_aie_columns=8),
+            r"rows \(60\) must be a multiple of num_aie_columns",
+        ),
+        (
+            lambda: RoPE(rows=64, cols=64, angle_rows=4, num_aie_columns=8),
+            r"angle_rows \(4\) must be a multiple of",
+        ),
+        (lambda: Softmax(rows=16, cols=64, soft_cap=30.0), "float32 input path"),
+        (
+            lambda: Softmax(rows=16, cols=64, input_dtype=np.float32, window=4),
+            "given together",
+        ),
+        (
+            lambda: Softmax(
+                rows=16, cols=64, input_dtype=np.float32, window=4, period=8
+            ),
+            "pre-cap addend",
+        ),
+    ],
+    ids=[
+        "conv_channels",
+        "conv_runs",
+        "emit_rows",
+        "clamp_bounds",
+        "rope_cols",
+        "rope_angle_rows",
+        "rope_rows_split",
+        "rope_angle_rows_split",
+        "softmax_f32_option",
+        "softmax_window_alone",
+        "softmax_window_no_addend",
+    ],
+)
+def test_a_validate_or_compatible_branch_refuses(make, match, npu2):
+    with pytest.raises(ValueError, match=match):
+        make().resolved(npu2)
