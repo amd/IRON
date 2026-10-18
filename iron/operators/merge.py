@@ -6,7 +6,7 @@ from aie.iron import ExternalFunction, ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 
-from iron.common import In, Operator, Out, Value, Param, Built, Operand, Rtp
+from iron.common import Built, In, Operand, Operator, Out, Param, Rtp, Value
 from iron.common.testing import Case, Testing
 
 # EmbeddingGemma 2's placeholders, (id, row), the towers' rows past 2048 text rows.

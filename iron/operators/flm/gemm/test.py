@@ -8,8 +8,8 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.utils.verify import Tolerance
 from aie.utils import bfp
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Chain, Precision

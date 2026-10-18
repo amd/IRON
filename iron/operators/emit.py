@@ -23,7 +23,7 @@ from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 
-from iron.common import In, Operator, Out, Param, Built, Operand, Rtp, Value
+from iron.common import Built, In, Operand, Operator, Out, Param
 from iron.common.testing import Case, Testing
 
 # A program row: (plane, index, scale, bias, down, mul, add, lo, hi, mask, shift).

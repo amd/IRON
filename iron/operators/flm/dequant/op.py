@@ -11,7 +11,7 @@ from aie.iron import ObjectFifo, TaskGroup, Worker
 from aie.iron.kernels import quant
 from aie.utils import bfp
 
-from iron.common import In, Operator, Out, Unresolvable, Auto, Param, Built, Operand
+from iron.common import Auto, Built, In, Operand, Operator, Out, Param, Unresolvable
 from iron.operators.flm.dequant.design import (
     CORE_BLOCKS,
     CORE_JOIN_OFFSETS,

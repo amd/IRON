@@ -32,20 +32,20 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Auto,
+    Built,
     Divisors,
     Extent,
     In,
+    Operand,
     Operator,
     Out,
+    Param,
+    Rtp,
+    Select,
     Unresolvable,
     Value,
     Width,
-    Auto,
-    Param,
-    Select,
-    Built,
-    Operand,
-    Rtp,
 )
 from iron.common.testing import Case, Testing
 
@@ -497,8 +497,8 @@ class MHA(Operator):
                 + (
                     "one query packed takes the widest key block that fits"
                     if self.packed
-                    else f"B_q's, as mha.cc's causal skip compares a KV block's "
-                    f"index with a Q block's"
+                    else "B_q's, as mha.cc's causal skip compares a KV block's "
+                    "index with a Q block's"
                 )
             )
         q_shims = 2 if self.num_pipelines > 6 else 1
@@ -707,7 +707,6 @@ class MHA(Operator):
             inQ, memQ, memO = [], [], []
             outO = [[] for _ in range(pv_cores)]
             for shim in range(self.q_shims):
-                suffix = "" if shim == 0 else "2"
                 in_q = ObjectFifo(joined_ty)
                 inQ.append(in_q)
                 memQ += in_q.cons().split(
@@ -722,7 +721,6 @@ class MHA(Operator):
                     ),
                 )
                 for h in range(pv_cores):
-                    half = "" if h == 0 else f"_{h}"
                     mem_o = ObjectFifo(self.O.obj_type, to_stream=o_dims)
                     memO.append(mem_o)
                     outO[h] += mem_o.prod().join(
@@ -742,7 +740,6 @@ class MHA(Operator):
             kv_lanes = self.kv_lanes
             inK, inV, memK, memV = [], [], [], []
             for lane in range(kv_lanes):
-                suffix = "" if lane == 0 else str(lane)
                 shared = kv_lanes == 1
                 inK.append(ObjectFifo(k_ty, depth=of_depth))
                 memK.append(
@@ -766,7 +763,6 @@ class MHA(Operator):
                     )
                 )
                 for h in range(pv_cores):
-                    half = "" if h == 0 else f"_{h}"
                     inV.append(ObjectFifo(v_ty, depth=of_depth))
                     memV.append(
                         inV[-1]

@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import ExternalFunction
-from aie.iron import kernels
+from aie.iron import ExternalFunction, kernels
 from aie.iron.kernels import KernelContract
 from aie.utils.compile.jit import markers
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, Operand, UnaryElementwise, Param
+from iron.common import In, Operand, Param, UnaryElementwise
 from iron.common.elementwise import Sweep
 from iron.common.testing import Testing
 

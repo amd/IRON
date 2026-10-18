@@ -39,17 +39,17 @@ from aie.iron.device import Device, Tile
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Auto,
+    Built,
     In,
+    Operand,
+    Operator,
     Out,
     Precision,
+    Select,
     Unresolvable,
     Value,
     Xclbin,
-    Auto,
-    Select,
-    Built,
-    Operand,
-    Operator,
 )
 from iron.operators.flm.gemm.design import CT_OUT_LEN, K_TILE, M_TILE, Gelu, Rounding
 from iron.operators.flm.gemm.op import GEMM

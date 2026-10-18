@@ -10,12 +10,12 @@ from aie.iron.kernels import flm_gemma4
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Auto,
     In,
     Operator,
     Out,
-    Unresolvable,
-    Auto,
     Param,
+    Unresolvable,
 )
 from iron.operators.flm.lm_head import reference
 from iron.operators.flm.lm_head.design import lm_head

@@ -5,7 +5,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
 
-from iron.common import Built, In, KernelCall, Operand, Out, Rowwise, Rtp, Param
+from iron.common import Built, In, KernelCall, Operand, Out, Param, Rowwise, Rtp
 from iron.common.elementwise import Sweep
 from iron.common.testing import Testing
 

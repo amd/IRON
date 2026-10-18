@@ -4,7 +4,7 @@
 from aie.iron.kernels import activation
 
 from iron import operators as catalog
-from iron.common import Chain, UnaryElementwise, Auto
+from iron.common import Auto, Chain, UnaryElementwise
 from iron.common.elementwise import Sweep
 from iron.common.testing import Case, Testing
 

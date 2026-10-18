@@ -7,7 +7,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise
 from ml_dtypes import bfloat16
 
-from iron.common import Built, KernelCall, Operand, Rtp, UnaryElementwise, Value, Param
+from iron.common import Built, KernelCall, Operand, Param, Rtp, UnaryElementwise, Value
 from iron.common.elementwise import Sweep
 from iron.common.testing import Case, Testing
 

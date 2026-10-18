@@ -14,16 +14,16 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Auto,
+    Built,
     Divisors,
     In,
+    Operand,
     Operator,
     Out,
-    Value,
-    Auto,
     Param,
-    Built,
-    Operand,
     Rtp,
+    Value,
 )
 from iron.common.testing import Case, Testing
 

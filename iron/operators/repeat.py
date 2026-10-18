@@ -11,15 +11,15 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Auto,
+    Built,
     Extent,
     In,
+    Operand,
     Operator,
     Out,
-    Unresolvable,
-    Auto,
     Param,
-    Built,
-    Operand,
+    Unresolvable,
 )
 from iron.common.testing import Case, Testing
 

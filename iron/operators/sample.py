@@ -17,22 +17,22 @@ from aie.dialects.aie import WireBundle, get_target_model
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
 from aie.iron.controlflow import range_
-from aie.iron.kernels import sample as kernels
+from aie.iron.kernels import sample
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Auto,
+    Built,
     Divisors,
     In,
     InOut,
+    Operand,
     Operator,
     Out,
+    Param,
     Unresolvable,
     Value,
-    Auto,
-    Param,
-    Built,
-    Operand,
 )
 from iron.common.testing import Case, Testing
 
@@ -83,7 +83,7 @@ def reference(logits, draw_row, k_max: int | None = None) -> int:
     temperature = row[0:1].view(np.float32)[0]
     n53 = int(row[2]) | int(row[3]) << 32
     top_k = max(int(words[1]), 1)
-    return kernels.sample_ref(logits, temperature, top_k, n53, k_max=k_max)
+    return sample.sample_ref(logits, temperature, top_k, n53, k_max=k_max)
 
 
 def _logits(op: "Sample") -> dict:
@@ -93,7 +93,7 @@ def _logits(op: "Sample") -> dict:
     logits[rng.choice(op.vocab, 8, replace=False)] = logits.max()
     draws = np.stack(
         [
-            kernels.draw_row(t, k, int(rng.integers(0, 1 << 53)))
+            sample.draw_row(t, k, int(rng.integers(0, 1 << 53)))
             for t, k in zip(
                 rng.choice([0.0, 0.7, 1.0], op.steps), rng.integers(1, 51, op.steps)
             )
@@ -135,7 +135,7 @@ class Sample(Operator):
 
     logits = In(vocab, obj_type=(chunk,), per=(cores,), depth=2)
     draws = In(
-        steps, kernels.ROW_WORDS, dtype=np.int32, obj_type=(kernels.ROW_WORDS,), depth=1
+        steps, sample.ROW_WORDS, dtype=np.int32, obj_type=(sample.ROW_WORDS,), depth=1
     )
     tokens = InOut(steps, dtype=np.int32, obj_type=(1,), depth=1)
     token = Out(1, dtype=np.int32, obj_type=(1,), depth=1)
@@ -198,17 +198,17 @@ class Sample(Operator):
             return [(size, self.chunk)] * (self.cores - 1) + [(last, tail)]
 
         def select(self, run: int, chunk: int):
-            return kernels.sample_select(slice_size=run, chunk=chunk, k_max=self.k_max)
+            return sample.sample_select(slice_size=run, chunk=chunk, k_max=self.k_max)
 
         def combine(self):
-            return kernels.sample_combine(
+            return sample.sample_combine(
                 columns=self.cores, slice_size=self.slice_size, k_max=self.k_max
             )
 
         def build(self) -> Built:
             runs, combine = self.runs, self.combine()
             selects = {run: self.select(*run) for run in set(runs)}
-            words = kernels.summary_words(self.slice_size, self.k_max)
+            words = sample.summary_words(self.slice_size, self.k_max)
             # Every core reads the draw row.
             of_draw = ObjectFifo(self.draws.obj_type, depth=1)
             self.draws.bind(of_draw.prod())
@@ -226,7 +226,7 @@ class Sample(Operator):
                 [words * c for c in range(self.cores)],
                 obj_types=[
                     np.ndarray[
-                        (kernels.summary_words(run, self.k_max),), np.dtype[np.int32]
+                        (sample.summary_words(run, self.k_max),), np.dtype[np.int32]
                     ]
                     for run, _ in runs
                 ],
@@ -261,8 +261,8 @@ class Sample(Operator):
                 )
                 logits.append(of_x.prod())
                 state = Buffer(
-                    np.ndarray[(kernels.SELECT_STATE_WORDS,), np.dtype[np.int32]],
-                    initial_value=np.zeros(kernels.SELECT_STATE_WORDS, dtype=np.int32),
+                    np.ndarray[(sample.SELECT_STATE_WORDS,), np.dtype[np.int32]],
+                    initial_value=np.zeros(sample.SELECT_STATE_WORDS, dtype=np.int32),
                 )
                 workers.append(
                     Worker(
@@ -273,7 +273,7 @@ class Sample(Operator):
                             of_summary[c].prod(),
                             selects[run, chunk],
                             state,
-                            kernels.select_streams(run, chunk) * run // chunk,
+                            sample.select_streams(run, chunk) * run // chunk,
                         ],
                     )
                 )
@@ -300,7 +300,7 @@ class Sample(Operator):
         self.draws.fill(self.draws[0], group=tg, offset_parameter=row)
         for c, (run, chunk) in enumerate(self.array_config().runs):
             # Core c's slice, once per select stream.
-            streams = kernels.select_streams(run, chunk)
+            streams = sample.select_streams(run, chunk)
             start = c * self.slice_size
             piece = TensorAccessPattern.full((self.vocab,))[start : start + run]
             halves = self.logits.split(run)
@@ -319,7 +319,7 @@ class Sample(Operator):
         """``(tokens, token)``: the draw at ``draws`` row ``row // 4``, recorded at ``at``."""
         token = reference(
             logits,
-            np.asarray(draws).reshape(-1)[row : row + kernels.ROW_WORDS],
+            np.asarray(draws).reshape(-1)[row : row + sample.ROW_WORDS],
             self.k_max,
         )
         tokens = np.array(tokens, dtype=np.int32).reshape(-1)

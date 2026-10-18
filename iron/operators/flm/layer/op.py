@@ -4,12 +4,11 @@
 import dataclasses
 import functools
 
-import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.kernels import FlmGemma4DecodeGeometry
 from ml_dtypes import bfloat16
 
-from iron.common import DispatchTime, In, InOut, Operator, Unresolvable, Param
+from iron.common import DispatchTime, In, InOut, Operator, Param, Unresolvable
 from iron.operators.flm.layer.design import (
     LAYER_TYPES,
     RTP_ADDRESSES,

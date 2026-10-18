@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 from aie.utils.verify import Tolerance
 
-
 from iron.common.testing import run_test
 from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor, rb
 from iron.operators.flm.dequant.design import N_TILE, qw_bytes_for

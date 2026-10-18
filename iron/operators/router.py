@@ -15,8 +15,7 @@ import dataclasses
 import numpy as np
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
 from aie.iron.controlflow import range_
-from aie.iron.kernels import moe
-from aie.iron.kernels import sample
+from aie.iron.kernels import moe, sample
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 

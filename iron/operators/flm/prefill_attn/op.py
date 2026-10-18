@@ -5,12 +5,11 @@ import dataclasses
 import functools
 from typing import ClassVar
 
-import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron import ExternalFunction
 from ml_dtypes import bfloat16
 
-from iron.common import DispatchTime, In, Operator, Out, Unresolvable, Param
+from iron.common import DispatchTime, In, Operator, Out, Param, Unresolvable
 from iron.operators.flm.prefill_attn import reference
 from iron.operators.flm.prefill_attn.design import (
     CAUSAL,

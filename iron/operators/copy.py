@@ -28,18 +28,18 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Auto,
+    Built,
     Divisors,
     Extent,
     In,
+    Operand,
     Operator,
     Out,
+    Param,
+    Rtp,
     Unresolvable,
     Value,
-    Auto,
-    Param,
-    Built,
-    Operand,
-    Rtp,
 )
 from iron.common.declare.operand import slots
 from iron.common.declare.operator import CopyRun

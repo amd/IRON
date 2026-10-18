@@ -33,27 +33,27 @@ from aie.iron import (
 from aie.iron.controlflow import range_
 from aie.iron.device import Device, Tile
 from aie.iron.kernels import fused_mm
-from aie.utils.verify import Tolerance
 from aie.utils import bfp
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Auto,
+    Built,
     Chain,
     Divisors,
     Extent,
     In,
     Link,
+    Operand,
     Operator,
     Out,
+    Param,
     Precision,
+    Rtp,
+    Select,
     Unresolvable,
     Value,
-    Auto,
-    Param,
-    Select,
-    Built,
-    Operand,
-    Rtp,
 )
 from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (

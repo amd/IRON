@@ -22,17 +22,17 @@ from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
 
 from iron.common import (
+    Auto,
+    Built,
     Divisors,
     Extent,
     In,
+    Operand,
     Operator,
     Out,
-    Value,
-    Auto,
     Param,
-    Built,
-    Operand,
     Rtp,
+    Value,
 )
 from iron.common.testing import Case, Testing
 

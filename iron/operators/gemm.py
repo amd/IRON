@@ -34,23 +34,23 @@ from ml_dtypes import bfloat16
 
 from iron import operators as catalog
 from iron.common import (
+    Auto,
+    Built,
     Chain,
     Divisors,
     Extent,
     Finish,
     In,
     Link,
+    Operand,
     Operator,
     Out,
+    Param,
     Precision,
+    Rtp,
+    Select,
     Unresolvable,
     Value,
-    Auto,
-    Param,
-    Select,
-    Built,
-    Operand,
-    Rtp,
 )
 from iron.common.testing import Case, Testing
 

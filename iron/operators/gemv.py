@@ -18,6 +18,7 @@ from ml_dtypes import bfloat16
 
 from iron import operators as catalog
 from iron.common import (
+    Auto,
     Built,
     Chain,
     Divisors,
@@ -28,11 +29,10 @@ from iron.common import (
     Operand,
     Operator,
     Out,
+    Param,
     Prepare,
     Rtp,
     Value,
-    Auto,
-    Param,
 )
 from iron.common.testing import Case, Testing
 

@@ -7,7 +7,7 @@ from typing import ClassVar
 import numpy as np
 from aie.iron.kernels import datamovement
 
-from iron.common import In, UnaryElementwise, Unresolvable, Auto, Param
+from iron.common import Auto, In, Param, UnaryElementwise, Unresolvable
 from iron.common.elementwise import Sweep
 from iron.common.testing import Testing
 
