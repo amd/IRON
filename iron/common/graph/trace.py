@@ -480,8 +480,9 @@ class Tracer:
         self.name = name
         self.profile = profile
         self.precision = precision
-        # Each instance applied below the precision, as raised to it.
-        self._raised: dict[int, Operator] = {}
+        # Each instance applied, held so its id stays its own, and as raised
+        # to the precision.
+        self._raised: dict[int, tuple[Operator, Operator]] = {}
         held = held or {}
         self._held_arrays = [
             x.array if isinstance(x, Weight) else x
@@ -688,7 +689,9 @@ class Tracer:
                 kwargs,
             )
         else:
-            op = self._raised.setdefault(id(target), self._at_precision(target))
+            _, op = self._raised.setdefault(
+                id(target), (target, self._at_precision(target))
+            )
             own = self._split_values(type(op), values)
             operands = _take_views(type(op), operands, {}, own)
             if kwargs or values:

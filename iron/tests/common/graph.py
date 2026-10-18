@@ -10,6 +10,7 @@ hardware tests' job.
 """
 
 import dataclasses
+import gc
 import inspect
 from types import SimpleNamespace
 from typing import Any
@@ -1181,6 +1182,24 @@ def test_a_graph_s_precision_raises_every_step_that_rounds_more(floor, levels):
     t = graph.trace(x=((256, 256), bfloat16), w=((256, 256), bfloat16))
     assert [s.op.precision for s in t.steps] == levels
     assert graph.gemm.precision == Precision.MEDIUM
+
+
+def test_an_instance_dropped_in_a_body_leaves_its_raised_copy_to_no_other():
+    """A later instance at a dropped one's address is raised on its own."""
+
+    class Temporaries(iron.Graph):
+        precision = "high"
+
+        def body(self, x, w, v):
+            for _ in range(8):
+                x = GEMM(M=256, K=256, N=256).apply(x, w)
+                gc.collect()
+            return GEMM(M=256, K=256, N=128).apply(x, v)
+
+    t = Temporaries().trace(
+        x=((256, 256), bfloat16), w=((256, 256), bfloat16), v=((256, 128), bfloat16)
+    )
+    assert [s.op.N for s in t.steps] == [256] * 8 + [128]
 
 
 def test_a_profile_gives_a_precision_the_tuner_does_not_search(tmp_path, npu2):
