@@ -7,6 +7,7 @@ tower's clipped linear (``Clipped``).
 """
 
 import dataclasses
+from functools import partial
 from types import SimpleNamespace
 
 import numpy as np
@@ -28,10 +29,12 @@ class SandwichLayer(DecoderLayer):
     """
 
     def __call__(self, w, x, attend, angles):
-        h = self.attention(w.self_attn, self.norm(w.input_layernorm, x), attend, angles)
-        x = self.add(x, self.norm(w.post_attention_layernorm, h))
-        h = self.mlp(w.mlp, self.norm(w.pre_feedforward_layernorm, x))
-        return self.add(x, self.norm(w.post_feedforward_layernorm, h))
+        attention = partial(self.attention, w.self_attn, attend=attend, angles=angles)
+        x = self.block(x, w.input_layernorm, attention, w.post_attention_layernorm)
+        mlp = partial(self.mlp, w.mlp)
+        return self.block(
+            x, w.pre_feedforward_layernorm, mlp, w.post_feedforward_layernorm
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -50,7 +53,7 @@ class TextLayer(SandwichLayer):
         accurate = self.mlp.accurate
         g = act(F.linear(x, w.per_layer_input_gate.weight, accurate=accurate)) * ple
         g = F.linear(g, w.per_layer_projection.weight, accurate=accurate)
-        x = x + F.rms_norm(g, w.post_per_layer_input_norm.weight, self.norm.eps)
+        x = self.add(x, self.norm(w.post_per_layer_input_norm, g))
         return RowwiseMul.step(x, scale)
 
 

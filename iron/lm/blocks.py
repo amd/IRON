@@ -12,6 +12,7 @@ error at trace time.
 
 import dataclasses
 import math
+from functools import partial
 
 import aie.utils as aie_utils
 import numpy as np
@@ -753,9 +754,19 @@ class DecoderLayer:
     residual: float = 1.0
 
     def __call__(self, w, x, attend, angles):
-        h = self.attention(w.self_attn, self.norm(w.input_layernorm, x), attend, angles)
-        x = self.add(x, h)
-        return self.add(x, self.mlp(w.mlp, self.norm(w.post_attention_layernorm, x)))
+        x = self.block(
+            x,
+            w.input_layernorm,
+            partial(self.attention, w.self_attn, attend=attend, angles=angles),
+        )
+        return self.block(x, w.post_attention_layernorm, partial(self.mlp, w.mlp))
+
+    def block(self, x, pre, f, post=None):
+        """``x`` plus ``f`` on ``x`` normed by the norm module ``pre``, its
+        output normed again by ``post`` where given (``add``).
+        """
+        h = f(self.norm(pre, x))
+        return self.add(x, h if post is None else self.norm(post, h))
 
     def add(self, x, y):
         """``x`` plus ``y`` times ``residual``, in ``x``'s shape."""
@@ -772,11 +783,17 @@ class CrossDecoderLayer(DecoderLayer):
     """
 
     def __call__(self, w, x, attend, angles, cross):
-        h = self.attention(w.self_attn, self.norm(w.input_layernorm, x), attend, angles)
-        x = self.add(x, h)
-        h = self.norm(w.encoder_attn_layer_norm, x)
-        x = self.add(x, self.attention.cross(w.encoder_attn, h, cross))
-        return self.add(x, self.mlp(w.mlp, self.norm(w.post_attention_layernorm, x)))
+        x = self.block(
+            x,
+            w.input_layernorm,
+            partial(self.attention, w.self_attn, attend=attend, angles=angles),
+        )
+        x = self.block(
+            x,
+            w.encoder_attn_layer_norm,
+            partial(self.attention.cross, w.encoder_attn, cross=cross),
+        )
+        return self.block(x, w.post_attention_layernorm, partial(self.mlp, w.mlp))
 
     def keys_values(self, w, memory) -> tuple:
         """The keys and values ``encoder_attn`` projects from ``memory``."""

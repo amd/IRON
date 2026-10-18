@@ -27,6 +27,7 @@ The operators' tunables are the graph's profile, ``profiles/<device>.json``.
 """
 
 import dataclasses
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -139,9 +140,8 @@ class Lfm2(CausalLM):
         if "self_attn" in vars(w):
             return super().layer(step, i, w, x)
         layer = self.config.layer(i)
-        h = self.conv(step, i, w.conv, layer.norm(w.input_layernorm, x))
-        x = layer.add(x, h)
-        return layer.add(x, layer.mlp(w.mlp, layer.norm(w.post_attention_layernorm, x)))
+        x = layer.block(x, w.input_layernorm, partial(self.conv, step, i, w.conv))
+        return layer.block(x, w.post_attention_layernorm, partial(layer.mlp, w.mlp))
 
     def conv(self, step, i, w, h):
         """The gated short conv in place of attention: a depth-wise causal
