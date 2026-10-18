@@ -276,7 +276,7 @@ class Elementwise(Operator):
 
     def __init_subclass__(cls, **kwargs) -> None:
         for m in vars(cls).values():
-            if isinstance(m, (In, Out)) and not m.kwargs.get("broadcast"):
+            if isinstance(m, (In, Out)):
                 m.kwargs.setdefault(
                     "per", (Elementwise.num_aie_columns, Elementwise.num_channels)
                 )

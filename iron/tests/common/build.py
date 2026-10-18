@@ -63,7 +63,7 @@ class MV(Operator):
     cols: CompileTime[int] = Auto(default=2)
     tile_out: CompileTime[int] = Auto(default=64)
     A = In(num_batches, M, K, obj_shape=(tile_out, K), per=(cols,))
-    B = In(num_batches, K, obj_shape=(K,), broadcast=True)
+    B = In(num_batches, K, obj_shape=(K,))
     C = Out(num_batches, M, obj_shape=(tile_out,), per=(cols,))
     valid = Extent(M)
 

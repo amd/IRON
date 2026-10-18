@@ -70,7 +70,7 @@ class MV(Operator):
     epilogue: CompileTime[str] = field(default="none", array=True)
 
     A = In(num_batches, M, K, obj_shape=(tile_out, K), per=columns)
-    B = In(num_batches, K, obj_shape=(K,), broadcast=True)
+    B = In(num_batches, K, obj_shape=(K,))
     C = Out(num_batches, M, obj_shape=(tile_out,), per=columns)
     count = Value(derive=lambda op: op.M // (op.columns * op.tile_out))
     start = Value(derive=lambda op: 0)  # per call when a graph binds it
@@ -286,15 +286,6 @@ def test_float_scratchpad_annotation_is_rejected():
         class Bad(iron.Graph):
             def body(self, x, *, scale: Scratchpad[np.float32]):
                 return x
-
-
-def test_per_and_broadcast_are_exclusive():
-    with pytest.raises(TypeError, match="either per"):
-
-        class Bad(Operator):
-            n: CompileTime[int] = field()
-            c: CompileTime[int] = Auto(default=2)
-            x = In(n, obj_shape=(4,), per=(c,), broadcast=True)
 
 
 def test_a_probe_may_not_be_on_a_field_the_array_reads():
@@ -812,7 +803,7 @@ def test_resolve_columns_is_the_count_given_or_the_most_that_fit():
         op.resolve_columns(None, None)
 
 
-def test_a_stream_with_no_lanes_or_broadcast_is_paid_once_in_the_shim_budget():
+def test_a_stream_with_no_lanes_is_paid_once_in_the_shim_budget():
     class Scaled(MV):
         scale = In(MV.M, obj_shape=(MV.tile_out,), per=MV.columns)
 

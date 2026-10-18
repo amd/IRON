@@ -82,7 +82,6 @@ class Operand(Member["Operand"]):
         per: The field (or fields, multiplied) the stream is replicated over.
         depth: The fifo depth.
         replicate: Every `per=` lane gets the whole buffer, not a share.
-        broadcast: One fifo every worker consumes.
         when: A bool `field()`; the operand and its stream exist only where
             it is true, and a call giving the operand by keyword sets it.
 
@@ -100,14 +99,11 @@ class Operand(Member["Operand"]):
         per: _DimSpec | None = None,
         depth: int = 2,
         replicate: bool = False,
-        broadcast: bool = False,
         when: _DimSpec | None = None,
     ) -> None:
         self.role = role
         self.fills = role is not Out
         self.drains = role is not In
-        if per is not None and broadcast:
-            raise TypeError("a stream is either per=<dim> or broadcast, not both")
         if replicate and per is None:
             raise TypeError(
                 "replicate=True needs per=<dim>: every slot receives the whole buffer"
@@ -129,7 +125,6 @@ class Operand(Member["Operand"]):
         )
         self.depth = depth
         self.replicate = replicate
-        self.broadcast = broadcast
         self.op: Operator | None = None
         self.lane_handles: list[Any] = []
 

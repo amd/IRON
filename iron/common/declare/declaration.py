@@ -396,7 +396,7 @@ class Declaration:
         """How many of ``dev``'s columns fit the class's streams in the shim DMA budget.
 
         A ``replicate`` stream is paid once per channel rather than per column,
-        and a stream with no ``per=`` (one lane, or a ``broadcast``) once.
+        and a stream with no ``per=`` once.
         """
         streams = [
             m
