@@ -4,7 +4,7 @@
 """``iron.lm``'s ``Encoder`` and ``Tower``, device-free: a call's inputs, the
 bounded gather a body traces, each kind's reference, the operators' own,
 against numpy attention over the valid rows, and the default layer, its
-config's ``DecoderLayer`` attending both ways.
+config's ``DecoderLayerSpec`` attending both ways.
 """
 
 import dataclasses
@@ -16,7 +16,15 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Precision, Scratchpad
-from iron.lm import MLP, Attention, DecoderLayer, Encoder, Norm, Tower, rope_angles
+from iron.lm import (
+    MLP,
+    AttentionSpec,
+    DecoderLayerSpec,
+    Encoder,
+    Norm,
+    Tower,
+    rope_angles,
+)
 from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.mha import MHA
@@ -43,9 +51,9 @@ class Windowed(Shape):
     """A Llama-shaped layer each, at HIGHEST precision, the first unscaled within 64
     positions."""
 
-    def layer(self, i: int) -> DecoderLayer:
+    def layer(self, i: int) -> DecoderLayerSpec:
         first = i == 0
-        attention = Attention(
+        attention = AttentionSpec(
             HEADS,
             1,
             HEAD_DIM,
@@ -53,7 +61,7 @@ class Windowed(Shape):
             window=64 if first else None,
             precision=Precision.HIGHEST,
         )
-        return DecoderLayer(attention, MLP(precision=Precision.HIGHEST), Norm(1e-6))
+        return DecoderLayerSpec(attention, MLP(precision=Precision.HIGHEST), Norm(1e-6))
 
 
 class Layers(Encoder):

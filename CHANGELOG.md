@@ -127,6 +127,9 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- The layer descriptions a config's `layer()` returns, `iron.lm.Attention`
+  and `DecoderLayer`, are `AttentionSpec` and `DecoderLayerSpec`, leaving
+  the names to the modules that own their weights.
 - `YOLOXNano` is written in `iron.functional`'s CNN functions, and returns
   each scale's predictions as `(H, W, 144)`, not `(H, W * 144)`.
 - `Model.generate` and `stream` stop after the first of `Model.eos` they

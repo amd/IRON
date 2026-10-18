@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .blocks import Attention, DecoderLayer, MLP, Norm
+from .blocks import AttentionSpec, DecoderLayerSpec, MLP, Norm
 
 RopeScaling = Callable[[np.ndarray], np.ndarray]
 
@@ -133,7 +133,7 @@ class Config:
         """Every norm's kind: RMS at ``eps``."""
         return Norm(self.eps)
 
-    def layer(self, i: int) -> DecoderLayer:
+    def layer(self, i: int) -> DecoderLayerSpec:
         """Layer ``i`` as the config describes it."""
         raise NotImplementedError(f"{type(self).__name__} describes no layer")
 
@@ -201,9 +201,9 @@ class DecoderConfig(Config):
             angles = angles * np.float32(self.rope_attention_scaling)
         return angles
 
-    def attention(self, i: int) -> Attention:
+    def attention(self, i: int) -> AttentionSpec:
         """Layer ``i``'s attention: Llama's."""
-        return Attention(
+        return AttentionSpec(
             self.num_attention_heads,
             self.num_key_value_heads,
             self.head_dim,
@@ -211,8 +211,8 @@ class DecoderConfig(Config):
             rotary=self.rotary_dim,
         )
 
-    def layer(self, i: int) -> DecoderLayer:
+    def layer(self, i: int) -> DecoderLayerSpec:
         """Layer ``i``: Llama's, ``attention(i)`` and a gated feed-forward,
         each after its RMS norm.
         """
-        return DecoderLayer(self.attention(i), MLP(self.hidden_act), self.norm())
+        return DecoderLayerSpec(self.attention(i), MLP(self.hidden_act), self.norm())

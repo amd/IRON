@@ -14,13 +14,13 @@ import numpy as np
 
 import iron.functional as F
 from iron import Precision
-from iron.lm import DecoderLayer
+from iron.lm import DecoderLayerSpec
 from iron.operators.clamp import Clamp
 
 
 @dataclasses.dataclass(frozen=True)
-class SandwichLayer(DecoderLayer):
-    """``DecoderLayer`` with each block's output normed again before its
+class SandwichLayer(DecoderLayerSpec):
+    """``DecoderLayerSpec`` with each block's output normed again before its
     residual, by ``post_attention_layernorm`` and
     ``post_feedforward_layernorm``, the feed-forward's input by
     ``pre_feedforward_layernorm``.

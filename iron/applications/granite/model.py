@@ -31,7 +31,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron import lm
-from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
+from iron.lm import AttentionSpec, CausalLM, DecoderConfig, DecoderLayerSpec
 
 
 @dataclasses.dataclass(frozen=True)
@@ -43,12 +43,12 @@ class GraniteConfig(DecoderConfig):
     embedding_multiplier: float = dataclasses.field(default=1.0, kw_only=True)
     logits_scaling: float = dataclasses.field(default=1.0, kw_only=True)
 
-    def attention(self, i: int) -> Attention:
+    def attention(self, i: int) -> AttentionSpec:
         return dataclasses.replace(
             super().attention(i), scale=self.attention_multiplier
         )
 
-    def layer(self, i: int) -> DecoderLayer:
+    def layer(self, i: int) -> DecoderLayerSpec:
         return dataclasses.replace(super().layer(i), residual=self.residual_multiplier)
 
 

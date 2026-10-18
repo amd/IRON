@@ -23,14 +23,14 @@ import dataclasses
 from pathlib import Path
 
 from iron import lm
-from iron.lm import Attention, CausalLM, DecoderConfig
+from iron.lm import AttentionSpec, CausalLM, DecoderConfig
 
 
 @dataclasses.dataclass(frozen=True)
 class Qwen3Config(DecoderConfig):
     """``DecoderConfig``, its attention norming q and k per head."""
 
-    def attention(self, i: int) -> Attention:
+    def attention(self, i: int) -> AttentionSpec:
         return dataclasses.replace(super().attention(i), qk_norm=True)
 
 

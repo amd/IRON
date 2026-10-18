@@ -25,12 +25,12 @@ import iron
 from iron import Scratchpad
 from iron.lm import (
     MLP,
-    Attention,
+    AttentionSpec,
     Config,
     Conv1d,
     CrossDecoderLayer,
     DecoderConfig,
-    DecoderLayer,
+    DecoderLayerSpec,
     EncoderDecoder,
     Norm,
     Tower,
@@ -110,10 +110,10 @@ class WhisperEncoderConfig(Config):
     def norm(self) -> Norm:
         return Norm(self.eps, bias=True)
 
-    def layer(self, i: int) -> DecoderLayer:
+    def layer(self, i: int) -> DecoderLayerSpec:
         H = self.num_attention_heads
-        return DecoderLayer(
-            Attention(H, H, self.hidden_size // H),
+        return DecoderLayerSpec(
+            AttentionSpec(H, H, self.hidden_size // H),
             MLP(self.hidden_act, gated=False),
             self.norm(),
         )
@@ -155,7 +155,7 @@ class WhisperConfig(DecoderConfig):
     def layer(self, i: int) -> CrossDecoderLayer:
         H = self.num_attention_heads
         return CrossDecoderLayer(
-            Attention(H, H, self.head_dim),
+            AttentionSpec(H, H, self.head_dim),
             MLP(self.hidden_act, gated=False),
             self.norm(),
         )

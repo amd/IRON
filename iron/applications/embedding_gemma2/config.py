@@ -130,7 +130,7 @@ class Config(lm.Config):
             None if self.layer_types[i] == "full_attention" else self.sliding_window
         )
         return TextLayer(
-            lm.Attention(
+            lm.AttentionSpec(
                 self.num_attention_heads,
                 G,
                 D,
@@ -287,7 +287,7 @@ class VisionConfig(lm.Config):
         """Layer ``i``: unscaled attention over RMS-normed values."""
         H = self.num_attention_heads
         return SandwichLayer(
-            lm.Attention(
+            lm.AttentionSpec(
                 H,
                 H,
                 self.head_dim,

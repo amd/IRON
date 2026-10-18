@@ -9,12 +9,12 @@ checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.lfm2.model``.
 
 Sixteen layers, only six of them full attention (``full_attn_idxs``),
-each a ``DecoderLayer`` with per-head q/k norms (Qwen3's shape); the rest
+each a ``DecoderLayerSpec`` with per-head q/k norms (Qwen3's shape); the rest
 are a gated short causal depthwise convolution (``conv_L_cache=3`` taps)
 in place of attention, then the same feed-forward block. ``renames``
 moves LFM2's modules to the names the parts read once at load; a conv
 layer holds no ``self_attn``, so ``layer()`` takes the whole
-``DecoderLayer`` where the checkpoint holds one.
+``DecoderLayerSpec`` where the checkpoint holds one.
 
 A conv layer's three per-channel taps, a row each (``sanitize``, once at
 load), read a window that spans the current call and the
@@ -35,7 +35,7 @@ import numpy as np
 import iron
 import iron.functional as F
 from iron import lm
-from iron.lm import Attention, CausalLM, Checkpoints, DecoderConfig, not_json
+from iron.lm import AttentionSpec, CausalLM, Checkpoints, DecoderConfig, not_json
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,7 +77,7 @@ class Lfm2Config(DecoderConfig):
             ff = self.multiple_of * -(-ff // self.multiple_of)
         object.__setattr__(self, "intermediate_size", ff)
 
-    def attention(self, i: int) -> Attention:
+    def attention(self, i: int) -> AttentionSpec:
         return dataclasses.replace(super().attention(i), qk_norm=True)
 
 
@@ -124,7 +124,7 @@ class Lfm2(CausalLM):
         return w
 
     def layer(self, step, i, w, x):
-        """Layer ``i``: an attention layer is ``DecoderLayer``'s; a conv
+        """Layer ``i``: an attention layer is ``DecoderLayerSpec``'s; a conv
         layer its short conv in attention's place, then the feed-forward.
         """
         if "self_attn" in vars(w):

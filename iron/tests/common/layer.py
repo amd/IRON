@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``iron.lm``'s layer parts (``Attention``, ``MLP``, ``Norm``,
-``DecoderLayer``), device-free: the steps each traces as it is configured,
+"""``iron.lm``'s layer parts (``AttentionSpec``, ``MLP``, ``Norm``,
+``DecoderLayerSpec``), device-free: the steps each traces as it is configured,
 and EmbeddingGemma 2's text layer, the parts at their fullest, through its
 operators' references against Hugging Face's own Gemma 4 layer.
 """
@@ -17,7 +17,7 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision
-from iron.lm import MLP, Attention, DecoderLayer, Norm
+from iron.lm import MLP, AttentionSpec, DecoderLayerSpec, Norm
 from iron.applications.embedding_gemma2.blocks import SandwichLayer, TextLayer
 from iron.operators.mha import MHA
 from iron.tests.common.llama_model import small
@@ -156,9 +156,9 @@ def ops(layer, names, **parts) -> Counter:
     return Counter(type(s.op).__name__ for s in steps)
 
 
-def llama(residual=1.0) -> DecoderLayer:
-    return DecoderLayer(
-        Attention(HEADS, GROUPS, HEAD, precision=Precision.HIGHEST),
+def llama(residual=1.0) -> DecoderLayerSpec:
+    return DecoderLayerSpec(
+        AttentionSpec(HEADS, GROUPS, HEAD, precision=Precision.HIGHEST),
         MLP(precision=Precision.HIGHEST),
         Norm(1e-6),
         residual,
@@ -171,7 +171,7 @@ def test_the_parts_decide_the_steps():
         GEMM=7, RMSNorm=2, RoPE=2, MHA=1, ElementwiseAdd=2, SiLU=1, ElementwiseMul=1
     )
     gemma = SandwichLayer(
-        Attention(
+        AttentionSpec(
             HEADS,
             GROUPS,
             HEAD,
@@ -256,7 +256,7 @@ def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
 
 def test_a_q_k_or_v_norm_needs_its_epsilon():
     with pytest.raises(ValueError, match="needs its eps"):
-        Attention(HEADS, GROUPS, HEAD, qk_norm=True)
+        AttentionSpec(HEADS, GROUPS, HEAD, qk_norm=True)
 
 
 def test_gelu_refuses_the_exact_form_it_has_no_operator_for():
@@ -340,7 +340,7 @@ def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
     x = rng.standard_normal((ROWS, WIDTH)).astype(bfloat16)
     ple = rng.standard_normal((ROWS, PLE)).astype(bfloat16)
     layer = TextLayer(
-        Attention(
+        AttentionSpec(
             HEADS,
             GROUPS,
             HEAD,

@@ -386,7 +386,7 @@ class Norm:
 
 
 @dataclasses.dataclass(frozen=True)
-class Attention:
+class AttentionSpec:
     """Self-attention over an attention module's ``q_proj``, ``k_proj``,
     ``v_proj`` and ``o_proj``, each with its bias where it holds one. A
     model kind gives the attention itself: ``attend(q, k, v, scale=,
@@ -421,7 +421,7 @@ class Attention:
 
     def __post_init__(self):
         if (self.qk_norm or self.v_norm) and self.eps is None:
-            raise ValueError("Attention: a q, k or v norm needs its eps")
+            raise ValueError("AttentionSpec: a q, k or v norm needs its eps")
 
     def __call__(self, w, x, attend, angles):
         """The block on ``x`` ``(rows, width)``; ``angles``, a row per
@@ -523,13 +523,13 @@ class MLP:
 
 
 @dataclasses.dataclass(frozen=True)
-class DecoderLayer:
+class DecoderLayerSpec:
     """A pre-norm transformer layer module's: ``self_attn`` after
     ``input_layernorm``, then ``mlp`` after ``post_attention_layernorm``,
     each block's output added to its residual times ``residual``.
     """
 
-    attention: Attention
+    attention: AttentionSpec
     mlp: MLP
     norm: Norm
     residual: float = 1.0
@@ -558,8 +558,8 @@ class DecoderLayer:
 
 
 @dataclasses.dataclass(frozen=True)
-class CrossDecoderLayer(DecoderLayer):
-    """``DecoderLayer`` with a third block between its two: ``encoder_attn``
+class CrossDecoderLayer(DecoderLayerSpec):
+    """``DecoderLayerSpec`` with a third block between its two: ``encoder_attn``
     after ``encoder_attn_layer_norm``, attending over an encoder's output.
     """
 

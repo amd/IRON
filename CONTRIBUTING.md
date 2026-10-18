@@ -38,7 +38,7 @@ Hugging Face decoders need a config and a model class; see
    checkpoint's `config.json` by name, or at `metadata={"json": ...}`;
    `not_json(default)` marks an IRON choice. Override
    `attention(i)` or `layer(i)` to pick the parts that differ from Llama's
-   (`Norm`, `Attention`, `MLP`, `DecoderLayer` in `iron/lm/blocks.py`):
+   (`Norm`, `AttentionSpec`, `MLP`, `DecoderLayerSpec` in `iron/lm/blocks.py`):
 
    ```python
    def attention(self, i):

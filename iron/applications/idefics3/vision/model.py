@@ -5,7 +5,7 @@
 
 """SmolVLM's vision tower: a SigLIP ViT (``Idefics3VisionTransformer``) and
 its ``Idefics3Connector`` (pixel-shuffle, then a bias-free projection into
-the text model's space), an ``iron.lm.Tower`` of ``DecoderLayer``s over
+the text model's space), an ``iron.lm.Tower`` of ``DecoderLayerSpec``s over
 SigLIP's modules (``layer_norm1``/``layer_norm2``, biased attention, a
 GELU-tanh ``fc1``/``fc2``).
 
@@ -25,7 +25,16 @@ from ml_dtypes import bfloat16
 import iron.functional as F
 from iron import Precision
 from iron.functional import LAYER_NORM_EPS
-from iron.lm import MLP, Attention, Config, Conv2d, DecoderLayer, Norm, Tower, not_json
+from iron.lm import (
+    MLP,
+    AttentionSpec,
+    Config,
+    Conv2d,
+    DecoderLayerSpec,
+    Norm,
+    Tower,
+    not_json,
+)
 from iron.operators.copy import Copy
 
 
@@ -76,10 +85,10 @@ class VisionConfig(Config):
         """The soft tokens an image gives."""
         return (self.side // self.scale_factor) ** 2
 
-    def layer(self, i: int) -> DecoderLayer:
+    def layer(self, i: int) -> DecoderLayerSpec:
         H, D = self.num_attention_heads, self.head_dim
-        return DecoderLayer(
-            Attention(H, H, D), MLP(self.hidden_act, gated=False), self.norm()
+        return DecoderLayerSpec(
+            AttentionSpec(H, H, D), MLP(self.hidden_act, gated=False), self.norm()
         )
 
     def norm(self) -> Norm:

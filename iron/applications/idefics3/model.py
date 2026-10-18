@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """SmolVLM-256M-Instruct over ``iron.lm``: its text model (``SmolVLMText``,
-a ``CausalLM`` of Llama's ``DecoderLayer``, 9 heads over 3 KV groups, with an untied
+a ``CausalLM`` of Llama's ``DecoderLayerSpec``, 9 heads over 3 KV groups, with an untied
 ``lm_head``), its vision tower (``vision/``, an ``iron.lm.Tower``), and the
 two as one ``iron.lm.Multimodal`` (``SmolVLM``), whose image
 placeholders take the tower's soft tokens, judged by transformers' own

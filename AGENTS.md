@@ -319,8 +319,8 @@ tunables and profiles already do that job.
   its index, or a PyTorch checkpoint read without torch);
   `tree("read" | "random" | "unread")` is the weights by the checkpoint's
   own names.
-- `blocks.py`: the parts a layer is made of (`Norm`, `Attention`, `MLP`,
-  `DecoderLayer`, `CrossDecoderLayer`), the leaf modules that declare their
+- `blocks.py`: the parts a layer is made of (`Norm`, `AttentionSpec`, `MLP`,
+  `DecoderLayerSpec`, `CrossDecoderLayer`), the leaf modules that declare their
   weights with `iron.param` (`Linear`, `Embedding`, `RMSNorm`,
   `LayerNorm`) and the front-end graphs.
 - `model.py`: `Model`, which loads from a checkpoint's directory or

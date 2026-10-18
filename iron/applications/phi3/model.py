@@ -13,7 +13,7 @@ Phi-4-mini is Llama's layer with three differences:
   ``mlp.gate_up_proj``, which ``Phi4.sanitize`` cuts by rows at load, each
   piece a view of the checkpoint's own array.
 * **Partial rotary.** Only the first ``rotary_dim`` (96 of 128) columns of
-  each head rotate (``partial_rotary_factor``); ``Attention`` turns that
+  each head rotate (``partial_rotary_factor``); ``AttentionSpec`` turns that
   prefix alone.
 * **LongRoPE.** A forward call whose sequence passes
   ``original_max_position_embeddings`` (4096) rotates by the
