@@ -5,7 +5,8 @@
 rows in, attended bidirectionally, compiled once for every length.
 
 ``Encoder`` looks up token ids' rows and runs ``forward`` over them: each
-layer, the final norm, ``pool`` and ``head``. A ``Tower`` is an encoder
+layer, the final norm (``final_norm``, none by default), ``pool`` and
+``head``. A ``Tower`` is an encoder
 whose rows come from a front end, ``front``, and whose output is soft tokens
 in a text model's space.
 """
@@ -57,6 +58,8 @@ class Encoder(Model):
         self.config = config
         self.layers = [self.sanitize(w) for w in layers]
         self.max_tokens = max_tokens
+        # The norm module after the last layer, by ``config.norm()``.
+        self.final_norm = None
 
     def lookup(self, ids):
         """The embedding rows of ``ids``, bounded as ``ids`` is."""
@@ -108,10 +111,6 @@ class Encoder(Model):
         )
         return o.reshape(n, H * D)
 
-    def norm(self, x):
-        """The final norm over the last layer's rows; none by default."""
-        return x
-
     def pool(self, x, n):
         """The rows ``head`` reads from the ``n`` valid rows of ``x``; all
         of them by default.
@@ -129,7 +128,9 @@ class Encoder(Model):
         x = self.positions(x, step)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
-        return self.head(self.pool(self.norm(x), n))
+        if self.final_norm is not None:
+            x = self.config.norm()(self.final_norm, x)
+        return self.head(self.pool(x, n))
 
     def from_rows(self, x, *, n):
         """A call on its embedding rows ``x``, bounded to ``n``, in place of

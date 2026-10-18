@@ -142,6 +142,10 @@ class Config:
             kwargs[f.name] = convert(value) if convert else value
         return cls(**kwargs)
 
+    def norm(self) -> Norm:
+        """Every norm's kind: RMS at ``eps``."""
+        return Norm(self.eps)
+
     def layer(self, i: int) -> DecoderLayer:
         """Layer ``i`` as the config describes it."""
         raise NotImplementedError(f"{type(self).__name__} describes no layer")
@@ -232,7 +236,7 @@ class DecoderConfig(Config):
         """Layer ``i``: Llama's, ``attention(i)`` and a gated feed-forward,
         each after its RMS norm.
         """
-        return DecoderLayer(self.attention(i), MLP(self.hidden_act), Norm(self.eps))
+        return DecoderLayer(self.attention(i), MLP(self.hidden_act), self.norm())
 
 
 def prompt_text(chars: int, skip: int = 0) -> str:

@@ -126,7 +126,7 @@ class Checkpoints:
 
 
 class CausalLM(Model):
-    """A decoder on ``config``'s shape; a subclass gives ``head``.
+    """A decoder on ``config``'s shape.
 
     The caches are ``(max_seq_len, num_key_value_heads, head_dim)`` so no descriptor
     steps by the context; a prompt chunk is a run of them
@@ -137,9 +137,11 @@ class CausalLM(Model):
     Args:
         config: The decoder's shape.
         weights: The checkpoint's tree (``Checkpoint.tree``).
-        decoder: The decoder's module of ``weights``, whose ``embed_tokens``
-            and ``layers`` are read here, the rest by the subclass; None is
-            ``weights.model``.
+        decoder: The decoder's module of ``weights``, whose ``embed_tokens``,
+            ``layers`` and ``norm`` are read here; None is ``weights.model``.
+
+    ``final_norm``, the norm module ``head`` reads, is ``decoder.norm``;
+    a subclass sets it where the checkpoint names it otherwise.
     """
 
     layers: list
@@ -151,6 +153,7 @@ class CausalLM(Model):
         self.weights = weights
         self.decoder = weights.model if decoder is None else decoder
         self.layers = [self.sanitize(w) for w in self.decoder.layers]
+        self.final_norm = getattr(self.decoder, "norm", None)
         if len(self.layers) != config.num_hidden_layers:
             raise ValueError(
                 f"the checkpoint has {len(self.layers)} layers, the config "
@@ -194,7 +197,7 @@ class CausalLM(Model):
     def head(self, x):
         """The final norm, then the output head (the embedding, if tied)."""
         c = self.config
-        x = F.rms_norm(x, self.decoder.norm.weight, c.eps)
+        x = c.norm()(self.final_norm, x)
         if c.tie_word_embeddings:
             return F.linear(x, self.decoder.embed_tokens.weight)
         return F.linear(x, self.weights.lm_head.weight)

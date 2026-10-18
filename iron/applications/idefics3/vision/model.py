@@ -23,7 +23,6 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
-import iron.functional as F
 from iron.functional import ACCURATE, LAYER_NORM_EPS
 from iron.lm import MLP, Attention, Config, Conv2d, DecoderLayer, Norm, Tower
 from iron.operators.copy import Copy
@@ -79,14 +78,15 @@ class VisionConfig(Config):
         return (self.side // self.scale_factor) ** 2
 
     def layer(self, i: int) -> DecoderLayer:
-        # The kernel's LayerNorm eps, not the checkpoint's layer_norm_eps,
-        # which transformers' uses.
         H, D = self.num_attention_heads, self.head_dim
         return DecoderLayer(
-            Attention(H, H, D),
-            MLP(self.hidden_act, gated=False),
-            Norm(LAYER_NORM_EPS, bias=True),
+            Attention(H, H, D), MLP(self.hidden_act, gated=False), self.norm()
         )
+
+    def norm(self) -> Norm:
+        # The kernel's LayerNorm eps, not the checkpoint's layer_norm_eps,
+        # which transformers' uses.
+        return Norm(LAYER_NORM_EPS, bias=True)
 
 
 class VisionTower(Tower):
@@ -106,6 +106,7 @@ class VisionTower(Tower):
         self.vision_model = weights.model.vision_model
         self.connector = weights.model.connector
         super().__init__(c, self.vision_model.encoder.layers, c.side**2, c.tokens)
+        self.final_norm = self.vision_model.post_layernorm
         embeddings = self.vision_model.embeddings
         self.patch_embed = Conv2d(
             embeddings.patch_embedding.weight, c.image_size, stride=c.patch
@@ -128,10 +129,6 @@ class VisionTower(Tower):
             post_attention_layernorm=w.layer_norm2,
             mlp=w.mlp,
         )
-
-    def norm(self, x):
-        n = self.vision_model.post_layernorm
-        return F.layer_norm(x, n.weight, n.bias, LAYER_NORM_EPS)
 
     def pool(self, x, n):
         c = self.config

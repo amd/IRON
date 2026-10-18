@@ -128,6 +128,7 @@ class EmbeddingGemma(Encoder):
         self.tokenizer = tokenizer
         w = self.language_model = weights.language_model
         super().__init__(config, w.layers, c.max_tokens)
+        self.final_norm = w.norm
         derived = Derived(weights)
         scale = np.sqrt(np.float32(c.hidden_size))
         derived.put(
@@ -180,10 +181,6 @@ class EmbeddingGemma(Encoder):
             ple=ple,
             scale=self.derived.language_model.layers[i].scale,
         )
-
-    def norm(self, x):
-        w = self.language_model.norm.weight
-        return RMSNorm.step(x, weight=w, epsilon=self.config.eps)
 
     def pool(self, x, n):
         """The mean of the ``n`` rows of ``x``: one zero query at scale 0

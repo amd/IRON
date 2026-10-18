@@ -144,7 +144,7 @@ class Config(lm.Config):
                 accurate=True,
             ),
             lm.MLP(self.hidden_act, accurate=True),
-            lm.Norm(self.eps),
+            self.norm(),
         )
 
 
@@ -300,7 +300,7 @@ class VisionConfig(lm.Config):
                 accurate=True,
             ),
             lm.MLP(self.hidden_act, accurate=True),
-            lm.Norm(self.eps),
+            self.norm(),
         )
 
     def size(self, height: int, width: int, max_tokens: int) -> tuple[int, int]:

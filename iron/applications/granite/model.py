@@ -25,6 +25,7 @@ the RoPE table alone.
 import dataclasses
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -32,8 +33,6 @@ from ml_dtypes import bfloat16
 from iron import lm
 from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer, Derived
 from iron.operators.elementwise_mul import RowwiseMul
-from iron.operators.gemv import GEMV
-from iron.operators.rms_norm import RMSNorm
 
 
 @dataclasses.dataclass(frozen=True)
@@ -80,11 +79,11 @@ class Granite(CausalLM):
             derived.put(
                 model.embed_tokens, scale=np.full(config.hidden_size, m, bfloat16)
             )
+        self.derived = derived.tree()
         if config.logits_scaling != 1:
             # The logits' divisor folded into the final norm's weight.
             divided = model.norm.weight / bfloat16(config.logits_scaling)
-            derived.put(model.norm, divided=divided)
-        self.derived = derived.tree()
+            self.final_norm = SimpleNamespace(weight=divided)
 
     def lookup(self, ids):
         x = super().lookup(ids)
@@ -93,15 +92,6 @@ class Granite(CausalLM):
         E = self.config.hidden_size
         x = x.reshape(math.prod(x.shape) // E, E)
         return RowwiseMul.step(x, self.derived.model.embed_tokens.scale)
-
-    def head(self, x):
-        norm = self.weights.model.norm.weight
-        if self.config.logits_scaling != 1:
-            norm = self.derived.model.norm.divided
-        return GEMV.step(
-            self.weights.lm_head.weight,
-            RMSNorm.step(x, weight=norm, epsilon=self.config.eps),
-        )
 
 
 class Runner(lm.Runner):

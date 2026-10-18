@@ -97,6 +97,7 @@ class Lfm2(CausalLM):
 
     def __init__(self, config: Lfm2Config, weights):
         super().__init__(config, weights)
+        self.final_norm = self.decoder.embedding_norm
         E, K, C = config.hidden_size, config.conv_kernel, config.prefill_chunk
         derived = Derived(weights)
         for i, w in enumerate(self.layers):
@@ -179,13 +180,6 @@ class Lfm2(CausalLM):
                 total = total + RowwiseMul.step(flat[first + k : first + k + 1], tap[k])
             Copy.step(flat[first + 1 : C + 1], write)
         return F.linear(cc * total, w.out_proj.weight)
-
-    def head(self, x):
-        m = self.weights.model
-        return F.linear(
-            F.rms_norm(x, m.embedding_norm.weight, self.config.eps),
-            m.embed_tokens.weight,
-        )
 
 
 class Runner(lm.Runner):

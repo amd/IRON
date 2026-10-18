@@ -24,7 +24,6 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-import iron.functional as F
 from iron.lm import (
     MLP,
     Attention,
@@ -42,7 +41,6 @@ from iron.lm.golden import Golden, flat, config_json
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gelu import GELU
-from iron.operators.gemv import GEMV
 
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.
 BLOCK = 64
@@ -119,12 +117,15 @@ class WhisperEncoderConfig(Config):
         """
         return -(-self.frames // BLOCK) * BLOCK
 
+    def norm(self) -> Norm:
+        return Norm(self.eps, bias=True)
+
     def layer(self, i: int) -> DecoderLayer:
         H = self.num_attention_heads
         return DecoderLayer(
             Attention(H, H, self.hidden_size // H),
             MLP(self.hidden_act, gated=False),
-            Norm(self.eps, bias=True),
+            self.norm(),
         )
 
 
@@ -166,12 +167,15 @@ class WhisperConfig(DecoderConfig):
         kw_only=True, metadata={"json": "max_source_positions"}
     )
 
+    def norm(self) -> Norm:
+        return Norm(self.eps, bias=True)
+
     def layer(self, i: int) -> CrossDecoderLayer:
         H = self.num_attention_heads
         return CrossDecoderLayer(
             Attention(H, H, self.head_dim),
             MLP(self.hidden_act, gated=False),
-            Norm(self.eps, bias=True),
+            self.norm(),
         )
 
     def encoder(self) -> WhisperEncoderConfig:
@@ -203,6 +207,7 @@ class WhisperEncoder(Tower):
         c, weights = config, bf16(weights)
         self.whisper_encoder = e = weights.model.encoder
         super().__init__(c, e.layers, c.rows, c.rows)
+        self.final_norm = e.layer_norm
         self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.mels)
         self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
         # The second convolution's input: a zero row, then the first's output.
@@ -226,10 +231,6 @@ class WhisperEncoder(Tower):
 
     def sanitize(self, w):
         return sanitize(w)
-
-    def norm(self, x):
-        n = self.whisper_encoder.layer_norm
-        return F.layer_norm(x, n.weight, n.bias, self.config.eps)
 
     def head(self, x):
         return x
@@ -280,6 +281,7 @@ class Whisper(EncoderDecoder):
         weights = bf16(weights)
         encoder = WhisperEncoder(config.encoder(), weights)
         super().__init__(config, weights, encoder, weights.model.decoder)
+        self.final_norm = self.decoder.layer_norm
 
     def positions(self, x, step):
         c = self.config
@@ -293,11 +295,6 @@ class Whisper(EncoderDecoder):
 
     def sanitize(self, w):
         return sanitize(w)
-
-    def head(self, x):
-        n = self.decoder.layer_norm
-        h = F.layer_norm(x, n.weight, n.bias, self.config.eps)
-        return GEMV.step(self.decoder.embed_tokens.weight, h)
 
 
 class Reference:
