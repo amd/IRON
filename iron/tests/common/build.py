@@ -778,3 +778,26 @@ def test_a_failed_fetch_leaves_no_partial_file(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="disk full"):
         image.fetch(tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_fetch_refuses_plain_http_and_a_download_of_another_digest(
+    tmp_path, monkeypatch
+):
+    with pytest.raises(ValueError, match="refusing to download over 'http://h/f'"):
+        Xclbin(url="http://h/f", sha256="0" * 64, filename="f").fetch(tmp_path)
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda url, timeout: io.BytesIO(b"other")
+    )
+    with pytest.raises(RuntimeError, match="expected " + "0" * 64):
+        Xclbin(url="https://h/f", sha256="0" * 64, filename="f").fetch(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_fetch_reuses_a_file_of_the_pinned_digest(tmp_path):
+    (tmp_path / "f").write_bytes(b"image")
+    image = Xclbin(
+        url="http://never/f",  # not fetched, so never refused
+        sha256=hashlib.sha256(b"image").hexdigest(),
+        filename="f",
+    )
+    assert image.fetch(tmp_path) == tmp_path / "f"

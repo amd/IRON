@@ -14,6 +14,7 @@ import dataclasses
 
 import aie.iron
 import aie.utils as aie_utils
+from aie.iron import ScratchpadParameter
 import numpy as np
 import pytest
 from aie.iron.device import from_name
@@ -24,7 +25,10 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Profile, Scratchpad
 from iron.common import (
+    Divisors,
     DispatchTime,
+    Rtp,
+    Width,
     Extent,
     In,
     Operator,
@@ -1049,3 +1053,69 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
 
     with pytest.raises(TypeError, match="axis 1"):
         k.trace(x=(64, 8))
+
+
+# --------------------------------------------------------------------------
+# Tuning domains, runtime parameters and shapes through a Select
+# --------------------------------------------------------------------------
+
+
+def test_a_width_is_the_value_and_every_power_of_two_up_to_the_columns():
+    assert Width().values(None, NPU2, 3) == (8, 4, 3, 2, 1)
+    assert Width().values(None, NPU2, 8) == (8, 4, 2, 1)
+
+
+@pytest.mark.parametrize(
+    "domain,expected",
+    [
+        (Divisors(of=64), (64, 32, 16, 8, 4, 2, 1)),
+        (Divisors(of=64, cap=16), (16, 8, 4, 2, 1)),  # the cap bounds above
+        (Divisors(of=64, step=4), (64, 32, 16, 8, 4)),  # the step bounds below
+        (Divisors(of=64, span=1), (16, 8, 4)),  # one octave either side
+        (Divisors(of=24), (8, 4, 2, 1)),  # 16 does not divide 24
+        (Divisors(of=lambda op, dev: dev.cols * 4), (32, 16, 8, 4, 2, 1)),
+    ],
+    ids=["plain", "cap", "step", "span", "not_dividing", "callable"],
+)
+def test_divisors_are_the_value_times_powers_of_two_within_the_bounds(domain, expected):
+    assert domain.values(None, NPU2, 8) == expected
+
+
+def test_divisors_read_a_field_off_the_operator():
+    op = MV(M=1024, K=256)
+    assert Divisors(of=MV.K, cap=64).values(op, NPU2, 32) == (64, 32, 16, 8, 4, 2, 1)
+
+
+def _value(name, **kw):
+    value = Value(**kw)
+    value.name = name
+    return value
+
+
+def test_runtime_parameters_lay_out_the_buffer_words_and_skip_scratchpad_ones():
+    one, block, scratch = _value("one"), _value("block", words=3), _value("s")
+    scratch.param = ScratchpadParameter("s", np.int32)
+    rtp = Rtp([block, one, scratch])
+    assert rtp.slots == {block: 0, one: 3}
+    assert rtp.buffer is not None and rtp[-1] is scratch.param
+    with pytest.raises(ValueError, match="block holds 3 words; it was given 2"):
+        rtp.write({"block": [1, 2], "one": 1})
+
+
+def test_a_scratchpad_parameter_holds_one_word():
+    block = _value("block", words=2)
+    block.param = ScratchpadParameter("block", np.int32)
+    with pytest.raises(ValueError, match="block is 2 words"):
+        Rtp([block])
+
+
+def test_an_axis_is_found_through_the_branch_a_select_takes():
+    class Laid(Operator):
+        rows: int = Param()
+        cols: int = Param()
+        flip: bool = Param(default=False)
+        x = In(Select(flip, (cols, rows), (rows, cols)))
+
+    assert Laid.x.dims.axis_of("rows", Laid(rows=4, cols=8)) == 0
+    assert Laid.x.dims.axis_of("rows", Laid(rows=4, cols=8, flip=True)) == 1
+    assert Laid(rows=4, cols=8, flip=True).x.shape == (8, 4)
