@@ -2,22 +2,23 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""EmbeddingGemma 2 on the NPU, from the real checkpoint, against its
-float32 oracles: the text encoder's embeddings (their cosine to the
-oracle's, their norm, a query ranking two documents, every call
-bit-identical to the first), each tower's soft tokens and, over text with
-a clip and an image, the whole model's. The audio tower's features and the
-image processor's patches are checked against the host's, which the
-oracles take. The oracles are checked against Hugging Face's processors
-and model (hugging_face.py), where torch is installed. On NPU1 each step is
+"""EmbeddingGemma 2 on the NPU, from the real checkpoint, against Hugging
+Face's own processors and model in float32 (hugging_face.py), their outputs
+recorded in ``golden.npz`` beside the checkpoint: the text encoder's
+embeddings (their cosine to Hugging Face's, their norm, a query ranking two
+documents, every call bit-identical to the first), each tower's soft tokens
+and, over text with a clip and an image, the whole model's, and the audio
+tower's features and the image processor's patches. On NPU1 each step is
 its own dispatch of an xclbin; on NPU2 that form is checked too.
 
 Each tower's graph is built for the class that tests it and dropped after
 it, before the text encoder's graphs are built for the module's last tests.
 """
 
+import functools
 import tarfile
 import time
+from types import SimpleNamespace
 
 import aie.utils as aie_utils
 import numpy as np
@@ -43,13 +44,9 @@ from iron.applications.embedding_gemma2.model import (
     Multimodal,
     Tokenizer,
 )
-from iron.applications.embedding_gemma2.oracle import (
-    AudioOracle,
-    EmbeddingGemmaOracle,
-    VisionOracle,
-)
 from iron.applications.embedding_gemma2.vision import VisionTower
 from iron.lm import Checkpoint, prompt_text, rope_angles
+from iron.lm.golden import Golden
 from iron.lm.testing import Download, cache_dir, check_embedding, require, weights_dir
 from iron.operators.copy import Copy
 
@@ -70,8 +67,8 @@ LONGEST = prompt_text(7000)
 
 # Measured: 0.99986 at the least, where HF's own bf16 model is 0.99997.
 MIN_COSINE = 0.9995
-# Against the oracle fed its own towers' soft tokens, so the towers' error is in
-# it. Measured: 0.99986 with an image, as the text alone.
+# Against Hugging Face's whole model, so the towers' error is in it. Measured:
+# 0.99986 with an image, as the text alone.
 MIN_COSINE_MIXED = 0.9995
 # A unit vector rounded to bf16 is up to 2**-9 off in norm, and the device's
 # reaches it.
@@ -167,11 +164,10 @@ IMAGES = {
     "living_room": V,
 }
 
-# The resizes the image processor is checked on, against Hugging Face's and
-# on the NPU, the cats photo tiled to each (height, width), with its budget
-# and what the NPU's refuses it for: a phone photo either way up, up- and
-# downscales, extreme aspect ratios, one side unchanged, and an image
-# already at its size.
+# The resizes the image processor is checked on, the cats photo tiled to
+# each (height, width), with its budget and what the NPU's refuses it for: a
+# phone photo either way up, up- and downscales, extreme aspect ratios, one
+# side unchanged, and an image already at its size.
 RESIZES = [
     ((3024, 4032), I, None),
     ((4032, 3024), I, None),
@@ -242,21 +238,6 @@ MIXED = {
     ),
 }
 
-# The cases the oracle's ids and embedding are checked against Hugging
-# Face's processor and model on: text, and text with a clip and a photo.
-HUGGING_FACE = {
-    "query": (QUERY, "query", None, None),
-    "past_the_window": (LONGER, "document", None, None),
-    "audio": ("<|audio|> someone reading aloud", "query", "short", None),
-    "image": ("<|image|> a baseball game", "query", None, "baseball"),
-    "both": (
-        "<|image|> the picture, then the speech: <|audio|>",
-        "query",
-        "short",
-        "baseball",
-    ),
-}
-
 
 @pytest.fixture(scope="module")
 def weights():
@@ -280,32 +261,75 @@ def tuner():
 
 
 @pytest.fixture(scope="module")
-def oracle(weights):
-    return EmbeddingGemmaOracle(Config(), weights)
-
-
-@pytest.fixture(scope="module")
-def audio_oracle(weights):
-    return AudioOracle(AudioConfig(), weights)
-
-
-@pytest.fixture(scope="module")
-def vision_oracle(weights):
-    return VisionOracle(VisionConfig(), weights)
-
-
-@pytest.fixture(scope="session")
-def hugging_face():
-    """Hugging Face's own EmbeddingGemma 2, which the oracles are checked
-    against: optional dependencies, so its tests skip without them.
+def reference():
+    """``reference(key, compute)``: ``compute(model)`` on Hugging Face's own
+    EmbeddingGemma 2 (hugging_face.py), an array kept under ``key`` in
+    ``golden.npz`` beside the checkpoint: recorded there where torch,
+    torchvision and transformers are installed, read back elsewhere, and
+    the test skipped when it is neither.
     """
-    for module in ("torch", "torchvision", "transformers"):
-        pytest.importorskip(module)
-    require(DIRECTORY / "model.safetensors", DIRECTORY / "processor_config.json")
-    # Imported here, once the optional dependencies are known to be present.
-    from iron.applications.embedding_gemma2.hugging_face import HuggingFace
+    golden = Golden(DIRECTORY / "golden.npz")
+    try:
+        from iron.applications.embedding_gemma2.hugging_face import HuggingFace
+    except ImportError:
+        HuggingFace = None
+    model = functools.cache(lambda: HuggingFace(DIRECTORY))
 
-    return HuggingFace(DIRECTORY)
+    def recorded(key, compute):
+        if HuggingFace is not None:
+            golden.reference = lambda: SimpleNamespace(
+                logits=lambda _: compute(model())
+            )
+        try:
+            return golden.logits(np.frombuffer(key.encode(), np.uint8))
+        except LookupError as e:
+            pytest.skip(str(e))
+
+    return recorded
+
+
+def embedding(reference, text, task, speech=None, name=None, dims=None):
+    """Hugging Face's embedding of ``text`` for ``task`` with the clip
+    ``speech`` and the photo ``name`` at its placeholders, its first
+    ``dims`` renormalized.
+    """
+    e = reference(
+        f"embedding {task} {speech} {name} {text}",
+        lambda model: model.encode(
+            Tokenizer.TASKS[task] + text,
+            None if speech is None else clip(speech),
+            None if name is None else photo(name),
+        ),
+    )[:dims]
+    return e / np.linalg.norm(e)
+
+
+def windows(config, pixel_values, positions):
+    """The processor's patches as the NPU's ``iron.lm.ImagePatches`` gives
+    them in ``config.patches`` rows: each soft token's ``pool ** 2``
+    patches together, row-major within their window, the tokens row-major
+    over the image, then padding, ids past each table.
+
+    Returns:
+        ``pixels`` ``(rows, 3 * patch ** 2)`` bf16; ``xy`` ``(2 * rows,)``
+        int32, each patch's x and y side by side; and ``position_ids``
+        ``(2 * rows,)`` int32, every patch's x, then every patch's y plus
+        ``positions``.
+    """
+    c, P, rows = config, config.positions, config.patches
+    real = np.flatnonzero((positions >= 0).all(axis=-1))
+    x, y = positions[real].T
+    token = x // c.pool + (x.max() + 1) // c.pool * (y // c.pool)
+    order = real[np.lexsort((x % c.pool, y % c.pool, token))]
+    n = order.size
+    x, y = positions[order].T
+    pixels = np.zeros((rows, 3 * c.patch**2), bfloat16)
+    pixels[:n] = pixel_values[order]
+    xy = np.full(2 * rows, P, np.int32)
+    xy.reshape(rows, 2)[:n] = np.stack([x, y], axis=-1)
+    position_ids = np.full(2 * rows, 2 * P, np.int32)
+    position_ids[:n], position_ids[rows : rows + n] = x, P + y
+    return pixels, xy, position_ids
 
 
 def loaded(graph, tuner, full_elf=None):
@@ -315,27 +339,13 @@ def loaded(graph, tuner, full_elf=None):
         aie_utils.DefaultNPURuntime.cleanup()
 
 
-def check_mixed(graph, oracle, audio_oracle, vision_oracle, case, record_property):
-    """The embedding of `MIXED[case]` against the oracle fed its own towers'
-    soft tokens.
-    """
+def check_mixed(graph, reference, case, record_property):
+    """The embedding of `MIXED[case]` against Hugging Face's."""
     text, speech, name = MIXED[case]
     audio = None if speech is None else clip(speech)
     image = None if name is None else photo(name)
-    c = graph.config
     got = graph.embed(text, "query", audio=audio, image=image)
-    soft = {}
-    if audio is not None:
-        soft[c.audio_token] = audio_oracle.soft_tokens(audio)
-    if image is not None:
-        soft[c.image_token] = vision_oracle.soft_tokens(image, I)
-    tokens = graph.tokenizer.encode(
-        text,
-        "query",
-        len(soft.get(c.audio_token, ())),
-        len(soft.get(c.image_token, ())),
-    )
-    similarity = cosine(got, oracle.encode(tokens, soft=soft))
+    similarity = cosine(got, embedding(reference, text, "query", speech, name))
     record_property("Cosine", similarity)
     record_property("Norm", float(np.linalg.norm(got)))
     assert similarity >= MIN_COSINE_MIXED, similarity
@@ -358,22 +368,20 @@ class TestEachStep:
         ids=["query", "past_the_window"],
     )
     def test_embeddinggemma_2_each_step_accuracy(
-        self, each_step, oracle, text, task, record_property
+        self, each_step, reference, text, task, record_property
     ):
         tokens = each_step.tokenizer.encode(text, task)
         got = each_step.encode(tokens)
-        similarity = cosine(got, oracle.encode(tokens))
+        similarity = cosine(got, embedding(reference, text, task))
         record_property("Cosine", similarity)
         assert similarity >= MIN_COSINE, similarity
         np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
         np.testing.assert_array_equal(each_step.encode(tokens), got)
 
     def test_embeddinggemma_2_each_step_multimodal(
-        self, each_step, oracle, audio_oracle, vision_oracle, record_property
+        self, each_step, reference, record_property
     ):
-        check_mixed(
-            each_step, oracle, audio_oracle, vision_oracle, "both", record_property
-        )
+        check_mixed(each_step, reference, "both", record_property)
 
 
 class Features(iron.Graph):
@@ -397,14 +405,14 @@ class TestAudio:
         yield from loaded(AudioTower(AudioConfig(), weights), tuner)
 
     @pytest.mark.parametrize("name", list(CLIPS))
-    def test_audio_features(self, audio, audio_oracle, name, record_property):
+    def test_audio_features(self, audio, reference, name, record_property):
         wave = clip(name)
         x, values = audio.inputs(wave)
         frames = values["frames"]
         got = Features(audio)(x, frames=frames).numpy().reshape(-1, audio.config.mels)
-        host, valid = audio_oracle.features(wave)
-        assert frames == valid
-        want = host[:frames].astype(bfloat16)
+        want = reference(f"features {name}", lambda model: model.features(wave))
+        assert frames == len(want)
+        want = want.astype(bfloat16)
         exact = float(
             np.mean(got[:frames].astype(np.float32) == want.astype(np.float32))
         )
@@ -416,9 +424,10 @@ class TestAudio:
 
     # Longest first: each clip runs over the rows a longer one left behind.
     @pytest.mark.parametrize("name", list(CLIPS)[::-1])
-    def test_audio_accuracy(self, audio, audio_oracle, name, record_property):
+    def test_audio_accuracy(self, audio, reference, name, record_property):
         wave = clip(name)
-        got, want = audio.soft_tokens(wave), audio_oracle.soft_tokens(wave)
+        got = audio.soft_tokens(wave)
+        want = reference(f"audio {name}", lambda model: model.audio_tower(wave))
         c = audio.config
         assert got.shape == want.shape
         assert got.shape == (c.tokens(c.frames(wave.size)), c.text_dim)
@@ -449,10 +458,16 @@ class TestVision:
         vision.processor.compile(**shapes)
         return vision.processor
 
-    def check_processor(self, vision, processor, oracle, image, tokens, record):
+    def check_processor(self, vision, processor, reference, key, image, tokens, record):
         rgb, values = vision.inputs(image, tokens)
         values.pop("n")
-        want = oracle.windows(*oracle.patches(image, tokens), vision.config.patches)
+        pixel_values = reference(
+            f"pixel_values {key} {tokens}", lambda m: m.patches(image, tokens)[0]
+        )
+        positions = reference(
+            f"positions {key} {tokens}", lambda m: m.patches(image, tokens)[1]
+        )
+        want = windows(vision.config, pixel_values, positions.astype(np.int64))
         got = processor(rgb, **values)
         for name, g, w in zip(("pixels", "xy", "position_ids"), got, want):
             g = np.asarray(g.numpy()).reshape(w.shape)
@@ -476,30 +491,38 @@ class TestVision:
         ],
     )
     def test_image_processor(
-        self, vision, processor, vision_oracle, name, shape, tokens, record_property
+        self, vision, processor, reference, name, shape, tokens, record_property
     ):
         image = photo(name) if shape is None else tiled(photo(name), *shape)
         self.check_processor(
-            vision, processor, vision_oracle, image, tokens, record_property
+            vision,
+            processor,
+            reference,
+            f"{name} {shape}",
+            image,
+            tokens,
+            record_property,
         )
 
     @pytest.mark.supported_devices("npu2")
     def test_image_processor_npu2_only(
-        self, vision, processor, vision_oracle, record_property
+        self, vision, processor, reference, record_property
     ):
         # 2016 pixels wide at image_tokens: 126 patch columns, 16 a core on
         # npu1's eight cores (test_image_processor_refuses_on_npu1 below) but
         # only 8 a core on npu2's sixteen, which Resample's default holds.
         image = tiled(photo("cats"), 97, 640)
         self.check_processor(
-            vision, processor, vision_oracle, image, I, record_property
+            vision, processor, reference, "cats (97, 640)", image, I, record_property
         )
 
     @pytest.mark.parametrize("name", list(IMAGES))
-    def test_vision_accuracy(self, vision, vision_oracle, name, record_property):
+    def test_vision_accuracy(self, vision, reference, name, record_property):
         image, tokens = photo(name), IMAGES[name]
-        got, want = vision.soft_tokens(image, tokens), vision_oracle.soft_tokens(
-            image, tokens
+        got = vision.soft_tokens(image, tokens)
+        want = reference(
+            f"vision {name} {tokens}",
+            lambda model: model.vision_tower(*model.patches(image, tokens)),
         )
         assert got.shape == want.shape
         cosines = (got * want).sum(-1) / (
@@ -541,10 +564,10 @@ def multimodal(weights, tokenizer, tuner):
     ],
     ids=["query", "document", "long_document", "past_the_window", "near_the_limit"],
 )
-def test_embeddinggemma_2_accuracy(encoder, oracle, text, task, record_property):
+def test_embeddinggemma_2_accuracy(encoder, reference, text, task, record_property):
     tokens = encoder.tokenizer.encode(text, task)
     got = encoder.encode(tokens)
-    similarity = cosine(got, oracle.encode(tokens))
+    similarity = cosine(got, embedding(reference, text, task))
     record_property("Cosine", similarity)
     record_property("Norm", float(np.linalg.norm(got)))
     assert similarity >= MIN_COSINE, similarity
@@ -553,36 +576,31 @@ def test_embeddinggemma_2_accuracy(encoder, oracle, text, task, record_property)
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dims", [512, 256, 128])
-def test_embeddinggemma_2_truncation(encoder, oracle, dims, record_property):
+def test_embeddinggemma_2_truncation(encoder, reference, dims, record_property):
     tokens = encoder.tokenizer.encode(QUERY, "query")
     got = encoder.encode(tokens, dims)
     record_property("Norm", float(np.linalg.norm(got)))
     np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
-    similarity = cosine(got, oracle.encode(tokens, dims))
+    similarity = cosine(got, embedding(reference, QUERY, "query", dims=dims))
     record_property("Cosine", similarity)
     assert similarity >= MIN_COSINE, similarity
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_embeddinggemma_2_ranking(encoder, oracle):
+def test_embeddinggemma_2_ranking(encoder, reference):
     query = encoder.embed(QUERY, "query")
     scores = [cosine(encoder.embed(d, "document"), query) for d in DOCUMENTS]
-    want_query = oracle.encode(encoder.tokenizer.encode(QUERY, "query"))
-    want = [
-        cosine(oracle.encode(encoder.tokenizer.encode(d, "document")), want_query)
-        for d in DOCUMENTS
-    ]
+    want_query = embedding(reference, QUERY, "query")
+    want = [cosine(embedding(reference, d, "document"), want_query) for d in DOCUMENTS]
     assert scores[0] > scores[1]
-    # Measured: 0.0013 and 0.0009 below the oracle's 0.871 and 0.604.
+    # Measured: 0.0013 and 0.0009 below Hugging Face's 0.871 and 0.604.
     np.testing.assert_allclose(scores, want, atol=3e-3)
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("case", MIXED)
-def test_embeddinggemma_2_multimodal(
-    multimodal, oracle, audio_oracle, vision_oracle, case, record_property
-):
-    check_mixed(multimodal, oracle, audio_oracle, vision_oracle, case, record_property)
+def test_embeddinggemma_2_multimodal(multimodal, reference, case, record_property):
+    check_mixed(multimodal, reference, case, record_property)
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
@@ -696,68 +714,3 @@ def test_image_processor_refuses_on_npu1(npu1):
     )
     with pytest.raises(ValueError, match="patch columns"):
         vision.inputs(np.zeros((97, 640, 3), np.uint8), I)
-
-
-@pytest.mark.parametrize("shape, tokens, refusal", RESIZES)
-def test_resize_matches_hugging_face(
-    hugging_face, vision_oracle, shape, tokens, refusal
-):
-    image = tiled(photo("cats"), *shape)
-    got_values, got_positions = vision_oracle.patches(image, tokens)
-    want_values, want_positions = hugging_face.patches(image, tokens)
-    np.testing.assert_array_equal(got_values, want_values)
-    np.testing.assert_array_equal(got_positions, want_positions)
-
-
-def test_audio_oracle_matches_hugging_face(hugging_face, audio_oracle):
-    wave = clip("medium")
-    got_features, frames = audio_oracle.features(wave)
-    want_features, mask = hugging_face.features(wave)
-    assert frames == int(mask.sum()) and mask[:frames].all()
-    # Measured: identical.
-    np.testing.assert_allclose(got_features, want_features, atol=1e-5)
-    want = hugging_face.audio_tower(want_features, mask)
-    got = audio_oracle.tower(got_features, frames)
-    assert got.shape == want.shape
-    # Measured: 2.1e-5, float32's own reordering.
-    np.testing.assert_allclose(
-        np.linalg.norm(got - want) / np.linalg.norm(want), 0, atol=1e-4
-    )
-
-
-def test_vision_oracle_matches_hugging_face(hugging_face, vision_oracle):
-    pixel_values, positions = vision_oracle.patches(
-        photo("stop_sign"), IMAGES["stop_sign"]
-    )
-    want = hugging_face.vision_tower(pixel_values, positions)
-    got = vision_oracle.tower(pixel_values, positions)
-    # Measured: 2.4e-6, float32's own reordering.
-    np.testing.assert_allclose(
-        np.linalg.norm(got - want) / np.linalg.norm(want), 0, atol=1e-5
-    )
-
-
-@pytest.mark.parametrize("case", HUGGING_FACE)
-def test_embeddinggemma_2_oracle_matches_hugging_face(
-    hugging_face, tokenizer, oracle, audio_oracle, vision_oracle, case
-):
-    text, task, speech, name = HUGGING_FACE[case]
-    wave = None if speech is None else clip(speech)
-    image = None if name is None else photo(name)
-    c = oracle.config
-    soft = {}
-    if wave is not None:
-        soft[c.audio_token] = audio_oracle.soft_tokens(wave)
-    if image is not None:
-        soft[c.image_token] = vision_oracle.soft_tokens(image, I)
-    ids = tokenizer.encode(
-        text,
-        task,
-        len(soft.get(c.audio_token, ())),
-        len(soft.get(c.image_token, ())),
-    )
-    want_ids, want = hugging_face.encode(Tokenizer.TASKS[task] + text, wave, image)
-    assert ids == want_ids
-    got = oracle.encode(ids, soft=soft)
-    # Measured: 1.4e-6 at the most, float32's own reordering.
-    np.testing.assert_allclose(np.linalg.norm(got - want), 0, atol=1e-5)

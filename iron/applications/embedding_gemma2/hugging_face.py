@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hugging Face's own EmbeddingGemma 2, in float32, which the tests check
-the float32 oracles against: its processors, its model and each tower
-alone. It needs torch, torchvision and transformers, which are not IRON's
-requirements, so the tests that use it skip where they are not installed.
+"""Hugging Face's own EmbeddingGemma 2, in float32, what the tests'
+goldens beside the checkpoint are recorded from: its processors, its model
+and each tower alone. It needs torch, torchvision and transformers, which
+are not IRON's requirements, only to record.
 """
 
 from pathlib import Path
@@ -63,10 +63,9 @@ class HuggingFace:
                 }
             )
 
-    def encode(self, text: str, audio=None, image=None) -> tuple[list[int], np.ndarray]:
-        """The ids the processor gives `text`, with one mono clip `audio`
-        and one decoded image `image` at its placeholders, and the model's
-        unit-length mean-pooled embedding of them.
+    def encode(self, text: str, audio=None, image=None) -> np.ndarray:
+        """The model's unit-length mean-pooled embedding of `text`, with one
+        mono clip `audio` and one decoded image `image` at its placeholders.
         """
         media = {}
         if audio is not None:
@@ -77,7 +76,7 @@ class HuggingFace:
         with torch.no_grad():
             states = self.model(**inputs).last_hidden_state[0].numpy()
         embedding = states.mean(axis=0)
-        return inputs["input_ids"][0].tolist(), embedding / np.linalg.norm(embedding)
+        return embedding / np.linalg.norm(embedding)
 
     def patches(self, image: np.ndarray, max_tokens: int):
         """The image processor's `pixel_values`, float32, and
@@ -105,15 +104,17 @@ class HuggingFace:
             soft = self.embed_vision(hidden).numpy()
         return soft.reshape(-1, soft.shape[-1])
 
-    def features(self, waveform) -> tuple[np.ndarray, np.ndarray]:
-        """The feature extractor's features and their mask for one mono clip."""
+    def features(self, waveform) -> np.ndarray:
+        """The feature extractor's valid features of one mono clip."""
         out = self.extractor([waveform], return_tensors="np")
-        return out["input_features"][0], out["input_features_mask"][0]
+        return out["input_features"][0][out["input_features_mask"][0].astype(bool)]
 
-    def audio_tower(self, features, mask) -> np.ndarray:
-        """The audio tower's valid soft tokens in the text model's space,
-        over the extractor's `features` and `mask`.
+    def audio_tower(self, waveform) -> np.ndarray:
+        """The audio tower's valid soft tokens of one mono clip in the text
+        model's space.
         """
+        out = self.extractor([waveform], return_tensors="np")
+        features, mask = out["input_features"][0], out["input_features_mask"][0]
         with torch.no_grad():
             out = self.audio(
                 torch.from_numpy(features)[None], torch.from_numpy(mask)[None]
