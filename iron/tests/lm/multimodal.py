@@ -14,8 +14,7 @@ from ml_dtypes import bfloat16
 
 from iron.lm import Sampler
 from iron.lm.testing import assert_close
-from iron.tests.common.multimodal import IMAGE
-from iron.tests.common.multimodal import causal  # noqa: F401 (a fixture)
+from iron.tests.common.multimodal import IMAGE, small_causal
 
 # The relative top-2 gap each step's argmax is checked at: past
 # assert_close's 5% of the logits' scale, where it checks the argmax.
@@ -29,8 +28,8 @@ def gapped(logits: np.ndarray) -> np.ndarray:
 
 
 @pytest.fixture(scope="module")
-def loaded(causal):
-    model, reference, tokens, soft = causal
+def loaded(golden):
+    model, reference, tokens, soft = small_causal(golden)
     yield model.load(), reference, tokens, soft
 
 

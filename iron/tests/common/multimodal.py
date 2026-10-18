@@ -151,8 +151,7 @@ class Placed(HuggingFace):
         return out.logits[0, -1].numpy()
 
 
-@pytest.fixture(scope="module")
-def causal(golden):
+def small_causal(golden):
     """A small Llama over chunks of 256 of 1024 positions, a tower on its
     image placeholder, Hugging Face's logits for it (``reference(tokens,
     soft)``, from ``goldens/multimodal.npz``), and a prompt whose run of 16
@@ -173,6 +172,11 @@ def causal(golden):
         "multimodal", lambda: Placed.build("llama", config, weights), config, weights
     )
     return model, hf.logits, tokens, soft
+
+
+@pytest.fixture(scope="module")
+def causal(golden):
+    return small_causal(golden)
 
 
 def test_a_causal_model_s_versions_and_signature(causal):
