@@ -869,9 +869,6 @@ class PerCall:
             return self is other
         raise TypeError(f"{self} has no value to compare: it is given per call")
 
-    def __ne__(self, other) -> bool:
-        return not self == other
-
     __hash__ = object.__hash__
 
     def __bool__(self):
@@ -1053,9 +1050,6 @@ class Affine:
         if isinstance(other, (int, float, np.integer, np.floating)):
             raise TypeError(f"{self} has no value to compare: it is computed per call")
         return NotImplemented
-
-    def __ne__(self, other) -> bool:
-        return not self == other
 
     def __bool__(self):
         raise TypeError(f"{self} has no truth value: it is computed per call")
