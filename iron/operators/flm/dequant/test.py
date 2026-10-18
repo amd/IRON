@@ -12,10 +12,10 @@ from aie.utils.verify import Tolerance
 from iron.common.testing import run_test
 from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor, rb
 from iron.operators.flm.dequant.op import N_TILE, DequantBFP, dequantize, qw_bytes_for
-from iron.operators.flm.gemm.op import GEMM
+from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE, packed_bytes
 
-# K = 512 is one k-tile, where flm.GEMM at tile_n = 128 wins on NPU2. It
+# K = 512 is one k-tile, where flm.ProjectionGEMM at tile_n = 128 wins on NPU2. It
 # defaults to 64 regardless, which is the order this operator emits.
 SHAPES = [(512, 128), (1024, 128), (1024, 512), (1536, 640), (2048, 256)]
 
@@ -84,7 +84,7 @@ def test_matches_reference(K, N, record_property):
 
 @pytest.mark.supported_devices("npu2")
 def test_output_feeds_gemm_unchanged():
-    """The output must equal what GEMM.pack_B produces, which is the contract
+    """The output must equal what ProjectionGEMM.pack_B produces, which is the contract
     that makes it a drop-in. Comparing against pack_B catches a drift in either
     operator's tiling that a self-consistent reference would not.
     """
@@ -92,7 +92,7 @@ def test_output_feeds_gemm_unchanged():
     qw = random_q4nx(K, N, seed=3)
     w = dequantize(qw, K, N)
     w = rb(w)
-    gemm = GEMM(M=256, K=K, N=N, tile_n=64, rounding="floor")
+    gemm = ProjectionGEMM(M=256, K=K, N=N, tile_n=64, rounding="floor")
     packed = gemm.pack_B(np.ascontiguousarray(w.T))
 
     _check(DequantBFP(K=K, N=N), qw, packed, "vs pack_B")
@@ -130,7 +130,7 @@ def test_gate_up_interleaved_blob(K, N, run, period):
         # Gemma 4 E2B's MLP down projection.
         pytest.param(6144, 1536, marks=pytest.mark.bench),
         pytest.param(12288, 1536, marks=pytest.mark.extensive),
-        # E4B's o, down and gate/up projections, as flm.GEMM's extensive set.
+        # E4B's o, down and gate/up projections, as flm.ProjectionGEMM's extensive set.
         pytest.param(2560, 2560, marks=pytest.mark.extensive),
         pytest.param(10240, 2560, marks=pytest.mark.extensive),
         pytest.param(2560, 10240, marks=pytest.mark.extensive),

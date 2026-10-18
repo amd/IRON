@@ -4,7 +4,7 @@
 # A checker's view of the names __getattr__ loads lazily at runtime (PEP 562).
 
 from .dequant.op import DequantBFP
-from .gemm.op import GEMM
+from .gemm.op import ProjectionGEMM
 from .layer.op import DecodeLayer
 from .lm_head.op import LMHead
 from .prefill_attn.op import PrefillAttention, PrefillSlidingAttention

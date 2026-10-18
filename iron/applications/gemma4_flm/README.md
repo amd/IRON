@@ -114,7 +114,7 @@ This example uses six operator classes from `iron/operators/flm/`:
 
 | Operator | Class | Abstraction level | Sequence | Engine hooks |
 |---|---|---|---|---|
-| [GEMM](../../operators/flm/gemm) | `GEMM` | high | static, one per (M, K, N) | `*_proj`, `pli_*_proj` |
+| [GEMM](../../operators/flm/gemm) | `ProjectionGEMM` | high | static, one per (M, K, N) | `*_proj`, `pli_*_proj` |
 | [Dequantization](../../operators/flm/dequant) | `DequantBFP` | high | static, one per (K, N) | `dequant_*` |
 | [LM head](../../operators/flm/lm_head) | `LMHead` | high | static | `lm_head` |
 | [Prefill attention](../../operators/flm/prefill_attn) | `PrefillAttention`, `PrefillSlidingAttention` | low | dynamic: `L_begin`, `L_end`, `max_l` | `global_attn_core`, `swa_attn_core` |
@@ -124,11 +124,11 @@ The high-level operators describe their dataflow with IRON's Workers,
 ObjectFifos and runtime sequence. Alongside the other operators in IRON, these
 are good examples of idiomatic IRON code:
 
-- `GEMM` runs every prefill projection: q, k, v, o, the MLP and the
+- `ProjectionGEMM` runs every prefill projection: q, k, v, o, the MLP and the
   per-layer-input (PLI) projections. It applies the activation in its output
   stage. All GEMM shapes share one configuration, and therefore one xclbin.
 - `DequantBFP` unpacks one layer's 4-bit weights into the block format that
-  `GEMM` reads.
+  `ProjectionGEMM` reads.
 - `LMHead` computes the logits of the last token from the 4-bit vocabulary
   weights.
 
@@ -145,7 +145,7 @@ Each of these operators is an IRON operator, laid out as
 [Adding a New Operator](../../../AGENTS.md#adding-a-new-operator) describes.
 `op.py` defines the `Operator` subclass. Its fields describe one problem, for
 example a GEMM's `M`, `K` and `N`, and declare the buffers the operator takes.
-`GEMM` and `DequantBFP` build their array in `Array.build()` and their runtime
+`ProjectionGEMM` and `DequantBFP` build their array in `Array.build()` and their runtime
 sequence in `sequence()`, both in `op.py`. The others return their program, a
 function in `design.py`, from `exported_design()`. The kernels are the C++ that
 runs on one compute tile, from mlir-aie's kernel factories

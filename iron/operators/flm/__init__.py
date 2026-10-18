@@ -5,10 +5,10 @@
 
 Operators are re-exported lazily (PEP 562):
 
-    from iron.operators.flm import GEMM  # imports iron.operators.flm.gemm.op
+    from iron.operators.flm import ProjectionGEMM  # imports iron.operators.flm.gemm.op
 
 The one catalog is ``iron.operators._OPERATOR_MODULES``, dotted
-(``"flm.GEMM"``); this package's own names, below, are that catalog's
+(``"flm.ProjectionGEMM"``); this package's own names, below, are that catalog's
 ``flm.`` entries with the prefix dropped.
 """
 

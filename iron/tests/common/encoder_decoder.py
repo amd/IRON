@@ -170,7 +170,7 @@ def test_the_encode_version_writes_each_layer_s_keys_and_values(whisper):
     traced = model.trace(**model.shapes()[2])
     names = [type(s.op).__name__ for s in traced.steps]
     # The tower's copy, then per layer k and v projected and written.
-    assert names.count("GEMM") == 4 and "MHA" not in names
+    assert names.count("ProjectionGEMM") == 4 and "MHA" not in names
     assert sorted(traced.reads) == ["encoder_rows", "position", "source", "token"]
 
 

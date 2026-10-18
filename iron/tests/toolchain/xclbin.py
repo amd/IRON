@@ -72,7 +72,7 @@ def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device):
 def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
     import iron.operators.flm.gemm.op as flm
 
-    op = flm.GEMM(M=256, K=512, N=512)
+    op = flm.ProjectionGEMM(M=256, K=512, N=512)
     artifacts = op.compile()
     assert artifacts.image.stat().st_size > 0
     assert artifacts.insts is not None and artifacts.insts.stat().st_size > 0

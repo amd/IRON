@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""FastFlowLM's shipped ``mm`` binary, as a second form of ``flm.GEMM``.
+"""FastFlowLM's shipped ``mm`` binary, as a second form of ``flm.ProjectionGEMM``.
 
-The port (``iron.operators.flm.gemm.op.GEMM``) is built from source;
+The port (``iron.operators.flm.gemm.op.ProjectionGEMM``) is built from source;
 this is the binary it was ported from, downloaded and pinned by digest, and
 driven by the same declaration:
 
@@ -24,7 +24,7 @@ selects its epilogue at build time (a branch-free inner loop, one build per
 activation), this binary at run time; the port rounds ``conv_even``, this
 binary runs in the core's power-up floor mode and carries a ~1% truncation
 bias; the port packs B in ``mm_fused_mmul_2x2``'s k order, this binary in
-its own (``pack_B``). ``GEMM(rounding=Rounding.FLOOR)`` on the port
+its own (``pack_B``). ``ProjectionGEMM(rounding=Rounding.FLOOR)`` on the port
 reproduces this overlay bit for bit without an activation.
 """
 
@@ -55,7 +55,7 @@ from iron.operators.flm.gemm.design import (
     S,
     T,
 )
-from iron.operators.flm.gemm.op import GEMM
+from iron.operators.flm.gemm.op import ProjectionGEMM
 
 # The FastFlowLM revision the overlay is taken from. A commit SHA rather than
 # a branch, so the digest below stays valid.
@@ -111,7 +111,7 @@ class _Built(Built):
 
 
 class Shipped(
-    GEMM,
+    ProjectionGEMM,
     image=Xclbin(
         url=XCLBIN_URL,
         sha256=XCLBIN_SHA256,
@@ -140,25 +140,29 @@ class Shipped(
 
     # One (M_TILE x K_TILE) block per object, broadcast along a compute row.
     A = In(
-        GEMM.M,
-        GEMM.K,
+        ProjectionGEMM.M,
+        ProjectionGEMM.K,
         obj_shape=(M_TILE, K_TILE),
-        per=(GEMM.rows,),
+        per=(ProjectionGEMM.rows,),
         depth=QUEUE_DEPTH,
     )
     B = In(
-        Select(GEMM.bfp16_b, (GEMM.packed_blocks,), (GEMM.K, GEMM.N)),
-        dtype=GEMM.b_dtype,
+        Select(
+            ProjectionGEMM.bfp16_b,
+            (ProjectionGEMM.packed_blocks,),
+            (ProjectionGEMM.K, ProjectionGEMM.N),
+        ),
+        dtype=ProjectionGEMM.b_dtype,
         obj_shape=(K_TILE, N_TILE),
-        per=(GEMM.cols,),
+        per=(ProjectionGEMM.cols,),
         depth=QUEUE_DEPTH,
     )
     # The joined (ROWS*M_TILE x N_TILE) block.
     C = Out(
-        GEMM.M,
-        GEMM.N,
+        ProjectionGEMM.M,
+        ProjectionGEMM.N,
         obj_shape=(ROWS * M_TILE * N_TILE,),
-        per=(GEMM.cols,),
+        per=(ProjectionGEMM.cols,),
         depth=QUEUE_DEPTH,
     )
     # The port's named values are not this image's: it reads one block of

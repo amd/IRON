@@ -34,9 +34,9 @@ def _modules_after_importing(name):
     """Import `name` from the catalog in a fresh interpreter; list what came with it.
 
     `name` is a catalog key: a bare name (``"GEMM"``) or a dotted one
-    (``"flm.GEMM"``, ``iron.operators.flm``'s own catalog under its
+    (``"flm.ProjectionGEMM"``, ``iron.operators.flm``'s own catalog under its
     prefix), which a real caller imports as ``from iron.operators.flm
-    import GEMM``, not as a single dotted import name (invalid syntax).
+    import ProjectionGEMM``, not as a single dotted import name (invalid syntax).
     """
     prefix, _, bare = name.rpartition(".")
     package = f"iron.operators.{prefix}" if prefix else "iron.operators"
@@ -59,10 +59,10 @@ def _modules_after_importing(name):
     return set(result.stdout.split())
 
 
-#: flm's GEMM names Clamp, Sigmoid and
+#: flm.ProjectionGEMM names Clamp, Sigmoid and
 #: SiLU directly, by module, to recognize a fused epilogue's consumer
 #: (isinstance checks): eager by design, not a lazy-catalog regression.
-_NAMES_OTHER_OPERATOR_TYPES = {"flm.GEMM"}
+_NAMES_OTHER_OPERATOR_TYPES = {"flm.ProjectionGEMM"}
 
 
 def _is_composite(name):

@@ -145,5 +145,5 @@ def test_e2b_shapes_are_servable(K, N):
     """
     assert K % K_TILE_B == 0, f"K={K} does not tile"
     assert N % N_TILE == 0, f"N={N} does not tile"
-    assert K // K_TILE_B > 1, f"K={K} would make flm.GEMM pick tile_n=128"
+    assert K // K_TILE_B > 1, f"K={K} would make flm.ProjectionGEMM pick tile_n=128"
     assert N // N_TILE >= 8, f"N={N} leaves columns without work"

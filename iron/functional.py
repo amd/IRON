@@ -21,7 +21,7 @@ import ml_dtypes
 from iron.common import Precision
 from iron.common.declare.operator import graph_tracer
 from iron.operators.flm.gemm.design import Epilogue
-from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
@@ -38,10 +38,10 @@ def linear(x, weight, bias=None, *, precision=None, **gemv):
     """``x @ weight.T``, plus ``bias`` on every row if given.
 
     One row is a GEMV, whose float32 sum rounds once, as every
-    ``precision`` (``Precision``) allows. More are flm.GEMM reading
+    ``precision`` (``Precision``) allows. More are flm.ProjectionGEMM reading
     ``weight`` column-major at ``precision``, or at ``HIGHEST``, asked for
     here or by the graph's ``precision``, the GEMM whose float32 sums round
-    once, which tiles row counts flm.GEMM does not. ``gemv`` is the GEMV's
+    once, which tiles row counts flm.ProjectionGEMM does not. ``gemv`` is the GEMV's
     tunables, for a call the profile cannot tell from another of its shape.
 
     Raises:
@@ -58,7 +58,7 @@ def linear(x, weight, bias=None, *, precision=None, **gemv):
         y = GEMM.step(x, weight, b_col_maj=True, precision=Precision.HIGHEST)
     else:
         tiled = {} if precision is None else dict(precision=precision)
-        y = FLMGEMM.step(
+        y = ProjectionGEMM.step(
             x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
         )
     if bias is None:

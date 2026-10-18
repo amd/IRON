@@ -42,7 +42,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.emit import UNCLAMPED, reference as emit_reference
 from iron.operators.flm.gemm.design import Epilogue
-from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
@@ -461,7 +461,7 @@ def test_two_spellings_of_one_array_are_one_design():
 def test_swiglu_over_a_sequence_reads_the_weights_column_major():
 
     t = FeedForward(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
-    gemms = [s.op for s in t.steps if type(s.op) is FLMGEMM]
+    gemms = [s.op for s in t.steps if type(s.op) is ProjectionGEMM]
     assert [(g.M, g.K, g.N) for g in gemms] == [(256, E, H), (256, E, H), (256, H, E)]
     assert all(g.b_col_maj for g in gemms)
     assert gemms[0].array_key() == gemms[1].array_key()
@@ -580,7 +580,7 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert set(t.weights) == set(token.weights)
     # Every projection reads the (out, in) checkpoint layout through the
     # column-major flag, which the trace carries into shape inference.
-    gemms = [s.op for s in t.steps if type(s.op) is FLMGEMM]
+    gemms = [s.op for s in t.steps if type(s.op) is ProjectionGEMM]
     assert all(op.b_col_maj for op in gemms)
     K = {op.K for op in gemms}
     assert K == {
@@ -599,7 +599,7 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
     t = g.trace(**g.shapes()[1])
     ops = [s.op for s in t.steps]
     assert not any(type(op) is GEMM for op in ops)
-    gemms = [op for op in ops if type(op) is FLMGEMM]
+    gemms = [op for op in ops if type(op) is ProjectionGEMM]
     assert len(gemms) == 7
     for op in gemms:
         assert op.b_col_maj and op.epilogue_modes == (Epilogue.NONE,)
@@ -621,7 +621,7 @@ class Pointwise(iron.Graph):
 @pytest.mark.parametrize("precision,macs", [(None, True), (Precision.HIGH, False)])
 def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
     t = Pointwise(precision).trace(x=((256, 128), bfloat16), w=((128, 128), bfloat16))
-    (op,) = [op for op in t.operators if type(op) is FLMGEMM]
+    (op,) = [op for op in t.operators if type(op) is ProjectionGEMM]
     assert op.resolved(npu2).emulate_bf16_mmul_with_bfp16 is macs
 
 
@@ -675,9 +675,9 @@ def test_an_instance_dropped_in_a_body_leaves_its_raised_copy_to_no_other():
 def test_a_profile_gives_a_precision_the_tuner_does_not_search(tmp_path, npu2):
     path = tmp_path / "npu2.json"
     path.write_text(
-        '{"entries": [{"operator": "flm.GEMM", "K": 512, "precision": "high"}]}'
+        '{"entries": [{"operator": "flm.ProjectionGEMM", "K": 512, "precision": "high"}]}'
     )
-    op = Profile.load(path).make(FLMGEMM, M=256, K=512, N=256)
+    op = Profile.load(path).make(ProjectionGEMM, M=256, K=512, N=256)
     assert op.precision is Precision.HIGH
     assert not op.resolved(npu2).emulate_bf16_mmul_with_bfp16
     assert "precision" not in op.resolved(npu2)._domains(npu2)
@@ -692,7 +692,7 @@ def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
     t = g.trace(**g.shapes()[1])
     words, shared = _words(t, share=True)
     assert len(words) <= 32
-    gemms = [op.resolved(npu2) for op in t.operators if type(op) is FLMGEMM]
+    gemms = [op.resolved(npu2) for op in t.operators if type(op) is ProjectionGEMM]
     names = {"units_valid", "units_repeat"}
     symbols = set()
     for op in gemms:
@@ -2405,7 +2405,7 @@ def test_a_handle_is_divided_by_a_number_alone():
         Divide().trace(x=(64,), y=(64,))
 
 
-@pytest.mark.parametrize("rows, op", [(1, "GEMV"), (256, "GEMM")])
+@pytest.mark.parametrize("rows, op", [(1, "GEMV"), (256, "ProjectionGEMM")])
 def test_matmul_by_a_weight_s_transpose_is_linear(rows, op):
     w = z(128, E)
 
@@ -2432,7 +2432,7 @@ def test_a_held_tensor_s_and_a_handle_s_t_is_their_transpose(held):
             assert v.T.shape == (E, 128) and v.T.tap == v.transpose(1, 0).tap
             return x @ self.w.T
 
-    assert _steps(Project().trace(x=(256, E), v=(128, E))) == ["GEMM"]
+    assert _steps(Project().trace(x=(256, E), v=(128, E))) == ["ProjectionGEMM"]
 
 
 def test_a_weight_times_a_row_is_linear_and_a_plain_matrix_is_refused():

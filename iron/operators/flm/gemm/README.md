@@ -3,12 +3,12 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# `iron.operators.flm.GEMM` — bf16 GEMM with a fused epilogue
+# `iron.operators.flm.ProjectionGEMM` — bf16 GEMM with a fused epilogue
 
 ```python
-from iron.operators.flm import GEMM
+from iron.operators.flm import ProjectionGEMM
 
-op = GEMM(M=1024, K=1536, N=6144, epilogue="silu")
+op = ProjectionGEMM(M=1024, K=1536, N=6144, epilogue="silu")
 op(A, op.pack_B(B), C_out)  # compiles once, then runs
 ```
 
@@ -33,7 +33,7 @@ The overall dataflow is the same whole-array shape as `iron.operators.GEMM`'s �
 A broadcast along each compute row, B down each column, C joined through the
 memtile — so those are *not* what distinguishes it. What does:
 
-| | `iron.operators.GEMM` | `flm.GEMM` |
+| | `iron.operators.GEMM` | `flm.ProjectionGEMM` |
 |---|---|---|
 | tiling | parameterized tiles, 1–8 columns | m=64, r/s/t 8/8/8; `k_tile` and `tile_n` tunable |
 | after the product | nothing | fused f32→bf16 + activation |
@@ -169,7 +169,7 @@ multiple of the full stride.
 ## B must be pre-packed
 
 ```python
-op = GEMM(M=M, K=K, N=N)
+op = ProjectionGEMM(M=M, K=K, N=N)
 op(A, op.pack_B(B), C_out)
 ```
 
@@ -193,7 +193,7 @@ cost belongs at the caller.
 ### Or read as stored
 
 ```python
-op = GEMM(M=M, K=K, N=N, b_col_maj=True)
+op = ProjectionGEMM(M=M, K=K, N=N, b_col_maj=True)
 op(A, W, C_out)  # W is (N, K), a checkpoint's layout
 ```
 
@@ -238,8 +238,8 @@ core powers up in `rounding_mode::floor` and the original kernel never calls
 `set_rounding`, so that is the arithmetic it ships with.
 
 ```python
-GEMM(M=M, K=K, N=N, rounding=Rounding.FLOOR)  # matches shipped
-GEMM(M=M, K=K, N=N)                           # conv_even, default
+ProjectionGEMM(M=M, K=K, N=N, rounding=Rounding.FLOOR)  # matches shipped
+ProjectionGEMM(M=M, K=K, N=N)                           # conv_even, default
 ```
 
 Verified against the shipped overlay on identical inputs, driven through
@@ -267,7 +267,7 @@ as the overlay's `getGeluBf16_nonLUT` does. fp32 is the default, for the
 accuracy reasons above. silu and sigmoid have no such option.
 
 ```python
-GEMM(M=M, K=K, N=N, epilogue="gelu", rounding="floor", gelu="bf16_steps")
+ProjectionGEMM(M=M, K=K, N=N, epilogue="gelu", rounding="floor", gelu="bf16_steps")
 # gelu matches Shipped
 ```
 
@@ -346,7 +346,7 @@ M=1024 K=1536 N=6144, min of per-run medians:
 
 | | bytes moved | latency | err/mass |
 |---|---|---|---|
-| `flm.GEMM` (`tile_n=64`) | 47 MB | **1143 us** | 2.39e-04 |
+| `flm.ProjectionGEMM` (`tile_n=64`) | 47 MB | **1143 us** | 2.39e-04 |
 | `Shipped(...)` (the shipped overlay) | 107 MB | 2175 us | 9.87e-03 |
 | `iron.operators.GEMM` (same emulated mode) | 126 MB | 3353 us | 2.41e-04 |
 
@@ -388,7 +388,7 @@ The measurements below predate the LUT reservation.
 Against `iron.operators.GEMM` at its own defaults (64/64/64 over all 4
 columns), min of 5 interleaved rounds of 20 dispatches each:
 
-| M / K / N | `flm.GEMM` | `iron.operators.GEMM` | speedup | GFLOP/s |
+| M / K / N | `flm.ProjectionGEMM` | `iron.operators.GEMM` | speedup | GFLOP/s |
 |---|---|---|---|---|
 | 256 / 512 / 512 | **218 us** | 227 us | 1.04x | 615 |
 | 512 / 512 / 1024 | **390 us** | 466 us | 1.19x | 1377 |
@@ -489,7 +489,7 @@ Constraints, all enforced in op.py:
 This needs mlir-aie #3791 (first in the 1.4.4.dev69 wheel): runtime tasks on a
 memtile's channels, `Task.start(repeat_count=...)`, `Lock.set`, and repeat
 counts past one push. The instruction stream is built with
-`aiecc --reclaim-runtime-bds` (`GEMM.aiecc_flags`), since a split leg's pieces outnumber the shim's
+`aiecc --reclaim-runtime-bds` (`ProjectionGEMM.aiecc_flags`), since a split leg's pieces outnumber the shim's
 BD ids. Every hardware limit the design uses but `B_MAX_SLOTS` comes from the
 target model.
 
@@ -565,7 +565,7 @@ op(A, op.pack_B(B), C_out)
 
 `Shipped` (`iron/tests/common/shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a
 second overlay for the same operator: the binary the port was ported from,
-driven by the same `GEMM`, its reference and its packing, so the two can be
+driven by the same `ProjectionGEMM`, its reference and its packing, so the two can be
 measured against each other on identical inputs through one host path.
 `test.py` does exactly that, and checks the shipped overlay's epilogues
 against its own accumulator.
@@ -587,7 +587,7 @@ default `-m "not extensive"` run.
 
 The overlay ships as a binary, so every core program, memtile buffer and
 stream-switch route comes from the xclbin. The overlay supplies only the
-host-side half of a dispatch, and `GEMM`'s own `pack_B`, `reference` and
+host-side half of a dispatch, and `ProjectionGEMM`'s own `pack_B`, `reference` and
 packaging serve it:
 
 * **The runtime parameters.** One overlay serves every projection in a model, so
@@ -598,7 +598,7 @@ packaging serve it:
 
 ### Differences from the port
 
-| | `Shipped(...)` | `GEMM(...)` |
+| | `Shipped(...)` | `ProjectionGEMM(...)` |
 |---|---|---|
 | provenance | shipped binary, downloaded | built from source in this repo |
 | devices | NPU2 only | NPU2 and NPU1 |
@@ -608,9 +608,9 @@ packaging serve it:
 | B | pre-packed bf16 | pre-packed, bfp16 on NPU2 |
 
 The epilogue difference is the interesting one. Selecting at runtime means one
-build serves every activation; baking it in, as `flm.GEMM` does, costs a build
+build serves every activation; baking it in, as `flm.ProjectionGEMM` does, costs a build
 per activation but leaves the inner loop branch-free. The rounding difference is
-why `flm.GEMM` is ~41x more accurate by default — see
+why `flm.ProjectionGEMM` is ~41x more accurate by default — see
 [Matching the shipped FastFlowLM overlay](#matching-the-shipped-fastflowlm-overlay),
-which also records that `GEMM(rounding="floor")` reproduces this overlay bit
+which also records that `ProjectionGEMM(rounding="floor")` reproduces this overlay bit
 for bit.

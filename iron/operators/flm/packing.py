@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Weight packing for flm.GEMM.
+"""Weight packing for flm.ProjectionGEMM.
 
-flm.GEMM consumes B pre-packed into the order the compute tiles read it, so
+flm.ProjectionGEMM consumes B pre-packed into the order the compute tiles read it, so
 its B transfers are plain linear descriptors.
 The reorder is deliberately the caller's job: expressing it as a strided
 descriptor over an unpacked B leaves an innermost run of ``t`` bf16 values, so

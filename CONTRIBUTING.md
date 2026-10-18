@@ -69,7 +69,7 @@ Hugging Face decoders need a config, a model class and a runner; see
    `tests/applications/<name>/test.py` and uses `iron.lm.testing`'s
    checks; `check_accuracy` judges the real checkpoint against the
    `golden.npz` recorded beside it. The host run uses each operator's
-   reference, which does not model aie2p's bfp16 rounding in flm.GEMM, so
+   reference, which does not model aie2p's bfp16 rounding in flm.ProjectionGEMM, so
    only the device test measures that error.
 
 A Llama-shaped decoder (Mistral v0.3, Qwen, SmolLM) needs only these

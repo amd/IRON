@@ -16,8 +16,8 @@ overlay and ``iron.operators.GEMM``.
 The constants below are the single source of truth: ``op.py`` passes them to
 the ``fused_mm`` kernel factory, so the C++ and the dataflow cannot drift apart.
 
-The array itself is ``GEMM.Array.build`` and the runtime sequence is
-``GEMM.sequence`` in ``op.py``; this module keeps the geometry, the L1 and
+The array itself is ``ProjectionGEMM.Array.build`` and the runtime sequence is
+``ProjectionGEMM.sequence`` in ``op.py``; this module keeps the geometry, the L1 and
 memtile budget helpers and the parameter-buffer layout they and
 the shipped overlay (``iron/tests/common/shipped.py``) share.
 """
@@ -33,7 +33,7 @@ from aie.dialects.aie import (
 from aie.utils import bfp
 
 # GEMM tiling per compute tile, and the register tiling inside it. K_TILE is
-# the default for GEMM's k_tile field.
+# the default for ProjectionGEMM's k_tile field.
 M_TILE, K_TILE = 64, 512
 # 64 doubles A fetches but gives the mmul colA=8 instead of 4.
 N_TILE_DEFAULT = 64
@@ -88,13 +88,13 @@ def l1_budget(dev, epilogue_modes):
 #
 # Slots in the pool, each one k-block. Bounded by the BDs a memtile channel's
 # parity half has left after the static objectfifo BDs, and, below that, by
-# what the memtile has left after A and C; see GEMM.Array.build().
+# what the memtile has left after A and C; see ProjectionGEMM.Array.build().
 B_MAX_SLOTS = 8
 
 
 class _Slab(NamedTuple):
     """A run of row-block units the sequence arms B for at once; see
-    GEMM.sequence().
+    ProjectionGEMM.sequence().
     """
 
     first: int  # the first unit
@@ -205,7 +205,7 @@ def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1, k_tile=K_TILE
             if acc + a + b + cout <= budget:
                 return t_ma, b_depth
     raise ValueError(
-        f"flm.GEMM: tile_n ({n_tile}) leaves no A tile fitting L1 at ct_max_k "
+        f"flm.ProjectionGEMM: tile_n ({n_tile}) leaves no A tile fitting L1 at ct_max_k "
         f"({ct_max_k})"
     )
 
@@ -231,6 +231,6 @@ def _b_depth_for(
         if acc + a + b + cout <= budget:
             return b_depth
     raise ValueError(
-        f"flm.GEMM: tile_ma ({t_ma}) does not fit L1 at tile_n ({n_tile}) and "
+        f"flm.ProjectionGEMM: tile_ma ({t_ma}) does not fit L1 at tile_n ({n_tile}) and "
         f"ct_max_k ({ct_max_k}); even single-buffered B overflows the budget"
     )

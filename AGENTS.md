@@ -124,11 +124,11 @@ reuse lint
    - One operator is one module: `relu.py` for a small one, a directory with
      `op.py` for one that also has a design, a reference, a README or a
      device test of its own (`flm/gemm/`). `flm/` holds the
-     FastFlowLM ports (`flm.GEMM`, `flm.DequantBFP`) and their weight
+     FastFlowLM ports (`flm.ProjectionGEMM`, `flm.DequantBFP`) and their weight
      packing, exported from its own
-     package (`from iron.operators.flm import GEMM`) as well as
-     `iron.operators`'s one catalog, dotted (`_OPERATOR_MODULES["flm.GEMM"]`,
-     what a `Profile` names it by); flm's GEMM is not `iron.operators.GEMM`.
+     package (`from iron.operators.flm import ProjectionGEMM`) as well as
+     `iron.operators`'s one catalog, dotted (`_OPERATOR_MODULES["flm.ProjectionGEMM"]`,
+     what a `Profile` names it by); flm.ProjectionGEMM is not `iron.operators.GEMM`.
    - An operator module holds:
      - the operator, one class (`iron/common/declare/`): `Param()` fields for what a host shape
        names, `Auto()` tunables `resolve(dev)` fills from the device and the
@@ -146,7 +146,7 @@ reuse lint
        declared `array=True`; one array serves every extent. A shipped binary
        is a subclass declared with `image=Xclbin(...)`, its operands pinned
        by its `Array.build()` (`operand.pin([DmaEndpoint(...), ...])`, each lane on a shim channel of the image). Two hooks change what is built: `xclbin_operator()`, the
-       operator whose xclbin this one runs (itself by default; flm's GEMM
+       operator whose xclbin this one runs (itself by default; flm.ProjectionGEMM
        returns its shape-free half, so one xclbin serves every shape), and
        `exported_design()`, a callable returning the module (an
        `ir.Module` or its text) for a hand-placed design (flm's
@@ -553,7 +553,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 | `ops()` | no (one op per output element) | a device test's throughput figure |
 | `extent_unit(buffer)` | no (`None`: the stream tile's own rows) | splitting a bounded call's rows across a round-robin stream |
 | `array_device()` | no (the bound device) | building the array, when it covers only part of the bound device (GEMM's row subset) |
-| `xclbin_operator()` | no (itself) | locating the xclbin a shipped subclass runs (flm's GEMM, one image for every shape) |
+| `xclbin_operator()` | no (itself) | locating the xclbin a shipped subclass runs (flm.ProjectionGEMM, one image for every shape) |
 | `exported_design()` | no (`None`: the derived module) | compiling, in place of the generated MLIR (flm's hand-placed designs) |
 
 Inside a graph's `body()`, a step is spelled `GEMV.step(w, h, **kw)`: a
@@ -648,7 +648,7 @@ constructed with, the call's keywords and the extents inferred from its
 operands: key MHA by `seq_pad`, which its shape gives, not `seq_len`, which
 follows from it later. A profile is a JSON file, `Profile.load(path)` and
 `profile.save(path)`, one entry to a line naming the class in
-`iron.operators` (an flm port dotted, `"flm.GEMM"`), then its dimensions
+`iron.operators` (an flm port dotted, `"flm.ProjectionGEMM"`), then its dimensions
 and tunables:
 
 ```json

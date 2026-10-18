@@ -3,7 +3,7 @@
 
 """The IRON operator library, re-exported lazily (PEP 562).
 
-flm's operators are named here with a dotted key (``"flm.GEMM"``), so a
+flm's operators are named here with a dotted key (``"flm.ProjectionGEMM"``), so a
 profile names either catalog's the same way.
 """
 
@@ -11,7 +11,7 @@ import importlib
 
 #: ``flm``'s operators, by their own bare name, relative to ``iron.operators.flm``.
 _FLM_OPERATOR_MODULES = {
-    "GEMM": "gemm.op",
+    "ProjectionGEMM": "gemm.op",
     "DequantBFP": "dequant.op",
     "DecodeLayer": "layer.op",
     "PrefillAttention": "prefill_attn.op",

@@ -26,7 +26,7 @@ from iron.operators.flm.gemm.design import (
     _default_l1,
     l1_budget,
 )
-from iron.operators.flm.gemm.op import GEMM
+from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.tests.common.shipped import Shipped
 
 # Unpacked so the parameter tables below stay column-aligned.
@@ -144,7 +144,7 @@ def flm_vectors(operator, scale=4.0):
     around +-200, where gelu/silu are indistinguishable from the identity (or
     from zero). Activation tests pass a smaller scale so the result sits in the
     range where the curve is actually interesting. B is drawn row-major
-    ``(K, N)``, which the operator consumes packed (see ``GEMM.pack_B``), or
+    ``(K, N)``, which the operator consumes packed (see ``ProjectionGEMM.pack_B``), or
     ``(N, K)`` as stored under ``b_col_maj``.
     """
     K, N = operator.K, operator.N
@@ -196,7 +196,7 @@ def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
 @pytest.mark.parametrize("M,K,N,epilogue,rounding", get_params())
 def test_gemm(M, K, N, epilogue, rounding, record_property):
     scale = INPUT_SCALE if epilogue is NONE else ACTIVATION_INPUT_SCALE
-    operator = GEMM(
+    operator = ProjectionGEMM(
         M=M,
         K=K,
         N=N,
@@ -216,7 +216,7 @@ def test_gemm(M, K, N, epilogue, rounding, record_property):
 def test_gemm_without_activations(M, K, N, record_property):
     """Compiling no activation links no LUT tables, so on AIE2 the bytes they
     held go to B and the tiles differ from every case above."""
-    operator = GEMM(M=M, K=K, N=N, epilogue_modes=(NONE,))
+    operator = ProjectionGEMM(M=M, K=K, N=N, epilogue_modes=(NONE,))
 
     errors = check_on_device(operator, flm_vectors(operator), record=record_property)
 
@@ -269,7 +269,7 @@ def b_col_maj_params():
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("M,K,N,tile_n,epilogue_modes,precision", b_col_maj_params())
 def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, precision, record_property):
-    operator = GEMM(
+    operator = ProjectionGEMM(
         M=M,
         K=K,
         N=N,
@@ -295,7 +295,7 @@ def test_gemm_split_leg_bounds_runs():
     despite the size: ~8s against the suite's ~13s.
     """
     M, K, N = 512, 10240, 10240
-    operator = GEMM(M=M, K=K, N=N)
+    operator = ProjectionGEMM(M=M, K=K, N=N)
 
     errors = check_on_device(operator, flm_vectors(operator))
     assert not errors, "Test failed"
@@ -353,7 +353,7 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
     the memtile locks are armed per dispatch, and one slab awaits one C per
     column.
     """
-    mlir = str(OperatorDesign(GEMM(M=M, K=K, N=N)).module())
+    mlir = str(OperatorDesign(ProjectionGEMM(M=M, K=K, N=N)).module())
     assert "aie.objectfifo @B" not in mlir
     assert "bd_id" not in mlir
     assert "aiex.set_lock" in mlir
@@ -364,7 +364,7 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
 @pytest.mark.parametrize("M,K,N,tile_n,tile_ma", tile_option_params())
 def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
     """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
-    operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma)
+    operator = ProjectionGEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma)
     resolved = operator.resolved()
     assert (resolved.tile_n, resolved.tile_ma) == (tile_n, tile_ma)
     errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
@@ -382,7 +382,7 @@ def test_gemm_k_tile(K):
     """
     dev = aie_utils.get_current_device()
     assert dev is not None
-    operator = GEMM(M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256)
+    operator = ProjectionGEMM(M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256)
     errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
     assert not errors, "Test failed"
 
@@ -405,7 +405,7 @@ def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, precision):
     dev = aie_utils.get_current_device()
     assert dev is not None
     N = tile_n * dev.cols
-    operator = GEMM(
+    operator = ProjectionGEMM(
         M=256,
         K=K,
         N=N,
@@ -446,7 +446,7 @@ def test_one_xclbin_serves_every_shape():
     ]
     xclbin = None
     for M, K, N, epilogue in shapes:
-        operator = GEMM(M=M, K=K, N=N, epilogue=epilogue)
+        operator = ProjectionGEMM(M=M, K=K, N=N, epilogue=epilogue)
         data = flm_vectors(operator, 4.0 if epilogue == "none" else 0.5)
         mass = accumulated_mass(K, data["A"], data["B"])
         errors = run_test(
@@ -636,7 +636,9 @@ def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N):
 
     shipped = run(Shipped(M=M, K=K, N=N, epilogue=GELU))
     ported = run(
-        GEMM(M=M, K=K, N=N, epilogue=GELU, rounding=FLOOR, gelu=Gelu.BF16_STEPS)
+        ProjectionGEMM(
+            M=M, K=K, N=N, epilogue=GELU, rounding=FLOOR, gelu=Gelu.BF16_STEPS
+        )
     )
     # The accumulator reaches about -15 at this scale. gelu's minimum is
     # about -0.17, so a lower minimum means the activation did not run.

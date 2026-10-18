@@ -26,7 +26,7 @@ def test_exported_operator_is_declared(name):
 
 def test_flm_gemm_is_declared_and_its_shipped_form_runs_an_image():
     module = importlib.import_module("iron.operators.flm")
-    cls = module.GEMM
+    cls = module.ProjectionGEMM
     assert issubclass(cls, Operator)
     assert issubclass(Shipped, cls) and Shipped._external is not None
     assert cls._external is None

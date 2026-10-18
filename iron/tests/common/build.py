@@ -455,8 +455,10 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     # Keyword construction leaves every tunable to resolution, which reads the
     # device alone; the operator's extent is checked against the resolved
     # tunables by compatible(), not folded into its defaults.
-    assert flm_gemm.GEMM(M=512, K=1024, N=1024).tile_n is None
-    op = flm_gemm.GEMM(M=512, K=1024, N=1024).resolved(from_name("npu2", n_cols=8))
+    assert flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024).tile_n is None
+    op = flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024).resolved(
+        from_name("npu2", n_cols=8)
+    )
     assert (op.tile_n, op.m_chunk, op.rows, op.cols, op.bfp16_b) == (64, 1, 4, 8, True)
     assert (
         op.tile_ma
@@ -464,7 +466,9 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     )
     # tile_n is resolution, not a function of K: the same on every shape.
     assert (
-        flm_gemm.GEMM(M=256, K=512, N=1024).resolved(from_name("npu2", n_cols=8)).tile_n
+        flm_gemm.ProjectionGEMM(M=256, K=512, N=1024)
+        .resolved(from_name("npu2", n_cols=8))
+        .tile_n
         == 64
     )
     assert (
@@ -490,11 +494,13 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         "units_repeat": 1,
     }
     with pytest.raises(ValueError, match="multiple of 256"):
-        flm_gemm.GEMM(M=100, K=1024, N=1024).resolved(
+        flm_gemm.ProjectionGEMM(M=100, K=1024, N=1024).resolved(
             from_name("npu2", n_cols=8)
         )  # M tiles to the array's rows
     with pytest.raises(ValueError, match="not in epilogue_modes"):
-        flm_gemm.GEMM(M=256, K=1024, N=1024, epilogue="gelu", epilogue_modes=("none",))
+        flm_gemm.ProjectionGEMM(
+            M=256, K=1024, N=1024, epilogue="gelu", epilogue_modes=("none",)
+        )
 
 
 def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
@@ -513,20 +519,22 @@ def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
         return sorted(name.sub("_", line).strip() for line in text.splitlines())
 
     dev = from_name("npu2", n_cols=8)
-    op = flm_gemm.GEMM(M=512, K=1536, N=256, tile_n=64, k_tile=256).resolved(dev)
+    op = flm_gemm.ProjectionGEMM(M=512, K=1536, N=256, tile_n=64, k_tile=256).resolved(
+        dev
+    )
     assert static(op) == static(op.xclbin_operator())
 
 
 def test_flm_gemm_layout_of_b_follows_the_device():
-    untuned = flm_gemm.GEMM(M=256, K=512, N=512)
+    untuned = flm_gemm.ProjectionGEMM(M=256, K=512, N=512)
     with pytest.raises(ValueError):
         [b.shape for b in untuned.buffers]  # B's layout follows the device
     assert untuned.resolved(from_name("npu2", n_cols=8)).B.shape == (512 * 512 // 8,)
 
 
 def test_flm_gemm_selects_its_activation_by_a_word():
-    op = flm_gemm.GEMM(M=256, K=512, N=512)
-    silu = flm_gemm.GEMM(M=256, K=512, N=512, epilogue="silu")
+    op = flm_gemm.ProjectionGEMM(M=256, K=512, N=512)
+    silu = flm_gemm.ProjectionGEMM(M=256, K=512, N=512, epilogue="silu")
     assert silu.config_name == op.config_name
     assert silu.resolved().residents["mode"] == Epilogue.SILU.mode
 
@@ -579,8 +587,8 @@ def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
     """
     dev = request.getfixturevalue(device)
     M = K = width = 2048
-    unbounded = flm_gemm.GEMM(M=M, K=K, N=width, b_col_maj=True).resolved(dev)
-    op = flm_gemm.GEMM(M=M, K=K, N=width, b_col_maj=True)
+    unbounded = flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True).resolved(dev)
+    op = flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True)
     op.use_value("valid", N)
     op = op.resolved(dev)
     blocks = width // (op.tile_n * op.cols)
@@ -598,7 +606,7 @@ def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
 def test_on_an_xclbin_a_bounded_flm_gemm_repeats_a_by_the_dispatch_scalar(npu1):
     # No scratchpad: A's units are the repeat count of one task per row and
     # column block, C's row blocks its D2, both the per-call scalar.
-    op = flm_gemm.GEMM(M=512, K=1024, N=512, b_col_maj=True)
+    op = flm_gemm.ProjectionGEMM(M=512, K=1024, N=512, b_col_maj=True)
     op.use_value("valid", N)
     _, tasks = generated_sequence(op.resolved(npu1), full_elf=False)
     a = [t.sizes for t in tasks if t.arg == 0]
@@ -622,7 +630,7 @@ def test_a_bounded_flm_gemm_refuses_a_call_with_no_rows(npu2):
 
 
 def test_a_row_bound_needs_one_row_block_per_unit():
-    op = flm_gemm.GEMM(M=512, K=512, N=512, b_col_maj=True, m_chunk=2)
+    op = flm_gemm.ProjectionGEMM(M=512, K=512, N=512, b_col_maj=True, m_chunk=2)
     op.use_value("valid", N)
     with pytest.raises(
         ValueError, match=r"m_chunk \(2\) must be 1 under a per-call row bound"

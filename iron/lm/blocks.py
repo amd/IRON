@@ -5,7 +5,7 @@
 
 A graph here is called in a model's body as it is on its own (``Graph``):
 its steps trace into the model's. Weights are a checkpoint's ``(out, in)``:
-one row projects with GEMV, more with flm.GEMM reading the weight as
+one row projects with GEMV, more with flm.ProjectionGEMM reading the weight as
 stored, and nothing is padded, so a row count the GEMM cannot tile is an
 error at trace time.
 """

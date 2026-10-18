@@ -24,7 +24,7 @@ from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
 from iron.applications.gemma4_flm import pli_weights
 from iron.operators.flm import (
-    GEMM,
+    ProjectionGEMM,
     DecodeLayer,
     DequantBFP,
     LMHead,
@@ -86,7 +86,7 @@ def gemm(M, K, N, gelu):
     bit. k_tile=256 divides every K, so all shapes share one configuration, and
     so one xclbin.
     """
-    return GEMM(
+    return ProjectionGEMM(
         M=M,
         K=K,
         N=N,

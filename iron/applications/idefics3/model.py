@@ -13,7 +13,7 @@ checkpoint's own nested ``config.json``. ``python -m
 iron.applications.idefics3.model`` runs the text model alone.
 
 Its tunables at 576 wide, which the default tiles do not divide, are its
-profile's: flm.GEMM's ``tile_n`` 32 and ``k_tile`` 192, and a decode
+profile's: flm.ProjectionGEMM's ``tile_n`` 32 and ``k_tile`` 192, and a decode
 step's residual ``ElementwiseAdd``'s ``tile_size`` 192.
 """
 

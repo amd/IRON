@@ -13,7 +13,7 @@ from aie.utils import bfp
 
 from iron.common import Auto, Built, In, Operator, Out, Param, Unresolvable
 
-# flm.GEMM's B tiling, imported rather than restated: this design has to write
+# flm.ProjectionGEMM's B tiling, imported rather than restated: this design has to write
 # the buffer in the order that one reads it, and two copies would drift.
 from iron.operators.flm.gemm.design import CT_MAX_K_FOR_N, S, T
 from iron.operators.flm.gemm.design import K_TILE as K_TILE_B
@@ -133,7 +133,7 @@ def dequantize(qw, K, N):
 
 
 class DequantBFP(Operator):
-    """q4nx weights to bfp16, packed the way ``flm.GEMM`` reads B.
+    """q4nx weights to bfp16, packed the way ``flm.ProjectionGEMM`` reads B.
 
     The array is the 4-row grid, as wide as the device, for one q4nx
     tiling: nothing in it depends on K or N, since every core loops forever
@@ -337,7 +337,7 @@ class DequantBFP(Operator):
     def xclbin_operator(self):
         """This configuration at its reference shape: its xclbin serves every
         shape sharing the configuration, and only the instruction stream is
-        per shape, as flm.GEMM's.
+        per shape, as flm.ProjectionGEMM's.
         """
         K, N = self._reference_shape
         return dataclasses.replace(

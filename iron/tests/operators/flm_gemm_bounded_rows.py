@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""flm.GEMM under a per-call row bound, on a device.
+"""flm.ProjectionGEMM under a per-call row bound, on a device.
 
 A prompt chunk projects ``x[:n]``: A and C move, and the cores compute, the
 256-row units ``n`` reaches, and past them the cores drain each column
@@ -18,7 +18,7 @@ import pytest
 from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
-from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.tests.common.graphs import ProjectAsStored
 
 SHORT = (512, 1, 300, 256, 257, 512, 17, 3)
@@ -48,7 +48,7 @@ CHUNK = (2048, 1, 15, 512, 2048, 15)
 )
 def test_the_units_a_bound_reaches_are_computed(full_elf, M, K, N, bounds):
     project = ProjectAsStored().compile(x=(M, K), w=(N, K), full_elf=full_elf)
-    op = FLMGEMM(M=M, K=K, N=N, b_col_maj=True)
+    op = ProjectionGEMM(M=M, K=K, N=N, b_col_maj=True)
     tolerance = op.resolved().tolerance()
 
     rng = np.random.default_rng(0)

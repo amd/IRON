@@ -27,7 +27,7 @@ from iron.operators.copy import Copy, Gather
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
 from iron.operators.emit import Emit
 from iron.operators.flm.dequant.op import DequantBFP
-from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.flm.layer.op import DecodeLayer
 from iron.operators.flm.lm_head.op import LMHead
 from iron.operators.flm.prefill_attn.op import (
@@ -376,9 +376,9 @@ def test_a_float32_softmax_under_a_per_call_bound_is_refused(npu2):
     [("npu1", None), ("npu2", None), ("npu2", Precision.HIGH)],
 )
 def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision, request):
-    op = FLMGEMM(M=256, K=512, N=256, b_col_maj=True, precision=precision).resolved(
-        request.getfixturevalue(device)
-    )
+    op = ProjectionGEMM(
+        M=256, K=512, N=256, b_col_maj=True, precision=precision
+    ).resolved(request.getfixturevalue(device))
     assert op.B.shape == (256, 512) and op.b_dtype is bfloat16
     assert not op.bfp16_b
     with pytest.raises(ValueError, match="reads B as stored"):
@@ -386,7 +386,7 @@ def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision, request):
 
 
 def test_flm_gemm_at_medium_takes_bf16_macs_on_aie2(npu1):
-    op = FLMGEMM(M=256, K=512, N=256, precision=Precision.MEDIUM).resolved(npu1)
+    op = ProjectionGEMM(M=256, K=512, N=256, precision=Precision.MEDIUM).resolved(npu1)
     assert not op.emulate_bf16_mmul_with_bfp16 and not op.bfp16_b
 
 

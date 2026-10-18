@@ -29,7 +29,7 @@ and the box decode, both on the host; and the graph, built from
   to 16, 32 and 96 channels, which the caller drops
   (`YOLOXNano.predictions`).
 
-Its tunables are `profiles/<device>.json`: the narrow projections' flm.GEMM
+Its tunables are `profiles/<device>.json`: the narrow projections' flm.ProjectionGEMM
 `tile_n`, and the stem's GEMM `tile_k`.
 
 ## Weights

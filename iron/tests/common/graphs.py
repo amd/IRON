@@ -10,13 +10,13 @@ from iron import Carried, Scratchpad
 import iron.functional as F
 from iron.operators import GEMM, ElementwiseAdd, ElementwiseMul, RoPE, SiLU
 from iron.operators.copy import Copy
-from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+from iron.operators.flm.gemm.op import ProjectionGEMM
 
 
 class FeedForward(iron.Graph):
     """A gated feed-forward, ``(SiLU(x @ w_gate.T) * (x @ w_up.T)) @
     w_down.T``, over the ``(out, in)`` weights it holds: a GEMV each for one
-    row, flm.GEMM for more.
+    row, flm.ProjectionGEMM for more.
     """
 
     def __init__(self, w_gate, w_up, w_down):
@@ -43,11 +43,11 @@ class Project(iron.Graph):
 
 class ProjectAsStored(iron.Graph):
     """The first `n` rows of `x` projected by `w` as a checkpoint stores it,
-    on flm.GEMM, as a prompt chunk's projections are.
+    on flm.ProjectionGEMM, as a prompt chunk's projections are.
     """
 
     def body(self, x, w, *, n: Scratchpad[np.int32]):
-        return FLMGEMM.step(x[:n], w, b_col_maj=True)
+        return ProjectionGEMM.step(x[:n], w, b_col_maj=True)
 
 
 class Walk(iron.Graph):

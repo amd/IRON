@@ -115,7 +115,7 @@ def _compiled_modes(epilogue_modes) -> tuple[Epilogue, ...]:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class _Built(Built):
-    """GEMM's build, with B's memtile pool for ``sequence()`` to program."""
+    """ProjectionGEMM's build, with B's memtile pool for ``sequence()`` to program."""
 
     b_pool: _BPool
 
@@ -129,11 +129,11 @@ def _units_valid(op) -> Any:
     """
     rows = op.valid
     if isinstance(rows, (int, np.integer)) and rows < 1:
-        raise ValueError(f"flm.GEMM: valid ({rows}) must be at least 1 row")
+        raise ValueError(f"flm.ProjectionGEMM: valid ({rows}) must be at least 1 row")
     return ceildiv(rows, M_TILE * op.rows * op.m_chunk)
 
 
-class GEMM(Operator):
+class ProjectionGEMM(Operator):
     """AIE-accelerated bf16 GEMM on a 4-row grid, with a fused epilogue.
 
     64-row tiles over a k tile of ``k_tile`` (the largest legal one up to 512
@@ -254,14 +254,14 @@ class GEMM(Operator):
         if self.tile_n is not None:
             if self.tile_n not in CT_MAX_K_FOR_N:
                 raise ValueError(
-                    f"flm.GEMM: tile_n ({self.tile_n}) must be one of "
+                    f"flm.ProjectionGEMM: tile_n ({self.tile_n}) must be one of "
                     f"{sorted(CT_MAX_K_FOR_N)}"
                 )
         if self.tile_ma is not None and (
             M_TILE % self.tile_ma or self.tile_ma % (2 * R)
         ):
             raise ValueError(
-                f"flm.GEMM: tile_ma ({self.tile_ma}) must divide {M_TILE} and be a multiple "
+                f"flm.ProjectionGEMM: tile_ma ({self.tile_ma}) must divide {M_TILE} and be a multiple "
                 f"of {2 * R}"
             )
         # Coerce so callers may pass bare strings; deduplicate, since the mask
@@ -274,7 +274,7 @@ class GEMM(Operator):
         self.epilogue = Epilogue(self.epilogue)
         if self.k_tile is not None and self.K % self.k_tile:
             raise ValueError(
-                f"flm.GEMM: K ({self.K}) must be a multiple of k_tile ({self.k_tile})"
+                f"flm.ProjectionGEMM: K ({self.K}) must be a multiple of k_tile ({self.k_tile})"
             )
         self.check_derived("packed_blocks")
         # A mode the mask leaves out reaches the kernel's default arm, which
@@ -284,14 +284,16 @@ class GEMM(Operator):
             and self.epilogue not in self.epilogue_modes
         ):
             raise ValueError(
-                f"flm.GEMM: epilogue ({self.epilogue}) is not in epilogue_modes "
+                f"flm.ProjectionGEMM: epilogue ({self.epilogue}) is not in epilogue_modes "
                 f"{tuple(str(m) for m in self.epilogue_modes)}, so it would "
                 "not be compiled in and the kernel would silently apply none"
             )
 
     def resolve(self, dev):
         if dev is None:
-            raise Unresolvable("flm.GEMM is sized from the device's L1 and grid")
+            raise Unresolvable(
+                "flm.ProjectionGEMM is sized from the device's L1 and grid"
+            )
         rows, cols = compute_rows(dev), dev.cols
         # B is packed to bfp16ebs8 where the macs are bfp16 and B is not read
         # as stored; otherwise it is bf16. AIE2 has no BFP types, so its mmul
@@ -342,7 +344,7 @@ class GEMM(Operator):
         # inexpressible.
         if self.k_tile % self.ct_max_k:
             raise ValueError(
-                f"flm.GEMM: k_tile ({self.k_tile}) must be a multiple of ct_max_k "
+                f"flm.ProjectionGEMM: k_tile ({self.k_tile}) must be a multiple of ct_max_k "
                 f"({self.ct_max_k}) for tile_n={self.tile_n}"
             )
         # N only needs to tile to tile_n: a trailing group of fewer than
@@ -354,21 +356,21 @@ class GEMM(Operator):
         ):
             if value % unit != 0:
                 raise ValueError(
-                    f"flm.GEMM: {name} ({value}) must be a multiple of {unit}"
+                    f"flm.ProjectionGEMM: {name} ({value}) must be a multiple of {unit}"
                 )
         m_row_blocks = self.M // (M_TILE * self.rows)
         if m_row_blocks % self.m_chunk:
             # A partial group is inexpressible: the object is m_chunk tiles
             # wide and the forward always drains that much.
             raise ValueError(
-                f"flm.GEMM: m_row_blocks ({m_row_blocks}) must be a multiple of m_chunk "
+                f"flm.ProjectionGEMM: m_row_blocks ({m_row_blocks}) must be a multiple of m_chunk "
                 f"({self.m_chunk}); pass m_chunk=1 for this shape"
             )
         # A bound's A transfer is one unit's row block a descriptor
         # dimension long; a unit of m_chunk blocks has no dimension left.
         if "valid" in self.bound_extents and self.m_chunk != 1:
             raise ValueError(
-                f"flm.GEMM: m_chunk ({self.m_chunk}) must be 1 under a per-call "
+                f"flm.ProjectionGEMM: m_chunk ({self.m_chunk}) must be 1 under a per-call "
                 f"row bound"
             )
 
@@ -403,7 +405,7 @@ class GEMM(Operator):
         dev = self.dev
         if dev is None:
             raise Unresolvable(
-                "flm.GEMM: the xclbin is named for a device; none is bound"
+                "flm.ProjectionGEMM: the xclbin is named for a device; none is bound"
             )
         return (
             f"FLM_GEMM_tn{t.tile_n}_kt{t.k_tile}_ck{t.ct_max_k}"
@@ -579,7 +581,7 @@ class GEMM(Operator):
             B_SLOTS = min(B_MAX_SLOTS, mt_free // b_slot_bytes)
             if B_SLOTS < 1:
                 raise ValueError(
-                    f"flm.GEMM: tile_n ({N_TILE}) leaves no room for a "
+                    f"flm.ProjectionGEMM: tile_n ({N_TILE}) leaves no room for a "
                     f"{b_slot_bytes}-byte B slot in the memtile; {mt_free} bytes "
                     f"remain after A and C"
                 )
@@ -913,7 +915,7 @@ class GEMM(Operator):
                 break
         else:
             raise ValueError(
-                f"flm.GEMM: M, K, N ({M}, {K}, {N}): even one unit per slab needs more passes "
+                f"flm.ProjectionGEMM: M, K, N ({M}, {K}, {N}): even one unit per slab needs more passes "
                 f"over a B pool per column-block than the {pool.queue} x "
                 f"{pool.passes} one memtile channel can queue"
             )
@@ -922,7 +924,7 @@ class GEMM(Operator):
         bounded = "valid" in self.bound_extents
         if bounded and len(slabs) > 1:
             raise ValueError(
-                f"flm.GEMM: M, K, N ({M}, {K}, {N}): a per-call row bound needs M in one slab, "
+                f"flm.ProjectionGEMM: M, K, N ({M}, {K}, {N}): a per-call row bound needs M in one slab, "
                 f"and this shape takes {len(slabs)}"
             )
 
@@ -1139,7 +1141,9 @@ class GEMM(Operator):
         """
         t = self.resolved()
         if t.b_col_maj:
-            raise ValueError("flm.GEMM: b_col_maj (True) reads B as stored (N, K)")
+            raise ValueError(
+                "flm.ProjectionGEMM: b_col_maj (True) reads B as stored (N, K)"
+            )
         return pack_b(
             B,
             k_tile=t.k_tile,

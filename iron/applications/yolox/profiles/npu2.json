@@ -1,14 +1,14 @@
 {"entries": [
   {"operator": "GEMM", "K": 144, "tile_k": 48},
-  {"operator": "flm.GEMM", "K": 16, "N": 16, "tile_n": 16},
-  {"operator": "flm.GEMM", "K": 16, "N": 32, "tile_n": 16},
-  {"operator": "flm.GEMM", "K": 32, "N": 16, "tile_n": 16},
-  {"operator": "flm.GEMM", "K": 32, "N": 32, "tile_n": 32},
-  {"operator": "flm.GEMM", "K": 32, "N": 64, "tile_n": 32},
-  {"operator": "flm.GEMM", "K": 64, "N": 16, "tile_n": 16},
-  {"operator": "flm.GEMM", "K": 64, "N": 32, "tile_n": 32},
-  {"operator": "flm.GEMM", "K": 64, "N": 64, "tile_n": 32},
-  {"operator": "flm.GEMM", "K": 64, "N": 96, "tile_n": 32},
-  {"operator": "flm.GEMM", "K": 64, "N": 128, "tile_n": 32},
-  {"operator": "flm.GEMM", "K": 128, "N": 32, "tile_n": 32}
+  {"operator": "flm.ProjectionGEMM", "K": 16, "N": 16, "tile_n": 16},
+  {"operator": "flm.ProjectionGEMM", "K": 16, "N": 32, "tile_n": 16},
+  {"operator": "flm.ProjectionGEMM", "K": 32, "N": 16, "tile_n": 16},
+  {"operator": "flm.ProjectionGEMM", "K": 32, "N": 32, "tile_n": 32},
+  {"operator": "flm.ProjectionGEMM", "K": 32, "N": 64, "tile_n": 32},
+  {"operator": "flm.ProjectionGEMM", "K": 64, "N": 16, "tile_n": 16},
+  {"operator": "flm.ProjectionGEMM", "K": 64, "N": 32, "tile_n": 32},
+  {"operator": "flm.ProjectionGEMM", "K": 64, "N": 64, "tile_n": 32},
+  {"operator": "flm.ProjectionGEMM", "K": 64, "N": 96, "tile_n": 32},
+  {"operator": "flm.ProjectionGEMM", "K": 64, "N": 128, "tile_n": 32},
+  {"operator": "flm.ProjectionGEMM", "K": 128, "N": 32, "tile_n": 32}
 ]}

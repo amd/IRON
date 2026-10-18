@@ -21,7 +21,7 @@ class OperatorImage:
     It is the one-step sequence of the operator as an xclbin chain
     (``XclbinChain``), so the xclbin is the operator's
     ``Operator.configuration``'s: an operator whose array serves every
-    shape (flm's GEMM) compiles only an instruction stream per shape, and
+    shape (flm.ProjectionGEMM) compiles only an instruction stream per shape, and
     on a shipped image (``image=``) it is the download.
     """
 

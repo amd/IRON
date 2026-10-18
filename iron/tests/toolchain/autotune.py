@@ -22,7 +22,7 @@ from iron.common.testing import vectors
 from iron.operators import GEMM, GEMV, MHA, ElementwiseAdd, ReLU, RoPE, Sample, SiLU
 from iron.operators import Softmax
 from iron.operators.flm import DequantBFP
-from iron.operators.flm import GEMM as FlmGEMM
+from iron.operators.flm import ProjectionGEMM
 from iron.operators.gemm import GEMMPlacement
 from iron.tests.common.graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
@@ -252,7 +252,7 @@ def test_a_row_a_core_holds_whole_is_one_block(npu2):
 
 
 def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
-    gemm = FlmGEMM(M=2048, K=2048, N=2048).resolved(npu2)
+    gemm = ProjectionGEMM(M=2048, K=2048, N=2048).resolved(npu2)
     assert gemm._domains(npu2) == {
         "tile_ma": (64, 32, 16),
         "m_chunk": (8, 4, 2, 1),

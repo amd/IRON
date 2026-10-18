@@ -50,7 +50,7 @@ POOLS = (5, 9, 13)
 # The value upstream's preprocessing pads a letterboxed image with.
 PAD_VALUE = 114
 # The predictions' channels on the NPU, each zero-padded: the box's 4 to
-# flm.GEMM's narrowest tile, objectness's 1 and the 80 class scores to
+# flm.ProjectionGEMM's narrowest tile, objectness's 1 and the 80 class scores to
 # whole 32-element vectors of Sigmoid's in a 13-pixel row.
 BOX, OBJECTNESS, CLASSES = 16, 32, 96
 
@@ -221,7 +221,7 @@ class YOLOXNanoOracle:
 class Pointwise(iron.Graph):
     """A 1x1 conv of a ``size``-square feature map by ``weight`` ``(out,
     in)``, plus ``bias``, then SiLU if ``act``: a projection of its pixels.
-    flm.GEMM takes them in whole blocks of rows, so a map of another count
+    flm.ProjectionGEMM takes them in whole blocks of rows, so a map of another count
     is first copied into a held one of whole blocks, whose rows past the
     map are computed and dropped.
     """

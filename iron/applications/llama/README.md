@@ -43,7 +43,7 @@ Llama 3.2 3B is the same model at another shape: its two shards, their
 `model.safetensors.index.json`, `config.json` and `tokenizer.model` from
 [`meta-llama/Llama-3.2-3B`](https://huggingface.co/meta-llama/Llama-3.2-3B),
 in `$IRON_EXAMPLE_WEIGHTS_DIR/llama3.2-3b/`. On NPU2 its projections take
-flm.GEMM's bf16 macs rather than bfp16's (its profile), which its accuracy
+flm.ProjectionGEMM's bf16 macs rather than bfp16's (its profile), which its accuracy
 needs: about 13 times the prompt chunk's GEMM cost, a path to optimise.
 
 ## Setup
