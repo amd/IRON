@@ -425,13 +425,15 @@ class Model(iron.Graph):
                 piece = self.tokenizer.decode(drawn[seen:])[len(shown) :]
                 # A token can end partway through a character; the next completes it.
                 if not piece.endswith("\ufffd"):
-                    yield piece
+                    if piece:
+                        yield piece
                     seen, held = held, len(drawn)
             if token in self.eos:
                 break
         if text and held < len(drawn):
             shown = self.tokenizer.decode(drawn[seen:held])
-            yield self.tokenizer.decode(drawn[seen:])[len(shown) :]
+            if piece := self.tokenizer.decode(drawn[seen:])[len(shown) :]:
+                yield piece
         later = len(drawn) - 1
         rate = later / (last - first) if later else math.nan
         self.stats = Stats(first - began, rate)

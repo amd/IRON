@@ -525,6 +525,7 @@ def test_generation_stops_at_an_eos_and_includes_it(cpu, tmp_path):
     model = OnHost.load(tmp_path)
     assert model.generate(tokens, 6) == drawn[:end]
     assert list(model.stream(tokens, 6)) == drawn[:end]
+    assert "" not in list(model.stream(QUESTION, 6))
 
 
 def test_a_run_that_draws_no_eos_draws_max_tokens(cpu, tmp_path):
