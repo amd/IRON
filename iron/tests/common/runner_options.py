@@ -14,6 +14,7 @@ import argparse
 import dataclasses
 import logging
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 
@@ -102,6 +103,7 @@ def _held(config, length: int) -> int:
     """What the model holds at ``length`` positions: its arena, traced."""
     config = dataclasses.replace(config, max_seq_len=length)
     model = Llama(config, checkpoint(config).tree("unread"))
+    model.profile = None
     return sum(model.trace(**model.shapes()[0]).pinned.values())
 
 
@@ -119,7 +121,19 @@ def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2):
         SmallRunner.fit(config, path, budget=_held(config, 256) - 1)
 
 
-def test_fit_says_what_it_chose_and_how_to_ask_for_more(npu2, caplog):
+def test_a_runner_fits_its_context_with_no_device_bound():
+    """``fit`` traces the model, whose profile is per device; it measures
+    what the model holds, which needs none.
+    """
+
+    class Native(SmallRunner):
+        config = dataclasses.replace(SMALL, max_seq_len=1024)
+
+    with aie_utils.set_current_device(None):
+        assert Native(checkpoint(Native.config).path, seed=1).config == Native.config
+
+
+def test_fit_says_what_it_chose_and_how_to_ask_for_more(caplog):
     config = dataclasses.replace(SMALL, max_seq_len=1024)
     path = checkpoint(config).path
     with caplog.at_level(logging.INFO, logger="iron.lm.base"):

@@ -893,6 +893,8 @@ class Runner:
         held = []
         for length in (C, 2 * C):
             model = cls.model(dataclasses.replace(config, max_seq_len=length), tree)
+            # What it holds does not follow its tunables, nor need a device.
+            model.profile = None
             held.append(sum(model.trace(**model.shapes()[0]).pinned.values()))
         per_position = (held[1] - held[0]) / C
         fixed = held[0] - per_position * C

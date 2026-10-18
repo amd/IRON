@@ -166,13 +166,16 @@ class HuggingFace:
 
 def config_json(config) -> dict:
     """``config``'s fields as its ``config.json`` names them: each field's
-    ``metadata["json"]`` path, the inverse of ``Config.from_checkpoint``.
-    A field that is None or not JSON is left out.
+    ``metadata["json"]`` path, the inverse of ``Config.from_checkpoint``:
+    a value its ``convert`` built gives its own ``to_json()``. A field that
+    is None or not JSON is left out.
     """
     out = {}
     for f in dataclasses.fields(config):
         key, value = f.metadata.get("json"), getattr(config, f.name)
-        if key is None or not isinstance(value, (bool, int, float, str, tuple)):
+        if hasattr(value, "to_json"):
+            value = value.to_json()
+        if key is None or not isinstance(value, (bool, int, float, str, tuple, dict)):
             continue
         *path, leaf = key.split(".")
         node = out

@@ -18,7 +18,10 @@ from iron.applications.embedding_gemma2.config import (
     VisionConfig,
 )
 from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig
+from iron.applications.phi3.model import LongRope, Phi4Config
 from iron.lm import Config, DecoderConfig
+from iron.lm.golden import config_json
+from iron.tests.common.llama_model import REAL_1B
 from iron.lm.testing import require, weights_dir
 
 LLAMA_DIR = weights_dir("llama3.2-1b")
@@ -104,3 +107,27 @@ def test_decoder_config_adds_the_decoder_fields_to_configs_eps():
     decoder_fields = {f.name for f in dataclasses.fields(DecoderConfig)}
     assert base_fields == {"eps"}
     assert {"vocab_size", "max_seq_len", "rope_scaling"} <= decoder_fields - base_fields
+
+
+PHI4 = Phi4Config(
+    vocab_size=32,
+    hidden_size=64,
+    num_hidden_layers=1,
+    num_attention_heads=2,
+    num_key_value_heads=2,
+    intermediate_size=128,
+    rope_theta=10000.0,
+    max_seq_len=512,
+    original_max_position_embeddings=128,
+    longrope_context=512,
+    longrope=LongRope(short_factor=(1.0,) * 16, long_factor=(2.0,) * 16),
+)
+
+
+@pytest.mark.parametrize("config", [REAL_1B, PHI4], ids=["llama", "phi4"])
+def test_config_json_is_from_checkpoints_inverse(tmp_path, config):
+    """A converted field (a ``rope_scaling``) is written as the checkpoint
+    writes it, so the file reads back the same config.
+    """
+    (tmp_path / "config.json").write_text(json.dumps(config_json(config)))
+    assert type(config).from_checkpoint(tmp_path) == config

@@ -67,6 +67,10 @@ class Llama3RopeScaling:
         """
         return cls(**{k: v for k, v in data.items() if k != "rope_type"})
 
+    def to_json(self) -> dict:
+        """The checkpoint's own ``rope_scaling``: ``from_dict``'s inverse."""
+        return {"rope_type": "llama3", **dataclasses.asdict(self)}
+
 
 @dataclasses.dataclass(frozen=True)
 class LlamaConfig(DecoderConfig):

@@ -72,8 +72,8 @@ class Download:
             raise ValueError(f"refusing to download over {self.url!r}")
         target.parent.mkdir(parents=True, exist_ok=True)
         # Beside the target and renamed, so an interrupted fetch leaves no
-        # truncated file behind.
-        partial = target.with_suffix(target.suffix + ".part")
+        # truncated file behind; by process, so concurrent workers share none.
+        partial = target.with_name(f".{target.name}.{os.getpid()}.part")
         with urllib.request.urlopen(self.url, timeout=60) as response:
             data = response.read()
         if (got := hashlib.sha256(data).hexdigest()) != self.sha256:

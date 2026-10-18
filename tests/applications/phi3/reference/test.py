@@ -93,11 +93,11 @@ class OnHost(Host, Phi4):
     profile = None
 
 
-def _hugging_face(config, weights, **json):
+def _hugging_face(config, weights):
     """Hugging Face's Phi-3 on ``config`` and ``weights``; its default
     padding token lies past the toy vocabulary.
     """
-    return HuggingFace.build("phi3", config, weights, pad_token_id=None, **json)
+    return HuggingFace.build("phi3", config, weights, pad_token_id=None)
 
 
 def _assert_close(got, expected):
@@ -203,18 +203,7 @@ def test_a_turn_past_the_original_context_rotates_only_its_own_rows_long(golden)
     logits are a whole forward call's, so no golden judges the second turn.
     """
     weights = _toy_weights(LONG)
-    longrope = {
-        "type": "longrope",
-        "short_factor": list(LONG.longrope.short_factor),
-        "long_factor": list(LONG.longrope.long_factor),
-    }
-    reference = golden(
-        "long",
-        lambda: _hugging_face(LONG, weights, rope_scaling=longrope),
-        LONG,
-        weights,
-        longrope,
-    )
+    reference = golden("long", lambda: _hugging_face(LONG, weights), LONG, weights)
     model = OnHost(LONG, weights)
     tokens = np.random.default_rng(5).integers(0, LONG.vocab_size, 301)
     _assert_close([model.logits(tokens[:100])], [reference.logits(tokens[:100])])

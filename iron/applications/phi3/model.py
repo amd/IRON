@@ -58,6 +58,14 @@ class LongRope:
             raise ValueError(f"LongRope: rope_scaling of type {kind!r}")
         return cls(tuple(data["short_factor"]), tuple(data["long_factor"]))
 
+    def to_json(self) -> dict:
+        """The checkpoint's own ``rope_scaling``: ``from_dict``'s inverse."""
+        return {
+            "type": "longrope",
+            "short_factor": list(self.short_factor),
+            "long_factor": list(self.long_factor),
+        }
+
     def short(self, inv_freq: np.ndarray) -> np.ndarray:
         return inv_freq / np.asarray(self.short_factor, np.float64)
 
