@@ -54,8 +54,13 @@ public API adds its entry under Unreleased.
 - `DecoderLayer.block(x, pre, f, post)`, one residual block; each layer is
   its list of blocks.
 - `Model.renames`, a class-level table of checkpoint module renames applied
-  before `sanitize`, and `leaves(tree)`, each weight of a tree by its dotted
-  name.
+  before `sanitize`, `renamed(tree, renames)`, which applies one to a copy
+  of a tree, and `leaves(tree)`, each weight of a tree by its dotted name.
+- `Config.to_json()`, `from_checkpoint`'s inverse: the fields as
+  `config.json` names them, which `HuggingFace.build` configures
+  transformers from.
+- `HuggingFace.model_class`, the transformers auto class a subclass loads
+  and builds (`AutoModelForCausalLM` by default).
 - `iron.lm.testing.assert_close`, the one check of a model's logits against
   its reference: within `LOGITS` (5%) of the largest, and the same argmax
   where the reference's top two lie further apart than that.
@@ -94,6 +99,9 @@ public API adds its entry under Unreleased.
 - A missing golden fails `check_accuracy` instead of skipping it, and a golden
   whose fingerprint no longer matches is refused.
 - `CausalLM.generate` times the first token from the call.
+- `Sampler` defaults to temperature 0.7 and top-k 50, a runner's
+  `--temperature` and `--top-k` take those defaults, and with no `rng` it
+  draws from one seeded at `SEED`.
 - `Checkpoint.tree("random")` draws a bias about zero, not one.
 - `Runner.npu()` takes only `full_elf`.
 
