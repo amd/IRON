@@ -24,7 +24,7 @@ import pytest
 
 from iron.applications.llama.model import Llama, SPECIAL_TOKENS, tokenizer
 from iron.lm import Checkpoint, Model, main
-from iron.lm.cli import FLAGS, parse_args
+from iron.lm.cli import parse_args
 from iron.lm.golden import RECORD
 from iron.lm.testing import require, weights_dir
 from iron.tests.common.llama_model import SMALL, checkpoint
@@ -49,8 +49,7 @@ def _directory(path, config=SMALL):
 
 def test_main_takes_the_path_and_flags_load_takes(monkeypatch):
     """The command line's positional argument is ``load``'s path, and its
-    ``--random-weights``/``--max-seq-len`` are ``FLAGS``, the same tuple
-    ``conftest.py``'s ``pytest_addoption`` reads.
+    ``--random-weights``/``--max-seq-len`` its ``seed``/``max_seq_len``.
     """
     given = {}
 
@@ -64,7 +63,6 @@ def test_main_takes_the_path_and_flags_load_takes(monkeypatch):
     with pytest.raises(SystemExit):
         main(Small)
     assert given == dict(path="org/repo", seed=7, max_seq_len=64)
-    assert {f[0] for f, _ in FLAGS} == {"--random-weights", "--max-seq-len"}
 
 
 def test_v_shows_iron_s_info_lines(caplog):

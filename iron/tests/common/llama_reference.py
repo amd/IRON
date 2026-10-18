@@ -300,12 +300,9 @@ def test_a_model_runs_only_the_versions_it_loaded(cpu):
     assert not model._versions
 
 
-def test_a_model_reads_as_its_config_and_whether_it_is_loaded(cpu):
+def test_a_model_reads_as_its_context_and_whether_it_is_loaded(cpu):
     model = Llama(cpu.config, cpu.weights)
-    assert repr(model) == (
-        f"Llama({type(cpu.config).__name__}, "
-        f"max_seq_len={cpu.config.max_seq_len}, not loaded)"
-    )
+    assert repr(model) == f"Llama(max_seq_len={cpu.config.max_seq_len}, not loaded)"
 
 
 def test_a_short_prompt_runs_at_its_own_rows(cpu):
@@ -330,7 +327,7 @@ def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
     """
     config, n, count = cpu.config, len(cpu.prompt), 6
     host = OnHost(config, cpu.weights)
-    expected, _, _ = generate_on_host(
+    expected = generate_on_host(
         host, cpu.prompt, count, Sampler(temperature, 40, seed=5)
     )
     model = OnHost(config, cpu.weights)
@@ -501,7 +498,7 @@ def test_the_quick_start_script_runs_on_a_toy_repository(cpu, tmp_path):
     assert tokens[0] == SMALL.vocab_size - 1
     assert model.tokenizer.decode(tokens[1:]) == QUESTION
     host = OnHost(cpu.config, cpu.weights)
-    want, _, _ = generate_on_host(host, tokens, 8, Sampler(seed=0))
+    want = generate_on_host(host, tokens, 8, Sampler(seed=0))
     assert out == model.tokenizer.decode(want)
 
 
@@ -550,6 +547,13 @@ def test_chat_messages_are_rendered_by_the_checkpoint_s_template(toy):
     text = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
     assert toy.tokenizer.chat(HI) == toy.tokenizer(text)
     assert toy.generate(HI, 4) == toy.generate(text, 4)
+
+
+def test_a_chat_template_s_raise_exception_raises_its_message():
+    jinja2 = pytest.importorskip("jinja2")
+    template = "{{ raise_exception('roles must alternate') }}"
+    with pytest.raises(jinja2.TemplateError, match="roles must alternate"):
+        Tokenizer(None, 0, template).chat(HI)
 
 
 # Llama 3's chat turns, after a BOS the template writes as given.

@@ -112,6 +112,13 @@ public API adds its entry under Unreleased.
   (`same_kind`): float ids into an int32 input raise rather than truncate.
 - Compiling, loading or tuning with no NPU found raises a `RuntimeError`
   saying how to compile without one, not an `AttributeError` on `None`.
+- An error inside `iron.functional.linear` starts `linear(x, weight):`.
+- Compiling or loading with no NPU found raises `RuntimeError: no NPU found
+  (NPU_RUNTIME ...); pass dev=NPU2() to compile without one`, not an
+  `AttributeError` on `None`.
+- `repr` of a graph names its traced shapes; of a compiled version, its
+  inputs, packaging and build directory; of a `Profile`, its operators; of
+  a model, its `max_seq_len` and whether it is loaded.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `cli`.
 - An operator declares with aie.iron's markers: `In`, `Out` and `InOut`
@@ -243,7 +250,7 @@ public API adds its entry under Unreleased.
 - `Derived`; computed weights live in `sanitize`'s output or on the model.
 - `CausalLM.head` and `Encoder.norm()` overrides, replaced by `final_norm`;
   `CausalLM.embed`.
-- `generate_on_host(show=)`.
+- `generate_on_host(show=)`, and its timings: it returns the tokens drawn.
 - `Runner`, its `runner` back-pointer and `VLMRunner`: the model class is
   what loads (`Model.load`); idefics3's whole model is `SmolVLM`. A model's
   command line takes the checkpoint's directory or repository id, not

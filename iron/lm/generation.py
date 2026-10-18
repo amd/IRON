@@ -8,8 +8,6 @@ A model is anything with ``logits(tokens)``: the logits after the last of
 ``CausalLM`` on the NPU is one, and so is a CPU reference.
 """
 
-import time
-
 import numpy as np
 from aie.iron.kernels.sample import (
     ROW_WORDS,
@@ -105,19 +103,12 @@ def greedy(logits: np.ndarray) -> int:
     return int(np.argmax(np.asarray(logits, dtype=np.float32).reshape(-1)))
 
 
-def generate_on_host(model, tokens, num_tokens, sample):
-    """Draw ``num_tokens`` after ``tokens``, each from ``model``'s logits.
-
-    Returns the tokens drawn, the seconds to the first and the mean seconds
-    per token after it (NaN for one token).
-    """
-    history, seconds = [int(t) for t in tokens], []
+def generate_on_host(model, tokens, num_tokens, sample) -> list[int]:
+    """The ``num_tokens`` drawn after ``tokens``, each from ``model``'s logits."""
+    history = [int(t) for t in tokens]
     for _ in range(num_tokens):
-        start = time.perf_counter()
         history.append(sample(model.logits(history)))
-        seconds.append(time.perf_counter() - start)
-    later = np.mean(seconds[1:]) if num_tokens > 1 else float("nan")
-    return history[-num_tokens:], seconds[0], float(later)
+    return history[-num_tokens:]
 
 
 def _log_softmax(logits):

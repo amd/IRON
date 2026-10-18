@@ -294,9 +294,11 @@ def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:
         yield prefix[:-1], tree
 
 
-def _nest(
-    named: Mapping[str, Any], path: str = "", file="the checkpoint"
-) -> SimpleNamespace:
+# What a missing name's error calls the file of a tree that names none.
+_FILE = "the checkpoint"
+
+
+def _nest(named: Mapping[str, Any], path: str = "", file=_FILE) -> SimpleNamespace:
     """Values by dotted name, nested as ``Checkpoint.tree()`` nests them,
     under ``path`` (a dotted prefix) of ``file``, which a missing name
     names.
@@ -384,5 +386,5 @@ def renamed(tree, renames: Mapping[str, str]):
     return _nest(
         {moved(path): value for path, value in leaves(tree)},
         getattr(tree, "_path", ""),
-        getattr(tree, "_file", "the checkpoint"),
+        getattr(tree, "_file", _FILE),
     )

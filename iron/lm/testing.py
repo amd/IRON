@@ -144,7 +144,7 @@ def check_device_sampling(model, prompt_len: int, num_tokens: int, *, record):
     logits from the same seed: the text is the same, token for token.
     """
     tokens, drawn = check_generation(model, prompt_len, num_tokens, record=record)
-    host, _, _ = generate_on_host(model, tokens, num_tokens, Sampler())
+    host = generate_on_host(model, tokens, num_tokens, Sampler())
     differing = [i for i, (a, b) in enumerate(zip(drawn, host)) if a != b]
     record("DifferingTokens", len(differing))
     assert not differing, f"tokens {differing} of {num_tokens} differ from the host's"

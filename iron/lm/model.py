@@ -75,19 +75,34 @@ class Tokenizer:
 
         Raises:
             ValueError: The checkpoint has no chat template.
+            ImportError: jinja2 is not installed.
+            jinja2.TemplateError: The template refuses ``messages``
+                (its ``raise_exception``).
         """
         if self.chat_template is None:
             raise ValueError(
                 "the checkpoint's tokenizer_config.json has no chat_template"
             )
-        from jinja2.sandbox import ImmutableSandboxedEnvironment
+        try:
+            from jinja2 import TemplateError
+            from jinja2.sandbox import ImmutableSandboxedEnvironment
+        except ImportError as e:
+            raise ImportError(
+                "a chat template renders with jinja2: pip install 'iron[models]'"
+            ) from e
+
+        def raise_exception(message):
+            raise TemplateError(message)
 
         env = ImmutableSandboxedEnvironment(
             trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"]
         )
         template = env.from_string(self.chat_template)
         text = template.render(
-            messages=messages, add_generation_prompt=True, bos_token=""
+            messages=messages,
+            add_generation_prompt=True,
+            bos_token="",
+            raise_exception=raise_exception,
         )
         ids = self.encoding.encode(text, allowed_special="all")
         return ids if ids[:1] == [self.bos] else [self.bos, *ids]
@@ -378,6 +393,7 @@ class Model(iron.Graph):
         """``stream``'s pieces; with ``each`` False, ``generate``'s, which
         may come all at once, after the last is drawn (``_draw``).
         """
+        self.stats = None
         text = _is_text(prompt)
         if text and self.tokenizer is None:
             raise RuntimeError(f"{type(self).__name__}: no tokenizer; give token ids")
@@ -388,7 +404,9 @@ class Model(iron.Graph):
         else:
             tokens = self.tokenizer.chat(prompt)
         sampler = Sampler(temperature=0) if sampler is None else sampler
-        drawn, shown = [], ""
+        # The text of drawn[held:] is yet to be shown; drawn[seen:held] is
+        # decoded with it, since a token's text can depend on the one before.
+        drawn, seen, held = [], 0, 0
         began = first = last = time.perf_counter()
         for token in self._draw(tokens, max_tokens, sampler, each, **inputs):
             last = time.perf_counter()
@@ -398,14 +416,15 @@ class Model(iron.Graph):
             if not text:
                 yield token
                 continue
-            whole = self.tokenizer.decode(drawn)
+            shown = self.tokenizer.decode(drawn[seen:held])
+            piece = self.tokenizer.decode(drawn[seen:])[len(shown) :]
             # A token can end partway through a character; the next completes it.
-            if not whole.endswith("\ufffd"):
-                yield whole[len(shown) :]
-                shown = whole
-        rest = self.tokenizer.decode(drawn)[len(shown) :] if text else ""
-        if rest:
-            yield rest
+            if not piece.endswith("\ufffd"):
+                yield piece
+                seen, held = held, len(drawn)
+        if text and held < len(drawn):
+            shown = self.tokenizer.decode(drawn[seen:held])
+            yield self.tokenizer.decode(drawn[seen:])[len(shown) :]
         later = len(drawn) - 1
         rate = later / (last - first) if later else math.nan
         self.stats = Stats(first - began, rate)
@@ -458,7 +477,7 @@ class Model(iron.Graph):
 
     def __repr__(self) -> str:
         config = getattr(self, "config", None)
-        fields = [] if config is None else [type(config).__name__]
+        fields = []
         if hasattr(config, "max_seq_len"):
             fields.append(f"max_seq_len={config.max_seq_len}")
         loaded = self._versions and all(v.is_loaded for v in self._versions.values())

@@ -4,6 +4,7 @@
 """``main``, a model's command line."""
 
 import argparse
+import importlib
 import inspect
 import logging
 
@@ -36,6 +37,20 @@ FLAGS = (
         ),
     ),
 )
+
+
+def exports(package: str, names):
+    """A model package's ``__getattr__``: each of ``names`` from its
+    ``model`` module, imported on first use, so ``python -m
+    <package>.model`` runs that module once.
+    """
+
+    def __getattr__(name):
+        if name in names:
+            return getattr(importlib.import_module(f"{package}.model"), name)
+        raise AttributeError(f"module {package!r} has no attribute {name!r}")
+
+    return __getattr__
 
 
 def sampling_arguments(parser: argparse.ArgumentParser) -> None:
@@ -160,6 +175,6 @@ def main(model: type[Model]):
             print(f"[Decode]  Tokens per second:   {model.stats.tokens_per_s:7.3f}")
         if args.compare_host:
             drawn = model.generate(tokens, args.num_tokens, sampler())
-            host, _, _ = generate_on_host(model, tokens, args.num_tokens, sampler())
+            host = generate_on_host(model, tokens, args.num_tokens, sampler())
             differ = sum(a != b for a, b in zip(drawn, host))
             print(f"[Device] Tokens differing from the host loop: {differ}/{len(host)}")
