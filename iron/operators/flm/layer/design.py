@@ -103,15 +103,14 @@ PROJ_COLS = tuple(PROJ_MEMS.values())
 
 _CORE, _MEM, _SHIM = AIETileType.CoreTile, AIETileType.MemTile, AIETileType.ShimNOCTile
 # The tile of each stage: its (column, row) where a kernel takes a
-# neighbour's locks by direction, else a tile type for the placer. Each kv
-# kernel takes its qk tile's handshake lock below it, the gate kernel the
-# RMS tile's locks on its left, and each projection core that does not send
-# y the locks of the one below.
+# neighbour's locks by direction, else a tile type for the placer. The gate
+# kernel takes the RMS tile's locks on its left, and each projection core
+# that does not send y the locks of the one below.
 STAGES = {
-    "attn_qk": (2, 2),
-    "attn_kv": (2, 3),
-    "swa_attn_qk": (2, 4),
-    "swa_attn_kv": (2, 5),
+    "attn_qk": _CORE,
+    "attn_kv": _CORE,
+    "swa_attn_qk": _CORE,
+    "swa_attn_kv": _CORE,
     "rms": (3, 2),
     "glu": _CORE,
     "rope": _CORE,
@@ -206,15 +205,14 @@ PROJ_LOCKS = dict(
     y_cons_ping_lock=(7, 0),
     y_cons_pong_lock=(8, 0),
 )
-# The qk core's lock 8 orders the kv core's RTP read after the qk core's.
-ATTN_HANDSHAKE_LOCK = 8
-# o_prod_lock's init is the o repeats, which the geometry sets.
+# o_prod_lock's init is the o repeats, which the geometry sets. The sequence
+# sets l_cons_lock after it writes the RTPs.
 ATTN_KV_LOCKS = dict(
     o_prod_lock=(0, None),
     o_cons_lock=(1, 0),
     v_prod_lock=(2, 2),
     v_cons_lock=(3, 0),
-    l_cons_lock=ATTN_HANDSHAKE_LOCK,
+    l_cons_lock=(8, 0),
 )
 ATTN_QK_LOCKS = dict(k_prod_lock=(2, 2), k_cons_lock=(3, 0))
 
@@ -251,14 +249,11 @@ def layer_kernels(geometry):
     depend on the geometry's KV head count.
     """
     two_kv = geometry.num_kv_heads == 2
-    qk_handshake = "l_prod_lock" if two_kv else "l_cons_lock"
 
     def build(factory, locks, **kwargs):
         ids = {k: v if isinstance(v, int) else v[0] for k, v in locks.items()}
         return factory(geometry=geometry, **ids, **kwargs)
 
-    attn_qk_locks = {**ATTN_QK_LOCKS, qk_handshake: ATTN_HANDSHAKE_LOCK}
-    swa_qk_locks = {**ATTN_QK_LOCKS, "l_cons_lock": ATTN_HANDSHAKE_LOCK}
     return {
         "rms_residual": build(flm_gemma4.flm_gemma4_decode_rms_residual, RMS_LOCKS),
         "rope": build(flm_gemma4.flm_gemma4_decode_rope, ROPE_LOCKS),
@@ -288,11 +283,11 @@ def layer_kernels(geometry):
                 if two_kv
                 else flm_gemma4.flm_gemma4_decode_attn_qk
             ),
-            attn_qk_locks,
+            ATTN_QK_LOCKS,
         ),
         "swa_attn_kv": build(flm_gemma4.flm_gemma4_decode_swa_attn_kv, ATTN_KV_LOCKS),
         "swa_attn_qk": build(
-            flm_gemma4.flm_gemma4_decode_attn_qk, swa_qk_locks, sliding_window=True
+            flm_gemma4.flm_gemma4_decode_attn_qk, ATTN_QK_LOCKS, sliding_window=True
         ),
     }
 
@@ -447,11 +442,11 @@ class _Array:
     ``grid`` holds every tile by (column, row), ``t`` the tile of each
     stage, ``flows`` each circuit-switched flow by name. ``rtps`` holds each
     RTP buffer by (key, stage), a projection core's stage being its
-    "row_column", and ``sync_locks`` each sync lock by stage. The RMS, GLU
-    and projection cores acquire their sync lock before they read their
-    RTPs; the sequence sets it after it writes them.
-    The RoPE and attention cores read their RTPs after data from the
-    projection cores arrives.
+    "row_column", and ``sync_locks`` each sync lock by stage. The RMS, GLU,
+    attention kv and projection cores acquire their sync lock before they
+    read their RTPs; the sequence sets it after it writes them. The RoPE and
+    attention qk cores read their RTPs after data from the projection cores
+    arrives.
     """
 
     dev: InitVar[Device]
@@ -1184,6 +1179,7 @@ class _Array:
         o = Buffer(type=o_ty, name=f"o_{n}", tile=kv_tile)
         o_repeats = g.model_dim // (q4nx.M_TILE * 16)
         kl = self.locks(kv_tile, ATTN_KV_LOCKS, o_prod_lock=o_repeats)
+        self.sync_locks[n] = kl["l_cons_lock"]
         lbuf = Buffer(type=l_ty, name=f"l_{n}", tile=kv_tile)
         self.core(
             kv_tile,
@@ -1252,7 +1248,6 @@ class _Array:
         k0 = Buffer(type=k_ty, name=f"k_0_{n}", tile=qk_tile)
         k1 = Buffer(type=k_ty, name=f"k_1_{n}", tile=qk_tile)
         ql = self.locks(qk_tile, ATTN_QK_LOCKS)
-        self.add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
         L = self.rtp_buffer(qk_tile, rtp_key)
         q_in_order = TensorAccessPattern.full((dh // 8, NQ_PADDED, 8)).permute(
             (1, 0, 2)
@@ -1480,8 +1475,8 @@ def _sequence(
     write("rope", "rope_skip_kv", int(dims.skip))
     write("swa_rope", "swa_rope_skip_kv", int(dims.skip))
     write("glu", "glu_skip", int(dims.skip and g.double_wide_mlp))
-    sync_locks["rms"].set(1)
-    sync_locks["glu"].set(1)
+    for stage in ("rms", "glu", "attn_kv", "swa_attn_kv"):
+        sync_locks[stage].set(1)
 
     # The sequence keeps two rounds of legs in flight, as the engine's
     # bd_offset double buffer does. A shim tile has 16 BDs.
