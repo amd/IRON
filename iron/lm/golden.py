@@ -27,7 +27,8 @@ class Golden:
         reference: Builds what records a sequence ``path`` lacks (a
             ``HuggingFace``), called once on the first such sequence, and only
             while ``RECORD`` is set; otherwise such a sequence raises
-            ``LookupError``.
+            ``LookupError``, or ``FileNotFoundError`` naming ``path`` where
+            there is no file.
         inputs: What the reference is built from (a config, weights); the
             file holds their ``fingerprint`` and is refused if they change.
 
@@ -68,6 +69,12 @@ class Golden:
             digest.update(f"{array.dtype}{array.shape}".encode() + array.tobytes())
         key = digest.hexdigest()[:16]
         if key not in self.rows:
+            if self.build is None and not self.path.exists():
+                raise FileNotFoundError(
+                    f"{self.path} is missing: record it where torch and "
+                    "transformers are installed (pytest --record-goldens) and "
+                    "install it at that path"
+                )
             if self.build is None:
                 raise LookupError(
                     f"{self.path} holds no logits for these {tokens.size} tokens: "

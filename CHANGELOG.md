@@ -112,6 +112,8 @@ public API adds its entry under Unreleased.
   (`same_kind`): float ids into an int32 input raise rather than truncate.
 - Compiling, loading or tuning with no NPU found raises a `RuntimeError`
   saying how to compile without one, not an `AttributeError` on `None`.
+- `Golden.logits` raises `FileNotFoundError` naming the file when there is
+  none to read, and `LookupError` only for a file that lacks the sequence.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `cli`.
 - An operator declares with aie.iron's markers: `In`, `Out` and `InOut`

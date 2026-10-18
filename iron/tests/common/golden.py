@@ -23,7 +23,7 @@ def test_it_records_only_while_asked_and_reads_back_without_the_reference(
 ):
     path = tmp_path / "golden.npz"
     monkeypatch.delenv(RECORD, raising=False)
-    with pytest.raises(LookupError):
+    with pytest.raises(FileNotFoundError, match=f"{path} is missing"):
         Golden(path, reference(2), (2,)).logits(TOKENS)
     monkeypatch.setenv(RECORD, "1")
     np.testing.assert_array_equal(
@@ -32,6 +32,8 @@ def test_it_records_only_while_asked_and_reads_back_without_the_reference(
     assert [p.name for p in tmp_path.iterdir()] == ["golden.npz"]
     monkeypatch.delenv(RECORD)
     np.testing.assert_array_equal(Golden(path, None, (2,)).logits(TOKENS), TOKENS * 2)
+    with pytest.raises(LookupError, match="holds no logits"):
+        Golden(path, None, (2,)).logits(TOKENS + 1)
 
 
 def test_a_file_of_other_inputs_is_refused_and_rerecorded(tmp_path, monkeypatch):
