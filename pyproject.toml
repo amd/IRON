@@ -10,7 +10,7 @@ name = "iron"
 version = "0.1.0"
 description = "IRON: Unlocking the Full Potential of NPUs"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 dependencies = [
     "numpy",

@@ -68,7 +68,7 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 1. Install the packages needed for IRON and MLIR-AIE:
 
     ```bash
-    # Python versions 3.10, 3.12 and 3.13 are currently supported by our wheels
+    # IRON needs Python 3.11 or later; our wheels support 3.12 and 3.13
     sudo apt install \
     build-essential clang clang-14 lld lld-14 python3-venv python3-pip
     ```
