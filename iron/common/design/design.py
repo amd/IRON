@@ -12,13 +12,12 @@ import inspect
 import re
 from collections.abc import Hashable, Mapping
 
+import aie.iron
 import aie.utils as aie_utils
 from aie import ir
-from aie.dialects import aie
+from aie.dialects.aie import CoreOp, DeviceOp
 from aie.iron import (
-    CompileTime,
     DeviceConfiguration,
-    DispatchTime,
     Flow,
     Lock,
     PacketFlow,
@@ -28,8 +27,7 @@ from aie.iron import (
 )
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
-from .. import declare
-from ..declare import Operator
+from ..declare import DispatchTime, Operator
 from .runtime import OperatorRuntime
 
 
@@ -55,7 +53,7 @@ class OperatorDesign:
                 P(
                     v.symbol,
                     P.KEYWORD_ONLY,
-                    annotation=DispatchTime[v.dtype],
+                    annotation=aie.iron.DispatchTime[v.dtype],
                 )
                 for v in op.values
                 if not full_elf
@@ -64,12 +62,16 @@ class OperatorDesign:
             params = list(inspect.signature(build).parameters.values())
         self.build = build
 
-        def generator(op: CompileTime[Operator], identity: CompileTime[str], **kwargs):
+        def generator(
+            op: aie.iron.CompileTime[Operator],
+            identity: aie.iron.CompileTime[str],
+            **kwargs,
+        ):
             return build(**kwargs)
 
         keys = [
-            P("op", P.KEYWORD_ONLY, annotation=CompileTime[Operator]),
-            P("identity", P.KEYWORD_ONLY, annotation=CompileTime[str]),
+            P("op", P.KEYWORD_ONLY, annotation=aie.iron.CompileTime[Operator]),
+            P("identity", P.KEYWORD_ONLY, annotation=aie.iron.CompileTime[str]),
         ]
         setattr(generator, "__signature__", inspect.Signature([*params, *keys]))
         self.generator = generator
@@ -174,7 +176,7 @@ class BuiltArray:
         op = design.op.resolved(design.op.dev).copy()  # a build binds streams
         # Before Array.build(), which may hand a core-read value to a worker.
         for value in op.values:
-            if design.full_elf and not isinstance(value, declare.DispatchTime):
+            if design.full_elf and not isinstance(value, DispatchTime):
                 value.param = ScratchpadParameter(
                     words.get(value.symbol, value.symbol), value.dtype
                 )
@@ -230,9 +232,9 @@ class BuiltArray:
             return ir.WalkResult.ADVANCE
 
         for device in module.body.operations:
-            if isinstance(device, aie.DeviceOp):
+            if isinstance(device, DeviceOp):
                 for op in device.body_region.blocks[0].operations:
-                    if isinstance(op, aie.CoreOp):
+                    if isinstance(op, CoreOp):
                         op.operation.walk(read)
         return frozenset(words)
 

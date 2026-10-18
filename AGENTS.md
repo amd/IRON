@@ -478,8 +478,10 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    `contract=KernelContract(roles=, parameter_bindings=, reference=,
    tolerance=)` and it is used like a factory's: `KernelContract` and the
    `Param` role come from `aie.iron.kernels`, the `In`/`Out` roles from
-   `aie.utils.compile.jit.markers` (not `iron.common`'s operand
-   declarators of the same names), and `tolerance=` is what its output is
+   `aie.utils.compile.jit.markers` (`In`, `Out`, `Param` and
+   `DispatchTime` each name one thing in aie.iron and another in
+   `iron.common`, so a module using both imports aie.iron's qualified:
+   `markers.In`, `kernels.Param`, `aie.iron.DispatchTime[T]`), and `tolerance=` is what its output is
    judged by on the device (`Tolerance.bf16_ulps(1, atol=2**-126)` for a
    bf16 result rounded once, as `eltwise`'s factories give); without it
    the catalog refuses to judge the operator. An operator running one kernel

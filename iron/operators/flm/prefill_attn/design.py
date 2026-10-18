@@ -18,6 +18,7 @@ differs.
 from dataclasses import dataclass
 from typing import Callable
 
+import aie.iron
 import numpy as np
 from aie.dialects import arith
 from aie.dialects.aie import DMAChannelDir
@@ -30,7 +31,6 @@ from aie.iron import (
     Acquire,
     Bd,
     Buffer,
-    DispatchTime,
     DmaChannel,
     ExternalFunction,
     Lock,
@@ -281,9 +281,9 @@ def prefill_attn(
     window=None,
     *,
     kernel,
-    L_begin: DispatchTime[np.int32],
-    L_end: DispatchTime[np.int32],
-    max_l: DispatchTime[np.int32],
+    L_begin: aie.iron.DispatchTime[np.int32],
+    L_end: aie.iron.DispatchTime[np.int32],
+    max_l: aie.iron.DispatchTime[np.int32],
 ):
     """Prefill attention over a KV cache of up to max_context rows.
 
