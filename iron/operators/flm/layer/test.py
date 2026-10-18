@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests of the outputs, the RTP placement and the weight reads.
+"""Tests of the outputs and the weight reads.
 
 test_matches_reference runs every layer type on synthetic inputs and compares
 x and the kv cache with reference.py. test_captured_case does the same on
 dispatches captured from FastFlowLM's engine, when FLM_LAYER_CASES names them.
-Both check the RTP placement of every build they dispatch.
 """
 
 import json
