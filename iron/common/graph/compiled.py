@@ -166,12 +166,15 @@ def param(*shape: int, dtype=bfloat16) -> np.ndarray:
     return np.broadcast_to(np.zeros((), dtype), shape).view(_Param)
 
 
-def _leaves(root, graphs: bool = True) -> Iterator[tuple[str, Any, Any, Any]]:
+def _leaves(
+    root, graphs: bool = True, shared: list[str] | None = None
+) -> Iterator[tuple[str, Any, Any, Any]]:
     """Each state and tensor under ``root``, by its dotted path from it, with
     the container holding it and its key there, through lists, tuples,
     dicts, dataclasses, namespaces and graphs (their attributes not starting
-    with ``_``), each container once; without ``graphs``, a graph under
-    ``root`` is yielded in place of what it holds.
+    with ``_``), each container once, the path it is met at again appended
+    to ``shared``; without ``graphs``, a graph under ``root`` is yielded in
+    place of what it holds.
     """
     seen: set[int] = set()
 
@@ -196,6 +199,8 @@ def _leaves(root, graphs: bool = True) -> Iterator[tuple[str, Any, Any, Any]]:
         else:
             return
         if id(x) in seen:
+            if shared is not None:
+                shared.append(path)
             return
         seen.add(id(x))
         for k, item in items:
@@ -314,16 +319,19 @@ class Graph:
         tensor at its dotted path in ``tree`` (a ``Checkpoint.tree()``, or
         tensors by dotted path) under ``path``, this graph's own prefix
         (``"model."``), cast to the param's dtype as torch's ``copy_``
-        casts. A param held at several paths is tied: its first path's
-        tensor binds every holder, and a tensor at another is ignored. Each
-        graph it holds loads through its own ``load``, so a subclass
-        derives a tensor after ``super().load()``.
+        casts it, a value past the dtype's range becoming inf. A param held
+        at several paths is tied: its first path, in attribute order, binds
+        every holder, and a tensor at another is ignored; so is any tensor
+        under a graph or container held again at a second path. Each graph
+        it holds loads through its own ``load``, so a subclass derives a
+        tensor after ``super().load()``.
 
         Raises:
             ValueError: ``path`` does not end in a dot; the graph is
-                already loaded; or a param's tensor is missing or of
-                another shape, or ``tree`` holds a tensor under ``path``
-                that no param declares, one error naming every such path.
+                already loaded; or a param's tensor is missing, of another
+                shape or of another kind (float for int), or ``tree`` holds
+                a tensor under ``path`` that no param declares, one error
+                naming every such path.
             TypeError: A param is in a tuple or a frozen dataclass, which
                 cannot be rebound.
         """
@@ -334,7 +342,8 @@ class Graph:
         tensors = {n: t for n, t, _, _ in _leaves(tree) if n.startswith(path)}
         tied: dict[int, list[str]] = {}
         params: dict[str, _Param] = {}
-        for n, p, parent, _ in _leaves(self):
+        shared: list[str] = []
+        for n, p, parent, _ in _leaves(self, shared=shared):
             if not isinstance(p, _Param):
                 continue
             if isinstance(parent, tuple) or getattr(
@@ -348,14 +357,33 @@ class Graph:
             params.setdefault(tied[id(p)][0], p)
         held = {n for paths in tied.values() for n in paths}
         missing = sorted(params.keys() - tensors.keys())
-        extra = sorted(tensors.keys() - held)
+        extra = sorted(
+            n
+            for n in tensors.keys() - held
+            if not any(n.startswith(f"{path}{s}.") for s in shared)
+        )
+        given = [(n, p, tensors[n]) for n, p in params.items() if n in tensors]
         shapes = [
-            f"{n} {tuple(tensors[n].shape)}, not {p.shape}"
-            for n, p in params.items()
-            if n in tensors and tuple(tensors[n].shape) != p.shape
+            f"{n} {tuple(t.shape)}, not {p.shape}"
+            for n, p, t in given
+            if tuple(t.shape) != p.shape
         ]
-        if missing or extra or shapes:
-            found = {"missing": missing, "extra": extra, "wrong shape": shapes}
+        kinds = [
+            f"{n} {t.dtype}, not {p.dtype}"
+            for n, p, t in given
+            # One kind either way: np.dtype.kind calls bfloat16 "V".
+            if not (
+                np.can_cast(t.dtype, p.dtype, "same_kind")
+                and np.can_cast(p.dtype, t.dtype, "same_kind")
+            )
+        ]
+        if missing or extra or shapes or kinds:
+            found = {
+                "missing": missing,
+                "extra": extra,
+                "wrong shape": shapes,
+                "wrong kind": kinds,
+            }
             raise ValueError(
                 f"{self.name}: cannot load: "
                 + "; ".join(f"{k} {', '.join(v)}" for k, v in found.items() if v)
@@ -365,7 +393,6 @@ class Graph:
                 params[first].dtype, copy=False
             )
             tensors.update(dict.fromkeys(others, tensors[first]))
-        self._loaded = True
         for n, x, parent, key in _leaves(self, graphs=False):
             if isinstance(x, Graph):
                 if not x.__dict__.get("_loaded"):
@@ -376,6 +403,7 @@ class Graph:
                 parent[key] = tensors[path + n]
             else:
                 setattr(parent, key, tensors[path + n])
+        self._loaded = True
 
     def draw(self, seed: int) -> None:
         """Load each ``param`` drawn at ``seed`` in the order the graph

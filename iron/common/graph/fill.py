@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Weights made from their shapes alone, for ``Graph.draw``/``unread``
-and ``Checkpoint.tree``."""
+"""Weights made from their shapes alone."""
 
 import math
 from collections.abc import Mapping
@@ -27,17 +26,12 @@ def filled(
             the pages are reserved, not touched, and a scalar is zero,
             since a graph may read one as it is built (a clamp's bounds).
         seed: The seed ``"random"`` draws at.
-
-    Raises:
-        ValueError: ``fill`` is neither.
     """
     if fill == "unread":
         return {
             n: np.zeros((), dtype) if not shape else np.empty(shape, dtype)
             for n, (shape, dtype) in named.items()
         }
-    if fill != "random":
-        raise ValueError(f"fill is random or unread, not {fill!r}")
     rng = np.random.default_rng(seed)
     out = {}
     for n, (shape, dtype) in named.items():

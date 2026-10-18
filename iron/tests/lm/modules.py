@@ -7,6 +7,7 @@
 the leaf modules' references against numpy.
 """
 
+import dataclasses
 from types import SimpleNamespace
 
 import numpy as np
@@ -128,10 +129,18 @@ def test_a_tied_param_ignores_a_tensor_at_its_other_path():
     assert tied.head.weight is tied.embed.weight is first
 
 
-def test_a_draw_draws_a_tied_param_once():
-    tied = Tied()
-    tied.draw(0)
-    assert tied.head.weight is tied.embed.weight
+def test_a_graph_held_at_two_paths_skips_the_second_paths_tensors():
+    class Shared(iron.Graph):
+        def __init__(self):
+            self.a = self.b = Linear(4, 4)
+            self.c = self.d = [iron.param(2)]
+
+    tensors = {
+        n: np.zeros(s, bfloat16) for n, s in [("a.weight", (4, 4)), ("c.0", (2,))]
+    }
+    shared = Shared()
+    shared.load(tensors | {"b.weight": np.ones((4, 4), bfloat16)})
+    assert shared.b.weight is tensors["a.weight"] and shared.d[0] is tensors["c.0"]
 
 
 def test_load_binds_params_in_lists_dicts_and_namespaces():
@@ -155,11 +164,32 @@ def test_load_refuses_a_param_in_a_tuple():
         Held().unread()
 
 
+def test_load_refuses_a_param_in_a_frozen_dataclass():
+    @dataclasses.dataclass(frozen=True)
+    class Pair:
+        first: np.ndarray
+
+    class Held(iron.Graph):
+        def __init__(self):
+            self.pair = Pair(iron.param(2))
+
+    with pytest.raises(TypeError, match=r"pair\.first is in a tuple or a frozen"):
+        Held().unread()
+
+
 def test_load_casts_to_the_params_dtype():
     named = {n: t.astype(np.float32) for n, t in tensors().items()}
     block = Block()
     block.load(named)
     assert block.norm.weight.dtype == bfloat16
+
+
+def test_load_refuses_a_change_of_kind():
+    named = tensors() | {"norm.weight": np.ones(256, np.int32)}
+    with pytest.raises(
+        ValueError, match=r"wrong kind norm\.weight int32, not bfloat16"
+    ):
+        Block().load(named)
 
 
 def test_a_second_load_is_refused():

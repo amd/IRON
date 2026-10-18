@@ -253,6 +253,8 @@ class Checkpoint:
             ValueError: ``fill`` is none of these, or a run of indices skips
                 one.
         """
+        if fill not in ("read", "random", "unread"):
+            raise ValueError(f"fill is read, random or unread, not {fill!r}")
         tensors = self.tensors
         if fill != "read":
             named = {n: (t.shape, t.dtype) for n, t in tensors.items()}
