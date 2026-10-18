@@ -11,7 +11,6 @@ import dataclasses
 import hashlib
 import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 
@@ -87,28 +86,19 @@ class Golden:
 
 
 def fingerprint(*values) -> str:
-    """A digest of ``values``: arrays by their bytes, shapes and types,
-    namespaces, lists and tuples by their items, anything else by ``repr``.
+    """A digest of ``values``, a weights tree's leaves by name (``leaves``):
+    arrays by their bytes, shapes and types, anything else by ``repr``.
     """
-    digest = hashlib.sha256()
+    from .base import leaves
 
-    def feed(value):
+    digest = hashlib.sha256()
+    for name, value in leaves(list(values)):
+        digest.update(name.encode())
         if isinstance(value, np.ndarray):
             digest.update(f"{value.dtype}{value.shape}".encode())
             digest.update(np.ascontiguousarray(value).tobytes())
-        elif isinstance(value, (list, tuple)):
-            digest.update(b"[")
-            for item in value:
-                feed(item)
-            digest.update(b"]")
-        elif isinstance(value, SimpleNamespace):
-            for name, item in sorted(vars(value).items()):
-                digest.update(name.encode())
-                feed(item)
         else:
             digest.update(repr(value).encode())
-
-    feed(values)
     return digest.hexdigest()[:16]
 
 
@@ -185,11 +175,8 @@ def config_json(config) -> dict:
     return out
 
 
-def flat(tree, prefix=""):
+def flat(tree):
     """``tree``'s arrays by their dotted names, in float32."""
-    items = enumerate(tree) if isinstance(tree, list) else vars(tree).items()
-    for name, value in items:
-        if isinstance(value, np.ndarray):
-            yield f"{prefix}{name}", value.astype(np.float32)
-        else:
-            yield from flat(value, f"{prefix}{name}.")
+    from .base import leaves
+
+    return ((name, value.astype(np.float32)) for name, value in leaves(tree))

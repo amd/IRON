@@ -20,7 +20,7 @@ import pickle
 import struct
 import zipfile
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -495,6 +495,18 @@ class Checkpoint:
         else:
             raise ValueError(f"fill is read, random or unread, not {fill!r}")
         return _nest(tensors)
+
+
+def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:
+    """Each leaf of ``tree``, a ``Checkpoint.tree()``'s namespaces and
+    lists, by its dotted name: ``_nest``'s inverse.
+    """
+    if isinstance(tree, (list, SimpleNamespace)):
+        items = enumerate(tree) if isinstance(tree, list) else vars(tree).items()
+        for name, value in items:
+            yield from leaves(value, f"{prefix}{name}.")
+    else:
+        yield prefix[:-1], tree
 
 
 def _nest(named: Mapping[str, Any]) -> SimpleNamespace:

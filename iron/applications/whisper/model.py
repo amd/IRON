@@ -36,6 +36,7 @@ from iron.lm import (
     Norm,
     Tower,
 )
+from iron.lm.base import _nest, leaves
 from iron.lm.golden import Golden, flat, config_json
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -46,17 +47,16 @@ BLOCK = 64
 
 
 def bf16(weights):
-    """``weights``, an array or a tree of namespaces and lists, each float16
-    array rounded once to bf16, the device's copy of an fp16 checkpoint (the
-    reference widens the float16 itself); any other array as it is.
+    """``weights``, a checkpoint's tree, each float16 array rounded once to
+    bf16, the device's copy of an fp16 checkpoint (the reference widens the
+    float16 itself); any other array as it is.
     """
-    if isinstance(weights, np.ndarray):
-        return weights.astype(bfloat16) if weights.dtype == np.float16 else weights
-    if isinstance(weights, list):
-        return [bf16(w) for w in weights]
-    if isinstance(weights, SimpleNamespace):
-        return SimpleNamespace(**{k: bf16(w) for k, w in vars(weights).items()})
-    return weights
+    return _nest(
+        {
+            name: w.astype(bfloat16) if w.dtype == np.float16 else w
+            for name, w in leaves(weights)
+        }
+    )
 
 
 def sanitize(w):
@@ -199,12 +199,12 @@ class WhisperEncoder(Tower):
 
     Args:
         config: The encoder's shape.
-        weights: The checkpoint's tree; ``model.encoder`` is read.
+        weights: The checkpoint's tree, bf16 (``bf16``); ``model.encoder`` is
+            read.
     """
 
     def __init__(self, config: WhisperEncoderConfig, weights):
-        c, weights = config, bf16(weights)
-        e = weights.model.encoder
+        c, e = config, weights.model.encoder
         super().__init__(c, e.layers, c.rows, c.rows)
         self.final_norm = e.layer_norm
         self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.mels)
