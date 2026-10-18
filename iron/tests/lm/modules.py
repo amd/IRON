@@ -7,6 +7,8 @@
 the leaf modules' references against numpy.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
@@ -59,21 +61,6 @@ def test_load_names_every_missing_tensor():
         Block().load(named)
 
 
-def test_load_names_every_extra_tensor():
-    named = tensors() | {"rotary.inv_freq": np.zeros(8, np.float32)}
-    with pytest.raises(ValueError, match=r"extra rotary\.inv_freq$"):
-        Block().load(named)
-
-
-def test_load_names_every_wrong_shaped_tensor():
-    named = tensors() | {"layers.1.weight": np.zeros((128, 256), bfloat16)}
-    with pytest.raises(
-        ValueError,
-        match=r"wrong shape layers\.1\.weight \(128, 256\), not \(256, 128\)",
-    ):
-        Block().load(named)
-
-
 def test_load_names_each_kind_in_one_error():
     named = tensors("model.") | {"model.norm.weight": np.zeros(4, bfloat16)}
     del named["model.out.bias"]
@@ -106,10 +93,85 @@ def test_draw_is_the_random_tree_of_a_checkpoint_in_the_same_order():
         assert np.array_equal(x.view(np.uint16), want.view(np.uint16)), path
 
 
-def test_unread_allocates_each_param():
-    block = Block()
+def test_unread_allocates_each_param_and_zeroes_a_scalar():
+    class Scaled(Block):
+        def __init__(self):
+            super().__init__()
+            self.scale = iron.param()
+
+    block = Scaled()
     block.unread()
     assert all(x.flags.owndata for _, x in block.held().values())
+    assert block.scale.shape == () and block.scale == 0
+
+
+class Tied(iron.Graph):
+    """An embedding and a head over one param, as a tied checkpoint has."""
+
+    def __init__(self):
+        self.embed = Embedding(512, 256)
+        self.head = Linear(256, 512)
+        self.head.weight = self.embed.weight
+
+
+def test_a_tied_param_needs_only_its_first_path():
+    table = np.ones((512, 256), bfloat16)
+    tied = Tied()
+    tied.load({"embed.weight": table})
+    assert tied.head.weight is tied.embed.weight is table
+
+
+def test_a_tied_param_ignores_a_tensor_at_its_other_path():
+    first, second = np.ones((512, 256), bfloat16), np.zeros((512, 256), bfloat16)
+    tied = Tied()
+    tied.load({"embed.weight": first, "head.weight": second})
+    assert tied.head.weight is tied.embed.weight is first
+
+
+def test_a_draw_draws_a_tied_param_once():
+    tied = Tied()
+    tied.draw(0)
+    assert tied.head.weight is tied.embed.weight
+
+
+def test_load_binds_params_in_lists_dicts_and_namespaces():
+    class Held(iron.Graph):
+        def __init__(self):
+            self.items = [iron.param(2)]
+            self.named = {"a": iron.param(2)}
+            self.space = SimpleNamespace(b=iron.param(2))
+
+    held = Held()
+    held.unread()
+    assert len(held.held()) == 3
+
+
+def test_load_refuses_a_param_in_a_tuple():
+    class Held(iron.Graph):
+        def __init__(self):
+            self.pair = (iron.param(2), iron.param(2))
+
+    with pytest.raises(TypeError, match=r"pair\.0 is in a tuple"):
+        Held().unread()
+
+
+def test_load_casts_to_the_params_dtype():
+    named = {n: t.astype(np.float32) for n, t in tensors().items()}
+    block = Block()
+    block.load(named)
+    assert block.norm.weight.dtype == bfloat16
+
+
+def test_a_second_load_is_refused():
+    block = Block()
+    block.draw(0)
+    with pytest.raises(ValueError, match="already loaded"):
+        block.load(tensors())
+
+
+def test_a_path_without_its_trailing_dot_is_refused():
+    with pytest.raises(ValueError, match="'model' must end in a dot"):
+        Block().load(tensors("model."), "model")
 
 
 def test_leaf_modules_match_numpy():

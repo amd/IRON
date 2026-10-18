@@ -22,7 +22,7 @@ from typing import Any, Literal
 import numpy as np
 from ml_dtypes import bfloat16
 
-from ..common.graph.compiled import drawn
+from ..common.graph.fill import filled
 from .golden import fingerprint
 
 
@@ -244,35 +244,19 @@ class Checkpoint:
 
         Args:
             fill: What the arrays hold. ``"read"``: the tensors, views of the
-                mapped file read only when touched. ``"random"``: drawn at
-                ``seed`` in the file's order (``iron.common.graph.compiled.drawn``).
-                ``"unread"``: allocated and never written, for tracing,
-                building and measuring a model, none of which reads a weight;
-                the pages are reserved, not touched, and a scalar is zero,
-                since a graph may read one as it is built (a clamp's bounds).
-                Only ``"read"`` reads past the header.
+                mapped file read only when touched. ``"random"`` (in the
+                file's order) or ``"unread"``: ``filled``'s, which reads
+                nothing past the header.
             seed: The seed ``"random"`` draws at.
 
         Raises:
             ValueError: ``fill`` is none of these, or a run of indices skips
                 one.
         """
-        if fill == "read":
-            tensors = self.tensors
-        elif fill == "random":
-            rng = np.random.default_rng(seed)
-            tensors = {
-                n: drawn(rng, n, t.shape, t.dtype) for n, t in self.tensors.items()
-            }
-        elif fill == "unread":
-            tensors = {
-                name: (
-                    np.zeros((), t.dtype) if t.ndim == 0 else np.empty(t.shape, t.dtype)
-                )
-                for name, t in self.tensors.items()
-            }
-        else:
-            raise ValueError(f"fill is read, random or unread, not {fill!r}")
+        tensors = self.tensors
+        if fill != "read":
+            named = {n: (t.shape, t.dtype) for n, t in tensors.items()}
+            tensors = filled(fill, named, seed)
         return _nest(tensors, file=self.path)
 
 

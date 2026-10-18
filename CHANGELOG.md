@@ -14,9 +14,11 @@ public API adds its entry under Unreleased.
 
 - `iron.param(*shape, dtype=bfloat16)`, a weight a graph declares by shape,
   and `Graph.load(tree, path="")`, which binds each one to the tensor at its
-  dotted path and raises once, naming every missing, extra and wrong-shaped
-  tensor; a param never loaded is named when the graph is traced.
-  `Graph.draw(seed)` and `Graph.unread()` load them drawn or unwritten.
+  dotted path, cast to its dtype, and raises once, naming every missing,
+  extra and wrong-shaped tensor; a param held at two paths is tied, bound
+  from its first. A param never loaded is named when the graph is traced,
+  and a second load is refused. `Graph.draw(seed)` and `Graph.unread()` load
+  them drawn or unwritten.
 - Leaf modules in `iron.lm`, graphs that declare their weights as
   transformers names them: `Linear`, `Embedding`, `RMSNorm` and `LayerNorm`.
 - `Graph.trace(precision=)`, which `compile(precision=)` passes on instead of

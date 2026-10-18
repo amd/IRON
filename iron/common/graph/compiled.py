@@ -15,7 +15,6 @@ import dataclasses
 import functools
 import inspect
 import logging
-import math
 from collections.abc import Callable, Iterator, Mapping
 from fractions import Fraction
 from pathlib import Path
@@ -40,6 +39,7 @@ from ..image.packaging import Kind, Plan, plan, require_device
 from ..image.sequence import ALIGNMENT, OperatorSequence
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
+from .fill import filled
 from .handle import Affine, Carry, Handle, PerCall, State, Weight, is_operand
 from .trace import TracedGraph, Tracer
 
@@ -166,29 +166,22 @@ def param(*shape: int, dtype=bfloat16) -> np.ndarray:
     return np.broadcast_to(np.zeros((), dtype), shape).view(_Param)
 
 
-def drawn(rng: np.random.Generator, name: str, shape, dtype) -> np.ndarray:
-    """A tensor named ``name`` drawn from ``rng``: a matrix normal with
-    deviation ``1/sqrt(in)`` (an embedding's ``in`` its width), anything of
-    fewer than two axes normal with deviation 0.1, about zero if it is a
-    bias and about one otherwise (a norm), so that swapping two changes the
-    output.
-    """
-    x = rng.standard_normal(shape, dtype=np.float32)
-    if len(shape) >= 2:
-        return (x / np.sqrt(math.prod(shape[1:]))).astype(dtype)
-    return (x / 10 + (not name.endswith("bias"))).astype(dtype)
-
-
-def _leaves(root) -> Iterator[tuple[str, Any]]:
-    """Each state and tensor under ``root``, by its dotted path from it,
-    through lists, tuples, dicts, dataclasses, namespaces and graphs (their
-    attributes not starting with ``_``), each container once.
+def _leaves(root, graphs: bool = True) -> Iterator[tuple[str, Any, Any, Any]]:
+    """Each state and tensor under ``root``, by its dotted path from it, with
+    the container holding it and its key there, through lists, tuples,
+    dicts, dataclasses, namespaces and graphs (their attributes not starting
+    with ``_``), each container once; without ``graphs``, a graph under
+    ``root`` is yielded in place of what it holds.
     """
     seen: set[int] = set()
 
-    def walk(x, path):
-        if isinstance(x, State) or (is_operand(x) and not isinstance(x, Handle)):
-            yield path, x
+    def walk(x, path, parent, key):
+        if (
+            isinstance(x, State)
+            or (is_operand(x) and not isinstance(x, Handle))
+            or (not graphs and isinstance(x, Graph) and x is not root)
+        ):
+            yield path, x, parent, key
             return
         if isinstance(x, (list, tuple)):
             items = enumerate(x)
@@ -205,10 +198,10 @@ def _leaves(root) -> Iterator[tuple[str, Any]]:
         if id(x) in seen:
             return
         seen.add(id(x))
-        for key, item in items:
-            yield from walk(item, f"{path}.{key}" if path else str(key))
+        for k, item in items:
+            yield from walk(item, f"{path}.{k}" if path else str(k), x, k)
 
-    return walk(root, "")
+    return walk(root, "", None, None)
 
 
 class Graph:
@@ -310,28 +303,52 @@ class Graph:
             TypeError: A ``param`` was never loaded.
         """
         held: dict[int, tuple[str, Any]] = {}
-        for path, x in _leaves(self):
+        for path, x, _, _ in _leaves(self):
             if isinstance(x, _Param):
                 raise TypeError(f"{self.name}: {path} was never loaded")
             held.setdefault(id(x), (path, x))
         return held
 
     def load(self, tree, path: str = "") -> None:
-        """Bind each ``param`` of this graph and of the graphs it holds, as
-        attributes or in lists, to the tensor at its dotted path in
-        ``tree`` (a ``Checkpoint.tree()``, or tensors by dotted path) under
-        ``path``, this graph's own prefix (``"model."``). A subclass derives
-        a tensor after ``super().load()``.
+        """Bind each ``param`` of this graph and of what it holds to the
+        tensor at its dotted path in ``tree`` (a ``Checkpoint.tree()``, or
+        tensors by dotted path) under ``path``, this graph's own prefix
+        (``"model."``), cast to the param's dtype as torch's ``copy_``
+        casts. A param held at several paths is tied: its first path's
+        tensor binds every holder, and a tensor at another is ignored. Each
+        graph it holds loads through its own ``load``, so a subclass
+        derives a tensor after ``super().load()``.
 
         Raises:
-            ValueError: A param's tensor is missing or of another shape, or
-                ``tree`` holds a tensor under ``path`` that no param
-                declares; one error names every such path.
+            ValueError: ``path`` does not end in a dot; the graph is
+                already loaded; or a param's tensor is missing or of
+                another shape, or ``tree`` holds a tensor under ``path``
+                that no param declares, one error naming every such path.
+            TypeError: A param is in a tuple or a frozen dataclass, which
+                cannot be rebound.
         """
-        tensors = {n: t for n, t in _leaves(tree) if n.startswith(path)}
-        params = {path + n: p for n, p in self._params().items()}
+        if path and not path.endswith("."):
+            raise ValueError(f"{self.name}: load's path {path!r} must end in a dot")
+        if self.__dict__.get("_loaded"):
+            raise ValueError(f"{self.name}: already loaded")
+        tensors = {n: t for n, t, _, _ in _leaves(tree) if n.startswith(path)}
+        tied: dict[int, list[str]] = {}
+        params: dict[str, _Param] = {}
+        for n, p, parent, _ in _leaves(self):
+            if not isinstance(p, _Param):
+                continue
+            if isinstance(parent, tuple) or getattr(
+                getattr(parent, "__dataclass_params__", None), "frozen", False
+            ):
+                raise TypeError(
+                    f"{self.name}: {path}{n} is in a tuple or a frozen "
+                    f"dataclass, which load cannot rebind; hold it in a list"
+                )
+            tied.setdefault(id(p), []).append(path + n)
+            params.setdefault(tied[id(p)][0], p)
+        held = {n for paths in tied.values() for n in paths}
         missing = sorted(params.keys() - tensors.keys())
-        extra = sorted(tensors.keys() - params.keys())
+        extra = sorted(tensors.keys() - held)
         shapes = [
             f"{n} {tuple(tensors[n].shape)}, not {p.shape}"
             for n, p in params.items()
@@ -343,39 +360,42 @@ class Graph:
                 f"{self.name}: cannot load: "
                 + "; ".join(f"{k} {', '.join(v)}" for k, v in found.items() if v)
             )
-        for key, x in list(vars(self).items()):
-            if isinstance(x, _Param):
-                setattr(self, key, tensors[path + key])
-            elif isinstance(x, Graph):
-                x.load(tensors, f"{path}{key}.")
-            elif isinstance(x, list):
-                for i, g in enumerate(x):
-                    if isinstance(g, Graph):
-                        g.load(tensors, f"{path}{key}.{i}.")
+        for first, *others in tied.values():
+            tensors[first] = np.asarray(tensors[first]).astype(
+                params[first].dtype, copy=False
+            )
+            tensors.update(dict.fromkeys(others, tensors[first]))
+        self._loaded = True
+        for n, x, parent, key in _leaves(self, graphs=False):
+            if isinstance(x, Graph):
+                if not x.__dict__.get("_loaded"):
+                    x.load(tensors, f"{path}{n}.")
+            elif not isinstance(x, _Param):
+                continue
+            elif isinstance(parent, (list, dict)):
+                parent[key] = tensors[path + n]
+            else:
+                setattr(parent, key, tensors[path + n])
 
     def draw(self, seed: int) -> None:
         """Load each ``param`` drawn at ``seed`` in the order the graph
-        holds them (``drawn``).
+        holds them (``filled``).
         """
-        rng = np.random.default_rng(seed)
-        self.load(
-            {n: drawn(rng, n, p.shape, p.dtype) for n, p in self._params().items()}
-        )
+        self.load(filled("random", self._shapes(), seed))
 
     def unread(self) -> None:
-        """Load each ``param`` allocated and never written, for tracing,
-        building and measuring, none of which reads a weight; a scalar is
-        zero, since a graph may read one as it is built.
-        """
-        self.load(
-            {
-                n: np.zeros((), p.dtype) if p.ndim == 0 else np.empty(p.shape, p.dtype)
-                for n, p in self._params().items()
-            }
-        )
+        """Load each ``param`` allocated and never written (``filled``)."""
+        self.load(filled("unread", self._shapes()))
 
-    def _params(self) -> dict[str, _Param]:
-        return {n: p for n, p in _leaves(self) if isinstance(p, _Param)}
+    def _shapes(self) -> dict[str, tuple[tuple[int, ...], Any]]:
+        """Each param's shape and dtype at its first path."""
+        shapes: dict[str, tuple[tuple[int, ...], Any]] = {}
+        seen: set[int] = set()
+        for n, p, _, _ in _leaves(self):
+            if isinstance(p, _Param) and id(p) not in seen:
+                seen.add(id(p))
+                shapes[n] = (p.shape, p.dtype)
+        return shapes
 
     def trace(self, *, precision: Precision | None = None, **shapes) -> TracedGraph:
         """Run ``body`` on handles of the given shapes; an optional input
