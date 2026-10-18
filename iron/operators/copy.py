@@ -301,11 +301,11 @@ class Gather(Operator):
         row's address-low word is (its length one before, its high word two after).
         """
         chain, words, slots = self.chain, [], []
+        row_words = self.row * np.dtype(self.dtype).itemsize // 4
         for b in range(2 * chain):
             at = self.bd_base + 0x20 * b
             last = b % chain == chain - 1
             word7 = self.valid | (0 if last else self.use_next | ((b + 1) << 27))
-            row_words = self.row * np.dtype(self.dtype).itemsize // 4
             words += [_control_header(3, at), row_words, 0, 0, self.bd_tail[0]]
             words += [_control_header(3, at + 16), *self.bd_tail[1:], word7]
         for j, n in enumerate(self.batches):
@@ -713,7 +713,6 @@ class Copy(Operator):
 
     class Array(Operator.Array):
         def build(self) -> Built:
-
             ins, outs = [], []
             for c in range(self.num_channels):
                 fifo_in = ObjectFifo(self.x.obj_type, depth=self.x.depth)
@@ -876,12 +875,7 @@ class Copy(Operator):
         src = tuple(at(tap, self.src_bound, src_valid) for tap in src)
         dst = tuple(at(tap, self.dst_bound, dst_valid) for tap in dst)
         gather, scatter = (
-            np.concatenate(
-                [
-                    p.gather(np.arange(prod(p.tensor_dims)))
-                    for p in (tap if isinstance(tap, tuple) else (tap,))
-                ]
-            )
+            np.concatenate([p.gather(np.arange(prod(p.tensor_dims))) for p in tap])
             + int(offset)
             for tap, offset in ((src, in_offset), (dst, out_offset))
         )
