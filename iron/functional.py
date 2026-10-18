@@ -39,8 +39,6 @@ def linear(
     bias=None,
     *,
     accurate: bool = False,
-    k_tile=None,
-    tile_n=None,
     precision=None,
     **gemv,
 ):
@@ -48,23 +46,15 @@ def linear(
 
     One row is a GEMV, which ``accurate`` leaves as it is; more are flm.GEMM
     reading ``weight`` column-major, or with ``accurate`` the GEMM whose
-    float32 sums round once (``ACCURATE``). ``k_tile``, ``tile_n`` and
-    ``precision`` are flm.GEMM's tunables and ``gemv``
-    the GEMV's, for a call the profile cannot tell from another of its shape.
+    float32 sums round once (``ACCURATE``). ``precision`` is flm.GEMM's and
+    ``gemv`` the GEMV's tunables, for a call the profile cannot tell from
+    another of its shape.
 
     Raises:
         ValueError: A tunable of the operator the rows do not choose, or
             ``accurate`` with one of flm.GEMM's.
     """
-    tiled = {
-        k: v
-        for k, v in dict(
-            k_tile=k_tile,
-            tile_n=tile_n,
-            precision=precision,
-        ).items()
-        if v is not None
-    }
+    tiled = {} if precision is None else dict(precision=precision)
     if len(x.shape) == 2 and x.shape[0] > 1:
         if gemv:
             raise ValueError(f"linear(): {x.shape[0]} rows take no GEMV {sorted(gemv)}")

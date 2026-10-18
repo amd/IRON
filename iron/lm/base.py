@@ -688,15 +688,13 @@ class Runner:
 
     A subclass names its ``config`` (a ``Config`` class read from the
     checkpoint's ``config.json``), ``model`` (the ``CausalLM``),
-    ``open_tokenizer`` and ``bos``, and
-    any ``sizes`` ``--size`` picks among; ``tune_arguments`` and
+    ``open_tokenizer`` and ``bos``; ``tune_arguments`` and
     ``tune_calls`` are what ``iron.lm.tune`` tunes its profile by. Given a ``seed``, the weights are drawn
     in the checkpoint's shapes and a prompt with no tokenizer is random
     tokens, so speed, accuracy and determinism need neither.
     """
 
     config: Config | type[Config]
-    sizes: dict[str, Config] = {}
     model: "type[CausalLM]"
     bos: int
     # What loads the checkpoint into transformers to record its goldens.
@@ -804,8 +802,7 @@ class Runner:
 
     @classmethod
     def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
-        """The checkpoint and tokenizer, a model with several ``sizes``'
-        ``--size``, and ``FLAGS``: the same flags ``main()``'s CLI and the
+        """The checkpoint and tokenizer, and ``FLAGS``: the same flags ``main()``'s CLI and the
         pytest fixtures read a runner's options by (``from_options``).
         """
         parser.add_argument(
@@ -814,13 +811,6 @@ class Runner:
             "model.safetensors.index.json",
         )
         parser.add_argument("tokenizer_path", nargs="?", help="the tokenizer's file")
-        if cls.sizes:
-            parser.add_argument(
-                "--size",
-                choices=cls.sizes,
-                default=next(n for n, c in cls.sizes.items() if c == cls.config),
-                help="the model's size (default: %(default)s)",
-            )
         for flags, kwargs in FLAGS:
             parser.add_argument(*flags, **kwargs)
 
@@ -845,8 +835,7 @@ class Runner:
         parser: argparse.ArgumentParser | None = None,
     ) -> "Runner":
         """A runner from ``args``, parsed or option strings: the checkpoint's
-        config.json gives the shape, narrowed by ``--size`` or
-        ``--max-seq-len``, and ``from_arguments`` builds the runner.
+        config.json gives the shape, narrowed by ``--max-seq-len``, and ``from_arguments`` builds the runner.
 
         Args:
             args: The parsed namespace, or the option strings to parse
@@ -859,9 +848,7 @@ class Runner:
             parser = argparse.ArgumentParser()
             cls.add_arguments(parser)
             args = parser.parse_args(args)
-        config = (
-            cls.sizes[args.size] if cls.sizes else cls.default_config(args.weights_path)
-        )
+        config = cls.default_config(args.weights_path)
         if args.max_seq_len is None:
             config = cls.fit(config, args.weights_path)
         elif args.max_seq_len > config.max_seq_len:

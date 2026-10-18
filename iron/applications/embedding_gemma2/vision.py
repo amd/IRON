@@ -217,7 +217,7 @@ class VisionTower(Tower):
 
     def layer(self, step, i, w, x):
         a = self.derived.vision_tower.encoder.layers[i].self_attn
-        # q and k reordered, until RoPE turns each half of a head itself.
+        # q and k reordered: RoPE turns halves, not each half of a head.
         reordered = {
             "q_proj": SimpleNamespace(weight=a.q_reordered),
             "k_proj": SimpleNamespace(weight=a.k_reordered),

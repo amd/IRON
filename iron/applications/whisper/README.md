@@ -24,8 +24,7 @@ OpenAI's Whisper (large-v3-turbo's shape: a 32-layer audio encoder, a
 - `Reference`: what the model is judged by, Hugging Face's
   `WhisperForConditionalGeneration` in float32 (`HuggingFaceWhisper`), its
   logits after a clip's features and the decoder's tokens recorded once to
-  a file (`iron.lm.Golden`). `Runner.reference` records `golden.npz`
-  beside a checkpoint.
+  a file (`iron.lm.Golden`).
 - `WhisperConfig`: both shapes, read from the checkpoint's own
   `config.json`, and each layer's parts.
 - `sanitize()`: renames Whisper's modules (`self_attn_layer_norm`/
@@ -49,9 +48,8 @@ version's operators resolve on npu2 and npu1.
 
 The real checkpoint waits on:
 
-- **Exact GELU.** Whisper's `activation_function` is `"gelu"`. `MLP`
-  and `WhisperEncoder` refuse it until mlir-aie's exact GELU arrives with
-  the pin bump.
+- **Exact GELU.** Whisper's `activation_function` is `"gelu"`, which
+  `MLP` refuses: no operator computes it.
 - **`Sample` at a vocabulary of 51866.** It has no even slice per core.
 - **The log-mel features.** The encoder takes the feature extractor's
   `input_features`. Whisper's extractor clamps each clip's log-mel to its

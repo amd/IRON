@@ -72,7 +72,7 @@ class AudioTower(Tower):
         super().__init__(config, tree.layers, c.max_tokens, c.max_tokens)
         T = c.max_tokens
         H, D, W, B = c.num_attention_heads, c.head_dim, c.window, c.band
-        C0, C1 = c.channels
+        C0, _ = c.channels
         F0 = c.mels // 2
         # The first convolution's output row: each frequency's channels in a
         # slot of their own, with a zero slot either side, the second's padding.

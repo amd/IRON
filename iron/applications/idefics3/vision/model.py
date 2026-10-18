@@ -79,8 +79,8 @@ class VisionConfig(Config):
         return (self.side // self.scale_factor) ** 2
 
     def layer(self, i: int) -> DecoderLayer:
-        # TODO(pin group): LayerNorm at the checkpoint's eps (layer_norm_eps)
-        # once the pin carries the kernel option; transformers' uses it now.
+        # The kernel's LayerNorm eps, not the checkpoint's layer_norm_eps,
+        # which transformers' uses.
         H, D = self.num_attention_heads, self.head_dim
         return DecoderLayer(
             Attention(H, H, D),

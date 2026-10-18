@@ -1139,18 +1139,18 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
 
 
 class Pointwise(iron.Graph):
-    """A 1x1 convolution's pixels projected, K and N of 16."""
+    """A 1x1 convolution's pixels projected."""
 
     def __init__(self, precision: Precision | None):
         self.precision = precision
 
     def body(self, x, w):
-        return F.linear(x, w, k_tile=16, tile_n=16, precision=self.precision)
+        return F.linear(x, w, precision=self.precision)
 
 
 @pytest.mark.parametrize("precision,macs", [(None, True), (Precision.HIGH, False)])
 def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
-    t = Pointwise(precision).trace(x=((256, 16), bfloat16), w=((16, 16), bfloat16))
+    t = Pointwise(precision).trace(x=((256, 128), bfloat16), w=((128, 128), bfloat16))
     (op,) = [op for op in t.operators if type(op) is FLMGEMM]
     assert op.resolved(npu2).emulate_bf16_mmul_with_bfp16 is macs
 
@@ -2795,7 +2795,7 @@ def test_a_handle_adds_and_multiplies_by_elementwise_and_rowwise_steps():
 
 @pytest.mark.parametrize(
     "rows, keywords",
-    [(1, dict(k_tile=64)), (4, dict(tile_size_output=32))],
+    [(1, dict(precision=Precision.HIGH)), (4, dict(tile_size_output=32))],
     ids=["gemv", "gemm"],
 )
 def test_linear_refuses_a_tunable_its_rows_do_not_choose(rows, keywords):

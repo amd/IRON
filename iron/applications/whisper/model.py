@@ -17,14 +17,13 @@ a zero row before them, as its convolutions' padding.
 """
 
 import dataclasses
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Scratchpad, lm
+from iron import Scratchpad
 import iron.functional as F
 from iron.lm import (
     MLP,
@@ -147,8 +146,8 @@ class WhisperConfig(DecoderConfig):
     rope_theta: float | None = dataclasses.field(default=None, kw_only=True)
     max_seq_len: int = dataclasses.field(metadata={"json": "max_target_positions"})
     prefill_chunk: int = 256
-    # Whisper's own "gelu" is exact, which MLP refuses until the pin group
-    # brings the kernel; a checkpoint at "gelu_pytorch_tanh" runs.
+    # Whisper's own "gelu" is exact, which MLP refuses: no operator computes
+    # it. A checkpoint at "gelu_pytorch_tanh" runs.
     hidden_act: str = dataclasses.field(
         default="gelu", metadata={"json": "activation_function"}
     )
@@ -204,11 +203,6 @@ class WhisperEncoder(Tower):
         c, weights = config, bf16(weights)
         self.whisper_encoder = e = weights.model.encoder
         super().__init__(c, e.layers, c.rows, c.rows)
-        if c.hidden_act != "gelu_pytorch_tanh":
-            # TODO(pin group): exact GELU, the checkpoint's own "gelu".
-            raise ValueError(
-                f"WhisperEncoder: no operator for activation {c.hidden_act!r} yet"
-            )
         self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.mels)
         self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
         # The second convolution's input: a zero row, then the first's output.
@@ -240,8 +234,6 @@ class WhisperEncoder(Tower):
     def head(self, x):
         return x
 
-    # TODO(whole-clip max reduction): the log-mel features on the device
-    # (LogMel with a power spectrum, log10 and the per-clip clamp).
     def body(self, features, *, n: Scratchpad[np.int32]):
         """The encoder's output over a clip's ``features``, ``(conv_rows +
         2, mels)``: a zero row, the frames, zero rows after.
@@ -306,26 +298,6 @@ class Whisper(EncoderDecoder):
         n = self.decoder.layer_norm
         h = F.layer_norm(x, n.weight, n.bias, self.config.eps)
         return GEMV.step(self.decoder.embed_tokens.weight, h)
-
-
-class Runner(lm.Runner):
-    """Whisper, from its checkpoint and ``tokenizer.json``."""
-
-    config = WhisperConfig
-    model = Whisper
-    #: ``<|startoftranscript|>``, every transcript's first token.
-    bos = 50258
-
-    def reference(self):
-        """With drawn weights, the model's own graph on the host; else
-        Hugging Face's logits (``Reference``), recorded beside the
-        checkpoint (``golden.npz``).
-        """
-        if self.seed is not None:
-            return super().reference()
-        directory = Path(self.checkpoint.path).parent
-        load = lambda: HuggingFaceWhisper.load(directory)  # noqa: E731
-        return Reference(Golden(directory / "golden.npz", load))
 
 
 class Reference:

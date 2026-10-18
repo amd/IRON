@@ -23,6 +23,7 @@ the RoPE table alone.
 """
 
 import dataclasses
+import math
 from pathlib import Path
 
 import numpy as np
@@ -85,9 +86,12 @@ class Granite(CausalLM):
             derived.put(model.norm, divided=divided)
         self.derived = derived.tree()
 
-    def embed(self, x):
+    def lookup(self, ids):
+        x = super().lookup(ids)
         if self.config.embedding_multiplier == 1:
             return x
+        E = self.config.hidden_size
+        x = x.reshape(math.prod(x.shape) // E, E)
         return RowwiseMul.step(x, self.derived.model.embed_tokens.scale)
 
     def head(self, x):

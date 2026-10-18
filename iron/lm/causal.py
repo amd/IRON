@@ -199,9 +199,6 @@ class CausalLM(Model):
             return F.linear(x, self.decoder.embed_tokens.weight)
         return F.linear(x, self.weights.lm_head.weight)
 
-    def embed(self, x):
-        return x
-
     def positions(self, x, step: DecodeStep):
         """``x``, the rows ``step`` runs, with the model's absolute positions
         placed; unchanged by default.
@@ -299,7 +296,6 @@ class CausalLM(Model):
             rows=rows,
             rope_start=rope_start,
         )
-        x = self.embed(x)
         # A decode step's one position is its start.
         start = start if prompt else position
         step = DecodeStep(prompt, angles, start, rows, position, source, x, ids)
@@ -512,7 +508,7 @@ class CausalLM(Model):
                 before any dispatch, so the caches are as they were.
         """
         tokens = self._tokens(tokens)
-        n, L, C = tokens.size, self.config.max_seq_len, self.config.prefill_chunk
+        n, L = tokens.size, self.config.max_seq_len
         if not 0 < n <= L:
             raise ValueError(f"{n} tokens do not fit {L} rows")
         held = self._held(tokens)
@@ -548,7 +544,7 @@ class CausalLM(Model):
             IndexError: A token is outside ``[0, vocab_size)``.
         """
         tokens = self._tokens(tokens)
-        n, L, C = tokens.size, self.config.max_seq_len, self.config.prefill_chunk
+        n, L = tokens.size, self.config.max_seq_len
         if not (0 < n and 0 < num_tokens and n + num_tokens - 1 <= L):
             raise ValueError(
                 f"{n} tokens and {num_tokens} more to draw do not fit {L} rows"

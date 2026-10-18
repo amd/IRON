@@ -300,7 +300,7 @@ class Conv1d(iron.Graph):
         self.bias = iron.weight(np.asarray(bias, np.float32).astype(bfloat16))
 
     def body(self, x, y=None, *, rows: Scratchpad[np.int32]):
-        k, s, C = self.kernel, self.stride, self.channels
+        k, s = self.kernel, self.stride
         R, line = x.shape
         out_rows = (R - k) // s + 1
         pattern = TensorAccessPattern((R, line), 0, [out_rows, k * line], [s * line, 1])
