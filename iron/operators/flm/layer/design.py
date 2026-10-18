@@ -466,12 +466,8 @@ class _Array:
             for c in range(dev.cols)
         }
         self.t = {stage: self.grid[at] for stage, at in PLACEMENT.items()}
-        self.flows = self.circuits()
-
-    def circuits(self) -> dict[str, Flow]:
-        """The circuit-switched flows, by name. The compiler assigns their
-        channels, and each stage's DMA reaches them by endpoint.
-        """
+        # The circuit-switched flows. The compiler assigns their channels, and
+        # each stage's DMA reaches them by endpoint.
         grid, t = self.grid, self.t
         ends = {}
         for col in PROJ_COLS:
@@ -496,7 +492,9 @@ class _Array:
             ("recv_y", "pl_up", "x_shim"),
         ):
             ends[name] = t[src], t[dst]
-        return {name: Flow(src, dst, name=name) for name, (src, dst) in ends.items()}
+        self.flows = {
+            name: Flow(src, dst, name=name) for name, (src, dst) in ends.items()
+        }
 
     def end(self, flow: str, tile: Tile):
         """The end of the circuit ``flow`` on ``tile``, for its DMA channel."""
@@ -1321,8 +1319,7 @@ class _Array:
         go first.
 
         Returns:
-            Every flow by name; the runtime sequence fills and drains those
-            with a shim end.
+            The flows the runtime sequence fills and drains, by name.
         """
         rt, t = self.rt, self.t
         x_shim, kv_shim = t["x_shim"], t["kv_shim"]
@@ -1390,7 +1387,8 @@ class _Array:
         add("amt_attn_qk", "amt_attn_kv", "amt_swa_attn_qk", "amt_swa_attn_kv")
         add("pli_rope_rms", "pli_down", "ple_y", "pli_gate", "plg_y", "plm_y")
         add("pli_up", "recv_y")
-        return shim | self.flows
+        shim_ends = ("proj_w", "recv_", "pli_")
+        return shim | {n: f for n, f in self.flows.items() if n.startswith(shim_ends)}
 
 
 def _ceil_mul(v, chunk):
@@ -1580,8 +1578,9 @@ _LINEAR_4W_TY = np.ndarray[(4 * W_BLOCK,), _BF16]
 _PROJ_MEM_W_INITS = (2, 0, 0, 2, 0, 0)
 
 
-def _proj_weight_channels(w0, w1, ins, outs, *locks):
-    """A projection memtile's weight channels, on the flow ends ``ins`` and ``outs``.
+def _proj_weight_channels(w0, w1, in_ends, out_ends, *locks):
+    """A projection memtile's weight channels, on the flow ends ``in_ends`` and
+    ``out_ends``.
 
     Each of the two halves of a weight object comes in on its own channel
     and goes out a W_BLOCK at a time on two, behind a chain of three locks.
@@ -1593,7 +1592,7 @@ def _proj_weight_channels(w0, w1, ins, outs, *locks):
         ins.append(
             _ping_pong(
                 DMAChannelDir.S2MM,
-                ins[h],
+                in_ends[h],
                 w0,
                 w1,
                 prod,
@@ -1606,7 +1605,7 @@ def _proj_weight_channels(w0, w1, ins, outs, *locks):
             outs.append(
                 _ping_pong(
                     DMAChannelDir.MM2S,
-                    outs[ch],
+                    out_ends[ch],
                     w0,
                     w1,
                     acq,
