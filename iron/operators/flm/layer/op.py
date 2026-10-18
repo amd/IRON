@@ -49,12 +49,13 @@ class DecodeLayer(Operator):
                 f"DecodeLayer: geometry ({self.geometry!r}) must be "
                 "aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or FLM_GEMMA4_E4B_DECODE"
             )
-        if self.layer_type not in LayerType:
+        try:
+            self.layer_type = LayerType(self.layer_type)
+        except ValueError:
             raise ValueError(
-                f"DecodeLayer: layer_type must be one of {', '.join(LayerType)}, "
-                f"not {self.layer_type!r}"
-            )
-        self.layer_type = LayerType(self.layer_type)
+                f"DecodeLayer: layer_type ({self.layer_type!r}) must be one of "
+                f"{', '.join(LayerType)}"
+            ) from None
         self.check_derived("x_len", "proj_len", "rms_len", "rope_rms_len", "kv_len")
 
     def resolve(self, dev):
