@@ -9,7 +9,7 @@ import inspect
 import numpy as np
 
 from .generation import Sampler, accuracy, determinism, generate_on_host, kl_stats
-from .model import Model
+from .model import Model, prompt_text
 
 #: The flags ``main()``'s CLI and pytest's fixtures read alike, each a
 #: tuple of ``add_argument``'s own flag strings and keywords.
@@ -58,12 +58,13 @@ def main(model: type[Model]):
     )
     for flags, kwargs in FLAGS:
         parser.add_argument(*flags, **kwargs)
+    parser.add_argument("--prompt", metavar="TEXT", help="the text to continue")
     parser.add_argument(
         "--prompt-len",
         type=int,
         default=2048,
-        help="characters of prompt.txt to prompt with, or with --random-weights "
-        "a third as many random tokens (default: 2048)",
+        help="without --prompt, characters of prompt.txt to prompt with, or "
+        "with --random-weights a third as many random tokens (default: 2048)",
     )
     parser.add_argument(
         "--num-tokens", type=int, default=40, help="tokens to generate (default: 40)"
@@ -103,7 +104,12 @@ def main(model: type[Model]):
         )
     except ValueError as e:
         parser.error(str(e))
-    tokens = model.prompt(args.prompt_len)
+    if args.prompt is None:
+        text, tokens = prompt_text(args.prompt_len), model.prompt(args.prompt_len)
+    elif model.tokenizer is None:
+        parser.error("--prompt takes the checkpoint's tokenizer: no --random-weights")
+    else:
+        text, tokens = args.prompt, model.tokenizer(args.prompt)
     if len(tokens) + args.num_tokens > model.config.max_seq_len:
         parser.error(
             f"a {len(tokens)}-token prompt and {args.num_tokens} more exceed "
@@ -126,41 +132,19 @@ def main(model: type[Model]):
         print(f"[Determinism] Differing runs: {n_differ}/{2 * (rounds - 1)}")
     else:
 
-        def decode(tokens: list[int]) -> str:
-            """``tokens`` as text, or as their numbers with no tokenizer."""
-            if model.tokenizer is None:
-                return "".join(f" {t}" for t in tokens)
-            return model.tokenizer.decode(tokens)
-
         def sampler():
             return Sampler(args.temperature, args.top_k)
 
-        pending: list[int] = []
-
-        def show(token):
-            pending.append(token)
-            text = decode(pending)
-            # A token can end partway through a character; the next completes it.
-            if not text.endswith("\ufffd"):
-                print(text, end="", flush=True)
-                pending.clear()
-
-        def report(first, later):
-            print(f"\n\n[Prefill] Time to first token: {first:7.3f} s")
-            if args.num_tokens > 1:
-                print(f"[Decode]  Tokens per second:   {1 / later:7.3f}")
-
-        print(decode(tokens[1:]), end="", flush=True)
-        drawn, first, later = model.generate(tokens, args.num_tokens, sampler())
-        print(decode(drawn), end="", flush=True)
-        report(first, later)
+        # The text, where there is a tokenizer to read it, else the ids.
+        ids = model.tokenizer is None
+        prompt = tokens if ids else text
+        for piece in model.stream(prompt, args.num_tokens, sampler()):
+            print(f" {piece}" if ids else piece, end="", flush=True)
+        print(f"\n\n[Prefill] Time to first token: {model.stats.ttft:7.3f} s")
+        if args.num_tokens > 1:
+            print(f"[Decode]  Tokens per second:   {model.stats.tokens_per_s:7.3f}")
         if args.compare_host:
-            print("\n[Host loop]\n" + decode(tokens[1:]), end="")
-            host, _, _ = generate_on_host(
-                model, tokens, args.num_tokens, sampler(), show
-            )
-            print(decode(pending), end="")
+            drawn = model.generate(tokens, args.num_tokens, sampler())
+            host, _, _ = generate_on_host(model, tokens, args.num_tokens, sampler())
             differ = sum(a != b for a, b in zip(drawn, host))
-            print(
-                f"\n[Device] Tokens differing from the host loop: {differ}/{len(host)}"
-            )
+            print(f"[Device] Tokens differing from the host loop: {differ}/{len(host)}")

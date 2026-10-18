@@ -17,6 +17,10 @@ dependencies = [
     "ml_dtypes",
 ]
 
+[project.optional-dependencies]
+# Chat messages rendered by a checkpoint's chat_template.
+models = ["jinja2"]
+
 [tool.setuptools.packages.find]
 include = ["iron*"]
 

@@ -2,16 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """``Model``, a model's graph, every version compiled and loaded before
-the first call, built from a checkpoint's files (``load``); ``OnHost``, the
-model with no device; and ``Tokenizer``, a prompt's text to its ids.
+the first call, built from a checkpoint's files (``load``), which generates
+from a prompt; ``OnHost``, the model with no device; and ``Tokenizer``, a
+prompt's text to its ids.
 """
 
 import dataclasses
 import functools
 import json
 import logging
+import math
 import os
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import ClassVar
 
@@ -23,7 +26,7 @@ from iron.common.image.packaging import require_device
 from .checkpoint import Checkpoint
 from .config import Config, DecoderConfig
 from .golden import Golden, HuggingFace
-from .generation import Sampler, generate_on_host
+from .generation import Sampler
 
 logger = logging.getLogger(__name__)
 
@@ -50,17 +53,41 @@ def prompt_text(chars: int, skip: int = 0) -> str:
 class Tokenizer:
     """Text to a prompt's token ids, ``bos`` first, and token ids back to
     text, over ``encoding``: anything with ``encode`` and ``decode``, as
-    ``Model.open_tokenizer`` gives.
+    ``Model.open_tokenizer`` gives. ``chat_template`` is the checkpoint's
+    own, from its ``tokenizer_config.json``, if it has one.
     """
 
-    def __init__(self, encoding, bos: int):
+    def __init__(self, encoding, bos: int, chat_template: str | None = None):
         self.encoding, self.bos = encoding, bos
+        self.chat_template = chat_template
 
     def __call__(self, text: str) -> list[int]:
         return [self.bos, *self.encoding.encode(text)]
 
     def decode(self, tokens) -> str:
         return self.encoding.decode(list(tokens))
+
+    def chat(self, messages: list[dict]) -> str:
+        """``messages``, each ``{"role": ..., "content": ...}``, as
+        ``chat_template`` renders them (with jinja2, the ``models`` extra),
+        the assistant's turn opened after them; the BOS is ``__call__``'s.
+
+        Raises:
+            ValueError: The checkpoint has no chat template.
+        """
+        if self.chat_template is None:
+            raise ValueError(
+                "the checkpoint's tokenizer_config.json has no chat_template"
+            )
+        from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+        env = ImmutableSandboxedEnvironment(
+            trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"]
+        )
+        template = env.from_string(self.chat_template)
+        return template.render(
+            messages=messages, add_generation_prompt=True, bos_token=""
+        )
 
 
 class _TokenizerJson:
@@ -81,6 +108,16 @@ class _TokenizerJson:
         return self._tokenizer.decode(tokens)
 
 
+@dataclasses.dataclass(frozen=True)
+class Stats:
+    """A generation's timings: the seconds to the first token, and the
+    tokens per second after it (NaN for one token).
+    """
+
+    ttft: float
+    tokens_per_s: float
+
+
 class Model(iron.Graph):
     """A model's graph, every version ``shapes()`` names compiled and
     loaded by ``load_versions()`` before the first call, so the arena is
@@ -95,7 +132,8 @@ class Model(iron.Graph):
     ``checkpoint``, the ``seed`` its weights were drawn at, if any, and the
     ``tokenizer``. Given a ``seed``, the weights are drawn in the
     checkpoint's shapes and a prompt with no tokenizer is random tokens, so
-    speed, accuracy and determinism need neither.
+    speed, accuracy and determinism need neither. ``stats`` are the last
+    generation's timings.
     """
 
     # Each checkpoint layer's dotted paths that its config's ``layer``
@@ -108,6 +146,7 @@ class Model(iron.Graph):
     checkpoint: Checkpoint | None = None
     seed: int | None = None
     tokenizer: Tokenizer | None = None
+    stats: Stats | None = None
 
     @classmethod
     def load(
@@ -172,7 +211,12 @@ class Model(iron.Graph):
             # A directory of its own may hold it at the top.
             if not tokenizer.exists():
                 tokenizer = directory / tokenizer.name
-            model.tokenizer = Tokenizer(cls.open_tokenizer(tokenizer), model.bos)
+            settings = directory / "tokenizer_config.json"
+            template = None
+            if settings.exists():
+                template = json.loads(settings.read_text()).get("chat_template")
+            encoding = cls.open_tokenizer(tokenizer)
+            model.tokenizer = Tokenizer(encoding, model.bos, template)
         return model
 
     @functools.cached_property
@@ -293,6 +337,64 @@ class Model(iron.Graph):
             return [self.bos, *draw]
         return self.tokenizer(prompt_text(chars, skip))
 
+    def generate(
+        self, prompt, max_tokens: int, sampler: Sampler | None = None, **inputs
+    ):
+        """``stream``'s pieces joined: the text drawn after a text prompt or
+        chat messages, else the token ids drawn.
+        """
+        pieces = list(self.stream(prompt, max_tokens, sampler, **inputs))
+        return "".join(pieces) if _is_text(prompt) else pieces
+
+    def stream(
+        self, prompt, max_tokens: int, sampler: Sampler | None = None, **inputs
+    ) -> Iterator:
+        """Draw ``max_tokens`` after ``prompt``, each yielded as it is drawn,
+        and its timings into ``stats`` once the last is.
+
+        Args:
+            prompt: Text, tokenized; a list of chat messages, each
+                ``{"role": ..., "content": ...}``, rendered by the
+                checkpoint's chat template (``Tokenizer.chat``); or token ids.
+                Text and messages yield text, each piece once its characters
+                are whole; ids yield ids.
+            max_tokens: How many tokens to draw.
+            sampler: How each is drawn; None is greedy.
+            inputs: What the model takes beside the tokens
+                (``Multimodal``'s ``raw``).
+
+        Raises:
+            RuntimeError: Text or messages, and no tokenizer.
+        """
+        text = _is_text(prompt)
+        if text and self.tokenizer is None:
+            raise RuntimeError(f"{type(self).__name__}: no tokenizer; give token ids")
+        if text and not isinstance(prompt, str):
+            prompt = self.tokenizer.chat(prompt)
+        tokens = self.tokenizer(prompt) if text else prompt
+        sampler = Sampler(temperature=0) if sampler is None else sampler
+        drawn, shown = [], ""
+        began = first = last = time.perf_counter()
+        for token in self._draw(tokens, max_tokens, sampler, **inputs):
+            last = time.perf_counter()
+            if not drawn:
+                first = last
+            drawn.append(token)
+            if not text:
+                yield token
+                continue
+            whole = self.tokenizer.decode(drawn)
+            # A token can end partway through a character; the next completes it.
+            if not whole.endswith("\ufffd"):
+                yield whole[len(shown) :]
+                shown = whole
+        rest = self.tokenizer.decode(drawn)[len(shown) :] if text else ""
+        if rest:
+            yield rest
+        later = len(drawn) - 1
+        rate = later / (last - first) if later else math.nan
+        self.stats = Stats(first - began, rate)
+
     def sanitize(self, w):
         """The checkpoint's layer module ``w``, after ``renames``, as its
         config's ``layer`` reads it (mlx-lm's ``sanitize``); ``w`` itself by
@@ -349,6 +451,13 @@ class Model(iron.Graph):
         return f"{self.name}({', '.join(fields)})"
 
 
+def _is_text(prompt) -> bool:
+    """Whether ``prompt`` is text or chat messages, not token ids."""
+    if isinstance(prompt, str):
+        return True
+    return isinstance(prompt, list) and isinstance(next(iter(prompt), None), dict)
+
+
 class OnHost:
     """A model with its images stood in by its graph's reference
     (``Graph.reference``), run at whatever shape it is called with: the
@@ -356,15 +465,18 @@ class OnHost:
     compiles nothing, and ``generate`` draws on the host.
     """
 
+    def _draw(self, tokens, max_tokens: int, sampler: Sampler) -> Iterator[int]:
+        history = [int(t) for t in tokens]
+        for _ in range(max_tokens):
+            history.append(sampler(self.logits(history)))
+            yield history[-1]
+
     def __call__(self, *tensors, **values):
         logits, carry = self.reference(*tensors, **values)
         return _HostOutput(logits), carry
 
     def load_versions(self, *, release=None, full_elf=None, dev=None) -> "OnHost":
         return self
-
-    def generate(self, tokens, num_tokens: int, sample: Sampler):
-        return generate_on_host(self, tokens, num_tokens, sample)
 
 
 class _HostOutput:

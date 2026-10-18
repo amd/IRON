@@ -59,5 +59,5 @@ def test_a_causal_model_draws_after_its_soft_tokens(loaded):
         expected.append(token)
         history = np.append(history, token)
     sample = Sampler(0.0, 40, seed=0)
-    drawn, _, _ = model.generate(tokens, 3, sample, {IMAGE: (soft,)})
+    drawn = model.generate(tokens, 3, sample, raw={IMAGE: (soft,)})
     assert drawn == expected

@@ -113,11 +113,11 @@ def check_generation(model, prompt_len: int, num_tokens: int, *, record):
     drawn.
     """
     tokens = prompt(model, prompt_len, num_tokens)
-    drawn, first, later = model.generate(tokens, num_tokens, Sampler())
+    drawn = model.generate(tokens, num_tokens, Sampler())
     print(drawn if model.tokenizer is None else model.tokenizer.decode(drawn))
-    record("TTFT", first)
+    record("TTFT", model.stats.ttft)
     if num_tokens > 1:
-        record("TPS", 1 / later)
+        record("TPS", model.stats.tokens_per_s)
     return tokens, drawn
 
 
@@ -131,8 +131,8 @@ def check_prompt_time(model, length: int, runs: int = 3, *, record):
     seconds = []
     for _ in range(runs):
         tokens = [model.bos, *rng.integers(0, model.config.vocab_size, length - 1)]
-        _, first, _ = model.generate(tokens, 1, Sampler())
-        seconds.append(first)
+        model.generate(tokens, 1, Sampler())
+        seconds.append(model.stats.ttft)
     record("TTFT", float(np.median(seconds)))
     record("Tokens", length)
 

@@ -84,7 +84,14 @@ public API adds its entry under Unreleased.
   methods. Each application's package exports its model class.
 - `lm.main(Model)`, a model's command line, whose positional argument is
   the path or repository id `load` takes.
-- `OnHost.generate`, which draws on the host (`generate_on_host`).
+- `OnHost.generate`, which draws on the host.
+- `Model.generate(prompt, max_tokens, sampler=None)`: text in gives text
+  out, token ids give ids, and a list of `{"role", "content"}` messages is
+  rendered by the checkpoint's `chat_template` (`Tokenizer.chat`, with
+  jinja2 from the `models` extra); `sampler=None` is greedy.
+  `Model.stream` yields the same pieces as they are drawn, and
+  `model.stats` holds the last call's `ttft` and `tokens_per_s`.
+- `--prompt TEXT` on a model's command line.
 
 ### Changed
 
@@ -163,6 +170,12 @@ public API adds its entry under Unreleased.
 - A missing golden fails `check_accuracy` instead of skipping it, and a golden
   whose fingerprint no longer matches is refused.
 - `CausalLM.generate` times the first token from the call.
+- `generate(tokens, num_tokens, sample)` is `generate(prompt, max_tokens,
+  sampler=None)`, and returns the answer alone, not a tuple with the
+  timings; `Multimodal.generate` takes `raw=` by keyword. The old names
+  are gone, with no aliases.
+- A model's command line streams the text it draws, and neither echoes
+  `prompt.txt` nor prints the host loop's text under `--compare-host`.
 - `Sampler` defaults to temperature 0.7 and top-k 50, a model CLI's
   `--temperature` and `--top-k` take those defaults, and with no `rng` it
   draws from one seeded at `SEED`.
@@ -232,6 +245,7 @@ public API adds its entry under Unreleased.
 - `Derived`; computed weights live in `sanitize`'s output or on the model.
 - `CausalLM.head` and `Encoder.norm()` overrides, replaced by `final_norm`;
   `CausalLM.embed`.
+- `generate_on_host(show=)`.
 - `Runner`, its `runner` back-pointer and `VLMRunner`: the model class is
   what loads (`Model.load`); idefics3's whole model is `SmolVLM`. A model's
   command line takes the checkpoint's directory or repository id, not

@@ -105,8 +105,8 @@ def greedy(logits: np.ndarray) -> int:
     return int(np.argmax(np.asarray(logits, dtype=np.float32).reshape(-1)))
 
 
-def generate_on_host(model, tokens, num_tokens, sample, show=None):
-    """Draw ``num_tokens`` after ``tokens``, each passed to ``show``.
+def generate_on_host(model, tokens, num_tokens, sample):
+    """Draw ``num_tokens`` after ``tokens``, each from ``model``'s logits.
 
     Returns the tokens drawn, the seconds to the first and the mean seconds
     per token after it (NaN for one token).
@@ -116,8 +116,6 @@ def generate_on_host(model, tokens, num_tokens, sample, show=None):
         start = time.perf_counter()
         history.append(sample(model.logits(history)))
         seconds.append(time.perf_counter() - start)
-        if show is not None:
-            show(history[-1])
     later = np.mean(seconds[1:]) if num_tokens > 1 else float("nan")
     return history[-num_tokens:], seconds[0], float(later)
 

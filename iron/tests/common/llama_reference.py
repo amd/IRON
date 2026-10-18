@@ -27,6 +27,7 @@ import base64
 import dataclasses
 import itertools
 import json
+import math
 import struct
 from types import SimpleNamespace
 
@@ -475,17 +476,72 @@ def _repository(directory, weights):
     (directory / "original" / "tokenizer.model").write_text(ranks)
 
 
+QUESTION = "The capital of France is"
+
+# The ChatML template Qwen 2.5's and SmolLM2's checkpoints follow.
+CHATML = (
+    "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\\n' + "
+    "message['content'] + '<|im_end|>' + '\\n'}}{% endfor %}"
+    "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+)
+
+
 def test_the_quick_start_script_runs_on_a_toy_repository(cpu, tmp_path):
     """The quick start's calls on a toy repository, the host standing in for
-    the NPU: the BOS and the text's ids, and from seed 0 the tokens the
-    host loop draws from the model on the same weights.
+    the NPU: the BOS and the text's ids, and from seed 0 the text of the
+    tokens the host loop draws from the model on the same weights.
     """
     _repository(tmp_path, cpu.weights)
     model = OnHost.load(tmp_path)
-    tokens = model.tokenizer("The capital of France is")
-    out, ttft, per_token = model.generate(tokens, num_tokens=8, sample=Sampler(seed=0))
+    out = model.generate(QUESTION, max_tokens=8, sampler=Sampler(seed=0))
+    tokens = model.tokenizer(QUESTION)
     assert tokens[0] == SMALL.vocab_size - 1
-    assert model.tokenizer.decode(tokens[1:]) == "The capital of France is"
+    assert model.tokenizer.decode(tokens[1:]) == QUESTION
     host = OnHost(cpu.config, cpu.weights)
     want, _, _ = generate_on_host(host, tokens, 8, Sampler(seed=0))
-    assert out == want
+    assert out == model.tokenizer.decode(want)
+
+
+@pytest.fixture(scope="module")
+def toy(cpu, tmp_path_factory):
+    """The model of a toy repository whose ``tokenizer_config.json`` holds
+    ``CHATML``, loaded, the host standing in for the NPU.
+    """
+    directory = tmp_path_factory.mktemp("repository")
+    _repository(directory, cpu.weights)
+    settings = {"chat_template": CHATML}
+    (directory / "tokenizer_config.json").write_text(json.dumps(settings))
+    return OnHost.load(directory)
+
+
+def test_generate_gives_text_for_text_and_ids_for_ids(toy):
+    text = toy.generate(QUESTION, 4)
+    ids = toy.generate(toy.tokenizer(QUESTION), 4)
+    assert len(ids) == 4 and all(type(t) is int for t in ids)
+    assert isinstance(text, str) and text == toy.tokenizer.decode(ids)
+
+
+def test_stream_s_pieces_joined_are_what_generate_gives(toy):
+    pieces = list(toy.stream(QUESTION, 6, Sampler(seed=3)))
+    assert all(isinstance(p, str) for p in pieces)
+    assert "".join(pieces) == toy.generate(QUESTION, 6, Sampler(seed=3))
+
+
+def test_no_sampler_is_greedy(toy):
+    tokens = toy.tokenizer(QUESTION)
+    assert toy.generate(tokens, 6) == toy.generate(tokens, 6, Sampler(temperature=0))
+
+
+def test_a_generation_s_timings_are_the_model_s_stats(toy):
+    toy.generate(QUESTION, 3)
+    assert toy.stats.ttft > 0 and toy.stats.tokens_per_s > 0
+    toy.generate(QUESTION, 1)
+    assert math.isnan(toy.stats.tokens_per_s)
+
+
+def test_chat_messages_are_rendered_by_the_checkpoint_s_template(toy):
+    pytest.importorskip("jinja2")
+    messages = [{"role": "user", "content": "Hi"}]
+    text = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+    assert toy.tokenizer.chat(messages) == text
+    assert toy.generate(messages, 4) == toy.generate(text, 4)

@@ -7,6 +7,7 @@ placeholders takes its tower's j-th soft token.
 """
 
 import inspect
+from collections.abc import Iterator
 
 import numpy as np
 
@@ -241,11 +242,16 @@ class Multimodal(Model):
         self.place(tokens, raw)
         return self.text.logits(tokens)
 
-    def generate(
-        self, tokens, num_tokens: int, sample: Sampler, raw: dict[int, tuple]
-    ) -> tuple[list[int], float, float]:
+    def _draw(
+        self,
+        tokens,
+        max_tokens: int,
+        sampler: Sampler,
+        raw: dict[int, tuple] | None = None,
+    ) -> Iterator[int]:
         """A causal text model's draws after ``tokens``, ``raw`` at their
-        placeholders (``CausalLM.generate``).
+        placeholders (none by default): ``generate(..., raw=)`` and
+        ``stream(..., raw=)``.
         """
-        self.place(tokens, raw)
-        return self.text.generate(tokens, num_tokens, sample)
+        self.place(tokens, raw or {})
+        return self.text._draw(tokens, max_tokens, sampler)

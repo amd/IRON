@@ -16,8 +16,8 @@ on the token the last one drew.
 
 import argparse
 import dataclasses
+import itertools
 import logging
-import time
 from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
@@ -569,38 +569,39 @@ class CausalLM(Model):
         logits = out.numpy()
         return np.array(logits).reshape(-1)
 
-    def generate(
-        self, tokens, num_tokens: int, sample: Sampler
-    ) -> tuple[list[int], float, float]:
-        """Draw ``num_tokens`` after ``tokens`` on the device.
+    def _draw(self, tokens, max_tokens: int, sampler: Sampler) -> Iterator[int]:
+        """Draw ``max_tokens`` after ``tokens`` on the device, each yielded
+        as it is drawn (``Model.stream``).
 
         Where the decode step is a full ELF each step starts the next
-        (``device_loop``); elsewhere the host starts each step on the token
-        the last one drew, which it reads alone. The draws match
-        ``generation.generate`` on the host with the same seed.
-
-        Returns:
-            The tokens drawn, the seconds to the first, and the mean seconds
-            per token after it (NaN for one token).
+        (``device_loop``), and each token is read once its step completes;
+        elsewhere the host starts each step on the token the last one drew,
+        which it reads alone. The draws match ``generate_on_host`` with the
+        same seed.
 
         Raises:
+            ValueError: The tokens and those to draw do not fit the caches.
             IndexError: A token is outside ``[0, vocab_size)``.
+            RuntimeError: Neither version is loaded: ``load_versions()``
+                first.
         """
         tokens = self._tokens(tokens)
         n, L = tokens.size, self.config.max_seq_len
-        if not (0 < n and 0 < num_tokens and n + num_tokens - 1 <= L):
+        if not (0 < n and 0 < max_tokens and n + max_tokens - 1 <= L):
             raise ValueError(
-                f"{n} tokens and {num_tokens} more to draw do not fit {L} rows"
+                f"{n} tokens and {max_tokens} more to draw do not fit {L} rows"
             )
+        if self._prompt is None or self._decode is None:
+            raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         loop = self.device_loop
-        assert self._prompt is not None and self._decode is not None
-        began = time.perf_counter()
         # The prompt draws at its last position, n - 1; decode step k at n + k.
         draws = np.zeros((L, ROW_WORDS), dtype=np.int32)
-        draws[n - 1 : n - 1 + num_tokens] = sample.rows(num_tokens, self._k_max())
+        draws[n - 1 : n - 1 + max_tokens] = sampler.rows(max_tokens, self._k_max())
         self._decode.write(self.draws, draws)
         start = self.resume(self._held(tokens))
-        self._seen = tokens[:start]
+        # A caller may stop early, leaving steps in the caches nothing records:
+        # until the last token, they hold nothing.
+        self._seen = np.empty(0, dtype=np.int64)
         for inputs, values in self._chunks(tokens, start):
             if not loop or values["position"] < n - 1:
                 _, carry = self(*inputs, **values)
@@ -610,25 +611,21 @@ class CausalLM(Model):
                     id(version), CarriedLoop(version, self._decode, depth=2)
                 )
                 started.start(*inputs, **values)
-        first = time.perf_counter()
+        drawn = []
         if loop:
-            for _ in started.steps(num_tokens - 1):
-                pass
+            steps = itertools.chain([None], started.steps(max_tokens - 1))
+            for k, _ in enumerate(steps):
+                drawn.append(int(self._decode.read(self.drawn)[n - 1 + k]))
+                yield drawn[-1]
         else:
-            drawn = [carry["token"]]
-            for _ in range(num_tokens - 1):
+            drawn.append(int(carry["token"]))
+            yield drawn[-1]
+            for _ in range(max_tokens - 1):
                 _, carry = self(start=0, rows=1, rope_start=0, **carry)
-                drawn.append(carry["token"])
-        later = (
-            (time.perf_counter() - first) / (num_tokens - 1)
-            if num_tokens > 1
-            else float("nan")
-        )
-        if loop:
-            drawn = self._decode.read(self.drawn)[n - 1 : n - 1 + num_tokens]
+                drawn.append(int(carry["token"]))
+                yield drawn[-1]
         # The caches hold every token but the last drawn, which no step read.
         self._seen = np.concatenate([tokens, drawn[:-1]]).astype(np.int64)
-        return [int(t) for t in drawn], first - began, later
 
     def forget(self, position: int) -> None:
         """Hold nothing the caches have from ``position`` on: the next call
