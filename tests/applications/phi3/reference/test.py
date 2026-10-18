@@ -75,9 +75,7 @@ class TestPhi3(Decoder):
     def names(cls):
         return _shapes(cls.config)
 
-    def test_a_turn_past_the_original_context_rotates_only_its_own_rows_long(
-        self, golden
-    ):
+    def test_a_turn_past_the_original_context_rotates_only_its_own_rows(self, golden):
         """Decision 35 on decision 50: a prompt within 128 positions rotates
         short and a first turn passing 128 long throughout, both Hugging
         Face's; a second turn passing 128 runs from its first new token, its

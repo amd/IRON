@@ -174,13 +174,8 @@ def small_causal(golden):
     return model, hf.logits, tokens, soft
 
 
-@pytest.fixture(scope="module")
-def causal(golden):
-    return small_causal(golden)
-
-
-def test_a_causal_model_s_versions_and_signature(causal):
-    model, *_ = causal
+def test_a_causal_model_s_versions_and_signature(golden):
+    model, *_ = small_causal(golden)
     assert list(model.signature().parameters) == [
         "ids",
         "features",
@@ -202,12 +197,12 @@ def test_a_causal_model_s_versions_and_signature(causal):
     assert model.at == {IMAGE: 256}
 
 
-def test_a_run_of_soft_tokens_crossing_a_chunk_is_placed_on_both_sides(causal):
+def test_a_run_of_soft_tokens_crossing_a_chunk_is_placed_on_both_sides(golden):
     """Each version's reference in turn, its states carried from one to the
     next: the tower, then each chunk, one holding a placeholder through
     ``placed`` with the count before it, then a decode step.
     """
-    model, reference, tokens, soft = causal
+    model, reference, tokens, soft = small_causal(golden)
     C = model.text.config.prefill_chunk
     calls, towers = model.tower_calls(tokens, {IMAGE: (soft,)})
     zero = dict(token=0, position=0, start=0, rows=1, rope_start=0)

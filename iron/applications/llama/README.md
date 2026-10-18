@@ -84,7 +84,7 @@ top-k must be at most 64.
   -l` must cover one bank. How a long prompt stays under the amdxdna
   driver's watchdog, and its measured times, are in AGENTS.md's "Not
   built, or limited"
-- `--temperature`, `--top-k`: the sampler's (default 0.7 and 50)
+- `--temperature`, `--top-k`: the sampler's, at `Sampler`'s defaults
 - `--check-accuracy`: instead of sampling, compare each step's logits with
   the reference's and print the KL divergence and top-1 agreement
 - `--check-determinism ROUNDS`: instead of sampling, run two prompts

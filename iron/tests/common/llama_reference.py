@@ -220,8 +220,8 @@ class Decoder:
         steps = len(cpu.expected) + 1
         results = accuracy(model, cpu.golden, cpu.prompt, steps)
         assert all(top1 for _, top1 in results), results
-        # bf16 graphs against a float32 forward: close, not equal. The toys
-        # measure at most 8e-5: a bound ten times that.
+        # bf16 graphs against a float32 forward: close, not equal. The seven
+        # toys measure at most 2.7e-4 (LFM2's), the rest at most 8e-5.
         assert all(0 <= kl < 1e-3 for kl, _ in results), results
         assert any(kl > 0 for kl, _ in results), results
 
