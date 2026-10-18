@@ -177,11 +177,10 @@ class VLMRunner(Runner):
         super().__init__(weights_path, tokenizer_path, config, seed)
         self.vision_config = VisionConfig.from_checkpoint(weights_path)
 
-    def npu(self, full_elf=None) -> Multimodal:
+    def build(self) -> Multimodal:
         text = SmolVLMText(self.config, self.weights)
         tower = VisionTower(self.vision_config, self.weights)
-        model = Multimodal(text, {self.vision_config.image_token: tower})
-        return model.load(release=self.checkpoint.release, full_elf=full_elf)
+        return Multimodal(text, {self.vision_config.image_token: tower})
 
     def reference(self) -> Reference:
         """What the model is judged by: transformers' own SmolVLM, over the

@@ -36,7 +36,6 @@ from iron.tune.autotune import Call
 from .blocks import Attention, DecoderLayer, MLP, Norm
 from .golden import Golden, HuggingFace
 from .generation import (
-    SEED,
     Sampler,
     accuracy,
     determinism,
@@ -762,8 +761,7 @@ class Runner:
             help="how many contexts up to --context it is timed at, each "
             "timed per setting: their cost grows with it (default: 6)",
         )
-        parser.add_argument("--temperature", type=float, default=0.7)
-        parser.add_argument("--top-k", type=int, default=50)
+        sampling_arguments(parser)
 
     @classmethod
     def tune_calls(
@@ -778,7 +776,7 @@ class Runner:
                 f"--context {args.context} is past max_seq_len {config.max_seq_len}"
             )
         model = cls.model(config, Checkpoint(args.checkpoint).tree("unread"))
-        sample = Sampler(args.temperature, args.top_k, np.random.default_rng(SEED))
+        sample = Sampler(args.temperature, args.top_k)
         return model.tune_calls(
             sample, args.position, args.token, args.context, args.points
         )
@@ -921,12 +919,15 @@ class Runner:
         )
         return dataclasses.replace(config, max_seq_len=fits)
 
-    def npu(self, full_elf: bool | None = None) -> "CausalLM":
-        """The model compiled and loaded, weights uploaded; ``full_elf`` is
-        both versions' packaging (``CausalLM.load``).
+    def build(self) -> "Model":
+        """The model on ``config`` and the weights, not yet loaded."""
+        return self.model(self.config, self.weights)
+
+    def npu(self, full_elf: bool | None = None) -> "Model":
+        """``build()``'s model compiled and loaded, weights uploaded;
+        ``full_elf`` is every version's packaging (``Model.load``).
         """
-        model = self.model(self.config, self.weights)
-        return model.load(release=self.checkpoint.release, full_elf=full_elf)
+        return self.build().load(release=self.checkpoint.release, full_elf=full_elf)
 
     def reference(self):
         """What the model is judged by: with drawn weights, its own graph on
@@ -968,6 +969,12 @@ class Runner:
         return self.encode(prompt_text(chars, skip))
 
 
+def sampling_arguments(parser: argparse.ArgumentParser) -> None:
+    """``--temperature`` and ``--top-k``, a ``Sampler``'s, at its defaults."""
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top-k", type=int, default=50)
+
+
 def main(runner: type[Runner], description: str):
     """The command line of ``runner``'s model: sample, or check it."""
     parser = argparse.ArgumentParser(description=description)
@@ -982,8 +989,7 @@ def main(runner: type[Runner], description: str):
     parser.add_argument(
         "--num-tokens", type=int, default=40, help="tokens to generate (default: 40)"
     )
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top-k", type=int, default=50)
+    sampling_arguments(parser)
     check = parser.add_mutually_exclusive_group()
     check.add_argument(
         "--check-accuracy",
@@ -1037,7 +1043,7 @@ def main(runner: type[Runner], description: str):
     else:
 
         def sampler():
-            return Sampler(args.temperature, args.top_k, np.random.default_rng(SEED))
+            return Sampler(args.temperature, args.top_k)
 
         pending: list[int] = []
 

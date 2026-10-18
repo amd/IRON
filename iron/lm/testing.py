@@ -108,15 +108,16 @@ def prompt(runner, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
 def check_generation(runner, model, prompt_len: int, num_tokens: int, *, record):
     """Sample ``num_tokens`` on the device after a prompt of ``prompt_len``
     characters (``CausalLM.generate``); record the time to the first token
-    and the tokens per second after it.
+    and the tokens per second after it. Returns the prompt and the tokens
+    drawn.
     """
     tokens = prompt(runner, prompt_len, num_tokens)
-    sample = Sampler(0.7, 50, np.random.default_rng(SEED))
-    drawn, first, later = model.generate(tokens, num_tokens, sample)
+    drawn, first, later = model.generate(tokens, num_tokens, Sampler())
     print(runner.decode(drawn))
     record("TTFT", first)
     if num_tokens > 1:
         record("TPS", 1 / later)
+    return tokens, drawn
 
 
 def check_prompt_time(runner, model, length: int, runs: int = 3, *, record):
@@ -129,8 +130,7 @@ def check_prompt_time(runner, model, length: int, runs: int = 3, *, record):
     seconds = []
     for _ in range(runs):
         tokens = [runner.bos, *rng.integers(0, runner.config.vocab_size, length - 1)]
-        sample = Sampler(0.7, 50, np.random.default_rng(SEED))
-        _, first, _ = model.generate(tokens, 1, sample)
+        _, first, _ = model.generate(tokens, 1, Sampler())
         seconds.append(first)
     record("TTFT", float(np.median(seconds)))
     record("Tokens", length)
@@ -142,17 +142,10 @@ def check_device_sampling(runner, model, prompt_len: int, num_tokens: int, *, re
     and tokens per second, then sample again on the host from each step's
     logits from the same seed: the text is the same, token for token.
     """
-    tokens = prompt(runner, prompt_len, num_tokens)
-
-    def sampler():
-        return Sampler(0.7, 50, np.random.default_rng(SEED))
-
-    drawn, first, later = model.generate(tokens, num_tokens, sampler())
-    print(runner.decode(drawn))
-    record("TTFT", first)
-    if num_tokens > 1:
-        record("TPS", 1 / later)
-    host, _, _ = generate_on_host(model, tokens, num_tokens, sampler())
+    tokens, drawn = check_generation(
+        runner, model, prompt_len, num_tokens, record=record
+    )
+    host, _, _ = generate_on_host(model, tokens, num_tokens, Sampler())
     differing = [i for i, (a, b) in enumerate(zip(drawn, host)) if a != b]
     record("DifferingTokens", len(differing))
     assert not differing, f"tokens {differing} of {num_tokens} differ from the host's"
@@ -311,15 +304,12 @@ def check_deep_prompt(
     chunk = np.resize(tokens, rows)
     ids = model.prompt_ids(chunk)
     begin = deepest * C
-    # A sequence past a second table's position takes it (``long_angles``).
-    past = model.long_past
-    table = L if past is not None and begin + rows > past else 0
     values = dict(
         token=int(chunk[-1]),
         position=begin + rows - 1,
         start=begin,
         rows=rows,
-        rope_start=table + begin,
+        rope_start=model.table_start(begin + rows) + begin,
     )
     with _fill_caches(model, len(tokens), begin):
         start = time.perf_counter()

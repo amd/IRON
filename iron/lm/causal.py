@@ -618,15 +618,21 @@ class CausalLM(Model):
         ids[: tokens.size] = tokens
         return ids
 
+    def table_start(self, n: int) -> int:
+        """The row of the RoPE angles a sequence of ``n`` tokens reads from:
+        past ``long_past``, the second table's, ``max_seq_len`` rows on.
+        """
+        past = self.long_past
+        return self.config.max_seq_len if past is not None and n > past else 0
+
     def _chunks(self, tokens: np.ndarray, start: int) -> Iterator[tuple]:
         """Each prompt call from ``start``: its inputs, ``ids`` and for a call
         holding a placeholder ``before``, and its per-call values. With
         recurrent state a call ends at the next chunk boundary, the slot it
         writes.
         """
-        n, L, C = tokens.size, self.config.max_seq_len, self.config.prefill_chunk
-        # A sequence passing it takes the second table, L rows on.
-        table = L if self.long_past is not None and n > self.long_past else 0
+        n, C = tokens.size, self.config.prefill_chunk
+        table = self.table_start(n)
         end = start
         while end < n:
             begin, end = end, min(end + C, n)

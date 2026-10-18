@@ -515,9 +515,9 @@ def test_greedy_is_argmax():
 
 
 def test_seeded_sampling_is_reproducible():
+    """Two default samplers, each seeded at ``SEED``, draw alike."""
     logits = random_logits()
-    a = Sampler(0.7, 50, np.random.default_rng(1608560892))
-    b = Sampler(0.7, 50, np.random.default_rng(1608560892))
+    a, b = Sampler(), Sampler()
     draws = [a(logits) for _ in range(200)]
     assert draws == [b(logits) for _ in range(200)]
     assert len(set(draws)) > 1  # it does sample
