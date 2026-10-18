@@ -12,6 +12,9 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `iron.lm.testing.load_from_flags`, a model test's `Model.load` at the
+  `--random-weights` and `--max-seq-len` pytest was given, its files
+  `require`d; `require(staged=False)` skips in CI too.
 - `Gather` and `GatherWords`, `Copy`'s gather steps, in `iron.operators`'
   catalog, so a profile that tunes them saves and loads; a test fails on
   any public operator the catalog leaves out.

@@ -13,8 +13,6 @@ shapes (only its header is read) and random prompts, on a host without the
 tokenizer, and ``--max-seq-len`` at another context.
 """
 
-import functools
-
 import aie.utils as aie_utils
 import pytest
 
@@ -26,6 +24,7 @@ from iron.lm.testing import (
     check_determinism,
     check_device_sampling,
     check_generation,
+    load_from_flags,
     require,
     weights_dir,
 )
@@ -43,20 +42,9 @@ pytestmark = pytest.mark.supported_devices("npu2")
 
 @pytest.fixture(scope="module", params=list(CHECKPOINTS), ids=str)
 def load(request):
-    """``Llama.load`` of the checkpoint, as the CLI loads it: at the
-    options pytest's own ``--random-weights``/``--max-seq-len`` flags
-    (``conftest.py``'s, ``iron.lm.cli.FLAGS``) were given.
-    """
     directory, name = CHECKPOINTS[request.param]
     weights = weights_dir(directory) / name
-    tokenizer = weights.with_name("tokenizer.model")
-    config = weights.with_name("config.json")
-    seed = request.config.getoption("--random-weights")
-    max_seq_len = request.config.getoption("--max-seq-len")
-    require(*((weights, config) if seed is not None else (weights, tokenizer, config)))
-    return functools.partial(
-        Llama.load, weights.parent, seed=seed, max_seq_len=max_seq_len
-    )
+    return load_from_flags(request, Llama, weights, "tokenizer.model")
 
 
 @pytest.fixture(scope="module")
@@ -69,12 +57,7 @@ def model(load):
         aie_utils.DefaultNPURuntime.cleanup()
 
 
-# KL(fp32 CPU || NPU), teacher-forced over 40 steps. The graphs measure a
-# mean of 0.0083 and a p90 of 0.018; over 140 positions of prompt.txt the
-# p90 is 0.017. The largest step is prefill at 0.091, one of two positions
-# of the 140 above 0.05. Decode attention over unmasked KV-cache slots
-# measured 9.2. Measured on 1B; 3B's projections take bf16 macs (its
-# profile), and its bounds are 1B's until measured.
+# KL(fp32 CPU || NPU) over 40 steps of 1B measured mean 0.0083, p90 0.018, max 0.091.
 MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
 
 

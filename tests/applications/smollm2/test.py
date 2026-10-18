@@ -13,8 +13,6 @@ shapes and random prompts, on a host without the tokenizer, and
 ``--max-seq-len`` at another context.
 """
 
-import functools
-
 import aie.utils as aie_utils
 import pytest
 
@@ -25,32 +23,18 @@ from iron.lm.testing import (
     check_determinism,
     check_device_sampling,
     check_generation,
-    require,
+    load_from_flags,
     weights_dir,
 )
 
 WEIGHTS = weights_dir("smollm2-1.7b-instruct") / "model.safetensors"
-TOKENIZER = weights_dir("smollm2-1.7b-instruct") / "tokenizer.json"
-CONFIG = weights_dir("smollm2-1.7b-instruct") / "config.json"
 
 pytestmark = pytest.mark.supported_devices("npu2")
 
 
 @pytest.fixture(scope="module")
 def load(request):
-    """``SmolLM2.load`` of the checkpoint, as the CLI loads it: at the
-    options pytest's own ``--random-weights``/``--max-seq-len`` flags
-    (``conftest.py``'s, ``iron.lm.cli.FLAGS``) were given.
-    """
-    seed = request.config.getoption("--random-weights")
-    max_seq_len = request.config.getoption("--max-seq-len")
-    if seed is not None:
-        require(WEIGHTS, CONFIG)
-    else:
-        require(WEIGHTS, TOKENIZER, CONFIG)
-    return functools.partial(
-        SmolLM2.load, WEIGHTS.parent, seed=seed, max_seq_len=max_seq_len
-    )
+    return load_from_flags(request, SmolLM2, WEIGHTS)
 
 
 @pytest.fixture(scope="module")
@@ -59,12 +43,7 @@ def model(load):
     yield load()
 
 
-# KL(fp32 CPU || NPU), teacher-forced over 40 steps from a 1024-character
-# prompt: a mean of 0.034, a p90 of 0.074 and a largest step of 0.287 (3 of
-# 40 steps rank another token first); a 10-step, 512-character run measured
-# a mean of 0.0056, a p90 of 0.011 and a largest step of 0.032. SmolLM2's 24
-# layers at Llama 3.2 1B's widths accumulate more bf16 error a step; these
-# bounds are the longer run's with headroom.
+# KL(fp32 CPU || NPU) over 40 steps measured mean 0.034, p90 0.074, max 0.287.
 MAX_KL = {"Mean": 0.05, "P90": 0.1, "Max": 0.35}
 
 GENERATION = pytest.mark.parametrize(

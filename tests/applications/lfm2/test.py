@@ -12,8 +12,6 @@ in-process.
 a host without the checkpoint, and ``--max-seq-len`` at another context.
 """
 
-import functools
-
 import pytest
 
 from iron.applications.lfm2 import Lfm2
@@ -22,32 +20,18 @@ from iron.lm.testing import (
     check_chat_turn,
     check_determinism,
     check_generation,
-    require,
+    load_from_flags,
     weights_dir,
 )
 
 WEIGHTS = weights_dir("lfm2-1.2b") / "model.safetensors"
-TOKENIZER = weights_dir("lfm2-1.2b") / "tokenizer.json"
-CONFIG = weights_dir("lfm2-1.2b") / "config.json"
 
 pytestmark = pytest.mark.supported_devices("npu2")
 
 
 @pytest.fixture(scope="module")
 def load(request):
-    """``Lfm2.load`` of the checkpoint, as the CLI loads it: at the
-    options pytest's own ``--random-weights``/``--max-seq-len`` flags
-    (``conftest.py``'s, ``iron.lm.cli.FLAGS``) were given.
-    """
-    seed = request.config.getoption("--random-weights")
-    max_seq_len = request.config.getoption("--max-seq-len")
-    if seed is not None:
-        require(WEIGHTS, CONFIG)
-    else:
-        require(WEIGHTS, TOKENIZER, CONFIG)
-    return functools.partial(
-        Lfm2.load, WEIGHTS.parent, seed=seed, max_seq_len=max_seq_len
-    )
+    return load_from_flags(request, Lfm2, WEIGHTS)
 
 
 @pytest.fixture(scope="module")
@@ -55,14 +39,7 @@ def model(load):
     yield load()
 
 
-# KL(fp32 CPU || NPU), teacher-forced: test_lfm2_1_2b_accuracy measures a
-# mean of 0.0013, a P90 of 0.0026 and a max of 0.0032 (40 steps); across two
-# chunks (prompt + decode spanning the conv layers' checkpointed rows, the
-# part of this port least sure of itself) a mean of 0.0057, a P90 of 0.0068
-# and a max of 0.0071 -- lower than Llama 3.2 1B's own (a dense model,
-# every layer attending, accrues more bf16 error than LFM2's six attention
-# layers of sixteen). One run each, so real headroom over the measured max,
-# not a tight bound.
+# KL(fp32 CPU || NPU) measured at most mean 0.0057, p90 0.0068, max 0.0071.
 MAX_KL = {"Mean": 0.02, "P90": 0.03, "Max": 0.05}
 
 

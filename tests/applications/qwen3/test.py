@@ -13,8 +13,6 @@ shapes (only its header is read) and random prompts, on a host without the
 tokenizer, and ``--max-seq-len`` at another context.
 """
 
-import functools
-
 import aie.utils as aie_utils
 import numpy as np
 import pytest
@@ -28,14 +26,14 @@ from iron.lm.testing import (
     check_determinism,
     check_device_sampling,
     check_generation,
+    load_from_flags,
     require,
     weights_dir,
 )
 
-# Each checkpoint's directory under $IRON_EXAMPLE_WEIGHTS_DIR and its file.
 CHECKPOINTS = {
-    "qwen3_1.7b": ("qwen3-1.7b", "model.safetensors.index.json"),
-    "qwen3_0.6b": ("qwen3-0.6b", "model.safetensors"),
+    "qwen3_1.7b": weights_dir("qwen3-1.7b") / "model.safetensors.index.json",
+    "qwen3_0.6b": weights_dir("qwen3-0.6b") / "model.safetensors",
 }
 # The checkpoints CI holds, so one missing there fails, not skips.
 STAGED = {"qwen3_1.7b"}
@@ -43,34 +41,10 @@ STAGED = {"qwen3_1.7b"}
 pytestmark = pytest.mark.supported_devices("npu2")
 
 
-def files(name: str, seed) -> tuple:
-    """The checkpoint ``name``'s files a run needs: with ``seed``, its
-    weights' header and config.json, else its tokenizer too. One missing
-    skips the checkpoint unless CI holds it (``STAGED``).
-    """
-    directory, checkpoint = CHECKPOINTS[name]
-    weights = weights_dir(directory) / checkpoint
-    tokenizer = weights.with_name("tokenizer.json")
-    config = weights.with_name("config.json")
-    needed = (weights, config) if seed is not None else (weights, tokenizer, config)
-    if name not in STAGED and not all(f.exists() for f in needed):
-        pytest.skip(f"{name}'s files are not in {weights.parent}")
-    require(*needed)
-    return weights, tokenizer
-
-
 @pytest.fixture(scope="module", params=list(CHECKPOINTS), ids=str)
 def load(request):
-    """``Qwen3.load`` of the checkpoint, as the CLI loads it: at the
-    options pytest's own ``--random-weights``/``--max-seq-len`` flags
-    (``conftest.py``'s, ``iron.lm.cli.FLAGS``) were given.
-    """
-    seed = request.config.getoption("--random-weights")
-    max_seq_len = request.config.getoption("--max-seq-len")
-    weights, _ = files(request.param, seed)
-    return functools.partial(
-        Qwen3.load, weights.parent, seed=seed, max_seq_len=max_seq_len
-    )
+    weights = CHECKPOINTS[request.param]
+    return load_from_flags(request, Qwen3, weights, staged=request.param in STAGED)
 
 
 @pytest.fixture(scope="module")
@@ -83,11 +57,7 @@ def model(load):
         aie_utils.DefaultNPURuntime.cleanup()
 
 
-# KL(fp32 CPU || NPU), teacher-forced. TestEachStep's 20-step, 256-char run
-# on npu1/Phoenix measured Mean 0.0110, P90 0.0331, Max 0.0553, 2/20 top-1
-# mismatches; these bounds give it about 2.5-3x headroom. Not yet measured
-# at the module-scoped tests' own 40-step/1024-char shape (full-ELF, npu2
-# only). Measured on 1.7B; 0.6B's are 1.7B's until measured.
+# KL(fp32 CPU || NPU) over 20 steps of 1.7B measured mean 0.011, p90 0.033, max 0.055.
 MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
 
 
@@ -167,7 +137,8 @@ def test_qwen3_lm_head_is_the_tied_embedding(name):
     """The real checkpoint's unread ``lm_head.weight`` is byte-identical to
     ``model.embed_tokens.weight``.
     """
-    weights, _ = files(name, seed=0)
+    weights = CHECKPOINTS[name]
+    require(weights, weights.with_name("config.json"), staged=name in STAGED)
     tree = Checkpoint(weights).tree()
     assert tree.lm_head.weight.dtype == bfloat16
     assert np.array_equal(

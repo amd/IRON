@@ -18,16 +18,13 @@ from ml_dtypes import bfloat16
 
 from iron.applications.idefics3.model import SmolVLM, build_prompt
 from iron.lm.generation import divergence
-from iron.lm.testing import require, weights_dir
+from iron.lm.testing import load_from_flags, weights_dir
 
 WEIGHTS = weights_dir("smolvlm-256m-instruct") / "model.safetensors"
-TOKENIZER = weights_dir("smolvlm-256m-instruct") / "tokenizer.json"
-CONFIG = weights_dir("smolvlm-256m-instruct") / "config.json"
 
 pytestmark = pytest.mark.supported_devices("npu2")
 
-# Mean KL(float32 forward || device) measured 0.0061-0.0094 over these questions on
-# the earlier splice of the same tower; not yet measured on Multimodal.
+# The bound on each question's mean KL(float32 forward || device).
 MAX_KL = 0.05
 
 QUESTIONS = [
@@ -39,17 +36,7 @@ QUESTIONS = [
 
 @pytest.fixture(scope="module")
 def model(request):
-    """``SmolVLM.load`` of the checkpoint, as the CLI loads it: at the
-    options pytest's own ``--random-weights``/``--max-seq-len`` flags
-    (``conftest.py``'s, ``iron.lm.cli.FLAGS``) were given.
-    """
-    seed = request.config.getoption("--random-weights")
-    max_seq_len = request.config.getoption("--max-seq-len")
-    if seed is not None:
-        require(WEIGHTS, CONFIG)
-    else:
-        require(WEIGHTS, TOKENIZER, CONFIG)
-    yield SmolVLM.load(WEIGHTS.parent, seed=seed, max_seq_len=max_seq_len)
+    yield load_from_flags(request, SmolVLM, WEIGHTS)()
 
 
 @pytest.fixture(scope="module")

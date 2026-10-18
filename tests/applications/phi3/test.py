@@ -9,12 +9,9 @@ compiled and loaded once for the module and every test calls it in-process.
 ``--random-weights SEED`` runs it on drawn weights and random prompts, on
 a host without the checkpoint, and ``--max-seq-len`` at another context.
 
-Like Qwen 2.5 1.5B Instruct, the decode step and the prompt chunk compile
-much faster packaged ``--each-step`` than as a full ELF at this model's
-depth (32 layers); this module's ``model`` fixture requests it explicitly.
+The ``model`` fixture packages it ``--each-step``: at 32 layers the full
+ELF links far slower.
 """
-
-import functools
 
 import pytest
 
@@ -24,51 +21,27 @@ from iron.lm.testing import (
     check_determinism,
     check_generation,
     check_device_sampling,
-    require,
+    load_from_flags,
     weights_dir,
 )
 
-DIRECTORY = weights_dir("phi-4-mini-instruct")
-WEIGHTS = DIRECTORY / "model.safetensors.index.json"
-TOKENIZER = DIRECTORY / "tokenizer.json"
-CONFIG = DIRECTORY / "config.json"
+WEIGHTS = weights_dir("phi-4-mini-instruct") / "model.safetensors.index.json"
 
 pytestmark = pytest.mark.supported_devices("npu2")
 
 
 @pytest.fixture(scope="module")
 def load(request):
-    """``Phi4.load`` of the checkpoint, as the CLI loads it: at the
-    options pytest's own ``--random-weights``/``--max-seq-len`` flags
-    (``conftest.py``'s, ``iron.lm.cli.FLAGS``) were given.
-    """
-    seed = request.config.getoption("--random-weights")
-    max_seq_len = request.config.getoption("--max-seq-len")
-    if seed is not None:
-        require(WEIGHTS, CONFIG)
-    else:
-        require(WEIGHTS, TOKENIZER, CONFIG)
-    return functools.partial(
-        Phi4.load, WEIGHTS.parent, seed=seed, max_seq_len=max_seq_len
-    )
+    return load_from_flags(request, Phi4, WEIGHTS)
 
 
 @pytest.fixture(scope="module")
 def model(load):
-    """The model, compiled and loaded once, packaged ``--each-step`` (the
-    full-ELF link is impractically slow at this model's depth, the same
-    finding Qwen 2.5 1.5B Instruct's own port made).
-    """
+    """The model, compiled and loaded once, packaged ``--each-step``."""
     yield load(full_elf=False)
 
 
-# KL(fp32 CPU || NPU), teacher-forced over 10 steps (not Llama/Qwen2.5's
-# own 40: the float32 reference recomputes the whole forward pass from
-# scratch every step it records, and at this model's scale -- hidden_size
-# 3072, vocab 200064, both well past Qwen 2.5 1.5B Instruct's own -- that
-# cost alone measured ~30s/step on this host). Measured over the first 13 steps:
-# KL 0.00039-0.02240, 13/13 top-1 -- comparable to or better than every
-# other model's own bound.
+# KL(fp32 CPU || NPU) over 13 steps measured 0.00039 to 0.0224, every top-1 matching.
 MAX_KL = {"Mean": 0.015, "P90": 0.025, "Max": 0.1}
 
 

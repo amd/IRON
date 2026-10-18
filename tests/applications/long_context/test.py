@@ -35,6 +35,7 @@ from iron.lm.testing import (
     check_deep_decode,
     check_deep_prompt,
     check_prompt_time,
+    load_from_flags,
     require,
     weights_dir,
 )
@@ -68,12 +69,6 @@ class Application:
     @property
     def path(self) -> Path:
         return weights_dir(self.directory) / self.weights
-
-    def require(self, *files: Path) -> None:
-        """Skip unless ``files`` exist; in CI, fail where it is staged."""
-        if not self.staged and not all(f.exists() for f in files):
-            pytest.skip(f"{self.directory} is not staged: {files}")
-        require(*files)
 
 
 INDEX = "model.safetensors.index.json"
@@ -153,7 +148,7 @@ def test_nothing_grows_with_the_context(application, version):
     row per position: its size is affine in the context.
     """
     app = APPLICATIONS[application]
-    app.require(app.path, app.path.with_name("config.json"))
+    require(app.path, app.path.with_name("config.json"), staged=app.staged)
     config = app.model.default_config(app.path)
     weights = Checkpoint(app.path).tree("unread")
     C = config.prefill_chunk
@@ -205,20 +200,9 @@ def loaded(request):
     each on the token the last one drew.
     """
     app = APPLICATIONS[request.param.removesuffix("_each_step")]
-    seed = request.config.getoption("--random-weights")
-    max_seq_len = request.config.getoption("--max-seq-len")
-    if seed is not None:
-        app.require(app.path, app.path.with_name("config.json"))
-    else:
-        tokenizer = weights_dir(app.directory) / app.tokenizer
-        app.require(app.path, tokenizer, app.path.with_name("config.json"))
+    load = load_from_flags(request, app.model, app.path, app.tokenizer, app.staged)
     each_step = request.param.endswith("_each_step")
-    model = app.model.load(
-        app.path.parent,
-        seed=seed,
-        max_seq_len=max_seq_len,
-        full_elf=False if each_step else None,
-    )
+    model = load(full_elf=False if each_step else None)
     assert model.device_loop is not each_step
     yield app, model
     if aie_utils.DefaultNPURuntime is not None:

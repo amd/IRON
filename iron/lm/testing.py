@@ -8,6 +8,7 @@ model's files.
 """
 
 import dataclasses
+import functools
 import hashlib
 import os
 import time
@@ -82,22 +83,43 @@ class Download:
         return target
 
 
-def require(*files: Path) -> None:
-    """Skip the test unless every one of ``files`` exists, except in CI,
-    where a missing file fails it, naming what the runner must hold.
+def require(*files: Path, staged: bool = True) -> None:
+    """Skip the test unless every one of ``files`` exists, except in CI where
+    they are ``staged``: there a missing file fails it, naming what the
+    runner must hold.
     """
     missing = [str(f) for f in files if not f.exists()]
     if not missing:
         return
     import pytest
 
-    if os.environ.get("CI"):
+    if staged and os.environ.get("CI"):
         pytest.fail(
             f"this CI runner lacks {', '.join(missing)}: install the model's "
             "files at that path; its README says which and how",
             pytrace=False,
         )
     pytest.skip(f"not found outside CI: {missing}")
+
+
+def load_from_flags(
+    request, model, weights: Path, tokenizer="tokenizer.json", staged=True
+):
+    """``model.load`` of ``weights``' directory, to call with any further
+    options, as the CLI loads it at the ``--random-weights`` and
+    ``--max-seq-len`` pytest was given. ``require``s ``weights``, the
+    config.json beside it and, unless the weights are random, the
+    ``tokenizer`` file there.
+    """
+    seed = request.config.getoption("--random-weights")
+    files = [weights, weights.with_name("config.json")]
+    if seed is None:
+        files.append(weights.with_name(tokenizer))
+    require(*files, staged=staged)
+    max_seq_len = request.config.getoption("--max-seq-len")
+    return functools.partial(
+        model.load, weights.parent, seed=seed, max_seq_len=max_seq_len
+    )
 
 
 def prompt(model, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
