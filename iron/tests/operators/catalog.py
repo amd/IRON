@@ -81,7 +81,8 @@ def test_the_stub_names_every_catalog_entry(package):
 def test_every_operator_is_in_the_catalog():
     """Every class at the top of a module under ``iron/operators``, named
     without a leading underscore, that subclasses ``Operator`` is a catalog
-    entry: one left out is never built by the tests above.
+    entry, so a profile can name it; ``test_operator`` builds the entries
+    that declare a ``Testing``.
     """
     root = Path(catalog.__file__).parent
     catalogued = {getattr(catalog, name) for name in catalog.__all__}
