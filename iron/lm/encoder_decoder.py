@@ -21,7 +21,7 @@ from iron.operators.mha import MHA
 
 from .base import DecoderConfig
 from .causal import CausalLM, DecodeStep
-from .encoder import Encoder, Tower
+from .encoder import Encoder
 
 
 class EncoderDecoder(CausalLM):
@@ -47,7 +47,7 @@ class EncoderDecoder(CausalLM):
     def __init__(self, config: DecoderConfig, weights, encoder: Encoder, decoder=None):
         super().__init__(config, weights, decoder)
         self.encoder = encoder
-        rows = encoder.soft_rows if isinstance(encoder, Tower) else encoder.max_tokens
+        rows = encoder.soft_rows
         if rows < config.prefill_chunk:
             # A prompt chunk's queries are the last rows of what MHA attends.
             raise ValueError(
@@ -168,11 +168,7 @@ class EncoderDecoder(CausalLM):
         if self._encode is None:
             raise RuntimeError(f"{type(self).__name__}: load() first")
         buffer, values = self.encoder.inputs(*raw)
-        self._source = (
-            self.encoder.soft(values)
-            if isinstance(self.encoder, Tower)
-            else values[self.encoder.bound]
-        )
+        self._source = self.encoder.soft(values)
         name = f"encoder_{self.encoder_input}"
         inputs = [buffer if n == name else None for n in self._parameters.inputs]
         named = {f"encoder_{v}": x for v, x in values.items()}

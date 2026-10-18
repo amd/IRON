@@ -48,13 +48,13 @@ def test_its_signature_is_its_text_model_s_and_towers(table):
     model = Multimodal(SelfAttention(table, 1), {PLACEHOLDER: Rows()})
     assert list(model.signature().parameters) == [
         "ids",
-        "rows",
+        "x",
         "placed",
-        "n",
-        "rows_n",
+        "rows",
+        "x_rows",
     ]
-    assert [sorted(s) for s in model.shapes()] == [["ids"], ["rows"], ["placed"]]
-    assert model.longest() == dict(n=128, rows_n=128)
+    assert [sorted(s) for s in model.shapes()] == [["ids"], ["x"], ["placed"]]
+    assert model.longest() == dict(rows=128, x_rows=128)
     assert model.at == {PLACEHOLDER: 128}
 
 
@@ -70,7 +70,7 @@ def test_a_mixed_call_places_the_soft_tokens_and_attends_over_them(table, soft):
     rows = (rng.standard_normal((soft, HEADS * HEAD_DIM)) / 4).astype(bfloat16)
     tokens = np.array([3, *[PLACEHOLDER] * soft, 7, 9])
     calls, values = model.calls(tokens, {PLACEHOLDER: (rows,)})
-    assert len(calls) == 2 and values == dict(n=tokens.size, rows_n=soft)
+    assert len(calls) == 2 and values == dict(rows=tokens.size, x_rows=soft)
     for inputs in calls:
         got = model.reference(*inputs, **values)
     soft_tokens = attention(rows, HEAD_DIM**-0.5).astype(bfloat16)
@@ -85,7 +85,7 @@ def test_a_text_only_call_runs_the_text_model_s_version(table):
     model = Multimodal(SelfAttention(table, 1), {PLACEHOLDER: Rows()})
     tokens = np.array([3, 7, 9])
     calls, values = model.calls(tokens, {})
-    assert len(calls) == 1 and values == dict(n=3, rows_n=0)
+    assert len(calls) == 1 and values == dict(rows=3, x_rows=0)
     got = model.reference(*calls[0], **values)
     verdict = compare(
         np.asarray(got), attention(table[tokens], 1.0), Tolerance.bf16_ulps(1)
@@ -112,26 +112,23 @@ class Features(Tower):
     def __init__(self, width: int, rows: int):
         super().__init__(Width(width, width), [], rows, rows)
 
-    def front(self, features, *, n):
-        return Copy.step(features)[:n], None
+    def front(self, features, *, rows):
+        return Copy.step(features)[:rows], None
 
     def head(self, x):
         return x
 
-    def soft(self, values: dict) -> int:
-        return values["n"]
-
     def inputs(self, features) -> tuple[np.ndarray, dict]:
         buffer = np.zeros((self.max_tokens, self.config.hidden_size), bfloat16)
         buffer[: len(features)] = features
-        return buffer, dict(n=len(features))
+        return buffer, dict(rows=len(features))
 
     def shapes(self) -> list[dict]:
         return [dict(features=((self.max_tokens, self.config.hidden_size), bfloat16))]
 
-    def body(self, features, *, n: Scratchpad[np.int32]):
-        x, angles = self.front(features, n=n)
-        return self.forward(x, n, angles)
+    def body(self, features, *, rows: Scratchpad[np.int32]):
+        x, angles = self.front(features, rows=rows)
+        return self.forward(x, rows, angles)
 
 
 IMAGE = SMALL.vocab_size - 1
@@ -200,7 +197,7 @@ def test_a_causal_model_s_versions_and_signature(causal):
         "start",
         "rows",
         "rope_start",
-        "features_n",
+        "features_rows",
     ]
     assert [sorted(s) for s in model.shapes()] == [
         [],

@@ -33,7 +33,7 @@ class Multimodal(Model):
     before the chunk, so a run of placeholders may cross chunks. A version
     is one dispatch with its own scratchpad, which all of them in one would
     overrun. A tower's per-call values are named after its input: a vision
-    tower's ``n`` on input ``rgb`` is ``rgb_n``.
+    tower's ``rows`` on input ``rgb`` is ``rgb_rows``.
 
     Args:
         text: The text model.
@@ -115,7 +115,7 @@ class Multimodal(Model):
         if "placed" not in given:
             inputs = [given.get(n) for n in self.text_inputs]
             return self.text.inline(self.text.body, *inputs, **text)
-        placed, n = given["placed"], text[self.text.bound]
+        placed, n = given["placed"], text["rows"]
         # An input's gather is encoded on the host into its buffer, which Merge
         # reads as the ids: gather by the device's copy of them.
         ids = Copy.step(placed, dtype=np.int32)[:n]

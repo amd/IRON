@@ -241,7 +241,7 @@ class AudioTower(Tower):
         x = self.feed_forward(w.feed_forward1, x)
         h = RMSNorm.step(x, weight=w.norm_pre_attn.weight, epsilon=c.eps)
         a = RMSNorm.step(
-            self.attention(w.self_attn, h, step.n),
+            self.attention(w.self_attn, h, step.rows),
             weight=w.norm_post_attn.weight,
             epsilon=c.eps,
         )

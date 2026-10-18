@@ -103,8 +103,8 @@ class Rows(Tower):
     def __init__(self):
         super().__init__(Shape(), [None], ROWS, ROWS)
 
-    def front(self, rows, *, n):
-        return Copy.step(rows)[:n], None
+    def front(self, x, *, rows):
+        return Copy.step(x)[:rows], None
 
     def layer(self, step, i, weights, x):
         q = x.reshape(x.shape[0], HEADS, HEAD_DIM)
@@ -113,20 +113,17 @@ class Rows(Tower):
     def head(self, x):
         return x
 
-    def soft(self, values: dict) -> int:
-        return values["n"]
-
     def inputs(self, rows) -> tuple[np.ndarray, dict]:
         buffer = np.zeros((ROWS, HEADS * HEAD_DIM), bfloat16)
         buffer[: len(rows)] = rows
-        return buffer, dict(n=len(rows))
+        return buffer, dict(rows=len(rows))
 
     def shapes(self) -> list[dict]:
-        return [dict(rows=((ROWS, HEADS * HEAD_DIM), bfloat16))]
+        return [dict(x=((ROWS, HEADS * HEAD_DIM), bfloat16))]
 
-    def body(self, rows, *, n: Scratchpad[np.int32]):
-        x, angles = self.front(rows, n=n)
-        return self.forward(x, n, angles)
+    def body(self, x, *, rows: Scratchpad[np.int32]):
+        x, angles = self.front(x, rows=rows)
+        return self.forward(x, rows, angles)
 
 
 def attention(x, scale: float, window: int | None = None) -> np.ndarray:
@@ -148,9 +145,9 @@ def table():
     return (rng.standard_normal((VOCAB, HEADS * HEAD_DIM)) / 4).astype(bfloat16)
 
 
-def test_inputs_pad_with_zero_and_give_n(table):
+def test_inputs_pad_with_zero_and_give_rows(table):
     ids, values = SelfAttention(table, 1).inputs([5, -1, 7])
-    assert values == dict(n=3)
+    assert values == dict(rows=3)
     assert ids.dtype == np.int32 and ids.shape == (ROWS,)
     np.testing.assert_array_equal(ids[:3], [5, VOCAB - 1, 7])
     assert not ids[3:].any()
@@ -228,7 +225,7 @@ class Positioned(SelfAttention):
         self.position_table = iron.weight(positions)
 
     def positions(self, x, step):
-        return ElementwiseAdd.step(x, Copy.step(self.position_table[: step.n]))
+        return ElementwiseAdd.step(x, Copy.step(self.position_table[: step.rows]))
 
 
 @pytest.mark.parametrize("n", [9, ROWS])

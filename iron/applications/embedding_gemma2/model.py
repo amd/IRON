@@ -103,7 +103,7 @@ class EmbeddingGemma(Encoder):
     """The text encoder over ``max_tokens`` rows at most, one compile for
     every length.
 
-    A call takes the token ids, padded to ``max_tokens``, and ``n``, the
+    A call takes the token ids, padded to ``max_tokens``, and ``rows``, the
     real rows, which bound the gather and every operator after it. The
     scaled table's rows are gathered on the device. It returns one unit-length
     embedding per ``mrl_dims`` truncation, a row each, zero past its length.

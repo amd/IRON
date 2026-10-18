@@ -200,7 +200,7 @@ def test_its_signature_and_versions_are_the_decoder_s_and_the_encoder_s(whisper)
         "rows",
         "rope_start",
         "source",
-        "encoder_n",
+        "encoder_rows",
     ]
     assert [sorted(s) for s in model.shapes()] == [[], ["ids"], ["encoder_features"]]
     assert [s.shape for s in model.cross_keys] == [(SOURCE, 8, 64)] * 2
@@ -212,7 +212,7 @@ def test_the_encode_version_writes_each_layer_s_keys_and_values(whisper):
     names = [type(s.op).__name__ for s in traced.steps]
     # The tower's copy, then per layer k and v projected and written.
     assert names.count("GEMM") == 4 and "MHA" not in names
-    assert sorted(traced.reads) == ["encoder_n", "position", "source", "token"]
+    assert sorted(traced.reads) == ["encoder_rows", "position", "source", "token"]
 
 
 @pytest.mark.parametrize("version", [0, 1])
@@ -239,7 +239,7 @@ def test_each_version_s_reference_in_turn_is_hugging_face_s(whisper):
     buffer, own = model.encoder.inputs(clip)
     source = model.encoder.soft(own)
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
-    model.reference(None, buffer, **values, encoder_n=own["n"])
+    model.reference(None, buffer, **values, encoder_rows=own["rows"])
     logits, carry = prompt(model, tokens, source)
     assert carry["source"] == source
     got, want = np.asarray(logits, np.float32).reshape(-1), reference.logits(tokens)
@@ -253,7 +253,7 @@ def test_each_version_s_reference_in_turn_is_hugging_face_s(whisper):
     )
     logits, carry = prompt(model, tokens, source)
     tokens = np.append(tokens, carry["token"])
-    logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_n=0, **carry)
+    logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_rows=0, **carry)
     _assert_close([np.asarray(logits).reshape(-1)], [reference.logits(tokens)])
     with pytest.raises(AssertionError):
         _assert_close([np.asarray(logits).reshape(-1)], [half.logits(tokens)])
@@ -274,7 +274,7 @@ def prompt(model, tokens, source: int):
             rope_start=begin,
             rows=chunk.size,
             source=source,
-            encoder_n=0,
+            encoder_rows=0,
         )
         out = model.reference(model.prompt_ids(chunk), **values)
     return out
@@ -288,7 +288,7 @@ def test_a_decoder_call_before_any_encode_is_refused(whisper):
 
 class Attending(Features):
     """A ``Features`` tower whose one layer attends its rows to themselves,
-    bounded to its ``n``."""
+    bounded to its ``rows``."""
 
     def __init__(self, width: int, rows: int):
         super().__init__(width, rows)
@@ -318,7 +318,7 @@ def run(model, buffer, n: int, source: int, tokens) -> np.ndarray:
     the last chunk's logits.
     """
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
-    model.reference(None, buffer, **values, encoder_n=n)
+    model.reference(None, buffer, **values, encoder_rows=n)
     logits, _ = prompt(model, tokens, source)
     return np.asarray(logits, np.float32).reshape(-1)
 
@@ -326,7 +326,7 @@ def run(model, buffer, n: int, source: int, tokens) -> np.ndarray:
 def test_padded_encoder_rows_reach_neither_attention(golden):
     """A clip of 200 rows padded to 256 with rows far from any real one, and
     a longer clip's rows left in the cross states past them: the encoder's
-    self-attention (bounded by its ``n``) and the decoder's cross attention
+    self-attention (bounded by its ``rows``) and the decoder's cross attention
     (by ``source``) read neither, so the logits are a zero-padded clip's on
     a fresh model bit for bit, and Hugging Face's over the 200 rows. Bounded
     to all 256 rows, they are not.

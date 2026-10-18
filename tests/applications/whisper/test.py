@@ -185,7 +185,7 @@ def test_the_decoder_attends_over_the_encoded_clip(clip, reference):
     buffer, own = model.encoder.inputs(features)
     source = model.encoder.soft(own)
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
-    model.reference(None, buffer, **values, encoder_n=own["n"])
+    model.reference(None, buffer, **values, encoder_rows=own["rows"])
     tokens = np.random.default_rng(2).integers(0, TOY.vocab_size, 300)
     C = TOY.prefill_chunk
     for begin in range(0, tokens.size, C):
@@ -197,12 +197,12 @@ def test_the_decoder_attends_over_the_encoded_clip(clip, reference):
             rope_start=begin,
             rows=chunk.size,
             source=source,
-            encoder_n=0,
+            encoder_rows=0,
         )
         logits, carry = model.reference(model.prompt_ids(chunk), **values)
     _assert_close(logits, reference.logits(tokens), "the prompt's logits")
     tokens = np.append(tokens, carry["token"])
-    logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_n=0, **carry)
+    logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_rows=0, **carry)
     _assert_close(logits, reference.logits(tokens), "a decode step's logits")
 
 
@@ -256,7 +256,7 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
     buffer, own = model.encoder.inputs(features)
     source = model.encoder.soft(own)
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
-    model.reference(None, buffer, **values, encoder_n=own["n"])
+    model.reference(None, buffer, **values, encoder_rows=own["rows"])
     reference.encode(features)
     tokens = np.random.default_rng(2).integers(0, TOY.vocab_size, 100)
     logits, _ = model.reference(
@@ -267,6 +267,6 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
         rows=100,
         rope_start=0,
         source=source,
-        encoder_n=0,
+        encoder_rows=0,
     )
     _assert_close(logits, reference.logits(tokens), "the prompt's logits")

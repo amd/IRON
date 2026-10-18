@@ -195,7 +195,7 @@ class WhisperEncoder(Tower):
     """Whisper's audio encoder over one clip's log-mel features: two
     convolutions, each then a GELU, the second at stride 2, the position
     table added, then each layer and the final LayerNorm. Its rows are
-    ``rows``, bounded per call to ``n``, the clip's positions.
+    ``config.rows``, bounded per call to ``rows``, the clip's positions.
 
     Args:
         config: The encoder's shape.
@@ -217,16 +217,16 @@ class WhisperEncoder(Tower):
         )
         self.embed_positions[: c.positions] = e.embed_positions.weight
 
-    def front(self, features, *, n):
-        """The clip's ``n`` positions after the convolutions, with their
+    def front(self, features, *, rows):
+        """The clip's ``rows`` positions after the convolutions, with their
         position embeddings.
         """
         c = self.config
         h = GELU.step(self.conv1(features, rows=c.conv_rows))
         Copy.step(h[: c.frames], self.convolved[1 : c.frames + 1])
-        h = GELU.step(self.conv2(self.convolved, rows=n))
+        h = GELU.step(self.conv2(self.convolved, rows=rows))
         table = iron.weight(self.embed_positions)
-        return ElementwiseAdd.step(h, table[:n]), None
+        return ElementwiseAdd.step(h, table[:rows]), None
 
     def sanitize(self, w):
         return sanitize(w)
@@ -234,26 +234,23 @@ class WhisperEncoder(Tower):
     def head(self, x):
         return x
 
-    def body(self, features, *, n: Scratchpad[np.int32]):
+    def body(self, features, *, rows: Scratchpad[np.int32]):
         """The encoder's output over a clip's ``features``, ``(conv_rows +
         2, mels)``: a zero row, the frames, zero rows after.
         """
-        x, angles = self.front(features, n=n)
-        return self.forward(x, n, angles)
-
-    def soft(self, values: dict) -> int:
-        return values["n"]
+        x, angles = self.front(features, rows=rows)
+        return self.forward(x, rows, angles)
 
     def shapes(self) -> list[dict]:
         c = self.config
         return [dict(features=((c.conv_rows + 2, c.mels), bfloat16))]
 
     def longest(self) -> dict:
-        return dict(n=self.config.positions)
+        return dict(rows=self.config.positions)
 
     def inputs(self, features) -> tuple[np.ndarray, dict]:
         """A call's buffer for ``features``, ``(mels, frames)`` as the
-        feature extractor gives them, and its ``n``.
+        feature extractor gives them, and its ``rows``.
 
         Raises:
             ValueError: ``features`` is not ``(mels, frames)``.
@@ -267,7 +264,7 @@ class WhisperEncoder(Tower):
             )
         buffer = np.zeros((c.conv_rows + 2, c.mels), bfloat16)
         buffer[1 : c.frames + 1] = features.T
-        return buffer, dict(n=c.positions)
+        return buffer, dict(rows=c.positions)
 
 
 class Whisper(EncoderDecoder):

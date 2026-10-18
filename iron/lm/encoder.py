@@ -13,7 +13,7 @@ in a text model's space.
 
 import dataclasses
 from functools import partial
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 
@@ -28,7 +28,7 @@ class EncodeStep:
     """What each of an encoder's layers is called with."""
 
     # The rows valid this call, a per-call value in a trace.
-    n: Any
+    rows: Any
     angles: Any
     # The rows ``forward`` took, before any positions.
     embeddings: Any
@@ -39,9 +39,9 @@ class Encoder(Model):
     length; a subclass gives ``lookup`` and ``head``, and its config
     ``layer(i)``.
 
-    A call takes the token ids, padded to ``max_tokens`` with 0, and ``n``,
-    the real rows, which bound the embedding gather and every operator
-    after it.
+    A call takes the token ids, padded to ``max_tokens`` with 0, and
+    ``rows``, the real rows, which bound the embedding gather and every
+    operator after it.
 
     Args:
         config: The model's shape: its ``layer(i)`` is each layer, and
@@ -51,13 +51,12 @@ class Encoder(Model):
         max_tokens: The longest sequence a call takes.
     """
 
-    # The per-call value bounding a call's rows.
-    bound: ClassVar[str] = "n"
-
     def __init__(self, config, layers: list, max_tokens: int):
         self.config = config
         self.layers = [self.sanitize(w) for w in layers]
         self.max_tokens = max_tokens
+        # The rows a call gives, the first ``soft(values)`` of them valid.
+        self.soft_rows = max_tokens
         # The norm module after the last layer, by ``config.norm()``.
         self.final_norm = None
 
@@ -65,8 +64,8 @@ class Encoder(Model):
         """The embedding rows of ``ids``, bounded as ``ids`` is."""
         raise NotImplementedError(f"{type(self).__name__} defines no lookup()")
 
-    def angles(self, n):
-        """The RoPE angles of the first ``n`` positions, as ``layer`` reads
+    def angles(self, rows):
+        """The RoPE angles of the first ``rows`` positions, as ``layer`` reads
         them; None rotates nothing.
         """
         return None
@@ -111,8 +110,8 @@ class Encoder(Model):
         )
         return o.reshape(n, H * D)
 
-    def pool(self, x, n):
-        """The rows ``head`` reads from the ``n`` valid rows of ``x``; all
+    def pool(self, x, rows):
+        """The rows ``head`` reads from the ``rows`` valid rows of ``x``; all
         of them by default.
         """
         return x
@@ -120,26 +119,26 @@ class Encoder(Model):
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
 
-    def forward(self, x, n, angles):
+    def forward(self, x, rows, angles):
         """The layers, the final norm, ``pool`` and ``head`` over the rows
-        ``x``, bounded to their first ``n``, rotated by ``angles``.
+        ``x``, bounded to their first ``rows``, rotated by ``angles``.
         """
-        step = EncodeStep(n, angles, x)
+        step = EncodeStep(rows, angles, x)
         x = self.positions(x, step)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
         if self.final_norm is not None:
             x = self.config.norm()(self.final_norm, x)
-        return self.head(self.pool(x, n))
+        return self.head(self.pool(x, rows))
 
-    def from_rows(self, x, *, n):
-        """A call on its embedding rows ``x``, bounded to ``n``, in place of
-        its ids' lookup.
+    def from_rows(self, x, *, rows):
+        """A call on its embedding rows ``x``, bounded to ``rows``, in place
+        of its ids' lookup.
         """
-        return self.forward(x, n, self.angles(n))
+        return self.forward(x, rows, self.angles(rows))
 
-    def body(self, ids, *, n: Scratchpad[np.int32]):
-        return self.from_rows(self.lookup(ids[:n]), n=n)
+    def body(self, ids, *, rows: Scratchpad[np.int32]):
+        return self.from_rows(self.lookup(ids[:rows]), rows=rows)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, ``max_tokens`` rows."""
@@ -147,7 +146,13 @@ class Encoder(Model):
 
     def longest(self) -> dict:
         """The per-call values of the longest call: every row real."""
-        return dict(n=self.max_tokens)
+        return dict(rows=self.max_tokens)
+
+    def soft(self, values: dict) -> int:
+        """The valid rows a call with per-call ``values`` gives: its
+        ``rows`` by default.
+        """
+        return values["rows"]
 
     def inputs(self, tokens) -> tuple[np.ndarray, dict]:
         """A call's ``ids``, ``tokens`` padded to ``max_tokens``, and its
@@ -166,7 +171,7 @@ class Encoder(Model):
             raise IndexError(f"tokens {outside} are outside [-{V}, {V})")
         ids = np.zeros(self.max_tokens, np.int32)
         ids[:n] = tokens % V
-        return ids, dict(n=n)
+        return ids, dict(rows=n)
 
 
 class Tower(Encoder):
@@ -174,7 +179,7 @@ class Tower(Encoder):
     and whose output is soft tokens in a text model's space, ``text_dim``
     wide, which take a placeholder's places.
 
-    A subclass gives ``front``, ``soft``, ``inputs`` and ``shapes``, and a
+    A subclass gives ``front``, ``inputs`` and ``shapes``, and a
     ``body`` naming its input and per-call values that runs ``forward`` on
     what ``front`` gives.
 
@@ -193,10 +198,6 @@ class Tower(Encoder):
     def front(self, *inputs, **values):
         """The rows the layers take, bounded, and the angles they rotate by."""
         raise NotImplementedError(f"{type(self).__name__} defines no front()")
-
-    def soft(self, values: dict) -> int:
-        """The soft tokens a call with per-call ``values`` gives."""
-        raise NotImplementedError(f"{type(self).__name__} defines no soft()")
 
     def inputs(self, *raw) -> tuple[np.ndarray, dict]:
         """A call's input buffer and per-call values for ``raw``."""

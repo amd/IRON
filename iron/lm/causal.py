@@ -19,7 +19,7 @@ import logging
 import time
 from collections.abc import Iterator
 from functools import partial
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 from aie.iron.kernels.sample import ROW_WORDS
@@ -145,8 +145,6 @@ class CausalLM(Model):
     """
 
     layers: list
-    # The per-call value bounding a prompt chunk's rows.
-    bound: ClassVar[str] = "rows"
 
     def __init__(self, config: DecoderConfig, weights, decoder=None):
         self.config = config
