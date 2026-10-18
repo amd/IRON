@@ -17,7 +17,7 @@ import logging
 from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 from aie.iron.kernels.sample import ROW_WORDS
@@ -30,9 +30,9 @@ from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.handle import State
 from iron.tune.autotune import Call, Point
 from iron.operators.copy import Copy
-from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
+from .blocks import DecoderLayer, Embedding, KVCache, Linear, RMSNorm, Rope
 from .checkpoint import Checkpoint, renamed
 from .config import DecoderConfig
 from .model import Model
@@ -126,30 +126,69 @@ class Checkpoints:
         return 0 if position == 0 else (position - 1) // self.chunk + 1
 
 
-class CausalLM(Model):
-    """A decoder on ``config``'s shape.
+class Decoder(iron.Graph):
+    """A decoder's modules on ``c``'s shape, as a checkpoint's ``model``
+    names them: ``embed_tokens``, ``layers``, layer ``i`` a ``layer(c, i)``,
+    and the final ``norm``.
+    """
 
-    The caches are ``(max_seq_len, num_key_value_heads, head_dim)`` so no descriptor
-    steps by the context; a prompt chunk is a run of them
-    (``cache[s : s + C][:rows]``), the last one short where the chunk does
-    not divide ``max_seq_len``. A decode step attends with ``MHA`` of one
-    query, which costs the context, not the cache.
+    def __init__(self, c: DecoderConfig, layer: type[iron.Graph]):
+        self.embed_tokens = Embedding(c.vocab_size, c.hidden_size)
+        self.layers = [layer(c, i) for i in range(c.num_hidden_layers)]
+        self.norm = RMSNorm(c.hidden_size, c.eps)
+
+
+class CausalLM(Model):
+    """A decoder on ``config``'s shape: ``model``, a ``Decoder`` of
+    ``layer_class`` layers, each holding its own ``KVCache`` and the
+    model's ``rope``, and ``lm_head``, the embedding where tied, loaded
+    from ``weights``.
 
     Args:
         config: The decoder's shape.
         weights: The checkpoint's tree (``Checkpoint.tree``).
-        decoder: The decoder's module of ``weights``, whose ``embed_tokens``,
-            ``layers`` and ``norm`` are read here; None is ``weights.model``.
+        decoder: With no ``layer_class``, the decoder's module of
+            ``weights``, whose ``embed_tokens``, ``layers`` and ``norm`` are
+            read here; None is ``weights.model``.
 
-    ``final_norm``, the norm module ``head`` reads, is ``decoder.norm``;
-    a subclass sets it where the checkpoint names it otherwise.
+    With no ``layer_class``, a model's layers are ``config.layer(i)`` on the
+    checkpoint's own modules, ``caches`` holding each attention layer's
+    ``KVCache``, and ``final_norm``, the norm module ``head`` reads, is
+    ``decoder.norm``; a subclass sets it where the checkpoint names it
+    otherwise.
     """
 
+    layer_class: ClassVar[type[iron.Graph] | None] = DecoderLayer
     layers: list
 
     def __init__(self, config: DecoderConfig, weights, decoder=None):
         self.config = config
         self.weights = weights
+        self.rope = None if config.rope_theta is None else Rope(config)
+        # Zero until the host writes draws: a row of zeros is greedy.
+        self.draws = iron.state((config.max_seq_len, ROW_WORDS), np.int32)
+        self.drawn = iron.state((config.max_seq_len,), np.int32)
+        self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
+        self._prompt: CompiledGraph | None = None
+        self._decode: CompiledGraph | None = None
+        self._placed: CompiledGraph | None = None
+        self._placeholders: tuple[int, ...] = ()
+        # By the version a device loop starts from, its loop.
+        self._loops: dict[int, CarriedLoop] = {}
+        # By layer, the states a recurrent mixer carries position to position,
+        # by name.
+        self.recurrent: dict[int, dict[str, Checkpoints]] = {}
+        if self.layer_class is not None:
+            self.model = Decoder(config, self.layer_class)
+            for layer in self.model.layers:
+                layer.rope = self.rope
+            self.lm_head = Linear(config.hidden_size, config.vocab_size)
+            if config.tie_word_embeddings:
+                self.lm_head.weight = self.model.embed_tokens.weight
+            # Graph's, not Model.load, which builds a model from its files.
+            iron.Graph.load(self, weights)
+            self.layers = self.model.layers
+            return
         self.decoder = weights.model if decoder is None else decoder
         self.layers = [
             self.sanitize(renamed(w, self.renames)) for w in self.decoder.layers
@@ -160,43 +199,26 @@ class CausalLM(Model):
                 f"the checkpoint has {len(self.layers)} layers, the config "
                 f"{config.num_hidden_layers}"
             )
-        L = config.max_seq_len
-        # By layer: the key and value caches of a module that attends with its
-        # own, and the states a recurrent mixer carries position to position,
-        # by name.
-        self.keys: dict[int, State] = {}
-        self.values: dict[int, State] = {}
-        self.recurrent: dict[int, dict[str, Checkpoints]] = {}
-        for i, w in enumerate(self.layers):
-            if "self_attn" in vars(w):
-                a = config.layer(i).attention
-                self.keys[i] = iron.state((L, a.groups, a.head_dim))
-                self.values[i] = iron.state((L, a.groups, a.head_dim))
-        angles = config.angles()
-        long = config.long_angles()
-        # LongRoPE's: a prompt passing it reads the second table, stacked after.
-        self.long_past = None if long is None else long[0]
-        if long is not None:
-            angles = np.concatenate([angles, long[1]])
-        self.rope = None if angles is None else iron.weight(angles.astype(bfloat16))
-        # Zero until the host writes draws: a row of zeros is greedy.
-        self.draws = iron.state((L, ROW_WORDS), np.int32)
-        self.drawn = iron.state((L,), np.int32)
-        self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
-        self._prompt: CompiledGraph | None = None
-        self._decode: CompiledGraph | None = None
-        self._placed: CompiledGraph | None = None
-        self._placeholders: tuple[int, ...] = ()
-        # By the version a device loop starts from, its loop.
-        self._loops: dict[int, CarriedLoop] = {}
+        self.caches = {
+            i: KVCache(config)
+            for i, w in enumerate(self.layers)
+            if "self_attn" in vars(w)
+        }
 
-    def layer(self, step: DecodeStep, i: int, weights, x):
-        """Layer ``i`` on ``x``: ``config.layer(i)``, attending over the caches."""
+    def layer(self, step: DecodeStep, i: int, w, x):
+        """Layer ``i`` on ``x``: the module ``w`` itself, or with no
+        ``layer_class`` ``config.layer(i)`` on its weights ``w``, attending
+        over ``caches``.
+        """
+        if self.layer_class is not None:
+            return w(x, step)
         attend = partial(self.attend, step, i)
-        return self.config.layer(i)(weights, x, attend, step.angles)
+        return self.config.layer(i)(w, x, attend, step.angles)
 
     def head(self, x):
         """The final norm, then the output head (the embedding, if tied)."""
+        if self.layer_class is not None:
+            return self.lm_head(self.model.norm(x))
         c = self.config
         x = c.norm()(self.final_norm, x)
         if c.tie_word_embeddings:
@@ -209,25 +231,12 @@ class CausalLM(Model):
         """
         return x
 
-    def angles(self, *, prompt: bool, position, start, rows, rope_start):
-        """The RoPE angles of a step's rows, a row a position, as ``layer``
-        reads them: a prompt call's from ``start``, or from ``rope_start``
-        where a second table is stacked (``long_angles``), else the decode
-        step's at ``position``; None: no RoPE.
-        """
-        c = self.config
-        C, A = c.prefill_chunk, c.rope_width
-        if self.rope is None:
-            return None
-        if prompt:
-            begin = start if self.long_past is None else rope_start
-            return Copy.step(self.rope[begin : begin + C][:rows])
-        return Copy.step(self.rope[position]).reshape(1, A)
-
     def lookup(self, ids):
         """The embedding rows of ``ids``, bounded as ``ids`` is, or of the
         decode step's token.
         """
+        if self.layer_class is not None:
+            return self.model.embed_tokens(ids)
         return Copy.step(iron.weight(self.decoder.embed_tokens.weight)[ids])
 
     def body(
@@ -293,13 +302,15 @@ class CausalLM(Model):
         and ``ids`` are the step's (``DecodeStep``).
         """
         c = self.config
-        angles = self.angles(
-            prompt=prompt,
-            position=position,
-            start=start,
-            rows=rows,
-            rope_start=rope_start,
-        )
+        angles = None
+        if self.rope is not None:
+            angles = self.rope.rows(
+                prompt=prompt,
+                position=position,
+                start=start,
+                rows=rows,
+                rope_start=rope_start,
+            )
         # A decode step's one position is its start.
         start = start if prompt else position
         step = DecodeStep(prompt, angles, start, rows, position, source, x, ids)
@@ -331,36 +342,14 @@ class CausalLM(Model):
         scale: float | None = None,
         window: int | None = None,
     ):
-        """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` into layer
-        ``i``'s caches and attend ``q`` ``(rows, heads, head_dim)`` over them
-        causally, the logits scaled by ``scale`` (MHA's ``1 / sqrt(head_dim)``
-        if None).
+        """Layer ``i``'s ``KVCache.attend``.
 
         Raises:
             ValueError: A ``window`` is given: none is built over the caches.
         """
         if window is not None:
             raise ValueError(f"CausalLM.attend: no {window}-position window")
-        c = self.config
-        C = c.prefill_chunk
-        keys, values = self.keys[i], self.values[i]
-        _, G, D = keys.shape
-        n, H, _ = q.shape
-        for x, cache in ((k, keys), (v, values)):
-            if step.prompt:
-                cache[step.start : step.start + C][: step.rows] = x
-            else:
-                cache[step.position] = x.reshape(G, D)
-        span = np.s_[: step.position + 1]
-        o = MHA.step(
-            q,
-            keys[span],
-            values[span],
-            heads_interleaved=True,
-            kv_interleaved=True,
-            scale=scale,
-        )
-        return o.reshape(n, H * D)
+        return self.caches[i].attend(step, q, k, v, scale)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the decode step's (none), then
@@ -677,7 +666,7 @@ class CausalLM(Model):
         """The row of the RoPE angles a sequence of ``n`` tokens reads from:
         past ``long_past``, the second table's, ``max_seq_len`` rows on.
         """
-        past = self.long_past
+        past = None if self.rope is None else self.rope.long_past
         return self.config.max_seq_len if past is not None and n > past else 0
 
     def _chunks(self, tokens: np.ndarray, start: int) -> Iterator[tuple]:

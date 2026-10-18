@@ -36,20 +36,27 @@ Hugging Face decoders need a config and a model class; see
 
 1. **Config.** Subclass `DecoderConfig`. Its fields are read from the
    checkpoint's `config.json` by name, or at `metadata={"json": ...}`;
-   `not_json(default)` marks an IRON choice. Override
-   `attention(i)` or `layer(i)` to pick the parts that differ from Llama's
-   (`Norm`, `AttentionSpec`, `MLP`, `DecoderLayerSpec` in `iron/lm/blocks.py`):
-
-   ```python
-   def attention(self, i):
-       return dataclasses.replace(super().attention(i), qk_norm=True)
-   ```
+   `not_json(default)` marks an IRON choice.
 
 2. **Model.** Subclass `CausalLM` (or `Encoder`, `Tower`, `EncoderDecoder`),
    naming `config` and pointing `profile` at a `profiles/` directory (and
-   naming `bos` where `config.json` has no `bos_token_id`). A layer reads the
-   checkpoint's own module names (`input_layernorm`, `self_attn.q_proj`,
-   ...). When the checkpoint names them differently, override
+   naming `bos` where `config.json` has no `bos_token_id`). A decoder's
+   layer is `layer_class(config, i)`, Llama's `DecoderLayer` by default
+   (`iron/lm/blocks.py`); a layer that differs subclasses it and swaps the
+   module that differs:
+
+   ```python
+   class Qwen3Layer(DecoderLayer):
+       def __init__(self, c, i):
+           super().__init__(c, i)
+           self.self_attn = Attention(c, i, norms="qk")
+   ```
+
+   Its modules declare their weights by shape under the checkpoint's own
+   names (`input_layernorm`, `self_attn.q_proj`, ...), and loading names
+   any tensor missing, extra or of another shape. A model still on
+   `config.layer(i)` (`layer_class = None`) reads the checkpoint's modules
+   as they are; when the checkpoint names them differently, override
    `sanitize(w)` to map one layer's modules to those names at load time
    (`iron/applications/lfm2/model.py`); a fused projection is cut into
    views, not copied (`iron/applications/phi3/model.py`). Write the model

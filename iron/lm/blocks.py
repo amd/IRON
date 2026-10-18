@@ -26,6 +26,7 @@ from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs, stacked
 from iron.operators.log import Log
 from iron.operators.magnitude import Magnitude
+from iron.operators.mha import MHA
 from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleTaps
 
 
@@ -363,6 +364,194 @@ class LayerNorm(iron.Graph):
         return F.layer_norm(x, x.shape[-1:], self.weight, self.bias)
 
 
+def _activation(name: str):
+    """The function ``hidden_act`` ``name`` is.
+
+    Raises:
+        ValueError: No operator computes it: only ``"silu"`` and
+            ``"gelu_pytorch_tanh"`` have one.
+    """
+    if name == "silu":
+        return F.silu
+    if name == "gelu_pytorch_tanh":
+        return partial(F.gelu, approximate="tanh")
+    raise ValueError(
+        f"no operator for hidden_act {name!r}; silu and gelu_pytorch_tanh have one"
+    )
+
+
+def _add(x, y, residual: float):
+    """``x`` plus ``y`` times ``residual``, in ``x``'s shape."""
+    y = y if y.shape == x.shape else y.reshape(x.shape)
+    if residual == 1:
+        return x + y
+    return AXPY.step(y, x, scalar_factor=residual)
+
+
+class Rope(iron.Graph):
+    """A decoder's RoPE table, a row a position (``DecoderConfig.angles``),
+    with LongRoPE's long table stacked after it where the config gives one
+    (``long_angles``), which a prompt passing ``long_past`` reads. A model
+    copies a call's rows once (``rows``); each layer holding the table reads
+    them.
+    """
+
+    def __init__(self, c):
+        angles, long = c.angles(), c.long_angles()
+        self.long_past = None if long is None else long[0]
+        if long is not None:
+            angles = np.concatenate([angles, long[1]])
+        self.table = iron.weight(angles.astype(bfloat16))
+        self.chunk, self.width = c.prefill_chunk, c.rope_width
+
+    def rows(self, *, prompt: bool, position, start, rows, rope_start):
+        """A call's rows: a prompt call's from ``start``, or from
+        ``rope_start`` where a long table is stacked, else the decode step's
+        at ``position``.
+        """
+        if prompt:
+            begin = start if self.long_past is None else rope_start
+            return Copy.step(self.table[begin : begin + self.chunk][:rows])
+        return Copy.step(self.table[position]).reshape(1, self.width)
+
+
+class KVCache(iron.Graph):
+    """A layer's keys and values, each ``(max_seq_len, num_key_value_heads,
+    head_dim)`` so no descriptor steps by the context, and causal attention
+    over them (``attend``). A prompt chunk writes a run of rows
+    (``cache[s : s + C][:rows]``), the last one short where the chunk does
+    not divide ``max_seq_len``; a decode step attends with ``MHA`` of one
+    query, which costs the context, not the cache.
+    """
+
+    def __init__(self, c):
+        shape = (c.max_seq_len, c.num_key_value_heads, c.head_dim)
+        self.keys, self.values = iron.state(shape), iron.state(shape)
+        self.chunk = c.prefill_chunk
+
+    def attend(self, step, q, k, v, scale: float | None = None):
+        """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` at ``step``'s
+        positions and attend ``q`` ``(rows, heads, head_dim)`` over every
+        position up to its last, causally, the logits scaled by ``scale``
+        (MHA's ``1 / sqrt(head_dim)`` if None); ``(rows, heads * head_dim)``.
+        """
+        C, (_, G, D), (n, H, _) = self.chunk, self.keys.shape, q.shape
+        for x, cache in ((k, self.keys), (v, self.values)):
+            if step.prompt:
+                cache[step.start : step.start + C][: step.rows] = x
+            else:
+                cache[step.position] = x.reshape(G, D)
+        span = np.s_[: step.position + 1]
+        o = MHA.step(
+            q,
+            self.keys[span],
+            self.values[span],
+            heads_interleaved=True,
+            kv_interleaved=True,
+            scale=scale,
+        )
+        return o.reshape(n, H * D)
+
+
+class Attention(iron.Graph):
+    """Layer ``i``'s self-attention on ``c``'s shape: ``q_proj``, ``k_proj``
+    and ``v_proj`` of the layer's input, q and k turned by the call's RoPE
+    angles where given, attended over the layer's ``KVCache``, then
+    ``o_proj``. ``scale`` is the logits' scale; None is ``head_dim **
+    -0.5``.
+
+    Args:
+        c: The decoder's shape.
+        i: The layer.
+        norms: Which of q and k each head of is RMS-normed by ``q_norm``
+            and ``k_norm``, before RoPE.
+        bias: Whether q, k and v each add a bias.
+    """
+
+    def __init__(self, c, i: int, norms: str = "", bias: bool = False):
+        H, G, D, E = (
+            c.num_attention_heads,
+            c.num_key_value_heads,
+            c.head_dim,
+            c.hidden_size,
+        )
+        self.heads, self.groups, self.head_dim = H, G, D
+        self.q_proj = Linear(E, H * D, bias=bias)
+        self.k_proj = Linear(E, G * D, bias=bias)
+        self.v_proj = Linear(E, G * D, bias=bias)
+        self.o_proj = Linear(H * D, E)
+        self.q_norm = RMSNorm(D, c.eps) if "q" in norms else None
+        self.k_norm = RMSNorm(D, c.eps) if "k" in norms else None
+        self.scale = None
+
+    def body(self, x, cache, step, angles=None):
+        n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
+        # One row's GEMV tiles half a head. Given here, not by the profile:
+        # q's shape is o's when heads * head_dim is the width.
+        tiles = dict(tile_size_output=D // 2) if n == 1 else {}
+        q, k, v = (
+            F.linear(x, p.weight, p.bias, **tiles)
+            for p in (self.q_proj, self.k_proj, self.v_proj)
+        )
+        q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+        if self.k_norm is not None:
+            k = self.k_norm(k)
+        if angles is not None:
+            q, k = F.rope(q, angles), F.rope(k, angles)
+        o = cache.attend(
+            step,
+            q.reshape(n, H, D),
+            k.reshape(n, G, D),
+            v.reshape(n, G, D),
+            scale=self.scale,
+        )
+        return self.o_proj(o)
+
+
+class GatedMLP(iron.Graph):
+    """A gated feed-forward on ``c``'s shape:
+    ``down_proj(act(gate_proj(x)) * up_proj(x))``, ``act`` its
+    ``hidden_act``.
+    """
+
+    def __init__(self, c):
+        E, M = c.hidden_size, c.intermediate_size
+        self.gate_proj, self.up_proj = Linear(E, M), Linear(E, M)
+        self.down_proj = Linear(M, E)
+        self.act = _activation(c.hidden_act)
+
+    def body(self, x):
+        gate, up = self.gate_proj(x), self.up_proj(x)
+        return self.down_proj(self.act(gate) * up)
+
+
+class DecoderLayer(iron.Graph):
+    """Layer ``i`` of a pre-norm decoder on ``c``'s shape: ``self_attn``
+    after ``input_layernorm``, attending over the layer's own ``cache``,
+    then ``mlp`` after ``post_attention_layernorm``, each block's output
+    added to its residual times ``residual``. ``rope`` is the model's
+    ``Rope``, whose rows of the call (``DecodeStep.angles``) turn q and k;
+    None turns nothing.
+    """
+
+    def __init__(self, c, i: int):
+        self.input_layernorm = RMSNorm(c.hidden_size, c.eps)
+        self.self_attn = Attention(c, i)
+        self.post_attention_layernorm = RMSNorm(c.hidden_size, c.eps)
+        self.mlp = GatedMLP(c)
+        self.cache = KVCache(c)
+        self.rope: Rope | None = None
+        self.residual = 1.0
+
+    def body(self, x, step):
+        angles = None if self.rope is None else step.angles
+        h = self.self_attn(self.input_layernorm(x), self.cache, step, angles)
+        x = _add(x, h, self.residual)
+        return _add(x, self.mlp(self.post_attention_layernorm(x)), self.residual)
+
+
 def _linear(x, p, **kw):
     """``x`` through the linear module ``p``: its ``weight``, and its
     ``bias`` where it holds one.
@@ -501,16 +690,10 @@ class MLP:
     precision: Precision | None = None
 
     def __post_init__(self):
-        if self.activation not in ("silu", "gelu_pytorch_tanh"):
-            raise ValueError(
-                f"MLP: no operator for hidden_act {self.activation!r}; "
-                "silu and gelu_pytorch_tanh have one"
-            )
+        _activation(self.activation)
 
     def act(self, x):
-        if self.activation == "silu":
-            return F.silu(x)
-        return F.gelu(x, approximate="tanh")
+        return _activation(self.activation)(x)
 
     def __call__(self, w, x):
         act = self.act
@@ -551,10 +734,7 @@ class DecoderLayerSpec:
 
     def add(self, x, y):
         """``x`` plus ``y`` times ``residual``, in ``x``'s shape."""
-        y = y if y.shape == x.shape else y.reshape(x.shape)
-        if self.residual == 1:
-            return x + y
-        return AXPY.step(y, x, scalar_factor=self.residual)
+        return _add(x, y, self.residual)
 
 
 @dataclasses.dataclass(frozen=True)

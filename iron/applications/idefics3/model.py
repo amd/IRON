@@ -74,6 +74,7 @@ class SmolVLMText(CausalLM):
     config = SmolVLMTextConfig
     profile = Path(__file__).with_name("profiles")
     bos = BOS
+    layer_class = None
 
     def __init__(self, config, weights):
         super().__init__(config, weights, decoder=weights.model.text_model)

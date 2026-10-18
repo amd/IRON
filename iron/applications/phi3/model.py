@@ -135,6 +135,7 @@ class Phi4(CausalLM):
 
     config = Phi4Config
     profile = Path(__file__).with_name("profiles")
+    layer_class = None
 
     def sanitize(self, w):
         c, a, m = self.config, w.self_attn, w.mlp

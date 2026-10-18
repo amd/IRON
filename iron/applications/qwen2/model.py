@@ -7,9 +7,9 @@
 from its checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.qwen2.model``.
 
-Qwen 2 is Llama's layer with a bias on each of its q, k and v projections,
-which ``AttentionSpec`` adds wherever the checkpoint holds one. It ties its embedding and output
-head, as Llama does, and takes no RoPE frequency scaling.
+Qwen 2 is Llama's layer with a bias on each of its q, k and v projections
+(``Qwen2Layer``). It ties its embedding and output head, as Llama does, and
+takes no RoPE frequency scaling.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,
 keyed by operator shape at Qwen 2.5 1.5B Instruct's shape: a decode step's
@@ -20,7 +20,15 @@ caches and the RoPE table alone.
 from pathlib import Path
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig
+from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
+
+
+class Qwen2Layer(DecoderLayer):
+    """Llama's layer, its q, k and v projections each with a bias."""
+
+    def __init__(self, c: DecoderConfig, i: int):
+        super().__init__(c, i)
+        self.self_attn = Attention(c, i, bias=True)
 
 
 class Qwen2(CausalLM):
@@ -30,6 +38,7 @@ class Qwen2(CausalLM):
 
     config = DecoderConfig
     profile = Path(__file__).with_name("profiles")
+    layer_class = Qwen2Layer
 
 
 if __name__ == "__main__":

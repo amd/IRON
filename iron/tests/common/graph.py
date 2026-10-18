@@ -498,8 +498,8 @@ def test_llama_decode_traces_and_tunes():
     assert draw == {"row": Affine(position, 4), "at": Affine(position)}
     # The weights are named by the checkpoint; the caches are pinned state.
     assert "weights.model.layers.1.self_attn.q_proj.weight" in t.pinned
-    assert "keys.0" in t.pinned
-    assert t.pinned["keys.0"] == cfg.num_key_value_heads * L * cfg.head_dim * 2
+    keys = "model.layers.0.cache.keys"
+    assert t.pinned[keys] == cfg.num_key_value_heads * L * cfg.head_dim * 2
     # Every MHA attends over the keys up to the position, its one query
     # packed by its heads.
     mhas = [s.op for s in t.steps if type(s.op) is MHA]
@@ -550,7 +550,8 @@ def test_llama_prompt_traces_over_the_same_caches():
     # so one arena holds them once for both.
     token = g.trace(**g.shapes()[0])
     assert set(t.states) == set(token.states)
-    assert t.residents["keys.0"] == token.residents["keys.0"]
+    keys = "model.layers.0.cache.keys"
+    assert t.residents[keys] == token.residents[keys]
     assert set(t.weights) == set(token.weights)
     # Every projection reads the (out, in) checkpoint layout through the
     # column-major flag, which the trace carries into shape inference.
@@ -701,8 +702,10 @@ def test_llama_does_not_grow_with_the_context(step):
         == ([] if step == "decode" else ["ids"])
     )
     grown = {name for name, n in long.pinned.items() if short.pinned[name] != n}
-    caches = {"keys.0", "keys.1", "values.0", "values.1"}
-    assert grown == {"rope", "draws", "drawn"} | caches
+    caches = {
+        f"model.layers.{i}.cache.{kv}" for i in (0, 1) for kv in ("keys", "values")
+    }
+    assert grown == {"rope.table", "draws", "drawn"} | caches
 
     def activations(t):
         return {

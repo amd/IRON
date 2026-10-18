@@ -85,7 +85,7 @@ def test_decode_step_reads_the_rope_table_at_its_own_width():
     by_op = {id(b.op): b for b in t.bindings}
     angles = t.steps[1].op
     assert by_op[id(angles)].expression == Affine(t.values[1], 32)
-    assert t.pinned["rope"] == cfg.max_seq_len * 32 * np.dtype(bfloat16).itemsize
+    assert t.pinned["rope.table"] == cfg.max_seq_len * 32 * np.dtype(bfloat16).itemsize
 
 
 def test_prompt_chunk_reads_the_rope_table_at_its_own_width():
@@ -94,7 +94,7 @@ def test_prompt_chunk_reads_the_rope_table_at_its_own_width():
     copies = [s.op for s in t.steps if type(s.op).__name__ == "Copy"]
     angle_copy = next(c for c in copies if c.dst.sizes[-1] == 32)
     assert list(angle_copy.dst.sizes) == [256, 32]
-    assert t.pinned["rope"] == 256 * 32 * np.dtype(bfloat16).itemsize
+    assert t.pinned["rope.table"] == 256 * 32 * np.dtype(bfloat16).itemsize
 
 
 def test_a_context_no_chunk_divides_is_allocated_exactly():
@@ -107,7 +107,8 @@ def test_a_context_no_chunk_divides_is_allocated_exactly():
     assert cfg.angles().shape == (300, cfg.head_dim)
     t = model.trace(**model.shapes()[1])
     row = cfg.num_key_value_heads * cfg.head_dim * np.dtype(bfloat16).itemsize
-    assert t.pinned["keys.0"] == t.pinned["values.1"] == 300 * row
+    layers = "model.layers.0.cache.keys", "model.layers.1.cache.values"
+    assert t.pinned[layers[0]] == t.pinned[layers[1]] == 300 * row
     assert t.pinned["drawn"] == 300 * np.dtype(np.int32).itemsize
     with pytest.raises(ValueError, match="301 tokens do not fit 300 rows"):
         model.logits(np.zeros(301, np.int64))

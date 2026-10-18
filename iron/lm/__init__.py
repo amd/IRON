@@ -13,9 +13,11 @@ from .model import Model, OnHost, Tokenizer, TokenizerJson, prompt_text
 from .cli import main
 from .blocks import (
     MLP,
+    Attention,
     AttentionSpec,
     Conv1d,
     CrossDecoderLayer,
+    DecoderLayer,
     DecoderLayerSpec,
     Embedding,
     ImagePatches,
@@ -35,8 +37,10 @@ from .generation import Sampler, accuracy, determinism, generate_on_host
 from .multimodal import Multimodal
 
 __all__ = [
+    "Attention",
     "AttentionSpec",
     "CrossDecoderLayer",
+    "DecoderLayer",
     "DecoderLayerSpec",
     "MLP",
     "Norm",

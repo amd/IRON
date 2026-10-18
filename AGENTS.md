@@ -319,10 +319,12 @@ tunables and profiles already do that job.
   its index, or a PyTorch checkpoint read without torch);
   `tree("read" | "random" | "unread")` is the weights by the checkpoint's
   own names.
-- `blocks.py`: the parts a layer is made of (`Norm`, `AttentionSpec`, `MLP`,
-  `DecoderLayerSpec`, `CrossDecoderLayer`), the leaf modules that declare their
-  weights with `iron.param` (`Linear`, `Embedding`, `RMSNorm`,
-  `LayerNorm`) and the front-end graphs.
+- `blocks.py`: the leaf modules that declare their weights with
+  `iron.param` (`Linear`, `Embedding`, `RMSNorm`, `LayerNorm`), the blocks
+  a decoder layer is made of (`Attention`, `GatedMLP`, `DecoderLayer`), the
+  memory a layer owns (`KVCache`) and the model's `Rope`; the descriptions
+  the models not yet on modules read (`Norm`, `AttentionSpec`, `MLP`,
+  `DecoderLayerSpec`, `CrossDecoderLayer`); and the front-end graphs.
 - `model.py`: `Model`, which loads from a checkpoint's directory or
   repository id (`Model.load`, its context fitted to the host by
   `Model.fit`) and generates (`generate(prompt, max_tokens, sampler=None)`,
@@ -333,7 +335,8 @@ tunables and profiles already do that job.
   own reference on the host (`OnHost`, which runs it in place of the
   device).
 - `causal.py`: `CausalLM`, a decoder as one graph of a prompt chunk and a
-  decode step; `Checkpoints`, recurrent state per chunk boundary.
+  decode step, its modules a `Decoder` of `layer_class` layers;
+  `Checkpoints`, recurrent state per chunk boundary.
 - `encoder.py`, `encoder_decoder.py`, `multimodal.py`: `Encoder` and
   `Tower`, `EncoderDecoder`, and `Multimodal`.
 - `cli.py`: `main`, the command line every model shares (`--help` lists

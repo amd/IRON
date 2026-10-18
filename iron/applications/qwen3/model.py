@@ -8,7 +8,7 @@ checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.qwen3.model``.
 
 Qwen3 is Llama's layer plus a per-head RMSNorm on q and k before RoPE,
-``self_attn.q_norm`` and ``k_norm`` (``Qwen3Config.attention``). Its output
+``self_attn.q_norm`` and ``k_norm`` (``Qwen3Layer``). Its output
 head is the input embedding, tied; its checkpoint also ships
 ``lm_head.weight``, byte-identical to ``model.embed_tokens.weight``, which
 is never read.
@@ -23,15 +23,20 @@ import dataclasses
 from pathlib import Path
 
 from iron import lm
-from iron.lm import AttentionSpec, CausalLM, DecoderConfig
+from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
 
 
 @dataclasses.dataclass(frozen=True)
 class Qwen3Config(DecoderConfig):
-    """``DecoderConfig``, its attention norming q and k per head."""
+    """``DecoderConfig`` under Qwen3's name."""
 
-    def attention(self, i: int) -> AttentionSpec:
-        return dataclasses.replace(super().attention(i), qk_norm=True)
+
+class Qwen3Layer(DecoderLayer):
+    """Llama's layer, its attention norming q and k per head."""
+
+    def __init__(self, c: DecoderConfig, i: int):
+        super().__init__(c, i)
+        self.self_attn = Attention(c, i, norms="qk")
 
 
 class Qwen3(CausalLM):
@@ -46,6 +51,7 @@ class Qwen3(CausalLM):
 
     config = Qwen3Config
     profile = Path(__file__).with_name("profiles")
+    layer_class = Qwen3Layer
     bos = 151643
 
 

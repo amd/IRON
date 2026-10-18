@@ -21,6 +21,10 @@ public API adds its entry under Unreleased.
   them drawn or unwritten.
 - Leaf modules in `iron.lm`, graphs that declare their weights as
   transformers names them: `Linear`, `Embedding`, `RMSNorm` and `LayerNorm`.
+- Decoder blocks as modules in `iron.lm.blocks`, each built from a config
+  and a layer index: `Attention(c, i, norms="", bias=False)`, `GatedMLP(c)`
+  and `DecoderLayer(c, i)`, which holds its own `KVCache(c)` and the
+  model's `Rope(c)`. `iron.lm` exports `Attention` and `DecoderLayer`.
 - `Graph.trace(precision=)`, which `compile(precision=)` passes on instead of
   setting `Graph.precision` while it compiles.
 - `iron.lm.testing.load_from_flags`, a model test's `Model.load` at the
@@ -127,6 +131,17 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `CausalLM` builds its modules, `model` (a `Decoder` of `layer_class`
+  layers, `DecoderLayer` by default) and `lm_head` (the embedding where
+  tied), and loads them from the checkpoint's tree with `Graph.load`. A
+  model with `layer_class = None` reads `config.layer(i)` as before, its
+  caches in `caches`, a `KVCache` per attention layer, in place of `keys`
+  and `values`. The RoPE table is `CausalLM.rope`, a `Rope`, whose `rows`
+  replaces `CausalLM.angles` and whose `long_past` replaces
+  `CausalLM.long_past`.
+- Qwen 2, Qwen3 and Granite name their layers, `Qwen2Layer`, `Qwen3Layer`
+  and `GraniteLayer`, in place of `Qwen3Config.attention` and
+  `GraniteConfig.attention` and `layer`.
 - The layer descriptions a config's `layer()` returns, `iron.lm.Attention`
   and `DecoderLayer`, are `AttentionSpec` and `DecoderLayerSpec`, leaving
   the names to the modules that own their weights.

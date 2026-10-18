@@ -11,8 +11,9 @@ iron.applications.granite.model``.
 Granite is Llama's layer with four scalars of its own config's: the
 attention logits scale by ``attention_multiplier`` rather than ``1 /
 sqrt(head_dim)``, each block's output joins its residual times
-``residual_multiplier`` (``GraniteConfig.attention`` and ``layer``), the embedding rows are scaled
-by ``embedding_multiplier`` and the logits divided by ``logits_scaling``.
+``residual_multiplier`` (``GraniteLayer``), the embedding rows are scaled
+by ``embedding_multiplier`` and the logits divided by ``logits_scaling``,
+folded into the final norm's weight once it loads.
 Its output head is untied (``lm_head``). Its checkpoint is sharded;
 ``Checkpoint`` reads the index.
 
@@ -25,13 +26,12 @@ the RoPE table alone.
 import dataclasses
 import math
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 from ml_dtypes import bfloat16
 
 from iron import lm
-from iron.lm import AttentionSpec, CausalLM, DecoderConfig, DecoderLayerSpec
+from iron.lm import CausalLM, DecoderConfig, DecoderLayer
 
 
 @dataclasses.dataclass(frozen=True)
@@ -43,13 +43,17 @@ class GraniteConfig(DecoderConfig):
     embedding_multiplier: float = dataclasses.field(default=1.0, kw_only=True)
     logits_scaling: float = dataclasses.field(default=1.0, kw_only=True)
 
-    def attention(self, i: int) -> AttentionSpec:
-        return dataclasses.replace(
-            super().attention(i), scale=self.attention_multiplier
-        )
 
-    def layer(self, i: int) -> DecoderLayerSpec:
-        return dataclasses.replace(super().layer(i), residual=self.residual_multiplier)
+class GraniteLayer(DecoderLayer):
+    """Llama's layer, its attention logits scaled by
+    ``attention_multiplier`` and each block's output by
+    ``residual_multiplier``.
+    """
+
+    def __init__(self, c: GraniteConfig, i: int):
+        super().__init__(c, i)
+        self.self_attn.scale = c.attention_multiplier
+        self.residual = c.residual_multiplier
 
 
 class Granite(CausalLM):
@@ -61,6 +65,7 @@ class Granite(CausalLM):
 
     config = GraniteConfig
     profile = Path(__file__).with_name("profiles")
+    layer_class = GraniteLayer
     bos = 100283  # "<s>"; eos/pad is "<|im_end|>" = 100257
 
     def __init__(self, config: GraniteConfig, weights):
@@ -69,9 +74,9 @@ class Granite(CausalLM):
         m = config.embedding_multiplier
         self.embed_scale = np.full(config.hidden_size, m, bfloat16)
         if config.logits_scaling != 1:
-            # The logits' divisor folded into the final norm's weight.
-            divided = self.decoder.norm.weight / bfloat16(config.logits_scaling)
-            self.final_norm = SimpleNamespace(weight=divided)
+            # The logits' divisor folded into the final norm's loaded weight.
+            norm = self.model.norm
+            norm.weight = norm.weight / bfloat16(config.logits_scaling)
 
     def lookup(self, ids):
         x = super().lookup(ids)

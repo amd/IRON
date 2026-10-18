@@ -369,13 +369,18 @@ def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
 
 def test_a_decoder_nested_in_its_checkpoint_is_read_where_it_is(cpu):
     """A checkpoint holding its decoder's embedding, layers and final norm
-    under ``model.decoder``: ``decoder=`` reads them there, and the model
-    gives the flat checkpoint's logits bit for bit.
+    under ``model.decoder``: with no ``layer_class``, ``decoder=`` reads
+    them there, and the model gives the flat checkpoint's logits bit for
+    bit.
     """
+
+    class Nested(OnHost):
+        layer_class = None
+
     m = cpu.weights.model
     decoder = SimpleNamespace(embed_tokens=m.embed_tokens, layers=m.layers, norm=m.norm)
     nested = SimpleNamespace(model=SimpleNamespace(decoder=decoder))
-    model = OnHost(cpu.config, nested, decoder)
+    model = Nested(cpu.config, nested, decoder)
     assert model.decoder is decoder
     np.testing.assert_array_equal(
         model.logits(cpu.prompt), OnHost(cpu.config, cpu.weights).logits(cpu.prompt)
@@ -393,12 +398,14 @@ def test_a_turn_runs_from_its_first_new_token(cpu):
     rng = np.random.default_rng(9)
     tokens = rng.integers(0, config.vocab_size, 300)
     model.logits(tokens)
-    before = np.array(model.keys[0].host)
+    before = np.array(model.model.layers[0].cache.keys.host)
     turn = np.concatenate([tokens[:270], rng.integers(0, config.vocab_size, 40)])
     assert model.resume(model._held(turn)) == 270
     assert [(v["start"], v["rows"]) for _, v in model._chunks(turn, 270)] == [(270, 40)]
     assert_close(model.logits(turn), reference.logits(turn))
-    np.testing.assert_array_equal(model.keys[0].host[:270], before[:270])
+    np.testing.assert_array_equal(
+        model.model.layers[0].cache.keys.host[:270], before[:270]
+    )
 
 
 def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):

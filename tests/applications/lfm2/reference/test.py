@@ -122,7 +122,7 @@ def ran(toy):
 def test_attention_layers_hold_caches_and_conv_layers_a_checkpointed_tail(ran):
     model, _, _ = ran
     C, K, E = TOY.prefill_chunk, TOY.conv_kernel, TOY.hidden_size
-    assert list(model.keys) == list(model.values) == [1, 3]
+    assert list(model.caches) == [1, 3]
     assert list(model.recurrent) == [0, 2]
     slots = (TOY.max_seq_len - 1) // C + 2
     for states in model.recurrent.values():

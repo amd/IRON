@@ -43,6 +43,8 @@ class EncoderDecoder(CausalLM):
         ValueError: The encoder's rows are fewer than a prompt chunk's.
     """
 
+    layer_class = None
+
     def __init__(self, config: DecoderConfig, weights, encoder: Encoder, decoder=None):
         super().__init__(config, weights, decoder)
         self.encoder = encoder

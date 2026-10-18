@@ -91,6 +91,7 @@ class Lfm2(CausalLM):
 
     config = Lfm2Config
     profile = Path(__file__).with_name("profiles")
+    layer_class = None
 
     def __init__(self, config: Lfm2Config, weights):
         super().__init__(config, weights)
