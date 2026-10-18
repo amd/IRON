@@ -142,7 +142,7 @@ class GEMM(Operator):
     )
     # Below HIGHEST C rounds to bf16 per K tile: tile_k changes it.
     tile_k: CompileTime[int] = Auto(
-        64,
+        default=64,
         domain=Divisors(
             of=K,
             step=lambda op, dev: op.mac_block(dev)[1],
@@ -151,20 +151,22 @@ class GEMM(Operator):
         array=True,
     )
     tile_n: CompileTime[int] = Auto(
-        64,
+        default=64,
         domain=Divisors(of=N, step=lambda op, dev: op.mac_block(dev)[2]),
         array=True,
     )
     # None: the most columns the shim budget allows that split N into tiles.
     num_aie_columns: CompileTime[int] = Auto()
-    placement: CompileTime[GEMMPlacement] = Auto(GEMMPlacement.SHIMS, array=True)
-    b_col_maj: CompileTime[bool] = field(False, array=True)
-    c_col_maj: CompileTime[bool] = field(False, array=True)
+    placement: CompileTime[GEMMPlacement] = Auto(
+        default=GEMMPlacement.SHIMS, array=True
+    )
+    b_col_maj: CompileTime[bool] = field(default=False, array=True)
+    c_col_maj: CompileTime[bool] = field(default=False, array=True)
     # MEDIUM multiplies on bfp16 macs; HIGHEST keeps a bf16 C's partial
     # sums f32 across K tiles.
-    precision: CompileTime[Precision] = Auto(Precision.MEDIUM, array=True)
-    input_dtype: CompileTime[Any] = field(bfloat16, repr=False)
-    output_dtype: CompileTime[Any] = field(bfloat16, repr=False)
+    precision: CompileTime[Precision] = Auto(default=Precision.MEDIUM, array=True)
+    input_dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
+    output_dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
     # Filled by resolve.
     n_aie_rows: CompileTime[int] = Auto(repr=False, init=False, array=True)
     n_shim_mem_a: CompileTime[int] = Auto(repr=False, init=False)

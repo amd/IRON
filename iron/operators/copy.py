@@ -101,7 +101,7 @@ class Gather(Operator):
     rows: CompileTime[int] = field()
     table_rows: CompileTime[int] = field()
     row: CompileTime[int] = field()
-    dtype: CompileTime[Any] = field(bfloat16, repr=False)
+    dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
     words: CompileTime[int] = field(
         derive=lambda op: 20 * op.chain
         + 6 * op.rows
@@ -400,7 +400,7 @@ class GatherWords(Operator):
     pairs: CompileTime[int] = field(
         derive=lambda op: 2 * op.rows, repr=False, array=True
     )
-    bounded: CompileTime[bool] = field(False, array=True)
+    bounded: CompileTime[bool] = field(default=False, array=True)
     # The words a call writes: the address pairs, then if bounded the lengths.
     record: CompileTime[int] = field(
         derive=lambda op: op.pairs + (op.rows if op.bounded else 0), repr=False
@@ -615,10 +615,10 @@ class Copy(Operator):
         held=False,
     )
     # The axis of each pattern a graph bounds per call.
-    src_bound: CompileTime[int | None] = field(None)
-    dst_bound: CompileTime[int | None] = field(None)
+    src_bound: CompileTime[int | None] = field(default=None)
+    dst_bound: CompileTime[int | None] = field(default=None)
     # The source's first axis runs a per-call count of times (Handle.at's repeat).
-    src_repeat: CompileTime[bool] = field(False)
+    src_repeat: CompileTime[bool] = field(default=False)
     tile_size: CompileTime[int] = Auto(
         domain=Divisors(
             of=lambda op, dev: op.channel_share,
@@ -630,8 +630,8 @@ class Copy(Operator):
     object_bytes: ClassVar[int] = 64 * 1024
     # The patterns a repeated source walks in turn: a repeat word each.
     max_walks: ClassVar[int] = 8
-    num_channels: CompileTime[int] = Auto(1)
-    dtype: CompileTime[Any] = field(bfloat16, repr=False)
+    num_channels: CompileTime[int] = Auto(default=1)
+    dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
 
     x = In(
         input_buffer_size,

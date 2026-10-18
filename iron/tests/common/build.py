@@ -59,9 +59,9 @@ NPU2_4COL = from_name("npu2", n_cols=4)
 class MV(Operator):
     M: CompileTime[int] = field()
     K: CompileTime[int] = field()
-    num_batches: CompileTime[int | None] = field(None)
-    cols: CompileTime[int] = Auto(2)
-    tile_out: CompileTime[int] = Auto(64)
+    num_batches: CompileTime[int | None] = field(default=None)
+    cols: CompileTime[int] = Auto(default=2)
+    tile_out: CompileTime[int] = Auto(default=64)
     A = In(num_batches, M, K, obj_shape=(tile_out, K), per=(cols,))
     B = In(num_batches, K, obj_shape=(K,), broadcast=True)
     C = Out(num_batches, M, obj_shape=(tile_out,), per=(cols,))
@@ -238,7 +238,7 @@ class Words(Operator):
     """A core reading a word, a block of three, a word, and one per call."""
 
     n: CompileTime[int] = field()
-    tile: CompileTime[int] = Auto(64)
+    tile: CompileTime[int] = Auto(default=64)
     A = In(n, obj_shape=(tile,))
     first = Value(derive=lambda op: 7)
     block = Value(derive=lambda op: [11, 12, 13], words=3)
@@ -665,7 +665,7 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 def test_a_lane_pins_to_a_channel_moving_its_way():
     class Pinned(Operator):
         n: CompileTime[int] = field()
-        c: CompileTime[int] = Auto(2)
+        c: CompileTime[int] = Auto(default=2)
         x = In(n, obj_shape=(n,))
         y = Out(n, obj_shape=(n,), per=(c,))
 

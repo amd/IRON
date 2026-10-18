@@ -94,8 +94,8 @@ class Merge(Operator):
     rows: CompileTime[int] = field()
     # Each placeholder's (token id, first row of its soft tokens).
     placeholders: CompileTime[tuple[tuple[int, int], ...]] = field(array=True)
-    block: CompileTime[int] = field(64)
-    offset: CompileTime[bool] = field(False)
+    block: CompileTime[int] = field(default=64)
+    offset: CompileTime[bool] = field(default=False)
     kinds: CompileTime[int] = field(derive=lambda op: len(op.placeholders), repr=False)
 
     ids = In(rows, dtype=np.int32, obj_shape=(block,))

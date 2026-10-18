@@ -151,7 +151,7 @@ class ProjectionGEMM(Operator):
     N: CompileTime[int] = field()
     # The activation, selected at run time from the compiled-in modes; its
     # gelu is x * sigmoid(1.702x), the port's own arithmetic.
-    epilogue: CompileTime[Epilogue | str] = field(Epilogue.NONE)
+    epilogue: CompileTime[Epilogue | str] = field(default=Epilogue.NONE)
     # B's packed block count on AIE2P: blocks, not bytes, since B's
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
     # into the byte count pack_B returns.
@@ -172,22 +172,24 @@ class ProjectionGEMM(Operator):
     # divide m_row_blocks (M % 512 == 0), and a shape that cannot use it would
     # fork config_name. See README.md.
     m_chunk: CompileTime[int] = Auto(
-        1,
+        default=1,
         domain=Divisors(of=lambda op, dev: op.M // (M_TILE * op.rows)),
         array=True,
     )
     # The activations the epilogue can select between at run time. Each one
     # compiled in costs
     # program memory, so a deployment that dispatches two should compile two.
-    epilogue_modes: CompileTime[tuple] = field(tuple(Epilogue), array=True)
-    rounding: CompileTime[Rounding | str] = field(Rounding.CONV_EVEN, array=True)
-    gelu: CompileTime[Gelu | str] = field(Gelu.FP32, array=True)
+    epilogue_modes: CompileTime[tuple] = field(default=tuple(Epilogue), array=True)
+    rounding: CompileTime[Rounding | str] = field(
+        default=Rounding.CONV_EVEN, array=True
+    )
+    gelu: CompileTime[Gelu | str] = field(default=Gelu.FP32, array=True)
     # B as stored (N, K), a checkpoint's layout, read as is: the memtile lays
     # out the k panels the kernel reads as B^T blocks, so no packed copy.
-    b_col_maj: CompileTime[bool] = field(False, array=True)
+    b_col_maj: CompileTime[bool] = field(default=False, array=True)
     # MEDIUM multiplies on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8
     # (the port's arithmetic); above it, or on AIE2, on bf16 macs.
-    precision: CompileTime[Precision] = Auto(Precision.MEDIUM)
+    precision: CompileTime[Precision] = Auto(default=Precision.MEDIUM)
     # Filled by resolve, from the device: the macs, the grid, B's storage,
     # the L2 tiles.
     emulate_bf16_mmul_with_bfp16: CompileTime[bool] = Auto(

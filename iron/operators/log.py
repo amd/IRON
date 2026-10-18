@@ -25,7 +25,7 @@ class Log(UnaryElementwise):
         ),
     )
 
-    offset: CompileTime[float] = field(0.0, array=True)
+    offset: CompileTime[float] = field(default=0.0, array=True)
 
     x = In(
         UnaryElementwise.size,

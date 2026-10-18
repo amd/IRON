@@ -30,8 +30,8 @@ class RMSNorm(Rowwise):
     )
 
     # The epsilon under the root: 1e-5 by default; a model states its own.
-    epsilon: CompileTime[float] = field(1e-5, array=True)
-    weighted: CompileTime[bool] = field(False)
+    epsilon: CompileTime[float] = field(default=1e-5, array=True)
+    weighted: CompileTime[bool] = field(default=False)
 
     x = In(
         Rowwise.rows,

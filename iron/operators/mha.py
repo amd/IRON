@@ -228,18 +228,18 @@ class MHA(Operator):
     # A cache longer than the queries, whose last rows the queries are.
     kv_len: CompileTime[int] = field(derive=lambda op: op.seq_pad, held=False)
     # ``(seq, heads, d)`` as a projection writes it, so no copy reorders the heads.
-    heads_interleaved: CompileTime[bool] = field(False)
-    kv_interleaved: CompileTime[bool] = field(False)
-    d: CompileTime[int] = field(64)
-    causal: CompileTime[bool] = field(True, array=True)
+    heads_interleaved: CompileTime[bool] = field(default=False)
+    kv_interleaved: CompileTime[bool] = field(default=False)
+    d: CompileTime[int] = field(default=64)
+    causal: CompileTime[bool] = field(default=True, array=True)
     # Keys more than this many positions from a query are masked.
-    window: CompileTime[int | None] = field(None, array=True)
+    window: CompileTime[int | None] = field(default=None, array=True)
     scale: CompileTime[float] = field(
         derive=lambda op: float(1 / np.sqrt(op.d)), held=False, array=True
     )
     B_q: CompileTime[int] = Auto(domain=BLOCK_SIZES, array=True)
     B_kv: CompileTime[int] = Auto(repr=False, init=False)
-    num_pipelines: CompileTime[int] = Auto(1, domain=Width(), array=True)
+    num_pipelines: CompileTime[int] = Auto(default=1, domain=Width(), array=True)
     # Filled by resolve.
     q_shims: CompileTime[int] = Auto(repr=False, init=False)
     join_rows: CompileTime[int] = Auto(repr=False, init=False)

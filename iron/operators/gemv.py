@@ -92,9 +92,9 @@ class GEMV(Operator):
     M: CompileTime[int] = field()
     K: CompileTime[int] = field()
     # None: a single batch, with no batch dimension.
-    num_batches: CompileTime[int | None] = field(None)
+    num_batches: CompileTime[int | None] = field(default=None)
     # Batches per matrix of A (grouped-query scores): no repeated copy.
-    repeat: CompileTime[int] = field(1)
+    repeat: CompileTime[int] = field(default=1)
     num_matrices: CompileTime[int | None] = field(
         derive=lambda op: (
             None if op.num_batches is None else op.num_batches // op.repeat

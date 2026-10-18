@@ -22,7 +22,7 @@ class AXPY(BinaryElementwise):
         ]
     )
 
-    scalar_factor: CompileTime[float] = field(3.0, array=True)
+    scalar_factor: CompileTime[float] = field(default=3.0, array=True)
 
     class Array(BinaryElementwise.Array):
         def kernel(self):

@@ -255,7 +255,7 @@ class Elementwise(Operator):
     """
 
     num_aie_columns: CompileTime[int] = Auto(array=True)
-    num_channels: CompileTime[int] = Auto(1, array=True)
+    num_channels: CompileTime[int] = Auto(default=1, array=True)
     tile_size: CompileTime[int] = Auto(
         domain=Divisors(
             of=lambda op, dev: op.outputs[0].elements,

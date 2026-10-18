@@ -112,10 +112,10 @@ class Sample(Operator):
     )
 
     vocab: CompileTime[int] = field(array=True)
-    k_max: CompileTime[int] = field(64, array=True)
+    k_max: CompileTime[int] = field(default=64, array=True)
     # Positions the draws and the record hold; the sequence picks one.
-    steps: CompileTime[int] = field(1)
-    cores: CompileTime[int] = Auto(4)
+    steps: CompileTime[int] = field(default=1)
+    cores: CompileTime[int] = Auto(default=4)
     # Logits per select call.
     chunk: CompileTime[int] = Auto(
         domain=Divisors(of=lambda op, dev: op.slice_size, step=2, cap=_CHUNK_LIMIT)

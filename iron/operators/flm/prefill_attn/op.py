@@ -132,4 +132,4 @@ class PrefillSlidingAttention(_PrefillAttentionBase):
     """Sliding-window causal prefill attention with a head dim of 256, from a KV cache."""
 
     variant = SLIDING
-    window: CompileTime[int] = field(512)
+    window: CompileTime[int] = field(default=512)

@@ -61,7 +61,7 @@ class AutoSpec(ParamSpec):
 
     Attributes:
         default: The starting value a construction or a profile leaves open
-            takes (``Auto(default)``), or None when ``resolve`` must
+            takes (``Auto(default=...)``), or None when ``resolve`` must
             fill the field.
         domain: The values a tuner searches the field over, or None.
     """
@@ -71,9 +71,8 @@ class AutoSpec(ParamSpec):
 
 
 def field(
-    default: Any = MISSING,
-    /,
     *,
+    default: Any = MISSING,
     derive: Callable[[Any], Any] | None = None,
     held: bool = True,
     repr: bool = True,
@@ -89,7 +88,7 @@ def field(
 
     Args:
         default: The value when neither the caller nor an operand gives
-            one: ``field(64)``. Without `default` or `derive`, the field is
+            one: ``field(default=64)``. Without `default` or `derive`, the field is
             a required constructor argument.
         derive: A function of the operator computing the field when
             neither the caller nor an operand gives it, called once the
@@ -119,7 +118,7 @@ def field(
         TypeError: Both `default` and `derive` are given.
     """
     if derive is not None and default is not MISSING:
-        raise TypeError("field(default, derive=): give one, not both")
+        raise TypeError("field(default=, derive=): give one, not both")
     return dataclasses.field(
         default=None if derive is not None else default,
         init=init,
@@ -137,9 +136,8 @@ def field(
 
 
 def Auto(
-    default: Any = None,
-    /,
     *,
+    default: Any = None,
     domain: Domain | tuple[Any, ...] | None = None,
     repr: bool = True,
     init: bool = True,

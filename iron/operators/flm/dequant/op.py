@@ -146,8 +146,8 @@ class DequantBFP(Operator):
     N: CompileTime[int] = field()
     # A projection interleaved with another in the same buffer: this one
     # occupies ``run_out_features`` of every ``run_period_out_features``.
-    run_out_features: CompileTime[int | None] = field(None)
-    run_period_out_features: CompileTime[int | None] = field(None)
+    run_out_features: CompileTime[int | None] = field(default=None)
+    run_period_out_features: CompileTime[int | None] = field(default=None)
     # Each buffer is declared in the unit its transfers count in. The q4nx
     # input is bytes, because a block interleaves three tables at 5 bits per
     # weight and the fill walks it bytewise. The output is bfp16ebs8 blocks,
@@ -164,7 +164,7 @@ class DequantBFP(Operator):
     # join, so it is not a field; halves is, because a stream's replication
     # count must be declared to be indexed, but the join bakes it too.
     cols: CompileTime[int] = Auto(repr=False)
-    halves: CompileTime[int] = Auto(HALVES, repr=False, init=False)
+    halves: CompileTime[int] = Auto(default=HALVES, repr=False, init=False)
 
     # One q4nx block per core, delivered as one per-column object the cores
     # split; one packed half-tile out per (column, n-half), joined from the

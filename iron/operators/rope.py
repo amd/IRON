@@ -78,7 +78,7 @@ class RoPE(Operator):
         derive=lambda op: op.rows, held=False
     )  # one row per position
     num_aie_columns: CompileTime[int] = Auto()
-    two_halves: CompileTime[bool] = field(True, array=True)
+    two_halves: CompileTime[bool] = field(default=True, array=True)
 
     x = In(rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))
     angles = In(angle_rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))
