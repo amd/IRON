@@ -26,11 +26,11 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 #: SmolVLM's vision tower at toy size: an 8x8 patch grid, shuffled 2x2.
 VISION = VisionConfig(
-    hidden=256,
+    hidden_size=256,
     num_hidden_layers=2,
     num_attention_heads=4,
     intermediate_size=512,
-    patch=16,
+    patch_size=16,
     image_size=128,
     scale_factor=2,
     text_dim=256,
@@ -56,10 +56,10 @@ def vision_names(c: VisionConfig) -> dict[str, tuple[int, ...]]:
     """The vision tower's and connector's tensors of a checkpoint of ``c``'s
     shape, by name.
     """
-    E, F = c.hidden, c.intermediate_size
+    E, F = c.hidden_size, c.intermediate_size
     v = "model.vision_model"
     out = {
-        f"{v}.embeddings.patch_embedding.weight": (E, 3, c.patch, c.patch),
+        f"{v}.embeddings.patch_embedding.weight": (E, 3, c.patch_size, c.patch_size),
         f"{v}.embeddings.patch_embedding.bias": (E,),
         f"{v}.embeddings.position_embedding.weight": (c.side**2, E),
         f"{v}.post_layernorm.weight": (E,),

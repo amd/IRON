@@ -94,7 +94,7 @@ class Phi4Config(DecoderConfig):
     )
     # The checkpoint's own full LongRoPE context, for the amplitude formula,
     # whatever context a caller serves.
-    longrope_context: int | None = dataclasses.field(
+    max_position_embeddings: int | None = dataclasses.field(
         default=None, kw_only=True, metadata={"json": "max_position_embeddings"}
     )
 
@@ -107,9 +107,11 @@ class Phi4Config(DecoderConfig):
         if (
             self.rope_attention_scaling == 1.0
             and self.original_max_position_embeddings
-            and self.longrope_context
+            and self.max_position_embeddings
         ):
-            factor = self.longrope_context / self.original_max_position_embeddings
+            factor = (
+                self.max_position_embeddings / self.original_max_position_embeddings
+            )
             scale = math.sqrt(
                 1 + math.log(factor) / math.log(self.original_max_position_embeddings)
             )

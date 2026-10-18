@@ -77,7 +77,7 @@ class WhisperEncoderConfig(Config):
     num_hidden_layers: int
     num_attention_heads: int
     intermediate_size: int
-    mels: int
+    num_mel_bins: int
     positions: int
     hidden_act: str
     eps: float = dataclasses.field(default=1e-5, kw_only=True)
@@ -145,14 +145,16 @@ class WhisperConfig(DecoderConfig):
     encoder_layers: int = dataclasses.field(
         kw_only=True, metadata={"json": "encoder_layers"}
     )
-    encoder_heads: int = dataclasses.field(
+    encoder_attention_heads: int = dataclasses.field(
         kw_only=True, metadata={"json": "encoder_attention_heads"}
     )
-    encoder_hidden_dim: int = dataclasses.field(
+    encoder_ffn_dim: int = dataclasses.field(
         kw_only=True, metadata={"json": "encoder_ffn_dim"}
     )
-    mels: int = dataclasses.field(kw_only=True, metadata={"json": "num_mel_bins"})
-    source_positions: int = dataclasses.field(
+    num_mel_bins: int = dataclasses.field(
+        kw_only=True, metadata={"json": "num_mel_bins"}
+    )
+    max_source_positions: int = dataclasses.field(
         kw_only=True, metadata={"json": "max_source_positions"}
     )
 
@@ -172,10 +174,10 @@ class WhisperConfig(DecoderConfig):
         return WhisperEncoderConfig(
             self.hidden_size,
             self.encoder_layers,
-            self.encoder_heads,
-            self.encoder_hidden_dim,
-            self.mels,
-            self.source_positions,
+            self.encoder_attention_heads,
+            self.encoder_ffn_dim,
+            self.num_mel_bins,
+            self.max_source_positions,
             self.hidden_act,
             eps=self.eps,
         )
@@ -197,7 +199,7 @@ class WhisperEncoder(Tower):
         c, e = config, weights.model.encoder
         super().__init__(c, e.layers, c.rows, c.rows)
         self.final_norm = e.layer_norm
-        self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.mels)
+        self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.num_mel_bins)
         self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
         # The second convolution's input: a zero row, then the first's output.
         self.convolved = iron.state((2 * c.rows + 1, c.hidden_size))
@@ -225,33 +227,33 @@ class WhisperEncoder(Tower):
 
     def body(self, features, *, rows: Scratchpad[np.int32]):
         """The encoder's output over a clip's ``features``, ``(conv_rows +
-        2, mels)``: a zero row, the frames, zero rows after.
+        2, num_mel_bins)``: a zero row, the frames, zero rows after.
         """
         x, angles = self.front(features, rows=rows)
         return self.forward(x, rows, angles)
 
     def shapes(self) -> list[dict]:
         c = self.config
-        return [dict(features=((c.conv_rows + 2, c.mels), bfloat16))]
+        return [dict(features=((c.conv_rows + 2, c.num_mel_bins), bfloat16))]
 
     def longest(self) -> dict:
         return dict(rows=self.config.positions)
 
     def inputs(self, features) -> tuple[np.ndarray, dict]:
-        """A call's buffer for ``features``, ``(mels, frames)`` as the
+        """A call's buffer for ``features``, ``(num_mel_bins, frames)`` as the
         feature extractor gives them, and its ``rows``.
 
         Raises:
-            ValueError: ``features`` is not ``(mels, frames)``.
+            ValueError: ``features`` is not ``(num_mel_bins, frames)``.
         """
         c = self.config
         features = np.asarray(features)
-        if features.shape != (c.mels, c.frames):
+        if features.shape != (c.num_mel_bins, c.frames):
             raise ValueError(
                 f"WhisperEncoder: features {features.shape} are not "
-                f"{(c.mels, c.frames)}"
+                f"{(c.num_mel_bins, c.frames)}"
             )
-        buffer = np.zeros((c.conv_rows + 2, c.mels), bfloat16)
+        buffer = np.zeros((c.conv_rows + 2, c.num_mel_bins), bfloat16)
         buffer[1 : c.frames + 1] = features.T
         return buffer, dict(rows=c.positions)
 
@@ -284,7 +286,7 @@ class Whisper(EncoderDecoder):
 class HuggingFaceWhisper(HuggingFace):
     """transformers' ``WhisperForConditionalGeneration`` in float32, what
     records Whisper's goldens: the logits after the decoder's tokens over a
-    clip's features, ``(mels, frames)``.
+    clip's features, ``(num_mel_bins, frames)``.
     """
 
     model_class = "AutoModelForSpeechSeq2Seq"

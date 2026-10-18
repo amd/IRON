@@ -35,7 +35,7 @@ class VisionConfig(Config):
     ``vision_config``, ``text_config`` and top-level ``scale_factor``.
     """
 
-    hidden: int = dataclasses.field(metadata={"json": "vision_config.hidden_size"})
+    hidden_size: int = dataclasses.field(metadata={"json": "vision_config.hidden_size"})
     num_hidden_layers: int = dataclasses.field(
         metadata={"json": "vision_config.num_hidden_layers"}
     )
@@ -45,7 +45,7 @@ class VisionConfig(Config):
     intermediate_size: int = dataclasses.field(
         metadata={"json": "vision_config.intermediate_size"}
     )
-    patch: int = dataclasses.field(metadata={"json": "vision_config.patch_size"})
+    patch_size: int = dataclasses.field(metadata={"json": "vision_config.patch_size"})
     image_size: int = dataclasses.field(metadata={"json": "vision_config.image_size"})
     scale_factor: int = dataclasses.field(metadata={"json": "scale_factor"})
     text_dim: int = dataclasses.field(metadata={"json": "text_config.hidden_size"})
@@ -63,13 +63,13 @@ class VisionConfig(Config):
     def __post_init__(self):
         if self.head_dim is None:
             object.__setattr__(
-                self, "head_dim", self.hidden // self.num_attention_heads
+                self, "head_dim", self.hidden_size // self.num_attention_heads
             )
 
     @property
     def side(self) -> int:
         """The patches along each side of the image."""
-        return self.image_size // self.patch
+        return self.image_size // self.patch_size
 
     @property
     def tokens(self) -> int:
@@ -108,13 +108,13 @@ class VisionTower(Tower):
         self.final_norm = self.vision_model.post_layernorm
         embeddings = self.vision_model.embeddings
         self.patch_embed = Conv2d(
-            embeddings.patch_embedding.weight, c.image_size, stride=c.patch
+            embeddings.patch_embedding.weight, c.image_size, stride=c.patch_size
         )
 
     def front(self, rgb):
         """The patches of the image ``rgb`` embedded, with their positions."""
         c, e = self.config, self.vision_model.embeddings
-        h = self.patch_embed(rgb, rows=c.side).reshape(c.side**2, c.hidden)
+        h = self.patch_embed(rgb, rows=c.side).reshape(c.side**2, c.hidden_size)
         h = RowwiseAdd.step(h, e.patch_embedding.bias)
         return ElementwiseAdd.step(h, e.position_embedding.weight), None
 
@@ -128,12 +128,17 @@ class VisionTower(Tower):
         c = self.config
         side, scale, rows = c.side, c.scale_factor, c.side // c.scale_factor
         shuffle = TensorAccessPattern(
-            (side, side * c.hidden),
+            (side, side * c.hidden_size),
             0,
-            [rows, rows, scale, scale * c.hidden],
-            [scale * side * c.hidden, scale * c.hidden, side * c.hidden, 1],
+            [rows, rows, scale, scale * c.hidden_size],
+            [
+                scale * side * c.hidden_size,
+                scale * c.hidden_size,
+                side * c.hidden_size,
+                1,
+            ],
         )
-        return Copy.step(x, src=shuffle).reshape(rows * rows, c.hidden * scale**2)
+        return Copy.step(x, src=shuffle).reshape(rows * rows, c.hidden_size * scale**2)
 
     def head(self, x):
         projection = self.connector.modality_projection.proj.weight

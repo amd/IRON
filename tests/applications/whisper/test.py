@@ -37,10 +37,10 @@ TOY = WhisperConfig(
     max_seq_len=448,
     hidden_act="gelu_pytorch_tanh",
     encoder_layers=2,
-    encoder_heads=4,
-    encoder_hidden_dim=512,
-    mels=64,
-    source_positions=200,
+    encoder_attention_heads=4,
+    encoder_ffn_dim=512,
+    num_mel_bins=64,
+    max_source_positions=200,
 )
 
 
@@ -48,11 +48,11 @@ def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
     """Each tensor of a Whisper checkpoint of ``c``'s shape, by name."""
     E, V = c.hidden_size, c.vocab_size
     out = {
-        "model.encoder.conv1.weight": (E, c.mels, 3),
+        "model.encoder.conv1.weight": (E, c.num_mel_bins, 3),
         "model.encoder.conv1.bias": (E,),
         "model.encoder.conv2.weight": (E, E, 3),
         "model.encoder.conv2.bias": (E,),
-        "model.encoder.embed_positions.weight": (c.source_positions, E),
+        "model.encoder.embed_positions.weight": (c.max_source_positions, E),
         "model.encoder.layer_norm.weight": (E,),
         "model.encoder.layer_norm.bias": (E,),
         "model.decoder.embed_tokens.weight": (V, E),
@@ -61,7 +61,7 @@ def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
         "model.decoder.layer_norm.bias": (E,),
     }
     stacks = [
-        ("model.encoder", c.encoder_layers, c.encoder_hidden_dim, ["self_attn"]),
+        ("model.encoder", c.encoder_layers, c.encoder_ffn_dim, ["self_attn"]),
         (
             "model.decoder",
             c.num_hidden_layers,
@@ -101,11 +101,11 @@ def _assert_close(got, want, what: str):
 
 @pytest.fixture(scope="module")
 def clip():
-    """The toy's weights and a clip's features, ``(mels, frames)``."""
+    """The toy's weights and a clip's features, ``(num_mel_bins, frames)``."""
     weights = drawn(TOY, names(TOY), 0)
     encoder = TOY.encoder()
     rng = np.random.default_rng(1)
-    features = rng.uniform(-1, 1, (encoder.mels, encoder.frames))
+    features = rng.uniform(-1, 1, (encoder.num_mel_bins, encoder.frames))
     return weights, features.astype(bfloat16).astype(np.float32)
 
 
@@ -162,7 +162,7 @@ def test_the_encoder_s_output_is_hugging_face_s(clip, golden):
         [], features
     )
     # 200 positions of the 256 rows the layers take.
-    assert got.shape == want.shape == (TOY.source_positions, TOY.hidden_size)
+    assert got.shape == want.shape == (TOY.max_source_positions, TOY.hidden_size)
     _assert_close(got, want, "the encoder's output")
 
 
@@ -239,7 +239,7 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
     )
     assert model.decoder.embed_tokens.weight.dtype == bfloat16
     features = np.random.default_rng(1).uniform(
-        -1, 1, (TOY.mels, 2 * TOY.source_positions)
+        -1, 1, (TOY.num_mel_bins, 2 * TOY.max_source_positions)
     )
     features = features.astype(bfloat16).astype(np.float32)
     buffer, own = model.encoder.inputs(features)
