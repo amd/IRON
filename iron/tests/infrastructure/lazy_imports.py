@@ -112,8 +112,9 @@ def test_the_check_can_observe_an_import():
     assert "iron.operators.gemm" in imported
 
 
-#: What only recording a golden needs; nothing a user imports may ask for it.
-_RECORDING_ONLY = ("torch", "torchvision", "transformers")
+#: What IRON does not require: recording a golden's packages and the
+#: examples' tokenizers. Nothing a user imports may ask for them.
+_RECORDING_ONLY = ("torch", "torchvision", "transformers", "tokenizers")
 
 
 def _heavy_imports_asked_for(modules):

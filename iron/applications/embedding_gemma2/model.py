@@ -24,7 +24,6 @@ from typing import ClassVar
 import aie.utils as aie_utils
 import numpy as np
 from ml_dtypes import bfloat16
-import tokenizers
 
 import iron
 import iron.functional as F
@@ -77,6 +76,8 @@ class Tokenizer:
     }
 
     def __init__(self, path, config: Config = Config()):
+        import tokenizers
+
         self.tokenizer = tokenizers.Tokenizer.from_file(str(path))
         self.config = config
 
