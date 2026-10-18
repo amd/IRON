@@ -5,57 +5,32 @@ SPDX-License-Identifier: Apache-2.0
 
 # EmbeddingGemma 2 on the NPU
 
-EmbeddingGemma 2's text encoder as one IRON graph, `EmbeddingGemma`,
-compiled once at `max_tokens` rows (2048 by default) with the prompt's
-length bound per call, and its audio and vision towers, whose soft tokens
-take their placeholders' places in the text (`Multimodal`, an
-`iron.lm.Multimodal`). Text goes in
-behind its task's prefix and a unit-length embedding of 768 comes out, or
-its first 512, 256 or 128 renormalized. Each graph is checked against
-Hugging Face's own model of the same part in float32.
+EmbeddingGemma 2's text encoder, `EmbeddingGemma`, an `iron.lm.Encoder`
+compiled once at `max_tokens` rows with the prompt's length bound per call,
+and its audio and vision towers, whose soft tokens take their placeholders'
+places in the text (`Multimodal`). Text goes in behind its task's prefix
+and a unit-length embedding of 768 comes out, or its first 512, 256 or 128
+renormalized. Each graph is checked against Hugging Face's own model of the
+same part in float32. The shared library is [AGENTS.md](../../../AGENTS.md#language-models).
 
-The application is one package over `iron.lm`:
-
-- `config.py`: each part's shape (`Config`, `AudioConfig`, `VisionConfig`)
-  and the largest call each graph is compiled for
-- `model.py`: the text encoder and `Multimodal` on the NPU, the
-  `Tokenizer` (each task's prefix, the placeholders), the command line, and
-  `Runner`, what `python -m iron.lm.tune embedding_gemma2` times: every
-  version of `Multimodal`, so every graph's operators, into one profile
-- `audio.py`, `vision.py`: the towers, each an `iron.lm.Tower`, a graph
-  of its own that `Multimodal` calls in its body
-- `blocks.py`: the layer parts its own, over `iron.lm`'s: Gemma's
-  sandwich-normed layer and the audio tower's clipped projections
-- `hugging_face.py`: Hugging Face's own processors, model and towers, what
-  the tests' goldens are recorded from
-- `profiles/`: the tunables per device, where an operator's own resolution
-  falls short, as `iron.lm.tune` writes them
+- `config.py`: each part's shape and the largest call each graph is
+  compiled for
+- `model.py`: the text encoder, `Multimodal`, the tokenizer, the command
+  line, and the `Runner` that `python -m iron.lm.tune embedding_gemma2`
+  times
+- `audio.py`, `vision.py`: the towers, each an `iron.lm.Tower`
+- `blocks.py`: Gemma's sandwich-normed layer and the audio tower's clipped
+  projections
+- `hugging_face.py`: Hugging Face's processors and model, what the goldens
+  are recorded from
 
 ## Weights and tokenizer
 
 The checkpoint directory holds `model.safetensors`, `tokenizer.json` and
-`config.json` (each part's shape: `Config.from_checkpoint`,
-`AudioConfig.from_checkpoint`, `VisionConfig.from_checkpoint`, checked
-against it in `iron/tests/common/config.py`).
-Every graph reads the weights by the checkpoint's own names
-(`iron.lm.Checkpoint.tree`: `language_model`, `audio_tower`,
-`vision_tower`, ...); tracing and tuning read only the header, for the
-shapes.
-The tests look for them at `$IRON_EXAMPLE_WEIGHTS_DIR/embeddinggemma-2/`
-(`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line they
-can be anywhere.
-
-## Setup
-
-Set up IRON as the repository root describes, then:
-
-```bash
-python3 -m pip install -r requirements_examples.txt
-```
+`config.json`. Install `requirements_examples.txt` as the README's
+[Models](../../../README.md#models) says.
 
 ## Running
-
-From the repository root, a query ranked against documents:
 
 ```bash
 python -m iron.applications.embedding_gemma2.model /path/to/embeddinggemma-2 \
@@ -71,21 +46,13 @@ python -m iron.applications.embedding_gemma2.model /path/to/embeddinggemma-2 \
 pytest tests/applications/embedding_gemma2/
 ```
 
-The text encoder's embeddings against Hugging Face's (their cosine and
-norm), the truncations, a query ranking two documents, text with a clip
-and an image, each tower's soft tokens, the audio features and image
-patches against Hugging Face's processors', determinism, and the latency
-of each, on NPU1 and NPU2. On
-NPU1 each step is its own dispatch of an xclbin; `TestEachStep` checks that
-form on NPU2.
-
-The vision tests run on four COCO val2017 photos, and the audio tests on
-five LibriSpeech test-clean utterances (CC BY 4.0), each fetched from where
-it is published (COCO's host, openslr's archive) by its sha256 into the
-checkpoint's directory the first time.
-
-What Hugging Face's processors and model give is recorded once in
-`golden.npz` in the checkpoint's directory by `pytest --record-goldens`,
-where torch, torchvision and transformers are installed (they are not
-IRON's requirements), and read back from it elsewhere; a test whose golden
-is missing fails.
+The text encoder's embeddings against Hugging Face's, the truncations, a
+query ranking two documents, text with a clip and an image, each tower's
+soft tokens, the audio features and image patches against Hugging Face's
+processors', determinism and latency, on NPU1 and NPU2; `TestEachStep`
+checks NPU1's form, an xclbin per step, on NPU2. The vision tests fetch
+four COCO val2017 photos and the audio tests five LibriSpeech test-clean
+utterances (CC BY 4.0) into IRON's cache, each pinned by its sha256.
+Hugging Face's outputs are recorded once in `golden.npz` beside the
+checkpoint by `pytest --record-goldens`; a test whose golden is missing
+fails.
