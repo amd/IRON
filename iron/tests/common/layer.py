@@ -220,6 +220,15 @@ def test_a_layer_norm_at_another_epsilon_than_its_kernels_is_refused():
         Norm(1e-6, bias=True)(norm, SimpleNamespace(shape=(1, WIDTH)))
 
 
+def test_an_rms_norm_given_no_weight_is_unweighted():
+    class Normed(iron.Graph):
+        def body(self, x):
+            return F.rms_norm(x, x.shape[-1:], None, 1e-6)
+
+    (step,) = Normed().trace(x=(T, WIDTH)).steps
+    assert not step.op.weighted and not step.op.inputs[1:]
+
+
 @pytest.mark.parametrize("norm", [F.rms_norm, F.layer_norm], ids=["rms", "layer"])
 def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
     x = SimpleNamespace(shape=(4, WIDTH))
