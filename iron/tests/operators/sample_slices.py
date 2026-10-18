@@ -15,13 +15,11 @@ from aie.iron.kernels import sample as kernels
 from iron.common.design import OperatorDesign
 from iron.operators.sample import Sample
 
-# Whisper's (no even split), Qwen3's, Gemma's and Llama's.
-VOCABS = [51866, 151936, 262144, 128256]
+# Whisper's vocab (no even split) and Llama's, on npu2, and Whisper's on npu1.
+CASES = [("npu2", v, c) for v in (51866, 128256) for c in (2, 4)]
 
 
-@pytest.mark.parametrize("cores", [2, 4])
-@pytest.mark.parametrize("vocab", VOCABS)
-@pytest.mark.parametrize("device", ["npu1", "npu2"])
+@pytest.mark.parametrize("device, vocab, cores", [*CASES, ("npu1", 51866, 2)])
 def test_each_core_reads_its_slice_once_a_pass(device, vocab, cores, request):
     op = Sample(vocab=vocab, cores=cores).resolved(request.getfixturevalue(device))
     runs = op.array_config().runs

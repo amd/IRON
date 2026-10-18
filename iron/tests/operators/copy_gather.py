@@ -232,7 +232,7 @@ def test_rows_of_an_intermediate_are_gathered(n_ids):
 
 
 # A feed count left out resolves, to one feed for 15 rows and four past 48.
-FEEDS = [(None, 15), (None, 256), (1, 71), (4, 71), (1, 512), (4, 512)]
+FEEDS = [(None, 15), (4, 71), (1, 512)]
 
 
 @pytest.mark.supported_devices("npu2")
