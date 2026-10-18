@@ -11,8 +11,8 @@ forward pass it is checked against, `YOLOXNanoOracle`; `model.py`'s
 docstrings describe both. Both read the release's own PyTorch checkpoint by
 its own names (`iron.lm.Checkpoint` reads it without torch).
 
-The graph is built from `iron.lm`'s `Conv2d`, `MaxPool2d`, `ConcatChannels`
-and `project`. Its tunables are `profiles/<device>.json`: the narrow
+The graph is built from `iron.lm`'s `Conv2d`, `MaxPool2d` and
+`ConcatChannels`, and `F.linear` for each 1x1 conv (`Pointwise`). Its tunables are `profiles/<device>.json`: the narrow
 projections' `flm.ProjectionGEMM` `tile_n`, and the stem's GEMM `tile_k`.
 
 ## Weights

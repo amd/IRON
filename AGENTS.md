@@ -54,7 +54,7 @@ pytest ... --csv-output=tests_latest.csv                # write benchmark figure
 ```
 
 Without an NPU, the device-free suite is
-`pytest iron/tests/common iron/tests/lm tests/applications -m "not extensive"`.
+`pytest iron/tests/common iron/tests/lm tests/applications iron/tests/operators iron/tests/infrastructure -m "not extensive"`.
 Formatting and licence checks are in CONTRIBUTING.md.
 
 ## Where things live
@@ -147,7 +147,9 @@ CONTRIBUTING.md walks through the common case. The rules:
    `iron/tests/toolchain/inline_kernel.py` is the example. A new C++ kernel
    goes into mlir-aie with a factory; IRON hosts none.
 5. `reference(*inputs)` only where the kernel's contract is not already
-   the reference: numpy, upcast to float32, round once. `ops()` where one
+   the reference: numpy, upcast to float32, round once. A composite builds
+   it from its kernels' contract references where it can, and says why in
+   a comment where it cannot. `ops()` where one
    operation per output element is not the count. `tolerance()` where the
    kernel's contract is not what the output is held to (a data mover
    returns `Tolerance.exact()`).
@@ -200,8 +202,8 @@ values, weights, state and profiles are named. The rules:
   and `test_llama_names_only_the_tunables_that_matter` checks that every
   keyword the model still passes is one a profile could not give.
 - `compile(full_elf=None)` picks one full ELF on NPU2 and an xclbin per
-  step on NPU1 (`iron/common/image/packaging.py`, which logs why at
-  INFO). `check=True` runs each step on its own dispatch against its
+  step on NPU1 (`iron/common/image/packaging.py`; `Graph.compile` logs
+  why at INFO). `check=True` runs each step on its own dispatch against its
   reference and raises at the first step outside its tolerance.
 - `graph.reference(...)` runs the body through each operator's
   `reference()` on the host.
@@ -272,7 +274,7 @@ assert not errors, errors
 - `run_test(..., record=record_property)` writes latency, bandwidth and
   throughput to the CSV; any other figure goes to `record_property`.
 - IRON is numpy only: `ml_dtypes.bfloat16` for bf16. torch and
-  transformers are needed only to record goldens (`--record-goldens`).
+  transformers are needed only to record goldens (`pytest <test> --record-goldens -p no:xdist`).
 - A bug fix comes with a test that fails without it.
 
 ## CI

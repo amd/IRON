@@ -54,5 +54,5 @@ checks NPU1's form, an xclbin per step, on NPU2. The vision tests fetch
 four COCO val2017 photos and the audio tests five LibriSpeech test-clean
 utterances (CC BY 4.0) into IRON's cache, each pinned by its sha256.
 Hugging Face's outputs are recorded once in `golden.npz` beside the
-checkpoint by `pytest --record-goldens`; a test whose golden is missing
+checkpoint by `pytest <test> --record-goldens -p no:xdist`; a test whose golden is missing
 fails.
