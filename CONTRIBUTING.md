@@ -141,6 +141,14 @@ black .
 - Write descriptive docstrings for public functions and classes
 - Use meaningful variable and function names
 
+### Git hook
+`scripts/hooks/pre-push` runs CI's lint checks (reuse, black, clang-format) before a push:
+```bash
+cp scripts/hooks/pre-push .git/hooks/pre-push
+chmod +x .git/hooks/pre-push
+```
+`git push --no-verify` skips it.
+
 ### C++ Code Style
 The few C++ files here follow `.clang-format`; `python scripts/clang-format-wrapper.py --fix` applies it.
 

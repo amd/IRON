@@ -28,22 +28,30 @@ IRON is an open-source & close-to-metal Python API enabling fast and efficient e
 
 **Key Features:**
 
-- Close-to-metal NPU programming via MLIR-AIE Python bindings
-- Pre-built operator library (GEMM, MHA, RMSNorm, RoPE, activations, etc.)
-- Graphs whose operators share compiled images and run on the NPU as one program
-- Extensible architecture for custom operators
-- End-to-end LLM inference (Llama 3.2 1B example included)
+- An operator library (GEMM, MHA, RMSNorm, RoPE, activations, ...) over mlir-aie's `aie.iron`, each operator one declared class
+- Graphs: a model's operators traced once per input shape and compiled into one image, so intermediate values stay on the device
+- Autotuning of each operator's tunables into a per-device profile
+- End-to-end models on the NPU, from Llama 3.2 1B to a vision-language model (see [Models](#models))
+
+## Quick start
+
+After [installing](#installation-linux) IRON and `pip install -r requirements_examples.txt`, given a Hugging Face token for meta-llama's gated repository:
+
+```python
+import iron.lm as lm
+from iron.applications.llama import Llama
+
+model = Llama.load("meta-llama/Llama-3.2-1B")   # downloads, fits, compiles once
+tokens = model.tokenizer("The capital of France is")
+out, ttft, per_token = model.generate(tokens, num_tokens=8, sample=lm.Sampler(seed=0))
+print(model.tokenizer.decode(out))
+```
+
+`Llama.load` also takes a local directory holding `config.json`, the checkpoint and `original/tokenizer.model`.
 
 The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 
 > E. Hunhoff, J. Melber, K. Denolf, A. Bisca, S. Bayliss, S. Neuendorffer, J. Fifield, J. Lo, P. Vasireddy, P. James-Roxby, E. Keller. "[Efficiency, Expressivity, and Extensibility in a Close-to-Metal NPU Programming Interface](https://arxiv.org/abs/2504.18430)". In 33rd IEEE International Symposium On Field-Programmable Custom Computing Machines, May 2025.
-
-#### Operators
-
-Every operator is one class under [iron/operators/](./iron/operators/), listed
-by name in `_OPERATOR_MODULES` in
-[iron/operators/\_\_init\_\_.py](./iron/operators/__init__.py); its
-docstring says what it computes.
 
 ## Installation (Linux)
 
@@ -96,113 +104,46 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    pytest iron/tests/operators/catalog.py -k AXPY
    ```
 
-### Building/Using & Testing Operators
+The commands that run the operator and model tests are in [AGENTS.md](./AGENTS.md#commands).
 
-All available operators can be found in `iron/operators`. These each contain:
+## Models
 
-- `op.py` (or `<name>.py` for a small operator): The operator, one declared class (see `iron/common/declare/` and the Architecture section of `AGENTS.md`): its tunables, its operands declared by shape with the tile each streams into the array in, the values the cores read, and its `Array`, whose `build()` builds the array with ObjectFIFOs and Workers around a C++ kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels). The library derives the runtime sequence from that declaration, or the operator writes it by hand. One array serves every extent, so one build of it serves many shapes.
-- The operator's `reference()` method: the CPU implementation the NPU result is checked against, on the declared shapes.
-- `test = Testing(cases, ...)` on the operator class: the shapes it is checked at on a device. `iron/tests/operators/catalog.py` runs every operator's declaration, building it, running `vectors(op)` through it and verifying against the reference. An operator with a device test of its own keeps a `test.py` beside it.
+Each model is a package under [iron/applications/](./iron/applications/) over [iron/lm/](./iron/lm/), the library every model shares ([AGENTS.md](./AGENTS.md#language-models) describes it); its README says what is its own and where its files come from. The tests find a checkpoint at `$IRON_EXAMPLE_WEIGHTS_DIR/<checkpoint>`, default `/srv` (`iron.lm.testing.weights_dir`).
 
-Operators compose into graphs: a subclass of `iron.Graph` whose `body()` is called on handles, traced once per input shape, compiled to one image per shape and called per token (see `iron/common/graph/`; `iron/applications/llama/model.py` is the worked example, its tunables a `Profile` the graph carries rather than keywords at every call).
+| Model | Application | Checkpoint |
+|---|---|---|
+| Llama 3.2 1B, 3B | [llama](./iron/applications/llama/) | `llama3.2-1b`, `llama3.2-3b` |
+| Qwen3 1.7B, 0.6B | [qwen3](./iron/applications/qwen3/) | `qwen3-1.7b`, `qwen3-0.6b` |
+| Qwen 2.5 1.5B Instruct | [qwen2](./iron/applications/qwen2/) | `qwen2.5-1.5b-instruct` |
+| SmolLM2 1.7B Instruct | [smollm2](./iron/applications/smollm2/) | `smollm2-1.7b-instruct` |
+| Phi-4-mini-instruct | [phi3](./iron/applications/phi3/) | `phi-4-mini-instruct` |
+| Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` |
+| LFM2-1.2B | [lfm2](./iron/applications/lfm2/) | `lfm2-1.2b` |
+| SmolVLM-256M-Instruct | [idefics3](./iron/applications/idefics3/) | `smolvlm-256m-instruct` |
+| EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |
+| YOLOX-Nano | [yolox](./iron/applications/yolox/) | `yolox-nano` |
+| Whisper (toy shape) | [whisper](./iron/applications/whisper/) | none: drawn weights |
+| Gemma 4 E2B in FastFlowLM | [gemma4_flm](./iron/applications/gemma4_flm/) | `$FLM_MODEL_PATH`, default `fastflowlm` |
 
-> NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated:
->       `source /opt/xilinx/xrt/setup.sh`
->       `source /path/to/ironenv/bin/activate`
+What the text decoders (Llama to LFM2 above) share:
 
-To build and test all the operators:
-
-``` bash
-pytest iron/operators/ iron/tests/ -m "not extensive"
-```
-
-To run the extensive test suite:
-
-``` bash
-pytest iron/operators/ iron/tests/
-```
-
-To run a specific operator's tests:
-
-``` bash
-pytest iron/tests/operators/catalog.py -k AXPY
-```
-
-### Git Hooks (Optional but Recommended)
-
-To ensure your code passes CI linting checks before pushing, install the pre-push hook:
-
-```bash
-cp scripts/hooks/pre-push .git/hooks/pre-push
-chmod +x .git/hooks/pre-push
-```
-
-The hook will run the same linting checks as CI:
-
-- License checks (reuse)
-- Python formatting (black)
-- C++ formatting (clang-format)
-
-To bypass the hook if needed: `git push --no-verify`
-
-## Language Models
-
-### Llama 3.2 1B Inference
-
-IRON includes a complete LLM inference example demonstrating NPU acceleration:
-
-- **Location**: `iron/applications/llama/`, over the decoder every model shares (`iron/lm/`)
-- **Model**: Meta Llama 3.2 1B
-- **Features**: Multi-head attention, the whole decode step and sampling on the NPU, bfloat16 quantization
-
-See [iron/applications/llama/README.md](./iron/applications/llama/README.md) for setup and usage instructions.
-
-### EmbeddingGemma 2
-
-- **Location**: `iron/applications/embedding_gemma2/`, over the library every model shares (`iron/lm/`)
-- **Model**: EmbeddingGemma 2's text encoder, text to a unit-length embedding
-
-See [iron/applications/embedding_gemma2/README.md](./iron/applications/embedding_gemma2/README.md) for setup and usage instructions.
+- **Run**: `python -m iron.applications.<application>.model <checkpoint> <tokenizer>`, with `config.json` beside the checkpoint; `--help` lists the options, and [Llama's README](./iron/applications/llama/README.md#running) explains them.
+- **Test**: `pytest tests/applications/<application>/` loads the model once and checks throughput, accuracy against transformers' logits recorded in `golden.npz` beside the checkpoint, and determinism. `pytest --record-goldens` records missing logits where torch and transformers are installed; they are not IRON's requirements.
+- **Tune**: `python -m iron.lm.tune <application> --checkpoint <checkpoint>` times each operator at every setting of its tunables and rewrites the application's `profiles/<device>.json`; review it with `git diff` and commit it.
 
 ## Architecture
 
-IRON uses a three-layer architecture:
-
-1. **Operators** (`iron/operators/`): High-level Python API for NPU operations
-   - Each operator is one declared class with its array and its CPU reference (a file at the root, or `op.py` in a package), and a `test = Testing(...)` that `iron/tests/operators/catalog.py` runs; a few keep a `test.py` beside them for a device test of their own
-
-2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): Low-level C++ compute kernels
-   - Organized by family (`activation/`, `eltwise/`, `linalg/`, `norm/`, ...); architecture-specific
-     code lives in `*_aie2.h` / `*_aie2p.h` headers the family's `.cc` selects between
-   - Vectorized using AIE API for optimal performance
-
-3. **Common Infrastructure** (`iron/common/`): Compilation, device management, and utilities
-   - The declaration layer (`declare/`), the design and its runtime sequence (`design/`), the images (`image/`) and graphs (`graph/`)
-   - MLIR-AIE compilation pipeline
-   - XRT runtime integration
-
-## Performance
-
-IRON operators are designed for maximum NPU utilization:
-
-- Parallel execution across multiple AIE columns
-- Optimized data movement via ObjectFIFOs
-- Whole graphs on the device, so intermediate values never return to the host
-- Vectorized kernels using AIE intrinsics
-
-Run benchmarks:
-
-```bash
-# Run all operators with performance metrics stored in tests_latest.csv
-pytest iron/operators/ iron/tests/ -m "not extensive" --csv-output=tests_latest.csv
-```
+1. **Operators** (`iron/operators/`): each operator is one class, listed by name in `_OPERATOR_MODULES` in [iron/operators/\_\_init\_\_.py](./iron/operators/__init__.py); its docstring says what it computes. Its fields are annotated aie.iron's `CompileTime[T]` and declared with `field()` (a tunable with `Auto()`); its operands are aie.iron's `In`/`Out`/`InOut`, declared by shape. A nested `Array` builds the array with ObjectFIFOs and Workers around a kernel; the library derives the runtime sequence unless the operator writes it. Its `reference()` and `test = Testing(...)` are what `iron/tests/operators/catalog.py` checks it by.
+2. **Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): C++ compute kernels, vectorized with the AIE API, reached through mlir-aie's kernel factories (`aie.iron.kernels`), which also carry each kernel's reference and tolerance. IRON hosts no kernels.
+3. **Graphs and images** (`iron/common/`): a graph is traced on handles and lowered onto an image: its buffers placed in one arena, and on NPU2 its operators' designs fused into one full ELF that runs them in turn (on NPU1, an xclbin per step), run through XRT.
+4. **Models** (`iron/lm/`, `iron/applications/`): see [Models](#models).
 
 ## Community and Support
 
 - 💬 **Discord**: Join our [Discord server](https://discord.gg/cW99Ds85e8) for discussions and support
 - 🐛 **Issues**: Report bugs and request features via [GitHub Issues](https://github.com/amd/iron/issues)
 - 📖 **Contributing**: See [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines
-- 📚 **Documentation**: Operator examples in `iron/operators/`, kernel docs in the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
+- 📚 **Documentation**: [AGENTS.md](./AGENTS.md) for the rules and the map of the code, operator docstrings in `iron/operators/`, kernel docs in the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
 
 ## License
 

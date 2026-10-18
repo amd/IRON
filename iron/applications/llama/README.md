@@ -56,20 +56,7 @@ python3 -m pip install -r requirements_examples.txt
 
 ## Running
 
-From Python, given a Hugging Face token for the gated repository:
-
-```python
-import iron.lm as lm
-from iron.applications.llama import Llama
-
-model = Llama.load("meta-llama/Llama-3.2-1B")   # downloads, fits, compiles once
-tokens = model.tokenizer("The capital of France is")
-out, ttft, per_token = model.generate(tokens, num_tokens=8, sample=lm.Sampler(seed=0))
-print(model.tokenizer.decode(out))
-```
-
-`Llama.load` also takes a local directory holding `config.json`, the
-checkpoint and `original/tokenizer.model`.
+From Python, see the [quick start](../../../README.md#quick-start).
 
 From the repository root, on the command line:
 
