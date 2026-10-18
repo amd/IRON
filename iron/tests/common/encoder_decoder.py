@@ -10,8 +10,6 @@ against Hugging Face's own Whisper decoder in float32 over the same
 weights and encoder rows, its logits recorded in ``goldens/``.
 """
 
-from types import SimpleNamespace
-
 import aie.utils as aie_utils
 import numpy as np
 import pytest
@@ -27,7 +25,8 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
-from iron.tests.common.layer import decoder, shapes
+from iron.tests.common.layer import WHISPER, shapes
+from iron.tests.common.llama_model import checkpoint
 from iron.lm.testing import assert_close
 from iron.tests.common.llama_reference import prompt
 from iron.tests.common.multimodal import Features
@@ -96,39 +95,37 @@ class HuggingFaceDecoder(HuggingFace):
         return out.logits[0, -1].numpy()
 
 
-def tree(seed: int):
-    """A checkpoint tree of ``CONFIG``'s shape under ``model.decoder``, bf16."""
-    rng = np.random.default_rng(seed)
-    c = CONFIG
-    E, V, L = c.hidden_size, c.vocab_size, c.max_seq_len
-    shape = shapes(
-        E, c.num_attention_heads, c.num_key_value_heads, c.head_dim, c.intermediate_size
-    )
-    layers = [decoder(rng, shape, bfloat16) for _ in range(c.num_hidden_layers)]
-    norm = SimpleNamespace(
-        weight=(1 + rng.standard_normal(E) / 8).astype(bfloat16),
-        bias=(rng.standard_normal(E) / 8).astype(bfloat16),
-    )
-    return SimpleNamespace(
-        model=SimpleNamespace(
-            decoder=SimpleNamespace(
-                embed_tokens=SimpleNamespace(
-                    weight=(rng.standard_normal((V, E)) / 4).astype(bfloat16)
-                ),
-                embed_positions=SimpleNamespace(
-                    weight=(rng.standard_normal((L, E)) / 4).astype(bfloat16)
-                ),
-                layers=layers,
-                layer_norm=norm,
-            )
-        )
-    )
+def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
+    """Each tensor of a Whisper decoder of ``c``'s shape, by name: every
+    projection biased but the keys', as Whisper's, every norm affine.
+    """
+    E, V = c.hidden_size, c.vocab_size
+    H, D, F = c.num_attention_heads, c.head_dim, c.intermediate_size
+    shape = shapes(E, H, H, D, F)
+    d = "model.decoder"
+    out = {
+        f"{d}.embed_tokens.weight": (V, E),
+        f"{d}.embed_positions.weight": (c.max_seq_len, E),
+        f"{d}.layer_norm.weight": (E,),
+        f"{d}.layer_norm.bias": (E,),
+    }
+    for i in range(c.num_hidden_layers):
+        for name in WHISPER:
+            out[f"{d}.layers.{i}.{name}.weight"] = shape[name]
+            if not name.endswith("k_proj"):
+                out[f"{d}.layers.{i}.{name}.bias"] = shape[name][:1]
+    return out
+
+
+def tree():
+    """A random checkpoint tree of ``CONFIG``'s decoder, bf16."""
+    return checkpoint(CONFIG, names(CONFIG)).tree("random")
 
 
 @pytest.fixture(scope="module")
 def reference(golden):
-    """Hugging Face's logits over ``tree(0)`` after tokens and encoder rows."""
-    weights = tree(0)
+    """Hugging Face's logits over ``tree()`` after tokens and encoder rows."""
+    weights = tree()
     return golden(
         "encoder_decoder",
         lambda: HuggingFaceDecoder.build("whisper", CONFIG, weights, pad_token_id=None),
@@ -142,7 +139,7 @@ def whisper(reference):
     """The model over a ``Features`` tower of ``SOURCE`` rows, a clip of 200
     encoder rows, Hugging Face's logits, and 300 tokens, two prompt chunks.
     """
-    weights = tree(0)
+    weights = tree()
     encoder = Features(CONFIG.hidden_size, SOURCE)
     model = Whisper(CONFIG, weights, encoder, weights.model.decoder)
     rng = np.random.default_rng(1)
@@ -274,7 +271,7 @@ def test_padded_encoder_rows_reach_neither_attention(reference):
     a fresh model bit for bit, and Hugging Face's over the 200 rows. Bounded
     to all 256 rows, they are not.
     """
-    weights = tree(0)
+    weights = tree()
     rng = np.random.default_rng(2)
     clip = (rng.standard_normal((200, CONFIG.hidden_size)) / 2).astype(bfloat16)
     tokens = rng.integers(0, CONFIG.vocab_size, 300)
@@ -309,7 +306,7 @@ def test_an_encoder_shorter_than_a_prompt_chunk_is_refused():
     """MHA takes a chunk's queries as the last rows of the keys, so a cross
     attention over fewer rows has none to compile.
     """
-    weights = tree(0)
+    weights = tree()
     with pytest.raises(ValueError, match="fewer than a 256-row prompt chunk"):
         Whisper(
             CONFIG, weights, Features(CONFIG.hidden_size, 128), weights.model.decoder

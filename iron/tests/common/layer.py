@@ -115,17 +115,6 @@ WHISPER = (
 )
 
 
-def decoder(rng, shape, dtype=np.float32):
-    """A Whisper decoder layer module at ``shape``: affine LayerNorms about
-    one, every projection biased but the keys', as Whisper's.
-    """
-    w = module(rng, shape, WHISPER, dtype, bias=True, norm_bias=True)
-    for n in (w.self_attn_layer_norm, w.encoder_attn_layer_norm, w.final_layer_norm):
-        n.weight += dtype(1)
-    del w.self_attn.k_proj.bias, w.encoder_attn.k_proj.bias
-    return w
-
-
 def attending(rows):
     """Attention over every row, as an encoder's."""
 
