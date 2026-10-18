@@ -15,7 +15,8 @@ import dataclasses
 import functools
 import inspect
 import logging
-from collections.abc import Callable, Mapping
+import math
+from collections.abc import Callable, Iterator, Mapping
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -154,6 +155,62 @@ class _Parameters:
         return cls(inputs, values, frozenset(optional))
 
 
+class _Param(np.ndarray):
+    """A ``param`` not yet bound: no storage, only its shape and dtype."""
+
+
+def param(*shape: int, dtype=bfloat16) -> np.ndarray:
+    """A weight a graph declares by shape, typed as the array
+    ``Graph.load`` binds in its place.
+    """
+    return np.broadcast_to(np.zeros((), dtype), shape).view(_Param)
+
+
+def drawn(rng: np.random.Generator, name: str, shape, dtype) -> np.ndarray:
+    """A tensor named ``name`` drawn from ``rng``: a matrix normal with
+    deviation ``1/sqrt(in)`` (an embedding's ``in`` its width), anything of
+    fewer than two axes normal with deviation 0.1, about zero if it is a
+    bias and about one otherwise (a norm), so that swapping two changes the
+    output.
+    """
+    x = rng.standard_normal(shape, dtype=np.float32)
+    if len(shape) >= 2:
+        return (x / np.sqrt(math.prod(shape[1:]))).astype(dtype)
+    return (x / 10 + (not name.endswith("bias"))).astype(dtype)
+
+
+def _leaves(root) -> Iterator[tuple[str, Any]]:
+    """Each state and tensor under ``root``, by its dotted path from it,
+    through lists, tuples, dicts, dataclasses, namespaces and graphs (their
+    attributes not starting with ``_``), each container once.
+    """
+    seen: set[int] = set()
+
+    def walk(x, path):
+        if isinstance(x, State) or (is_operand(x) and not isinstance(x, Handle)):
+            yield path, x
+            return
+        if isinstance(x, (list, tuple)):
+            items = enumerate(x)
+        elif isinstance(x, dict):
+            items = x.items()
+        elif dataclasses.is_dataclass(x) and not isinstance(x, type):
+            items = ((f.name, getattr(x, f.name)) for f in dataclasses.fields(x))
+        elif isinstance(x, SimpleNamespace):
+            items = vars(x).items()
+        elif isinstance(x, Graph):
+            items = ((k, v) for k, v in vars(x).items() if not k.startswith("_"))
+        else:
+            return
+        if id(x) in seen:
+            return
+        seen.add(id(x))
+        for key, item in items:
+            yield from walk(item, f"{path}.{key}" if path else str(key))
+
+    return walk(root, "")
+
+
 class Graph:
     """A graph: a subclass whose ``body`` is traced on handles.
 
@@ -248,40 +305,82 @@ class Graph:
     def held(self) -> dict[int, tuple[str, Any]]:
         """Each tensor and state the instance holds, by identity, with its
         path name.
+
+        Raises:
+            TypeError: A ``param`` was never loaded.
         """
         held: dict[int, tuple[str, Any]] = {}
-        seen: set[int] = set()
-
-        def walk(x, path):
-            if isinstance(x, State) or (is_operand(x) and not isinstance(x, Handle)):
-                held.setdefault(id(x), (path, x))
-                return
-            if isinstance(x, (list, tuple)):
-                items = enumerate(x)
-            elif isinstance(x, dict):
-                items = x.items()
-            elif dataclasses.is_dataclass(x) and not isinstance(x, type):
-                items = ((f.name, getattr(x, f.name)) for f in dataclasses.fields(x))
-            elif isinstance(x, SimpleNamespace):
-                items = vars(x).items()
-            elif isinstance(x, Graph):
-                # A graph held to be called in this one's body.
-                items = ((k, v) for k, v in vars(x).items() if not k.startswith("_"))
-            else:
-                return
-            if id(x) in seen:
-                return
-            seen.add(id(x))
-            for key, item in items:
-                walk(item, f"{path}.{key}")
-
-        for key, x in vars(self).items():
-            if not key.startswith("_"):
-                walk(x, key)
+        for path, x in _leaves(self):
+            if isinstance(x, _Param):
+                raise TypeError(f"{self.name}: {path} was never loaded")
+            held.setdefault(id(x), (path, x))
         return held
 
-    def trace(self, **shapes) -> TracedGraph:
-        """Run ``body`` on handles of the given shapes; an optional input given none is None."""
+    def load(self, tree, path: str = "") -> None:
+        """Bind each ``param`` of this graph and of the graphs it holds, as
+        attributes or in lists, to the tensor at its dotted path in
+        ``tree`` (a ``Checkpoint.tree()``, or tensors by dotted path) under
+        ``path``, this graph's own prefix (``"model."``). A subclass derives
+        a tensor after ``super().load()``.
+
+        Raises:
+            ValueError: A param's tensor is missing or of another shape, or
+                ``tree`` holds a tensor under ``path`` that no param
+                declares; one error names every such path.
+        """
+        tensors = {n: t for n, t in _leaves(tree) if n.startswith(path)}
+        params = {path + n: p for n, p in self._params().items()}
+        missing = sorted(params.keys() - tensors.keys())
+        extra = sorted(tensors.keys() - params.keys())
+        shapes = [
+            f"{n} {tuple(tensors[n].shape)}, not {p.shape}"
+            for n, p in params.items()
+            if n in tensors and tuple(tensors[n].shape) != p.shape
+        ]
+        if missing or extra or shapes:
+            found = {"missing": missing, "extra": extra, "wrong shape": shapes}
+            raise ValueError(
+                f"{self.name}: cannot load: "
+                + "; ".join(f"{k} {', '.join(v)}" for k, v in found.items() if v)
+            )
+        for key, x in list(vars(self).items()):
+            if isinstance(x, _Param):
+                setattr(self, key, tensors[path + key])
+            elif isinstance(x, Graph):
+                x.load(tensors, f"{path}{key}.")
+            elif isinstance(x, list):
+                for i, g in enumerate(x):
+                    if isinstance(g, Graph):
+                        g.load(tensors, f"{path}{key}.{i}.")
+
+    def draw(self, seed: int) -> None:
+        """Load each ``param`` drawn at ``seed`` in the order the graph
+        holds them (``drawn``).
+        """
+        rng = np.random.default_rng(seed)
+        self.load(
+            {n: drawn(rng, n, p.shape, p.dtype) for n, p in self._params().items()}
+        )
+
+    def unread(self) -> None:
+        """Load each ``param`` allocated and never written, for tracing,
+        building and measuring, none of which reads a weight; a scalar is
+        zero, since a graph may read one as it is built.
+        """
+        self.load(
+            {
+                n: np.zeros((), p.dtype) if p.ndim == 0 else np.empty(p.shape, p.dtype)
+                for n, p in self._params().items()
+            }
+        )
+
+    def _params(self) -> dict[str, _Param]:
+        return {n: p for n, p in _leaves(self) if isinstance(p, _Param)}
+
+    def trace(self, *, precision: Precision | None = None, **shapes) -> TracedGraph:
+        """Run ``body`` on handles of the given shapes; an optional input
+        given none is None. ``precision`` overrides ``self.precision``.
+        """
         shapes = {k: v for k, v in shapes.items() if v is not None}
         params = self._parameters
         missing = [
@@ -304,7 +403,11 @@ class Graph:
             args.append(inputs[-1])
         values = [PerCall(n, kind, dtype) for n, (kind, dtype) in params.values.items()]
         with Tracer(
-            self.name, self._profile(), self.held(), params.inputs, self.precision
+            self.name,
+            self._profile(),
+            self.held(),
+            params.inputs,
+            self.precision if precision is None else precision,
         ) as tracer:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
@@ -422,37 +525,33 @@ class Graph:
             if dev is not None
             else contextlib.nullcontext()
         ):
-            previous = self.precision
-            if precision is not None:
-                self.precision = Precision(precision)
-            try:
-                traced = self.trace(**shapes)
-                chosen = plan(require_device(), traced, full_elf, check)
-                logger.info("%s", chosen.report(self.name))
-                signature = self._signature(
-                    {h.name: (h.shape, h.dtype) for h in traced.inputs}
+            traced = self.trace(
+                precision=None if precision is None else Precision(precision), **shapes
+            )
+            chosen = plan(require_device(), traced, full_elf, check)
+            logger.info("%s", chosen.report(self.name))
+            signature = self._signature(
+                {h.name: (h.shape, h.dtype) for h in traced.inputs}
+            )
+            emit, sized = self._emit(traced, chosen, feeds)
+            version = CompiledGraph(
+                traced,
+                chosen,
+                check=check,
+                arena=self._arena,
+                emit=emit,
+                coresident=coresident,
+            )
+            if sized is not None and len(version.parameters) != len(sized):
+                read = {p.name for p in version.parameters}
+                raise NotImplementedError(
+                    f"{self.name}: the image reads {len(version.parameters)} of the "
+                    f"{len(sized)} words its Emit was sized for; a word it reads only "
+                    f"through a derivation cannot be fed yet (sized for but not "
+                    f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
                 )
-                emit, sized = self._emit(traced, chosen, feeds)
-                version = CompiledGraph(
-                    traced,
-                    chosen,
-                    check=check,
-                    arena=self._arena,
-                    emit=emit,
-                    coresident=coresident,
-                )
-                if sized is not None and len(version.parameters) != len(sized):
-                    read = {p.name for p in version.parameters}
-                    raise NotImplementedError(
-                        f"{self.name}: the image reads {len(version.parameters)} of the "
-                        f"{len(sized)} words its Emit was sized for; a word it reads only "
-                        f"through a derivation cannot be fed yet (sized for but not "
-                        f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
-                    )
-                self._versions[signature] = version
-                return version
-            finally:
-                self.precision = previous
+            self._versions[signature] = version
+            return version
 
     def _emit(
         self, traced: TracedGraph, chosen: Plan, feeds: CompiledGraph | None

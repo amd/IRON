@@ -318,7 +318,9 @@ tunables and profiles already do that job.
   `tree("read" | "random" | "unread")` is the weights by the checkpoint's
   own names.
 - `blocks.py`: the parts a layer is made of (`Norm`, `Attention`, `MLP`,
-  `DecoderLayer`, `CrossDecoderLayer`) and the front-end graphs.
+  `DecoderLayer`, `CrossDecoderLayer`), the leaf modules that declare their
+  weights with `iron.param` (`Linear`, `Embedding`, `RMSNorm`,
+  `LayerNorm`) and the front-end graphs.
 - `model.py`: `Model`, which loads from a checkpoint's directory or
   repository id (`Model.load`, its context fitted to the host by
   `Model.fit`) and generates (`generate(prompt, max_tokens, sampler=None)`,

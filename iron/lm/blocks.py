@@ -588,6 +588,51 @@ class ImagePatches(iron.Graph):
         )
 
 
+class Linear(iron.Graph):
+    """A linear module: ``x @ weight.T``, plus ``bias`` where it holds one."""
+
+    def __init__(self, d_in: int, d_out: int, bias: bool = False):
+        self.weight = iron.param(d_out, d_in)
+        self.bias = iron.param(d_out) if bias else None
+
+    def body(self, x):
+        return F.linear(x, self.weight, self.bias)
+
+
+class Embedding(iron.Graph):
+    """An embedding module: the rows of ``weight`` that ``ids`` name."""
+
+    def __init__(self, vocab: int, dim: int):
+        self.weight = iron.param(vocab, dim)
+
+    def body(self, ids):
+        return Copy.step(iron.weight(self.weight)[ids])
+
+
+class RMSNorm(iron.Graph):
+    """An RMS norm module over the last axis, times ``weight``."""
+
+    def __init__(self, dim: int, eps: float):
+        self.weight = iron.param(dim)
+        self.eps = eps
+
+    def body(self, x):
+        return F.rms_norm(x, x.shape[-1:], self.weight, self.eps)
+
+
+class LayerNorm(iron.Graph):
+    """A LayerNorm module over the last axis, times ``weight`` plus ``bias``,
+    at the kernel's own epsilon (``F.layer_norm``).
+    """
+
+    def __init__(self, dim: int):
+        self.weight = iron.param(dim)
+        self.bias = iron.param(dim)
+
+    def body(self, x):
+        return F.layer_norm(x, x.shape[-1:], self.weight, self.bias)
+
+
 def _linear(x, p, **kw):
     """``x`` through the linear module ``p``: its ``weight``, and its
     ``bias`` where it holds one.

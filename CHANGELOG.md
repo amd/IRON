@@ -12,6 +12,15 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `iron.param(*shape, dtype=bfloat16)`, a weight a graph declares by shape,
+  and `Graph.load(tree, path="")`, which binds each one to the tensor at its
+  dotted path and raises once, naming every missing, extra and wrong-shaped
+  tensor; a param never loaded is named when the graph is traced.
+  `Graph.draw(seed)` and `Graph.unread()` load them drawn or unwritten.
+- Leaf modules in `iron.lm`, graphs that declare their weights as
+  transformers names them: `Linear`, `Embedding`, `RMSNorm` and `LayerNorm`.
+- `Graph.trace(precision=)`, which `compile(precision=)` passes on instead of
+  setting `Graph.precision` while it compiles.
 - `iron.lm.testing.load_from_flags`, a model test's `Model.load` at the
   `--random-weights` and `--max-seq-len` pytest was given, its files
   `require`d; `require(staged=False)` skips in CI too.

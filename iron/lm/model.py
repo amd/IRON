@@ -483,7 +483,7 @@ def _is_text(prompt) -> bool:
 
 
 class OnHost:
-    """A model with its images stood in by its graph's reference
+    """A model with its versions stood in by its graph's reference
     (``Graph.reference``), run at whatever shape it is called with: the
     model with no device, mixed in before the model's own class. It
     compiles nothing, and ``generate`` draws on the host.
@@ -504,7 +504,7 @@ class OnHost:
 
 
 class _HostOutput:
-    """What an image returns: a buffer read with ``numpy()``."""
+    """What a version returns: a buffer read with ``numpy()``."""
 
     def __init__(self, array):
         self.array = array

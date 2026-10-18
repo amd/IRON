@@ -9,7 +9,7 @@ compute it and loop (``CarriedLoop``).
 """
 
 from .carried import CarriedLoop
-from .compiled import CompiledGraph, Graph
+from .compiled import CompiledGraph, Graph, param
 from .handle import (
     Carried,
     Carry,
@@ -31,6 +31,7 @@ __all__ = [
     "Scratchpad",
     "carry",
     "clamp",
+    "param",
     "state",
     "weight",
 ]

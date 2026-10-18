@@ -22,6 +22,7 @@ from typing import Any, Literal
 import numpy as np
 from ml_dtypes import bfloat16
 
+from ..common.graph.compiled import drawn
 from .golden import fingerprint
 
 
@@ -244,16 +245,12 @@ class Checkpoint:
         Args:
             fill: What the arrays hold. ``"read"``: the tensors, views of the
                 mapped file read only when touched. ``"random"``: drawn at
-                ``seed`` in the file's order, each matrix normal with
-                deviation ``1/sqrt(in)`` (an embedding's ``in`` its width),
-                anything of fewer than two axes normal with deviation 0.1,
-                about zero if it is a bias and about one otherwise (a norm),
-                so that swapping two changes the output. ``"unread"``: allocated
-                and never written, for tracing, building and measuring a
-                model, none of which reads a weight; the pages are reserved,
-                not touched, and a scalar is zero, since a graph may read one
-                as it is built (a clamp's bounds). Only ``"read"`` reads past
-                the header.
+                ``seed`` in the file's order (``iron.common.graph.compiled.drawn``).
+                ``"unread"``: allocated and never written, for tracing,
+                building and measuring a model, none of which reads a weight;
+                the pages are reserved, not touched, and a scalar is zero,
+                since a graph may read one as it is built (a clamp's bounds).
+                Only ``"read"`` reads past the header.
             seed: The seed ``"random"`` draws at.
 
         Raises:
@@ -264,14 +261,9 @@ class Checkpoint:
             tensors = self.tensors
         elif fill == "random":
             rng = np.random.default_rng(seed)
-
-            def draw(name, t):
-                x = rng.standard_normal(t.shape, dtype=np.float32)
-                if t.ndim >= 2:
-                    return (x / np.sqrt(math.prod(t.shape[1:]))).astype(t.dtype)
-                return (x / 10 + (not name.endswith("bias"))).astype(t.dtype)
-
-            tensors = {name: draw(name, t) for name, t in self.tensors.items()}
+            tensors = {
+                n: drawn(rng, n, t.shape, t.dtype) for n, t in self.tensors.items()
+            }
         elif fill == "unread":
             tensors = {
                 name: (
