@@ -759,6 +759,11 @@ class CompiledGraph:
                     f"{handle.shape}, got {tuple(tensor.shape)}; a new shape is a "
                     f"new compile"
                 )
+            if not np.can_cast(tensor.dtype, handle.dtype, "same_kind"):
+                raise TypeError(
+                    f"{self.traced.name}: input {handle.name} is "
+                    f"{np.dtype(handle.dtype)}, got {tensor.dtype}"
+                )
         self.upload()
         for handle, tensor in zip(self.traced.inputs, tensors):
             held = self.traced.encoders.get(handle.name)

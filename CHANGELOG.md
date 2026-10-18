@@ -90,6 +90,8 @@ public API adds its entry under Unreleased.
   `field(lambda op: op.num_heads)`.
 - A name or layer missing from a `Checkpoint.tree()` raises an error naming
   its dotted path, the checkpoint file and what the module does have.
+- A compiled graph refuses an input numpy would not cast to its dtype
+  (`same_kind`): float ids into an int32 input raise rather than truncate.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `runner`; `iron.lm`'s own names are unchanged.
 - A `Runner` subclass is its model's `runner`, which `CausalLM.load` builds.

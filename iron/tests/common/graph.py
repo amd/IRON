@@ -28,7 +28,7 @@ from iron import Carried, Precision, Profile, Scratchpad
 from iron.common.graph import Handle
 from iron.common.graph.trace import TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
-from iron.common.graph.compiled import _words
+from iron.common.graph.compiled import CompiledGraph, _words
 from iron.common.graph.handle import Affine, PerCall
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef, SequenceStep
@@ -1728,6 +1728,25 @@ def test_a_call_refuses_its_values_before_it_compiles():
     with pytest.raises(TypeError, match=r"\['position'\] unknown"):
         ffn(z(1, E), pos=0, position=0)
     assert not ffn._versions
+
+
+def test_a_call_refuses_an_input_numpy_would_not_cast_to_its_dtype():
+    """Float ids are refused, not truncated; int64 ids cast to int32."""
+    g = small()
+    C = g.config.prefill_chunk
+
+    class Staged(Exception):
+        pass
+
+    def upload():
+        raise Staged
+
+    version = SimpleNamespace(traced=g.trace(**g.shapes()[1]), upload=upload)
+    values = dict(position=C - 1, token=0, start=0, rows=C, rope_start=0)
+    with pytest.raises(TypeError, match="input ids is int32, got float64"):
+        CompiledGraph._stage(version, [np.zeros(C)], values)
+    with pytest.raises(Staged):
+        CompiledGraph._stage(version, [np.zeros(C, np.int64)], values)
 
 
 def test_a_refused_compile_restores_the_device_it_was_given_over(npu2):
