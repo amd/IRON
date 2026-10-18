@@ -92,7 +92,10 @@ class Handle:
         self.tap: TensorAccessPattern | tuple[TensorAccessPattern, ...] | None = tap
         self.index_by: Affine | None = index_by  # a view's per-call element offset
         # axis -> its leading entries valid this call (``x[:n]``)
-        self.bounds: dict[int, Affine] = dict(bounds or {})
+        self.bounds: dict[int, Affine] = {
+            axis: n.affine() if isinstance(n, PerCall) else n
+            for axis, n in (bounds or {}).items()
+        }
         # The handle whose ids pick the rows each call, for a gather.
         self.gather_by: Handle | None = gather_by
         # A view's runs of each walk's first dimension, and entries of its
@@ -503,24 +506,16 @@ class _Viewed:
 
     __slots__ = ()
 
-    def _as_operand(self):
+    def _as_operand(self) -> Handle:
         tracer = graph_tracer.get()
         if tracer is None:
             raise TypeError(f"{self!r} is viewed inside a graph's body")
-        return tracer.viewed(self)
+        return tracer.operand(self)
 
     def __getitem__(self, key):
         if isinstance(key, _Viewed):  # a gather by the ids a state holds
             key = key._as_operand()
-        x = self._as_operand()
-        if not isinstance(x, np.ndarray):
-            return x[key]
-        # A reference's run past the axis's end, x[s : s + W], bounded after.
-        entries = key if isinstance(key, tuple) else (key,)
-        for axis, (e, n) in enumerate(zip(entries, x.shape)):
-            if isinstance(e, slice) and e.stop is not None and e.stop > n:
-                return _HostRun(x[key], axis, e.start or 0, n)
-        return x[key]
+        return self._as_operand()[key]
 
     def reshape(self, *shape):
         return self._as_operand().reshape(*shape)
@@ -529,49 +524,16 @@ class _Viewed:
         return self._as_operand().transpose(*axes)
 
     def at(self, tap, shape, bounds=None, *, repeat=None, length=None):
-        """``Handle.at`` of the tensor as the tracer views it; in a reference,
-        the rows ``tap`` walks this call, to its ``bounds``.
-        """
-        operand = self._as_operand()
-        if isinstance(operand, Handle):
-            return operand.at(tap, shape, bounds=bounds, repeat=repeat, length=length)
-        if isinstance(operand, _HostView):
-            operand = operand.tensor()
-        walks = tap if isinstance(tap, tuple) else (tap,)
-        repeats = repeat if isinstance(tap, tuple) else (repeat,)
-        flat = np.asarray(operand).reshape(-1)
-        rows = []
-        for walk, r in zip(walks, repeats):
-            walk = walk if r is None else walk[: int(r)]
-            walk = walk if length is None else walk[:, : int(length)]
-            rows.append(flat[walk.gather(np.arange(flat.size))])
-        out = np.concatenate(rows).reshape(-1, *shape[1:])
-        for axis, count in (bounds or {}).items():
-            out = out[(slice(None),) * axis + (slice(int(count)),)]
-        return out
-
-
-class _HostRun:
-    """A reference's run from ``start`` past the end of its ``n``-long axis:
-    the rows there are, of which its bound may take no more.
-    """
-
-    def __init__(self, rows: np.ndarray, axis: int, start: int, n: int) -> None:
-        self.rows, self.axis, self.start, self.n = rows, axis, start, n
-
-    def __getitem__(self, key):
-        entries = key if isinstance(key, tuple) else (key,)
-        run = entries[self.axis] if self.axis < len(entries) else slice(None)
-        if run.stop is None:
-            raise IndexError(f"a run from {self.start} passes {self.n} rows: bound it")
-        if run.stop > self.rows.shape[self.axis]:
-            raise IndexError(f"rows to {self.start + run.stop} of {self.n}")
-        return self.rows[key]
+        """``Handle.at`` of the tensor as the tracer views it."""
+        return self._as_operand().at(
+            tap, shape, bounds=bounds, repeat=repeat, length=length
+        )
 
 
 class State(_Viewed):
     """A tensor that persists on the device across calls (a KV cache), zero
-    when first uploaded; read and written through ``CompiledGraph.buffer``.
+    when first uploaded; read and written through ``CompiledGraph.read`` and
+    ``write``, and held in ``host`` across ``Graph.reference`` calls.
     """
 
     __slots__ = ("shape", "dtype", "name", "host")
@@ -970,15 +932,10 @@ class Carry(Mapping[str, "Handle | Affine | int"]):
         return f"Carry({items})"
 
 
-def clamp(
-    x: PerCall | Affine | int, lo: int | None = None, hi: int | None = None
-) -> Affine | int:
-    """``x`` held to ``[lo, hi]``, a bound of None none: a per-call value's
-    expression traced, the number a reference call gives as it is."""
-    if isinstance(x, (PerCall, Affine)):
-        return (x if isinstance(x, Affine) else x.affine()).clamp(lo, hi)
-    x = int(x) if lo is None else max(int(x), lo)
-    return x if hi is None else min(x, hi)
+def clamp(x: PerCall | Affine, lo: int | None = None, hi: int | None = None) -> Affine:
+    """A per-call value's expression ``x`` held to ``[lo, hi]``, a bound of
+    None none."""
+    return (x if isinstance(x, Affine) else x.affine()).clamp(lo, hi)
 
 
 def carry(**next_values: Handle | Affine | PerCall | int) -> Carry:
@@ -990,54 +947,4 @@ def carry(**next_values: Handle | Affine | PerCall | int) -> Carry:
 
 def is_operand(x) -> bool:
     """A graph handle, a state or weight (or a view of one), or a host tensor."""
-    return isinstance(x, (Handle, State, Weight, _HostView, np.ndarray, np.generic))
-
-
-class _HostView:
-    """A state as the reference views it: reshaped, then indexed, both kept,
-    so a copy writes the whole host tensor in place through ``pattern``.
-    """
-
-    def __init__(self, state: State, shape, key=None) -> None:
-        self.state, self.shape, self.key = state, tuple(shape), key
-
-    def __getitem__(self, key):
-        if self.key is None:
-            return _HostView(self.state, self.shape, key)
-        # A run then its bound, x[s : s + W][:n], as one slice of each axis.
-        first = self.key if isinstance(self.key, tuple) else (self.key,)
-        then = key if isinstance(key, tuple) else (key,)
-        if not all(isinstance(e, slice) for e in (*first, *then)):
-            raise TypeError(f"a view of {self.state!r} is sliced again by slices alone")
-        rank = len(self.shape)
-        first += (slice(None),) * (rank - len(first))
-        then += (slice(None),) * (rank - len(then))
-        runs = []
-        for n, a, b in zip(self.shape, first, then):
-            run = range(n)[a]
-            if b.stop is not None and b.stop > len(run):
-                raise IndexError(f"rows to {run.start + b.stop} of {n}")
-            runs.append(run[b])
-        return _HostView(
-            self.state, self.shape, tuple(slice(r.start, r.stop) for r in runs)
-        )
-
-    def reshape(self, *shape):
-        if self.key is not None:
-            raise ValueError(f"cannot reshape a view of {self.state!r}")
-        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
-            shape = tuple(shape[0])
-        return _HostView(self.state, shape)
-
-    def transpose(self, *axes):
-        return self.tensor().transpose(*axes)
-
-    def pattern(self) -> Handle:
-        s = self.state
-        whole = Handle(s.shape, s.dtype, s.name, "state").reshape(self.shape)
-        return whole if self.key is None else whole[self.key]
-
-    def tensor(self) -> np.ndarray:
-        assert self.state.host is not None
-        view = self.state.host.reshape(self.shape)
-        return view if self.key is None else view[self.key]
+    return isinstance(x, (Handle, State, Weight, np.ndarray, np.generic))

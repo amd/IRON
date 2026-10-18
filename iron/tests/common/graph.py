@@ -1429,8 +1429,6 @@ def test_a_clamped_expression_carries_its_range_through_integer_arithmetic():
         _ = start // 3
     with pytest.raises(ValueError, match="holds no value"):
         (p + 0).clamp(lo=5, hi=2)
-    # A reference call gives the number itself.
-    assert [iron.clamp(v, lo=0, hi=4) for v in (-2, 3, 9)] == [0, 3, 4]
     assert iron.clamp(p - 3, lo=0) == start
     cache = Handle((8, 4), bfloat16, "cache", "state")
     assert cache[start].index_by == start * 4
@@ -1624,7 +1622,7 @@ def test_a_run_from_a_per_call_start_is_written_and_read_as_numpy_does():
         got = write.reference(x, start=start, rows=rows)
         np.testing.assert_array_equal(np.asarray(got), x[:rows])
         np.testing.assert_array_equal(cache.host, expected)
-    with pytest.raises(IndexError, match="rows to 101 of 100"):
+    with pytest.raises(IndexError, match=r"start \+ rows is 101, outside \[0, 101\)"):
         write.reference(x, start=90, rows=11)
 
 
@@ -2818,3 +2816,22 @@ def test_an_operand_neither_of_its_shape_nor_a_row_is_refused():
 
     with pytest.raises(TypeError, match="takes an operand of its shape or a row"):
         Add().trace(x=(4, E), y=(4, E // 2))
+
+
+def test_the_reference_runs_the_trace_so_held_state_takes_arithmetic():
+    """The reference interprets the recorded steps: a view of a state times a
+    row, plus an input, is what its operators' references compute, and a
+    state the body writes keeps that write for the next call.
+    """
+    held = iron.state((8, 64), name="held")
+    row = np.full(64, 2, bfloat16)
+
+    class Scaled(iron.Graph):
+        def body(self, x):
+            Copy.step(x, held[0:4])
+            return held.reshape(2, 4, 64)[0] * row + x
+
+    x = (np.arange(4 * 64) % 16).reshape(4, 64).astype(bfloat16)
+    got = np.asarray(Scaled().reference(x), np.float32)
+    np.testing.assert_array_equal(got, 3 * x.astype(np.float32))
+    np.testing.assert_array_equal(held.host[:4], x)

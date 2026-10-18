@@ -773,9 +773,10 @@ class GEMM(Operator):
         return ceildiv(calls, self.n_aie_rows * self.num_aie_columns)
 
     def reference(self, A, B):
+        """``A @ B`` over the first ``valid_k`` of K, a bounded call's."""
         # float32, not mm_ref's float64, which doubles the weight's host copy.
-        a = A.astype(np.float32)
-        b = (B.T if self.b_col_maj else B).astype(np.float32)
+        a = A.astype(np.float32)[:, : self.valid_k]
+        b = (B.T if self.b_col_maj else B).astype(np.float32)[: self.valid_k]
         C = np.matmul(b.T, a.T) if self.c_col_maj else np.matmul(a, b)
         return C.astype(self.dtype_out)
 

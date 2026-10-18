@@ -562,14 +562,24 @@ class Softmax(Operator):
         row's own index.
         """
         addend = rest[0] if self.has_addend else None
+        # A bounded call's first ``length`` columns, the rest left zero.
+        n = self.length
+        x = x[..., :n]
+        addend = None if addend is None else addend[..., :n]
         if self.window is not None:
-            return activation.softmax(
-                self.cols,
+            y = activation.softmax(
+                n,
                 input_dtype=self.input_dtype,
                 soft_cap=self.soft_cap,
                 window=self.window,
                 period=self.period,
             ).contract.reference(x, addend, np.arange(self.rows))
-        return activation.softmax_ref(
-            x, addend, None, tile_size=self.cols, soft_cap=self.soft_cap
-        )
+        else:
+            y = activation.softmax_ref(
+                x, addend, None, tile_size=n, soft_cap=self.soft_cap
+            )
+        if n == self.cols:
+            return y
+        out = np.zeros((*np.shape(y)[:-1], self.cols), np.asarray(y).dtype)
+        out[..., :n] = y
+        return out

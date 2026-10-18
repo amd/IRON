@@ -349,7 +349,7 @@ def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):
     tokens = np.random.default_rng(8).integers(0, config.vocab_size, 300)
     _assert_close([model.logits(tokens[:299])], [reference.logits(tokens[:299])])
     _assert_close([model.logits(tokens)], [reference.logits(tokens)])
-    with pytest.raises(IndexError, match="rows to 301 of 300"):
+    with pytest.raises(IndexError, match=r"start \+ rows is 301, outside \[0, 301\)"):
         model(
             model.prompt_ids(tokens[256:]),
             token=0,

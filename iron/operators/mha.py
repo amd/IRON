@@ -1134,10 +1134,12 @@ class MHA(Operator):
         if self.kv_interleaved:
             K, V = (np.swapaxes(t, 0, 1) for t in (K, V))
         groups = self.num_heads // self.num_KV_heads
-        offset = K.shape[1] - Q.shape[1]
+        # The keys before the first query: those not in Q's padding, or a
+        # bounded call's.
+        offset = self.kv_tokens - self.q_tokens
         start = offset if self.causal or self.window else 0
-        s_q = start + self.seq_len if s_q is None else int(s_q)
-        s_kv = offset + self.seq_len if s_kv is None else int(s_kv)
+        s_q = start + self.q_tokens if s_q is None else int(s_q)
+        s_kv = self.kv_tokens if s_kv is None else int(s_kv)
         K, V = K[:, :s_kv], V[:, :s_kv]
         rows = max(s_q - start, 0)
         q = Q[:, :rows].astype(np.float32)

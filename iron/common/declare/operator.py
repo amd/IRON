@@ -54,6 +54,9 @@ if TYPE_CHECKING:
 LUT_BYTES = 5248
 
 graph_tracer: ContextVar[Any] = ContextVar("graph_tracer", default=None)
+# False while a graph's reference is traced: a reference runs shapes no
+# device fits (a small model's), so compatible() is not asked.
+device_fit: ContextVar[bool] = ContextVar("device_fit", default=True)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -240,14 +243,11 @@ class Operator:
             if vars(self)[name] is None and spec.default is not None:
                 setattr(self, name, spec.default)
         self._derive_params()
-        # A graph's reference constructs at a bounded call's valid rows, a
-        # shape no device runs, for reference() alone: it is not checked.
-        tracer = graph_tracer.get()
-        checked = tracer is None or tracer.checks
-        if checked:
-            self.validate()
+        self.validate()
         self._bind()
-        if checked and not any(vars(self)[n] is None for n in self.declaration.autos):
+        if device_fit.get() and not any(
+            vars(self)[n] is None for n in self.declaration.autos
+        ):
             self.compatible()
 
     def _derive_params(self) -> None:

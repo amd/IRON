@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import itertools
 import math
@@ -28,7 +29,6 @@ from .handle import (
     PerCall,
     State,
     Weight,
-    _HostView,
     _rescale_bounds,
     is_operand,
 )
@@ -40,6 +40,10 @@ class TracedStep:
     slots: list  # one handle per declared buffer
     inputs: list
     outputs: list
+    # The ids a per-call gather takes, on both its steps: the reference
+    # gathers by them where the table is read, and skips the step that
+    # writes the table's words.
+    gather: Handle | None = None
 
     def refs(self) -> tuple[BufferRef, ...]:
         """Where each declared buffer of the step is."""
@@ -334,6 +338,111 @@ class TracedGraph:
 
         return dot(self)
 
+    def check_limits(self, values: Mapping[str, int]) -> None:
+        """Refuse a call whose values index or bound a view outside it.
+
+        Raises:
+            IndexError: A recorded limit does not hold for ``values``.
+        """
+        for limit in self.limits:
+            at = limit.evaluate(values)
+            if not limit.lo <= at < limit.hi:
+                raise IndexError(
+                    f"{self.name}: {limit} is {at}, outside "
+                    f"[{limit.lo}, {limit.hi}) for {limit.view}"
+                )
+
+    def reference(
+        self, tensors: Mapping[str, np.ndarray], values: Mapping[str, int]
+    ) -> tuple[list[np.ndarray], dict[str, int]]:
+        """Run each step's ``reference()`` on host buffers: the returned
+        outputs, each cut to the rows its bounds keep, and each carried
+        value's next.
+
+        A step reads its buffers as the device holds them, and its per-call
+        values, an extent's (``op.valid``) too, evaluated for this call; it
+        writes only the rows its outputs' bounds keep. A state's
+        buffer is its ``host`` array, kept from call to call.
+
+        Args:
+            tensors: Each input, by name.
+            values: Each per-call value, by name.
+
+        Raises:
+            IndexError: ``values`` index or bound a view outside it.
+        """
+        self.check_limits(values)
+        buffers: dict[str, np.ndarray] = {}
+
+        def store(name: str, array) -> None:
+            buffers[name] = np.ascontiguousarray(array).reshape(-1).view(np.uint8)
+
+        for h in self.inputs:
+            store(h.name, tensors[h.name])
+        for array, h in self.weights.values():
+            store(h.name, array)
+        for state, h in self.states.values():
+            if state.host is None:
+                state.host = np.zeros(state.shape, state.dtype)
+            store(h.name, state.host)
+
+        def view(h: Handle) -> np.ndarray:
+            ref = h.ref()
+            if ref.root not in buffers:
+                root = h
+                while root.parent is not None:
+                    root = root.parent
+                buffers[ref.root] = np.zeros(root.nbytes, np.uint8)
+            raw = buffers[ref.root][ref.start : ref.start + h.nbytes]
+            return raw if bfp.is_bfp(h.dtype) else raw.view(h.dtype).reshape(h.shape)
+
+        def valid(h: Handle) -> tuple:
+            key = [slice(None)] * len(h.shape)
+            for axis, count in h.bounds.items():
+                key[axis] = slice(count.evaluate(values))
+            return tuple(key)
+
+        bound: dict[int, list[Binding]] = {}
+        for b in self.bindings:
+            bound.setdefault(id(b.op), []).append(b)
+        for step in self.steps:
+            if step.gather is not None:
+                if step.inputs[0] is not step.gather:
+                    _gather_reference(step, view(step.gather)[valid(step.gather)], view)
+                continue
+            op = step.op
+            given = {
+                b.member.name: b.expression.evaluate(values)
+                for b in bound.get(id(op), ())
+            }
+            extents = {n: given[n] for n in op.bound_extents}
+            if extents:
+                # Each extent reads as this call's in the reference.
+                op = copy.copy(op)
+                vars(op)["_extents"] = extents
+            declared = list(zip(op.buffers, step.slots))
+            inputs = {b.name: view(h) for b, h in declared if b.fills}
+            outputs = {b.name: view(h) for b, h in declared if not b.fills}
+            results = op._call_reference(inputs, outputs, given)
+            for b, h in declared:
+                if not b.drains:
+                    continue
+                target = outputs[b.name] if b.name in outputs else inputs[b.name]
+                if results[b.name] is not target:
+                    rows = valid(h)
+                    result = np.asarray(results[b.name]).reshape(target.shape)
+                    target[rows] = result[rows]
+        returned = [view(h)[valid(h)] for h in self.returned]
+        carry = {
+            name: (
+                nxt.evaluate(values)
+                if isinstance(nxt, Affine)
+                else int(view(nxt).reshape(-1)[0])
+            )
+            for name, nxt in self.carry.items()
+        }
+        return returned, carry
+
     @property
     def operators(self) -> list:
         seen = {}
@@ -349,10 +458,20 @@ class TracedGraph:
         return list(seen.values())
 
 
+def _gather_reference(step: TracedStep, ids: np.ndarray, view) -> None:
+    """A per-call gather's step, on the host: the table's rows ``ids``
+    names, each clipped to the table where the device made them.
+    """
+    table, out = (view(h) for h in (step.inputs[0], step.outputs[0]))
+    table = table.reshape(table.shape[0], -1)
+    rows = ids.astype(np.int64)
+    if step.gather.role != "input":
+        rows = np.clip(rows, -len(table), len(table) - 1)
+    out.reshape(-1, table.shape[1])[: len(rows)] = table[rows]
+
+
 class Tracer:
     """Records operator calls on handles while a graph's body runs."""
-
-    checks = True
 
     def __init__(
         self,
@@ -410,9 +529,6 @@ class Tracer:
 
     def __exit__(self, *exc):
         graph_tracer.reset(self._token)
-
-    def viewed(self, x: State | Weight):
-        return self.operand(x)
 
     def operand(self, x) -> Handle:
         if isinstance(x, Handle):
@@ -628,7 +744,9 @@ class Tracer:
                 self.addresses[name] = (table.name, source.address_words, member)
                 self._bind(source, member, PerCall(name, Kind.SCRATCHPAD, np.int32))
             self._record(source, [ids, control])
+            self.steps[-1].gather = ids
         out = self._record(op, [table, control])
+        self.steps[-1].gather = ids
         return out if out.shape == view.shape else out.reshape(view.shape)
 
     @staticmethod
@@ -857,116 +975,3 @@ class Tracer:
         must lie in ``[lo, hi)`` for ``view``, which it indexes or bounds.
         """
         self.limits.append(Limit(expression, lo, hi, repr(view), plus))
-
-
-class _ReferenceTracer(Tracer):
-    """Runs each call as ``op.call_reference`` on host tensors, a state
-    written in place and per-call values as plain numbers.
-    """
-
-    # Operators are constructed at a bounded call's valid rows, which only
-    # their reference() runs at.
-    checks = False
-
-    def __init__(
-        self,
-        name: str,
-        profile: Profile | None = None,
-        held: Iterable[tuple[str, np.ndarray]] = (),
-    ):
-        super().__init__(name, profile)
-        self.held = list(held)
-
-    def operand(self, x):
-        return x
-
-    def viewed(self, x: State | Weight):
-        if isinstance(x, Weight):
-            return x.array
-        if x.host is None:
-            x.host = np.zeros(x.shape, dtype=x.dtype)
-        return _HostView(x, x.shape)
-
-    def overwrites(self, given) -> str | None:
-        if isinstance(given, Weight):
-            return "weight"
-        if not isinstance(given, np.ndarray):
-            return None
-        return next(
-            (kind for kind, t in self.held if np.may_share_memory(given, t)), None
-        )
-
-    def call(self, target, args, kwargs):
-        cls = target if isinstance(target, type) else type(target)
-        inputs, outputs, kwargs = cls.declaration.call_operands(args, kwargs)
-        self.check_outputs(cls, outputs)
-        n_views = len(cls.accept_views)
-        tensors, patterns = [], []
-        for i, a in enumerate([*inputs.values(), *outputs]):
-            pattern = None
-            if isinstance(a, _HostView):
-                pattern = a.pattern()
-                if pattern.tap is not None and i < n_views:
-                    a = a.state.host
-                else:
-                    pattern, a = None, a.tensor()
-            elif isinstance(a, State):
-                if a.host is None:
-                    a.host = np.zeros(a.shape, dtype=a.dtype)
-                a = a.host
-            elif isinstance(a, Weight):
-                a = a.array
-            tensors.append(a)
-            patterns.append(pattern)
-        n_in = len(inputs)
-        if isinstance(target, type):
-            values = self._split_values(cls, kwargs)
-            shapes = [
-                Handle(t.shape, np.dtype(t.dtype).type, "", "input") if p is None else p
-                for t, p in zip(tensors, patterns)
-            ]
-            # The reference runs a bounded call on the rows it covers, so a
-            # view one axis longer than the operand it copies is narrowed to
-            # it there, as the trace bounds the view alike.
-            given = [t.shape for t, p in zip(tensors[:n_views], patterns) if p is None]
-            for i, p in enumerate(patterns[:n_views]):
-                for shape in given if p is not None else ():
-                    axes = [a for a, (m, n) in enumerate(zip(p.shape, shape)) if m != n]
-                    if len(shape) != len(p.shape) or len(axes) != 1:
-                        continue
-                    (axis,) = axes
-                    if shape[axis] < p.shape[axis]:
-                        key = [slice(None)] * len(shape)
-                        key[axis] = slice(shape[axis])
-                        shapes[i] = Handle(
-                            shape,
-                            p.dtype,
-                            p.name,
-                            p.role,
-                            p.parent,
-                            p.start,
-                            p.tap[tuple(key)],
-                        )
-            shapes = _take_views(cls, shapes, kwargs, {})
-            op = self._construct(cls, dict(zip(inputs, shapes)), shapes[n_in:], kwargs)
-        else:
-            op = target
-            values = self._split_values(cls, kwargs)
-        outs = [b for b in op.buffers if isinstance(b, Out)]
-        given = dict(zip((b.name for b in outs), tensors[n_in:]))
-        results = op._call_reference(dict(zip(inputs, tensors[:n_in])), given, values)
-        for name, out in given.items():
-            if results[name] is not out:
-                out[...] = np.asarray(results[name]).reshape(out.shape)
-        if len(results) > 1:
-            return tuple(results.values())
-        (result,) = results.values()
-        # Shaped as Tracer._record shapes a flat output.
-        if not given and len(outs) == 1 and len(outs[0].shape) == 1:
-            called = [t if p is None else p for t, p in zip(tensors, patterns)]
-            like = next(
-                (t for t in called if math.prod(t.shape) == outs[0].elements), None
-            )
-            if like is not None:
-                result = result.reshape(like.shape, copy=False)
-        return result

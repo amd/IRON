@@ -27,7 +27,7 @@ from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 from ..declare import Operator
-from ..declare.operator import graph_tracer
+from ..declare.operator import device_fit, graph_tracer
 from ..declare.value import Extent, ExtentWord
 from ..declare.precision import Precision
 from ..declare.profile import Profile
@@ -41,7 +41,7 @@ from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fold import Folding, folded
 from .handle import Affine, Carry, Handle, PerCall, State, Weight, is_operand
-from .trace import TracedGraph, Tracer, _ReferenceTracer
+from .trace import TracedGraph, Tracer
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +207,10 @@ class Graph:
 
     @functools.cached_property
     def _versions(self) -> dict[Signature, CompiledGraph]:
+        return {}
+
+    @functools.cached_property
+    def _references(self) -> dict[Signature, TracedGraph]:
         return {}
 
     @functools.cached_property
@@ -543,32 +547,31 @@ class Graph:
             tracer.profile = previous
 
     def reference(self, *tensors, **values) -> Any:
-        """``body`` on host tensors, each operator run through its ``reference()``.
+        """The graph traced for these tensors' shapes, each step run on the
+        host through its operator's ``reference()`` (``TracedGraph.reference``):
+        what a call on the device returns, each output cut to its bounds,
+        at any shape the operators take, one no device fits too.
 
         Raises:
             TypeError: An input is missing, or a per-call value is missing or
-                unknown, as a call on the device refuses them; or an output
-                a step is given is a weight or an input, as a trace refuses
-                it.
+                unknown, as a call on the device refuses them; or the body
+                does not trace.
+            IndexError: The values index or bound a view outside it, as a
+                call on the device refuses them.
         """
-        given = self._given(tensors)
+        given = {n: np.asarray(t) for n, t in self._given(tensors).items()}
         _check_values(self.name, self._parameters.values, values)
-        args = [given.get(name) for name in self._parameters.inputs]
-        held = [
-            *(
-                ("weight", np.asarray(x))
-                for _, x in self.held().values()
-                if not isinstance(x, State)
-            ),
-            *(("input", t) for t in args if isinstance(t, np.ndarray)),
-        ]
-        with _ReferenceTracer(self.name, self._profile(), held):
-            result = self.body(*args, **values)
-        items, carry = self._split_carry(result)
-        if carry is None:
-            return result
-        nxt = Carry(**{n: int(np.asarray(v).reshape(-1)[0]) for n, v in carry.items()})
-        return _results(items, nxt)
+        shapes = {n: (t.shape, np.dtype(t.dtype).type) for n, t in given.items()}
+        signature = self._signature(shapes)
+        traced = self._references.get(signature)
+        if traced is None:
+            token = device_fit.set(False)
+            try:
+                traced = self._references[signature] = self.trace(**shapes)
+            finally:
+                device_fit.reset(token)
+        outputs, carry = traced.reference(given, values)
+        return _results(outputs, Carry(**carry) if traced.carry else None)
 
     def _profile(self) -> Profile | None:
         profile = self.profile
@@ -757,13 +760,7 @@ class CompiledGraph:
             raise TypeError(
                 f"{self.traced.name}: per-call values {sorted(unknown)} unknown"
             )
-        for limit in self.traced.limits:
-            at = limit.evaluate(values)
-            if not limit.lo <= at < limit.hi:
-                raise IndexError(
-                    f"{self.traced.name}: {limit} is {at}, outside "
-                    f"[{limit.lo}, {limit.hi}) for {limit.view}"
-                )
+        self.traced.check_limits(values)
         for handle, tensor in zip(self.traced.inputs, tensors):
             if tuple(tensor.shape) != handle.shape:
                 raise ValueError(
