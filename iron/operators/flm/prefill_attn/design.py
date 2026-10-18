@@ -20,6 +20,7 @@ from typing import Callable
 
 import numpy as np
 from aie.dialects import arith
+from aie.dialects._aie_enum_gen import AIETileType
 from aie.dialects.aie import DMAChannelDir
 from aie.dialects.aiex import _as_i32
 from aie.extras import types as T
@@ -55,9 +56,6 @@ LK_MT = 128  # key rows per memtile buffer
 # rows per core equal ROUND.
 ROUND = 128
 
-# The k/v DMA and the kernel's steps synchronize on these locks of each core.
-IN_PROD_LOCK, IN_CONS_LOCK = 2, 3
-
 bf16 = np.dtype[bfloat16]
 
 
@@ -73,7 +71,7 @@ class Geometry:
     def of(cls, kernel):
         """Read the shapes from the argument types of the kernel's entry points."""
         lq, dh = np_ndarray_type_get_shape(kernel.attn_round_begin.arg_types()[4])
-        lk, _ = np_ndarray_type_get_shape(kernel.attn_qk_step.arg_types()[2])
+        lk, _ = np_ndarray_type_get_shape(kernel.attn_qk_chunk.arg_types()[2])
         return cls(dh=dh, lq=lq, lk=lk)
 
 
@@ -121,10 +119,10 @@ SLIDING = Variant(
 VARIANTS = {v.name: v for v in (CAUSAL, SLIDING)}
 
 
-def _stage_kv_causal(rt, MT, v, g):
+def _stage_kv_causal(rt, MT, v, g, k_in, v_in, kv_out):
     """The k/v memtile takes k and v on two channels and sends them interleaved on one.
 
-    The memtile to its left holds half of the buffers.
+    The memtile to its left holds half of the buffers, so both are placed.
     """
     mt, mt_left = MT[v.kv_memtile], MT[v.kv_memtile - 1]
     in_mem_ty = np.ndarray[(LK_MT, g.dh), bf16]
@@ -134,10 +132,10 @@ def _stage_kv_causal(rt, MT, v, g):
         for n in (0, 1)
     }
     # The locks of the left pair sit on mt.
-    left_prod = Lock(tile=mt, lock_id=0, init=2)
-    left_cons = Lock(tile=mt, lock_id=1, init=0)
-    own_prod = Lock(tile=mt, lock_id=7, init=2)
-    own_cons = Lock(tile=mt, lock_id=8, init=0)
+    left_prod = Lock(tile=mt, init=2)
+    left_cons = Lock(tile=mt, init=0)
+    own_prod = Lock(tile=mt, init=2)
+    own_cons = Lock(tile=mt, init=0)
     # Each lk-row block arrives row by row and lands as 8-column groups.
     fill = TensorAccessPattern.full((LK_MT // g.lk, g.dh // 8, g.lk, 8)).permute(
         (0, 2, 1, 3)
@@ -148,7 +146,7 @@ def _stage_kv_causal(rt, MT, v, g):
             [
                 DmaChannel(
                     DMAChannelDir.S2MM,
-                    0,
+                    k_in.endpoint(mt),
                     ping_pong(
                         bufs[("left", 0)],
                         bufs[("left", 1)],
@@ -159,7 +157,7 @@ def _stage_kv_causal(rt, MT, v, g):
                 ),
                 DmaChannel(
                     DMAChannelDir.S2MM,
-                    1,
+                    v_in.endpoint(mt),
                     ping_pong(
                         bufs[("own", 0)],
                         bufs[("own", 1)],
@@ -170,7 +168,7 @@ def _stage_kv_causal(rt, MT, v, g):
                 ),
                 DmaChannel(
                     DMAChannelDir.MM2S,
-                    0,
+                    kv_out.endpoint(mt),
                     [
                         Bd(
                             bufs[(side, n)],
@@ -189,7 +187,7 @@ def _stage_kv_causal(rt, MT, v, g):
     )
 
 
-def _stage_kv_sliding(rt, MT, v, g):
+def _stage_kv_sliding(rt, MT, v, g, k_in, v_in, kv_out):
     """The k/v memtile stages k and v in one buffer pair: k in the first half, v in the second.
 
     Each S2MM channel releases one count per buffer. The MM2S channel acquires
@@ -200,29 +198,29 @@ def _stage_kv_sliding(rt, MT, v, g):
     mt = MT[v.kv_memtile]
     in_0 = Buffer(type=in_mem_ty, name=f"in_0_0_{mt.col}", tile=mt)
     in_1 = Buffer(type=in_mem_ty, name=f"in_1_0_{mt.col}", tile=mt)
-    prod = Lock(tile=mt, lock_id=0, init=4)
-    cons = Lock(tile=mt, lock_id=1, init=0)
+    prod = Lock(tile=mt, init=4)
+    cons = Lock(tile=mt, init=0)
     rt.add_tile_dma(
         TileDma(
             mt,
             [
                 DmaChannel(
                     DMAChannelDir.S2MM,
-                    ch,
+                    flow.endpoint(mt),
                     ping_pong(
                         in_0,
                         in_1,
                         prod,
                         cons,
-                        tap=halves[ch].permute((0, 2, 1, 3)),
+                        tap=halves[half].permute((0, 2, 1, 3)),
                     ),
                 )
-                for ch in (0, 1)
+                for half, flow in enumerate((k_in, v_in))
             ]
             + [
                 DmaChannel(
                     DMAChannelDir.MM2S,
-                    0,
+                    kv_out.endpoint(mt),
                     ping_pong(
                         in_0,
                         in_1,
@@ -267,8 +265,7 @@ def prefill_attn(
 
     The README gives the layout of O, Q and KV and the meaning of the
     dispatch parameters ``L_begin``, ``L_end`` and ``max_l``. ``kernel`` is
-    the variant's factory's build with the locks IN_PROD_LOCK and
-    IN_CONS_LOCK.
+    the variant's factory's build.
     """
     v = VARIANTS[variant]
     if v.windowed != (window is not None):
@@ -287,7 +284,7 @@ def prefill_attn(
     # Query rows per memtile fifo half.
     lq_mt = 4 * g.lq
 
-    s_ty, q_ty, in_ty, _, m_ty, L_ty = kernel.attn_qk_step.arg_types()[:6]
+    s_ty, q_ty, in_ty, m_ty, L_ty = kernel.attn_qk_chunk.arg_types()[:5]
     mv_ty, _, cv_ty, _, y_ty = kernel.attn_round_begin.arg_types()
     o_ty, l_bf16_ty, _, _ = kernel.attn_epilogue.arg_types()
     q_half_ty = np.ndarray[(lq_mt, g.dh), bf16]
@@ -302,15 +299,17 @@ def prefill_attn(
     )
     blocks_per_round = ROUND // lq_mt
 
-    # Shim row 0, memtile row 1. Each tile carries its type. A Worker stamps an
-    # untyped tile with Tile.with_type(). That call returns a second CoreTile
-    # at the coordinates of the first tile's buffers and locks.
+    # Shim row 0, memtile row 1. The memtiles' S2MM channels are all spent
+    # (o's joins, q's halves, k and v) in a layout the placer would have to
+    # rediscover, so the shims and memtiles stay placed. Every core is used
+    # and alike, so the cores are not: core (j, i) is the logical column and
+    # row the kernel and the q and o fifos index.
     IT = [Tile(j, 0, tile_type=dev.get_tile_type(j, 0)) for j in range(dev.cols)]
     MT = [Tile(j, 1, tile_type=dev.get_tile_type(j, 1)) for j in range(dev.cols)]
     CT = {
-        (j, r): Tile(j, r, tile_type=dev.get_tile_type(j, r))
+        (j, i): Tile(tile_type=AIETileType.CoreTile)
         for j in range(dev.cols)
-        for r in dev.core_rows
+        for i in range(len(dev.core_rows))
     }
 
     def sequence(o, q, kv, lb_arg, le_arg, max_l_arg, o_shim, q_shims):
@@ -387,8 +386,8 @@ def prefill_attn(
                 for t in q_tasks + kv_tasks:
                     t.free()
 
-    # RTPs, one set per core, keyed by the tile's (row, col): the sequence
-    # writes the token range and the window into them.
+    # RTPs, one set per core, keyed by the core's logical (row, column): the
+    # sequence writes the token range and the window into them.
     rtp = {}
     # go orders each core's RTP read after the sequence's RTP write. A core
     # starts its next pass when a dispatch ends. The next dispatch writes the
@@ -397,7 +396,6 @@ def prefill_attn(
     # The sequence sets go to the number of passes after it writes the RTPs.
     # A core acquires one count before each pass.
     go = {}
-    kv_flows = []
 
     # o: one fifo per memtile m. Memtile m joins the output of four cores:
     # rows 0 and 1 for an even m, rows 2 and 3 for an odd m, in columns
@@ -462,6 +460,8 @@ def prefill_attn(
             o_h,
             in0,
             in1,
+            in_prod,
+            in_cons,
             s,
             m,
             y,
@@ -495,13 +495,22 @@ def prefill_attn(
                 blocks_k(*((lb, ws) if v.windowed else (lb,)), i, nb)
                 for b in range_(nb[0]):
                     block_begin_k(m, prev_m)
-                    for j in range_(LK_MT // g.lk):
+                    # k and then v arrive a chunk at a time, alternating
+                    # between in0 and in1; a block holds an even number of
+                    # chunks, so each loop starts at in0.
+                    for j in range_(0, LK_MT // g.lk, 2):
                         _no_unroll(j)
-                        qk_k(s, q, in0, in1, m, lb, ws, row, col, i, b, j)
+                        for chunk, jj in ((in0, j), (in1, j + 1)):
+                            in_cons.acquire(1)
+                            qk_k(s, q, chunk, m, lb, ws, row, col, i, b, jj)
+                            in_prod.release(1)
                     block_mid_k(s, m, new_m, prev_m, cbuf, lbuf, y)
-                    for j in range_(LK_MT // g.lk):
+                    for j in range_(0, LK_MT // g.lk, 2):
                         _no_unroll(j)
-                        fv_k(y, s, in0, in1, j)
+                        for chunk, jj in ((in0, j), (in1, j + 1)):
+                            in_cons.acquire(1)
+                            fv_k(y, s, chunk, jj)
+                            in_prod.release(1)
                     block_end_k(prev_m, new_m)
                 finalize_k(lbuf, l_bf16)
                 if v.release_q_before_epilogue:
@@ -515,91 +524,86 @@ def prefill_attn(
 
         return core_fn
 
-    workers = []
-    for j in range(dev.cols):
-        for i, r in enumerate(dev.core_rows):
-            tile = CT[(j, r)]
-            name = f"{tile.row}_{tile.col}"
-
-            def buf(ty, key, **kw):
-                return Buffer(type=ty, name=f"{key}_{name}", tile=tile, **kw)
-
-            rtp[(tile.row, tile.col)] = [
-                buf(L_ty, f"{key}_attn_core", use_write_rtp=True)
-                for key in ("L_begin", "L_end", "window_size")
-            ]
-            in_0 = buf(in_ty, "in_0")
-            in_1 = buf(in_ty, "in_1")
-            core_bufs = [
-                in_0,
-                in_1,
-                buf(s_ty, "s"),
-                buf(m_ty, "m"),
-                buf(y_ty, "y"),
-                buf(l_bf16_ty, "l_bf16"),
-                buf(mv_ty, "prev_m"),
-                buf(mv_ty, "new_m"),
-                buf(cv_ty, "c"),
-                buf(cv_ty, "l"),
-            ]
-            n_rounds = buf(L_ty, "n_rounds")
-            n_blocks = buf(L_ty, "n_blocks")
-            in_prod = Lock(tile=tile, lock_id=IN_PROD_LOCK, init=2)
-            in_cons = Lock(tile=tile, lock_id=IN_CONS_LOCK, init=0)
-            go_lock = Lock(tile=tile, init=0, name=f"go_{name}")
-            go[(tile.row, tile.col)] = go_lock
-            workers.append(
-                Worker(
-                    make_core_fn(i, j % group_cols),
-                    [q_cons[(i, j)].cons(), o_prod[(i, j)].prod()]
-                    + core_bufs
-                    + rtp[(tile.row, tile.col)]
-                    + [
-                        n_rounds,
-                        n_blocks,
-                        kernel.attn_rounds,
-                        kernel.attn_round_begin,
-                        kernel.attn_blocks,
-                        kernel.attn_block_begin,
-                        kernel.attn_qk_step,
-                        kernel.attn_block_mid,
-                        kernel.attn_fv_step,
-                        kernel.attn_block_end,
-                        kernel.attn_finalize,
-                        kernel.attn_epilogue,
-                        go_lock,
-                    ],
-                    tile=tile,
-                    while_true=True,
-                    stack_size=v.stack_size,
-                )
-            )
-            # k and v share S2MM channel 1; q takes channel 0.
-            rt.add_tile_dma(
-                TileDma(
-                    tile,
-                    [
-                        DmaChannel(
-                            DMAChannelDir.S2MM,
-                            1,
-                            ping_pong(in_0, in_1, in_prod, in_cons),
-                        )
-                    ],
-                )
-            )
-
+    # k and v: two shim flows into the k/v memtile, and one broadcast from it
+    # to every core. The compiler assigns their channels.
+    kv_mt = MT[v.kv_memtile]
+    kv_flows = [Flow(IT[v.kv_memtile], kv_mt) for _ in ("k", "v")]
+    kv_out = Flow(kv_mt, list(CT.values()))
+    for flow in (*kv_flows, kv_out):
+        rt.add_flow(flow)
     stage_kv = _stage_kv_sliding if v.windowed else _stage_kv_causal
-    stage_kv(rt, MT, v, g)
+    stage_kv(rt, MT, v, g, *kv_flows, kv_out)
 
-    kv_mt = v.kv_memtile
-    for ch, symbol in enumerate(("k_in", "v_in")):
-        kv_flows.append(
-            Flow(
-                IT[kv_mt], MT[kv_mt], src_channel=ch, dst_channel=ch, shim_symbol=symbol
+    workers = []
+    for (j, i), tile in CT.items():
+        name = f"{i}_{j}"
+
+        def buf(ty, key, **kw):
+            return Buffer(type=ty, name=f"{key}_{name}", tile=tile, **kw)
+
+        rtp[(i, j)] = [
+            buf(L_ty, f"{key}_attn_core", use_write_rtp=True)
+            for key in ("L_begin", "L_end", "window_size")
+        ]
+        in_0 = buf(in_ty, "in_0")
+        in_1 = buf(in_ty, "in_1")
+        in_prod = Lock(tile=tile, init=2, name=f"in_prod_{name}")
+        in_cons = Lock(tile=tile, init=0, name=f"in_cons_{name}")
+        core_bufs = [
+            in_0,
+            in_1,
+            in_prod,
+            in_cons,
+            buf(s_ty, "s"),
+            buf(m_ty, "m"),
+            buf(y_ty, "y"),
+            buf(l_bf16_ty, "l_bf16"),
+            buf(mv_ty, "prev_m"),
+            buf(mv_ty, "new_m"),
+            buf(cv_ty, "c"),
+            buf(cv_ty, "l"),
+        ]
+        n_rounds = buf(L_ty, "n_rounds")
+        n_blocks = buf(L_ty, "n_blocks")
+        go_lock = Lock(tile=tile, init=0, name=f"go_{name}")
+        go[(i, j)] = go_lock
+        workers.append(
+            Worker(
+                make_core_fn(i, j % group_cols),
+                [q_cons[(i, j)].cons(), o_prod[(i, j)].prod()]
+                + core_bufs
+                + rtp[(i, j)]
+                + [
+                    n_rounds,
+                    n_blocks,
+                    kernel.attn_rounds,
+                    kernel.attn_round_begin,
+                    kernel.attn_blocks,
+                    kernel.attn_block_begin,
+                    kernel.attn_qk_chunk,
+                    kernel.attn_block_mid,
+                    kernel.attn_fv_chunk,
+                    kernel.attn_block_end,
+                    kernel.attn_finalize,
+                    kernel.attn_epilogue,
+                    go_lock,
+                ],
+                tile=tile,
+                while_true=True,
+                stack_size=v.stack_size,
             )
         )
-        rt.add_flow(kv_flows[-1])
-    for tile in CT.values():
-        rt.add_flow(Flow(MT[kv_mt], tile, src_channel=0, dst_channel=1))
+        rt.add_tile_dma(
+            TileDma(
+                tile,
+                [
+                    DmaChannel(
+                        DMAChannelDir.S2MM,
+                        kv_out.endpoint(tile),
+                        ping_pong(in_0, in_1, in_prod, in_cons),
+                    )
+                ],
+            )
+        )
 
     return Program(dev, rt, workers=workers).resolve_program()

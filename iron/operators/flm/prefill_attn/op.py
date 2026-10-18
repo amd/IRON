@@ -14,8 +14,6 @@ from iron.common import Operator, Unresolvable, field
 from iron.operators.flm.prefill_attn import reference
 from iron.operators.flm.prefill_attn.design import (
     CAUSAL,
-    IN_CONS_LOCK,
-    IN_PROD_LOCK,
     SLIDING,
     Geometry,
     Variant,
@@ -59,12 +57,10 @@ class _PrefillAttentionBase(Operator):
     max_l: DispatchTime[np.int32] = field(init=False)
 
     def kernel(self) -> ExternalFunction:
-        """The variant's kernel, built with the k/v locks the design declares."""
+        """The variant's kernel."""
         # The factory reads the architecture of the bound device.
         self.dev
-        return self.variant.factory(
-            in_prod_lock=IN_PROD_LOCK, in_cons_lock=IN_CONS_LOCK
-        )
+        return self.variant.factory()
 
     def validate(self) -> None:
         for name in ("max_context", "num_heads", "num_kv_heads"):
