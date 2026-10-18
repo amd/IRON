@@ -2,17 +2,22 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""LFM2's graph against its own float32 forward pass, device-free (no
-checkpoint, no NPU): the short convolution's rows before a call, carried
-as a ``Checkpoints`` state across prompt chunks, decode steps and a chat
-turn from a boundary a decode step crossed.
+"""LFM2's graph against Hugging Face's LFM2 in float32 over the same random
+weights, its logits recorded in ``goldens/``, device-free (no checkpoint,
+no NPU): the short convolution's rows before a call, carried as a
+``Checkpoints`` state across prompt chunks, decode steps and a chat turn
+from a boundary a decode step crossed.
 """
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 
 from iron.applications.lfm2.model import Lfm2, Lfm2Config
+from iron.lm import OnHost as Host
+from iron.lm.golden import HuggingFace
 from iron.tests.common.llama_model import checkpoint
+from iron.tests.toolchain.tools import DEVICES
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -69,35 +74,17 @@ def names(c: Lfm2Config) -> dict[str, tuple[int, ...]]:
     return out
 
 
-class _Output:
-    """What an image returns: a buffer read with ``numpy()``."""
-
-    def __init__(self, array):
-        self.array = array
-
-    def numpy(self):
-        return self.array
-
-
-class OnHost(Lfm2):
-    """The model with its images stood in by its reference, which runs at
-    whatever shape it is called with.
-    """
-
+class OnHost(Host, Lfm2):
     profile = None
 
-    def __call__(self, *tensors, **values):
-        logits, carry = self.reference(*tensors, **values)
-        return _Output(logits), carry
 
-
-def _assert_close(model, oracle, tokens):
-    """The model's logits after ``tokens`` against the oracle's: bf16 against
+def _assert_close(model, reference, tokens):
+    """The model's logits after ``tokens`` against the reference's: bf16 against
     float32, so within 5% of the largest logit (this toy measures at most
     2.2%; a turn reading a stale slot, 124%), and the same argmax.
     """
     got = np.asarray(model.logits(tokens), dtype=np.float32)
-    want = oracle.logits(tokens)
+    want = reference.logits(tokens)
     err, scale = np.abs(got - want).max(), np.abs(want).max()
     assert err <= 0.05 * scale, f"{len(tokens)}: |diff| {err:.4f}, |logits| {scale:.3f}"
     assert got.argmax() == want.argmax(), f"{len(tokens)} tokens"
@@ -105,16 +92,26 @@ def _assert_close(model, oracle, tokens):
 
 
 @pytest.fixture(scope="module")
-def ran():
-    """The model after a prompt of two chunks and decode steps across the
-    next boundary, each call held to the oracle, and the tokens it ran.
-    """
+def toy(golden):
+    """The toy's random weights and their golden logits."""
     weights = checkpoint(TOY, names(TOY)).tree("random", 0)
-    model, oracle = OnHost(TOY, weights), Lfm2.oracle(TOY, weights)
-    tokens = list(np.random.default_rng(7).integers(0, TOY.vocab_size, PROMPT))
-    while len(tokens) <= LAST:
-        tokens.append(int(_assert_close(model, oracle, tokens).argmax()))
-    return model, oracle, tokens
+    return weights, golden("toy", lambda: HuggingFace.build("lfm2", TOY, weights))
+
+
+@pytest.fixture(scope="module")
+def ran(toy):
+    """The model after a prompt of two chunks and decode steps across the
+    next boundary, each call held to the reference, and the tokens it ran.
+    It binds the device itself, being set up before the tests' ``npu2``.
+    """
+    weights, reference = toy
+    model = OnHost(TOY, weights)
+    # No greedy step of this prompt has a top-2 gap within bf16's resolution.
+    tokens = list(np.random.default_rng(27).integers(0, TOY.vocab_size, PROMPT))
+    with aie_utils.set_current_device(DEVICES["npu2"]()):
+        while len(tokens) <= LAST:
+            tokens.append(int(_assert_close(model, reference, tokens).argmax()))
+    return model, reference, tokens
 
 
 def test_attention_layers_hold_caches_and_conv_layers_a_checkpointed_tail(ran):
@@ -133,24 +130,25 @@ def test_a_turn_resumes_from_a_boundary(ran):
     step crossing 512 wrote, then from the one the prompt's first chunk
     wrote.
     """
-    model, oracle, tokens = ran
+    model, reference, tokens = ran
     for boundary in (512, 256):
         turn = tokens[:boundary] + [int(np.random.default_rng(boundary).integers(512))]
-        turn.append(int(_assert_close(model, oracle, turn).argmax()))
-        _assert_close(model, oracle, turn)
+        turn.append(int(_assert_close(model, reference, turn).argmax()))
+        _assert_close(model, reference, turn)
 
 
-def test_a_turn_resumes_where_its_state_is_held():
+def test_a_turn_resumes_where_its_state_is_held(toy):
     """Decision 50 with recurrent state: an appended turn resumes at its
     first new token, the state where the last call ended; a turn changing
     a token mid-chunk resumes at the boundary before it. A call never
-    crosses a boundary, so each writes its slot; every turn is the oracle's.
+    crosses a boundary, so each writes its slot; every turn is the
+    reference's.
     """
-    weights = checkpoint(TOY, names(TOY)).tree("random", 0)
-    model, oracle = OnHost(TOY, weights), Lfm2.oracle(TOY, weights)
+    weights, reference = toy
+    model = OnHost(TOY, weights)
     rng = np.random.default_rng(3)
     tokens = list(rng.integers(0, TOY.vocab_size, 500))
-    _assert_close(model, oracle, tokens)
+    _assert_close(model, reference, tokens)
     for turn, start, calls in (
         (tokens + list(rng.integers(0, 512, 30)), 500, [(500, 12), (512, 18)]),
         (tokens[:280] + list(rng.integers(0, 512, 1)), 256, [(256, 25)]),
@@ -160,4 +158,4 @@ def test_a_turn_resumes_where_its_state_is_held():
         assert model.resume(model._held(turn)) == start
         got = [(v["start"], v["rows"]) for _, v in model._chunks(turn, start)]
         assert got == calls
-        _assert_close(model, oracle, list(turn))
+        _assert_close(model, reference, list(turn))

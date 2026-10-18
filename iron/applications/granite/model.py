@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Granite 4.2 3B over the shared decoder and layer (``iron.lm``): its
-embedding and head on the NPU (``Granite``) and on the CPU in float32
-(``GraniteOracle``, the reference it is judged by), and its shape, read from its checkpoint's ``config.json``. Run it with ``python -m
+embedding and head on the NPU (``Granite``) and its shape, read from its
+checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.granite.model``.
 
 Granite is Llama's layer with four scalars of its own config's: the
@@ -29,7 +29,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig, Derived, Layer, Oracle, widen
+from iron.lm import CausalLM, DecoderConfig, Derived, Layer
 from iron.operators.elementwise_mul import RowwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
@@ -60,19 +60,6 @@ class GraniteConfig(DecoderConfig):
         )
 
 
-class GraniteOracle(Oracle):
-    """Granite's forward pass in float32, on the host."""
-
-    def embed(self, x):
-        return x * np.float32(self.config.embedding_multiplier)
-
-    def head(self, x):
-        norm = widen(self.weights.model.norm.weight)
-        lm_head = widen(self.weights.lm_head.weight)
-        logits = self.rms_norm(x, norm) @ lm_head.T
-        return logits / np.float32(self.config.logits_scaling)
-
-
 class Granite(CausalLM):
     """Granite on ``config``'s shape and a checkpoint's ``weights``, by its
     names: the (untied) output head is ``lm_head``. Every matrix is read
@@ -81,7 +68,6 @@ class Granite(CausalLM):
     """
 
     profile = Path(__file__).with_name("profiles")
-    oracle = GraniteOracle
 
     def __init__(self, config: GraniteConfig, weights):
         super().__init__(config, weights)

@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Phi-4-mini-instruct's graph against its own plain forward pass, device-free
+"""Phi-4-mini-instruct's graph against Hugging Face's Phi-3 in float32 over
+the same random weights, its logits recorded in ``goldens/``, device-free
 (no checkpoint, no NPU): Layer's partial rotary and fused qkv_proj and
 gate_up_proj, through the shared decoder's caches, independent of whether
 the real checkpoint or hardware is at hand.
@@ -23,7 +24,8 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 from iron.applications.phi3.model import LongRope, Phi4, Phi4Config
-from iron.lm import Checkpoint, accuracy, determinism
+from iron.lm import Checkpoint, OnHost as Host, accuracy, determinism
+from iron.lm.golden import HuggingFace
 
 
 @pytest.fixture(autouse=True)
@@ -44,7 +46,7 @@ def _npu2():
 #: partial rotary (half of each head), LongRoPE's amplitude scale.
 TOY = Phi4Config(
     vocab_size=1024,
-    hidden_size=256,
+    hidden_size=512,
     num_hidden_layers=2,
     num_attention_heads=8,
     num_key_value_heads=2,
@@ -52,7 +54,7 @@ TOY = Phi4Config(
     intermediate_size=512,
     rope_theta=10000.0,
     max_seq_len=256,
-    rotary_dim=32,
+    partial_rotary_factor=0.5,
     prefill_chunk=256,
 )
 
@@ -102,24 +104,15 @@ def _toy_weights(config: Phi4Config, seed: int = 0):
     return _checkpoint(config).tree("random", seed)
 
 
-class _Output:
-    def __init__(self, array):
-        self.array = array
-
-    def numpy(self):
-        return self.array
-
-
-class OnHost(Phi4):
-    """The model with its images stood in by its reference, which runs at
-    whatever shape it is called with.
-    """
-
+class OnHost(Host, Phi4):
     profile = None
 
-    def __call__(self, *tensors, **values):
-        logits, carry = self.reference(*tensors, **values)
-        return _Output(logits), carry
+
+def _hugging_face(config, weights, **json):
+    """Hugging Face's Phi-3 on ``config`` and ``weights``; its default
+    padding token lies past the toy vocabulary.
+    """
+    return HuggingFace.build("phi3", config, weights, pad_token_id=None, **json)
 
 
 def _assert_close(got, expected):
@@ -136,22 +129,22 @@ def _assert_close(got, expected):
 
 
 @pytest.fixture(scope="module")
-def cpu():
+def cpu(golden):
     config = TOY
     weights = _toy_weights(config)
-    oracle = Phi4.oracle(config, weights)
+    reference = golden("toy", lambda: _hugging_face(config, weights))
     prompt = np.random.default_rng(7).integers(0, config.vocab_size, 8)
     tokens, expected = prompt, []
-    first = logits = oracle.logits(tokens)
+    first = logits = reference.logits(tokens)
     for _ in range(6):
         tokens = np.append(tokens, logits.argmax())
-        logits = oracle.logits(tokens)
+        logits = reference.logits(tokens)
         expected.append(logits)
-    return config, weights, oracle, prompt, first, expected
+    return config, weights, reference, prompt, first, expected
 
 
 def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(cpu):
-    config, weights, oracle, prompt, first, expected = cpu
+    config, weights, reference, prompt, first, expected = cpu
     model = OnHost(config, weights)
     last = model.logits(prompt[:1])
     for n in range(2, len(prompt) + 1):
@@ -160,7 +153,7 @@ def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(cpu):
 
 
 def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
-    config, weights, oracle, prompt, first, expected = cpu
+    config, weights, reference, prompt, first, expected = cpu
     model = OnHost(config, weights)
     got = model.logits(prompt)
     _assert_close([got], [first])
@@ -174,29 +167,29 @@ def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
     _assert_close(out, expected)
 
 
-def test_a_prompt_longer_than_a_chunk_runs_in_chunks():
-    config = dataclasses.replace(TOY, max_seq_len=4 * TOY.prefill_chunk)
-    weights = _toy_weights(config)
-    model, oracle = OnHost(config, weights), Phi4.oracle(config, weights)
+def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
+    config, weights, reference, *_ = cpu
+    config = dataclasses.replace(config, max_seq_len=4 * config.prefill_chunk)
+    model = OnHost(config, weights)
     tokens = np.random.default_rng(3).integers(0, config.vocab_size, 150)
-    first = oracle.logits(tokens)
+    first = reference.logits(tokens)
     _assert_close([model.logits(tokens)], [first])
     tokens = np.append(tokens, first.argmax())
-    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
     tokens = np.append(tokens, np.random.default_rng(4).integers(0, 1024, 30))
-    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
 
 
 def test_the_accuracy_check_scores_the_model_against_the_reference(cpu):
-    config, weights, oracle, prompt, first, expected = cpu
+    config, weights, reference, prompt, first, expected = cpu
     model = OnHost(config, weights)
-    results = accuracy(model, oracle, prompt, len(expected) + 1)
+    results = accuracy(model, reference, prompt, len(expected) + 1)
     assert all(top1 for _, top1 in results), results
     assert all(0 <= kl < 0.05 for kl, _ in results), results
 
 
 def test_the_determinism_check_finds_the_reference_deterministic(cpu):
-    config, weights, oracle, prompt, first, expected = cpu
+    config, weights, reference, prompt, first, expected = cpu
     model = OnHost(config, weights)
     assert determinism(model, [prompt, prompt[::-1]], 3, 3) == 0
 
@@ -215,23 +208,31 @@ LONG = dataclasses.replace(
 )
 
 
-def test_a_turn_past_the_original_context_rotates_only_its_own_rows_long():
+def test_a_turn_past_the_original_context_rotates_only_its_own_rows_long(golden):
     """Decision 35 on decision 50: a prompt within 128 positions rotates
-    short; a second turn passing 128 runs from its first new token, its own
-    rows rotated long, the cached ones as they were written, as Hugging
-    Face's forward calls over a cache do; a decode step past 128 reads the
-    long rows; a first turn passing 128 is long throughout.
+    short and a first turn passing 128 long throughout, both Hugging
+    Face's; a second turn passing 128 runs from its first new token, its
+    own rows rotated long, the cached ones as they were written, so it
+    differs from a first turn over the same tokens, and a decode step past
+    128 then reads the long rows as a turn over it does. Hugging Face's
+    logits are a whole forward call's, so no golden judges the second turn.
     """
     weights = _toy_weights(LONG)
-    model, oracle = OnHost(LONG, weights), Phi4.oracle(LONG, weights)
-    tokens = np.random.default_rng(5).integers(0, LONG.vocab_size, 300)
-    _assert_close([model.logits(tokens[:100])], [oracle.logits(tokens[:100])])
-    got = np.asarray(model.logits(tokens), np.float32)
-    want = oracle.logits(tokens, ends=(100, 300))
-    _assert_close([got], [want])
-    # Rotating the cached rows long instead moves the logits further.
-    assert np.abs(oracle.logits(tokens) - want).max() > np.abs(got - want).max()
-    tokens = np.append(tokens, want.argmax())
-    _assert_close([model.logits(tokens)], [oracle.logits(tokens, ends=(100, 300, 301))])
-    fresh = OnHost(LONG, weights)
-    _assert_close([fresh.logits(tokens)], [oracle.logits(tokens)])
+    longrope = {
+        "type": "longrope",
+        "short_factor": list(LONG.longrope.short_factor),
+        "long_factor": list(LONG.longrope.long_factor),
+    }
+    reference = golden(
+        "long", lambda: _hugging_face(LONG, weights, rope_scaling=longrope)
+    )
+    model = OnHost(LONG, weights)
+    tokens = np.random.default_rng(5).integers(0, LONG.vocab_size, 301)
+    _assert_close([model.logits(tokens[:100])], [reference.logits(tokens[:100])])
+    got = np.asarray(model.logits(tokens[:300]), np.float32)
+    whole = reference.logits(tokens[:300])
+    assert np.abs(got - whole).max() > 0.1 * np.abs(whole).max()
+    turned = OnHost(LONG, weights)
+    turned.logits(tokens[:100])
+    _assert_close([model.logits(tokens)], [turned.logits(tokens)])
+    _assert_close([OnHost(LONG, weights).logits(tokens)], [reference.logits(tokens)])

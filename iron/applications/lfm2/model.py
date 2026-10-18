@@ -4,9 +4,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """LFM2-1.2B over the shared decoder and layer (``iron.lm``): its short
-convolution on the NPU (``Lfm2``) and in float32 (``Lfm2Oracle``), and
-LFM2-1.2B's shape, read from its checkpoint's
-``config.json``. Run it with ``python -m iron.applications.lfm2.model``.
+convolution on the NPU (``Lfm2``) and LFM2-1.2B's shape, read from its
+checkpoint's ``config.json``. Run it with ``python -m
+iron.applications.lfm2.model``.
 
 Sixteen layers, only six of them full attention (``full_attn_idxs``),
 each ``Layer``'s on LFM2's own names (per-head q/k norms, Qwen3's shape);
@@ -33,15 +33,7 @@ import numpy as np
 import iron
 import iron.functional as F
 from iron import lm
-from iron.lm import (
-    CausalLM,
-    Checkpoints,
-    DecoderConfig,
-    Derived,
-    Layer,
-    Oracle,
-    widen,
-)
+from iron.lm import CausalLM, Checkpoints, DecoderConfig, Derived, Layer
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
@@ -91,33 +83,6 @@ class Lfm2Config(DecoderConfig):
         object.__setattr__(self, "intermediate_size", F)
 
 
-class Lfm2Oracle(Oracle):
-    """LFM2-1.2B's forward pass in float32, on the host."""
-
-    def layer(self, i, angles, w, x):
-        if "self_attn" in vars(w):
-            return super().layer(i, angles, w, x)
-        x = x + self._conv(self.normed(x, w.operator_norm), w.conv)
-        return self.config.layer(i).feed_forward_oracle(self, w, x)
-
-    def _conv(self, h, w):
-        c = self.config
-        n, E, K = h.shape[0], h.shape[1], c.conv_kernel
-        bcx = h @ w.in_proj.weight.T
-        b, cc, x = bcx[:, :E], bcx[:, E : 2 * E], bcx[:, 2 * E :]
-        gated = b * x
-        taps = w.conv.weight.reshape(E, K)
-        padded = np.concatenate([np.zeros((K - 1, E), dtype=np.float32), gated], axis=0)
-        total = np.zeros((n, E), dtype=np.float32)
-        for k in range(K):
-            total += taps[:, k] * padded[k : k + n]
-        return (cc * total) @ w.out_proj.weight.T
-
-    def head(self, x):
-        norm = widen(self.weights.model.embedding_norm.weight)
-        return self.rms_norm(x, norm) @ self.embedding.T
-
-
 class Lfm2(CausalLM):
     """LFM2-1.2B on ``config``'s shape and a checkpoint's ``weights``, by
     its names: each layer either an attention layer's weights or a conv
@@ -126,7 +91,6 @@ class Lfm2(CausalLM):
     """
 
     profile = Path(__file__).with_name("profiles")
-    oracle = Lfm2Oracle
 
     def __init__(self, config: Lfm2Config, weights):
         super().__init__(config, weights)
