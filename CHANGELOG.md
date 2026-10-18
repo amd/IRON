@@ -58,6 +58,8 @@ public API adds its entry under Unreleased.
   name.
 - `Model.loaded()`, the hook `Model.load` hands the compiled versions to;
   `Runner.build()` makes the model `npu()` loads.
+- `BuiltArray.program()`, a built array alone with its operator's own
+  sequence, as a `Program`.
 
 ### Changed
 
@@ -149,6 +151,7 @@ public API adds its entry under Unreleased.
   `CausalLM.embed`.
 - `Runner.sizes` and `--size`, `F.linear`'s `k_tile` and `tile_n`, and
   Whisper's `Runner`.
+- `Operand.runtime`; an operand finds the running sequence itself.
 - Operator fusion, one operator's step run in another's cores, until it is
   done as dataflow: `compile(fold=)` and `iron.common.graph.fold`; `Chain`,
   `Link`, `Finish` and `Prepare`; `Operator`'s `finish`, `prepare` and
