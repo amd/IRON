@@ -7,9 +7,8 @@ kernels compute it.
 The reference takes the five buffers of DecodeLayer and returns x and the kv
 cache as the device leaves them:
 
-    x_out, kv_out = reference(
-        FLM_GEMMA4_E2B_DECODE, "swa", x, proj, rms, rope_rms, kv,
-        context_len=37, max_l=1024)
+    g = LayerDims(FLM_GEMMA4_E2B_DECODE, LayerType.SWA)
+    x_out, kv_out = reference(g, x, proj, rms, rope_rms, kv, context_len=37, max_l=1024)
 
 It reproduces the kernels' rounding, accumulation order and lookup tables with
 aie2p_math_emulation. A product or an inverse square root can still differ
@@ -38,8 +37,7 @@ from iron.operators.flm.layer.design import (
     LK,
     MIN_BF16_PAD,
     SLIDING_WINDOW,
-    layer_dims,
-    weight_layout,
+    LayerDims,
 )
 from iron.operators.flm.q4nx import (
     BLOCK_BYTES,
@@ -56,38 +54,36 @@ RMS_EPS = 1e-6
 BF16_M, BF16_K = 32, 256
 
 
-def proj_layout(geometry, layer_type):
+def proj_layout(g: LayerDims) -> dict[str, tuple[int, str, int, int]]:
     """Weight name -> (byte offset, format, rows, cols) in proj: the design's
-    weight_layout, with its qkv split into q, k and v (absent on a skip layer).
+    weights, with its qkv split into q, k and v (absent on a skip layer).
     rows are output features.
     """
-    g = layer_dims(geometry, layer_type)
     out = {}
-    for name, w in weight_layout(geometry, layer_type).items():
+    for name, w in g.weights.items():
         fmt = "q4nx" if w.packed else "bf16"
         if name != "qkv":
             out[name] = (2 * w.offset, fmt, w.dout, w.din)
             continue
         off = 2 * w.offset
-        for part, rows in (("q", g["dq"]), ("k", g["dk"]), ("v", g["dk"])):
-            if part == "q" or not g["skip"]:
+        for part, rows in (("q", g.dq), ("k", g.dk), ("v", g.dk)):
+            if part == "q" or not g.skip:
                 out[part] = (off, fmt, rows, w.din)
                 off += _size(fmt, rows, w.din)
     return out
 
 
-def _size(fmt, rows, cols):
+def _size(fmt: str, rows: int, cols: int) -> int:
     """Bytes of a weight in q4nx or in bf16."""
     return packed_bytes(rows * cols) if fmt == "q4nx" else 2 * rows * cols
 
 
-def rope_rms_layout(geometry, layer_type):
+def rope_rms_layout(g: LayerDims) -> dict[str, int]:
     """Element offsets in rope_rms: cos and sin of this token's position, the q
     and k norm weights, the per-layer embedding of this token, the per-layer
     norm weight, the post-per-layer-input norm weight and the layer scale.
     """
-    g = layer_dims(geometry, layer_type)
-    dh, P, D = g["dh"], g["pli_d"], g["model_dim"]
+    dh, P, D = g.dh, g.pli_d, g.model_dim
     lay = dict(cos=0, sin=dh // 2, q_norm=dh, k_norm=2 * dh, pli_embed=3 * dh)
     lay["pli_norm"] = lay["pli_embed"] + P
     lay["post_pli_norm"] = lay["pli_norm"] + P
@@ -96,26 +92,14 @@ def rope_rms_layout(geometry, layer_type):
     return lay
 
 
-def kv_rows(geometry, layer_type, max_l):
-    """Rows of each half (K, then V) of the kv cache."""
-    return SLIDING_WINDOW if layer_dims(geometry, layer_type)["swa"] else max_l
-
-
-def kv_row(geometry, layer_type, context_len):
-    """The cache row of the token at position context_len."""
-    if layer_dims(geometry, layer_type)["swa"]:
-        return context_len % SLIDING_WINDOW
-    return context_len
-
-
-def _attention_rows(g, context_len):
+def _attention_rows(g: LayerDims, context_len: int) -> tuple[np.ndarray, int]:
     """Cache rows in the order the attention core reads them, and how many hold
     keys. The core reads whole rounds and masks the rows past the keys. A
     sliding-window ring of L >= 512 tokens holds them in time order from row
     L % 512.
     """
     L = context_len + 1
-    if g["swa"] and L >= SLIDING_WINDOW:
+    if g.swa and L >= SLIDING_WINDOW:
         lb = L % SLIDING_WINDOW
         return (
             np.concatenate([np.arange(lb, SLIDING_WINDOW), np.arange(lb)]),
@@ -272,7 +256,9 @@ def _u8(buf):
     return np.ascontiguousarray(buf).reshape(-1).view(np.uint8)
 
 
-def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max_l):
+def reference(
+    g: LayerDims, x, proj, rms, rope_rms, kv, context_len: int, max_l: int
+) -> tuple[np.ndarray, np.ndarray]:
     """One decode-layer dispatch on DecodeLayer's five buffers.
 
     The buffers are numpy arrays of any dtype (bf16, uint16 or uint8) and may be
@@ -280,19 +266,18 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
     patterns: the layer output in x[:D], and on a non-skip layer this token's K
     and V rows in kv.
     """
-    g = layer_dims(geometry, layer_type)
     D, dh, H, n_kv, P, dk = (
-        g["model_dim"],
-        g["dh"],
-        g["num_attn_heads"],
-        g["num_kv_heads"],
-        g["pli_d"],
-        g["dk"],
+        g.model_dim,
+        g.dh,
+        g.num_attn_heads,
+        g.num_kv_heads,
+        g.pli_d,
+        g.dk,
     )
     x16, rms16, rr16 = (_u8(b).view("<u2") for b in (x, rms, rope_rms))
     proj_u8 = _u8(proj)
-    W = proj_layout(geometry, layer_type)
-    lay = rope_rms_layout(geometry, layer_type)
+    W = proj_layout(g)
+    lay = rope_rms_layout(g)
 
     def vec(buf, off, n):
         return buf[off : off + n].view(bfloat16).astype(np.float64)
@@ -314,14 +299,14 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
     q = rope_head(q4("q", xn).reshape(H, dh), vec(rr16, lay["q_norm"], dh), cos, sin)
 
     kv_out = _u8(kv).view("<u2").copy()
-    rows = kv_rows(geometry, layer_type, max_l)
+    rows = g.kv_rows(max_l)
     v_off = rows * dk
-    if not g["skip"]:
+    if not g.skip:
         k_new = rope_head(
             q4("k", xn).reshape(n_kv, dh), vec(rr16, lay["k_norm"], dh), cos, sin
         )
         v_new = rms_norm(q4("v", xn).reshape(n_kv, dh), None)
-        r = kv_row(geometry, layer_type, context_len)
+        r = g.kv_row(context_len)
         kv_out[r * dk : (r + 1) * dk] = to_bf16(k_new.reshape(-1))
         kv_out[v_off + r * dk : v_off + (r + 1) * dk] = to_bf16(v_new.reshape(-1))
 
@@ -333,16 +318,16 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
     o = attention(q, K, V, valid, n_kv)
 
     h1 = rb(h0 + rms_norm(q4("o", o.reshape(-1)), w_post_attn))
-    act = glu(q4("up_gate", rms_norm(h1, w_pre_ff)), g["glu_slice"])
+    act = glu(q4("up_gate", rms_norm(h1, w_pre_ff)), g.geometry.glu_slice)
     h2 = rb(h1 + rms_norm(q4("down", act), w_post_ff))
 
     # The per-layer input of this layer, from the token embedding:
     # bf16(norm(bf16(W_down emb) / sqrt(D)) + per-layer embedding) / sqrt(2).
-    pli = rb(bf("pli_down", emb) * rb(g["pli_input_scale"], "rne"))
+    pli = rb(bf("pli_down", emb) * rb(g.geometry.pli_input_scale, "rne"))
     pli = rb(
         rms_norm(pli, vec(rr16, lay["pli_norm"], P)) + vec(rr16, lay["pli_embed"], P)
     )
-    pli = rb(pli * rb(g["pli_projection_scale"], "rne"))
+    pli = rb(pli * rb(g.geometry.pli_projection_scale, "rne"))
     gate = gelu_kernel(bf("pli_gate", h2))
     up = bf("pli_up", rb(pli * gate))
     out = rb(rb(h2 + rms_norm(up, vec(rr16, lay["post_pli_norm"], D))) * layer_scale)
@@ -376,7 +361,7 @@ def pack_bf16_blocked(w):
     return to_bf16(b.reshape(-1), "rne").view(np.uint8)
 
 
-def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
+def generate_inputs(g: LayerDims, context_len: int, max_l: int, seed: int = 0):
     """Random buffers (x, proj, rms, rope_rms, kv) for one dispatch, as uint16
     bf16 bit patterns (proj as uint8).
 
@@ -390,9 +375,8 @@ def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
     rows the layer reads.
     """
     rng = np.random.default_rng(seed)
-    g = layer_dims(geometry, layer_type)
-    D, P, dh, dk = g["model_dim"], g["pli_d"], g["dh"], g["dk"]
-    W = proj_layout(geometry, layer_type)
+    D, P, dh, dk = g.model_dim, g.pli_d, g.dh, g.dk
+    W = proj_layout(g)
     end = max(off + _size(fmt, rows, cols) for off, fmt, rows, cols in W.values())
     proj = np.zeros(end, np.uint8)
     for off, fmt, rows, cols in W.values():
@@ -412,9 +396,9 @@ def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
     # The input, post-attention, pre-feedforward and post-feedforward norms.
     rms = (rng.normal(1, 0.2, (4, D)) * np.array([[20], [0.5], [4], [1]])).reshape(-1)
 
-    lay = rope_rms_layout(geometry, layer_type)
+    lay = rope_rms_layout(g)
     rr = np.zeros(lay["size"])
-    if g["swa"]:
+    if g.swa:
         inv_freq = 10000.0 ** (-np.arange(dh // 2) * 2 / dh)
     else:
         inv_freq = np.zeros(dh // 2)
@@ -431,9 +415,9 @@ def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
         rr[lay[name] : lay[name] + n] = rng.normal(mean, std, n)
     rr[lay["layer_scale"]] = 0.6
 
-    rows = kv_rows(geometry, layer_type, max_l)
+    rows = g.kv_rows(max_l)
     kv = np.zeros((2, rows, dk))
-    n = min(context_len + g["skip"], rows)
+    n = min(context_len + g.skip, rows)
     kv[0, :n] = rng.normal(0, 0.1, (n, dk))
     kv[1, :n] = rng.normal(0, 1, (n, dk))
     x, rms, rr = to_bf16(x, "rne"), to_bf16(rms, "rne"), to_bf16(rr, "rne")
@@ -443,15 +427,13 @@ def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
 
 def _query(g, W, x, proj, rms, rope_rms, lay):
     """The rotated query heads [heads, dh] of the layer."""
-    D, dh = g["model_dim"], g["dh"]
+    D, dh = g.model_dim, g.dh
     off, _, rows, cols = W["q"]
     xn = rms_norm(
         x[:D].view(bfloat16).astype(np.float32),
         rms[:D].view(bfloat16).astype(np.float32),
     )
-    qp = q4_matvec(xn, *parse_q4nx(proj, off, rows, cols)).reshape(
-        g["num_attn_heads"], dh
-    )
+    qp = q4_matvec(xn, *parse_q4nx(proj, off, rows, cols)).reshape(g.num_attn_heads, dh)
     cos, sin, q_norm = (
         rope_rms[lay[name] : lay[name] + n].view(bfloat16).astype(np.float32)
         for name, n in (("cos", dh // 2), ("sin", dh // 2), ("q_norm", dh))
@@ -475,15 +457,15 @@ def _plant_needles(g, context_len, kv, q, rng):
     """
     order, valid = _attention_rows(g, context_len)
     # A non-skip layer writes its own key at the newest position.
-    newest = order[valid - 1 - (not g["skip"])]
+    newest = order[valid - 1 - (not g.skip)]
     rows = {order[0], newest, 0}
-    if not g["skip"]:
+    if not g.skip:
         # The layer overwrites this row with its own key.
         rows.add(order[valid - 1])
     if valid < kv.shape[1] and context_len + 1 < kv.shape[1]:
         rows.add(context_len + 1)
-    n_kv, dh = g["num_kv_heads"], g["dh"]
-    group = g["num_attn_heads"] // n_kv
+    n_kv, dh = g.num_kv_heads, g.dh
+    group = g.num_attn_heads // n_kv
     for h in range(n_kv):
         qh = q[h * group : (h + 1) * group]
         u = (qh / np.linalg.norm(qh, axis=1, keepdims=True)).sum(0)

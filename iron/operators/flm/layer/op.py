@@ -14,6 +14,7 @@ from iron.common import Operator, Unresolvable, field
 from iron.operators.flm.layer import reference
 from iron.operators.flm.layer.design import (
     RTP_ADDRESSES,
+    LayerDims,
     LayerType,
     arg_sizes,
     decode_layer,
@@ -75,6 +76,11 @@ class DecodeLayer(Operator):
             )
         return dataclasses.replace(self)
 
+    @property
+    def dims(self) -> LayerDims:
+        """This layer type's dimensions and weight blob."""
+        return LayerDims(self.geometry, self.layer_type)
+
     def xclbin_operator(self):
         # The four layer types share one array; they differ in their sequences.
         return dataclasses.replace(self, layer_type=LayerType.GLOBAL)
@@ -90,17 +96,10 @@ class DecodeLayer(Operator):
         )
 
     def reference(self, x, proj, rms, rope_rms, kv, context_len, max_l):
-        """x and kv as the dispatch leaves them, as uint16 bf16 bit patterns;
-        see reference.py.
-        """
-        return reference.reference(
-            self.geometry,
-            self.layer_type,
-            x,
-            proj,
-            rms,
-            rope_rms,
-            kv,
-            context_len,
-            max_l,
+        """x and kv as the dispatch leaves them; see reference.py."""
+        return tuple(
+            r.view(bfloat16)
+            for r in reference.reference(
+                self.dims, x, proj, rms, rope_rms, kv, context_len, max_l
+            )
         )

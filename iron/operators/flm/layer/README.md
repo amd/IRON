@@ -89,7 +89,7 @@ The design expects these buffers, in this order. The operator's buffer sizes
 | Buffer | Holds |
 |---|---|
 | `x` | the hidden state at offset 0. The layer writes its output over it. The per-layer-input path reads the token embedding, `model_dim` values at `2 * model_dim`. |
-| `proj` | the layer's weights, at the offsets that `weight_layout` in `design.py` gives |
+| `proj` | the layer's weights, at the offsets that `LayerDims.weights` in `design.py` gives |
 | `rms` | the four RMS norm weights |
 | `rope_rms` | the cos and sin of the token's position and the q and k norm weights (`3 * head_dim`), then the token's per-layer embedding, its norm weight and `model_dim + 32` values for the up projection |
 | `kv` | the K cache, then the V cache. Every layer except a skip layer writes this token's k and v at row `context_len`. |

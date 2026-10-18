@@ -134,8 +134,8 @@ class LMHead(Operator):
         )
 
     def tolerance(self) -> Tolerance:
-        return Tolerance(
-            bound=lambda w, x: self.projection_error(w, x) + TANH_ERROR * self.softcap,
+        return Tolerance.bounded(
+            lambda w, x: self.projection_error(w, x) + TANH_ERROR * self.softcap,
             note="README.md's Numerics section",
         )
 

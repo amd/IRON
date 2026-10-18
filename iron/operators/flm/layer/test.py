@@ -31,11 +31,9 @@ from iron.operators.flm.layer.design import (
     SLIDING_WINDOW,
     LayerType,
     arg_sizes,
-    layer_dims,
-    weight_layout,
 )
 from iron.operators.flm.layer.op import DecodeLayer
-from iron.operators.flm.layer.reference import generate_inputs, kv_row, kv_rows
+from iron.operators.flm.layer.reference import generate_inputs
 
 GEOMETRIES = (FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE)
 
@@ -87,18 +85,18 @@ def _layer(geometry, layer_type):
     return op
 
 
-def _record_metrics(record, op, bufs, geometry, layer_type, context_len, max_l):
+def _record_metrics(record, op, bufs, context_len, max_l):
     """Time one more dispatch and record its latency, bandwidth and throughput.
 
     The bytes count the weights and the K and V rows that the layer reads. The
     FLOPs count the projections and the attention.
     """
-    g = layer_dims(geometry, layer_type)
-    blob = weight_layout(geometry, layer_type).values()
-    keys = min(context_len + 1, SLIDING_WINDOW) if g["swa"] else context_len + 1
-    total_bytes = 2 * (sum(w.size for w in blob) + 2 * keys * g["dk"])
+    g = op.dims
+    blob = g.weights.values()
+    keys = min(context_len + 1, SLIDING_WINDOW) if g.swa else context_len + 1
+    total_bytes = 2 * (sum(w.size for w in blob) + 2 * keys * g.dk)
     flops = 2 * sum(w.dout * w.din for w in blob)
-    flops += 4 * g["num_attn_heads"] * g["dh"] * keys
+    flops += 4 * g.num_attn_heads * g.dh * keys
     time_call(
         op,
         *bufs,
@@ -137,17 +135,18 @@ def check_outputs(op, context_len, max_l, inputs, x_out, kv_out):
     RTOL_KV, and that the rest of x and of the kv cache equals the input bit for
     bit.
     """
-    ref_x, ref_kv = op.reference(*inputs, context_len, max_l)
-    geometry, layer_type = op.geometry, op.layer_type
-    g = layer_dims(geometry, layer_type)
-    D, dk = g["model_dim"], g["dk"]
+    ref_x, ref_kv = (
+        r.view(np.uint16) for r in op.reference(*inputs, context_len, max_l)
+    )
+    g = op.dims
+    D, dk = g.model_dim, g.dk
     got_x = np.asarray(x_out).view(np.uint16).reshape(-1)
     got_kv = np.asarray(kv_out).view(np.uint16).reshape(-1)
     errors = {"x": _rel_l2(got_x[:D].view(bfloat16), ref_x[:D].view(bfloat16))}
     rest = np.ones(ref_kv.size, bool)
-    if not g["skip"]:
-        row = kv_row(geometry, layer_type, context_len)
-        v_off = kv_rows(geometry, layer_type, max_l) * dk
+    if not g.skip:
+        row = g.kv_row(context_len)
+        v_off = g.kv_rows(max_l) * dk
         for name, start in (("k", row * dk), ("v", v_off + row * dk)):
             rows = slice(start, start + dk)
             errors[name] = _rel_l2(
@@ -185,12 +184,12 @@ SYNTHETIC = [
 @pytest.mark.parametrize("geometry, layer_type, context_len", SYNTHETIC, ids=str)
 def test_matches_reference(geometry, layer_type, context_len, record_property):
     op = _layer(geometry, layer_type)
-    inputs = generate_inputs(geometry, layer_type, context_len, MAX_L, seed=context_len)
+    inputs = generate_inputs(op.dims, context_len, MAX_L, seed=context_len)
     bufs = _tensors(op, inputs)
     full = [b.numpy().copy() for b in bufs]
     op(*bufs, context_len=context_len, max_l=MAX_L)
     check_outputs(op, context_len, MAX_L, full, bufs[0].numpy(), bufs[4].numpy())
-    _record_metrics(record_property, op, bufs, geometry, layer_type, context_len, MAX_L)
+    _record_metrics(record_property, op, bufs, context_len, MAX_L)
 
 
 @pytest.mark.supported_devices("npu2")
@@ -252,7 +251,7 @@ def test_captured_case(case, record_property):
             got = buf.numpy().reshape(-1).view(np.uint8)
             n = min(want.size, got.size)
             assert np.array_equal(got[:n], want[:n]), f"{key} differs from the engine's"
-    _record_metrics(record_property, op, bufs, geometry, layer_type, ctx, max_l)
+    _record_metrics(record_property, op, bufs, ctx, max_l)
 
 
 def _ops(op):
@@ -292,6 +291,6 @@ def test_weight_reads_fit_proj(geometry, layer_type, npu2):
     for offset, length in sorted(_proj_reads(module)):
         assert offset == end, f"the reads skip or reread proj at {offset}"
         end += length
-    blob = weight_layout(g, layer_type)
+    blob = op.dims.weights
     assert end == max(w.offset + w.size for w in blob.values())
     assert end <= arg_sizes(g)["proj"]

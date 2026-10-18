@@ -88,10 +88,10 @@ def cases():
                 yield (
                     f"DecodeLayer-{name}-{layer_type}-{c}",
                     op,
-                    lambda g=geometry, t=layer_type, c=c: dict(
+                    lambda op=op, c=c: dict(
                         zip(
                             ("x", "proj", "rms", "rope_rms", "kv"),
-                            generate_inputs(g, t, c, DECODE_MAX_L, seed=c),
+                            generate_inputs(op.dims, c, DECODE_MAX_L, seed=c),
                         )
                     ),
                     dict(context_len=c, max_l=DECODE_MAX_L),

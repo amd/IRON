@@ -22,14 +22,18 @@ def packed_bytes(n_weights: int) -> int:
     return n_weights * BITS_PER_WEIGHT // 8
 
 
-def parts(blocks):
-    """Each q4nx block's codes, scales and minima, its out-features first:
-    ``(n, M_TILE, K_TILE)`` uint8 codes and ``(n, M_TILE, K_TILE // GROUP)``
-    float32 scales and minima. A block stores the scales, then the minima, at
-    ``[k // GROUP, m]`` and the codes at ``[m // 16, k, m % 16]``, the lower
-    index in a byte's low nibble.
+def unpack(grid):
+    """A weight's codes ``(rows, cols)`` uint8 and its scales and minima
+    ``(rows, cols // GROUP)`` float32, from its blocks laid out as a
+    ``(rows // M_TILE, cols // K_TILE)`` grid.
+
+    A block stores the scales, then the minima, at ``[k // GROUP, m]`` and
+    the codes at ``[m // 16, k, m % 16]``, the lower index in a byte's low
+    nibble.
     """
-    b = np.asarray(blocks, np.uint8).reshape(-1, BLOCK_BYTES)
+    grid = np.asarray(grid, np.uint8)
+    nb_r, nb_c = grid.shape[:2]
+    b = grid.reshape(-1, BLOCK_BYTES)
     groups = K_TILE // GROUP
     params = b[:, : 4 * groups * M_TILE].copy().view(bfloat16).astype(np.float32)
     scales, mins = params.reshape(-1, 2, groups, M_TILE).transpose(1, 0, 3, 2)
@@ -37,21 +41,11 @@ def parts(blocks):
     codes = np.empty((len(b), M_TILE * K_TILE), np.uint8)
     codes[:, 0::2], codes[:, 1::2] = packed & 15, packed >> 4
     codes = codes.reshape(-1, M_TILE // 16, K_TILE, 16).transpose(0, 1, 3, 2)
-    return codes.reshape(-1, M_TILE, K_TILE), scales, mins
-
-
-def unpack(grid):
-    """A weight's codes ``(rows, cols)`` and its scales and minima
-    ``(rows, cols // GROUP)``, from its blocks laid out as a
-    ``(rows // M_TILE, cols // K_TILE)`` grid.
-    """
-    grid = np.asarray(grid, np.uint8)
-    nb_r, nb_c = grid.shape[:2]
     return tuple(
         part.reshape(nb_r, nb_c, M_TILE, -1)
         .transpose(0, 2, 1, 3)
         .reshape(nb_r * M_TILE, -1)
-        for part in parts(grid)
+        for part in (codes, scales, mins)
     )
 
 

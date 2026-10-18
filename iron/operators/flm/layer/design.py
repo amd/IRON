@@ -13,7 +13,7 @@ sequence writes the layer type into RTPs. It then streams the weights, the KV
 cache and the hidden state.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from functools import partial
 from typing import NamedTuple
@@ -361,51 +361,92 @@ class BlobWeight(NamedTuple):
     packed: bool
 
 
-def layer_dims(geometry, layer_type):
-    """The dimensions of one layer type, in elements, by geometry field name.
+@dataclass(frozen=True)
+class LayerDims:
+    """One layer type's dimensions, in elements, and its weight blob.
 
-    geometry is aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or FLM_GEMMA4_E4B_DECODE.
-    dh is the head dim of this layer type. A skip layer with double_wide_mlp has
-    twice the intermediate size.
+    ``geometry`` is aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or
+    FLM_GEMMA4_E4B_DECODE. dh is the head dim of this layer type. A skip
+    layer with double_wide_mlp has twice the intermediate size.
     """
-    t = LayerType(layer_type)
-    g = asdict(geometry)
-    g["swa"], g["skip"] = t.swa, t.skip
-    if t.swa:
-        g["dh"] = g["swa_dh"]
-    g["dq"] = g["num_attn_heads"] * g["dh"]
-    g["dk"] = g["num_kv_heads"] * g["dh"]
-    if t.skip and g["double_wide_mlp"]:
-        g["intermediate_size"] *= 2
-    return g
 
+    geometry: FlmGemma4DecodeGeometry
+    type: LayerType
 
-def weight_layout(geometry, layer_type):
-    """The weights in the blob that the sequence reads from proj, in blob order.
+    @property
+    def swa(self) -> bool:
+        return self.type.swa
 
-    The engine packs one blob per layer: qkv, o, up_gate and down in q4nx,
-    then the per-layer-input down, gate and up projections in bf16. qkv is
-    q alone on a skip layer. A skip layer with double_wide_mlp has twice the
-    intermediate size.
-    """
-    g = layer_dims(geometry, layer_type)
-    D, P, dq, dk = g["model_dim"], g["pli_d"], g["dq"], g["dk"]
-    inter = g["intermediate_size"]
-    shapes = {
-        "qkv": (dq if g["skip"] else dq + 2 * dk, D, True),
-        "o": (D, dq, True),
-        "up_gate": (2 * inter, D, True),
-        "down": (D, inter, True),
-        "pli_down": (P, D, False),
-        "pli_gate": (P, D, False),
-        "pli_up": (D, P, False),
-    }
-    layout, offset = {}, 0
-    for name, (dout, din, packed) in shapes.items():
-        size = q4nx.packed_bytes(dout * din) // 2 if packed else dout * din
-        layout[name] = BlobWeight(offset, size, dout, din, packed)
-        offset += size
-    return layout
+    @property
+    def skip(self) -> bool:
+        return self.type.skip
+
+    @property
+    def model_dim(self) -> int:
+        return self.geometry.model_dim
+
+    @property
+    def pli_d(self) -> int:
+        return self.geometry.pli_d
+
+    @property
+    def num_attn_heads(self) -> int:
+        return self.geometry.num_attn_heads
+
+    @property
+    def num_kv_heads(self) -> int:
+        return self.geometry.num_kv_heads
+
+    @property
+    def dh(self) -> int:
+        return self.geometry.swa_dh if self.swa else self.geometry.dh
+
+    @property
+    def dq(self) -> int:
+        return self.num_attn_heads * self.dh
+
+    @property
+    def dk(self) -> int:
+        return self.num_kv_heads * self.dh
+
+    @property
+    def intermediate_size(self) -> int:
+        wide = self.skip and self.geometry.double_wide_mlp
+        return self.geometry.intermediate_size * (2 if wide else 1)
+
+    @property
+    def weights(self) -> dict[str, BlobWeight]:
+        """The weights in the blob that the sequence reads from proj, in blob order.
+
+        The engine packs one blob per layer: qkv, o, up_gate and down in q4nx,
+        then the per-layer-input down, gate and up projections in bf16. qkv is
+        q alone on a skip layer.
+        """
+        D, P, dq, dk = self.model_dim, self.pli_d, self.dq, self.dk
+        inter = self.intermediate_size
+        shapes = {
+            "qkv": (dq if self.skip else dq + 2 * dk, D, True),
+            "o": (D, dq, True),
+            "up_gate": (2 * inter, D, True),
+            "down": (D, inter, True),
+            "pli_down": (P, D, False),
+            "pli_gate": (P, D, False),
+            "pli_up": (D, P, False),
+        }
+        layout, offset = {}, 0
+        for name, (dout, din, packed) in shapes.items():
+            size = q4nx.packed_bytes(dout * din) // 2 if packed else dout * din
+            layout[name] = BlobWeight(offset, size, dout, din, packed)
+            offset += size
+        return layout
+
+    def kv_rows(self, max_l: int) -> int:
+        """Rows of each half (K, then V) of the kv cache."""
+        return SLIDING_WINDOW if self.swa else max_l
+
+    def kv_row(self, context_len: int) -> int:
+        """The cache row of the token at position context_len."""
+        return context_len % SLIDING_WINDOW if self.swa else context_len
 
 
 def arg_sizes(geometry):
@@ -419,7 +460,7 @@ def arg_sizes(geometry):
     proj = max(
         w.offset + w.size
         for t in LayerType
-        for w in weight_layout(geometry, t).values()
+        for w in LayerDims(geometry, t).weights.values()
     )
     return {
         "x": 3 * D,
@@ -549,7 +590,7 @@ def _sequence(
     SW = SLIDING_WINDOW
     DH = g.swa_dh if IS_SWA else g.dh
     DK = g.num_kv_heads * DH
-    weights = weight_layout(g, layer_type)
+    weights = LayerDims(g, LayerType(layer_type)).weights
 
     require(_as_i32(len_arg) >= 0, "context_len must be >= 0")
     require(MAX_L_v <= MAX_CONTEXT, f"max_l exceeds {MAX_CONTEXT}")
