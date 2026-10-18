@@ -131,8 +131,10 @@ def test_a_cached_setting_is_not_timed_again(tmp_path):
     logged = []
     again = measure(found, full_elf=True, timing=timing, cache=cache, log=logged.append)
     assert again == first and not logged
-    # Each pairs with the default timed in its own batch.
-    assert all(m.difference(first[0])[1] is not None for m in first.values())
+    # Each pairs round for round with the default timed in its own batch.
+    for i, m in first.items():
+        assert len(m.default_round_us) == (0 if i == 0 else len(m.round_us))
+        assert i == 0 or m.against_default()[1] is not None
 
 
 @pytest.mark.extensive

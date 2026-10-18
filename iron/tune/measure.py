@@ -42,6 +42,7 @@ from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef, SequenceStep
 
 
+@dataclasses.dataclass(frozen=True)
 class Timing:
     """How long to measure: ``rounds`` interleaved rounds of ``calls`` runs.
 
@@ -568,6 +569,8 @@ class Measurement:
         run: Which ``time_interleaved`` call timed it.
         pmode: The NPU's power mode.
         calls: The runs a round timed.
+        default_round_us: The rounds of the default timed beside it in its
+            `run`; empty for the default itself.
         measured: The day, as an ISO date.
     """
 
@@ -577,9 +580,19 @@ class Measurement:
     run: str
     pmode: str
     calls: int
+    default_round_us: tuple[float, ...] = ()
     measured: str = dataclasses.field(
         default_factory=lambda: datetime.date.today().isoformat()
     )
+
+    def against_default(self) -> tuple[float, float | None]:
+        """``difference`` from the default timed beside it."""
+        default = self.default_round_us
+        return self.difference(
+            dataclasses.replace(
+                self, t_step_us=statistics.median(default), round_us=default
+            )
+        )
 
     def difference(self, other: Measurement) -> tuple[float, float | None]:
         """How much longer a step of this one takes than one of ``other``,
@@ -659,7 +672,13 @@ class Cache:
         fields = json.loads(path.read_text())
         if fields.keys() != {f.name for f in dataclasses.fields(Measurement)}:
             return None
-        return Measurement(**{**fields, "round_us": tuple(fields["round_us"])})
+        return Measurement(
+            **{
+                **fields,
+                "round_us": tuple(fields["round_us"]),
+                "default_round_us": tuple(fields["default_round_us"]),
+            }
+        )
 
     def put(self, key: str, m: Measurement) -> None:
         write(self.directory / f"{key}.json", json.dumps(dataclasses.asdict(m)) + "\n")
@@ -765,13 +784,22 @@ def measure(
         )
         run = uuid.uuid4().hex
         n = len(built)
-        for j, i in enumerate(built):
-            rounds = tuple(
+        steps = [
+            tuple(
                 (many - one) / (repeats - 1)
                 for one, many in zip(times[j].round_us, times[n + j].round_us)
             )
+            for j in range(n)
+        ]
+        for j, i in enumerate(built):
             out[i] = Measurement(
-                statistics.median(rounds), rounds, outputs[j], run, mode, timing.calls
+                statistics.median(steps[j]),
+                steps[j],
+                outputs[j],
+                run,
+                mode,
+                timing.calls,
+                () if i == 0 else steps[0],
             )
             if cache is not None:
                 cache.put(keys[i], out[i])

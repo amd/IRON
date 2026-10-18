@@ -50,9 +50,11 @@ EXHAUSTIVE = 32
 
 FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
 
-# A core's clock in cycles per us: what mlir-aie's programming guide measured
-# on npu2 (section-4d, "Two clocks"). npu1's has not been measured.
-CORE_MHZ = {"npu2": 1760.0}
+# The fastest a core's clock may run, in cycles per us: a quarter above the
+# 1.76 GHz mlir-aie's programming guide measured on one npu2 part
+# (section-4d, "Two clocks"), so a faster part's best setting is not skipped.
+# npu1's has not been measured.
+CORE_MHZ = {"npu2": 1760.0 * 1.25}
 
 KERNEL_CHECKS = "https://xilinx.github.io/mlir-aie/kernel-checks/{npu}/latest.json"
 
@@ -70,6 +72,9 @@ def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
             latest = json.load(response)
     except (OSError, ValueError) as e:
         log(f"no kernel timings from {url}: {e}")
+        return {}
+    if latest.get("schema") != 1:
+        log(f"no kernel timings from {url}: schema {latest.get('schema')}, not 1")
         return {}
     rows = latest.get("rows", {})
     return {
@@ -474,7 +479,7 @@ def _time(
                 if i not in ran:
                     refused[i] = refused[i] or "does not build"
                     continue
-                delta, noise = ran[i].difference(default)
+                delta, noise = ran[i].against_default()
                 deltas[i] += weight * delta
                 variances[i] = (
                     None
@@ -531,10 +536,12 @@ def autotune(
         full_elf: How the calls' graphs are packaged.
         cache: Where each time is kept across runs (``Cache.here()``).
         remeasure: Time again what ``cache`` holds.
-        cycles: Kernel cycles per call by build key (``kernel_cycles``).
+        cycles: Kernel cycles per call by recipe key (``kernel_cycles``).
     """
     found = shapes(calls, dev)
     covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
+    # What the covering entries set that the search does not move, as precision.
+    held: dict[Hashable, dict[str, Any]] = {s.key: {} for s in found}
     out = Profile()
     for cls, matched, tunables in profile or ():
         covered = [
@@ -544,6 +551,7 @@ def autotune(
         ]
         for s in covered:
             covering[s.key].append(matched)
+            held[s.key].update(tunables)
         if not covered:
             out.add(cls, **matched, **tunables)
     for i, shape in enumerate(found):
@@ -563,5 +571,9 @@ def autotune(
         best = min(gains, key=lambda t: t.delta_us, default=tried[0])
         if gains:
             log(f"    {best.tunables}: {best.delta_us:+.1f} ± {best.noise_us:.1f} us")
-        out.add(shape.cls, **shape.named(covering[shape.key]), **best.tunables)
+        out.add(
+            shape.cls,
+            **shape.named(covering[shape.key]),
+            **{**held[shape.key], **best.tunables},
+        )
     return out

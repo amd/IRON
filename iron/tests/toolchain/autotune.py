@@ -28,7 +28,7 @@ from iron.tests.common.graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
 from iron.tune import autotune as tuning
 from iron.tune.autotune import Call, Point, Shape, autotune, line, refusal, settings
-from iron.tune.measure import Cache, Measurement, judge
+from iron.tune.measure import Cache, Measurement, Timing, judge
 
 SIZE = 8192
 TILE = 256
@@ -336,7 +336,9 @@ def test_cache_keys_follow_the_build_the_values_and_the_inputs(npu2):
 
 
 def test_cache_entries_round_trip_per_platform_and_mode(tmp_path):
-    m = Measurement(4.0, (4.1, 3.9), "ab" * 32, "run", "turbo", 50, "2026-10-06")
+    m = Measurement(
+        4.0, (4.1, 3.9), "ab" * 32, "run", "turbo", 50, (4.0, 4.2), "2026-10-06"
+    )
     cache = Cache("NPU Strix Halo", "turbo", root=tmp_path)
     cache.put("k", m)
     assert cache.directory == tmp_path / "npu-strix-halo" / "turbo"
@@ -357,6 +359,49 @@ def test_a_difference_pairs_rounds_only_within_one_run():
     assert a.difference(b) == (1.0, 0.0)
     delta, noise = a.difference(dataclasses.replace(b, run="other"))
     assert delta == 1.0 and noise > 0.5
+
+
+def test_each_setting_pairs_with_the_default_timed_in_its_own_batch(monkeypatch):
+    """Past one batch the default is timed again beside each batch, and a
+    setting is compared with that one, round for round.
+    """
+    from iron.tune import measure as measuring
+
+    class Run:
+        def __init__(self, name, ops, **_):
+            self.callable = (name, ops[0])
+
+        def load(self):
+            pass
+
+        def digest(self):
+            return "same"
+
+    batches = []
+
+    def time_interleaved(runs, timing, groups, fastest, log):
+        batches.append(len(batches))
+        # A batch's long runs are slower the later the batch, its short ones free.
+        n = len(runs) // 2
+        return [
+            measuring.Timed(
+                (0.0 if i < n else 10.0 * len(batches) + i,) * timing.rounds
+            )
+            for i in range(len(runs))
+        ]
+
+    monkeypatch.setattr(measuring, "Standalone", Run)
+    monkeypatch.setattr(measuring, "time_interleaved", time_interleaved)
+    monkeypatch.setattr(measuring, "pmode", lambda: "turbo")
+    monkeypatch.setattr(measuring, "CONTEXTS", 4)  # one setting a batch
+    ops = [
+        ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=c) for c in (8, 4, 2)
+    ]
+    ran = measuring.measure(ops, full_elf=True, log=lambda _: None)
+    assert len(batches) == 2
+    for i in (1, 2):
+        assert ran[i].default_round_us != ran[3 - i].default_round_us
+        assert ran[i].against_default()[1] == 0.0
 
 
 def _gemm_judged():
@@ -430,7 +475,13 @@ def _fake(monkeypatch, step_us, output=lambda op: "same"):
     def measure(ops, *, values=None, **_):
         return {
             i: Measurement(
-                step_us(op), (step_us(op),) * 3, output(op), "run", "turbo", 50
+                step_us(op),
+                (step_us(op),) * 3,
+                output(op),
+                "run",
+                "turbo",
+                50,
+                () if i == 0 else (step_us(ops[0]),) * 3,
             )
             for i, op in enumerate(ops)
         }
@@ -487,7 +538,7 @@ def test_a_tuned_profile_replaces_the_entries_it_covers(monkeypatch, npu2):
     profile = _tune(traced, npu2, old)
     entries = {(cls, tuple(matched)) for cls, matched, _ in profile}
     assert (ElementwiseAdd, ()) not in entries and (GEMV, ()) in entries
-    # Another size of add still takes no entry of this one's.
+    # The add's new entry gives it the one column the made-up times favour.
     assert profile.make(ElementwiseAdd, size=SIZE, tile_size=TILE).num_aie_columns == 1
 
 
@@ -497,7 +548,7 @@ def test_an_operator_is_timed_at_each_point_its_extents_move(monkeypatch, npu2):
     def measure(ops, *, values=None, **_):
         timed.append(dict(values))
         return {
-            i: Measurement(1.0, (1.0,) * 3, "same", "run", "turbo", 50)
+            i: Measurement(1.0, (1.0,) * 3, "same", "run", "turbo", 50, (1.0,) * 3)
             for i in range(len(ops))
         }
 
@@ -522,19 +573,24 @@ def test_a_gemm_s_busiest_core_makes_a_call_per_k_tile_of_each_of_its_tiles(npu2
     assert op.matmul_calls({"valid": 32, "valid_k": 64}) == -(-256 // 64 // cores)
 
 
-def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(monkeypatch, npu2):
+@pytest.mark.parametrize("margin, timed", [(1.01, False), (0.99, True)])
+def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(
+    monkeypatch, npu2, margin, timed
+):
     def key(array):
         return f"{array.tile_m}x{array.tile_k}x{array.tile_n}"
 
     monkeypatch.setattr(
         GEMM.Array, "matmul", lambda self: type("K", (), {"recipe_key": key(self)})
     )
-    timed = []
+    ran = []
 
     def measure(ops, **_):
-        timed.extend(key(op.array_config()) for op in ops)
+        ran.extend(key(op.array_config()) for op in ops)
         return {
-            i: Measurement(100.0, (100.0,) * 3, "same", "run", "turbo", 50)
+            i: Measurement(
+                100.0, (100.0,) * 3, "same", "run", "turbo", 50, (100.0,) * 3
+            )
             for i in range(len(ops))
         }
 
@@ -545,9 +601,11 @@ def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(monkeypatch, n
     shape.members.append((op, [(1.0, {})], {}))
     found = [op._with_tunables(**s).resolved(npu2) for s in settings(op, npu2)]
     # Every tile but 16 rows by 16 columns runs at 1 cycle a call, that one
-    # at a cycle count no step under 100 us could hold.
+    # at what puts its bound just over or just under the 100 us step.
     cycles = {key(o.array_config()): 1 for o in found}
-    cycles["16x64x16"] = 10**9
+    small = next(o for o in found if key(o.array_config()) == "16x64x16")
+    calls = small.matmul_calls({})
+    cycles["16x64x16"] = margin * 100.0 * tuning.CORE_MHZ["npu2"] / calls
     tuning.time_shape(
         shape,
         npu2,
@@ -556,14 +614,15 @@ def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(monkeypatch, n
         cycles=cycles,
         log=lambda _: None,
     )
-    assert "16x64x16" not in timed
-    assert len(set(timed)) == len(set(cycles)) - 1
+    assert ("16x64x16" in ran) == timed
+    assert len(set(ran)) == len(set(cycles)) - (not timed)
 
 
 def test_kernel_cycles_are_the_nightly_s_rows_by_their_build(
     monkeypatch, tmp_path, npu2
 ):
     latest = {
+        "schema": 1,
         "rows": {"mm/a": {"cycles": {"value": 900, "unit": "cycles"}}, "mm/b": {}},
         "builds": {"mm/a": "matmul-1", "mm/b": "matmul-2"},
     }
@@ -601,3 +660,31 @@ def test_every_gemm_tile_searched_is_one_the_nightly_times(name, request):
             assert m >= least_m and n >= 16, (precision, m, n)
             assert k == 64 or precision == Precision.HIGHEST, (precision, k)
             assert 4 * (m * k + k * n) + c_bytes * m * n + 0xD00 <= 64 * 1024
+
+
+def test_the_command_line_s_timing_is_what_it_parsed(monkeypatch):
+    from iron.tune import cli
+
+    monkeypatch.setattr(cli.Cache, "here", classmethod(lambda cls: None))
+    args = cli.parser("").parse_args(["--rounds", "3", "--cutoff", "2"])
+    timing = cli._timing(args)["timing"]
+    assert (timing.rounds, timing.calls, timing.cutoff) == (3, Timing.calls, 2.0)
+
+
+class Projection(iron.Graph):
+    def body(self, x, w):
+        return GEMM.step(x, w)
+
+
+def test_retuning_keeps_what_the_profile_set_that_the_search_does_not_move(
+    monkeypatch, npu2
+):
+    _fake(monkeypatch, lambda op: op.tile_n)  # the narrowest tile_n is fastest
+    old = Profile()
+    old.add(GEMM, precision=Precision.HIGH)
+    graph = Projection()
+    graph.profile = old
+    traced = graph.trace(x=(256, 256), w=(256, 256))
+    profile = _tune(traced, npu2, old)
+    op = profile.make(GEMM, M=256, K=256, N=256)
+    assert op.precision is Precision.HIGH and op.resolved(npu2).tile_n == 16

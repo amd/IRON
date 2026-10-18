@@ -802,7 +802,8 @@ code before relying on a line here; it is the authority.
 - Tuning times each operator alone, not inside the fused image it runs
   in. Kernel cycles skip only GEMM settings, since only GEMM's calls per
   core are known here, and only on npu2, the one NPU whose core clock was
-  measured.
+  measured. A GEMM with a column-major B (`b_col_maj`) is never skipped:
+  the nightly times no such tile.
 - A fold whose cores would read more streams than a core tile's two input
   channels is refused (`Chain.at_tile`, at `resolved()`). So EmbeddingGemma 2's
   residual `ElementwiseAdd` does not fold into a weighted `RMSNorm` (its
