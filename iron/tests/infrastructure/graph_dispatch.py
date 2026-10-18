@@ -310,7 +310,7 @@ def test_each_merge_of_one_array_runs_on_its_own_count():
     graph = TwoMerges()
     net = graph.compile(full_elf=True, ids=((64,), np.int32), more=((192,), np.int32))
     text = Fusion(net.sequence).text()
-    assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == [Fusion.EMPTY]
+    assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
     assert len(re.findall(r"aiex\.run", text)) == 2
     for _ in range(2):
         ids, more = (
@@ -343,7 +343,7 @@ def test_each_table_of_one_array_runs_on_its_own_sizes():
     graph = TwoTables()
     net = graph.compile(full_elf=True)
     text = Fusion(net.sequence).text()
-    assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == [Fusion.EMPTY]
+    assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
     assert len(re.findall(r"aiex\.run", text)) == 2
     for _ in range(2):
         for got, want in zip(net(), graph.reference()):
@@ -377,7 +377,7 @@ def test_each_position_table_of_one_array_runs_on_its_own_rows():
     graph = TwoPositions()
     net = graph.compile(full_elf=True)
     text = Fusion(net.sequence).text()
-    assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == [Fusion.EMPTY]
+    assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
     assert len(re.findall(r"aiex\.run", text)) == 2
     for sizes in (
         dict(out_height=96, out_width=48),
@@ -423,7 +423,7 @@ def test_each_resize_of_one_array_runs_on_its_own_sizes():
         },
     )
     text = Fusion(net.sequence).text()
-    assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == [Fusion.EMPTY]
+    assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
     assert len(re.findall(r"aiex\.run", text)) == 2
     for _ in range(2):
         for got, want in zip(net(rgb, *taps), graph.reference(rgb, *taps)):

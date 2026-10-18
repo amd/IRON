@@ -218,10 +218,9 @@ def test_manual_pack_shares_one_configure():
 
     pack = Packing.device_name(list(fused.designs))
     assert fused.packing == Packing((tuple(fused.designs),))
-    # The pack, and the reset the parity rule adds for one configure point
-    # (main is left unnamed).
-    assert _devices(text) == [pack, Fusion.EMPTY]
-    assert re.findall(r"aiex\.configure @(\w+)", text) == [pack, Fusion.EMPTY]
+    # The pack (main is left unnamed).
+    assert _devices(text) == [pack]
+    assert re.findall(r"aiex\.configure @(\w+)", text) == [pack]
     assert re.findall(r"aiex\.run @(\w+)", text) == list(fused.designs)
 
 
@@ -295,8 +294,8 @@ def test_designs_of_one_array_share_its_device():
     fused = Fusion(seq)
     text = fused.text()
     pack = Packing.device_name(list(fused.designs))
-    assert _devices(text) == [pack, Fusion.EMPTY]
-    assert re.findall(r"aiex\.configure @(\w+)", text) == [pack, Fusion.EMPTY]
+    assert _devices(text) == [pack]
+    assert re.findall(r"aiex\.configure @(\w+)", text) == [pack]
     assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, _ in fused.steps]
     assert text.count("aie.core(") == 8
     assert fits(fused.designs) is None
@@ -423,13 +422,12 @@ def test_traced_graph_packs():
     fused = Fusion(packed)
     assert len(fused.designs) == 3 and len(fused.steps) == 5
 
-    # Temporal: a configure per step that changes design, and the reset.
-    assert len(re.findall(r"aiex\.configure", Fusion(temporal).text())) == 6
+    # Temporal: a configure per step that changes design.
+    assert len(re.findall(r"aiex\.configure", Fusion(temporal).text())) == 5
     # Packed: one pack named for all three designs, each step its own run.
     text = fused.text()
     assert re.findall(r"aiex\.configure @(\w+)", text) == [
-        Packing.device_name(list(fused.designs)),
-        Fusion.EMPTY,
+        Packing.device_name(list(fused.designs))
     ]
     assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, _ in fused.steps]
 
@@ -458,6 +456,5 @@ def test_graph_compile_forwards_the_packing():
     assert version.sequence.coresident == AdjacentPacking()
     fused = Fusion(version.sequence)
     assert re.findall(r"aiex\.configure @(\w+)", fused.text()) == [
-        Packing.device_name(list(fused.designs)),
-        Fusion.EMPTY,
+        Packing.device_name(list(fused.designs))
     ]

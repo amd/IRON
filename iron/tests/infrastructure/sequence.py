@@ -180,8 +180,8 @@ def test_fused_mlir_contains_reconfiguration(sequence, npu2):
 
 def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
     """A full ELF cut into commands runs each as a runtime sequence of
-    ``main``, each with an even number of configure points, over the uncut
-    image's designs, byte for byte; only the cut image's key moves.
+    ``main`` over the uncut image's designs, byte for byte; only the cut
+    image's key moves.
     """
     fusions = {}
     for commands in ((), (1,)):
@@ -194,18 +194,12 @@ def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
     device = re.compile(r"^  aie\.device\(\w+\) @(\w+) \{$.*?^  \}$", re.M | re.S)
     designs = {m.group(1): m.group(0) for m in device.finditer(whole)}
     assert len(designs) == 2
-    assert {
-        m.group(1): m.group(0)
-        for m in device.finditer(cut)
-        if m.group(1) != Fusion.EMPTY
-    } == designs
+    assert {m.group(1): m.group(0) for m in device.finditer(cut)} == designs
     # The printer leaves out the default symbols, @main and @sequence.
     main = cut[cut.rindex("aie.device(") :]
     commands = re.split(r"aie\.runtime_sequence", main)[1:]
     names = [re.match(r" @(\w+)", text) for text in commands]
     assert names[0] is None and names[1].group(1) == Fusion.sequence_name(1)
-    for text in commands:
-        assert len(re.findall(r"aiex\.configure @", text)) % 2 == 0, text
     assert whole[whole.rindex("aie.device(") :].count("aie.runtime_sequence") == 1
     assert fusions[()].identity != fusions[(1,)].identity
 
@@ -402,21 +396,14 @@ def _relu():
 
 
 def _expanded_pdis(seq):
-    """The PDIs only an expanded load builds: its empty ones and the empty
-    configuration's.
-    """
-    return [
-        p.name
-        for p in seq.artifacts.entry.pdis
-        if p.stem.startswith("empty_") or p.stem == Fusion.EMPTY
-    ]
+    """The PDIs only an expanded load builds: its empty ones."""
+    return [p.name for p in seq.artifacts.entry.pdis if p.stem.startswith("empty_")]
 
 
 @pytest.mark.parametrize("reconfigure", [False, True])
 def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
-    """One design's fusion leaves its load unexpanded and adds no empty
-    configuration, unless the sequence asks to reconfigure at every call, as a
-    probe timing a design's entry does.
+    """One design's fusion leaves its load unexpanded, unless the sequence
+    asks to reconfigure at every call, as a probe timing a design's entry does.
     """
     seq = _build_one_design_sequence(
         _relu(), f"infra_fused_relu_reconfigure_{reconfigure}", reconfigure
@@ -424,8 +411,6 @@ def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
     seq.prepare()
     fusion = Fusion(seq)
     assert fusion.expands == reconfigure
-    devices = re.findall(r"aie\.device\(\w+\) @(\w+)", fusion.text())
-    assert (Fusion.EMPTY in devices) == reconfigure, devices
 
 
 def test_reconfigure_needs_a_full_elf():

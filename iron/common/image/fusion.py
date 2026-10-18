@@ -95,10 +95,6 @@ class Fusion:
     be set.
     """
 
-    # The device configuration a sequence ends on to keep the configure
-    # points of an expanded load even (``needs_reset``).
-    EMPTY = "empty_configuration"
-
     def __init__(self, seq):
         designs, design_of = seq.unique_designs()
         own = [OperatorDesign(op) for op in designs]
@@ -164,26 +160,6 @@ class Fusion:
         )
         h.update(repr(state).encode())
         return h.hexdigest()[:24]
-
-    def needs_reset(self, packing: Packing, steps: list[str]) -> bool:
-        """Whether a command of ``steps`` must configure one more device than
-        the runlist asks for.
-
-        ``aiecc --expand-load-pdis`` marks each configure point by loading one of two
-        otherwise empty PDIs, alternating between them from a fixed start. A load of the
-        PDI already loaded has no effect, so a sequence with an odd number of configure
-        points ends on the one the next dispatch starts with, and that dispatch
-        reconfigures over the state the last design left. Configuring one more device
-        makes the count even. Consecutive entries running in one device (one design,
-        or one pack) share a configure point. An unexpanded load needs none.
-        """
-        if not self.expands:
-            return False
-        names = [packing.device_of(name) for name in steps]
-        points = sum(
-            1 for i, name in enumerate(names) if i == 0 or name != names[i - 1]
-        )
-        return points % 2 == 1
 
     def text(self) -> str:
         """The fused module: a device configuration per array or pack, and a
@@ -264,11 +240,9 @@ class Fusion:
         commands = [
             calls[a:b] for a, b in itertools.pairwise((0, *self.commands, len(calls)))
         ]
-        resets = [self.needs_reset(packing, [c[3] for c in cs]) for cs in commands]
-        empty = DeviceConfiguration(self.EMPTY, device) if any(resets) else None
         arguments = self.buffer_sizes.arguments()
 
-        def sequence_of(command, reset):
+        def sequence_of(command):
             def sequence(*tensors):
                 held = dict(zip(arguments, tensors))
                 # Consecutive steps in one device share its configure point.
@@ -286,28 +260,24 @@ class Fusion:
                                     for kind, offset, view_type in views
                                 )
                             )
-                if reset:
-                    assert empty is not None
-                    with empty.configure():
-                        pass
 
             return sequence
 
         # Flat bytes; each buffer is a typed view at its byte offset.
         entries = [
             Runtime(
-                sequence_of(command, reset),
+                sequence_of(command),
                 [
                     np.ndarray[(nbytes,), np.dtype[np.int8]]
                     for nbytes in arguments.values()
                 ],
                 name=self.sequence_name(k),
             )
-            for k, (command, reset) in enumerate(zip(commands, resets))
+            for k, command in enumerate(commands)
         ]
         main = DeviceConfiguration("main", device, runtimes=entries)
         module = Program.compose(
-            [*configurations.values(), *([empty] if empty is not None else []), main],
+            [*configurations.values(), main],
             entry=entries[0],
         ).resolve_program()
 

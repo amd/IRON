@@ -327,7 +327,7 @@ def test_packed_word_steps_of_one_array_each_read_their_own_table():
     graph = FromDeviceIds(table, other)
     net = graph.compile(coresident=AdjacentPacking(), ids=((256,), np.int32))
     text = Fusion(net.sequence).text()
-    assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == [Fusion.EMPTY]
+    assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
     for call in range(3):
         ids = rng.integers(0, len(table), 256).astype(np.int32)
         rows, others = graph(ids)
