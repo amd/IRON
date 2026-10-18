@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """``Model.load`` up to the device: ``main()``'s command line handing its
-path and flags to ``from_checkpoint``, the model ``from_checkpoint``
-builds with drawn weights or a real tokenizer (skipped without the real
-checkpoint's), the context ``fit`` chooses, the BOS, and the golden
+path and flags to ``from_checkpoint``, its ``-v``, the model
+``from_checkpoint`` builds with drawn weights or a real tokenizer (skipped
+without the real checkpoint's), the context ``fit`` chooses, the BOS, and the golden
 beside a checkpoint. No NPU (the fit tests trace under a bound npu2, as
 Llama's profile is per device); the checkpoint is synthetic, of
 ``SMALL``'s shape, a concrete ``Config`` instance so no config.json is
 read.
 """
 
+import argparse
 import dataclasses
 import logging
 import shutil
@@ -23,7 +24,7 @@ import pytest
 
 from iron.applications.llama.model import Llama, SPECIAL_TOKENS, tokenizer
 from iron.lm import Checkpoint, Model, main
-from iron.lm.cli import FLAGS
+from iron.lm.cli import FLAGS, parse_args
 from iron.lm.golden import RECORD
 from iron.lm.testing import require, weights_dir
 from iron.tests.common.llama_model import SMALL, checkpoint
@@ -64,6 +65,18 @@ def test_main_takes_the_path_and_flags_load_takes(monkeypatch):
         main(Small)
     assert given == dict(path="org/repo", seed=7, max_seq_len=64)
     assert {f[0] for f, _ in FLAGS} == {"--random-weights", "--max-seq-len"}
+
+
+def test_v_shows_iron_s_info_lines(caplog):
+    """``-v`` shows a compile's "compiling for" line, an INFO of iron's."""
+    iron_logger = logging.getLogger("iron")
+    level = iron_logger.level
+    try:
+        parse_args(argparse.ArgumentParser(), ["-v"])
+        logging.getLogger("iron.common.graph.compiled").info("Small: compiling for")
+    finally:
+        iron_logger.setLevel(level)
+    assert "compiling for" in caplog.text
 
 
 def test_from_checkpoint_draws_its_weights_at_a_seed(tmp_path):

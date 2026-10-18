@@ -25,6 +25,7 @@ from pathlib import Path
 
 from iron.tune import cli as tune_cli
 
+from .cli import parse_args
 from .model import Model
 
 
@@ -58,7 +59,7 @@ def main(name: str, model: type[Model], argv: Sequence[str] | None = None) -> No
     """
     parser = tune_cli.parser(f"Tune {name}'s profile")
     model.tune_arguments(parser)
-    args = parser.parse_args(argv)
+    args = parse_args(parser, argv)
     tune_cli.tune(args, model.tune_calls(parser, args), Path(model.profile))
 
 

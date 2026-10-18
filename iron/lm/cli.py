@@ -5,6 +5,7 @@
 
 import argparse
 import inspect
+import logging
 
 import numpy as np
 
@@ -44,6 +45,20 @@ def sampling_arguments(parser: argparse.ArgumentParser) -> None:
         "--temperature", type=float, default=defaults["temperature"].default
     )
     parser.add_argument("--top-k", type=int, default=defaults["top_k"].default)
+
+
+def parse_args(parser: argparse.ArgumentParser, args=None) -> argparse.Namespace:
+    """``parser``'s arguments with ``-v``, which logs iron's INFO lines, such
+    as each compile's.
+    """
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="log iron's INFO lines"
+    )
+    args = parser.parse_args(args)
+    if args.verbose:
+        logging.basicConfig()
+        logging.getLogger("iron").setLevel(logging.INFO)
+    return args
 
 
 def main(model: type[Model]):
@@ -97,7 +112,7 @@ def main(model: type[Model]):
         "dispatch every step on its own from one xclbin, as NPU1 does "
         "(default: a full ELF where the device runs one)",
     )
-    args = parser.parse_args()
+    args = parse_args(parser)
     try:
         model = model.from_checkpoint(
             args.path, seed=args.random_weights, max_seq_len=args.max_seq_len

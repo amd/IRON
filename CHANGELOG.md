@@ -92,6 +92,8 @@ public API adds its entry under Unreleased.
   `Model.stream` yields the same pieces as they are drawn, and
   `model.stats` holds the last call's `ttft` and `tokens_per_s`.
 - `--prompt TEXT` on a model's command line.
+- `-v` on a model's command line and `python -m iron.lm.tune`, which logs
+  iron's INFO lines, such as each compile's.
 
 ### Changed
 
