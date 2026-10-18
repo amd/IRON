@@ -493,13 +493,15 @@ class KVCache(iron.Graph):
 
     def attend(self, step, q, k, v, scale: float | None = None):
         """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` at ``step``'s
-        positions and attend ``q`` ``(rows, heads, head_dim)`` over every
+        positions, unless None (a layer reading another's cache), and attend ``q`` ``(rows, heads, head_dim)`` over every
         position up to its last, causally and within ``window``, the logits
         scaled by ``scale`` (MHA's ``1 / sqrt(head_dim)`` if None); ``(rows,
         heads * head_dim)``.
         """
         C, (_, G, D), (n, H, _) = self.chunk, self.keys.shape, q.shape
         for x, cache in ((k, self.keys), (v, self.values)):
+            if x is None:
+                continue
             if step.prompt:
                 cache[step.start : step.start + C][: step.rows] = x
             else:
@@ -520,25 +522,27 @@ class KVCache(iron.Graph):
 class Attention(iron.Graph):
     """Layer ``i``'s self-attention on ``c``'s shape: ``q_proj``, ``k_proj``
     and ``v_proj`` of the layer's input, q and k turned by the call's RoPE
-    rows where given, a pair of q's and k's (``Rope.rows``), only their first ``rotary`` columns where the config
-    gives a ``rotary_dim``, attended over the layer's ``KVCache``, then
-    ``o_proj``, each projection with a bias where the config's
-    ``attention_bias`` says. ``scaling`` is the logits' scale; None is
-    ``head_dim ** -0.5``.
+    rows where given, a pair of q's and k's (``Rope.rows``), only their
+    first ``rotary`` columns where the config gives a ``rotary_dim``,
+    attended over the layer's ``KVCache``, then ``o_proj``, each projection
+    with a bias where the config's ``attention_bias`` says. ``scaling`` is
+    the logits' scale; None is ``head_dim ** -0.5``. A layer that reads
+    another's cache, holding the same ``KVCache``, sets ``k_proj`` and
+    ``v_proj`` to None, and projects and writes no keys or values.
 
     Args:
         c: The decoder's shape.
         i: The layer.
-        norms: Which of q and k each head of is RMS-normed by ``q_norm``
-            and ``k_norm``, before RoPE.
+        norms: Which of q, k and v each head of is RMS-normed before RoPE:
+            q and k by ``q_norm`` and ``k_norm``, v unweighted.
 
     Raises:
-        ValueError: ``norms`` names other than q and k.
+        ValueError: ``norms`` names other than q, k and v.
     """
 
     def __init__(self, c, i: int, norms: str = ""):
-        if set(norms) - set("qk"):
-            raise ValueError(f"Attention: norms {norms!r} names other than q and k")
+        if set(norms) - set("qkv"):
+            raise ValueError(f"Attention: norms {norms!r} names other than q, k and v")
         H, G, D, E = (
             c.num_attention_heads,
             c.num_key_value_heads,
@@ -553,13 +557,16 @@ class Attention(iron.Graph):
         self.o_proj = Linear(H * D, E, bias=bias)
         self.q_norm = RMSNorm(D, c.eps) if "q" in norms else None
         self.k_norm = RMSNorm(D, c.eps) if "k" in norms else None
+        self.v_norm, self.eps = "v" in norms, c.eps
         self.scaling = None
         self.rotary = c.rotary_dim
 
     def project(self, x, **tiles) -> list:
-        """q, k and v of ``x``, each projection given the GEMV ``tiles``."""
+        """q, k and v of ``x``, each projection given the GEMV ``tiles``;
+        None for a projection the layer does not hold.
+        """
         return [
-            F.linear(x, p.weight, p.bias, **tiles)
+            None if p is None else F.linear(x, p.weight, p.bias, **tiles)
             for p in (self.q_proj, self.k_proj, self.v_proj)
         ]
 
@@ -578,20 +585,21 @@ class Attention(iron.Graph):
         # q's shape is o's when heads * head_dim is the width.
         tiles = dict(tile_size_output=D // 2) if n == 1 else {}
         q, k, v = self.project(x, **tiles)
-        q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
+        q = q.reshape(n * H, D)
         if self.q_norm is not None:
             q = self.q_norm(q)
-        if self.k_norm is not None:
-            k = self.k_norm(k)
+        if k is not None:
+            k, v = k.reshape(n * G, D), v.reshape(n * G, D)
+            if self.k_norm is not None:
+                k = self.k_norm(k)
+            if self.v_norm:
+                v = F.rms_norm(v, (D,), eps=self.eps)
         if angles is not None:
-            q, k = self.rotate(q, angles[0]), self.rotate(k, angles[1])
-        o = cache.attend(
-            step,
-            q.reshape(n, H, D),
-            k.reshape(n, G, D),
-            v.reshape(n, G, D),
-            scale=self.scaling,
-        )
+            q = self.rotate(q, angles[0])
+            k = None if k is None else self.rotate(k, angles[1])
+        if k is not None:
+            k, v = k.reshape(n, G, D), v.reshape(n, G, D)
+        o = cache.attend(step, q.reshape(n, H, D), k, v, scale=self.scaling)
         return self.o_proj(o)
 
 

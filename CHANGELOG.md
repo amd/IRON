@@ -64,6 +64,9 @@ public API adds its entry under Unreleased.
   None for none), copied once a call per distinct `Rope` into
   `DecodeStep.ropes`. `Rope(c, q_scale=None)` scales a table of q's own,
   and `Rope.rows` and `Attention`'s angles are a (q, k) pair.
+- `Attention(norms="v")` RMS-norms each head of v, unweighted; a layer
+  that holds another layer's `KVCache` and sets `k_proj` and `v_proj` to
+  None attends over that cache, projecting and writing no keys or values.
 - `Linear.split(x, *rows)`, a fused projection's outputs: one `F.linear`
   per run of the weight's rows.
 - `Graph.trace(precision=)`, which `compile(precision=)` passes on instead of

@@ -19,6 +19,7 @@ from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
 from iron.lm.blocks import KVCache, Rope
 from iron.lm.checkpoint import leaves
 from iron.operators.mha import MHA
+from iron.operators.rms_norm import RMSNorm as RMSNormOp
 from iron.operators.rope import RoPE
 from iron.tests.common.llama_reference import OnHost
 from iron.tests.common.llama_model import SMALL, checkpoint, small
@@ -269,9 +270,9 @@ def test_a_norm_refuses_more_than_the_last_axis_and_layer_norm_another_eps():
         LayerNorm(4, eps=1e-6)
 
 
-def test_attention_refuses_a_norm_of_other_than_q_and_k():
-    with pytest.raises(ValueError, match="'qv' names other than q and k"):
-        Attention(SMALL, 0, norms="qv")
+def test_attention_refuses_a_norm_of_other_than_q_k_and_v():
+    with pytest.raises(ValueError, match="'qo' names other than q, k and v"):
+        Attention(SMALL, 0, norms="qo")
 
 
 def test_a_cache_refuses_a_sliding_window():
@@ -331,3 +332,41 @@ def test_attention_turns_only_the_rotary_columns():
     t = model.trace(**model.shapes()[1])
     turned = [s.op.cols for s in t.steps if type(s.op) is RoPE]
     assert turned == [32] * 4 and model.config.head_dim == 64
+
+
+def test_a_v_norm_is_one_unweighted_rms_norm_a_layer():
+    model = small()
+    for i, layer in enumerate(model.model.layers):
+        v = Attention(model.config, i, norms="v")
+        v.q_proj, v.k_proj, v.v_proj, v.o_proj = (
+            layer.self_attn.q_proj,
+            layer.self_attn.k_proj,
+            layer.self_attn.v_proj,
+            layer.self_attn.o_proj,
+        )
+        layer.self_attn = v
+    t = model.trace(**model.shapes()[1])
+    norms = [s for s in t.steps if type(s.op) is RMSNormOp]
+    assert len(norms) == 7 and sum(len(s.inputs) == 1 for s in norms) == 2
+
+
+def test_a_layer_reading_another_s_cache_projects_and_writes_no_keys():
+    """A layer holding layer 0's ``KVCache``, without k and v projections,
+    attends over the keys layer 0 wrote and writes none.
+    """
+    model = small()
+    first, second = model.model.layers
+    base = model.trace(**model.shapes()[1])
+    second.cache = first.cache
+    second.self_attn.k_proj = second.self_attn.v_proj = None
+    t = model.trace(**model.shapes()[1])
+    # No k or v projection, k's RoPE, or write of either.
+    assert len(t.steps) == len(base.steps) - 5
+    keys = [s.inputs[1].name for s in t.steps if type(s.op) is MHA]
+    assert keys[0] == keys[1]
+    tokens = np.arange(9)
+    host = OnHost(model.config, model.weights)
+    host.model.layers[1].cache = host.model.layers[0].cache
+    host.model.layers[1].self_attn.k_proj = None
+    host.model.layers[1].self_attn.v_proj = None
+    assert np.isfinite(host.logits(tokens)).all()
