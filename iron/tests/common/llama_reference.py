@@ -150,7 +150,10 @@ class Decoder:
             logits = reference.logits(tokens)
             expected.append(logits)
         # Each step's top two lie further apart than bf16's resolution, 2^-8
-        # of the largest logit, so rounding alone cannot swap them.
+        # of the largest logit, so rounding alone cannot swap them. The bf16
+        # graphs' own error can exceed that floor, so the accuracy check's
+        # strict top1 also rests on these seeds: a kernel change that flips
+        # it needs a new seed, not a looser check.
         for step, logits in enumerate([first, *expected]):
             second, top = np.sort(logits)[-2:]
             assert (
