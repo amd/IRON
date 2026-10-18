@@ -59,6 +59,11 @@ def _shape_and_dtype(spec):
     return tuple(spec), bfloat16
 
 
+def _kind(dtype):
+    # np.dtype.kind calls bfloat16 "V".
+    return "f" if dtype == bfloat16 else np.dtype(dtype).kind
+
+
 UPLOAD_PIECE = 64 * 2**20
 
 
@@ -371,11 +376,7 @@ class Graph:
         kinds = [
             f"{n} {t.dtype}, not {p.dtype}"
             for n, p, t in given
-            # One kind either way: np.dtype.kind calls bfloat16 "V".
-            if not (
-                np.can_cast(t.dtype, p.dtype, "same_kind")
-                and np.can_cast(p.dtype, t.dtype, "same_kind")
-            )
+            if _kind(t.dtype) != _kind(p.dtype)
         ]
         if missing or extra or shapes or kinds:
             found = {

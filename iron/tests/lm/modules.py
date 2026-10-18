@@ -177,8 +177,9 @@ def test_load_refuses_a_param_in_a_frozen_dataclass():
         Held().unread()
 
 
-def test_load_casts_to_the_params_dtype():
-    named = {n: t.astype(np.float32) for n, t in tensors().items()}
+@pytest.mark.parametrize("dtype", [np.float32, np.float16])
+def test_load_casts_to_the_params_dtype(dtype):
+    named = {n: t.astype(dtype) for n, t in tensors().items()}
     block = Block()
     block.load(named)
     assert block.norm.weight.dtype == bfloat16
