@@ -13,8 +13,8 @@ sequence writes the layer type into RTPs. It then streams the weights, the KV
 cache and the hidden state.
 """
 
-from dataclasses import dataclass
-from enum import IntEnum
+from dataclasses import asdict, dataclass
+from enum import IntEnum, StrEnum
 from functools import partial
 from typing import NamedTuple
 
@@ -54,7 +54,25 @@ from ml_dtypes import bfloat16
 from iron.operators.flm import q4nx
 from iron.operators.flm.dataflow import ping_pong
 
-LAYER_TYPES = ("global", "swa", "global_skip", "swa_skip")
+
+class LayerType(StrEnum):
+    """Global or sliding-window (swa) attention, and whether the layer reads
+    an earlier layer's KV cache (skip) instead of writing its own.
+    """
+
+    GLOBAL = "global"
+    SWA = "swa"
+    GLOBAL_SKIP = "global_skip"
+    SWA_SKIP = "swa_skip"
+
+    @property
+    def swa(self) -> bool:
+        return self in (LayerType.SWA, LayerType.SWA_SKIP)
+
+    @property
+    def skip(self) -> bool:
+        return self in (LayerType.GLOBAL_SKIP, LayerType.SWA_SKIP)
+
 
 # The KV cache rows that the runtime sequence's buffer types allow. The
 # sequence takes the row count, max_l, at dispatch.
@@ -321,12 +339,33 @@ class BlobWeight(NamedTuple):
     """One weight matrix in the engine's weight blob.
 
     offset and size count bf16 elements. dout and din give the matrix shape.
+    packed is true for q4nx, false for bf16.
     """
 
     offset: int
     size: int
     dout: int
     din: int
+    packed: bool
+
+
+def layer_dims(geometry, layer_type):
+    """The dimensions of one layer type, in elements, by geometry field name.
+
+    geometry is aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or FLM_GEMMA4_E4B_DECODE.
+    dh is the head dim of this layer type. A skip layer with double_wide_mlp has
+    twice the intermediate size.
+    """
+    t = LayerType(layer_type)
+    g = asdict(geometry)
+    g["swa"], g["skip"] = t.swa, t.skip
+    if t.swa:
+        g["dh"] = g["swa_dh"]
+    g["dq"] = g["num_attn_heads"] * g["dh"]
+    g["dk"] = g["num_kv_heads"] * g["dh"]
+    if t.skip and g["double_wide_mlp"]:
+        g["intermediate_size"] *= 2
+    return g
 
 
 def weight_layout(geometry, layer_type):
@@ -337,26 +376,22 @@ def weight_layout(geometry, layer_type):
     q alone on a skip layer. A skip layer with double_wide_mlp has twice the
     intermediate size.
     """
-    g = geometry
-    is_swa = layer_type in ("swa", "swa_skip")
-    is_skip = layer_type in ("global_skip", "swa_skip")
-    D = g.model_dim
-    dh = g.swa_dh if is_swa else g.dh
-    dq, dk = g.num_attn_heads * dh, g.num_kv_heads * dh
-    inter = g.intermediate_size * (2 if is_skip and g.double_wide_mlp else 1)
+    g = layer_dims(geometry, layer_type)
+    D, P, dq, dk = g["model_dim"], g["pli_d"], g["dq"], g["dk"]
+    inter = g["intermediate_size"]
     shapes = {
-        "qkv": (dq if is_skip else dq + 2 * dk, D, True),
+        "qkv": (dq if g["skip"] else dq + 2 * dk, D, True),
         "o": (D, dq, True),
         "up_gate": (2 * inter, D, True),
         "down": (D, inter, True),
-        "pli_down": (g.pli_d, D, False),
-        "pli_gate": (g.pli_d, D, False),
-        "pli_up": (D, g.pli_d, False),
+        "pli_down": (P, D, False),
+        "pli_gate": (P, D, False),
+        "pli_up": (D, P, False),
     }
     layout, offset = {}, 0
     for name, (dout, din, packed) in shapes.items():
         size = q4nx.packed_bytes(dout * din) // 2 if packed else dout * din
-        layout[name] = BlobWeight(offset, size, dout, din)
+        layout[name] = BlobWeight(offset, size, dout, din, packed)
         offset += size
     return layout
 
@@ -371,7 +406,7 @@ def arg_sizes(geometry):
     dk = geometry.num_kv_heads * geometry.dh
     proj = max(
         w.offset + w.size
-        for t in LAYER_TYPES
+        for t in LayerType
         for w in weight_layout(geometry, t).values()
     )
     return {
@@ -484,8 +519,7 @@ def _sequence(
     and lengths count bf16 elements. L counts the tokens up to and including
     this one.
     """
-    IS_SWA = layer_type in ("swa", "swa_skip")
-    IS_SKIP = layer_type in ("global_skip", "swa_skip")
+    IS_SWA, IS_SKIP = LayerType(layer_type).swa, LayerType(layer_type).skip
     D = g.model_dim
     L = _as_i32(len_arg) + 1
     MAX_L_v = _as_i32(max_l_arg)
@@ -1644,8 +1678,6 @@ def decode_layer(
     layer_kernels(geometry). README.md gives the meaning of the dispatch
     parameters ``context_len`` and ``max_l``.
     """
-    if layer_type not in LAYER_TYPES:
-        raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
     g = geometry
     G_DQ = g.num_attn_heads * g.dh
     S_DQ = g.num_attn_heads * g.swa_dh

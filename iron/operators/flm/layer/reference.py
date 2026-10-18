@@ -19,8 +19,6 @@ changes the bf16 result by one ulp.
 generate_inputs() draws synthetic buffers with a fixed seed.
 """
 
-import dataclasses
-
 import numpy as np
 from aie.iron.kernels import bf16_exp_lut_ref
 from ml_dtypes import bfloat16
@@ -37,10 +35,11 @@ from iron.operators.flm.aie2p_math_emulation import (
     tree_sum,
 )
 from iron.operators.flm.layer.design import (
-    LAYER_TYPES,
     LK,
     MIN_BF16_PAD,
     SLIDING_WINDOW,
+    layer_dims,
+    weight_layout,
 )
 from iron.operators.flm.q4nx import (
     BLOCK_BYTES,
@@ -57,51 +56,23 @@ RMS_EPS = 1e-6
 BF16_M, BF16_K = 32, 256
 
 
-def layer_dims(geometry, layer_type):
-    """The dimensions of one layer type, in elements, by geometry field name.
-
-    geometry is aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or FLM_GEMMA4_E4B_DECODE.
-    dh is the head dim of this layer type. A skip layer with double_wide_mlp has
-    twice the intermediate size.
-    """
-    if layer_type not in LAYER_TYPES:
-        raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
-    g = dataclasses.asdict(geometry)
-    g["swa"] = layer_type.startswith("swa")
-    g["skip"] = layer_type.endswith("_skip")
-    if g["swa"]:
-        g["dh"] = g["swa_dh"]
-    g["dq"] = g["num_attn_heads"] * g["dh"]
-    g["dk"] = g["num_kv_heads"] * g["dh"]
-    if g["skip"] and g["double_wide_mlp"]:
-        g["intermediate_size"] *= 2
-    return g
-
-
 def proj_layout(geometry, layer_type):
-    """Weight name -> (byte offset, format, rows, cols) in proj.
-
-    The weights lie back to back: q, k and v (absent on a skip layer), o, the
-    interleaved up/gate and down in q4nx, then the per-layer-input down, gate
-    and up projections in blocked bf16. rows are output features.
+    """Weight name -> (byte offset, format, rows, cols) in proj: the design's
+    weight_layout, with its qkv split into q, k and v (absent on a skip layer).
+    rows are output features.
     """
     g = layer_dims(geometry, layer_type)
-    D, F, P = g["model_dim"], g["intermediate_size"], g["pli_d"]
-    items = [("q", "q4nx", g["dq"], D)]
-    if not g["skip"]:
-        items += [("k", "q4nx", g["dk"], D), ("v", "q4nx", g["dk"], D)]
-    items += [
-        ("o", "q4nx", D, g["dq"]),
-        ("up_gate", "q4nx", 2 * F, D),
-        ("down", "q4nx", D, F),
-        ("pli_down", "bf16", P, D),
-        ("pli_gate", "bf16", P, D),
-        ("pli_up", "bf16", D, P),
-    ]
-    out, off = {}, 0
-    for name, fmt, rows, cols in items:
-        out[name] = (off, fmt, rows, cols)
-        off += _size(fmt, rows, cols)
+    out = {}
+    for name, w in weight_layout(geometry, layer_type).items():
+        fmt = "q4nx" if w.packed else "bf16"
+        if name != "qkv":
+            out[name] = (2 * w.offset, fmt, w.dout, w.din)
+            continue
+        off = 2 * w.offset
+        for part, rows in (("q", g["dq"]), ("k", g["dk"]), ("v", g["dk"])):
+            if part == "q" or not g["skip"]:
+                out[part] = (off, fmt, rows, w.din)
+                off += _size(fmt, rows, w.din)
     return out
 
 

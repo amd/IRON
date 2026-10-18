@@ -32,6 +32,7 @@ from iron.operators.flm import (
     PrefillSlidingAttention,
 )
 from iron.operators.flm.gemm.design import Epilogue
+from iron.operators.flm.layer.design import LayerType
 
 MODEL = "Gemma4-E2B-IT-NPU2"
 # The engine's xclbins IRON replaces, by file stem.
@@ -129,10 +130,9 @@ def main(engine_xclbins, out, only):
     model_dir = Path(os.environ["FLM_MODEL_PATH"]) / "models" / MODEL
     config = json.loads((model_dir / "config.json").read_text())
     with aie_utils.set_current_device(NPU2()):
-        layers = {
-            t: DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type=t)
-            for t in ("global", "swa", "global_skip", "swa_skip")
-        }
+        layers = [
+            DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type=t) for t in LayerType
+        ]
         heads = dict(
             max_context=32768,  # bounds the KV cache rows; the stride is a dispatch parameter
             num_heads=config["num_attention_heads"],
@@ -165,7 +165,7 @@ def main(engine_xclbins, out, only):
         gemms += [gemm(m, k, n, gelu) for m in PLI_WIDTHS for k, n, gelu in pli_shapes]
 
         groups = {
-            "layer": list(layers.values()),
+            "layer": layers,
             "attn": [attn],
             "swa": [swa],
             "lm_head": [lm_head],

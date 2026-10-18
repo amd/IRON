@@ -25,12 +25,13 @@ from ml_dtypes import bfloat16
 from iron.common.design import OperatorDesign
 from iron.common.testing import time_call
 from iron.operators.flm.layer.design import (
-    LAYER_TYPES,
     MAX_CONTEXT,
     RTP_ADDRESSES,
     RTP_SYMBOLS,
     SLIDING_WINDOW,
+    LayerType,
     arg_sizes,
+    layer_dims,
     weight_layout,
 )
 from iron.operators.flm.layer.op import DecodeLayer
@@ -38,8 +39,6 @@ from iron.operators.flm.layer.reference import (
     generate_inputs,
     kv_row,
     kv_rows,
-    layer_dims,
-    proj_layout,
     reference,
 )
 
@@ -184,7 +183,7 @@ SYNTHETIC = [
         + ([pytest.mark.bench] if (g, t, c) in BENCH else []),
     )
     for g in GEOMETRIES
-    for t in LAYER_TYPES
+    for t in LayerType
     for c in CONTEXT_LENS[t]
 ]
 
@@ -289,7 +288,7 @@ def _proj_reads(module):
     return reads
 
 
-@pytest.mark.parametrize("layer_type", LAYER_TYPES)
+@pytest.mark.parametrize("layer_type", LayerType)
 @pytest.mark.parametrize("geometry", GEOMETRIES, ids=str)
 def test_weight_reads_fit_proj(geometry, layer_type, npu2):
     """Each layer type's sequence reads its whole blob and nothing past proj.
@@ -307,6 +306,3 @@ def test_weight_reads_fit_proj(geometry, layer_type, npu2):
     blob = weight_layout(g, layer_type)
     assert end == max(w.offset + w.size for w in blob.values())
     assert end <= arg_sizes(g)["proj"]
-    ref = proj_layout(g, layer_type)
-    for name in ("o", "up_gate", "down", "pli_down", "pli_gate", "pli_up"):
-        assert (blob[name].dout, blob[name].din) == ref[name][2:], name

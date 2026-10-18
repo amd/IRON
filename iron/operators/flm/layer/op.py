@@ -10,8 +10,8 @@ from ml_dtypes import bfloat16
 
 from iron.common import DispatchTime, In, InOut, Operator, Param, Unresolvable
 from iron.operators.flm.layer.design import (
-    LAYER_TYPES,
     RTP_ADDRESSES,
+    LayerType,
     arg_sizes,
     decode_layer,
     layer_kernels,
@@ -25,7 +25,7 @@ class DecodeLayer(Operator):
     """
 
     geometry: FlmGemma4DecodeGeometry = Param()
-    layer_type: str = Param()
+    layer_type: LayerType | str = Param()
     x_len: int = Param(derive=lambda op: arg_sizes(op.geometry)["x"], repr=False)
     proj_len: int = Param(derive=lambda op: arg_sizes(op.geometry)["proj"], repr=False)
     rms_len: int = Param(derive=lambda op: arg_sizes(op.geometry)["rms"], repr=False)
@@ -49,10 +49,12 @@ class DecodeLayer(Operator):
                 "DecodeLayer: geometry must be aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or "
                 f"FLM_GEMMA4_E4B_DECODE, not {self.geometry!r}"
             )
-        if self.layer_type not in LAYER_TYPES:
+        if self.layer_type not in LayerType:
             raise ValueError(
-                f"DecodeLayer: layer_type must be one of {LAYER_TYPES}, not {self.layer_type!r}"
+                f"DecodeLayer: layer_type must be one of {', '.join(LayerType)}, "
+                f"not {self.layer_type!r}"
             )
+        self.layer_type = LayerType(self.layer_type)
         self.check_derived("x_len", "proj_len", "rms_len", "rope_rms_len", "kv_len")
 
     def resolve(self, dev):
@@ -64,7 +66,7 @@ class DecodeLayer(Operator):
 
     def configuration(self):
         # The four layer types share one array; they differ in their sequences.
-        return dataclasses.replace(self, layer_type="global")
+        return dataclasses.replace(self, layer_type=LayerType.GLOBAL)
 
     def exported_design(self):
         return functools.partial(
