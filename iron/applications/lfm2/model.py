@@ -147,7 +147,7 @@ class Lfm2(CausalLM):
             for k in range(3)
         )
         read, write = self.recurrent[i]["conv"].at(step)
-        state = (read, write, self.conv_window, self.conv_tail)
+        state = F.ConvState(read, write, self.conv_window, self.conv_tail)
         return F.linear(cc * F.causal_conv1d(b * x, w.taps, state), w.out_proj.weight)
 
 

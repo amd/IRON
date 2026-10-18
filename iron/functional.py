@@ -17,7 +17,9 @@ A feature map is one image, channels last: ``(H, W, C)``, not torch's
 ``(N, C, H, W)``. Its rows, ``(H, W * C)``, are what its steps read.
 """
 
+import dataclasses
 import math
+from typing import Any
 
 import ml_dtypes
 import numpy as np
@@ -150,19 +152,29 @@ def rope(x, angles):
     return RoPE.step(x, angles)
 
 
-def causal_conv1d(x, taps, state):
+@dataclasses.dataclass(frozen=True)
+class ConvState:
+    """What a short causal conv carries between calls: ``read``, the
+    ``K - 1`` rows before a call's first, and ``write``, where the ``K - 1``
+    ending it go; and the scratch states a call stages them in, ``window``
+    ``(2, chunk, channels)`` and ``tail`` ``(K - 1, channels)``.
+    """
+
+    read: Any
+    write: Any
+    window: Any
+    tail: Any
+
+
+def causal_conv1d(x, taps, state: ConvState):
     """``x`` ``(rows, channels)`` through a depth-wise causal FIR of ``K``
     taps: row ``t`` is ``sum_k taps[k] * x[t - K + 1 + k]``, each channel its
     own column of ``taps`` ``(K, channels)``, the rows before ``x``'s first
-    the carried ones.
-
-    ``state`` is ``(read, write, window, tail)``: the ``K - 1`` rows before
-    ``x``'s first, where the ``K - 1`` ending it go, and the scratch states
-    a call stages them in, ``(2, chunk, channels)`` and ``(K - 1, channels)``.
+    ``state.read``, the ``K - 1`` ending it written to ``state.write``.
     ``x`` bounded per call on its rows (``x[:n]``) is a prompt chunk of
     ``chunk`` rows; one row otherwise is a decode step.
     """
-    read, write, window, tail = state
+    read, write, window, tail = state.read, state.write, state.window, state.tail
     K, C = taps.shape[0], window.shape[1]
     # Block 0 ends with the rows before the call; block 1 is the call's.
     flat = window.reshape(2 * C, x.shape[1])

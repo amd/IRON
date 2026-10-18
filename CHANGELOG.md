@@ -38,7 +38,8 @@ public API adds its entry under Unreleased.
   steps need, and refuses what it does not compute.
 - `iron.functional.causal_conv1d(x, taps, state)`, a depth-wise causal FIR
   over a prompt chunk or a decode step that stages and carries the rows
-  before the call itself; LFM2's short conv calls it.
+  before the call itself, its `state` an `F.ConvState(read, write, window,
+  tail)`; LFM2's short conv calls it.
 - Handle arithmetic in graph bodies: `x + y` and `x * y` record an
   elementwise step, or a rowwise one when a row meets a matrix, in either
   order.

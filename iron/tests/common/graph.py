@@ -2276,7 +2276,7 @@ def test_causal_conv1d_carries_its_tail_from_a_prompt_chunk_to_decode_steps():
     carried, tail = iron.state((K - 1, 64)), iron.state((K - 1, 64))
     window = iron.state((2, C, 64))
     taps = (np.arange(K * 64) % 5 + 1).reshape(K, 64).astype(bfloat16)
-    state = (carried, carried, window, tail)
+    state = F.ConvState(carried, carried, window, tail)
 
     class Prompt(iron.Graph):
         def body(self, x, *, rows: Scratchpad[np.int32]):
