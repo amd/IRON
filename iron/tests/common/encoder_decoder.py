@@ -6,7 +6,8 @@ decoder (tanh GELU, no RoPE, a learned position table, a tied head) over a
 tower whose output is the rows it is given: its signature and versions,
 what each traces, and each version's reference in turn, the encoder's keys
 and values carried in states to the prompt chunks and the decode step,
-against its oracle.
+against Hugging Face's own Whisper decoder in float32 over the same
+weights and encoder rows, its logits recorded in ``goldens/``.
 """
 
 from types import SimpleNamespace
@@ -17,7 +18,8 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.lm import DecoderConfig, EncoderDecoder, EncoderDecoderOracle, widen
+from iron.lm import DecoderConfig, EncoderDecoder
+from iron.lm.golden import _flat
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
@@ -67,15 +69,43 @@ class Whisper(EncoderDecoder):
         return GEMV.step(self.decoder.embed_tokens.weight, h)
 
 
-class WhisperOracle(EncoderDecoderOracle):
-    def positions(self, x):
-        return x + widen(self.decoder.embed_positions.weight[: x.shape[0]])
+class HuggingFaceDecoder:
+    """transformers' Whisper decoder in float32 on ``CONFIG``'s shape over
+    ``weights``, attending over the encoder's output ``rows``: what
+    records a golden, the logits after a sequence of tokens.
+    """
 
-    def head(self, x):
-        return self.normed(x, widen(self.decoder.layer_norm)) @ self.embedding.T
+    def __init__(self, weights, rows):
+        import torch
+        import transformers
 
+        c = CONFIG
+        hf = transformers.WhisperConfig(
+            vocab_size=c.vocab_size,
+            d_model=c.hidden_size,
+            decoder_layers=c.num_hidden_layers,
+            decoder_attention_heads=c.num_attention_heads,
+            decoder_ffn_dim=c.intermediate_size,
+            max_target_positions=c.max_seq_len,
+            activation_function=c.hidden_act,
+            encoder_layers=0,
+            pad_token_id=None,
+        )
+        self.model = transformers.WhisperForConditionalGeneration(hf).eval()
+        state = {k: torch.from_numpy(v) for k, v in _flat(weights)}
+        self.model.load_state_dict(state, strict=False)
+        self.rows = torch.from_numpy(np.asarray(rows, np.float32))[None]
 
-Whisper.oracle = WhisperOracle
+    def logits(self, tokens):
+        import torch
+
+        with torch.no_grad():
+            out = self.model(
+                encoder_outputs=(self.rows,),
+                decoder_input_ids=torch.tensor([list(tokens)]),
+                use_cache=False,
+            )
+        return out.logits[0, -1].numpy()
 
 
 def tree(seed: int):
@@ -108,18 +138,22 @@ def tree(seed: int):
 
 
 @pytest.fixture(scope="module")
-def whisper():
-    """The model over a ``Features`` tower of ``SOURCE`` rows, its oracle,
-    a clip of 200 encoder rows and 300 tokens, two prompt chunks.
+def whisper(golden):
+    """The model over a ``Features`` tower of ``SOURCE`` rows, a clip of 200
+    encoder rows, Hugging Face's logits after it and after its first half,
+    and 300 tokens, two prompt chunks.
     """
     weights = tree(0)
     encoder = Features(CONFIG.hidden_size, SOURCE)
     model = Whisper(CONFIG, weights, encoder, weights.model.decoder)
-    oracle = Whisper.oracle(CONFIG, weights, weights.model.decoder)
     rng = np.random.default_rng(1)
     clip = (rng.standard_normal((200, CONFIG.hidden_size)) / 2).astype(bfloat16)
     tokens = rng.integers(0, CONFIG.vocab_size, 300)
-    return model, oracle, clip, tokens
+    reference = golden("encoder_decoder", lambda: HuggingFaceDecoder(weights, clip))
+    half = golden(
+        "encoder_decoder_half", lambda: HuggingFaceDecoder(weights, clip[:100])
+    )
+    return model, clip, reference, half, tokens
 
 
 def test_its_signature_and_versions_are_the_decoder_s_and_the_encoder_s(whisper):
@@ -162,21 +196,20 @@ def test_a_decoder_version_attends_over_the_source_rows_it_carries(whisper, vers
     assert "source" in traced.reads
 
 
-def test_each_version_s_reference_in_turn_is_the_oracle(whisper):
+def test_each_version_s_reference_in_turn_is_hugging_face_s(whisper):
     """The encode version, then two prompt chunks and a decode step, each
-    reference carrying its states to the next: the oracle's logits after
+    reference carrying its states to the next: Hugging Face's logits after
     the same clip and tokens, and not after another clip's; and the
     source rows bound the cross attention.
     """
-    model, oracle, clip, tokens = whisper
+    model, clip, reference, half, tokens = whisper
     buffer, own = model.encoder.inputs(clip)
     source = model.encoder.soft(own)
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_n=own["n"])
     logits, carry = prompt(model, tokens, source)
     assert carry["source"] == source
-    oracle.encode(clip)
-    got, want = np.asarray(logits, np.float32).reshape(-1), oracle.logits(tokens)
+    got, want = np.asarray(logits, np.float32).reshape(-1), reference.logits(tokens)
     _assert_close([got], [want])
     # Rows past the source move the logits further than the model's own
     # error does.
@@ -188,10 +221,9 @@ def test_each_version_s_reference_in_turn_is_the_oracle(whisper):
     logits, carry = prompt(model, tokens, source)
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_n=0, **carry)
-    _assert_close([np.asarray(logits).reshape(-1)], [oracle.logits(tokens)])
-    oracle.encode(clip[: source // 2])
+    _assert_close([np.asarray(logits).reshape(-1)], [reference.logits(tokens)])
     with pytest.raises(AssertionError):
-        _assert_close([np.asarray(logits).reshape(-1)], [oracle.logits(tokens)])
+        _assert_close([np.asarray(logits).reshape(-1)], [half.logits(tokens)])
 
 
 def prompt(model, tokens, source: int):
@@ -258,12 +290,12 @@ def run(model, buffer, n: int, source: int, tokens) -> np.ndarray:
     return np.asarray(logits, np.float32).reshape(-1)
 
 
-def test_padded_encoder_rows_reach_neither_attention():
+def test_padded_encoder_rows_reach_neither_attention(golden):
     """A clip of 200 rows padded to 256 with rows far from any real one, and
     a longer clip's rows left in the cross states past them: the encoder's
     self-attention (bounded by its ``n``) and the decoder's cross attention
     (by ``source``) read neither, so the logits are a zero-padded clip's on
-    a fresh model bit for bit, and the oracle's over the 200 rows. Bounded
+    a fresh model bit for bit, and Hugging Face's over the 200 rows. Bounded
     to all 256 rows, they are not.
     """
     weights = tree(0)
@@ -291,11 +323,12 @@ def test_padded_encoder_rows_reach_neither_attention():
     padded[n:] = garbage[n:]
     np.testing.assert_array_equal(run(stale, padded, n, n, tokens), clean)
 
-    oracle = Whisper.oracle(CONFIG, weights, weights.model.decoder)
-    oracle.encode(attended(clip))
-    _assert_close([clean], [oracle.logits(tokens)])
+    want = golden(
+        "encoder_decoder_padded", lambda: HuggingFaceDecoder(weights, attended(clip))
+    ).logits(tokens)
+    _assert_close([clean], [want])
     leaked = run(model(), padded, SOURCE, SOURCE, tokens)
-    assert np.abs(leaked - clean).max() > np.abs(clean - oracle.logits(tokens)).max()
+    assert np.abs(leaked - clean).max() > np.abs(clean - want).max()
 
 
 def test_an_encoder_shorter_than_a_prompt_chunk_is_refused():

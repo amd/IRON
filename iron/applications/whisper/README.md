@@ -21,11 +21,15 @@ OpenAI's Whisper (large-v3-turbo's shape: a 32-layer audio encoder, a
   encoder's output (`encoder_attn`). It adds a learned position table
   after the embedding, and its head is the final LayerNorm and the
   embedding.
-- `WhisperOracle`/`WhisperEncoderOracle`: the float32 twins.
+- `Reference`: what the model is judged by, Hugging Face's
+  `WhisperForConditionalGeneration` in float32 (`HuggingFaceWhisper`), its
+  logits after a clip's features and the decoder's tokens recorded once to
+  a file (`iron.lm.Golden`). `Runner.reference` records `golden.npz`
+  beside a checkpoint.
 - `WhisperConfig`: both shapes, read from the checkpoint's own
   `config.json`.
 - `bf16()`: the checkpoint ships float16; the graphs hold each weight
-  rounded once to bf16, and the oracles read the float16 itself.
+  rounded once to bf16, and the reference reads the float16 itself.
 
 Nothing rotates (`rope_theta` None).
 
@@ -33,7 +37,8 @@ Nothing rotates (`rope_theta` None).
 
 The model runs at a toy shape with tanh GELU on drawn weights
 (`tests/applications/whisper/test.py`). Device-free, each version's
-reference is checked against the oracle; on the NPU, the same checks run
+reference is checked against Hugging Face's logits, recorded in
+`tests/applications/whisper/goldens/`; on the NPU, the same checks run
 through the compiled versions. At large-v3-turbo's real shape, with tanh
 GELU and a vocabulary of 51872 standing in for the gaps below, every
 version's operators resolve on npu2 and npu1.

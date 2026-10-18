@@ -5,8 +5,9 @@
 
 """Whisper over ``iron.lm``: a bidirectional audio encoder (``WhisperEncoder``,
 an ``iron.lm.Tower``) feeding a causal text decoder through cross attention
-(``Whisper``, an ``iron.lm.EncoderDecoder``), and their float32 twins
-(``WhisperOracle``). Both are ``Layer``s on Whisper's names; nothing rotates:
+(``Whisper``, an ``iron.lm.EncoderDecoder``), judged by Hugging Face's own
+model in float32 (``Reference``). Both are ``Layer``s on Whisper's names;
+nothing rotates:
 the encoder adds a fixed position table after its two convolutions, the
 decoder a learned one after its embedding. The shape is read from the
 checkpoint's ``config.json``.
@@ -16,6 +17,8 @@ a zero row before them, as its convolutions' padding.
 """
 
 import dataclasses
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -29,12 +32,10 @@ from iron.lm import (
     DecoderConfig,
     Derived,
     EncoderDecoder,
-    EncoderDecoderOracle,
     Layer,
-    Oracle,
     Tower,
-    widen,
 )
+from iron.lm.golden import Golden, _flat, config_json
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gelu import GELU
@@ -47,7 +48,7 @@ BLOCK = 64
 def bf16(weights):
     """``weights``, an array or a tree of namespaces and lists, each float16
     array rounded once to bf16, the device's copy of an fp16 checkpoint (the
-    oracle widens the float16 itself); any other array as it is.
+    reference widens the float16 itself); any other array as it is.
     """
     if isinstance(weights, np.ndarray):
         return weights.astype(bfloat16) if weights.dtype == np.float16 else weights
@@ -237,58 +238,11 @@ class WhisperEncoder(Tower):
         return buffer, dict(n=c.positions)
 
 
-class WhisperEncoderOracle(Oracle):
-    """``WhisperEncoder``'s float32 twin.
-
-    Args:
-        config: The encoder's shape.
-        weights: The checkpoint's tree, as ``WhisperEncoder`` takes it.
-    """
-
-    def __init__(self, config: WhisperEncoderConfig, weights):
-        super().__init__(config)
-        self.whisper_encoder = widen(weights.model.encoder)
-
-    def soft_tokens(self, features) -> np.ndarray:
-        """The encoder's ``(positions, hidden_size)`` output over ``features``,
-        ``(mels, frames)``.
-        """
-        c, e = self.config, self.whisper_encoder
-        x = np.pad(np.asarray(features, np.float32).T, ((1, 1), (0, 0)))
-        conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.mels)
-        conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
-        h = self.gelu_tanh(conv1.oracle(x, e.conv1.weight, e.conv1.bias))
-        h = np.pad(h, ((1, 1), (0, 0)))
-        h = self.gelu_tanh(conv2.oracle(h, e.conv2.weight, e.conv2.bias))
-        x = h + e.embed_positions.weight
-        for i, w in enumerate(e.layers):
-            x = c.layer(i).oracle(self, w, x, self.attend, None)
-        return self.normed(x, e.layer_norm)
-
-
-class WhisperOracle(EncoderDecoderOracle):
-    """Whisper's float32 forward pass on the host: ``encode`` the encoder's
-    output, then ``logits``.
-    """
-
-    def __init__(self, config: WhisperConfig, weights):
-        super().__init__(config, weights, weights.model.decoder)
-        self.encoder = WhisperEncoderOracle(config.encoder(), weights)
-
-    def positions(self, x):
-        return x + widen(self.decoder.embed_positions.weight[: x.shape[0]])
-
-    def head(self, x):
-        return self.normed(x, widen(self.decoder.layer_norm)) @ self.embedding.T
-
-
 class Whisper(EncoderDecoder):
     """Whisper on ``config``'s shape and a checkpoint's ``weights``: its
     encoder a ``WhisperEncoder``, its decoder under ``model.decoder``, the
     head tied to the embedding.
     """
-
-    oracle = WhisperOracle
 
     def __init__(self, config: WhisperConfig, weights):
         weights = bf16(weights)
@@ -317,3 +271,81 @@ class Runner(lm.Runner):
     model = Whisper
     #: ``<|startoftranscript|>``, every transcript's first token.
     bos = 50258
+
+    def reference(self):
+        """With drawn weights, the model's own graph on the host; else
+        Hugging Face's logits (``Reference``), recorded beside the
+        checkpoint (``golden.npz``) where transformers is installed.
+        """
+        if self.seed is not None:
+            return super().reference()
+        directory = Path(self.checkpoint.path).parent
+        record = importlib.util.find_spec("transformers") is not None
+        load = (lambda: HuggingFaceWhisper.load(directory)) if record else None
+        return Reference(Golden(directory / "golden.npz", load))
+
+
+class Reference:
+    """What Whisper is judged by: ``golden``'s logits after a clip and the
+    decoder's tokens, keyed on both. ``encode`` the clip's features,
+    ``(mels, frames)``, then ``logits``, as ``Whisper`` takes them.
+    """
+
+    def __init__(self, golden: Golden):
+        self.golden = golden
+
+    def encode(self, features) -> None:
+        self.features = np.asarray(features, np.float32).view(np.int32).reshape(-1)
+
+    def logits(self, tokens) -> np.ndarray:
+        return self.golden.logits(np.append(self.features, tokens))
+
+
+class HuggingFaceWhisper:
+    """transformers' ``WhisperForConditionalGeneration`` in float32, what
+    records a ``Reference``'s golden: the logits after a key of a clip's
+    features (their float32 bits), then the decoder's tokens.
+    """
+
+    def __init__(self, model):
+        self.model = model.eval()
+
+    @classmethod
+    def load(cls, directory) -> "HuggingFaceWhisper":
+        import torch
+        import transformers
+
+        return cls(
+            transformers.WhisperForConditionalGeneration.from_pretrained(
+                directory, dtype=torch.float32
+            )
+        )
+
+    @classmethod
+    def build(cls, config: WhisperConfig, weights) -> "HuggingFaceWhisper":
+        """The model on ``config``'s shape over ``weights``."""
+        import torch
+        import transformers
+
+        # A toy vocabulary holds no Whisper padding token.
+        hf = transformers.WhisperConfig(**config_json(config), pad_token_id=None)
+        model = transformers.WhisperForConditionalGeneration(hf)
+        state = {k: torch.from_numpy(v) for k, v in _flat(weights)}
+        model.load_state_dict(state, strict=False)
+        return cls(model)
+
+    def logits(self, key) -> np.ndarray:
+        import torch
+
+        c = self.model.config
+        n = c.num_mel_bins * 2 * c.max_source_positions
+        features = np.asarray(key[:n], np.int32).view(np.float32)
+        with torch.no_grad():
+            out = self.model(
+                input_features=torch.from_numpy(features).reshape(
+                    1, c.num_mel_bins, -1
+                ),
+                decoder_input_ids=torch.tensor([list(key[n:])]),
+                use_cache=False,
+            )
+        return out.logits[0, -1].numpy()

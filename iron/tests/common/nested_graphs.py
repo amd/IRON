@@ -14,6 +14,7 @@ import iron
 from iron import Carried, Scratchpad
 from iron.lm import LogMel
 from iron.tests.common.graphs import FeedForward
+from iron.tests.lm.log_mel import EVERY, Extractor
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs
@@ -142,19 +143,20 @@ def test_a_called_graph_takes_every_value_and_carries_none():
         CallsWithoutValue().trace(x=((256, E), bfloat16))
 
 
-def test_log_mel_holds_to_the_extractor():
-    """The operators' exact products against the extractor's float64: each
-    feature its bf16 rounding or the next, bar a log near 0 within 4e-6.
+def test_log_mel_holds_to_the_extractor(golden):
+    """The operators' exact products against Hugging Face's Gemma 4
+    extractor's float64, every 8th frame: each feature its bf16 rounding
+    or the next, bar a log near 0 within 4e-6.
     """
     log_mel = LogMel()
-    frames = 3072
+    frames = 256
     n = (frames + 1) * log_mel.hop
     t = np.arange(n) / 16000
     wave = (0.5 * np.sin(2 * np.pi * (200 * t + 300 * t**2))).astype(np.float32)
     wave += 0.05 * np.random.default_rng(0).standard_normal(n).astype(np.float32)
-    got = np.asarray(log_mel.reference(wave, frames=frames), np.float32)
-    want = log_mel.oracle(wave, frames).astype(bfloat16).astype(np.float32)
+    got = np.asarray(log_mel.reference(wave, frames=frames), np.float32)[::EVERY]
+    want = golden("log_mel", Extractor).logits(wave.view(np.int32))
     ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)
-    # Measured: 0.99966 exact.
+    # Measured: 0.99951 exact.
     assert np.mean(got == want) >= 0.999
     assert (np.abs(got - want) <= np.maximum(ulp, 4e-6)).all()
