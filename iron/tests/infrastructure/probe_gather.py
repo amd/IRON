@@ -15,8 +15,8 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Carried
-from iron.tune.narrowing import CostTable, cost_key
-from iron.tune.probe import Call, Standalone, Timing, measure_graph
+from iron.tune.autotune import Call
+from iron.tune.measure import Standalone, Timing, measure
 from iron.common.image.step import BufferRef
 from iron.operators.copy import APERTURE, Copy, Gather, GatherWords
 
@@ -85,16 +85,20 @@ def test_a_gather_alone_reads_the_rows_its_words_name(table, rows):
 
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
-def test_a_graph_gathering_by_device_ids_is_measured(table, tmp_path):
+def test_a_graph_gathering_by_device_ids_is_timed(table):
     traced = DeviceIds(table).trace(ids=((15,), np.int32))
-    costs = CostTable(tmp_path / "costs.json", "npu2", True)
-    log = []
-    measure_graph(
-        costs, [Call(traced)], None, Timing(rounds=1, calls=5), 2, log=log.append
-    )
+    call = Call(traced)
     assert {type(s.op) for s in traced.steps} == {Copy, GatherWords, Gather}
     for step in traced.steps:
-        assert costs.steps[cost_key(step.op)].exact, type(step.op).__name__
+        ran = measure(
+            [step.op.resolved()],
+            full_elf=True,
+            timing=Timing(rounds=1, calls=5),
+            repeats=2,
+            values=call.op_values(step.op),
+            log=lambda _: None,
+        )
+        assert 0 in ran, type(step.op).__name__
 
 
 @pytest.mark.supported_devices("npu2")

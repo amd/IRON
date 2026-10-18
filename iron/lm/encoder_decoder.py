@@ -155,7 +155,6 @@ class EncoderDecoder(CausalLM):
         self,
         *,
         release=None,
-        tuner=None,
         full_elf: bool | None = None,
         dev=None,
     ) -> "EncoderDecoder":
@@ -165,7 +164,6 @@ class EncoderDecoder(CausalLM):
 
         Args:
             release: Given each piece of each weight once it is on the device.
-            tuner: Folds, narrows and packs each version's designs by cost.
             full_elf: Each version's packaging (``Graph.compile``).
             dev: The device every version compiles for, else the current one.
         """
@@ -176,7 +174,6 @@ class EncoderDecoder(CausalLM):
             version = self.compile(
                 dev=dev,
                 feeds=decode if "ids" in shapes else None,
-                tuner=tuner,
                 full_elf=full_elf,
                 **shapes,
             )

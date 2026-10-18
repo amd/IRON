@@ -21,7 +21,7 @@ attention and MLP parts a layer is composed from, `iron/lm/blocks.py`),
 - [`profiles/`](profiles): its tunables, one file per device
 
 `python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors`
-measures the cost table its designs can be narrowed and packed by (below).
+rewrites its profile for the NPU it runs on (below).
 
 ## Weights and tokenizer
 
@@ -94,8 +94,6 @@ top-k must be at most 64.
 - `--compare-host`: then generate again drawing on the host from each
   step's logits, from the same seed, and count the tokens that differ (the
   text is the same, token for token)
-- `--cost-table TABLE`: narrow and pack the decode step's and prompt
-  chunk's designs by a measured cost table (below)
 - `--no-full-elf`: dispatch every step of each version on its own from one
   xclbin, the form NPU1 runs (below); `--full-elf` asks for one full ELF
 
@@ -112,26 +110,14 @@ how `test_llama_3_2_1b_each_step_accuracy` checks it there.
 
 ## Tuning
 
-`--cost-table TABLE` folds steps into the step producing their input (the
-gate projection's SiLU into its GEMV), narrows the designs of the decode
-step and the prompt chunk and packs them into shared device configurations,
-by what each design costs on the device
-(`iron.tune.narrowing`). No table is checked in: one is measured on
-the NPU it is used on.
+Each operator of the decode step and the prompt chunk is timed on the NPU at
+every setting of its tunables, and the fastest whose output its tolerance
+admits is written to `profiles/<device>.json`, which the model then runs
+with. Review the change with `git diff` and commit it.
 
 ```bash
 python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors
-python -m iron.applications.llama.model /path/to/model.safetensors /path/to/tokenizer.model \
-    --cost-table iron/applications/llama/costs_npu2.json
 ```
-
-On NPU1, where each step is its own dispatch, nothing is packed: a
-narrower design is chosen where it is cheaper to switch into. There a
-table measured on a Phoenix NPU (4 columns) narrowed the elementwise
-steps, moved several GEMVs between columns and lanes, put Sample on two
-cores and kept MHA at the profile's width: with random weights and the
-default caches, a token went from 362 to 338 ms (20 tokens after a
-16-token prompt, medians of 8 interleaved runs).
 
 ## Testing
 

@@ -28,8 +28,7 @@ import tokenizers
 
 import iron
 from iron import lm
-from iron.tune.narrowing import CostTable, JointNarrowing
-from iron.tune.probe import Call
+from iron.tune.autotune import Call
 from iron.lm import Checkpoint, Derived, Encoder, rope_angles
 from iron.functional import ACCURATE
 from iron.lm.testing import weights_dir
@@ -292,21 +291,20 @@ class Multimodal(lm.Multimodal):
 
 
 class Runner(lm.Runner):
-    """EmbeddingGemma 2 as ``iron.lm.tune`` measures it: every version of
+    """EmbeddingGemma 2 as ``iron.lm.tune`` tunes it: every version of
     ``Multimodal`` (the text encoder, each tower and the merge) at its
     longest call, on weights it never reads, unread from the shapes the
-    checkpoint's header gives, the table in ``profiles/``. The towers'
-    graphs alone run designs these hold, so one table serves them.
+    checkpoint's header gives. The towers' graphs alone run designs these
+    hold, so the one profile in ``profiles/`` serves them.
     """
 
     config = Config()
     model = Multimodal
-    tables = PROFILES
 
     @classmethod
     def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
         """The checkpoint whose header gives the weights' shapes; every
-        version is measured at its longest call.
+        version is timed at its longest call.
         """
         parser.add_argument(
             "--checkpoint",
@@ -320,13 +318,10 @@ class Runner(lm.Runner):
     def tune_calls(
         cls, parser: argparse.ArgumentParser, args: argparse.Namespace
     ) -> list[Call]:
-        dev = aie_utils.ensure_current_device()
         weights = Checkpoint(args.checkpoint / "model.safetensors").tree("unread")
         graph = cls.model(cls.config, weights)
         return [
-            call
-            for shapes in graph.shapes()
-            for call in Call.admitted(graph.trace(**shapes), dev, graph.longest())
+            Call(graph.trace(**shapes), graph.longest()) for shapes in graph.shapes()
         ]
 
 
@@ -344,18 +339,10 @@ def main():
     parser.add_argument("--query", required=True)
     parser.add_argument("--document", nargs="+", required=True)
     parser.add_argument("--dims", type=int, choices=config.mrl_dims, default=768)
-    parser.add_argument(
-        "--costs",
-        type=Path,
-        help="the cost table the designs are narrowed and packed by "
-        "(`python -m iron.lm.tune embedding_gemma2` writes costs_<device>.json "
-        f"in {PROFILES}); default: as the profile gives them",
-    )
     args = parser.parse_args()
     tokenizer = Tokenizer(args.directory / "tokenizer.json", config)
-    tuner = None if args.costs is None else JointNarrowing(CostTable(args.costs))
     weights = Checkpoint(args.directory / "model.safetensors").tree()
-    encoder = EmbeddingGemma(config, weights, tokenizer).load(tuner=tuner)
+    encoder = EmbeddingGemma(config, weights, tokenizer).load()
     try:
         t = time.perf_counter()
         query = encoder.embed(args.query, "query", args.dims)

@@ -55,11 +55,9 @@ def runner(request):
 
 
 @pytest.fixture(scope="module")
-def model(runner, request):
-    """The model, compiled and loaded once, its versions tuned by
-    ``--cost-table`` if given.
-    """
-    yield runner.npu(request.config.getoption("--cost-table"))
+def model(runner):
+    """The model, compiled and loaded once."""
+    yield runner.npu()
 
 
 # KL(fp32 CPU || NPU), teacher-forced over 40 steps from a 1024-character

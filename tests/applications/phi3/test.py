@@ -55,12 +55,12 @@ def runner(request):
 
 
 @pytest.fixture(scope="module")
-def model(runner, request):
+def model(runner):
     """The model, compiled and loaded once, packaged ``--each-step`` (the
     full-ELF link is impractically slow at this model's depth, the same
     finding Qwen 2.5 1.5B Instruct's own port made).
     """
-    yield runner.npu(request.config.getoption("--cost-table"), full_elf=False)
+    yield runner.npu(full_elf=False)
 
 
 # KL(fp32 CPU || NPU), teacher-forced over 10 steps (not Llama/Qwen2.5's

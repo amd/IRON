@@ -62,12 +62,11 @@ def runner(request):
 
 
 @pytest.fixture(scope="module")
-def model(runner, request):
-    """The model, compiled and loaded once, its versions tuned by
-    ``--cost-table`` if given; the runtime is released after its
+def model(runner):
+    """The model, compiled and loaded once; the runtime is released after its
     checkpoint's last test.
     """
-    yield runner.npu(request.config.getoption("--cost-table"))
+    yield runner.npu()
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 

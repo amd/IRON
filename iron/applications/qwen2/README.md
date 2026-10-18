@@ -23,7 +23,8 @@ lead token; its tunables are in `iron/applications/qwen2/profiles/`. The
 rest is `iron.lm`, shared with every other model.
 
 `python -m iron.lm.tune qwen2 --checkpoint /path/to/model.safetensors`
-measures the cost table its designs can be narrowed and packed by (below).
+rewrites its profile for the NPU it runs on, as
+`iron/applications/llama/README.md`'s "Tuning" section describes.
 
 ## Weights and tokenizer
 
@@ -62,7 +63,7 @@ python -m iron.applications.qwen2.model \
 The options are `iron.applications.llama.model`'s own (see its README):
 `--random-weights`, `--prompt-len`, `--num-tokens`, `--max-seq-len`,
 `--temperature`, `--top-k`, `--check-accuracy`, `--check-determinism`,
-`--compare-host`, `--cost-table` and `--full-elf`/`--no-full-elf`.
+`--compare-host` and `--full-elf`/`--no-full-elf`.
 `--no-full-elf` is the form this model's tests run it in: the full-ELF
 link does not finish in a practical time at this shape (see
 `skill-ports/qwen2.5-1.5b/skill-gaps.md`).

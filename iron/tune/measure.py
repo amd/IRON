@@ -1,0 +1,781 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Timing designs on the NPU.
+
+A design's step is the excess of ``repeats`` runs of it over one run, per
+extra step, so the dispatch cancels (``measure``). Runs are interleaved
+round by round, timed only while no other process holds the NPU, and a
+figure whose calls waited for a CPU (``CPU_WAIT_US``) is refused. Every
+figure is kept in a ``Cache`` keyed on what it follows, so a design is
+timed once per NPU and power mode.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import datetime
+import hashlib
+import json
+import math
+import os
+import re
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from collections.abc import Callable, Hashable, Mapping, Sequence
+from pathlib import Path
+
+import numpy as np
+from aie.utils import bfp
+from aie.utils.compile import NPU_CACHE_HOME
+
+from iron.common.declare import Operand, Operator, Out
+from iron.common.declare.value import PlaceWord, Value
+from iron.common.design import OperatorDesign
+from iron.common.graph.trace import TracedGraph
+from iron.common.image.callable import FullELFCallable, StepCallable
+from iron.common.image.sequence import OperatorSequence
+from iron.common.image.step import BufferRef, SequenceStep
+
+
+class Timing:
+    """How long to measure: ``rounds`` interleaved rounds of ``calls`` runs.
+
+    Where the runs are settings of one design, a setting whose runs take
+    more than ``cutoff`` times the fastest setting's once ``settle`` rounds
+    are in is timed no further, its figure those rounds'.
+    """
+
+    rounds: int = 8
+    calls: int = 50
+    settle: int = 2
+    cutoff: float = 1.5
+
+
+@dataclasses.dataclass(frozen=True)
+class Timed:
+    """A run's per-round medians, microseconds, and their median ``us``."""
+
+    round_us: tuple[float, ...]
+
+    @property
+    def us(self) -> float:
+        return statistics.median(self.round_us)
+
+    @property
+    def rounds(self) -> int:
+        return len(self.round_us)
+
+
+def standard_error(samples: Sequence[float]) -> float | None:
+    """The standard error of the median of ``samples``, taken as normal
+    (sqrt(pi / 2) times the mean's); None from fewer than two.
+    """
+    if len(samples) < 2:
+        return None
+    return math.sqrt(math.pi / 2) * statistics.stdev(samples) / math.sqrt(len(samples))
+
+
+def platform() -> dict[str, str]:
+    """The NPU's platform report from ``xrt-smi``: its ``Name``, its
+    ``Power Mode``, ...
+    """
+    out = subprocess.run(
+        ["xrt-smi", "examine", "-r", "platform"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    report = {}
+    for line in out.splitlines():
+        name, sep, value = line.partition(":")
+        if sep:
+            report[name.strip()] = value.strip()
+    if "Name" not in report or "Power Mode" not in report:
+        raise RuntimeError(f"xrt-smi reports no platform name or power mode:\n{out}")
+    return report
+
+
+def pmode() -> str:
+    """The NPU's power mode, as ``xrt-smi`` reports it."""
+    return platform()["Power Mode"]
+
+
+def others(holding: bool = False) -> set[int]:
+    """The processes other than this one holding a context on the NPU, by
+    pid, as ``xrt-smi`` reports them: in the host's pid namespace, so in a
+    container this process cannot tell which is its own.
+
+    Args:
+        holding: Whether this process holds a context. Where its pid is not
+            reported, it is then the one pid when one is reported, and
+            somewhere among them, all returned, when more are.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        report = Path(d) / "partitions.json"
+        subprocess.run(
+            ["xrt-smi", "examine", "-r", "aie-partitions", "-f", "JSON", "-o", report],
+            capture_output=True,
+            check=True,
+        )
+        devices = json.loads(report.read_text())["devices"]
+    pids = {
+        int(context["pid"])
+        for device in devices
+        for partition in device["aie_partitions"].get("partitions", [])
+        for context in partition.get("hw_contexts", [])
+    }
+    if os.getpid() in pids or not holding:
+        return pids - {os.getpid()}
+    return pids if len(pids) > 1 else set()
+
+
+# Seconds between looks at an NPU another process holds, and the most waited.
+IDLE_POLL = 5.0
+IDLE_WAIT = 1800.0
+
+# Kernel work holds the timing thread's core for tens of microseconds, mostly
+# outside the timed window; another process, under lazy preemption, until the
+# core's next tick, hundreds of microseconds on.
+CPU_WAIT_US = 100.0
+
+
+def wait_idle(log: Callable[[str], None] = print, holding: bool = False) -> None:
+    """Return once no other process holds a context on the NPU (``others``).
+
+    Args:
+        holding: Whether this process holds a context (``others``).
+
+    Raises:
+        TimeoutError: Another has held one for ``IDLE_WAIT`` seconds. Two
+            processes measuring at once would each wait for the other.
+    """
+    held, told = others(holding), set()
+    start = time.monotonic()
+    while held:
+        if held != told:
+            log(f"    the NPU is in use by pid {sorted(held)}: waiting")
+            told = held
+        if time.monotonic() - start > IDLE_WAIT:
+            raise TimeoutError(
+                f"pid {sorted(held)} has held the NPU for {IDLE_WAIT:.0f} s; "
+                f"measure once it is idle"
+            )
+        time.sleep(IDLE_POLL)
+        held = others(holding)
+
+
+class Awake:
+    """While entered, the calling thread on the CPUs the NPU's completions
+    interrupted since ``before`` (``interrupts``), and a spinner at nice 19
+    on each of their SMT siblings: a busy sibling keeps the core out of deep
+    idle, whose exit latency would land only on the runs with long gaps
+    between completions.
+    """
+
+    IRQ = "xdna_mailbox"
+
+    def __init__(self, before: Mapping[str, int]):
+        # A container's cpuset may leave out the cores the completions
+        # interrupt: only the ones it allows can be held.
+        allowed = os.sched_getaffinity(0)
+        self.cpus: set[int] = set()
+        for irq, count in self.interrupts().items():
+            if count > before.get(irq, 0):
+                self.cpus |= self._cpus(f"/proc/irq/{irq}/effective_affinity_list")
+        self.cpus &= allowed
+        self.siblings: set[int] = set()
+        for cpu in self.cpus:
+            self.siblings |= self._cpus(
+                f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
+            )
+        self.siblings = (self.siblings & allowed) - self.cpus
+        self._affinity: set[int] | None = None
+        self._spinners: list[subprocess.Popen] = []
+
+    @classmethod
+    def interrupts(cls) -> dict[str, int]:
+        """Each NPU completion interrupt's count over every CPU, by number."""
+        counts = {}
+        for line in Path("/proc/interrupts").read_text().splitlines():
+            fields = line.split()
+            if fields and fields[-1] == cls.IRQ:
+                counts[fields[0].rstrip(":")] = sum(
+                    int(f) for f in fields[1:] if f.isdigit()
+                )
+        return counts
+
+    @staticmethod
+    def waited_us() -> float:
+        """How long the calling thread has waited, runnable, for a CPU,
+        microseconds in all (``/proc/thread-self/schedstat``)."""
+        return int(Path("/proc/thread-self/schedstat").read_text().split()[1]) / 1e3
+
+    @staticmethod
+    def _cpus(path: str) -> set[int]:
+        cpus = set()
+        for part in Path(path).read_text().strip().split(","):
+            first, _, last = part.partition("-")
+            cpus.update(range(int(first), int(last or first) + 1))
+        return cpus
+
+    def __enter__(self) -> Awake:
+        if self.cpus:
+            self._affinity = os.sched_getaffinity(0)
+            os.sched_setaffinity(0, self.cpus)
+        try:
+            for cpu in sorted(self.siblings):
+                spinner = subprocess.Popen([sys.executable, "-c", "while True: pass"])
+                self._spinners.append(spinner)
+                os.sched_setaffinity(spinner.pid, {cpu})
+                os.setpriority(os.PRIO_PROCESS, spinner.pid, 19)
+        except BaseException:
+            self.__exit__()
+            raise
+        return self
+
+    def __exit__(self, *exc) -> None:
+        for spinner in self._spinners:
+            spinner.kill()
+            spinner.wait()
+        self._spinners.clear()
+        if self._affinity is not None:
+            os.sched_setaffinity(0, self._affinity)
+            self._affinity = None
+
+
+def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
+    dtype = np.dtype(dtype)
+    if dtype.kind == "f" or dtype.name == "bfloat16":
+        n = nbytes // dtype.itemsize
+        return rng.standard_normal(n, dtype=np.float32).astype(dtype).view(np.uint8)
+    return rng.integers(0, 4, nbytes, dtype=np.uint8)
+
+
+class Standalone:
+    """A runlist of operators built alone into a loaded image, its inputs
+    seeded random data.
+
+    Args:
+        full_elf: How the runlist is packaged: one full ELF, else an xclbin
+            per design dispatched step by step.
+        distinct: Every step runs on buffers of its own, as a graph's do, so
+            no step finds its inputs in a SoC cache.
+        values: Per operator, each per-call value by name: the tuner cannot
+            know what a value means. One derived from bound extents follows
+            from theirs.
+        inputs: Per operator, input buffers by name, where random bytes
+            would not be representative (a draw row's temperature and top-k).
+        load: Write the per-call values now; with `False` the image is built
+            and seeded, and `load()` writes them.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        runlist: Sequence[Operator],
+        coresident: Sequence[Sequence[Operator]] = (),
+        values: Mapping[Operator, Mapping[str, int]] | None = None,
+        seed: int = 0,
+        distinct: bool = True,
+        inputs: Mapping[Operator, Mapping[str, np.ndarray]] | None = None,
+        full_elf: bool = True,
+        load: bool = True,
+    ):
+        self.steps = list(runlist)
+        values, inputs = values or {}, inputs or {}
+        self._values = {op: dict(values.get(op, {})) for op in self.steps}
+        firsts = {}
+        for k, op in enumerate(self.steps):
+            firsts.setdefault(id(op), k)
+        self._slot = [
+            k if distinct else firsts[id(op)] for k, op in enumerate(self.steps)
+        ]
+        self._filled = sorted(set(self._slot))
+        in_names, out_names = [], []
+        for k in self._filled:
+            op = self.steps[k]
+            for buf, name_ in zip(op.buffers, self._names(k, op)):
+                (out_names if isinstance(buf, Out) else in_names).append(name_)
+        steps = [
+            SequenceStep(op, tuple(map(BufferRef, self._names(self._slot[k], op))))
+            for k, op in enumerate(self.steps)
+        ]
+        self.sequence = OperatorSequence(
+            TracedGraph.of_steps(name, steps, in_names, out_names),
+            full_elf=full_elf,
+            coresident=coresident,
+            # A design run alone must still pay its entry: alone = D0 + base + load + R.
+            reconfigure=full_elf,
+        ).compile()
+        self.callable = self.sequence.get_callable()
+        rng = np.random.default_rng(seed)
+        self._before: dict[str, np.ndarray] = {}
+        for k in self._filled:
+            op = self.steps[k]
+            names = self._names(k, op)
+            addressed = op.addressed_inputs(
+                {buf.name: self.address(n) for buf, n in zip(op.buffers, names)}, rng
+            )
+            for buf, name_ in zip(op.buffers, names):
+                if buf.name in addressed:
+                    content = np.ascontiguousarray(addressed[buf.name], buf.dtype)
+                    self._bytes(name_)[: buf.nbytes] = content.view(np.uint8)
+                elif buf.fills:
+                    content = self._content(buf, inputs.get(op, {}), rng)
+                    at = buf.placement[1] * bfp.itemsize(buf.dtype)
+                    self._bytes(name_)[at : at + buf.nbytes] = content
+                    if buf.drains:
+                        self._before[name_] = content.copy()
+        ops = {id(op): op for op in self.steps}.values()
+        artifacts = self.sequence.artifacts
+        # An extent read only through its derivations has no word in a full
+        # ELF; an xclbin chain has no parameter table, its values dispatch-time.
+        self._symbols = {
+            v.symbol: np.int32(self._value(op, self._values[op], v))
+            for op in ops
+            for v in op.values
+            if not artifacts.full_elf or v.symbol in artifacts.parameters
+        }
+        if load:
+            self.load()
+
+    def load(self) -> None:
+        """Write the per-call values, which loads a full ELF that holds any;
+        any other image is loaded by its first run.
+        """
+        if self._symbols:
+            self.callable.write_values(self._symbols)
+
+    @staticmethod
+    def _value(op: Operator, values: Mapping[str, int], v: Value) -> int:
+        # Each operand here is a buffer of its own: a placed one at its run.
+        if isinstance(v, PlaceWord):
+            return 0
+        if v.name in values:
+            return values[v.name]
+        extents = op.bound_extents
+        if v.name in op._per_call_derived() and extents.keys() <= values.keys():
+            return op.resolved().derived_at(v.name, **{e: values[e] for e in extents})
+        raise ValueError(
+            f"per-call value {v.name!r} needs a representative value to be measured"
+        )
+
+    @staticmethod
+    def _content(
+        buf: Operand,
+        inputs: Mapping[str, np.ndarray],
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        if buf.name not in inputs:
+            return _sample(buf.dtype, buf.nbytes, rng)
+        content = np.ascontiguousarray(inputs[buf.name], dtype=buf.dtype)
+        if content.nbytes != buf.nbytes:
+            raise ValueError(
+                f"input {buf.name!r} is {content.nbytes} bytes, its buffer {buf.nbytes}"
+            )
+        return content.reshape(-1).view(np.uint8)
+
+    @staticmethod
+    def _names(k: int, op: Operator) -> list[str]:
+        return [f"s{k}_{b.name}" for b in op.buffers]
+
+    def _bytes(self, name: str) -> np.ndarray:
+        return self.callable.get_storage(name).numpy_view().view(np.uint8)
+
+    def address(self, name: str) -> int:
+        """The device address of buffer ``name``."""
+        view = self.callable.get_storage(name)
+        root = view.storage.binding_handle(0, view.storage.nbytes)
+        return root.address() + view.storage_offset
+
+    def digest(self) -> str:
+        """Run once: the sha256 of what every step ``written``."""
+        self.callable()
+        return hashlib.sha256(
+            b"".join(
+                a.tobytes() for k in self._filled for a in self.written(k).values()
+            )
+        ).hexdigest()
+
+    def inputs(self, k: int = 0) -> dict[str, np.ndarray]:
+        """What step ``k`` was given, by buffer name: views of the device
+        buffers, an in-out one as it was before any run.
+        """
+        op = self.steps[k]
+        out = {}
+        for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
+            if buf.fills:
+                at = buf.placement[1] * bfp.itemsize(buf.dtype)
+                data = self._before.get(name, self._bytes(name)[at : at + buf.nbytes])
+                out[buf.name] = data.view(buf.host_dtype).reshape(buf.host_shape)
+        return out
+
+    def written(self, k: int = 0) -> dict[str, np.ndarray]:
+        """What step ``k`` wrote in the last run, by buffer name: along a
+        bounded axis only the rows under the call's bound.
+        """
+        op = self.steps[k]
+        out = {}
+        for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
+            if not buf.drains:
+                continue
+            under = [slice(None)] * len(buf.shape)
+            for extent in op.bound_extents:
+                axis = buf.extent_axis(op.value(extent))
+                if axis is not None:
+                    under[axis] = slice(0, self._values[op][extent])
+            at = buf.placement[1] * bfp.itemsize(buf.dtype)
+            data = self.callable.get_storage(name).numpy().view(np.uint8)
+            data = data[at : at + buf.nbytes].reshape(*buf.shape, -1)
+            # A block-float buffer stays its blocks' bytes, as its host shape is.
+            data = np.ascontiguousarray(data[tuple(under)]).view(buf.host_dtype)
+            out[buf.name] = data if bfp.is_bfp(buf.dtype) else data[..., 0]
+        return out
+
+
+def judge(
+    default: Operator,
+    op: Operator,
+    inputs: Mapping[str, np.ndarray],
+    written: Mapping[str, np.ndarray],
+    values: Mapping[str, int] | None = None,
+) -> str | None:
+    """Why ``op``'s output ``written`` on ``inputs`` may not replace that of
+    ``default``, the setting it would replace: it must be within the
+    default's gate and its own. None where it may.
+
+    Only a bit-identical setting is admitted where a gate is missing or
+    exact, or ``values`` bound an extent short of its length.
+    """
+    gates = {
+        "the default's": default.resolved().tolerance(),
+        "its own": op.resolved().tolerance(),
+    }
+    if any(g is None or g.kind == "exact" for g in gates.values()):
+        return "only a bit-identical output is admitted"
+    values = values or {}
+    for extent in op.bound_extents:
+        if values.get(extent) != vars(op)[op.value(extent).field.name]:
+            return "only a bit-identical output is admitted under a bound"
+    want = op._call_reference(inputs, values=values)
+    for which, gate in gates.items():
+        for name, verdict in op.judge(inputs, written, gate, want).items():
+            if not verdict:
+                return f"{name} under {which} gate: {verdict.detail}"
+    return None
+
+
+def time_interleaved(
+    runs: Sequence[FullELFCallable | StepCallable],
+    timing: Timing,
+    groups: Sequence[Hashable | None] = (),
+    fastest: float = math.inf,
+    log: Callable[[str], None] = print,
+) -> list[Timed]:
+    """Each loaded image's median of per-round medians, microseconds, each
+    round timed while no other process holds the NPU (``wait_idle``) and the
+    completions' cores are held ``Awake``.
+
+    Args:
+        groups: Per run, the setting it measures, where the runs are
+            settings of one design; a setting is timed no further once its
+            slowest run is past ``timing.cutoff`` times the fastest
+            setting's (``Timing``). None marks a run never stopped. Every
+            run is timed every round if not given.
+        fastest: The slowest run of the fastest setting timed before these.
+        log: Where waiting for the NPU, or a round timed again, is reported.
+
+    Raises:
+        RuntimeError: A run's middle call waited for a CPU past
+            ``CPU_WAIT_US`` (``Awake.waited_us``) in its median round: the
+            host was busy enough to hold completions off a core.
+    """
+    for run in runs:
+        run()  # warm: first-run setup lands on nobody's figure
+    # Which interrupts a call raises, its first one's setup aside.
+    before = Awake.interrupts()
+    for run in runs:
+        run()
+    medians: list[list[float]] = [[] for _ in runs]
+    waited: list[list[float]] = [[] for _ in runs]
+    live = set(range(len(runs)))
+    wait_idle(log, holding=True)
+    r = 0
+    with Awake(before):
+        while r < timing.rounds:
+            timed = {}
+            for i, run in enumerate(runs):
+                if i not in live:
+                    continue
+                times, waits = [], []
+                for _ in range(timing.calls):
+                    start = Awake.waited_us()
+                    run()
+                    times.append(run.last_elapsed)
+                    waits.append(Awake.waited_us() - start)
+                timed[i] = (statistics.median(times) * 1e6, statistics.median(waits))
+            held = others(holding=True)
+            if held:
+                log(
+                    f"    pid {sorted(held)} used the NPU during a round: timing it again"
+                )
+                wait_idle(log, holding=True)
+                continue
+            for i, (us, wait) in timed.items():
+                medians[i].append(us)
+                waited[i].append(wait)
+            r += 1
+            if not groups or r < timing.settle:
+                continue
+            slowest: dict[Hashable, float] = {}
+            for i in live:
+                us = statistics.median(medians[i])
+                slowest[groups[i]] = max(slowest.get(groups[i], 0.0), us)
+            bar = timing.cutoff * min([fastest, *slowest.values()])
+            live = {i for i in live if groups[i] is None or slowest[groups[i]] <= bar}
+    late = max(statistics.median(w) for w in waited)
+    if late > CPU_WAIT_US:
+        raise RuntimeError(
+            f"a run's middle call waited {late:.0f} us for a CPU in its median "
+            f"round; measure with the host otherwise idle"
+        )
+    return [Timed(tuple(m)) for m in medians]
+
+
+# The device contexts the driver holds at once; each run timed keeps one.
+CONTEXTS = 16
+
+# Past this nothing stays in a cache, and the repeats' copies would not fit.
+DISTINCT_BYTES = 256 * 2**20
+
+
+@dataclasses.dataclass(frozen=True)
+class Measurement:
+    """One design's step, as ``measure`` timed it.
+
+    Attributes:
+        t_step_us: Its time per step, the median of `round_us`.
+        round_us: Its time per step as each round measured it. Two
+            measurements of one `run` were timed round for round together,
+            so their rounds pair.
+        output: The sha256 of what one run wrote, so two settings run on
+            the same inputs compare without a rerun.
+        run: Which ``time_interleaved`` call timed it.
+        pmode: The NPU's power mode.
+        calls: The runs a round timed.
+        measured: The day, as an ISO date.
+    """
+
+    t_step_us: float
+    round_us: tuple[float, ...]
+    output: str
+    run: str
+    pmode: str
+    calls: int
+    measured: str = dataclasses.field(
+        default_factory=lambda: datetime.date.today().isoformat()
+    )
+
+    def difference(self, other: Measurement) -> tuple[float, float | None]:
+        """How much longer a step of this one takes than one of ``other``,
+        and that difference's standard error: round by round where the two
+        were timed in one run, else from each one's own.
+        """
+        delta = self.t_step_us - other.t_step_us
+        if self.run == other.run:
+            return delta, standard_error(
+                [a - b for a, b in zip(self.round_us, other.round_us)]
+            )
+        noises = [standard_error(m.round_us) for m in (self, other)]
+        if None in noises:
+            return delta, None
+        return delta, math.hypot(*noises)
+
+
+class Cache:
+    """Every design measured on one NPU platform at one power mode, one
+    JSON file each under ``root/<platform>/<power mode>/``.
+
+    An entry is keyed on what its time follows: the design's build (its
+    recipe and the sources, tools and device it is compiled with, as
+    mlir-aie's compile cache keys it), the per-call values it was run at,
+    the contents of the inputs it was given and its packaging. Editing how a
+    design is generated therefore misses rather than reusing a stale time.
+    """
+
+    def __init__(
+        self,
+        platform: str,
+        mode: str,
+        root: Path = Path(NPU_CACHE_HOME) / "iron" / "costs",
+    ):
+        self.mode = mode
+        slug = re.sub(r"[^a-z0-9]+", "-", platform.lower()).strip("-")
+        self.directory = Path(root) / slug / mode
+
+    @classmethod
+    def here(cls) -> Cache:
+        """The cache of this NPU at its present power mode."""
+        report = platform()
+        return cls(report["Name"], report["Power Mode"])
+
+    @staticmethod
+    def key(
+        op: Operator,
+        values: Mapping[str, int] | None = None,
+        inputs: Mapping[str, np.ndarray] | None = None,
+        full_elf: bool = True,
+    ) -> str:
+        """The entry ``op``, resolved for the current device, is kept in as
+        run at ``values`` on ``inputs`` (random where not given), packaged
+        as one full ELF or not.
+        """
+        design = OperatorDesign(op.resolved()).compilable()
+        given = sorted(
+            (name, hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest())
+            for name, a in (inputs or {}).items()
+        )
+        key = (
+            design.recipe_hash,
+            design.artifact_hash,
+            sorted((values or {}).items()),
+            given,
+            full_elf,
+        )
+        return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
+
+    def get(self, key: str) -> Measurement | None:
+        """The measurement at ``key``; None if there is none, or it was
+        written with other fields than ``Measurement`` has.
+        """
+        path = self.directory / f"{key}.json"
+        if not path.exists():
+            return None
+        fields = json.loads(path.read_text())
+        if fields.keys() != {f.name for f in dataclasses.fields(Measurement)}:
+            return None
+        return Measurement(**{**fields, "round_us": tuple(fields["round_us"])})
+
+    def put(self, key: str, m: Measurement) -> None:
+        write(self.directory / f"{key}.json", json.dumps(dataclasses.asdict(m)) + "\n")
+
+
+def write(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` whole, as another process may read it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_suffix(f".{os.getpid()}")
+    partial.write_text(text)
+    partial.replace(path)
+
+
+def measure(
+    ops: Sequence[Operator],
+    *,
+    full_elf: bool,
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    values: Mapping[str, int] | None = None,
+    inputs: Mapping[str, np.ndarray] | None = None,
+    cache: Cache | None = None,
+    remeasure: bool = False,
+    log: Callable[[str], None] = print,
+) -> dict[int, Measurement]:
+    """Time each of ``ops``, settings of one design with the default first,
+    as many at once as the device's contexts hold. Every batch times the
+    default too, so each other setting pairs with it round by round.
+
+    Args:
+        values: The per-call values each is run at.
+        inputs: What its input buffers hold, by name, where random bytes
+            would not be representative.
+        cache: Settings it holds are taken from it rather than run, unless
+            `remeasure`; those run are written to it.
+
+    Returns:
+        Each one timed, by its index in ``ops``. One other than the default
+        that does not build is left out, and reported to ``log``.
+
+    Raises:
+        RuntimeError: The default does not build.
+    """
+    mode = pmode()
+    if cache is not None and cache.mode != mode:
+        raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    keys = [
+        None if cache is None else cache.key(op, values, inputs, full_elf) for op in ops
+    ]
+    out: dict[int, Measurement] = {}
+    if cache is not None and not remeasure:
+        for i, key in enumerate(keys):
+            if (m := cache.get(key)) is not None:
+                out[i] = m
+    todo = [i for i in range(len(ops)) if i not in out]
+    if todo and 0 not in todo:
+        todo.insert(0, 0)  # the default, timed beside the others
+    distinct = sum(b.nbytes for b in ops[0].resolved().buffers) <= DISTINCT_BYTES
+    # Each setting is two runs, each holding a context; one pair is the default's.
+    size = CONTEXTS // 2 - 1
+    fastest = math.inf
+    others = todo[1:]
+    for begin in range(0, max(len(others), 1), size):
+        batch = [todo[0]] + others[begin : begin + size]
+        log(f"    timing {len(batch)} settings, {len(others) - begin} to go")
+        built, short, long = [], [], []
+        for i in batch:
+            try:
+                one = Standalone(
+                    f"probe1_{i}",
+                    [ops[i]],
+                    values={ops[i]: values or {}},
+                    inputs={ops[i]: inputs or {}},
+                    full_elf=full_elf,
+                    load=False,
+                )
+                many = Standalone(
+                    f"probe{repeats}_{i}",
+                    [ops[i]] * repeats,
+                    values={ops[i]: values or {}},
+                    distinct=distinct,
+                    inputs={ops[i]: inputs or {}},
+                    full_elf=full_elf,
+                    load=False,
+                )
+            except RuntimeError as e:
+                # The placer passed it, but the build did not.
+                if i == 0:
+                    raise
+                log(f"    {ops[i]} does not build, not measured: {e}")
+                continue
+            # A load that fails is the device's state, not a verdict on the design.
+            one.load()
+            many.load()
+            built.append(i)
+            short.append(one)
+            long.append(many)
+        outputs = [run.digest() for run in short]
+        # The default is timed in full; the others stop once far behind.
+        groups = [None if i == 0 else i for i in built] * 2
+        times = time_interleaved(
+            [r.callable for r in short + long], timing, groups, fastest, log
+        )
+        run = uuid.uuid4().hex
+        n = len(built)
+        for j, i in enumerate(built):
+            rounds = tuple(
+                (many - one) / (repeats - 1)
+                for one, many in zip(times[j].round_us, times[n + j].round_us)
+            )
+            out[i] = Measurement(
+                statistics.median(rounds), rounds, outputs[j], run, mode, timing.calls
+            )
+            if cache is not None:
+                cache.put(keys[i], out[i])
+        fastest = min(fastest, *(times[n + j].us for j in range(n)))
+        # A probe holds its context while it lives; the next batch needs them.
+        del short, long
+    return out

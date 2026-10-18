@@ -10,7 +10,7 @@ whose every user is an ``aiex.npu.rtp_write`` may differ. A probe field
 leaking into a transfer, a trip count or a core shows up as any other
 difference. What the walk cannot see is a kernel whose time follows the
 words' values; the hardware check in
-``iron/tests/infrastructure/narrowing.py`` measures that.
+``iron/tests/infrastructure/autotune.py`` times that.
 
 No toolchain and no NPU: the modules are generated in process.
 """

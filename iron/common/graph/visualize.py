@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pictures of a graph: its trace, and what compile and the tuner made of
-it, drawn from the live objects as Graphviz text (``dot()``), SVG
+"""Pictures of a graph: its trace, and what compile made of it, drawn from the live objects as Graphviz text (``dot()``), SVG
 (``svg()``) or one self-contained page (``html()``).
 """
 
@@ -31,7 +30,6 @@ from .handle import Handle
 
 if TYPE_CHECKING:
     from .compiled import CompiledGraph
-    from .tuner import Prices
     from .trace import TracedGraph
 
 INK = "#0b0b0b"
@@ -110,9 +108,7 @@ class Dataflow:
         weights: Draw each weight as its own node; else name it in the box
             of the step reading it.
         version: The compiled version ``traced`` is of: each box names its
-            design and the steps folded into it, a tuned version's moved
-            tunables and packs too.
-        prices: Each box shows the time these prices give its design.
+            design and the steps folded into it.
     """
 
     def __init__(
@@ -122,14 +118,12 @@ class Dataflow:
         layers: set[int] | None = None,
         weights: bool = True,
         version: CompiledGraph | None = None,
-        prices: Prices | None = None,
     ):
         self.traced = traced
         self.title = title or traced.name
         self.layers = layers
         self.weights = weights
         self.version = version
-        self.prices = prices
 
     @staticmethod
     def root(h: Handle) -> Handle:
@@ -183,16 +177,6 @@ class Dataflow:
             if self.layers is None or layer[i] in self.layers
         ]
 
-    def packs(self) -> dict[int, int]:
-        """The pack each step's design shares a device in, by step index:
-        a tuned full ELF's devices holding more than one design.
-        """
-        tuning = None if self.version is None else self.version.tuning
-        # An xclbin chain loads each design alone: it has no shared device.
-        if tuning is None or not self.version.plan.full_elf:
-            return {}
-        return tuning.packs(self.traced, None)
-
     def designs(self) -> dict[int, tuple[str, int]]:
         """Each step's design in the compiled image, a short label, and how
         many operators run that design, by step index.
@@ -204,11 +188,6 @@ class Dataflow:
             d.name: (f"d{i}", len(d.operators)) for i, d in enumerate(artifacts.designs)
         }
         return {s.index: labels[s.design] for s in artifacts.steps}
-
-    def moved(self) -> dict[int, dict]:
-        """The tunables the tuner moved, by step index."""
-        tuning = None if self.version is None else self.version.tuning
-        return {} if tuning is None else tuning.moved(self.traced, None)
 
     def values(self) -> dict[int, list[str]]:
         """Each operator's per-call values as written, by the ``id`` of the
@@ -224,8 +203,6 @@ class Dataflow:
         i: int,
         values: Mapping[int, list[str]],
         designs: Mapping[int, tuple[str, int]],
-        moved: Mapping[int, dict],
-        prices: Mapping[int, float | None],
     ) -> list[str]:
         """The lines of step ``i``'s box, as Graphviz HTML-like label text.
 
@@ -233,8 +210,6 @@ class Dataflow:
             i: The step's index.
             values: ``values()``.
             designs: ``designs()``.
-            moved: ``moved()``.
-            prices: Each step's time, None where it is not priced.
         """
         s = self.traced.steps[i]
         op = s.op
@@ -269,25 +244,12 @@ class Dataflow:
             lines.append(
                 f'<font point-size="9" color="{INK_2}"><i>{html.escape(v)}</i></font>'
             )
-        tuned = moved.get(i)
-        if tuned:
-            text = ", ".join(f"{k}={v}" for k, v in tuned.items())
-            lines.append(
-                f'<font point-size="9" color="{INK}"><b>tuned</b> {html.escape(text)}</font>'
-            )
         if i in designs:
             label, count = designs[i]
             shared = f", shared by {count}" if count > 1 else ""
             lines.append(
                 f'<font point-size="8" color="{MUTED}">design {label}{shared}</font>'
             )
-        if i in prices:
-            if prices[i] is not None:
-                lines.append(
-                    f'<font point-size="9" color="{INK_2}">{prices[i]:.1f} µs</font>'
-                )
-            else:
-                lines.append(f'<font point-size="8" color="{MUTED}">unmeasured</font>')
         return lines
 
     def tooltip(self, op: Operator) -> str:
@@ -306,7 +268,7 @@ class Dataflow:
         return "×".join(str(n) for n in h.shape) or "1"
 
     def caption(self) -> str:
-        """The title, then what a compiled version's plan and tuning say."""
+        """The title, then what a compiled version's plan says."""
         lines = [html.escape(self.title)]
         if self.version is not None:
             plan = self.version.plan
@@ -315,12 +277,6 @@ class Dataflow:
                 f'<font point-size="11" color="{INK_2}">{image}: '
                 f"{html.escape('; '.join(plan.reasons))}</font>"
             )
-            tuning = self.version.tuning
-            if tuning is not None:
-                lines.append(
-                    f'<font point-size="11" color="{INK_2}">'
-                    f"{html.escape(tuning.summary())}</font>"
-                )
         return "<br/>".join(lines)
 
     def body(self, prefix: str = "") -> tuple[list[str], list[str]]:
@@ -336,9 +292,7 @@ class Dataflow:
             for h in s.outputs:
                 if self.root(h).role in ("intermediate", "output"):
                     writer[self.root(h).name] = i
-        values, designs, moved = self.values(), self.designs(), self.moved()
-        prices = {} if self.prices is None else self.prices.step_us(self.traced, None)
-        packs = self.packs()
+        values, designs = self.values(), self.designs()
 
         nodes: dict[object, list[str]] = defaultdict(list)
         edges: list[str] = []
@@ -381,8 +335,8 @@ class Dataflow:
             s = steps[i]
             color = FAMILIES[FAMILY.get(type(s.op).__name__, "other")]
             tip = html.escape(self.tooltip(s.op), quote=True)
-            at = ("pack", packs[i]) if i in packs else ("layer", layer[i])
-            label = "<br/>".join(self.box(i, values, designs, moved, prices))
+            at = ("layer", layer[i])
+            label = "<br/>".join(self.box(i, values, designs))
             nodes[at].append(
                 f'  "{prefix}s{i}" [shape=box, style="rounded,filled", '
                 f'fillcolor="{color}33", color="{color}", penwidth=2, '
@@ -433,7 +387,7 @@ class Dataflow:
             if n is None:
                 out += lines
                 continue
-            label = f"layer {n}" if kind == "layer" else f"pack {n}: one device"
+            label = f"layer {n}"
             out.append(f'  subgraph "cluster_{prefix}{kind}{n}" {{')
             out.append(
                 f'    label=<{label}>; fontcolor="{INK_2}"; color="{HAIRLINE}"; '

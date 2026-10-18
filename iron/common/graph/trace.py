@@ -9,7 +9,6 @@ import dataclasses
 import itertools
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping
-from typing import TYPE_CHECKING
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -33,9 +32,6 @@ from .handle import (
     is_operand,
 )
 from .visualize import Dataflow
-
-if TYPE_CHECKING:
-    from .tuner import Prices
 
 
 @dataclasses.dataclass
@@ -343,7 +339,6 @@ class TracedGraph:
         title: str = "",
         layers: set[int] | None = None,
         weights: bool = True,
-        prices: Prices | None = None,
     ) -> Dataflow:
         """This graph drawn (``visualize.Dataflow``): its ``dot()``, ``svg()``
         and ``html()``.
@@ -352,9 +347,8 @@ class TracedGraph:
             title: The caption; the graph's name if empty.
             layers: The layers drawn, or None for every step.
             weights: Draw each weight as its own node.
-            prices: Show the time these prices give each design.
         """
-        return Dataflow(self, title, layers, weights, prices=prices)
+        return Dataflow(self, title, layers, weights)
 
     def dot(self) -> str:
         """This graph drawn as Graphviz text (``picture``)."""

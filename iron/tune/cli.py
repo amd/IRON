@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measuring costs on this NPU from the command line.
+"""Tuning on this NPU from the command line.
 
-A graph's cost table is filled by a module built on this one: it takes
-``parser``, adds the arguments its calls follow from, builds each version's
-calls (``probe.Call.admitted``) and passes them to ``measure`` with the
-directory its tables are in: one per device, ``costs_<device>.json``,
-measured under the packaging the device runs. A model's is ``iron.lm.tune`` (``python -m iron.lm.tune
-<application>``), by the plan its ``Runner`` gives.
+A model's profile is tuned by a module built on this one: it takes
+``parser``, adds the arguments its calls follow from, traces the calls
+(``autotune.Call``) and passes them to ``tune`` with its profiles'
+directory, whose ``<device>.json`` it rewrites. A model's is ``iron.lm.tune``
+(``python -m iron.lm.tune <application>``).
 
-One operator is measured at every setting it tunes to by this module's own
+One operator is timed at every setting it tunes to by this module's own
 command line, its fields as a profile entry names them:
 
 ```bash
@@ -24,34 +23,23 @@ Run with XRT sourced and the NPU otherwise idle.
 import argparse
 import functools
 import json
-import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
 import aie.utils as aie_utils
 
 from iron import operators
-from iron.common.declare import Operator
+from iron.common.declare import Profile
 from iron.common.image.packaging import dispatches_full_elf
-from .narrowing import CostTable, fitting, variants
-from .probe import Call, Timing, cost_cache, measure_graph, pmode, search
+from .autotune import Call, Shape, autotune, time_shape
+from .measure import Cache, Timing, pmode
 
 
-def parser(description: str, tables: Path | None) -> argparse.ArgumentParser:
-    """The arguments every measurement takes: the table to fill (by default
-    the device's in ``tables``, ``table``; a scratch one if None) and how
-    each figure is timed.
-    """
+def parser(description: str) -> argparse.ArgumentParser:
+    """The arguments every tuning takes: how each setting is timed."""
     p = argparse.ArgumentParser(description=description)
-    p.add_argument(
-        "--table",
-        type=Path,
-        help="the table to fill (default: "
-        + (f"costs_<device>.json in {tables}" if tables else "a scratch table")
-        + ")",
-    )
-    p.add_argument("--rounds", type=int, default=8)
-    p.add_argument("--calls", type=int, default=50)
+    p.add_argument("--rounds", type=int, default=Timing.rounds)
+    p.add_argument("--calls", type=int, default=Timing.calls)
     p.add_argument(
         "--cutoff",
         type=float,
@@ -71,54 +59,42 @@ def parser(description: str, tables: Path | None) -> argparse.ArgumentParser:
     p.add_argument(
         "--remeasure",
         action="store_true",
-        help="measure designs and calibrations already in the table or the "
-        "cost cache again",
+        help="time settings the cache already holds again",
     )
     return p
 
 
-def table(args: argparse.Namespace, dev, tables: Path) -> Path:
-    """The table ``args`` fills on ``dev``: ``args.table``, else
-    ``costs_<device>.json`` in ``tables``.
-    """
-    if args.table is not None:
-        return args.table
-    return tables / f"costs_{dev.name}.json"
-
-
-def measure(
-    args: argparse.Namespace,
-    calls: Sequence[Call],
-    triangle: tuple[type[Operator], ...],
-    tables: Path,
-) -> list[str]:
-    """Fill the table ``args`` names in ``tables`` (``table``) with
-    ``calls``' designs and the configure cost between each pair of
-    ``triangle``'s operator classes (``measure_graph``), timed as ``args``
-    says.
-    """
-    print(f"power mode: {pmode()}", flush=True)
-    dev = aie_utils.ensure_current_device()
-    return measure_graph(
-        CostTable(
-            table(args, dev, tables),
-            dev.name,
-            dispatches_full_elf(dev),
-            remeasure_stale=True,
-        ),
-        calls,
-        triangle,
-        Timing(args.rounds, args.calls, args.settle, args.cutoff),
-        args.repeats,
-        args.remeasure,
+def _timing(args: argparse.Namespace) -> dict:
+    return dict(
+        timing=Timing(args.rounds, args.calls, args.settle, args.cutoff),
+        repeats=args.repeats,
+        cache=Cache.here(),
+        remeasure=args.remeasure,
         # Hours long and usually redirected: each line lands as it is logged.
         log=functools.partial(print, flush=True),
     )
 
 
+def tune(args: argparse.Namespace, calls: Sequence[Call], profiles: Path) -> Path:
+    """Rewrite ``profiles/<device>.json`` with the settings ``calls`` time
+    fastest at (``autotune``), timed as ``args`` says; return its path.
+    """
+    print(f"power mode: {pmode()}", flush=True)
+    dev = aie_utils.ensure_current_device()
+    path = profiles / f"{dev.name}.json"
+    profile = Profile.load(path) if path.exists() else None
+    tuned = autotune(
+        calls, dev, profile, full_elf=dispatches_full_elf(dev), **_timing(args)
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tuned.save(path)
+    print(f"wrote {path}")
+    return path
+
+
 def main() -> None:
-    """Measure one operator at each of its settings and print them."""
-    p = parser("Measure one operator at every setting it tunes to", None)
+    """Time one operator at each of its settings and print them."""
+    p = parser("Time one operator at every setting it tunes to")
     p.add_argument("operator", choices=operators.__all__)
     p.add_argument(
         "fields",
@@ -148,38 +124,15 @@ def main() -> None:
 
     dev = aie_utils.ensure_current_device()
     op = getattr(operators, args.operator)(**fields)
-    found, refused = fitting(variants(op._probed(), dev))
-    print(f"power mode: {pmode()}; {len(found)} settings")
-    for key, why in refused.items():
-        first_line, _, _ = why.partition("\n")
-        print(f"not measured, the placer refuses {key}: {first_line}")
-    with tempfile.TemporaryDirectory() as scratch:
-        costs = CostTable(
-            args.table or Path(scratch) / "costs.json",
-            dev.name,
-            dispatches_full_elf(dev),
-            remeasure_stale=True,
-        )
-        search(
-            costs,
-            found,
-            Timing(args.rounds, args.calls, args.settle, args.cutoff),
-            args.repeats,
-            values,
-            None,
-            cost_cache(),
-            args.remeasure,
-        )
-        if args.table:
-            costs.save()
-        measured = [v for v in found if v.key in costs.steps]
-        for v in sorted(measured, key=lambda v: costs.steps[v.key].t_step_us):
-            c = costs.steps[v.key]
-            print(
-                f"{dict(v.tunables)}: t_step {c.t_step_us:8.2f} us  "
-                f"alone {c.alone_us:8.2f} us  exact {c.exact}  accurate {c.accurate}"
-                + ("  (default)" if v is found[0] else "")
-            )
+    shape = Shape(op)
+    shape.members.append((op, [(1.0, values)], {}))
+    print(f"power mode: {pmode()}")
+    tried = time_shape(shape, dev, full_elf=dispatches_full_elf(dev), **_timing(args))
+    for t in sorted(tried, key=lambda t: t.delta_us):
+        noise = "" if t.noise_us is None else f" ± {t.noise_us:.2f}"
+        why = "" if t.refused is None else f"  refused: {t.refused}"
+        mark = "  (traced)" if t is tried[0] else ""
+        print(f"{t.tunables}: {t.delta_us:+9.2f}{noise} us{mark}{why}")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ tower's (``AudioConfig``) and the vision tower's (``VisionConfig``), as the
 checkpoint's ``config.json`` and ``processor_config.json`` give them, named
 as ``iron.lm.Config`` names a decoder's, and the largest call each graph is
 compiled for. ``PROFILES`` holds every graph's tunables, one profile per
-device, and the cost tables ``iron.lm.tune`` measures.
+device, as ``iron.lm.tune`` writes them.
 """
 
 import dataclasses

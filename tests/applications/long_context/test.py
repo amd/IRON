@@ -227,9 +227,7 @@ def loaded(request):
         options += ["--max-seq-len", str(max_seq_len)]
     runner = app.runner.from_options(options)
     each_step = request.param.endswith("_each_step")
-    model = runner.npu(
-        request.config.getoption("--cost-table"), full_elf=False if each_step else None
-    )
+    model = runner.npu(full_elf=False if each_step else None)
     assert model.device_loop is not each_step
     yield app, runner, model
     if aie_utils.DefaultNPURuntime is not None:

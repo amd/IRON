@@ -41,7 +41,6 @@ from .carried import CARRY, EmitSite, attach_emit, compose
 from .fold import Folding, folded
 from .handle import Affine, Carry, Handle, PerCall, State, Weight, is_operand
 from .trace import TracedGraph, Tracer, _ReferenceTracer
-from .tuner import Prices, Tuner, Tuning
 from .visualize import Dataflow
 
 logger = logging.getLogger(__name__)
@@ -395,7 +394,6 @@ class Graph:
         verbose=False,
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | None = None,
-        tuner: Tuner | None = None,
         fold: bool | Collection[Folding] = False,
         **shapes,
     ) -> CompiledGraph:
@@ -418,14 +416,10 @@ class Graph:
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
             coresident: Packs designs into shared configurations.
-            tuner: Chooses tunables, folds and packs for the trace
-                (``iron.tune.narrowing.JointNarrowing``); its packs take
-                ``coresident``'s place.
             fold: Fold every step its readers or its producer can apply
                 in their own cores into them, and every copy its producer
                 can write in its place (``iron.common.graph.fold``),
-                whatever it costs; or those folds alone, as a tuning's
-                ``folds`` name them.
+                whatever it costs; or those folds alone.
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
         with (
@@ -450,18 +444,8 @@ class Graph:
                             f"readers or producers"
                         )
                 current = aie_utils.ensure_current_device()
-                # Folding and narrowing change nothing the packaging follows from.
+                # Folding changes nothing the packaging follows from.
                 chosen = plan(current, traced, full_elf, check)
-                tuning = None
-                groups: AdjacentPacking | list[list[Operator]] | None = coresident
-                if tuner is not None:
-                    if coresident is not None:
-                        raise TypeError(
-                            f"{self.name}: a tuner chooses the packs; give "
-                            f"coresident= or tuner=, not both"
-                        )
-                    tuning = tuner.tune(traced, current, chosen.full_elf)
-                    traced, groups = tuning.apply(traced, current)
                 if verbose:
                     print(chosen.report(self.name))
                 signature = self._signature(
@@ -497,8 +481,7 @@ class Graph:
                     check=check,
                     arena=self._arena,
                     emit=emit,
-                    coresident=groups,
-                    tuning=tuning,
+                    coresident=coresident,
                 )
                 if sized is not None and len(version.parameters) != len(sized):
                     read = {p.name for p in version.parameters}
@@ -626,12 +609,10 @@ class CompiledGraph:
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
         coresident: AdjacentPacking | list[list[Operator]] | None = None,
-        tuning: Tuning | None = None,
     ):
         self.traced = traced
         self.plan = plan
         self.arena = arena
-        self.tuning = tuning
         self.emit = emit
         self.words, self.shared = _words(
             traced, share=plan.full_elf, extents=not plan.full_elf
@@ -673,21 +654,16 @@ class CompiledGraph:
         title: str = "",
         layers: set[int] | None = None,
         weights: bool = True,
-        prices: Prices | None = None,
     ) -> Dataflow:
         """This version drawn (``visualize.Dataflow``): each step's design and
-        the steps folded into it, a tuned version's moved tunables and packs;
-        its ``dot()``, ``svg()`` and ``html()``.
+        the steps folded into it; its ``dot()``, ``svg()`` and ``html()``.
 
         Args:
             title: The caption; the graph's name if empty.
             layers: The layers drawn, or None for every step.
             weights: Draw each weight as its own node.
-            prices: Show the time these prices give each design.
         """
-        return Dataflow(
-            self.traced, title, layers, weights, version=self, prices=prices
-        )
+        return Dataflow(self.traced, title, layers, weights, version=self)
 
     def dot(self) -> str:
         """This version drawn as Graphviz text (``picture``)."""

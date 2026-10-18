@@ -83,22 +83,10 @@ class Profile:
         """The tunables for the ``cls`` a call with ``given`` keywords makes,
         each from the most specific entry naming it.
         """
-        dims = {}
-        for f in dataclasses.fields(cls):
-            if f.name not in cls.declaration.params:
-                continue
-            if f.name in given:
-                dims[f.name] = given[f.name]
-            elif f.default is not dataclasses.MISSING:
-                dims[f.name] = f.default
-            elif f.default_factory is not dataclasses.MISSING:
-                dims[f.name] = f.default_factory()
+        dims = self.dims(cls, given)
         chosen: dict[str, tuple[int, Any]] = {}
         for base, matched, tunables in self._entries:
-            if not issubclass(cls, base) or any(
-                name not in dims or dims[name] != value
-                for name, value in matched.items()
-            ):
+            if not issubclass(cls, base) or not self.matches(matched, dims):
                 continue
             rank = len(matched)
             for name, value in tunables.items():
@@ -111,6 +99,28 @@ class Profile:
                         f"entries of equal specificity"
                     )
         return {name: value for name, (_, value) in chosen.items()}
+
+    @staticmethod
+    def dims(cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
+        """Every dimension (``Param`` field) of the ``cls`` a call with
+        ``given`` keywords makes, as an entry is matched against.
+        """
+        dims = {}
+        for f in dataclasses.fields(cls):
+            if f.name not in cls.declaration.params:
+                continue
+            if f.name in given:
+                dims[f.name] = given[f.name]
+            elif f.default is not dataclasses.MISSING:
+                dims[f.name] = f.default
+            elif f.default_factory is not dataclasses.MISSING:
+                dims[f.name] = f.default_factory()
+        return dims
+
+    @staticmethod
+    def matches(matched: Mapping[str, Any], dims: Mapping[str, Any]) -> bool:
+        """Whether an entry's ``matched`` dimensions cover ``dims``."""
+        return all(name in dims and dims[name] == v for name, v in matched.items())
 
     def lookup(self, op) -> dict[str, Any]:
         """The tunables the profile gives an operator of ``op``'s class and shape."""

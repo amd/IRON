@@ -1,20 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measure the cost table a model's versions are tuned by, on this NPU:
+"""Tune a model's profile on this NPU:
 
 ```bash
 python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors
 python -m iron.lm.tune embedding_gemma2
 ```
 
-The application's ``Runner`` names what is measured (``tune_calls``,
-``calibration_triangle``) and where ``costs_<device>.json`` lands
-(``tables``, else beside its module); ``--cost-table`` on the model's own
-command line tunes by it (``JointNarrowing``). The table is keyed by each
-design's fields, so a design changed since is left as the profile gives
-it. Designs the table or the cost cache hold are kept unless
-``--remeasure``; a design a per-call value moves is also measured at
+The application's ``Runner`` names the calls its operators are timed in
+(``tune_calls``), and the fastest settings found rewrite its model's
+``profiles/<device>.json`` (``iron.tune.autotune``): review the change with
+``git diff`` and commit it. Times the cost cache holds are kept unless
+``--remeasure``; an operator a per-call value moves is also timed at
 contexts up to ``--context``. The model is built on weights it never
 reads, since a step's time does not follow them. Run with the NPU
 otherwise idle.
@@ -30,10 +28,9 @@ from iron.tune import cli as tune_cli
 from .base import Runner
 
 
-def application_runner(name: str) -> tuple[type[Runner], Path]:
-    """``name``'s ``Runner``, read from its ``model`` module, and the
-    directory its cost table lands in (its ``tables``, else that module's
-    own): ``name`` dotted under ``iron.applications``.
+def application_runner(name: str) -> type[Runner]:
+    """``name``'s ``Runner``, read from its ``model`` module: ``name``
+    dotted under ``iron.applications``.
 
     Raises:
         ValueError: ``name`` names no such application, or its ``model``
@@ -45,31 +42,23 @@ def application_runner(name: str) -> tuple[type[Runner], Path]:
         raise ValueError(f"no application {name!r}: {e}") from e
     if "Runner" not in vars(module):
         raise ValueError(f"iron.applications.{name}.model exports no Runner")
-    runner = vars(module)["Runner"]
-    if runner.tables is not None:
-        return runner, runner.tables
-    return runner, Path(module.__file__).parent
+    return vars(module)["Runner"]
 
 
-def main(
-    name: str, runner: type[Runner], tables: Path, argv: Sequence[str] | None = None
-) -> None:
-    """The command line that measures ``name``'s cost table in ``tables``
-    (``tune_cli.table``): the calls ``runner`` plans (``Runner.tune_calls``,
-    on the flags ``Runner.tune_arguments`` adds), and the configure cost
-    between each pair of its ``calibration_triangle``.
+def main(name: str, runner: type[Runner], argv: Sequence[str] | None = None) -> None:
+    """The command line that tunes ``name``'s profile: the calls ``runner``
+    plans (``Runner.tune_calls``, on the flags ``Runner.tune_arguments``
+    adds), into its model's profiles directory.
     """
-    parser = tune_cli.parser(f"Measure {name}'s cost table", tables)
+    parser = tune_cli.parser(f"Tune {name}'s profile")
     runner.tune_arguments(parser)
     args = parser.parse_args(argv)
-    tune_cli.measure(
-        args, runner.tune_calls(parser, args), runner.calibration_triangle, tables
-    )
+    tune_cli.tune(args, runner.tune_calls(parser, args), Path(runner.model.profile))
 
 
 def cli() -> None:
-    """``python -m iron.lm.tune <application>``: measure ``<application>``'s
-    cost table (``main``), its ``Runner`` found by ``application_runner``.
+    """``python -m iron.lm.tune <application>``: tune ``<application>``'s
+    profile (``main``), its ``Runner`` found by ``application_runner``.
     ``--help`` after ``<application>`` lists the rest of its flags; without
     one, only ``application`` is required, since the flags follow from it.
     """
@@ -83,10 +72,10 @@ def cli() -> None:
     )
     args, rest = parser.parse_known_args()
     try:
-        runner, tables = application_runner(args.application)
+        runner = application_runner(args.application)
     except ValueError as e:
         parser.error(str(e))
-    main(args.application, runner, tables, rest)
+    main(args.application, runner, rest)
 
 
 if __name__ == "__main__":

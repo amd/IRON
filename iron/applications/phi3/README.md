@@ -78,7 +78,7 @@ python -m iron.applications.phi3.model \
 The options are `iron.applications.llama.model`'s own (see its README):
 `--random-weights`, `--prompt-len`, `--num-tokens`, `--max-seq-len`,
 `--temperature`, `--top-k`, `--check-accuracy`, `--check-determinism`,
-`--compare-host`, `--cost-table` and `--full-elf`/`--no-full-elf`.
+`--compare-host` and `--full-elf`/`--no-full-elf`.
 `--no-full-elf` is the form this model's tests run it in: the full-ELF
 link is impractically slow at this model's depth (32 layers), the same
 finding Qwen 2.5 1.5B Instruct's own port made.

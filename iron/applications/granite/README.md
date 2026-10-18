@@ -86,12 +86,12 @@ python -m iron.applications.granite.model \
 The options are `iron.applications.llama.model`'s own (see its README):
 `--random-weights`, `--prompt-len`, `--num-tokens`, `--max-seq-len`,
 `--temperature`, `--top-k`, `--check-accuracy`, `--check-determinism`,
-`--compare-host`, `--cost-table` and `--full-elf`/`--no-full-elf`.
+`--compare-host` and `--full-elf`/`--no-full-elf`.
 
 ## Tuning
 
 `python -m iron.lm.tune granite --checkpoint /path/to/model.safetensors.index.json`
-measures the cost table its designs can be narrowed and packed by, as
+rewrites its profile for the NPU it runs on, as
 `iron/applications/llama/README.md`'s "Tuning" section describes.
 
 ## Testing

@@ -60,11 +60,11 @@ def runner(request):
 
 
 @pytest.fixture(scope="module")
-def model(runner, request):
+def model(runner):
     """The model, compiled and loaded once, packaged ``--each-step`` (the
     full-ELF link is impractically slow here, see the module docstring).
     """
-    yield runner.npu(request.config.getoption("--cost-table"), full_elf=False)
+    yield runner.npu(full_elf=False)
 
 
 # KL(fp32 CPU || NPU), teacher-forced over 40 steps, a 1024-character

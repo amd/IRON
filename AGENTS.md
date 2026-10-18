@@ -168,7 +168,7 @@ reuse lint
        contract is the reference. A composite builds its reference from its
        kernels' contract references where it can, and says why where not.
      - `tolerance()`, what every output is judged by, in tests, a graph's
-       check mode (`compile(check=True)`) and the tuner alike: the contract of the kernel it runs unless
+       check mode (`compile(check=True)`) and autotuning alike: the contract of the kernel it runs unless
        it overrides it (a data mover returns `Tolerance.exact()`: any other
        accepts a wrong permutation). A finish or a prologue carries it
        through its steps' own.
@@ -216,9 +216,7 @@ reuse lint
      `sequence(rt)` receives; the derived sequence, each operand's
      `transfers()`, a pinned lane's shim DMA tasks)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
-     `compile(dev=, full_elf=, coresident=, tuner=)`; `graph/tuner.py` is
-     all the core knows of tuning: the `Tuner`, `Tuning` and `Prices`
-     interfaces
+     `compile(dev=, full_elf=, coresident=, profile=)`
    - `image/`: what a graph lowers onto, all of it internal:
      `OperatorSequence(traced)`, what a `TracedGraph` becomes (its steps
      as `SequenceStep(op, buffers)`, each buffer a `BufferRef(root, start,
@@ -257,15 +255,18 @@ reuse lint
 
 4. **Tuning** (`iron/tune/`), at the edge: it depends on the graph core
    and nothing in the core imports it
-   - `probe.py` and `costcache.py` measure designs on the NPU into a
-     `CostTable` (`narrowing.py`), which is the core's `Prices`
-   - `narrowing.py`'s `JointNarrowing` is a `Tuner`: given as
-     `compile(tuner=JointNarrowing(CostTable(path)))`, it chooses each
-     design's tunables, the folds and the packs from the table, its
-     `JointTuning` applied to the trace before packaging
-   - `cli.py` measures one operator at every setting it tunes to
-     (`python -m iron.tune.cli GEMV M=2048 K=8192`) and holds the parser a
-     model's tuner builds on (`python -m iron.lm.tune <application>`)
+   - `measure.py` times settings of one design on the NPU, interleaved
+     round by round with the traced setting, and caches each time by its
+     build, per-call values and inputs (`Cache`); `judge` admits a setting
+     whose output differs only within both its own and the traced
+     setting's `tolerance()`
+   - `autotune.py` times every setting of each operator shape a model's
+     calls run (coordinate descent past 32) and writes the fastest that
+     beats the traced one by two standard errors as a `Profile` entry
+   - `cli.py` times one operator at every setting it tunes to
+     (`python -m iron.tune.cli GEMV M=2048 K=8192`) and holds the parser
+     `python -m iron.lm.tune <application>` builds on, which rewrites the
+     application's `profiles/<device>.json`
 
 ### Key Concepts
 
@@ -677,9 +678,7 @@ and `verbose=True` prints why. `check=True` debugs a graph a step at a
 time: each step is its own dispatch, held to its reference on the inputs
 the NPU gave it by its `tolerance()`, and the first step outside it raises,
 naming the step and its buffers. `coresident=AdjacentPacking()` packs
-designs into shared device configurations; `tuner=` (a `Tuner` from
-`iron.tune`) chooses the tunables, folds and packs instead, and the two
-are exclusive. It links the image (`version.image`) and stops
+designs into shared device configurations. It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
 `iron/applications/llama/model.py` is the worked example
@@ -764,7 +763,7 @@ code before relying on a line here; it is the authority.
   is searched over its own members. `Array.build()` writes mlir-aie's
   `Tile(c, r)`, `Tile(col=c)` or `Any*Tile` (`AnyComputeTile`, `AnyMemTile`,
   `AnyShimTile`) by the resolved member, the hand-found one the default.
-  The tuner measures each member the placer takes, like any other tunable.
+  Autotuning times each member the placer takes, like any other tunable.
   GEMM's shim tiles stay pinned regardless of the member: unpinned, a wide
   b_col_maj shape still piles more buffer descriptors onto one shim tile
   than it holds, checked against mlir-aie #3921's placer fixes (533e0c121).

@@ -27,7 +27,6 @@ from iron import lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal
 from iron.lm.golden import flat, config_json
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
-from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
 
 
 @dataclasses.dataclass(frozen=True)
@@ -207,18 +206,11 @@ class VLMRunner(Runner):
         super().__init__(weights_path, tokenizer_path, config, seed)
         self.vision_config = VisionConfig.from_checkpoint(weights_path)
 
-    def npu(self, cost_table=None, full_elf=None, kinds=None) -> Multimodal:
+    def npu(self, full_elf=None) -> Multimodal:
         text = SmolVLMText(self.config, self.weights)
         tower = VisionTower(self.vision_config, self.weights)
         model = Multimodal(text, {self.vision_config.image_token: tower})
-        tuner = (
-            None
-            if cost_table is None
-            else JointNarrowing(CostTable(cost_table), kinds=kinds or NarrowingKinds())
-        )
-        return model.load(
-            release=self.checkpoint.release, tuner=tuner, full_elf=full_elf
-        )
+        return model.load(release=self.checkpoint.release, full_elf=full_elf)
 
     def reference(self) -> Reference:
         """What the model is judged by: transformers' own SmolVLM, over the

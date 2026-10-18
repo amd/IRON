@@ -20,8 +20,8 @@ The application is one package over `iron.lm`:
   and the largest call each graph is compiled for
 - `model.py`: the text encoder and `Multimodal` on the NPU, the
   `Tokenizer` (each task's prefix, the placeholders), the command line, and
-  `Runner`, what `python -m iron.lm.tune embedding_gemma2` measures: every
-  version of `Multimodal`, so every graph's designs, in one cost table
+  `Runner`, what `python -m iron.lm.tune embedding_gemma2` times: every
+  version of `Multimodal`, so every graph's operators, into one profile
 - `audio.py`, `vision.py`: the towers, each an `iron.lm.Tower`, a graph
   of its own that `Multimodal` calls in its body
 - `blocks.py`: the layer parts its own, over `iron.lm`'s: Gemma's
@@ -29,7 +29,7 @@ The application is one package over `iron.lm`:
 - `hugging_face.py`: Hugging Face's own processors, model and towers, what
   the tests' goldens are recorded from
 - `profiles/`: the tunables per device, where an operator's own resolution
-  falls short, and the cost tables `iron.lm.tune` writes
+  falls short, as `iron.lm.tune` writes them
 
 ## Weights and tokenizer
 
@@ -63,8 +63,7 @@ python -m iron.applications.embedding_gemma2.model /path/to/embeddinggemma-2 \
     --document "Charged particles from the sun." "Photosynthesis in plants."
 ```
 
-`--dims` truncates the embeddings, and `--costs` narrows and packs the
-designs by the table `python -m iron.lm.tune embedding_gemma2` measured.
+`--dims` truncates the embeddings.
 
 ## Testing
 

@@ -76,7 +76,7 @@ python -m iron.applications.qwen3.model \
 The options are `iron.applications.llama.model`'s own (see its README):
 `--random-weights`, `--prompt-len`, `--num-tokens`, `--max-seq-len`,
 `--temperature`, `--top-k`, `--check-accuracy`, `--check-determinism`,
-`--compare-host`, `--cost-table` and `--full-elf`/`--no-full-elf`.
+`--compare-host` and `--full-elf`/`--no-full-elf`.
 
 Qwen3's `head_dim` is 128, twice Llama 3.2 1B's 64: MHA's block-size
 search (the largest block whose cores fit L1 at this head size) picks a
@@ -89,7 +89,7 @@ count the fill repeats under the cap.
 ## Tuning
 
 `python -m iron.lm.tune qwen3 --checkpoint /path/to/model.safetensors.index.json`
-measures the cost table its designs can be narrowed and packed by, as
+rewrites its profile for the NPU it runs on, as
 `iron/applications/llama/README.md`'s "Tuning" section describes.
 
 ## Testing

@@ -52,8 +52,8 @@ def runner(request):
 
 
 @pytest.fixture(scope="module")
-def model(runner, request):
-    yield runner.npu(request.config.getoption("--cost-table"))
+def model(runner):
+    yield runner.npu()
 
 
 # KL(fp32 CPU || NPU), teacher-forced: test_lfm2_1_2b_accuracy measures a

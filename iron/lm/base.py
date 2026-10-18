@@ -30,10 +30,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.graph.tuner import Tuner
-from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
-from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
-from iron.tune.probe import Call
+from iron.tune.autotune import Call
 
 from .blocks import Attention, DecoderLayer, MLP, Norm
 from .golden import Golden, HuggingFace
@@ -600,7 +597,6 @@ class Model(iron.Graph):
         self,
         *,
         release: Callable[[np.ndarray], None] | None = None,
-        tuner: Tuner | None = None,
         full_elf: bool | None = None,
         dev=None,
     ) -> "Model":
@@ -608,7 +604,6 @@ class Model(iron.Graph):
 
         Args:
             release: Given each piece of each weight once it is on the device.
-            tuner: Folds, narrows and packs each version's designs by cost.
             full_elf: Each version's packaging (``Graph.compile``).
             dev: The device every version compiles for, else the current one.
         """
@@ -616,9 +611,7 @@ class Model(iron.Graph):
             dev = aie_utils.ensure_current_device()
         feeds = None
         for shapes in self.shapes():
-            version = self.compile(
-                dev=dev, feeds=feeds, tuner=tuner, full_elf=full_elf, **shapes
-            )
+            version = self.compile(dev=dev, feeds=feeds, full_elf=full_elf, **shapes)
             version.load(release=release)
             feeds = version if version.emit is not None else None
         return self
@@ -696,9 +689,8 @@ class Runner:
     A subclass names its ``config`` (a ``Config`` class read from the
     checkpoint's ``config.json``), ``model`` (the ``CausalLM``),
     ``open_tokenizer`` and ``bos``, and
-    any ``sizes`` ``--size`` picks among; ``tune_arguments``,
-    ``tune_calls``, ``calibration_triangle`` and ``tables`` are what
-    ``iron.lm.tune`` measures it by. Given a ``seed``, the weights are drawn
+    any ``sizes`` ``--size`` picks among; ``tune_arguments`` and
+    ``tune_calls`` are what ``iron.lm.tune`` tunes its profile by. Given a ``seed``, the weights are drawn
     in the checkpoint's shapes and a prompt with no tokenizer is random
     tokens, so speed, accuracy and determinism need neither.
     """
@@ -709,11 +701,6 @@ class Runner:
     bos: int
     # What loads the checkpoint into transformers to record its goldens.
     hugging_face: type = HuggingFace
-    # The configure cost is measured between small single-column designs, at
-    # their narrowest: one design's configure then costs least beside the
-    # fixed part the calibration isolates.
-    calibration_triangle: tuple[type, ...] = (ElementwiseAdd, SiLU, ElementwiseMul)
-    tables: Path | None = None
 
     @staticmethod
     def open_tokenizer(path):
@@ -734,8 +721,8 @@ class Runner:
     def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
         """The flags ``tune_calls`` follows from: the checkpoint whose header
         gives the weights' shapes, the decode step's position and token, the
-        contexts attention over the cache is priced at, and the sampling
-        Sample is measured at.
+        contexts attention over the cache is timed at, and the sampling
+        Sample is timed at.
         """
         parser.add_argument(
             "--checkpoint",
@@ -748,7 +735,7 @@ class Runner:
             "--position",
             type=int,
             default=256,
-            help="the decode position the decode step's designs are measured at: "
+            help="the decode position the decode step's designs are timed at: "
             "what their per-call values follow from (default: 256)",
         )
         parser.add_argument(
@@ -761,15 +748,15 @@ class Runner:
             "--context",
             type=int,
             default=8192,
-            help="the longest context a design whose work follows it is priced "
+            help="the longest context a design whose work follows it is timed "
             "at, a multiple of the prompt chunk (default: 8192)",
         )
         parser.add_argument(
             "--points",
             type=int,
             default=6,
-            help="how many contexts up to --context it is priced at, each "
-            "measured per setting: their cost grows with it (default: 6)",
+            help="how many contexts up to --context it is timed at, each "
+            "timed per setting: their cost grows with it (default: 6)",
         )
         parser.add_argument("--temperature", type=float, default=0.7)
         parser.add_argument("--top-k", type=int, default=50)
@@ -778,7 +765,7 @@ class Runner:
     def tune_calls(
         cls, parser: argparse.ArgumentParser, args: argparse.Namespace
     ) -> list[Call]:
-        """The calls the model's designs are measured in (``CausalLM.tune_calls``),
+        """The calls the model's designs are timed in (``CausalLM.tune_calls``),
         on weights it never reads.
         """
         config = cls.default_config(args.checkpoint)
@@ -939,26 +926,12 @@ class Runner:
         )
         return dataclasses.replace(config, max_seq_len=fits)
 
-    def npu(
-        self,
-        cost_table: Path | None = None,
-        full_elf: bool | None = None,
-        kinds: NarrowingKinds | None = None,
-    ) -> "CausalLM":
-        """The model compiled and loaded, weights uploaded. With a
-        ``cost_table`` (``tune``) each version's designs are folded,
-        narrowed and packed by it, restricted to ``kinds`` if given;
-        ``full_elf`` is both versions' packaging (``CausalLM.load``).
+    def npu(self, full_elf: bool | None = None) -> "CausalLM":
+        """The model compiled and loaded, weights uploaded; ``full_elf`` is
+        both versions' packaging (``CausalLM.load``).
         """
         model = self.model(self.config, self.weights)
-        tuner = (
-            None
-            if cost_table is None
-            else JointNarrowing(CostTable(cost_table), kinds=kinds or NarrowingKinds())
-        )
-        return model.load(
-            release=self.checkpoint.release, tuner=tuner, full_elf=full_elf
-        )
+        return model.load(release=self.checkpoint.release, full_elf=full_elf)
 
     def reference(self):
         """What the model is judged by: with drawn weights, its own graph on
@@ -1037,13 +1010,6 @@ def main(runner: type[Runner], description: str):
         "from the same seed and count the tokens that differ",
     )
     parser.add_argument(
-        "--cost-table",
-        type=Path,
-        help="fold, narrow and pack the designs of the decode step and the "
-        "prompt chunk by this measured cost table (iron.lm.tune); default: as "
-        "the profile gives them",
-    )
-    parser.add_argument(
         "--full-elf",
         action=argparse.BooleanOptionalAction,
         help="package each version as one full ELF, or with --no-full-elf "
@@ -1058,9 +1024,7 @@ def main(runner: type[Runner], description: str):
             f"a {len(tokens)}-token prompt and {args.num_tokens} more exceed "
             f"{run.config.max_seq_len} rows"
         )
-    model = run.npu(args.cost_table, args.full_elf)
-    for name, tuning in model.tunings.items():
-        print(f"[Tuning] {name}:\n" + tuning.report(), flush=True)
+    model = run.npu(args.full_elf)
 
     if args.check_accuracy:
         results = accuracy(model, run.reference(), tokens, args.num_tokens)

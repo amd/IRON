@@ -55,13 +55,13 @@ def runner(request):
 
 
 @pytest.fixture(scope="module")
-def model(runner, request):
+def model(runner):
     """The model, compiled and loaded once (a full ELF: the arena's banks
     hold its ~10 GB of weights and caches within aiebu's 32-bit
     relocation addend, past which Granite's decode step did not link
-    before), its versions tuned by ``--cost-table`` if given.
+    before).
     """
-    loaded = runner.npu(request.config.getoption("--cost-table"))
+    loaded = runner.npu()
     assert loaded.device_loop
     yield loaded
 

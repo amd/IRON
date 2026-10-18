@@ -16,7 +16,6 @@ from iron import Scratchpad
 from iron.common import UnaryElementwise, Unresolvable
 from iron.common.design import OperatorDesign
 from iron.common.elementwise import _interval
-from iron.tune.costcache import CostCache
 from iron.common.testing import vectors
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gelu import GELU
@@ -148,7 +147,6 @@ def test_an_activation_is_judged_by_its_devices_row(request, device, cls):
     lines = x.reshape(-1, kernel.arg_shape(0)[0])
     want = np.asarray(row.reference(lines)).astype(y.dtype)
     np.testing.assert_array_equal(y.reshape(want.shape), want)
-    assert CostCache.judged_key("default", "entry", op, op)
 
 
 class Bounded(iron.Graph):

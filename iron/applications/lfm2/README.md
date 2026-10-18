@@ -57,7 +57,7 @@ python -m iron.applications.lfm2.model \
 The options are `iron.applications.llama.model`'s own (see its README):
 `--random-weights`, `--prompt-len`, `--num-tokens`, `--max-seq-len`,
 `--temperature`, `--top-k`, `--check-accuracy`, `--check-determinism`,
-`--compare-host`, `--cost-table` and `--full-elf`/`--no-full-elf`.
+`--compare-host` and `--full-elf`/`--no-full-elf`.
 
 ## The arena past one bank
 
@@ -73,7 +73,7 @@ NPU2.
 ## Tuning
 
 `python -m iron.lm.tune lfm2 --checkpoint /path/to/model.safetensors`
-measures the cost table its designs can be narrowed and packed by, as
+rewrites its profile for the NPU it runs on, as
 `iron/applications/llama/README.md`'s "Tuning" section describes.
 
 ## Testing

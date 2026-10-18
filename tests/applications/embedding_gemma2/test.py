@@ -31,10 +31,8 @@ from PIL import Image
 
 import iron
 from iron import Scratchpad
-from iron.tune.narrowing import CostTable, JointNarrowing
 from iron.applications.embedding_gemma2.audio import AudioTower
 from iron.applications.embedding_gemma2.config import (
-    PROFILES,
     AudioConfig,
     Config,
     VisionConfig,
@@ -252,15 +250,6 @@ def tokenizer():
 
 
 @pytest.fixture(scope="module")
-def tuner():
-    """The designs narrowed and packed by the cost table `iron.lm.tune`
-    measured on this device, or as they resolve where it has measured none.
-    """
-    table = PROFILES / f"costs_{aie_utils.ensure_current_device().name}.json"
-    return JointNarrowing(CostTable(table)) if table.exists() else None
-
-
-@pytest.fixture(scope="module")
 def reference():
     """``reference(key, compute)``: ``compute(model)`` on Hugging Face's own
     EmbeddingGemma 2 (hugging_face.py), an array kept under ``key`` in
@@ -328,9 +317,9 @@ def windows(config, pixel_values, positions):
     return pixels, xy, position_ids
 
 
-def loaded(graph, tuner, full_elf=None):
+def loaded(graph, full_elf=None):
     """`graph` compiled and loaded for a fixture's tests, then released."""
-    yield graph.load(tuner=tuner, full_elf=full_elf)
+    yield graph.load(full_elf=full_elf)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 
@@ -356,7 +345,7 @@ class TestEachStep:
 
     @pytest.fixture(scope="class")
     def each_step(self, weights, tokenizer):
-        yield from loaded(Multimodal(Config(), weights, tokenizer), None, False)
+        yield from loaded(Multimodal(Config(), weights, tokenizer), False)
 
     @pytest.mark.parametrize(
         "text,task",
@@ -397,8 +386,8 @@ class TestAudio:
     """The audio tower alone."""
 
     @pytest.fixture(scope="class")
-    def audio(self, weights, tuner):
-        yield from loaded(AudioTower(AudioConfig(), weights), tuner)
+    def audio(self, weights):
+        yield from loaded(AudioTower(AudioConfig(), weights))
 
     @pytest.mark.parametrize("name", list(CLIPS))
     def test_audio_features(self, audio, reference, name, record_property):
@@ -445,8 +434,8 @@ class TestVision:
     """
 
     @pytest.fixture(scope="class")
-    def vision(self, weights, tuner):
-        yield from loaded(VisionTower(VisionConfig(), weights), tuner)
+    def vision(self, weights):
+        yield from loaded(VisionTower(VisionConfig(), weights))
 
     @pytest.fixture(scope="class")
     def processor(self, vision):
@@ -539,13 +528,13 @@ class TestVision:
 
 
 @pytest.fixture(scope="module")
-def encoder(weights, tokenizer, tuner):
-    yield from loaded(EmbeddingGemma(Config(), weights, tokenizer), tuner)
+def encoder(weights, tokenizer):
+    yield from loaded(EmbeddingGemma(Config(), weights, tokenizer))
 
 
 @pytest.fixture(scope="module")
-def multimodal(weights, tokenizer, tuner):
-    yield from loaded(Multimodal(Config(), weights, tokenizer), tuner)
+def multimodal(weights, tokenizer):
+    yield from loaded(Multimodal(Config(), weights, tokenizer))
 
 
 @pytest.mark.supported_devices("npu1", "npu2")

@@ -58,8 +58,8 @@ def runner(request):
 
 
 @pytest.fixture(scope="module")
-def model(runner, request):
-    yield runner.npu(request.config.getoption("--cost-table"))
+def model(runner):
+    yield runner.npu()
 
 
 @pytest.fixture(scope="module")

@@ -21,7 +21,6 @@ from collections.abc import Iterator
 from functools import partial
 from typing import Any, ClassVar
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.iron.kernels.sample import ROW_WORDS
 from ml_dtypes import bfloat16
@@ -31,8 +30,7 @@ import iron.functional as F
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.handle import State
-from iron.common.graph.tuner import Tuning
-from iron.tune.probe import Call, Point
+from iron.tune.autotune import Call, Point
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
@@ -374,7 +372,6 @@ class CausalLM(Model):
         self,
         *,
         release=None,
-        tuner=None,
         full_elf: bool | None = None,
         dev=None,
     ) -> "CausalLM":
@@ -382,12 +379,11 @@ class CausalLM(Model):
 
         Args:
             release: Given each piece of each weight once it is on the device.
-            tuner: Folds, narrows and packs each version's designs by cost.
             full_elf: Both versions' packaging (``Graph.compile``).
             dev: The device both versions are compiled for, else the current
                 one.
         """
-        super().load(release=release, tuner=tuner, full_elf=full_elf, dev=dev)
+        super().load(release=release, full_elf=full_elf, dev=dev)
         self.use(*self.versions.values())
         return self
 
@@ -430,7 +426,7 @@ class CausalLM(Model):
 
         Raises:
             RuntimeError: Neither version is loaded: ``load()`` first, which
-                compiles them with the tuner and packaging asked for.
+                compiles them with the packaging asked for.
         """
         if self._decode is None:
             raise RuntimeError(f"{type(self).__name__}: load() first")
@@ -450,18 +446,6 @@ class CausalLM(Model):
             raise RuntimeError(f"{type(self).__name__}: load() first")
         return self._decode.emit is not None
 
-    @property
-    def tunings(self) -> dict[str, Tuning]:
-        """Each tuned version's ``Tuning``, by ``"decode"`` and ``"prompt"``."""
-        if self._decode is None:
-            raise RuntimeError(f"{type(self).__name__}: load() first")
-        versions = dict(decode=self._decode, prompt=self._prompt)
-        return {
-            name: v.tuning
-            for name, v in versions.items()
-            if v is not None and v.tuning is not None
-        }
-
     def tune_calls(
         self,
         sample: Sampler,
@@ -470,14 +454,12 @@ class CausalLM(Model):
         context: int,
         count: int,
     ) -> list[Call]:
-        """The calls the model's designs are measured in on the current device:
-        the decode step at ``position`` and ``token``, and the prompt chunk at
-        a whole first chunk, each as traced and with each fold it admits, Sample
-        on the draw rows ``sample`` gives. Each is priced over ``contexts`` up to
-        ``context``, ``count`` of them: the decode step at their last position,
-        the prompt chunk as the whole chunk ending there.
+        """The calls the model's designs are timed in: the decode step at
+        ``position`` and ``token``, and the prompt chunk at a whole first
+        chunk, Sample on the draw rows ``sample`` gives. Each is timed over
+        ``contexts`` up to ``context``, ``count`` of them: the decode step at
+        their last position, the prompt chunk as the whole chunk ending there.
         """
-        dev = aie_utils.ensure_current_device()
         C = self.config.prefill_chunk
         decode_shapes, prompt_shapes = self.shapes()
         versions = [
@@ -515,7 +497,7 @@ class CausalLM(Model):
             [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
             _, draws = traced.states[id(self.draws)]
             rows = sample.rows(self.config.max_seq_len, k_max)
-            out += Call.admitted(traced, dev, values, {draws.name: rows}, points)
+            out.append(Call(traced, values, {draws.name: rows}, points))
         return out
 
     def logits(self, tokens) -> np.ndarray:

@@ -45,13 +45,6 @@ def pytest_addoption(parser):
         help="Output CSV file for test metrics",
     )
     parser.addoption(
-        "--cost-table",
-        type=Path,
-        default=None,
-        help="Fold, narrow and pack a language model's versions by this "
-        "measured cost table (iron.lm.tune)",
-    )
-    parser.addoption(
         "--record-goldens",
         action="store_true",
         help="Record the Hugging Face logits a test's goldens lack (needs "
