@@ -30,7 +30,7 @@ IRON is an open-source & close-to-metal Python API enabling fast and efficient e
 
 - Close-to-metal NPU programming via MLIR-AIE Python bindings
 - Pre-built operator library (GEMM, MHA, RMSNorm, RoPE, activations, etc.)
-- Operator fusion for optimal performance
+- Graphs whose operators share compiled images and run on the NPU as one program
 - Extensible architecture for custom operators
 - End-to-end LLM inference (Llama 3.2 1B example included)
 
@@ -153,7 +153,7 @@ IRON includes a complete LLM inference example demonstrating NPU acceleration:
 
 - **Location**: `iron/applications/llama/`, over the decoder every model shares (`iron/lm/`)
 - **Model**: Meta Llama 3.2 1B
-- **Features**: Multi-head attention, fused operators, bfloat16 quantization
+- **Features**: Multi-head attention, the whole decode step and sampling on the NPU, bfloat16 quantization
 
 See [iron/applications/llama/README.md](./iron/applications/llama/README.md) for setup and usage instructions.
 
@@ -187,7 +187,7 @@ IRON operators are designed for maximum NPU utilization:
 
 - Parallel execution across multiple AIE columns
 - Optimized data movement via ObjectFIFOs
-- Fused operations to minimize host-NPU transfers
+- Whole graphs on the device, so intermediate values never return to the host
 - Vectorized kernels using AIE intrinsics
 
 Run benchmarks:
