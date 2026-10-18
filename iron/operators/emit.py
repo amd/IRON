@@ -94,9 +94,6 @@ class Emit(Operator):
     image = Out(slots, dtype=np.int32, obj_shape=(slots,), depth=1)
     state = Out(carried, dtype=np.int32, obj_shape=(carried,), depth=1)
 
-    def validate(self) -> None:
-        self.check_derived("rows")
-
     class Array(Operator.Array):
         def build(self) -> Built:
             slots, carried = self.slots, self.carried

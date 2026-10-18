@@ -66,7 +66,6 @@ class DecodeLayer(Operator):
                 f"DecodeLayer: layer_type ({self.layer_type!r}) must be one of "
                 f"{', '.join(LayerType)}"
             ) from None
-        self.check_derived("x_len", "proj_len", "rms_len", "rope_rms_len", "kv_len")
 
     def resolve(self, dev):
         if dev is None or dev.arch != AIEArch.AIE2p:

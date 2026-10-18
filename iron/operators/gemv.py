@@ -159,7 +159,6 @@ class GEMV(Operator):
                 f"GEMV: repeat ({self.repeat}) must divide num_batches "
                 f"({self.num_batches})"
             )
-        self.check_derived("num_matrices")
         tso, tsi = self.tile_size_output, self.tile_size_input
         if tso is not None and tsi is not None and not (tso % tsi == 0 and tso >= tsi):
             raise ValueError(

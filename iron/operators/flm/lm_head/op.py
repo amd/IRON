@@ -46,7 +46,6 @@ class LMHead(Operator):
             raise ValueError(
                 f"LMHead: softcap ({self.softcap}) must be finite and positive"
             )
-        self.check_derived("w_words", "x_len")
 
     def resolve(self, dev):
         if dev is None:

@@ -47,7 +47,6 @@ class Magnitude(Rowwise):
     )
 
     def validate(self) -> None:
-        self.check_derived("tile_size")
         if self.width % 2:
             raise ValueError(
                 f"Magnitude: width ({self.width}) is not two halves, re and im"

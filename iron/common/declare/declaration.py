@@ -67,6 +67,7 @@ class Declaration:
         members: The members, the most derived body's order first.
         params: The `field()` fields.
         derived: Each `field()` field's computing default, by name.
+        held: The `field(derive=)` fields, which a given value must agree with.
         autos: The `Auto` fields.
         tunables: The `Auto` fields a caller, a profile or the tuner sets.
         domains: Each tunable's declared `Domain`, by name.
@@ -256,6 +257,7 @@ class Declaration:
         autos = {n: s for n, s in specs.items() if isinstance(s, AutoSpec)}
         self.params = tuple(params)
         self.derived = {n: s.derive for n, s in params.items() if s.derive is not None}
+        self.held = tuple(n for n, s in params.items() if s.held)
         self.autos = tuple(autos)
         self.tunables = tuple(n for n in autos if fields[n].init)
         # A tunable given no domain and annotated with an Enum is searched

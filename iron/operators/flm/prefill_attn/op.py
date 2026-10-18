@@ -87,7 +87,6 @@ class _PrefillAttentionBase(Operator):
                 raise ValueError(
                     f"{type(self).__name__}: {name} ({value}) must be a multiple of 128"
                 )
-        self.check_derived("head_dim", "qo_len", "kv_len")
 
     def resolve(self, dev):
         if dev is None or dev.arch != AIEArch.AIE2p:

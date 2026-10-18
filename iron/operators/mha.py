@@ -220,13 +220,13 @@ class MHA(Operator):
     test = Testing(_cases)
 
     num_heads: CompileTime[int] = field()
-    num_KV_heads: CompileTime[int] = field(derive=lambda op: op.num_heads)
-    seq_len: CompileTime[int] = field(derive=lambda op: op.seq_pad)
+    num_KV_heads: CompileTime[int] = field(lambda op: op.num_heads)
+    seq_len: CompileTime[int] = field(lambda op: op.seq_pad)
     seq_pad: CompileTime[int] = field(
         derive=lambda op: op.seq_padding(op.seq_len), repr=False
     )
     # A cache longer than the queries, whose last rows the queries are.
-    kv_len: CompileTime[int] = field(derive=lambda op: op.seq_pad)
+    kv_len: CompileTime[int] = field(lambda op: op.seq_pad)
     # ``(seq, heads, d)`` as a projection writes it, so no copy reorders the heads.
     heads_interleaved: CompileTime[bool] = field(False)
     kv_interleaved: CompileTime[bool] = field(False)
@@ -234,9 +234,7 @@ class MHA(Operator):
     causal: CompileTime[bool] = field(True, array=True)
     # Keys more than this many positions from a query are masked.
     window: CompileTime[int | None] = field(None, array=True)
-    scale: CompileTime[float] = field(
-        derive=lambda op: float(1 / np.sqrt(op.d)), array=True
-    )
+    scale: CompileTime[float] = field(lambda op: float(1 / np.sqrt(op.d)), array=True)
     B_q: CompileTime[int] = Auto(domain=BLOCK_SIZES, array=True)
     B_kv: CompileTime[int] = Auto(repr=False, init=False)
     num_pipelines: CompileTime[int] = Auto(1, domain=Width(), array=True)
@@ -380,7 +378,6 @@ class MHA(Operator):
             )
         if self.seq_len <= 0:
             raise ValueError(f"MHA: seq_len ({self.seq_len}) must be at least 1")
-        self.check_derived("seq_pad")
 
     def compatible(self) -> None:
         if 64 % self.B_q:

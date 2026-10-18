@@ -185,7 +185,6 @@ class DequantBFP(Operator):
     )
 
     def validate(self) -> None:
-        self.check_derived("quantized_bytes", "packed_blocks")
         # Validates the pair and the multiples.
         run_geometry(
             self.run_out_features, self.run_period_out_features, self.N // N_TILE

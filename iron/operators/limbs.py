@@ -43,9 +43,6 @@ class Limbs(Rowwise):
         obj_shape=(line,),
     )
 
-    def validate(self) -> None:
-        self.check_derived("tile_size")
-
     class Array(Rowwise.Array):
         def kernel(self):
             return datamovement.limbs_f32(self.line)

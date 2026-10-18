@@ -862,17 +862,18 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
         rows: CompileTime[int] = field()
         repeat: CompileTime[int] = field()
         out_rows: CompileTime[int] = field(derive=lambda op: op.rows * op.repeat)
+        cap: CompileTime[int] = field(lambda op: op.out_rows)
         x = In(rows, 8)
         y = Out(out_rows, 8)
 
-        def validate(self):
-            self.check_derived("out_rows")  # a shape may bind it: it must agree
-
     assert Rep(rows=2, repeat=3).out_rows == 6  # computed
     assert Rep(rows=2, repeat=3, out_rows=6).out_rows == 6  # given, agrees
-    with pytest.raises(ValueError, match=r"out_rows \(5\) must be"):
-        Rep(rows=2, repeat=3, out_rows=5)
+    with pytest.raises(ValueError, match=r"out_rows \(5\) must be 6"):
+        Rep(rows=2, repeat=3, out_rows=5)  # a derived field is held to its formula
     assert Rep.declaration.infer({"x": (2, 8)}, [(6, 8)]) == {"rows": 2, "out_rows": 6}
+    # A function default is computed after the fields before it, or given.
+    assert Rep(rows=2, repeat=3).cap == 6
+    assert Rep(rows=2, repeat=3, cap=8).cap == 8
 
 
 def test_a_select_picks_a_layout_within_a_storage():

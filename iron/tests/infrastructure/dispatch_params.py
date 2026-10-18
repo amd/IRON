@@ -66,9 +66,6 @@ class ChunkCopy(Operator):
     dst = Out(size, dtype=np.int32)
     n: DispatchTime[np.int32] = field(init=False)
 
-    def validate(self) -> None:
-        self.check_derived("size")
-
     def resolve(self, dev):
         return dataclasses.replace(self)
 

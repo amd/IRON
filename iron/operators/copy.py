@@ -590,11 +590,11 @@ class Copy(Operator):
 
     input_buffer_size: CompileTime[int] = field(repr=False)
     src: CompileTime[TensorAccessPattern | tuple[TensorAccessPattern, ...]] = field(
-        derive=lambda op: TensorAccessPattern.full((op.input_buffer_size,))
+        lambda op: TensorAccessPattern.full((op.input_buffer_size,))
     )
     # A repeated source's walk is its capacity: the destination's rows are the copy's.
     output_buffer_size: CompileTime[int] = field(
-        derive=lambda op: sum(
+        lambda op: sum(
             prod(p.sizes)
             for p in (
                 (op.dst,)
@@ -606,7 +606,7 @@ class Copy(Operator):
     )
     # Rows as wide as the source's innermost axis: the channels split both alike.
     dst: CompileTime[TensorAccessPattern | tuple[TensorAccessPattern, ...]] = field(
-        derive=lambda op: TensorAccessPattern.full(
+        lambda op: TensorAccessPattern.full(
             (op.output_buffer_size // op.src.sizes[-1], op.src.sizes[-1])
             if isinstance(op.src, TensorAccessPattern)
             else (op.output_buffer_size // op.src[0].sizes[-1], op.src[0].sizes[-1])

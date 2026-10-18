@@ -236,6 +236,7 @@ class Operator:
             self.compatible()
 
     def _derive_params(self) -> None:
+        given = [n for n in self.declaration.held if vars(self)[n] is not None]
         for name, derive in self.declaration.derived.items():
             if vars(self)[name] is None:
                 value = derive(self)
@@ -248,20 +249,11 @@ class Operator:
                         f"nothing computes it"
                     )
                 setattr(self, name, value)
-
-    def check_derived(self, *names: str) -> None:
-        """Raise ``ValueError`` if a given computed-default parameter disagrees with its rule.
-
-        Only a `field(derive=)` field an operator's own `validate()` names
-        here is held to its formula: a plain computed default (MHA's
-        ``num_KV_heads``, left to default to ``num_heads``) may be
-        overridden to something the formula disagrees with on purpose.
-        """
-        for name in names:
-            given, expected = vars(self)[name], self.declaration.derived[name](self)
-            if given != expected:
+        for name in given:
+            expected = self.declaration.derived[name](self)
+            if vars(self)[name] != expected:
                 raise ValueError(
-                    f"{type(self).__name__}: {name} ({given!r}) must be "
+                    f"{type(self).__name__}: {name} ({vars(self)[name]!r}) must be "
                     f"{expected!r}, what its other fields make it"
                 )
 

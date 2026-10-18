@@ -278,7 +278,6 @@ class ProjectionGEMM(Operator):
             raise ValueError(
                 f"flm.ProjectionGEMM: K ({self.K}) must be a multiple of k_tile ({self.k_tile})"
             )
-        self.check_derived("packed_blocks")
         # A mode the mask leaves out reaches the kernel's default arm, which
         # is NONE: an unactivated result rather than an error. Refuse.
         if (

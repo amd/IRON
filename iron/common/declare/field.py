@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import MISSING
+from types import FunctionType
 from typing import Any, Callable
 
 from .domain import Domain
@@ -32,13 +33,17 @@ class ParamSpec:
     """What a ``field()`` field declares beyond its dataclass field.
 
     Attributes:
-        derive: The field's computing default, or None.
+        derive: The function computing the field's default (``derive=``
+            or a function ``default``), or None.
+        held: Declared ``derive=``: a value given for the field must be
+            what `derive` computes.
         probe: The value the tuner measures the field at, or ``MISSING``.
         array: The operator's ``Array`` reads the field though no stream
             names it.
     """
 
     derive: Callable[[Any], Any] | None
+    held: bool
     probe: Any
     array: bool
 
@@ -85,14 +90,16 @@ def field(
     rebuilds only the instruction stream.
 
     Args:
-        default: The value. Without one, and without `derive`, the field is
-            a required constructor argument.
-        derive: A callable of the operator computing the field when neither
-            the caller nor an operand gives it
-            (``derive=lambda op: op.rows * op.repeat``). A value the caller
-            gives overrides it, unless the operator's ``validate()`` holds
-            the field to it with ``check_derived``. `default` and `derive`
-            are exclusive.
+        default: The value when neither the caller nor an operand gives
+            one: ``field(64)``. A function is called with the operator for
+            it, once the computed fields declared before it are set
+            (``field(lambda op: op.num_heads)``). Without `default` or
+            `derive`, the field is a required constructor argument.
+        derive: A function of the operator computing the field, as a
+            function `default` does, which also holds the field to it: a
+            value the caller or an operand gives that disagrees raises
+            ``ValueError`` (``derive=lambda op: op.rows * op.repeat``).
+            `default` and `derive` are exclusive.
         repr: The field is in the operator's repr.
         init: The field is a constructor argument.
         probe: The field reaches the device only as the words of `Value`s
@@ -114,12 +121,15 @@ def field(
     """
     if derive is not None and default is not MISSING:
         raise TypeError("field(default, derive=): give one, not both")
+    held = derive is not None
+    if isinstance(default, FunctionType):
+        derive, default = default, MISSING
     return dataclasses.field(
         default=None if derive is not None else default,
         init=init,
         repr=repr,
         kw_only=True,
-        metadata={SPEC: ParamSpec(derive=derive, probe=probe, array=array)},
+        metadata={SPEC: ParamSpec(derive=derive, held=held, probe=probe, array=array)},
     )
 
 
@@ -169,6 +179,7 @@ def Auto(
         metadata={
             SPEC: AutoSpec(
                 derive=None,
+                held=False,
                 probe=MISSING,
                 array=array,
                 default=default,
