@@ -212,17 +212,17 @@ class GEMM(Operator):
     precision: Precision = Auto(default=Precision.MEDIUM)
     # Filled by resolve, from the device: the macs, the grid, B's storage,
     # the L2 tiles.
-    emulate_bf16_mmul_with_bfp16: bool = Auto(repr=False, derived=True)
-    rows: int = Auto(repr=False, derived=True)
-    cols: int = Auto(repr=False, derived=True)
-    bfp16_b: bool = Auto(repr=False, derived=True)
+    emulate_bf16_mmul_with_bfp16: bool = Auto(repr=False, init=False)
+    rows: int = Auto(repr=False, init=False)
+    cols: int = Auto(repr=False, init=False)
+    bfp16_b: bool = Auto(repr=False, init=False)
     # B's element type, on the array and in DDR alike; the host holds a
     # block-float B as bytes (Operand.host_dtype).
-    b_dtype: Any = Auto(repr=False, derived=True)
-    l1_b_depth: int = Auto(repr=False, derived=True)
-    a_l2: int = Auto(repr=False, derived=True)
-    b_l2: int = Auto(repr=False, derived=True)
-    c_l2: int = Auto(repr=False, derived=True)
+    b_dtype: Any = Auto(repr=False, init=False)
+    l1_b_depth: int = Auto(repr=False, init=False)
+    a_l2: int = Auto(repr=False, init=False)
+    b_l2: int = Auto(repr=False, init=False)
+    c_l2: int = Auto(repr=False, init=False)
 
     # The sequence writes the cores' parameters itself, behind the first
     # block's fills and once per slab; see sequence().
@@ -350,8 +350,7 @@ class GEMM(Operator):
                 tile_ma, tile_n, ct_k, b_elem_bytes, l1, m_chunk, k_tile
             )
         b_dtype = v8bfp16ebs8 if bfp16_b else bfloat16
-        return dataclasses.replace(
-            self,
+        return self.replace(
             tile_n=tile_n,
             k_tile=k_tile,
             tile_ma=tile_ma,

@@ -233,7 +233,6 @@ def test_mha_whose_pipelines_do_not_fill_the_rows_is_refused(npu2):
         (dict(d=256, causal=False, window=520), "whole 16-row blocks"),
         (dict(scale=-1.0), "scale"),
         (dict(B_q=128), "divide 64"),
-        (dict(B_q=32, B_kv=64), "causal skip"),
     ],
     ids=[
         "head_not_whole_64",
@@ -242,7 +241,6 @@ def test_mha_whose_pipelines_do_not_fill_the_rows_is_refused(npu2):
         "window_not_whole_small_blocks",
         "negative_scale",
         "block_past_the_padding",
-        "kv_block_not_the_q_block",
     ],
 )
 def test_mha_band_and_head_that_do_not_tile_are_refused(kwargs, why, npu2):
@@ -290,13 +288,6 @@ def test_mha_one_query_packed_takes_the_narrowest_block_and_64_keys(
         heads_interleaved=True,
     ).resolved(bound)
     assert (op.B_q, op.B_kv) == (block, 64)
-
-
-def test_mha_one_query_packed_refuses_a_key_block_it_does_not_take(npu2):
-    with pytest.raises(ValueError, match="widest key block"):
-        MHA(num_heads=32, num_KV_heads=8, seq_len=1, kv_len=2048, B_kv=16).resolved(
-            npu2
-        )
 
 
 @pytest.mark.parametrize(

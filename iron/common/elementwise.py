@@ -1156,8 +1156,8 @@ class RowBroadcast(Rowwise):
         ]
     )
 
-    segments: int = Auto(derived=True)
-    line: int = Auto(derived=True)
+    segments: int = Auto(init=False)
+    line: int = Auto(init=False)
 
     x = In(
         Rowwise.rows,
@@ -1202,9 +1202,7 @@ class RowBroadcast(Rowwise):
             self.num_channels,
             fits=lambda c: out.elements % (c * self.num_channels * W) == 0,
         )
-        return dataclasses.replace(
-            self, num_aie_columns=cols, segments=segments, line=W // segments
-        )
+        return self.replace(num_aie_columns=cols, segments=segments, line=W // segments)
 
     def compatible(self) -> None:
         super().compatible()

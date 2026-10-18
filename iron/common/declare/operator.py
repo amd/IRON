@@ -248,6 +248,12 @@ class Operator:
         self._derive_params()
         self.validate()
         self._bind()
+        self._check_complete()
+
+    def _check_complete(self) -> None:
+        """Run ``compatible()`` once every tunable is known, where the
+        device fit is checked.
+        """
         if device_fit.get() and not any(
             vars(self)[n] is None for n in self.declaration.autos
         ):
@@ -778,8 +784,7 @@ class Operator:
                     f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
                 )
             if any(new.prepare.chains) or any(new.finish.chains):
-                new = dataclasses.replace(
-                    new,
+                new = new.replace(
                     prepare=(
                         new.prepare.at_prepare(new, dev)
                         if any(new.prepare.chains)
@@ -799,11 +804,24 @@ class Operator:
 
     def copy(self) -> Self:
         """A fresh instance for one build, keeping resolution and bound values."""
-        new = dataclasses.replace(self)
+        new = self.replace()
         new._resolved = self._resolved
-        if self._resolved:
-            # replace() resets the init=False fields compatible() records.
-            new.compatible()
+        return new
+
+    def replace(self, **changes: Any) -> Self:
+        """``dataclasses.replace`` that also takes and keeps the ``init=False``
+        fields, which it would refuse and reset: what ``resolve`` returns,
+        ``self.replace(tile=..., derived=...)``.
+        """
+        fixed = {
+            f.name: changes.pop(f.name, vars(self)[f.name])
+            for f in dataclasses.fields(self)
+            if not f.init
+        }
+        new = dataclasses.replace(self, **changes)
+        vars(new).update(fixed)
+        new._bind()
+        new._check_complete()
         return new
 
     def _with_tunables(self, **tunables: Any) -> Self:

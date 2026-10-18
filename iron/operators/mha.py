@@ -234,16 +234,16 @@ class MHA(Operator):
     window: int | None = Param(default=None)
     scale: float = Param(derive=lambda op: float(1 / np.sqrt(op.d)))
     B_q: int = Auto(domain=BLOCK_SIZES)
-    B_kv: int = Auto(repr=False, derived=True)
+    B_kv: int = Auto(repr=False, init=False)
     num_pipelines: int = Auto(default=1, domain=Width())
     # Filled by resolve.
-    q_shims: int = Auto(repr=False, derived=True)
-    join_rows: int = Auto(repr=False, derived=True)
-    kv_lanes: int = Auto(repr=False, derived=True)
-    width: int = Auto(repr=False, derived=True)
+    q_shims: int = Auto(repr=False, init=False)
+    join_rows: int = Auto(repr=False, init=False)
+    kv_lanes: int = Auto(repr=False, init=False)
+    width: int = Auto(repr=False, init=False)
     # Two P*V cores, by halves of the head, where one's L1 holds no block.
     pv_cores: int = Auto(repr=False, domain=(1, 2))
-    pv_width: int = Auto(repr=False, derived=True)
+    pv_width: int = Auto(repr=False, init=False)
 
     # One query packed puts pipeline p's K and V on column p: pipelines stop short of q.
     COLUMNS: ClassVar[dict[int, Columns]] = {
@@ -500,28 +500,17 @@ class MHA(Operator):
                 )
             pv_cores, B_q = fit or (pv_cores or 1, B_q)
         B_kv = self.key_block(B_q, mem)
-        if self.B_kv not in (None, B_kv):
-            raise ValueError(
-                f"MHA: B_kv ({self.B_kv}) is {B_kv}: "
-                + (
-                    "one query packed takes the widest key block that fits"
-                    if self.packed
-                    else "B_q's, as mha.cc's causal skip compares a KV block's "
-                    "index with a Q block's"
-                )
-            )
         q_shims = 2 if self.num_pipelines > 6 else 1
         if dev is not None:
             width = max(w for w in self.COLUMNS if w <= dev.cols)
         else:
-            width = max(self.COLUMNS) if self.width is None else self.width
+            width = max(self.COLUMNS)
         if pv_cores > 1 and width not in self.SPLIT_COLUMNS:
             raise Unresolvable(
                 f"MHA at d={self.d} splits P*V over two cores, which is placed "
                 f"on {', '.join(map(str, self.SPLIT_COLUMNS))} columns, not {width}"
             )
-        return dataclasses.replace(
-            self,
+        return self.replace(
             B_q=B_q,
             B_kv=B_kv,
             q_shims=q_shims,

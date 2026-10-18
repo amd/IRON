@@ -57,12 +57,10 @@ class AutoSpec(ParamSpec):
         default: The starting value a construction or a profile leaves open
             takes (``Auto(default=...)``), or None when ``resolve`` must
             fill the field.
-        derived: ``resolve`` computes the field whatever it was given.
         domain: The values a tuner searches the field over, or None.
     """
 
     default: Any
-    derived: bool
     domain: Domain | tuple[Any, ...] | None
 
 
@@ -119,7 +117,6 @@ def Param(
 def Auto(
     *,
     default: Any = None,
-    derived: bool = False,
     domain: Domain | tuple[Any, ...] | None = None,
     repr: bool = True,
     init: bool = True,
@@ -129,7 +126,10 @@ def Auto(
 
     Annotate it with the resolved type. It may name a stream tile but never
     a host shape, since inference would cycle through resolution.
-    ``init=False`` fixes a subclass's value of an inherited tunable.
+    ``init=False`` makes it no tunable: a subclass's fixed value of an
+    inherited one (``default=``), or one ``resolve`` computes from the device
+    and the other fields, giving it to the copy it returns
+    (``self.replace(x=...)``).
 
     Args:
         default: The starting value; `None` means `resolve` must fill it.
@@ -137,9 +137,6 @@ def Auto(
             (always ``None``, whatever is given): a caller leaving the
             tunable open must still read as "nothing given" in
             ``Operator.__post_init__``, before it fills this in.
-        derived: `resolve` computes the field from the device and the other
-            fields whatever it was given, so it is not a tunable a caller,
-            a profile or a tuner sets.
         domain: The values a tuner searches the field over: a `Width`, a
             `Divisors`, a fixed tuple, or (left out, on an `Enum`-annotated
             field) that `Enum`'s members. Left out otherwise, a tunable a
@@ -161,7 +158,6 @@ def Auto(
                 derive=None,
                 probe=MISSING,
                 default=default,
-                derived=derived,
                 domain=domain,
             ),
         },

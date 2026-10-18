@@ -191,11 +191,11 @@ class GEMM(Operator):
     dtype_in: Any = Param(default=bfloat16, repr=False)
     dtype_out: Any = Param(default=bfloat16, repr=False)
     # Filled by resolve.
-    n_aie_rows: int = Auto(repr=False, derived=True)
-    n_shim_mem_a: int = Auto(repr=False, derived=True)
-    a_l2: int = Auto(repr=False, derived=True)
-    b_l2: int = Auto(repr=False, derived=True)
-    c_l2: int = Auto(repr=False, derived=True)
+    n_aie_rows: int = Auto(repr=False, init=False)
+    n_shim_mem_a: int = Auto(repr=False, init=False)
+    a_l2: int = Auto(repr=False, init=False)
+    b_l2: int = Auto(repr=False, init=False)
+    c_l2: int = Auto(repr=False, init=False)
 
     A = In(M, K, dtype=dtype_in, obj_type=(a_l2,), per=(n_shim_mem_a,))
     B = In(
@@ -354,9 +354,7 @@ class GEMM(Operator):
             and self.held(dev, tile_m) > dev.core_memory_bytes
         ):
             tile_m //= 2
-        new = dataclasses.replace(
-            self, tile_m=tile_m, num_aie_columns=cols, n_aie_rows=rows
-        )
+        new = self.replace(tile_m=tile_m, num_aie_columns=cols, n_aie_rows=rows)
         held = new.held(dev, tile_m)
         if held > dev.core_memory_bytes:
             raise ValueError(
@@ -364,8 +362,7 @@ class GEMM(Operator):
                 f"tile_n={self.tile_n}: a core holds {held} bytes, past its "
                 f"{dev.core_memory_bytes}"
             )
-        return dataclasses.replace(
-            new,
+        return new.replace(
             n_shim_mem_a=min(cols, new.n_aie_rows),
             a_l2=new.mem_tile_m_a * self.tile_k,
             b_l2=self.tile_k * self.tile_n,

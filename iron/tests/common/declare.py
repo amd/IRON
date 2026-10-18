@@ -682,6 +682,26 @@ def test_resolving_for_a_device_binds_it_while_it_resolves():
         )
 
 
+def test_a_field_resolve_computes_is_kept_by_copies_and_checked_once_known():
+    class Derived(MV):
+        half: int = Auto(init=False)
+
+        def resolve(self, dev):
+            new = super().resolve(dev)
+            return new.replace(half=new.tile_out // 2)
+
+        def compatible(self):
+            super().compatible()
+            if self.half is not None and self.half > 16:
+                raise ValueError(f"half={self.half} is past 16")
+
+    assert "half" not in Derived.declaration.tunables
+    r = Derived(M=1024, K=128, tile_out=32).resolved(NPU2)
+    assert r.half == 16 and r.copy().half == 16
+    with pytest.raises(ValueError, match="half=32 is past 16"):
+        Derived(M=1024, K=128).resolved(NPU2)
+
+
 def test_a_profile_fills_the_tunables_a_call_leaves_open():
     p = Profile()
     p.add(MV, columns=4, tile_out=32)  # any MV: a declared default (64) counts as open

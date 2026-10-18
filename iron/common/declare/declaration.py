@@ -216,9 +216,7 @@ class Declaration:
         self.params = tuple(params)
         self.derived = {n: s.derive for n, s in params.items() if s.derive is not None}
         self.autos = tuple(autos)
-        self.tunables = tuple(
-            n for n, s in autos.items() if fields[n].init and not s.derived
-        )
+        self.tunables = tuple(n for n in autos if fields[n].init)
         # A tunable given no domain and annotated with an Enum is searched
         # over that Enum's members.
         self.domains = {}

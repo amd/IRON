@@ -411,7 +411,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      |---|---|
      | Host Python, never a field itself | `@property` |
      | A compile-time field a caller may still override (`check_derived` catches disagreement) | `Param(derive=lambda op: ...)` |
-     | A tunable `resolve(dev)` always fills, never a caller's | `Auto(derived=True)` |
+     | A tunable `resolve(dev)` always fills, never a caller's | `Auto(init=False)`, given by `resolve`'s `self.replace(...)` |
      | A core, as a trip count or scalar | `Value(derive=lambda op: ...)` |
    - `class Array(Operator.Array)`: a frozen dataclass naming, as
      annotated fields, the operator's fields, operands (`x: Operand`) and
