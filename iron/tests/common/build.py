@@ -322,8 +322,10 @@ def test_the_slots_after_a_multi_word_value_follow_its_words(npu2):
 
 
 def test_mha_infers_the_padded_length_and_the_kv_head_count():
-
-    op = MHA.from_operands((8, 128, 64), (2, 128, 64), (2, 128, 64))
+    inputs, _, _ = MHA.declaration.call_operands(
+        ((8, 128, 64), (2, 128, 64), (2, 128, 64)), {}
+    )
+    op = MHA(**MHA.declaration.infer(inputs))
     assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
     with pytest.raises(ValueError, match="seq_pad=100"):
         MHA(num_heads=1, seq_len=100, seq_pad=100, d=64)

@@ -122,12 +122,6 @@ class Profile:
         """Whether an entry's ``matched`` dimensions cover ``dims``."""
         return all(name in dims and dims[name] == v for name, v in matched.items())
 
-    def lookup(self, op) -> dict[str, Any]:
-        """The tunables the profile gives an operator of ``op``'s class and shape."""
-        return self.tunables_for(
-            type(op), {f.name: vars(op)[f.name] for f in dataclasses.fields(op)}
-        )
-
     @classmethod
     def load(cls, path: str | Path) -> Profile:
         """The profile ``save`` wrote to ``path``."""

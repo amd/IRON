@@ -163,7 +163,7 @@ class ExtentWord(Value):
         return ceildiv(extent, self.divisor(op))
 
     def divisor(self, op) -> int:
-        b = op.value_buffer(self.buffer)
+        b = getattr(op, self.buffer)
         lanes = 1 if b.replicate else b.count
         return lanes * b.extent_unit(self.axis)
 

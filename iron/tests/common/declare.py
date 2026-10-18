@@ -33,16 +33,23 @@ from iron.common import (
     Unresolvable,
     Value,
     Auto,
-    AutoSpec,
     Param,
-    ParamSpec,
     Built,
 )
+from iron.common.declare.field import AutoSpec, ParamSpec
 from iron.common.design import OperatorDesign
 from iron.operators import ReLU as LibraryReLU
 from iron.operators import Tanh
 
 NPU2 = from_name("npu2", n_cols=8)
+
+
+def from_operands(cls, *operand_shapes, **overrides):
+    """``cls`` constructed from operand shapes, an optional input's by keyword."""
+    inputs, outputs, overrides = cls.declaration.call_operands(
+        operand_shapes, overrides
+    )
+    return cls(**{**overrides, **cls.declaration.infer(inputs, outputs, **overrides)})
 
 
 # --------------------------------------------------------------------------
@@ -521,13 +528,13 @@ def test_an_operand_declared_when_a_flag_exists_only_where_it_is_true():
     assert "scaled" in Scaled.declaration.array
     assert plain.array_key() != scaled.array_key()
     # A call gives the optional input by keyword, which sets its flag.
-    assert not Scaled.from_operands((64,)).scaled
-    assert Scaled.from_operands((64,), s=(64,)).scaled
-    assert Scaled.from_operands((64,), s=(64,), scaled=True).scaled
+    assert not from_operands(Scaled, (64,)).scaled
+    assert from_operands(Scaled, (64,), s=(64,)).scaled
+    assert from_operands(Scaled, (64,), s=(64,), scaled=True).scaled
     with pytest.raises(TypeError, match="only where scaled is true"):
-        Scaled.from_operands((64,), s=(64,), scaled=False)
+        from_operands(Scaled, (64,), s=(64,), scaled=False)
     with pytest.raises(TypeError, match=r"Scaled\(scaled=True\) takes s="):
-        Scaled.from_operands((64,), scaled=True)
+        from_operands(Scaled, (64,), scaled=True)
 
 
 def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one():
@@ -687,7 +694,7 @@ def test_a_profile_fills_the_tunables_a_call_leaves_open():
     assert (r.columns, r.tile_out, r.vec) == (4, 32, 64)  # resolve fills the rest
     # plain construction reads no profile
     assert MV(M=1024, K=128).columns is None and MV(M=1024, K=128).tile_out == 64
-    assert p.lookup(MV(M=1024, K=256)) == {"columns": 4, "tile_out": 16}
+    assert p.tunables_for(MV, dict(M=1024, K=256)) == {"columns": 4, "tile_out": 16}
     assert len(p) == 2
 
 
@@ -761,7 +768,7 @@ def test_overriding_an_inherited_field_needs_an_annotation():
 
 def test_resolve_columns_is_the_count_given_or_the_most_that_fit():
     op = MV(M=96, K=64)
-    dev = from_name("npu2", n_cols=8)  # the shim budget is the device's
+    dev = NPU2  # the shim budget is the device's
     assert op.resolve_columns(dev, 2) == 2  # given, within the budget
     assert op.resolve_columns(dev, None) == 8  # the whole budget, nothing to fit
     assert op.resolve_columns(dev, None, fits=lambda c: 96 % (c * 32) == 0) == 3
@@ -834,7 +841,8 @@ def test_compatible_runs_at_construction_once_every_tunable_is_known():
 
 
 def test_inference_binds_the_fields_from_the_operands():
-    op = MV.from_operands(
+    op = from_operands(
+        MV,
         (3, 1024, 128),
         (
             3,
@@ -843,7 +851,7 @@ def test_inference_binds_the_fields_from_the_operands():
     )
     assert (op.M, op.K, op.num_batches) == (1024, 128, 3)
     assert op.A.shape == (3, 1024, 128)
-    assert MV.from_operands((1024, 128), (128,)).num_batches is None
+    assert from_operands(MV, (1024, 128), (128,)).num_batches is None
 
 
 # --------------------------------------------------------------------------

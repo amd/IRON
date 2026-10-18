@@ -82,11 +82,7 @@ class OperatorDesign:
                 per-call value's dispatch-time scalar, by device symbol.
         """
         array = BuiltArray(self, dispatch=dispatch)
-        prog = Program(
-            array.op.device(),
-            OperatorRuntime(array.op, array.built),
-            workers=array.workers,
-        )
+        prog = array.program()
         if array.traced:
             prog.enable_trace(array.op.trace.trace_size, workers=array.traced)
         return prog.resolve_program()
@@ -210,6 +206,12 @@ class BuiltArray:
             self.traced = [w for w in self.workers if w.trace is not None]
             self.traced = self.traced or self.workers[:1]
 
+    def program(self) -> Program:
+        """This array alone with its operator's own sequence."""
+        return Program(
+            self.op.device(), OperatorRuntime(self.op, self.built), workers=self.workers
+        )
+
     @functools.cached_property
     def reads(self) -> frozenset[str]:
         """The scratchpad words this design's cores read: beside its
@@ -219,11 +221,7 @@ class BuiltArray:
         reads a word through the parameter its function closes over.
         """
         alone = BuiltArray(self.design, self._words, self._dispatch)
-        module = Program(
-            alone.op.device(),
-            OperatorRuntime(alone.op, alone.built),
-            workers=alone.workers,
-        ).resolve_program()
+        module = alone.program().resolve_program()
         words: set[str] = set()
 
         def read(op: ir.Operation) -> ir.WalkResult:

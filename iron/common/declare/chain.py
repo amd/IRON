@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from enum import Enum
 from typing import TYPE_CHECKING, Callable
 
 from aie.dialects.aie import AIETileType
@@ -16,15 +15,6 @@ from .field import Unresolvable
 
 if TYPE_CHECKING:
     from .operator import Operator
-
-
-class Side(Enum):
-    """Which tile ``Chain.at_tile`` rebuilds a chain at: a producer's
-    finished output, or a consumer's prepared input.
-    """
-
-    FINISH = "finish"
-    PREPARE = "prepare"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -148,30 +138,6 @@ class Chain:
             return Chain(own)
         return Chain(own, tuple(chains[k] for k in sorted(chains, key=repr)))
 
-    def at_tile(self, owner: Operator, side: Side, dev) -> Chain:
-        """This chain rebuilt at the tile ``owner``'s cores hold it in,
-        resolved for ``dev``: the steps of a finish at the output tile they
-        release, or of a prologue at the input tile they acquire.
-
-        Args:
-            owner: The operator whose finish or prologue this is.
-            side: Which of the two.
-            dev: The device it resolves for.
-
-        Raises:
-            ValueError: The array applies no finish or no prologue, or the
-                chain does not rebuild at the tile (``rebuilt``).
-            Unresolvable: Each core reads more streams, its own and the
-                chain's inputs, than a core tile has input channels, a
-                finish input would stream into a block held out of order,
-                a prologue's other inputs do not match the tile they stream
-                in beside, or the chain's inputs do not fit the tiles or the
-                descriptors of the input they ride (``feed=True``).
-        """
-        if side is Side.FINISH:
-            return self._at_finish(owner, dev)
-        return self._at_prepare(owner, dev)
-
     def _riding_fits(self, feed, riding: int, name: str, what: str) -> None:
         """Both sides: ``riding`` inputs of ``what`` fit the depth ``feed``'s
         cores hold of it.
@@ -182,7 +148,19 @@ class Chain:
                 f"cores hold {feed.depth} tiles of it at once"
             )
 
-    def _at_finish(self, owner: Operator, dev) -> Chain:
+    def at_finish(self, owner: Operator, dev) -> Chain:
+        """This finish rebuilt at the output tile ``owner``'s cores release,
+        resolved for ``dev``.
+
+        Raises:
+            ValueError: ``owner``'s cores finish no output, or the chain does
+                not rebuild at the tile (``rebuilt``).
+            Unresolvable: Each core reads more streams, its own and the
+                finish's inputs, than a core tile has input channels, a
+                finish input would stream into a block held out of order, or
+                the finish's inputs do not fit the tiles or the descriptors
+                of the input they ride (``feed=True``).
+        """
         out = owner.outputs[0] if len(owner.outputs) == 1 else None
         # A subclass whose Array builds anew does not apply what its base's output declares.
         runs = next(
@@ -277,7 +255,16 @@ class Chain:
             )
         return finish
 
-    def _at_prepare(self, owner: Operator, dev) -> Chain:
+    def at_prepare(self, owner: Operator, dev) -> Chain:
+        """This prologue rebuilt at the input tile ``owner``'s cores acquire,
+        resolved for ``dev``.
+
+        Raises:
+            ValueError: ``owner``'s cores prepare no input, or the chain does
+                not rebuild at the tile (``rebuilt``).
+            Unresolvable: The prologue's other inputs do not match the tile
+                they stream in beside, or do not fit the input they ride.
+        """
         into = next((b for b in owner.inputs if b.prepare), None)
         if into is None:
             raise ValueError(

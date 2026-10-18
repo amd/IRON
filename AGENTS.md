@@ -795,7 +795,7 @@ code before relying on a line here; it is the authority.
   measured. A GEMM with a column-major B (`b_col_maj`) is never skipped:
   the nightly times no such tile.
 - A fold whose cores would read more streams than a core tile's two input
-  channels is refused (`Chain.at_tile`, at `resolved()`). So EmbeddingGemma 2's
+  channels is refused (`Chain.at_finish`, at `resolved()`). So EmbeddingGemma 2's
   residual `ElementwiseAdd` does not fold into a weighted `RMSNorm` (its
   multiplying core would read the normalized line, the weight and the
   residual), its layer scale (`RowwiseMul` by a held row) does not fold

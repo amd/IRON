@@ -35,7 +35,7 @@ from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
-from .chain import Chain, Link, Side
+from .chain import Chain, Link
 from .declaration import Declaration
 from .domain import Domain, Width
 from .field import Auto, Param, ParamSpec, Unresolvable
@@ -779,12 +779,12 @@ class Operator:
                 new = dataclasses.replace(
                     new,
                     prepare=(
-                        new.prepare.at_tile(new, Side.PREPARE, dev)
+                        new.prepare.at_prepare(new, dev)
                         if any(new.prepare.chains)
                         else new.prepare
                     ),
                     finish=(
-                        new.finish.at_tile(new, Side.FINISH, dev)
+                        new.finish.at_finish(new, dev)
                         if any(new.finish.chains)
                         else new.finish
                     ),
@@ -980,12 +980,6 @@ class Operator:
         """
         return None
 
-    def value_buffer(self, name: str) -> Operand:
-        b = self._bound.get(name)
-        if not isinstance(b, Operand):
-            raise TypeError(f"{type(self).__name__} declares no operand {name!r}")
-        return b
-
     def value(self, name: str) -> Value:
         """The device word of value ``name`` (an ``Extent`` attribute reads as an integer)."""
         try:
@@ -1112,16 +1106,6 @@ class Operator:
             *self.__dict__.get("_chain_words", ()),
             *self.__dict__.get("_place_words", ()),
         ]
-
-    @classmethod
-    def from_operands(cls, *operand_shapes, **overrides) -> Self:
-        """Construct from operand shapes, an optional input's by keyword."""
-        inputs, outputs, overrides = cls.declaration.call_operands(
-            operand_shapes, overrides
-        )
-        return cls(
-            **{**overrides, **cls.declaration.infer(inputs, outputs, **overrides)}
-        )
 
     @property
     def dev(self):

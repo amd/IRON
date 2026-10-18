@@ -28,9 +28,7 @@ from .declare import (
     Width,
     Xclbin,
     Auto,
-    AutoSpec,
     Param,
-    ParamSpec,
     Select,
 )
 from .elementwise import (
@@ -72,7 +70,5 @@ __all__ = [
     "Width",
     "Xclbin",
     "Auto",
-    "AutoSpec",
     "Param",
-    "ParamSpec",
 ]
