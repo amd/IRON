@@ -579,6 +579,8 @@ def _domain(domain) -> str:
     """``domain`` in a few words."""
     if isinstance(domain, type):
         return "{" + ", ".join(m.name for m in domain) + "}"
+    if not isinstance(domain, Domain):
+        return "{" + ", ".join(map(repr, domain)) + "}"
     text = type(domain).__name__
     if isinstance(domain, Divisors):
         parts = [f"of {_bound(domain.of)}"]

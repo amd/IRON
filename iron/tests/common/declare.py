@@ -129,6 +129,19 @@ def test_a_declaration_prints_what_it_inferred():
     )
 
 
+def test_every_catalog_operator_s_declaration_prints():
+    import iron.operators as catalog
+    import iron.operators.flm as flm
+
+    for name in catalog._OPERATOR_MODULES:
+        cls = (
+            getattr(flm, name[4:])
+            if name.startswith("flm.")
+            else getattr(catalog, name)
+        )
+        assert repr(cls.declaration).startswith(cls.__name__)
+
+
 def test_members_keep_declaration_order_and_names():
     assert [m.name for m in MV.declaration.members] == ["A", "B", "C", "count", "start"]
     assert MV.A.role is In and MV.C.role is Out
