@@ -179,6 +179,11 @@ class DecoderConfig(Config):
     hidden_act: str = "silu"
     # Whether the output head is the input embedding.
     tie_word_embeddings: bool = True
+    # Whether q, k, v and o, and every feed-forward projection, add a bias.
+    attention_bias: bool = dataclasses.field(default=False, kw_only=True)
+    mlp_bias: bool = dataclasses.field(default=False, kw_only=True)
+    # Refused by KVCache when set.
+    use_sliding_window: bool = dataclasses.field(default=False, kw_only=True)
 
     def __post_init__(self):
         if self.head_dim is None:

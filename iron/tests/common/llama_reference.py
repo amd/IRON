@@ -42,6 +42,7 @@ from iron.lm.checkpoint import leaves
 from iron.lm.golden import Golden, HuggingFace
 from iron.lm.testing import assert_close
 from iron.applications.llama import Llama
+from iron.applications.llama.model import Llama3RopeScaling
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE
@@ -236,8 +237,21 @@ class Decoder:
         assert determinism(model, prompts, 3, 3) == 0
 
 
+#: ``SMALL`` with Llama 3's RoPE scaling from a 64-position original
+#: context, so its toy prompts reach every band of frequencies.
+SCALED = dataclasses.replace(
+    SMALL,
+    rope_scaling=Llama3RopeScaling(
+        factor=8.0,
+        low_freq_factor=1.0,
+        high_freq_factor=4.0,
+        original_max_position_embeddings=64,
+    ),
+)
+
+
 class TestLlama(Decoder):
-    model, config, model_type, name, profile = Llama, SMALL, "llama", "small", PROFILE
+    model, config, model_type, name, profile = Llama, SCALED, "llama", "small", PROFILE
 
 
 @pytest.fixture(scope="module")
@@ -384,7 +398,7 @@ def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
     )
     table = (table / 2).astype(bfloat16)
     model = Placed(config, cpu.weights, table)
-    assert model.rope is None
+    assert model.rotary_emb is None
     for version in model.shapes():
         steps = model.trace(**version).steps
         assert not any(isinstance(s.op, RoPE) for s in steps)
@@ -421,7 +435,7 @@ def test_a_turn_runs_from_its_first_new_token(cpu):
     256, calls from 270 alone; the caches' rows before it are the first
     prompt's, and its logits the golden ones.
     """
-    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    config = dataclasses.replace(cpu.config, max_seq_len=1024)
     weights, reference = cpu.weights, cpu.golden
     model = OnHost(config, weights)
     rng = np.random.default_rng(9)
@@ -442,7 +456,7 @@ def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):
     rows, then the decode step at the last position, 299, each the golden
     logits; the caches are 300 rows, exactly.
     """
-    config = dataclasses.replace(SMALL, max_seq_len=300)
+    config = dataclasses.replace(cpu.config, max_seq_len=300)
     model, reference = OnHost(config, cpu.weights), cpu.golden
     tokens = np.random.default_rng(8).integers(0, config.vocab_size, 300)
     assert_close(model.logits(tokens[:299]), reference.logits(tokens[:299]))
@@ -450,13 +464,13 @@ def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):
 
 
 def _repository(directory, weights):
-    """A Hugging Face Llama repository's files at ``SMALL``'s shape: its
+    """A Hugging Face Llama repository's files at ``SCALED``'s shape: its
     ``config.json``, of a context of two prompt chunks so that loading fits
     it, ``weights``, and a tokenizer of every byte and enough two-byte
     pieces to fill the vocabulary, its last id the BOS.
     """
     V = SMALL.vocab_size
-    config = SMALL.to_json() | {"max_position_embeddings": 4096, "bos_token_id": V - 1}
+    config = SCALED.to_json() | {"max_position_embeddings": 4096, "bos_token_id": V - 1}
     (directory / "config.json").write_text(json.dumps(config))
     header, end = {}, 0
     for name, t in leaves(weights):

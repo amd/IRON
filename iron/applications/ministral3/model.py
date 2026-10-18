@@ -182,7 +182,7 @@ class Ministral3Attention(Attention):
             q.reshape(n, H, D),
             k.reshape(n, G, D),
             v.reshape(n, G, D),
-            scale=self.scale,
+            scale=self.scaling,
         )
         return self.o_proj(o)
 

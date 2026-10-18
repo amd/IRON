@@ -496,10 +496,11 @@ def test_llama_decode_traces_and_tunes():
     assert by_op[id(angles)].expression == Affine(position, cfg.head_dim)
     draw = {b.member.name: b.expression for b in t.bindings if b.op is t.steps[-1].op}
     assert draw == {"row": Affine(position, 4), "at": Affine(position)}
-    # The weights are named by the checkpoint; the caches are pinned state.
-    assert "weights.model.layers.1.self_attn.q_proj.weight" in t.pinned
-    keys = "model.layers.0.cache.keys"
-    assert t.pinned[keys] == cfg.num_key_value_heads * L * cfg.head_dim * 2
+    # The weights are pinned, and so are the caches, as state.
+    layers = model.model.layers
+    assert id(layers[1].self_attn.q_proj.weight) in t.weights
+    _, keys = t.states[id(layers[0].cache.keys)]
+    assert t.pinned[keys.name] == cfg.num_key_value_heads * L * cfg.head_dim * 2
     # Every MHA attends over the keys up to the position, its one query
     # packed by its heads.
     mhas = [s.op for s in t.steps if type(s.op) is MHA]
@@ -705,7 +706,7 @@ def test_llama_does_not_grow_with_the_context(step):
     caches = {
         f"model.layers.{i}.cache.{kv}" for i in (0, 1) for kv in ("keys", "values")
     }
-    assert grown == {"rope.table", "draws", "drawn"} | caches
+    assert grown == {"rotary_emb.table", "draws", "drawn"} | caches
 
     def activations(t):
         return {

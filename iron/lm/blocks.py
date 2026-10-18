@@ -430,8 +430,7 @@ class Rope(iron.Graph):
     """A decoder's RoPE table, a row a position (``DecoderConfig.angles``),
     with LongRoPE's long table stacked after it where the config gives one
     (``long_angles``), which a prompt passing ``long_past`` reads. A model
-    copies a call's rows once (``rows``); each layer holding the table reads
-    them.
+    copies a call's rows once (``rows``), and every layer reads them.
     """
 
     def __init__(self, c):
@@ -460,9 +459,14 @@ class KVCache(iron.Graph):
     (``cache[s : s + C][:rows]``), the last one short where the chunk does
     not divide ``max_seq_len``; a decode step attends with ``MHA`` of one
     query, which costs the context, not the cache.
+
+    Raises:
+        ValueError: The config's ``use_sliding_window`` is set.
     """
 
     def __init__(self, c):
+        if c.use_sliding_window:
+            raise ValueError("KVCache: use_sliding_window is set; none attends in one")
         shape = (c.max_seq_len, c.num_key_value_heads, c.head_dim)
         self.keys, self.values = iron.state(shape), iron.state(shape)
         self.chunk = c.prefill_chunk
@@ -496,18 +500,23 @@ class Attention(iron.Graph):
     and ``v_proj`` of the layer's input, q and k turned by the call's RoPE
     angles where given, only their first ``rotary`` columns where the config
     gives a ``rotary_dim``, attended over the layer's ``KVCache``, then
-    ``o_proj``. ``scale`` is the logits' scale; None is ``head_dim **
-    -0.5``.
+    ``o_proj``, each projection with a bias where the config's
+    ``attention_bias`` says. ``scaling`` is the logits' scale; None is
+    ``head_dim ** -0.5``.
 
     Args:
         c: The decoder's shape.
         i: The layer.
         norms: Which of q and k each head of is RMS-normed by ``q_norm``
             and ``k_norm``, before RoPE.
-        bias: Whether q, k and v each add a bias.
+
+    Raises:
+        ValueError: ``norms`` names other than q and k.
     """
 
-    def __init__(self, c, i: int, norms: str = "", bias: bool = False):
+    def __init__(self, c, i: int, norms: str = ""):
+        if set(norms) - set("qk"):
+            raise ValueError(f"Attention: norms {norms!r} names other than q and k")
         H, G, D, E = (
             c.num_attention_heads,
             c.num_key_value_heads,
@@ -515,13 +524,14 @@ class Attention(iron.Graph):
             c.hidden_size,
         )
         self.heads, self.groups, self.head_dim = H, G, D
+        bias = c.attention_bias
         self.q_proj = Linear(E, H * D, bias=bias)
         self.k_proj = Linear(E, G * D, bias=bias)
         self.v_proj = Linear(E, G * D, bias=bias)
-        self.o_proj = Linear(H * D, E, bias=False)
+        self.o_proj = Linear(H * D, E, bias=bias)
         self.q_norm = RMSNorm(D, c.eps) if "q" in norms else None
         self.k_norm = RMSNorm(D, c.eps) if "k" in norms else None
-        self.scale = None
+        self.scaling = None
         self.rotary = c.rotary_dim
 
     def project(self, x, **tiles) -> list:
@@ -558,7 +568,7 @@ class Attention(iron.Graph):
             q.reshape(n, H, D),
             k.reshape(n, G, D),
             v.reshape(n, G, D),
-            scale=self.scale,
+            scale=self.scaling,
         )
         return self.o_proj(o)
 
@@ -566,14 +576,15 @@ class Attention(iron.Graph):
 class GatedMLP(iron.Graph):
     """A gated feed-forward on ``c``'s shape:
     ``down_proj(act(gate_proj(x)) * up_proj(x))``, ``act`` its
-    ``hidden_act``.
+    ``hidden_act``, each projection with a bias where the config's
+    ``mlp_bias`` says.
     """
 
     def __init__(self, c):
-        E, M = c.hidden_size, c.intermediate_size
-        self.gate_proj = Linear(E, M, bias=False)
-        self.up_proj = Linear(E, M, bias=False)
-        self.down_proj = Linear(M, E, bias=False)
+        E, M, bias = c.hidden_size, c.intermediate_size, c.mlp_bias
+        self.gate_proj = Linear(E, M, bias=bias)
+        self.up_proj = Linear(E, M, bias=bias)
+        self.down_proj = Linear(M, E, bias=bias)
         self.act = _activation(c.hidden_act)
 
     def body(self, x):
@@ -585,9 +596,9 @@ class DecoderLayer(iron.Graph):
     """Layer ``i`` of a pre-norm decoder on ``c``'s shape: ``self_attn``
     after ``input_layernorm``, attending over the layer's own ``cache``,
     then ``mlp`` after ``post_attention_layernorm``, each block's output
-    added to its residual times ``residual``. ``rope`` is the model's
-    ``Rope``, whose rows of the call (``DecodeStep.angles``) turn q and k;
-    None turns nothing.
+    added to its residual times ``residual_multiplier``. ``rope`` is the
+    model's ``Rope``, whose rows of the call (``DecodeStep.angles``) turn q
+    and k; None: no RoPE.
     """
 
     def __init__(self, c, i: int):
@@ -597,13 +608,14 @@ class DecoderLayer(iron.Graph):
         self.mlp = GatedMLP(c)
         self.cache = KVCache(c)
         self.rope: Rope | None = None
-        self.residual = 1.0
+        self.residual_multiplier = 1.0
 
     def body(self, x, step):
         angles = None if self.rope is None else step.angles
         h = self.self_attn(self.input_layernorm(x), self.cache, step, angles)
-        x = _add(x, h, self.residual)
-        return _add(x, self.mlp(self.post_attention_layernorm(x)), self.residual)
+        x = _add(x, h, self.residual_multiplier)
+        h = self.mlp(self.post_attention_layernorm(x))
+        return _add(x, h, self.residual_multiplier)
 
 
 def _linear(x, p, **kw):

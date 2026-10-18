@@ -141,9 +141,9 @@ class Decoder(iron.Graph):
 
 class CausalLM(Model):
     """A decoder on ``config``'s shape: ``model``, a ``Decoder`` of
-    ``layer_class`` layers, each holding its own ``KVCache`` and the
-    model's ``rope``, and ``lm_head``, the embedding where tied, bound
-    to ``weights``.
+    ``layer_class`` layers, each holding its own ``KVCache``; ``lm_head``,
+    the embedding where tied, loaded from ``weights``; and ``rotary_emb``,
+    the RoPE table (``Rope``), None with no ``rope_theta``.
 
     Args:
         config: The decoder's shape.
@@ -165,7 +165,7 @@ class CausalLM(Model):
     def __init__(self, config: DecoderConfig, weights, decoder=None):
         self.config = config
         self.weights = weights
-        self.rope = None if config.rope_theta is None else Rope(config)
+        self.rotary_emb = None if config.rope_theta is None else Rope(config)
         # Zero until the host writes draws: a row of zeros is greedy.
         self.draws = iron.state((config.max_seq_len, ROW_WORDS), np.int32)
         self.drawn = iron.state((config.max_seq_len,), np.int32)
@@ -179,7 +179,7 @@ class CausalLM(Model):
         if self.layer_class is not None:
             self.model = Decoder(config, self.layer_class)
             for layer in self.model.layers:
-                layer.rope = self.rope
+                layer.rope = self.rotary_emb
             self.lm_head = Linear(config.hidden_size, config.vocab_size, bias=False)
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
@@ -305,8 +305,8 @@ class CausalLM(Model):
         """
         c = self.config
         angles = None
-        if self.rope is not None:
-            angles = self.rope.rows(
+        if self.rotary_emb is not None:
+            angles = self.rotary_emb.rows(
                 prompt=prompt,
                 position=position,
                 start=start,
@@ -667,7 +667,7 @@ class CausalLM(Model):
         """The row of the RoPE angles a sequence of ``n`` tokens reads from:
         past ``long_past``, the second table's, ``max_seq_len`` rows on.
         """
-        past = None if self.rope is None else self.rope.long_past
+        past = None if self.rotary_emb is None else self.rotary_emb.long_past
         return self.config.max_seq_len if past is not None and n > past else 0
 
     def _chunks(self, tokens: np.ndarray, start: int) -> Iterator[tuple]:

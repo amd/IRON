@@ -132,8 +132,9 @@ class Lfm2Layer(DecoderLayer):
     def body(self, x, step):
         if "conv" not in vars(self):
             return super().body(x, step)
-        x = _add(x, self.conv(self.input_layernorm(x), step), self.residual)
-        return _add(x, self.mlp(self.post_attention_layernorm(x)), self.residual)
+        x = _add(x, self.conv(self.input_layernorm(x), step), self.residual_multiplier)
+        h = self.mlp(self.post_attention_layernorm(x))
+        return _add(x, h, self.residual_multiplier)
 
 
 class Lfm2(CausalLM):

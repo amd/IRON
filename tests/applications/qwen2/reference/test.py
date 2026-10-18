@@ -8,13 +8,12 @@ device-free: the shared decoder's tests (``Decoder``) with a bias on each
 of q, k and v.
 """
 
-from iron.applications.qwen2.model import Qwen2
-from iron.lm import DecoderConfig
+from iron.applications.qwen2.model import Qwen2, Qwen2Config
 from iron.tests.common.llama_model import shapes
 from iron.tests.common.llama_reference import Decoder
 
 #: Qwen 2.5's proportions at toy size: GQA, a tied head.
-TOY = DecoderConfig(
+TOY = Qwen2Config(
     vocab_size=1024,
     hidden_size=512,
     num_hidden_layers=2,

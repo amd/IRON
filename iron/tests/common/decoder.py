@@ -85,7 +85,10 @@ def test_decode_step_reads_the_rope_table_at_its_own_width():
     by_op = {id(b.op): b for b in t.bindings}
     angles = t.steps[1].op
     assert by_op[id(angles)].expression == Affine(t.values[1], 32)
-    assert t.pinned["rope.table"] == cfg.max_seq_len * 32 * np.dtype(bfloat16).itemsize
+    assert (
+        t.pinned["rotary_emb.table"]
+        == cfg.max_seq_len * 32 * np.dtype(bfloat16).itemsize
+    )
 
 
 def test_prompt_chunk_reads_the_rope_table_at_its_own_width():
@@ -94,7 +97,7 @@ def test_prompt_chunk_reads_the_rope_table_at_its_own_width():
     copies = [s.op for s in t.steps if type(s.op).__name__ == "Copy"]
     angle_copy = next(c for c in copies if c.dst.sizes[-1] == 32)
     assert list(angle_copy.dst.sizes) == [256, 32]
-    assert t.pinned["rope.table"] == 256 * 32 * np.dtype(bfloat16).itemsize
+    assert t.pinned["rotary_emb.table"] == 256 * 32 * np.dtype(bfloat16).itemsize
 
 
 def test_a_context_no_chunk_divides_is_allocated_exactly():

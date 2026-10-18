@@ -52,8 +52,8 @@ class GraniteLayer(DecoderLayer):
 
     def __init__(self, c: GraniteConfig, i: int):
         super().__init__(c, i)
-        self.self_attn.scale = c.attention_multiplier
-        self.residual = c.residual_multiplier
+        self.self_attn.scaling = c.attention_multiplier
+        self.residual_multiplier = c.residual_multiplier
 
 
 class Granite(CausalLM):

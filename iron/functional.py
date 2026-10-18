@@ -19,7 +19,7 @@ A feature map is one image, channels last: ``(H, W, C)``, not torch's
 
 import dataclasses
 import math
-from typing import Any
+
 
 import ml_dtypes
 import numpy as np
@@ -28,6 +28,7 @@ from aie.helpers.taplib import TensorAccessPattern
 import iron
 from iron.common import Precision
 from iron.common.feature_map import ConcatChannels, Conv2d, MaxPool2d
+from iron.common.graph.handle import Handle, State
 from iron.common.image.packaging import require_device
 from iron.operators.copy import Copy
 from iron.operators.flm.gemm.design import M_TILE, Epilogue, compute_rows
@@ -160,10 +161,10 @@ class ConvState:
     ``(2, chunk, channels)`` and ``tail`` ``(K - 1, channels)``.
     """
 
-    read: Any
-    write: Any
-    window: Any
-    tail: Any
+    read: Handle
+    write: Handle
+    window: State
+    tail: State
 
 
 def causal_conv1d(x, taps, state: ConvState):

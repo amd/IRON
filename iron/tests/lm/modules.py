@@ -15,7 +15,8 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.lm import Embedding, LayerNorm, Linear, RMSNorm
+from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
+from iron.lm.blocks import KVCache
 from iron.lm.checkpoint import leaves
 from iron.tests.common.llama_model import SMALL, checkpoint
 
@@ -263,3 +264,13 @@ def test_a_norm_refuses_more_than_the_last_axis_and_layer_norm_another_eps():
         RMSNorm((2, 4))
     with pytest.raises(ValueError, match="takes eps 1e-05, not 1e-06"):
         LayerNorm(4, eps=1e-6)
+
+
+def test_attention_refuses_a_norm_of_other_than_q_and_k():
+    with pytest.raises(ValueError, match="'qv' names other than q and k"):
+        Attention(SMALL, 0, norms="qv")
+
+
+def test_a_cache_refuses_a_sliding_window():
+    with pytest.raises(ValueError, match="use_sliding_window is set"):
+        KVCache(dataclasses.replace(SMALL, use_sliding_window=True))

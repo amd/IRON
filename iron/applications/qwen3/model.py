@@ -19,16 +19,10 @@ keyed by operator shape at Qwen3 1.7B's shape: a decode step's and a
 the RoPE table alone.
 """
 
-import dataclasses
 from pathlib import Path
 
 from iron import lm
 from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
-
-
-@dataclasses.dataclass(frozen=True)
-class Qwen3Config(DecoderConfig):
-    """``DecoderConfig`` under Qwen3's name."""
 
 
 class Qwen3Layer(DecoderLayer):
@@ -49,7 +43,7 @@ class Qwen3(CausalLM):
     prompt's leading token, as ``lm.Model`` requires one.
     """
 
-    config = Qwen3Config
+    config = DecoderConfig
     profile = Path(__file__).with_name("profiles")
     layer_class = Qwen3Layer
     bos = 151643

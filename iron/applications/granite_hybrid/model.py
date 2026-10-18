@@ -213,12 +213,12 @@ class GraniteHybridLayer(GraniteLayer):
         else:
             angles = None if self.rope is None else step.angles
             h = self.self_attn(h, self.cache, step, angles)
-        x = _add(x, h, self.residual)
+        x = _add(x, h, self.residual_multiplier)
         h = self.post_attention_layernorm(x)
         y = self.shared_mlp(h)
         if self.block_sparse_moe is not None:
             y = self.block_sparse_moe(h) + y
-        return _add(x, y, self.residual)
+        return _add(x, y, self.residual_multiplier)
 
 
 class GraniteHybrid(Granite):

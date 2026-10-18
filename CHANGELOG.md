@@ -50,9 +50,10 @@ public API adds its entry under Unreleased.
   eps=None)` (the dtype's machine epsilon) and `LayerNorm(normalized_shape,
   eps=1e-5)`.
 - Decoder blocks as modules in `iron.lm.blocks`, each built from a config
-  and a layer index: `Attention(c, i, norms="", bias=False)`, `GatedMLP(c)`
-  and `DecoderLayer(c, i)`, which holds its own `KVCache(c)` and the
-  model's `Rope(c)`. `iron.lm` exports `Attention`, `GatedMLP` and
+  and a layer index: `Attention(c, i, norms="")`, `GatedMLP(c)` and
+  `DecoderLayer(c, i)`, which holds its own `KVCache(c)` and the model's
+  `Rope(c)`; their projections are biased where the config's
+  `attention_bias` and `mlp_bias` say. `iron.lm` exports `Attention`, `GatedMLP` and
   `DecoderLayer`.
 - `Linear.split(x, *rows)`, a fused projection's outputs: one `F.linear`
   per run of the weight's rows.
@@ -177,7 +178,7 @@ public API adds its entry under Unreleased.
   tied), and binds them to the checkpoint's tree with `Graph.load_state_dict`. A
   model with `layer_class = None` reads `config.layer(i)` as before, its
   caches in `caches`, a `KVCache` per attention layer, in place of `keys`
-  and `values`. The RoPE table is `CausalLM.rope`, a `Rope`, whose `rows`
+  and `values`. The RoPE table is `CausalLM.rotary_emb`, a `Rope`, whose `rows`
   replaces `CausalLM.angles` and whose `long_past` replaces
   `CausalLM.long_past`.
 - Phi-4 and LFM2 are built from modules: `Phi4Layer`, whose fused
@@ -192,7 +193,12 @@ public API adds its entry under Unreleased.
   `rotary`.
 - Qwen 2, Qwen3 and Granite name their layers, `Qwen2Layer`, `Qwen3Layer`
   and `GraniteLayer`, in place of `Qwen3Config.attention` and
-  `GraniteConfig.attention` and `layer`.
+  `GraniteConfig.attention` and `layer`; Granite's sets
+  `Attention.scaling` and `DecoderLayer.residual_multiplier`. Qwen3
+  reads `DecoderConfig`, and `Qwen3Config` is gone; Qwen 2 reads
+  `Qwen2Config`, whose `attention_bias` is set.
+- `DecoderConfig` reads `attention_bias`, `mlp_bias` and
+  `use_sliding_window` from `config.json`; `KVCache` refuses the last.
 - The layer descriptions a config's `layer()` returns, `iron.lm.Attention`
   and `DecoderLayer`, are `AttentionSpec` and `DecoderLayerSpec`, leaving
   the names to the modules that own their weights.

@@ -8,8 +8,9 @@ from its checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.qwen2.model``.
 
 Qwen 2 is Llama's layer with a bias on each of its q, k and v projections
-(``Qwen2Layer``). It ties its embedding and output head, as Llama does, and
-takes no RoPE frequency scaling.
+(``Qwen2Config.attention_bias``) and none on o (``Qwen2Layer``). It ties
+its embedding and output head, as Llama does, and takes no RoPE frequency
+scaling.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,
 keyed by operator shape at Qwen 2.5 1.5B Instruct's shape: a decode step's
@@ -17,18 +18,29 @@ and a 2048-row prompt chunk's, at any ``max_seq_len``, which sizes the
 caches and the RoPE table alone.
 """
 
+import dataclasses
 from pathlib import Path
 
 from iron import lm
-from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
+from iron.lm import CausalLM, DecoderConfig, DecoderLayer, Linear, not_json
+
+
+@dataclasses.dataclass(frozen=True)
+class Qwen2Config(DecoderConfig):
+    """``DecoderConfig``, its attention biased, which Qwen 2's
+    ``config.json`` does not say.
+    """
+
+    attention_bias: bool = not_json(True, kw_only=True)
 
 
 class Qwen2Layer(DecoderLayer):
-    """Llama's layer, its q, k and v projections each with a bias."""
+    """Llama's layer, its output projection unbiased, as Qwen 2's always is."""
 
-    def __init__(self, c: DecoderConfig, i: int):
+    def __init__(self, c: Qwen2Config, i: int):
         super().__init__(c, i)
-        self.self_attn = Attention(c, i, bias=True)
+        H, D, E = c.num_attention_heads, c.head_dim, c.hidden_size
+        self.self_attn.o_proj = Linear(H * D, E, bias=False)
 
 
 class Qwen2(CausalLM):
@@ -36,7 +48,7 @@ class Qwen2(CausalLM):
     its checkpoint and ``tokenizer.json``.
     """
 
-    config = DecoderConfig
+    config = Qwen2Config
     profile = Path(__file__).with_name("profiles")
     layer_class = Qwen2Layer
 
