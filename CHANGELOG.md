@@ -44,6 +44,12 @@ public API adds its entry under Unreleased.
   and every application asks for neither torch nor transformers; only
   recording a golden needs them.
 
+- `Operator.replace`, `dataclasses.replace` that also keeps the fields a
+  resolve computes (`Auto(init=False)`), and checks the result as
+  construction does.
+- `Param(array=True)` and `Auto(array=True)`: an operator's `Array` is
+  generated from its declarations, so a field is declared once.
+
 ### Changed
 
 - Config fields use `config.json`'s names: `hidden_size`,
@@ -62,6 +68,14 @@ public API adds its entry under Unreleased.
 - `CausalLM.generate` times the first token from the call.
 - `Runner.npu()` takes only `full_elf`.
 
+- `Operand.count`, `Operator.device()` and `Operator.configuration()` are
+  `Operand.lanes`, `Operator.array_device()` and
+  `Operator.xclbin_operator()`.
+- `In`, `Out` and `InOut` are plain operands, not aie.iron's kernel-argument
+  markers.
+- `resolved(dev)` resolves for the device given instead of probing for an
+  NPU, and an unresolved `Auto()` tile raises instead of becoming a 0-d fifo.
+
 ### Removed
 
 - gemma4_flm's GEMM and dequant exploration and `build.py --only`; the
@@ -75,3 +89,8 @@ public API adds its entry under Unreleased.
 - `compile(tuner=)`, `CompiledGraph.tuning`, `Model.load(tuner=)`,
   `Runner.tables`, `--cost-table`, and the `Tuner`, `Tuning` and `Prices`
   interfaces.
+- `Auto(derived=True)`, replaced by `Auto(init=False)`; a caller can no
+  longer give MHA's `B_kv`.
+- `Profile.lookup`, `Operator.from_operands`, `Operator.value_buffer`,
+  `Chain.at_tile` and its `Side` enum, and the `AutoSpec` and `ParamSpec`
+  exports from `iron.common`.
