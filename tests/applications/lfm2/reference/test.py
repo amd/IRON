@@ -15,9 +15,8 @@ import pytest
 
 from iron.applications.lfm2.model import Lfm2, Lfm2Config
 from iron.lm import OnHost as Host
-from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close
-from iron.tests.common.llama_model import checkpoint
+from iron.tests.common.llama_reference import Decoder
 from iron.tests.toolchain.tools import DEVICES
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -75,6 +74,14 @@ def names(c: Lfm2Config) -> dict[str, tuple[int, ...]]:
     return out
 
 
+class TestLfm2(Decoder):
+    model, config, model_type, name = Lfm2, TOY, "lfm2", "toy"
+
+    @classmethod
+    def names(cls):
+        return names(cls.config)
+
+
 class OnHost(Host, Lfm2):
     profile = None
 
@@ -92,10 +99,8 @@ def _assert_close(model, reference, tokens):
 @pytest.fixture(scope="module")
 def toy(golden):
     """The toy's random weights and their golden logits."""
-    weights = checkpoint(TOY, names(TOY)).tree("random", 0)
-    return weights, golden(
-        "toy", lambda: HuggingFace.build("lfm2", TOY, weights), TOY, weights
-    )
+    case = TestLfm2.case(golden)
+    return case.weights, case.golden
 
 
 @pytest.fixture(scope="module")
