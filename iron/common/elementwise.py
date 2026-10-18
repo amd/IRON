@@ -768,12 +768,21 @@ class WeightedRowwise(Rowwise):
         own = super().tolerance()
         if not self.weighted:
             return own
-        # Each kernel's ulp, and the product's of a row one ulp off.
-        return Tolerance.bf16_ulps(
-            2,
-            atol=own.atol,
+        tiny = float(np.finfo(np.float32).tiny)
+
+        def bound(x, weight):
+            # Each kernel's ulp, and the product's of a row one ulp off; or the
+            # first kernel's atol, scaled by the weight that multiplies it.
+            y = np.abs(np.asarray(self.reference(x, weight), np.float32))
+            ulp = np.exp2(np.floor(np.log2(np.maximum(y, tiny))) - 7)
+            w = np.abs(np.asarray(weight, np.float32)).reshape(-1)
+            scaled = (own.atol or 0.0) * np.resize(w, y.size).reshape(y.shape)
+            return np.maximum(2 * ulp, scaled)
+
+        return Tolerance.bounded(
+            bound,
             note="the row's kernel then mul_sized, one ulp each; atol is the "
-            "first kernel's",
+            "first kernel's times |weight|",
         )
 
     class Array(Rowwise.Array):
