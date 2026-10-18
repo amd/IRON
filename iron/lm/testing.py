@@ -153,7 +153,10 @@ def check_device_sampling(runner, model, prompt_len: int, num_tokens: int, *, re
 
 
 #: How far a bf16 graph's logits may lie from float32 transformers' on the
-#: same weights: a share of the largest logit.
+#: same weights: a share of the largest logit. Set by hand between what the
+#: toys' host references measure, at most 2.2% (LFM2's), and the faults they
+#: must catch: half a clip's encoder rows (8.4%), a stale recurrent slot
+#: (124%), a position table for RoPE (143%).
 LOGITS = 0.05
 
 

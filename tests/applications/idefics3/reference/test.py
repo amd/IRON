@@ -17,7 +17,7 @@ from iron.applications.idefics3.hugging_face import HuggingFaceVLM
 from iron.applications.idefics3.model import SmolVLMText, SmolVLMTextConfig
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.lm import Multimodal
-from iron.lm.testing import assert_close
+from iron.lm.testing import LOGITS, assert_close
 from iron.tests.common.llama_model import checkpoint, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -137,7 +137,8 @@ def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
     want = reference.logits([], image)
     assert got.shape == (tower.soft_rows, VISION.text_dim)
     err, scale = np.abs(got - want).max(), np.abs(want).max()
-    assert err <= 0.05 * scale, f"|diff| {err:.4f} against |soft tokens| {scale:.3f}"
+    # Measured 0.84%.
+    assert err <= LOGITS * scale, f"|diff| {err:.4f} against |soft tokens| {scale:.3f}"
 
 
 def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, weights):

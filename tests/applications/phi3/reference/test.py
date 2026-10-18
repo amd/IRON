@@ -24,7 +24,7 @@ from ml_dtypes import bfloat16
 from iron.applications.phi3.model import LongRope, Phi4, Phi4Config
 from iron.lm import Checkpoint, OnHost as Host, accuracy, determinism
 from iron.lm.golden import HuggingFace
-from iron.lm.testing import assert_close
+from iron.lm.testing import LOGITS, assert_close
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -159,7 +159,8 @@ def test_the_accuracy_check_scores_the_model_against_the_reference(cpu):
     model = OnHost(config, weights)
     results = accuracy(model, reference, prompt, len(expected) + 1)
     assert all(top1 for _, top1 in results), results
-    assert all(0 <= kl < 0.05 for kl, _ in results), results
+    # The toys measure at most 8e-5: a bound ten times that.
+    assert all(0 <= kl < 1e-3 for kl, _ in results), results
 
 
 def test_the_determinism_check_finds_the_reference_deterministic(cpu):
@@ -197,7 +198,8 @@ def test_a_turn_past_the_original_context_rotates_only_its_own_rows_long(golden)
     assert_close(model.logits(tokens[:100]), reference.logits(tokens[:100]))
     got = np.asarray(model.logits(tokens[:300]), np.float32)
     whole = reference.logits(tokens[:300])
-    assert np.abs(got - whole).max() > 0.1 * np.abs(whole).max()
+    # Measured 64%: past twice LOGITS, so no rounding passes for it.
+    assert np.abs(got - whole).max() > 2 * LOGITS * np.abs(whole).max()
     turned = OnHost(LONG, weights)
     turned.logits(tokens[:100])
     assert_close(model.logits(tokens), turned.logits(tokens))

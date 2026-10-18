@@ -192,8 +192,9 @@ def test_the_accuracy_check_scores_the_model_against_the_reference(cpu):
     steps = len(cpu.expected) + 1
     results = accuracy(model, cpu.golden, cpu.prompt, steps)
     assert all(top1 for _, top1 in results), results
-    # bf16 graphs against a float32 forward: close, not equal.
-    assert all(0 <= kl < 0.05 for kl, _ in results), results
+    # bf16 graphs against a float32 forward: close, not equal. The toys
+    # measure at most 8e-5: a bound ten times that.
+    assert all(0 <= kl < 1e-3 for kl, _ in results), results
     assert any(kl > 0 for kl, _ in results), results
 
 
