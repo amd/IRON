@@ -16,9 +16,11 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
-from iron.lm.blocks import KVCache
+from iron.lm.blocks import KVCache, Rope
 from iron.lm.checkpoint import leaves
 from iron.operators.mha import MHA
+from iron.operators.rope import RoPE
+from iron.tests.common.llama_reference import OnHost
 from iron.tests.common.llama_model import SMALL, checkpoint, small
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -285,3 +287,37 @@ def test_a_cache_attends_within_its_window():
     model.model.layers[0].cache = KVCache(model.config, window=64)
     t = model.trace(**model.shapes()[1])
     assert [s.op.window for s in t.steps if type(s.op) is MHA] == [64, None]
+
+
+def test_each_layer_reads_the_rows_of_its_own_rope():
+    """A layer holding another ``Rope`` turns q and k by its table's rows,
+    copied once a call however many layers hold it; one holding none turns
+    nothing.
+    """
+    model = small(num_hidden_layers=3)
+    layers = model.model.layers
+    other = Rope(dataclasses.replace(model.config, rope_theta=1e4))
+    layers[1].rope = layers[2].rope = other
+    t = model.trace(**model.shapes()[1])
+    assert {id(model.rotary_emb.table.array), id(other.table.array)} <= t.weights.keys()
+    assert sum(type(s.op) is RoPE for s in t.steps) == 6
+    layers[0].rope = None
+    t = model.trace(**model.shapes()[1])
+    assert id(model.rotary_emb.table.array) not in t.weights
+    assert sum(type(s.op) is RoPE for s in t.steps) == 4
+
+
+def test_a_q_table_scaled_by_two_doubles_the_logits_scale():
+    """q's own table, twice k's, gives exactly the logits of attention
+    scaled twice as much: every factor is a power of two.
+    """
+    config = dataclasses.replace(SMALL, max_seq_len=256)
+    weights = checkpoint(config).tree("random", 3)
+    scaled, doubled = (OnHost(config, weights) for _ in range(2))
+    rope = Rope(config, q_scale=np.full(config.max_seq_len, 2.0))
+    for layer in scaled.model.layers:
+        layer.rope = rope
+    for layer in doubled.model.layers:
+        layer.self_attn.scaling = 2 / np.sqrt(config.head_dim)
+    tokens = np.random.default_rng(1).integers(0, config.vocab_size, 20)
+    np.testing.assert_array_equal(scaled.logits(tokens), doubled.logits(tokens))

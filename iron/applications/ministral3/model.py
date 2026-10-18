@@ -12,19 +12,16 @@ Ministral 3 is Llama's layer under YaRN's RoPE (``YarnRopeScaling``), its
 queries scaled by position past the context it was trained at: by ``1 +
 beta * log(1 + floor(position / original_max_position_embeddings))``,
 Llama 4's attention temperature. RoPE is linear in its angles, so the
-queries turn by a second table, the first one times that scale
-(``Ministral3Attention``).
+queries turn by a table of their own, k's times that scale (``Rope``'s
+``q_scale``).
 """
 
 import dataclasses
 import math
 
 import numpy as np
-from ml_dtypes import bfloat16
 
-import iron
-import iron.functional as F
-from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
+from iron.lm import CausalLM, DecoderConfig
 from iron.lm.blocks import Rope
 from iron.lm.checkpoint import _tree, leaves
 
@@ -141,60 +138,6 @@ class Ministral3Config(DecoderConfig):
         return (1 + self.llama_4_scaling_beta * np.log1p(blocks)).astype(np.float32)
 
 
-class QueryRope(Rope):
-    """The config's RoPE, each row of its table times its position's query
-    scale.
-    """
-
-    def __init__(self, c: Ministral3Config):
-        super().__init__(c)
-        scaled = c.angles() * c.query_scale()[:, None]
-        self.table = iron.weight(scaled.astype(bfloat16))
-
-
-class Ministral3Attention(Attention):
-    """Llama's attention, q turned by ``query_rope``'s rows of the call
-    where it holds one and k by the call's angles.
-    """
-
-    query_rope: QueryRope | None = None
-
-    def body(self, x, cache, step, angles=None):
-        n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
-        tiles = dict(tile_size_output=D // 2) if n == 1 else {}
-        q, k, v = (
-            F.linear(x, p.weight, p.bias, **tiles)
-            for p in (self.q_proj, self.k_proj, self.v_proj)
-        )
-        rows = angles
-        if self.query_rope is not None:
-            rows = self.query_rope.rows(
-                prompt=step.prompt,
-                position=step.position,
-                start=step.start,
-                rows=step.rows,
-                rope_start=None,
-            )
-        q = F.rope(q.reshape(n * H, D), rows)
-        k = F.rope(k.reshape(n * G, D), angles)
-        o = cache.attend(
-            step,
-            q.reshape(n, H, D),
-            k.reshape(n, G, D),
-            v.reshape(n, G, D),
-            scale=self.scaling,
-        )
-        return self.o_proj(o)
-
-
-class Ministral3Layer(DecoderLayer):
-    """Llama's layer, its attention ``Ministral3Attention``."""
-
-    def __init__(self, c: Ministral3Config, i: int):
-        super().__init__(c, i)
-        self.self_attn = Ministral3Attention(c, i)
-
-
 def text_weights(weights):
     """The text decoder's modules of a checkpoint's tree, as ``model`` and
     ``lm_head``: a Mistral 3 checkpoint holds them at
@@ -225,11 +168,10 @@ class Ministral3(CausalLM):
     """
 
     config = Ministral3Config
-    layer_class = Ministral3Layer
 
     def __init__(self, config: Ministral3Config, weights):
         super().__init__(config, text_weights(weights))
         if config.llama_4_scaling_beta:
-            rope = QueryRope(config)
+            self.rotary_emb = Rope(config, q_scale=config.query_scale())
             for layer in self.layers:
-                layer.self_attn.query_rope = rope
+                layer.rope = self.rotary_emb

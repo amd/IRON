@@ -429,27 +429,40 @@ def _add(x, y, residual: float):
 class Rope(iron.Graph):
     """A decoder's RoPE table, a row a position (``DecoderConfig.angles``),
     with LongRoPE's long table stacked after it where the config gives one
-    (``long_angles``), which a prompt passing ``long_past`` reads. A model
-    copies a call's rows once (``rows``), and every layer reads them.
+    (``long_angles``), which a prompt passing ``long_past`` reads; k's, and
+    q's too unless ``q_scale``, a factor for each row of the table (the
+    stacked one where long), scales a table of q's own. A model copies a
+    call's rows of each ``Rope`` its layers hold once (``rows``), and every
+    layer holding it reads them.
     """
 
-    def __init__(self, c):
+    def __init__(self, c, q_scale: np.ndarray | None = None):
         angles, long = c.angles(), c.long_angles()
         self.long_past = None if long is None else long[0]
         if long is not None:
             angles = np.concatenate([angles, long[1]])
         self.table = iron.weight(angles.astype(bfloat16))
+        self.q_table = None
+        if q_scale is not None:
+            q = angles * np.asarray(q_scale, np.float32)[:, None]
+            self.q_table = iron.weight(q.astype(bfloat16))
         self.chunk, self.width = c.prefill_chunk, c.rope_width
 
-    def rows(self, *, prompt: bool, position, start, rows, rope_start):
-        """A call's rows: a prompt call's from ``start``, or from
-        ``rope_start`` where a long table is stacked, else the decode step's
-        at ``position``.
+    def rows(self, *, prompt: bool, position, start, rows, rope_start) -> tuple:
+        """A call's rows of q's table and of k's, the same rows where they
+        share one: a prompt call's from ``start``, or from ``rope_start``
+        where a long table is stacked, else the decode step's at
+        ``position``.
         """
-        if prompt:
-            begin = start if self.long_past is None else rope_start
-            return Copy.step(self.table[begin : begin + self.chunk][:rows])
-        return Copy.step(self.table[position]).reshape(1, self.width)
+
+        def read(table):
+            if prompt:
+                begin = start if self.long_past is None else rope_start
+                return Copy.step(table[begin : begin + self.chunk][:rows])
+            return Copy.step(table[position]).reshape(1, self.width)
+
+        k = read(self.table)
+        return (k if self.q_table is None else read(self.q_table)), k
 
 
 class KVCache(iron.Graph):
@@ -507,7 +520,7 @@ class KVCache(iron.Graph):
 class Attention(iron.Graph):
     """Layer ``i``'s self-attention on ``c``'s shape: ``q_proj``, ``k_proj``
     and ``v_proj`` of the layer's input, q and k turned by the call's RoPE
-    angles where given, only their first ``rotary`` columns where the config
+    rows where given, a pair of q's and k's (``Rope.rows``), only their first ``rotary`` columns where the config
     gives a ``rotary_dim``, attended over the layer's ``KVCache``, then
     ``o_proj``, each projection with a bias where the config's
     ``attention_bias`` says. ``scaling`` is the logits' scale; None is
@@ -571,7 +584,7 @@ class Attention(iron.Graph):
         if self.k_norm is not None:
             k = self.k_norm(k)
         if angles is not None:
-            q, k = self.rotate(q, angles), self.rotate(k, angles)
+            q, k = self.rotate(q, angles[0]), self.rotate(k, angles[1])
         o = cache.attend(
             step,
             q.reshape(n, H, D),
@@ -606,8 +619,8 @@ class DecoderLayer(iron.Graph):
     after ``input_layernorm``, attending over the layer's own ``cache``,
     then ``mlp`` after ``post_attention_layernorm``, each block's output
     added to its residual times ``residual_multiplier``. ``rope`` is the
-    model's ``Rope``, whose rows of the call (``DecodeStep.angles``) turn q
-    and k; None: no RoPE.
+    ``Rope`` whose rows of the call (``DecodeStep.ropes``) turn q and k, the
+    model's unless a model sets another; None: no RoPE.
     """
 
     def __init__(self, c, i: int):
@@ -620,7 +633,7 @@ class DecoderLayer(iron.Graph):
         self.residual_multiplier = 1.0
 
     def body(self, x, step):
-        angles = None if self.rope is None else step.angles
+        angles = None if self.rope is None else step.ropes[self.rope]
         h = self.self_attn(self.input_layernorm(x), self.cache, step, angles)
         x = _add(x, h, self.residual_multiplier)
         h = self.mlp(self.post_attention_layernorm(x))

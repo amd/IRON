@@ -64,7 +64,8 @@ def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
 @dataclasses.dataclass
 class DecodeStep:
     prompt: bool
-    # None: no RoPE.
+    # The k rows of the model's rotary_emb, which a layer on config.layer(i)
+    # reads; None: no RoPE.
     angles: Handle | None
     # The first position the call runs: a per-call value in a trace, its
     # number in the reference.
@@ -77,6 +78,8 @@ class DecodeStep:
     # the token (a decode step's) they are of; None for rows given.
     embeddings: Any = None
     ids: Any = None
+    # By each Rope a layer holds, its rows of the call (Rope.rows).
+    ropes: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -304,18 +307,23 @@ class CausalLM(Model):
         and ``ids`` are the step's (``DecodeStep``).
         """
         c = self.config
-        angles = None
-        if self.rotary_emb is not None:
-            angles = self.rotary_emb.rows(
-                prompt=prompt,
-                position=position,
-                start=start,
-                rows=rows,
-                rope_start=rope_start,
-            )
+        held = [self.rotary_emb]
+        if self.layer_class is not None:
+            held = [layer.rope for layer in self.layers]
+        ropes = {}
+        for rope in held:
+            if rope is not None and rope not in ropes:
+                ropes[rope] = rope.rows(
+                    prompt=prompt,
+                    position=position,
+                    start=start,
+                    rows=rows,
+                    rope_start=rope_start,
+                )
+        angles = ropes[self.rotary_emb][1] if self.rotary_emb in ropes else None
         # A decode step's one position is its start.
         start = start if prompt else position
-        step = DecodeStep(prompt, angles, start, rows, position, source, x, ids)
+        step = DecodeStep(prompt, angles, start, rows, position, source, x, ids, ropes)
         x = self.positions(x, step)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)

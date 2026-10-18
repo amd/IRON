@@ -211,7 +211,7 @@ class GraniteHybridLayer(GraniteLayer):
         if self.mamba is not None:
             h = self.mamba(h, step)
         else:
-            angles = None if self.rope is None else step.angles
+            angles = None if self.rope is None else step.ropes[self.rope]
             h = self.self_attn(h, self.cache, step, angles)
         x = _add(x, h, self.residual_multiplier)
         h = self.post_attention_layernorm(x)

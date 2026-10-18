@@ -59,6 +59,11 @@ public API adds its entry under Unreleased.
   before a query, as `MHA` counts them (Hugging Face's `sliding_window`
   minus one). A layer on `config.layer(i)` gets its attention's window
   this way, in place of `CausalLM.attend`'s refusal.
+- Per-layer RoPE: each `DecoderLayer` turns q and k by the rows of the
+  `Rope` it holds (the model's `rotary_emb` unless a model sets another,
+  None for none), copied once a call per distinct `Rope` into
+  `DecodeStep.ropes`. `Rope(c, q_scale=None)` scales a table of q's own,
+  and `Rope.rows` and `Attention`'s angles are a (q, k) pair.
 - `Linear.split(x, *rows)`, a fused projection's outputs: one `F.linear`
   per run of the weight's rows.
 - `Graph.trace(precision=)`, which `compile(precision=)` passes on instead of
