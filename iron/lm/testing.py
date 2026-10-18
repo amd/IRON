@@ -343,18 +343,11 @@ def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, reco
 @contextmanager
 def _fill_caches(model, n: int, position: int):
     """The caches' first ``n`` rows, a prompt's, repeated up to ``position``
-    on the device and as the graph reference's state, for the body of the
-    ``with``. The prompt's own rows are left as it wrote them, so the
-    model's record of what its caches hold stays true, and the step attends
-    over a real prompt's scale of keys and values, the same ones on the
-    device and in the reference. A state checkpointed at each chunk boundary
-    (``Checkpoints``) holds, in the slot a call at ``position`` reads, the
-    state the prompt left.
-
-    The reference's state is the device buffers' own host memory, filled in
-    place, so no second copy of the caches is held. Its writes land past
-    the prompt, in rows no call reads before writing, and are sent to the
-    device after it, so no stale host line meets a later device write.
+    on the device and as the graph reference's state (the device buffers'
+    own host memory, filled in place), for the body of the ``with``; the
+    prompt's own rows stay as it wrote them. A state checkpointed at each
+    chunk boundary (``Checkpoints``) holds, in the slot a call at
+    ``position`` reads, the state the prompt left.
     """
     version = next(iter(model.versions.values()))
     caches = [*model.keys.values(), *model.values.values()]

@@ -3,9 +3,8 @@
 
 """The operator: one class declaring the array, the buffers and the sequence.
 
-The fields its ``Array`` reads, those a tile names and those declared
-``array=True``, configure the array, which serves every extent; the rest
-reach only the runtime sequence.
+The fields its ``Array`` reads (``Declaration.array``) configure the array,
+which serves every extent; the rest reach only the runtime sequence.
 """
 
 from __future__ import annotations
@@ -59,7 +58,7 @@ def spelled(v: Any) -> str:
     if isinstance(v, bool):
         return str(int(v))
     if isinstance(v, float):
-        # repr() round-trips; a symbol takes neither '.' nor '-'.
+        # repr() round-trips; a symbol takes no '.', '-' or '+'.
         return repr(v).replace(".", "p").replace("-", "n").replace("+", "")
     if isinstance(v, tuple) and all(isinstance(x, TensorAccessPattern) for x in v):
         # A gather's rows, one pattern each: too many to spell out.
@@ -95,9 +94,8 @@ class Built:
 @dataclass_transform(kw_only_default=True, frozen_default=True)
 class Array:
     """The array tier of an operator, which its array is built from alone.
-    Each subclass is a frozen dataclass, made so as its body finishes; the
-    operator's ``Declaration`` adds every field a stream names, every field
-    declared ``array=True`` and every member.
+    Each subclass is a frozen dataclass, made so as its body finishes, of
+    the fields of ``Declaration.array`` and every member.
 
     Besides those, an ``Array`` annotates only its operands (``buffers``,
     ``inputs``, ``outputs``) and ``dev``; a property of the operator it may

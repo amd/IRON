@@ -6,14 +6,7 @@
 ``autotune`` takes the calls a model runs (``Call``), finds each operator
 shape in them, times every setting of its tunables
 (``Operator.domains``) the placer takes against the setting it was traced
-at, and returns a ``Profile`` naming the fastest for each shape. A setting
-is taken only where it beats the traced one by ``CONFIDENCE`` standard
-errors at the calls' operating points, and only where its output is
-bit-identical to the traced one's or within both their tolerances
-(``measure.judge``). Steps sharing a shape share its entry, so they are
-timed together and their times summed. A GEMM setting is not built when its
-matmul kernel alone, at the cycles mlir-aie's nightly timed it at
-(``kernel_cycles``), takes longer than the fastest setting timed so far.
+at, and returns a ``Profile`` naming the fastest for each shape.
 """
 
 from __future__ import annotations

@@ -5,13 +5,10 @@
 
 A call with no tensor is a decode step; ``prefill_chunk`` token ``ids`` are
 a prompt chunk from position ``start``, of which a call runs the first
-``rows``, their rows of the
-embedding table gathered on the device, in a full ELF or an xclbin. Both
-draw the next token on the device and carry it and ``position + 1`` into
-the next call.
-Both attend with ``MHA``. Where the decode step is not a full ELF (NPU1, or
-``full_elf=False``) there is no device loop: the host starts each step
-on the token the last one drew.
+``rows``, their embedding rows gathered on the device. Both draw the next
+token on the device and carry it and ``position + 1`` into the next call.
+Where the decode step is not a full ELF (NPU1, or ``full_elf=False``) there
+is no device loop: the host starts each step on the token the last one drew.
 """
 
 import argparse
@@ -66,7 +63,7 @@ def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
 @dataclasses.dataclass
 class DecodeStep:
     prompt: bool
-    # None turns nothing.
+    # None: no RoPE.
     angles: Handle | None
     # The first position the call runs: a per-call value in a trace, its
     # number in the reference.
@@ -216,7 +213,7 @@ class CausalLM(Model):
         """The RoPE angles of a step's rows, a row a position, as ``layer``
         reads them: a prompt call's from ``start``, or from ``rope_start``
         where a second table is stacked (``long_angles``), else the decode
-        step's at ``position``; None turns nothing.
+        step's at ``position``; None: no RoPE.
         """
         c = self.config
         C, A = c.prefill_chunk, c.rope_width

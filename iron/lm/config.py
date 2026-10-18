@@ -54,10 +54,9 @@ def _dotted(data: dict, path: str):
 
 @dataclasses.dataclass(frozen=True)
 class Config:
-    """A model's shape: a decoder's (``DecoderConfig``) and EmbeddingGemma
-    2's own subclass it, for the one field every model judges its RMS norms
-    by and the one way every model is built from a checkpoint's own
-    ``config.json``.
+    """A model's shape, built from a checkpoint's ``config.json``
+    (``from_checkpoint``). ``DecoderConfig`` and EmbeddingGemma 2's config
+    subclass it; ``eps`` is every model's RMS norm epsilon.
     """
 
     eps: float = dataclasses.field(
@@ -151,13 +150,13 @@ class DecoderConfig(Config):
     num_key_value_heads: int = dataclasses.field(
         metadata={"json": "num_key_value_heads"}
     )
-    # None where the checkpoint's own config.json has no head_dim (Qwen 2.5,
-    # Granite, LFM2, Phi-4-mini-instruct): __post_init__ derives it.
+    # None where the checkpoint's config.json has no head_dim: __post_init__
+    # derives it.
     head_dim: int | None = dataclasses.field(
         default=None, kw_only=True, metadata={"json": "head_dim"}
     )
     intermediate_size: int = dataclasses.field(metadata={"json": "intermediate_size"})
-    # None turns nothing: a decoder of absolute positions (``positions``).
+    # None: no RoPE, a decoder of absolute positions (``positions``).
     rope_theta: float | None = dataclasses.field(metadata={"json": "rope_theta"})
     max_seq_len: int = dataclasses.field(metadata={"json": "max_position_embeddings"})
     rope_scaling: RopeScaling | None = None

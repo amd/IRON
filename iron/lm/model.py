@@ -437,7 +437,10 @@ class Model(iron.Graph):
         return w
 
     def shapes(self) -> list[dict]:
-        """The input shapes of each version."""
+        """The input shapes of each version, the decode step (no input)
+        first: a later version on token ids (``ids`` or ``placed``) feeds
+        off it where it is a full ELF, its Emit starting there.
+        """
         raise NotImplementedError(f"{type(self).__name__} defines no shapes()")
 
     def load_versions(

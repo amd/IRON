@@ -67,9 +67,11 @@ class _Shard:
             info = archive.getinfo(f"{root}/data/{key}")
             if info.compress_type != zipfile.ZIP_STORED:
                 raise ValueError(f"{self.path}: storage {key} is compressed")
-            # The local header's name and extra field lengths, then the bytes.
-            names = self._map[info.header_offset + 26 : info.header_offset + 30]
-            begin = info.header_offset + 30 + sum(struct.unpack("<HH", names))
+            # A ZIP local file header is 30 bytes, its name's and extra
+            # field's lengths at 26; the name, the field, then the bytes.
+            header, lengths = info.header_offset + 30, info.header_offset + 26
+            names = self._map[lengths:header]
+            begin = header + sum(struct.unpack("<HH", names))
             return data[begin : begin + info.file_size]
 
         pickled = io.BytesIO(archive.read(f"{root}/data.pkl"))

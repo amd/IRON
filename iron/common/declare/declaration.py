@@ -280,8 +280,7 @@ class Declaration:
                     f"{cls.__name__}.{n}: when={when!r} must be a callable of "
                     f"(op, dev), the flag the tunable is searched under"
                 )
-        # The array tier: what a stream's tile, its dtype, its replication
-        # or its presence names, and array=True fields.
+        # The array tier (``array`` above).
         named: set[str] = set()
         for m in members:
             if isinstance(m, Operand) and m.obj_dims is not None:
@@ -293,8 +292,7 @@ class Declaration:
                 if m.when is not None:
                     named.add(m.when.name)
         named |= {n for n, s in specs.items() if s.array}
-        # The Array is generated with those fields and every member; by hand
-        # it annotates only the library's views it reads.
+        # By hand an Array annotates only the library's views it reads.
         if "Array" in vars(cls):
             hand = sorted(inspect.get_annotations(cls.Array).keys() - LIBRARY_VIEWS)
             if hand:

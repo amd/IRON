@@ -119,7 +119,7 @@ class Extent(Value):
 
     def __init__(self, field: Any, *, dtype: Any = np.int32) -> None:
         super().__init__(dtype=dtype)
-        self.field = field  # the field()
+        self.field = field
 
     @property
     def per_call(self) -> bool:

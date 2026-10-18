@@ -140,7 +140,8 @@ class GEMM(Operator):
         ),
         array=True,
     )
-    # Below HIGHEST C rounds to bf16 per K tile: tile_k changes it.
+    # Searched at HIGHEST alone: below it C rounds to bf16 after every K
+    # tile, so tile_k changes the result.
     tile_k: CompileTime[int] = Auto(
         default=64,
         domain=Divisors(
@@ -162,8 +163,6 @@ class GEMM(Operator):
     )
     b_col_maj: CompileTime[bool] = field(default=False, array=True)
     c_col_maj: CompileTime[bool] = field(default=False, array=True)
-    # MEDIUM multiplies on bfp16 macs; HIGHEST keeps a bf16 C's partial
-    # sums f32 across K tiles.
     precision: CompileTime[Precision] = Auto(default=Precision.MEDIUM, array=True)
     input_dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
     output_dtype: CompileTime[Any] = field(default=bfloat16, repr=False)

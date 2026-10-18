@@ -67,7 +67,7 @@ class Encoder(Model):
 
     def angles(self, rows):
         """The RoPE angles of the first ``rows`` positions, as ``layer`` reads
-        them; None rotates nothing.
+        them; None: no RoPE.
         """
         return None
 

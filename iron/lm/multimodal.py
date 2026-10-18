@@ -24,17 +24,14 @@ from .generation import Sampler
 class Multimodal(Model):
     """A text model and its towers, keyed by placeholder token, as one graph.
 
-    Its versions are the text model's own, one per tower, and ``placed``. A
-    tower's takes its input and writes its soft tokens into ``merged`` from
-    its own row. ``placed``, the ids with their placeholders, writes the
-    text's rows into ``merged`` from its first row; ``Merge`` then gives each
-    position its row of ``merged``, and the text model runs over those rows.
-    A causal text model runs a prompt in chunks: its placed version is a
-    prompt chunk, and takes ``before`` too, the count of each placeholder
-    before the chunk, so a run of placeholders may cross chunks. A version
-    is one dispatch with its own scratchpad, which all of them in one would
-    overrun. A tower's per-call values are named after its input: a vision
-    tower's ``rows`` on input ``rgb`` is ``rgb_rows``.
+    Its versions are the text model's own, one per tower, and ``placed``,
+    each one dispatch. A tower's writes its soft tokens into ``merged`` from
+    its own row; ``placed``, the ids with their placeholders, writes the
+    text's rows from its first, and ``Merge`` gives each position its row of
+    ``merged``. A causal text model's ``placed`` is a prompt chunk and takes
+    ``before``, each placeholder's count before the chunk. A tower's per-call
+    values are named after its input: a vision tower's ``rows`` on input
+    ``rgb`` is ``rgb_rows``.
 
     Args:
         text: The text model.
@@ -128,8 +125,9 @@ class Multimodal(Model):
         return self.text.inline(self.text.from_rows, rows, **text)
 
     def shapes(self) -> list[dict]:
-        """The input shapes of each version: the text model's, each tower's,
-        and the ids with their placeholders (and a causal model's counts).
+        """The input shapes of each version: the text model's, first so its
+        decode step leads (``Model.shapes``), each tower's, and the ids with
+        their placeholders (and a causal model's counts).
         """
         text = self.text.shapes()
         (ids,) = [s["ids"] for s in text if "ids" in s]

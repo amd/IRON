@@ -311,7 +311,8 @@ class Standalone:
             TracedGraph.of_steps(name, steps, in_names, out_names),
             full_elf=full_elf,
             coresident=coresident,
-            # A design run alone must still pay its entry: alone = D0 + base + load + R.
+            # Configure the array every call, as a design beside others in a
+            # model's image is, so one timed alone pays that too.
             reconfigure=full_elf,
         ).compile()
         self.callable = self.sequence.get_callable()
@@ -765,7 +766,7 @@ def measure(
                     raise
                 log(f"    {ops[i]} does not build, not measured: {e}")
                 continue
-            # A load that fails is the device's state, not a verdict on the design.
+            # Not caught: a failed load is the device's state, not the design's.
             one.load()
             many.load()
             built.append(i)

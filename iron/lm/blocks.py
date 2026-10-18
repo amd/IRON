@@ -4,10 +4,8 @@
 """The blocks a model builds from operators, for a graph's body.
 
 A graph here is called in a model's body as it is on its own (``Graph``):
-its steps trace into the model's. Weights are a checkpoint's ``(out, in)``:
-one row projects with GEMV, more with flm.ProjectionGEMM reading the weight as
-stored, and nothing is padded, so a row count the GEMM cannot tile is an
-error at trace time.
+its steps trace into the model's. Weights are a checkpoint's ``(out, in)``,
+projected by ``F.linear``.
 """
 
 import dataclasses
@@ -475,8 +473,8 @@ class ImagePatches(iron.Graph):
         self.patches, self.image, self.pool, self.chunk = patches, image, pool, chunk
         k, side = pool, pool * SIDE
         cores = 2 * require_device().cols
-        # Pooling windows across at most: Resample's cores hold `patch_columns`
-        # patch columns each, a zero one past the image among them.
+        # The most pooling windows across: Resample's cores hold
+        # `patch_columns` patch columns each, one a zero column past the image.
         self.across = (patch_columns * cores - 1) // k
         # Every grid of whole pooling windows the rows hold; the fewest patch
         # columns give the most bands and padded raster rows.
@@ -652,7 +650,7 @@ class Attention:
 
     def __call__(self, w, x, attend, angles):
         """The block on ``x`` ``(rows, width)``; ``angles``, a row per
-        position, turns q and k, or None nothing.
+        position, turns q and k (None: no RoPE).
         """
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         q, k, v = (
@@ -677,9 +675,9 @@ class Attention:
         return _linear(o, w.o_proj, precision=self.precision)
 
     def head_tiles(self, rows: int) -> dict:
-        """Half a head per GEMV tile for one row: q's shape is o's when
-        ``heads * head_dim`` is the width, so it is given here rather than
-        by the profile.
+        """For one row, GEMV tiles of half a head. Set here, not in the
+        profile: q's shape is o's when ``heads * head_dim`` is the width, so
+        the profile cannot tell them apart.
         """
         return dict(tile_size_output=self.head_dim // 2) if rows == 1 else {}
 
@@ -735,7 +733,6 @@ class MLP:
             )
 
     def act(self, x):
-        """The activation on ``x``."""
         if self.activation == "silu":
             return F.silu(x)
         return F.gelu(x, approximate="tanh")

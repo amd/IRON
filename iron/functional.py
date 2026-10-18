@@ -37,12 +37,14 @@ LAYER_NORM_EPS = 1e-5
 def linear(x, weight, bias=None, *, precision=None, **gemv):
     """``x @ weight.T``, plus ``bias`` on every row if given.
 
-    One row is a GEMV, whose float32 sum rounds once, as every
-    ``precision`` (``Precision``) allows. More are flm.ProjectionGEMM reading
-    ``weight`` column-major at ``precision``, or at ``HIGHEST``, asked for
-    here or by the graph's ``precision``, the GEMM whose float32 sums round
-    once, which tiles row counts flm.ProjectionGEMM does not. ``gemv`` is the GEMV's
-    tunables, for a call the profile cannot tell from another of its shape.
+    One row is a GEMV, its float32 sum rounded once, which every
+    ``precision`` (``Precision``) allows. More rows are flm.ProjectionGEMM
+    reading ``weight`` column-major at ``precision``; ``HIGHEST``, asked for
+    here or by the graph's ``precision``, is instead the GEMM whose float32
+    sums round once, which also tiles row counts flm.ProjectionGEMM cannot.
+    Nothing is padded: a row count neither tiles is an error at trace time.
+    ``gemv`` is the GEMV's tunables, for a call the profile cannot tell from
+    another of its shape.
 
     Raises:
         ValueError: GEMV tunables for more than one row.
@@ -123,7 +125,9 @@ def silu(x):
 
 
 def gelu(x, approximate: str = "none"):
-    """GELU by its tanh approximation (``gelu_pytorch_tanh``).
+    """GELU by its tanh approximation (``gelu_pytorch_tanh``). The default
+    is torch's, the exact GELU, so a call written for it is refused rather
+    than approximated.
 
     Raises:
         ValueError: ``approximate`` is not ``"tanh"``: no operator computes
