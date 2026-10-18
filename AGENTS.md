@@ -285,6 +285,9 @@ assert not errors, errors
 - `phoenix-extensive.yml`, `krackan-extensive.yml`: the same with extensive
   tests, nightly and on pushes to `main` and `devel`.
 - `phoenix-test-examples.yml`, `krackan-examples.yml`: `tests/applications/`.
+- `phoenix-nightly.yml`, `krackan-nightly.yml`: every `tests/applications/`
+  test, extensive ones too, each night; a benched TTFT, TPS or Latency 10%
+  worse than the night before's fails it (`pretty_trends.py --fail-on`).
 - `ci-lint.yml`: black, clang-format, reuse.
 - `pr-comment.yml` and `publish-pages.yml`: the performance trends of a PR
   and the benchmark history site.

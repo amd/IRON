@@ -18,6 +18,8 @@ on:
       - Phoenix - Small Benchmark/Test Suite
       - Phoenix - Extensive Benchmark/Test Suite
       - Phoenix - Test Example Applications
+      - Krackan - Nightly Applications
+      - Phoenix - Nightly Applications
     types:
       - completed
   workflow_dispatch:
@@ -38,7 +40,7 @@ jobs:
     # branch reaches the deploy step and GitHub rejects it there.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.event == 'push' &&
+      (github.event.workflow_run.event != 'pull_request' &&
        github.event.workflow_run.head_branch == 'devel')
     runs-on: ubuntu-latest
     environment:

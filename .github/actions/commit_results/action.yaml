@@ -57,8 +57,10 @@ runs:
         echo "results_dir=${RESULTS_DIR}" >> $GITHUB_OUTPUT
 
     - name: Push new test results to branch
-      if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
-      continue-on-error: true  # This step will fail for PRs from forks because of permission issues; ignore
+      # A push, a scheduled run or a manual one on a trunk branch; never a pull
+      # request or the merge queue, whose refs are their own.
+      if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel' }}
+      continue-on-error: true  # A lost race with another run's push; ignore
       shell: bash
       run: |
         ./ci/scripts/pretty_aggregate.py --results-root ../results -o ../results/readme.md

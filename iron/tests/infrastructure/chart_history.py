@@ -267,3 +267,21 @@ def test_a_rebased_parametrization_continues_its_history(tmp_path):
         for series in krackan["series"]:
             assert series["points"]["TTFT"] == [2.0786, 2.0808]
             assert series["points"]["TPS"] == [7.6496, 7.6672]
+
+
+def test_each_runner_s_nightly_results_get_charts_of_their_own(tmp_path):
+    for arch, value in (("krackan", "1.0"), ("phoenix", "2.0")):
+        directory = tmp_path / arch / "nightly"
+        directory.mkdir(parents=True)
+        write_rows(directory / "all.csv", rows(AFTER, value, renamed=True))
+
+    run("build_pages.py", "--results-root", tmp_path, "-o", tmp_path / "site")
+    page = (tmp_path / "site" / "index.html").read_text()
+    data = json.loads(
+        re.search(r'<script id="data" type="application/json">(.*?)</script>', page)[1]
+    )
+    for *_, chart in RENAMES:
+        krackan, phoenix = data[chart]["charts"]
+        assert krackan["name"] == "krackan — nightly"
+        assert phoenix["name"] == "phoenix — nightly"
+        assert phoenix["series"][0]["points"]["TTFT"] == [2.0]

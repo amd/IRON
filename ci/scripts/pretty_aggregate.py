@@ -9,7 +9,13 @@ import argparse
 import csv
 import os
 
-from pretty_common import display_name, parse_checks, split_test_path, status_emoji
+from pretty_common import (
+    ARCHS,
+    SUITES,
+    display_name,
+    parse_checks,
+    split_test_path,
+)
 
 parser = argparse.ArgumentParser(
     description="Aggregate CI results from all architecture subdirectories into a top-level readme.md"
@@ -26,9 +32,6 @@ parser.add_argument(
     help="Output markdown file (default: readme.md)",
 )
 args = parser.parse_args()
-
-SUITES = ["examples", "small", "extensive"]
-ARCHS = ["krackan", "phoenix"]
 
 # Benchmark metric columns to include (in order).  For each architecture we
 # show the first metric column that exists in the CSV.

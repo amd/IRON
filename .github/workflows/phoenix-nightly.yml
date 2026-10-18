@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Every application test on the real checkpoints, the extensive ones too (the
+# README's quick start among them), each night. A time worse than the night
+# before's by the gate below fails the run.
+
+name: Phoenix - Nightly Applications
+
+on:
+  workflow_dispatch:
+  schedule:
+   - cron:  '0 10 * * *'  # 3 AM MT, after the extensive suite
+
+# A run takes hours; a later one waits for it rather than cancelling it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+# commit_results pushes results to the ci branch from main and devel.
+permissions:
+  contents: write
+
+jobs:
+  test_nightly_on_phoenix:
+    name: Test Applications Nightly on Phoenix
+    runs-on: [self-hosted, phoenix]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        env:
+          HOME: /workspace
+
+      - name: Use a compile cache of this job's own
+        shell: bash
+        run: echo "NPU_CACHE_HOME=$RUNNER_TEMP/npu-cache" >> "$GITHUB_ENV"
+
+      - name: Prerequisites
+        uses: ./.github/actions/prereqs
+        with:
+          env_name: ci_env
+
+      - name: Run every application test
+        id: test
+        continue-on-error: true
+        uses: ./.github/actions/test
+        env:
+          PYTHONUNBUFFERED: "1"
+        with:
+          env_name: ci_env
+          extensive: "true"
+          test_suite: "applications"
+
+      - name: Commit test results
+        uses: ./.github/actions/commit_results
+        id: commit_results
+        with:
+          dir: phoenix/nightly
+          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' --metric='MaxKL (mean)' --metric='Top1Mismatches (mean)' -o pretty.md"
+
+      - name: Upload test results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-phoenix-nightly
+          path: ${{ steps.commit_results.outputs.results_dir }}
+          retention-days: 14
+
+      - name: Compare times with the night before
+        id: timing
+        continue-on-error: true
+        shell: bash
+        run: >-
+          python3 ci/scripts/pretty_trends.py
+          "${{ steps.commit_results.outputs.results_dir }}/all.csv"
+          -o /dev/null --threshold 10
+          --fail-on TTFT --fail-on TPS --fail-on Latency
+
+      - name: Clean up this job's compile cache
+        # This runner is self-hosted, so $RUNNER_TEMP is not emptied for us
+        # between jobs; remove it ourselves, win or lose.
+        if: always()
+        shell: bash
+        run: rm -rf "$NPU_CACHE_HOME"
+
+      - name: Fail workflow if a test failed or a time regressed
+        if: steps.test.outcome == 'failure' || steps.timing.outcome == 'failure'
+        run: exit 1

@@ -21,17 +21,18 @@ UNKNOWN_OPERATOR = "(unknown)"
 # The results branch stores one directory per architecture and suite. The
 # workflow that benchmarks each one names its artifact after the pair.
 ARCHS = ["krackan", "phoenix"]
-SUITES = ["small", "extensive", "examples"]
+SUITES = ["small", "extensive", "examples", "nightly"]
 
 # What each suite holds, for a reader of the report.
 SUITE_LABELS = {
     "small": "Operators",
     "extensive": "Operators, extensive",
     "examples": "Applications",
+    "nightly": "Applications, nightly",
 }
 
-# A pull request runs the default and the example suites. The extensive suite
-# runs on a push to a trunk branch, so no pull request reports it.
+# A pull request runs the default and the example suites. The extensive and
+# nightly suites run on a trunk branch alone, so no pull request reports them.
 PR_SUITES = ["small", "examples"]
 
 
