@@ -15,7 +15,7 @@ from typing import Annotated, Any, ClassVar, Union, get_args, get_origin
 
 from aie.iron import In, InOut, Out
 
-from .domain import Domain
+from .domain import Divisors, Domain
 from .field import AutoSpec, ParamSpec
 from .member import Member
 from .operand import Operand
@@ -362,6 +362,31 @@ class Declaration:
                     f"value; its stream is built once per shape"
                 )
 
+    def __repr__(self) -> str:
+        """What was declared and inferred, a line a kind: fields, tunables
+        with the values each is searched over, members with their symbolic
+        shapes, and the array tier the cores are built from.
+        """
+        given = [n for n in self.params if n not in self.derived]
+        lines = [
+            f"{self.name}",
+            f"  fields:   {', '.join(given) or '-'}",
+            f"  derived:  {', '.join(self.derived) or '-'}",
+            "  tunables: "
+            + (
+                ", ".join(
+                    f"{n} in {_domain(self.domains[n])}" if n in self.domains else n
+                    for n in self.tunables
+                )
+                or "-"
+            ),
+            "  resolved: "
+            + (", ".join(n for n in self.autos if n not in self.tunables) or "-"),
+            *(f"  {_member(m)}" for m in self.members),
+            f"  array:    ({', '.join(self.array)})",
+        ]
+        return "\n".join(lines)
+
     def shim_columns(
         self,
         dev,
@@ -542,3 +567,32 @@ class Declaration:
             bound[ref.name] = value
             origin.setdefault(ref.name, where)
         return bound
+
+
+def _bound(bound) -> str:
+    if isinstance(bound, dataclasses.Field):
+        return bound.name
+    return "f(op, dev)" if callable(bound) else repr(bound)
+
+
+def _domain(domain) -> str:
+    """``domain`` in a few words."""
+    if isinstance(domain, type):
+        return "{" + ", ".join(m.name for m in domain) + "}"
+    text = type(domain).__name__
+    if isinstance(domain, Divisors):
+        parts = [f"of {_bound(domain.of)}"]
+        if domain.step != 1:
+            parts.append(f"step {_bound(domain.step)}")
+        if domain.cap is not None:
+            parts.append(f"cap {_bound(domain.cap)}")
+        text += f"({', '.join(parts)})"
+    return text + (" when f(op, dev)" if domain.when is not None else "")
+
+
+def _member(m) -> str:
+    """A member's kind, name and, for an operand, its symbolic shape."""
+    if isinstance(m, Operand):
+        per = "" if m.per is None else f" per [{m.per}]"
+        return f"{m.role.__name__:<9} {m.name} [{m.dims}]{per}"
+    return f"{type(m).__name__:<9} {m.name}"

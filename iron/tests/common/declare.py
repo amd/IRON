@@ -111,6 +111,24 @@ def test_fields_are_their_own_references_and_instances_shadow_them():
     assert op.K == 256 and op.columns == 2 and MV.K is fields["K"]
 
 
+def test_a_declaration_prints_what_it_inferred():
+    assert repr(MV.declaration) == "\n".join(
+        [
+            "MV",
+            "  fields:   M, K, num_batches, epilogue",
+            "  derived:  -",
+            "  tunables: columns, tile_out, vec",
+            "  resolved: -",
+            "  In        A [num_batches, M, K] per [columns]",
+            "  In        B [num_batches, K]",
+            "  Out       C [num_batches, M] per [columns]",
+            "  Value     count",
+            "  Value     start",
+            "  array:    (K, columns, tile_out, epilogue)",
+        ]
+    )
+
+
 def test_members_keep_declaration_order_and_names():
     assert [m.name for m in MV.declaration.members] == ["A", "B", "C", "count", "start"]
     assert MV.A.role is In and MV.C.role is Out

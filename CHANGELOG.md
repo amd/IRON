@@ -101,6 +101,9 @@ public API adds its entry under Unreleased.
 - `repr` of a graph names its traced shapes; of a compiled version, its
   inputs, packaging and build directory; of a `Profile`, its operators; of
   a model, its `max_seq_len` and whether it is loaded.
+- `repr` of an operator's `declaration` lists its fields, tunables with the
+  values each is searched over, members with their symbolic shapes, and the
+  array tier its cores are built from.
 
 ### Changed
 
