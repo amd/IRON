@@ -568,7 +568,14 @@ def test_kernel_cycles_are_the_nightly_s_rows_by_their_build(
         "builds": {"mm/a": "matmul-1", "mm/b": "matmul-2"},
     }
     (tmp_path / "npu2.json").write_text(json.dumps(latest))
+    monkeypatch.setattr(tuning.ExternalFunction, "build_key", None, raising=False)
     monkeypatch.setattr(tuning, "KERNEL_CHECKS", f"file://{tmp_path}/{{npu}}.json")
     assert tuning.kernel_cycles(npu2) == {"matmul-1": 900}
     monkeypatch.setattr(tuning, "KERNEL_CHECKS", f"file://{tmp_path}/none.json")
     assert tuning.kernel_cycles(npu2, log=lambda _: None) == {}
+
+
+def test_an_mlir_aie_that_names_no_builds_gives_no_kernel_cycles(monkeypatch, npu2):
+    monkeypatch.delattr(tuning.ExternalFunction, "build_key", raising=False)
+    monkeypatch.setattr(tuning, "KERNEL_CHECKS", "file:///never/read/{npu}.json")
+    assert tuning.kernel_cycles(npu2) == {}
