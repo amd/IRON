@@ -49,6 +49,15 @@ public API adds its entry under Unreleased.
   construction does.
 - `Param(array=True)` and `Auto(array=True)`: an operator's `Array` is
   generated from its declarations, so a field is declared once.
+- `Config.norm()`, the kind of norm a config's layers and final norm share,
+  and `Model.final_norm`, the module that final norm reads.
+- `DecoderLayer.block(x, pre, f, post)`, one residual block; each layer is
+  its list of blocks.
+- `Model.renames`, a class-level table of checkpoint module renames applied
+  before `sanitize`, and `leaves(tree)`, each weight of a tree by its dotted
+  name.
+- `Model.loaded()`, the hook `Model.load` hands the compiled versions to;
+  `Runner.build()` makes the model `npu()` loads.
 
 ### Changed
 
@@ -76,6 +85,19 @@ public API adds its entry under Unreleased.
 - `resolved(dev)` resolves for the device given instead of probing for an
   NPU, and an unresolved `Auto()` tile raises instead of becoming a 0-d fifo.
 - RoPE's `method_type` is `two_halves`, a flag.
+- IRON requires Python 3.11.
+- An `Encoder`'s per-call row count is `rows`, as a causal model's is.
+- `Runner.bos` is read from the checkpoint's `config.json` unless a runner
+  names one.
+- `Golden.logits` keys on the tokens and any clip or image array beside
+  them, and a checkpoint's `golden.npz` is fingerprinted with its
+  `config.json`; one recorded before must be recorded again.
+- `Config.from_checkpoint` names the missing `config.json` keys, and an
+  encoder refuses a token outside its vocabulary.
+- idefics3 vision, Whisper and Phi-4 config fields take `config.json`'s
+  names: `hidden_size`, `patch_size`, `encoder_attention_heads`,
+  `encoder_ffn_dim`, `num_mel_bins`, `max_source_positions` and
+  `max_position_embeddings`.
 
 ### Removed
 
@@ -101,3 +123,8 @@ public API adds its entry under Unreleased.
 - GEMM's `round_conv_even` and `use_scalar`, `DequantBFP`'s `tile_n`,
   `decode_layer`'s `sliding_window`, and `lm_head`'s and `prefill_attn`'s
   `trace_size`.
+- `Derived`; computed weights live in `sanitize`'s output or on the model.
+- `CausalLM.head` and `Encoder.norm()` overrides, replaced by `final_norm`;
+  `CausalLM.embed`.
+- `Runner.sizes` and `--size`, `F.linear`'s `k_tile` and `tile_n`, and
+  Whisper's `Runner`.
