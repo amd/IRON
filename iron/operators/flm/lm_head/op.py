@@ -267,9 +267,12 @@ class LMHead(Operator):
         before the softcap.
         """
         uncapped = type(self)(dim=self.dim, vocab=self.vocab, softcap=1e30)
-        return PROJECTION_ERROR * np.abs(uncapped.reference(w, x)).max()
+        return PROJECTION_ERROR * float(np.abs(uncapped.reference(w, x)).max())
 
     def reference(self, w, x):
-        """The softcapped logits of X for W, in float64."""
+        """The softcapped logits of X for W, computed in float64 and rounded
+        to Y's bf16.
+        """
         weights = reference.dequantize(w, self.dim, self.vocab, self.resolved().rows)
-        return reference.reference(weights, np.asarray(x, np.float64), self.softcap)
+        logits = reference.reference(weights, np.asarray(x, np.float64), self.softcap)
+        return logits.astype(bfloat16)
