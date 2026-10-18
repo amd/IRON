@@ -189,6 +189,11 @@ class Handle:
             shape, self.dtype, self.name, self.role, self, 0, tap, bounds=bounds
         )
 
+    @property
+    def T(self) -> "Handle":
+        """``transpose(1, 0)``, as numpy's ``.T`` of a matrix."""
+        return self.transpose(1, 0)
+
     def _bound(self, key) -> "Handle":
         """A run from a per-call start bounded per call, ``x[s : s + W][:n]``:
         every call keeps ``s + n`` inside the axis, checked before it.
@@ -734,6 +739,10 @@ class _Viewed:
 
     def transpose(self, *axes):
         return self._as_operand().transpose(*axes)
+
+    @property
+    def T(self):
+        return self._as_operand().T
 
     def at(self, tap, shape, *, bounds=None, repeat=None, length=None):
         """``Handle.at`` of the tensor as the tracer views it."""

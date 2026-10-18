@@ -2924,6 +2924,21 @@ def test_matmul_by_a_weight_s_transpose_is_linear(rows, op):
     assert _steps(t) == [op] and t.weights[id(w)][1].name == "w"
 
 
+@pytest.mark.parametrize(
+    "held", [iron.weight, lambda w: iron.state(w.shape)], ids=["weight", "state"]
+)
+def test_a_held_tensor_s_and_a_handle_s_t_is_their_transpose(held):
+    class Project(iron.Graph):
+        def __init__(self):
+            self.w = held(z(128, E))
+
+        def body(self, x, v):
+            assert v.T.shape == (E, 128) and v.T.tap == v.transpose(1, 0).tap
+            return x @ self.w.T
+
+    assert _steps(Project().trace(x=(256, E), v=(128, E))) == ["GEMM"]
+
+
 def test_a_weight_times_a_row_is_linear_and_a_plain_matrix_is_refused():
     w = z(128, E)
 
