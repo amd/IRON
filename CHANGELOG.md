@@ -67,8 +67,8 @@ public API adds its entry under Unreleased.
   epsilon, as torch's. A `normalized_shape` other than the input's last
   axis is refused.
 - `F.linear(precision=)` is the one way to ask for an accurate projection:
-  at `Precision.HIGHEST` several rows run the GEMM whose float32 sums round
-  once, and one row, a GEMV that rounds once, takes any precision.
+  at `Precision.HIGHEST` several rows run core GEMM, whose float32 sums
+  round once, where they ran flm.GEMM before; and one row, a GEMV that rounds once, takes any precision.
   `Attention` and `MLP` take `precision` in place of `accurate`.
 - Config fields use `config.json`'s names: `hidden_size`,
   `num_hidden_layers`, `num_attention_heads`, `num_key_value_heads`,
