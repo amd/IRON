@@ -160,17 +160,17 @@ class Encoder(Model):
 
         Raises:
             ValueError: ``tokens`` is empty or longer than ``max_tokens``.
-            IndexError: A token is outside ``[-vocab_size, vocab_size)``.
+            IndexError: A token is outside ``[0, vocab_size)``.
         """
         tokens = np.asarray(tokens)
         n, V = len(tokens), self.config.vocab_size
         if not 0 < n <= self.max_tokens:
             raise ValueError(f"{n} tokens do not fit {self.max_tokens} rows")
-        outside = tokens[(tokens < -V) | (tokens >= V)]
+        outside = tokens[(tokens < 0) | (tokens >= V)]
         if outside.size:
-            raise IndexError(f"tokens {outside} are outside [-{V}, {V})")
+            raise IndexError(f"tokens {outside} are outside [0, {V})")
         ids = np.zeros(self.max_tokens, np.int32)
-        ids[:n] = tokens % V
+        ids[:n] = tokens
         return ids, dict(rows=n)
 
 

@@ -124,12 +124,13 @@ class Config:
 
         Raises:
             FileNotFoundError: No ``config.json`` is there.
+            ValueError: The file lacks a field that has no default.
         """
         path = Path(path)
         if path.name != "config.json":
             path = (path if path.is_dir() else path.parent) / "config.json"
         data = json.loads(path.read_text())
-        kwargs = {}
+        kwargs, missing = {}, []
         for f in dataclasses.fields(cls):
             key = f.metadata.get("json")
             if key is None:
@@ -137,9 +138,14 @@ class Config:
             value = _dotted(data, key)
             # Hugging Face writes an unset option as null.
             if value is _MISSING or value is None:
+                required = dataclasses.MISSING
+                if f.default is required and f.default_factory is required:
+                    missing.append(key)
                 continue
             convert = f.metadata.get("convert")
             kwargs[f.name] = convert(value) if convert else value
+        if missing:
+            raise ValueError(f"{path} lacks {missing}")
         return cls(**kwargs)
 
     def to_json(self) -> dict:

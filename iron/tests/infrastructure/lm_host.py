@@ -715,3 +715,9 @@ def test_download_shares_no_partial_file_with_a_concurrent_fetch(tmp_path, monke
         "https://example.com/file", hashlib.sha256(data).hexdigest()
     )
     assert download.fetch().read_bytes() == data
+
+
+def test_the_lm_testing_helpers_import_without_pytest():
+    """A model's CLI reads ``weights_dir`` from ``iron.lm.testing``."""
+    code = "import sys, iron.lm.testing; assert 'pytest' not in sys.modules"
+    subprocess.run([sys.executable, "-c", code], check=True)

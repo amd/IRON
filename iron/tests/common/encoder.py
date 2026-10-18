@@ -146,7 +146,7 @@ def table():
 
 
 def test_inputs_pad_with_zero_and_give_rows(table):
-    ids, values = SelfAttention(table, 1).inputs([5, -1, 7])
+    ids, values = SelfAttention(table, 1).inputs([5, VOCAB - 1, 7])
     assert values == dict(rows=3)
     assert ids.dtype == np.int32 and ids.shape == (ROWS,)
     np.testing.assert_array_equal(ids[:3], [5, VOCAB - 1, 7])
@@ -155,7 +155,12 @@ def test_inputs_pad_with_zero_and_give_rows(table):
 
 @pytest.mark.parametrize(
     "tokens, error",
-    [([], ValueError), ([1] * (ROWS + 1), ValueError), ([VOCAB], IndexError)],
+    [
+        ([], ValueError),
+        ([1] * (ROWS + 1), ValueError),
+        ([VOCAB], IndexError),
+        ([-1], IndexError),
+    ],
 )
 def test_inputs_refuse_what_no_call_takes(table, tokens, error):
     with pytest.raises(error):

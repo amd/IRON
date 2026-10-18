@@ -78,6 +78,12 @@ def test_from_checkpoint_raises_with_no_config_json_beside_the_path(tmp_path):
         LlamaConfig.from_checkpoint(tmp_path / "model.safetensors")
 
 
+def test_from_checkpoint_names_the_keys_a_config_json_lacks(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 8}))
+    with pytest.raises(ValueError, match="lacks .*'hidden_size'"):
+        LlamaConfig.from_checkpoint(tmp_path)
+
+
 @pytest.mark.parametrize(
     "cls,instance",
     [

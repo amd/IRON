@@ -16,7 +16,6 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
-import pytest
 from aie.utils.compile import NPU_CACHE_HOME
 
 from .generation import (
@@ -90,6 +89,8 @@ def require(*files: Path) -> None:
     missing = [str(f) for f in files if not f.exists()]
     if not missing:
         return
+    import pytest
+
     if os.environ.get("CI"):
         pytest.fail(
             f"this CI runner lacks {', '.join(missing)}: install the model's "
