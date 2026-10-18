@@ -141,7 +141,8 @@ public API adds its entry under Unreleased.
 
 - `Tokenizer.chat` puts the BOS where the chat template writes it, and only
   there, as transformers' `apply_chat_template` does; it no longer adds one.
-  The template may call `strftime_now`, and `Model.load` reads it from
+  The template may call `strftime_now` and writes `tokenizer_config.json`'s
+  `bos_token` where it has one; `Model.load` reads the template from
   `chat_template.jinja` when `tokenizer_config.json` has none.
 - `CausalLM` builds its modules, `model` (a `Decoder` of `layer_class`
   layers, `DecoderLayer` by default) and `lm_head` (the embedding where

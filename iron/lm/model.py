@@ -56,12 +56,19 @@ class Tokenizer:
     text, over ``encoding``: anything with ``encode`` and ``decode``, as
     ``TokenizerJson`` gives. ``chat_template`` is the checkpoint's
     own, from its ``tokenizer_config.json`` or ``chat_template.jinja``, if
-    it has one.
+    it has one, and ``bos_token`` the text it writes for ``bos_token``
+    (``bos``'s own text when None).
     """
 
-    def __init__(self, encoding, bos: int, chat_template: str | None = None):
+    def __init__(
+        self,
+        encoding,
+        bos: int,
+        chat_template: str | None = None,
+        bos_token: str | None = None,
+    ):
         self.encoding, self.bos = encoding, bos
-        self.chat_template = chat_template
+        self.chat_template, self.bos_token = chat_template, bos_token
 
     def __call__(self, text: str) -> list[int]:
         return [self.bos, *self.encoding.encode(text)]
@@ -102,7 +109,11 @@ class Tokenizer:
         text = template.render(
             messages=messages,
             add_generation_prompt=True,
-            bos_token=self.encoding.token(self.bos),
+            bos_token=(
+                self.encoding.token(self.bos)
+                if self.bos_token is None
+                else self.bos_token
+            ),
             raise_exception=raise_exception,
             strftime_now=lambda f: datetime.datetime.now().strftime(f),
         )
@@ -231,13 +242,18 @@ class Model(iron.Graph):
         if seed is None:
             settings = directory / "tokenizer_config.json"
             jinja = directory / "chat_template.jinja"
-            template = None
-            if settings.exists():
-                template = json.loads(settings.read_text()).get("chat_template")
+            found = json.loads(settings.read_text()) if settings.exists() else {}
+            template = found.get("chat_template")
             if template is None and jinja.exists():
                 template = jinja.read_text()
+            # transformers renders tokenizer_config.json's bos_token, which
+            # may be null (nothing) or an added token's record.
+            bos_token = None
+            if "bos_token" in found:
+                b = found["bos_token"]
+                bos_token = (b["content"] if isinstance(b, dict) else b) or ""
             encoding = TokenizerJson(directory / "tokenizer.json")
-            model.tokenizer = Tokenizer(encoding, model.bos, template)
+            model.tokenizer = Tokenizer(encoding, model.bos, template, bos_token)
         return model
 
     @functools.cached_property

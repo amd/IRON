@@ -578,6 +578,21 @@ def test_a_chat_template_jinja_file_is_read_and_may_call_strftime_now(cpu, tmp_p
     assert tokenizer.decode(tokenizer.chat(HI)).startswith(year + "<|im_start|>")
 
 
+@pytest.mark.parametrize(
+    "given, written", [(None, ""), ("<s>", "<s>"), ({"content": "<s>"}, "<s>")]
+)
+def test_a_chat_template_writes_tokenizer_config_s_bos_token(
+    cpu, tmp_path, given, written
+):
+    pytest.importorskip("jinja2")
+    _repository(tmp_path, cpu.weights)
+    settings = {"chat_template": "{{ bos_token }}" + CHATML, "bos_token": given}
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps(settings))
+    tokenizer = OnHost.load(tmp_path).tokenizer
+    text = written + "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+    assert tokenizer.chat(HI) == tokenizer.encoding.encode(text)
+
+
 def test_a_chat_template_s_raise_exception_raises_its_message(tmp_path):
     jinja2 = pytest.importorskip("jinja2")
     template = "{{ raise_exception('roles must alternate') }}"
