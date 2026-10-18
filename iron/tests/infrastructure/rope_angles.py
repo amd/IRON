@@ -3,11 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """RoPE's angle table (``rope_angles``) and Llama 3's frequency scaling
-(``REAL_1B.rope_scaling``) against their formulas and Meta's published
-reference. No NPU.
+(``REAL_1B.rope_scaling``) against their formulas. No NPU.
 """
-
-import math
 
 import numpy as np
 
@@ -54,33 +51,25 @@ def test_rope_is_correctly_rounded_at_position_zero_and_one():
     )
 
 
-def _published_llama3_scaling(freqs, factor, low, high, original):
-    """``apply_scaling`` from Meta's llama-models reference, as published:
-    one frequency at a time, in float64.
+def _llama3_scaling(freqs, factor, low, high, original):
+    """The ``llama3`` rope type's scaling as Hugging Face transformers
+    documents it: a frequency's interpolation weight between ``freq /
+    factor`` and ``freq`` is ``original / wavelength`` taken from ``low``
+    to ``high``, clipped to [0, 1]; in float64.
     """
-    low_wavelen, high_wavelen = original / low, original / high
-    scaled = []
-    for freq in freqs:
-        wavelen = 2 * math.pi / freq
-        if wavelen < high_wavelen:
-            scaled.append(freq)
-        elif wavelen > low_wavelen:
-            scaled.append(freq / factor)
-        else:
-            smooth = (original / wavelen - low) / (high - low)
-            scaled.append((1 - smooth) * freq / factor + smooth * freq)
-    return np.array(scaled)
+    smooth = np.clip((original * freqs / (2 * np.pi) - low) / (high - low), 0, 1)
+    return (1 - smooth) * freqs / factor + smooth * freqs
 
 
 def test_llama3_scaling_is_the_published_formula():
     """Every frequency of Llama 3.2 1B's (head_dim 64, base 500000) matches
-    Meta's reference, and all three bands are exercised: the fastest fifteen
+    the formula, and all three bands are exercised: the fastest fifteen
     kept, three interpolated, the slowest fourteen divided by 32.
     """
     D, base = 64, 500000.0
     inv_freq = 1.0 / base ** (np.arange(0, D, 2) / D)
     ours = LLAMA_3_2_ROPE_SCALING(inv_freq)
-    published = _published_llama3_scaling(inv_freq, 32.0, 1.0, 4.0, 8192)
+    published = _llama3_scaling(inv_freq, 32.0, 1.0, 4.0, 8192)
     np.testing.assert_allclose(ours, published, rtol=1e-15, atol=0)
 
     kept = ours == inv_freq
