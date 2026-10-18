@@ -368,6 +368,10 @@ class Handle:
         view.window = window
         return view
 
+    def __setitem__(self, key, value) -> None:
+        """``self[key] = value``: a copy of ``value`` into that view."""
+        _write(self[key], value)
+
     def _placed(self, parent: Handle, start: int) -> Handle:
         """This handle of a buffer of its own, as the run of ``parent``
         from its element ``start``.
@@ -643,6 +647,12 @@ def _broadcast(whole, rowwise, x: Handle, y) -> Handle:
     )
 
 
+def _write(view: Handle, value) -> None:
+    from iron.operators.copy import Copy
+
+    Copy.step(value, view)
+
+
 class _Viewed:
     """A tensor the graph holds, viewed inside its body as the tracer says."""
 
@@ -658,6 +668,10 @@ class _Viewed:
         if isinstance(key, _Viewed):  # a gather by the ids a state holds
             key = key._as_operand()
         return self._as_operand()[key]
+
+    def __setitem__(self, key, value) -> None:
+        """``self[key] = value``: a copy of ``value`` into that view."""
+        _write(self[key], value)
 
     def reshape(self, *shape):
         return self._as_operand().reshape(*shape)

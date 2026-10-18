@@ -2942,3 +2942,32 @@ def test_a_row_times_a_held_matrix_is_rowwise():
             return x[0] * self.m
 
     assert _steps(Scale().trace(x=(2, E))) == ["RowwiseMul"]
+
+
+def test_an_assignment_into_a_view_is_the_copy_into_it():
+    """``cache[pos] = x`` records the step ``Copy.step(x, cache[pos])`` does,
+    traced and in the reference; a handle's slice takes one too.
+    """
+    cache = iron.state((8, 64), name="cache")
+
+    class Store(iron.Graph):
+        def body(self, x, *, pos: Scratchpad[np.int32]):
+            cache[pos] = x
+            y = Copy.step(x).reshape(2, 32)
+            y[1] = x[0:32]
+            return y
+
+    class Spelled(iron.Graph):
+        def body(self, x, *, pos: Scratchpad[np.int32]):
+            Copy.step(x, cache[pos])
+            y = Copy.step(x).reshape(2, 32)
+            Copy.step(x[0:32], y[1])
+            return y
+
+    a, b = (g().trace(x=(64,)) for g in (Store, Spelled))
+    assert _steps(a) == _steps(b) == ["Copy"] * 3
+    assert [s.refs() for s in a.steps] == [s.refs() for s in b.steps]
+    x = (np.arange(64) % 16).astype(bfloat16)
+    y = Store().reference(x, pos=3)
+    np.testing.assert_array_equal(cache.host[3], x)
+    np.testing.assert_array_equal(np.asarray(y)[1], x[:32])
