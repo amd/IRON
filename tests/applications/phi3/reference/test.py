@@ -4,7 +4,7 @@
 
 """Phi-4-mini-instruct's graph against Hugging Face's Phi-3 in float32 over
 the same random weights, its logits recorded in ``goldens/``, device-free
-(no checkpoint, no NPU): Layer's partial rotary and fused qkv_proj and
+(no checkpoint, no NPU): its partial rotary and fused qkv_proj and
 gate_up_proj, through the shared decoder's caches, independent of whether
 the real checkpoint or hardware is at hand.
 """
@@ -28,7 +28,7 @@ from iron.lm.golden import HuggingFace
 pytestmark = pytest.mark.usefixtures("npu2")
 
 #: Phi-4-mini-instruct's proportions at toy size: GQA, a fused qkv/gate_up,
-#: partial rotary (half of each head), LongRoPE's amplitude scale.
+#: partial rotary (half of each head).
 TOY = Phi4Config(
     vocab_size=1024,
     hidden_size=512,
