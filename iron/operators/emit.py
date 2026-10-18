@@ -89,10 +89,10 @@ class Emit(Operator):
     carried: int = Param()
     rows: int = Param(derive=lambda op: op.slots + op.carried, repr=False)
 
-    program = In(rows, ROW, dtype=np.int32, obj_type=(rows, ROW), depth=1)
-    planes = In(2, carried, dtype=np.int32, obj_type=(2, carried), depth=1)
-    image = Out(slots, dtype=np.int32, obj_type=(slots,), depth=1)
-    state = Out(carried, dtype=np.int32, obj_type=(carried,), depth=1)
+    program = In(rows, ROW, dtype=np.int32, obj_shape=(rows, ROW), depth=1)
+    planes = In(2, carried, dtype=np.int32, obj_shape=(2, carried), depth=1)
+    image = Out(slots, dtype=np.int32, obj_shape=(slots,), depth=1)
+    state = Out(carried, dtype=np.int32, obj_shape=(carried,), depth=1)
 
     def validate(self) -> None:
         self.check_derived("rows")

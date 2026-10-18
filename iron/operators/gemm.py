@@ -171,17 +171,17 @@ class GEMM(Operator):
     b_l2: int = Auto(repr=False, init=False)
     c_l2: int = Auto(repr=False, init=False)
 
-    A = In(M, K, dtype=input_dtype, obj_type=(a_l2,), per=(n_shim_mem_a,))
+    A = In(M, K, dtype=input_dtype, obj_shape=(a_l2,), per=(n_shim_mem_a,))
     B = In(
         Select(b_col_maj, (N, K), (K, N)),
         dtype=input_dtype,
-        obj_type=(b_l2,),
+        obj_shape=(b_l2,),
         per=(num_aie_columns,),
     )
     C = Out(
         Select(c_col_maj, (N, M), (M, N)),
         dtype=output_dtype,
-        obj_type=(c_l2,),
+        obj_shape=(c_l2,),
         per=(num_aie_columns,),
     )
     # A bound limits the compute, not the DMAs: A's pattern fills all four BD dims.

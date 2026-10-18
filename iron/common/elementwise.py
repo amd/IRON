@@ -599,12 +599,12 @@ class UnaryElementwise(Elementwise):
 
     x = In(
         size,
-        obj_type=(Elementwise.tile_size,),
+        obj_shape=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     y = Out(
         size,
-        obj_type=(Elementwise.tile_size,),
+        obj_shape=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
 
@@ -632,17 +632,17 @@ class BinaryElementwise(Elementwise):
 
     a = In(
         size,
-        obj_type=(Elementwise.tile_size,),
+        obj_shape=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     b = In(
         size,
-        obj_type=(Elementwise.tile_size,),
+        obj_shape=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     y = Out(
         size,
-        obj_type=(Elementwise.tile_size,),
+        obj_shape=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
 
@@ -670,13 +670,13 @@ class Rowwise(Elementwise):
     x = In(
         rows,
         tile_size,
-        obj_type=(tile_size,),
+        obj_shape=(tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     y = Out(
         rows,
         tile_size,
-        obj_type=(tile_size,),
+        obj_shape=(tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
 
@@ -720,19 +720,19 @@ class RowBroadcast(Rowwise):
     x = In(
         Rowwise.rows,
         Rowwise.tile_size,
-        obj_type=(line,),
+        obj_shape=(line,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     row = In(
         Rowwise.tile_size,
-        obj_type=(line,),
+        obj_shape=(line,),
         per=(Elementwise.num_channels,),
         replicate=True,
     )
     y = Out(
         Rowwise.rows,
         Rowwise.tile_size,
-        obj_type=(line,),
+        obj_shape=(line,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
 

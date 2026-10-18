@@ -71,6 +71,9 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- An operand's element shape is `obj_shape=`, not `obj_type=`:
+  `In(M, K, obj_shape=(tile, K))`. aie.iron's `ObjectFifo(obj_type=)` keeps
+  its name, since there it is an `np.ndarray` type.
 - GEMM's `dtype_in` and `dtype_out` are `input_dtype` and `output_dtype`,
   the names its kernel factory (`aie.iron.kernels.linalg.mm`) takes.
 - An operator's nested `Array` annotates only the library's views it reads

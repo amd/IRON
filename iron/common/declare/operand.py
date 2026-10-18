@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """An operator's operands: the host buffers it is called with, each with an
-``obj_type=`` its own stream into the array.
+``obj_shape=`` its own stream into the array.
 """
 
 from __future__ import annotations
@@ -70,11 +70,10 @@ class Operand(Member["Operand"]):
     Args:
         dims: The host shape.
         dtype: The element type.
-        obj_type: What one fifo element holds, in the units a core reads
-            (upstream's `ObjectFifo.obj_type`, a shape here rather than an
-            `np.ndarray` type). With one the buffer is its own stream;
-            without one it is an argument of a hand-written
-            `Operator.sequence`.
+        obj_shape: What one fifo element holds, in the units a core reads
+            (the shape of upstream's `ObjectFifo.obj_type`). With one the
+            buffer is its own stream; without one it is an argument of a
+            hand-written `Operator.sequence`.
         per: The field (or fields, multiplied) the stream is replicated over.
         depth: The fifo depth.
         replicate: Every `per=` lane gets the whole buffer, not a share.
@@ -90,7 +89,7 @@ class Operand(Member["Operand"]):
         self,
         *dims: _DimSpec,
         dtype: Any = bfloat16,
-        obj_type: Any = None,
+        obj_shape: Any = None,
         per: _DimSpec | None = None,
         depth: int = 2,
         replicate: bool = False,
@@ -106,11 +105,13 @@ class Operand(Member["Operand"]):
         self.dims = Shape(tuple(dims))
         self.declared_dtype = dtype
         self.when = when
-        self.obj_dims = (
+        self._obj_shape = (
             None
-            if obj_type is None
+            if obj_shape is None
             else Shape(
-                tuple(obj_type) if isinstance(obj_type, (tuple, list)) else (obj_type,)
+                tuple(obj_shape)
+                if isinstance(obj_shape, (tuple, list))
+                else (obj_shape,)
             )
         )
         self.per = (
@@ -178,13 +179,13 @@ class Operand(Member["Operand"]):
 
     @property
     def streamed(self) -> bool:
-        return self.obj_dims is not None
+        return self._obj_shape is not None
 
     @property
     def obj_shape(self) -> tuple[int, ...]:
-        if self.obj_dims is None:
-            raise TypeError(f"{self.name} is declared without an obj_type=: no stream")
-        return self._resolve(self.obj_dims)
+        if self._obj_shape is None:
+            raise TypeError(f"{self.name} is declared without an obj_shape=: no stream")
+        return self._resolve(self._obj_shape)
 
     @property
     def obj_type(self):
@@ -206,8 +207,8 @@ class Operand(Member["Operand"]):
     @property
     def lanes(self) -> int:
         """The stream's lanes (fifos)."""
-        if self.obj_dims is None:
-            raise TypeError(f"{self.name} is declared without an obj_type=: no stream")
+        if self._obj_shape is None:
+            raise TypeError(f"{self.name} is declared without an obj_shape=: no stream")
         return 1 if self.per is None else math.prod(self._resolve(self.per))
 
     def bind(self, handles) -> None:
@@ -450,15 +451,15 @@ class Operand(Member["Operand"]):
         patches, counting tiles of ``length_unit`` elements.
 
         Raises:
-            ValueError: The operand has no obj_type=, does not divide across
+            ValueError: The operand has no obj_shape=, does not divide across
                 its lanes, or is bounded on an axis the split cannot bound or
                 in tiles no descriptor holds.
         """
         name = f"{type(self.op).__name__}.{self.name}"
         if not self.streamed:
             raise ValueError(
-                f"{name} has no obj_type=, so its sequence cannot be derived; add "
-                f"obj_type= or override sequence(rt)"
+                f"{name} has no obj_shape=, so its sequence cannot be derived; add "
+                f"obj_shape= or override sequence(rt)"
             )
         count, shape = self.lanes, self.shape
         bounded = self.bounded

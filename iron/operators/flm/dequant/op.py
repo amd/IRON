@@ -168,14 +168,14 @@ class DequantBFP(Operator):
     qw = In(
         quantized_bytes,
         dtype=np.uint8,
-        obj_type=(ROWS * BLOCK_BYTES,),
+        obj_shape=(ROWS * BLOCK_BYTES,),
         per=(cols,),
         depth=2,
     )
     out = Out(
         packed_blocks,
         dtype=v8bfp16ebs8,
-        obj_type=(HALF_BLOCKS,),
+        obj_shape=(HALF_BLOCKS,),
         per=(cols, halves),
         depth=2,
     )

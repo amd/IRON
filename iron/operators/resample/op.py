@@ -261,7 +261,7 @@ class ResampleTaps(Operator):
         chunks,
         words,
         dtype=np.int32,
-        obj_type=(words,),
+        obj_shape=(words,),
         per=(num_aie_columns, num_channels),
     )
     in_samples = Extent(in_size)
@@ -870,15 +870,15 @@ class Resample(Operator):
     out_rows = Extent(out_height)
     out_columns = Extent(out_width)
 
-    image = In(image_chunks, chunk, dtype=np.uint8, obj_type=(chunk,), broadcast=True)
-    taps_w = In(width_chunks, words, dtype=np.int32, obj_type=(words,), broadcast=True)
+    image = In(image_chunks, chunk, dtype=np.uint8, obj_shape=(chunk,), broadcast=True)
+    taps_w = In(width_chunks, words, dtype=np.int32, obj_shape=(words,), broadcast=True)
     # Through taps_w's stream, after it.
     taps_h = In(height_chunks, words, dtype=np.int32)
     patches = Out(
         patch_rows,
         SIDE * SIDE * 3,
         dtype=bfloat16,
-        obj_type=(SIDE * SIDE * 3,),
+        obj_shape=(SIDE * SIDE * 3,),
         per=(num_aie_columns, num_channels),
     )
 
@@ -1263,9 +1263,9 @@ class PatchPositions(Operator):
     out_rows = Extent(out_height)
     out_columns = Extent(out_width)
 
-    xy = Out(rows, 2, dtype=np.int32, obj_type=(block, 2))
-    position_ids = Out(2, rows, dtype=np.int32, obj_type=(2, block))
-    order = Out(rows, dtype=np.int32, obj_type=(block,))
+    xy = Out(rows, 2, dtype=np.int32, obj_shape=(block, 2))
+    position_ids = Out(2, rows, dtype=np.int32, obj_shape=(2, block))
+    order = Out(rows, dtype=np.int32, obj_shape=(block,))
 
     count = Value(derive=lambda op: op.rows // op.block)
     dst_rows = Value(derive=lambda op: op.out_rows)

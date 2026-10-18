@@ -98,9 +98,9 @@ class Merge(Operator):
     offset: bool = Param(default=False)
     kinds: int = Param(derive=lambda op: len(op.placeholders), repr=False)
 
-    ids = In(rows, dtype=np.int32, obj_type=(block,))
-    before = In(kinds, dtype=np.int32, obj_type=(kinds,), depth=1, when=offset)
-    merge = Out(rows, dtype=np.int32, obj_type=(block,))
+    ids = In(rows, dtype=np.int32, obj_shape=(block,))
+    before = In(kinds, dtype=np.int32, obj_shape=(kinds,), depth=1, when=offset)
+    merge = Out(rows, dtype=np.int32, obj_shape=(block,))
 
     count = Value(derive=lambda op: op.rows // op.block)
 

@@ -135,14 +135,14 @@ reuse lint
        extents (a tunable is an `Auto()` field: the caller or a profile may
        give it, and the library resolves it when neither does), `In`/`Out`
        operands (mlir-aie's `aie.iron.In`/`Out`/`InOut` markers, with a
-       declared shape) whose `obj_type=` makes each its own stream into the
+       declared shape) whose `obj_shape=` makes each its own stream into the
        array (`per=` a column count), `Value`
        members the cores read (trip counts, derived from the extents so the
        array never depends on them), a nested `class Array(Operator.Array)`
        whose `build()` builds ObjectFIFOs and Workers and binds each
        operand's lane to a fifo's shim end, and optionally `sequence(rt)`
        when the runtime sequence is not the derived one. The array tier is
-       the fields the `Array` reads: what an `obj_type=` names and what is
+       the fields the `Array` reads: what an `obj_shape=` names and what is
        declared `array=True`; one array serves every extent. A shipped binary
        is a subclass declared with `image=Xclbin(...)`, its operands pinned
        by its `Array.build()` (`operand.pin([DmaEndpoint(...), ...])`, each lane on a shim channel of the image). Two hooks change what is built: `xclbin_operator()`, the
@@ -394,8 +394,8 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 2. Declare the operator (`class X(Operator)`):
    - `Param()` fields for what a host shape names; `Auto()` tunables, filled
      by `resolve(dev)` from the device and the extents
-   - `In`/`Out` operands by shape, each with its `obj_type=` in the units a
-     core reads (`per=` a column count): an operand with an `obj_type=` is
+   - `In`/`Out` operands by shape, each with its `obj_shape=` in the units a
+     core reads (`per=` a column count): an operand with an `obj_shape=` is
      its own stream of `op.x.lanes` lanes, `op.x.obj_type` the fifo type;
      `when=flag`, a bool `Param()`, makes an operand (and its stream) exist
      only where the flag is true; a call gives it by keyword, its name,
@@ -693,7 +693,7 @@ code before relying on a line here; it is the authority.
 ### Rationale
 
 - **One class per operator, tiers by declaration.** The array tier is
-  the fields the operator's `Array` reads, what an `obj_type=`/`per=`
+  the fields the operator's `Array` reads, what an `obj_shape=`/`per=`
   names and what is declared `array=True`; `Array.build()` sees that tier alone, so an
   extent cannot leak into a core program. Trip
   counts are `Value`s the sequence writes, so one array serves every

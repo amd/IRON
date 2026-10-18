@@ -48,9 +48,11 @@ class DepthwiseConv1d(Operator):
     channels: int = Param()
     num_aie_columns: int = Auto()
 
-    x = In(rows, channels, obj_type=(channels,), per=(num_aie_columns,), depth=TAPS + 1)
-    weight = In(TAPS, channels, obj_type=(channels,), broadcast=True, depth=TAPS)
-    y = Out(rows, channels, obj_type=(channels,), per=(num_aie_columns,))
+    x = In(
+        rows, channels, obj_shape=(channels,), per=(num_aie_columns,), depth=TAPS + 1
+    )
+    weight = In(TAPS, channels, obj_shape=(channels,), broadcast=True, depth=TAPS)
+    y = Out(rows, channels, obj_shape=(channels,), per=(num_aie_columns,))
     # Every row is still computed under a bound: a row reads only those before it.
     valid = Extent(rows)
     steps = Value(derive=lambda op: op.rows // op.num_aie_columns)

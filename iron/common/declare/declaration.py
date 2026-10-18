@@ -143,8 +143,10 @@ class Declaration:
                 continue  # inherited; already processed on its own class
             if isinstance(m, Operand):
                 m.dims.check(cls, m, "dimension", allow_tunable=False)
-                if m.obj_dims is not None:
-                    m.obj_dims.check(cls, m, "obj_type dimension", allow_tunable=True)
+                if m._obj_shape is not None:
+                    m._obj_shape.check(
+                        cls, m, "obj_shape dimension", allow_tunable=True
+                    )
                 optional = [
                     d.name
                     for d in m.dims.dims
@@ -169,7 +171,11 @@ class Declaration:
                         f"{cls.__name__}.{m.name}: Extent({Shape((m.field,))}) must "
                         f"name a Param() field, the one a graph may bound per call"
                     )
-            if isinstance(m, Operand) and m.obj_dims is not None and m.per is not None:
+            if (
+                isinstance(m, Operand)
+                and m._obj_shape is not None
+                and m.per is not None
+            ):
                 for ref in m.per.dims:
                     if ParamSpec.of(ref) is None:
                         raise TypeError(
@@ -214,8 +220,8 @@ class Declaration:
         # or its presence names, and array=True fields.
         named: set[str] = set()
         for m in members:
-            if isinstance(m, Operand) and m.obj_dims is not None:
-                named |= m.obj_dims.names()
+            if isinstance(m, Operand) and m._obj_shape is not None:
+                named |= m._obj_shape.names()
                 if m.per is not None:
                     named |= m.per.names()
                 if isinstance(m.declared_dtype, dataclasses.Field):
@@ -309,7 +315,7 @@ class Declaration:
             m
             for m in self.members
             if isinstance(m, Operand)
-            and m.obj_dims is not None
+            and m._obj_shape is not None
             and m.present(flags or {})
         ]
         cols = dev.cols

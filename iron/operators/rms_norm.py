@@ -36,13 +36,13 @@ class RMSNorm(Rowwise):
     x = In(
         Rowwise.rows,
         Rowwise.tile_size,
-        obj_type=(Rowwise.tile_size,),
+        obj_shape=(Rowwise.tile_size,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
     # Shared by every column of a channel: counted once per channel.
     weight = In(
         Rowwise.tile_size,
-        obj_type=(Rowwise.tile_size,),
+        obj_shape=(Rowwise.tile_size,),
         per=(Rowwise.num_channels,),
         replicate=True,
         when=weighted,
@@ -50,7 +50,7 @@ class RMSNorm(Rowwise):
     y = Out(
         Rowwise.rows,
         Rowwise.tile_size,
-        obj_type=(Rowwise.tile_size,),
+        obj_shape=(Rowwise.tile_size,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 

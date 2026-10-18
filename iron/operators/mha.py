@@ -256,22 +256,22 @@ class MHA(Operator):
 
     Q = In(
         Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
-        obj_type=(join_rows, d),
+        obj_shape=(join_rows, d),
         per=(q_shims,),
     )
     K = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
-        obj_type=(d, B_kv),
+        obj_shape=(d, B_kv),
         per=(kv_lanes,),
     )
     V = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
-        obj_type=(B_kv, pv_width),
+        obj_shape=(B_kv, pv_width),
         per=(kv_lanes, pv_cores),
     )
     O = Out(
         Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
-        obj_type=(join_rows, pv_width),
+        obj_shape=(join_rows, pv_width),
         per=(q_shims, pv_cores),
     )
     # A bound on the queries limits the compute; Q and O stream every row.

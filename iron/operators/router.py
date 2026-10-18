@@ -65,9 +65,9 @@ class TopKRouter(Operator):
     weights_width: int = Param(derive=lambda op: 2 * op.top_k, repr=False)
     pairs: int = Auto()
 
-    logits = In(rows, experts, obj_type=(experts,), per=(pairs,))
-    ids = Out(rows, top_k, dtype=np.int32, obj_type=(top_k,), per=(pairs,))
-    weights = Out(rows, weights_width, obj_type=(weights_width,), per=(pairs,))
+    logits = In(rows, experts, obj_shape=(experts,), per=(pairs,))
+    ids = Out(rows, top_k, dtype=np.int32, obj_shape=(top_k,), per=(pairs,))
+    weights = Out(rows, weights_width, obj_shape=(weights_width,), per=(pairs,))
     valid = Extent(rows)
     count = Value(derive=lambda op: ceildiv(op.valid, op.pairs))
 

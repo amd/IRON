@@ -39,7 +39,7 @@ class Limbs(Rowwise):
         Rowwise.rows,
         line,
         dtype=np.float32,
-        obj_type=(line,),
+        obj_shape=(line,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 

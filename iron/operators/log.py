@@ -29,7 +29,7 @@ class Log(UnaryElementwise):
     x = In(
         UnaryElementwise.size,
         dtype=np.float32,
-        obj_type=(UnaryElementwise.tile_size,),
+        obj_shape=(UnaryElementwise.tile_size,),
         per=(UnaryElementwise.num_aie_columns, UnaryElementwise.num_channels),
     )
 

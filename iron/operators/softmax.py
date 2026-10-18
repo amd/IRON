@@ -155,7 +155,7 @@ class Softmax(Operator):
         rows,
         cols,
         dtype=input_dtype,
-        obj_type=(block,),
+        obj_shape=(block,),
         per=(num_aie_columns, num_channels),
     )
     # A float32 row added to x before the cap, such as relative-position logits.
@@ -163,11 +163,11 @@ class Softmax(Operator):
         rows,
         cols,
         dtype=np.float32,
-        obj_type=(block,),
+        obj_shape=(block,),
         per=(num_aie_columns, num_channels),
         when=has_addend,
     )
-    y = Out(rows, cols, obj_type=(block,), per=(num_aie_columns, num_channels))
+    y = Out(rows, cols, obj_shape=(block,), per=(num_aie_columns, num_channels))
     valid_cols = Value(derive=lambda op: op.length)
     # A row held whole is one block, which the bound does not change.
     blocks = Value(derive=lambda op: ceildiv(op.length, op.block) if op.streamed else 1)

@@ -95,8 +95,8 @@ class Transpose(Operator):
     num_aie_columns: int = Auto()
     num_channels: int = Auto(default=1)
 
-    x = In(num_batches, M, N, obj_type=(m, n), per=(num_aie_columns, num_channels))
-    y = Out(num_batches, N, M, obj_type=(m, n), per=(num_aie_columns, num_channels))
+    x = In(num_batches, M, N, obj_shape=(m, n), per=(num_aie_columns, num_channels))
+    y = Out(num_batches, N, M, obj_shape=(m, n), per=(num_aie_columns, num_channels))
     batches = Value(derive=lambda op: op.num_batches or 1)
     col_tiles = Value(derive=lambda op: op.N // op.n // op.num_aie_columns)
     chan_tiles = Value(derive=lambda op: op.M // op.m // op.num_channels)

@@ -133,7 +133,7 @@ class GEMV(Operator):
         num_matrices,
         M,
         K,
-        obj_type=(tile_size_input, K),
+        obj_shape=(tile_size_input, K),
         per=(num_aie_columns, num_channels),
         depth=2,
     )
@@ -141,7 +141,7 @@ class GEMV(Operator):
     C = Out(
         num_batches,
         M,
-        obj_type=(tile_size_output,),
+        obj_shape=(tile_size_output,),
         per=(num_aie_columns, num_channels),
         depth=2,
     )

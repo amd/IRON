@@ -73,9 +73,9 @@ class MV(Operator):
     num_batches: int | None = Param(default=None)
     cols: int = Auto(default=2)
     tile_out: int = Auto(default=64)
-    A = In(num_batches, M, K, obj_type=(tile_out, K), per=(cols,))
-    B = In(num_batches, K, obj_type=(K,), broadcast=True)
-    C = Out(num_batches, M, obj_type=(tile_out,), per=(cols,))
+    A = In(num_batches, M, K, obj_shape=(tile_out, K), per=(cols,))
+    B = In(num_batches, K, obj_shape=(K,), broadcast=True)
+    C = Out(num_batches, M, obj_shape=(tile_out,), per=(cols,))
     valid = Extent(M)
 
 
@@ -170,10 +170,10 @@ def test_a_buffer_without_a_stream_has_no_derived_transfers():
         M: int = Param()
         K: int = Param()
         A = In(M, K)
-        C = Out(M, obj_type=(64,))
+        C = Out(M, obj_shape=(64,))
 
     op = NoStream(M=256, K=128)
-    with pytest.raises(ValueError, match="NoStream.A has no obj_type="):
+    with pytest.raises(ValueError, match="NoStream.A has no obj_shape="):
         op.A.transfers()
 
 
@@ -250,7 +250,7 @@ class Words(Operator):
 
     n: int = Param()
     tile: int = Auto(default=64)
-    A = In(n, obj_type=(tile,))
+    A = In(n, obj_shape=(tile,))
     first = Value(derive=lambda op: 7)
     block = Value(derive=lambda op: [11, 12, 13], words=3)
     last = Value(derive=lambda op: op.n // op.tile)
@@ -661,7 +661,7 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
         class Unbuilt(Operator, image=image):
             n: int = Param()
-            x = In(n, obj_type=(64,))
+            x = In(n, obj_shape=(64,))
             count = Value()
 
 
@@ -669,8 +669,8 @@ def test_a_lane_pins_to_a_channel_moving_its_way():
     class Pinned(Operator):
         n: int = Param()
         c: int = Auto(default=2)
-        x = In(n, obj_type=(n,))
-        y = Out(n, obj_type=(n,), per=(c,))
+        x = In(n, obj_shape=(n,))
+        y = Out(n, obj_shape=(n,), per=(c,))
 
     op = Pinned(n=2)
     shims = [Tile(c, 0) for c in range(2)]

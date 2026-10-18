@@ -209,7 +209,7 @@ class GEMM(Operator):
     # issued after it (see sequence()'s emit_slab).
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
-    A = In(M, K, obj_type=(a_l2,), per=(rows,), depth=A_DEPTH)
+    A = In(M, K, obj_shape=(a_l2,), per=(rows,), depth=A_DEPTH)
     # Packed for bfp16 macs, B is quantized to bfp16ebs8, so it is declared
     # as a count of those blocks, the unit the array, the core and every
     # descriptor into B count in. Declared in bytes, the sequence's offsets
@@ -220,10 +220,10 @@ class GEMM(Operator):
     B = In(
         Select(bfp16_b, (packed_blocks,), (Select(b_col_maj, (N, K), (K, N)),)),
         dtype=b_dtype,
-        obj_type=(b_l2,),
+        obj_shape=(b_l2,),
         per=(cols,),
     )
-    C = Out(M, N, obj_type=(c_l2,), per=(cols,), depth=C_DEPTH)
+    C = Out(M, N, obj_shape=(c_l2,), per=(cols,), depth=C_DEPTH)
     # M, or fewer rows per call (``A[:n]`` in a graph). A and C move, and the
     # cores compute, only the units (rows * M_TILE rows each) the bound
     # reaches; past them the cores drain each column-block's B replay

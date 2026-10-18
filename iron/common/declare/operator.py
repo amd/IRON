@@ -808,7 +808,7 @@ class Operator:
                 continue
             for b in self._members_io():
                 # Asked first: an unshortened shape may Select on an Auto() field.
-                if b.obj_dims is not None and self.extent_unit(b.name) != 0:
+                if b._obj_shape is not None and self.extent_unit(b.name) != 0:
                     axis = bound[b.name].extent_axis(e)
                     if axis is not None:
                         words.append(ExtentWord(type(self), e, b.name, axis))

@@ -112,7 +112,7 @@ class Gather(Operator):
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
-    y = Out(rows, row, dtype=dtype, obj_type=(row,), per=(feeds,))
+    y = Out(rows, row, dtype=dtype, obj_shape=(row,), per=(feeds,))
     valid_rows = Extent(rows)
     # Per feed, the 16-byte units it drains under a bound.
     drained0 = Value(derive=lambda op: op.drained(0))
@@ -403,8 +403,8 @@ class GatherWords(Operator):
         derive=lambda op: op.pairs + (op.rows if op.bounded else 0), repr=False
     )
 
-    ids = In(rows, dtype=np.int32, obj_type=(rows,), depth=1)
-    control = Out(words, dtype=np.uint32, obj_type=(record,), depth=1)
+    ids = In(rows, dtype=np.int32, obj_shape=(rows,), depth=1)
+    control = Out(words, dtype=np.uint32, obj_shape=(record,), depth=1)
     base_lo = Value()
     base_hi = Value()
     valid_rows = Extent(rows)
@@ -631,14 +631,14 @@ class Copy(Operator):
     x = In(
         input_buffer_size,
         dtype=dtype,
-        obj_type=(tile_size,),
+        obj_shape=(tile_size,),
         per=(num_channels,),
         depth=1,
     )
     y = Out(
         output_buffer_size,
         dtype=dtype,
-        obj_type=(tile_size,),
+        obj_shape=(tile_size,),
         per=(num_channels,),
         depth=1,
     )

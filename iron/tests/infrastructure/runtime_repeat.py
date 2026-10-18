@@ -44,8 +44,8 @@ class RepeatTile(Operator):
     valid = Extent(max_k)
     reps = Value(derive=lambda op: op.valid - 1)
 
-    x = In(width, dtype=np.int32, obj_type=(width,))
-    y = Out(max_k, width, dtype=np.int32, obj_type=(width,))
+    x = In(width, dtype=np.int32, obj_shape=(width,))
+    y = Out(max_k, width, dtype=np.int32, obj_shape=(width,))
 
     def resolve(self, dev):
         return dataclasses.replace(self)

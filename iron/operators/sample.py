@@ -132,12 +132,12 @@ class Sample(Operator):
         domain=Divisors(of=lambda op, dev: op.slice_size, step=2, cap=_CHUNK_LIMIT)
     )
 
-    logits = In(vocab, obj_type=(chunk,), per=(cores,))
+    logits = In(vocab, obj_shape=(chunk,), per=(cores,))
     draws = In(
-        steps, sample.ROW_WORDS, dtype=np.int32, obj_type=(sample.ROW_WORDS,), depth=1
+        steps, sample.ROW_WORDS, dtype=np.int32, obj_shape=(sample.ROW_WORDS,), depth=1
     )
-    tokens = InOut(steps, dtype=np.int32, obj_type=(1,), depth=1)
-    token = Out(1, dtype=np.int32, obj_type=(1,), depth=1)
+    tokens = InOut(steps, dtype=np.int32, obj_shape=(1,), depth=1)
+    token = Out(1, dtype=np.int32, obj_shape=(1,), depth=1)
     # Element offsets of this position's draw row and record.
     row = Value(derive=lambda op: 0)
     at = Value(derive=lambda op: 0)

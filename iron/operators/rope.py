@@ -88,9 +88,9 @@ class RoPE(Operator):
     num_aie_columns: int = Auto()
     two_halves: bool = Param(default=True, array=True)
 
-    x = In(rows, cols, obj_type=(1, cols), per=(num_aie_columns,))
-    angles = In(angle_rows, cols, obj_type=(1, cols), per=(num_aie_columns,))
-    y = Out(rows, cols, obj_type=(1, cols), per=(num_aie_columns,))
+    x = In(rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))
+    angles = In(angle_rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))
+    y = Out(rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))
     # Either row count may be bounded per call: x[:n] and angles[:m].
     valid = Extent(rows)
     valid_angles = Extent(angle_rows)
