@@ -2,63 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import ExternalFunction, kernels
-from aie.iron.kernels import KernelContract
-from aie.utils.compile.jit import markers
-from aie.utils.verify import Tolerance
-from ml_dtypes import bfloat16
+from aie.iron.kernels import datamovement
 
-from iron.common import In, Operand, Param, Rowwise
+from iron.common import In, Param, Rowwise
 from iron.common.testing import Case, Testing
 
-from .split3 import SPLIT
-
-# Against [hi, hi, mid, hi, mid, lo], the six products a float32 product keeps.
-PLANES = (0, 1, 0, 2, 1, 0)
+# The planes of a stacked weight, as limbs_f32_split's (hi, mid, lo) indices,
+# against the six planes datamovement.limbs_f32 writes of an activation.
 WEIGHT_PLANES = (0, 0, 1, 0, 1, 2)
-
-LIMBS = SPLIT + """
-extern "C" void limbs_f32(float *restrict x, bfloat16 *restrict y, int32_t n) {
-    event0();
-    aie::rounding_mode saved = aie::swap_rounding(aie::rounding_mode::conv_even);
-    const bf_t one = bf_lanes(0x3f80);
-    const bf_t half = bf_lanes(0x3f00);
-    for (int i = 0; i < n; i += 32) chess_prepare_for_pipelining {
-        bf_t hi, mid, lo;
-        split3(acc_t(aie::load_v<32>(x + i)), hi, mid, lo, one, half);
-        aie::store_v(y + i, hi);
-        aie::store_v(y + n + i, mid);
-        aie::store_v(y + 2 * n + i, hi);
-        aie::store_v(y + 3 * n + i, lo);
-        aie::store_v(y + 4 * n + i, mid);
-        aie::store_v(y + 5 * n + i, hi);
-    }
-    aie::set_rounding(saved);
-    event1();
-}
-"""
-
-
-def split(x):
-    """The bf16 limbs of `x`, each rounded from the residual before it."""
-    x = np.asarray(x)
-    x = x if x.dtype == np.float64 else x.astype(np.float32)
-    hi = x.astype(bfloat16)
-    r = x - hi.astype(x.dtype)
-    mid = r.astype(bfloat16)
-    lo = (r - mid.astype(x.dtype)).astype(bfloat16)
-    return hi, mid, lo
-
-
-def planes(x):
-    """Rows of `x` as the six planes `Limbs` writes, `(rows, 6 * line)`."""
-    limbs = split(x)
-    return np.concatenate([limbs[p] for p in PLANES], axis=-1)
 
 
 def stacked(w):
     """`w` `(K, N)` as its limbs stacked `[hi, hi, mid, hi, mid, lo]`."""
-    limbs = split(w)
+    limbs = datamovement.limbs_f32_split(w)
     return np.concatenate([limbs[p] for p in WEIGHT_PLANES])
 
 
@@ -77,7 +33,7 @@ class Limbs(Rowwise):
     )
 
     line: int = Param()
-    tile_size: int = Param(derive=lambda op: len(PLANES) * op.line)
+    tile_size: int = Param(derive=lambda op: 6 * op.line)
 
     x = In(
         Rowwise.rows,
@@ -89,29 +45,9 @@ class Limbs(Rowwise):
 
     def validate(self) -> None:
         self.check_derived("tile_size")
-        if self.line % 32:
-            raise ValueError(
-                f"Limbs: line ({self.line}) is not a whole number of 32-element "
-                f"vectors"
-            )
 
     class Array(Rowwise.Array):
         line: int
-        x: Operand
-        y: Operand
 
         def kernel(self):
-            contract = KernelContract(
-                roles=(markers.In, markers.Out, kernels.Param),
-                parameter_bindings=((2, self.line),),
-                reference=planes,
-                tolerance=Tolerance.exact(
-                    note="each residual is exact, and so is each limb of it"
-                ),
-            )
-            return ExternalFunction(
-                "limbs_f32",
-                source_string=LIMBS,
-                arg_types=[self.x.obj_type, self.y.obj_type, np.int32],
-                contract=contract,
-            )
+            return datamovement.limbs_f32(self.line)

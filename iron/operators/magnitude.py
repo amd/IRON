@@ -2,76 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import ExternalFunction, kernels
-from aie.iron.kernels import KernelContract
-from aie.utils.compile.jit import markers
-from aie.utils.verify import Tolerance
+from aie.iron.kernels import eltwise
 
-from iron.common import In, Operand, Out, Param, Rowwise
+from iron.common import In, Out, Param, Rowwise
 from iron.common.testing import Case, Testing
-
-from .split3 import SPLIT
-
-# aie2p has no float32 vector multiply: products of bf16 limbs, exact in f32.
-MAGNITUDE = SPLIT + """
-extern "C" void magnitude_f32(float *restrict x, float *restrict out, int32_t n) {
-    event0();
-    aie::rounding_mode saved = aie::swap_rounding(aie::rounding_mode::conv_even);
-    const bf_t one = bf_lanes(0x3f80);
-    const bf_t half = bf_lanes(0x3f00);
-    for (int i = 0; i < n; i += 32) chess_prepare_for_pipelining {
-        bf_t rh, rm, rl, ih, im, il;
-        split3(acc_t(aie::load_v<32>(x + i)), rh, rm, rl, one, half);
-        split3(acc_t(aie::load_v<32>(x + n + i)), ih, im, il, one, half);
-        acc_t p = aie::mul(rm, rm);
-        p = aie::mac(p, im, im);
-        p = aie::mac(aie::mac(p, rh, rl), rh, rl);
-        p = aie::mac(aie::mac(p, ih, il), ih, il);
-        p = aie::mac(aie::mac(p, rh, rm), rh, rm);
-        p = aie::mac(aie::mac(p, ih, im), ih, im);
-        p = aie::mac(aie::mac(p, rh, rh), ih, ih);
-
-        // 1 / sqrt(p): the bit-trick estimate, 3.4e-2 off, then a Newton
-        // step to about 4e-3. p = 0 gives a finite estimate, and s = 0.
-        auto bits = p.to_vector<float>().cast_to<int32_t>();
-        auto y0_bits = aie::sub(aie::broadcast<int32_t, 32>(0x5f3759df),
-                                aie::downshift(bits, 1));
-        bf_t y0 = acc_t(y0_bits.cast_to<float>()).to_vector<bfloat16>();
-        bf_t ph, pm, pl;
-        split3(p, ph, pm, pl, one, half);
-        bf_t py = aie::mac(aie::mul(pm, y0), ph, y0).to_vector<bfloat16>();
-        acc_t r = aie::msc(acc_t(aie::broadcast<float, 32>(1.0f)), py, y0);
-        bf_t y0_half = aie::mul(y0, half).to_vector<bfloat16>();
-        bf_t y = aie::mac(aie::mul(y0, one), r.to_vector<bfloat16>(), y0_half)
-                     .to_vector<bfloat16>();
-        bf_t y_half = aie::mul(y, half).to_vector<bfloat16>();
-
-        // s = p y, then s += y / 2 (p - s^2): each step multiplies the error
-        // by y's, and p - s^2 is taken from s's exact limb products.
-        acc_t s = aie::mac(aie::mac(aie::mul(pl, y), pm, y), ph, y);
-        for (int k = 0; k < 3; k++) {
-            bf_t sh, sm, sl;
-            split3(s, sh, sm, sl, one, half);
-            acc_t e = aie::msc(p, sh, sh);
-            e = aie::msc(aie::msc(e, sh, sm), sh, sm);
-            e = aie::msc(aie::msc(e, sh, sl), sh, sl);
-            e = aie::msc(e, sm, sm);
-            bf_t eh = e.to_vector<bfloat16>();
-            bf_t em = aie::msc(e, eh, one).to_vector<bfloat16>();
-            s = aie::mac(aie::mac(s, em, y_half), eh, y_half);
-        }
-        aie::store_v(out + i, s.to_vector<float>());
-    }
-    aie::set_rounding(saved);
-    event1();
-}
-"""
-
-
-def magnitude(x):
-    """`sqrt(re^2 + im^2)` of rows `[re | im]`, in float64."""
-    re, im = np.split(np.asarray(x, np.float64), 2, axis=-1)
-    return np.hypot(re, im)
 
 
 class Magnitude(Rowwise):
@@ -115,29 +49,13 @@ class Magnitude(Rowwise):
 
     def validate(self) -> None:
         self.check_derived("tile_size")
-        if self.width % 64:
+        if self.width % 2:
             raise ValueError(
-                f"Magnitude: width ({self.width}) is not two halves of whole "
-                f"32-element vectors"
+                f"Magnitude: width ({self.width}) is not two halves, re and im"
             )
 
     class Array(Rowwise.Array):
         width: int
-        x: Operand
-        y: Operand
 
         def kernel(self):
-            contract = KernelContract(
-                roles=(markers.In, markers.Out, kernels.Param),
-                parameter_bindings=((2, self.tile_size),),
-                reference=magnitude,
-                tolerance=Tolerance.relative(
-                    2e-7, note="measured 1.43e-7 for magnitudes 1e-15 to 1e15"
-                ),
-            )
-            return ExternalFunction(
-                "magnitude_f32",
-                source_string=MAGNITUDE,
-                arg_types=[self.x.obj_type, self.y.obj_type, np.int32],
-                contract=contract,
-            )
+            return eltwise.magnitude_f32(self.tile_size)

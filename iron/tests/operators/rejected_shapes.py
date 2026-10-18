@@ -477,12 +477,13 @@ def test_a_finish_a_core_does_not_hold_beside_its_tiles_is_refused_or_narrowed()
     ],
     ids=["limbs", "magnitude"],
 )
-def test_a_line_of_part_of_a_vector_is_refused(make):
+def test_a_line_of_part_of_a_vector_is_refused(make, npu2):
     """Limbs and Magnitude load and store whole 32-lane vectors, so a line
-    (or each half of a complex row) of part of one would read past it.
+    (or each half of a complex row) of part of one would read past it: their
+    kernels' factories refuse it.
     """
-    with pytest.raises(ValueError, match="32-element vectors"):
-        make()
+    with pytest.raises(ValueError, match="32-element vector step"):
+        make().resolved().tolerance()
 
 
 @pytest.mark.parametrize(
