@@ -90,15 +90,16 @@ class Xclbin(NPUKernel):
         target.parent.mkdir(parents=True, exist_ok=True)
         # A file of this fetch's own, renamed over the target whole: concurrent
         # fetches never share one, and none sees a partial target.
-        with tempfile.NamedTemporaryFile(
+        partial = tempfile.NamedTemporaryFile(
             dir=target.parent, prefix=f"{target.name}.", suffix=".part", delete=False
-        ) as partial:
-            partial.write(content)
-            # A temporary file is created owner-only; the cache is read as any file is.
-            os.fchmod(partial.fileno(), 0o644)
+        )
         try:
+            with partial:
+                partial.write(content)
+                # A temporary file is created owner-only; the cache is read as any file is.
+                os.fchmod(partial.fileno(), 0o644)
             os.replace(partial.name, target)
-        except OSError:
+        except BaseException:
             os.unlink(partial.name)
             raise
         return target

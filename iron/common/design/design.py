@@ -203,8 +203,9 @@ class BuiltArray:
         if op.trace is not None:
             if op.trace.reuse_output_buffer:
                 raise ValueError(
-                    f"{type(op).__name__}: a full ELF consolidates its outputs, so "
-                    f"its trace takes a buffer of its own (reuse_output_buffer=False)"
+                    f"{type(op).__name__}: its trace takes a buffer of its own "
+                    f"(reuse_output_buffer=False), since a full ELF consolidates "
+                    f"its outputs and an xclbin's build is traced the same way"
                 )
             self.traced = [w for w in self.workers if w.trace is not None]
             self.traced = self.traced or self.workers[:1]
@@ -286,7 +287,8 @@ def configuration(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfigur
     ``sequence`` where there is one, else for its key.
 
     Raises:
-        ValueError: The arrays are built for different devices.
+        ValueError: The arrays are built for different devices, or traced
+            with different trace sizes.
     """
     of = identities(arrays)
     owners: dict[Hashable, BuiltArray] = {}
@@ -295,6 +297,13 @@ def configuration(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfigur
     kinds = {type(a.op.device()).__name__ for a in owners.values()}
     if len(kinds) != 1:
         raise ValueError(f"{list(arrays)} are built for different devices {kinds}")
+    traced = [owner for owner in owners.values() if owner.traced]
+    sizes = {owner.op.trace.trace_size for owner in traced}
+    if len(sizes) > 1:
+        raise ValueError(
+            f"{name}: its traced arrays ask for trace sizes {sorted(sizes)}; one "
+            f"configuration has one trace buffer, so give them one size"
+        )
     runtimes = [
         owners[of[key]].runtime(array, "sequence" if len(arrays) == 1 else key)
         for key, array in arrays.items()
@@ -306,10 +315,9 @@ def configuration(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfigur
         workers=[w for owner in owners.values() for w in owner.workers],
         runtimes=runtimes,
     )
-    traced = [owner for owner in owners.values() if owner.traced]
     if traced:
         configured.enable_trace(
-            traced[0].op.trace.trace_size,
+            sizes.pop(),
             workers=[w for owner in traced for w in owner.traced],
         )
     return configured

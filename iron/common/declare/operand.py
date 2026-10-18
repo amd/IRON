@@ -24,7 +24,7 @@ from ml_dtypes import bfloat16
 from .field import ParamSpec
 from .shape import Shape, _DimSpec
 from .member import Member
-from .value import DispatchTime, Extent, Value
+from .value import Extent, Value
 
 if TYPE_CHECKING:
     from .operator import Operator
@@ -263,7 +263,7 @@ class Operand(Member["Operand"]):
         dev = self.op.dev
         # Half a programmer bank: at the whole one, two 16 KB streams no longer fit.
         bank = dev.core_memory_bytes // (2 * dev.core_memory_banks)
-        obj_bytes = math.prod(self.obj_shape) * np.dtype(self.dtype).itemsize
+        obj_bytes = math.prod(self.obj_shape) * bfp.itemsize(self.dtype)
         return 1 if obj_bytes > bank else 2
 
     @property

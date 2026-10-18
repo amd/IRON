@@ -29,6 +29,7 @@ import aie.utils as aie_utils
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
+from aie.utils import bfp
 from aie.utils.hostruntime.tensor_class import NpuTensor
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
@@ -504,7 +505,7 @@ class Operator:
             if call.kernel.contract is not None and call.kernel.contract.uses_lut
         }
         tables = LUT_BYTES * len(luts) if dev.arch is AIEArch.AIE2 else 0
-        return line * np.dtype(out.dtype).itemsize + tables
+        return line * bfp.itemsize(out.dtype) + tables
 
     def device(self):
         """The device the array's Program is built for: the bound device
@@ -750,44 +751,49 @@ class Operator:
         return key
 
     def resolved(self, dev=None) -> Self:
-        """This operator resolved for ``dev`` (the bound device unless given), checked."""
+        """This operator resolved for ``dev`` (the bound device unless given),
+        checked. ``dev`` is bound while it resolves, so what the operator's
+        operands read of the device (``Operand.split``) is ``dev``'s.
+        """
         if self._resolved:
             return self
-        new = self.resolve(dev if dev is not None else self.dev)
-        if new is self:
-            raise TypeError(
-                f"{type(self).__name__}.resolve() must return a copy, "
-                f"dataclasses.replace(self, ...), not self"
-            )
-        if not isinstance(new, type(self)):
-            raise TypeError(
-                f"{type(self).__name__}.resolve() must return a {type(self).__name__}"
-            )
-        missing = [n for n in self.declaration.autos if vars(new)[n] is None]
-        if missing:
-            raise Unresolvable(
-                f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
-            )
-        at_dev = dev if dev is not None else self.dev
-        if any(new.prepare.chains) or any(new.finish.chains):
-            new = dataclasses.replace(
-                new,
-                prepare=(
-                    new.prepare.at_tile(new, Side.PREPARE, at_dev)
-                    if any(new.prepare.chains)
-                    else new.prepare
-                ),
-                finish=(
-                    new.finish.at_tile(new, Side.FINISH, at_dev)
-                    if any(new.finish.chains)
-                    else new.finish
-                ),
-            )
-            new._bind()
-        new.validate()
-        new.compatible()
-        new._resolved = True
-        return new
+        if dev is None:
+            dev = self.dev
+        with aie_utils.set_current_device(dev):
+            new = self.resolve(dev)
+            if new is self:
+                raise TypeError(
+                    f"{type(self).__name__}.resolve() must return a copy, "
+                    f"dataclasses.replace(self, ...), not self"
+                )
+            if not isinstance(new, type(self)):
+                raise TypeError(
+                    f"{type(self).__name__}.resolve() must return a {type(self).__name__}"
+                )
+            missing = [n for n in self.declaration.autos if vars(new)[n] is None]
+            if missing:
+                raise Unresolvable(
+                    f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
+                )
+            if any(new.prepare.chains) or any(new.finish.chains):
+                new = dataclasses.replace(
+                    new,
+                    prepare=(
+                        new.prepare.at_tile(new, Side.PREPARE, dev)
+                        if any(new.prepare.chains)
+                        else new.prepare
+                    ),
+                    finish=(
+                        new.finish.at_tile(new, Side.FINISH, dev)
+                        if any(new.finish.chains)
+                        else new.finish
+                    ),
+                )
+                new._bind()
+            new.validate()
+            new.compatible()
+            new._resolved = True
+            return new
 
     def copy(self) -> Self:
         """A fresh instance for one build, keeping resolution and bound values."""

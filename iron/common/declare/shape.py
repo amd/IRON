@@ -118,13 +118,27 @@ class Shape:
             return int(value)
         raise TypeError(f"cannot resolve {spec!r} as a dimension")
 
+    @staticmethod
+    def absent(spec, op) -> bool:
+        """Whether ``spec`` is a ``T | None`` ``Param`` dimension that is None
+        on ``op``, so the shape leaves it out. An unset ``Auto()`` is not: it
+        is unresolved, which ``dim`` refuses.
+        """
+        found = ParamSpec.of(spec)
+        return (
+            found is not None
+            and not isinstance(found, AutoSpec)
+            and spec.name in op.declaration.nullable
+            and vars(op)[spec.name] is None
+        )
+
     def resolve(self, op) -> tuple[int, ...]:
-        """The shape on ``op``: a ``None``-valued ``Param`` dimension left
-        out, each ``Select`` the branch its flag picks.
+        """The shape on ``op``: an absent ``T | None`` dimension left out,
+        each ``Select`` the branch its flag picks.
         """
         out: list[int] = []
         for d in self.dims:
-            if ParamSpec.of(d) is not None and vars(op)[d.name] is None:
+            if Shape.absent(d, op):
                 continue
             if isinstance(d, Select):
                 out.extend(d.branch(op).resolve(op))
@@ -136,7 +150,7 @@ class Shape:
         """The axis of the resolved shape that ``field`` sizes, or None."""
         axis = 0
         for d in self.dims:
-            if ParamSpec.of(d) is not None and vars(op)[d.name] is None:
+            if Shape.absent(d, op):
                 continue
             if isinstance(d, Select):
                 branch = d.branch(op)

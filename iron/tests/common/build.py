@@ -10,7 +10,10 @@ task's lane, buffer argument, offset, sizes, strides and patched size.
 """
 
 import hashlib
+import io
+import os
 import re
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from math import prod
 from typing import NamedTuple
@@ -23,6 +26,7 @@ from aie.dialects.aie import DMAChannelDir
 from aie.iron import DmaEndpoint, ObjectFifo, Program, Worker
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
+from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
 import iron
@@ -44,6 +48,7 @@ from iron.common import (
     Rtp,
 )
 from iron.common.design import BuiltArray, OperatorDesign, OperatorRuntime
+from iron.common.design.design import configuration
 from iron.common.graph.compiled import _words
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
@@ -737,3 +742,35 @@ def test_concurrent_fetches_of_a_shipped_image_each_get_the_whole_file(tmp_path)
     with open(paths[0], "rb") as f:
         assert hashlib.file_digest(f, "sha256").hexdigest() == image.sha256
     assert [p.name for p in tmp_path.iterdir()] == [image.filename]
+
+
+def test_one_configuration_traces_at_one_size():
+    arrays = {
+        name: BuiltArray(OperatorDesign(op, full_elf=False))
+        for name, op in (
+            ("gelu", GELU(size=4096, trace=TraceConfig(4096))),
+            ("sigmoid", Sigmoid(size=4096, trace=TraceConfig(8192))),
+        )
+    }
+    with pytest.raises(ValueError, match=r"trace sizes \[4096, 8192\]"):
+        configuration("both", arrays)
+
+
+def test_a_failed_fetch_leaves_no_partial_file(tmp_path, monkeypatch):
+    content = b"image"
+    image = Xclbin(
+        url="https://example.invalid/f",
+        sha256=hashlib.sha256(content).hexdigest(),
+        filename="f",
+    )
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda url, timeout: io.BytesIO(content)
+    )
+
+    def full(fd, mode):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "fchmod", full)
+    with pytest.raises(OSError, match="disk full"):
+        image.fetch(tmp_path)
+    assert list(tmp_path.iterdir()) == []

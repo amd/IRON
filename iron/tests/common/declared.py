@@ -13,8 +13,9 @@ def declared(dev):
     """Every catalog operator that declares its cases, with each case at `dev`.
 
     Read from the catalog's own table, so an operator added there is covered
-    without touching a test. Resolving reads the bound device, so `dev` is
-    bound while the cases resolve and the previous one restored after.
+    without touching a test. Constructing may read the bound device (a
+    `validate()`), so `dev` is bound while the cases are made and the
+    previous one restored after.
 
     Args:
         dev: The device the cases are declared and resolved for.

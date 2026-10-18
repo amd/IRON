@@ -13,9 +13,11 @@ toolchain.
 import dataclasses
 
 import aie.iron
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.iron.device import from_name
+from aie.utils import bfp
 from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
@@ -355,6 +357,31 @@ def test_a_t_or_none_dim_is_omitted_when_none_and_may_sit_anywhere():
     assert Stack(rows=8, cols=64, seq=16).y.shape == (8, 16, 64)
 
 
+def test_an_unresolved_tile_dimension_refuses_to_resolve():
+    class Tiled(Operator):
+        n: int = Param()
+        t: int = Auto()
+        x = In(n, obj_type=(t,))
+
+        class Array(Operator.Array):
+            t: int
+
+    with pytest.raises(ValueError, match="t is None.*Resolve the operator first"):
+        Tiled(n=64).x.obj_type
+
+
+def test_a_block_float_tile_is_sized_by_its_blocks(npu2):
+    class Blocks(Operator):
+        n: int = Param()
+        x = In(n, dtype=bfp.v8bfp16ebs8, obj_type=(4096,))
+
+        class Array(Operator.Array):
+            pass
+
+    # 4096 blocks of 9 bytes: past half a core memory bank, so one deep.
+    assert Blocks(n=4096).x.l1_depth == 1
+
+
 def test_buffers_carry_the_declared_dtype_and_size(npu2):
     """The sizing contract: the sequence layout and the test harness allocate
     from ``b.dtype`` and ``b.nbytes`` of a declared buffer.
@@ -625,6 +652,21 @@ def test_resolution_fills_every_tunable_or_says_which_it_left():
     r = ok.resolved(NPU2)
     assert r._resolved and r.resolved(NPU2) is r and (r.columns, r.vec) == (2, 64)
     assert ok.columns == 2 and ok.vec is None  # the original is untouched
+
+
+def test_resolving_for_a_device_binds_it_while_it_resolves():
+    seen = []
+
+    class Reads(MV):
+        def resolve(self, dev):
+            seen.append(self.dev)
+            return super().resolve(dev)
+
+    with aie_utils.set_current_device(None):
+        Reads(M=1024, K=128).resolved(NPU2)
+        assert (
+            seen == [NPU2] and aie_utils.get_current_device(probe_runtime=False) is None
+        )
 
 
 def test_a_profile_fills_the_tunables_a_call_leaves_open():
