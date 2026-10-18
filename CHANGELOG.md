@@ -68,7 +68,9 @@ public API adds its entry under Unreleased.
   axis is refused.
 - `F.linear(precision=)` is the one way to ask for an accurate projection:
   at `Precision.HIGHEST` several rows run core GEMM, whose float32 sums
-  round once, where they ran flm.GEMM before; and one row, a GEMV that rounds once, takes any precision.
+  round once, where they ran flm.GEMM before, whether asked for by the call
+  or by `Graph.precision`; one row, a GEMV that rounds once, takes any
+  precision.
   `Attention` and `MLP` take `precision` in place of `accurate`.
 - Config fields use `config.json`'s names: `hidden_size`,
   `num_hidden_layers`, `num_attention_heads`, `num_key_value_heads`,

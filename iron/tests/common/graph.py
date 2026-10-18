@@ -2819,6 +2819,23 @@ def test_linear_takes_a_precision_for_any_rows_and_gemv_tunables_for_one(
         assert [type(s.op).__name__ for s in t.steps] == steps
 
 
+def test_highest_picks_one_gemm_asked_for_by_call_or_by_graph():
+    class Asked(iron.Graph):
+        def body(self, x, w):
+            return F.linear(x, w, precision=Precision.HIGHEST)
+
+    class Floored(iron.Graph):
+        precision = "highest"
+
+        def body(self, x, w):
+            return F.linear(x, w)
+
+    shapes = dict(x=((128, 256), bfloat16), w=((256, 256), bfloat16))
+    asked, floored = (g().trace(**shapes).steps for g in (Asked, Floored))
+    assert [repr(s.op) for s in asked] == [repr(s.op) for s in floored]
+    assert [type(s.op) for s in asked] == [GEMM]
+
+
 def test_a_row_times_a_matrix_is_rowwise_either_way_round():
     class Scale(iron.Graph):
         def body(self, x, row):
