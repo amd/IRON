@@ -684,8 +684,8 @@ def test_flm_prefill_attention_rejects_unservable_shapes(cls, kwargs, match, npu
 @pytest.mark.parametrize(
     "dim, vocab, softcap, match",
     [
-        (1000, 4096, 30.0, "multiple of"),
-        (1536, 1000, 30.0, "multiple of"),
+        (1000, 4096, 30.0, r"dim \(1000\) must be a multiple"),
+        (1536, 1000, 30.0, r"vocab \(1000\) must be a multiple"),
         (1536, 4096, 0.0, "finite and positive"),
         (1536, 4096, float("inf"), "finite and positive"),
     ],
