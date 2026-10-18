@@ -869,7 +869,7 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
         rows: CompileTime[int] = field()
         repeat: CompileTime[int] = field()
         out_rows: CompileTime[int] = field(derive=lambda op: op.rows * op.repeat)
-        cap: CompileTime[int] = field(lambda op: op.out_rows)
+        cap: CompileTime[int] = field(derive=lambda op: op.out_rows, held=False)
         x = In(rows, 8)
         y = Out(out_rows, 8)
 
@@ -878,16 +878,17 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     with pytest.raises(ValueError, match=r"out_rows \(5\) must be 6"):
         Rep(rows=2, repeat=3, out_rows=5)  # a derived field is held to its formula
     assert Rep.declaration.infer({"x": (2, 8)}, [(6, 8)]) == {"rows": 2, "out_rows": 6}
-    # A function default is computed after the fields before it, or given.
+    # held=False: computed after the fields before it, or given and kept.
     assert Rep(rows=2, repeat=3).cap == 6
     assert Rep(rows=2, repeat=3, cap=8).cap == 8
-    # replace computes a derived field again from the fields it changes.
+    # replace computes a held field again from the fields it changes.
     assert Rep(rows=2, repeat=3).replace(repeat=4).out_rows == 8
+    assert Rep(rows=2, repeat=3, cap=8).replace(repeat=4).cap == 8
 
 
 def test_a_computed_default_of_none_must_be_given():
     class Unknown(Operator):
-        n: CompileTime[int] = field(lambda op: None)
+        n: CompileTime[int] = field(derive=lambda op: None, held=False)
 
     with pytest.raises(ValueError, match=r"n \(None\) must be given"):
         Unknown()

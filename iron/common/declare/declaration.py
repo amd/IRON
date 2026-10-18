@@ -67,7 +67,7 @@ class Declaration:
         members: The members, the most derived body's order first.
         params: The `field()` fields.
         derived: Each `field()` field's computing default, by name.
-        held: The `field(derive=)` fields, which a given value must agree with.
+        held: The held `field(derive=)` fields, which a given value must agree with.
         autos: The `Auto` fields.
         tunables: The `Auto` fields a caller, a profile or the tuner sets.
         domains: Each tunable's declared `Domain`, by name.

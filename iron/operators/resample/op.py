@@ -241,11 +241,12 @@ class ResampleTaps(Operator):
     slots: CompileTime[int | None] = field(None, array=True)
     # A multiple of 16, so every core count up to it divides.
     chunks: CompileTime[int] = field(
-        lambda op: 16
+        derive=lambda op: 16
         * -(
             -op.out_size
             // (16 * max(1, per_chunk(op.in_size, op.out_size, op.words, op.slots)))
-        )
+        ),
+        held=False,
     )
     num_aie_columns: CompileTime[int] = Auto()
     num_channels: CompileTime[int] = Auto(2)
@@ -842,19 +843,19 @@ class Resample(Operator):
     words: CompileTime[int] = field(356)
     # A floor of 8, so two resizes of one image that need no more share an array.
     patch_columns: CompileTime[int] = field(
-        lambda op: max(8, op.default_patch_columns()), array=True
+        derive=lambda op: max(8, op.default_patch_columns()), held=False, array=True
     )
     image_chunks: CompileTime[int] = field(
-        lambda op: op.height * -(-3 * op.width // op.chunk)
+        derive=lambda op: op.height * -(-3 * op.width // op.chunk), held=False
     )
     # Multiples of 16, as ResampleTaps's are.
     width_chunks: CompileTime[int] = field(
-        lambda op: 16 * -(-op.out_width // (16 * SIDE))
+        derive=lambda op: 16 * -(-op.out_width // (16 * SIDE)), held=False
     )
     height_chunks: CompileTime[int] = field(
-        lambda op: 16 * -(-op.out_height // (16 * SIDE))
+        derive=lambda op: 16 * -(-op.out_height // (16 * SIDE)), held=False
     )
-    patch_rows: CompileTime[int] = field(lambda op: op.padded_rows())
+    patch_rows: CompileTime[int] = field(derive=lambda op: op.padded_rows(), held=False)
     num_aie_columns: CompileTime[int] = Auto()
     num_channels: CompileTime[int] = Auto(2)
 

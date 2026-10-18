@@ -103,9 +103,8 @@ public API adds its entry under Unreleased.
 - An operand of an `Elementwise` or `Rowwise` operator that gives no `per=`
   is split over every core, `per=(num_aie_columns, num_channels)`.
 - A `field(derive=...)` field is held to its formula: a value given that
-  disagrees raises `ValueError`, and `Operator.check_derived` is removed. A
-  field a caller may override takes a function default instead,
-  `field(lambda op: op.num_heads)`.
+  disagrees raises `ValueError`, and `Operator.check_derived` is removed.
+  `field(derive=..., held=False)` is one a given value overrides.
 - A name or layer missing from a `Checkpoint.tree()` raises an error naming
   its dotted path, the checkpoint file and what the module does have.
 - A compiled graph refuses an input numpy would not cast to its dtype

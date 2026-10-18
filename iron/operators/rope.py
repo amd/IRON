@@ -74,7 +74,9 @@ class RoPE(Operator):
 
     rows: CompileTime[int] = field()
     cols: CompileTime[int] = field()
-    angle_rows: CompileTime[int] = field(lambda op: op.rows)  # one row per position
+    angle_rows: CompileTime[int] = field(
+        derive=lambda op: op.rows, held=False
+    )  # one row per position
     num_aie_columns: CompileTime[int] = Auto()
     two_halves: CompileTime[bool] = field(True, array=True)
 
