@@ -26,10 +26,10 @@ What is SmolVLM's own is in `iron/applications/idefics3/`:
     `text_config`. The checkpoint nests it under `model.text_model`, which
     `CausalLM` reads through `decoder=`; `lm_head` is a sibling of
     `model`. Its tunables at 576 wide are its profile's.
-  - `VLMRunner.npu()`: the text model and the tower as one `Multimodal`,
+  - `VLMRunner.build()`: the text model and the tower as one `Multimodal`,
     keyed by the checkpoint's `image_token_id`.
-  - `HuggingFaceVLM`/`Reference`: transformers' SmolVLM, keyed by a
-    sequence's tokens and the image's bits.
+  - `HuggingFaceVLM`: transformers' SmolVLM, its logits after a
+    sequence's tokens and the image.
   - `build_prompt()`: the real processor's token layout around one image
     and a question's ids, the ids either side read off
     `Idefics3Processor`'s output.

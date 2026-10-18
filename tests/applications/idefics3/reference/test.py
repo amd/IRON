@@ -15,13 +15,11 @@ from ml_dtypes import bfloat16
 
 from iron.applications.idefics3.model import (
     HuggingFaceVLM,
-    Reference,
     SmolVLMText,
     SmolVLMTextConfig,
 )
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.lm import Multimodal
-from iron.lm.golden import config_json
 from iron.tests.common.llama_model import drawn, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -103,18 +101,18 @@ def weights():
 
 
 class SoftTokens:
-    """transformers' soft tokens of an image, from its bfloat16 bits:
-    ``logits``, as ``Golden`` reads them.
+    """transformers' soft tokens of an image: ``logits``, as ``Golden``
+    reads them.
     """
 
     def __init__(self, hf: HuggingFaceVLM):
         self.hf = hf
 
-    def logits(self, bits):
+    def logits(self, tokens, image):
         import torch
 
         with torch.no_grad():
-            out = self.hf.model.model.get_image_features(self.hf.pixels(bits))
+            out = self.hf.model.model.get_image_features(self.hf.pixels(image))
         return out.pooler_output[0].numpy()
 
 
@@ -132,13 +130,13 @@ def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
     reference = golden(
         "soft_tokens",
         lambda: SoftTokens(
-            HuggingFaceVLM.build("idefics3", VISION, weights, **config_json(TEXT))
+            HuggingFaceVLM.build("idefics3", VISION, weights, **TEXT.to_json())
         ),
         TEXT,
         VISION,
         weights,
     )
-    want = reference.logits(buffer.view(np.uint16))
+    want = reference.logits([], image)
     assert got.shape == (tower.soft_rows, VISION.text_dim)
     err, scale = np.abs(got - want).max(), np.abs(want).max()
     assert err <= 0.05 * scale, f"|diff| {err:.4f} against |soft tokens| {scale:.3f}"
@@ -158,19 +156,18 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
     """Each version's reference in turn, its states carried from one to the
     next: the tower, then each chunk, both holding some of the run of
     placeholders that crosses their boundary, through ``placed``, then a
-    decode step, against transformers' logits (``Reference``).
+    decode step, against transformers' logits.
     """
     model = Multimodal(
         SmolVLMText(TEXT, weights), {IMAGE: VisionTower(VISION, weights)}
     )
-    hf = golden(
+    reference = golden(
         "small",
-        lambda: HuggingFaceVLM.build("idefics3", VISION, weights, **config_json(TEXT)),
+        lambda: HuggingFaceVLM.build("idefics3", VISION, weights, **TEXT.to_json()),
         TEXT,
         VISION,
         weights,
     )
-    reference = Reference(hf, IMAGE)
     rng = np.random.default_rng(2)
     tokens = rng.integers(0, IMAGE, 300)
     tokens[250 : 250 + VISION.tokens] = IMAGE
@@ -199,7 +196,7 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
             logits, carry = model.reference(None, None, ids, before, **values)
         else:
             logits, carry = model.reference(ids, **values)
-    _assert_close(logits, reference.logits(tokens, raw))
+    _assert_close(logits, reference.logits(tokens, image))
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)
-    _assert_close(logits, reference.logits(tokens, raw))
+    _assert_close(logits, reference.logits(tokens, image))

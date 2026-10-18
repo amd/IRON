@@ -142,6 +142,27 @@ class Config:
             kwargs[f.name] = convert(value) if convert else value
         return cls(**kwargs)
 
+    def to_json(self) -> dict:
+        """The fields as ``config.json`` names them, ``from_checkpoint``'s
+        inverse: a value its ``convert`` built gives its own ``to_json()``.
+        A field that is None or not JSON is left out.
+        """
+        out = {}
+        for f in dataclasses.fields(self):
+            key, value = f.metadata.get("json"), getattr(self, f.name)
+            if hasattr(value, "to_json"):
+                value = value.to_json()
+            if key is None or not isinstance(
+                value, (bool, int, float, str, tuple, dict)
+            ):
+                continue
+            *path, leaf = key.split(".")
+            node = out
+            for part in path:
+                node = node.setdefault(part, {})
+            node[leaf] = list(value) if isinstance(value, tuple) else value
+        return out
+
     def norm(self) -> Norm:
         """Every norm's kind: RMS at ``eps``."""
         return Norm(self.eps)
@@ -932,7 +953,8 @@ class Runner:
     def reference(self):
         """What the model is judged by: with drawn weights, its own graph on
         the host (``OnHost``); else ``hugging_face``'s logits, recorded
-        beside the checkpoint (``golden.npz``).
+        beside the checkpoint (``golden.npz``) from its ``config.json`` and
+        its tensors' names, types and shapes.
         """
         if self.seed is not None:
 
@@ -941,8 +963,11 @@ class Runner:
 
             return Host(self.config, self.weights)
         directory = Path(self.checkpoint.path).parent
+        header = {n: f"{t.dtype}{t.shape}" for n, t in self.checkpoint.tensors.items()}
         return Golden(
-            directory / "golden.npz", lambda: self.hugging_face.load(directory)
+            directory / "golden.npz",
+            lambda: self.hugging_face.load(directory),
+            ((directory / "config.json").read_text(), header),
         )
 
     def encode(self, text: str) -> list[int]:

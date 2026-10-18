@@ -155,3 +155,16 @@ def test_a_runner_s_bos_is_its_checkpoint_s_unless_it_names_one(tmp_path):
     (tmp_path / "config.json").write_text('{"bos_token_id": 7}')
     assert FromCheckpoint(path, seed=1).bos == 7
     assert SmallRunner(path, seed=1).bos == SPECIAL_TOKENS["<|begin_of_text|>"]
+
+
+def test_a_checkpoint_s_golden_is_refused_once_its_config_changes(tmp_path):
+    path = tmp_path / "model.safetensors"
+    path.symlink_to(checkpoint(SMALL).path)
+    (tmp_path / "config.json").write_text('{"bos_token_id": 7}')
+    golden = SmallRunner(path).reference()
+    golden.rows = {"key": np.zeros(1, np.float32)}
+    golden.write()
+    assert SmallRunner(path).reference().rows.keys() == {"key"}
+    (tmp_path / "config.json").write_text('{"bos_token_id": 8}')
+    with pytest.raises(ValueError, match="other inputs"):
+        SmallRunner(path).reference()

@@ -21,10 +21,10 @@ OpenAI's Whisper (large-v3-turbo's shape: a 32-layer audio encoder, a
   over the encoder's output (`encoder_attn`). It adds a learned position table
   after the embedding, and its head is the final LayerNorm and the
   embedding.
-- `Reference`: what the model is judged by, Hugging Face's
-  `WhisperForConditionalGeneration` in float32 (`HuggingFaceWhisper`), its
-  logits after a clip's features and the decoder's tokens recorded once to
-  a file (`iron.lm.Golden`).
+- `HuggingFaceWhisper`: what the model is judged by, Hugging Face's
+  `WhisperForConditionalGeneration` in float32, its logits after the
+  decoder's tokens over a clip's features recorded once to a file
+  (`iron.lm.Golden`).
 - `WhisperConfig`: both shapes, read from the checkpoint's own
   `config.json`, and each layer's parts.
 - `RENAMES`: renames Whisper's modules (`self_attn_layer_norm`/

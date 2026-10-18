@@ -89,7 +89,7 @@ def test_smolvlm_accuracy(runner, model, reference, seed, question, record_prope
     raw = {vision.image_token: (image,)}
     results = []
     for _ in range(2):
-        want = reference.logits(tokens, raw)
+        want = reference.logits(tokens, image)
         results.append(divergence(want, model.logits(tokens, raw)))
         tokens.append(int(want.argmax()))
     worst = max(kl for kl, _ in results)

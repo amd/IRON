@@ -19,7 +19,6 @@ from ml_dtypes import bfloat16
 
 from iron.applications.whisper.model import (
     HuggingFaceWhisper,
-    Reference,
     Whisper,
     WhisperConfig,
     WhisperEncoder,
@@ -113,19 +112,13 @@ def clip():
 @pytest.fixture(scope="module")
 def reference(clip, golden):
     """Hugging Face's logits over the toy's weights after the clip."""
-    weights, features = clip
-    toy = Reference(
-        golden(
-            "toy",
-            lambda: HuggingFaceWhisper.build(
-                "whisper", TOY, weights, pad_token_id=None
-            ),
-            TOY,
-            weights,
-        )
+    weights, _ = clip
+    return golden(
+        "toy",
+        lambda: HuggingFaceWhisper.build("whisper", TOY, weights, pad_token_id=None),
+        TOY,
+        weights,
     )
-    toy.encode(features)
-    return toy
 
 
 @pytest.mark.parametrize("version", [0, 1, 2], ids=["decode", "prompt", "encode"])
@@ -138,8 +131,7 @@ def test_each_version_resolves(clip, npu2, version):
 
 class Encoder:
     """Hugging Face's encoder over the toy's weights, what records
-    ``goldens/encoder.npz``: its output over a clip's features (their
-    float32 bits), rounded to bf16 to keep the file small, a hundredth of
+    ``goldens/encoder.npz``: its output over a clip's features, rounded to bf16 to keep the file small, a hundredth of
     the bound it is held to.
     """
 
@@ -148,12 +140,12 @@ class Encoder:
             "whisper", TOY, weights, pad_token_id=None
         ).model.model.encoder
 
-    def logits(self, bits):
+    def logits(self, tokens, features):
         import torch
 
-        features = np.asarray(bits, np.int32).view(np.float32).reshape(1, TOY.mels, -1)
+        features = torch.from_numpy(np.asarray(features, np.float32))[None]
         with torch.no_grad():
-            out = self.encoder(torch.from_numpy(features)).last_hidden_state[0]
+            out = self.encoder(features).last_hidden_state[0]
         return out.numpy().astype(bfloat16).astype(np.float32)
 
 
@@ -167,7 +159,7 @@ def test_the_encoder_s_output_is_hugging_face_s(clip, golden):
     buffer, values = encoder.inputs(features)
     got = np.asarray(encoder.reference(buffer, **values), np.float32)
     want = golden("encoder", lambda: Encoder(weights), TOY, weights).logits(
-        features.view(np.int32)
+        [], features
     )
     # 200 positions of the 256 rows the layers take.
     assert got.shape == want.shape == (TOY.source_positions, TOY.hidden_size)
@@ -200,10 +192,11 @@ def test_the_decoder_attends_over_the_encoded_clip(clip, reference):
             encoder_rows=0,
         )
         logits, carry = model.reference(model.prompt_ids(chunk), **values)
-    _assert_close(logits, reference.logits(tokens), "the prompt's logits")
+    _assert_close(logits, reference.logits(tokens, features), "the prompt's logits")
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_rows=0, **carry)
-    _assert_close(logits, reference.logits(tokens), "a decode step's logits")
+    want = reference.logits(tokens, features)
+    _assert_close(logits, want, "a decode step's logits")
 
 
 def test_whisper_s_exact_gelu_is_refused_until_its_kernel():
@@ -223,7 +216,7 @@ def test_whisper_toy_on_the_device(clip, reference):
     model.encode(features)
     tokens = list(np.random.default_rng(2).integers(0, TOY.vocab_size, 300))
     for _ in range(3):
-        want = reference.logits(tokens)
+        want = reference.logits(tokens, features)
         _assert_close(model.logits(tokens), want, f"{len(tokens)} tokens")
         tokens.append(int(want.argmax()))
 
@@ -238,15 +231,11 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
     weights = drawn(TOY, names(TOY), 0, "F16")
     assert weights.model.decoder.embed_tokens.weight.dtype == np.float16
     model = Whisper(TOY, weights)
-    reference = Reference(
-        golden(
-            "toy_f16",
-            lambda: HuggingFaceWhisper.build(
-                "whisper", TOY, weights, pad_token_id=None
-            ),
-            TOY,
-            weights,
-        )
+    reference = golden(
+        "toy_f16",
+        lambda: HuggingFaceWhisper.build("whisper", TOY, weights, pad_token_id=None),
+        TOY,
+        weights,
     )
     assert model.decoder.embed_tokens.weight.dtype == bfloat16
     features = np.random.default_rng(1).uniform(
@@ -257,7 +246,6 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
     source = model.encoder.soft(own)
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_rows=own["rows"])
-    reference.encode(features)
     tokens = np.random.default_rng(2).integers(0, TOY.vocab_size, 100)
     logits, _ = model.reference(
         model.prompt_ids(tokens),
@@ -269,4 +257,4 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
         source=source,
         encoder_rows=0,
     )
-    _assert_close(logits, reference.logits(tokens), "the prompt's logits")
+    _assert_close(logits, reference.logits(tokens, features), "the prompt's logits")

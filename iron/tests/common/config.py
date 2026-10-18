@@ -20,7 +20,6 @@ from iron.applications.embedding_gemma2.config import (
 from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig
 from iron.applications.phi3.model import LongRope, Phi4Config
 from iron.lm import Config, DecoderConfig
-from iron.lm.golden import config_json
 from iron.tests.common.llama_model import REAL_1B
 from iron.lm.testing import require, weights_dir
 
@@ -125,9 +124,9 @@ PHI4 = Phi4Config(
 
 
 @pytest.mark.parametrize("config", [REAL_1B, PHI4], ids=["llama", "phi4"])
-def test_config_json_is_from_checkpoints_inverse(tmp_path, config):
+def test_to_json_is_from_checkpoint_s_inverse(tmp_path, config):
     """A converted field (a ``rope_scaling``) is written as the checkpoint
     writes it, so the file reads back the same config.
     """
-    (tmp_path / "config.json").write_text(json.dumps(config_json(config)))
+    (tmp_path / "config.json").write_text(json.dumps(config.to_json()))
     assert type(config).from_checkpoint(tmp_path) == config

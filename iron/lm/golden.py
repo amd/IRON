@@ -7,7 +7,6 @@ so a test or an accuracy run needs neither torch nor transformers, which
 are not IRON's requirements, only to record.
 """
 
-import dataclasses
 import hashlib
 import os
 from pathlib import Path
@@ -19,8 +18,9 @@ RECORD = "IRON_RECORD_GOLDENS"
 
 
 class Golden:
-    """Logits by token sequence, each the logits after a sequence's last
-    token, read from ``path`` (an ``.npz``).
+    """Logits by token sequence and any arrays beside it (a clip, an
+    image), each the logits after a sequence's last token, read from
+    ``path`` (an ``.npz``).
 
     Args:
         path: The file; it need not exist yet.
@@ -58,9 +58,15 @@ class Golden:
             "transformers is installed (pytest --record-goldens)"
         )
 
-    def logits(self, tokens) -> np.ndarray:
+    def logits(self, tokens, *arrays) -> np.ndarray:
+        """The logits after ``tokens`` given ``arrays``, which the
+        reference's ``logits`` takes after them.
+        """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        key = hashlib.sha256(tokens.tobytes()).hexdigest()[:16]
+        digest = hashlib.sha256(tokens.tobytes())
+        for array in map(np.ascontiguousarray, arrays):
+            digest.update(f"{array.dtype}{array.shape}".encode() + array.tobytes())
+        key = digest.hexdigest()[:16]
         if key not in self.rows:
             if self.build is None:
                 raise LookupError(
@@ -70,7 +76,7 @@ class Golden:
                 )
             if self.reference is None:
                 self.reference = self.build()
-            row = np.asarray(self.reference.logits(tokens), np.float32)
+            row = np.asarray(self.reference.logits(tokens, *arrays), np.float32)
             # Another process may have recorded others since this one read.
             self.rows = self.read() | self.rows | {key: row}
             self.write()
@@ -135,9 +141,7 @@ class HuggingFace:
         import torch
         import transformers
 
-        hf = transformers.AutoConfig.for_model(
-            model_type, **(config_json(config) | json)
-        )
+        hf = transformers.AutoConfig.for_model(model_type, **(config.to_json() | json))
         auto = getattr(transformers, cls.model_class)
         model = auto.from_config(hf, dtype=torch.float32)
         state = {k: torch.from_numpy(v) for k, v in flat(weights)}
@@ -155,27 +159,6 @@ class HuggingFace:
         with torch.no_grad():
             out = self.model(torch.tensor([list(tokens)]), use_cache=False)
         return out.logits[0, -1].numpy()
-
-
-def config_json(config) -> dict:
-    """``config``'s fields as its ``config.json`` names them: each field's
-    ``metadata["json"]`` path, the inverse of ``Config.from_checkpoint``:
-    a value its ``convert`` built gives its own ``to_json()``. A field that
-    is None or not JSON is left out.
-    """
-    out = {}
-    for f in dataclasses.fields(config):
-        key, value = f.metadata.get("json"), getattr(config, f.name)
-        if hasattr(value, "to_json"):
-            value = value.to_json()
-        if key is None or not isinstance(value, (bool, int, float, str, tuple, dict)):
-            continue
-        *path, leaf = key.split(".")
-        node = out
-        for part in path:
-            node = node.setdefault(part, {})
-        node[leaf] = list(value) if isinstance(value, tuple) else value
-    return out
 
 
 def flat(tree):

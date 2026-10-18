@@ -6,7 +6,7 @@
 """Whisper over ``iron.lm``: a bidirectional audio encoder (``WhisperEncoder``,
 an ``iron.lm.Tower``) feeding a causal text decoder through cross attention
 (``Whisper``, an ``iron.lm.EncoderDecoder``), judged by Hugging Face's own
-model in float32 (``Reference``). Both are ``iron.lm``'s layer parts over
+model in float32 (``HuggingFaceWhisper``). Both are ``iron.lm``'s layer parts over
 Whisper's modules renamed once at load (``RENAMES``); nothing rotates:
 the encoder adds a fixed position table after its two convolutions, the
 decoder a learned one after its embedding. The shape is read from the
@@ -36,7 +36,7 @@ from iron.lm import (
     Tower,
 )
 from iron.lm.base import _nest, leaves
-from iron.lm.golden import Golden, HuggingFace
+from iron.lm.golden import HuggingFace
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gelu import GELU
@@ -281,42 +281,21 @@ class Whisper(EncoderDecoder):
     renames = RENAMES
 
 
-class Reference:
-    """What Whisper is judged by: ``golden``'s logits after a clip and the
-    decoder's tokens, keyed on both. ``encode`` the clip's features,
-    ``(mels, frames)``, then ``logits``, as ``Whisper`` takes them.
-    """
-
-    def __init__(self, golden: Golden):
-        self.golden = golden
-
-    def encode(self, features) -> None:
-        self.features = np.asarray(features, np.float32).view(np.int32).reshape(-1)
-
-    def logits(self, tokens) -> np.ndarray:
-        return self.golden.logits(np.append(self.features, tokens))
-
-
 class HuggingFaceWhisper(HuggingFace):
     """transformers' ``WhisperForConditionalGeneration`` in float32, what
-    records a ``Reference``'s golden: the logits after a key of a clip's
-    features (their float32 bits), then the decoder's tokens.
+    records Whisper's goldens: the logits after the decoder's tokens over a
+    clip's features, ``(mels, frames)``.
     """
 
     model_class = "AutoModelForSpeechSeq2Seq"
 
-    def logits(self, key) -> np.ndarray:
+    def logits(self, tokens, features) -> np.ndarray:
         import torch
 
-        c = self.model.config
-        n = c.num_mel_bins * 2 * c.max_source_positions
-        features = np.asarray(key[:n], np.int32).view(np.float32)
         with torch.no_grad():
             out = self.model(
-                input_features=torch.from_numpy(features).reshape(
-                    1, c.num_mel_bins, -1
-                ),
-                decoder_input_ids=torch.tensor([list(key[n:])]),
+                input_features=torch.from_numpy(np.asarray(features, np.float32))[None],
+                decoder_input_ids=torch.tensor([list(tokens)]),
                 use_cache=False,
             )
         return out.logits[0, -1].numpy()

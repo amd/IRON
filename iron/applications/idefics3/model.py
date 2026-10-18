@@ -6,9 +6,9 @@
 """SmolVLM-256M-Instruct over ``iron.lm``: its text model (``SmolVLMText``,
 a ``CausalLM`` of Llama's ``DecoderLayer``, 9 heads over 3 KV groups, with an untied
 ``lm_head``), its vision tower (``vision/``, an ``iron.lm.Tower``), and the
-two as one ``iron.lm.Multimodal`` (``VLMRunner.npu``), whose image
+two as one ``iron.lm.Multimodal`` (``VLMRunner.build``), whose image
 placeholders take the tower's soft tokens, judged by transformers' own
-SmolVLM's logits (``Reference``). Its shape is read from the
+SmolVLM's logits (``HuggingFaceVLM``). Its shape is read from the
 checkpoint's own nested ``config.json``. ``python -m
 iron.applications.idefics3.model`` runs the text model alone.
 
@@ -25,7 +25,7 @@ from ml_dtypes import bfloat16
 
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal
-from iron.lm.golden import HuggingFace, config_json
+from iron.lm.golden import HuggingFace
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 
 
@@ -84,38 +84,30 @@ BOS = 1
 class HuggingFaceVLM(HuggingFace):
     """transformers' own SmolVLM (``Idefics3ForConditionalGeneration``) in
     float32, built over both configs as ``HuggingFace.build("idefics3",
-    vision, weights, **config_json(text))``. It takes what a ``Golden`` is
-    keyed by: a sequence's tokens, then, if they hold image placeholders,
-    the image's bfloat16 bits (``Reference``).
+    vision, weights, **text.to_json())``.
     """
 
     model_class = "AutoModelForImageTextToText"
 
-    def pixels(self, bits):
-        """The ``pixel_values`` of one image's bfloat16 ``bits``, laid out
-        as ``VisionTower.inputs`` takes the image, ``(side, side, 3)``.
+    def pixels(self, image):
+        """The ``pixel_values`` of ``image``, as ``VisionTower.inputs``
+        takes it, rounded to bfloat16 as the device holds it.
         """
         import torch
 
-        S = self.model.config.vision_config.image_size
-        image = np.asarray(bits, np.uint16).view(bfloat16).astype(np.float32)
-        image = image.reshape(S, S, 3).transpose(2, 0, 1)
-        return torch.from_numpy(image.copy())[None, None]
+        image = np.asarray(image).astype(bfloat16).astype(np.float32)
+        return torch.from_numpy(image.transpose(2, 0, 1).copy())[None, None]
 
-    def logits(self, key) -> np.ndarray:
-        """The logits after a sequence's last token, its image at its
-        placeholders, from ``key``.
+    def logits(self, tokens, *image) -> np.ndarray:
+        """The logits after ``tokens``, ``image``, if given, at its
+        placeholders.
         """
         import torch
 
-        config, n, pixels = self.model.config, key.size, None
-        if (key == config.image_token_id).any():
-            n -= 3 * config.vision_config.image_size**2
-            pixels = self.pixels(key[n:])
         with torch.no_grad():
             out = self.model(
-                input_ids=torch.from_numpy(key[None, :n]),
-                pixel_values=pixels,
+                input_ids=torch.from_numpy(np.asarray(tokens, np.int64)[None]),
+                pixel_values=self.pixels(*image) if image else None,
                 use_cache=False,
             )
         return out.logits[0, -1].numpy()
@@ -149,25 +141,6 @@ def build_prompt(question: list[int], vision: VisionConfig) -> list[int]:
     return _PREAMBLE_IDS + image + _SUFFIX_IDS + question + _TAIL_IDS
 
 
-class Reference:
-    """SmolVLM's logits as ``model`` gives them for a key of the tokens and
-    the image's bfloat16 bits (a ``Golden`` or a ``HuggingFaceVLM``), taken
-    as ``Multimodal.logits`` takes them.
-    """
-
-    def __init__(self, model, image_token: int):
-        self.model = model
-        self.image_token = image_token
-
-    def logits(self, tokens, raw: dict[int, tuple]) -> np.ndarray:
-        """The logits after ``tokens``, the one image ``raw`` holds (by
-        placeholder token) at its placeholders.
-        """
-        (image,) = raw[self.image_token]
-        bits = np.asarray(image).astype(bfloat16).view(np.uint16)
-        return self.model.logits(np.concatenate([np.ravel(tokens), bits.ravel()]))
-
-
 class VLMRunner(Runner):
     """SmolVLM-256M-Instruct, its text model and vision tower as one
     ``iron.lm.Multimodal``, from its checkpoint and ``tokenizer.json``.
@@ -182,18 +155,16 @@ class VLMRunner(Runner):
         tower = VisionTower(self.vision_config, self.weights)
         return Multimodal(text, {self.vision_config.image_token: tower})
 
-    def reference(self) -> Reference:
-        """What the model is judged by: transformers' own SmolVLM, over the
-        drawn weights, else its logits recorded beside the checkpoint.
+    def reference(self):
+        """What the model is judged by, its ``logits`` taking the tokens and
+        the image: transformers' own SmolVLM, over the drawn weights, else
+        its logits recorded beside the checkpoint.
         """
-        vision = self.vision_config
-        if self.seed is not None:
-            model = HuggingFaceVLM.build(
-                "idefics3", vision, self.weights, **config_json(self.config)
-            )
-        else:
-            model = super().reference()
-        return Reference(model, vision.image_token)
+        if self.seed is None:
+            return super().reference()
+        return HuggingFaceVLM.build(
+            "idefics3", self.vision_config, self.weights, **self.config.to_json()
+        )
 
 
 if __name__ == "__main__":
