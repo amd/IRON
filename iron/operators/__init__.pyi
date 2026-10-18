@@ -12,6 +12,7 @@ from .elementwise_add import ElementwiseAdd, RowwiseAdd
 from .elementwise_max import ElementwiseMax
 from .elementwise_mul import ElementwiseMul, RowwiseMul
 from .emit import Emit
+from .experts import Experts
 from .gelu import GELU
 from .gemm import GEMM
 from .gemv import GEMV
