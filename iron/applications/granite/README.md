@@ -6,28 +6,27 @@ SPDX-License-Identifier: Apache-2.0
 # Granite 4.2 3B on the NPU
 
 Prefill and decode of IBM's Granite 4.2 3B as one IRON graph, `Granite`, a
-version compiled per input shape, and the float32 numpy forward pass it is
-checked against, `GraniteOracle`, its `oracle`. `GraniteForCausalLM` is
-pure dense attention (no Mamba, MoE or hybrid layers): Llama 3's layer
-(`iron.lm.Layer`) plus four scalars from its `config.json`, so what is
-Granite's own is short, all of it in `iron/applications/granite/model.py`:
+version compiled per input shape, judged against transformers as Llama is
+(see `iron/applications/llama/README.md`). `GraniteForCausalLM` is pure
+dense attention: Llama 3's layer plus four scalars from its `config.json`,
+so what is Granite's own is short, all of it in
+`iron/applications/granite/model.py`:
 
 - its `GraniteConfig` (`DecoderConfig` plus `attention_multiplier`,
   `residual_multiplier`, `embedding_multiplier` and `logits_scaling`), whose
-  `layer(i)` gives `Layer` the attention scale and the residual scale
+  `attention(i)` sets `Attention`'s logit scale and `layer(i)`
+  `DecoderLayer`'s residual scale
 - the embedding rows scaled by `embedding_multiplier` in `embed()`, and the
   logits divided by `logits_scaling` in `head()`, the divisor folded into
   the final norm's weight as `iron.lm.Derived`; each is skipped at 1.0, as
   this checkpoint's are
 - its own output head, untied from its embedding (`lm_head.weight`)
-- its tokenizer, `tokenizers.Tokenizer` over `tokenizer.json`, which adds
-  no BOS of its own -- `Runner.encode` prepends it
+- its tokenizer's lead token, `<s>`
 - its checkpoint, which ships as two shards (`Checkpoint` maps the
   `.safetensors.index.json` beside them)
 
-Everything else -- `CausalLM`, `Layer`, `Oracle`, `DecoderConfig`,
-`Checkpoint`, `Runner`, `generation` and `testing` -- is `iron.lm`, shared
-with Llama 3 (`iron/applications/llama/`).
+Everything else is `iron.lm`, shared with Llama 3
+(`iron/applications/llama/`).
 
 ## A note on scale: the full-ELF arena
 
@@ -101,5 +100,6 @@ measures the cost table its designs can be narrowed and packed by, as
 pytest tests/applications/granite/
 ```
 
-Loads the model once and runs the accuracy, determinism and chunk-boundary
-checks above in-process through `model.Runner`.
+Loads the model once and runs in-process through `model.Runner` the
+throughput, accuracy and determinism checks above, again in the each-step
+form (`TestEachStep`), and over a two-chunk prompt and a chat turn.

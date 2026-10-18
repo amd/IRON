@@ -6,30 +6,26 @@ SPDX-License-Identifier: Apache-2.0
 # LFM2-1.2B on the NPU
 
 LiquidAI's LFM2-1.2B: a hybrid decoder, sixteen layers of which only six
-(`full_attn_idxs`, from `config.json`) are full attention; the rest are a
-gated short causal convolution (`conv_L_cache=3` taps, depth-wise, one tap
-row a channel) in place of attention. Every layer still ends in the same
-SwiGLU feed-forward. `Lfm2` is the NPU graph, over the shared decoder
-(`iron.lm`); `Lfm2Oracle` its float32 numpy forward pass, which it is
-judged by; both are in `model.py`.
+(`full_attn_idxs`, from `config.json`) are full attention, with Qwen3's
+per-head q/k norms; the rest are a gated short causal convolution
+(`conv_L_cache=3` taps, depth-wise, one tap row a channel) in place of
+attention. Every layer still ends in the same SwiGLU feed-forward. `Lfm2`
+in `model.py` is the NPU graph over the shared decoder (`iron.lm`), judged
+against transformers as Llama is (see `iron/applications/llama/README.md`).
 
-`layer()` dispatches on which the checkpoint gives a layer, per index
-(`"self_attn" in vars(w)`): an attention layer is `iron.lm.Layer`'s, which
-reads LFM2's own names (`operator_norm`/`ffn_norm`, `q_layernorm`/
-`k_layernorm` before RoPE, `out_proj`, `feed_forward.w1`/`w3`/`w2`); a
-conv layer is its short conv in attention's place, then `Layer`'s
-feed-forward block (`Layer.feed_forward`). A conv layer's three per-channel taps, a row each derived
-once at load (`iron.lm.Derived`), read a window spanning the current call
-and the `conv_kernel - 1` gated rows before it. Those rows are the layer's
+At load, `Lfm2.sanitize` renames LFM2's modules (`operator_norm`/
+`ffn_norm`, `q_layernorm`/`k_layernorm`, `out_proj`,
+`feed_forward.w1`/`w3`/`w2`) to the names the shared parts read. A layer
+whose checkpoint holds `self_attn` is a `DecoderLayer`; a conv layer is its
+short conv in attention's place, then the same feed-forward. A conv
+layer's three per-channel taps, a row each derived once at load
+(`iron.lm.Derived`), read a window spanning the current call and the
+`conv_kernel - 1` gated rows before it. Those rows are the layer's
 `iron.lm.Checkpoints` state, a slot per prompt-chunk boundary: a prompt
 chunk reads its boundary's slot and writes the next, a decode step its
 chunk's own, so a prompt may resume from any chunk (a chat turn) after
 positions decode steps wrote. Slot 0, never written, is zero: "before the
-sequence". A call assembles its window in a `(2, prefill_chunk, conv_dim)`
-scratch state before three `RowwiseMul`s (one a tap) and two
-`ElementwiseAdd`s sum it (`Lfm2.conv`, parallel to the base class's
-`attend`). Only the six attention layers hold key and value caches
-(`CausalLM` allocates them where a layer holds `self_attn`).
+sequence". Only the six attention layers hold key and value caches.
 
 ## Weights and tokenizer
 
@@ -86,5 +82,11 @@ measures the cost table its designs can be narrowed and packed by, as
 pytest tests/applications/lfm2/
 ```
 
-Loads the model once and runs the accuracy, determinism and chunk-boundary
-checks above in-process through `model.Runner`.
+`test.py` loads the model once and runs in-process through
+`model.Runner` the throughput, accuracy and determinism checks above, and
+over a two-chunk prompt and a chat turn. `reference/test.py` needs no
+checkpoint and no NPU: it runs the graph on the host over random toy
+weights against transformers' LFM2 on the same weights, its logits
+recorded in `reference/goldens/` (`pytest --record-goldens -p no:xdist`
+records them), across prompt chunks, decode steps and chat turns resumed
+from a boundary.

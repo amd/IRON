@@ -24,6 +24,8 @@ The application is one package over `iron.lm`:
   version of `Multimodal`, so every graph's designs, in one cost table
 - `audio.py`, `vision.py`: the towers, each an `iron.lm.Tower`, a graph
   of its own that `Multimodal` calls in its body
+- `blocks.py`: the layer parts its own, over `iron.lm`'s: Gemma's
+  sandwich-normed layer and the audio tower's clipped projections
 - `hugging_face.py`: Hugging Face's own processors, model and towers, what
   the tests' goldens are recorded from
 - `profiles/`: the tunables per device, where an operator's own resolution
@@ -73,7 +75,8 @@ pytest tests/applications/embedding_gemma2/
 The text encoder's embeddings against Hugging Face's (their cosine and
 norm), the truncations, a query ranking two documents, text with a clip
 and an image, each tower's soft tokens, the audio features and image
-patches against Hugging Face's processors', and the latency of each, on NPU1 and NPU2. On
+patches against Hugging Face's processors', determinism, and the latency
+of each, on NPU1 and NPU2. On
 NPU1 each step is its own dispatch of an xclbin; `TestEachStep` checks that
 form on NPU2.
 

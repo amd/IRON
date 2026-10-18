@@ -684,11 +684,10 @@ there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
 `iron/applications/llama/model.py` is the worked example
 (`Llama`, a `CausalLM` from `iron.lm`, called through
-`logits(tokens)`, and `LlamaOracle`, its float32 forward pass on the host;
-its `Runner` builds both and checks one against the other);
+`logits(tokens)`, judged by transformers' logits);
 `iron/tests/common/graph.py` traces it device-free,
-`iron/tests/common/llama_reference.py` runs its reference against the CPU
-one and `iron/tests/toolchain/` builds it.
+`iron/tests/common/llama_reference.py` runs its reference against
+transformers' recorded logits and `iron/tests/toolchain/` builds it.
 
 ## Design rationale and known limits
 
@@ -1037,170 +1036,68 @@ of its own that carries the mark.
 ### The shared library
 
 `iron/lm/` is what every language model shares; each model is an
-application over it, a package of its own under `iron/applications/`
-(`llama`, `embedding_gemma2`) holding its test, README, tokenizer and
-profiles. The library is six modules:
+application over it, a package under `iron/applications/`. How to add one
+is "Add a model" in [CONTRIBUTING.md](CONTRIBUTING.md). Nothing in the
+library imports a model. The modules:
 
-- `base.py`: what any model is over it. `Config`, the one field every
-  model judges its RMS norms by (`eps`) and `from_checkpoint(path)`, built
-  from a checkpoint's own `config.json` (a field with no `metadata={"json":
-  ...}` is an IRON choice, not the checkpoint's, and keeps its default);
-  `DecoderConfig`, a decoder's own shape, and
-  `rope_angles`, the RoPE table it names the base and scaling of;
-  `Checkpoint`, the mapped `.safetensors` (or a sharded checkpoint, by its
-  `.safetensors.index.json`, every shard the index names, or a PyTorch
-  checkpoint, read without torch, its pickle refused any code), whose
-  `tree(fill=)` is the weights by the checkpoint's own names
-  (`weights.model.layers[3].self_attn.q_proj.weight`), which the graphs and
-  oracles read: `"read"`, views of the file; `"random"`, drawn at a seed;
-  `"unread"`, allocated and never written, for tracing, building and
-  tuning, which read only the header; `Derived`, the weights a model
-  computes from that tree, `put(module, leaf=array)` and held as
-  `self.derived`, its paths `derived.<module>.<leaf>`; `Oracle`,
-  a model's float32 forward pass on the host, the reference it is judged
-  by, as an operator's is its `reference()` (not composed from the
-  operators' references, so it catches a wiring mistake the graph's own
-  reference repeats; it widens a layer's weights to float32 as the pass
-  reaches them, and holds the embedding in float32, so it is built to check
-  with; it also carries the primitives every model's own oracle shares:
-  `linear`, `rms_norm`, `layer_norm`, `normed` (a norm module's),
-  `silu`, `gelu_tanh`, `attend(causal=, window=, scale=)`, `rotate`,
-  `softplus`, `causal_conv` and `ssd`, Mamba-2's chunked scan as Hugging
-  Face computes it);
-  `Model`, a graph
-  whose versions `load(tuner, full_elf)` compiles before the first call,
-  in the packaging asked for; and `Runner` and `main`, a decoder's
-  checkpoint, tokenizer, model and oracle, and the command line. A model's
-  runner names its `config`, `model`, `open_tokenizer` and `bos`,
-  and, for a model that comes in several sizes, `sizes`, of which `--size`
-  picks one.
-  With `--random-weights SEED` (and pytest's option of that name) the
-  weights are drawn in the checkpoint's shapes (`tree("random")`) and the
-  prompts random: speed, accuracy against the oracle and determinism
-  without the real weights or the tokenizer
+- `base.py`: `Config` and `DecoderConfig`, a model's shape read from the
+  checkpoint's `config.json` (a field with no `metadata={"json": ...}` is
+  IRON's choice and keeps its default), whose `attention(i)` and
+  `layer(i)` give layer `i`'s parts; `rope_angles`; `Checkpoint`, the
+  mapped `.safetensors` (sharded, or a PyTorch checkpoint read without
+  torch), whose `tree(fill=)` is the weights by the checkpoint's own names
+  (`weights.model.layers[3].self_attn.q_proj.weight`): `"read"`, views of
+  the file; `"random"`, drawn at a seed; `"unread"`, allocated and never
+  written, for tracing and building; `Derived`, weights a model computes
+  from that tree; `Model`, a graph whose versions `load()` compiles before
+  the first call, with `sanitize(w)`, which renames one layer's modules to
+  the names the parts read; `OnHost`, a model mixin that runs the graph's
+  own reference (`Graph.reference`) in place of the device; and `Runner`
+  and `main`, a checkpoint, tokenizer and model and the command line.
+  `Runner.reference()` is what a model is judged by: transformers' logits
+  recorded beside the checkpoint, or with `--random-weights SEED` the
+  graph's own reference over the drawn weights
+- `blocks.py`: the parts a layer is composed from, each a frozen
+  dataclass called inside a graph's body: `Norm` (RMS, or affine LayerNorm
+  with `bias=True`), `Attention` (heads, groups, q/k/v norms, scale,
+  window, partial rotary), `MLP` (gated or plain, SiLU or GELU-tanh),
+  `DecoderLayer` (pre-norm attention and MLP with residuals, a residual
+  scale where one is set) and `CrossDecoderLayer` (adds attention over an
+  encoder's output). Also the front-end graphs `LogMel`, `Conv1d`,
+  `Conv2d`, `MaxPool2d`, `ConcatChannels` and `ImagePatches`
+- `golden.py`: `Golden`, transformers' logits stored by token hash in an
+  `.npz` and computed on a miss only while recording
+  (`--record-goldens`), and `HuggingFace`, transformers' model built over
+  IRON's config and weights (`build`) or a checkpoint (`load`)
 - `causal.py`: `CausalLM`, a decoder as one graph, a prompt chunk and a
-  decode step (`DecodeStep`), the key and value caches, attention over them
-  (`attend`) and `logits(tokens)`, its body `lookup(ids[:rows])` then
-  `forward` (`from_rows`, a prompt chunk from rows given). A prompt call
-  runs `rows` positions from `start`, any position: a turn runs from its
-  first token the caches do not hold (`resume`), or for a model with
-  recurrent state from the boundary before it where it changes the
-  history. `use()` runs its
-  host loop on another graph's versions (a multimodal model's), a chunk
-  holding a placeholder through `placed`. A model subclasses it with `head(x)`,
-  and `Oracle` with a numpy `head(x)`, which it names as its `CausalLM`'s
-  `oracle`; each layer is its config's `layer(i)`, a `Layer`, on the NPU
-  (`CausalLM.layer`) and in numpy (`Oracle.layer`), and the pass, RoPE and
-  attention are shared. `embed()` on both, the identity
-  by default, is where a model scales the rows the embedding gather
-  gives, and `positions()` (`CausalLM.positions(x, step)`,
-  `Oracle.positions(x)`, `Encoder.positions(x, step)`), the identity by
-  default, where it adds an absolute position table's rows. A
-  `DecoderConfig`'s `rotary_dim` rotates only that prefix of each head, and
-  its `rope_attention_scaling` scales the whole angle table once; with no
-  `rope_theta` nothing rotates. `decoder=` names a decoder nested in its
-  checkpoint (`weights.model.decoder`), `weights.model` by default.
-  `Checkpoints` is a state a decoder carries from position to position (a
-  recurrence, a convolution's last rows), a slot per prompt-chunk boundary
-  (`iron/tests/lm/checkpoints.py`): a call reads the slot holding the state
-  before its first position and writes the one after its last, a call
-  never crossing a boundary, so a rerun from any boundary (a chat turn's) is
-  exact; a model holds its layers' in
-  `recurrent`, and its key and value caches in `keys` and `values`, each
-  by the index of a layer whose module attends (`self_attn`) or recurs
-  (`mamba`); a layer attending over an earlier layer's keys and values
-  (the config's `kv_source(i)`, Gemma 4's shared layers) holds none of its
-  own. `angles()` is the RoPE angles a step's layers read, and a
-  `DecodeStep` carries the rows `embed()` gave and the ids (a prompt
-  chunk's) or the token (a decode step's) they are of
-- `encoder_decoder.py`: `EncoderDecoder(config, weights, encoder,
-  decoder)`, a `CausalLM` whose layers also attend over an encoder's
-  output (a `Layer` holding `encoder_attn`). Its encode version (`encode()`
-  on the host) runs the encoder, its input and values named `encoder_<name>`,
-  and writes each layer's `cross_kv` into the states `cross_keys` and
-  `cross_values`; every version carries `source`, the encoder rows the
-  cross attention (`cross`) reads, which each host call gives through
-  `call_values()`, `CausalLM`'s hook for the per-call values a subclass
-  adds to every call. `EncoderDecoderOracle.encode(memory)`
-  projects the twin's keys and values once a clip
-- `encoder.py`: `Encoder`, a bidirectional encoder compiled once at
-  `max_tokens` rows with the length bound per call, with `CausalLM`'s
-  hooks: its body is `lookup(ids[:n])`, then `forward`, which runs each
-  `layer` (`config.layer(i)`'s `Layer` by default, attending both ways
-  within its window), `norm`, `pool(x, n)` and `head`. `Tower` is an
-  encoder whose rows come from a front end (`front`) and whose output is
-  `soft_rows` of soft tokens in a text model's space (`soft`, `inputs`,
-  `soft_tokens`)
-- `multimodal.py`: `Multimodal(text, towers)`, an encoder or a causal
-  text model and its towers keyed by placeholder token as one graph: the
-  text model's versions, a version per tower writing its soft tokens into
-  a merged state, and `placed`, which `Merge`s them in at the
-  placeholders and runs the text model over the rows (for a causal model a
-  prompt chunk, given `before`, each placeholder's count before it, so a
-  run may cross chunks). Its inputs and per-call values are its parts',
-  named in `signature()` (`Graph.signature`), a tower's values after its
-  input (`rgb_n`). `calls`/`run` are an encoder's call, `logits`/`generate`
-  a causal model's
-- `blocks.py`: what layers are built from: `project(x, w)`, a weight's
-  projection at either row count (GEMV for one row, GEMM for more), with a
-  `bias` folded on by `RowwiseAdd` where a checkpoint's projection carries
-  one, flm.GEMM's `k_tile` and `tile_n` where a call pins them (its
-  `k_tile` is otherwise the largest legal tile up to 512 dividing K), and
-  with `accurate=True` the GEMM whose float32 sums round once;
-  `LogMel`, an audio front end's log-mel spectrogram, and `Conv2d`, a
-  channels-last convolution, are graphs, device-tested by
-  `iron/tests/lm/log_mel.py` and `iron/tests/lm/conv2d.py` (each graph's
-  numpy reference is its `oracle()` method); `ImagePatches` resizes a vision
-  front end's image into patches, `iron/tests/lm/image_patches.py`; and
-  `Layer`, a transformer layer read from a checkpoint's layer module by its
-  Hugging Face names (`input_layernorm`, `self_attn.q_proj`, ...,
-  `mlp.down_proj`; a SigLIP layer's `layer_norm1`/`layer_norm2`, a
-  Whisper layer's `self_attn_layer_norm`/`final_layer_norm` and `fc1`/`fc2`,
-  an LFM2 layer's `operator_norm`/`ffn_norm`, `q_layernorm`/`k_layernorm`
-  and `feed_forward.w1`/`w3`/`w2`, a Granite 4.0-H layer's
-  `shared_mlp.input_linear`/`output_linear`, any of their `out_proj`). The module
-  decides its parts: sandwich norms, an
-  affine LayerNorm where a norm holds a bias, q and k norms, biases, a
-  `linear` wrapper, a fused `qkv_proj` or `gate_up_proj` (cut by rows,
-  views of the checkpoint's array), a plain `fc1`/`fc2` feed-forward, a
-  per-layer input (`per_layer_input_gate`, on the module or its
-  `ple_block`), a `layer_scalar`, a Mamba-2 mixer in
-  place of attention where it holds `mamba` (`Mamba2`, whose `states()` a
-  `CausalLM` checkpoints), and a cross-attention block where it holds
-  `encoder_attn` (Whisper's decoder: its `encoder_attn_layer_norm`, q, the
-  model kind's `cross(q, scale=)` over the keys and values
-  `cross_kv(w, memory)` projects from the encoder's output, `out_proj` and
-  the residual). The config's
-  `layer(i)` gives the rest: heads, activation, attention scale and window,
-  the rotated prefix of a head (`rotary_dim`), a value norm, a residual
-  scale, the Mamba-2 mixer's shape (`ssm`), whether it attends over an
-  earlier layer's keys and values, projecting none (`shares_kv`), and the
-  per-layer input's scale (`ple_scale`, folded into its norm's epsilon). Its
-  `step()` runs in a graph's body with the model kind's `attend` and RoPE
-  angles (None turns nothing), and `oracle()` is its float32 twin
-  (`cross_kv_oracle()` the keys' and values'), built from `Oracle`'s
-  primitives (`iron/tests/common/layer.py`). `feed_forward()` and its twin
-  `feed_forward_oracle()` are the feed-forward block alone (pre-norm,
-  feed-forward, post-norm, residual), which `step()` runs and a layer
-  whose mixer is not attention (LFM2's short convolutions) calls itself.
-  EmbeddingGemma 2's text encoder and vision tower run `Layer` with their
-  own bidirectional `attend`, `iron/applications/embedding_gemma2/blocks.py`
+  decode step (`DecodeStep`), the key and value caches (`keys`, `values`,
+  by layer index), and `logits(tokens)`. A subclass gives `head(x)`;
+  `embed()` and `positions()` (identity by default) scale the embedded
+  rows and add an absolute position table. `decoder=` names a decoder
+  nested in the checkpoint. `Checkpoints` is state carried position to
+  position (LFM2's short convolutions), a slot per prompt-chunk boundary,
+  held in `recurrent` (`iron/tests/lm/checkpoints.py`)
+- `encoder.py`: `Encoder`, bidirectional, compiled once at `max_tokens`
+  rows with the length bound per call; `Tower`, an encoder whose rows come
+  from a front end (`front`) and whose output is soft tokens in a text
+  model's space
+- `encoder_decoder.py`: `EncoderDecoder`, a `CausalLM` whose layers also
+  attend over an encoder's output; `encode()` runs the encoder and writes
+  each layer's cross keys and values once
+- `multimodal.py`: `Multimodal(text, towers)`, a text model and its towers
+  keyed by placeholder token as one graph, the soft tokens merged in at
+  the placeholders
 
-Nothing of a model's own is needed by `generation.py` (sampling, the
-generation loop and the accuracy and determinism checks over any model
-with `logits(tokens)`) or `testing.py` (what a model's device test checks
-with them, and where it finds the files,
-`$IRON_EXAMPLE_WEIGHTS_DIR/<name>`; pytest's `--max-seq-len` runs a
-model's test at another context). Nothing in the library imports a
-model.
-
-Their dependencies (safetensors, tiktoken, ...) are in
-`requirements_examples.txt`.
+`generation.py` (sampling, the generation loop, the accuracy and
+determinism checks) and `testing.py` (a device test's checks, the files
+under `$IRON_EXAMPLE_WEIGHTS_DIR/<name>`) need only `logits(tokens)`. Their
+dependencies are in `requirements_examples.txt`; transformers and torch
+are needed only to record goldens.
 
 ### Llama 3.2 1B Inference
 
 Full LLM inference example at `iron/applications/llama/`: `model.py`
-(Llama 3's head on the NPU and in numpy, Llama 3.2 1B's shape,
+(Llama 3's head, Llama 3.2 1B's shape,
 the tokenizer), `profiles/` (tunables), its test and README:
 
 - **Required files**: `config.json`, `model.safetensors`, `tokenizer.model` from Hugging Face
@@ -1222,8 +1119,7 @@ Its text encoder, audio and vision towers at
 `iron/applications/embedding_gemma2/`, one package and one test, an
 `Encoder` rather than a `CausalLM`: one graph compiled once at `max_tokens`
 rows (2048 by default), the prompt's length bound per call, each tower a
-`Tower` and the multimodal model an `iron.lm.Multimodal`, and an oracle per
-part, its float32 forward pass on the host:
+`Tower` and the multimodal model an `iron.lm.Multimodal`:
 
 - **Required files**: `model.safetensors`, `tokenizer.json`
 - **Default location**: `/srv/embeddinggemma-2/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)

@@ -6,25 +6,21 @@ SPDX-License-Identifier: Apache-2.0
 # Qwen 2.5 1.5B Instruct on the NPU
 
 Prefill and decode of Qwen 2.5 as one IRON graph, `Qwen2`, a version
-compiled per input shape, and the float32 numpy forward pass it is checked
-against, `Qwen2Oracle`, its `oracle`. Both are built from the same config
-and weights, Qwen 2.5 1.5B Instruct's here; nothing here needs torch.
+compiled per input shape, from Qwen 2.5 1.5B Instruct's config and weights,
+judged against transformers as Llama is (see
+`iron/applications/llama/README.md`).
 
-Qwen 2 is Llama's layer (`iron.lm.Layer`) with one difference a Llama
-checkpoint has no place for: its q/k/v projections each carry a bias, which
-`Layer` reads from the checkpoint and adds once per output column across
-every row (`project(..., bias=...)`, folded with `RowwiseAdd`). It ties its
+Qwen 2 is Llama's layer with one difference a Llama checkpoint has no
+place for: its q/k/v projections each carry a bias, which `Attention`
+(`iron/lm/blocks.py`) adds wherever the checkpoint holds one. It ties its
 embedding and output head, as Llama does, and takes no RoPE frequency
 scaling.
 
 What is Qwen 2's own is short, and all of it is in
-`iron/applications/qwen2/model.py`: its head on the NPU and in numpy, its
-shape (`DecoderConfig.from_checkpoint`, from `config.json`),
-where its checkpoint keeps each weight by its own name, and its tokenizer;
-its tunables are in `iron/applications/qwen2/profiles/`. The rest is
-`iron.lm`, shared with every other model (see
-`iron/applications/llama/README.md`'s description of `CausalLM`, `Oracle`,
-`Checkpoint`/`DecoderConfig`, `Runner` and `generation`/`testing`).
+`iron/applications/qwen2/model.py`: its shape
+(`DecoderConfig.from_checkpoint`, from `config.json`) and its tokenizer's
+lead token; its tunables are in `iron/applications/qwen2/profiles/`. The
+rest is `iron.lm`, shared with every other model.
 
 `python -m iron.lm.tune qwen2 --checkpoint /path/to/model.safetensors`
 measures the cost table its designs can be narrowed and packed by (below).
@@ -77,5 +73,5 @@ link does not finish in a practical time at this shape (see
 pytest tests/applications/qwen2/
 ```
 
-Loads the model once and runs the accuracy, determinism and throughput
-checks above in-process through `model.Runner`.
+Loads the model once and runs the throughput, device-sampling, accuracy
+and determinism checks above in-process through `model.Runner`.

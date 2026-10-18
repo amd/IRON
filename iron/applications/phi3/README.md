@@ -6,29 +6,27 @@ SPDX-License-Identifier: Apache-2.0
 # Phi-4-mini-instruct on the NPU
 
 Prefill and decode of Phi-4-mini-instruct as one IRON graph, `Phi4`, a
-version compiled per input shape, and the float32 numpy forward pass it is
-checked against, `Phi4Oracle`, its `oracle`. Both are built from the same
-config and weights; nothing here needs torch.
+version compiled per input shape, judged against transformers as Llama is
+(see `iron/applications/llama/README.md`).
 
 What is Phi-4-mini-instruct's own is in `iron/applications/phi3/model.py`:
-its head on the NPU and in numpy, its shape (`Phi4Config.from_checkpoint`,
-from `config.json`) and its tokenizer; its tunables are in
-`iron/applications/phi3/profiles/`. The rest is `iron.lm`, shared with
-every other model, its layers `iron.lm.Layer` (see
-`iron/applications/llama/README.md`'s description of `CausalLM`, `Oracle`,
-`Checkpoint`/`DecoderConfig`, `Runner` and `generation`/`testing`).
+its shape (`Phi4Config.from_checkpoint`, from `config.json`), its
+checkpoint's names (`Phi4.sanitize`) and its tokenizer's lead token; its
+tunables are in `iron/applications/phi3/profiles/`. The rest is `iron.lm`,
+shared with every other model.
 
 ## Phi-4-mini-instruct vs. Llama 3
 
 Three differences, none needing an operator of its own:
 
 - **Fused projections.** Its checkpoint holds one `qkv_proj` and one
-  `mlp.gate_up_proj` (`gate` first, then `up`), which `Layer` cuts by
-  rows, each piece a view of the checkpoint's own array.
+  `mlp.gate_up_proj` (`gate` first, then `up`), which `Phi4.sanitize`
+  cuts by rows at load, each piece a view of the checkpoint's own array.
 - **Partial rotary.** Only the first `rotary_dim` (96 of 128) dimensions
   of each head rotate; the rest pass through unrotated
   (`partial_rotary_factor` in `config.json`, from which
-  `Phi4Config.__post_init__` derives `rotary_dim`, which `Layer` takes).
+  `Phi4Config.__post_init__` derives `rotary_dim`, which `Attention`
+  takes).
 - **LongRoPE.** It serves the native 131072 positions. Hugging Face
   rotates a forward call by the `long_factor` frequencies when its
   sequence passes `original_max_position_embeddings` (4096), else by the
@@ -91,9 +89,10 @@ finding Qwen 2.5 1.5B Instruct's own port made.
 pytest tests/applications/phi3/
 ```
 
-`test.py` loads the real checkpoint once and runs the accuracy, sampling,
-determinism and throughput checks above in-process through `model.Runner`;
-`reference/test.py` needs no checkpoint and no NPU, checking only that the
-graph's partial rotary and fused `qkv_proj`/`gate_up_proj` slices match
-`Phi4Oracle` token by token, across a chunk boundary and from an empty
-cache.
+`test.py` loads the real checkpoint once and runs the throughput,
+sampling, accuracy and determinism checks above in-process through
+`model.Runner`. `reference/test.py` needs no checkpoint and no NPU: it runs
+the graph on the host over random toy weights against transformers' Phi-3
+on the same weights, its logits recorded in `reference/goldens/` (`pytest
+--record-goldens -p no:xdist` records them), from an empty cache, across a
+chunk boundary, and past LongRoPE's original context.

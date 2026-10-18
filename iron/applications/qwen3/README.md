@@ -6,25 +6,22 @@ SPDX-License-Identifier: Apache-2.0
 # Qwen3 1.7B on the NPU
 
 Prefill and decode of Qwen3 1.7B as one IRON graph, `Qwen3`, a version
-compiled per input shape, and the float32 numpy forward pass it is checked
-against, `Qwen3Oracle`, its `oracle`. Both are built from the same config
-and weights; nothing here needs torch.
+compiled per input shape, from its checkpoint's config and weights, judged
+against transformers as Llama is (see `iron/applications/llama/README.md`).
 
 What is Qwen3's own is short, and all of it is in
-`iron/applications/qwen3/model.py`: its head on the NPU and in numpy, its
-shape (`DecoderConfig.from_checkpoint`, from `config.json`),
-where its checkpoint keeps each weight by its own name, and its tokenizer;
-its tunables are in `iron/applications/qwen3/profiles/`. The rest is
-`iron.lm`, shared with every other model, its layers `iron.lm.Layer` (see
-`iron/applications/llama/README.md`'s description of `CausalLM`, `Oracle`,
-`Checkpoint`/`DecoderConfig`, `Runner` and `generation`/`testing`).
+`iron/applications/qwen3/model.py`: its shape (`Qwen3Config`, from
+`config.json`) and its tokenizer's lead token; its tunables are in
+`iron/applications/qwen3/profiles/`. The rest is `iron.lm`, shared with
+every other model.
 
 ## Qwen3 vs. Llama 3
 
 One difference from Llama's own layer: **per-head RMSNorm on Q and K,
 before RoPE** (`q_norm`/`k_norm`, one weight row of `head_dim`, shared by
-every head and every position), which `Layer` reads from the checkpoint's
-`self_attn`, at its config's `rms_norm_eps` (1e-6).
+every head and every position), read from the checkpoint's `self_attn`
+at its config's `rms_norm_eps` (1e-6): `Qwen3Config.attention` sets
+`Attention`'s `qk_norm`.
 
 Its output head is the input embedding, tied (`tie_word_embeddings: true`
 in its `config.json`); its checkpoint also ships `lm_head.weight`,
@@ -101,5 +98,7 @@ measures the cost table its designs can be narrowed and packed by, as
 pytest tests/applications/qwen3/
 ```
 
-Loads the model once and runs the accuracy, determinism and chunk-boundary
-checks above in-process through `model.Runner`.
+Loads each checkpoint's model once, 1.7B's and 0.6B's, and runs in-process
+through `model.Runner` the throughput, accuracy and determinism checks
+above, again in the each-step form, and over a two-chunk prompt and a chat
+turn; one more checks the unread `lm_head.weight` is the tied embedding.

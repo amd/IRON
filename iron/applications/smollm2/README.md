@@ -8,9 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 Hugging Face's SmolLM2 1.7B Instruct is Llama 3's architecture at its own
 shape: full multi-head attention (32 heads, each its own KV group), 24
 layers, an unscaled RoPE base of 130000, a tied head and an 8192-position
-context. `iron/applications/smollm2/model.py` runs it on Llama's model and
-oracle (`iron.applications.llama`), read from its `config.json`; what is its
-own is its tokenizer (`tokenizer.json`, BPE, BOS `<|im_start|>`) and its
+context. `iron/applications/smollm2/model.py` runs it on Llama's model
+(`iron.applications.llama`), read from its `config.json`; what is its own
+is its tokenizer (`tokenizer.json`, BPE, BOS `<|im_start|>`) and its
 tunables (`profiles/`).
 
 Full multi-head attention has no KV groups to share, so a prompt chunk's

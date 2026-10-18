@@ -6,17 +6,18 @@ SPDX-License-Identifier: Apache-2.0
 # Llama 3 on the NPU
 
 Prefill and decode of Llama 3 as one IRON graph, `Llama`, a version
-compiled per input shape, and the float32 numpy forward pass it is checked
-against, `LlamaOracle`. Both are built from the same config and weights,
-read from a checkpoint's own `config.json`: Llama 3.2 1B's or 3B's here;
-nothing here needs torch.
+compiled per input shape, built from a checkpoint's own `config.json` and
+weights: Llama 3.2 1B's or 3B's here. It is judged by Hugging Face
+transformers' float32 logits for the same checkpoint, recorded once to
+`golden.npz` beside it (`Runner.reference`), so running and testing need
+no torch.
 
-The model is a package of `iron.lm` (its shared decoder, attention and
-layer, `Layer`), `iron/applications/llama/`:
+The model is a package of `iron.lm` (its shared decoder, and the norm,
+attention and MLP parts a layer is composed from, `iron/lm/blocks.py`),
+`iron/applications/llama/`:
 
-- [`model.py`](model.py): its head on the NPU and in numpy, its
-  shape, where its checkpoint keeps each weight, its tokenizer, and the
-  command line below
+- [`model.py`](model.py): its shape (Llama 3's RoPE scaling), its
+  tokenizer, and the command line below
 - [`profiles/`](profiles): its tunables, one file per device
 
 `python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors`
@@ -70,7 +71,8 @@ top-k must be at most 64.
 - `--random-weights SEED`: in place of the checkpoint's weights and the
   tokenizer, weights drawn at `SEED` in the checkpoint's shapes (only its
   header is read) and prompts of random tokens, for the speed, accuracy
-  against the oracle and determinism of the real checkpoint's shape
+  against the graph's own host reference and determinism of the real
+  checkpoint's shape
 - `--prompt-len`, `--num-tokens`: characters of `iron/lm/prompt.txt` to use
   as the prompt (default 2048) and tokens to generate (default 40)
 - `--max-seq-len`: the longest context served, prompt and generated tokens
@@ -86,7 +88,7 @@ top-k must be at most 64.
   (315 s to the first token, then 5 tokens a second)
 - `--temperature`, `--top-k`: the sampler's (default 0.7 and 50)
 - `--check-accuracy`: instead of sampling, compare each step's logits with
-  `LlamaOracle` and print the KL divergence and top-1 agreement
+  the reference's and print the KL divergence and top-1 agreement
 - `--check-determinism ROUNDS`: instead of sampling, run two prompts
   `ROUNDS` times each and count the runs whose logits differ bitwise
 - `--compare-host`: then generate again drawing on the host from each
@@ -138,5 +140,8 @@ pytest tests/applications/llama/
 ```
 
 Loads each checkpoint's model once, 1B's and then 3B's (skipped where
-its files are not), and runs the accuracy, determinism and throughput
-checks above in-process through `model.Runner`.
+its files are not), and runs in-process through `model.Runner` the
+throughput, accuracy and determinism checks above, again in the each-step
+form, and over a two-chunk prompt and a chat turn. Accuracy reads
+`golden.npz` beside the checkpoint, recording the logits it lacks where
+transformers is installed, and skips where it cannot.
