@@ -40,7 +40,7 @@ Run the steps below from this directory, `iron/applications/gemma4_flm`.
    export FLM_MODEL_PATH=/path/to/flm
    ```
 
-2. Download the weights. `make weights` clones FastFlowLM at a fixed commit,
+2. Download the weights. `make weights` clones FastFlowLM at a fixed tag,
    builds flm and pulls the model. It skips the pull if the model directory
    holds `model.q4nx`.
 
@@ -94,10 +94,9 @@ token and decode rate for each prompt. Run it from the repository root:
 pytest tests/applications/gemma4_flm
 ```
 
-The `Makefile` clones FastFlowLM at the merge of
-[ROCm/FastFlowLM#763](https://github.com/ROCm/FastFlowLM/pull/763), which adds
-the `FLM_OVERRIDE` hooks and the Gemma 4 engine. `FLM_BUILD_GEMMA4E=ON` builds
-that engine from source in place of FastFlowLM's prebuilt one.
+The `Makefile` clones FastFlowLM at the tag `FLM_TAG` names, which has the
+`FLM_OVERRIDE` hooks and the Gemma 4 engine, and sets `FLM_BUILD_GEMMA4E=ON`
+to build that engine from source in place of FastFlowLM's prebuilt one.
 
 | File | Purpose |
 |---|---|
@@ -141,16 +140,11 @@ buffer descriptors by hand:
 - `DecodeLayer` runs one token through one whole layer: norms, projections,
   attention over the KV cache and the MLP.
 
-Each of these operators is an IRON operator, laid out as
-[Adding an operator](../../../AGENTS.md#adding-an-operator) describes.
-`op.py` defines the `Operator` subclass. Its fields describe one problem, for
-example a GEMM's `M`, `K` and `N`, and declare the buffers the operator takes.
-`ProjectionGEMM` and `DequantBFP` build their array in `Array.build()` and their runtime
-sequence in `sequence()`, both in `op.py`. The others return their program, a
-function in `design.py`, from `exported_design()`. The kernels are the C++ that
-runs on one compute tile, from mlir-aie's kernel factories
-(`aie.iron.kernels`). `reference()`, or `reference.py`, computes the result on
-the CPU, and `test.py` compares the NPU's output with it.
+Each is an IRON operator, laid out as
+[Adding an operator](../../../AGENTS.md#adding-an-operator) describes:
+`ProjectionGEMM` and `DequantBFP` build their array in `Array.build()` and
+their runtime sequence in `sequence()`; the others return the design in
+their `design.py` through `exported_design()`.
 
 `op.compile()` generates the operator's artifacts: an xclbin and an
 instruction sequence. `build.py` overwrites the engine's xclbins with IRON's
