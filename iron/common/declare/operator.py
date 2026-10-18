@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import functools
 import hashlib
 import inspect
 from collections.abc import Iterable, Mapping
@@ -217,6 +218,7 @@ class Operator:
                 vars(self).setdefault(f.name, f.default)
         self._resolved = False
         self._image: OperatorImage | None = None
+        self._library_values: tuple[Value, ...] = ()
         # An Enum-domain tunable (GEMM's placement) takes its own Enum
         # alone, or None (left for resolve() to fill): a string names one
         # in a profile's JSON, which Profile.load converts before it
@@ -902,10 +904,13 @@ class Operator:
     @property
     def residents(self) -> dict[str, Any]:
         """What the preamble writes once per build, by name."""
-        fixed = self._derived_under_bound()
+        fixed = self._derived_under_bound
         return {
             m.name: m.derive(self) if fixed.get(m.name) is None else fixed[m.name]
-            for m in (*self.declaration.members, *self._chain_words)
+            for m in (
+                *self.declaration.members,
+                *(w for w in self._library_values if isinstance(w, ChainWord)),
+            )
             if isinstance(m, Value)
             and m.derive is not None
             and not self._bound[m.name].per_call
@@ -921,12 +926,14 @@ class Operator:
         }
 
     def _per_call_derived(self) -> frozenset[str]:
-        return frozenset(k for k, v in self._derived_under_bound().items() if v is None)
+        return frozenset(k for k, v in self._derived_under_bound.items() if v is None)
 
+    @functools.cached_property
     def _derived_under_bound(self) -> dict[str, int | None]:
         """Each derived value that reads a bound extent: the number it is at
         every bound (``n - n``, ``(4 * n) // n``), or None where it follows
-        the call.
+        the call. Kept per instance: ``use_value`` forgets it, and every
+        other change makes a new instance.
         """
         bound = self.bound_extents
         if not bound:
@@ -942,7 +949,7 @@ class Operator:
             vars(probe)["_extent_reads"] = reads
             try:
                 m.derive(probe)
-            except Exception:
+            except (TypeError, ValueError, AttributeError):
                 pass  # unresolved: what it read before failing still counts
             if not reads & bound.keys():
                 continue
@@ -951,7 +958,7 @@ class Operator:
                 continue
             try:
                 got = op.derived_at(m.name, **forms)
-            except Exception:
+            except (TypeError, ValueError, AttributeError):
                 continue  # no form, or unresolved: per call either way
             if isinstance(got, (int, np.integer)) and not isinstance(got, bool):
                 out[m.name] = int(got)
@@ -997,6 +1004,7 @@ class Operator:
             )
         # Rebound, not updated: replace() hands a copy the same dict.
         self.bound_values = {**self.bound_values, name: bound_to}
+        vars(self).pop("_derived_under_bound", None)
 
     def compile(self) -> Artifacts:
         """Build the image this operator runs on outside a graph, once.
@@ -1034,6 +1042,7 @@ class Operator:
         return self._image(*args, **kwargs)
 
     def _bind(self) -> None:
+        vars(self).pop("_derived_under_bound", None)
         self._prepare_inputs = ()
         self._finish_inputs = ()
         prepared = next((m for m in self._members_io() if m.prepare), None)
@@ -1074,7 +1083,9 @@ class Operator:
             if isinstance(m, Value):
                 bound[m.name] = m.of(self)
         self._bound = bound
-        words = []
+        # The values the library adds: tiles per bound operand, the chain a
+        # design selects, the offset an operand is placed at.
+        words: list[Value] = []
         for e in self.declaration.members:
             if not isinstance(e, Extent):
                 continue
@@ -1083,29 +1094,19 @@ class Operator:
                 if b.obj_dims is not None and self.extent_unit(b.name) != 0:
                     axis = bound[b.name].extent_axis(e)
                     if axis is not None:
-                        word = ExtentWord(type(self), e, b.name, axis)
-                        bound[word.name] = word.of(self)
-                        words.append(word)
-        self._extent_words = tuple(words)
-        self._chain_words: tuple[ChainWord, ...] = ()
+                        words.append(ExtentWord(type(self), e, b.name, axis))
         for finish, chain in ((False, self.prepare), (True, self.finish)):
             if len(chain.shared) > 1:
-                word = ChainWord(type(self), finish)
-                bound[word.name] = word.of(self)
-                self._chain_words += (word,)
-        self._place_words = tuple(
-            PlaceWord(type(self), m.name) for m in self._members_io()
-        )
-        for word in self._place_words:
+                words.append(ChainWord(type(self), finish))
+        words += [PlaceWord(type(self), m.name) for m in self._members_io()]
+        for word in words:
             bound[word.name] = word.of(self)
+        self._library_values = tuple(words)
 
     @property
     def _value_members(self) -> list[Value]:
-        return [m for m in self.declaration.members if isinstance(m, Value)] + [
-            *self.__dict__.get("_extent_words", ()),
-            *self.__dict__.get("_chain_words", ()),
-            *self.__dict__.get("_place_words", ()),
-        ]
+        own = [m for m in self.declaration.members if isinstance(m, Value)]
+        return own + list(self._library_values)
 
     @property
     def dev(self):

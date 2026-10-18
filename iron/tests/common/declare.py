@@ -960,6 +960,33 @@ def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
     assert a.design_key() == b.design_key()
 
 
+def test_what_a_bound_makes_per_call_is_worked_out_once_per_binding():
+    calls = []
+
+    class Counted(Rows):
+        count = Value(derive=lambda op: calls.append(1) or op.valid // op.lanes)
+
+    op = Counted(rows=64, cols=8)
+    op.use_value("valid")
+    assert op.value("count").per_call
+    once = len(calls)
+    op.values, op.values
+    assert len(calls) == once
+    op.use_value("count")  # a new binding asks again
+    op.values
+    assert len(calls) > once
+
+
+def test_a_derive_that_fails_for_another_reason_than_resolution_raises():
+    class Buggy(Rows):
+        count = Value(derive=lambda op: op.valid and {}["typo"])
+
+    op = Buggy(rows=64, cols=8)
+    op.use_value("valid")
+    with pytest.raises(KeyError, match="typo"):
+        op.values
+
+
 def test_a_bound_is_refused_where_no_extent_takes_it():
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
