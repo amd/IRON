@@ -92,6 +92,7 @@ def test_phi_4_mini_instruct_sampling(model, record_property):
     check_device_sampling(model, 256, 20, record=record_property)
 
 
+@pytest.mark.bench
 def test_phi_4_mini_instruct_accuracy(model, record_property):
     check_accuracy(model, MAX_KL, 10, 1024, record=record_property)
 

@@ -75,6 +75,7 @@ def test_lfm2_1_2b(model, prompt_len, num_tokens, record_property):
     check_generation(model, prompt_len, num_tokens, record=record_property)
 
 
+@pytest.mark.bench
 def test_lfm2_1_2b_accuracy(model, record_property):
     check_accuracy(model, MAX_KL, record=record_property)
 

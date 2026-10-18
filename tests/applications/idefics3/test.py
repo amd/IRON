@@ -57,6 +57,7 @@ def reference(model):
     return model.cpu_reference()
 
 
+@pytest.mark.bench
 @pytest.mark.parametrize("seed,question", list(enumerate(QUESTIONS)))
 def test_smolvlm_accuracy(model, reference, seed, question, record_property):
     """One image (a distinct synthetic one a seed) and one question: the

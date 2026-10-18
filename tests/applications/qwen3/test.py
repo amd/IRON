@@ -133,6 +133,7 @@ def test_qwen3_device_loop(model, record_property):
     check_device_sampling(model, 1024, 100, record=record_property)
 
 
+@pytest.mark.bench
 def test_qwen3_accuracy(model, record_property):
     check_accuracy(model, MAX_KL, record=record_property)
 

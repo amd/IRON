@@ -543,6 +543,7 @@ def multimodal(weights, tokenizer):
     yield from loaded(Multimodal(Config(), weights, tokenizer))
 
 
+@pytest.mark.bench
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "text,task",
