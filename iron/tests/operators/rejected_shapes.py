@@ -402,6 +402,20 @@ def test_a_streamed_softmax_core_with_more_rows_than_it_unrolls_is_refused():
     assert Softmax(rows=256, cols=8192, num_aie_columns=8).resolved(dev).streamed
 
 
+def test_a_float32_softmax_under_a_per_call_bound_is_refused(npu2):
+    """The float32 kernel takes its row length at build time, so a bound
+    row would come out as the softmax of every element, stale ones too.
+    """
+
+    class Attend(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32]):
+            return Softmax.step(x[:, :n], input_dtype=np.float32)
+
+    (step,) = Attend().trace(x=((32, 1024), np.float32)).steps
+    with pytest.raises(ValueError, match="Softmax: the float32 input path"):
+        step.op.resolved()
+
+
 @pytest.mark.parametrize(
     "device,precision",
     [(("npu1", 4), None), (("npu2", 8), None), (("npu2", 8), Precision.HIGH)],

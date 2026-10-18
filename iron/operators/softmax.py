@@ -226,6 +226,13 @@ class Softmax(Operator):
         return self.num_aie_columns * self.num_channels
 
     def compatible(self) -> None:
+        if np.dtype(self.input_dtype) == np.dtype(np.float32) and (
+            "length" in self.bound_extents
+        ):
+            raise ValueError(
+                f"Softmax: the float32 input path reads each row's {self.cols} "
+                "cols whole; it takes no per-call bound on them"
+            )
         if self.rows % self.cores:
             raise ValueError(
                 f"rows ({self.rows}) must be a multiple of the {self.cores} cores"
