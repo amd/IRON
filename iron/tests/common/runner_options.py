@@ -157,6 +157,9 @@ def test_a_runner_s_bos_is_its_checkpoint_s_unless_it_names_one(tmp_path):
     path.symlink_to(checkpoint(SMALL).path)
     (tmp_path / "config.json").write_text('{"bos_token_id": 7}')
     assert FromCheckpoint(path, seed=1).bos == 7
+    (tmp_path / "config.json").write_text("{}")
+    with pytest.raises(KeyError, match="config.json has no bos_token_id"):
+        FromCheckpoint(path, seed=1).bos
     assert SmallRunner(path, seed=1).bos == SPECIAL_TOKENS["<|begin_of_text|>"]
 
 

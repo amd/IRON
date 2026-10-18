@@ -34,6 +34,7 @@ from safetensors.numpy import load_file, save_file
 from iron.lm import Checkpoint, Sampler
 from iron.applications.llama.model import SPECIAL_TOKENS, LlamaConfig, tokenizer
 from iron.lm import testing
+from iron.lm.base import renamed
 from iron.lm.testing import require, weights_dir
 from iron.operators import sample
 from iron.tests.common.llama_model import REAL_1B
@@ -486,6 +487,13 @@ def test_random_fill_draws_at_its_seed(toy_path):
             assert abs(x.mean() - 1) < 0.1 and 0 < x.std() < 0.2, name
         else:
             assert abs(x.std() * np.sqrt(tensor.shape[1]) - 1) < 0.1, name
+
+
+def test_renamed_is_a_copy_a_sanitize_may_change(toy_path):
+    tree = Checkpoint(toy_path).tree("unread")
+    layer = tree.model.layers[0]
+    renamed(layer, {}).input_layernorm = None
+    assert layer.input_layernorm is not None
 
 
 def test_unread_fill_zeroes_a_scalar(tmp_path):

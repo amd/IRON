@@ -11,6 +11,7 @@
 import argparse
 import dataclasses
 import functools
+import inspect
 import io
 import json
 import logging
@@ -578,11 +579,10 @@ def _tree(node) -> Any:
 
 
 def renamed(tree, renames: Mapping[str, str]):
-    """``tree`` with each leaf under a dotted path among ``renames``' keys
-    moved to the path its value names, the rest where they are.
+    """A copy of ``tree`` with each leaf under a dotted path among
+    ``renames``' keys moved to the path its value names, the rest where
+    they are: its namespaces new, so a ``sanitize`` may change them.
     """
-    if not renames:
-        return tree
 
     def moved(path):
         for old, new in renames.items():
@@ -741,7 +741,10 @@ class Runner:
         ``config.json``'s ``bos_token_id``, unless a subclass names it.
         """
         path = Path(self.checkpoint.path).parent / "config.json"
-        return json.loads(path.read_text())["bos_token_id"]
+        bos = json.loads(path.read_text()).get("bos_token_id")
+        if bos is None:
+            raise KeyError(f"{path} has no bos_token_id: name the runner's bos")
+        return bos
 
     @staticmethod
     def open_tokenizer(path):
@@ -1012,8 +1015,11 @@ class Runner:
 
 def sampling_arguments(parser: argparse.ArgumentParser) -> None:
     """``--temperature`` and ``--top-k``, a ``Sampler``'s, at its defaults."""
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top-k", type=int, default=50)
+    defaults = inspect.signature(Sampler).parameters
+    parser.add_argument(
+        "--temperature", type=float, default=defaults["temperature"].default
+    )
+    parser.add_argument("--top-k", type=int, default=defaults["top_k"].default)
 
 
 def main(runner: type[Runner], description: str):

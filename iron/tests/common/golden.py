@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from iron.lm.golden import RECORD, Golden
+from iron.lm.golden import RECORD, Golden, HuggingFace
+from iron.tests.common.llama_model import SMALL, checkpoint
 
 TOKENS = np.arange(4)
 
@@ -45,3 +46,11 @@ def test_a_file_of_other_inputs_is_refused_and_rerecorded(tmp_path, monkeypatch)
     golden = Golden(path, reference(3), (3,))
     np.testing.assert_array_equal(golden.logits(TOKENS), TOKENS * 3)
     assert len(Golden(path, None, (3,)).rows) == 1
+
+
+def test_a_weight_the_model_does_not_hold_is_refused():
+    pytest.importorskip("transformers")
+    weights = checkpoint(SMALL).tree("random")
+    weights.model.extra = np.zeros(1, np.float32)
+    with pytest.raises(ValueError, match=r"hold \['model.extra'\]"):
+        HuggingFace.build("llama", SMALL, weights)

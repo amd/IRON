@@ -107,7 +107,9 @@ public API adds its entry under Unreleased.
 - IRON requires Python 3.11.
 - An `Encoder`'s per-call row count is `rows`, as a causal model's is.
 - `Runner.bos` is read from the checkpoint's `config.json` unless a runner
-  names one.
+  names one; a file without `bos_token_id` raises a `KeyError` naming it.
+- `HuggingFace.build` refuses a weight the model does not hold, as it
+  refuses one the model lacks.
 - `Golden.logits` keys on the tokens and any clip or image array beside
   them, and a checkpoint's `golden.npz` is fingerprinted with its
   `config.json` and `Checkpoint.fingerprint()`, each tensor's name, type,

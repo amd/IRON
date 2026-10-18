@@ -136,7 +136,7 @@ class HuggingFace:
 
         Raises:
             ValueError: ``weights`` lacks a parameter the model holds, other
-                than one tied to another.
+                than one tied to another, or holds one it does not.
         """
         import torch
         import transformers
@@ -145,11 +145,15 @@ class HuggingFace:
         auto = getattr(transformers, cls.model_class)
         model = auto.from_config(hf, dtype=torch.float32)
         state = {k: torch.from_numpy(v) for k, v in flat(weights)}
-        missing, _ = model.load_state_dict(state, strict=False)
+        missing, unexpected = model.load_state_dict(state, strict=False)
         # A tied parameter is named once, by the first of its names.
-        missing = [k for k in missing if k in dict(model.named_parameters())]
-        if missing:
-            raise ValueError(f"the weights lack {missing}")
+        named = dict(model.named_parameters())
+        missing = [k for k in missing if k in named]
+        if missing or unexpected:
+            raise ValueError(
+                f"{model_type}: the weights lack {missing} and hold {unexpected}, "
+                "which the model does not"
+            )
         return cls(model)
 
     def logits(self, tokens) -> np.ndarray:
