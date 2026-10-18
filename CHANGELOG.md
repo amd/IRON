@@ -33,6 +33,10 @@ public API adds its entry under Unreleased.
 - `python -m iron.lm.tune <application>`, which writes the fastest admissible
   setting of each operator shape to `profiles/<device>.json`.
 
+- `SECURITY.md`, Dependabot for GitHub Actions, the OpenSSF Scorecard
+  workflow and actionlint in the lint job, following mlir-aie's CI
+  security baseline.
+
 ### Changed
 
 - Config fields use `config.json`'s names: `hidden_size`,
