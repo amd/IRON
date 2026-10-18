@@ -4,7 +4,8 @@
 """``Runner.from_options``: the CLI's own parsing (``add_arguments``'s
 flags, ``FLAGS`` among them) and a test's option strings give the same
 runner state as constructing one directly, for both ``--random-weights``
-and a real tokenizer (skipped without the real checkpoint's). No NPU; the
+and a real tokenizer (skipped without the real checkpoint's). No NPU (the
+fit tests trace under a bound npu2, as Llama's profile is per device); the
 checkpoint is synthetic, of ``SMALL``'s shape, a concrete ``Config``
 instance so no config.json is read.
 """
@@ -104,7 +105,7 @@ def _held(config, length: int) -> int:
     return sum(model.trace(**model.shapes()[0]).pinned.values())
 
 
-def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks():
+def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2):
     """1024 native positions in 256-row chunks: a budget one byte short of
     a context takes the next shorter whole chunks.
     """
@@ -118,7 +119,7 @@ def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks():
         SmallRunner.fit(config, path, budget=_held(config, 256) - 1)
 
 
-def test_fit_says_what_it_chose_and_how_to_ask_for_more(caplog):
+def test_fit_says_what_it_chose_and_how_to_ask_for_more(npu2, caplog):
     config = dataclasses.replace(SMALL, max_seq_len=1024)
     path = checkpoint(config).path
     with caplog.at_level(logging.INFO, logger="iron.lm.base"):
