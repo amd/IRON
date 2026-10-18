@@ -12,8 +12,8 @@ docstrings. It reads the release's own PyTorch checkpoint by its own names
 float32 numpy forward pass, `YOLOXNanoOracle` in
 `tests/applications/yolox/test.py`.
 
-The graph is built from `iron.lm`'s `Conv2d`, `MaxPool2d` and
-`ConcatChannels`, and `F.linear` for each 1x1 conv (`Pointwise`). Its tunables are `profiles/<device>.json`: the narrow
+The graph is written in `iron.functional`'s `conv2d`, `max_pool2d`,
+`interpolate` and `cat`. Its tunables are `profiles/<device>.json`: the narrow
 projections' `flm.ProjectionGEMM` `tile_n`, and the stem's GEMM `tile_k`.
 
 ## Weights

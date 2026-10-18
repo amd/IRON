@@ -124,6 +124,8 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `YOLOXNano` is written in `iron.functional`'s CNN functions, and returns
+  each scale's predictions as `(H, W, 144)`, not `(H, W * 144)`.
 - `LayerNorm` takes an optional `weight=` row, as `RMSNorm` does: weighted,
   a second core per (column, channel) multiplies each normalized row by it.
   Both share `iron.common.WeightedRowwise`, and `F.layer_norm` passes its
