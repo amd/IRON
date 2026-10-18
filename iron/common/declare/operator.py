@@ -656,7 +656,7 @@ class Operator:
             written: What it wrote to each buffer it writes, by buffer name.
             tolerance: What every written buffer is judged by.
             expected: Each written buffer's reference result, by buffer
-                name; `call_reference` on `inputs` where None.
+                name; `_call_reference` on `inputs` where None.
 
         Returns:
             Each written buffer's verdict, by buffer name.

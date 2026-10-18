@@ -55,11 +55,8 @@ class AutoSpec(ParamSpec):
 
     Attributes:
         default: The starting value a construction or a profile leaves open
-            takes. The dataclass's own default is always None (so
-            ``Operator.__post_init__`` can tell a caller's or a profile's
-            value from "left open" before it fills this in); this is the
-            one the caller gave ``Auto(default=...)``, or None itself when
-            ``resolve`` must fill the field.
+            takes (``Auto(default=...)``), or None when ``resolve`` must
+            fill the field.
         derived: ``resolve`` computes the field whatever it was given.
         domain: The values a tuner searches the field over, or None.
     """
@@ -88,8 +85,10 @@ def Param(
             a required constructor argument.
         derive: A callable of the operator computing the field when neither
             the caller nor an operand gives it
-            (``derive=lambda op: op.rows * op.repeat``); a value the caller
-            gives must agree with it. `default` and `derive` are exclusive.
+            (``derive=lambda op: op.rows * op.repeat``). A value the caller
+            gives overrides it, unless the operator's ``validate()`` holds
+            the field to it with ``check_derived``. `default` and `derive`
+            are exclusive.
         repr: The field is in the operator's repr.
         init: The field is a constructor argument.
         probe: The field reaches the device only as the words of `Value`s
@@ -152,10 +151,6 @@ def Auto(
     Returns:
         The field.
     """
-    # The dataclass's own default is always None, whatever default= is
-    # given: Operator.__post_init__ tells a caller's or a profile's value
-    # from "left open" by whether the field is None, then fills an open one
-    # from the AutoSpec's own default itself.
     return dataclasses.field(
         default=None,
         init=init,

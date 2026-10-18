@@ -23,7 +23,7 @@ class Value(Member["Value"]):
 
     Declared in an operator's body; on an instance, ``self.count`` is the
     value bound to it (`of`), which a build gives its device parameter and
-    a core reads through ``Operator.rtp``.
+    a core reads through its ``Rtp``.
 
     Args:
         dtype: An integer type: the scratchpad encoding has no floating point.

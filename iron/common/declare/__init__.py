@@ -4,7 +4,7 @@
 """The declaration layer: operators and their members.
 
 A host buffer's dimension is a ``Param()`` field or an integer literal, so
-inference stays a lookup (``Operator.infer``); a tile's may also be a
+inference stays a lookup (``Declaration.infer``); a tile's may also be a
 tunable, since inference never reads one.
 """
 

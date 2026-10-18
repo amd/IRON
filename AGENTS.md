@@ -562,9 +562,9 @@ instance inside a body is `op.apply(*operands, **values)`; `op(*npu_tensors)`
 still runs the operator on the device. Construction is keyword-only
 (`GEMV(M=..., K=...)`, as written above) and never traces, with or without a
 body around it. A graph's own `profile` reaches every step its tracer
-constructs without the body passing one explicitly (`Tracer(name, profile)`
-merges `profile.tunables_for(cls, given)`); standalone use of the same
-profile is `profile.make(Cls, **kw)`.
+constructs without the body passing one explicitly (`Tracer(name, profile)` makes each step
+with `profile.make(cls, **given)`); standalone use of the same profile
+calls it explicitly, `profile.make(Cls, **kw)`.
 
 ## Graphs
 
