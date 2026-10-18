@@ -102,7 +102,7 @@ class Profile:
 
     @staticmethod
     def dims(cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
-        """Every dimension (``Param`` field) of the ``cls`` a call with
+        """Every dimension (``field()``) of the ``cls`` a call with
         ``given`` keywords makes, as an entry is matched against.
         """
         dims = {}

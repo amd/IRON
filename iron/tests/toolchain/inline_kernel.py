@@ -12,9 +12,8 @@ any other, the kernel compiled from the text.
 """
 
 import numpy as np
-from aie.iron import ExternalFunction
+from aie.iron import ExternalFunction, In, Out
 from aie.iron.kernels import KernelContract, Param
-from aie.utils.compile.jit.markers import In, Out
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 

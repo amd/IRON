@@ -13,7 +13,6 @@ test needs no kernel.
 import dataclasses
 import functools
 
-import aie.iron
 import aie.utils as aie_utils
 import numpy as np
 import pytest
@@ -38,7 +37,7 @@ SENTINEL = -1
 MAX_CHUNKS = 16
 
 
-def chunk_copy(dev, max_chunks, *, n: aie.iron.DispatchTime[np.int32]):
+def chunk_copy(dev, max_chunks, *, n: DispatchTime[np.int32]):
     chunk_ty = np.ndarray[(CHUNK,), np.dtype[np.int32]]
     buf_ty = np.ndarray[(max_chunks * CHUNK,), np.dtype[np.int32]]
 

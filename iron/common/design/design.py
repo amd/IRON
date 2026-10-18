@@ -12,12 +12,13 @@ import inspect
 import re
 from collections.abc import Hashable, Mapping
 
-import aie.iron
 import aie.utils as aie_utils
 from aie import ir
 from aie.dialects.aie import CoreOp, DeviceOp
 from aie.iron import (
+    CompileTime,
     DeviceConfiguration,
+    DispatchTime,
     Flow,
     Lock,
     PacketFlow,
@@ -54,7 +55,7 @@ class OperatorDesign:
                 P(
                     v.symbol,
                     P.KEYWORD_ONLY,
-                    annotation=aie.iron.DispatchTime[v.dtype],
+                    annotation=DispatchTime[v.dtype],
                 )
                 for v in op.values
                 if not full_elf
@@ -64,15 +65,15 @@ class OperatorDesign:
         self.build = build
 
         def generator(
-            op: aie.iron.CompileTime[Operator],
-            identity: aie.iron.CompileTime[str],
+            op: CompileTime[Operator],
+            identity: CompileTime[str],
             **kwargs,
         ):
             return build(**kwargs)
 
         keys = [
-            P("op", P.KEYWORD_ONLY, annotation=aie.iron.CompileTime[Operator]),
-            P("identity", P.KEYWORD_ONLY, annotation=aie.iron.CompileTime[str]),
+            P("op", P.KEYWORD_ONLY, annotation=CompileTime[Operator]),
+            P("identity", P.KEYWORD_ONLY, annotation=CompileTime[str]),
         ]
         setattr(generator, "__signature__", inspect.Signature([*params, *keys]))
         self.generator = generator

@@ -13,7 +13,6 @@ toolchain.
 import dataclasses
 from types import SimpleNamespace
 
-import aie.iron
 import aie.utils as aie_utils
 from aie.iron import CompileTime, DispatchTime, In, Out, ScratchpadParameter
 import numpy as np
@@ -1019,7 +1018,7 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
         g.trace(x=(64, 128))
 
     class H(iron.Graph):
-        def body(self, x, *, n: aie.iron.DispatchTime[np.int32]):
+        def body(self, x, *, n: DispatchTime[np.int32]):
             return Rows.step(x[:n])
 
     h = H()

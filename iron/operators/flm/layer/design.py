@@ -18,7 +18,6 @@ from enum import IntEnum, StrEnum
 from functools import partial
 from typing import NamedTuple
 
-import aie.iron
 import numpy as np
 from aie.dialects import arith
 from aie.dialects.aie import DMAChannelDir
@@ -30,6 +29,7 @@ from aie.iron import (
     Acquire,
     Bd,
     Buffer,
+    DispatchTime,
     DmaChannel,
     Lock,
     ObjectFifo,
@@ -1668,8 +1668,8 @@ def decode_layer(
     layer_type,
     *,
     kernels,
-    context_len: aie.iron.DispatchTime[np.int32],
-    max_l: aie.iron.DispatchTime[np.int32],
+    context_len: DispatchTime[np.int32],
+    max_l: DispatchTime[np.int32],
 ):
     """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
 

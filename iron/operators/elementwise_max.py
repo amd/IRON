@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import ExternalFunction
+from aie.iron import ExternalFunction, In, Out
 from aie.iron.kernels import KernelContract, Param
-from aie.utils.compile.jit import markers
 from aie.utils.verify import Tolerance
 
 from iron.common import BinaryElementwise
@@ -48,7 +47,7 @@ class ElementwiseMax(BinaryElementwise):
                 source_string=MAX,
                 arg_types=[self.a.obj_type, self.b.obj_type, self.y.obj_type, np.int32],
                 contract=KernelContract(
-                    roles=(markers.In, markers.In, markers.Out, Param),
+                    roles=(In, In, Out, Param),
                     parameter_bindings=((3, self.tile_size),),
                     reference=np.maximum,
                     tolerance=Tolerance.exact(note="a selection"),

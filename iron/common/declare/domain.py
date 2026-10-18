@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable
 
-# An integer, a Param field read straight off the operator, or what a
+# An integer, a field() read straight off the operator, or what a
 # callable of the resolved operator and its device returns.
 Bound = int | Callable[[Any, Any], int] | dataclasses.Field | None
 
@@ -69,7 +69,7 @@ class Divisors(Domain):
     `cap`.
 
     Attributes:
-        of: What the value must divide: an int, a `Param` field read
+        of: What the value must divide: an int, a `field()` read
             straight off the resolved operator (``of=K``), or a callable
             of the operator and the device.
         step: What the value must be a multiple of, in the same terms.

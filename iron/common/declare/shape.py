@@ -41,19 +41,19 @@ class Select:
         )
 
 
-_DimSpec = Any  # Param | int | Select
+_DimSpec = Any  # field() | int | Select
 
 
 @dataclass(frozen=True)
 class Shape:
-    """A declared shape: integers, ``Param`` fields and ``Select``s: a
+    """A declared shape: integers, ``field()``s and ``Select``s: a
     member's declared shape, or a stream's ``per=``.
 
-    A ``Param`` field annotated ``T | None`` is a dimension present only
-    where it resolves to something other than None (``In(num_batches, M, K)``
-    is ``(M, K)`` when ``num_batches`` is None and ``(num_batches, M, K)``
-    otherwise); inference tells the two ranks apart, so a shape has at most
-    one such field.
+    A ``field()`` annotated ``CompileTime[T | None]`` is a dimension present
+    only where it resolves to something other than None
+    (``In(num_batches, M, K)`` is ``(M, K)`` when ``num_batches`` is None and
+    ``(num_batches, M, K)`` otherwise); inference tells the two ranks apart,
+    so a shape has at most one such field.
     """
 
     dims: tuple
@@ -115,7 +115,7 @@ class Shape:
 
     @staticmethod
     def absent(spec, op) -> bool:
-        """Whether ``spec`` is a ``T | None`` ``Param`` dimension that is None
+        """Whether ``spec`` is a ``T | None`` ``field()`` dimension that is None
         on ``op``, so the shape leaves it out. An unset ``Auto()`` is not: it
         is unresolved, which ``dim`` refuses.
         """

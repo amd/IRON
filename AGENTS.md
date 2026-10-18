@@ -130,7 +130,7 @@ reuse lint
      `iron.operators`'s one catalog, dotted (`_OPERATOR_MODULES["flm.ProjectionGEMM"]`,
      what a `Profile` names it by); flm.ProjectionGEMM is not `iron.operators.GEMM`.
    - An operator module holds:
-     - the operator, one class (`iron/common/declare/`): `Param()` fields for what a host shape
+     - the operator, one class (`iron/common/declare/`): `field()` fields for what a host shape
        names, `Auto()` tunables `resolve(dev)` fills from the device and the
        extents (a tunable is an `Auto()` field: the caller or a profile may
        give it, and the library resolves it when neither does), `In`/`Out`
@@ -184,10 +184,10 @@ reuse lint
    - Compiled to `.o` files and linked into operator `.xclbin`
 
 3. **Common Infrastructure** (`iron/common/`)
-   - `declare/`: the declaration layer (`Operator`, its `Param`/`Auto` fields (`Param()`/`Auto()` return the plain `dataclasses.Field`, its `ParamSpec`/`AutoSpec` in the field's metadata and read back with `ParamSpec.of(f)`; each field is its own dimension reference, `GEMV.K` in a shape and `vars(op)["K"]` on an instance),
+   - `declare/`: the declaration layer (`Operator`, its `field()`/`Auto()` fields, each annotated aie.iron's `CompileTime[T]` (`field()`/`Auto()` return the plain `dataclasses.Field`, its `ParamSpec`/`AutoSpec` in the field's metadata and read back with `ParamSpec.of(f)`; each field is its own dimension reference, `GEMV.K` in a shape and `vars(op)["K"]` on an instance),
      operands (`Operand`: `op.x` is the declared operand bound to the
      instance, its shape and lanes resolved), the `Value` member and its
-     `DispatchTime`/`Extent` specializations (`op.value(name)` is the value
+     `DispatchValue`/`Extent` specializations (`op.value(name)` is the value
      bound to the instance, its device parameter once built),
      `Xclbin` and its
      `fetch()`, inference; `cls.declaration`, a `Declaration`, is what a
@@ -302,10 +302,11 @@ different order overrides `sequence(rt)`:
   elements one unit counts) and `repeat_parameter=`
 
 **Per-call values**: `Value()` members (`dtype=np.int32` by default) are
-patched into descriptors or read by cores without a rebuild; `DispatchTime()`
-members regenerate the sequence per call (xclbin only). A graph binds them to
+patched into descriptors or read by cores without a rebuild; fields declared
+`name: DispatchTime[np.int32] = field(init=False)` are values that regenerate
+the sequence per call (xclbin only). A graph binds them to
 keyword-only parameters annotated `iron.Scratchpad[T]`, `iron.Carried[T]` or
-`aie.iron.DispatchTime[T]`. The parameter scratchpad exists on a full ELF only
+`DispatchTime[T]`. The parameter scratchpad exists on a full ELF only
 (XRT's `get_ctrl_scratchpad_bo` serves a module run), so on an xclbin image a
 scratchpad value lowers to a dispatch-time scalar: an offset use regenerates
 the stream, a core-read use is a write of the scalar into the core's
@@ -392,24 +393,26 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    if it needs more than one module: a hand-written design, its own
    reference, a README, a device test of its own)
 2. Declare the operator (`class X(Operator)`):
-   - `Param()` fields for what a host shape names; `Auto()` tunables, filled
+   - fields, each annotated aie.iron's `CompileTime[T]`: `field()` for what
+     a host shape names (`M: CompileTime[int] = field()`,
+     `d: CompileTime[int] = field(default=64)`); `Auto()` tunables, filled
      by `resolve(dev)` from the device and the extents
-   - `In`/`Out` operands by shape, each with its `obj_shape=` in the units a
+   - `In`/`Out`/`InOut` operands (aie.iron's, called) by shape, each with its `obj_shape=` in the units a
      core reads (`per=` a column count): an operand with an `obj_shape=` is
      its own stream of `op.x.lanes` lanes, `op.x.obj_type` the fifo type;
-     `when=flag`, a bool `Param()`, makes an operand (and its stream) exist
+     `when=flag`, a bool `field()`, makes an operand (and its stream) exist
      only where the flag is true; a call gives it by keyword, its name,
      which sets the flag (`RMSNorm.step(x, weight=w)` is `weighted=True`)
    - a `Value(derive=...)` for every trip count the core reads, so the
      array never depends on the extent; what else the array bakes is a
-     field declared `Param(array=True)` (or `Auto(array=True)`)
+     field declared `field(array=True)` (or `Auto(array=True)`)
    - which of these computes a quantity from other fields depends on who
      reads it:
 
      | Reads it | Declare |
      |---|---|
      | Host Python, never a field itself | `@property` |
-     | A compile-time field a caller may still override (`check_derived` catches disagreement) | `Param(derive=lambda op: ...)` |
+     | A compile-time field a caller may still override (`check_derived` catches disagreement) | `field(derive=lambda op: ...)` |
      | A tunable `resolve(dev)` always fills, never a caller's | `Auto(init=False)`, given by `resolve`'s `self.replace(...)` |
      | A core, as a trip count or scalar | `Value(derive=lambda op: ...)` |
    - `class Array(Operator.Array)`: the array tier, a frozen dataclass the
@@ -478,10 +481,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    `contract=KernelContract(roles=, parameter_bindings=, reference=,
    tolerance=)` and it is used like a factory's: `KernelContract` and the
    `Param` role come from `aie.iron.kernels`, the `In`/`Out` roles from
-   `aie.utils.compile.jit.markers` (`In`, `Out`, `Param` and
-   `DispatchTime` each name one thing in aie.iron and another in
-   `iron.common`, so a module using both imports aie.iron's qualified:
-   `markers.In`, `kernels.Param`, `aie.iron.DispatchTime[T]`), and `tolerance=` is what its output is
+   `aie.iron`, and `tolerance=` is what its output is
    judged by on the device (`Tolerance.bf16_ulps(1, atol=2**-126)` for a
    bf16 result rounded once, as `eltwise`'s factories give); without it
    the catalog refuses to judge the operator. An operator running one kernel
