@@ -69,7 +69,7 @@ def host_budget() -> int:
 def rope_angles(
     head_dim: int,
     context_length: int,
-    rope_base: float = 500000.0,
+    rope_theta: float = 500000.0,
     scaling: RopeScaling | None = None,
 ) -> np.ndarray:
     """The RoPE table, ``(context_length, head_dim)`` float32, cos and sin interleaved.
@@ -77,7 +77,7 @@ def rope_angles(
     Each transcendental is evaluated in float64 and rounded once.
     """
     exponents = np.arange(0, head_dim, 2, dtype=np.float32) / np.float32(head_dim)
-    inv_freq = 1.0 / np.power(rope_base, exponents.astype(np.float64))
+    inv_freq = 1.0 / np.power(rope_theta, exponents.astype(np.float64))
     if scaling is not None:
         inv_freq = scaling(inv_freq)
     inv_freq = inv_freq.astype(np.float32)
@@ -160,18 +160,22 @@ class DecoderConfig(Config):
     """
 
     vocab_size: int = dataclasses.field(metadata={"json": "vocab_size"})
-    emb_dim: int = dataclasses.field(metadata={"json": "hidden_size"})
-    n_layers: int = dataclasses.field(metadata={"json": "num_hidden_layers"})
-    n_heads: int = dataclasses.field(metadata={"json": "num_attention_heads"})
-    n_kv_groups: int = dataclasses.field(metadata={"json": "num_key_value_heads"})
+    hidden_size: int = dataclasses.field(metadata={"json": "hidden_size"})
+    num_hidden_layers: int = dataclasses.field(metadata={"json": "num_hidden_layers"})
+    num_attention_heads: int = dataclasses.field(
+        metadata={"json": "num_attention_heads"}
+    )
+    num_key_value_heads: int = dataclasses.field(
+        metadata={"json": "num_key_value_heads"}
+    )
     # None where the checkpoint's own config.json has no head_dim (Qwen 2.5,
     # Granite, LFM2, Phi-4-mini-instruct): __post_init__ derives it.
     head_dim: int | None = dataclasses.field(
         default=None, kw_only=True, metadata={"json": "head_dim"}
     )
-    hidden_dim: int = dataclasses.field(metadata={"json": "intermediate_size"})
+    intermediate_size: int = dataclasses.field(metadata={"json": "intermediate_size"})
     # None turns nothing: a decoder of absolute positions (``positions``).
-    rope_base: float | None = dataclasses.field(metadata={"json": "rope_theta"})
+    rope_theta: float | None = dataclasses.field(metadata={"json": "rope_theta"})
     max_seq_len: int = dataclasses.field(metadata={"json": "max_position_embeddings"})
     rope_scaling: RopeScaling | None = None
     # The rotated prefix of head_dim (partial rotary, e.g. Phi's 0.75): None
@@ -183,10 +187,10 @@ class DecoderConfig(Config):
     prefill_chunk: int = 2048
     hidden_act: str = dataclasses.field(default="silu", metadata={"json": "hidden_act"})
     # A mixture of experts' routing: None where the model has none.
-    experts_per_token: int | None = dataclasses.field(
+    num_experts_per_tok: int | None = dataclasses.field(
         default=None, metadata={"json": "num_experts_per_tok"}
     )
-    normalize_top_k: bool = dataclasses.field(
+    norm_topk_prob: bool = dataclasses.field(
         default=True, metadata={"json": "norm_topk_prob"}
     )
     # Whether the output head is the input embedding.
@@ -196,7 +200,9 @@ class DecoderConfig(Config):
 
     def __post_init__(self):
         if self.head_dim is None:
-            object.__setattr__(self, "head_dim", self.emb_dim // self.n_heads)
+            object.__setattr__(
+                self, "head_dim", self.hidden_size // self.num_attention_heads
+            )
 
     @property
     def rope_width(self) -> int:
@@ -212,11 +218,11 @@ class DecoderConfig(Config):
         return None
 
     def angles(self) -> np.ndarray | None:
-        """The RoPE table, a row per position; None with no ``rope_base``."""
-        if self.rope_base is None:
+        """The RoPE table, a row per position; None with no ``rope_theta``."""
+        if self.rope_theta is None:
             return None
         angles = rope_angles(
-            self.rope_width, self.max_seq_len, self.rope_base, self.rope_scaling
+            self.rope_width, self.max_seq_len, self.rope_theta, self.rope_scaling
         )
         if self.rope_attention_scaling != 1.0:
             angles = angles * np.float32(self.rope_attention_scaling)
@@ -231,16 +237,16 @@ class DecoderConfig(Config):
     def layer(self, i: int) -> Layer:
         """Layer ``i``: every layer of a decoder is alike."""
         return Layer(
-            heads=self.n_heads,
-            groups=self.n_kv_groups,
+            heads=self.num_attention_heads,
+            groups=self.num_key_value_heads,
             head_dim=self.head_dim,
             eps=self.eps,
             activation=self.hidden_act,
             rotary=self.rotary_dim,
             experts=(
                 None
-                if self.experts_per_token is None
-                else Experts(self.experts_per_token, self.normalize_top_k)
+                if self.num_experts_per_tok is None
+                else Experts(self.num_experts_per_tok, self.norm_topk_prob)
             ),
         )
 
@@ -622,7 +628,7 @@ class Oracle:
         """
         c = self.config
         source = c.kv_source(i)
-        readers = any(c.kv_source(j) == i != j for j in range(c.n_layers))
+        readers = any(c.kv_source(j) == i != j for j in range(c.num_hidden_layers))
 
         def attend(q, k, v, **kw):
             if k is None:

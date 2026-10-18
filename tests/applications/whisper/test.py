@@ -28,11 +28,11 @@ from iron.tests.common.llama_model import drawn
 #: as many as a prompt chunk's queries, the fewest its cross attention takes.
 TOY = WhisperConfig(
     vocab_size=512,
-    emb_dim=256,
-    n_layers=2,
-    n_heads=4,
-    n_kv_groups=4,
-    hidden_dim=512,
+    hidden_size=256,
+    num_hidden_layers=2,
+    num_attention_heads=4,
+    num_key_value_heads=4,
+    intermediate_size=512,
     max_seq_len=448,
     hidden_act="gelu_pytorch_tanh",
     encoder_layers=2,
@@ -45,7 +45,7 @@ TOY = WhisperConfig(
 
 def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
     """Each tensor of a Whisper checkpoint of ``c``'s shape, by name."""
-    E, V = c.emb_dim, c.vocab_size
+    E, V = c.hidden_size, c.vocab_size
     out = {
         "model.encoder.conv1.weight": (E, c.mels, 3),
         "model.encoder.conv1.bias": (E,),
@@ -61,7 +61,12 @@ def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
     }
     stacks = [
         ("model.encoder", c.encoder_layers, c.encoder_hidden_dim, ["self_attn"]),
-        ("model.decoder", c.n_layers, c.hidden_dim, ["self_attn", "encoder_attn"]),
+        (
+            "model.decoder",
+            c.num_hidden_layers,
+            c.intermediate_size,
+            ["self_attn", "encoder_attn"],
+        ),
     ]
     for stack, layers, F, attentions in stacks:
         for i in range(layers):
@@ -119,7 +124,7 @@ def test_the_encoder_s_output_matches_its_oracle(clip):
     got = np.asarray(encoder.reference(buffer, **values), np.float32)
     want = WhisperEncoderOracle(TOY.encoder(), weights).soft_tokens(features)
     # 200 positions of the 256 rows the layers take.
-    assert got.shape == want.shape == (TOY.source_positions, TOY.emb_dim)
+    assert got.shape == want.shape == (TOY.source_positions, TOY.hidden_size)
     _assert_close(got, want, "the encoder's output")
 
 

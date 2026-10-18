@@ -45,7 +45,7 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
 
 @pytest.mark.parametrize("rows", ["decode", "prompt"])
 def test_attention_over_a_128k_cache_lowers(rows, tmp_path):
-    """The caches are (max_seq_len, n_kv_groups, head_dim), a position's
+    """The caches are (max_seq_len, num_key_value_heads, head_dim), a position's
     heads together, so neither their per-call writes nor MHA's bounded
     reads step by the context: at 131072 rows, where a (groups, positions)
     cache's writes would step past a descriptor's reach, they still lower.

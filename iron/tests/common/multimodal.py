@@ -101,7 +101,7 @@ def test_placeholders_that_are_not_the_soft_tokens_are_refused(table):
 
 @dataclasses.dataclass(frozen=True)
 class Width:
-    emb_dim: int
+    hidden_size: int
     text_dim: int
 
 
@@ -121,12 +121,12 @@ class Features(Tower):
         return values["n"]
 
     def inputs(self, features) -> tuple[np.ndarray, dict]:
-        buffer = np.zeros((self.max_tokens, self.config.emb_dim), bfloat16)
+        buffer = np.zeros((self.max_tokens, self.config.hidden_size), bfloat16)
         buffer[: len(features)] = features
         return buffer, dict(n=len(features))
 
     def shapes(self) -> list[dict]:
-        return [dict(features=((self.max_tokens, self.config.emb_dim), bfloat16))]
+        return [dict(features=((self.max_tokens, self.config.hidden_size), bfloat16))]
 
     def body(self, features, *, n: Scratchpad[np.int32]):
         x, angles = self.front(features, n=n)
@@ -146,12 +146,12 @@ def causal():
     weights = checkpoint(config).tree("random")
     text = Llama(config, weights)
     text.profile = PROFILE
-    model = Multimodal(text, {IMAGE: Features(config.emb_dim, 64)})
+    model = Multimodal(text, {IMAGE: Features(config.hidden_size, 64)})
     model.profile = PROFILE
     rng = np.random.default_rng(8)
     tokens = rng.integers(0, IMAGE, 300)
     tokens[250:266] = IMAGE
-    soft = (rng.standard_normal((16, config.emb_dim)) / 8).astype(bfloat16)
+    soft = (rng.standard_normal((16, config.hidden_size)) / 8).astype(bfloat16)
     return model, Llama.oracle(config, weights), tokens, soft
 
 

@@ -258,13 +258,13 @@ def test_a_decoder_holds_caches_where_it_attends_and_checkpoints_where_it_recurs
 
     shape = dict(
         vocab_size=64,
-        emb_dim=8,
-        n_layers=3,
-        n_heads=2,
-        n_kv_groups=1,
+        hidden_size=8,
+        num_hidden_layers=3,
+        num_attention_heads=2,
+        num_key_value_heads=1,
         head_dim=4,
-        hidden_dim=16,
-        rope_base=1e4,
+        intermediate_size=16,
+        rope_theta=1e4,
         max_seq_len=L,
         prefill_chunk=C,
     )

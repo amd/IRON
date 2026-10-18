@@ -22,7 +22,7 @@ import iron
 from iron import Scratchpad
 from iron.operators.copy import Copy
 
-# Llama's KV-cache write, shrunk: (n_kv_groups, seq, head_dim), one token's
+# Llama's KV-cache write, shrunk: (num_key_value_heads, seq, head_dim), one token's
 # keys landing in slot t of every group.
 N_KV, HEAD_DIM, SEQ = 8, 64, 128
 

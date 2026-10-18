@@ -43,7 +43,7 @@ def test_the_config_reads_the_checkpoint_s_layers(config):
     """
     assert config.global_layers == tuple(range(4, 35, 5))
     assert config.heads(4) == (1, 512) and config.heads(5) == (1, 256)
-    sources = [config.kv_source(i) for i in range(config.n_layers)]
+    sources = [config.kv_source(i) for i in range(config.num_hidden_layers)]
     assert sources[:15] == list(range(15))
     assert sources[15:] == [14 if i % 5 == 4 else 13 for i in range(15, 35)]
     assert [config.layer(i).shares_kv for i in (14, 15)] == [False, True]
@@ -56,10 +56,10 @@ def test_e4b_s_config_reads_its_own_layers():
     """
     require(E4B)
     config = Gemma4Config.from_checkpoint(E4B)
-    assert (config.n_layers, config.emb_dim) == (42, 2560)
+    assert (config.num_hidden_layers, config.hidden_size) == (42, 2560)
     assert config.global_layers == tuple(range(5, 42, 6))
     assert config.heads(5) == (2, 512) and config.heads(4) == (2, 256)
-    sources = [config.kv_source(i) for i in range(config.n_layers)]
+    sources = [config.kv_source(i) for i in range(config.num_hidden_layers)]
     assert sources[:24] == list(range(24))
     assert sources[24:] == [23 if i % 6 == 5 else 22 for i in range(24, 42)]
 

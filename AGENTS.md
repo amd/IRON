@@ -589,7 +589,7 @@ class Decode(iron.Graph):
     def __init__(self, weights, angles):
         self.weights = weights                   # a namespace of arrays: weights
         self.rope = iron.weight(angles)          # (max_len, head_dim)
-        self.kv = iron.state((n_kv_groups, max_len, head_dim))
+        self.kv = iron.state((num_key_value_heads, max_len, head_dim))
 
     def body(self, x, *, pos: Scratchpad[np.int32]):
         w = self.weights
@@ -736,7 +736,7 @@ code before relying on a line here; it is the authority.
   V lanes; a group that does
   not divide a block is two overlapping runs of its first and last
   `width` heads, `width` the largest power of two in it). The caches are
-  `(max_seq_len, n_kv_groups, head_dim)`, so a call's write is contiguous
+  `(max_seq_len, num_key_value_heads, head_dim)`, so a call's write is contiguous
   and no descriptor steps by the context: a `(groups, positions)` cache
   would step `max_seq_len * head_dim` between groups, past a descriptor's
   2^20-granule stride from 32768 rows on.
@@ -1098,7 +1098,7 @@ profiles. The library is six modules:
   default, where it adds an absolute position table's rows. A
   `DecoderConfig`'s `rotary_dim` rotates only that prefix of each head, and
   its `rope_attention_scaling` scales the whole angle table once; with no
-  `rope_base` nothing rotates. `decoder=` names a decoder nested in its
+  `rope_theta` nothing rotates. `decoder=` names a decoder nested in its
   checkpoint (`weights.model.decoder`), `weights.model` by default.
   `Checkpoints` is a state a decoder carries from position to position (a
   recurrence, a convolution's last rows), a slot per prompt-chunk boundary

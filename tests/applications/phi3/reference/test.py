@@ -44,13 +44,13 @@ def _npu2():
 #: partial rotary (half of each head), LongRoPE's amplitude scale.
 TOY = Phi4Config(
     vocab_size=1024,
-    emb_dim=256,
-    n_layers=2,
-    n_heads=8,
-    n_kv_groups=2,
+    hidden_size=256,
+    num_hidden_layers=2,
+    num_attention_heads=8,
+    num_key_value_heads=2,
     head_dim=64,
-    hidden_dim=512,
-    rope_base=10000.0,
+    intermediate_size=512,
+    rope_theta=10000.0,
     max_seq_len=256,
     rotary_dim=32,
     prefill_chunk=256,
@@ -58,10 +58,10 @@ TOY = Phi4Config(
 
 
 def _shapes(c: Phi4Config) -> dict[str, tuple[int, ...]]:
-    E, F, V = c.emb_dim, c.hidden_dim, c.vocab_size
-    Q, KV = c.n_heads * c.head_dim, c.n_kv_groups * c.head_dim
+    E, F, V = c.hidden_size, c.intermediate_size, c.vocab_size
+    Q, KV = c.num_attention_heads * c.head_dim, c.num_key_value_heads * c.head_dim
     out = {"model.embed_tokens.weight": (V, E), "model.norm.weight": (E,)}
-    for i in range(c.n_layers):
+    for i in range(c.num_hidden_layers):
         layer = f"model.layers.{i}"
         out |= {
             f"{layer}.input_layernorm.weight": (E,),

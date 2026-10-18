@@ -168,7 +168,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     """
     from iron.tests.common.llama_model import llama_1b
 
-    model = llama_1b(n_layers=1)
+    model = llama_1b(num_hidden_layers=1)
     version = build_elf(model, **model.shapes()[1])
     # The chunk's embedding rows and RoPE rows, the block, the last row,
     # norm, head and draw.

@@ -130,7 +130,7 @@ def test_llama_builds_xclbins_at_its_size_on_npu1(npu1, chunk, pipelines):
     chain, MHA on four columns. One layer: the designs are the same for
     sixteen.
     """
-    model = llama_1b(n_layers=1)
+    model = llama_1b(num_hidden_layers=1)
     version = model.compile(full_elf=False, **model.shapes()[1 if chunk else 0])
     assert not version.plan.full_elf
     assert Path(version.image).stat().st_size > 0

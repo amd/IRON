@@ -51,12 +51,12 @@ def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:
 TOY = dataclasses.replace(
     REAL_1B,
     vocab_size=32,
-    emb_dim=64,
-    n_layers=2,
-    n_heads=8,
-    n_kv_groups=2,
+    hidden_size=64,
+    num_hidden_layers=2,
+    num_attention_heads=8,
+    num_key_value_heads=2,
     head_dim=8,
-    hidden_dim=128,
+    intermediate_size=128,
     max_seq_len=16,
     prefill_chunk=8,
 )
@@ -65,8 +65,11 @@ TOY = dataclasses.replace(
 # Each layer's tensors under its Hugging Face name, spelled out here rather
 # than read from the model.
 def layer_shapes(cfg) -> dict[str, tuple[int, ...]]:
-    head, kv = cfg.n_heads * cfg.head_dim, cfg.n_kv_groups * cfg.head_dim
-    E, F = cfg.emb_dim, cfg.hidden_dim
+    head, kv = (
+        cfg.num_attention_heads * cfg.head_dim,
+        cfg.num_key_value_heads * cfg.head_dim,
+    )
+    E, F = cfg.hidden_size, cfg.intermediate_size
     return {
         "input_layernorm.weight": (E,),
         "self_attn.q_proj.weight": (head, E),
@@ -84,10 +87,10 @@ def toy_checkpoint(cfg=TOY):
     """A Hugging Face state_dict for ``cfg``, every tensor distinct, bf16."""
     rng = np.random.default_rng(0)
     ckpt = {
-        "model.embed_tokens.weight": rng.normal(size=(cfg.vocab_size, cfg.emb_dim)),
-        "model.norm.weight": rng.normal(size=cfg.emb_dim),
+        "model.embed_tokens.weight": rng.normal(size=(cfg.vocab_size, cfg.hidden_size)),
+        "model.norm.weight": rng.normal(size=cfg.hidden_size),
     }
-    for i in range(cfg.n_layers):
+    for i in range(cfg.num_hidden_layers):
         for name, shape in layer_shapes(cfg).items():
             ckpt[f"model.layers.{i}.{name}"] = rng.normal(size=shape)
     return {k: v.astype(bfloat16) for k, v in ckpt.items()}
@@ -292,7 +295,7 @@ def test_each_checkpoint_tensor_lands_on_its_name_bitwise(toy_path):
     """
     tree = Checkpoint(toy_path).tree()
     ckpt = load_file(toy_path)
-    assert len(tree.model.layers) == TOY.n_layers
+    assert len(tree.model.layers) == TOY.num_hidden_layers
     assert list(vars(tree)) == ["model"]
     for name, expected in ckpt.items():
         assert bitwise_equal(at(tree, name), expected), name
@@ -466,7 +469,7 @@ def test_derived_weights_nest_beside_their_modules_names(toy_path):
         derived.put(a, q_rows=a.q_proj.weight[:2], k_scaled=a.k_proj.weight * 2)
     derived.put(tree.model, norm_half=tree.model.norm.weight * 0.5)
     got = derived.tree()
-    assert len(got.model.layers) == TOY.n_layers
+    assert len(got.model.layers) == TOY.num_hidden_layers
     a = tree.model.layers[1].self_attn
     d = got.model.layers[1].self_attn
     assert bitwise_equal(d.q_rows, a.q_proj.weight[:2])
@@ -651,9 +654,9 @@ def test_real_checkpoint_is_llama_3_2_1b():
     require(real_checkpoint.parent / "config.json")
     c = LlamaConfig.from_checkpoint(real_checkpoint)
     model = Checkpoint(real_checkpoint).tree().model
-    assert model.embed_tokens.weight.shape == (c.vocab_size, c.emb_dim)
+    assert model.embed_tokens.weight.shape == (c.vocab_size, c.hidden_size)
     assert model.embed_tokens.weight.dtype == bfloat16
-    assert len(model.layers) == c.n_layers
+    assert len(model.layers) == c.num_hidden_layers
     for layer in model.layers:
         for name, shape in layer_shapes(c).items():
             assert at(layer, name).shape == shape, name

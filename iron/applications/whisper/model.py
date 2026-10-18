@@ -62,10 +62,10 @@ def bf16(weights):
 class WhisperEncoderConfig(Config):
     """The audio encoder's shape (``WhisperConfig.encoder``)."""
 
-    emb_dim: int
-    n_layers: int
-    n_heads: int
-    hidden_dim: int
+    hidden_size: int
+    num_hidden_layers: int
+    num_attention_heads: int
+    intermediate_size: int
     mels: int
     positions: int
     hidden_act: str
@@ -74,7 +74,7 @@ class WhisperEncoderConfig(Config):
     @property
     def text_dim(self) -> int:
         """The width of the encoder's output, the decoder's."""
-        return self.emb_dim
+        return self.hidden_size
 
     @property
     def frames(self) -> int:
@@ -96,8 +96,8 @@ class WhisperEncoderConfig(Config):
         return -(-self.frames // BLOCK) * BLOCK
 
     def layer(self, i: int) -> Layer:
-        H = self.n_heads
-        return Layer(H, H, self.emb_dim // H, self.eps, self.hidden_act)
+        H = self.num_attention_heads
+        return Layer(H, H, self.hidden_size // H, self.eps, self.hidden_act)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,12 +106,16 @@ class WhisperConfig(DecoderConfig):
     (``encoder()``).
     """
 
-    emb_dim: int = dataclasses.field(metadata={"json": "d_model"})
-    n_layers: int = dataclasses.field(metadata={"json": "decoder_layers"})
-    n_heads: int = dataclasses.field(metadata={"json": "decoder_attention_heads"})
-    n_kv_groups: int = dataclasses.field(metadata={"json": "decoder_attention_heads"})
-    hidden_dim: int = dataclasses.field(metadata={"json": "decoder_ffn_dim"})
-    rope_base: float | None = dataclasses.field(default=None, kw_only=True)
+    hidden_size: int = dataclasses.field(metadata={"json": "d_model"})
+    num_hidden_layers: int = dataclasses.field(metadata={"json": "decoder_layers"})
+    num_attention_heads: int = dataclasses.field(
+        metadata={"json": "decoder_attention_heads"}
+    )
+    num_key_value_heads: int = dataclasses.field(
+        metadata={"json": "decoder_attention_heads"}
+    )
+    intermediate_size: int = dataclasses.field(metadata={"json": "decoder_ffn_dim"})
+    rope_theta: float | None = dataclasses.field(default=None, kw_only=True)
     max_seq_len: int = dataclasses.field(metadata={"json": "max_target_positions"})
     prefill_chunk: int = 256
     # Whisper's own "gelu" is exact, which Layer refuses until the pin group
@@ -137,7 +141,7 @@ class WhisperConfig(DecoderConfig):
     def encoder(self) -> WhisperEncoderConfig:
         """The encoder's shape."""
         return WhisperEncoderConfig(
-            self.emb_dim,
+            self.hidden_size,
             self.encoder_layers,
             self.encoder_heads,
             self.encoder_hidden_dim,
@@ -169,11 +173,11 @@ class WhisperEncoder(Tower):
                 f"WhisperEncoder: no operator for activation {c.hidden_act!r} yet"
             )
         self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.mels)
-        self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.emb_dim, stride=2)
+        self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
         # The second convolution's input: a zero row, then the first's output.
-        self.convolved = iron.state((2 * c.rows + 1, c.emb_dim))
+        self.convolved = iron.state((2 * c.rows + 1, c.hidden_size))
         derived = Derived(weights)
-        table = np.zeros((c.rows, c.emb_dim), e.embed_positions.weight.dtype)
+        table = np.zeros((c.rows, c.hidden_size), e.embed_positions.weight.dtype)
         table[: c.positions] = e.embed_positions.weight
         derived.put(e.embed_positions, padded=table)
         self.derived = derived.tree()
@@ -246,13 +250,13 @@ class WhisperEncoderOracle(Oracle):
         self.whisper_encoder = widen(weights.model.encoder)
 
     def soft_tokens(self, features) -> np.ndarray:
-        """The encoder's ``(positions, emb_dim)`` output over ``features``,
+        """The encoder's ``(positions, hidden_size)`` output over ``features``,
         ``(mels, frames)``.
         """
         c, e = self.config, self.whisper_encoder
         x = np.pad(np.asarray(features, np.float32).T, ((1, 1), (0, 0)))
         conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.mels)
-        conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.emb_dim, stride=2)
+        conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
         h = self.gelu_tanh(conv1.oracle(x, e.conv1.weight, e.conv1.bias))
         h = np.pad(h, ((1, 1), (0, 0)))
         h = self.gelu_tanh(conv2.oracle(h, e.conv2.weight, e.conv2.bias))
@@ -298,7 +302,7 @@ class Whisper(EncoderDecoder):
             C = c.prefill_chunk
             rows = Copy.step(table[step.start : step.start + C][: step.rows])
         else:
-            rows = Copy.step(table[step.position]).reshape(1, c.emb_dim)
+            rows = Copy.step(table[step.position]).reshape(1, c.hidden_size)
         return ElementwiseAdd.step(x, rows)
 
     def head(self, x):

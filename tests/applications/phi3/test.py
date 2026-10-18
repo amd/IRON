@@ -65,7 +65,7 @@ def model(runner, request):
 
 # KL(fp32 CPU || NPU), teacher-forced over 10 steps (not Llama/Qwen2.5's
 # own 40: the float32 CPU oracle recomputes the whole forward pass from
-# scratch every step, and at this model's scale -- emb_dim 3072, vocab
+# scratch every step, and at this model's scale -- hidden_size 3072, vocab
 # 200064, both well past Qwen 2.5 1.5B Instruct's own -- that cost alone
 # measured ~30s/step on this host). Measured over the first 13 steps:
 # KL 0.00039-0.02240, 13/13 top-1 -- comparable to or better than every

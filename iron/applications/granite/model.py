@@ -89,7 +89,9 @@ class Granite(CausalLM):
         model = weights.model
         if config.embedding_multiplier != 1:
             m = config.embedding_multiplier
-            derived.put(model.embed_tokens, scale=np.full(config.emb_dim, m, bfloat16))
+            derived.put(
+                model.embed_tokens, scale=np.full(config.hidden_size, m, bfloat16)
+            )
         if config.logits_scaling != 1:
             # The logits' divisor folded into the final norm's weight.
             divided = model.norm.weight / bfloat16(config.logits_scaling)

@@ -27,7 +27,7 @@ OpenAI's Whisper (large-v3-turbo's shape: a 32-layer audio encoder, a
 - `bf16()`: the checkpoint ships float16; the graphs hold each weight
   rounded once to bf16, and the oracles read the float16 itself.
 
-Nothing rotates (`rope_base` None).
+Nothing rotates (`rope_theta` None).
 
 ## Status
 

@@ -49,21 +49,21 @@ class Gemma4Config(DecoderConfig):
     """
 
     vocab_size: int = dataclasses.field(metadata={"json": "text_config.vocab_size"})
-    emb_dim: int = dataclasses.field(metadata={"json": "text_config.hidden_size"})
-    n_layers: int = dataclasses.field(
+    hidden_size: int = dataclasses.field(metadata={"json": "text_config.hidden_size"})
+    num_hidden_layers: int = dataclasses.field(
         metadata={"json": "text_config.num_hidden_layers"}
     )
-    n_heads: int = dataclasses.field(
+    num_attention_heads: int = dataclasses.field(
         metadata={"json": "text_config.num_attention_heads"}
     )
-    n_kv_groups: int = dataclasses.field(
+    num_key_value_heads: int = dataclasses.field(
         metadata={"json": "text_config.num_key_value_heads"}
     )
     head_dim: int = dataclasses.field(metadata={"json": "text_config.head_dim"})
-    hidden_dim: int = dataclasses.field(
+    intermediate_size: int = dataclasses.field(
         metadata={"json": "text_config.intermediate_size"}
     )
-    rope_base: float = dataclasses.field(
+    rope_theta: float = dataclasses.field(
         metadata={"json": "text_config.rope_parameters.sliding_attention.rope_theta"}
     )
     max_seq_len: int = dataclasses.field(
@@ -124,14 +124,14 @@ class Gemma4Config(DecoderConfig):
     def heads(self, i: int) -> tuple[int, int]:
         """Layer ``i``'s key and value heads and head size."""
         if i in self.global_layers:
-            return self.n_kv_groups, self.global_head_dim
-        return self.n_kv_groups, self.head_dim
+            return self.num_key_value_heads, self.global_head_dim
+        return self.num_key_value_heads, self.head_dim
 
     def kv_source(self, i: int) -> int:
         """Layer ``i`` itself, or for a shared layer the last layer of its
         kind before the shared ones.
         """
-        first = self.n_layers - self.shared_layers
+        first = self.num_hidden_layers - self.shared_layers
         if i < first:
             return i
         kind = i in self.global_layers
@@ -144,7 +144,7 @@ class Gemma4Config(DecoderConfig):
         """
         G, D = self.heads(i)
         return Layer(
-            heads=self.n_heads,
+            heads=self.num_attention_heads,
             groups=G,
             head_dim=D,
             eps=self.eps,
@@ -168,7 +168,7 @@ class Gemma4Config(DecoderConfig):
 
 class Gemma4Oracle(Oracle):
     """Gemma 4's text model in float32, on the host: the embedding scaled
-    by ``sqrt(emb_dim)``, each layer's per-layer input and the soft-capped
+    by ``sqrt(hidden_size)``, each layer's per-layer input and the soft-capped
     head over the tied embedding.
     """
 
@@ -177,17 +177,17 @@ class Gemma4Oracle(Oracle):
         self.global_angles = config.global_angles()
 
     def embed(self, x):
-        return x * np.float32(math.sqrt(self.config.emb_dim))
+        return x * np.float32(math.sqrt(self.config.hidden_size))
 
     def per_layer_inputs(self, tokens, x) -> np.ndarray:
         """Each layer's per-layer input for ``tokens`` embedded as ``x``,
-        ``(rows, n_layers, ple_dim)``, over its ``2 ** -0.5``: the
+        ``(rows, num_hidden_layers, ple_dim)``, over its ``2 ** -0.5``: the
         embedding projected and normed, plus the layer's own row.
         """
         c, d = self.config, self.decoder
-        n, L, P = x.shape[0], c.n_layers, c.ple_dim
+        n, L, P = x.shape[0], c.num_hidden_layers, c.ple_dim
         projection = widen(d.per_layer_model_projection.weight)
-        context = (x @ projection.T) * np.float32(c.emb_dim**-0.5)
+        context = (x @ projection.T) * np.float32(c.hidden_size**-0.5)
         norm = widen(d.per_layer_projection_norm.weight)
         context = self.rms_norm(context.reshape(n, L, P), norm)
         rows = widen(d.embed_tokens_per_layer.weight[tokens]).reshape(n, L, P)

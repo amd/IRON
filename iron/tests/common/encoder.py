@@ -34,7 +34,7 @@ TOLERANCE = Tolerance.bf16_ulps(LAYERS)
 @dataclasses.dataclass(frozen=True)
 class Shape:
     vocab_size: int = VOCAB
-    emb_dim: int = HEADS * HEAD_DIM
+    hidden_size: int = HEADS * HEAD_DIM
     text_dim: int = HEADS * HEAD_DIM
 
 

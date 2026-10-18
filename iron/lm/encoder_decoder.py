@@ -59,7 +59,7 @@ class EncoderDecoder(CausalLM):
             )
         shapes = [
             (rows, config.layer(i).groups, config.layer(i).head_dim)
-            for i in range(config.n_layers)
+            for i in range(config.num_hidden_layers)
         ]
         self.cross_keys = [iron.state(shape) for shape in shapes]
         self.cross_values = [iron.state(shape) for shape in shapes]
@@ -103,7 +103,7 @@ class EncoderDecoder(CausalLM):
         if prompt:
             x = self.lookup(ids[:rows])
         else:
-            x = self.lookup(values["token"]).reshape(1, self.config.emb_dim)
+            x = self.lookup(values["token"]).reshape(1, self.config.hidden_size)
         logits, carry = self.forward(
             x,
             prompt=prompt,

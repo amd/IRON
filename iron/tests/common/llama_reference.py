@@ -173,7 +173,7 @@ class SharingConfig(LlamaConfig):
     """
 
     def kv_source(self, i: int) -> int:
-        return 0 if i == self.n_layers - 1 else i
+        return 0 if i == self.num_hidden_layers - 1 else i
 
     def layer(self, i: int):
         return dataclasses.replace(super().layer(i), shares_kv=self.kv_source(i) != i)
@@ -186,7 +186,7 @@ def test_a_layer_sharing_an_earlier_layers_caches_matches_the_forward():
     those of the layers each attending over their own.
     """
     given = {f.name: vars(SMALL)[f.name] for f in dataclasses.fields(SMALL)}
-    given.update(n_layers=3, max_seq_len=4 * SMALL.prefill_chunk)
+    given.update(num_hidden_layers=3, max_seq_len=4 * SMALL.prefill_chunk)
     config = SharingConfig(**given)
     weights = checkpoint(config).tree("random", 9)
     model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
@@ -317,7 +317,7 @@ class Placed(OnHost):
 
     def positions(self, x, step):
         c = self.config
-        C, E = c.prefill_chunk, c.emb_dim
+        C, E = c.prefill_chunk, c.hidden_size
         if step.prompt:
             rows = Copy.step(self.table[step.start : step.start + C][: step.rows])
         else:
@@ -337,17 +337,17 @@ class PlacedOracle(Oracle):
 
 
 def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
-    """No ``rope_base``: no table is held and nothing turns q and k; a
+    """No ``rope_theta``: no table is held and nothing turns q and k; a
     model's ``positions`` adds its own rows instead, in each prompt chunk at
     the chunk's positions and in a decode step at its one, as its oracle's
     ``positions`` does.
     """
     config = dataclasses.replace(
-        cpu.config, rope_base=None, max_seq_len=2 * cpu.config.prefill_chunk
+        cpu.config, rope_theta=None, max_seq_len=2 * cpu.config.prefill_chunk
     )
     assert config.angles() is None
     table = np.random.default_rng(9).standard_normal(
-        (config.max_seq_len, config.emb_dim)
+        (config.max_seq_len, config.hidden_size)
     )
     table = (table / 2).astype(bfloat16)
     model = Placed(config, cpu.weights, table)

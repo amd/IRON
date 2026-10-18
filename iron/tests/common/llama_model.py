@@ -24,7 +24,7 @@ from iron.applications.llama.model import Llama, Llama3RopeScaling, LlamaConfig
 # 1B's shape, which ``llama_1b`` runs under.
 PROFILE = Profile.load(Path(__file__).with_name("llama_small_profile.json"))
 
-#: Llama 3.2 1B's own rope_base and eps (meta-llama/Llama-3.2-1B's published
+#: Llama 3.2 1B's own rope_theta and eps (meta-llama/Llama-3.2-1B's published
 #: config.json): not the checkpoint, which these tests never read, but the
 #: two numbers ``SMALL`` and ``llama_1b`` keep to be Llama 3.2's own shape.
 _ROPE_BASE, _EPS = 500000.0, 1e-5
@@ -33,13 +33,13 @@ _ROPE_BASE, _EPS = 500000.0, 1e-5
 #: would otherwise give (``llama_1b``, and ``SMALL``'s inherited fields).
 REAL_1B = LlamaConfig(
     vocab_size=128256,
-    emb_dim=2048,
-    n_layers=16,
-    n_heads=32,
-    n_kv_groups=8,
+    hidden_size=2048,
+    num_hidden_layers=16,
+    num_attention_heads=32,
+    num_key_value_heads=8,
     head_dim=64,
-    hidden_dim=8192,
-    rope_base=_ROPE_BASE,
+    intermediate_size=8192,
+    rope_theta=_ROPE_BASE,
     max_seq_len=131072,
     eps=_EPS,
     rope_scaling=Llama3RopeScaling(
@@ -54,12 +54,12 @@ REAL_1B = LlamaConfig(
 SMALL = dataclasses.replace(
     REAL_1B,
     vocab_size=1024,
-    emb_dim=512,
-    n_layers=2,
-    n_heads=16,
-    n_kv_groups=4,
+    hidden_size=512,
+    num_hidden_layers=2,
+    num_attention_heads=16,
+    num_key_value_heads=4,
     head_dim=64,
-    hidden_dim=2048,
+    intermediate_size=2048,
     max_seq_len=256,
     prefill_chunk=256,
     rope_scaling=None,
@@ -76,10 +76,10 @@ def shapes(config: DecoderConfig) -> dict[str, tuple[int, ...]]:
     by name: the model's own, then each layer's.
     """
     c = config
-    E, F, V = c.emb_dim, c.hidden_dim, c.vocab_size
-    Q, KV = c.n_heads * c.head_dim, c.n_kv_groups * c.head_dim
+    E, F, V = c.hidden_size, c.intermediate_size, c.vocab_size
+    Q, KV = c.num_attention_heads * c.head_dim, c.num_key_value_heads * c.head_dim
     out = {"model.embed_tokens.weight": (V, E), "model.norm.weight": (E,)}
-    for i in range(c.n_layers):
+    for i in range(c.num_hidden_layers):
         layer = f"model.layers.{i}"
         out |= {
             f"{layer}.input_layernorm.weight": (E,),
@@ -159,11 +159,11 @@ def small(seed=0, **config) -> Llama:
     return model
 
 
-def llama_1b(n_layers=16) -> Llama:
+def llama_1b(num_hidden_layers=16) -> Llama:
     """Llama 3.2 1B's real shape with unset weights: for builds, not numbers.
 
-    ``n_layers`` below 16 builds a shallower model of the same layer: the
+    ``num_hidden_layers`` below 16 builds a shallower model of the same layer: the
     designs are the same at any depth.
     """
-    config = dataclasses.replace(REAL_1B, n_layers=n_layers)
+    config = dataclasses.replace(REAL_1B, num_hidden_layers=num_hidden_layers)
     return Llama(config, checkpoint(config).tree("unread"))

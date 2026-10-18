@@ -31,13 +31,13 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 CONFIG = DecoderConfig(
     vocab_size=1024,
-    emb_dim=512,
-    n_layers=2,
-    n_heads=8,
-    n_kv_groups=8,
+    hidden_size=512,
+    num_hidden_layers=2,
+    num_attention_heads=8,
+    num_key_value_heads=8,
     head_dim=64,
-    hidden_dim=1024,
-    rope_base=None,
+    intermediate_size=1024,
+    rope_theta=None,
     max_seq_len=512,
     prefill_chunk=256,
     hidden_act="gelu_pytorch_tanh",
@@ -54,7 +54,7 @@ class Whisper(EncoderDecoder):
 
     def positions(self, x, step):
         c = self.config
-        C, E = c.prefill_chunk, c.emb_dim
+        C, E = c.prefill_chunk, c.hidden_size
         table = iron.weight(self.decoder.embed_positions.weight)
         if step.prompt:
             rows = Copy.step(table[step.start : step.start + C][: step.rows])
@@ -82,9 +82,11 @@ def tree(seed: int):
     """A checkpoint tree of ``CONFIG``'s shape under ``model.decoder``, bf16."""
     rng = np.random.default_rng(seed)
     c = CONFIG
-    E, V, L = c.emb_dim, c.vocab_size, c.max_seq_len
-    shape = shapes(E, c.n_heads, c.n_kv_groups, c.head_dim, c.hidden_dim)
-    layers = [decoder(rng, shape, bfloat16) for _ in range(c.n_layers)]
+    E, V, L = c.hidden_size, c.vocab_size, c.max_seq_len
+    shape = shapes(
+        E, c.num_attention_heads, c.num_key_value_heads, c.head_dim, c.intermediate_size
+    )
+    layers = [decoder(rng, shape, bfloat16) for _ in range(c.num_hidden_layers)]
     norm = SimpleNamespace(
         weight=(1 + rng.standard_normal(E) / 8).astype(bfloat16),
         bias=(rng.standard_normal(E) / 8).astype(bfloat16),
@@ -111,11 +113,11 @@ def whisper():
     a clip of 200 encoder rows and 300 tokens, two prompt chunks.
     """
     weights = tree(0)
-    encoder = Features(CONFIG.emb_dim, SOURCE)
+    encoder = Features(CONFIG.hidden_size, SOURCE)
     model = Whisper(CONFIG, weights, encoder, weights.model.decoder)
     oracle = Whisper.oracle(CONFIG, weights, weights.model.decoder)
     rng = np.random.default_rng(1)
-    clip = (rng.standard_normal((200, CONFIG.emb_dim)) / 2).astype(bfloat16)
+    clip = (rng.standard_normal((200, CONFIG.hidden_size)) / 2).astype(bfloat16)
     tokens = rng.integers(0, CONFIG.vocab_size, 300)
     return model, oracle, clip, tokens
 
@@ -228,7 +230,7 @@ class Attending(Features):
         self.layers = [None]
 
     def layer(self, step, i, weights, x):
-        q = x.reshape(x.shape[0], CONFIG.n_heads, CONFIG.head_dim)
+        q = x.reshape(x.shape[0], CONFIG.num_attention_heads, CONFIG.head_dim)
         return self.attend(step, i, q, q, q)
 
 
@@ -236,7 +238,7 @@ def attended(rows) -> np.ndarray:
     """``rows`` attended to themselves per head in float32, as ``Attending``'s
     layer does, rounded once to bf16.
     """
-    H, D = CONFIG.n_heads, CONFIG.head_dim
+    H, D = CONFIG.num_attention_heads, CONFIG.head_dim
     h = np.asarray(rows, np.float32).reshape(-1, H, D).transpose(1, 0, 2)
     p = h @ h.transpose(0, 2, 1) * np.float32(D**-0.5)
     p = np.exp(p - p.max(-1, keepdims=True))
@@ -266,13 +268,16 @@ def test_padded_encoder_rows_reach_neither_attention():
     """
     weights = tree(0)
     rng = np.random.default_rng(2)
-    clip = (rng.standard_normal((200, CONFIG.emb_dim)) / 2).astype(bfloat16)
+    clip = (rng.standard_normal((200, CONFIG.hidden_size)) / 2).astype(bfloat16)
     tokens = rng.integers(0, CONFIG.vocab_size, 300)
-    garbage = (rng.standard_normal((SOURCE, CONFIG.emb_dim)) * 4).astype(bfloat16)
+    garbage = (rng.standard_normal((SOURCE, CONFIG.hidden_size)) * 4).astype(bfloat16)
 
     def model():
         return Whisper(
-            CONFIG, weights, Attending(CONFIG.emb_dim, SOURCE), weights.model.decoder
+            CONFIG,
+            weights,
+            Attending(CONFIG.hidden_size, SOURCE),
+            weights.model.decoder,
         )
 
     fresh = model()
@@ -299,4 +304,6 @@ def test_an_encoder_shorter_than_a_prompt_chunk_is_refused():
     """
     weights = tree(0)
     with pytest.raises(ValueError, match="fewer than a 256-row prompt chunk"):
-        Whisper(CONFIG, weights, Features(CONFIG.emb_dim, 128), weights.model.decoder)
+        Whisper(
+            CONFIG, weights, Features(CONFIG.hidden_size, 128), weights.model.decoder
+        )

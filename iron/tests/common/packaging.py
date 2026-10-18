@@ -142,7 +142,7 @@ def test_a_prompt_chunk_is_a_command_per_attention_and_decode_one(npu2):
     assert plan(npu2, decode).commands == ()
     cuts = plan(npu2, prompt).commands
     attention = [i + 1 for i, s in enumerate(prompt.steps) if isinstance(s.op, MHA)]
-    assert list(cuts) == attention and len(cuts) == model.config.n_layers
+    assert list(cuts) == attention and len(cuts) == model.config.num_hidden_layers
 
 
 class Shrinks(iron.Graph):

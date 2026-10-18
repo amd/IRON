@@ -39,23 +39,23 @@ class SmolVLMTextConfig(DecoderConfig):
     """
 
     vocab_size: int = dataclasses.field(metadata={"json": "text_config.vocab_size"})
-    emb_dim: int = dataclasses.field(metadata={"json": "text_config.hidden_size"})
-    n_layers: int = dataclasses.field(
+    hidden_size: int = dataclasses.field(metadata={"json": "text_config.hidden_size"})
+    num_hidden_layers: int = dataclasses.field(
         metadata={"json": "text_config.num_hidden_layers"}
     )
-    n_heads: int = dataclasses.field(
+    num_attention_heads: int = dataclasses.field(
         metadata={"json": "text_config.num_attention_heads"}
     )
-    n_kv_groups: int = dataclasses.field(
+    num_key_value_heads: int = dataclasses.field(
         metadata={"json": "text_config.num_key_value_heads"}
     )
     head_dim: int | None = dataclasses.field(
         default=None, kw_only=True, metadata={"json": "text_config.head_dim"}
     )
-    hidden_dim: int = dataclasses.field(
+    intermediate_size: int = dataclasses.field(
         metadata={"json": "text_config.intermediate_size"}
     )
-    rope_base: float = dataclasses.field(metadata={"json": "text_config.rope_theta"})
+    rope_theta: float = dataclasses.field(metadata={"json": "text_config.rope_theta"})
     eps: float = dataclasses.field(
         default=1e-5, kw_only=True, metadata={"json": "text_config.rms_norm_eps"}
     )

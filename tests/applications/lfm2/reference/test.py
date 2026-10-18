@@ -19,12 +19,12 @@ pytestmark = pytest.mark.usefixtures("npu2")
 #: LFM2-1.2B's proportions at toy size: two conv layers, two attending.
 TOY = Lfm2Config(
     vocab_size=512,
-    emb_dim=512,
-    n_layers=4,
-    n_heads=8,
-    n_kv_groups=2,
+    hidden_size=512,
+    num_hidden_layers=4,
+    num_attention_heads=8,
+    num_key_value_heads=2,
     head_dim=64,
-    rope_base=1e6,
+    rope_theta=1e6,
     max_seq_len=1024,
     prefill_chunk=256,
     block_ff_dim=1024,
@@ -36,13 +36,13 @@ PROMPT, LAST = 500, 514
 
 def names(c: Lfm2Config) -> dict[str, tuple[int, ...]]:
     """Each tensor of an LFM2 checkpoint of ``c``'s shape, by name."""
-    E, F, D, K = c.emb_dim, c.hidden_dim, c.head_dim, c.conv_kernel
-    Q, KV = c.n_heads * D, c.n_kv_groups * D
+    E, F, D, K = c.hidden_size, c.intermediate_size, c.head_dim, c.conv_kernel
+    Q, KV = c.num_attention_heads * D, c.num_key_value_heads * D
     out = {
         "model.embed_tokens.weight": (c.vocab_size, E),
         "model.embedding_norm.weight": (E,),
     }
-    for i in range(c.n_layers):
+    for i in range(c.num_hidden_layers):
         p = f"model.layers.{i}"
         out |= {
             f"{p}.operator_norm.weight": (E,),
@@ -119,7 +119,7 @@ def ran():
 
 def test_attention_layers_hold_caches_and_conv_layers_a_checkpointed_tail(ran):
     model, _, _ = ran
-    C, K, E = TOY.prefill_chunk, TOY.conv_kernel, TOY.emb_dim
+    C, K, E = TOY.prefill_chunk, TOY.conv_kernel, TOY.hidden_size
     assert list(model.keys) == list(model.values) == [1, 3]
     assert list(model.recurrent) == [0, 2]
     slots = (TOY.max_seq_len - 1) // C + 2

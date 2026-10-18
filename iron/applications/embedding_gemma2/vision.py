@@ -78,16 +78,16 @@ class VisionTower(Tower):
         order = np.concatenate(
             [quarter, quarter + half, quarter + half // 2, quarter + 3 * half // 2]
         )
-        heads = (c.n_heads, c.head_dim, c.emb_dim)
+        heads = (c.num_attention_heads, c.head_dim, c.hidden_size)
         for layer in tree.encoder.layers:
             a = layer.self_attn
             derived.put(
                 a,
                 q_reordered=a.q_proj.linear.weight.reshape(heads)[:, order].reshape(
-                    c.emb_dim, c.emb_dim
+                    c.hidden_size, c.hidden_size
                 ),
                 k_reordered=a.k_proj.linear.weight.reshape(heads)[:, order].reshape(
-                    c.emb_dim, c.emb_dim
+                    c.hidden_size, c.hidden_size
                 ),
                 q_norm_reordered=a.q_norm.weight[order],
                 k_norm_reordered=a.k_norm.weight[order],
@@ -117,7 +117,7 @@ class VisionTower(Tower):
             tree.patch_embedder, x_windows=table[0][x_ids], y_windows=table[1][y_ids]
         )
         self.derived = derived.tree()
-        rope = rope_angles(half, c.positions, c.rope_base).astype(bfloat16)
+        rope = rope_angles(half, c.positions, c.rope_theta).astype(bfloat16)
         self.x_angles, self.y_angles = rope[x_ids], rope[y_ids]
         self.capacity = max(
             self.walked(hk, wk)
@@ -125,9 +125,9 @@ class VisionTower(Tower):
             for wk in range(1, min(across, windows // hk) + 1)
         )
         # What the walks write, past `patches` rows of the image's windows.
-        self.window_rows = iron.state((self.capacity, c.emb_dim))
+        self.window_rows = iron.state((self.capacity, c.hidden_size))
         self.angle_rows = iron.state((self.capacity, c.head_dim))
-        self.minus_one = iron.weight(np.full((c.patches, c.emb_dim), -1, bfloat16))
+        self.minus_one = iron.weight(np.full((c.patches, c.hidden_size), -1, bfloat16))
         # Soft token j sums rows j * pool ** 2 onwards; a token past the
         # image's sums none of its rows.
         pool = np.zeros((tokens, c.patches), bfloat16)
@@ -168,7 +168,7 @@ class VisionTower(Tower):
             walk = self.walk(table, x_side, repeat=repeat, wk=wk, walked=walked)
             Copy.step(walk, self.window_rows[:walked])
             side = TensorAccessPattern.full(self.window_rows.shape)[:T]
-            side = self.window_rows.at(side, (T, c.emb_dim), bounds={0: n})
+            side = self.window_rows.at(side, (T, c.hidden_size), bounds={0: n})
             h = ElementwiseAdd.step(h, side)
         half = c.head_dim // 2
         for table, x_side, cut in (
@@ -222,9 +222,9 @@ class VisionTower(Tower):
 
     def head(self, x):
         c = self.config
-        # The mean's 1 / pool ** 2 and the sqrt(emb_dim) scale folded into
+        # The mean's 1 / pool ** 2 and the sqrt(hidden_size) scale folded into
         # the norm's epsilon: RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
-        s2 = c.emb_dim / c.pool**4
+        s2 = c.hidden_size / c.pool**4
         x = RMSNorm.step(x, epsilon=c.eps / s2)
         projection = self.embed_vision.embedding_projection.weight
         return GEMM.step(x, projection, b_col_maj=True, **ACCURATE)

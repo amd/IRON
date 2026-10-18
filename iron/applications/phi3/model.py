@@ -108,7 +108,9 @@ class Phi4Config(DecoderConfig):
             object.__setattr__(self, "rope_attention_scaling", scale)
 
     def _table(self, scaling) -> np.ndarray:
-        angles = rope_angles(self.rope_width, self.max_seq_len, self.rope_base, scaling)
+        angles = rope_angles(
+            self.rope_width, self.max_seq_len, self.rope_theta, scaling
+        )
         return angles * np.float32(self.rope_attention_scaling)
 
     def angles(self) -> np.ndarray:

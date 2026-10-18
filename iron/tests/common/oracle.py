@@ -129,7 +129,11 @@ def test_llama_oracle_head_uses_the_configs_eps():
     config = dataclasses.replace(SMALL, eps=1e-3)
     weights = checkpoint(config).tree("random", seed=8)
     oracle = Llama.oracle(config, weights)
-    x = np.random.default_rng(9).standard_normal((1, config.emb_dim)).astype(np.float32)
+    x = (
+        np.random.default_rng(9)
+        .standard_normal((1, config.hidden_size))
+        .astype(np.float32)
+    )
     norm = np.asarray(weights.model.norm.weight, np.float32)
     got = oracle.head(x)
     want = (x / np.sqrt(np.mean(x * x, -1, keepdims=True) + 1e-3) * norm) @ np.asarray(

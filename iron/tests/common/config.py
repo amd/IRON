@@ -28,9 +28,9 @@ EMBEDDING_GEMMA2_DIR = weights_dir("embeddinggemma-2")
 def test_llama_1b_from_checkpoint_is_its_published_shape():
     require(LLAMA_DIR / "config.json")
     c = LlamaConfig.from_checkpoint(LLAMA_DIR)
-    assert (c.vocab_size, c.emb_dim, c.n_layers) == (128256, 2048, 16)
-    assert (c.n_heads, c.n_kv_groups, c.head_dim) == (32, 8, 64)
-    assert (c.hidden_dim, c.rope_base) == (8192, 500000.0)
+    assert (c.vocab_size, c.hidden_size, c.num_hidden_layers) == (128256, 2048, 16)
+    assert (c.num_attention_heads, c.num_key_value_heads, c.head_dim) == (32, 8, 64)
+    assert (c.intermediate_size, c.rope_theta) == (8192, 500000.0)
     assert c.eps == 1e-5
     assert c.max_seq_len == 131072
     assert c.rope_scaling == Llama3RopeScaling(

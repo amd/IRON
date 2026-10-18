@@ -667,7 +667,7 @@ def test_vision_window_positions_are_each_patch_rows(npu2, hk, wk):
     c = tower.config
     k, n = c.pool, c.pool**2 * hk * wk
     rng = np.random.default_rng(hk * 100 + wk)
-    h = rng.standard_normal((c.patches, c.emb_dim)).astype(bfloat16)
+    h = rng.standard_normal((c.patches, c.hidden_size)).astype(bfloat16)
     got, angles = WindowPositions(tower).reference(
         h, n=n, hk=hk, wk=wk, walked=tower.walked(hk, wk)
     )
@@ -680,7 +680,7 @@ def test_vision_window_positions_are_each_patch_rows(npu2, hk, wk):
     np.testing.assert_array_equal(
         np.asarray(got)[:n].view(np.uint16), want.view(np.uint16)
     )
-    rope = rope_angles(c.head_dim // 2, c.positions, c.rope_base).astype(bfloat16)
+    rope = rope_angles(c.head_dim // 2, c.positions, c.rope_theta).astype(bfloat16)
     np.testing.assert_array_equal(
         np.asarray(angles)[:n].view(np.uint16),
         np.concatenate([rope[x], rope[y]], axis=1).view(np.uint16),

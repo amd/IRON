@@ -36,13 +36,13 @@ class VisionConfig(Config):
     """
 
     hidden: int = dataclasses.field(metadata={"json": "vision_config.hidden_size"})
-    n_layers: int = dataclasses.field(
+    num_hidden_layers: int = dataclasses.field(
         metadata={"json": "vision_config.num_hidden_layers"}
     )
-    n_heads: int = dataclasses.field(
+    num_attention_heads: int = dataclasses.field(
         metadata={"json": "vision_config.num_attention_heads"}
     )
-    hidden_dim: int = dataclasses.field(
+    intermediate_size: int = dataclasses.field(
         metadata={"json": "vision_config.intermediate_size"}
     )
     patch: int = dataclasses.field(metadata={"json": "vision_config.patch_size"})
@@ -62,7 +62,9 @@ class VisionConfig(Config):
 
     def __post_init__(self):
         if self.head_dim is None:
-            object.__setattr__(self, "head_dim", self.hidden // self.n_heads)
+            object.__setattr__(
+                self, "head_dim", self.hidden // self.num_attention_heads
+            )
 
     @property
     def side(self) -> int:
@@ -77,7 +79,7 @@ class VisionConfig(Config):
     def layer(self, i: int) -> Layer:
         # TODO(pin group): LayerNorm at the checkpoint's eps (layer_norm_eps)
         # once the pin carries the kernel option; the oracle uses it now.
-        H, D = self.n_heads, self.head_dim
+        H, D = self.num_attention_heads, self.head_dim
         return Layer(H, H, D, LAYER_NORM_EPS, self.hidden_act)
 
 

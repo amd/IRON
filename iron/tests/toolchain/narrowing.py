@@ -151,7 +151,7 @@ def test_variants_give_each_design_once():
     # once a setting.
     dev = from_name("npu1", n_cols=4)
     with aie_utils.set_current_device(dev):
-        model = llama_1b(n_layers=1)
+        model = llama_1b(num_hidden_layers=1)
         traced = model.trace(**model.shapes()[0])
         [mha] = {s.op for s in traced.steps if isinstance(s.op, MHA)}
         found = variants(mha, dev)

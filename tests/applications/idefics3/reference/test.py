@@ -30,9 +30,9 @@ pytestmark = pytest.mark.usefixtures("npu2")
 #: SmolVLM's vision tower at toy size: an 8x8 patch grid, shuffled 2x2.
 VISION = VisionConfig(
     hidden=256,
-    n_layers=2,
-    n_heads=4,
-    hidden_dim=512,
+    num_hidden_layers=2,
+    num_attention_heads=4,
+    intermediate_size=512,
     patch=16,
     image_size=128,
     scale_factor=2,
@@ -42,13 +42,13 @@ VISION = VisionConfig(
 #: Its text model, Llama's layer under ``model.text_model``.
 TEXT = SmolVLMTextConfig(
     vocab_size=512,
-    emb_dim=256,
-    n_layers=2,
-    n_heads=4,
-    n_kv_groups=2,
+    hidden_size=256,
+    num_hidden_layers=2,
+    num_attention_heads=4,
+    num_key_value_heads=2,
     head_dim=64,
-    hidden_dim=512,
-    rope_base=1e5,
+    intermediate_size=512,
+    rope_theta=1e5,
     max_seq_len=1024,
     prefill_chunk=256,
 )
@@ -59,7 +59,7 @@ def vision_names(c: VisionConfig) -> dict[str, tuple[int, ...]]:
     """The vision tower's and connector's tensors of a checkpoint of ``c``'s
     shape, by name.
     """
-    E, F = c.hidden, c.hidden_dim
+    E, F = c.hidden, c.intermediate_size
     v = "model.vision_model"
     out = {
         f"{v}.embeddings.patch_embedding.weight": (E, 3, c.patch, c.patch),
@@ -72,7 +72,7 @@ def vision_names(c: VisionConfig) -> dict[str, tuple[int, ...]]:
             E * c.scale_factor**2,
         ),
     }
-    for i in range(c.n_layers):
+    for i in range(c.num_hidden_layers):
         p = f"{v}.encoder.layers.{i}"
         for norm in ("layer_norm1", "layer_norm2"):
             out |= {f"{p}.{norm}.weight": (E,), f"{p}.{norm}.bias": (E,)}
@@ -95,7 +95,7 @@ def text_names(c: SmolVLMTextConfig) -> dict[str, tuple[int, ...]]:
     text = {
         k.replace("model.", "model.text_model.", 1): v for k, v in shapes(c).items()
     }
-    return text | {"lm_head.weight": (c.vocab_size, c.emb_dim)}
+    return text | {"lm_head.weight": (c.vocab_size, c.hidden_size)}
 
 
 def test_the_vision_tower_s_soft_tokens_match_its_oracle():

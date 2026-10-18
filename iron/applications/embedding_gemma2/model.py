@@ -130,7 +130,7 @@ class EmbeddingGemma(Encoder):
         w = self.language_model = weights.language_model
         super().__init__(config, w.layers, c.max_tokens)
         derived = Derived(weights)
-        scale = np.sqrt(np.float32(c.emb_dim))
+        scale = np.sqrt(np.float32(c.hidden_size))
         derived.put(
             w.embed_tokens,
             scaled=(w.embed_tokens.weight.astype(np.float32) * scale).astype(bfloat16),
@@ -139,15 +139,15 @@ class EmbeddingGemma(Encoder):
             c.layer(i).derive(derived, layer)
         self.rope = {
             D: iron.weight(rope_angles(D, c.max_tokens, base).astype(bfloat16))
-            for _, D, base in {c.heads(i) for i in range(c.n_layers)}
+            for _, D, base in {c.heads(i) for i in range(c.num_hidden_layers)}
         }
-        self.query = np.zeros((c.block, 1, c.emb_dim), bfloat16)
+        self.query = np.zeros((c.block, 1, c.hidden_size), bfloat16)
         # A power of four: a row's RMS over it is its norm over a power of two.
         width = 4 ** math.ceil(math.log(c.out_dim, 4))
-        mrl = np.zeros((len(c.mrl_dims), width, c.emb_dim), bfloat16)
+        mrl = np.zeros((len(c.mrl_dims), width, c.hidden_size), bfloat16)
         for j, d in enumerate(c.mrl_dims):
             mrl[j, :d] = w.embedding_projection.weight[:d]
-        derived.put(w.embedding_projection, mrl=mrl.reshape(-1, c.emb_dim))
+        derived.put(w.embedding_projection, mrl=mrl.reshape(-1, c.hidden_size))
         self.derived = derived.tree()
         self.unit = np.full(width, 1 / np.sqrt(width), bfloat16)
 
@@ -169,7 +169,7 @@ class EmbeddingGemma(Encoder):
         projection = tree.per_layer_model_projection.weight[i * P : (i + 1) * P]
         ple = GEMM.step(step.embeddings, projection, b_col_maj=True, **ACCURATE)
         norm = tree.per_layer_projection_norm.weight
-        ple = RMSNorm.step(ple, weight=norm, epsilon=c.eps * c.emb_dim)
+        ple = RMSNorm.step(ple, weight=norm, epsilon=c.eps * c.hidden_size)
         layer = c.layer(i)
         return layer.step(
             w,
@@ -190,7 +190,7 @@ class EmbeddingGemma(Encoder):
         multiplying them by 0.
         """
         c = self.config
-        h = x.reshape(x.shape[0], 1, c.emb_dim)
+        h = x.reshape(x.shape[0], 1, c.hidden_size)
         mean = MHA.step(
             self.query,
             h,
@@ -202,7 +202,7 @@ class EmbeddingGemma(Encoder):
             scale=0.0,
             num_pipelines=1,
         )
-        return mean.reshape(c.block, c.emb_dim)[0]
+        return mean.reshape(c.block, c.hidden_size)[0]
 
     def head(self, x):
         c = self.config

@@ -130,7 +130,7 @@ class Checkpoints:
 class CausalLM(Model):
     """A decoder on ``config``'s shape; a subclass gives ``head`` and ``oracle``.
 
-    The caches are ``(max_seq_len, n_kv_groups, head_dim)`` so no descriptor
+    The caches are ``(max_seq_len, num_key_value_heads, head_dim)`` so no descriptor
     steps by the context; a prompt chunk is a run of them
     (``cache[s : s + C][:rows]``), the last one short where the chunk does
     not divide ``max_seq_len``. A decode step attends with ``MHA`` of one
@@ -154,10 +154,10 @@ class CausalLM(Model):
         self.weights = weights
         self.decoder = weights.model if decoder is None else decoder
         self.layers = self.decoder.layers
-        if len(self.layers) != config.n_layers:
+        if len(self.layers) != config.num_hidden_layers:
             raise ValueError(
                 f"the checkpoint has {len(self.layers)} layers, the config "
-                f"{config.n_layers}"
+                f"{config.num_hidden_layers}"
             )
         L = config.max_seq_len
         # By layer: the key and value caches of a module that attends with its
@@ -261,7 +261,7 @@ class CausalLM(Model):
                 rope_start=rope_start,
                 ids=bounded,
             )
-        x = self.lookup(token).reshape(1, self.config.emb_dim)
+        x = self.lookup(token).reshape(1, self.config.hidden_size)
         return self.forward(
             x,
             prompt=False,
@@ -319,7 +319,7 @@ class CausalLM(Model):
             x = self.layer(step, i, weights, x)
         if prompt:
             x = Copy.step(x[rows - 1]).reshape(
-                1, c.emb_dim
+                1, c.hidden_size
             )  # the last row's logits alone
         logits = self.head(x)
         _, drawn = Sample.step(

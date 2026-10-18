@@ -46,7 +46,7 @@ class EmbeddingGemmaOracle(Oracle):
         )
 
     def layer(self, i: int, angles: np.ndarray, w, x, ple):
-        """Layer `i` on `x` `(n, emb_dim)`, with its per-layer input `ple`
+        """Layer `i` on `x` `(n, hidden_size)`, with its per-layer input `ple`
         `(n, ple_dim)` and the RoPE table `angles` of its head size.
         """
         return self.config.layer(i).oracle(self, w, x, self.attend, angles, ple=ple)
@@ -56,7 +56,7 @@ class EmbeddingGemmaOracle(Oracle):
 
         Args:
             tokens: The token ids.
-            soft: Each placeholder id's soft tokens `(k, emb_dim)`, the
+            soft: Each placeholder id's soft tokens `(k, hidden_size)`, the
                 `k` placeholders' embeddings in order.
 
         Raises:
@@ -66,7 +66,9 @@ class EmbeddingGemmaOracle(Oracle):
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         n = tokens.size
         # Hugging Face rounds the scale to the weights' dtype: 22.625 in bfloat16 only.
-        x = self.embedding[tokens].astype(np.float32) * np.float32(np.sqrt(c.emb_dim))
+        x = self.embedding[tokens].astype(np.float32) * np.float32(
+            np.sqrt(c.hidden_size)
+        )
         for token, rows in soft.items():
             at = tokens == token
             if at.sum() != len(rows):
@@ -74,10 +76,13 @@ class EmbeddingGemmaOracle(Oracle):
                     f"{at.sum()} placeholders {token} for {len(rows)} soft tokens"
                 )
             x[at] = rows
-        ple = (x @ self.ple.T) * np.float32(c.emb_dim**-0.5)
-        ple = self.rms_norm(ple.reshape(n, c.n_layers, c.ple_dim), self.ple_norm)
+        ple = (x @ self.ple.T) * np.float32(c.hidden_size**-0.5)
+        ple = self.rms_norm(
+            ple.reshape(n, c.num_hidden_layers, c.ple_dim), self.ple_norm
+        )
         angles = {
-            D: rope_angles(D, n, base) for _, D, base in map(c.heads, range(c.n_layers))
+            D: rope_angles(D, n, base)
+            for _, D, base in map(c.heads, range(c.num_hidden_layers))
         }
         for i, w in enumerate(self.layers):
             x = self.layer(i, angles[c.heads(i)[1]], w, x, ple[:, i])
@@ -168,7 +173,7 @@ class AudioOracle(Oracle):
     def subsample(self, features, frames: int):
         """The two convolutions over `features` `(F, mels)` with `frames`
         valid, each masking the rows its input's mask says are padding, and
-        the input projection: `(ceil(F / 4), emb_dim)`.
+        the input projection: `(ceil(F / 4), hidden_size)`.
         """
         sub = self.weights.subsample_conv_projection
         mask = np.arange(features.shape[0]) < frames
@@ -192,7 +197,7 @@ class AudioOracle(Oracle):
         logits soft-capped.
         """
         c = self.config
-        T, H, D = x.shape[0], c.n_heads, c.head_dim
+        T, H, D = x.shape[0], c.num_attention_heads, c.head_dim
         q_scale = np.float32(D**-0.5 / math.log(2))
         k_scale = np.float32(math.log(1 + math.e) / math.log(2))
         q = self.clipped(w.q_proj, x).reshape(T, H, D) * q_scale
@@ -218,7 +223,7 @@ class AudioOracle(Oracle):
     def light_conv(self, w, x):
         """The gated linear unit, then a causal depthwise convolution in time."""
         c = self.config
-        E, K, T = c.emb_dim, c.conv_kernel, x.shape[0]
+        E, K, T = c.hidden_size, c.conv_kernel, x.shape[0]
         h = self.clipped(w.linear_start, self.rms_norm(x, w.pre_layer_norm.weight))
         h = h[:, :E] * (0.5 * (1 + np.tanh(0.5 * h[:, E:])))
         h = np.pad(h, ((K - 1, 0), (0, 0)))
@@ -270,7 +275,7 @@ class VisionOracle(Oracle):
             ]
         )
         self.angles = rope_angles(
-            config.head_dim // 2, config.positions, config.rope_base
+            config.head_dim // 2, config.positions, config.rope_theta
         )
 
     def patches(self, image: np.ndarray, max_tokens: int):
@@ -352,9 +357,9 @@ class VisionOracle(Oracle):
         # numbered row-major over the blocks.
         k = c.pool
         block = x // k + (x.max() + 1) // k * (y // k)
-        pooled = np.zeros((block.max() + 1, c.emb_dim), np.float32)
+        pooled = np.zeros((block.max() + 1, c.hidden_size), np.float32)
         np.add.at(pooled, block, h)
-        pooled *= np.float32(np.sqrt(c.emb_dim) / k**2)
+        pooled *= np.float32(np.sqrt(c.hidden_size) / k**2)
         return self.rms_norm(pooled) @ self.projection.T
 
     def soft_tokens(self, image, max_tokens: int) -> np.ndarray:

@@ -71,7 +71,7 @@ class AudioTower(Tower):
             raise ValueError(f"a frame of {c.frame} samples is not two hops")
         super().__init__(config, tree.layers, c.max_tokens, c.max_tokens)
         T = c.max_tokens
-        H, D, W, B = c.n_heads, c.head_dim, c.window, c.band
+        H, D, W, B = c.num_attention_heads, c.head_dim, c.window, c.band
         C0, C1 = c.channels
         F0 = c.mels // 2
         # The first convolution's output row: each frequency's channels in a
@@ -249,7 +249,7 @@ class AudioTower(Tower):
 
     def attention(self, a, d, h, tokens):
         c = self.config
-        T, H, D, W, B = h.shape[0], c.n_heads, c.head_dim, c.window, c.band
+        T, H, D, W, B = h.shape[0], c.num_attention_heads, c.head_dim, c.window, c.band
         K = self.width
         keys, values = self.keys, self.values
         scores, probs = self.scores, self.probs
@@ -300,7 +300,7 @@ class AudioTower(Tower):
         h = start.clamp(
             RMSNorm.step(x, weight=conv.pre_layer_norm.weight, epsilon=c.eps)
         )
-        glu, E = conv.linear_start.linear.weight, c.emb_dim
+        glu, E = conv.linear_start.linear.weight, c.hidden_size
         a, b = start.project(h, glu[:E]), start.project(h, glu[E:])
         h = DepthwiseConv1d.step(ElementwiseMul.step(a, Sigmoid.step(b)), d.planes)
         h = SiLU.step(RMSNorm.step(h, weight=conv.conv_norm.weight, epsilon=c.eps))

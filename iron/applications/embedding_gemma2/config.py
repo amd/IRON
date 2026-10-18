@@ -29,27 +29,27 @@ class Config(lm.Config):
     vocab_size: int = dataclasses.field(
         default=262144, metadata={"json": "text_config.vocab_size"}
     )
-    emb_dim: int = dataclasses.field(
+    hidden_size: int = dataclasses.field(
         default=512, metadata={"json": "text_config.hidden_size"}
     )
-    n_layers: int = dataclasses.field(
+    num_hidden_layers: int = dataclasses.field(
         default=24, metadata={"json": "text_config.num_hidden_layers"}
     )
-    n_heads: int = dataclasses.field(
+    num_attention_heads: int = dataclasses.field(
         default=4, metadata={"json": "text_config.num_attention_heads"}
     )
-    hidden_dim: int = dataclasses.field(
+    intermediate_size: int = dataclasses.field(
         default=2048, metadata={"json": "text_config.intermediate_size"}
     )
     # A sliding layer's KV groups, head size and RoPE base; a global layer's
     # are its own.
-    n_kv_groups: int = dataclasses.field(
+    num_key_value_heads: int = dataclasses.field(
         default=2, metadata={"json": "text_config.num_key_value_heads"}
     )
     head_dim: int = dataclasses.field(
         default=256, metadata={"json": "text_config.head_dim"}
     )
-    rope_base: float = dataclasses.field(
+    rope_theta: float = dataclasses.field(
         default=10000.0,
         metadata={"json": "text_config.rope_parameters.sliding_attention.rope_theta"},
     )
@@ -121,7 +121,7 @@ class Config(lm.Config):
         """Layer ``i``'s KV groups, head size and RoPE base."""
         if i in self.global_layers:
             return self.global_kv_groups, self.global_head_dim, self.global_rope_base
-        return self.n_kv_groups, self.head_dim, self.rope_base
+        return self.num_key_value_heads, self.head_dim, self.rope_theta
 
     def layer(self, i: int) -> lm.Layer:
         """Layer ``i``: unscaled attention over RMS-normed values, a sliding
@@ -129,7 +129,7 @@ class Config(lm.Config):
         """
         G, D, _ = self.heads(i)
         return lm.Layer(
-            heads=self.n_heads,
+            heads=self.num_attention_heads,
             groups=G,
             head_dim=D,
             eps=self.eps,
@@ -143,16 +143,16 @@ class Config(lm.Config):
 
 @dataclasses.dataclass(frozen=True)
 class AudioConfig(lm.Config):
-    emb_dim: int = dataclasses.field(
+    hidden_size: int = dataclasses.field(
         default=1024, metadata={"json": "audio_config.hidden_size"}
     )
-    n_layers: int = dataclasses.field(
+    num_hidden_layers: int = dataclasses.field(
         default=12, metadata={"json": "audio_config.num_hidden_layers"}
     )
-    n_heads: int = dataclasses.field(
+    num_attention_heads: int = dataclasses.field(
         default=8, metadata={"json": "audio_config.num_attention_heads"}
     )
-    hidden_dim: int = 4096
+    intermediate_size: int = 4096
     mels: int = 128
     # The two subsampling convolutions' output channels.
     channels: tuple[int, int] = dataclasses.field(
@@ -197,7 +197,7 @@ class AudioConfig(lm.Config):
 
     @property
     def head_dim(self) -> int:
-        return self.emb_dim // self.n_heads
+        return self.hidden_size // self.num_attention_heads
 
     def tokens(self, frames: int) -> int:
         """The soft tokens `frames` valid feature frames give: each
@@ -214,10 +214,10 @@ class AudioConfig(lm.Config):
         return max(0, -(-audio // self.hop))
 
     def timing(self) -> np.ndarray:
-        """The `(window, emb_dim)` float32 timing signal of each distance a
+        """The `(window, hidden_size)` float32 timing signal of each distance a
         query reaches back: sines, then cosines.
         """
-        n = self.emb_dim // 2
+        n = self.hidden_size // 2
         rates = np.exp(np.arange(n) * -(math.log(1e4) / (n - 1))).astype(np.float32)
         angles = np.arange(self.window, dtype=np.float32)[:, None] * rates
         return np.concatenate([np.sin(angles), np.cos(angles)], axis=-1)
@@ -225,19 +225,19 @@ class AudioConfig(lm.Config):
 
 @dataclasses.dataclass(frozen=True)
 class VisionConfig(lm.Config):
-    emb_dim: int = dataclasses.field(
+    hidden_size: int = dataclasses.field(
         default=768, metadata={"json": "vision_config.hidden_size"}
     )
-    n_layers: int = dataclasses.field(
+    num_hidden_layers: int = dataclasses.field(
         default=16, metadata={"json": "vision_config.num_hidden_layers"}
     )
-    n_heads: int = dataclasses.field(
+    num_attention_heads: int = dataclasses.field(
         default=12, metadata={"json": "vision_config.num_attention_heads"}
     )
     head_dim: int = dataclasses.field(
         default=64, metadata={"json": "vision_config.head_dim"}
     )
-    hidden_dim: int = dataclasses.field(
+    intermediate_size: int = dataclasses.field(
         default=3072, metadata={"json": "vision_config.intermediate_size"}
     )
     # A patch's side in pixels, and a soft token's side in patches.
@@ -251,7 +251,7 @@ class VisionConfig(lm.Config):
     positions: int = dataclasses.field(
         default=10240, metadata={"json": "vision_config.position_embedding_size"}
     )
-    rope_base: float = dataclasses.field(
+    rope_theta: float = dataclasses.field(
         default=100.0, metadata={"json": "vision_config.rope_parameters.rope_theta"}
     )
     hidden_act: str = dataclasses.field(
@@ -281,8 +281,8 @@ class VisionConfig(lm.Config):
     def layer(self, i: int) -> lm.Layer:
         """Layer ``i``: unscaled attention over RMS-normed values."""
         return lm.Layer(
-            heads=self.n_heads,
-            groups=self.n_heads,
+            heads=self.num_attention_heads,
+            groups=self.num_attention_heads,
             head_dim=self.head_dim,
             eps=self.eps,
             activation=self.hidden_act,

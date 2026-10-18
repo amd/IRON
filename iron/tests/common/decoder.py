@@ -5,7 +5,7 @@
 scale (``rope_attention_scaling``), device-free: the angle table's own
 shape and values, and that a traced decoder reads it at that width rather
 than ``head_dim`` -- Phi-4-mini-instruct's need, exercised here without a
-model of its own. Also ``head_dim``'s own fallback (``emb_dim // n_heads``)
+model of its own. Also ``head_dim``'s own fallback (``hidden_size // num_attention_heads``)
 for a checkpoint whose ``config.json`` has none (Qwen 2.5, Granite, LFM2,
 Phi-4-mini-instruct all omit it), and ``max_seq_len``, the checkpoint's
 native context, served where no prompt chunk divides it.
@@ -42,10 +42,12 @@ class _PartialRotaryLlama(Llama):
 
     def layer(self, step, i, w, x):
         c, n = self.config, x.shape[0]
-        H, D, A = c.n_heads, c.head_dim, c.rope_width
+        H, D, A = c.num_attention_heads, c.head_dim, c.rope_width
         h = RMSNorm.step(x, weight=w.input_layernorm.weight)
         q = w.self_attn.q_proj.weight
-        q_rot_weight = q.reshape(H, D, c.emb_dim)[:, :A, :].reshape(H * A, c.emb_dim)
+        q_rot_weight = q.reshape(H, D, c.hidden_size)[:, :A, :].reshape(
+            H * A, c.hidden_size
+        )
         q_rot = F.linear(h, q_rot_weight)
         RoPE.step(q_rot.reshape(n * H, A), step.angles)
         return x
@@ -72,18 +74,18 @@ def test_rope_width_is_the_rotary_dim_when_given():
     assert cfg.angles().shape == (cfg.max_seq_len, 32)
     # Every other weight keeps the full head_dim: only the angle table narrows.
     q = model.layers[0].self_attn.q_proj.weight
-    assert q.shape == (cfg.n_heads * cfg.head_dim, cfg.emb_dim)
+    assert q.shape == (cfg.num_attention_heads * cfg.head_dim, cfg.hidden_size)
 
 
 def test_angles_are_the_unscaled_table_at_rope_width():
     cfg = small(rotary_dim=32).config
-    expected = rope_angles(32, cfg.max_seq_len, cfg.rope_base, cfg.rope_scaling)
+    expected = rope_angles(32, cfg.max_seq_len, cfg.rope_theta, cfg.rope_scaling)
     np.testing.assert_array_equal(cfg.angles(), expected.astype(np.float32))
 
 
 def test_attention_scaling_multiplies_the_whole_table_once():
     cfg = small(rotary_dim=32, rope_attention_scaling=1.25).config
-    unscaled = rope_angles(32, cfg.max_seq_len, cfg.rope_base, cfg.rope_scaling)
+    unscaled = rope_angles(32, cfg.max_seq_len, cfg.rope_theta, cfg.rope_scaling)
     np.testing.assert_allclose(cfg.angles(), unscaled * np.float32(1.25), rtol=1e-6)
 
 
@@ -94,7 +96,7 @@ def test_attention_scaling_of_one_leaves_llama_unchanged():
     assert cfg.rope_attention_scaling == 1.0
     np.testing.assert_array_equal(
         cfg.angles(),
-        rope_angles(cfg.head_dim, cfg.max_seq_len, cfg.rope_base, cfg.rope_scaling),
+        rope_angles(cfg.head_dim, cfg.max_seq_len, cfg.rope_theta, cfg.rope_scaling),
     )
 
 
@@ -187,7 +189,7 @@ def test_a_context_no_chunk_divides_is_allocated_exactly():
     cfg = model.config
     assert cfg.angles().shape == (300, cfg.head_dim)
     t = model.trace(**model.shapes()[1])
-    row = cfg.n_kv_groups * cfg.head_dim * np.dtype(bfloat16).itemsize
+    row = cfg.num_key_value_heads * cfg.head_dim * np.dtype(bfloat16).itemsize
     assert t.pinned["keys.0"] == t.pinned["values.1"] == 300 * row
     assert t.pinned["drawn"] == 300 * np.dtype(np.int32).itemsize
     with pytest.raises(ValueError, match="301 tokens do not fit 300 rows"):

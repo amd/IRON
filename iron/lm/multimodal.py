@@ -68,7 +68,7 @@ class Multimodal(Model):
         for token, tower in towers.items():
             self.at[token] = rows
             rows += tower.soft_rows
-        self.merged = iron.state((rows, text.config.emb_dim))
+        self.merged = iron.state((rows, text.config.hidden_size))
         # What each tower ran on last, so a causal model's caches outlive a
         # call with the same.
         self._last_raw: dict[int, tuple] = {}

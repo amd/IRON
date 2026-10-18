@@ -55,7 +55,7 @@ class Lfm2Config(DecoderConfig):
     keys, and which layers are full attention.
     """
 
-    hidden_dim: int = dataclasses.field(default=0, init=False)
+    intermediate_size: int = dataclasses.field(default=0, init=False)
     eps: float = dataclasses.field(
         default=1e-5, kw_only=True, metadata={"json": "norm_eps"}
     )
@@ -88,7 +88,7 @@ class Lfm2Config(DecoderConfig):
             if self.ffn_dim_multiplier is not None:
                 F = int(self.ffn_dim_multiplier * F)
             F = self.multiple_of * -(-F // self.multiple_of)
-        object.__setattr__(self, "hidden_dim", F)
+        object.__setattr__(self, "intermediate_size", F)
 
 
 class Lfm2Oracle(Oracle):
@@ -130,7 +130,7 @@ class Lfm2(CausalLM):
 
     def __init__(self, config: Lfm2Config, weights):
         super().__init__(config, weights)
-        E, K, C = config.emb_dim, config.conv_kernel, config.prefill_chunk
+        E, K, C = config.hidden_size, config.conv_kernel, config.prefill_chunk
         derived = Derived(weights)
         for i, w in enumerate(self.layers):
             if "conv" in vars(w):
@@ -161,7 +161,7 @@ class Lfm2(CausalLM):
         tap weights, gated on both sides by a projection of ``h``.
         """
         c, n = self.config, h.shape[0]
-        E, K, C = c.emb_dim, c.conv_kernel, c.prefill_chunk
+        E, K, C = c.hidden_size, c.conv_kernel, c.prefill_chunk
         # Three projections, not one split three ways: a bounded row count's
         # column range of a combined projection is a strided view no single
         # descriptor fits, where three plain projections need none.

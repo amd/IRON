@@ -973,19 +973,19 @@ def test_llama_decode_traces_and_tunes():
     assert {b.expression.value.name for b in t.bindings} == {"token", "position"}
     by_op = {id(b.op): b for b in t.bindings}
     embedding, angles = t.steps[0].op, t.steps[1].op
-    assert by_op[id(embedding)].expression == Affine(token, cfg.emb_dim)
+    assert by_op[id(embedding)].expression == Affine(token, cfg.hidden_size)
     assert by_op[id(angles)].expression == Affine(position, cfg.head_dim)
     draw = {b.member.name: b.expression for b in t.bindings if b.op is t.steps[-1].op}
     assert draw == {"row": Affine(position, 4), "at": Affine(position)}
     # The weights are named by the checkpoint; the caches are pinned state.
     assert "weights.model.layers.1.self_attn.q_proj.weight" in t.pinned
     assert "keys.0" in t.pinned
-    assert t.pinned["keys.0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
+    assert t.pinned["keys.0"] == cfg.num_key_value_heads * L * cfg.head_dim * 2
     # Every MHA attends over the keys up to the position, its one query
     # packed by its heads.
     mhas = [s.op for s in t.steps if type(s.op) is MHA]
     assert all(op.kv_interleaved for op in mhas)
-    assert len(mhas) == cfg.n_layers
+    assert len(mhas) == cfg.num_hidden_layers
     assert all(
         {k: e.name for k, e in op.bound_values.items()} == {"kv_valid": "position_p1"}
         for op in mhas
@@ -996,8 +996,8 @@ def test_llama_decode_traces_and_tunes():
         s.op.array_key()
         for s in t.steps
         if type(s.op) is GEMV
-        and s.op.M == cfg.n_heads * cfg.head_dim
-        and s.op.K == cfg.emb_dim
+        and s.op.M == cfg.num_attention_heads * cfg.head_dim
+        and s.op.K == cfg.hidden_size
     }
     assert len(q_arrays) == 1
     # Every operator tunes and is compatible on an 8-column device.
@@ -1006,7 +1006,7 @@ def test_llama_decode_traces_and_tunes():
     # The profile gave the tiles decode was tuned with: half a head per
     # projection tile, a column's share of the row for the output
     # projection, a pipeline per KV head, one core for the norm.
-    E, D = cfg.emb_dim, cfg.head_dim
+    E, D = cfg.hidden_size, cfg.head_dim
     gemvs = [s.op for s in t.steps if type(s.op) is GEMV]
     q, k, v, o, gate, up, down = gemvs[:7]
     assert (q.tile_size_output, k.tile_size_output, o.tile_size_output) == (
@@ -1014,8 +1014,11 @@ def test_llama_decode_traces_and_tunes():
         D // 2,
         E // 8,
     )
-    assert (down.tile_size_input, gate.tile_size_output) == (1, cfg.hidden_dim // 8)
-    assert mhas[0].num_pipelines == cfg.n_kv_groups
+    assert (down.tile_size_input, gate.tile_size_output) == (
+        1,
+        cfg.intermediate_size // 8,
+    )
+    assert mhas[0].num_pipelines == cfg.num_key_value_heads
     assert (
         next(
             s.op for s in t.steps if type(s.op) is RMSNorm and s.op.weighted
@@ -1047,7 +1050,7 @@ def test_llama_decode_folds_its_norms_into_the_projections(npu2):
     ]
     assert (len(t.steps), len(f.steps)) == (41, 24)
     assert not any(type(s.op) is RMSNorm for s in f.steps)
-    row = model.config.n_kv_groups * model.config.head_dim
+    row = model.config.num_key_value_heads * model.config.head_dim
     placed = {
         str(h.ref()): (
             s.op.placements,
@@ -1108,7 +1111,11 @@ def test_llama_prompt_traces_over_the_same_caches():
     gemms = [s.op for s in t.steps if type(s.op) is FLMGEMM]
     assert all(op.b_col_maj for op in gemms)
     K = {op.K for op in gemms}
-    assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
+    assert K == {
+        cfg.hidden_size,
+        cfg.intermediate_size,
+        cfg.num_attention_heads * cfg.head_dim,
+    }
     for op in t.operators:
         op.resolved(aie_utils.get_current_device())
 
@@ -1116,7 +1123,7 @@ def test_llama_prompt_traces_over_the_same_caches():
 @pytest.mark.parametrize("device", ["npu1", "npu2"])
 def test_llama_prompt_projects_with_flm_gemm(device, request):
     dev = request.getfixturevalue(device)
-    g = llama_1b(n_layers=1)
+    g = llama_1b(num_hidden_layers=1)
     t = g.trace(**g.shapes()[1])
     ops = [s.op for s in t.steps]
     assert not any(type(op) is GEMM for op in ops)
@@ -1153,7 +1160,7 @@ def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
     rows, the 256-row units they reach and that less one, A's repeat count,
     and every projection shares them.
     """
-    g = llama_1b(n_layers=2)
+    g = llama_1b(num_hidden_layers=2)
     t = g.trace(**g.shapes()[1])
     words, shared = _words(t, share=True)
     assert len(words) <= 32
@@ -1275,7 +1282,7 @@ def test_llama_names_only_the_tunables_that_matter(monkeypatch):
     parameters that shape needs.
     """
     npu2 = from_name("npu2", n_cols=8)
-    real, scaled = llama_1b(n_layers=1), small()
+    real, scaled = llama_1b(num_hidden_layers=1), small()
     settings = [
         (npu2, lambda: real.trace(**real.shapes()[0])),
         (npu2, lambda: real.trace(**real.shapes()[1])),
