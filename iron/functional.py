@@ -19,6 +19,7 @@ import math
 import ml_dtypes
 
 from iron.common import Precision
+from iron.operators.copy import Copy
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gelu import GELU
@@ -139,3 +140,40 @@ def gelu(x, approximate: str = "none"):
 def rope(x, angles):
     """``x`` ``(rows, head_dim)`` turned by RoPE, a row of ``angles`` per row."""
     return RoPE.step(x, angles)
+
+
+def causal_conv1d(x, taps, state):
+    """``x`` ``(rows, channels)`` through a depth-wise causal FIR of ``K``
+    taps: row ``t`` is ``sum_k taps[k] * x[t - K + 1 + k]``, each channel its
+    own column of ``taps`` ``(K, channels)``, the rows before ``x``'s first
+    the carried ones.
+
+    ``state`` is ``(read, write, window, tail)``: the ``K - 1`` rows before
+    ``x``'s first, where the ``K - 1`` ending it go, and the scratch states
+    a call stages them in, ``(2, chunk, channels)`` and ``(K - 1, channels)``.
+    ``x`` bounded per call on its rows (``x[:n]``) is a prompt chunk of
+    ``chunk`` rows; one row otherwise is a decode step.
+    """
+    read, write, window, tail = state
+    K, C = taps.shape[0], window.shape[1]
+    # Block 0 ends with the rows before the call; block 1 is the call's.
+    flat = window.reshape(2 * C, x.shape[1])
+    first = C - (K - 1)
+    flat[first:C] = read
+    rows = x.bounds.get(0)
+    if rows is None:
+        flat[C] = x.reshape(x.shape[1])
+        y = x * taps[K - 1]
+        for k in range(K - 1):
+            y = y + flat[first + k : first + k + 1] * taps[k]
+        Copy.step(flat[first + 1 : C + 1], write)
+        return y
+    window[1, :rows] = x
+    y = flat[first : first + C] * taps[0]
+    for k in range(1, K):
+        y = y + flat[first + k : first + k + C] * taps[k]
+    y = y[:rows]
+    for j in range(K - 1):
+        tail[j] = flat[first + rows + j]
+    Copy.step(tail, write)
+    return y

@@ -21,6 +21,9 @@ public API adds its entry under Unreleased.
 - `iron.functional` with torch's names: `linear`, `rms_norm`, `layer_norm`,
   `silu`, `gelu(x, approximate=)` and `rope`. `linear` replaces
   `iron.lm.blocks.project`.
+- `iron.functional.causal_conv1d(x, taps, state)`, a depth-wise causal FIR
+  over a prompt chunk or a decode step that stages and carries the rows
+  before the call itself; LFM2's short conv calls it.
 - Handle arithmetic in graph bodies: `x + y` and `x * y` record an
   elementwise step, or a rowwise one when a row meets a matrix, in either
   order.

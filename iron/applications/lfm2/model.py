@@ -36,7 +36,6 @@ import iron
 import iron.functional as F
 from iron import lm
 from iron.lm import Attention, CausalLM, Checkpoints, DecoderConfig, not_json
-from iron.operators.copy import Copy
 
 
 @dataclasses.dataclass(frozen=True)
@@ -101,7 +100,7 @@ class Lfm2(CausalLM):
             if "conv" in vars(w):
                 tail = Checkpoints.of((K - 1, E), config.max_seq_len, C)
                 self.recurrent[i] = {"conv": tail}
-        # The rows before a call end block 0; a chunk's rows are block 1.
+        # Scratch F.causal_conv1d stages a call's window and tail in.
         self.conv_window = iron.state((2, C, E))
         self.conv_tail = iron.state((K - 1, E))
 
@@ -139,8 +138,7 @@ class Lfm2(CausalLM):
         FIR of ``conv_kernel`` taps over ``h``'s rows, each channel its own
         tap weights, gated on both sides by a projection of ``h``.
         """
-        c, n = self.config, h.shape[0]
-        E, K, C = c.hidden_size, c.conv_kernel, c.prefill_chunk
+        n, E = h.shape[0], self.config.hidden_size
         # Three projections, not one split three ways: a bounded row count's
         # column range of a combined projection is a strided view no single
         # descriptor fits, where three plain projections need none.
@@ -148,28 +146,9 @@ class Lfm2(CausalLM):
             F.linear(h, w.in_proj.weight[k * E : (k + 1) * E]).reshape(n, E)
             for k in range(3)
         )
-        gated = b * x
-        tap = w.taps
         read, write = self.recurrent[i]["conv"].at(step)
-        flat = self.conv_window.reshape(2 * C, E)
-        first = C - (K - 1)
-        flat[first:C] = read
-        if step.prompt:
-            self.conv_window[1, : step.rows] = gated
-            total = flat[first : first + C] * tap[0]
-            for k in range(1, K):
-                total = total + flat[first + k : first + k + C] * tap[k]
-            total = total[: step.rows]
-            for j in range(K - 1):
-                self.conv_tail[j] = flat[first + step.rows + j]
-            Copy.step(self.conv_tail, write)
-        else:
-            flat[C] = gated.reshape(E)
-            total = gated * tap[K - 1]
-            for k in range(K - 1):
-                total = total + flat[first + k : first + k + 1] * tap[k]
-            Copy.step(flat[first + 1 : C + 1], write)
-        return F.linear(cc * total, w.out_proj.weight)
+        state = (read, write, self.conv_window, self.conv_tail)
+        return F.linear(cc * F.causal_conv1d(b * x, w.taps, state), w.out_proj.weight)
 
 
 if __name__ == "__main__":

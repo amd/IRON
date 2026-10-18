@@ -2267,6 +2267,34 @@ def test_the_reference_runs_the_trace_so_held_state_takes_arithmetic():
     np.testing.assert_array_equal(held.host[:4], x)
 
 
+def test_causal_conv1d_carries_its_tail_from_a_prompt_chunk_to_a_decode_step():
+    """A bounded chunk then one row, each row the taps over it and the rows
+    before it, the first chunk's from zeros, the step's from the chunk's tail.
+    """
+    K, C, n = 3, 8, 5
+    carried, tail = iron.state((K - 1, 64)), iron.state((K - 1, 64))
+    window = iron.state((2, C, 64))
+    taps = (np.arange(K * 64) % 5 + 1).reshape(K, 64).astype(bfloat16)
+    state = (carried, carried, window, tail)
+
+    class Prompt(iron.Graph):
+        def body(self, x, *, rows: Scratchpad[np.int32]):
+            return F.causal_conv1d(x[:rows], taps, state)
+
+    class Decode(iron.Graph):
+        def body(self, x):
+            return F.causal_conv1d(x, taps, state)
+
+    x = (np.arange((C + 1) * 64) % 7).reshape(C + 1, 64).astype(bfloat16)
+    got = np.concatenate(
+        [Prompt().reference(x[:C], rows=n), Decode().reference(x[C:])]
+    ).astype(np.float32)
+    rows = np.concatenate([np.zeros((K - 1, 64)), x[:n], x[C:]])
+    t = taps.astype(np.float32)
+    want = [sum(t[k] * rows[i + k] for k in range(K)) for i in range(n + 1)]
+    np.testing.assert_array_equal(got, want)
+
+
 def _steps(t) -> list[str]:
     return [type(s.op).__name__ for s in t.steps]
 
