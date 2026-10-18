@@ -20,7 +20,6 @@ from iron import Precision
 from iron.lm import MLP, AttentionSpec, DecoderLayerSpec, Norm
 from iron.applications.embedding_gemma2.blocks import SandwichLayer, TextLayer
 from iron.operators.mha import MHA
-from iron.tests.common.llama_model import small
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -262,11 +261,6 @@ def test_a_q_k_or_v_norm_needs_its_epsilon():
 def test_gelu_refuses_the_exact_form_it_has_no_operator_for():
     with pytest.raises(ValueError, match="only approximate='tanh'"):
         F.gelu(None)
-
-
-def test_causal_attention_refuses_a_window():
-    with pytest.raises(ValueError, match="window"):
-        small().attend(None, 0, None, None, None, window=4)
 
 
 # The per-layer input's width, and the rows of the Gemma layer's test.

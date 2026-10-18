@@ -197,7 +197,7 @@ class CausalLM(Model):
                 f"{config.num_hidden_layers}"
             )
         self.caches = {
-            i: KVCache(config)
+            i: KVCache(config, config.layer(i).attention.window)
             for i, w in enumerate(self.layers)
             if "self_attn" in vars(w)
         }
@@ -344,13 +344,9 @@ class CausalLM(Model):
         scale: float | None = None,
         window: int | None = None,
     ):
-        """Layer ``i``'s ``KVCache.attend``.
-
-        Raises:
-            ValueError: A ``window`` is given: none is built over the caches.
+        """Layer ``i``'s ``KVCache.attend``, built with its layer's
+        ``window``.
         """
-        if window is not None:
-            raise ValueError(f"CausalLM.attend: no {window}-position window")
         return self.caches[i].attend(step, q, k, v, scale)
 
     def shapes(self) -> list[dict]:

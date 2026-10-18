@@ -18,7 +18,8 @@ import iron
 from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
 from iron.lm.blocks import KVCache
 from iron.lm.checkpoint import leaves
-from iron.tests.common.llama_model import SMALL, checkpoint
+from iron.operators.mha import MHA
+from iron.tests.common.llama_model import SMALL, checkpoint, small
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -274,3 +275,13 @@ def test_attention_refuses_a_norm_of_other_than_q_and_k():
 def test_a_cache_refuses_a_sliding_window():
     with pytest.raises(ValueError, match="use_sliding_window is set"):
         KVCache(dataclasses.replace(SMALL, use_sliding_window=True))
+
+
+def test_a_cache_attends_within_its_window():
+    """A layer's cache built with a window gives its MHA that window; the
+    others attend to every position before the query.
+    """
+    model = small()
+    model.model.layers[0].cache = KVCache(model.config, window=64)
+    t = model.trace(**model.shapes()[1])
+    assert [s.op.window for s in t.steps if type(s.op) is MHA] == [64, None]

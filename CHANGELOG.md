@@ -55,6 +55,10 @@ public API adds its entry under Unreleased.
   `Rope(c)`; their projections are biased where the config's
   `attention_bias` and `mlp_bias` say. `iron.lm` exports `Attention`, `GatedMLP` and
   `DecoderLayer`.
+- `KVCache(c, window=None)`: the cache attends within `window` positions
+  before a query, as `MHA` counts them (Hugging Face's `sliding_window`
+  minus one). A layer on `config.layer(i)` gets its attention's window
+  this way, in place of `CausalLM.attend`'s refusal.
 - `Linear.split(x, *rows)`, a fused projection's outputs: one `F.linear`
   per run of the weight's rows.
 - `Graph.trace(precision=)`, which `compile(precision=)` passes on instead of

@@ -460,22 +460,30 @@ class KVCache(iron.Graph):
     not divide ``max_seq_len``; a decode step attends with ``MHA`` of one
     query, which costs the context, not the cache.
 
+    Args:
+        c: The decoder's shape.
+        window: The positions before a query it attends to besides its own,
+            as ``MHA`` counts them; None is all. Hugging Face's
+            ``sliding_window`` counts the query's own, so a model passes
+            ``sliding_window - 1``.
+
     Raises:
         ValueError: The config's ``use_sliding_window`` is set.
     """
 
-    def __init__(self, c):
+    def __init__(self, c, window: int | None = None):
         if c.use_sliding_window:
             raise ValueError("KVCache: use_sliding_window is set; none attends in one")
         shape = (c.max_seq_len, c.num_key_value_heads, c.head_dim)
         self.keys, self.values = iron.state(shape), iron.state(shape)
-        self.chunk = c.prefill_chunk
+        self.chunk, self.window = c.prefill_chunk, window
 
     def attend(self, step, q, k, v, scale: float | None = None):
         """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` at ``step``'s
         positions and attend ``q`` ``(rows, heads, head_dim)`` over every
-        position up to its last, causally, the logits scaled by ``scale``
-        (MHA's ``1 / sqrt(head_dim)`` if None); ``(rows, heads * head_dim)``.
+        position up to its last, causally and within ``window``, the logits
+        scaled by ``scale`` (MHA's ``1 / sqrt(head_dim)`` if None); ``(rows,
+        heads * head_dim)``.
         """
         C, (_, G, D), (n, H, _) = self.chunk, self.keys.shape, q.shape
         for x, cache in ((k, self.keys), (v, self.values)):
@@ -490,6 +498,7 @@ class KVCache(iron.Graph):
             self.values[span],
             heads_interleaved=True,
             kv_interleaved=True,
+            window=self.window,
             scale=scale,
         )
         return o.reshape(n, H * D)
