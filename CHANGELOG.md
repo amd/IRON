@@ -50,7 +50,7 @@ public API adds its entry under Unreleased.
 - `Operator.replace`, `dataclasses.replace` that also keeps the fields a
   resolve computes (`Auto(init=False)`), and checks the result as
   construction does.
-- `Param(array=True)` and `Auto(array=True)`: an operator's `Array` is
+- `field(array=True)` and `Auto(array=True)`: an operator's `Array` is
   generated from its declarations, so a field is declared once.
 - `Config.norm()`, the kind of norm a config's layers and final norm share,
   and `Model.final_norm`, the module that final norm reads.
@@ -89,7 +89,9 @@ public API adds its entry under Unreleased.
   the declaration reads: `M: CompileTime[int] = field()`,
   `tile: CompileTime[int] = Auto()`,
   `n: DispatchTime[np.int32] = field(init=False)`. A field annotated with
-  neither, or declared without `field()`/`Auto()`, is refused.
+  neither, with a marker inside a union (`CompileTime[int] | None`; write
+  `CompileTime[int | None]`), or declared without `field()`/`Auto()` is
+  refused, as is a dispatch value given any other `field()` option.
 - `Param(...)` is `field(...)`, with the same options.
 - `iron.operators.flm`'s GEMM is `ProjectionGEMM`, so it is not confused
   with `iron.operators.GEMM`; a profile names it `"flm.ProjectionGEMM"`.
@@ -107,7 +109,7 @@ public API adds its entry under Unreleased.
 - An operator's nested `Array` annotates only the library's views it reads
   (`dev`, `buffers`, `inputs`, `outputs`); an annotation of a field or member
   is refused. A field the array reads that no stream names is declared
-  `Param(array=True)` or `Auto(array=True)`.
+  `field(array=True)` or `Auto(array=True)`.
 - `F.rms_norm(input, normalized_shape, weight=None, eps=None)` and
   `F.layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-5)`
   take torch's arguments in torch's order; `eps=None` is the input dtype's
@@ -172,8 +174,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
-- `iron.common`'s `In`, `Out`, `InOut`, `Param` and `DispatchTime`; import
-  the markers from `aie.iron` and use `field`.
+- `iron.common`'s `In`, `Out`, `InOut` and `DispatchTime`; import the
+  markers from `aie.iron`.
 - `F.linear(accurate=)`, `Attention(accurate=)`, `MLP(accurate=)` and
   `iron.functional.ACCURATE`; pass `precision=Precision.HIGHEST`.
 - `Phi4Config.max_position_embeddings`: LongRoPE's amplitude scale is set

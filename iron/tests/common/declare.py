@@ -178,6 +178,30 @@ def test_a_marked_field_not_declared_with_field_is_rejected():
             n: DispatchTime[np.int32]
 
 
+def test_a_marker_inside_a_union_is_rejected():
+    # CompileTime[int] | None would read as int and lose the None.
+    with pytest.raises(TypeError, match=r"Bad\.n: .*CompileTime\[int \| None\]"):
+
+        class Bad(Operator):
+            n: CompileTime[int] | None = field(default=None)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"init": False, "default": 1},
+        {"init": False, "array": True},
+        {"init": False, "probe": 0},
+    ],
+)
+def test_a_dispatch_value_takes_no_field_option(options):
+    with pytest.raises(TypeError, match="Bad.n: declare a DispatchTime value"):
+
+        class Bad(Operator):
+            n: DispatchTime[np.int32] = field(**options)
+
+
 def test_expression_in_a_shape_is_rejected():
     with pytest.raises(TypeError, match="Expressions are not allowed"):
 

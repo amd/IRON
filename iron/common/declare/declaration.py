@@ -9,11 +9,11 @@ import dataclasses
 import enum
 import inspect
 import math
+import types
 from collections.abc import Mapping
-from typing import Any, ClassVar, get_args, get_origin
+from typing import Annotated, Any, ClassVar, Union, get_args, get_origin
 
 from aie.iron import In, InOut, Out
-from aie.utils.compile.jit._introspect import _dispatch_param_type, _tagged_type
 
 from .domain import Domain
 from .field import AutoSpec, ParamSpec
@@ -25,6 +25,25 @@ from .value import DispatchValue, Extent, Value
 # What an Array annotates by hand, besides what it is given: its operands
 # and the device.
 LIBRARY_VIEWS = frozenset({"buffers", "inputs", "outputs", "dev"})
+
+
+def _marked(cls: type, name: str, hint, tag: str):
+    """``T`` of ``hint`` when it is ``Annotated[T, tag]`` (aie.iron's
+    ``CompileTime[T]`` or ``DispatchTime[T]``), else None.
+
+    A marker inside a union is refused: ``CompileTime[int] | None`` reads as
+    either, so the optional type goes inside, ``CompileTime[int | None]``.
+    """
+    if get_origin(hint) is Annotated:
+        return get_args(hint)[0] if tag in hint.__metadata__ else None
+    if get_origin(hint) in (Union, types.UnionType) and any(
+        get_origin(a) is Annotated for a in get_args(hint)
+    ):
+        raise TypeError(
+            f"{cls.__name__}.{name}: annotated {hint!r}; put the union inside "
+            f"the marker, `CompileTime[int | None]`"
+        )
+    return None
 
 
 class Declaration:
@@ -87,18 +106,28 @@ class Declaration:
             if hint is ClassVar or get_origin(hint) is ClassVar:
                 continue
             spec = ParamSpec.of(vars(cls).get(name))
-            dtype = _dispatch_param_type(hint)
+            dtype = _marked(cls, name, hint, "aie.dispatch_time")
             if dtype is not None:
-                if spec is None or vars(cls)[name].init:
+                f = vars(cls).get(name)
+                if (
+                    spec is None
+                    or f.init
+                    or f.default is not dataclasses.MISSING
+                    or isinstance(spec, AutoSpec)
+                    or spec.derive is not None
+                    or spec.probe is not dataclasses.MISSING
+                    or spec.array
+                ):
                     raise TypeError(
                         f"{cls.__name__}.{name}: declare a DispatchTime value "
-                        f"`{name}: DispatchTime[np.int32] = field(init=False)`"
+                        f"`{name}: DispatchTime[np.int32] = field(init=False)`, "
+                        f"with no other option"
                     )
                 del annotations[name]
                 member = DispatchValue(dtype=dtype)
                 setattr(cls, name, member)
                 member.__set_name__(cls, name)
-            elif _tagged_type(hint, "aie.compile_time") is None:
+            elif _marked(cls, name, hint, "aie.compile_time") is None:
                 raise TypeError(
                     f"{cls.__name__}.{name}: annotated {hint!r}; a field is "
                     f"annotated aie.iron's CompileTime[T] or DispatchTime[T]"
@@ -142,7 +171,7 @@ class Declaration:
         for klass in reversed(cls.__mro__):
             if klass is not library and issubclass(klass, library):
                 hints |= {
-                    n: _tagged_type(h, "aie.compile_time") or h
+                    n: _marked(klass, n, h, "aie.compile_time") or h
                     for n, h in inspect.get_annotations(klass, eval_str=True).items()
                 }
         # A field's type is `T | None`: a shape dimension of it is present
