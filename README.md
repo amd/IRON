@@ -127,6 +127,8 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 
 What the text decoders (Llama to LFM2 above) share:
 
+- **Setup**: `pip install -r requirements_examples.txt`. XRT maps every device buffer locked, and a model's weights and caches are banks of at most 3.5 GiB (`iron.common.image.allocator.BANK`), so `ulimit -l` must cover one bank.
+
 - **Run**: `python -m iron.applications.<application>.model <checkpoint> <tokenizer>`, with `config.json` beside the checkpoint; `--help` lists the options, and [Llama's README](./iron/applications/llama/README.md#running) explains them.
 - **Test**: `pytest tests/applications/<application>/` loads the model once and checks throughput, accuracy against transformers' logits recorded in `golden.npz` beside the checkpoint, and determinism. `pytest --record-goldens` records missing logits where torch and transformers are installed; they are not IRON's requirements.
 - **Tune**: `python -m iron.lm.tune <application> --checkpoint <checkpoint>` times each operator at every setting of its tunables and rewrites the application's `profiles/<device>.json`; review it with `git diff` and commit it.

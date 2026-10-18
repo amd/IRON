@@ -5,100 +5,28 @@ SPDX-License-Identifier: Apache-2.0
 
 # Qwen3 1.7B on the NPU
 
-Prefill and decode of Qwen3 1.7B as one IRON graph, `Qwen3`, a version
-compiled per input shape, from its checkpoint's config and weights, judged
-against transformers as Llama is (see `iron/applications/llama/README.md`).
-
-What is Qwen3's own is short, and all of it is in
-`iron/applications/qwen3/model.py`: its shape (`Qwen3Config`, from
-`config.json`) and its tokenizer's lead token; its tunables are in
-`iron/applications/qwen3/profiles/`. The rest is `iron.lm`, shared with
-every other model.
-
-## Qwen3 vs. Llama 3
-
-One difference from Llama's own layer: **per-head RMSNorm on Q and K,
-before RoPE** (`q_norm`/`k_norm`, one weight row of `head_dim`, shared by
-every head and every position), read from the checkpoint's `self_attn`
-at its config's `rms_norm_eps` (1e-6): `Qwen3Config.attention` sets
-`Attention`'s `qk_norm`.
-
-Its output head is the input embedding, tied (`tie_word_embeddings: true`
-in its `config.json`); its checkpoint also ships `lm_head.weight`,
-confirmed byte-identical to `model.embed_tokens.weight` by sha256, which
-sits unread in its checkpoint tree (`Checkpoint.tree()` maps every tensor
-the checkpoint has; nothing here reads this one).
-
-Its checkpoint is sharded (two `.safetensors` files and a
-`model.safetensors.index.json`); `Checkpoint` reads the index directly
-(passed as `weights_path`, in place of a single `.safetensors` file),
-mapping every shard the index names.
+Qwen3 1.7B and 0.6B, `Qwen3` in `model.py`, whose docstring says how it
+differs from Llama: a per-head RMSNorm on q and k before RoPE, and an
+unread `lm_head.weight` beside its tied head. How to run, test and tune it is the README's [Models](../../../README.md#models); the shared library is [AGENTS.md](../../../AGENTS.md#language-models).
 
 ## Weights and tokenizer
 
 From Hugging Face ([`Qwen/Qwen3-1.7B`](https://huggingface.co/Qwen/Qwen3-1.7B), Apache-2.0):
+`model-00001-of-00002.safetensors`, `model-00002-of-00002.safetensors`,
+`model.safetensors.index.json` (the checkpoint argument), `tokenizer.json`
+and `config.json`. Qwen3 0.6B is the same model at another shape: its
+`model.safetensors`, `tokenizer.json` and `config.json` from
+[`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B).
 
-- `model-00001-of-00002.safetensors`, `model-00002-of-00002.safetensors`,
-  `model.safetensors.index.json`
-- `tokenizer.json`
-- `config.json`: the model's shape (`DecoderConfig.from_checkpoint`), read
-  from beside the checkpoint rather than hand-copied
+## NPU1's profile
 
-The tests look for all of these in `$IRON_EXAMPLE_WEIGHTS_DIR/qwen3-1.7b/`
-(`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line they
-can be anywhere, with `config.json` beside the checkpoint.
-
-Qwen3 0.6B is the same model at another shape, read from its own
-`config.json`: its `model.safetensors`, `tokenizer.json` and `config.json`
-from [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B), in
-`$IRON_EXAMPLE_WEIGHTS_DIR/qwen3-0.6b/`; the tests run each checkpoint. The tokenizer
-loads through the `tokenizers` package (already a dependency of
-`requirements_examples.txt`), not `transformers`: nothing here needs torch.
-
-## Setup
-
-Set up IRON as the repository root describes, then:
-
-```bash
-python3 -m pip install -r requirements_examples.txt
-```
-
-## Running
-
-From the repository root:
-
-```bash
-python -m iron.applications.qwen3.model \
-    /path/to/model.safetensors.index.json /path/to/tokenizer.json \
-    --prompt-len 2048 --num-tokens 40
-```
-
-The options are `iron.applications.llama.model`'s own (see its README):
-`--random-weights`, `--prompt-len`, `--num-tokens`, `--max-seq-len`,
-`--temperature`, `--top-k`, `--check-accuracy`, `--check-determinism`,
-`--compare-host` and `--full-elf`/`--no-full-elf`.
-
-Qwen3's `head_dim` is 128, twice Llama 3.2 1B's 64: MHA's block-size
-search (the largest block whose cores fit L1 at this head size) picks a
-smaller block there, which at the default `num_pipelines=1` pushes a
-prompt chunk's K/V fill past the DMA descriptor's 64-iteration cap.
-`profiles/npu1.json` pins `num_pipelines=4` for the prompt-chunk shape
-(the same value Llama's own NPU1 profile uses), which keeps the block
-count the fill repeats under the cap.
-
-## Tuning
-
-`python -m iron.lm.tune qwen3 --checkpoint /path/to/model.safetensors.index.json`
-rewrites its profile for the NPU it runs on, as
-`iron/applications/llama/README.md`'s "Tuning" section describes.
+Qwen3's `head_dim` is 128, twice Llama 3.2 1B's: MHA's block-size search
+picks a smaller block, which at `num_pipelines=1` pushes a prompt chunk's
+K/V fill past the DMA descriptor's 64-iteration cap. `profiles/npu1.json`
+pins `num_pipelines=4` for the prompt-chunk shape to stay under it.
 
 ## Testing
 
-```bash
-pytest tests/applications/qwen3/
-```
-
-Loads each checkpoint's model once, 1.7B's and 0.6B's, and runs in-process
-through `model.Runner` the throughput, accuracy and determinism checks
-above, again in the each-step form, and over a two-chunk prompt and a chat
-turn; one more checks the unread `lm_head.weight` is the tied embedding.
+`tests/applications/qwen3/` runs 1.7B's checkpoint and 0.6B's, each also
+in the each-step form, over a two-chunk prompt and a chat turn, and checks
+that the unread `lm_head.weight` is the tied embedding.

@@ -12,16 +12,11 @@ transformers' float32 logits for the same checkpoint, recorded once to
 `golden.npz` beside it (`Runner.reference`), so running and testing need
 no torch.
 
-The model is a package of `iron.lm` (its shared decoder, and the norm,
-attention and MLP parts a layer is composed from, `iron/lm/blocks.py`),
-`iron/applications/llama/`:
-
-- [`model.py`](model.py): its shape (Llama 3's RoPE scaling), its
-  tokenizer, and the command line below
-- [`profiles/`](profiles): its tunables, one file per device
-
-`python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors`
-rewrites its profile for the NPU it runs on (below).
+What is Llama's own, its shape (Llama 3's RoPE scaling) and its
+tokenizer, is in [`model.py`](model.py); its tunables are in
+[`profiles/`](profiles). How to run, test and tune a model is the README's
+[Models](../../../README.md#models); the shared library is
+[AGENTS.md](../../../AGENTS.md#language-models).
 
 ## Weights and tokenizer
 
@@ -34,25 +29,12 @@ and pass a Hugging Face token to download any of these):
   the model's shape (`LlamaConfig.from_checkpoint`), read from beside the
   checkpoint rather than hand-copied
 
-The tests look for all three in `$IRON_EXAMPLE_WEIGHTS_DIR/llama3.2-1b/`
-(`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line the
-checkpoint and tokenizer can be anywhere, with `config.json` beside the
-checkpoint.
-
 Llama 3.2 3B is the same model at another shape: its two shards, their
 `model.safetensors.index.json`, `config.json` and `tokenizer.model` from
 [`meta-llama/Llama-3.2-3B`](https://huggingface.co/meta-llama/Llama-3.2-3B),
-in `$IRON_EXAMPLE_WEIGHTS_DIR/llama3.2-3b/`. On NPU2 its projections take
+in its own directory. On NPU2 its projections take
 flm.ProjectionGEMM's bf16 macs rather than bfp16's (its profile), which its accuracy
 needs: about 13 times the prompt chunk's GEMM cost, a path to optimise.
-
-## Setup
-
-Set up IRON as the repository root describes, then:
-
-```bash
-python3 -m pip install -r requirements_examples.txt
-```
 
 ## Running
 
@@ -80,12 +62,9 @@ top-k must be at most 64.
 - `--max-seq-len`: the longest context served, prompt and generated tokens
   together, up to the checkpoint's own `max_position_embeddings` (131072,
   4 GiB of caches, the default where it fits the host; a log line says
-  what was chosen); the compile is the same at any of them.
-  XRT maps every device buffer locked, and the weights and the caches are
-  banks of at most 3.76 GB (`iron.common.image.allocator.BANK`), so `ulimit
-  -l` must cover one bank. How a long prompt stays under the amdxdna
-  driver's watchdog, and its measured times, are in AGENTS.md's "Not
-  built, or limited"
+  what was chosen); the compile is the same at any of them. How a long
+  prompt stays under the amdxdna driver's watchdog is in AGENTS.md's
+  [Not built, or limited](../../../AGENTS.md#not-built-or-limited)
 - `--temperature`, `--top-k`: the sampler's, at `Sampler`'s defaults
 - `--check-accuracy`: instead of sampling, compare each step's logits with
   the reference's and print the KL divergence and top-1 agreement
@@ -108,26 +87,7 @@ four columns as on NPU2's eight (`MHA.COLUMNS`), so a prompt runs a chunk
 at a time there too. `--no-full-elf` builds the same form on NPU2, which is
 how `test_llama_3_2_each_step_accuracy` checks it there.
 
-## Tuning
-
-Each operator of the decode step and the prompt chunk is timed on the NPU at
-every setting of its tunables, and the fastest whose output its tolerance
-admits is written to `profiles/<device>.json`, which the model then runs
-with. Review the change with `git diff` and commit it.
-
-```bash
-python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors
-```
-
 ## Testing
 
-```bash
-pytest tests/applications/llama/
-```
-
-Loads each checkpoint's model once, 1B's and then 3B's (skipped where
-its files are not), and runs in-process through `model.Runner` the
-throughput, accuracy and determinism checks above, again in the each-step
-form, and over a two-chunk prompt and a chat turn. Accuracy reads
-`golden.npz` beside the checkpoint and fails on logits it lacks; `pytest
---record-goldens` records them where transformers is installed.
+`tests/applications/llama/` runs 1B's checkpoint and then 3B's, each also
+in the each-step form, over a two-chunk prompt and a chat turn.
