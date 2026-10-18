@@ -419,21 +419,17 @@ class ResampleTaps(Operator):
             ):
                 words = rtp.read()
                 n, n_in, n_out = (words[v] for v in counts)
+                mine = last if passed is None else passed.acquire(1)
+                peak_fn(mine, n_in, n_out, core, n)
+                if prior is not None:
+                    before = prior.acquire(1)
+                    join_fn(before, mine, mine)
+                    prior.release(1)
                 if passed is not None:
-                    mine = passed.acquire(1)
-                    peak_fn(mine, n_in, n_out, core, n)
-                    if prior is not None:
-                        before = prior.acquire(1)
-                        join_fn(before, mine, mine)
-                        prior.release(1)
                     passed.release(1)
                     peak = shared.acquire(1)
                 else:
-                    peak_fn(last, n_in, n_out, core, n)
                     if prior is not None:
-                        before = prior.acquire(1)
-                        join_fn(before, last, last)
-                        prior.release(1)
                         out = shared.acquire(1)
                         join_fn(last, last, out)
                         shared.release(1)
