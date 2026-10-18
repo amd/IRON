@@ -20,9 +20,9 @@ from typing import NamedTuple
 
 import numpy as np
 import pytest
+from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
-from aie.dialects.aie import DMAChannelDir
 from aie.iron import DmaEndpoint, ObjectFifo, Program, Worker
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
@@ -32,20 +32,19 @@ from ml_dtypes import bfloat16
 import iron
 import iron.operators.flm.gemm.op as flm_gemm
 from iron import Scratchpad
-from iron.operators.flm.packing import packed_b_size
 from iron.common import (
+    Auto,
+    Built,
     Chain,
     Extent,
     In,
+    Operand,
     Operator,
     Out,
+    Param,
+    Rtp,
     Value,
     Xclbin,
-    Auto,
-    Param,
-    Built,
-    Operand,
-    Rtp,
 )
 from iron.common.design import BuiltArray, OperatorDesign, OperatorRuntime
 from iron.common.design.design import configuration
@@ -56,7 +55,7 @@ from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
-from iron.tests.common.shipped import Shipped
+from iron.operators.flm.packing import packed_b_size
 from iron.operators.gelu import GELU
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
@@ -64,8 +63,9 @@ from iron.operators.rope import RoPE
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
-from iron.tests.common.graphs import ProjectAsStored
 from iron.tests.common.declare import Rows
+from iron.tests.common.graphs import ProjectAsStored
+from iron.tests.common.shipped import Shipped
 
 # A descriptor's fields are the current device's.
 pytestmark = pytest.mark.usefixtures("npu2")

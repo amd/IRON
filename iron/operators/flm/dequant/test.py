@@ -11,8 +11,7 @@ from aie.utils.verify import Tolerance
 
 from iron.common.testing import run_test
 from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor, rb
-from iron.operators.flm.dequant.op import N_TILE, qw_bytes_for
-from iron.operators.flm.dequant.op import DequantBFP, dequantize
+from iron.operators.flm.dequant.op import N_TILE, DequantBFP, dequantize, qw_bytes_for
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE, packed_bytes
 
