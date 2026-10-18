@@ -19,6 +19,7 @@ import pytest
 
 from iron import applications
 from iron.applications.gemma4_flm import dequantize
+from iron.operators.flm import GEMM
 
 APP = Path(applications.__file__).with_name("gemma4_flm")
 BUILD = APP / "build"
@@ -105,6 +106,15 @@ def test_offline_dequant_layout_is_a_permutation():
     kk, nn = np.meshgrid(np.arange(k_dim), np.arange(n_dim), indexing="ij")
     offsets = dequantize.dequant_offset(kk, nn, k_dim)
     np.testing.assert_array_equal(np.sort(offsets, axis=None), np.arange(k_dim * n_dim))
+
+
+@pytest.mark.parametrize("k_dim", [512, 1536])
+def test_offline_bfp_sidecar_is_packed_as_the_gemm_reads_it(k_dim, npu2):
+    """build.gemm()'s tile_n at every K, a K of one k-tile too."""
+    weights = np.random.default_rng(0).standard_normal((128, k_dim), np.float32)
+    gemm = GEMM(M=256, K=k_dim, N=128, tile_n=64, k_tile=256, rounding="floor")
+    expected = gemm.pack_B(dequantize.through_bf16(weights).T)
+    np.testing.assert_array_equal(dequantize.to_bfp16ebs8(weights), expected)
 
 
 def test_offline_dequant_writes_a_sidecar(tmp_path):

@@ -27,9 +27,8 @@ WEIGHTS_PER_BLOCK = ROW_CHUNK * COL_CHUNK
 SUFFIX = {"bf16": ".dq_bf16", "bfp": ".dq_bfp"}
 DTYPE = {"bf16": "BF16", "bfp": "U8"}
 
-# These values must match iron/operators/flm/gemm/design.py.
-K_TILE, S, T = 512, 8, 8
-CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32}
+# These values must match build.gemm(), which takes tile_n=64.
+K_TILE, S, T, TILE_N, CT_K = 512, 8, 8, 64, 128
 
 
 def read_header(path):
@@ -136,16 +135,14 @@ def to_bfp16ebs8(weights):
         sys.path.insert(0, IRON)
     from iron.operators.flm.packing import pack_b
 
-    k_dim = weights.shape[1]
-    tile_n = 128 if k_dim == K_TILE else 64
     operand = np.ascontiguousarray(through_bf16(weights).T)
     packed = pack_b(
         operand,
         k_tile=K_TILE,
-        n_tile=tile_n,
+        n_tile=TILE_N,
         s=S,
         t=T,
-        ct_k=CT_MAX_K_FOR_N[tile_n],
+        ct_k=CT_K,
         bfp16=True,
         round_conv_even=False,
     )
