@@ -1770,7 +1770,10 @@ def test_a_call_refuses_an_input_numpy_would_not_cast_to_its_dtype():
 
     version = SimpleNamespace(traced=g.trace(**g.shapes()[1]), upload=upload)
     values = dict(position=C - 1, token=0, start=0, rows=C, rope_start=0)
-    with pytest.raises(TypeError, match="input ids is int32, got float64"):
+    with pytest.raises(
+        TypeError,
+        match=r"input ids is int32, got float64; pass ids\.astype\(np\.int32\)",
+    ):
         CompiledGraph._stage(version, [np.zeros(C)], values)
     with pytest.raises(Staged):
         CompiledGraph._stage(version, [np.zeros(C, np.int64)], values)

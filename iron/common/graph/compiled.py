@@ -774,9 +774,11 @@ class CompiledGraph:
                     f"new compile"
                 )
             if not np.can_cast(tensor.dtype, handle.dtype, "same_kind"):
+                dtype = np.dtype(handle.dtype)
+                module = dtype.type.__module__.replace("numpy", "np")
                 raise TypeError(
-                    f"{self.traced.name}: input {handle.name} is "
-                    f"{np.dtype(handle.dtype)}, got {tensor.dtype}"
+                    f"{self.traced.name}: input {handle.name} is {dtype}, got "
+                    f"{tensor.dtype}; pass {handle.name}.astype({module}.{dtype})"
                 )
         self.upload()
         for handle, tensor in zip(self.traced.inputs, tensors):
