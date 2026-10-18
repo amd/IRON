@@ -832,13 +832,9 @@ def _rename(tracer: Tracer, handle: Handle, name: str) -> None:
     old = handle.name
     for step in tracer.steps:
         for h in step.slots + step.inputs + step.outputs:
-            for view in (h, h.parent):  # a slice names its parent's buffer
-                if (
-                    view is not None
-                    and view.role == "intermediate"
-                    and view.name == old
-                ):
-                    view.name, view.role = name, "output"
+            root = h.root  # one buffer may have several roots, one per reshape
+            if root.role == "intermediate" and root.name == old:
+                root.name, root.role = name, "output"
     handle.name, handle.role = name, "output"
 
 

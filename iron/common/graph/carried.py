@@ -70,7 +70,7 @@ def attach_emit(
             _move(traced, nxt, planes, n + j)
     program = State((slots + n, ROW), np.int32, PROGRAM)
     image = Handle((slots,), np.int32, IMAGE, "intermediate")
-    current = Handle((n,), np.int32, CARRY, "slice", planes, 0)
+    current = Handle((n,), np.int32, CARRY, planes.role, planes, 0)
     inputs = [_resident(traced, program), planes]
     traced.steps.append(
         TracedStep(
@@ -100,12 +100,7 @@ def _move(traced: TracedGraph, handle: Handle, parent: Handle, start: int) -> No
                 f"{traced.name}: {view!r} slices the carried element {old!r}"
             )
         if view.parent is None and view.name == old:
-            view.name, view.role, view.parent, view.start = (
-                parent.name,
-                "slice",
-                parent,
-                start,
-            )
+            view.parent, view.start = parent, start
     traced.outputs = [h for h in traced.outputs if h.name != parent.name]
 
 

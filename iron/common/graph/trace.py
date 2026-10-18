@@ -268,7 +268,9 @@ class TracedGraph:
                     slots.append(root)
                     continue
                 slots.append(
-                    Handle((ref.nbytes,), np.uint8, ref.root, "slice", root, ref.start)
+                    Handle(
+                        (ref.nbytes,), np.uint8, ref.root, root.role, root, ref.start
+                    )
                 )
             declared = list(zip(slots, step.op.buffers))
             traced.append(
@@ -389,10 +391,7 @@ class TracedGraph:
         def view(h: Handle) -> np.ndarray:
             ref = h.ref()
             if ref.root not in buffers:
-                root = h
-                while root.parent is not None:
-                    root = root.parent
-                buffers[ref.root] = np.zeros(root.nbytes, np.uint8)
+                buffers[ref.root] = np.zeros(h.root.nbytes, np.uint8)
             raw = buffers[ref.root][ref.start : ref.start + h.nbytes]
             return raw if bfp.is_bfp(h.dtype) else raw.view(h.dtype).reshape(h.shape)
 
@@ -611,8 +610,6 @@ class Tracer:
             return None
         if not isinstance(given, Handle):
             return "weight"
-        while given.parent is not None:
-            given = given.parent
         return given.role if given.role in ("weight", "input") else None
 
     def check_outputs(self, cls, outputs) -> None:

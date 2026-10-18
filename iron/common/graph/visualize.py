@@ -20,12 +20,6 @@ if TYPE_CHECKING:
 LAYERED = re.compile(r"(?:^|\.)(?:layers|keys|values)\.(\d+)(?:\.|$)")
 
 
-def _root(h: Handle) -> Handle:
-    while h.parent is not None:
-        h = h.parent
-    return h
-
-
 def layers(traced: TracedGraph) -> dict[int, int | None]:
     """Each step's layer, by step index (``layers.3.q`` and
     ``vision.layers.3.q`` are layer 3). A step reading no layer's buffer is
@@ -36,29 +30,29 @@ def layers(traced: TracedGraph) -> dict[int, int | None]:
     steps = traced.steps
     own = {}
     for i, s in enumerate(steps):
-        found = [LAYERED.search(_root(h).name) for h in s.inputs + s.outputs]
+        found = [LAYERED.search(h.root.name) for h in s.inputs + s.outputs]
         own[i] = next((int(m.group(1)) for m in found if m), None)
     placed = [i for i, n in own.items() if n is not None]
     layer, made = {}, {}
     for i, s in enumerate(steps):
         layer[i] = own[i]
-        held = any(_root(h).role in ("weight", "state") for h in s.inputs + s.outputs)
+        held = any(h.root.role in ("weight", "state") for h in s.inputs + s.outputs)
         if own[i] is None and placed and placed[0] < i and (i < placed[-1] or not held):
-            found = [made.get(_root(h).name) for h in s.inputs]
+            found = [made.get(h.root.name) for h in s.inputs]
             layer[i] = max((n for n in found if n is not None), default=None)
         for h in s.outputs:
-            made[_root(h).name] = layer[i]
+            made[h.root.name] = layer[i]
     # One reading only a slice of a shared tensor and what came before
     # the layers (a per-layer projection) is in the layer of its readers.
     read: dict[str, int] = {}
     for i in reversed(range(len(steps))):
         s = steps[i]
         if layer[i] is None and placed and placed[0] < i < placed[-1]:
-            found = [read.get(_root(h).name) for h in s.outputs]
+            found = [read.get(h.root.name) for h in s.outputs]
             layer[i] = min((n for n in found if n is not None), default=None)
         if layer[i] is not None:
             for h in s.inputs:
-                read[_root(h).name] = layer[i]
+                read[h.root.name] = layer[i]
     return layer
 
 
@@ -79,7 +73,7 @@ def _box(traced: TracedGraph, i: int, values: dict[int, list[str]]) -> str:
             lines.append(f"<i>{kind} {html.escape(folded)}</i>")
     for buffer, _, _ in op.placements:
         lines.append(f"<i>writes {html.escape(buffer)} in place</i>")
-    shapes = ", ".join(_shape(h) for h in s.outputs if _root(h).role != "state")
+    shapes = ", ".join(_shape(h) for h in s.outputs if h.root.role != "state")
     if shapes:
         lines.append(shapes)
     lines += [f"<i>{html.escape(v)}</i>" for v in values.get(id(op), [])]
@@ -97,8 +91,8 @@ def dot(traced: TracedGraph) -> str:
     writer = {}
     for i, s in enumerate(steps):
         for h in s.outputs:
-            if _root(h).role in ("intermediate", "output"):
-                writer[_root(h).name] = i
+            if h.root.role in ("intermediate", "output"):
+                writer[h.root.name] = i
     values = defaultdict(list)
     for b in traced.bindings:
         values[id(b.op)].append(f"{b.member.name} = {b.expression}")
@@ -108,7 +102,7 @@ def dot(traced: TracedGraph) -> str:
     named: set[str] = set()
 
     def source(h: Handle, at: int | None) -> str:
-        r = _root(h)
+        r = h.root
         if r.name in writer:
             return f"s{writer[r.name]}"
         node = f"b_{r.name}"
@@ -132,13 +126,13 @@ def dot(traced: TracedGraph) -> str:
                 f'  "{source(h, layer[i])}" -> "s{i}" [label="{_shape(h)}{bounded}"];'
             )
         for h in s.outputs:
-            if _root(h).role == "state":
+            if h.root.role == "state":
                 edges.append(
                     f'  "s{i}" -> "{source(h, layer[i])}" [label="write {_shape(h)}"];'
                 )
-    returned = {_root(h).name for h in traced.returned}
+    returned = {h.root.name for h in traced.returned}
     for h in traced.outputs:
-        r = _root(h)
+        r = h.root
         if r.name not in writer:
             continue
         kind = "returned" if r.name in returned else "carried"
@@ -148,7 +142,7 @@ def dot(traced: TracedGraph) -> str:
         )
         edges.append(f'  "s{writer[r.name]}" -> "o_{r.name}";')
         for name, nxt in traced.carry.items():
-            if isinstance(nxt, Handle) and _root(nxt).name == r.name:
+            if isinstance(nxt, Handle) and nxt.root.name == r.name:
                 nodes[None].append(
                     f'  "v_{name}" [shape=plain, '
                     f"label=<<i>{html.escape(name)}</i>, next call>];"

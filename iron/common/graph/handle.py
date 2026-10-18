@@ -52,8 +52,8 @@ class Handle:
     __slots__ = (
         "shape",
         "dtype",
-        "name",
-        "role",
+        "_name",
+        "_role",
         "parent",
         "start",
         "tap",
@@ -84,7 +84,6 @@ class Handle:
         self.shape = tuple(int(s) for s in shape)
         self.dtype = dtype
         self.name = name
-        # input | output | weight | state | intermediate | slice | view
         self.role = role
         self.parent = parent
         self.start = start  # a slice's element offset into the parent
@@ -105,6 +104,32 @@ class Handle:
         # A run from a per-call start, ``x[s : s + W]``: its axis, s, W and
         # the axis's length, until a bound (``[:n]``) keeps it inside.
         self.window: tuple[int, Affine, int, int] | None = window
+
+    @property
+    def root(self) -> Handle:
+        """The whole buffer this handle is, or is a slice or view of."""
+        h = self
+        while h.parent is not None:
+            h = h.parent
+        return h
+
+    @property
+    def name(self) -> str:
+        """The name of the buffer: its root's."""
+        return self.root._name
+
+    @name.setter
+    def name(self, name: str) -> None:
+        self._name = name
+
+    @property
+    def role(self) -> str:
+        """input, output, weight, state or intermediate: its root's."""
+        return self.root._role
+
+    @role.setter
+    def role(self, role: str) -> None:
+        self._role = role
 
     @property
     def elements(self) -> int:
@@ -160,7 +185,9 @@ class Handle:
         shape = tuple(self.shape[a] for a in axes)
         tap = TensorAccessPattern.full(self.shape).permute(axes)
         bounds = {axes.index(axis): b for axis, b in self.bounds.items()}
-        return Handle(shape, self.dtype, self.name, "view", self, 0, tap, bounds=bounds)
+        return Handle(
+            shape, self.dtype, self.name, self.role, self, 0, tap, bounds=bounds
+        )
 
     def _bound(self, key) -> "Handle":
         """A run from a per-call start bounded per call, ``x[s : s + W][:n]``:
@@ -212,7 +239,7 @@ class Handle:
         if self.parent is not None:
             # A slice: indexed as a buffer of its own, then placed in its parent.
             whole = Handle(
-                self.shape, self.dtype, self.name, "slice", bounds=self.bounds
+                self.shape, self.dtype, self.name, self.role, bounds=self.bounds
             )
             return whole[key]._placed(self.parent, self.start)
         entries = list(key) if isinstance(key, tuple) else [key]
@@ -251,7 +278,9 @@ class Handle:
                     f"{self!r}"
                 )
             shape = (ids.shape[0], *self.shape[1:])
-            return Handle(shape, self.dtype, self.name, "view", self, 0, gather_by=ids)
+            return Handle(
+                shape, self.dtype, self.name, self.role, self, 0, gather_by=ids
+            )
         if isinstance(entries[0], np.ndarray):
             ids, n = entries[0], self.shape[0]
             if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer) or rank < 2:
@@ -268,7 +297,7 @@ class Handle:
             whole = TensorAccessPattern.full(self.shape)
             rows = tuple(whole[int(i) % n] for i in ids)
             shape = (len(ids), *self.shape[1:])
-            return Handle(shape, self.dtype, self.name, "view", self, 0, rows)
+            return Handle(shape, self.dtype, self.name, self.role, self, 0, rows)
         for axis in self.bounds:
             if isinstance(entries[axis], slice) and entries[axis] != slice(None):
                 raise TypeError(
@@ -375,7 +404,14 @@ class Handle:
     def _placed(self, parent: Handle, start: int) -> Handle:
         """This handle of a buffer of its own, as the run of ``parent``
         from its element ``start``.
+
+        Raises:
+            TypeError: It gathers per call, which reads a whole table.
         """
+        if self.gather_by is not None:
+            raise TypeError(
+                f"a gather per call reads a whole table, not a slice of {parent!r}"
+            )
         tap = None
         if self.parent is not None and self.tap is None:
             start += self.start
@@ -390,7 +426,7 @@ class Handle:
             self.shape,
             self.dtype,
             parent.name,
-            "slice" if tap is None else "view",
+            parent.role,
             parent,
             start,
             tap,
@@ -470,7 +506,7 @@ class Handle:
                 shape,
                 self.dtype,
                 self.name,
-                "view",
+                self.role,
                 self,
                 0,
                 tap,
@@ -493,10 +529,24 @@ class Handle:
             and 1 in (dense.sizes[0], dense.strides[0])
         ):
             return Handle(
-                shape, self.dtype, self.name, "slice", self, int(offset), bounds=bounds
+                shape,
+                self.dtype,
+                self.name,
+                self.role,
+                self,
+                int(offset),
+                bounds=bounds,
             )
         return Handle(
-            shape, self.dtype, self.name, "view", self, 0, tap, index_by, bounds=bounds
+            shape,
+            self.dtype,
+            self.name,
+            self.role,
+            self,
+            0,
+            tap,
+            index_by,
+            bounds=bounds,
         )
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
