@@ -296,6 +296,14 @@ def test_a_model_runs_only_the_versions_it_loaded(cpu):
     assert not model._versions
 
 
+def test_a_model_reads_as_its_config_and_whether_it_is_loaded(cpu):
+    model = Llama(cpu.config, cpu.weights)
+    assert repr(model) == (
+        f"Llama({type(cpu.config).__name__}, "
+        f"max_seq_len={cpu.config.max_seq_len}, not loaded)"
+    )
+
+
 def test_a_short_prompt_runs_at_its_own_rows(cpu):
     """A context longer than a chunk: the prompt runs its own rows of one
     chunk, not the context, and its logits are the golden ones; decode

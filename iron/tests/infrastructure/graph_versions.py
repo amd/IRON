@@ -96,6 +96,14 @@ def test_two_shapes_share_weights_and_state_through_one_arena():
     assert f.arena.plan.size < private
 
 
+def test_a_version_reads_as_its_inputs_plan_and_build_directory():
+    f, *_ = _function()
+    one = f.compile(x=(E,))
+    lines = repr(one).splitlines()
+    assert lines[0].startswith(f"F(x=({E},)): ")
+    assert lines[-1] == f"  built in {one.artifacts.directory}"
+
+
 def test_load_hands_each_piece_of_each_weight_to_release_once_it_is_uploaded():
     """``release`` sees every weight once over every version, in order, in
     pieces of at most ``piece_bytes``; after that the host copy is not read:

@@ -96,6 +96,9 @@ public API adds its entry under Unreleased.
 - Compiling or loading with no NPU found raises `RuntimeError: no NPU found
   (NPU_RUNTIME ...); pass dev=NPU2() to compile without one`, not an
   `AttributeError` on `None`.
+- `repr` of a graph names its traced shapes; of a compiled version, its
+  inputs, packaging and build directory; of a `Profile`, its operators; of
+  a model, its config, `max_seq_len` and whether it is loaded.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `runner`; `iron.lm`'s own names are unchanged.
 - A `Runner` subclass is its model's `runner`, which `CausalLM.load` builds.

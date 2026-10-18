@@ -320,6 +320,19 @@ def test_a_graph_carries_its_profile():
     assert GEMV(M=E, K=256).tile_size_output is None  # nothing outside it
 
 
+def test_a_graph_reads_as_its_name_and_traced_shapes():
+    w = z(256, E)
+
+    class Project(iron.Graph):
+        def body(self, x):
+            return GEMV.step(w, x)
+
+    project = Project()
+    project.reference(z(E))
+    assert repr(project).startswith(f"Project(x=({E},) ")
+    assert "weights" not in repr(project.trace(x=(E,)))
+
+
 def test_an_explicit_instance_is_applied_like_the_class():
     q = GEMV(M=256, K=E, num_aie_columns=8, tile_size_input=4, tile_size_output=32)
     w = z(256, E)

@@ -196,6 +196,14 @@ class Graph:
             parameters = list(signature.parameters.values())[1:]
             _Parameters.of(cls.__name__, signature.replace(parameters=parameters))
 
+    def __repr__(self) -> str:
+        traced = dict.fromkeys([*self._versions, *self._references])
+        shapes = "; ".join(
+            ", ".join(f"{n}={shape} {dtype}" for n, shape, dtype in signature)
+            for signature in traced
+        )
+        return f"{self.name}({shapes})"
+
     @functools.cached_property
     def _parameters(self) -> _Parameters:
         return _Parameters.of(type(self).__name__, self.signature())
@@ -637,6 +645,11 @@ class CompiledGraph:
     @property
     def is_loaded(self) -> bool:
         return self._callable is not None
+
+    def __repr__(self) -> str:
+        inputs = ", ".join(f"{h.name}={h.shape}" for h in self.traced.inputs)
+        report = self.plan.report(f"{self.traced.name}({inputs})")
+        return f"{report}\n  built in {self.artifacts.directory}"
 
     def _ref(self, x) -> BufferRef:
         if isinstance(x, State):

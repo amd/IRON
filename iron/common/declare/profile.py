@@ -162,3 +162,7 @@ class Profile:
 
     def __len__(self) -> int:
         return len(self._entries)
+
+    def __repr__(self) -> str:
+        names = dict.fromkeys(cls.__name__ for cls, _, _ in self._entries)
+        return f"Profile({', '.join(names)})"

@@ -758,6 +758,13 @@ def test_a_profile_fills_the_tunables_a_call_leaves_open():
     assert len(p) == 2
 
 
+def test_a_profile_reads_as_its_operators():
+    p = Profile()
+    p.add(MV, columns=4)
+    p.add(MV, K=256, tile_out=16)
+    assert repr(p) == "Profile(MV)"
+
+
 def test_profile_make_has_no_shared_state():
     """``profile.make()`` touches no global state, so concurrent calls from
     different threads cannot see each other's tunables.

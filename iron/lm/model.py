@@ -75,6 +75,15 @@ class Model(iron.Graph):
         ``load_versions`` has them: nothing by default.
         """
 
+    def __repr__(self) -> str:
+        config = getattr(self, "config", None)
+        fields = [] if config is None else [type(config).__name__]
+        if hasattr(config, "max_seq_len"):
+            fields.append(f"max_seq_len={config.max_seq_len}")
+        loaded = self._versions and all(v.is_loaded for v in self._versions.values())
+        fields.append("loaded" if loaded else "not loaded")
+        return f"{self.name}({', '.join(fields)})"
+
 
 class OnHost:
     """A model with its images stood in by its graph's reference

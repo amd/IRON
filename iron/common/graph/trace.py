@@ -191,7 +191,9 @@ class TracedGraph:
     # buffer name -> nbytes, for weights, states and slice parents
     pinned: dict[str, int] = dataclasses.field(default_factory=dict)
     values: list[PerCall] = dataclasses.field(default_factory=list)
-    weights: dict[int, tuple[object, Handle]] = dataclasses.field(default_factory=dict)
+    weights: dict[int, tuple[object, Handle]] = dataclasses.field(
+        default_factory=dict, repr=False
+    )
     states: dict[int, tuple[State, Handle]] = dataclasses.field(default_factory=dict)
     bindings: list[Binding] = dataclasses.field(default_factory=list)
     returned: list[Handle] = dataclasses.field(default_factory=list)
