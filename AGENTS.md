@@ -1010,8 +1010,7 @@ library imports a model. The modules:
   torch), whose `tree(fill=)` is the weights by the checkpoint's own names
   (`weights.model.layers[3].self_attn.q_proj.weight`): `"read"`, views of
   the file; `"random"`, drawn at a seed; `"unread"`, allocated and never
-  written, for tracing and building; `Derived`, weights a model computes
-  from that tree
+  written, for tracing and building
 - `model.py`: `Model`, a graph whose versions `load_versions()` compiles before
   the first call, with `sanitize(w)`, which renames one layer's modules to
   the names the parts read; and `OnHost`, a model mixin that runs the graph's
