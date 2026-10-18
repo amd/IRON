@@ -519,8 +519,10 @@ class Operator:
 
     def resolved(self, dev=None) -> Self:
         """This operator resolved for ``dev`` (the bound device unless given),
-        checked. ``dev`` is bound while it resolves, so what the operator's
-        operands read of the device (``Operand.split``) is ``dev``'s.
+        checked as the copy ``resolve`` returns was made (``validate``, then
+        ``compatible`` where the device fit is checked). ``dev`` is bound
+        while it resolves, so what the operator's operands read of the
+        device (``Operand.split``) is ``dev``'s.
         """
         if self._resolved:
             return self
@@ -542,8 +544,6 @@ class Operator:
                 raise Unresolvable(
                     f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
                 )
-            new.validate()
-            new.compatible()
             new._resolved = True
             return new
 
