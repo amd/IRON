@@ -12,18 +12,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   Linting:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-format
-          pip install reuse black
+          pip install reuse black actionlint-py==1.7.12.25 shellcheck-py==0.11.0.1
 
       - name: Check Licenses
         if: success() || failure()
@@ -43,3 +46,7 @@ jobs:
         run: |
           python scripts/clang-format-wrapper.py --diff 
           python scripts/clang-format-wrapper.py --check
+
+      - name: Lint workflows
+        if: success() || failure()
+        run: actionlint

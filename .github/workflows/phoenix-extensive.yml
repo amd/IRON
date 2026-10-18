@@ -18,13 +18,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# commit_results pushes results to the ci branch on pushes to main and devel.
+permissions:
+  contents: write
+
 jobs:
   test_extensive_on_phoenix:
     name: Test Extensive Suite on Phoenix
     runs-on: [self-hosted, phoenix]
     steps:
       - name: Pull
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         env:
           HOME: /workspace
 
@@ -51,7 +55,7 @@ jobs:
           dir: phoenix/extensive
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: results-phoenix-extensive
           path: ${{ steps.commit_results.outputs.results_dir }}

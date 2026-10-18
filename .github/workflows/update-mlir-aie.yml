@@ -26,12 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: devel
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.x'
 
@@ -39,18 +39,18 @@ jobs:
         id: current_version
         run: |
           raw_version=$(grep 'mlir_aie==' requirements.txt | cut -d'=' -f3)
-          version=$(echo "$raw_version" | sed 's/^v//')
+          version="${raw_version#v}"
           echo "Current version: $version"
-          echo "version=$version" >> $GITHUB_OUTPUT
-          echo "raw_version=$raw_version" >> $GITHUB_OUTPUT
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "raw_version=$raw_version" >> "$GITHUB_OUTPUT"
 
       - name: Resolve the mlir-aie version to track
         id: target
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          requested: ${{ github.event.inputs.version }}
         run: |
           pip install packaging
-          requested="${{ github.event.inputs.version }}"
 
           if [ -z "$requested" ]; then
             # No override: the newest tagged release, proposed only when it
@@ -106,12 +106,14 @@ jobs:
             peano_ref="${version##*+g}"
           fi
 
-          echo "version=$version" >> $GITHUB_OUTPUT
-          echo "raw_version=$raw_version" >> $GITHUB_OUTPUT
-          echo "find_links_target=$find_links_target" >> $GITHUB_OUTPUT
-          echo "peano_ref=$peano_ref" >> $GITHUB_OUTPUT
-          echo "kind=$kind" >> $GITHUB_OUTPUT
-          echo "proceed=$proceed" >> $GITHUB_OUTPUT
+          {
+            echo "version=$version"
+            echo "raw_version=$raw_version"
+            echo "find_links_target=$find_links_target"
+            echo "peano_ref=$peano_ref"
+            echo "kind=$kind"
+            echo "proceed=$proceed"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Get the llvm-aie (Peano) version mlir-aie validated
         id: matched_peano
@@ -136,7 +138,7 @@ jobs:
             exit 1
           fi
           echo "Matched llvm-aie version: $pin"
-          echo "raw_version=$pin" >> $GITHUB_OUTPUT
+          echo "raw_version=$pin" >> "$GITHUB_OUTPUT"
 
       - name: Get current llvm-aie (Peano) version
         id: current_peano
@@ -144,7 +146,7 @@ jobs:
         run: |
           raw_version=$(grep 'llvm-aie==' requirements.txt | cut -d'=' -f3)
           echo "Current llvm-aie version: $raw_version"
-          echo "raw_version=$raw_version" >> $GITHUB_OUTPUT
+          echo "raw_version=$raw_version" >> "$GITHUB_OUTPUT"
 
       - name: Compare versions and create PR
         if: steps.target.outputs.proceed == 'true'

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: "Commit Test Results to a Branch"
+description: "Commit the test results to a branch of this repository."
 
 inputs:
   pretty_flags:
