@@ -12,7 +12,6 @@ from iron.common import DispatchTime, In, InOut, Operator, Param, Unresolvable
 from iron.operators.flm.layer.design import (
     LAYER_TYPES,
     RTP_ADDRESSES,
-    SLIDING_WINDOW,
     arg_sizes,
     decode_layer,
     layer_kernels,
@@ -72,6 +71,5 @@ class DecodeLayer(Operator):
             self.geometry,
             RTP_ADDRESSES[self.geometry],
             self.layer_type,
-            SLIDING_WINDOW,
             kernels=layer_kernels(self.geometry),
         )

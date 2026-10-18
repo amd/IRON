@@ -41,9 +41,6 @@ N_TILE_DEFAULT = 64
 # L1 budget split two ways, passed to the kernel as its ``chunk_k``. n=256 is
 # absent because its f32 accumulator alone (M_TILE*256*4) fills all of L1.
 CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32}
-# (tile_n, ct_max_k) pairs verified on hardware: another pair computes a
-# wrong answer silently, for a reason not yet known, so it is refused.
-_VERIFIED_CT_K = {(16, 16), (32, 32), (64, 128), (128, 32)}
 # Register tiling, shared by both architectures. pack_B, the stream-dimension
 # lists and gather_dims all key off these; changing one alone is silently
 # wrong.
@@ -82,12 +79,6 @@ def l1_budget(dev, epilogue_modes):
     activated = any(Epilogue(m) is not Epilogue.NONE for m in epilogue_modes)
     return budget - (LUT_STATIC_SIZE if dev.arch == AIEArch.AIE2 and activated else 0)
 
-
-# Row-blocks a core folds into one B fetch, cutting B's DDR reads by M_CHUNK
-# at the cost of that many L1 accumulators. Off everywhere: it must divide
-# m_row_blocks (M % 512 == 0), and a shape that cannot use it would fork
-# config_name. See README.md.
-M_CHUNK_FOR_N = {16: 1, 32: 1, 64: 1, 128: 1}
 
 # B does not go through an ObjectFifo. A fifo's memtile BDs are part of the
 # device configuration, so holding a column-block there would put K (the buffer

@@ -86,7 +86,6 @@ class LMHead(Operator):
             self.dim,
             self.vocab,
             self.softcap,
-            0,
             lm_head_kernel=kernel,
         )
 

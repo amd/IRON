@@ -519,7 +519,6 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         "mode": 0,
         "clamp_min": int(np.float32(-np.inf).view(np.int32)),
         "clamp_max": int(np.float32(np.inf).view(np.int32)),
-        "n_chunks": 2,
         "n_units": 2,
         "units_valid": 2,
         "units_repeat": 1,

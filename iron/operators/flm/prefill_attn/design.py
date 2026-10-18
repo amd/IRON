@@ -279,7 +279,6 @@ def prefill_attn(
     num_heads,
     num_kv_heads,
     window=None,
-    trace_size=0,
     *,
     kernel,
     L_begin: DispatchTime[np.int32],
@@ -622,7 +621,4 @@ def prefill_attn(
     for tile in CT.values():
         rt.add_flow(Flow(MT[kv_mt], tile, src_channel=0, dst_channel=1))
 
-    prog = Program(dev, rt, workers=workers)
-    if trace_size > 0:
-        prog.enable_trace(trace_size)
-    return prog.resolve_program()
+    return Program(dev, rt, workers=workers).resolve_program()

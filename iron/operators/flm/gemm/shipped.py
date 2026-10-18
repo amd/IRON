@@ -165,7 +165,7 @@ class Shipped(
     # The port's named values are not this image's: it reads one block of
     # eight words behind a lock, written once per shape.
     n_val = m_row_blocks = k_iters = mode = clamp_min = clamp_max = None
-    n_chunks = n_units = units_valid = units_repeat = valid = None
+    n_units = units_valid = units_repeat = valid = None
     parameters = Value(derive=_parameter_words, words=PARAMETER_WORDS)
 
     class Array(Operator.Array):

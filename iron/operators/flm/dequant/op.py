@@ -150,18 +150,11 @@ class DequantBFP(Operator):
             cols=dev.cols if self.cols is None else self.cols,
         )
 
-    @staticmethod
-    def _check_extents(K, N, error) -> None:
-        """The divisibility rule. It names K or N, never the tile_n a caller
-        did not pass.
-        """
-        if K % K_TILE_B:
-            raise error(f"K ({K}) must be a multiple of {K_TILE_B}")
-        if N % N_TILE:
-            raise error(f"N ({N}) must be a multiple of {N_TILE}")
-
     def compatible(self) -> None:
-        self._check_extents(self.K, self.N, ValueError)
+        if self.K % K_TILE_B:
+            raise ValueError(f"K ({self.K}) must be a multiple of {K_TILE_B}")
+        if self.N % N_TILE:
+            raise ValueError(f"N ({self.N}) must be a multiple of {N_TILE}")
 
     @property
     def config_name(self) -> str:

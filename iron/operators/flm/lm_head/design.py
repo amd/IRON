@@ -43,7 +43,7 @@ def vocab_per_round(dev) -> int:
     return dev.cols * len(dev.core_rows) * M_TILE
 
 
-def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
+def lm_head(dev, dim, vocab, softcap, *, lm_head_kernel):
     """Program for ``iron.operators.flm.LMHead``, which documents the arguments.
 
     ``lm_head_kernel`` is the ``flm_gemma4_q4nx_lm_head`` kernel for ``dim``.
@@ -173,7 +173,4 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
         x_task.free()
 
     rt = Runtime(sequence, [y_l3_ty, w_l3_ty, x_l3_ty, x_prod, w_prods, y_conses, rtps])
-    prog = Program(dev, rt, workers=workers)
-    if trace_size > 0:
-        prog.enable_trace(trace_size)
-    return prog.resolve_program()
+    return Program(dev, rt, workers=workers).resolve_program()

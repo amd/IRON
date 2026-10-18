@@ -57,14 +57,12 @@ from iron.common import (
 )
 from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (
-    _VERIFIED_CT_K,
     A_DEPTH,
     B_MAX_SLOTS,
     C_DEPTH,
     CT_MAX_K_FOR_N,
     CT_OUT_LEN,
     K_TILE,
-    M_CHUNK_FOR_N,
     M_TILE,
     N_TILE_DEFAULT,
     STACK_SIZE,
@@ -193,8 +191,13 @@ class GEMM(Operator):
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
     tile_ma: int = Auto(domain=Divisors(of=M_TILE, step=2 * R))
-    # Row-blocks folded into one B fetch.
-    m_chunk: int = Auto(domain=Divisors(of=lambda op, dev: op.M // (M_TILE * op.rows)))
+    # Row-blocks a core folds into one B fetch, cutting B's DDR reads by
+    # m_chunk at the cost of that many L1 accumulators. 1 by default: it must
+    # divide m_row_blocks (M % 512 == 0), and a shape that cannot use it would
+    # fork config_name. See README.md.
+    m_chunk: int = Auto(
+        default=1, domain=Divisors(of=lambda op, dev: op.M // (M_TILE * op.rows))
+    )
     # The activations the epilogue can select between at run time, beside
     # those of the finishes its array applies. Each one compiled in costs
     # program memory, so a deployment that dispatches two should compile two.
@@ -266,7 +269,6 @@ class GEMM(Operator):
     mode = Value(derive=lambda op: op.activation.mode)
     clamp_min = Value(derive=lambda op: _clamp_bits(op.clamp)[0])
     clamp_max = Value(derive=lambda op: _clamp_bits(op.clamp)[1])
-    n_chunks = Value(derive=lambda op: op._n_units)
     n_units = Value(derive=lambda op: op._n_units)
     # Under a bound, the units it reaches: the cores' trip count and C's
     # length, in row blocks.
@@ -282,16 +284,6 @@ class GEMM(Operator):
             if self.tile_n not in CT_MAX_K_FOR_N:
                 raise ValueError(
                     f"tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {self.tile_n}"
-                )
-            ct_k = CT_MAX_K_FOR_N[self.tile_n]
-            if (self.tile_n, ct_k) not in _VERIFIED_CT_K:
-                raise ValueError(
-                    f"tile_n={self.tile_n} with ct_max_k={ct_k} is not a verified "
-                    f"combination (verified: {sorted(_VERIFIED_CT_K)}). It would "
-                    f"build, run, and compute the WRONG ANSWER -- see "
-                    f"_VERIFIED_CT_K. If you are retuning CT_MAX_K_FOR_N, fix that "
-                    f"coupling first and add the pair here once a hardware test "
-                    f"passes."
                 )
         if self.tile_ma is not None and (
             M_TILE % self.tile_ma or self.tile_ma % (2 * R)
@@ -344,7 +336,7 @@ class GEMM(Operator):
         b_group = bfp.BLOCK if bfp16_b else 1
         tile_n = N_TILE_DEFAULT if self.tile_n is None else self.tile_n
         ct_k = CT_MAX_K_FOR_N[tile_n]
-        m_chunk = M_CHUNK_FOR_N[tile_n] if self.m_chunk is None else self.m_chunk
+        m_chunk = self.m_chunk
         k_tile = self.k_tile
         if k_tile is None:
             k_tile = K_TILE
@@ -485,17 +477,6 @@ class GEMM(Operator):
         return (*super().design_key(), ("epilogue", self.activation, self.clamp))
 
     @property
-    def _tuned(self) -> "GEMM":
-        """This operator resolved for the current device, when construction
-        left it unresolved: the names and the packing read fields resolution
-        fills (tile_n, tile_ma, the B block depth), and both are wanted
-        before the build resolves.
-        """
-        if self._resolved:
-            return self
-        return self.resolved()
-
-    @property
     def ct_max_k(self) -> int:
         return CT_MAX_K_FOR_N[self.tile_n]
 
@@ -512,7 +493,7 @@ class GEMM(Operator):
     @property
     def config_name(self) -> str:
         """Stem of the artifacts that do not depend on the shape: the xclbin's."""
-        t = self._tuned
+        t = self.resolved()
         dev = self.dev
         if dev is None:
             raise Unresolvable(
@@ -576,7 +557,6 @@ class GEMM(Operator):
         mode: Value
         clamp_min: Value
         clamp_max: Value
-        n_chunks: Value
         n_units: Value
         units_valid: Value
         dev: Device
@@ -824,7 +804,7 @@ class GEMM(Operator):
                 self.clamp_max,
             ]
             if M_CHUNK > 1:
-                read += [self.n_chunks, self.n_units]
+                read.append(self.n_units)
             if bounded:
                 read.append(self.units_valid)
             rtps = [Rtp(read) for _ in range(ROWS * COLS)]
@@ -859,12 +839,7 @@ class GEMM(Operator):
                 epi_mode = words[self.mode]
                 clamp_min_bits = words[self.clamp_min]
                 clamp_max_bits = words[self.clamp_max]
-                if M_CHUNK > 1:
-                    n_chunks = words[self.n_chunks]
-                    n_units_rt = words[self.n_units]
-                else:
-                    n_chunks = n_row_blocks
-                    n_units_rt = n_row_blocks
+                n_units_rt = words[self.n_units] if M_CHUNK > 1 else n_row_blocks
                 # Bounded, m_chunk is 1: a unit is a chunk.
                 n_live = words[self.units_valid] if bounded else n_units_rt
 
@@ -914,7 +889,7 @@ class GEMM(Operator):
                                     for _ in b_bufs:
                                         b_cons.acquire(1)
                                         b_prod.release(1)
-                    for _ in range_(n_live if bounded else n_chunks):
+                    for _ in range_(n_live):
                         sweep(accs)
 
                 # Column-blocks this column sits out. A is broadcast along the
@@ -1205,7 +1180,6 @@ class GEMM(Operator):
                 # Every core's parameters for this slab, then every barrier.
                 rt.preamble(
                     m_row_blocks=slab.units * M_CHUNK,
-                    n_chunks=slab.units,
                     n_units=slab.units,
                 )
 
@@ -1292,7 +1266,7 @@ class GEMM(Operator):
         Raises:
             ValueError: Under ``b_col_maj``, which reads B as stored.
         """
-        t = self._tuned
+        t = self.resolved()
         if t.b_col_maj:
             raise ValueError("flm.GEMM(b_col_maj=True) reads B as stored (N, K)")
         return pack_b(

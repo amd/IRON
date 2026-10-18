@@ -98,7 +98,6 @@ class _PrefillAttentionBase(Operator):
             self.num_heads,
             self.num_kv_heads,
             self.window,
-            0,
             kernel=self.kernel(),
         )
 

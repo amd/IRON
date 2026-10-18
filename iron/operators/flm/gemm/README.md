@@ -545,8 +545,7 @@ The sequence's only share is order and one token. Only each column's last C of
 a slab carries a token: C drains in order, so it finishing means the slab is
 done.
 
-`m_chunk` is off by default — see `M_CHUNK_FOR_N` in design.py, which would
-fork the xclbin.
+`m_chunk` is 1 by default: a shape it does not divide would fork the xclbin.
 
 ### A row bound per call
 

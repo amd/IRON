@@ -18,7 +18,6 @@ from iron.common.testing import run_test, vectors
 from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (
     CT_MAX_K_FOR_N,
-    M_CHUNK_FOR_N,
     M_TILE,
     Epilogue,
     Gelu,
@@ -358,17 +357,14 @@ def tile_option_params():
 
     params = []
     for tile_n, ct_k in sorted(CT_MAX_K_FOR_N.items()):
-        # m_chunk matters: the core holds a B chunk across that many
-        # accumulators, so it is what decides which A heights still fit.
-        m_chunk = M_CHUNK_FOR_N[tile_n]
-        default_ma = _default_l1(tile_n, ct_k, b_elem, l1, m_chunk)[0]
+        default_ma = _default_l1(tile_n, ct_k, b_elem, l1)[0]
         # One full sweep of the grid at this tile_n, so every column has work.
         M, K, N = 256, 512, tile_n * dev.cols
         for tile_ma in (16, 32, 64):
             if M_TILE % tile_ma or tile_ma % (2 * R):
                 continue
             try:
-                _b_depth_for(tile_ma, tile_n, ct_k, b_elem, l1, m_chunk)
+                _b_depth_for(tile_ma, tile_n, ct_k, b_elem, l1)
             except ValueError:
                 continue  # this A height leaves no room for B at this width
             marks = [] if tile_ma == default_ma else [pytest.mark.extensive]
@@ -407,7 +403,8 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
 def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
     """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
     operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma)
-    assert (operator._tuned.tile_n, operator._tuned.tile_ma) == (tile_n, tile_ma)
+    resolved = operator.resolved()
+    assert (resolved.tile_n, resolved.tile_ma) == (tile_n, tile_ma)
     errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
     assert not errors, "Test failed"
 

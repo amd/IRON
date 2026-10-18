@@ -59,6 +59,8 @@ LAYER_TYPES = ("global", "swa", "global_skip", "swa_skip")
 # The KV cache rows that the runtime sequence's buffer types allow. The
 # sequence takes the row count, max_l, at dispatch.
 MAX_CONTEXT = 32768
+# A power of two of at least LK: the sequence takes the remainder by it with
+# a mask, and the attention memtile takes the cache in buffers of LK rows.
 SLIDING_WINDOW = 512
 
 # The L1 address of each RTP, per geometry, from FastFlowLM's address book. The
@@ -466,7 +468,6 @@ def _sequence(
     g,
     rtp,
     layer_type,
-    sliding_window,
     shim,
     x_arg,
     proj_arg,
@@ -488,7 +489,7 @@ def _sequence(
     D = g.model_dim
     L = _as_i32(len_arg) + 1
     MAX_L_v = _as_i32(max_l_arg)
-    SW = sliding_window
+    SW = SLIDING_WINDOW
     DH = g.swa_dh if IS_SWA else g.dh
     DK = g.num_kv_heads * DH
     weights = weight_layout(g, layer_type)
@@ -1631,7 +1632,6 @@ def decode_layer(
     geometry,
     rtp,
     layer_type,
-    sliding_window=SLIDING_WINDOW,
     *,
     kernels,
     context_len: DispatchTime[np.int32],
@@ -1646,12 +1646,6 @@ def decode_layer(
     """
     if layer_type not in LAYER_TYPES:
         raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
-    if sliding_window < LK or sliding_window & (sliding_window - 1):
-        raise ValueError(
-            f"sliding_window ({sliding_window}) must be a power of two of at "
-            f"least {LK}: the sequence takes the remainder by it with a mask, "
-            "and the attention memtile takes the cache in buffers of LK rows"
-        )
     g = geometry
     G_DQ = g.num_attn_heads * g.dh
     S_DQ = g.num_attn_heads * g.swa_dh
@@ -1661,7 +1655,7 @@ def decode_layer(
     # _route fills the shim flows in before the sequence body runs.
     shim = {}
     rt = Runtime(
-        partial(_sequence, g, rtp, layer_type, sliding_window, shim),
+        partial(_sequence, g, rtp, layer_type, shim),
         [
             np.ndarray[(sizes["x"],), _BF16],
             np.ndarray[(sizes["proj"],), _BF16],
