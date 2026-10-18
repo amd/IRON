@@ -24,7 +24,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig, Golden, Multimodal
+from iron.lm import CausalLM, DecoderConfig, Multimodal
 from iron.lm.golden import _flat, config_json
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
@@ -91,18 +91,10 @@ class Runner(lm.Runner):
     model = SmolVLMText
     bos = BOS
 
-    def reference(self):
-        """``lm.Runner.reference``, transformers' model a ``HuggingFaceVLM``:
-        no ``AutoModelForCausalLM`` loads SmolVLM's checkpoint.
-        """
-        if self.seed is not None:
-            return super().reference()
-        directory = Path(self.checkpoint.path).parent
-        try:
-            import transformers  # noqa: F401
-        except ImportError:
-            return Golden(directory / "golden.npz")
-        return Golden(directory / "golden.npz", lambda: HuggingFaceVLM.load(directory))
+    @property
+    def hugging_face(self):
+        # No AutoModelForCausalLM loads SmolVLM's checkpoint.
+        return HuggingFaceVLM
 
 
 # The real processor's own ids either side of an image and its question

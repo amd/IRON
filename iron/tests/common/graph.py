@@ -2729,3 +2729,20 @@ def test_a_handle_adds_and_multiplies_by_elementwise_and_rowwise_steps():
     ]
     with pytest.raises(TypeError, match="a row of"):
         Arithmetic().trace(x=(2, E), y=(2, E // 2))
+
+
+@pytest.mark.parametrize(
+    "rows, keywords",
+    [(1, dict(k_tile=64)), (4, dict(tile_size_output=32))],
+    ids=["gemv", "gemm"],
+)
+def test_linear_refuses_a_tunable_its_rows_do_not_choose(rows, keywords):
+    class Linear(iron.Graph):
+        def __init__(self):
+            self.w = iron.weight(z(E, E))
+
+        def body(self, x):
+            return F.linear(x, self.w, **keywords)
+
+    with pytest.raises(ValueError, match="no (GEMV|flm.GEMM)"):
+        Linear().trace(x=(rows, E))

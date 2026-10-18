@@ -45,25 +45,28 @@ def linear(
 ):
     """``x @ weight.T``, plus ``bias`` on every row if given.
 
-    One row is a GEMV; more are flm.GEMM reading ``weight`` column-major, or
-    with ``accurate`` the GEMM whose float32 sums round once (``ACCURATE``).
-    ``k_tile``, ``tile_n`` and ``emulate_bf16_mmul_with_bfp16`` are
-    flm.GEMM's tunables and ``gemv`` the GEMV's, for a call the profile
-    cannot tell from another of its shape.
+    One row is a GEMV, which ``accurate`` leaves as it is; more are flm.GEMM
+    reading ``weight`` column-major, or with ``accurate`` the GEMM whose
+    float32 sums round once (``ACCURATE``). ``k_tile``, ``tile_n`` and
+    ``emulate_bf16_mmul_with_bfp16`` are flm.GEMM's tunables and ``gemv``
+    the GEMV's, for a call the profile cannot tell from another of its shape.
 
     Raises:
-        ValueError: ``accurate`` with one of flm.GEMM's keywords.
+        ValueError: A tunable of the operator the rows do not choose, or
+            ``accurate`` with one of flm.GEMM's.
     """
+    tiled = {
+        k: v
+        for k, v in dict(
+            k_tile=k_tile,
+            tile_n=tile_n,
+            emulate_bf16_mmul_with_bfp16=emulate_bf16_mmul_with_bfp16,
+        ).items()
+        if v is not None
+    }
     if len(x.shape) == 2 and x.shape[0] > 1:
-        tiled = {
-            k: v
-            for k, v in dict(
-                k_tile=k_tile,
-                tile_n=tile_n,
-                emulate_bf16_mmul_with_bfp16=emulate_bf16_mmul_with_bfp16,
-            ).items()
-            if v is not None
-        }
+        if gemv:
+            raise ValueError(f"linear(): {x.shape[0]} rows take no GEMV {sorted(gemv)}")
         if accurate and tiled:
             raise ValueError(f"linear(): accurate takes no flm.GEMM {sorted(tiled)}")
         if accurate:
@@ -72,6 +75,8 @@ def linear(
             y = FLMGEMM.step(
                 x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
             )
+    elif tiled:
+        raise ValueError(f"linear(): one row takes no flm.GEMM {sorted(tiled)}")
     else:
         y = GEMV.step(weight, x, **gemv)
     if bias is None:

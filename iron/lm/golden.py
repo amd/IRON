@@ -9,9 +9,14 @@ are not IRON's requirements, only to record.
 
 import dataclasses
 import hashlib
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+
+#: Set (``pytest --record-goldens`` sets it) to record what a ``Golden`` lacks.
+RECORD = "IRON_RECORD_GOLDENS"
 
 
 class Golden:
@@ -21,34 +26,90 @@ class Golden:
     Args:
         path: The file; it need not exist yet.
         reference: Builds what records a sequence ``path`` lacks (a
-            ``HuggingFace``), called on the first such sequence; None
-            records nothing, and such a sequence raises ``LookupError``.
+            ``HuggingFace``), called once on the first such sequence, and only
+            while ``RECORD`` is set; otherwise such a sequence raises
+            ``LookupError``.
+        inputs: What the reference is built from (a config, weights); the
+            file holds their ``fingerprint`` and is refused if they change.
+
+    Raises:
+        ValueError: ``path`` was recorded from other ``inputs``.
     """
 
-    def __init__(self, path, reference=None):
+    def __init__(self, path, reference=None, inputs=()):
         self.path = Path(path)
-        self.rows = dict(np.load(self.path)) if self.path.exists() else {}
-        self.reference = reference
+        self.build = reference if os.environ.get(RECORD) else None
+        self.reference = None
+        self.fingerprint = fingerprint(*inputs) if inputs else None
+        self.rows = self.read()
+
+    def read(self) -> dict:
+        """The file's rows; none if it is stale and this records."""
+        if not self.path.exists():
+            return {}
+        with np.load(self.path) as f:
+            rows = dict(f)
+        held = str(rows.pop("fingerprint", ""))
+        if self.fingerprint is None or held == self.fingerprint:
+            return rows
+        if self.build is not None:
+            return {}
+        raise ValueError(
+            f"{self.path} was recorded from other inputs: re-record it where "
+            "transformers is installed (pytest --record-goldens)"
+        )
 
     def logits(self, tokens) -> np.ndarray:
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         key = hashlib.sha256(tokens.tobytes()).hexdigest()[:16]
         if key not in self.rows:
-            if self.reference is None:
+            if self.build is None:
                 raise LookupError(
                     f"{self.path} holds no logits for these {tokens.size} tokens: "
                     "record them where transformers is installed (pytest "
                     "--record-goldens)"
                 )
-            if callable(self.reference):
-                self.reference = self.reference()
-            self.rows[key] = np.asarray(self.reference.logits(tokens), np.float32)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.reference is None:
+                self.reference = self.build()
+            row = np.asarray(self.reference.logits(tokens), np.float32)
             # Another process may have recorded others since this one read.
-            if self.path.exists():
-                self.rows = dict(np.load(self.path)) | self.rows
-            np.savez_compressed(self.path, **self.rows)
+            self.rows = self.read() | self.rows | {key: row}
+            self.write()
         return self.rows[key]
+
+    def write(self):
+        """The rows to the file, replaced whole so no reader sees half."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        held = {} if self.fingerprint is None else {"fingerprint": self.fingerprint}
+        partial = self.path.with_name(f".{self.path.stem}.{os.getpid()}.npz")
+        np.savez_compressed(partial, **self.rows, **held)
+        os.replace(partial, self.path)
+
+
+def fingerprint(*values) -> str:
+    """A digest of ``values``: arrays by their bytes, shapes and types,
+    namespaces, lists and tuples by their items, anything else by ``repr``.
+    """
+    digest = hashlib.sha256()
+
+    def feed(value):
+        if isinstance(value, np.ndarray):
+            digest.update(f"{value.dtype}{value.shape}".encode())
+            digest.update(np.ascontiguousarray(value).tobytes())
+        elif isinstance(value, (list, tuple)):
+            digest.update(b"[")
+            for item in value:
+                feed(item)
+            digest.update(b"]")
+        elif isinstance(value, SimpleNamespace):
+            for name, item in sorted(vars(value).items()):
+                digest.update(name.encode())
+                feed(item)
+        else:
+            digest.update(repr(value).encode())
+
+    feed(values)
+    return digest.hexdigest()[:16]
 
 
 class HuggingFace:

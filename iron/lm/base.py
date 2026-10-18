@@ -10,7 +10,6 @@ computed from them), ``Model``, and ``Runner`` and ``main``.
 
 import argparse
 import dataclasses
-import importlib.util
 import io
 import json
 import logging
@@ -454,7 +453,9 @@ class Checkpoint:
                 mapped file read only when touched. ``"random"``: drawn at
                 ``seed`` in the file's order, each matrix normal with
                 deviation ``1/sqrt(in)`` (an embedding's ``in`` its width),
-                anything of fewer than two axes one. ``"unread"``: allocated
+                anything of fewer than two axes (a norm, a bias) normal about
+                one with deviation 0.1, so that swapping two changes the
+                output. ``"unread"``: allocated
                 and never written, for tracing, building and measuring a
                 model, none of which reads a weight; the pages are reserved,
                 not touched, and a scalar is zero, since a graph may read one
@@ -472,7 +473,9 @@ class Checkpoint:
             rng = np.random.default_rng(seed)
             tensors = {
                 name: (
-                    np.ones(t.shape, t.dtype)
+                    (1 + rng.standard_normal(t.shape, dtype=np.float32) / 10).astype(
+                        t.dtype
+                    )
                     if t.ndim < 2
                     else (
                         rng.standard_normal(t.shape, dtype=np.float32)
@@ -704,6 +707,8 @@ class Runner:
     sizes: dict[str, Config] = {}
     model: "type[CausalLM]"
     bos: int
+    # What loads the checkpoint into transformers to record its goldens.
+    hugging_face: type = HuggingFace
     # The configure cost is measured between small single-column designs, at
     # their narrowest: one design's configure then costs least beside the
     # fixed part the calibration isolates.
@@ -957,15 +962,19 @@ class Runner:
 
     def reference(self):
         """What the model is judged by: with drawn weights, its own graph on
-        the host (``OnHost``); else Hugging Face's logits, recorded beside
-        the checkpoint (``golden.npz``) where transformers is installed.
+        the host (``OnHost``); else ``hugging_face``'s logits, recorded
+        beside the checkpoint (``golden.npz``).
         """
         if self.seed is not None:
-            return type("Host", (OnHost, self.model), {})(self.config, self.weights)
+
+            class Host(OnHost, self.model):
+                pass
+
+            return Host(self.config, self.weights)
         directory = Path(self.checkpoint.path).parent
-        if importlib.util.find_spec("transformers") is None:
-            return Golden(directory / "golden.npz")
-        return Golden(directory / "golden.npz", lambda: HuggingFace.load(directory))
+        return Golden(
+            directory / "golden.npz", lambda: self.hugging_face.load(directory)
+        )
 
     def encode(self, text: str) -> list[int]:
         return [self.bos, *self.tokenizer.encode(text)]

@@ -95,7 +95,9 @@ def _assert_close(model, reference, tokens):
 def toy(golden):
     """The toy's random weights and their golden logits."""
     weights = checkpoint(TOY, names(TOY)).tree("random", 0)
-    return weights, golden("toy", lambda: HuggingFace.build("lfm2", TOY, weights))
+    return weights, golden(
+        "toy", lambda: HuggingFace.build("lfm2", TOY, weights), TOY, weights
+    )
 
 
 @pytest.fixture(scope="module")

@@ -180,6 +180,8 @@ def causal(golden):
         hf = golden(
             "multimodal",
             lambda: Placed(HuggingFace.build("llama", config, weights), soft),
+            config,
+            weights,
         )
         return hf.logits(key)
 

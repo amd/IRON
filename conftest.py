@@ -4,6 +4,7 @@
 import csv
 import numbers
 import re
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,7 @@ from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
 
 from iron.lm.base import FLAGS
-from iron.lm.golden import Golden
+from iron.lm.golden import RECORD, Golden
 from iron.tests.toolchain.tools import DEVICES
 
 
@@ -62,15 +63,14 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="module")
 def golden(request):
-    """``golden(name, reference)``: the ``Golden`` file ``goldens/<name>.npz``
-    beside the test, recording what it lacks from ``reference()`` (a
-    ``HuggingFace``) under ``--record-goldens``.
+    """``golden(name, reference, *inputs)``: the ``Golden`` file
+    ``goldens/<name>.npz`` beside the test, of what ``reference()`` (a
+    ``HuggingFace``) builds from ``inputs``.
     """
-    record = request.config.getoption("--record-goldens")
 
-    def open_golden(name, reference):
+    def open_golden(name, reference, *inputs):
         path = request.path.with_name("goldens") / f"{name}.npz"
-        return Golden(path, reference if record else None)
+        return Golden(path, reference, inputs)
 
     return open_golden
 
@@ -214,6 +214,8 @@ def pytest_runtest_makereport(item, call):
 
 
 def pytest_configure(config):
+    if config.getoption("--record-goldens"):
+        os.environ[RECORD] = "1"
     csv_path = config.getoption("--csv-output")
     config._csv_reporter = CSVReporter(csv_path)
 

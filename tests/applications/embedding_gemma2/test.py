@@ -264,26 +264,22 @@ def tuner():
 def reference():
     """``reference(key, compute)``: ``compute(model)`` on Hugging Face's own
     EmbeddingGemma 2 (hugging_face.py), an array kept under ``key`` in
-    ``golden.npz`` beside the checkpoint: recorded there where torch,
-    torchvision and transformers are installed, read back elsewhere, and
-    the test skipped when it is neither.
+    ``golden.npz`` beside the checkpoint, recorded under ``pytest
+    --record-goldens`` (torch, torchvision and transformers installed).
     """
-    golden = Golden(DIRECTORY / "golden.npz")
-    try:
+
+    @functools.cache
+    def model():
         from iron.applications.embedding_gemma2.hugging_face import HuggingFace
-    except ImportError:
-        HuggingFace = None
-    model = functools.cache(lambda: HuggingFace(DIRECTORY))
+
+        return HuggingFace(DIRECTORY)
 
     def recorded(key, compute):
-        if HuggingFace is not None:
-            golden.reference = lambda: SimpleNamespace(
-                logits=lambda _: compute(model())
-            )
-        try:
-            return golden.logits(np.frombuffer(key.encode(), np.uint8))
-        except LookupError as e:
-            pytest.skip(str(e))
+        record = lambda: SimpleNamespace(
+            logits=lambda _: compute(model())
+        )  # noqa: E731
+        golden = Golden(DIRECTORY / "golden.npz", record)
+        return golden.logits(np.frombuffer(key.encode(), np.uint8))
 
     return recorded
 

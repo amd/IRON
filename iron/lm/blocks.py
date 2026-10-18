@@ -642,10 +642,8 @@ class Attention:
         position, turns q and k, or None nothing.
         """
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
-        # Half a head per tile for one row; q's shape is o's when H * D is
-        # the width, so it is given here rather than by the profile.
         q, k, v = (
-            _linear(x, p, accurate=self.accurate, tile_size_output=D // 2)
+            _linear(x, p, accurate=self.accurate, **self.head_tiles(n))
             for p in (w.q_proj, w.k_proj, w.v_proj)
         )
         q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
@@ -664,6 +662,13 @@ class Attention:
             window=self.window,
         )
         return _linear(o, w.o_proj, accurate=self.accurate)
+
+    def head_tiles(self, rows: int) -> dict:
+        """Half a head per GEMV tile for one row: q's shape is o's when
+        ``heads * head_dim`` is the width, so it is given here rather than
+        by the profile.
+        """
+        return dict(tile_size_output=self.head_dim // 2) if rows == 1 else {}
 
     def rotate(self, x, angles):
         """``x`` ``(rows, head_dim)`` turned by RoPE, only its first
@@ -690,7 +695,7 @@ class Attention:
         ``cross(q, scale=)`` on ``(rows, heads, head_dim)``.
         """
         n, H, D = x.shape[0], self.heads, self.head_dim
-        q = _linear(x, w.q_proj, accurate=self.accurate, tile_size_output=D // 2)
+        q = _linear(x, w.q_proj, accurate=self.accurate, **self.head_tiles(n))
         o = cross(q.reshape(n, H, D), scale=self.scale)
         return _linear(o, w.o_proj, accurate=self.accurate)
 

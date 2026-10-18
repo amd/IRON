@@ -173,10 +173,7 @@ def check_accuracy(
     bound a drift across many steps, the max a single broken step.
     """
     tokens = prompt(runner, chars, num_tokens)
-    try:
-        results = accuracy(model, runner.reference(), tokens, num_tokens)
-    except LookupError as e:
-        pytest.skip(str(e))
+    results = accuracy(model, runner.reference(), tokens, num_tokens)
     stats = kl_stats(results)
     for stat, value in stats.items():
         record(f"{stat}KL", float(value))

@@ -86,6 +86,7 @@ it is published (COCO's host, openslr's archive) by its sha256 into the
 checkpoint's directory the first time.
 
 What Hugging Face's processors and model give is recorded once in
-`golden.npz` in the checkpoint's directory, where torch, torchvision and
-transformers are installed (they are not IRON's requirements), and read back
-from it elsewhere; a test whose golden is missing there skips.
+`golden.npz` in the checkpoint's directory by `pytest --record-goldens`,
+where torch, torchvision and transformers are installed (they are not
+IRON's requirements), and read back from it elsewhere; a test whose golden
+is missing fails.

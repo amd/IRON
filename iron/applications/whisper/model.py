@@ -17,7 +17,6 @@ a zero row before them, as its convolutions' padding.
 """
 
 import dataclasses
-import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -320,13 +319,12 @@ class Runner(lm.Runner):
     def reference(self):
         """With drawn weights, the model's own graph on the host; else
         Hugging Face's logits (``Reference``), recorded beside the
-        checkpoint (``golden.npz``) where transformers is installed.
+        checkpoint (``golden.npz``).
         """
         if self.seed is not None:
             return super().reference()
         directory = Path(self.checkpoint.path).parent
-        record = importlib.util.find_spec("transformers") is not None
-        load = (lambda: HuggingFaceWhisper.load(directory)) if record else None
+        load = lambda: HuggingFaceWhisper.load(directory)  # noqa: E731
         return Reference(Golden(directory / "golden.npz", load))
 
 

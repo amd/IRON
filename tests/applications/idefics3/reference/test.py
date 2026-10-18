@@ -131,6 +131,9 @@ def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
     reference = golden(
         "soft_tokens",
         lambda: SoftTokens(HuggingFaceVLM.build(TEXT, VISION, weights)),
+        TEXT,
+        VISION,
+        weights,
     )
     want = reference.logits(buffer.view(np.uint16))
     assert got.shape == (tower.soft_rows, VISION.text_dim)
@@ -157,7 +160,13 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
     model = Multimodal(
         SmolVLMText(TEXT, weights), {IMAGE: VisionTower(VISION, weights)}
     )
-    hf = golden("small", lambda: HuggingFaceVLM.build(TEXT, VISION, weights))
+    hf = golden(
+        "small",
+        lambda: HuggingFaceVLM.build(TEXT, VISION, weights),
+        TEXT,
+        VISION,
+        weights,
+    )
     reference = Reference(hf, IMAGE)
     rng = np.random.default_rng(2)
     tokens = rng.integers(0, IMAGE, 300)

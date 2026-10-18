@@ -78,7 +78,7 @@ def test_the_reference_is_the_convolution(case, golden):
     key = np.concatenate([x.view(np.uint16).ravel(), w.view(np.uint16).ravel()])
     groups = CASES[case][3].get("groups", 1)
     reference = golden(
-        "conv2d", lambda: Convolution(conv, x, w.astype(np.float32), groups)
+        "conv2d", lambda: Convolution(conv, x, w.astype(np.float32), groups), CASES
     )
     want = reference.logits(key)
     ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)

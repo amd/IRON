@@ -114,7 +114,9 @@ def clip():
 def reference(clip, golden):
     """Hugging Face's logits over the toy's weights after the clip."""
     weights, features = clip
-    toy = Reference(golden("toy", lambda: HuggingFaceWhisper.build(TOY, weights)))
+    toy = Reference(
+        golden("toy", lambda: HuggingFaceWhisper.build(TOY, weights), TOY, weights)
+    )
     toy.encode(features)
     return toy
 
@@ -155,7 +157,9 @@ def test_the_encoder_s_output_is_hugging_face_s(clip, golden):
     encoder = WhisperEncoder(TOY.encoder(), weights)
     buffer, values = encoder.inputs(features)
     got = np.asarray(encoder.reference(buffer, **values), np.float32)
-    want = golden("encoder", lambda: Encoder(weights)).logits(features.view(np.int32))
+    want = golden("encoder", lambda: Encoder(weights), TOY, weights).logits(
+        features.view(np.int32)
+    )
     # 200 positions of the 256 rows the layers take.
     assert got.shape == want.shape == (TOY.source_positions, TOY.hidden_size)
     _assert_close(got, want, "the encoder's output")
@@ -226,7 +230,7 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
     assert weights.model.decoder.embed_tokens.weight.dtype == np.float16
     model = Whisper(TOY, weights)
     reference = Reference(
-        golden("toy_f16", lambda: HuggingFaceWhisper.build(TOY, weights))
+        golden("toy_f16", lambda: HuggingFaceWhisper.build(TOY, weights), TOY, weights)
     )
     assert model.decoder.embed_tokens.weight.dtype == bfloat16
     features = np.random.default_rng(1).uniform(

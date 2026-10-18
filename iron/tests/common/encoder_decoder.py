@@ -177,9 +177,14 @@ def whisper(golden):
     rng = np.random.default_rng(1)
     clip = (rng.standard_normal((200, CONFIG.hidden_size)) / 2).astype(bfloat16)
     tokens = rng.integers(0, CONFIG.vocab_size, 300)
-    reference = golden("encoder_decoder", lambda: HuggingFaceDecoder(weights, clip))
+    reference = golden(
+        "encoder_decoder", lambda: HuggingFaceDecoder(weights, clip), CONFIG, weights
+    )
     half = golden(
-        "encoder_decoder_half", lambda: HuggingFaceDecoder(weights, clip[:100])
+        "encoder_decoder_half",
+        lambda: HuggingFaceDecoder(weights, clip[:100]),
+        CONFIG,
+        weights,
     )
     return model, clip, reference, half, tokens
 
@@ -352,7 +357,10 @@ def test_padded_encoder_rows_reach_neither_attention(golden):
     np.testing.assert_array_equal(run(stale, padded, n, n, tokens), clean)
 
     want = golden(
-        "encoder_decoder_padded", lambda: HuggingFaceDecoder(weights, attended(clip))
+        "encoder_decoder_padded",
+        lambda: HuggingFaceDecoder(weights, attended(clip)),
+        CONFIG,
+        weights,
     ).logits(tokens)
     _assert_close([clean], [want])
     leaked = run(model(), padded, SOURCE, SOURCE, tokens)

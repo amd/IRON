@@ -314,7 +314,7 @@ def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
             return layer(self.weights, x, attend, None, ple=ple, scale=self.scale)
 
     got = np.asarray(Text().reference(x, ple), np.float32)
-    reference = golden("gemma_layer", lambda: HuggingFaceGemma(w, x, ple))
+    reference = golden("gemma_layer", lambda: HuggingFaceGemma(w, x, ple), w, ple)
     want = reference.logits(x.view(np.uint16))
     # Measured 0.013; 0.073 with the v norm left out.
     error = np.linalg.norm(got - want) / np.linalg.norm(want)

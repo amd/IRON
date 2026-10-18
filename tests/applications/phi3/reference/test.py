@@ -132,7 +132,7 @@ def _assert_close(got, expected):
 def cpu(golden):
     config = TOY
     weights = _toy_weights(config)
-    reference = golden("toy", lambda: _hugging_face(config, weights))
+    reference = golden("toy", lambda: _hugging_face(config, weights), config, weights)
     prompt = np.random.default_rng(7).integers(0, config.vocab_size, 8)
     tokens, expected = prompt, []
     first = logits = reference.logits(tokens)
@@ -224,7 +224,11 @@ def test_a_turn_past_the_original_context_rotates_only_its_own_rows_long(golden)
         "long_factor": list(LONG.longrope.long_factor),
     }
     reference = golden(
-        "long", lambda: _hugging_face(LONG, weights, rope_scaling=longrope)
+        "long",
+        lambda: _hugging_face(LONG, weights, rope_scaling=longrope),
+        LONG,
+        weights,
+        longrope,
     )
     model = OnHost(LONG, weights)
     tokens = np.random.default_rng(5).integers(0, LONG.vocab_size, 301)

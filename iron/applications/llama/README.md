@@ -143,5 +143,5 @@ Loads each checkpoint's model once, 1B's and then 3B's (skipped where
 its files are not), and runs in-process through `model.Runner` the
 throughput, accuracy and determinism checks above, again in the each-step
 form, and over a two-chunk prompt and a chat turn. Accuracy reads
-`golden.npz` beside the checkpoint, recording the logits it lacks where
-transformers is installed, and skips where it cannot.
+`golden.npz` beside the checkpoint and fails on logits it lacks; `pytest
+--record-goldens` records them where transformers is installed.
