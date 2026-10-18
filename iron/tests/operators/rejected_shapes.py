@@ -16,7 +16,6 @@ import functools
 import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron.device import from_name
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 from ml_dtypes import bfloat16
 
@@ -69,7 +68,7 @@ def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():
         )  # every tunable given
 
 
-def test_transfer_size_not_dividing_a_bounded_row_is_rejected():
+def test_transfer_size_not_dividing_a_bounded_row_is_rejected(npu2):
     """A bounded copy moves any whole number of rows, so its object divides
     one row: a prompt's 513 rows of (8, 64) keys into a cache are 256.5
     objects of 1024 elements, and the last half-object hangs the device.
@@ -86,7 +85,7 @@ def test_transfer_size_not_dividing_a_bounded_row_is_rejected():
     )
     with pytest.raises(ValueError, match="one row of the bounded axis"):
         copy(tile_size=1024)  # every tunable given
-    assert copy().resolved(from_name("npu2")).tile_size == G * D
+    assert copy().resolved(npu2).tile_size == G * D
 
 
 def test_channels_not_dividing_the_shared_run_are_rejected():
@@ -105,16 +104,16 @@ def test_channels_not_dividing_the_shared_run_are_rejected():
 
 
 @pytest.mark.parametrize(
-    "name,cols,feeds",
-    [("npu1", 4, 3), ("npu2", 8, 5), ("npu2", 8, 0)],
+    "name,feeds",
+    [("npu1", 3), ("npu2", 5), ("npu2", 0)],
 )
 def test_a_gather_feeding_from_more_shim_pairs_than_the_device_has_is_refused(
-    name, cols, feeds
+    name, feeds, request
 ):
     """Feed ``k`` streams from shim column ``2k`` into column ``2k + 1``."""
     gather = Gather(rows=512, table_rows=4096, row=512, feeds=feeds)
     with pytest.raises(Unresolvable, match="shim columns"):
-        gather.resolved(from_name(name, n_cols=cols))
+        gather.resolved(request.getfixturevalue(name))
 
 
 def test_a_gather_whose_feeds_outnumber_its_batch_pairs_is_refused(npu2):
@@ -183,11 +182,10 @@ def test_a_tile_past_what_one_core_holds_is_refused_not_split(npu2):
     assert RMSNorm(rows=2, tile_size=8192).resolved(npu2).tile_size == 8192
 
 
-def test_the_default_column_count_is_the_most_that_leave_whole_tiles(npu2):
+def test_the_default_column_count_is_the_most_that_leave_whole_tiles(npu1, npu2):
     """A tunable-free operator resolves on either device to the widest count
     its shape divides over, rather than the whole shim budget and a refusal.
     """
-    npu1 = from_name("npu1", n_cols=4)
     assert GEMM(M=256, K=64, N=256).resolved(npu2).num_aie_columns == 4
     assert GEMM(M=256, K=64, N=512).resolved(npu1).num_aie_columns == 4
     assert Transpose(M=64, N=64).resolved(npu2).num_aie_columns == 1
@@ -272,12 +270,12 @@ def test_mha_blocks_follow_the_head_size(npu2):
     ids=["llama_1b", "group_of_5", "llama_3b", "group_of_32"],
 )
 def test_mha_one_query_packed_takes_the_narrowest_block_and_64_keys(
-    dev, heads, kv_heads, d, block
+    dev, heads, kv_heads, d, block, request
 ):
     """Every row of a packed block is computed, so one query takes the
     narrowest block that holds its group, over 64-key blocks: mha.cc's
     vectorized softmax reads 64-key rows."""
-    bound = from_name(dev, n_cols=8 if dev == "npu2" else 4)
+    bound = request.getfixturevalue(dev)
     op = MHA(
         num_heads=heads,
         num_KV_heads=kv_heads,
@@ -373,17 +371,17 @@ def test_a_float32_softmax_under_a_per_call_bound_is_refused(npu2):
             return Softmax.step(x[:, :n], input_dtype=np.float32)
 
     (step,) = Attend().trace(x=((32, 1024), np.float32)).steps
-    with pytest.raises(ValueError, match="Softmax: the float32 input path"):
+    with pytest.raises(ValueError, match="takes no per-call bound"):
         step.op.resolved()
 
 
 @pytest.mark.parametrize(
     "device,precision",
-    [(("npu1", 4), None), (("npu2", 8), None), (("npu2", 8), Precision.HIGH)],
+    [("npu1", None), ("npu2", None), ("npu2", Precision.HIGH)],
 )
-def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision):
+def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision, request):
     op = FLMGEMM(M=256, K=512, N=256, b_col_maj=True, precision=precision).resolved(
-        from_name(device[0], n_cols=device[1])
+        request.getfixturevalue(device)
     )
     assert op.B.shape == (256, 512) and op.b_dtype is bfloat16
     assert not op.bfp16_b
@@ -391,10 +389,8 @@ def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision):
         op.pack_B(None)
 
 
-def test_flm_gemm_at_medium_takes_bf16_macs_on_aie2():
-    op = FLMGEMM(M=256, K=512, N=256, precision=Precision.MEDIUM).resolved(
-        from_name("npu1", n_cols=4)
-    )
+def test_flm_gemm_at_medium_takes_bf16_macs_on_aie2(npu1):
+    op = FLMGEMM(M=256, K=512, N=256, precision=Precision.MEDIUM).resolved(npu1)
     assert not op.emulate_bf16_mmul_with_bfp16 and not op.bfp16_b
 
 
@@ -428,13 +424,14 @@ def test_a_step_that_needs_the_order_of_a_gemm_block_is_refused(npu2):
     GEMM(**kwargs, finish=Chain.of(SiLU(size=2048 * 2048))).resolved(npu2)
 
 
-def test_a_finish_a_core_does_not_hold_beside_its_tiles_is_refused_or_narrowed(npu2):
+def test_a_finish_a_core_does_not_hold_beside_its_tiles_is_refused_or_narrowed(
+    npu1, npu2
+):
     """On AIE2 a SiLU finish links 5 KB of LUT tables beside its scratch
     line, past what a core holding 64-row GEMM tiles or a 2048-row GEMV
     tile at K = 8192 has left: an open tile_m narrows until it fits, and a
     given tile is refused at resolution rather than failing to place.
     """
-    npu1 = from_name("npu1", n_cols=4)
     kwargs = dict(M=2048, K=2048, N=2048, b_col_maj=True)
     silu = Chain.of(SiLU(size=2048 * 2048))
     assert GEMM(**kwargs, finish=silu).resolved(npu1).tile_m == 32
@@ -499,14 +496,14 @@ def test_merge_of_no_or_repeated_placeholders_is_refused(placeholders):
         Merge(rows=128, placeholders=placeholders)
 
 
-@pytest.mark.parametrize("device,n_cols", [("npu1", 4), ("npu2", 8)])
-def test_gemm_on_columns_that_do_not_divide_its_rows_is_refused(device, n_cols):
+@pytest.mark.parametrize("device", ["npu1", "npu2"])
+def test_gemm_on_columns_that_do_not_divide_its_rows_is_refused(device, request):
     """Each of a GEMM's first shims carries A to as many rows of cores as
     the others: three columns leave a fourth row without its A. Left open,
     the columns resolve to a count that divides the rows or covers them:
     two on npu1, six on npu2.
     """
-    dev = from_name(device, n_cols=n_cols)
+    dev = request.getfixturevalue(device)
     shape = dict(M=256, K=128, N=384, b_col_maj=True)
     with pytest.raises(ValueError, match="do not divide the 4 rows"):
         GEMM(**shape, num_aie_columns=3).resolved(dev)
@@ -624,12 +621,14 @@ def test_an_open_tile_m_is_the_widest_that_splits_m(
         ("npu1", Precision.HIGH, 16, 1, 16),
     ],
 )
-def test_a_short_m_takes_fewer_rows_of_cores(device, precision, M, rows, tile_m):
+def test_a_short_m_takes_fewer_rows_of_cores(
+    device, precision, M, rows, tile_m, request
+):
     """An M shorter than every row of cores at the kernel's m block is split
     over half as many, down to one.
     """
     op = GEMM(M=M, K=64, N=512, precision=precision)
-    resolved = op.resolved(from_name(device))
+    resolved = op.resolved(request.getfixturevalue(device))
     assert (resolved.n_aie_rows, resolved.tile_m) == (rows, tile_m)
 
 
@@ -644,9 +643,11 @@ def test_an_m_no_tile_splits_is_rejected(device, precision, request):
 
 
 # Extents the grid does not divide: refused once the grid is known.
-@pytest.mark.parametrize("K, N", [(1000, 128), (1024, 100)])
-def test_flm_dequant_rejects_unservable_shapes(K, N, npu2):
-    with pytest.raises(ValueError, match="multiple of"):
+@pytest.mark.parametrize(
+    "K, N, match", [(1000, 128, r"K \(1000\)"), (1024, 100, r"N \(100\)")]
+)
+def test_flm_dequant_rejects_unservable_shapes(K, N, match, npu2):
+    with pytest.raises(ValueError, match=match):
         DequantBFP(K=K, N=N).resolved(npu2)
 
 
@@ -749,7 +750,7 @@ def test_top_k_router_refuses_rows_its_pairs_do_not_split(rows, pairs, npu2):
             lambda: RoPE(rows=64, cols=64, angle_rows=4, num_aie_columns=8),
             r"angle_rows \(4\) must be a multiple of",
         ),
-        (lambda: Softmax(rows=16, cols=64, soft_cap=30.0), "float32 input path"),
+        (lambda: Softmax(rows=16, cols=64, soft_cap=30.0), "of the float32 input path"),
         (
             lambda: Softmax(rows=16, cols=64, input_dtype=np.float32, window=4),
             "given together",
