@@ -100,7 +100,7 @@ def test_a_version_reads_as_its_inputs_plan_and_build_directory():
     f, *_ = _function()
     one = f.compile(x=(E,))
     lines = repr(one).splitlines()
-    assert lines[0].startswith(f"F(x=({E},)): ")
+    assert lines[0].startswith(f"F(x=({E},) bfloat16): ")
     assert lines[-1] == f"  built in {one.artifacts.directory}"
 
 

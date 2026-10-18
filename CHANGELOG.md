@@ -95,6 +95,9 @@ public API adds its entry under Unreleased.
 - `--prompt TEXT` on a model's command line.
 - `-v` on a model's command line and `python -m iron.lm.tune`, which logs
   iron's INFO lines, such as each compile's.
+- `repr` of a graph names its traced shapes; of a compiled version, its
+  inputs, packaging and build directory; of a `Profile`, its operators; of
+  a model, its config, `max_seq_len` and whether it is loaded.
 
 ### Changed
 
@@ -109,9 +112,6 @@ public API adds its entry under Unreleased.
   (`same_kind`): float ids into an int32 input raise rather than truncate.
 - Compiling, loading or tuning with no NPU found raises a `RuntimeError`
   saying how to compile without one, not an `AttributeError` on `None`.
-- `repr` of a graph names its traced shapes; of a compiled version, its
-  inputs, packaging and build directory; of a `Profile`, its operators; of
-  a model, its config, `max_seq_len` and whether it is loaded.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `cli`.
 - An operator declares with aie.iron's markers: `In`, `Out` and `InOut`

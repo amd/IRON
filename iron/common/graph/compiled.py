@@ -647,8 +647,12 @@ class CompiledGraph:
         return self._callable is not None
 
     def __repr__(self) -> str:
-        inputs = ", ".join(f"{h.name}={h.shape}" for h in self.traced.inputs)
+        inputs = ", ".join(
+            f"{h.name}={h.shape} {bfp.dtype_name(h.dtype)}" for h in self.traced.inputs
+        )
         report = self.plan.report(f"{self.traced.name}({inputs})")
+        if self.artifacts.directory is None:
+            return report
         return f"{report}\n  built in {self.artifacts.directory}"
 
     def _ref(self, x) -> BufferRef:
