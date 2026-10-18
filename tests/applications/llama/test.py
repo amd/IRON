@@ -18,6 +18,7 @@ import functools
 import aie.utils as aie_utils
 import pytest
 
+import iron.lm as lm
 from iron.applications.llama import Llama
 from iron.lm.testing import (
     check_accuracy,
@@ -82,6 +83,33 @@ GENERATION = pytest.mark.parametrize(
     [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
     ids=[f"prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
 )
+
+
+@pytest.mark.extensive
+def test_the_readme_quick_start(record_property):
+    """The README's quick start, word for word but for the checkpoint's
+    directory in place of the repository's id: ``Llama.load`` compiling
+    from scratch. First, so no other model is held beside it.
+    """
+    directory = weights_dir("llama3.2-1b")
+    require(
+        directory / "config.json",
+        directory / "model.safetensors",
+        directory / "original" / "tokenizer.model",
+    )
+    try:
+        model = Llama.load(directory)
+        tokens = model.tokenizer("The capital of France is")
+        out, ttft, per_token = model.generate(
+            tokens, num_tokens=8, sample=lm.Sampler(seed=0)
+        )
+        print(model.tokenizer.decode(out))
+    finally:
+        if aie_utils.DefaultNPURuntime is not None:
+            aie_utils.DefaultNPURuntime.cleanup()
+    record_property("TTFT", ttft)
+    record_property("TPS", 1 / per_token)
+    assert len(out) == 8
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
