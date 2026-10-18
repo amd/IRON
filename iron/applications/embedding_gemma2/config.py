@@ -22,10 +22,6 @@ from .blocks import SandwichLayer, TextLayer
 PROFILES = Path(__file__).with_name("profiles")
 
 
-def _global_layers(layer_types: list[str]) -> tuple[int, ...]:
-    return tuple(i for i, kind in enumerate(layer_types) if kind == "full_attention")
-
-
 @dataclasses.dataclass(frozen=True)
 class Config(lm.Config):
     vocab_size: int = dataclasses.field(
@@ -55,9 +51,9 @@ class Config(lm.Config):
         default=10000.0,
         metadata={"json": "text_config.rope_parameters.sliding_attention.rope_theta"},
     )
-    global_layers: tuple[int, ...] = dataclasses.field(
-        default=(5, 11, 17, 23),
-        metadata={"json": "text_config.layer_types", "convert": _global_layers},
+    layer_types: tuple[str, ...] = dataclasses.field(
+        default=(("sliding_attention",) * 5 + ("full_attention",)) * 4,
+        metadata={"json": "text_config.layer_types", "convert": tuple},
     )
     global_kv_groups: int = dataclasses.field(
         default=1,
@@ -121,7 +117,7 @@ class Config(lm.Config):
 
     def heads(self, i: int) -> tuple[int, int, float]:
         """Layer ``i``'s KV groups, head size and RoPE base."""
-        if i in self.global_layers:
+        if self.layer_types[i] == "full_attention":
             return self.global_kv_groups, self.global_head_dim, self.global_rope_base
         return self.num_key_value_heads, self.head_dim, self.rope_theta
 
@@ -130,7 +126,9 @@ class Config(lm.Config):
         layer's within ``sliding_window`` positions.
         """
         G, D, _ = self.heads(i)
-        window = None if i in self.global_layers else self.sliding_window
+        window = (
+            None if self.layer_types[i] == "full_attention" else self.sliding_window
+        )
         return TextLayer(
             lm.Attention(
                 self.num_attention_heads,

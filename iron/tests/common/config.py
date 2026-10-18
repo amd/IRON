@@ -172,7 +172,11 @@ PHI4 = Phi4Config(
 )
 
 
-@pytest.mark.parametrize("config", [REAL_1B, PHI4], ids=["llama", "phi4"])
+@pytest.mark.parametrize(
+    "config",
+    [REAL_1B, PHI4, EmbeddingGemmaConfig()],
+    ids=["llama", "phi4", "embedding_gemma2"],
+)
 def test_to_json_is_from_checkpoint_s_inverse(tmp_path, config):
     """A converted field (a ``rope_scaling``) is written as the checkpoint
     writes it, so the file reads back the same config.
