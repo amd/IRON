@@ -343,7 +343,7 @@ class Handle:
             else:
                 static.append(int(entry))
         tap = TensorAccessPattern.full(self.shape)[tuple(static)]
-        if bounds and tuple(shape) == self.shape:
+        if bounds and index_by is None and tuple(shape) == self.shape:
             return Handle(
                 self.shape,
                 self.dtype,

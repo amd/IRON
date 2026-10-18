@@ -1541,6 +1541,16 @@ def test_a_run_from_a_per_call_start_takes_any_start_on_any_axis():
     assert w.index_by == pos * 8
 
 
+def test_a_run_as_wide_as_its_axis_keeps_its_start_under_a_bound():
+    """``x[:n][:, s : s + W]`` with ``W`` the whole axis is still offset by
+    ``s`` each call, and still bounded by ``n``.
+    """
+    s = PerCall("s", Kind.SCRATCHPAD, np.int32)
+    n = PerCall("n", Kind.SCRATCHPAD, np.int32)
+    v = Handle((8, 256), bfloat16, "x", "state")[:n][:, s : s + 256]
+    assert v.index_by == s.affine() and v.bounds == {0: n.affine()}
+
+
 @pytest.mark.parametrize(
     "key,error",
     [
