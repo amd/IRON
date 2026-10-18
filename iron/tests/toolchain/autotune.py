@@ -527,7 +527,7 @@ def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(monkeypatch, n
         return f"{array.tile_m}x{array.tile_k}x{array.tile_n}"
 
     monkeypatch.setattr(
-        GEMM.Array, "matmul", lambda self: type("K", (), {"build_key": key(self)})
+        GEMM.Array, "matmul", lambda self: type("K", (), {"recipe_key": key(self)})
     )
     timed = []
 
@@ -568,7 +568,7 @@ def test_kernel_cycles_are_the_nightly_s_rows_by_their_build(
         "builds": {"mm/a": "matmul-1", "mm/b": "matmul-2"},
     }
     (tmp_path / "npu2.json").write_text(json.dumps(latest))
-    monkeypatch.setattr(tuning.ExternalFunction, "build_key", None, raising=False)
+    monkeypatch.setattr(tuning.ExternalFunction, "recipe_key", None, raising=False)
     monkeypatch.setattr(tuning, "KERNEL_CHECKS", f"file://{tmp_path}/{{npu}}.json")
     assert tuning.kernel_cycles(npu2) == {"matmul-1": 900}
     monkeypatch.setattr(tuning, "KERNEL_CHECKS", f"file://{tmp_path}/none.json")
@@ -576,6 +576,28 @@ def test_kernel_cycles_are_the_nightly_s_rows_by_their_build(
 
 
 def test_an_mlir_aie_that_names_no_builds_gives_no_kernel_cycles(monkeypatch, npu2):
-    monkeypatch.delattr(tuning.ExternalFunction, "build_key", raising=False)
+    monkeypatch.delattr(tuning.ExternalFunction, "recipe_key", raising=False)
     monkeypatch.setattr(tuning, "KERNEL_CHECKS", "file:///never/read/{npu}.json")
     assert tuning.kernel_cycles(npu2) == {}
+
+
+@pytest.mark.parametrize("name", ["npu1", "npu2"])
+def test_every_gemm_tile_searched_is_one_the_nightly_times(name, request):
+    """mlir-aie's nightly times the tiles ``_iron_gemm_tiles`` in its
+    ``test/python/npu/kernel_cases.py`` names: powers of two, m and n at
+    least 16 (m 8 on npu2 without bfp16 macs), k 64 below HIGHEST, whose
+    double-buffered A and B, C and stack fit 64 KiB. A tile the search
+    reaches outside them has no cycles to skip it by.
+    """
+    dev = request.getfixturevalue(name)
+    for precision in Precision:
+        op = GEMM(M=4096, K=4096, N=4096, precision=precision)
+        least_m = 8 if name == "npu2" and precision != Precision.MEDIUM else 16
+        c_bytes = 6 if precision == Precision.HIGHEST else 4
+        for s in settings(op, dev):
+            r = op._with_tunables(**s).resolved(dev)
+            m, k, n = r.tile_m, r.tile_k, r.tile_n
+            assert all(v & (v - 1) == 0 for v in (m, k, n)), (m, k, n)
+            assert m >= least_m and n >= 16, (precision, m, n)
+            assert k == 64 or precision == Precision.HIGHEST, (precision, k)
+            assert 4 * (m * k + k * n) + c_bytes * m * n + 0xD00 <= 64 * 1024

@@ -265,7 +265,7 @@ reuse lint
      calls run (coordinate descent past 32) and writes the fastest that
      beats the traced one by two standard errors as a `Profile` entry. It
      does not build a GEMM setting whose matmul kernel alone, at the cycles
-     per call mlir-aie's nightly published for its `build_key` and the
+     per call mlir-aie's nightly published for its `recipe_key` and the
      core's clock (`CORE_MHZ`), is slower than the fastest setting timed
    - `cli.py` times one operator at every setting it tunes to
      (`python -m iron.tune.cli GEMV M=2048 K=8192`) and holds the parser

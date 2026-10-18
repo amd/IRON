@@ -59,10 +59,10 @@ KERNEL_CHECKS = "https://xilinx.github.io/mlir-aie/kernel-checks/{npu}/latest.js
 
 def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
     """Each kernel's cycles per call as mlir-aie's nightly last timed it on
-    ``dev``'s NPU, by ``ExternalFunction.build_key``; empty where they
+    ``dev``'s NPU, by ``ExternalFunction.recipe_key``; empty where they
     cannot be read or this mlir-aie names no builds.
     """
-    if not hasattr(ExternalFunction, "build_key"):
+    if not hasattr(ExternalFunction, "recipe_key"):
         return {}
     url = KERNEL_CHECKS.format(npu=dev.name)
     try:
@@ -87,7 +87,7 @@ def least_us(op: GEMM, values: Mapping[str, int], cycles, dev) -> float | None:
     mhz = CORE_MHZ.get(dev.name)
     if mhz is None:
         return None
-    per_call = cycles.get(op.array_config().matmul().build_key)
+    per_call = cycles.get(op.array_config().matmul().recipe_key)
     if per_call is None:
         return None
     return op.matmul_calls(values) * per_call / mhz
