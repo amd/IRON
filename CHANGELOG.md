@@ -40,6 +40,10 @@ public API adds its entry under Unreleased.
 - Autotune skips GEMM settings whose matmul kernel alone, by mlir-aie's
   nightly cycles, is slower than the fastest setting timed.
 
+- A test that importing `iron`, `iron.functional`, `iron.lm`, the operators
+  and every application asks for neither torch nor transformers; only
+  recording a golden needs them.
+
 ### Changed
 
 - Config fields use `config.json`'s names: `hidden_size`,
