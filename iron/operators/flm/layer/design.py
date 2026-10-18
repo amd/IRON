@@ -13,7 +13,7 @@ sequence writes the layer type into RTPs. It then streams the weights, the KV
 cache and the hidden state.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from enum import IntEnum, StrEnum
 from functools import partial
 from typing import NamedTuple
@@ -497,15 +497,16 @@ class _Array:
     PLACEMENT stage.
     """
 
-    dev: Device
+    dev: InitVar[Device]
     rt: Runtime
     g: FlmGemma4DecodeGeometry
     rtp: dict[str, int]
     kernels: dict[str, ExternalFunction]
     workers: list[Worker] = field(default_factory=list, init=False)
+    grid: dict[tuple[int, int], Tile] = field(init=False)
+    t: dict[str, Tile] = field(init=False)
 
-    def __post_init__(self) -> None:
-        dev = self.dev
+    def __post_init__(self, dev: Device) -> None:
         self.grid = {
             (c, r): Tile(c, r, tile_type=dev.get_tile_type(c, r))
             for r in range(dev.rows)
@@ -1392,38 +1393,38 @@ def _sequence(
     and lengths count bf16 elements. L counts the tokens up to and including
     this one.
     """
-    d = LayerDims(g, LayerType(layer_type))
+    dims = LayerDims(g, LayerType(layer_type))
     D = g.model_dim
     L = _as_i32(len_arg) + 1
     MAX_L_v = _as_i32(max_l_arg)
     SW = SLIDING_WINDOW
-    weights = d.weights
+    weights = dims.weights
 
     require(_as_i32(len_arg) >= 0, "context_len must be >= 0")
     require(MAX_L_v <= MAX_CONTEXT, f"max_l exceeds {MAX_CONTEXT}")
-    if not d.swa:
+    if not dims.swa:
         require(L <= MAX_L_v, "context_len must be below max_l")
 
     for c in PROJ_COLS:
         for r in (2, 3, 4, 5):
-            npu_write32(rtp["proj_swa"], int(d.swa), column=c, row=r)
-            npu_write32(rtp["proj_skip"], int(d.skip), column=c, row=r)
+            npu_write32(rtp["proj_swa"], int(dims.swa), column=c, row=r)
+            npu_write32(rtp["proj_skip"], int(dims.skip), column=c, row=r)
             npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=c, row=r)
 
     def write(stage, addr, value):
         col, row = PLACEMENT[stage]
         npu_write32(addr, value, column=col, row=row)
 
-    L_local = _min_const(L, SW) if d.swa else L
+    L_local = _min_const(L, SW) if dims.swa else L
     write("attn_qk", rtp["l_qk"], L_local)
     write("attn_kv", rtp["l_kv"], L_local)
     write("swa_attn_qk", rtp["swa_l_qk"], L_local)
     write("swa_attn_kv", rtp["swa_l_kv"], L_local)
-    write("rms", rtp["rms_swa"], int(d.swa))
-    write("rms", rtp["rms_skip"], int(d.skip))
-    write("rope", rtp["rope_skip_kv"], int(d.skip))
-    write("swa_rope", rtp["swa_rope_skip_kv"], int(d.skip))
-    write("glu", rtp["glu_skip"], int(d.skip and g.double_wide_mlp))
+    write("rms", rtp["rms_swa"], int(dims.swa))
+    write("rms", rtp["rms_skip"], int(dims.skip))
+    write("rope", rtp["rope_skip_kv"], int(dims.skip))
+    write("swa_rope", rtp["swa_rope_skip_kv"], int(dims.skip))
+    write("glu", rtp["glu_skip"], int(dims.skip and g.double_wide_mlp))
     write("rms", RTP_SYNC_LOCK_ADDR, 1)
     write("glu", RTP_SYNC_LOCK_ADDR, 1)
 
@@ -1457,7 +1458,11 @@ def _sequence(
     emit(leg("send_rms", rms_arg, 0, 4 * D))
     # The RoPE weights go out on the channel whose flow reaches this layer
     # type's RoPE tile.
-    emit(leg("send_rms_rope" if d.swa else "send_x_rope", rope_rms_arg, 0, 3 * d.dh))
+    emit(
+        leg(
+            "send_rms_rope" if dims.swa else "send_x_rope", rope_rms_arg, 0, 3 * dims.dh
+        )
+    )
     recv_y = shim["recv_y"].drain(x_arg, tap=x_arg[:D], wait=True, managed=False)
 
     def move_weights(w):
@@ -1478,26 +1483,26 @@ def _sequence(
         """One leg over the bf16 weight ``name``, on the shim flow ``name``."""
         return leg(name, proj_arg, weights[name].offset, weights[name].size)
 
-    v_cache_off = d.dk * SW if d.swa else MAX_L_v * d.dk
+    v_cache_off = dims.dk * SW if dims.swa else MAX_L_v * dims.dk
     move_weights(weights["qkv"])
-    if not d.skip:
+    if not dims.skip:
         # recv_k carries the global layers' k and v, recv_v the sliding-window
         # layers'.
-        L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if d.swa else (L - 1)) * d.dk
-        recv = "recv_v" if d.swa else "recv_k"
+        L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if dims.swa else (L - 1)) * dims.dk
+        recv = "recv_v" if dims.swa else "recv_k"
         for off in (L_off, L_off + v_cache_off):
             task = shim[recv].drain(
-                kv_arg, tap=kv_arg[off : off + d.dk], wait=True, managed=False
+                kv_arg, tap=kv_arg[off : off + dims.dk], wait=True, managed=False
             )
             emit((task, True))
-    emit(leg("pli_rope_rms", rope_rms_arg, 3 * d.dh, g.pli_d * 2 + D + MIN_BF16_PAD))
+    emit(leg("pli_rope_rms", rope_rms_arg, 3 * dims.dh, g.pli_d * 2 + D + MIN_BF16_PAD))
     # x reuses pli_rope_rms's channel as a second BD.
     emit(leg("pli_rope_rms", x_arg, 2 * D, D, token=False))
     emit(pli_leg("pli_down"))
     # The KV cache into the attention memtile.
-    move_k, move_v = ("move_k_swa", "move_v_swa") if d.swa else ("move_k", "move_v")
-    if not d.swa:
-        d2m = _ceil_mul(L, LK) * d.dk
+    move_k, move_v = ("move_k_swa", "move_v_swa") if dims.swa else ("move_k", "move_v")
+    if not dims.swa:
+        d2m = _ceil_mul(L, LK) * dims.dk
         emit(leg(move_k, kv_arg, 0, d2m))
         emit(leg(move_v, kv_arg, v_cache_off, d2m))
     else:
@@ -1516,10 +1521,10 @@ def _sequence(
         start = arith.andi(_m, _lb)
         # All ones if start is 0, else 0.
         _z = arith.xori(_mask_ge(start, 1), _as_i32(-1))
-        p1_off = start * d.dk
-        p1_len = (rows - start) * d.dk - arith.andi(_z, _as_i32(d.dk))
+        p1_off = start * dims.dk
+        p1_len = (rows - start) * dims.dk - arith.andi(_z, _as_i32(dims.dk))
         p2_off = arith.andi(_z, p1_len)
-        p2_len = arith.ori(start * d.dk, arith.andi(_z, _as_i32(d.dk)))
+        p2_len = arith.ori(start * dims.dk, arith.andi(_z, _as_i32(dims.dk)))
         emit(leg(move_k, kv_arg, p1_off, p1_len))
         emit(leg(move_v, kv_arg, p1_off + v_cache_off, p1_len))
         emit(leg(move_k, kv_arg, p2_off, p2_len, token=False))

@@ -149,14 +149,11 @@ def check_outputs(op, context_len, max_l, inputs, x_out, kv_out):
             errors[name] = _rel_l2(got_kv[rows], ref_kv[rows])
             rest[rows] = False
 
-    def bits(a):
-        return a.view(np.uint16)
-
     assert np.array_equal(
-        bits(got_x[D:]), bits(ref_x[D:])
+        got_x[D:].view(np.uint16), ref_x[D:].view(np.uint16)
     ), "the layer wrote x past its output"
     assert np.array_equal(
-        bits(got_kv[rest]), bits(ref_kv[rest])
+        got_kv[rest].view(np.uint16), ref_kv[rest].view(np.uint16)
     ), "the layer wrote other kv rows"
     limits = {"x": RTOL_X, "k": RTOL_KV, "v": RTOL_KV}
     assert all(
