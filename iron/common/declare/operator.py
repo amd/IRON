@@ -61,6 +61,26 @@ graph_tracer: ContextVar[Any] = ContextVar("graph_tracer", default=None)
 device_fit: ContextVar[bool] = ContextVar("device_fit", default=True)
 
 
+def spelled(v: Any) -> str:
+    """A field's value as it may appear in a device symbol (``Operator.name``)."""
+    if isinstance(v, bool):
+        return str(int(v))
+    if isinstance(v, float):
+        # repr() round-trips; a symbol takes neither '.' nor '-'.
+        return repr(v).replace(".", "p").replace("-", "n").replace("+", "")
+    if isinstance(v, tuple) and all(isinstance(x, TensorAccessPattern) for x in v):
+        # A gather's rows, one pattern each: too many to spell out.
+        return f"{len(v)}p{hashlib.sha256(repr(v).encode()).hexdigest()[:8]}"
+    if isinstance(v, (list, tuple)):
+        return "x".join(str(x) for x in v)
+    if isinstance(v, TensorAccessPattern):
+        return (
+            f"o{v.offset}s{'x'.join(map(str, v.sizes))}"
+            f"t{'x'.join(map(str, v.strides))}"
+        )
+    return f"{v}"
+
+
 @dataclasses.dataclass(frozen=True)
 class Built:
     """What an operator's ``Array.build`` made: what the array declares,
@@ -1139,30 +1159,11 @@ class Operator:
                 f"{type(self).__name__}: the label names the device; none is bound"
             )
         op = self.resolved(dev)
-        own = []
-        for f in dataclasses.fields(op):
-            v = vars(op)[f.name]
-            if not f.repr or v is None:
-                continue
-            if isinstance(v, bool):
-                v = int(v)
-            elif isinstance(v, float):
-                # repr() round-trips; a symbol takes neither '.' nor '-'.
-                v = repr(v).replace(".", "p").replace("-", "n").replace("+", "")
-            elif isinstance(v, tuple) and all(
-                isinstance(x, TensorAccessPattern) for x in v
-            ):
-                # A gather's rows, one pattern each: too many to spell out.
-                digest = hashlib.sha256(repr(v).encode()).hexdigest()[:8]
-                v = f"{len(v)}p{digest}"
-            elif isinstance(v, (list, tuple)):
-                v = "x".join(str(x) for x in v)
-            elif isinstance(v, TensorAccessPattern):
-                v = (
-                    f"o{v.offset}s{'x'.join(map(str, v.sizes))}"
-                    f"t{'x'.join(map(str, v.strides))}"
-                )
-            own.append(f"{f.name}{v}")
+        own = [
+            f"{f.name}{spelled(vars(op)[f.name])}"
+            for f in dataclasses.fields(op)
+            if f.repr and vars(op)[f.name] is not None
+        ]
         if any(op.finish.chains):
             # A step's scalars and the array's other finishes change the build too.
             keys = (op.finish.array_key(), op.finish.keys())
