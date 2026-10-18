@@ -20,7 +20,7 @@ bare strings `"gelu"` / `"conv_even"` / `"bf16_steps"` are accepted too.
 This is the GEMM `F.linear` runs for any input of more than one row. It reads
 the checkpoint's weight as stored, `(N, K)`, with `b_col_maj=True`; a
 dequantized weight comes as bfp16 B packed once by `pack_B`. It was ported from
-FastFlowLM's `mm` overlay. [`iron.operators.GEMM`](../../gemm) is the GEMM of
+FastFlowLM's `mm` overlay. [`iron.operators.GEMM`](../../gemm.py) is the GEMM of
 `F.linear(..., precision=Precision.HIGHEST)` and of integer types.
 
 **M, K, N and the activation are runtime parameters**, so one xclbin serves

@@ -54,8 +54,9 @@ Hugging Face decoders need a config, a model class and a runner; see
    body with `iron.functional as F` and handle arithmetic (`x + y`), the
    way you would with `torch.nn.functional`.
 
-3. **Runner.** Subclass `iron.lm.Runner`, naming `config`, `model` and
-   `bos`, and end the file with `lm.main(Runner, "...")`.
+3. **Runner.** Subclass `iron.lm.Runner`, naming `config` and `model` (and
+   `bos` where `config.json` has no `bos_token_id`), and end the file with
+   `lm.main(Runner, "...")`.
 
 4. **Tests.** A decoder's device-free test subclasses `Decoder`
    (`iron/tests/common/llama_reference.py`) with the model, a toy config
