@@ -96,8 +96,9 @@ public API adds its entry under Unreleased.
   `Operator.xclbin_operator()`.
 - `In`, `Out` and `InOut` are plain operands, not aie.iron's kernel-argument
   markers.
-- `resolved(dev)` resolves for the device given instead of probing for an
-  NPU, and an unresolved `Auto()` tile raises instead of becoming a 0-d fifo.
+- `resolved(dev)` resolves for the device given, bound only while it
+  resolves and not recorded on the result, instead of probing for an NPU,
+  and an unresolved `Auto()` tile raises instead of becoming a 0-d fifo.
 - RoPE's `method_type` is `two_halves`, a flag.
 - flm.GEMM takes `epilogue="silu"` and `"sigmoid"`, which a SiLU or Sigmoid
   finish applied before.

@@ -521,8 +521,10 @@ class Operator:
         """This operator resolved for ``dev`` (the bound device unless given),
         checked as the copy ``resolve`` returns was made (``validate``, then
         ``compatible`` where the device fit is checked). ``dev`` is bound
-        while it resolves, so what the operator's operands read of the
-        device (``Operand.split``) is ``dev``'s.
+        only while it resolves, so what the operator's operands read of the
+        device then (``Operand.split``) is ``dev``'s; the result does not
+        record it, and what it reads of a device later (``dev``, ``name``)
+        is the current one's.
         """
         if self._resolved:
             return self
