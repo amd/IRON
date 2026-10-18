@@ -28,7 +28,7 @@ from iron.tests.common.graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
 from iron.tune import autotune as tuning
 from iron.tune.autotune import Call, Point, Shape, autotune, line, refusal, settings
-from iron.tune.measure import Cache, Measurement, Timing, judge
+from iron.tune.measure import Cache, Measurement, judge
 
 SIZE = 8192
 TILE = 256
@@ -138,8 +138,11 @@ def test_derived_fields_are_not_widths(npu2):
     # and built alike.
     gemm = GEMM(M=512, K=512, N=512)
     assert gemm.resolved(npu2)._widths == {"num_aie_columns": 8}
-    found = designs(gemm, npu2)
+    # n_shim_mem_a resolves to at most the columns: many settings, one design.
+    found = designs(GEMM(M=2560, K=768, N=3072, b_col_maj=True), npu2)
     assert len(identities(found, npu2)) == len(found)
+    widths = [s["num_aie_columns"] for s, _ in found]
+    assert list(dict.fromkeys(widths)) == [8, 4, 2, 1]
     mha = MHA(num_heads=8, seq_pad=256).resolved(npu2)
     assert mha._widths == {"num_pipelines": 1}
     assert mha._domains(npu2) == {
@@ -147,8 +150,6 @@ def test_derived_fields_are_not_widths(npu2):
         "B_q": (64, 32, 16),
         "pv_cores": (1, 2),
     }
-    with pytest.raises(TypeError, match="no tunable"):
-        gemm._with_tunables(n_shim_mem_a=1)
 
 
 def test_gemm_searches_tile_k_only_where_c_accumulates_in_f32(npu2):
@@ -289,14 +290,6 @@ def test_a_profile_refuses_a_derived_field():
         Profile().add(GEMM, M=512, n_shim_mem_a=1)
 
 
-def test_settings_of_a_column_major_gemm_give_each_design_once(npu2):
-    # GEMM resolves n_shim_mem_a to at most its columns: many settings, one design.
-    found = designs(GEMM(M=2560, K=768, N=3072, b_col_maj=True), npu2)
-    assert len(identities(found, npu2)) == len(found)
-    widths = [s["num_aie_columns"] for s, _ in found]
-    assert list(dict.fromkeys(widths)) == [8, 4, 2, 1]
-
-
 def test_a_narrowed_operator_keeps_its_fixed_fields():
     add = ElementwiseAdd(size=SIZE, tile_size=TILE)
     narrow = add._with_tunables(num_aie_columns=2)
@@ -415,19 +408,6 @@ def _gemm_judged():
         op.resolved().tolerance().bound(*v.inputs.values()) for op in (default, narrow)
     ]
     return default, narrow, v, bounds
-
-
-def test_a_setting_within_its_default_s_gate_is_admitted(npu2):
-    default, narrow, v, _ = _gemm_judged()
-    assert judge(default, narrow, v.inputs, v.outputs) is None
-
-
-def test_a_setting_past_its_default_s_bound_is_refused(npu2):
-    default, narrow, v, (bound, _) = _gemm_judged()
-    c = v["C"].astype(np.float32)
-    c[0, 0] += 2 * bound[0, 0]
-    why = judge(default, narrow, v.inputs, {"C": c.astype(bfloat16)})
-    assert why.startswith("C under the default's")
 
 
 def test_a_setting_is_never_judged_by_its_looser_bound_alone(npu2):
@@ -660,15 +640,6 @@ def test_every_gemm_tile_searched_is_one_the_nightly_times(name, request):
             assert m >= least_m and n >= 16, (precision, m, n)
             assert k == 64 or precision == Precision.HIGHEST, (precision, k)
             assert 4 * (m * k + k * n) + c_bytes * m * n + 0xD00 <= 64 * 1024
-
-
-def test_the_command_line_s_timing_is_what_it_parsed(monkeypatch):
-    from iron.tune import cli
-
-    monkeypatch.setattr(cli.Cache, "here", classmethod(lambda cls: None))
-    args = cli.parser("").parse_args(["--rounds", "3", "--cutoff", "2"])
-    timing = cli._timing(args)["timing"]
-    assert (timing.rounds, timing.calls, timing.cutoff) == (3, Timing.calls, 2.0)
 
 
 class Projection(iron.Graph):

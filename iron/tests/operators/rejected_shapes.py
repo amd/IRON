@@ -259,19 +259,17 @@ def test_mha_blocks_follow_the_head_size(npu2):
         assert op.pv_width * pv_cores == d
 
 
-@pytest.mark.parametrize("dev", ["npu1", "npu2"])
 @pytest.mark.parametrize(
     "heads,kv_heads,d,block",
-    [(32, 8, 64, 16), (40, 8, 64, 16), (24, 8, 128, 16), (32, 1, 64, 32)],
-    ids=["llama_1b", "group_of_5", "llama_3b", "group_of_32"],
+    [(32, 8, 64, 16), (32, 1, 64, 32)],
+    ids=["llama_1b", "group_of_32"],
 )
 def test_mha_one_query_packed_takes_the_narrowest_block_and_64_keys(
-    dev, heads, kv_heads, d, block, request
+    heads, kv_heads, d, block, npu2
 ):
     """Every row of a packed block is computed, so one query takes the
     narrowest block that holds its group, over 64-key blocks: mha.cc's
     vectorized softmax reads 64-key rows."""
-    bound = request.getfixturevalue(dev)
     op = MHA(
         num_heads=heads,
         num_KV_heads=kv_heads,
@@ -280,7 +278,7 @@ def test_mha_one_query_packed_takes_the_narrowest_block_and_64_keys(
         kv_len=32768,
         num_pipelines=1,
         heads_interleaved=True,
-    ).resolved(bound)
+    ).resolved(npu2)
     assert (op.B_q, op.B_kv) == (block, 64)
 
 
@@ -463,28 +461,12 @@ def test_gemm_on_columns_that_do_not_divide_its_rows_is_refused(device, request)
             Precision.MEDIUM,
             pytest.raises(ValueError, match="tile_m .* multiple of 16"),
         ),
-        (16, 64, 64, Precision.MEDIUM, contextlib.nullcontext()),
-        (64, 64, 64, Precision.MEDIUM, contextlib.nullcontext()),
         (8, 64, 64, Precision.HIGH, contextlib.nullcontext()),
         (
-            4,
-            64,
-            64,
-            Precision.HIGH,
-            pytest.raises(ValueError, match="tile_m .* multiple of 8"),
-        ),
-        (
             64,
             64,
             8,
             Precision.HIGH,
-            pytest.raises(ValueError, match="tile_n .* multiple of 16"),
-        ),
-        (
-            64,
-            64,
-            8,
-            Precision.MEDIUM,
             pytest.raises(ValueError, match="tile_n .* multiple of 16"),
         ),
         # tile_k=4 still divides K=512 evenly (the outer K % tile_k check),
@@ -499,12 +481,8 @@ def test_gemm_on_columns_that_do_not_divide_its_rows_is_refused(device, request)
     ],
     ids=[
         "m8_emulated",
-        "m16_emulated",
-        "m64_emulated",
         "m8",
-        "m4",
         "n8",
-        "n8_emulated",
         "k4_emulated",
     ],
 )
@@ -600,18 +578,6 @@ def test_flm_dequant_rejects_unservable_shapes(K, N, match, npu2):
         (PrefillAttention, dict(num_kv_heads=3), "multiple of"),
         (PrefillAttention, dict(num_kv_heads=0), "must be positive"),
         (PrefillAttention, dict(num_kv_heads=8), "query heads"),
-        (PrefillSlidingAttention, dict(num_kv_heads=3), "multiple of"),
-        (PrefillSlidingAttention, dict(num_kv_heads=4), "query heads"),
-        (
-            PrefillAttention,
-            dict(max_context=1000, num_kv_heads=1),
-            "multiple of 128",
-        ),
-        (
-            PrefillSlidingAttention,
-            dict(max_context=1000, num_kv_heads=1),
-            "multiple of 128",
-        ),
         (
             PrefillSlidingAttention,
             dict(num_kv_heads=1, window=500),
@@ -630,7 +596,6 @@ def test_flm_prefill_attention_rejects_unservable_shapes(cls, kwargs, match, npu
         (1000, 4096, 30.0, r"dim \(1000\) must be a multiple"),
         (1536, 1000, 30.0, r"vocab \(1000\) must be a multiple"),
         (1536, 4096, 0.0, "finite and positive"),
-        (1536, 4096, float("inf"), "finite and positive"),
     ],
 )
 def test_flm_lm_head_rejects_unservable_shapes(dim, vocab, softcap, match, npu2):

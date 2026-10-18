@@ -256,13 +256,8 @@ finally:
 
 @pytest.mark.extensive
 def test_timing_refuses_a_figure_its_calls_waited_for_a_cpu_through():
-    # A process on the cores the completions interrupt held the timing
-    # thread off them until each core's tick, 970 us for a 190 us run. At
-    # nice 19 beside nice-0 spinners of its own session, as an autogroup
-    # weighs them, the thread waits every call: 1.6-5.7 ms in ten of ten
-    # runs on Strix Halo, where at nice 0 it waited in two of five. Where
-    # no completion interrupt is visible, the spinners share the one core
-    # the thread is left on.
+    # At nice 19 beside nice-0 spinners on the cores the completions
+    # interrupt, the timing thread waits for a CPU every call.
     starved = subprocess.run(
         [sys.executable, "-c", STARVE], capture_output=True, text=True
     )

@@ -4,21 +4,9 @@
 """Importing one operator must not import the rest of the catalog.
 
 ``iron.operators`` re-exports lazily (PEP 562), so ``from iron.operators import
-GEMM`` should pull in ``iron.operators.gemm`` (or, for a small operator,
-its single file) and nothing else. What that
-saves is importing every other operator module and its design, not the
-cost of any one of them -- MHA, long named here as a witness, actually imports
-slightly faster than ReLU.
-
-Two things this does differently from a direct ``sys.modules`` check:
-
-* It runs in a fresh interpreter. ``sys.modules`` records what the whole
-  *session* imported, so a sibling test importing an operator for its own
-  reasons fails this one while the catalog is still perfectly lazy -- and a
-  session that happens not to touch that operator passes even if the catalog
-  turned eager. Process history gives a false signal in both directions.
-* It reads the catalog's own table rather than naming witnesses, so an
-  operator added to ``_OPERATOR_MODULES`` is covered without touching a test.
+GEMM`` pulls in ``iron.operators.gemm`` and nothing else. Each check runs in
+a fresh interpreter, since ``sys.modules`` holds what the whole session
+imported, and covers every entry of ``_OPERATOR_MODULES``.
 """
 
 import subprocess

@@ -85,7 +85,6 @@ def test_conv1d(case, share):
     rows = max(1, int(out_rows * share))
     got = conv(x, rows=rows).numpy().reshape(out_rows, conv.out_channels)[:rows]
     kept = -(-rows // EVERY)
-    # Two roundings (the GEMM's, then RowwiseAdd's own): a looser bound than
-    # Conv2d's single-rounding 2^-7, not yet measured on real hardware.
+    # Two roundings (the GEMM's, then RowwiseAdd's): twice Conv2d's 2^-7.
     bound = 2.0**-6 * magnitude[:kept]
     assert (np.abs(got[::EVERY].astype(np.float32) - want[:kept]) <= bound).all()
