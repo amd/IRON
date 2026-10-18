@@ -20,6 +20,7 @@ from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
+from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE
 from ml_dtypes import bfloat16
 
@@ -193,6 +194,11 @@ def main(argv=None) -> int:
     p.add_argument("action", choices=("record", "check"))
     p.add_argument("dir", type=Path)
     args = p.parse_args(argv)
+    dev = aie_utils.get_current_device()
+    if dev is None or dev.arch != AIEArch.AIE2p:
+        p.error(f"the goldens are NPU2's; this host's NPU is {dev and dev.name}")
+    if args.action == "check" and not args.dir.is_dir():
+        p.error(f"{args.dir} holds no goldens; record them first")
     if args.action == "record":
         record(args.dir)
         return 0
