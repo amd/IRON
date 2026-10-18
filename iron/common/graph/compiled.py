@@ -443,32 +443,7 @@ class Graph:
                 signature = self._signature(
                     {h.name: (h.shape, h.dtype) for h in traced.inputs}
                 )
-                emit = None
-                # The words an Emit feeding its own version was sized for.
-                sized: list[Word] | None = None
-                loops = feeds is not None or not traced.inputs
-                if chosen.full_elf and traced.carry and loops:
-                    if feeds is None:
-                        sized = _words(traced, share=True, extents=False)[0]
-                        slots = len(sized)
-                    elif feeds.emit is None or not any(
-                        feeds is v for v in self._versions.values()
-                    ):
-                        raise ValueError(
-                            f"{self.name}: feeds= takes a full-ELF version of this "
-                            f"graph, got {feeds!r}"
-                        )
-                    else:
-                        slots = len(feeds.parameters)
-                    assert self._carry is not None
-                    emit = attach_emit(
-                        traced, self._parameters.carried, self._carry, slots
-                    )
-                elif feeds is not None:
-                    raise ValueError(
-                        f"{self.name}: only a full-ELF version with carried values "
-                        f"feeds another"
-                    )
+                emit, sized = self._emit(traced, chosen, feeds)
                 version = CompiledGraph(
                     traced,
                     chosen,
@@ -489,6 +464,40 @@ class Graph:
                 return version
             finally:
                 self.precision = previous
+
+    def _emit(
+        self, traced: TracedGraph, chosen: Plan, feeds: CompiledGraph | None
+    ) -> tuple[EmitSite | None, list[Word] | None]:
+        """The Emit step a full ELF with carried values ends in, appended to
+        ``traced``, sized for ``feeds``' words or, feeding itself, for its
+        own; and those own words, or None.
+
+        Raises:
+            ValueError: ``feeds`` is not a full-ELF version of this graph,
+                or this version does not loop.
+        """
+        loops = feeds is not None or not traced.inputs
+        if not (chosen.full_elf and traced.carry and loops):
+            if feeds is not None:
+                raise ValueError(
+                    f"{self.name}: only a full-ELF version with carried values "
+                    f"feeds another"
+                )
+            return None, None
+        sized = None
+        if feeds is None:
+            sized = _words(traced, share=True, extents=False)[0]
+            slots = len(sized)
+        elif feeds.emit is None or not any(feeds is v for v in self._versions.values()):
+            raise ValueError(
+                f"{self.name}: feeds= takes a full-ELF version of this graph, "
+                f"got {feeds!r}"
+            )
+        else:
+            slots = len(feeds.parameters)
+        assert self._carry is not None
+        emit = attach_emit(traced, self._parameters.carried, self._carry, slots)
+        return emit, sized
 
     def _given(self, tensors) -> dict[str, Any]:
         params = self._parameters
@@ -947,47 +956,7 @@ def _words(
                 )
             )
 
-    shared: dict[str, str] = {}
-    if share:
-        forms: dict[str, set[Linear | str | None]] = {}
-        for w in words:
-            found, e = w.linear, w.form
-            if found is None and e is not None and (e.clamped or e.mod is not None):
-                # A clamped or wrapped expression has no Linear form; its name spells it whole.
-                found = f"{e.name}_{np.dtype(w.dtype).name}"
-            elif found is None and e is not None and e.mul in (1, -1):
-                # ((s v + b) >> k) * m + a as a Linear, which rounds up: a
-                # floor is the ceiling of (s v + b - 2^k + 1) / 2^k, and
-                # -floor(x) is ceil(-x).
-                d = 1 << e.down
-                bias = e.bias * e.mul - (d - 1 if e.mul == 1 else 0)
-                found = Linear(
-                    e.value.name,
-                    Fraction(e.scale * e.mul, d),
-                    Fraction(bias, d) + e.add,
-                    np.dtype(w.dtype).name,
-                )
-            forms.setdefault(w.symbol, set()).add(found)
-        groups: dict[Linear | str, list[str]] = {}
-        for symbol, found in forms.items():
-            if len(found) == 1 and None not in found:
-                groups.setdefault(next(iter(found)), []).append(symbol)
-
-        def spell(r: Fraction) -> str:
-            # An identifier's: m for minus, d for over.
-            den = f"d{r.denominator}" if r.denominator > 1 else ""
-            return f"{'m' if r < 0 else ''}{abs(r.numerator)}{den}"
-
-        for form, symbols in groups.items():
-            if len(symbols) > 1 and isinstance(form, str):
-                shared.update(dict.fromkeys(symbols, f"graph_{form}"))
-            elif len(symbols) > 1:
-                name = f"graph_{form.value}_x{spell(form.ratio)}"
-                if form.offset:
-                    name += (
-                        f"{'p' if form.offset > 0 else 'm'}{spell(abs(form.offset))}"
-                    )
-                shared.update(dict.fromkeys(symbols, f"{name}_{form.dtype}"))
+    shared = _shared(words) if share else {}
     out: list[Word] = []
     written: set[str] = set()
     for w in words:
@@ -996,3 +965,48 @@ def _words(
             written.add(symbol)
             out.append(dataclasses.replace(w, symbol=symbol))
     return out, shared
+
+
+def _shared(words: list[Word]) -> dict[str, str]:
+    """The symbol each word shares with the words of its one form: a
+    ``Linear``, or a clamped or wrapped expression's name.
+    """
+    shared: dict[str, str] = {}
+    forms: dict[str, set[Linear | str | None]] = {}
+    for w in words:
+        found, e = w.linear, w.form
+        if found is None and e is not None and (e.clamped or e.mod is not None):
+            # A clamped or wrapped expression has no Linear form; its name spells it whole.
+            found = f"{e.name}_{np.dtype(w.dtype).name}"
+        elif found is None and e is not None and e.mul in (1, -1):
+            # ((s v + b) >> k) * m + a as a Linear, which rounds up: a
+            # floor is the ceiling of (s v + b - 2^k + 1) / 2^k, and
+            # -floor(x) is ceil(-x).
+            d = 1 << e.down
+            bias = e.bias * e.mul - (d - 1 if e.mul == 1 else 0)
+            found = Linear(
+                e.value.name,
+                Fraction(e.scale * e.mul, d),
+                Fraction(bias, d) + e.add,
+                np.dtype(w.dtype).name,
+            )
+        forms.setdefault(w.symbol, set()).add(found)
+    groups: dict[Linear | str, list[str]] = {}
+    for symbol, found in forms.items():
+        if len(found) == 1 and None not in found:
+            groups.setdefault(next(iter(found)), []).append(symbol)
+
+    def spell(r: Fraction) -> str:
+        # An identifier's: m for minus, d for over.
+        den = f"d{r.denominator}" if r.denominator > 1 else ""
+        return f"{'m' if r < 0 else ''}{abs(r.numerator)}{den}"
+
+    for form, symbols in groups.items():
+        if len(symbols) > 1 and isinstance(form, str):
+            shared.update(dict.fromkeys(symbols, f"graph_{form}"))
+        elif len(symbols) > 1:
+            name = f"graph_{form.value}_x{spell(form.ratio)}"
+            if form.offset:
+                name += f"{'p' if form.offset > 0 else 'm'}{spell(abs(form.offset))}"
+            shared.update(dict.fromkeys(symbols, f"{name}_{form.dtype}"))
+    return shared
