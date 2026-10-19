@@ -375,8 +375,9 @@ def time_interleaved(
                     start = cpu_wait_us()
                     run()
                     times.append(run.last_elapsed)
-                    if start is not None:
-                        waits.append(cpu_wait_us() - start)
+                    end = cpu_wait_us()
+                    if start is not None and end is not None:
+                        waits.append(end - start)
                 timed[i] = (
                     statistics.median(times) * 1e6,
                     statistics.median(waits) if waits else 0.0,
