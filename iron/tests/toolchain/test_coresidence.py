@@ -489,6 +489,9 @@ def test_an_npu1_run_is_cut_at_the_kernel_s_buffers(npu1):
     # 3 + 2 + 3 + 2 + 3 + 2 = 15 buffers, then 3 more: the last add runs alone.
     seq = _image(_steps(*["add", "silu"] * 3, "add"), AdjacentPacking())
     assert list(_runs(seq)[1]) == [(0, 6)]
+    # 3 + 2 + 3 + 2 + 3 + 3 = exactly 16 buffers: the run stays whole.
+    seq = _image(_steps("add", "silu", "add", "silu", "add", "add"), AdjacentPacking())
+    assert list(_runs(seq)[1]) == [(0, 6)]
 
 
 class _Bounded(iron.Graph):
