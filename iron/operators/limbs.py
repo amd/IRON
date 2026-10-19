@@ -6,6 +6,7 @@ from aie.iron import CompileTime, In
 from aie.iron.kernels import datamovement
 
 from iron.common import Rowwise, field
+from iron.common.elementwise import CORES
 from iron.common.testing import Case, Testing
 
 # The planes of a stacked weight, as limbs_f32_split's (hi, mid, lo) indices,
@@ -41,6 +42,7 @@ class Limbs(Rowwise):
         line,
         dtype=np.float32,
         obj_shape=(line,),
+        per=CORES,
     )
 
     class Array(Rowwise.Array):

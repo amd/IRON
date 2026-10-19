@@ -6,7 +6,7 @@ from aie.iron import CompileTime, In
 from aie.iron.kernels import activation
 
 from iron.common import UnaryElementwise, field
-from iron.common.elementwise import Sweep
+from iron.common.elementwise import CORES, Sweep
 from iron.common.testing import Testing
 
 
@@ -31,6 +31,7 @@ class Log(UnaryElementwise):
         UnaryElementwise.size,
         dtype=np.float32,
         obj_shape=(UnaryElementwise.tile_size,),
+        per=CORES,
     )
 
     class Array(UnaryElementwise.Array):

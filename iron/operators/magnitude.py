@@ -6,6 +6,7 @@ from aie.iron import CompileTime, In, Out
 from aie.iron.kernels import eltwise
 
 from iron.common import Rowwise, field
+from iron.common.elementwise import CORES
 from iron.common.testing import Case, Testing
 
 
@@ -38,12 +39,14 @@ class Magnitude(Rowwise):
         width,
         dtype=np.float32,
         obj_shape=(width,),
+        per=CORES,
     )
     y = Out(
         Rowwise.rows,
         tile_size,
         dtype=np.float32,
         obj_shape=(tile_size,),
+        per=CORES,
     )
 
     def validate(self) -> None:

@@ -205,6 +205,9 @@ public API adds its entry under Unreleased.
 - A checkpoint's tensors at indices (`nn.ParameterList`'s) read as a list
   of those tensors: a single zero is no longer taken for an empty module,
   and a longer tensor no longer raises.
+- An `Elementwise` operand is split over every core only where it says
+  `per=CORES` (`iron.common.elementwise.CORES`); an operand without `per=` is
+  one lane.
 - A tunable's `domain=` is a tuple, an `Enum` or a function
   `(op, dev, start) -> tuple`, such as mlir-aie's `widths` and `divisors`,
   which replace `Width` and `Divisors`; a tunable is searched only where its

@@ -155,16 +155,6 @@ def test_shapes_captured_bare_names_resolve_to_refs():
     assert MV.A.per.dims == (MV.columns,)
 
 
-def test_an_elementwise_operand_is_split_over_every_core_unless_it_says():
-    from iron.operators import RMSNorm
-
-    def per(operand):
-        return [d.name for d in operand.per.dims]
-
-    assert per(Tanh.x) == per(RMSNorm.x) == ["num_aie_columns", "num_channels"]
-    assert per(RMSNorm.weight) == ["num_channels"]
-
-
 # --------------------------------------------------------------------------
 # Rules rejected at class creation
 # --------------------------------------------------------------------------

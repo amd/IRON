@@ -249,10 +249,9 @@ class KernelCall:
 class Elementwise(Operator):
     """The array for an elementwise kernel over lines of ``tile_size`` elements.
 
-    Subclasses declare the operands with the line as their tile and
-    implement ``kernel``; an operand that gives no ``per=`` is split over
-    every core, ``per=(num_aie_columns, num_channels)``. ``tile_cap`` is the
-    largest line the kernel holds.
+    Subclasses declare the operands with the line as their tile, most split
+    over every core (``per=CORES``), and implement ``kernel``. ``tile_cap``
+    is the largest line the kernel holds.
     """
 
     num_aie_columns: CompileTime[int] = Auto(domain=widths, array=True)
@@ -270,12 +269,6 @@ class Elementwise(Operator):
 
     default_tile: ClassVar[int] = DEFAULT_TILE
     tile_cap: ClassVar[int] = 4096
-
-    def __init_subclass__(cls, **kwargs) -> None:
-        for m in vars(cls).values():
-            if isinstance(m, (In, Out)) and m.per is None:
-                m.per = (Elementwise.num_aie_columns, Elementwise.num_channels)
-        super().__init_subclass__(**kwargs)
 
     def resolve(self, dev) -> Self:
         tile_size = self.default_tile if self.tile_size is None else self.tile_size
@@ -594,6 +587,10 @@ class Elementwise(Operator):
             return Built(workers, rtps)
 
 
+# An operand split over every core: one lane per (column, channel).
+CORES = (Elementwise.num_aie_columns, Elementwise.num_channels)
+
+
 class UnaryElementwise(Elementwise):
     """A flat buffer in, a flat buffer of the same size out."""
 
@@ -604,10 +601,12 @@ class UnaryElementwise(Elementwise):
     x = In(
         size,
         obj_shape=(Elementwise.tile_size,),
+        per=CORES,
     )
     y = Out(
         size,
         obj_shape=(Elementwise.tile_size,),
+        per=CORES,
     )
 
     @property
@@ -635,14 +634,17 @@ class BinaryElementwise(Elementwise):
     a = In(
         size,
         obj_shape=(Elementwise.tile_size,),
+        per=CORES,
     )
     b = In(
         size,
         obj_shape=(Elementwise.tile_size,),
+        per=CORES,
     )
     y = Out(
         size,
         obj_shape=(Elementwise.tile_size,),
+        per=CORES,
     )
 
     @property
@@ -670,11 +672,13 @@ class Rowwise(Elementwise):
         rows,
         tile_size,
         obj_shape=(tile_size,),
+        per=CORES,
     )
     y = Out(
         rows,
         tile_size,
         obj_shape=(tile_size,),
+        per=CORES,
     )
 
     @property
@@ -719,6 +723,7 @@ class WeightedRowwise(Rowwise):
         Rowwise.rows,
         Rowwise.tile_size,
         obj_shape=(Rowwise.tile_size,),
+        per=CORES,
     )
     # Shared by every column of a channel: counted once per channel.
     weight = In(
@@ -732,6 +737,7 @@ class WeightedRowwise(Rowwise):
         Rowwise.rows,
         Rowwise.tile_size,
         obj_shape=(Rowwise.tile_size,),
+        per=CORES,
     )
 
     def validate(self) -> None:
@@ -893,6 +899,7 @@ class RowBroadcast(Rowwise):
         Rowwise.rows,
         Rowwise.tile_size,
         obj_shape=(line,),
+        per=CORES,
     )
     row = In(
         Rowwise.tile_size,
@@ -904,6 +911,7 @@ class RowBroadcast(Rowwise):
         Rowwise.rows,
         Rowwise.tile_size,
         obj_shape=(line,),
+        per=CORES,
     )
 
     def resolve(self, dev) -> Self:
