@@ -12,6 +12,8 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `iron.lm.checkpoint.subtree(tree, **modules)`: a tree of a checkpoint's
+  modules at new names, as a model loads part of a checkpoint.
 - `Session(model)`: one conversation over a `CausalLM`'s loaded versions,
   with `logits(tokens)`, `draw(...)`, `forget`, `resume` and `prompt_ids`,
   which move there from `CausalLM`. Several sessions share one compiled
@@ -195,6 +197,14 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `SelectiveScan` and `GatedDeltaRule` refuse a head count their columns
+  do not divide, more than 64 slices a core, or more than 1023 rows, which
+  no shim buffer descriptor holds.
+- `GraniteHybridConfig.rope_theta` defaults to transformers' 10000.0 under
+  `position_embedding_type="rope"`.
+- A checkpoint's tensors at indices (`nn.ParameterList`'s) read as a list
+  of those tensors: a single zero is no longer taken for an empty module,
+  and a longer tensor no longer raises.
 - A tunable's `domain=` is a tuple, an `Enum` or a function
   `(op, dev, start) -> tuple`, such as mlir-aie's `widths` and `divisors`,
   which replace `Width` and `Divisors`; a tunable is searched only where its

@@ -23,7 +23,7 @@ from pathlib import Path
 
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal, not_json
-from iron.lm.checkpoint import _tree
+from iron.lm.checkpoint import subtree
 from iron.lm.config import RopeScaling, unscaled
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 
@@ -88,8 +88,8 @@ class SmolVLMText(CausalLM):
     bos = BOS
 
     def __init__(self, config, weights):
-        text = {"model": weights.model.text_model, "lm_head": weights.lm_head}
-        super().__init__(config, _tree(text, "", weights._file))
+        text = subtree(weights, model=weights.model.text_model, lm_head=weights.lm_head)
+        super().__init__(config, text)
 
     @property
     def hugging_face(self):

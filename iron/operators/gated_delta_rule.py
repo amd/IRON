@@ -3,8 +3,6 @@
 
 """GatedDeltaRule: Gated DeltaNet's recurrence over a run of rows."""
 
-import dataclasses
-
 import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
@@ -23,9 +21,9 @@ from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Extent, Operator, Rtp, Unresolvable, Value, field
+from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
-from iron.operators.selective_scan import SLICE, _block
+from iron.operators.state_slices import SLICE, block_rows, resolve_heads
 
 
 def _slices(op) -> int:
@@ -100,7 +98,9 @@ class GatedDeltaRule(Operator):
     inner: CompileTime[int] = field(
         derive=lambda op: op.v_heads * op.value_dim, repr=False, array=True
     )
-    block: CompileTime[int] = field(derive=lambda op: _block(op) * SLICE, repr=False)
+    block: CompileTime[int] = field(
+        derive=lambda op: block_rows(op) * SLICE, repr=False
+    )
     slice_state: CompileTime[int] = field(
         derive=lambda op: op.key_dim * SLICE, repr=False
     )
@@ -141,28 +141,20 @@ class GatedDeltaRule(Operator):
             )
 
     def resolve(self, dev):
-        # As many cores as divide the heads and the shim's input channels feed.
-        columns = self.resolve_columns(
-            dev, self.columns, fits=lambda c: self.v_heads % c == 0
-        )
-        if self.v_heads % columns:
-            raise Unresolvable(
-                f"GatedDeltaRule: {self.v_heads} value heads over {columns} cores"
-            )
-        return dataclasses.replace(self, columns=columns)
+        return resolve_heads(self, dev, self.v_heads, self.value_dim)
 
     class Array(Operator.Array):
         def kernel(self):
             return kernels.ssm.gated_delta_rule(
-                rows=_block(self),
+                rows=block_rows(self),
                 key_dim=self.key_dim,
                 value_dim=SLICE,
-                blocks=self.rows // _block(self),
+                blocks=self.rows // block_rows(self),
             )
 
         def build(self) -> Built:
             V, Dk, Dv, W = self.v_heads, self.key_dim, self.value_dim, self.width
-            T, per_group, heads = _block(self), V // self.k_heads, V // self.columns
+            T, per_group, heads = block_rows(self), V // self.k_heads, V // self.columns
             kernel = self.kernel()
             f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
             bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]

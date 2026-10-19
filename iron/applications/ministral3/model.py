@@ -23,7 +23,7 @@ import numpy as np
 
 from iron.lm import CausalLM, DecoderConfig
 from iron.lm.blocks import Rope
-from iron.lm.checkpoint import _tree, leaves
+from iron.lm.checkpoint import leaves, subtree
 
 
 @dataclasses.dataclass(frozen=True)
@@ -159,7 +159,7 @@ def text_weights(weights):
         model, head = weights.language_model.model, weights.language_model.lm_head
     else:
         return weights
-    return _tree({"model": model, "lm_head": head}, "", weights._file)
+    return subtree(weights, model=model, lm_head=head)
 
 
 class Ministral3(CausalLM):

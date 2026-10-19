@@ -3,9 +3,6 @@
 
 """SelectiveScan: Mamba2's state space recurrence over a run of rows."""
 
-import dataclasses
-import math
-
 import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
@@ -24,18 +21,9 @@ from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Extent, Operator, Rtp, Unresolvable, Value, field
+from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
-
-#: The rows of a head's state a kernel call carries.
-SLICE = 16
-
-
-def _block(op) -> int:
-    """The rows a kernel call takes: up to 32, so a head's blocks stay
-    within a shim BD's 64 repeats.
-    """
-    return math.gcd(op.rows, 32)
+from iron.operators.state_slices import SLICE, block_rows, resolve_heads
 
 
 def _slices(op) -> int:
@@ -103,7 +91,9 @@ class SelectiveScan(Operator):
     width: CompileTime[int] = field(
         derive=lambda op: op.inner + 2 * op.groups * op.state_size, repr=False
     )
-    block: CompileTime[int] = field(derive=lambda op: _block(op) * SLICE, repr=False)
+    block: CompileTime[int] = field(
+        derive=lambda op: block_rows(op) * SLICE, repr=False
+    )
     slice_state: CompileTime[int] = field(
         derive=lambda op: SLICE * op.state_size, repr=False
     )
@@ -143,28 +133,20 @@ class SelectiveScan(Operator):
             )
 
     def resolve(self, dev):
-        # As many cores as divide the heads and the shim's input channels feed.
-        columns = self.resolve_columns(
-            dev, self.columns, fits=lambda c: self.heads % c == 0
-        )
-        if self.heads % columns:
-            raise Unresolvable(
-                f"SelectiveScan: {self.heads} heads over {columns} cores"
-            )
-        return dataclasses.replace(self, columns=columns)
+        return resolve_heads(self, dev, self.heads, self.head_dim)
 
     class Array(Operator.Array):
         def kernel(self):
             return kernels.ssm.selective_scan(
-                rows=_block(self),
+                rows=block_rows(self),
                 head_dim=SLICE,
                 state=self.state_size,
-                blocks=self.rows // _block(self),
+                blocks=self.rows // block_rows(self),
             )
 
         def build(self) -> Built:
             H, P, N, I = self.heads, self.head_dim, self.state_size, self.inner
-            T, per_group, heads = _block(self), H // self.groups, H // self.columns
+            T, per_group, heads = block_rows(self), H // self.groups, H // self.columns
             kernel = self.kernel()
             f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
             bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]

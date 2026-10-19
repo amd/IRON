@@ -39,7 +39,7 @@ from iron.lm import (
 )
 from iron.lm.blocks import _activation
 from iron.lm.causal import Decoder
-from iron.lm.checkpoint import _nest, _tree, leaves, renamed
+from iron.lm.checkpoint import _nest, leaves, renamed, subtree
 from iron.operators.copy import Copy
 
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.
@@ -216,7 +216,7 @@ class WhisperDecoder(Decoder):
 
 def decoder_weights(weights):
     """The decoder's modules of a Whisper checkpoint's tree, as ``model``."""
-    return _tree({"model": weights.model.decoder}, "", weights._file)
+    return subtree(weights, model=weights.model.decoder)
 
 
 class WhisperEncoder(Tower):

@@ -43,8 +43,8 @@ class GraniteHybridConfig(GraniteConfig):
     wide.
     """
 
-    # None, as __post_init__ leaves it but under "rope", reads back absent.
-    rope_theta: float | None = dataclasses.field(default=None, kw_only=True)
+    # transformers' default; __post_init__ sets None but under "rope".
+    rope_theta: float | None = dataclasses.field(default=10000.0, kw_only=True)
     layer_types: tuple[str, ...] = dataclasses.field(
         kw_only=True, metadata={"convert": tuple}
     )

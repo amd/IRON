@@ -240,8 +240,8 @@ class Checkpoint:
         """The checkpoint as a tree of its tensors' names, each split at its
         dots: ``model.layers.3.self_attn.q_proj.weight`` is
         ``tree.model.layers[3].self_attn.q_proj.weight``, a run of indices a
-        list, None at an index the checkpoint skips (a module holding no
-        tensor, as ``nn.Sequential``'s ``Flatten``).
+        list, an empty module at an index the checkpoint skips (a module
+        holding no tensor, as ``nn.Sequential``'s ``Flatten``).
 
         Args:
             fill: What the arrays hold. ``"read"``: the tensors, views of the
@@ -303,7 +303,8 @@ def _tree(node, path: str, file) -> Any:
     if items and all(key.isdigit() for key in items):
         indices = range(max(map(int, items)) + 1)
         tree = _Layers(
-            items.get(str(i)) or _tree({}, f"{path}{i}.", file) for i in indices
+            items[str(i)] if str(i) in items else _tree({}, f"{path}{i}.", file)
+            for i in indices
         )
     else:
         tree = _Module(**items)
@@ -343,6 +344,14 @@ class _Layers(list):
             raise IndexError(
                 f"{self._path}{index} is not in {self._file} (it has {len(self)})"
             ) from None
+
+
+def subtree(tree, **modules):
+    """A tree of ``modules``, each a module of ``tree``, at their names: a
+    checkpoint's part as a model loads it (a text decoder of a
+    vision-language checkpoint), a missing name naming ``tree``'s file.
+    """
+    return _tree(modules, "", getattr(tree, "_file", _FILE))
 
 
 def renamed(tree, renames: Mapping[str, str]):

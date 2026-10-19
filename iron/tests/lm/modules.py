@@ -17,7 +17,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
 from iron.lm.blocks import KVCache, Rope
-from iron.lm.checkpoint import leaves
+from iron.lm.checkpoint import _nest, leaves
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close
 from iron.operators.mha import MHA
@@ -77,6 +77,15 @@ def test_an_index_a_checkpoint_skips_is_empty_and_no_leaf():
     head = Head()
     head.load_state_dict(tree)
     assert head.classifier[1].weight is tree.classifier[1].weight
+
+
+def test_tensors_at_indices_are_a_list_of_tensors():
+    """``nn.ParameterList``'s tensors at ``0`` and ``1``, one a single zero:
+    each kept as it is, none taken for an empty module.
+    """
+    zero, row = np.zeros(1, bfloat16), np.ones(4, bfloat16)
+    tree = _nest({"scales.0": zero, "scales.1": row})
+    assert tree.scales[0] is zero and tree.scales[1] is row
 
 
 def test_load_state_dict_names_every_missing_tensor():

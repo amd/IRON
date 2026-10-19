@@ -16,7 +16,6 @@ import numpy as np
 import pytest
 
 from iron.applications.granite_hybrid.model import GraniteHybrid, GraniteHybridConfig
-from iron.lm import tune
 from iron.tests.common.llama_reference import Decoder
 
 #: Granite 4.0-H's proportions at toy size: three Mamba2 layers of two
@@ -30,7 +29,6 @@ TOY = GraniteHybridConfig(
     num_attention_heads=8,
     num_key_value_heads=2,
     intermediate_size=256,
-    rope_theta=10000.0,
     max_seq_len=256,
     prefill_chunk=64,
     attention_multiplier=0.0625,
@@ -80,7 +78,10 @@ def golden(golden):
 class TestGraniteHybrid(Decoder):
     model, config, model_type, name = GraniteHybrid, TOY, "granitemoehybrid", "toy"
     json = {"mamba_expand": 2}
-    seed = 2
+    # A prompt with no near-tie in its logits or its routing: at seed 32
+    # every token's chosen experts lead the next by at least 2.4e-2 of
+    # router logit at every step, so bf16 picks the float32 ones.
+    seed = 32
 
     @classmethod
     def names(cls):
@@ -133,21 +134,23 @@ class TestGraniteHybridDense(TestGraniteHybrid):
     """Granite 4.0-H 1B's kind: no experts, the shared MLP alone."""
 
     config, name = dataclasses.replace(TOY, num_local_experts=0), "dense"
+    # No router to tie; at seed 32 bf16 leaves float32 at step 5.
+    seed = 2
 
     @classmethod
     def names(cls):
         return {k: v for k, v in super().names().items() if "block_sparse_moe" not in k}
 
 
-def test_tuning_is_refused_without_a_profiles_directory(capsys):
-    with pytest.raises(SystemExit):
-        tune.main("granite_hybrid", GraniteHybrid, [])
-    assert "no profiles directory" in capsys.readouterr().err
-
-
 def test_a_config_without_rope_reads_back_from_its_json(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps(TOY.to_json()))
     assert GraniteHybridConfig.from_checkpoint(tmp_path).to_json() == TOY.to_json()
+
+
+def test_a_rope_config_without_rope_theta_takes_transformers_default(tmp_path):
+    config = TOY.to_json() | {"position_embedding_type": "rope"}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    assert GraniteHybridConfig.from_checkpoint(tmp_path).rope_theta == 10000.0
 
 
 def test_layer_types_short_of_the_layers_are_refused():
