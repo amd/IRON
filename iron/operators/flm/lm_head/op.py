@@ -105,7 +105,7 @@ class LMHead(Operator):
     # the token and its RMS weight to every core.
     y = Out(vocab, dtype=bfloat16, obj_shape=(rows, M_TILE), per=(cols,))
     w = In(w_words, dtype=np.uint32, obj_shape=(rows, BLOCK_BYTES // 4), per=(cols,))
-    x = In(x_len, dtype=bfloat16, obj_shape=(x_len,), broadcast=True)
+    x = In(x_len, dtype=bfloat16, obj_shape=(x_len,))
 
     def validate(self) -> None:
         if self.dim % K_TILE:
