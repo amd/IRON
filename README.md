@@ -119,6 +119,7 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | Phi-4-mini-instruct | [phi3](./iron/applications/phi3/) | `phi-4-mini-instruct` |
 | Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` |
 | SmolLM3 3B | [smollm3](./iron/applications/smollm3/) | `smollm3-3b` |
+| Gemma 3 1B (context up to its 512-token window) | [gemma3](./iron/applications/gemma3/) | `gemma-3-1b-it` |
 | Qwen3-30B-A3B (reference only) | [qwen3_moe](./iron/applications/qwen3_moe/) | `qwen3-30b-a3b` |
 | Granite 4.0-H (reference only) | [granite_hybrid](./iron/applications/granite_hybrid/) | none yet |
 | Ministral 3 text decoder (drawn weights) | [ministral3](./iron/applications/ministral3/) | none yet |

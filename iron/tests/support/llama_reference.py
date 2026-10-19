@@ -81,7 +81,7 @@ class Decoder:
     does over the same random weights. A subclass names the ``model``
     class, its toy ``config``, transformers' ``model_type`` and the golden's
     ``name`` (``goldens/<name>.npz`` beside the subclass); and ``names``,
-    ``json`` or ``profile`` where they are not Llama's or none.
+    ``weights``, ``json`` or ``profile`` where they are not Llama's or none.
     """
 
     pytestmark = pytest.mark.usefixtures("npu2")
@@ -101,12 +101,17 @@ class Decoder:
         return shapes(cls.config)
 
     @classmethod
+    def weights(cls) -> SimpleNamespace:
+        """The toy's checkpoint tree, drawn (``Checkpoint.tree``)."""
+        return checkpoint(cls.config, cls.names()).tree("random")
+
+    @classmethod
     def case(cls, golden) -> Case:
         """The config, its weights, its golden logits, a prompt, the golden
         logits for it and six greedy tokens' logits.
         """
         config = cls.config
-        weights = checkpoint(config, cls.names()).tree("random")
+        weights = cls.weights()
         reference = golden(
             cls.name,
             lambda: HuggingFace.build(cls.model_type, config, weights, **cls.json),

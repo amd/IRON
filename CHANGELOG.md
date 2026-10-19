@@ -55,6 +55,9 @@ public API adds its entry under Unreleased.
 - `Conv2d`'s gathered patches pad to whole 64-pixel GEMM tiles, and
   `flm.ProjectionGEMM` narrows its default n tile where K is short of its
   k chunk, so ResNet-50's 7x7 to 28x28 maps and 64-channel 1x1 convs build.
+- Application `gemma3` (Gemma 3 1B), judged by a device-free toy golden; its
+  context is capped at `sliding_window` until MHA keeps Hugging Face's
+  window and windows a decode step.
 - Applications `smollm3` (SmolLM3 3B), `ministral3` (Ministral 3's text
   decoder, on drawn weights) and `qwen3_moe` (Qwen3-30B-A3B, on the host),
   each judged by a device-free toy golden.
