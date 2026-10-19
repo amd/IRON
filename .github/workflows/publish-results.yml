@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Pushes a suite's merged results, each runner's results-<runner>-<suite>
+# artifact, to the ci branch. The one job of a hardware workflow that can push:
+# the test jobs, which run the commit's code, read only.
+
+name: Publish Results
+
+on:
+  workflow_call:
+    inputs:
+      suite:
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check out the results
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ci
+          path: results
+
+      - name: Download each runner's results
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: results-*-${{ inputs.suite }}
+          path: artifacts
+
+      - name: Push the results to the ci branch
+        continue-on-error: true # a lost race with another run's push
+        env:
+          SUITE: ${{ inputs.suite }}
+        run: |
+          for runner in phoenix krackan; do
+            artifact="artifacts/results-$runner-$SUITE"
+            [ -d "$artifact" ] || continue
+            mkdir -p "results/$runner/$SUITE"
+            cp "$artifact"/{all.csv,latest.csv,readme.md,trends.md} "results/$runner/$SUITE/"
+          done
+          ./ci/scripts/pretty_aggregate.py --results-root results -o results/readme.md
+          cd results
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Add test results testing commit \`${GITHUB_SHA::7}\`" || echo "No changes to commit"
+          git push origin ci

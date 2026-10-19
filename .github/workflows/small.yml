@@ -23,15 +23,19 @@ permissions:
 
 jobs:
   test_small:
-    name: Test Small Suite on ${{ matrix.runner }}
+    name: Test Small Suite on ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [phoenix, krackan]
+        include:
+          - {runner: phoenix, name: Phoenix}
+          - {runner: krackan, name: Krackan}
     runs-on: [self-hosted, "${{ matrix.runner }}"]
     steps:
       - name: Pull
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
         env:
           HOME: /workspace
 
@@ -56,10 +60,7 @@ jobs:
           extensive: "false"
           test_suite: "operators"
 
-      # A pull request's results go to its comment (pr-comment.yml); a trunk
-      # run's are published by the job below, the only one that can push.
       - name: Commit test results
-        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/devel'
         id: commit_results
         env:
           HOME: /workspace
@@ -68,46 +69,21 @@ jobs:
           dir: ${{ matrix.runner }}/small
 
       - name: Upload test results
-        if: steps.commit_results.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: results-${{ matrix.runner }}-small
           path: ${{ steps.commit_results.outputs.results_dir }}
           retention-days: 7
 
-      - name: Upload results to publish
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: tests-latest-${{ matrix.runner }}-small
-          path: tests_latest.csv
-          retention-days: 1
-
       - name: Mark workflow as failed if tests failed
         if: steps.test.outcome == 'failure'
         run: exit 1
 
   publish:
-    name: Publish Small Suite Results
     needs: test_small
     if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
-    strategy:
-      max-parallel: 1 # each leg pushes to the ci branch
-      matrix:
-        runner: [phoenix, krackan]
-    runs-on: ubuntu-latest
     permissions:
-      contents: write # commit_results pushes to the ci branch
-    steps:
-      - name: Pull
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - name: Download test results
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: tests-latest-${{ matrix.runner }}-small
-
-      - name: Commit test results
-        uses: ./.github/actions/commit_results
-        with:
-          dir: ${{ matrix.runner }}/small
+      contents: write
+    uses: ./.github/workflows/publish-results.yml
+    with:
+      suite: small

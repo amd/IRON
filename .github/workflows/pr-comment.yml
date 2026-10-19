@@ -106,14 +106,14 @@ jobs:
               const run = matching[0]; // most recent
               core.info(`Found run ${run.id} for "${wf}" (${run.conclusion})`);
 
-              // Each runner's job ends its name with the runner.
+              // Each runner's job ends its name with the runner's.
               const jobs = await github.rest.actions.listJobsForWorkflowRun({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 run_id: run.id,
               });
               for (const runner of RUNNERS) {
-                const job = jobs.data.jobs.find(j => j.name.endsWith(` on ${runner}`));
+                const job = jobs.data.jobs.find(j => j.name.toLowerCase().endsWith(` on ${runner}`));
                 status[`${runner}/${name}`] = job?.conclusion || 'unknown';
               }
 

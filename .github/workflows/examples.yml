@@ -16,21 +16,24 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# commit_results pushes results to the ci branch on pushes to main and devel.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test_examples:
-    name: Test Examples on ${{ matrix.runner }}
+    name: Test Examples on ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [phoenix, krackan]
+        include:
+          - {runner: phoenix, name: Phoenix}
+          - {runner: krackan, name: Krackan}
     runs-on: [self-hosted, "${{ matrix.runner }}"]
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
         env:
           HOME: /workspace
 
@@ -118,3 +121,12 @@ jobs:
       - name: Fail workflow if examples failed
         if: steps.test.outcome == 'failure'
         run: exit 1
+
+  publish:
+    needs: test_examples
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-results.yml
+    with:
+      suite: examples

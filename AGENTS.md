@@ -306,8 +306,10 @@ Each hardware workflow runs one job per runner, Phoenix (NPU1) and Krackan
 - `pr-comment.yml` and `publish-pages.yml`: the performance trends of a PR
   and the benchmark history site.
 
-Each run's `tests_latest.csv` is merged into `{arch}/{suite}/all.csv` on the
-`ci` branch by `.github/actions/commit_results`; `ci/scripts/` turns those
+Each run's `tests_latest.csv` is merged into `{arch}/{suite}/all.csv` by
+`.github/actions/commit_results`, and on `main` and `devel` pushed to the
+`ci` branch by `publish-results.yml`, the only job that can push;
+`ci/scripts/` turns those
 into the PR comment and the charts. Only cases marked `@pytest.mark.bench`
 (a `Case(bench=True)`) are tracked.
 

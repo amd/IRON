@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: "Commit Test Results to a Branch"
-description: "Commit the test results to a branch of this repository."
+description: "Merge the test results into those on a branch of this repository; publish-results.yml pushes them."
 
 inputs:
   pretty_flags:
@@ -55,18 +55,3 @@ runs:
         echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
         echo "date=${DATE}" >> $GITHUB_OUTPUT
         echo "results_dir=${RESULTS_DIR}" >> $GITHUB_OUTPUT
-
-    - name: Push new test results to branch
-      # A push, a scheduled run or a manual one on a trunk branch; never a pull
-      # request or the merge queue, whose refs are their own.
-      if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel' }}
-      continue-on-error: true  # A lost race with another run's push; ignore
-      shell: bash
-      run: |
-        ./ci/scripts/pretty_aggregate.py --results-root ../results -o ../results/readme.md
-        cd ../results
-        git add ${{ inputs.dir }}/all.csv ${{ inputs.dir }}/latest.csv ${{ inputs.dir }}/readme.md ${{ inputs.dir }}/trends.md readme.md
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git commit -m "Add test results testing commit \`${{ steps.merge_results.outputs.commit_sha }}\` at ${{ steps.merge_results.outputs.date }}" || echo "No changes to commit"
-        git push origin ${{ inputs.branch }}
