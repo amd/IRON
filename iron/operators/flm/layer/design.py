@@ -102,14 +102,16 @@ PROJ_MEMS = ("proj_gather_0", "proj_x", "proj_gather_1", "proj_weight")
 PROJ_COLS = (0, 1, 6, 7)
 
 _CORE, _MEM, _SHIM = AIETileType.CoreTile, AIETileType.MemTile, AIETileType.ShimNOCTile
-# Tile type, or (col, row) where set_lock, delegates or shared buffers block placing.
+# Tile type, or (col, row) where a kernel takes the lock of the neighbour in
+# a fixed direction: the gate core the RMS core's, west, and each projection
+# core without x output the one below's.
 STAGES = {
-    "attn_qk": (2, 2),
-    "attn_kv": (2, 3),
-    "swa_attn_qk": (2, 4),
-    "swa_attn_kv": (2, 5),
+    "attn_qk": _CORE,
+    "attn_kv": _CORE,
+    "swa_attn_qk": _CORE,
+    "swa_attn_kv": _CORE,
     "rms": (3, 2),
-    "glu": (3, 3),
+    "glu": _CORE,
     "rope": _CORE,
     "swa_rope": _CORE,
     "pl_gate": (4, 2),
