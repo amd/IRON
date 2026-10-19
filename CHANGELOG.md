@@ -22,7 +22,8 @@ public API adds its entry under Unreleased.
   from a state to the state after its last valid row, over mlir-aie's
   scalar `selective_scan`, a core per run of heads.
 - `GatedDeltaRule`: Gated DeltaNet's recurrence over a run of rows, as
-  Qwen3.5 calls it; reference-only.
+  Qwen3.5 calls it, over mlir-aie's scalar `gated_delta_rule`, a core per
+  run of value heads.
 - Application `granite_hybrid` (Granite 4.0-H, dense and MoE, on the host),
   judged by device-free toy goldens.
 - Application `resnet` (ResNet-50), judged by a device-free toy golden.

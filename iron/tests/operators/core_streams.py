@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experts' and SelectiveScan's arrays, built device-free: every operand
+"""Experts', SelectiveScan's and GatedDeltaRule's arrays, built device-free: every operand
 bound, and no core reading more streams than its two input DMA channels.
 """
 
@@ -11,10 +11,13 @@ from aie.iron import Worker, kernels
 from aie.iron.dataflow.objectfifo import ObjectFifoHandle
 
 from iron.operators.experts import Experts
+from iron.operators.gated_delta_rule import GatedDeltaRule
 from iron.operators.selective_scan import SelectiveScan
 
-CASES = [(Experts, case) for case in Experts.test.cases] + [
-    (SelectiveScan, case) for case in SelectiveScan.test.cases
+CASES = [
+    (cls, case)
+    for cls in (Experts, SelectiveScan, GatedDeltaRule)
+    for case in cls.test.cases
 ]
 
 
@@ -22,8 +25,8 @@ CASES = [(Experts, case) for case in Experts.test.cases] + [
     "cls,case", CASES, ids=[f"{c.__name__}-{i}" for i, (c, _) in enumerate(CASES)]
 )
 def test_each_core_reads_at_most_two_streams(cls, case, npu2):
-    if not hasattr(kernels, "ssm") or not hasattr(kernels.moe, "experts"):
-        pytest.skip("mlir-aie has no expert or scan kernels before 780703205")
+    if not hasattr(kernels, "ssm") or not hasattr(kernels.ssm, "gated_delta_rule"):
+        pytest.skip("mlir-aie has no expert or scan kernels before 454c28d")
     op = cls(**case.kwargs).resolved(npu2)
     built = op.array_config().build()
     for operand in (*op.inputs, *op.outputs):
