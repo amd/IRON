@@ -797,8 +797,9 @@ class Recorder:
         """``op``, its precision raised to the graph's where it rounds more."""
         if self.precision is None or "precision" not in op.declaration.tunables:
             return op
-        level = vars(op)["precision"].at_least(self.precision)
-        if level == vars(op)["precision"]:
+        current: Precision = getattr(op, "precision")
+        level = current.at_least(self.precision)
+        if level == current:
             return op
         raised = op.at_precision(level)
         if type(raised) is type(op) or self.profile is None:
