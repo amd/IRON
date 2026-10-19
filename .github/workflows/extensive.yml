@@ -60,19 +60,14 @@ jobs:
           extensive: "true"
           test_suite: "operators"
 
-      - name: Commit test results
-        id: commit_results
-        env:
-          HOME: /workspace
-        uses: ./.github/actions/commit_results
-        with:
-          dir: ${{ matrix.runner }}/extensive
+      - name: Format test results
+        uses: ./.github/actions/format_results
 
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: results-${{ matrix.runner }}-extensive
-          path: ${{ steps.commit_results.outputs.results_dir }}
+          path: results/
           retention-days: 7
 
       - name: Mark workflow as failed if tests failed

@@ -87,18 +87,16 @@ jobs:
           env_name: ci_env
           test_suite: "applications"
 
-      - name: Commit example test results
-        uses: ./.github/actions/commit_results
-        id: commit_results
+      - name: Format test results
+        uses: ./.github/actions/format_results
         with:
-          dir: ${{ matrix.runner }}/examples
-          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' -o pretty.md"
+          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)'"
 
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: results-${{ matrix.runner }}-examples
-          path: ${{ steps.commit_results.outputs.results_dir }}
+          path: results/
           retention-days: 14
 
       - name: Upload MLIR artifacts for debugging

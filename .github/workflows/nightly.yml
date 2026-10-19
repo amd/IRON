@@ -65,29 +65,17 @@ jobs:
           extensive: "true"
           test_suite: "applications"
 
-      - name: Commit test results
-        uses: ./.github/actions/commit_results
-        id: commit_results
+      - name: Format test results
+        uses: ./.github/actions/format_results
         with:
-          dir: ${{ matrix.runner }}/nightly
-          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' --metric='MaxKL (mean)' --metric='Top1Mismatches (mean)' -o pretty.md"
+          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' --metric='MaxKL (mean)' --metric='Top1Mismatches (mean)'"
 
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: results-${{ matrix.runner }}-nightly
-          path: ${{ steps.commit_results.outputs.results_dir }}
+          path: results/
           retention-days: 14
-
-      - name: Compare times with the night before
-        id: timing
-        continue-on-error: true
-        shell: bash
-        run: >-
-          python3 ci/scripts/pretty_trends.py
-          "${{ steps.commit_results.outputs.results_dir }}/all.csv"
-          -o /dev/null --threshold 10
-          --fail-on TTFT --fail-on TPS --fail-on Latency
 
       - name: Clean up this job's compile cache
         # This runner is self-hosted, so $RUNNER_TEMP is not emptied for us
@@ -96,9 +84,44 @@ jobs:
         shell: bash
         run: rm -rf "$NPU_CACHE_HOME"
 
-      - name: Fail workflow if a test failed or a time regressed
-        if: steps.test.outcome == 'failure' || steps.timing.outcome == 'failure'
+      - name: Fail workflow if a test failed
+        if: steps.test.outcome == 'failure'
         run: exit 1
+
+  timing:
+    name: Compare times with the night before
+    needs: test_nightly
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check out the results
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ci
+          path: history
+          persist-credentials: false
+
+      - name: Download each runner's results
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: results-*-nightly
+          path: runs
+
+      - name: Fail if a time is 10% worse than the night before's
+        run: |
+          for run in runs/results-*-nightly; do
+            runner=${run#runs/results-}
+            dir="history/${runner%-nightly}/nightly"
+            ci/scripts/merge_results.sh "$run" "$dir"
+            ci/scripts/pretty_trends.py "$dir/all.csv" -o /dev/null --threshold 10 \
+              --fail-on TTFT --fail-on TPS --fail-on Latency || failed=1
+          done
+          exit "${failed:-0}"
 
   publish:
     needs: test_nightly

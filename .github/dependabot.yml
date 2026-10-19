@@ -10,7 +10,7 @@ updates:
     # `/` covers .github/workflows only; each composite action is listed.
     directories:
       - "/"
-      - "/.github/actions/commit_results"
+      - "/.github/actions/format_results"
       - "/.github/actions/prereqs"
       - "/.github/actions/test"
     schedule:

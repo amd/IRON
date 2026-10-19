@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Pushes a suite's merged results, each runner's results-<runner>-<suite>
-# artifact, to the ci branch. The one job of a hardware workflow that can push:
-# the test jobs, which run the commit's code, read only.
+# Merges each runner's results-<runner>-<suite> artifact into the suite's
+# history on the ci branch and pushes it. The one job of a hardware workflow
+# that can push: the test jobs, which run the commit's code, read only.
 
 name: Publish Results
 
@@ -35,16 +35,14 @@ jobs:
           pattern: results-*-${{ inputs.suite }}
           path: artifacts
 
-      - name: Push the results to the ci branch
+      - name: Merge the results and push them to the ci branch
         continue-on-error: true # a lost race with another run's push
         env:
           SUITE: ${{ inputs.suite }}
         run: |
-          for runner in phoenix krackan; do
-            artifact="artifacts/results-$runner-$SUITE"
-            [ -d "$artifact" ] || continue
-            mkdir -p "results/$runner/$SUITE"
-            cp "$artifact"/{all.csv,latest.csv,readme.md,trends.md} "results/$runner/$SUITE/"
+          for run in artifacts/results-*-"$SUITE"; do
+            runner=${run#artifacts/results-}
+            ci/scripts/merge_results.sh "$run" "results/${runner%-"$SUITE"}/$SUITE"
           done
           ./ci/scripts/pretty_aggregate.py --results-root results -o results/readme.md
           cd results
