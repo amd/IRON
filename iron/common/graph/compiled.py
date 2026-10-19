@@ -310,16 +310,16 @@ class Graph:
         path name.
 
         Raises:
-            TypeError: A ``param`` was never bound.
+            TypeError: A ``param`` was never loaded.
         """
         held: dict[int, tuple[str, Any]] = {}
         for path, x, _, _ in _leaves(self):
             if isinstance(x, _Param):
-                raise TypeError(f"{self.name}: {path} was never bound")
+                raise TypeError(f"{self.name}: {path} was never loaded")
             held.setdefault(id(x), (path, x))
         return held
 
-    def load_state_dict(self, tree, path: str = "") -> None:
+    def load_state_dict(self, tree, *, path: str = "") -> None:
         """Bind each ``param`` of this graph and of what it holds to the
         tensor at its dotted path in ``tree`` (a ``Checkpoint.tree()``, or
         tensors by dotted path) under ``path``, this graph's own prefix
@@ -333,7 +333,7 @@ class Graph:
 
         Raises:
             ValueError: ``path`` does not end in a dot; the graph is
-                already bound; or a param's tensor is missing, of another
+                already loaded; or a param's tensor is missing, of another
                 shape or of another kind (float for int), or ``tree`` holds
                 a tensor under ``path`` that no param declares, one error
                 naming every such path.
@@ -345,7 +345,7 @@ class Graph:
                 f"{self.name}: load_state_dict's path {path!r} must end in a dot"
             )
         if self.__dict__.get("_bound"):
-            raise ValueError(f"{self.name}: already bound")
+            raise ValueError(f"{self.name}: already loaded")
         tensors = {n: t for n, t, _, _ in _leaves(tree) if n.startswith(path)}
         tied: dict[int, list[str]] = {}
         params: dict[str, _Param] = {}
@@ -399,7 +399,7 @@ class Graph:
         for n, x, parent, key in _leaves(self, graphs=False):
             if isinstance(x, Graph):
                 if not x.__dict__.get("_bound"):
-                    x.load_state_dict(tensors, f"{path}{n}.")
+                    x.load_state_dict(tensors, path=f"{path}{n}.")
             elif not isinstance(x, _Param):
                 continue
             elif isinstance(parent, (list, dict)):

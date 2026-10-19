@@ -31,11 +31,15 @@ public API adds its entry under Unreleased.
   and `Graph.load_state_dict(tree, path="")`, which binds each one to the tensor at its
   dotted path, cast to its dtype, and raises once, naming every missing,
   extra and wrong-shaped tensor; a param held at two paths is tied, bound
-  from its first. A param never bound is named when the graph is traced,
+  from its first. A param never loaded is named when the graph is traced,
   and a second load is refused. `Graph.draw(seed)` and `Graph.unread()` bind
   them drawn or unwritten.
 - Leaf modules in `iron.lm`, graphs that declare their weights as
-  transformers names them: `Linear`, `Embedding`, `RMSNorm` and `LayerNorm`.
+  transformers names them, with `torch.nn`'s arguments, defaults and
+  attribute names: `Linear(in_features, out_features, bias=True)`,
+  `Embedding(num_embeddings, embedding_dim)`, `RMSNorm(normalized_shape,
+  eps=None)` (the dtype's machine epsilon) and `LayerNorm(normalized_shape,
+  eps=1e-5)`.
 - Decoder blocks as modules in `iron.lm.blocks`, each built from a config
   and a layer index: `Attention(c, i, norms="", bias=False)`, `GatedMLP(c)`
   and `DecoderLayer(c, i)`, which holds its own `KVCache(c)` and the
@@ -146,11 +150,6 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
-- `iron.lm`'s leaf modules take `torch.nn`'s names and defaults:
-  `Linear(in_features, out_features, bias=True)`,
-  `Embedding(num_embeddings, embedding_dim)`, `RMSNorm(normalized_shape,
-  eps=None)` (the dtype's machine epsilon) and `LayerNorm(normalized_shape,
-  eps=1e-5)`, holding those as attributes.
 - `Tokenizer.chat` puts the BOS where the chat template writes it, and only
   there, as transformers' `apply_chat_template` does; it no longer adds one.
   The template may call `strftime_now` and writes `tokenizer_config.json`'s
