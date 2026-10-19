@@ -48,11 +48,6 @@ from iron.operators.copy import Copy
 from iron.operators.tanh import Tanh
 
 
-def _text(name: str, **kwargs):
-    """A field at ``text_config.`` and ``name``, from the file's root."""
-    return dataclasses.field(metadata={"json": f"text_config.{name}"}, **kwargs)
-
-
 @dataclasses.dataclass(frozen=True)
 class Gemma4Config(DecoderConfig):
     """``DecoderConfig`` under ``text_config``, the global layers' heads and
@@ -61,23 +56,29 @@ class Gemma4Config(DecoderConfig):
 
     json_prefix = "text_config."
 
-    rope_theta: float = _text("rope_parameters.sliding_attention.rope_theta")
-    max_seq_len: int = _text("max_position_embeddings")
-    hidden_act: str = _text("hidden_activation", default="gelu_pytorch_tanh")
-    eps: float = _text("rms_norm_eps", default=1e-6, kw_only=True)
+    rope_theta: float = dataclasses.field(
+        metadata={"json": "rope_parameters.sliding_attention.rope_theta"}
+    )
+    hidden_act: str = dataclasses.field(
+        default="gelu_pytorch_tanh", metadata={"json": "hidden_activation"}
+    )
     layer_types: tuple[str, ...] = dataclasses.field(
         kw_only=True, metadata={"convert": tuple}
     )
     global_head_dim: int = 512
-    global_rope_theta: float = _text(
-        "rope_parameters.full_attention.rope_theta", default=1000000.0
+    global_rope_theta: float = dataclasses.field(
+        default=1000000.0,
+        metadata={"json": "rope_parameters.full_attention.rope_theta"},
     )
-    partial_rotary_factor: float = _text(
-        "rope_parameters.full_attention.partial_rotary_factor", default=0.25
+    partial_rotary_factor: float = dataclasses.field(
+        default=0.25,
+        metadata={"json": "rope_parameters.full_attention.partial_rotary_factor"},
     )
     num_kv_shared_layers: int = 0
     use_double_wide_mlp: bool = False
-    ple_dim: int = _text("hidden_size_per_layer_input", default=256)
+    ple_dim: int = dataclasses.field(
+        default=256, metadata={"json": "hidden_size_per_layer_input"}
+    )
     final_logit_softcapping: float | None = None
 
     @classmethod

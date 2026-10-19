@@ -253,7 +253,7 @@ def test_embeddinggemma_2_loads_a_layer_s_per_layer_input_flat_or_nested():
     shape |= {f"ple_block.{n}": s for n, s in PER_LAYER.items()}
     named = {
         "embed_tokens.weight": (c.vocab_size, WIDTH),
-        "embedding_projection.weight": (c.out_dim, WIDTH),
+        "embedding_projection.weight": (c.embedding_dim, WIDTH),
         "norm.weight": (WIDTH,),
         "ple.per_layer_model_projection.weight": (2 * PLE, WIDTH),
         "ple.per_layer_projection_norm.weight": (PLE,),

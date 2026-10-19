@@ -12,9 +12,11 @@ public API adds its entry under Unreleased.
 
 ### Added
 
-- `Config.json_prefix`, where in `config.json` a field read by its own
-  name is: `"text_config."` for EmbeddingGemma 2's text encoder and
-  SmolVLM's text model.
+- `Config.json_prefix`, the object of `config.json` a config's fields are
+  read from: `"text_config."` for EmbeddingGemma 2's text encoder, SmolVLM's
+  text model and Gemma 4, `"audio_config."` and `"vision_config."` for
+  EmbeddingGemma 2's towers. A field's `metadata["json"]` path is under it,
+  or from the file's root after a `/` (`Config.json_key`).
 - `DecoderLayer.norm`, the class its norms are built from: `RMSNorm`, or
   Whisper's decoder's `LayerNorm`.
 - `CausalLM.rope_row(n, begin)`: the RoPE table row a prompt chunk reads
@@ -215,6 +217,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- EmbeddingGemma 2's configs take Hugging Face's names where they differ
+  only in name (`Config.embedding_dim`, `AudioConfig.attention_logit_cap`)
+  and drop the fields nothing read (`bos`, `eos`, `pad`, `video_token`,
+  `video_tokens`, `output_dim`, `fft`, `max_hz`, `mel_floor`, `pad_to`).
 - `SelectiveScan` and `GatedDeltaRule` compile with
   `--reclaim-runtime-bds`, so a 2048-row prefill lowers.
 - An operator's output declared `Out(like=x)` (mlir-aie's) takes the shape

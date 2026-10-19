@@ -36,10 +36,7 @@ class SmolVLMTextConfig(DecoderConfig):
     json_prefix = "text_config."
 
     eps: float = dataclasses.field(
-        default=1e-5, kw_only=True, metadata={"json": "text_config.rms_norm_eps"}
-    )
-    max_seq_len: int = dataclasses.field(
-        metadata={"json": "text_config.max_position_embeddings"}
+        default=1e-5, kw_only=True, metadata={"json": "rms_norm_eps"}
     )
     tie_word_embeddings: bool = False
 

@@ -171,7 +171,7 @@ class EmbeddingGemma(Encoder):
         }
         self.query = np.zeros((c.block, 1, c.hidden_size), bfloat16)
         # A power of four: a row's RMS over it is its norm over a power of two.
-        width = 4 ** math.ceil(math.log(c.out_dim, 4))
+        width = 4 ** math.ceil(math.log(c.embedding_dim, 4))
         mrl = np.zeros((len(c.mrl_dims), width, c.hidden_size), bfloat16)
         for j, d in enumerate(c.mrl_dims):
             mrl[j, :d] = w.embedding_projection.weight[:d]

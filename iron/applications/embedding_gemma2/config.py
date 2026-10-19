@@ -37,7 +37,7 @@ class Config(lm.Config):
     head_dim: int = 256
     rope_theta: float = dataclasses.field(
         default=10000.0,
-        metadata={"json": "text_config.rope_parameters.sliding_attention.rope_theta"},
+        metadata={"json": "rope_parameters.sliding_attention.rope_theta"},
     )
     layer_types: tuple[str, ...] = dataclasses.field(
         default=(("sliding_attention",) * 5 + ("full_attention",)) * 4,
@@ -45,57 +45,39 @@ class Config(lm.Config):
     )
     global_kv_groups: int = dataclasses.field(
         default=1,
-        metadata={"json": "text_config.per_layer_config.05.num_key_value_heads"},
+        metadata={"json": "per_layer_config.05.num_key_value_heads"},
     )
     global_head_dim: int = dataclasses.field(
-        default=512, metadata={"json": "text_config.per_layer_config.05.head_dim"}
+        default=512, metadata={"json": "per_layer_config.05.head_dim"}
     )
     global_rope_base: float = dataclasses.field(
         default=1000000.0,
-        metadata={"json": "text_config.rope_parameters.full_attention.rope_theta"},
+        metadata={"json": "rope_parameters.full_attention.rope_theta"},
     )
     sliding_window: int = 512
     ple_dim: int = dataclasses.field(
-        default=512, metadata={"json": "text_config.hidden_size_per_layer_input"}
+        default=512, metadata={"json": "hidden_size_per_layer_input"}
     )
-    out_dim: int = dataclasses.field(
-        default=768, metadata={"json": "text_config.embedding_dim"}
-    )
+    embedding_dim: int = 768
     hidden_act: str = dataclasses.field(
-        default="gelu_pytorch_tanh",
-        metadata={"json": "text_config.hidden_activation"},
+        default="gelu_pytorch_tanh", metadata={"json": "hidden_activation"}
     )
     # The Matryoshka truncations, each renormalized.
     mrl_dims: tuple[int, ...] = lm.not_json((768, 512, 256, 128))
-    eps: float = dataclasses.field(
-        default=1e-6, kw_only=True, metadata={"json": "text_config.rms_norm_eps"}
-    )
-    bos: int = dataclasses.field(
-        default=2, metadata={"json": "text_config.bos_token_id"}
-    )
-    eos: int = dataclasses.field(
-        default=1, metadata={"json": "text_config.eos_token_id"}
-    )
-    pad: int = dataclasses.field(
-        default=0, metadata={"json": "text_config.pad_token_id"}
-    )
     # The placeholders an image's or a clip's soft tokens take the place of,
     # and the markers either side of a run of them.
     image_token: int = dataclasses.field(
-        default=258880, metadata={"json": "image_token_id"}
+        default=258880, metadata={"json": "/image_token_id"}
     )
     audio_token: int = dataclasses.field(
-        default=258881, metadata={"json": "audio_token_id"}
+        default=258881, metadata={"json": "/audio_token_id"}
     )
-    video_token: int = dataclasses.field(
-        default=258884, metadata={"json": "video_token_id"}
-    )
-    boi: int = dataclasses.field(default=255999, metadata={"json": "boi_token_id"})
-    eoi: int = dataclasses.field(default=258882, metadata={"json": "eoi_token_id"})
-    boa: int = dataclasses.field(default=256000, metadata={"json": "boa_token_id"})
+    boi: int = dataclasses.field(default=255999, metadata={"json": "/boi_token_id"})
+    eoi: int = dataclasses.field(default=258882, metadata={"json": "/eoi_token_id"})
+    boa: int = dataclasses.field(default=256000, metadata={"json": "/boa_token_id"})
     # Hugging Face's own config.json spells this one an "index", unlike every
     # other marker's "id".
-    eoa: int = dataclasses.field(default=258883, metadata={"json": "eoa_token_index"})
+    eoa: int = dataclasses.field(default=258883, metadata={"json": "/eoa_token_index"})
     # The longest sequence a call takes, soft tokens included.
     max_tokens: int = lm.not_json(2048)
     # An MHA query block: the mean over the sequence is one query, a block.
@@ -117,22 +99,18 @@ class Config(lm.Config):
 
 @dataclasses.dataclass(frozen=True)
 class AudioConfig(lm.Config):
-    hidden_size: int = dataclasses.field(
-        default=1024, metadata={"json": "audio_config.hidden_size"}
-    )
-    num_hidden_layers: int = dataclasses.field(
-        default=12, metadata={"json": "audio_config.num_hidden_layers"}
-    )
-    num_attention_heads: int = dataclasses.field(
-        default=8, metadata={"json": "audio_config.num_attention_heads"}
-    )
+    json_prefix = "audio_config."
+
+    hidden_size: int = 1024
+    num_hidden_layers: int = 12
+    num_attention_heads: int = 8
     intermediate_size: int = lm.not_json(4096)
     mels: int = lm.not_json(128)
     # The two subsampling convolutions' output channels.
     channels: tuple[int, int] = dataclasses.field(
         default=(128, 32),
         metadata={
-            "json": "audio_config.subsampling_conv_channels",
+            "json": "subsampling_conv_channels",
             "convert": tuple,
         },
     )
@@ -141,31 +119,17 @@ class AudioConfig(lm.Config):
     # The key columns a query's band spans: its window, then the zeros that
     # make the row a whole Softmax line.
     band: int = lm.not_json(32)
-    logit_cap: float = dataclasses.field(
-        default=50.0, metadata={"json": "audio_config.attention_logit_cap"}
-    )
+    attention_logit_cap: float = 50.0
     conv_kernel: int = dataclasses.field(
-        default=5, metadata={"json": "audio_config.conv_kernel_size"}
+        default=5, metadata={"json": "conv_kernel_size"}
     )
-    residual_weight: float = dataclasses.field(
-        default=0.5, metadata={"json": "audio_config.residual_weight"}
-    )
-    output_dim: int = dataclasses.field(
-        default=1536, metadata={"json": "audio_config.output_proj_dims"}
-    )
+    residual_weight: float = 0.5
     text_dim: int = lm.not_json(512)
-    eps: float = dataclasses.field(
-        default=1e-6, kw_only=True, metadata={"json": "audio_config.rms_norm_eps"}
-    )
     # The feature extractor's: samples per second, per frame and per hop.
     sample_rate: int = lm.not_json(16000)
     frame: int = lm.not_json(320)
     hop: int = lm.not_json(160)
-    fft: int = lm.not_json(512)
-    mel_floor: float = lm.not_json(1e-3)
-    max_hz: float = lm.not_json(8000.0)
     max_samples: int = lm.not_json(480000)
-    pad_to: int = lm.not_json(128)
     # The soft tokens a call takes at most: 30 s of audio gives 750.
     max_tokens: int = lm.not_json(768)
 
@@ -201,48 +165,30 @@ class AudioConfig(lm.Config):
 class VisionConfig(lm.Config):
     # As the text encoder's.
     precision = Precision.HIGHEST
+    json_prefix = "vision_config."
 
-    hidden_size: int = dataclasses.field(
-        default=768, metadata={"json": "vision_config.hidden_size"}
-    )
-    num_hidden_layers: int = dataclasses.field(
-        default=16, metadata={"json": "vision_config.num_hidden_layers"}
-    )
-    num_attention_heads: int = dataclasses.field(
-        default=12, metadata={"json": "vision_config.num_attention_heads"}
-    )
-    head_dim: int = dataclasses.field(
-        default=64, metadata={"json": "vision_config.head_dim"}
-    )
-    intermediate_size: int = dataclasses.field(
-        default=3072, metadata={"json": "vision_config.intermediate_size"}
-    )
+    hidden_size: int = 768
+    num_hidden_layers: int = 16
+    num_attention_heads: int = 12
+    head_dim: int = 64
+    intermediate_size: int = 3072
     # A patch's side in pixels, and a soft token's side in patches.
-    patch: int = dataclasses.field(
-        default=16, metadata={"json": "vision_config.patch_size"}
-    )
-    pool: int = dataclasses.field(
-        default=3, metadata={"json": "vision_config.pooling_kernel_size"}
-    )
+    patch: int = dataclasses.field(default=16, metadata={"json": "patch_size"})
+    pool: int = dataclasses.field(default=3, metadata={"json": "pooling_kernel_size"})
     # The rows of each axis's position-embedding table.
     positions: int = dataclasses.field(
-        default=10240, metadata={"json": "vision_config.position_embedding_size"}
+        default=10240, metadata={"json": "position_embedding_size"}
     )
     rope_theta: float = dataclasses.field(
-        default=100.0, metadata={"json": "vision_config.rope_parameters.rope_theta"}
+        default=100.0, metadata={"json": "rope_parameters.rope_theta"}
     )
     hidden_act: str = dataclasses.field(
-        default="gelu_pytorch_tanh",
-        metadata={"json": "vision_config.hidden_activation"},
+        default="gelu_pytorch_tanh", metadata={"json": "hidden_activation"}
     )
     text_dim: int = lm.not_json(512)
-    # The processor's soft-token budgets.
+    # The processor's soft-token budget.
     image_tokens: int = dataclasses.field(
-        default=280, metadata={"json": "vision_soft_tokens_per_image"}
-    )
-    video_tokens: int = lm.not_json(140)
-    eps: float = dataclasses.field(
-        default=1e-6, kw_only=True, metadata={"json": "vision_config.rms_norm_eps"}
+        default=280, metadata={"json": "/vision_soft_tokens_per_image"}
     )
     # The patch rows of a call, an image's budget, and the largest image it
     # takes either way up, 12.6 MP.

@@ -124,7 +124,8 @@ CLIPS = {
     "long": "4507-16021-0047",
 }
 
-I, V = VisionConfig().image_tokens, VisionConfig().video_tokens
+# The processor's soft-token budgets for an image and for video.
+I, V = VisionConfig().image_tokens, 140
 
 VAL2017 = "https://s3.amazonaws.com/images.cocodataset.org/val2017"
 

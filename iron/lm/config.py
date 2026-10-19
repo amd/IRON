@@ -81,9 +81,9 @@ class Config:
     # Unbiased projections, RoPE over whole heads, unless a model says.
     attention_bias = mlp_bias = False
     rotary_dim = None
-    # The object of config.json a field read by its own name is in
-    # ("text_config." for a model nested there); a ``metadata["json"]`` path
-    # is from the file's root.
+    # The object of config.json the fields are read from ("text_config."
+    # for a model nested there); a ``metadata["json"]`` path after "/" is
+    # from the file's root.
     json_prefix = ""
 
     eps: float = dataclasses.field(
@@ -93,8 +93,8 @@ class Config:
     @classmethod
     def from_checkpoint(cls, path) -> "Config":
         """``cls``'s fields read from ``path``'s own ``config.json``: each
-        at its ``metadata["json"]``, a dot-separated path from the file's
-        root (its own name if unset), converted by its
+        at its ``metadata["json"]``, a dot-separated path under
+        ``json_prefix`` (its own name if unset), converted by its
         ``metadata["convert"]`` if it names one; a ``not_json`` field keeps
         its default, as does one the file leaves out or null.
 
@@ -121,7 +121,7 @@ class Config:
         """
         kwargs, missing = {}, []
         for f in dataclasses.fields(cls):
-            key = f.metadata.get("json", cls.json_prefix + f.name)
+            key = cls.json_key(f)
             if key is None:
                 continue
             value = _dotted(data, key)
@@ -137,6 +137,14 @@ class Config:
             raise ValueError(f"{source} lacks {missing}")
         return cls(**kwargs)
 
+    @classmethod
+    def json_key(cls, f: dataclasses.Field) -> str | None:
+        """Where ``config.json`` holds field ``f``; None: nowhere."""
+        key = f.metadata.get("json", f.name)
+        if key is None or key.startswith("/"):
+            return key and key[1:]
+        return cls.json_prefix + key
+
     def to_json(self) -> dict:
         """The fields as ``config.json`` names them, ``from_checkpoint``'s
         inverse: a value its ``convert`` built gives its own ``to_json()``.
@@ -144,7 +152,7 @@ class Config:
         """
         out = {}
         for f in dataclasses.fields(self):
-            key = f.metadata.get("json", self.json_prefix + f.name)
+            key = self.json_key(f)
             value = getattr(self, f.name)
             if hasattr(value, "to_json"):
                 value = value.to_json()

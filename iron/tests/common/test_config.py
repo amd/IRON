@@ -80,10 +80,10 @@ def test_from_checkpoint_reads_each_key_and_no_not_json_field(tmp_path, cls):
     neither read nor written, even where the file names it.
     """
     fields = dataclasses.fields(cls)
-    keys = {f.metadata.get("json", cls.json_prefix + f.name) for f in fields}
+    keys = {cls.json_key(f) for f in fields}
     data, expected, unread = {}, {}, {}
     for f in fields:
-        key = f.metadata.get("json", cls.json_prefix + f.name)
+        key = cls.json_key(f)
         if key is None:
             if f.name not in keys:
                 unread[f.name] = 7
@@ -100,6 +100,12 @@ def test_from_checkpoint_reads_each_key_and_no_not_json_field(tmp_path, cls):
     assert {name: getattr(config, name) for name in expected} == expected
     assert 7 not in [getattr(config, name) for name in unread]
     assert not unread.keys() & config.to_json().keys()
+
+
+def test_a_path_is_under_the_prefix_unless_it_starts_at_the_root():
+    data = {"image_token_id": 5, "text_config": {"rms_norm_eps": 0.5}}
+    config = EmbeddingGemmaConfig.from_json(data)
+    assert (config.image_token, config.eps) == (5, 0.5)
 
 
 @pytest.mark.parametrize(

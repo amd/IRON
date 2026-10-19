@@ -92,7 +92,7 @@ class ConformerAttention(iron.Graph):
         )
         self.per_dim_scale = iron.param(D, dtype=np.float32)
         self.timing, self.dims = c.timing(), (H, D, c.window, c.band)
-        self.logit_cap = c.logit_cap
+        self.logit_cap = c.attention_logit_cap
         # The tower's keys, values, scores and probabilities, every layer's.
         self._buffers = None
 
@@ -261,8 +261,6 @@ class AudioTower(Tower):
         tree = self.audio_tower = weights.audio_tower
         self.embed_audio = weights.embed_audio
         sub = tree.subsample_conv_projection
-        if c.frame != 2 * c.hop:
-            raise ValueError(f"a frame of {c.frame} samples is not two hops")
         super().__init__(config, c.max_tokens, c.max_tokens)
         self.load_layers(weights, "audio_tower.layers.")
         T = c.max_tokens
@@ -278,15 +276,7 @@ class AudioTower(Tower):
         )
         self.conv0 = Conv2d(w0 - w0.mean(axis=0), c.mels, stride=2, padding=1, border=1)
         self.conv1 = Conv2d(w1 - w1.mean(axis=0), F0 + 2, stride=2)
-        self.log_mel = blocks.LogMel(
-            frame=c.frame,
-            hop=c.hop,
-            fft=c.fft,
-            mels=c.mels,
-            sample_rate=c.sample_rate,
-            max_hz=c.max_hz,
-            mel_floor=c.mel_floor,
-        )
+        self.log_mel = blocks.LogMel(c.frame, c.hop, mels=c.mels)
         self.features = iron.state((4 * T + 2, c.mels))
         self.zero_mel = np.zeros((1, c.mels), bfloat16)
         self.subsampled = iron.state((2 * T + 2, self.slots))
@@ -316,37 +306,6 @@ class AudioTower(Tower):
         self.log_mel(wave, self.features[1 : F + 1], frames=frames)
         self.features[frames + 1] = self.zero_mel
 
-    def front(self, wave, *, n, frames, tokens):
-        """The rows of `wave`'s `tokens` soft tokens before the first layer;
-        nothing rotates them.
-        """
-        c = self.config
-        C0, C1 = c.channels
-        F1 = c.mels // 4
-        T = c.max_tokens
-        # The first row of each convolution's input is its zero padding in time.
-        self.logmel(wave, frames)
-        sub = self.audio_tower.subsample_conv_projection
-        h = self.conv0(self.features, rows=n)
-        h = F.rms_norm(
-            h.reshape(2 * T * self.slots // C0, C0),
-            (C0,),
-            sub.layer0.norm.weight,
-            c.eps,
-        )
-        ReLU.step(h.reshape(2 * T, self.slots), self.subsampled[1 : 2 * T + 1])
-        self.subsampled[n + 1] = self.zero
-        h = self.conv1(self.subsampled, rows=tokens)
-        h = ReLU.step(
-            F.rms_norm(h.reshape(T * F1, C1), (C1,), sub.layer1.norm.weight, c.eps)
-        )
-        x = F.linear(
-            h.reshape(T, F1 * C1),
-            sub.input_proj_linear.weight,
-            precision=Precision.HIGHEST,
-        )
-        return x, None
-
     def head(self, x):
         c = self.config
         out = self.audio_tower.output_proj
@@ -373,8 +332,32 @@ class AudioTower(Tower):
             frames: The per-call valid frames.
             tokens: The per-call `config.tokens(frames)`.
         """
-        x, angles = self.front(wave, n=n, frames=frames, tokens=tokens)
-        return self.forward(x, tokens, angles)
+        c = self.config
+        C0, C1 = c.channels
+        F1 = c.mels // 4
+        T = c.max_tokens
+        # The first row of each convolution's input is its zero padding in time.
+        self.logmel(wave, frames)
+        sub = self.audio_tower.subsample_conv_projection
+        h = self.conv0(self.features, rows=n)
+        h = F.rms_norm(
+            h.reshape(2 * T * self.slots // C0, C0),
+            (C0,),
+            sub.layer0.norm.weight,
+            c.eps,
+        )
+        ReLU.step(h.reshape(2 * T, self.slots), self.subsampled[1 : 2 * T + 1])
+        self.subsampled[n + 1] = self.zero
+        h = self.conv1(self.subsampled, rows=tokens)
+        h = ReLU.step(
+            F.rms_norm(h.reshape(T * F1, C1), (C1,), sub.layer1.norm.weight, c.eps)
+        )
+        x = F.linear(
+            h.reshape(T, F1 * C1),
+            sub.input_proj_linear.weight,
+            precision=Precision.HIGHEST,
+        )
+        return self.forward(x, tokens, None)
 
     def soft(self, values: dict) -> int:
         return values["tokens"]
