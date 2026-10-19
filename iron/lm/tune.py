@@ -39,12 +39,7 @@ def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
     """At most ``count`` contexts halving down from ``top``, multiples of
     ``unit``, ascending, each weighted by the share of a uniform context in
     ``(0, top]`` nearest it (the trapezoid rule): the weights sum to 1.
-
-    Raises:
-        ValueError: ``top`` is not a positive multiple of ``unit``.
     """
-    if top < unit or top % unit:
-        raise ValueError(f"the context {top} is not a multiple of {unit}")
     found = [top]
     while len(found) < count and found[-1] // 2 >= unit and found[-1] // 2 % unit == 0:
         found.append(found[-1] // 2)

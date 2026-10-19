@@ -293,13 +293,11 @@ class FullELFCallable(ImageCallable):
         weakref.WeakValueDictionary()
     )
 
-    def __init__(
-        self,
-        seq,
-        device_name="main",
-        sequence_name="sequence",
-        arena: ScratchArena | None = None,
-    ):
+    # The device and runtime sequence the full ELF's first command runs.
+    device_name = "main"
+    sequence_name = "sequence"
+
+    def __init__(self, seq, arena: ScratchArena | None = None):
         super().__init__(seq, arena)
         if (arena is None) != (seq.arena is None):
             raise ValueError(
@@ -309,16 +307,15 @@ class FullELFCallable(ImageCallable):
             )
         if arena is not None and arena.plan is not seq.arena:
             raise ValueError(f"{seq.name} was placed in another arena plan")
-        self.device_name = device_name
-        self.sequence_name = sequence_name
         self.kernel = NPUKernel(
-            elf_path=str(seq.image), kernel_name=f"{device_name}:{sequence_name}"
+            elf_path=str(seq.image),
+            kernel_name=f"{self.device_name}:{self.sequence_name}",
         )
         # Each later command's runtime sequence, on the same hw_context.
         self.later = [
             NPUKernel(
                 elf_path=str(seq.image),
-                kernel_name=f"{device_name}:{Composition.sequence_name(k)}",
+                kernel_name=f"{self.device_name}:{Composition.sequence_name(k)}",
             )
             for k in range(1, len(seq.packaging.commands) + 1)
         ]
@@ -350,7 +347,8 @@ class FullELFCallable(ImageCallable):
         self._trace_arg: int | None = None
         if seq.traced:
             layout = get_trace_buffer(
-                self.lowered_mlir_path.read_text(), f"{device_name}:{sequence_name}"
+                self.lowered_mlir_path.read_text(),
+                f"{self.device_name}:{self.sequence_name}",
             )
             if layout:
                 self._trace_arg = layout["arg_index"]

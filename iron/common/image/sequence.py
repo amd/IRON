@@ -232,8 +232,6 @@ class Image:
 
     def _link(self):
         """Build this sequence's image, once; sets ``self.image`` and ``artifacts``."""
-        if self.layout is None:
-            self._prepare()
         self.image = self.packaging.link(self)
         self._artifacts = self._record()
         return self.image
