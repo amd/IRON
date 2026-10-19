@@ -41,22 +41,27 @@ from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
-# The epsilon mlir-aie's layer_norm kernel fixes.
+# mlir-aie's layer_norm kernel always uses this epsilon.
 LAYER_NORM_EPS = 1e-5
 
 
 def linear(x: Handle | State, weight, bias=None, *, precision=None, **gemv) -> Handle:
-    """``x @ weight.T``, plus ``bias`` on every row if given.
+    """Return ``x @ weight.T``, plus ``bias`` on every row if ``bias`` is given.
 
-    ``x`` is one row (``(in,)`` or ``(1, in)``) or several (``(rows, in)``).
-    One row is a GEMV, whose float32 sum rounds once, as every
-    ``precision`` (``Precision``) allows. Several are flm.ProjectionGEMM
-    reading ``weight`` column-major at ``precision``; at ``HIGHEST``, asked
-    for here or by the graph raising flm.ProjectionGEMM, they are the GEMM
-    whose float32 sums round once, which also tiles row counts
-    flm.ProjectionGEMM cannot. Nothing is padded: a row count neither tiles
-    is an error at record time. ``gemv`` is the GEMV's tunables, for a call
-    the profile cannot tell from another of its shape.
+    ``x`` is one row, ``(in,)`` or ``(1, in)``, or several rows,
+    ``(rows, in)``. ``weight`` is ``(out, in)``, as ``torch.nn.Linear``
+    stores it.
+
+    One row runs on GEMV, which sums in float32 and rounds once, so
+    ``precision`` has no effect on it. Several rows run on
+    flm.ProjectionGEMM at the given ``precision``. At
+    ``Precision.HIGHEST`` (asked for here, or set on the graph) they run on
+    GEMM instead, which also sums in float32 and handles row counts
+    flm.ProjectionGEMM cannot tile. Nothing is padded: a row count neither
+    operator tiles raises when the graph is recorded.
+
+    ``gemv`` passes tunables to the GEMV, for a call the profile cannot
+    tell apart from another call of the same shape.
 
     Raises:
         ValueError: ``x`` of another rank, or GEMV tunables for several rows.
@@ -170,12 +175,16 @@ class ConvState:
 
 
 def causal_conv1d(x: Handle, taps, state: ConvState) -> Handle:
-    """``x`` ``(rows, channels)`` through a depth-wise causal FIR of ``K``
-    taps: row ``t`` is ``sum_k taps[k] * x[t - K + 1 + k]``, each channel its
-    own column of ``taps`` ``(K, channels)``, the rows before ``x``'s first
-    ``state.read``, the ``K - 1`` ending it written to ``state.write``.
-    ``x`` bounded per call on its rows (``x[:n]``) is a prompt chunk of
-    ``chunk`` rows; one row otherwise is a decode step.
+    """Run ``x`` ``(rows, channels)`` through a depth-wise causal filter of
+    ``K`` taps.
+
+    Output row ``t`` is ``sum_k taps[k] * x[t - K + 1 + k]``, and each
+    channel uses its own column of ``taps`` ``(K, channels)``. The ``K - 1``
+    rows before ``x``'s first row are read from ``state.read``, and the
+    ``K - 1`` rows that end this call's input (counting the rows read) are
+    written to ``state.write`` for the next call. When ``x``'s rows are
+    bounded per call (``x[:n]``), the call is a prompt chunk of at most
+    ``chunk`` rows; otherwise ``x`` is one row, a decode step.
     """
     read, write, window, tail = state.read, state.write, state.window, state.tail
     K, C = taps.shape[0], window.shape[1]

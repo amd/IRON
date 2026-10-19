@@ -200,9 +200,10 @@ class Recording:
     # buffer's device address (a gather's ids): a table's after another's,
     # each gathered from by the same input.
     encoders: dict[str, list[Encoder]] = dataclasses.field(default_factory=dict)
-    # A per-call value the graph fills in rather than the caller, from a
-    # buffer's device address (a gather by ids the device made):
-    # value -> (buffer, address -> words by name, its word's name).
+    # Per-call values the graph fills in itself rather than the caller, from
+    # a buffer's device address (for a gather by ids the device made). Each
+    # value's name maps to the buffer, a function from its address to words
+    # by name, and the name of the word that is the value.
     addresses: dict[str, tuple[str, Callable[[int], dict], str]] = dataclasses.field(
         default_factory=dict
     )

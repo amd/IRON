@@ -154,25 +154,26 @@ class Stats:
 
 
 class Model(iron.Graph):
-    """A model's graph, every version ``shapes()`` names compiled and
-    loaded by ``load_versions()`` before the first call, so the arena is
-    made once: a version on token ids (``ids`` or ``placed``) feeds off the
-    decode step, the version with no input, where that is a full ELF, its
-    Emit starting there. ``versions`` (``Graph``'s own), in ``shapes()``'s
-    order, is every version ``load_versions()`` compiled.
+    """A model compiled as several versions of one graph, one per input shape.
 
-    A model ``load`` builds from a checkpoint names its ``config``, the
-    ``Config`` class its ``config.json`` is read by (or one shape), and its
-    tokenizer's file and how to open it; ``load`` gives the instance the
-    ``checkpoint``, the ``seed`` its weights were drawn at, if any, and the
-    ``tokenizer``. Given a ``seed``, the weights are drawn in the
-    checkpoint's shapes and a prompt with no tokenizer is random tokens, so
-    speed, accuracy and determinism need neither. ``stats`` are the last
-    generation's timings.
+    ``shapes()`` lists the versions, the decode step (no input) first.
+    ``load_versions()`` compiles and loads all of them before the first
+    call, so the device arena is allocated once, and ``versions``
+    (``Graph``'s own) holds them in ``shapes()``'s order. When the decode
+    step is a full ELF, a version on token ids (``ids`` or ``placed``)
+    hands off to it directly: its Emit step starts the decode step.
+
+    A subclass sets ``config`` to the ``Config`` class that reads
+    ``config.json``, or to one fixed shape. ``load`` sets ``checkpoint`` and
+    ``tokenizer`` on the instance, and ``seed`` when the weights are drawn
+    at random. With a seed, a prompt without a tokenizer is random tokens,
+    so speed, accuracy and determinism can be checked without real weights.
+    ``stats`` holds the last generation's timings.
     """
 
-    # The checkpoint's runs of dotted names, matched anywhere in a path, that
-    # the model's modules read under another name, by that name.
+    # Renames applied to the checkpoint's tensor names before loading: each
+    # key is a run of dotted name parts, matched anywhere in a name, and its
+    # value is the name the model's modules use instead.
     renames: ClassVar[dict[str, str]] = {}
     # What loads the checkpoint into transformers to record its goldens.
     hugging_face: type = HuggingFace
@@ -180,8 +181,9 @@ class Model(iron.Graph):
     seed: int | None = None
     tokenizer: Tokenizer | None = None
     stats: Stats | None = None
-    # A subclass's: on the class the Config class or one shape, on an
-    # instance its shape; and the weights it holds.
+    # Set by a subclass. On the class, config is the Config class or one
+    # shape; on an instance, it is the instance's shape. weights is the tree
+    # of weights the instance holds.
     config: Any
     weights: Any
 

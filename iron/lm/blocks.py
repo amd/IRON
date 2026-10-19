@@ -628,18 +628,20 @@ class CrossCache(iron.Graph):
 
 
 class Attention(iron.Graph):
-    """Layer ``i``'s self-attention on ``c``'s shape: ``q_proj``, ``k_proj``
-    and ``v_proj`` of the layer's input, q and k turned by the call's RoPE
-    rows where given, a pair of q's and k's (``Rope.rows``), only their
-    first ``rotary`` columns where the config gives a ``rotary_dim``,
-    attended over the layer's ``KVCache``, then ``output``, ``o_proj`` of
-    the heads unless a model says; q, k and v
-    with a bias where the config's ``attention_bias`` says, o where
-    ``o_bias`` does, each at the config's ``precision``. ``projections``
-    builds what ``project`` reads. ``scaling`` is the logits' scale; None
-    is ``head_dim ** -0.5``. A layer that reads another's cache, holding
-    the same ``KVCache``, sets ``k_proj`` and ``v_proj`` to None, and
-    projects and writes no keys or values.
+    """Self-attention for layer ``i`` of a decoder with config ``c``.
+
+    The input is projected by ``q_proj``, ``k_proj`` and ``v_proj``. If the
+    call carries RoPE angles (``Rope.rows``), q and k are rotated, only
+    their first ``rotary`` columns when the config sets ``rotary_dim``.
+    Attention then runs over the layer's ``KVCache``, and ``output`` turns
+    the heads into the block's output: ``o_proj`` unless a model overrides it.
+
+    q, k and v have a bias when ``config.attention_bias`` is set; o has one
+    when ``o_bias`` is. Every projection runs at ``config.precision``.
+    ``projections`` builds the projections that ``project`` applies.
+    ``scaling`` scales the logits and defaults to ``head_dim ** -0.5``. A
+    layer that shares another layer's ``KVCache`` sets ``k_proj`` and
+    ``v_proj`` to None and writes no keys or values.
 
     Args:
         c: The decoder's shape.
@@ -795,15 +797,21 @@ class GatedMLP(iron.Graph):
 
 
 class DecoderLayer(iron.Graph):
-    """Layer ``i`` of a pre-norm decoder on ``c``'s shape: ``self_attn``
-    after ``input_layernorm``, attending over the layer's own ``cache``,
-    then ``mlp`` after ``post_attention_layernorm``, each a ``norm``
-    (``RMSNorm`` unless a model sets another), each block's output
-    added to its residual times ``residual_multiplier``. ``rope`` keys the
-    call's rows (``Call.ropes``) that turn q and k: the model's ``Rope``
-    unless a model sets another key; None: no RoPE. ``self_attn``, its
-    o biased with q, k and v where ``attention_bias`` says, ``mlp`` and
-    ``cache`` are a model's own where given.
+    """Layer ``i`` of a pre-norm decoder with config ``c``.
+
+    The input goes through ``input_layernorm`` and ``self_attn``, which
+    attends over the layer's own ``cache``, then through
+    ``post_attention_layernorm`` and ``mlp``. Each block's output is
+    multiplied by ``residual_multiplier`` and added to its residual. Both
+    norms are ``norm``, which is ``RMSNorm`` unless a model sets another.
+
+    ``rope`` selects which of the call's RoPE angles (``Call.ropes``)
+    rotate q and k. It is the model's ``Rope`` unless a model sets another
+    key, and None means the layer applies no RoPE.
+
+    A model may pass its own ``self_attn``, ``mlp`` and ``cache``. The
+    default ``self_attn`` gives o a bias when ``attention_bias`` is set, as
+    it does q, k and v.
     """
 
     norm = RMSNorm

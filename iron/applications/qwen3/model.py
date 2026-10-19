@@ -33,8 +33,9 @@ class Qwen3Layer(DecoderLayer):
 
 
 class Qwen3(CausalLM):
-    """Qwen3 on ``config``'s shape and a checkpoint's ``weights``, from its
-    checkpoint and ``tokenizer.json``.
+    """The Qwen3 decoder, with the shape ``config`` and the checkpoint's
+    ``weights``. ``Qwen3.load`` builds one from a checkpoint and its
+    ``tokenizer.json``.
 
     Qwen3's ``tokenizer_config.json`` names no ``bos_token``; its
     ``generation_config.json`` names ``<|endoftext|>`` (151643) as both
