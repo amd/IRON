@@ -16,7 +16,7 @@ import functools
 import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
+from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE, flm_gemma4
 from ml_dtypes import bfloat16
 
 import iron
@@ -589,6 +589,10 @@ def test_flm_dequant_rejects_unservable_shapes(K, N, match, npu2):
             "multiple of 128",
         ),
     ],
+)
+@pytest.mark.skipif(
+    "attn_qk_chunk" not in flm_gemma4._PrefillKernel.__annotations__,
+    reason="needs mlir-aie's prefill kernel with attn_qk_chunk (PR #50)",
 )
 def test_flm_prefill_attention_rejects_unservable_shapes(cls, kwargs, match, npu2):
     with pytest.raises(ValueError, match=match):
