@@ -228,7 +228,7 @@ public API adds its entry under Unreleased.
   `Operator.call_operands` are classmethods, off `declaration`.
 - A graph's per-call values and their expressions are taplib's `PerCall`
   and `Affine` (`aie.helpers.taplib`): `marker` replaces `kind`, and an
-  expression prints as its symbol name (`pos_p1`, not `pos + 1`).
+  expression prints as itself (`pos + 1`).
 - `iron.lm.testing.assert_close(..., share=LOGITS)`: a test's own bound,
   a share of the largest logit (ResNet's toy holds 2%).
 - `Experts` leaves its hidden and width tile check to mlir-aie's

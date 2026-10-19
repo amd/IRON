@@ -1051,10 +1051,10 @@ def test_the_trace_records_the_range_each_per_call_index_and_bound_holds():
 
     t = Chunked().trace(x=(C, G * D))
     got = {(str(m.expression), m.lo, m.hi) for m in t.limits}
-    assert got == {("rows", 0, C + 1), ("chunk", 0, L // C), ("pos_p1", 0, L)}
+    assert got == {("rows", 0, C + 1), ("chunk", 0, L // C), ("pos + 1", 0, L)}
     for m in t.limits:
         assert m.expression.evaluate(dict(chunk=3, rows=C, pos=L - 2)) < m.hi
-    (outside,) = [m for m in t.limits if str(m.expression) == "pos_p1"]
+    (outside,) = [m for m in t.limits if str(m.expression) == "pos + 1"]
     assert outside.expression.evaluate(dict(pos=L - 1)) == outside.hi
 
 
