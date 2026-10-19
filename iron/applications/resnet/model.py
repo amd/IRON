@@ -25,7 +25,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron.lm import Linear
+from iron.lm import BatchNorm2d, Linear
 from iron.lm.config import Config, not_json
 from iron.operators.relu import ReLU
 
@@ -77,15 +77,6 @@ class Convolution(iron.Graph):
         self.weight = iron.param(*shape, dtype=np.float32)
 
 
-class BatchNorm(iron.Graph):
-    """A BatchNorm's affine weights and running statistics, float32."""
-
-    def __init__(self, channels: int):
-        for name in ("weight", "bias", "running_mean", "running_var"):
-            setattr(self, name, iron.param(channels, dtype=np.float32))
-        self.num_batches_tracked = iron.param(dtype=np.int64)
-
-
 class ConvLayer(iron.Graph):
     """A ``k``-square conv at ``stride``, same padding, its BatchNorm
     folded in as it loads, then ReLU where ``relu``.
@@ -93,21 +84,12 @@ class ConvLayer(iron.Graph):
 
     def __init__(self, cin, cout, k=1, stride=1, relu=True):
         self.convolution = Convolution(cout, cin, k, k)
-        self.normalization = BatchNorm(cout)
+        self.normalization = BatchNorm2d(cout, BN_EPS)
         self.stride, self.relu = stride, relu
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
-        bn = self.normalization
-        self.weight, bias = F.fuse_conv_bn_weights(
-            self.convolution.weight,
-            None,
-            bn.running_mean,
-            bn.running_var,
-            BN_EPS,
-            bn.weight,
-            bn.bias,
-        )
+        self.weight, bias = self.normalization.fold(self.convolution.weight)
         self.bias = bias.astype(bfloat16)
 
     def body(self, x):

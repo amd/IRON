@@ -24,7 +24,7 @@ from ml_dtypes import bfloat16
 
 import iron.functional as F
 from iron import Precision
-from iron.lm import Config, Conv2d, LayerNorm, Tower, not_json
+from iron.lm import Config, LayerNorm, Tower, not_json
 from iron.operators.copy import Copy
 
 
@@ -111,15 +111,13 @@ class VisionTower(Tower):
         self.final_norm = LayerNorm(c.hidden_size)
         v = "model.vision_model."
         self.load_layers(weights, f"{v}encoder.layers.", f"{v}post_layernorm.")
-        embeddings = self.vision_model.embeddings
-        self.patch_embed = Conv2d(
-            embeddings.patch_embedding.weight, c.image_size, stride=c.patch_size
-        )
 
     def front(self, rgb):
         """The patches of the image ``rgb`` embedded, with their positions."""
         c, e = self.config, self.vision_model.embeddings
-        h = self.patch_embed(rgb, rows=c.side).reshape(c.side**2, c.hidden_size)
+        rgb = rgb.reshape(c.image_size, c.image_size, 3)
+        h = F.conv2d(rgb, e.patch_embedding.weight, stride=c.patch_size)
+        h = h.reshape(c.side**2, c.hidden_size)
         return h + e.patch_embedding.bias + e.position_embedding.weight, None
 
     def pool(self, x, n):

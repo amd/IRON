@@ -14,12 +14,13 @@ import pytest
 from ml_dtypes import bfloat16
 from PIL import Image
 
+import iron.functional as F
 from iron.applications.yolox.model import (
+    BN_EPS,
     INPUT_SIZE,
     POOLS,
     YOLOXNano,
     decode,
-    folded,
     preprocess,
     sigmoid,
 )
@@ -75,7 +76,17 @@ class YOLOXNanoOracle:
 
     def conv(self, m, x, stride=1, depthwise=False):
         """A ``BaseConv``: the conv, BatchNorm folded, then SiLU."""
-        return silu(conv2d(x, *folded(m), stride, depthwise))
+        bn = m.bn
+        folded = F.fuse_conv_bn_weights(
+            m.conv.weight,
+            None,
+            bn.running_mean,
+            bn.running_var,
+            BN_EPS,
+            bn.weight,
+            bn.bias,
+        )
+        return silu(conv2d(x, *folded, stride, depthwise))
 
     def dwconv(self, m, x, stride=1):
         """A depthwise 3x3 then a pointwise 1x1, each a ``BaseConv``."""

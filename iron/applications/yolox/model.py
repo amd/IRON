@@ -26,6 +26,7 @@ so a model built without it detects umbrellas in a photo of two cats.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -33,6 +34,8 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
+from iron.lm import BatchNorm2d
+from iron.lm.checkpoint import subtree
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.sigmoid import Sigmoid
@@ -48,16 +51,6 @@ PAD_VALUE = 114
 # flm.ProjectionGEMM's narrowest tile, objectness's 1 and the 80 class scores to
 # whole 32-element vectors of Sigmoid's in a 13-pixel row.
 BOX, OBJECTNESS, CLASSES = 16, 32, 96
-
-
-def folded(m) -> tuple[np.ndarray, np.ndarray]:
-    """A ``BaseConv`` module's conv weight and bias with its BatchNorm
-    folded in, float32.
-    """
-    bn = m.bn
-    return F.fuse_conv_bn_weights(
-        m.conv.weight, None, bn.running_mean, bn.running_var, BN_EPS, bn.weight, bn.bias
-    )
 
 
 def preprocess(image: np.ndarray, size: int = INPUT_SIZE) -> np.ndarray:
@@ -101,17 +94,6 @@ def decode(scales: list[np.ndarray]) -> np.ndarray:
     return np.concatenate(rows)
 
 
-def padded(p, width: int) -> tuple[np.ndarray, np.ndarray]:
-    """A prediction's 1x1 conv weight and bias, zero-padded to ``width``
-    output channels, bfloat16.
-    """
-    out, channels = p.weight.shape[:2]
-    weight = np.zeros((width, channels, 1, 1), bfloat16)
-    bias = np.zeros(width, bfloat16)
-    weight[:out], bias[:out] = p.weight, p.bias
-    return weight, bias
-
-
 def base_conv(x, weight, bias, stride: int = 1):
     """A ``BaseConv`` of the feature map ``x`` by its folded ``weight`` and
     ``bias``, same padding, depthwise if ``weight`` reads one channel, then
@@ -133,6 +115,175 @@ def sigmoid(x):
     return (np.tanh(x / 2) + 1) / 2
 
 
+class BaseConv(iron.Graph):
+    """A bias-free ``k``-square conv at ``stride``, depthwise over
+    ``groups``, its BatchNorm folded in as it loads, then SiLU
+    (``base_conv``).
+    """
+
+    def __init__(self, cin: int, cout: int, k: int = 1, stride: int = 1, groups=1):
+        shape = (cout, cin // groups, k, k)
+        self.conv = SimpleNamespace(weight=iron.param(*shape, dtype=np.float32))
+        self.bn = BatchNorm2d(cout, BN_EPS)
+        self.stride = stride
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        self.weight, self.bias = self.bn.fold(self.conv.weight)
+
+    def body(self, x):
+        return base_conv(x, self.weight, self.bias, self.stride)
+
+
+class DWConv(iron.Graph):
+    """A depthwise ``k``-square ``BaseConv`` at ``stride``, then a 1x1."""
+
+    def __init__(self, cin: int, cout: int, k: int = 3, stride: int = 1):
+        self.dconv = BaseConv(cin, cin, k, stride, groups=cin)
+        self.pconv = BaseConv(cin, cout)
+
+    def body(self, x):
+        return self.pconv(self.dconv(x))
+
+
+class Bottleneck(iron.Graph):
+    def __init__(self, channels: int):
+        self.conv1 = BaseConv(channels, channels)
+        self.conv2 = DWConv(channels, channels)
+
+
+class CSPLayer(iron.Graph):
+    """A CSP block: ``m``'s bottlenecks over half the channels, each added
+    to its input where ``shortcut``, beside a 1x1 of the input, then a
+    1x1 of both.
+    """
+
+    def __init__(self, cin: int, cout: int, depth: int, shortcut: bool = True):
+        hidden = cout // 2
+        self.conv1 = BaseConv(cin, hidden)
+        self.conv2 = BaseConv(cin, hidden)
+        self.conv3 = BaseConv(2 * hidden, cout)
+        self.m = [Bottleneck(hidden) for _ in range(depth)]
+        self.shortcut = shortcut
+
+    def body(self, x):
+        y = self.conv1(x)
+        for b in self.m:
+            z = b.conv2(b.conv1(y))
+            y = ElementwiseAdd.step(z, y, tile_size=_row(y)) if self.shortcut else z
+        return self.conv3(F.cat([y, self.conv2(x)], dim=-1))
+
+
+class SPPBottleneck(iron.Graph):
+    """A 1x1 conv, its max pools of each of ``POOLS`` beside it, then a
+    1x1 of all four.
+    """
+
+    def __init__(self, channels: int):
+        hidden = channels // 2
+        self.conv1 = BaseConv(channels, hidden)
+        self.conv2 = BaseConv(hidden * (len(POOLS) + 1), channels)
+
+    def body(self, x):
+        x = self.conv1(x)
+        pooled = [F.max_pool2d(x, k, 1, k // 2) for k in POOLS]
+        return self.conv2(F.cat([x, *pooled], dim=-1))
+
+
+class Prediction(iron.Graph):
+    """A head's 1x1 prediction conv, its ``cout`` output channels
+    zero-padded to ``width`` as it loads, bfloat16.
+    """
+
+    def __init__(self, cin: int, cout: int, width: int):
+        self.weight = iron.param(cout, cin, 1, 1, dtype=np.float32)
+        self.bias = iron.param(cout, dtype=np.float32)
+        self.width = width
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        out, channels = self.weight.shape[:2]
+        weight = np.zeros((self.width, channels, 1, 1), bfloat16)
+        bias = np.zeros(self.width, bfloat16)
+        weight[:out], bias[:out] = self.weight, self.bias
+        self.weight, self.bias = weight, bias
+
+    def body(self, x):
+        return F.conv2d(x, self.weight, self.bias)
+
+
+class Focus(iron.Graph):
+    """The stem: a ``BaseConv`` over the image's 2x2 space-to-depth, its
+    four corners each taking a zero channel after BGR's three.
+    """
+
+    def __init__(self, cout: int):
+        self.conv = BaseConv(4 * 3, cout, 3)
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        weight = self.conv.weight.reshape(-1, 4, 3, 3, 3)
+        weight = np.pad(weight, ((0, 0), (0, 0), (0, 1), (0, 0), (0, 0)))
+        self.conv.weight = weight.reshape(-1, 16, 3, 3)
+
+
+class CSPDarknet(iron.Graph):
+    """YOLOX-Nano's backbone (``dark2`` to ``dark5`` after the stem),
+    ``width`` channels from the stem.
+    """
+
+    def __init__(self, width: int = 16):
+        w = width
+        self.stem = Focus(w)
+        self.dark2 = [DWConv(w, 2 * w, 3, 2), CSPLayer(2 * w, 2 * w, 1)]
+        self.dark3 = [DWConv(2 * w, 4 * w, 3, 2), CSPLayer(4 * w, 4 * w, 3)]
+        self.dark4 = [DWConv(4 * w, 8 * w, 3, 2), CSPLayer(8 * w, 8 * w, 3)]
+        self.dark5 = [
+            DWConv(8 * w, 16 * w, 3, 2),
+            SPPBottleneck(16 * w),
+            CSPLayer(16 * w, 16 * w, 1, shortcut=False),
+        ]
+
+
+class PAFPN(iron.Graph):
+    """The backbone, then the neck: top-down then bottom-up over its last
+    three maps, ``width`` channels at the finest.
+    """
+
+    def __init__(self, width: int = 64):
+        w = width
+        self.backbone = CSPDarknet(w // 4)
+        self.lateral_conv0 = BaseConv(4 * w, 2 * w)
+        self.C3_p4 = CSPLayer(4 * w, 2 * w, 1, shortcut=False)
+        self.reduce_conv1 = BaseConv(2 * w, w)
+        self.C3_p3 = CSPLayer(2 * w, w, 1, shortcut=False)
+        self.bu_conv2 = DWConv(w, w, 3, 2)
+        self.C3_n3 = CSPLayer(2 * w, 2 * w, 1, shortcut=False)
+        self.bu_conv1 = DWConv(2 * w, 2 * w, 3, 2)
+        self.C3_n4 = CSPLayer(4 * w, 4 * w, 1, shortcut=False)
+
+
+class Head(iron.Graph):
+    """The decoupled head over the neck's maps, ``widths`` channels each:
+    per scale a 1x1 stem, two-conv classification and regression
+    branches, and their 1x1 predictions.
+    """
+
+    def __init__(self, widths=(64, 128, 256), hidden: int = 64, classes: int = 80):
+        self.stems = [BaseConv(w, hidden) for w in widths]
+        self.cls_convs = [[DWConv(hidden, hidden) for _ in "ab"] for _ in widths]
+        self.reg_convs = [[DWConv(hidden, hidden) for _ in "ab"] for _ in widths]
+        self.cls_preds = [Prediction(hidden, classes, CLASSES) for _ in widths]
+        self.reg_preds = [Prediction(hidden, 4, BOX) for _ in widths]
+        self.obj_preds = [Prediction(hidden, 1, OBJECTNESS) for _ in widths]
+
+
+class YOLOX(iron.Graph):
+    def __init__(self):
+        self.backbone = PAFPN()
+        self.head = Head()
+
+
 class YOLOXNano(iron.Graph):
     """YOLOX-Nano on the NPU, from a preprocessed image's rows, ``(416,
     416 * 4)``, BGR and a zero channel so each corner the stem gathers is
@@ -140,35 +291,22 @@ class YOLOXNano(iron.Graph):
     box, objectness and class scores, each zero-padded (``BOX``,
     ``OBJECTNESS``, ``CLASSES``), the last two through their sigmoid.
 
-    Every ``BaseConv``'s BatchNorm folds into its weight and bias as it is
-    traced, and so do the stem's zero channels and the predictions' zero
+    Every ``BaseConv``'s BatchNorm folds into its weight and bias as it
+    loads, and so do the stem's zero channels and the predictions' zero
     padding. A map's elementwise steps each take one of its rows a tile.
 
     Args:
-        weights: The checkpoint (``Checkpoint.tree()``).
+        weights: The checkpoint (``Checkpoint.tree()``), its ``model`` read.
     """
 
     profile = Path(__file__).with_name("profiles")
 
     def __init__(self, weights):
-        self.weights = weights
-
-    def conv(self, m, x, stride: int = 1):
-        return base_conv(x, *folded(m), stride)
-
-    def dwconv(self, m, x, stride: int = 1):
-        return self.conv(m.pconv, self.conv(m.dconv, x, stride))
-
-    def csp(self, m, x, shortcut: bool):
-        """A CSP block, as the oracle's."""
-        y = self.conv(m.conv1, x)
-        for b in m.m:
-            z = self.dwconv(b.conv2, self.conv(b.conv1, y))
-            y = ElementwiseAdd.step(z, y, tile_size=_row(y)) if shortcut else z
-        return self.conv(m.conv3, F.cat([y, self.conv(m.conv2, x)], dim=-1))
+        self.model = YOLOX()
+        self.load_state_dict(subtree(weights, model=weights.model))
 
     def backbone(self, image):
-        b = self.weights.model.backbone.backbone
+        b = self.model.backbone.backbone
         S, line = INPUT_SIZE // 2, INPUT_SIZE * 4
         corners = [
             Copy.step(
@@ -179,49 +317,31 @@ class YOLOXNano(iron.Graph):
             ).reshape(S, S, 4)
             for r, c in ((0, 0), (1, 0), (0, 1), (1, 1))
         ]
-        # The stem's four corners each take a zero channel after BGR's three.
-        weight, bias = folded(b.stem.conv)
-        weight = np.pad(
-            weight.reshape(-1, 4, 3, 3, 3), ((0, 0), (0, 0), (0, 1), (0, 0), (0, 0))
-        )
-        x = base_conv(F.cat(corners, dim=-1), weight.reshape(-1, 16, 3, 3), bias)
-        x = self.csp(b.dark2[1], self.dwconv(b.dark2[0], x, 2), True)
-        dark3 = self.csp(b.dark3[1], self.dwconv(b.dark3[0], x, 2), True)
-        dark4 = self.csp(b.dark4[1], self.dwconv(b.dark4[0], dark3, 2), True)
-        spp = b.dark5[1]
-        x = self.conv(spp.conv1, self.dwconv(b.dark5[0], dark4, 2))
-        pooled = [F.max_pool2d(x, k, 1, k // 2) for k in POOLS]
-        x = self.conv(spp.conv2, F.cat([x, *pooled], dim=-1))
-        return dark3, dark4, self.csp(b.dark5[2], x, False)
+        x = b.stem.conv(F.cat(corners, dim=-1))
+        x = b.dark2[1](b.dark2[0](x))
+        dark3 = b.dark3[1](b.dark3[0](x))
+        dark4 = b.dark4[1](b.dark4[0](dark3))
+        x = b.dark5[1](b.dark5[0](dark4))
+        return dark3, dark4, b.dark5[2](x)
 
     def neck(self, dark3, dark4, dark5):
-        n = self.weights.model.backbone
-        top0 = self.conv(n.lateral_conv0, dark5)
+        n = self.model.backbone
+        top0 = n.lateral_conv0(dark5)
         x = F.cat([F.interpolate(top0, scale_factor=2), dark4], dim=-1)
-        x = self.csp(n.C3_p4, x, False)
-        top1 = self.conv(n.reduce_conv1, x)
+        top1 = n.reduce_conv1(n.C3_p4(x))
         x = F.cat([F.interpolate(top1, scale_factor=2), dark3], dim=-1)
-        out3 = self.csp(n.C3_p3, x, False)
-        x = F.cat([self.dwconv(n.bu_conv2, out3, 2), top1], dim=-1)
-        out4 = self.csp(n.C3_n3, x, False)
-        x = F.cat([self.dwconv(n.bu_conv1, out4, 2), top0], dim=-1)
-        return out3, out4, self.csp(n.C3_n4, x, False)
+        out3 = n.C3_p3(x)
+        out4 = n.C3_n3(F.cat([n.bu_conv2(out3), top1], dim=-1))
+        x = F.cat([n.bu_conv1(out4), top0], dim=-1)
+        return out3, out4, n.C3_n4(x)
 
     def head(self, i, x):
-        h = self.weights.model.head
-        x = self.conv(h.stems[i], x)
-        cls, reg = x, x
+        h = self.model.head
+        cls = reg = h.stems[i](x)
         for j in range(2):
-            cls = self.dwconv(h.cls_convs[i][j], cls)
-            reg = self.dwconv(h.reg_convs[i][j], reg)
-        box, obj, scores = (
-            F.conv2d(y, *padded(p, width))
-            for y, p, width in (
-                (reg, h.reg_preds[i], BOX),
-                (reg, h.obj_preds[i], OBJECTNESS),
-                (cls, h.cls_preds[i], CLASSES),
-            )
-        )
+            cls = h.cls_convs[i][j](cls)
+            reg = h.reg_convs[i][j](reg)
+        box, obj, scores = h.reg_preds[i](reg), h.obj_preds[i](reg), h.cls_preds[i](cls)
         obj, scores = (
             Sigmoid.step(y, tile_size=_row(y) // (2 if _row(y) > 4096 else 1))
             for y in (obj, scores)

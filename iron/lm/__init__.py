@@ -14,6 +14,7 @@ from .cli import main
 from .blocks import (
     MLP,
     Attention,
+    BatchNorm2d,
     Conv1d,
     CrossAttention,
     CrossCache,
@@ -43,6 +44,7 @@ from .session import Session
 
 __all__ = [
     "Attention",
+    "BatchNorm2d",
     "CrossAttention",
     "CrossCache",
     "CrossDecoderLayer",

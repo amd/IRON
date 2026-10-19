@@ -47,6 +47,8 @@ public API adds its entry under Unreleased.
 - `F.max_pool2d` takes a `stride` (torch's default, the window); and
   `F.fuse_conv_bn_weights`, torch's, folds a BatchNorm into the conv
   before it, for YOLOX and ResNet alike.
+- `BatchNorm2d`, torch's weights and running statistics, which `fold`
+  folds into the conv before it at load.
 - `Conv2d`'s gathered patches pad to whole 64-pixel GEMM tiles, and
   `flm.ProjectionGEMM` narrows its default n tile where K is short of its
   k chunk, so ResNet-50's 7x7 to 28x28 maps and 64-channel 1x1 convs build.
@@ -308,8 +310,9 @@ public API adds its entry under Unreleased.
 - The layer descriptions a config's `layer()` returns, `iron.lm.Attention`
   and `DecoderLayer`, are `AttentionSpec` and `DecoderLayerSpec`, leaving
   the names to the modules that own their weights.
-- `YOLOXNano` is written in `iron.functional`'s CNN functions, and returns
-  each scale's predictions as `(H, W, 144)`, not `(H, W * 144)`.
+- `YOLOXNano` is written in `iron.functional`'s CNN functions on modules
+  that load the checkpoint's tree, and returns each scale's predictions as
+  `(H, W, 144)`, not `(H, W * 144)`. SmolVLM's patch embed is `F.conv2d`.
 - `Model.generate` and `stream` stop after the first of `Model.eos` they
   draw, the eos token included, as Hugging Face's `generate` does:
   `max_tokens` is a cap. `Model.eos` is the checkpoint's `eos_token_id`, one
@@ -449,6 +452,7 @@ public API adds its entry under Unreleased.
   `layers=` argument and `attend`); EmbeddingGemma 2's `Config.layer` and
   `VisionConfig.layer`. A module derives a tensor in its own
   `load_state_dict`.
+- YOLOX's `folded` and `padded`: its modules fold and pad their own weights.
 - `iron.common.field`, `Auto`, `Extent` and `Select`, and `Value(words=)`:
   mlir-aie's `param`, `tunable`, `per_call` and `Select`, and IRON's
   `Block(words)` for a shipped image's block of words, replace them.
