@@ -106,10 +106,6 @@ class Operator(jit.Operator, library=True):
     # Per leading operand that may be a view: the param holding its pattern
     # and the per-call value a dynamic index binds.
     accept_views: ClassVar[tuple[tuple[str, str], ...]] = ()
-    # What a call on a view gathered by a graph input (``Copy(table[ids])``)
-    # becomes: the class, built with ``rows``, ``table_rows``, ``row`` and
-    # ``dtype``, and ``control_words(ids, address)`` encoding each call's ids.
-    per_call_gather: ClassVar[type[Operator] | None] = None
 
     trace: TraceConfig | None = None
     # Rebound, never updated: a copy shares its operator's dict.

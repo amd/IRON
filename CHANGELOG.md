@@ -209,6 +209,7 @@ public API adds its entry under Unreleased.
 ### Changed
 
 - `Image.prepare()` and `Image.link()` are private; `compile()` builds.
+- `Operator.per_call_gather` is gone: a gather by input ids is `Copy`'s alone.
 - `lm.main(model_class)`, was `lm.main(model)`.
 - `Handle` is a frozen record of `buffer` (a `Buffer`, which every handle
   on it shares), `shape`, `dtype`, `valid` (was `bounds`) and `layout`:

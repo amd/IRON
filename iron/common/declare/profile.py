@@ -16,12 +16,14 @@ from dataclasses import MISSING
 from enum import Enum
 from types import FunctionType
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, TypeVar
 
 from ... import operators
 
 if TYPE_CHECKING:
     from .operator import Operator
+
+_Op = TypeVar("_Op", bound="Operator")
 
 
 class Profile:
@@ -42,7 +44,7 @@ class Profile:
     def __init__(self) -> None:
         self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
 
-    def make(self, cls: type, **kwargs: Any) -> Operator:
+    def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
         """``cls(**kwargs)``, its open tunables filled from this profile's
         entries: standalone use of what a graph's recorder applies implicitly
         to every step it constructs.

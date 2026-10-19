@@ -1895,6 +1895,16 @@ def test_a_whole_reshape_of_a_held_array_is_gathered_under_its_own_path():
     np.testing.assert_array_equal(g.reference(ids), tables.reshape(16, 256)[ids])
 
 
+def test_only_a_copy_takes_the_rows_an_input_names():
+    class Relu(iron.Graph):
+        def body(self, ids):
+            table = np.zeros((8, 256), bfloat16)
+            return ReLU.step(iron.weight(table)[ids])
+
+    with pytest.raises(TypeError, match=r"only a Copy of it alone does"):
+        Relu().record(ids=((4,), np.int32))
+
+
 class _Summed(iron.Graph):
     """The sum of the first ``n`` rows of as many inputs as it is made with."""
 

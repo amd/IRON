@@ -698,39 +698,33 @@ class Recorder:
         return self._record(op, operands, called)
 
     def _gather(self, target, operands: list[Handle], extra) -> Handle:
-        """``Copy(table[ids])`` with ``ids`` per call: the class's per-call
-        gather. For ids an input the host encodes its control words from
+        """``Copy(table[ids])`` with ``ids`` per call: a ``Gather``. For ids an input the host encodes its control words from
         the ids each call; for ids the device made, its word source writes
         them into its template first.
         """
+        from iron.operators.copy import Copy
+        from iron.operators.copy import Gather as GatherRows
+
         view = operands[0]
         assert isinstance(view.layout, Gather), "a gather"
         ids, row = view.layout.rows, math.prod(view.shape[1:])
         rows = view.buffer.nbytes // (row * bfp.itemsize(view.dtype))
         table = Handle(view.buffer, (rows, *view.shape[1:]), view.dtype)
-        if (
-            not isinstance(target, type)
-            or target.per_call_gather is None
-            or len(operands) != 1
-            or extra
-        ):
+        if target is not Copy or len(operands) != 1 or extra:
             raise TypeError(
                 f"{view!r} takes the rows the input {ids.name!r} names each "
                 f"call; only a Copy of it alone does, Copy(table[ids])"
             )
-        given = dict(
+        given: dict[str, Any] = dict(
             rows=ids.shape[0],
             table_rows=table.shape[0],
             row=row,
             dtype=table.dtype,
         )
-        gather = target.per_call_gather
-        # The class's gather operator, whose words and template only it declares.
-        op: Any
         if self.profile is None:
-            op = gather(**given)
+            op = GatherRows(**given)
         else:
-            op = self.profile.make(gather, **given)
+            op = self.profile.make(GatherRows, **given)
         bound = ids.valid.get(0)
         if bound is not None:
             self._bind(op, "valid_rows", bound)

@@ -547,7 +547,6 @@ class Copy(Operator):
     """
 
     accept_views = (("src", "in_offset"), ("dst", "out_offset"))
-    per_call_gather: ClassVar[type[Operator] | None] = Gather
 
     test = Testing(
         [
