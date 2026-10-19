@@ -174,7 +174,7 @@ class DecoderConfig(Config):
     ``config.json`` does where it has one. ``max_seq_len``, the longest
     context served, is the checkpoint's native ``max_position_embeddings``
     unless a caller lowers it; ``prefill_chunk`` is IRON's own prompt
-    chunking.
+    chunking, cut to ``max_seq_len``.
     """
 
     vocab_size: int
@@ -217,6 +217,8 @@ class DecoderConfig(Config):
             object.__setattr__(
                 self, "head_dim", self.hidden_size // self.num_attention_heads
             )
+        if self.prefill_chunk > self.max_seq_len:
+            object.__setattr__(self, "prefill_chunk", self.max_seq_len)
         if self.use_sliding_window and self.window is not None:
             raise ValueError(
                 f"{type(self).__name__}: use_sliding_window with sliding_window "

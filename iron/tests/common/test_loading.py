@@ -104,7 +104,7 @@ def test_from_checkpoint_opens_the_tokenizer_beside_it(tmp_path):
 def test_from_checkpoint_lowers_the_context_and_refuses_to_raise_it(tmp_path):
     directory = _directory(tmp_path)
     lowered = Small.from_checkpoint(directory, seed=1, max_seq_len=128)
-    assert lowered.config.max_seq_len == 128
+    assert (lowered.config.max_seq_len, lowered.config.prefill_chunk) == (128, 128)
     with pytest.raises(ValueError, match="past the model's 256"):
         Small.from_checkpoint(directory, seed=1, max_seq_len=512)
 
