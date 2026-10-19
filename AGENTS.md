@@ -51,6 +51,7 @@ pytest iron/tests/operators/test_catalog.py -k AXPY     # one declared operator
 pytest tests/applications/                              # model tests
 pytest ... -n auto                                      # in parallel
 pytest ... --csv-output=tests_latest.csv                # write benchmark figures
+pyright                                                 # types, as CI's Types job
 ```
 
 Without an NPU, the device-free suite is
@@ -297,7 +298,8 @@ assert not errors, errors
 - `phoenix-nightly.yml`, `krackan-nightly.yml`: every `tests/applications/`
   test, extensive ones too, each night; a benched TTFT, TPS or Latency 10%
   worse than the night before's fails it (`pretty_trends.py --fail-on`).
-- `ci-lint.yml`: black, clang-format, reuse.
+- `ci-lint.yml`: black, clang-format, reuse and actionlint, and pyright
+  over `[tool.pyright]`'s paths in `pyproject.toml`.
 - `pr-comment.yml` and `publish-pages.yml`: the performance trends of a PR
   and the benchmark history site.
 

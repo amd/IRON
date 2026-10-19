@@ -82,11 +82,15 @@ Hugging Face decoders need a config and a model class; see
    reference, which does not model aie2p's bfp16 rounding in flm.ProjectionGEMM, so
    only the device test measures that error.
 
+4. **Register.** Add the decoder to `APPLICATIONS` in
+   `tests/applications/long_context/test.py`, or to `UNHELD` with the
+   reason; a test fails until it is in one. Write its `profiles/` with
+   `iron.lm.tune` ("Tune" in the [README](README.md#models)), give the
+   package a README, and add a row to the README's model table.
+
 A Llama-shaped decoder (Mistral v0.3, Qwen, SmolLM) needs only these
-steps. A sliding window over the caches, Gemma's `(1 + w)` norms and
-sandwich norms, per-layer RoPE tables, or post-norm layers (OLMo 2) need
-new code in `iron/lm/` first; `iron/applications/embedding_gemma2/blocks.py`
-shows a sandwich-normed layer.
+steps. Gemma 3 (`iron/applications/gemma3/model.py`) shows a
+sandwich-normed, windowed layer with per-layer RoPE.
 
 ## Add an operator and kernel
 
@@ -115,10 +119,10 @@ class ReLU(UnaryElementwise):
    `Operator` with `In`/`Out` operands and `build()`; `gemm.py` and
    `mha.py` are the worked examples.
 3. **Test.** Declare `test = Testing(...)` on the class;
-   `iron/tests/operators/test_catalog.py` runs every operator's cases. Every
-   operator needs a `bench=True` case and a `lower=True` case per layout
-   (`Sweep` adds the first, and the second with `lower=True`); a shape it
-   must refuse goes in `iron/tests/operators/test_rejected_shapes.py`.
+   `iron/tests/operators/test_catalog.py` runs every operator's cases, and
+   rule 6 of "Adding an operator" in [AGENTS.md](AGENTS.md) says which
+   cases it needs. A shape it must refuse goes in
+   `iron/tests/operators/test_rejected_shapes.py`.
 4. **Register.** Add the name to `_OPERATOR_MODULES` in
    `iron/operators/__init__.py` and to `__init__.pyi`.
 5. **Use it.** Inside a graph's `body()`, `ReLU.step(x)` records a step.
