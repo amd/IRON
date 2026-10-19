@@ -107,7 +107,8 @@ def test_two_designs_whose_device_names_collide_are_refused():
     seen = {}
     for size in range(1024, 1024 * 200_000, 1024):
         op = ReLU(size=size, num_aie_columns=1, num_channels=1, tile_size=1024)
-        name = OperatorDesign(op).name
+        # Resolved, as the composition names it: the device is in its key.
+        name = OperatorDesign(op.resolved()).name
         if name in seen:
             break
         seen[name] = op
