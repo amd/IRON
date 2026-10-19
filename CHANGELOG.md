@@ -214,6 +214,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- An operator's output declared `Out(like=x)` (mlir-aie's) takes the shape
+  and valid rows the call gave `x`, as the elementwise operators' outputs
+  do; a flat output no longer takes its first operand's shape by matching
+  its size, except a copy of a view (`accept_views`), which takes the view's.
 - `Image.prepare()` and `Image.link()` are private; `compile()` builds.
 - `Operator.per_call_gather` is gone: a gather by input ids is `Copy`'s alone.
 - `Handle` is a frozen record of `buffer` (a `Buffer`, which every handle
