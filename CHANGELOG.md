@@ -200,6 +200,8 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- The autotuner's matmul bound holds on npu2_1col too: it reads the core
+  clock by architecture (mlir-aie's `dev.core_mhz`), not by device name.
 - An operator declares itself with mlir-aie's declaration
   (`aie.utils.compile.jit.params`): `param()` for a compile-time parameter,
   `tunable()` for one resolution or the tuner picks, `per_call()` for a
@@ -442,6 +444,10 @@ public API adds its entry under Unreleased.
   times `CLOCK_HEADROOM`.
 - `iron.tune.measure.others` and `wait_idle`: mlir-aie's
   `aie.utils.benchmark.other_npu_users` and `wait_idle` replace them.
+- `iron.tune.measure.CPU_WAIT_US` and `Awake`: mlir-aie's
+  `aie.utils.benchmark.CPU_WAIT_US` and `CompletionCores` replace them.
+- `XclbinChain.KERNELS`: mlir-aie's `CompilableDesign.chain` splits a chain
+  at the hardware context's kernel limit.
 - `field(probe=)`: the tuner times each distinct value of such a field, as
   it does every other (Clamp's `low` and `high`).
 - `CausalLM`'s `layer_class = None` path: its `decoder=` argument,
