@@ -9,8 +9,8 @@
 Qwen3-MoE is Qwen3's layer with its feed-forward a mixture of experts
 (``SparseMoE``): a router picks each token's ``num_experts_per_tok``
 experts and weighs them by a softmax over their logits alone, which is
-``TopKRouter``'s; the chosen experts' feed-forwards are ``Experts``, which
-has no kernel yet. Its output head is untied.
+``TopKRouter``'s; the chosen experts' feed-forwards are ``Experts``. Its
+output head is untied.
 """
 
 import dataclasses

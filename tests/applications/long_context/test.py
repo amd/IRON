@@ -129,8 +129,8 @@ APPLICATIONS = {
 
 #: Decoder applications held to no context yet, and why.
 UNHELD = {
-    "granite_hybrid": "SelectiveScan and Experts have no kernel",
-    "qwen3_moe": "Experts has no kernel",
+    "granite_hybrid": "SelectiveScan has no kernel",
+    "qwen3_moe": "Experts streams every expert a row: too slow to generate",
     "ministral3": "its released checkpoints nest the text decoder, unread",
 }
 

@@ -11,8 +11,7 @@ a shared MLP, and a mixture of experts in the MoE sizes. The shared library
 is [AGENTS.md](../../../AGENTS.md#language-models).
 
 The Mamba2 scan is `SelectiveScan`, an operator with a reference and no
-kernel yet, as is the experts' `Experts`, so the model has no device run
-until both land. Its test is the device-free
+kernel yet, so the model has no device run until one lands. Its test is the device-free
 `tests/applications/granite_hybrid/reference/`, at an MoE toy and a dense
 one.
 

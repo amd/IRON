@@ -15,8 +15,9 @@ public API adds its entry under Unreleased.
 - `Operator.reference_only = True`: an operator that is a declaration plus
   `reference()`, with no kernel. Graphs trace it and references run it;
   compiling it raises, and the device catalog skips it.
-- `Experts`, reference only: each row through the gated feed-forwards of
-  the experts `TopKRouter` chose for it, weighted.
+- `Experts`: each row through the gated feed-forwards of the experts
+  `TopKRouter` chose for it, weighted, on one core over mlir-aie's scalar
+  `expert_gate_up` and `expert_down`, streaming every expert each row.
 - `SelectiveScan`, reference only: Mamba2's state space recurrence over a
   run of rows, from a state to the state after its last valid row.
 - Application `granite_hybrid` (Granite 4.0-H, dense and MoE, on the host),
