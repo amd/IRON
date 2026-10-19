@@ -235,22 +235,34 @@ def _line_view(parent: XRTTensor, offset: int, length: int, dtype) -> XRTTensor:
 
 
 class ImageCallable:
-    """What a caller invokes once a sequence ``op`` has an image: write the
-    per-call values (``write_values``), call it, and read a buffer by its
-    ref (``get_buffer``) or whole (``get_storage``); ``last_elapsed`` is
-    the last call's seconds. The residents a sequence placed in an arena
-    plan are views of ``arena``'s banks, made again once it has grown.
+    """What a caller invokes once a sequence ``op`` has an image. The
+    residents a sequence placed in an arena plan are views of ``arena``'s
+    banks, made again once it has grown.
     """
-
-    # The trace buffer a traced build fills; only a full ELF allocates one.
-    trace_buffer: XRTTensor | None = None
 
     def __init__(self, seq, arena: ScratchArena | None):
         _require_xrt()
         self.op = seq
         self.arena = arena
+        # The last call's seconds.
         self.last_elapsed = 0.0
         self._arena_generation: int | None = None
+
+    def write_values(self, values: Mapping[str, np.generic]) -> None:
+        """The per-call values the next call reads."""
+        raise NotImplementedError
+
+    def get_buffer(self, ref: BufferRef) -> XRTTensor:
+        """The bytes ``ref`` names, as its dtype."""
+        raise NotImplementedError
+
+    def get_storage(self, root: str) -> XRTTensor:
+        """The buffer ``root`` whole."""
+        raise NotImplementedError
+
+    def __call__(self) -> None:
+        """Run the sequence once."""
+        raise NotImplementedError
 
     def _arena_grew(self) -> bool:
         """Whether the arena grew since the views were made, now made again."""
@@ -332,6 +344,7 @@ class FullELFCallable(ImageCallable):
         if sizes.feedback is not None:
             self.feedback_buffer = XRTTensor((sizes.feedback,), dtype=np.uint8)
         # The trace buffer's argument and size are read from the lowered module.
+        self.trace_buffer: XRTTensor | None = None
         self._trace_arg: int | None = None
         if seq.traced:
             layout = get_trace_buffer(
@@ -453,7 +466,6 @@ class FullELFCallable(ImageCallable):
         return path
 
     def get_buffer(self, ref: BufferRef):
-        """The bytes ``ref`` names, as its dtype."""
         self._follow_arena()
         if ref not in self._buffer_cache:
             kind, offset, length = ref.place(self.op.layout)
@@ -593,7 +605,6 @@ class StepCallable(ImageCallable):
         self._bind_steps()
 
     def get_buffer(self, ref: BufferRef):
-        """The bytes ``ref`` names, as its dtype."""
         self._follow_arena()
         if ref not in self._buffers:
             if ref.root not in self._storage:
