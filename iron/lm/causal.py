@@ -143,15 +143,16 @@ class CausalLM(Model):
         # Zero until the host writes draws: a row of zeros is greedy.
         self.draws = iron.state((config.max_seq_len, ROW_WORDS), np.int32)
         self.drawn = iron.state((config.max_seq_len,), np.int32)
-        self._prompt: CompiledGraph | None = None
-        self._decode: CompiledGraph | None = None
-        self._placed: CompiledGraph | None = None
-        self._placeholders: tuple[int, ...] = ()
+        # The versions ``use`` runs, which every session calls.
+        self.prompt_chunk: CompiledGraph | None = None
+        self.decode_step: CompiledGraph | None = None
+        self.placed_chunk: CompiledGraph | None = None
+        self.placeholders: tuple[int, ...] = ()
         # By the version a device loop starts from, its loop (``loop``).
         self._loops: dict[int, CarriedLoop] = {}
         # The session whose tokens the caches hold, and the one ``logits``
         # and ``generate`` run in.
-        self._holder: Session | None = None
+        self.holder: Session | None = None
         self.session = Session(self)
         self.model = self.decoder_class(config, self.layer_class)
         for layer in self.model.layers:
@@ -288,9 +289,9 @@ class CausalLM(Model):
                 the chunk.
             placeholders: The placeholder tokens, in ``before``'s order.
         """
-        self._decode, self._prompt = decode, prompt
-        self._placed, self._placeholders = placed, tuple(placeholders)
-        self._loops, self._holder = {}, None
+        self.decode_step, self.prompt_chunk = decode, prompt
+        self.placed_chunk, self.placeholders = placed, tuple(placeholders)
+        self._loops, self.holder = {}, None
         if not decode.plan.full_elf:
             logger.info("%s", decode.plan.report("decode"))
 
@@ -310,30 +311,30 @@ class CausalLM(Model):
             RuntimeError: Neither version is loaded: ``load_versions()``
                 first, which compiles them with the packaging asked for.
         """
-        if self._decode is None:
+        if self.decode_step is None:
             raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         values = {**self.call_values(), **values}
         if ids is None:
-            return self._decode(**values)
+            return self.decode_step(**values)
         if before is not None:
-            assert self._placed is not None
-            return self._placed(ids, before, **values)
-        assert self._prompt is not None
-        return self._prompt(ids, **values)
+            assert self.placed_chunk is not None
+            return self.placed_chunk(ids, before, **values)
+        assert self.prompt_chunk is not None
+        return self.prompt_chunk(ids, **values)
 
     @property
     def device_loop(self) -> bool:
         """Whether ``generate`` can draw on the device: a full-ELF decode step."""
-        if self._decode is None:
+        if self.decode_step is None:
             raise RuntimeError(f"{type(self).__name__}: load_versions() first")
-        return self._decode.emit is not None
+        return self.decode_step.emit is not None
 
     def loop(self, version: CompiledGraph) -> CarriedLoop:
         """The device loop of decode steps ``version`` starts, made once: its
         runs are bound to the versions, which every session shares.
         """
         if id(version) not in self._loops:
-            self._loops[id(version)] = CarriedLoop(version, self._decode, depth=2)
+            self._loops[id(version)] = CarriedLoop(version, self.decode_step, depth=2)
         return self._loops[id(version)]
 
     def logits(self, tokens) -> np.ndarray:
@@ -352,5 +353,5 @@ class CausalLM(Model):
         """Hold nothing the caches have from ``position`` on, whichever
         session's tokens they hold (``Session.forget``).
         """
-        if self._holder is not None:
-            self._holder.forget(position)
+        if self.holder is not None:
+            self.holder.forget(position)

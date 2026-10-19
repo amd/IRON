@@ -22,10 +22,12 @@ NOTHING = np.empty(0, dtype=np.int64)
 
 
 class Session:
-    """A conversation over ``model``'s versions (``CausalLM.use``)."""
+    """A conversation over the versions of ``lm``, a ``CausalLM``
+    (``CausalLM.use``).
+    """
 
-    def __init__(self, model):
-        self.model = model
+    def __init__(self, lm):
+        self.lm = lm
         self._seen = NOTHING  # the tokens in the caches
 
     def logits(self, tokens) -> np.ndarray:
@@ -40,20 +42,20 @@ class Session:
                 before any dispatch, so the caches are as they were.
         """
         tokens = self._tokens(tokens)
-        n, L = tokens.size, self.model.config.max_seq_len
+        n, L = tokens.size, self.lm.config.max_seq_len
         if not 0 < n <= L:
             raise ValueError(f"{n} tokens do not fit {L} rows")
         self._take()
         held = self._held(tokens)
         if held == n - 1 == self._seen.size:
-            out, _ = self.model(
+            out, _ = self.lm(
                 token=int(tokens[-1]), position=n - 1, start=0, rows=1, rope_start=0
             )
         else:
             start = self.resume(held)
             self._seen = tokens[:start]
             for inputs, values in self._chunks(tokens, start):
-                out, _ = self.model(*inputs, **values)
+                out, _ = self.lm(*inputs, **values)
         self._seen = tokens
         # A copy: the next call rewrites the output buffer.
         return np.array(out.numpy()).reshape(-1)
@@ -72,29 +74,35 @@ class Session:
             RuntimeError: Neither version is loaded: ``load_versions()``
                 first.
         """
-        model, tokens = self.model, self._tokens(tokens)
+        model, tokens = self.lm, self._tokens(tokens)
         n, L = tokens.size, model.config.max_seq_len
         if not (0 < n and 0 < max_tokens and n + max_tokens - 1 <= L):
             raise ValueError(
                 f"{n} tokens and {max_tokens} more to draw do not fit {L} rows"
             )
-        if model._prompt is None or model._decode is None:
+        if model.prompt_chunk is None or model.decode_step is None:
             raise RuntimeError(f"{type(model).__name__}: load_versions() first")
-        draw = device_draws if model.device_loop else host_draws
         self._take()
         # The prompt draws at its last position, n - 1; decode step k at n + k.
         rows = np.zeros((L, ROW_WORDS), dtype=np.int32)
         k_max = next(
-            s.op.k_max for s in model._decode.traced.steps if isinstance(s.op, Sample)
+            s.op.k_max
+            for s in model.decode_step.traced.steps
+            if isinstance(s.op, Sample)
         )
         rows[n - 1 : n - 1 + max_tokens] = sampler.rows(max_tokens, k_max)
-        model._decode.write(model.draws, rows)
+        model.decode_step.write(model.draws, rows)
         start = self.resume(self._held(tokens))
         # A caller may stop early, leaving steps in the caches nothing records:
         # until the last token, they hold nothing.
         self._seen = NOTHING
         drawn = []
-        for token in draw(model, self._chunks(tokens, start), n, max_tokens, each):
+        chunks = self._chunks(tokens, start)
+        if model.device_loop:
+            draws = device_draws(model, chunks, n, max_tokens, each)
+        else:
+            draws = host_draws(model, chunks, max_tokens)
+        for token in draws:
             drawn.append(token)
             yield token
         # The caches hold every token but the last drawn, which no step read.
@@ -113,7 +121,7 @@ class Session:
         (``Checkpoints.restart``), the earliest one of them can.
         """
         ran = self._seen.size
-        return min([held, *(c.restart(held, ran) for c in self.model.recurrent)])
+        return min([held, *(c.restart(held, ran) for c in self.lm.recurrent)])
 
     def prompt_ids(self, tokens) -> np.ndarray:
         """A prompt call's ``ids`` for a chunk of ``tokens``, padded to
@@ -121,7 +129,7 @@ class Session:
         unread.
         """
         tokens = np.asarray(tokens)
-        ids = np.zeros(self.model.config.prefill_chunk, dtype=np.int32)
+        ids = np.zeros(self.lm.config.prefill_chunk, dtype=np.int32)
         ids[: tokens.size] = tokens
         return ids
 
@@ -129,12 +137,12 @@ class Session:
         """Hold the caches: what another session left there is none of this
         one's tokens.
         """
-        if self.model._holder is not self:
-            self.model._holder, self._seen = self, NOTHING
+        if self.lm.holder is not self:
+            self.lm.holder, self._seen = self, NOTHING
 
     def _tokens(self, tokens) -> np.ndarray:
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        V = self.model.config.vocab_size
+        V = self.lm.config.vocab_size
         if ((tokens < 0) | (tokens >= V)).any():
             raise IndexError(
                 f"tokens {tokens[(tokens < 0) | (tokens >= V)]} are outside [0, {V})"
@@ -153,10 +161,10 @@ class Session:
         recurrent state a call ends at the next chunk boundary, the slot it
         writes.
         """
-        model = self.model
+        model = self.lm
         n, C, rope = tokens.size, model.config.prefill_chunk, model.rotary_emb
         table = 0 if rope is None else rope.table_start(n)
-        placeholders = model._placeholders
+        placeholders = model.placeholders
         end = start
         while end < n:
             begin, end = end, min(end + C, n)
@@ -172,7 +180,7 @@ class Session:
                 rope_start=table + begin,
             )
             placed = np.isin(tokens[begin:end], placeholders).any()
-            if model._placed is None or not placed:
+            if model.placed_chunk is None or not placed:
                 yield (ids,), values
                 continue
             before = np.array(
@@ -182,8 +190,8 @@ class Session:
             yield (ids, before), values
 
 
-def host_draws(model, chunks, n: int, max_tokens: int, each: bool) -> Iterator[int]:
-    """``max_tokens`` drawn after the prompt ``chunks`` of ``n`` tokens, the
+def host_draws(model, chunks, max_tokens: int) -> Iterator[int]:
+    """``max_tokens`` drawn after the prompt ``chunks``, the
     host starting each decode step on the token the last one drew, which it
     reads alone.
     """
@@ -205,9 +213,11 @@ def device_draws(model, chunks, n: int, max_tokens: int, each: bool) -> Iterator
         if values["position"] < n - 1:
             model(*inputs, **values)
             continue
-        loop = model.loop(model._prompt if len(inputs) == 1 else model._placed)
+        loop = model.loop(
+            model.prompt_chunk if len(inputs) == 1 else model.placed_chunk
+        )
         loop.start(*inputs, **values)
-    read = partial(model._decode.read, model.drawn)
+    read = partial(model.decode_step.read, model.drawn)
     yield int(read()[n - 1])
     for k, _ in enumerate(loop.steps(max_tokens - 1), start=1):
         if each:
