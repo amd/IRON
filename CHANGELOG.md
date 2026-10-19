@@ -37,7 +37,7 @@ public API adds its entry under Unreleased.
   decoder, on drawn weights) and `qwen3_moe` (Qwen3-30B-A3B, on the host),
   each judged by a device-free toy golden.
 - `iron.param(*shape, dtype=bfloat16)`, a weight a graph declares by shape,
-  and `Graph.load_state_dict(tree, path="")`, which binds each one to the tensor at its
+  and `Graph.load_state_dict(tree, *, path="")`, which binds each one to the tensor at its
   dotted path, cast to its dtype, and raises once, naming every missing,
   extra and wrong-shaped tensor; a param held at two paths is tied, bound
   from its first. A param never loaded is named when the graph is traced,
