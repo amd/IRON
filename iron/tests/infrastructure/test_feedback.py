@@ -154,7 +154,9 @@ def test_feedback_ping_pong():
     row = 5
     first.write_values({offset: np.int32(row * ROW)})
     for k in range(2 * ROWS + 1):
-        run((first, second)[k % 2])
+        dispatched = (first, second)[k % 2]
+        run.start(dispatched)
+        run.wait(dispatched)
         assert np.array_equal(_row(run), table[row]), f"dispatch {k}: not row {row}"
         row = successor[row]
         fed_into = (second, first)[k % 2]
@@ -176,7 +178,8 @@ def test_feedback_chain_queued():
         producer.bind_feedback(consumer.scratchpad_alias())
     start = 2
     runs[0].write_values({offset: np.int32(start * ROW)})
-    run(*runs)
+    run.start(*runs)
+    run.wait(*runs)
 
     rows = [start]
     for _ in runs[1:]:
@@ -212,7 +215,8 @@ def test_feedback_with_trace():
     first, second = run.run, run.new_run()
     first.bind_feedback(second.scratchpad_alias())
     first.write_values({offset: np.int32(1 * ROW)})
-    run(first, second)
+    run.start(first, second)
+    run.wait(first, second)
     assert np.array_equal(_row(run), table[successor[1]])
     assert _fed(run)[0] == (successor[successor[1]] * ROW)
     assert run.trace_buffer is not None
