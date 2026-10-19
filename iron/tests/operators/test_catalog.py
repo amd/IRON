@@ -79,6 +79,10 @@ def test_every_operator_is_in_the_catalog():
     catalogued = set(catalog.CATALOG.values())
     missing = []
     for path in sorted(root.rglob("*.py")):
+        parts = path.relative_to(root).with_suffix("").parts
+        # A make's output, as gemma4_engine's FastFlowLM, holds no IRON module.
+        if "build" in parts[:-1]:
+            continue
         names = [
             node.name
             for node in ast.parse(path.read_text()).body
@@ -86,7 +90,6 @@ def test_every_operator_is_in_the_catalog():
         ]
         if not names:
             continue
-        parts = path.relative_to(root).with_suffix("").parts
         module = importlib.import_module(".".join((catalog.__name__, *parts)))
         missing += [
             f"{module.__name__}.{name}"
