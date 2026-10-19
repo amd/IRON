@@ -518,9 +518,10 @@ class Attention(iron.Graph):
     and ``v_proj`` of the layer's input, q and k turned by the call's RoPE
     rows where given, a pair of q's and k's (``Rope.rows``), only their
     first ``rotary`` columns where the config gives a ``rotary_dim``,
-    attended over the layer's ``KVCache``, then ``o_proj``, each projection
-    with a bias where the config's ``attention_bias`` says. ``scaling`` is
-    the logits' scale; None is ``head_dim ** -0.5``. A layer that reads
+    attended over the layer's ``KVCache``, then ``o_proj``; q, k and v
+    with a bias where the config's ``attention_bias`` says, o never, as
+    Qwen 2's is. ``projections`` builds what ``project`` reads. ``scaling``
+    is the logits' scale; None is ``head_dim ** -0.5``. A layer that reads
     another's cache, holding the same ``KVCache``, sets ``k_proj`` and
     ``v_proj`` to None, and projects and writes no keys or values.
 
@@ -544,16 +545,20 @@ class Attention(iron.Graph):
             c.hidden_size,
         )
         self.heads, self.groups, self.head_dim = H, G, D
-        bias = c.attention_bias
-        self.q_proj = Linear(E, H * D, bias=bias)
-        self.k_proj = Linear(E, G * D, bias=bias)
-        self.v_proj = Linear(E, G * D, bias=bias)
-        self.o_proj = Linear(H * D, E, bias=bias)
+        self.projections(c)
+        self.o_proj = Linear(H * D, E, bias=False)
         self.q_norm = RMSNorm(D, c.eps) if "q" in norms else None
         self.k_norm = RMSNorm(D, c.eps) if "k" in norms else None
         self.v_norm, self.eps = "v" in norms, c.eps
         self.scaling = None
         self.rotary = c.rotary_dim
+
+    def projections(self, c) -> None:
+        """``q_proj``, ``k_proj`` and ``v_proj``."""
+        E, D, bias = c.hidden_size, self.head_dim, c.attention_bias
+        self.q_proj = Linear(E, self.heads * D, bias=bias)
+        self.k_proj = Linear(E, self.groups * D, bias=bias)
+        self.v_proj = Linear(E, self.groups * D, bias=bias)
 
     def project(self, x, **tiles) -> list:
         """q, k and v of ``x``, each projection given the GEMV ``tiles``;
@@ -601,15 +606,20 @@ class GatedMLP(iron.Graph):
     """A gated feed-forward on ``c``'s shape:
     ``down_proj(act(gate_proj(x)) * up_proj(x))``, ``act`` its
     ``hidden_act``, each projection with a bias where the config's
-    ``mlp_bias`` says.
+    ``mlp_bias`` says. ``projections`` builds what ``body`` reads besides
+    ``down_proj``.
     """
 
     def __init__(self, c):
+        self.projections(c)
+        self.down_proj = Linear(c.intermediate_size, c.hidden_size, bias=c.mlp_bias)
+        self.act = _activation(c.hidden_act)
+
+    def projections(self, c) -> None:
+        """``gate_proj`` and ``up_proj``."""
         E, M, bias = c.hidden_size, c.intermediate_size, c.mlp_bias
         self.gate_proj = Linear(E, M, bias=bias)
         self.up_proj = Linear(E, M, bias=bias)
-        self.down_proj = Linear(M, E, bias=bias)
-        self.act = _activation(c.hidden_act)
 
     def body(self, x):
         gate, up = self.gate_proj(x), self.up_proj(x)
@@ -622,14 +632,15 @@ class DecoderLayer(iron.Graph):
     then ``mlp`` after ``post_attention_layernorm``, each block's output
     added to its residual times ``residual_multiplier``. ``rope`` is the
     ``Rope`` whose rows of the call (``Call.ropes``) turn q and k, the
-    model's unless a model sets another; None: no RoPE.
+    model's unless a model sets another; None: no RoPE. ``self_attn`` and
+    ``mlp`` are a model's own where given.
     """
 
-    def __init__(self, c, i: int):
+    def __init__(self, c, i: int, self_attn=None, mlp=None):
         self.input_layernorm = RMSNorm(c.hidden_size, c.eps)
-        self.self_attn = Attention(c, i)
+        self.self_attn = Attention(c, i) if self_attn is None else self_attn
         self.post_attention_layernorm = RMSNorm(c.hidden_size, c.eps)
-        self.mlp = GatedMLP(c)
+        self.mlp = GatedMLP(c) if mlp is None else mlp
         self.cache = KVCache(c, c.window)
         self.rope: Rope | None = None
         self.residual_multiplier = 1.0

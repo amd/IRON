@@ -8,9 +8,9 @@ from its checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.qwen2.model``.
 
 Qwen 2 is Llama's layer with a bias on each of its q, k and v projections
-(``Qwen2Config.attention_bias``) and none on o (``Qwen2Layer``). It ties
-its embedding and output head, as Llama does, and takes no RoPE frequency
-scaling.
+(``Qwen2Config.attention_bias``) and, as every ``Attention``, none on o. It
+ties its embedding and output head, as Llama does, and takes no RoPE
+frequency scaling.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,
 keyed by operator shape at Qwen 2.5 1.5B Instruct's shape: a decode step's
@@ -22,7 +22,7 @@ import dataclasses
 from pathlib import Path
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig, DecoderLayer, Linear, not_json
+from iron.lm import CausalLM, DecoderConfig, DecoderLayer, not_json
 
 
 @dataclasses.dataclass(frozen=True)
@@ -34,15 +34,6 @@ class Qwen2Config(DecoderConfig):
     attention_bias: bool = not_json(True, kw_only=True)
 
 
-class Qwen2Layer(DecoderLayer):
-    """Llama's layer, its output projection unbiased, as Qwen 2's always is."""
-
-    def __init__(self, c: Qwen2Config, i: int):
-        super().__init__(c, i)
-        H, D, E = c.num_attention_heads, c.head_dim, c.hidden_size
-        self.self_attn.o_proj = Linear(H * D, E, bias=False)
-
-
 class Qwen2(CausalLM):
     """Qwen 2.5 on ``config``'s shape and a checkpoint's ``weights``, from
     its checkpoint and ``tokenizer.json``.
@@ -50,7 +41,7 @@ class Qwen2(CausalLM):
 
     config = Qwen2Config
     profile = Path(__file__).with_name("profiles")
-    layer_class = Qwen2Layer
+    layer_class = DecoderLayer
 
 
 if __name__ == "__main__":

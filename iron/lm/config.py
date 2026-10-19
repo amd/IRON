@@ -192,7 +192,8 @@ class DecoderConfig(Config):
     hidden_act: str = "silu"
     # Whether the output head is the input embedding.
     tie_word_embeddings: bool = True
-    # Whether q, k, v and o, and every feed-forward projection, add a bias.
+    # Whether q, k and v (never o), and every feed-forward projection, add a
+    # bias.
     attention_bias: bool = dataclasses.field(default=False, kw_only=True)
     mlp_bias: bool = dataclasses.field(default=False, kw_only=True)
     # The positions each layer attends to, its own included, where under

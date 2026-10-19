@@ -169,9 +169,7 @@ class LongRopeTable(Rope):
 class Phi4Attention(Attention):
     """``Attention`` with q, k and v the rows of one ``qkv_proj``."""
 
-    def __init__(self, c: Phi4Config, i: int):
-        super().__init__(c, i)
-        del self.q_proj, self.k_proj, self.v_proj
+    def projections(self, c: Phi4Config) -> None:
         H, G, D = self.heads, self.groups, self.head_dim
         self.qkv_proj = Linear(c.hidden_size, (H + 2 * G) * D, bias=False)
 
@@ -183,13 +181,12 @@ class Phi4Attention(Attention):
 class Phi4MLP(GatedMLP):
     """``GatedMLP`` with gate and up the rows of one ``gate_up_proj``."""
 
-    def __init__(self, c: Phi4Config):
-        super().__init__(c)
-        del self.gate_proj, self.up_proj
-        self.gate_up_proj = Linear(c.hidden_size, 2 * c.intermediate_size, bias=False)
+    def projections(self, c: Phi4Config) -> None:
+        M = self.intermediate_size = c.intermediate_size
+        self.gate_up_proj = Linear(c.hidden_size, 2 * M, bias=False)
 
     def body(self, x):
-        M = self.down_proj.weight.shape[1]
+        M = self.intermediate_size
         gate, up = self.gate_up_proj.split(x, M, M)
         return self.down_proj(self.act(gate) * up)
 
@@ -198,9 +195,7 @@ class Phi4Layer(DecoderLayer):
     """Llama's layer on Phi-4's fused projections."""
 
     def __init__(self, c: Phi4Config, i: int):
-        super().__init__(c, i)
-        self.self_attn = Phi4Attention(c, i)
-        self.mlp = Phi4MLP(c)
+        super().__init__(c, i, Phi4Attention(c, i), Phi4MLP(c))
 
 
 class Phi4(CausalLM):

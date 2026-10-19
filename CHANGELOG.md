@@ -55,10 +55,12 @@ public API adds its entry under Unreleased.
   eps=1e-5)`.
 - Decoder blocks as modules in `iron.lm.blocks`, each built from a config
   and a layer index: `Attention(c, i, norms="")`, `GatedMLP(c)` and
-  `DecoderLayer(c, i)`, which holds its own `KVCache(c)` and the model's
-  `Rope(c)`; their projections are biased where the config's
-  `attention_bias` and `mlp_bias` say. `iron.lm` exports `Attention`, `GatedMLP` and
-  `DecoderLayer`.
+  `DecoderLayer(c, i, self_attn=None, mlp=None)`, which holds its own
+  `KVCache(c)` and the model's `Rope(c)`, and a model's own attention and
+  feed-forward where given. Their projections are biased where the
+  config's `attention_bias` (q, k and v; o never) and `mlp_bias` say; a
+  subclass with fused projections builds them in `projections(c)`.
+  `iron.lm` exports `Attention`, `GatedMLP` and `DecoderLayer`.
 - `KVCache(c, window=None)`: the cache attends within `window` positions
   before a query, as `MHA` counts them (Hugging Face's `sliding_window`
   minus one). A layer on `config.layer(i)` gets its attention's window
@@ -221,9 +223,9 @@ public API adds its entry under Unreleased.
   `layer_class` renames its whole tree before loading. `Attention` turns
   only the config's `rotary_dim` columns, and `AttentionSpec` loses
   `rotary`.
-- Qwen 2, Qwen3 and Granite name their layers, `Qwen2Layer`, `Qwen3Layer`
-  and `GraniteLayer`, in place of `Qwen3Config.attention` and
-  `GraniteConfig.attention` and `layer`; Granite's sets
+- Qwen3 and Granite name their layers, `Qwen3Layer` and `GraniteLayer`,
+  in place of `Qwen3Config.attention` and `GraniteConfig.attention` and
+  `layer`; Granite's sets
   `Attention.scaling` and `DecoderLayer.residual_multiplier`. Qwen3
   reads `DecoderConfig`, and `Qwen3Config` is gone; Qwen 2 reads
   `Qwen2Config`, whose `attention_bias` is set.

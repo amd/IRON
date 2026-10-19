@@ -39,7 +39,9 @@ from iron.lm import (
     Checkpoints,
     DecoderConfig,
     DecoderLayer,
+    GatedMLP,
     Linear,
+    RMSNorm,
     not_json,
 )
 from iron.lm.blocks import _add
@@ -122,15 +124,18 @@ class Lfm2Layer(DecoderLayer):
     """
 
     def __init__(self, c: Lfm2Config, i: int):
-        super().__init__(c, i)
         if i in c.full_attn_idxs:
-            self.self_attn = Attention(c, i, norms="qk")
+            super().__init__(c, i, Attention(c, i, norms="qk"))
+            self.conv = None
             return
-        del self.self_attn, self.cache
+        self.input_layernorm = RMSNorm(c.hidden_size, c.eps)
+        self.post_attention_layernorm = RMSNorm(c.hidden_size, c.eps)
+        self.mlp = GatedMLP(c)
+        self.residual_multiplier = 1.0
         self.conv = ShortConv(c)
 
     def body(self, x, call):
-        if "conv" not in vars(self):
+        if self.conv is None:
             return super().body(x, call)
         x = _add(x, self.conv(self.input_layernorm(x), call), self.residual_multiplier)
         h = self.mlp(self.post_attention_layernorm(x))
@@ -164,7 +169,7 @@ class Lfm2(CausalLM):
         E, K, C = config.hidden_size, config.conv_kernel, config.prefill_chunk
         window, tail = iron.state((2, C, E)), iron.state((K - 1, E))
         for layer in self.layers:
-            if "conv" in vars(layer):
+            if layer.conv is not None:
                 layer.conv.window, layer.conv.tail = window, tail
 
 
