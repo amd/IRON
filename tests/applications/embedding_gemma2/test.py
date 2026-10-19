@@ -459,7 +459,9 @@ class TestVision:
 
     def check_processor(self, vision, processor, reference, key, image, tokens, record):
         rgb, values = vision.inputs(image, tokens)
-        values.pop("n")
+        # The tower's per-call values, not the processor's alone.
+        for name in ("n", "hk", "wk", "walked"):
+            values.pop(name)
         pixel_values = reference(
             f"pixel_values {key} {tokens}", lambda m: m.patches(image, tokens)[0]
         )
