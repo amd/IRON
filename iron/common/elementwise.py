@@ -276,10 +276,14 @@ class Elementwise(Operator):
 
     def __init_subclass__(cls, **kwargs) -> None:
         for m in vars(cls).values():
-            if isinstance(m, (In, Out)):
-                m.kwargs.setdefault(
-                    "per", (Elementwise.num_aie_columns, Elementwise.num_channels)
-                )
+            if not isinstance(m, (In, Out)):
+                continue
+            lanes = (Elementwise.num_aie_columns, Elementwise.num_channels)
+            # 1.4.5a1's call record, else PR #50's typed one (pin bump).
+            if hasattr(m, "kwargs"):
+                m.kwargs.setdefault("per", lanes)
+            elif m.per is None:
+                m.per = lanes
         super().__init_subclass__(**kwargs)
 
     def resolve(self, dev) -> Self:
