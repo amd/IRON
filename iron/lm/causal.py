@@ -277,6 +277,7 @@ class CausalLM(Model):
         from .tune import calls
 
         config = cls.default_config(args.checkpoint)
+        assert isinstance(config, DecoderConfig), "a decoder's"
         model = cls(config, Checkpoint(args.checkpoint).tree("unread"))
         L, C = config.max_seq_len, config.prefill_chunk
         if not C <= args.context <= L or args.context % C:

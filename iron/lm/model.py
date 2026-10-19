@@ -180,13 +180,12 @@ class Model(iron.Graph):
     seed: int | None = None
     tokenizer: Tokenizer | None = None
     stats: Stats | None = None
+    # A subclass's: on the class the Config class or one shape, on an
+    # instance its shape; and the weights it holds.
+    config: Any
+    weights: Any
 
-    if TYPE_CHECKING:
-        # A subclass's: on the class, ``config`` is the Config class or one
-        # shape, on an instance its shape; the weights it holds; the
-        # constructor ``load`` calls; and how it draws a generation's tokens.
-        config: Any
-        weights: Any
+    if TYPE_CHECKING:  # a subclass's: the constructor and the draw
 
         def __init__(self, config: Any, weights: Any) -> None: ...
 
@@ -241,11 +240,13 @@ class Model(iron.Graph):
         config = cls.default_config(weights)
         if max_seq_len is None:
             config = cls.fit(config, weights)
-        elif max_seq_len > config.max_seq_len:
-            raise ValueError(
-                f"max_seq_len {max_seq_len} is past the model's {config.max_seq_len}"
-            )
         else:
+            assert isinstance(config, DecoderConfig), "a context is a decoder's"
+            if max_seq_len > config.max_seq_len:
+                raise ValueError(
+                    f"max_seq_len {max_seq_len} is past the model's "
+                    f"{config.max_seq_len}"
+                )
             config = dataclasses.replace(config, max_seq_len=max_seq_len)
         checkpoint = Checkpoint(weights)
         tree = checkpoint.tree() if seed is None else checkpoint.tree("random", seed)
@@ -303,7 +304,7 @@ class Model(iron.Graph):
         return set()
 
     @classmethod
-    def default_config(cls, weights_path) -> Any:
+    def default_config(cls, weights_path) -> Config:
         """``cls.config`` itself, if it is already one shape; else that
         class's own, built from ``weights_path``'s checkpoint directory
         (``Config.from_checkpoint``).
