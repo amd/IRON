@@ -66,7 +66,7 @@ SMALL = dataclasses.replace(
 )
 
 # The dtypes a toy checkpoint holds, by their safetensors names.
-ITEMS = {"BF16": bfloat16, "F16": np.float16}
+ITEMS = {"BF16": bfloat16, "F16": np.float16, "F32": np.float32}
 # A run's checkpoints, one a shape, removed when the process exits.
 CHECKPOINTS = tempfile.TemporaryDirectory(prefix="iron-llama-")
 

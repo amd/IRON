@@ -141,7 +141,7 @@ class GatedDeltaRule(Operator):
             )
 
     def resolve(self, dev):
-        return resolve_heads(self, dev, self.v_heads, self.value_dim)
+        return resolve_heads(self, dev, self.v_heads)
 
     class Array(Operator.Array):
         def kernel(self):

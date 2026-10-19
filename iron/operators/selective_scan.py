@@ -133,7 +133,7 @@ class SelectiveScan(Operator):
             )
 
     def resolve(self, dev):
-        return resolve_heads(self, dev, self.heads, self.head_dim)
+        return resolve_heads(self, dev, self.heads)
 
     class Array(Operator.Array):
         def kernel(self):

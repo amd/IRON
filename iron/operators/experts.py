@@ -79,13 +79,6 @@ class Experts(Operator):
     # Every row is still computed under a bound.
     valid = Extent(rows)
 
-    def validate(self) -> None:
-        if self.hidden % TILE or self.width % TILE:
-            raise ValueError(
-                f"Experts: hidden ({self.hidden}) and width ({self.width}) "
-                f"must be whole {TILE}-wide tiles"
-            )
-
     class Array(Operator.Array):
         def kernel(self):
             return moe.experts(

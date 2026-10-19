@@ -183,8 +183,10 @@ def check_device_sampling(model, prompt_len: int, num_tokens: int, *, record):
 LOGITS = 0.05
 
 
-def assert_close(got, want: np.ndarray, what: str = "the logits") -> None:
-    """``got`` within ``LOGITS`` of ``want``, the reference's logits, at
+def assert_close(
+    got, want: np.ndarray, what: str = "the logits", *, share: float = LOGITS
+) -> None:
+    """``got`` within ``share`` of ``want``, the reference's logits, at
     their largest magnitude; and where the reference's top two lie further
     apart than that bound, the same argmax. A nearer pair may go either
     way. The gate is the bound, not twice the error: a pair further apart
@@ -192,7 +194,7 @@ def assert_close(got, want: np.ndarray, what: str = "the logits") -> None:
     """
     got = np.asarray(got, np.float32).reshape(want.shape)
     scale = np.abs(want).max()
-    bound, err = LOGITS * scale, np.abs(got - want).max()
+    bound, err = share * scale, np.abs(got - want).max()
     assert err <= bound, f"{what}: max |diff| {err:.4f} against |logits| {scale:.3f}"
     second, first = np.sort(want)[-2:]
     if first - second > bound:

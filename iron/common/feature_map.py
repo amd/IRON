@@ -11,6 +11,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Precision, Scratchpad
+from iron.common.declare.field import ParamSpec
 from iron.operators.copy import Copy
 from iron.operators.elementwise_max import ElementwiseMax
 from iron.operators.gemm import GEMM
@@ -18,7 +19,7 @@ from iron.operators.gemm import GEMM
 # What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
 GEMM_ROWS = 16
 # GEMM's default tile_n, which a patches GEMM's pixels are padded to.
-GEMM_COLUMNS = 64
+GEMM_COLUMNS = ParamSpec.of(GEMM.__dataclass_fields__["tile_n"]).default
 
 
 class Conv2d(iron.Graph):

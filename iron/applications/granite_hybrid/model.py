@@ -21,7 +21,6 @@ The convolution's last rows and the scan's state are the layer's
 """
 
 import dataclasses
-from types import SimpleNamespace
 
 import numpy as np
 
@@ -113,8 +112,8 @@ class Mamba(iron.Graph):
         chunk = c.prefill_chunk
         self.conv_state = Checkpoints.of((K - 1, self.channels), c.max_seq_len, chunk)
         self.ssm_state = Checkpoints.of(state, c.max_seq_len, chunk, np.float32)
-        # Every layer's scratch, one for the model (GraniteHybrid).
-        self.scratch = None
+        # The scratch every layer shares, set by the model (GraniteHybrid).
+        self.window = self.tail = None
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
@@ -132,7 +131,7 @@ class Mamba(iron.Graph):
             F.linear(x, part) for part in (w[:I], w[I : I + C], w[I + C :])
         )
         read, write = self.conv_state.at(call)
-        state = F.ConvState(read, write, self.scratch.window, self.scratch.tail)
+        state = F.ConvState(read, write, self.window, self.tail)
         xbc = F.silu(F.causal_conv1d(xbc, self.taps, state) + self.conv1d.bias)
         read, write = self.ssm_state.at(call)
         y, final = SelectiveScan.step(
@@ -235,11 +234,8 @@ class GraniteHybrid(Granite):
     def __init__(self, config: GraniteHybridConfig, weights):
         super().__init__(config, weights)
         # Scratch F.causal_conv1d stages a call's window and tail in.
-        channels = config.conv_channels
-        scratch = SimpleNamespace(
-            window=iron.state((2, config.prefill_chunk, channels)),
-            tail=iron.state((config.mamba_d_conv - 1, channels)),
-        )
+        C, K = config.conv_channels, config.mamba_d_conv
+        window, tail = iron.state((2, config.prefill_chunk, C)), iron.state((K - 1, C))
         for layer in self.layers:
             if layer.mamba is not None:
-                layer.mamba.scratch = scratch
+                layer.mamba.window, layer.mamba.tail = window, tail

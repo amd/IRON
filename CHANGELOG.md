@@ -203,9 +203,10 @@ public API adds its entry under Unreleased.
 - A graph's per-call values and their expressions are taplib's `PerCall`
   and `Affine` (`aie.helpers.taplib`): `marker` replaces `kind`, and an
   expression prints as its symbol name (`pos_p1`, not `pos + 1`).
-- `SelectiveScan` and `GatedDeltaRule` refuse a head count their columns
-  do not divide, more than 64 slices a core, or more than 1023 rows, which
-  no shim buffer descriptor holds.
+- `iron.lm.testing.assert_close(..., share=LOGITS)`: a test's own bound,
+  a share of the largest logit (ResNet's toy holds 2%).
+- `Experts` leaves its hidden and width tile check to mlir-aie's
+  `moe.experts`, which makes the same one.
 - `GraniteHybridConfig.rope_theta` defaults to transformers' 10000.0 under
   `position_embedding_type="rope"`.
 - A checkpoint's tensors at indices (`nn.ParameterList`'s) read as a list

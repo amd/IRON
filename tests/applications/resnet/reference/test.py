@@ -13,12 +13,17 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.applications.resnet.model import ResNet, ResNetConfig
+import iron.functional as F
+from iron.applications.resnet.model import BN_EPS, ResNet, ResNetConfig
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close
 from iron.tests.common.llama_model import checkpoint
 
 pytestmark = pytest.mark.usefixtures("npu2")
+
+#: The logits' bound, a share of the largest: the toy measures under 1%,
+#: and an average pool scaled by 1.03 moves them 3.1%.
+RESNET = 0.02
 
 #: ResNet-50's widths, its stages one bottleneck deep but the first, of
 #: two, the second's shortcut the identity, on a 96-pixel image, so the
@@ -72,14 +77,14 @@ def names(c: ResNetConfig) -> dict[str, tuple[int, ...]]:
     return out
 
 
-def tree(c: ResNetConfig):
-    """Random weights of ``c``'s shape, each BatchNorm's running mean about
+def tree(c: ResNetConfig, dtype: str = "BF16"):
+    """Random ``dtype`` weights of ``c``'s shape, each BatchNorm's running mean about
     zero rather than the draw's one, which would leave every ReLU of a
     random net dead, its running variance log-uniform down to 1e-4, where
     its epsilon counts, and its count of batches beside them.
     """
     named = names(c)
-    weights = checkpoint(c, named).tree("random")
+    weights = checkpoint(c, named, dtype).tree("random")
     rng = np.random.default_rng(1)
     for name in named:
         if name.endswith("normalization.weight"):
@@ -113,7 +118,24 @@ def test_the_graph_classifies_as_transformers(toy):
         image = np.random.default_rng(seed).standard_normal((S, S, 3))
         image = image.astype(bfloat16)
         got = model.reference(model.inputs(image))
-        assert_close(got, reference.logits((), image))
+        assert_close(got, reference.logits((), image), share=RESNET)
+
+
+def test_a_float32_conv_weight_rounds_only_after_its_fold():
+    weights = tree(TOY, "F32")
+    layer = ResNet(TOY, weights).resnet.encoder.stages[0].layers[0].layer[0]
+    w = weights.resnet.encoder.stages[0].layers[0].layer[0]
+    bn = w.normalization
+    want, _ = F.fuse_conv_bn_weights(
+        w.convolution.weight,
+        None,
+        bn.running_mean,
+        bn.running_var,
+        BN_EPS,
+        bn.weight,
+        bn.bias,
+    )
+    np.testing.assert_array_equal(layer.weight, want)
 
 
 @pytest.mark.parametrize("size", [64, 224])

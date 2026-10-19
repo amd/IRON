@@ -304,7 +304,10 @@ def max_pool2d(x, kernel_size, stride=None, padding=0):
 
 def fuse_conv_bn_weights(conv_w, conv_b, bn_rm, bn_rv, bn_eps, bn_w, bn_b):
     """``torch.nn.utils.fusion.fuse_conv_bn_weights``: a conv's weight and
-    bias with the BatchNorm after it folded in, float32.
+    bias with the BatchNorm after it folded in. Unlike torch's, it takes no
+    ``transpose=`` (no model here folds a transposed conv) and returns
+    float32 whatever the conv's dtype, so a bf16 weight rounds once, after
+    the fold.
     """
     scale = bn_w / np.sqrt(bn_rv + np.float32(bn_eps))
     weight = np.asarray(conv_w, np.float32) * scale[:, None, None, None]
