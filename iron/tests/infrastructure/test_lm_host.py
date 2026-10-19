@@ -255,6 +255,14 @@ def test_checkpoint_rejects_a_shard_that_disagrees_with_the_index(tmp_path):
         Checkpoint(index)
 
 
+@pytest.mark.parametrize("shard", ["../a.safetensors", "/tmp/a.safetensors"])
+def test_checkpoint_refuses_a_shard_outside_the_index_s_directory(tmp_path, shard):
+    index = tmp_path / "escaping.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": {"w": shard}}))
+    with pytest.raises(ValueError, match="not a file beside the index"):
+        Checkpoint(index)
+
+
 def test_checkpoint_release_drops_the_right_shard(sharded_toy_path):
     first_shard = sharded_toy_path.parent / "model-00001-of-00002.safetensors"
     second_shard = sharded_toy_path.parent / "model-00002-of-00002.safetensors"

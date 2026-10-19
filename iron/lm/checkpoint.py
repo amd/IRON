@@ -205,7 +205,11 @@ class Checkpoint:
         paths = [self.path]
         if self.path.suffix == ".json":
             weight_map = json.loads(self.path.read_text())["weight_map"]
-            paths = [self.path.parent / n for n in sorted(set(weight_map.values()))]
+            names = sorted(set(weight_map.values()))
+            for n in names:
+                if Path(n).name != n:
+                    raise ValueError(f"{self.path}: {n} is not a file beside the index")
+            paths = [self.path.parent / n for n in names]
         self._shards = [_Shard(p) for p in paths]
         self.tensors: dict[str, np.ndarray] = {}
         for shard in self._shards:
