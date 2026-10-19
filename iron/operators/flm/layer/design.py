@@ -892,11 +892,12 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
     )
 
 
-def _build_pl_embedding(ctx, ple_tile, w_fifo):
+def _build_pl_embedding(ctx, ple_tile, w_fifo, y_fifo):
     """Per-layer-input embedding.
 
     x0_per_layer, the norm weights and x0 arrive on S2MM 0 as a 4-BD cycle,
-    the projection weights through w_fifo on S2MM 1. y leaves on MM2S 1.
+    the projection weights through w_fifo on S2MM 1. y leaves through y_fifo
+    on MM2S 1, into the front of the up projection's input object.
     """
     D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     ple_name = f"{ple_tile.row}_{ple_tile.col}"
@@ -904,7 +905,7 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo):
     ple_zero = ctx.entry("bf16_proj_zero", "bf16_proj_zero")
     ple_mvm = ctx.entry("proj_layer_embedding_mvm", "proj_layer_embedding_mvm")
     ple_store = ctx.entry("proj_layer_embedding_store", "proj_layer_embedding_store")
-    ple_norm_w_ty, ple_x0_pl_ty, ple_x_proj_ty, ple_y_ty = ple_finish.arg_types()
+    ple_norm_w_ty, ple_x0_pl_ty, ple_x_proj_ty, _ = ple_finish.arg_types()
     _, ple_x0_ty, ple_y_acc_ty, _, _ = ple_mvm.arg_types()
     ple_norm_w = Buffer(type=ple_norm_w_ty, name=f"norm_w_{ple_name}", tile=ple_tile)
     ple_x0_pl = Buffer(
@@ -913,10 +914,7 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo):
     ple_x0 = Buffer(type=ple_x0_ty, name=f"x0_{ple_name}", tile=ple_tile)
     ple_x_proj = Buffer(type=ple_x_proj_ty, name=f"x_proj_{ple_name}", tile=ple_tile)
     ple_y_acc = Buffer(type=ple_y_acc_ty, name=f"y_acc_{ple_name}", tile=ple_tile)
-    ple_y = Buffer(type=ple_y_ty, name=f"y_{ple_name}", tile=ple_tile)
-    x0_per_layer_prod, xw_cons, ple_y_prod, ple_y_cons = ctx.add_locks(
-        ple_tile, [1, 0, 1, 0]
-    )
+    x0_per_layer_prod, xw_cons = ctx.add_locks(ple_tile, [1, 0])
     ple_norm_w_prod, ple_norm_w_p2, ple_x0_prod = ctx.add_locks(ple_tile, [0, 0, 0])
 
     def ple_body(
@@ -924,7 +922,7 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo):
         x0_per_layer,
         x0,
         x_proj,
-        y,
+        y_h,
         w_h,
         y_acc,
         finish,
@@ -933,7 +931,7 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo):
         store,
     ):
         xw_cons.acquire(1)
-        ple_y_prod.acquire(1)
+        y = y_h.acquire(1)
         _bf16_proj(
             x_proj,
             w_h,
@@ -948,7 +946,7 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo):
             store,
         )
         finish(norm_w, x0_per_layer, x_proj, y)
-        ple_y_cons.release(1)
+        y_h.release(1)
         x0_per_layer_prod.release(1)
 
     ctx.workers.append(
@@ -959,7 +957,7 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo):
                 ple_x0_pl,
                 ple_x0,
                 ple_x_proj,
-                ple_y,
+                y_fifo.prod(channel=1),
                 w_fifo.cons(channel=1),
                 ple_y_acc,
                 ple_finish,
@@ -1009,17 +1007,17 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo):
                         ),
                     ],
                 ),
-                _single_bd(DMAChannelDir.MM2S, 1, ple_y, ple_y_cons, ple_y_prod),
             ],
         )
     )
 
 
-def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons, w_fifo):
+def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons, w_fifo, y_fifo):
     """Per-layer-input gate.
 
     x is the RMS tile's y_out, behind the x_prod/x_cons pair of that tile. The
-    weights arrive through w_fifo on S2MM 1. y leaves on MM2S 1.
+    weights arrive through w_fifo on S2MM 1. y leaves through y_fifo on MM2S
+    1, into the back of the up projection's input object.
     """
     D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     gle_name = f"{gle_tile.row}_{gle_tile.col}"
@@ -1028,16 +1026,13 @@ def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons, w_fifo):
     gle_zero = ctx.entry("bf16_proj_zero", "bf16_proj_zero")
     gle_mvm = ctx.entry("gate_layer_embedding_mvm", "gate_layer_embedding_mvm")
     gle_store = ctx.entry("gate_layer_embedding_store", "gate_layer_embedding_store")
-    _, gle_y_ty = gle_begin.arg_types()
     _, _, gle_y_acc_ty, _, _ = gle_mvm.arg_types()
-    gle_y = Buffer(type=gle_y_ty, name=f"y_{gle_name}", tile=gle_tile)
     gle_y_acc = Buffer(type=gle_y_acc_ty, name=f"y_acc_{gle_name}", tile=gle_tile)
-    gle_y_prod, gle_y_cons = ctx.add_locks(gle_tile, [1, 0])
 
     def gle_body(
         xx,
         w_h,
-        y,
+        y_h,
         y_acc,
         begin,
         finish,
@@ -1046,7 +1041,7 @@ def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons, w_fifo):
         store,
     ):
         x_cons.acquire(1)
-        gle_y_prod.acquire(1)
+        y = y_h.acquire(1)
         begin(xx, y)
         _bf16_proj(
             y,
@@ -1062,7 +1057,7 @@ def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons, w_fifo):
             store,
         )
         finish(y)
-        gle_y_cons.release(1)
+        y_h.release(1)
         x_prod.release(1)
 
     ctx.workers.append(
@@ -1071,7 +1066,7 @@ def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons, w_fifo):
             [
                 x,
                 w_fifo.cons(channel=1),
-                gle_y,
+                y_fifo.prod(channel=1),
                 gle_y_acc,
                 gle_begin,
                 gle_finish,
@@ -1083,61 +1078,14 @@ def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons, w_fifo):
             stack_size=1024 * 4,
         )
     )
-    ctx.rt.add_tile_dma(
-        TileDma(
-            gle_tile,
-            [
-                _single_bd(DMAChannelDir.MM2S, 1, gle_y, gle_y_cons, gle_y_prod),
-            ],
-        )
-    )
 
 
-def _build_pl_merge(ctx, plm_tile):
-    """Per-layer-input merge.
-
-    The tile runs no kernel. Its DMA gathers the embedding and the gate
-    outputs into one buffer and sends the buffer to the up projection.
-    """
-    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
-    plm_dual_y_ty = np.ndarray[(2 * (PLI_D + D) + 32,), _BF16]
-    plm_y = Buffer(
-        type=plm_dual_y_ty, name=f"y_{plm_tile.row}_{plm_tile.col}", tile=plm_tile
-    )
-    plm_norm_i_prod, plm_res_gate_prod, plm_cons = ctx.add_locks(plm_tile, [1, 0, 0])
-    ctx.rt.add_tile_dma(
-        TileDma(
-            plm_tile,
-            [
-                _single_bd(
-                    DMAChannelDir.S2MM,
-                    0,
-                    plm_y,
-                    plm_norm_i_prod,
-                    plm_res_gate_prod,
-                    tap=TensorAccessPattern(plm_y.shape, 0, [D + PLI_D + 32], [1]),
-                ),
-                _single_bd(
-                    DMAChannelDir.S2MM,
-                    1,
-                    plm_y,
-                    plm_res_gate_prod,
-                    plm_cons,
-                    tap=TensorAccessPattern(
-                        plm_y.shape, D + PLI_D + 32, [D + PLI_D], [1]
-                    ),
-                ),
-                _single_bd(DMAChannelDir.MM2S, 0, plm_y, plm_cons, plm_norm_i_prod),
-            ],
-        )
-    )
-
-
-def _build_pl_up(ctx, plu_tile, w_fifo, y_fifo):
+def _build_pl_up(ctx, plu_tile, x_fifo, w_fifo, y_fifo):
     """Per-layer-input up projection.
 
-    x arrives on S2MM 0, the weights through w_fifo on S2MM 1. The layer
-    output leaves through y_fifo on MM2S 0, which the sequence drains.
+    x arrives through x_fifo on S2MM 0, the weights through w_fifo on S2MM 1.
+    The layer output leaves through y_fifo on MM2S 0, which the sequence
+    drains.
     """
     D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     plu_name = f"{plu_tile.row}_{plu_tile.col}"
@@ -1146,14 +1094,11 @@ def _build_pl_up(ctx, plu_tile, w_fifo, y_fifo):
     plu_zero = ctx.entry("bf16_proj_zero", "bf16_proj_zero")
     plu_mvm = ctx.entry("per_layer_up_mvm", "per_layer_up_mvm")
     plu_store = ctx.entry("per_layer_up_store", "per_layer_up_store")
-    (plu_dual_x_ty,) = plu_begin.arg_types()
     _, _, plu_y_acc_ty, _, _ = plu_mvm.arg_types()
-    plu_x = Buffer(type=plu_dual_x_ty, name=f"x_{plu_name}", tile=plu_tile)
     plu_y_acc = Buffer(type=plu_y_acc_ty, name=f"y_acc_{plu_name}", tile=plu_tile)
-    plu_x_prod, plu_x_cons = ctx.add_locks(plu_tile, [1, 0])
 
     def plu_body(
-        x,
+        x_h,
         w_h,
         y_h,
         y_acc,
@@ -1163,7 +1108,7 @@ def _build_pl_up(ctx, plu_tile, w_fifo, y_fifo):
         mvm,
         store,
     ):
-        plu_x_cons.acquire(1)
+        x = x_h.acquire(1)
         y = y_h.acquire(1)
         begin(x)
         _bf16_proj(
@@ -1181,13 +1126,13 @@ def _build_pl_up(ctx, plu_tile, w_fifo, y_fifo):
         )
         finish(x, y)
         y_h.release(1)
-        plu_x_prod.release(1)
+        x_h.release(1)
 
     ctx.workers.append(
         Worker(
             plu_body,
             [
-                plu_x,
+                x_fifo.cons(channel=0),
                 w_fifo.cons(channel=1),
                 y_fifo.prod(channel=0),
                 plu_y_acc,
@@ -1199,14 +1144,6 @@ def _build_pl_up(ctx, plu_tile, w_fifo, y_fifo):
             ],
             tile=plu_tile,
             stack_size=1024 * 4,
-        )
-    )
-    ctx.rt.add_tile_dma(
-        TileDma(
-            plu_tile,
-            [
-                _single_bd(DMAChannelDir.S2MM, 0, plu_x, plu_x_prod, plu_x_cons),
-            ],
         )
     )
 
@@ -1934,13 +1871,9 @@ def _route(rt, grid, t, proj_send_tiles):
     _connect(rt, amt, 2, t["swa_attn_qk"], 1)
     _connect(rt, amt, 3, t["swa_attn_kv"], 1)
 
-    # The per-layer-input path. The three bf16 projection weight streams are
-    # ObjectFifos, which route themselves between the ends PLI_WEIGHTS pins.
-    pl_shim_0 = t["pl_shim_0"]
-    _connect(rt, pl_shim_0, 0, t["pl_embedding"], 0, shim_symbol="pli_rope_rms")
-    _connect(rt, t["pl_embedding"], 1, t["pl_merge"], 0)
-    _connect(rt, t["pl_gate"], 1, t["pl_merge"], 1)
-    _connect(rt, t["pl_merge"], 0, t["pl_up"], 0)
+    # The per-layer-input path. Only the rope and rms stream keeps a flow of
+    # its own; ObjectFifos route the rest of the cluster themselves.
+    _connect(rt, t["pl_shim_0"], 0, t["pl_embedding"], 0, shim_symbol="pli_rope_rms")
 
 
 def decode_layer(
@@ -1990,6 +1923,21 @@ def decode_layer(
     }
     # The layer output. One buffer, as the engine's single y BD has.
     y_of = ObjectFifo(np.ndarray[(g.model_dim,), _BF16], name="layer_y", depth=1)
+    # The up projection's input, gathered on the merge tile: the embedding
+    # output in front, the gate output behind it.
+    D, PLI = g.model_dim, g.pli_d
+    plu_x_of = ObjectFifo(
+        np.ndarray[(2 * (PLI + D) + 32,), _BF16], name="pl_x", depth=1
+    )
+    ple_y_of, gle_y_of = plu_x_of.prod().join(
+        [0, D + PLI + 32],
+        tile=t["pl_merge"],
+        obj_types=[
+            np.ndarray[(PLI + D + 32,), _BF16],
+            np.ndarray[(D + PLI,), _BF16],
+        ],
+        names=["pl_embedding_y", "pl_gate_y"],
+    )
     rt = Runtime(
         partial(_sequence, g, rtp, layer_type, sliding_window, sync),
         [
@@ -2019,10 +1967,11 @@ def decode_layer(
     q_of_swa = ObjectFifo(np.ndarray[(S_DQ,), _BF16], name="swa_q_in", depth=2)
     _build_rope(ctx, t["rope"], "rope", "rope_skip_kv", g.dh, q_of_g)
     _build_rope(ctx, t["swa_rope"], "swa_rope", "swa_rope_skip_kv", g.swa_dh, q_of_swa)
-    _build_pl_embedding(ctx, t["pl_embedding"], pli_w["pli_down"])
-    _build_pl_gate(ctx, t["pl_gate"], rms_y_out, out_prod, out_cons, pli_w["pli_gate"])
-    _build_pl_merge(ctx, t["pl_merge"])
-    _build_pl_up(ctx, t["pl_up"], pli_w["pli_up"], y_of)
+    _build_pl_embedding(ctx, t["pl_embedding"], pli_w["pli_down"], ple_y_of)
+    _build_pl_gate(
+        ctx, t["pl_gate"], rms_y_out, out_prod, out_cons, pli_w["pli_gate"], gle_y_of
+    )
+    _build_pl_up(ctx, t["pl_up"], plu_x_of, pli_w["pli_up"], y_of)
     _build_glu(ctx, t["glu"], sync["glu"])
 
     proj_send_tiles = _build_proj_cores(ctx, grid, sync["proj"])
