@@ -55,7 +55,13 @@ class _Shard:
             if t["dtype"] not in self.DTYPES:
                 raise ValueError(f"{self.path}: {name} is {t['dtype']}")
             begin, end = (8 + length + o for o in t["data_offsets"])
-            view = data[begin:end].view(self.DTYPES[t["dtype"]])
+            dtype = np.dtype(self.DTYPES[t["dtype"]])
+            if end - begin != dtype.itemsize * math.prod(t["shape"]) or end > data.size:
+                raise ValueError(
+                    f"{self.path}: {name} spans bytes {begin} to {end}, not "
+                    f"{t['dtype']} {t['shape']} within the file"
+                )
+            view = data[begin:end].view(dtype)
             self.tensors[name] = view.reshape(t["shape"])
 
     def _torch(self, data: np.ndarray) -> dict[str, np.ndarray]:
@@ -211,9 +217,6 @@ class Checkpoint:
                         f"{sorted(shard.tensors.keys() - named)} the index does "
                         f"not name and lacks {sorted(named - shard.tensors.keys())}"
                     )
-            overlap = sorted(self.tensors.keys() & shard.tensors.keys())
-            if overlap:
-                raise ValueError(f"{self.path}: {overlap} is in more than one shard")
             self.tensors.update(shard.tensors)
 
     def release(self, array: np.ndarray) -> None:

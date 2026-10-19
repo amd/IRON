@@ -186,7 +186,7 @@ def test_checkpoint_rejects_a_malformed_file(tmp_path, end, data):
     blob = json.dumps(header).encode()
     path = tmp_path / "bad.safetensors"
     path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(data))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="x spans bytes"):
         Checkpoint(path)
 
 
@@ -239,26 +239,9 @@ def test_checkpoint_reads_a_sharded_index(sharded_toy_path):
         assert bitwise_equal(tensors[name], t), name
 
 
-def test_checkpoint_rejects_a_tensor_named_in_two_shards(tmp_path):
-    """Both files on disk hold every tensor (a malformed split): the index
-    names each shard once, but ``name`` is in both files' own headers.
-    """
-    tensors = toy_checkpoint()
-    name = next(iter(tensors))
-    save_file(tensors, tmp_path / "a.safetensors")
-    save_file(tensors, tmp_path / "b.safetensors")
-    weight_map = {k: "a.safetensors" for k in tensors}
-    weight_map[name] = "b.safetensors"
-    index = tmp_path / "both.safetensors.index.json"
-    index.write_text(json.dumps({"weight_map": weight_map}))
-    with pytest.raises(ValueError, match=re.escape(name)):
-        Checkpoint(index)
-
-
 def test_checkpoint_rejects_a_shard_that_disagrees_with_the_index(tmp_path):
     """The index's own partition and a shard's real header disagree, with no
-    tensor duplicated across shards: a stale or hand-edited index, not the
-    two-shards-claim-the-same-name corruption above.
+    tensor duplicated across shards: a stale or hand-edited index.
     """
     tensors = toy_checkpoint()
     names = list(tensors)
