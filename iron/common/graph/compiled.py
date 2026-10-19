@@ -679,9 +679,11 @@ class Graph:
 
     def reference(self, *tensors, **values) -> Any:
         """The graph recorded for these tensors' shapes, each step run on the
-        host through its operator's ``reference()`` (``Recording.reference``):
-        what a call on the device returns, each output cut to its bounds,
-        at any shape the operators take, one no device fits too.
+        host through its operator's ``reference()`` (``Recording.reference``),
+        at any shape the operators take, one no device fits too. Each output
+        is a numpy array of its recorded shape, cut to its bounds, where a
+        call on the device returns each as a flat device tensor of its
+        elements, uncut.
 
         Raises:
             TypeError: An input is missing, or a per-call value is missing or
