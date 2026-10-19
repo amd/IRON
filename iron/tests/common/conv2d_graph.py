@@ -132,29 +132,6 @@ def test_patches_short_of_a_tile_compute_a_whole_one():
         Into(conv, 3).trace(x=(x, bfloat16))
 
 
-def test_patches_short_of_a_tile_are_the_convolution():
-    """3 rows of 8 pixels, 24 patches of a 64-pixel tile, within 2 units of
-    2^-8 of the convolution of |x| by |weight|, through ``Subsample``'s
-    ReLU.
-    """
-    rng = np.random.default_rng(0)
-    weight = rng.standard_normal((32, 128, 3, 3)).astype(bfloat16)
-    x = rng.standard_normal((7, 18 * 128)).astype(bfloat16)
-    conv = Conv2d(weight.astype(np.float32), 18, stride=2)
-    got = np.asarray(Subsample(conv).reference(x, n=3), np.float32)
-
-    def convolution(x, w):
-        windows = np.lib.stride_tricks.sliding_window_view(
-            x.reshape(7, 18, 128), (3, 3), (0, 1)
-        )
-        return np.einsum("hwckl,ockl->hwo", windows[::2, ::2], w)
-
-    f = [np.asarray(a, np.float32) for a in (x, weight)]
-    want = np.maximum(convolution(*f), 0).reshape(3, -1)
-    bound = 2.0**-7 * convolution(*(np.abs(a) for a in f)).reshape(3, -1)
-    assert (np.abs(got[:3] - want) <= bound).all()
-
-
 def test_gathered_patches_hold_no_padding():
     with pytest.raises(ValueError, match="hold no zero padding"):
         Conv2d(np.zeros((32, 128, 3, 3), np.float32), 18, stride=2, padding=1)

@@ -19,7 +19,7 @@ from iron.operators.gemm import GEMM
 # What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
 GEMM_ROWS = 16
 # GEMM's default tile_n, which a patches GEMM's pixels are padded to.
-GEMM_COLUMNS = ParamSpec.of(GEMM.__dataclass_fields__["tile_n"]).default
+GEMM_COLUMNS = ParamSpec.of(GEMM.tile_n).default
 
 
 class Conv2d(iron.Graph):

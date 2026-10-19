@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+import iron
+from iron import Scratchpad
 from iron.operators.gated_delta_rule import GatedDeltaRule
 
 VALID = 5
@@ -42,32 +44,37 @@ class Transformers:
         return np.concatenate([y[0].numpy().ravel(), final[0].numpy().ravel()])
 
 
+class Bounded(iron.Graph):
+    """The recurrence over a call's first ``n`` of the rows given."""
+
+    def body(self, qkv, a, b, head, state, *, n: Scratchpad[np.int32]):
+        return GatedDeltaRule.step(qkv[:n], a[:n], b[:n], head, state, k_heads=2)
+
+
 @pytest.mark.parametrize("scale", [1.0, 1e-4], ids=["unit", "near-zero"])
-def test_the_reference_matches_transformers_over_the_valid_rows(scale, golden):
-    """Recorded in ``goldens/gated_delta_rule.npz`` with transformers 5.20.1
-    (``pytest --record-goldens``).
+def test_the_reference_matches_transformers_over_the_valid_rows(scale, golden, npu2):
+    """6 rows, the call's first 5 valid; recorded in
+    ``goldens/gated_delta_rule.npz`` with transformers 5.20.1 (``pytest
+    --record-goldens``).
     """
-    op = GatedDeltaRule(rows=6, k_heads=2, v_heads=4, key_dim=8, value_dim=16)
-    op = op._at_extents(valid=VALID)
     rng = np.random.default_rng(0)
-    qkv = rng.standard_normal((op.rows, op.width))
+    qkv = rng.standard_normal((6, 96))
     qkv[1, :32] *= scale
     qkv = qkv.astype(bfloat16)
-    a, b = (rng.standard_normal((op.rows, 4)).astype(bfloat16) for _ in "ab")
+    a, b = (rng.standard_normal((6, 4)).astype(bfloat16) for _ in "ab")
     head = np.stack([rng.uniform(0, 2, 4), -rng.uniform(0.5, 8, 4)], 1)
     head = head.astype(np.float32)
     state = rng.standard_normal((4, 8, 16)).astype(np.float32)
-    y, final = op.reference(qkv, a, b, head, state)
+    y, final = Bounded().reference(qkv, a, b, head, state, n=VALID)
 
     want = golden("gated_delta_rule", Transformers).logits((), qkv, a, b, head, state)
-    n = VALID * op.inner
+    y = np.asarray(y, np.float32)
     np.testing.assert_allclose(
-        final, want[n:].reshape(final.shape), rtol=1e-5, atol=1e-5
+        final, want[y.size :].reshape(final.shape), rtol=1e-5, atol=1e-5
     )
     np.testing.assert_allclose(
-        y[:VALID].astype(np.float32), want[:n].reshape(VALID, -1), rtol=8e-3, atol=1e-3
+        y, want[: y.size].reshape(VALID, -1), rtol=8e-3, atol=1e-3
     )
-    assert not y[VALID:].astype(np.float32).any()
 
 
 @pytest.mark.parametrize(

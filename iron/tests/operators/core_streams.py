@@ -16,8 +16,9 @@ from iron.operators.experts import Experts
 from iron.operators.gated_delta_rule import GatedDeltaRule
 from iron.operators.selective_scan import SelectiveScan
 
-# Each operator's kernel and the parameters it passes, which an older
-# mlir-aie's lacks (blocks=, from 7807032).
+# Each operator's kernel and the parameters its Array.kernel() passes,
+# which an older mlir-aie's lacks (blocks=, from 7807032). Kept in step with
+# those calls by hand: a parameter added there belongs here too.
 KERNELS = {
     Experts: (
         "moe",

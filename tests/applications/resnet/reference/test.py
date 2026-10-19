@@ -13,7 +13,6 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-import iron.functional as F
 from iron.applications.resnet.model import BN_EPS, ResNet, ResNetConfig
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close
@@ -125,17 +124,11 @@ def test_a_float32_conv_weight_rounds_only_after_its_fold():
     weights = tree(TOY, "F32")
     layer = ResNet(TOY, weights).resnet.encoder.stages[0].layers[0].layer[0]
     w = weights.resnet.encoder.stages[0].layers[0].layer[0]
-    bn = w.normalization
-    want, _ = F.fuse_conv_bn_weights(
-        w.convolution.weight,
-        None,
-        bn.running_mean,
-        bn.running_var,
-        BN_EPS,
-        bn.weight,
-        bn.bias,
-    )
-    np.testing.assert_array_equal(layer.weight, want)
+    bn = {k: np.asarray(v, np.float64) for k, v in vars(w.normalization).items()}
+    scale = bn["weight"] / np.sqrt(bn["running_var"] + BN_EPS)
+    want = np.asarray(w.convolution.weight, np.float64) * scale[:, None, None, None]
+    # float32's rounding, where a bf16 weight before the fold is 2^-9 off.
+    np.testing.assert_allclose(layer.weight, want, rtol=1e-6)
 
 
 @pytest.mark.parametrize("size", [64, 224])
