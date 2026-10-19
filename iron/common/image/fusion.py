@@ -22,7 +22,7 @@ from aie import ir
 from aie.dialects import aie, arith, memref
 from aie.helpers.npdtypes import np_ndarray_type_get_dtype, np_ndarray_type_get_shape
 from aie.helpers.util import mlir_type_to_np_dtype, np_ndarray_type_to_memref_type
-from aie.iron import DeviceConfiguration, Program, Runtime, ScratchpadParameter
+from aie.iron import DeviceConfiguration, Program, Runtime
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
@@ -217,10 +217,7 @@ class Fusion:
                 )
             if outside:
                 (name,) = outside
-                stub, types[name] = self._exported_sequence(name, exported[name])
-                configured = DeviceConfiguration(
-                    symbol, self.designs[name].op.array_device(), runtimes=[stub]
-                )
+                configured, types[name] = self._exported(symbol, name, exported[name])
             else:
                 configured = pack(symbol, {m: arrays[m] for m in members})
                 for m in members:
@@ -280,41 +277,25 @@ class Fusion:
             [*configurations.values(), main],
             entry=entries[0],
         ).resolve_program()
-
-        # Each exported device takes the place its stub configuration held.
-        with module.context, ir.Location.unknown():
-            stubs = {
-                ir.StringAttr(op.operation.attributes["sym_name"]).value: op
-                for op in module.body.operations
-                if isinstance(op, aie.DeviceOp)
-            }
-            for name, text in exported.items():
-                foreign = ir.Module.parse(text)
-                (device_op,) = [
-                    op for op in foreign.body.operations if isinstance(op, aie.DeviceOp)
-                ]
-                stub = stubs[packing.device_of(name)]
-                device_op.operation.attributes["sym_name"] = ir.StringAttr.get(
-                    packing.device_of(name)
-                )
-                device_op.operation.move_before(stub.operation)
-                stub.operation.erase()
-            return str(module)
+        return str(module)
 
     @staticmethod
     def sequence_name(command: int) -> str:
         """The runtime sequence of the ``command``-th command in ``main``."""
         return "sequence" if command == 0 else f"sequence_{command}"
 
-    def _exported_sequence(self, name: str, text: str) -> tuple[Runtime, list]:
-        """A stub of exported design ``name``'s runtime sequence, which
-        declares its scratchpad parameters, and its argument types.
+    def _exported(
+        self, symbol: str, name: str, text: str
+    ) -> tuple[DeviceConfiguration, list]:
+        """Exported design ``name``'s device as configuration ``symbol``, and
+        its runtime sequence's argument types.
 
         Raises:
             ValueError: A shared word names one of its parameters.
         """
         with ir.Context(), ir.Location.unknown():
             foreign = ir.Module.parse(text)
+            configured = DeviceConfiguration.from_module(symbol, foreign)
             (device_op,) = [
                 op for op in foreign.body.operations if isinstance(op, aie.DeviceOp)
             ]
@@ -327,33 +308,17 @@ class Fusion:
             for arg in sequence_op.body.blocks[0].arguments:
                 memref_type = ir.MemRefType(arg.type)
                 dtype = mlir_type_to_np_dtype(memref_type.element_type)
-                if dtype is None:
-                    raise TypeError(f"no host dtype for the elements of {memref_type}")
                 types.append(np.ndarray[tuple(memref_type.shape), np.dtype[dtype]])
-            parameters = {
-                ir.StringAttr(op.operation.attributes["sym_name"]).value: (
-                    mlir_type_to_np_dtype(
-                        ir.TypeAttr(op.operation.attributes["type"]).value
-                    )
-                )
-                for op in foreign.body.operations
-                if op.operation.name == "aiex.scratchpad_parameter"
-            }
-            sequence_name = ir.StringAttr(
-                sequence_op.operation.attributes["sym_name"]
-            ).value
-        renamed = sorted(set(parameters) & set(self.shared_words))
+        (runtime,) = configured.runtimes
+        renamed = sorted(
+            {p.name for p in runtime.scratchpad_parameters} & set(self.shared_words)
+        )
         if renamed:
             raise ValueError(
                 f"{name} is exported by another tool, so its scratchpad words "
                 f"{renamed} are its own to name; none is shared"
             )
-        stub = Runtime(
-            lambda *_: None, types, name=sequence_name, implicit_configure=False
-        )
-        for symbol, dtype in parameters.items():
-            stub.register_parameter(ScratchpadParameter(symbol, dtype))
-        return stub, types
+        return configured, types
 
     def _views(
         self, name: str, buffers: tuple[BufferRef, ...], types
