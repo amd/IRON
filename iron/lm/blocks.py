@@ -93,12 +93,11 @@ class LogMel(iron.Graph):
             )
         self.frame, self.hop, self.fft, self.mels = frame, hop, fft, mels
         self.mel_floor = mel_floor
-        self.window = np.hanning(frame + 1)[:-1].astype(np.float32)
-        self.filters = filterbank(fft, mels, sample_rate, max_hz)
+        filters = filterbank(fft, mels, sample_rate, max_hz)
         bins = fft // 2 + 1
         width = -(-bins // 64) * 64
         angle = 2 * np.pi * np.arange(frame)[:, None] * np.arange(bins) / fft
-        window = self.window.astype(np.float64)[:, None]
+        window = np.hanning(frame + 1)[:-1, None].astype(np.float32)
         # The rfft as a matrix, the window folded in: the real parts, then
         # the imaginary, each padded to the width.
         dft = np.zeros((frame, 2 * width))
@@ -106,7 +105,7 @@ class LogMel(iron.Graph):
         dft[:, width : width + bins] = -window * np.sin(angle)
         self.dft = iron.param(stacked(dft))
         self.filterbank = iron.param(
-            stacked(np.pad(self.filters, ((0, width - bins), (0, 0))))
+            stacked(np.pad(filters, ((0, width - bins), (0, 0))))
         )
 
     def body(

@@ -24,7 +24,7 @@ class Project(iron.Graph):
     """x + x, projected by ``w``, then SiLU: three steps, the second weighted."""
 
     def __init__(self, w):
-        self.w = w
+        self.w = iron.param(w)
 
     def body(self, x):
         return SiLU.step(GEMV.step(self.w, ElementwiseAdd.step(x, x)))

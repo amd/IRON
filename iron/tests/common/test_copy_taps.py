@@ -236,7 +236,7 @@ def test_a_gather_merges_the_rows_it_can(name):
 class _Gathers(iron.Graph):
     def __init__(self, ids):
         self.table = iron.weight(np.zeros((V, W), dtype=bfloat16))
-        self.ids = ids
+        self.ids = iron.param(ids)
 
     def body(self, x):
         rows = Copy.step(self.table[self.ids])
@@ -360,7 +360,7 @@ class _IntoColumns(iron.Graph):
     """
 
     def __init__(self, columns):
-        self.columns = columns
+        self.columns = iron.param(columns)
 
     def body(self, x):
         h = Copy.step(x)

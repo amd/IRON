@@ -176,8 +176,8 @@ class _Unbound(_Param):
 def param(*shape, dtype=bfloat16) -> np.ndarray:
     """A weight a graph holds, declared by shape, typed as the array
     ``Graph.load_state_dict`` binds in its place; or ``param(array)``,
-    ``array`` itself held as one, as torch's ``nn.Parameter(tensor)``. An
-    array a graph holds that is not a param is no weight.
+    ``array`` itself held as one, as torch's ``nn.Parameter(tensor)``. A
+    graph refuses to hold an array that is not one.
     """
     if len(shape) == 1 and isinstance(shape[0], np.ndarray):
         a = shape[0]
@@ -320,12 +320,18 @@ class Graph:
         identity, with its path name.
 
         Raises:
-            TypeError: A ``param`` was never loaded.
+            TypeError: A ``param`` was never loaded, or an array held is no
+                ``param``.
         """
         held: dict[int, tuple[str, Any]] = {}
         for path, x, _, _ in walk(self):
             if isinstance(x, _Unbound):
                 raise TypeError(f"{self.name}: {path} was never loaded")
+            if isinstance(x, np.ndarray) and not isinstance(x, _Param):
+                raise TypeError(
+                    f"{self.name}: {path} is an array, not a weight: "
+                    f"wrap it in iron.param"
+                )
             if isinstance(x, (_Param, Weight, State)):
                 held.setdefault(id(x), (path, x))
         return held

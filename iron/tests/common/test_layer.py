@@ -80,7 +80,7 @@ def test_an_activation_with_no_operator_is_refused():
 def test_a_norm_is_its_kernel_weighted_if_given_then_any_bias(norm, steps):
     class Normed(iron.Graph):
         def __init__(self):
-            self.w = np.ones(WIDTH, bfloat16)
+            self.w = iron.param(np.ones(WIDTH, bfloat16))
 
         def body(self, x):
             return norm(x, self.w)
@@ -263,7 +263,9 @@ def test_embeddinggemma_2_loads_a_layer_s_per_layer_input_flat_or_nested():
         for name in (*GEMMA, *(f"ple_block.{n}" for n in PER_LAYER)):
             named[f"layers.{i}.{name}.weight"] = shape[name]
     tensors = {
-        f"language_model.{n}": (rng.standard_normal(s) * 0.05).astype(bfloat16)
+        f"language_model.{n}": iron.param(
+            (rng.standard_normal(s) * 0.05).astype(bfloat16)
+        )
         for n, s in sorted(named.items())
     }
     encoder = EmbeddingGemma(c, nest(tensors))

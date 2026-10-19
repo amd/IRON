@@ -81,7 +81,7 @@ class Layers(Encoder):
     """The default layer, its weights drawn, at HIGHEST precision."""
 
     def __init__(self, table):
-        self.table = table
+        self.table = iron.param(table)
         super().__init__(Encoding(), ROWS)
         self.load_state_dict(
             checkpoint(Encoding(), _shapes(Encoding())).tree("random", 2)

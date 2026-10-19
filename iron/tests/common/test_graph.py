@@ -321,7 +321,7 @@ def test_an_explicit_instance_is_applied_like_the_class():
 
     class Step(iron.Graph):
         def __init__(self, w):
-            self.w = w
+            self.w = iron.param(w)
 
         def body(self, x):
             return q(self.w, x)
@@ -1076,7 +1076,7 @@ def test_a_weight_given_where_an_optional_input_was_meant_is_refused(view):
 
     class Norm(iron.Graph):
         def __init__(self):
-            self.w = w
+            self.w = iron.param(w)
 
         def body(self, x):
             return RMSNorm.step(x, self.w.reshape(1, E) if view else self.w)
@@ -1467,6 +1467,18 @@ class _Held(iron.Graph):
         row = Copy.step(iron.weight(table)[r])
         half = ElementwiseAdd.step(x, table[2:4].reshape(512))
         return row, half, Copy.step(table.T)
+
+
+def test_a_held_array_that_is_no_param_is_refused():
+    class Plain(iron.Graph):
+        def __init__(self):
+            self.w = z(256, E)
+
+        def body(self, x):
+            return GEMV.step(self.w, x)
+
+    with pytest.raises(TypeError, match=r"Plain: w is an array.*iron\.param"):
+        Plain().record(x=(E,))
 
 
 def test_a_held_array_is_viewed_in_the_body_under_its_own_path():
@@ -2017,7 +2029,7 @@ def test_a_handle_adds_and_multiplies_by_elementwise_and_rowwise_steps():
 
     class Arithmetic(iron.Graph):
         def __init__(self):
-            self.w, self.m = w, m
+            self.w, self.m = iron.param(w), iron.param(m)
 
         def body(self, x, y, row):
             return (x + y) * self.w + x, row * x, x * row, x[0] * self.m
@@ -2228,8 +2240,8 @@ def test_a_handle_is_divided_by_a_number_alone():
 @pytest.mark.parametrize(
     "rows, op, held",
     [
-        (1, "GEMV", lambda w: w),
-        (256, "ProjectionGEMM", lambda w: w),
+        (1, "GEMV", iron.param),
+        (256, "ProjectionGEMM", iron.param),
         (256, "ProjectionGEMM", iron.weight),
         (256, "ProjectionGEMM", lambda w: iron.state(w.shape)),
     ],
@@ -2256,14 +2268,14 @@ def test_a_weight_times_a_row_is_linear_and_a_plain_matrix_is_refused():
 
     class Left(iron.Graph):
         def __init__(self):
-            self.w = w
+            self.w = iron.param(w)
 
         def body(self, x):
             return self.w @ x
 
     class Plain(iron.Graph):
         def __init__(self):
-            self.w = w
+            self.w = iron.param(w)
 
         def body(self, x):
             return x @ self.w
