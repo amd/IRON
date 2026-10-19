@@ -211,6 +211,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `Value` is mlir-aie's `PerCallMember` bound to one operator, so a
+  declared `per_call()` and the value a build gives a device parameter are
+  one type; `op.value(name)` returns it, and an extent attribute still reads
+  as its number. `iron.common.declare.value.Bound` is gone.
 - Graph capture is recording, so "trace" means only hardware event tracing:
   `Graph.record()` (was `trace()`), `Recording` (`TracedGraph`), `Step`
   (`TracedStep`), `Recorder` (`Tracer`) and `graph_recorder`

@@ -67,7 +67,10 @@ Formatting and licence checks are in CONTRIBUTING.md.
   `iron.operators.GEMM`.
 - `iron/common/declare/`: IRON's `Operator` over mlir-aie's declaration
   (`aie.utils.compile.jit`'s `param()`, `tunable()`, `per_call()`), the
-  bound operands and `Value`s a build reads, `Xclbin`, `Profile`, `Precision`.
+  bound operands and `Value`s a build reads (a `Value` is a `per_call()`
+  member bound to one operator, `op.value(name)`; `op.<name>` is it too,
+  except an extent's, which reads as its number), `Xclbin`, `Profile`,
+  `Precision`.
 - `iron/common/design/`: an operator's MLIR module (`OperatorDesign`) and
   its runtime sequence (`OperatorRuntime`).
 - `iron/common/graph/`: `iron.Graph`, recording and `compile`.

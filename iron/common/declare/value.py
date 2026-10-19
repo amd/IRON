@@ -4,7 +4,8 @@
 """The per-call values an operator's cores read, as one operator holds them.
 
 An operator's body declares them with mlir-aie's ``per_call()``; ``Value``
-is one on an operator instance, with the device parameter a build gives it.
+is that member bound to an operator instance, with the device parameter a
+build gives it.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 from aie.iron import ScratchpadParameter, ceildiv
+from aie.utils.compile.jit.params import PerCallMember
 
 if TYPE_CHECKING:
     from aie.utils.compile.jit.params import Param
@@ -20,12 +22,13 @@ if TYPE_CHECKING:
     from .operator import Operator
 
 
-class Value:
-    """A per-call value on one operator: per call when a graph binds it,
+class Value(PerCallMember):
+    """A ``per_call()`` member bound to one operator: per call when a graph binds it,
     else written once per build before the first DMA.
 
-    On an instance, ``op.value("count")`` is it; a build gives it its device
-    parameter and a core reads it through its ``Rtp``.
+    ``op.value("count")`` is it, as is ``op.count`` but for an extent, which
+    reads as its number. A build gives it its device parameter and a core
+    reads it through its ``Rtp``.
 
     Attributes:
         name: Its member's name.
@@ -50,11 +53,9 @@ class Value:
         bounds: Param | None = None,
         words: int = 1,
     ) -> None:
+        super().__init__(dtype, derive, bounds)
         self.op = op
         self.name = name
-        self.dtype = dtype
-        self.derive = derive
-        self.bounds = bounds
         self.words = words
         self.param: Any = None
         self.ssa = None
@@ -129,46 +130,3 @@ class ExtentWord(Value):
 
     def __repr__(self) -> str:
         return f"<tiles per lane of {self.buffer} under {self.extent}>"
-
-
-class Bound(dict):
-    """What an operator's members are bound to, by name, as mlir-aie's
-    members read them (``op.x`` is ``op._bound["x"]``).
-
-    An extent (``per_call(bounds=)``) reads as an integer: the parameter it
-    bounds, or the number `at` gives it. A copy made by `recording` notes
-    each extent read, which tells which derived values follow a bound.
-    """
-
-    def __init__(
-        self,
-        op: Operator,
-        members: dict[str, Any],
-        extents: dict[str, Any] | None = None,
-        reads: set[str] | None = None,
-    ) -> None:
-        super().__init__(dict.items(members))
-        self.op = op
-        self.extents = extents or {}
-        self.reads = reads
-
-    def __getitem__(self, name: str) -> Any:
-        member = super().__getitem__(name)
-        if not (isinstance(member, Value) and member.bounds is not None):
-            return member
-        if self.reads is not None:
-            self.reads.add(name)
-        at = self.extents.get(name)
-        return vars(self.op)[member.bounds.name] if at is None else at
-
-    def member(self, name: str) -> Any:
-        """The operand or ``Value`` bound to ``name``, an extent's too."""
-        return super().__getitem__(name)
-
-    def at(self, **extents: Any) -> Bound:
-        """These members, with the given extents reading as the given numbers."""
-        return Bound(self.op, self, {**self.extents, **extents}, self.reads)
-
-    def recording(self, reads: set[str]) -> Bound:
-        """These members, each extent read noted in ``reads``."""
-        return Bound(self.op, self, self.extents, reads)

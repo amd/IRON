@@ -32,7 +32,7 @@ from ..testing import Testing
 from .operand import Operand
 from .precision import Precision
 from .rtp import Rtp
-from .value import Bound, ExtentWord, Value
+from .value import ExtentWord, Value
 
 if TYPE_CHECKING:
     from aie.helpers.taplib import Affine
@@ -513,7 +513,7 @@ class Operator(jit.Operator, library=True):
 
     @property
     def buffers(self) -> list[Operand]:
-        return [self._bound.member(m.name) for m in self._members_io()]
+        return [self._bound[m.name] for m in self._members_io()]
 
     @property
     def inputs(self) -> list[Operand]:
@@ -534,7 +534,7 @@ class Operator(jit.Operator, library=True):
         fixed = self._derived_under_bound
         out = {}
         for m in self.declaration.per_calls:
-            v = self._bound.member(m.name)
+            v = self._values[m.name]
             if v.derive is not None and not v.per_call:
                 out[m.name] = (
                     v.derive(self) if fixed.get(m.name) is None else fixed[m.name]
@@ -571,7 +571,7 @@ class Operator(jit.Operator, library=True):
             if m.derive is None:
                 continue
             reads: set[str] = set()
-            vars(probe)["_bound"] = self._bound.recording(reads)
+            vars(probe)["_bound"] = _Reads(self._bound, reads)
             try:
                 m.derive(probe)
             except (TypeError, ValueError, AttributeError):
@@ -606,7 +606,7 @@ class Operator(jit.Operator, library=True):
     def _at_extents(self, **extents: int) -> Self:
         """A copy whose extents (``per_call(bounds=)``) read as the given numbers."""
         at = copy.copy(self)
-        vars(at)["_bound"] = self._bound.at(**extents)
+        vars(at)["_bound"] = {**self._bound, **extents}
         return at
 
     def extent_unit(self, buffer: str) -> int | None:
@@ -619,7 +619,7 @@ class Operator(jit.Operator, library=True):
     def value(self, name: str) -> Value:
         """The device word of value ``name`` (an extent attribute reads as an integer)."""
         try:
-            return self._bound.member(name)
+            return self._values[name]
         except KeyError:
             raise TypeError(
                 f"{type(self).__name__} declares no value {name!r}"
@@ -671,11 +671,15 @@ class Operator(jit.Operator, library=True):
         return self._image(*args, **kwargs)
 
     def _bind(self) -> None:
+        """Bind each member: an operand an ``Operand``, a per-call value a
+        ``Value`` in ``_values``, which an extent reads as its number.
+        """
         vars(self).pop("_derived_under_bound", None)
-        members: dict[str, Any] = {}
+        self._bound: dict[str, Any] = {}
+        self._values: dict[str, Value] = {}
         for m in self.declaration.members:
             if isinstance(m, PerCallMember):
-                members[m.name] = Value(
+                value = Value(
                     self,
                     m.name,
                     dtype=m.dtype,
@@ -683,9 +687,12 @@ class Operator(jit.Operator, library=True):
                     bounds=m.bounds,
                     words=getattr(m, "words", 1),
                 )
+                self._values[m.name] = value
+                self._bound[m.name] = (
+                    value if m.bounds is None else vars(self)[m.bounds.name]
+                )
             elif m.when is None or vars(self)[m.when.name]:
-                members[m.name] = Operand(m, self)
-        self._bound = Bound(self, members)
+                self._bound[m.name] = Operand(m, self)
         # The values the library adds: tiles per bound operand.
         for e in self.declaration.per_calls:
             if e.bounds is None:
@@ -696,12 +703,17 @@ class Operator(jit.Operator, library=True):
                     axis = b.extent_axis(e)
                     if axis is not None:
                         word = ExtentWord(self, e.name, b.name, axis)
-                        dict.__setitem__(self._bound, word.name, word)
+                        self._values[word.name] = word
+
+    def layout(self) -> Self:
+        view = super().layout()
+        view._values = self._values
+        return view
 
     @property
     def _value_members(self) -> list[Value]:
         """Every per-call value: the declared ones, then the library's."""
-        return [v for v in dict.values(self._bound) if isinstance(v, Value)]
+        return list(self._values.values())
 
     @property
     def dev(self):
@@ -729,3 +741,15 @@ class Operator(jit.Operator, library=True):
             for m in self.declaration.operands
             if m.when is None or vars(self)[m.when.name]
         ]
+
+
+class _Reads(dict):
+    """An operator's members by name, noting each name read in ``reads``."""
+
+    def __init__(self, members: dict[str, Any], reads: set[str]) -> None:
+        super().__init__(members)
+        self.reads = reads
+
+    def __getitem__(self, name: str) -> Any:
+        self.reads.add(name)
+        return super().__getitem__(name)
