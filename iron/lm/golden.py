@@ -7,6 +7,7 @@ so a test or an accuracy run needs neither torch nor transformers, which
 are not IRON's requirements, only to record.
 """
 
+import dataclasses
 import hashlib
 import os
 from pathlib import Path
@@ -111,8 +112,35 @@ def fingerprint(*values) -> str:
             digest.update(f"{value.dtype}{value.shape}".encode())
             digest.update(np.ascontiguousarray(value).tobytes())
         else:
-            digest.update(repr(value).encode())
+            digest.update(_text(value).encode())
     return digest.hexdigest()[:16]
+
+
+def _text(value) -> str:
+    """``repr(value)``, but a dataclass names only its fields off their
+    defaults, so a field added with a default changes no fingerprint.
+    """
+    if not dataclasses.is_dataclass(value) or isinstance(value, type):
+        return repr(value)
+    changed = [
+        f"{f.name}={_text(getattr(value, f.name))}"
+        for f in dataclasses.fields(value)
+        if not _is_default(f, getattr(value, f.name))
+    ]
+    return f"{type(value).__name__}({', '.join(changed)})"
+
+
+def _is_default(field: dataclasses.Field, value) -> bool:
+    if field.default is not dataclasses.MISSING:
+        default = field.default
+    elif field.default_factory is not dataclasses.MISSING:
+        default = field.default_factory()
+    else:
+        return False
+    try:
+        return type(value) is type(default) and bool(value == default)
+    except (TypeError, ValueError):
+        return False
 
 
 class HuggingFace:

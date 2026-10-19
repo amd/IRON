@@ -3,12 +3,13 @@
 
 """``Golden``: what it records, when, and the file it refuses."""
 
+import dataclasses
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from iron.lm.golden import RECORD, Golden, HuggingFace
+from iron.lm.golden import RECORD, Golden, HuggingFace, fingerprint
 from iron.tests.common.llama_model import SMALL, checkpoint
 
 TOKENS = np.arange(4)
@@ -56,3 +57,19 @@ def test_a_weight_the_model_does_not_hold_is_refused():
     weights.model.extra = np.zeros(1, np.float32)
     with pytest.raises(ValueError, match=r"hold \['model.extra'\]"):
         HuggingFace.build("llama", SMALL, weights)
+
+
+def test_a_field_added_at_its_default_keeps_the_fingerprint():
+    @dataclasses.dataclass(frozen=True)
+    class Before:
+        width: int
+        eps: float = 1e-5
+
+    @dataclasses.dataclass(frozen=True)
+    class After(Before):
+        window: int | None = None
+
+    After.__name__ = "Before"
+    assert fingerprint(After(8)) == fingerprint(Before(8))
+    assert fingerprint(After(8, window=4)) != fingerprint(Before(8))
+    assert fingerprint(Before(8, eps=1e-6)) != fingerprint(Before(8))
