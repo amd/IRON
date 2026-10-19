@@ -276,7 +276,7 @@ class Image:
         in ``arena``, made here if not given.
         """
         if self.layout is None:
-            self.compile()
+            self._prepare()
         self._link()
         if self.arena is not None and arena is None:
             arena = ScratchArena(self.arena)

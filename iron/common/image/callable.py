@@ -294,8 +294,8 @@ class FullELFCallable(ImageCallable):
     )
 
     # The device and runtime sequence the full ELF's first command runs.
-    device_name = "main"
-    sequence_name = "sequence"
+    device_name = Composition.device
+    sequence_name = Composition.sequence_name(0)
 
     def __init__(self, seq, arena: ScratchArena | None = None):
         super().__init__(seq, arena)

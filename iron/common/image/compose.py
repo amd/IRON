@@ -217,13 +217,16 @@ class Composition:
             )
             for k, command in enumerate(commands)
         ]
-        main = DeviceConfiguration("main", device, runtimes=entries)
+        main = DeviceConfiguration(self.device, device, runtimes=entries)
         module = Program.compose(
             [*configurations.values(), main],
             entry=entries[0],
             expand_load_pdis=self.expands or None,
         ).resolve_program()
         return str(module)
+
+    # The device configuration every full ELF's commands run on.
+    device = "main"
 
     @staticmethod
     def sequence_name(command: int) -> str:
