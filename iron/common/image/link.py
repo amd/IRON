@@ -48,9 +48,6 @@ class FullELF:
     # --get-scratchpad-parameters emits the parameter table the host writes
     # through. Without it the ELF is not the same program.
     FLAGS = ("--get-scratchpad-parameters",)
-    # Only when the composition expands its loads (``Composition.expands``): what makes
-    # a multi-device runlist switch PDIs between steps.
-    EXPAND_FLAG = "--expand-load-pdis"
     # Only when tracing: the trace parser reads the lowered module for the
     # buffer layout and each design's traced tiles and events.
     TRACE_FLAG = "--get-input-with-addresses"
@@ -89,7 +86,6 @@ class FullELF:
                 )
             composition = self.composition = Composition(seq)
             flags = [
-                *([self.EXPAND_FLAG] if composition.expands else []),
                 *self.FLAGS,
                 *([self.TRACE_FLAG] if seq.traced else []),
             ]

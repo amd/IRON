@@ -411,6 +411,8 @@ def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
     seq._prepare()
     composition = Composition(seq)
     assert composition.expands == reconfigure
+    # aiecc's --expand-load-pdis, which mlir-aie reads off the module.
+    assert ("iron.expand_load_pdis = true" in composition.text()) == reconfigure
 
 
 @pytest.mark.supported_devices("npu1", "npu2")

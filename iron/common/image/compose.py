@@ -14,7 +14,7 @@ import hashlib
 import itertools
 import logging
 import math
-from collections.abc import Collection, Hashable
+from collections.abc import Hashable
 
 import aie.utils as aie_utils
 import numpy as np
@@ -61,9 +61,12 @@ class Composition:
                     f"to either one (a tile size, a column count) separates them"
                 )
         self.steps = [(own[design_of[id(s.op)]].name, s.buffers) for s in seq.steps]
-        self.expands = self.expanded(
-            self.designs, traced=seq.traced, reconfigure=full_elf.reconfigure
-        )
+        # A full ELF expands its loads, configuring the array at every call,
+        # where it runs more than one design: one design is configured by the
+        # first dispatch alone, as the firmware skips an unexpanded load of
+        # the PDI it has loaded, unless the build is traced or asks to
+        # reconfigure.
+        self.expands = len(self.designs) > 1 or seq.traced or full_elf.reconfigure
         self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
         self.commands = full_elf.commands
@@ -81,25 +84,10 @@ class Composition:
                 raise ValueError(f"coresident names designs no step runs: {strays}")
             self.packing = Packing(groups)
 
-    @staticmethod
-    def expanded(
-        designs: Collection[Hashable],
-        *,
-        traced: bool = False,
-        reconfigure: bool = False,
-    ) -> bool:
-        """Whether a full ELF of ``designs`` expands its loads, configuring
-        the array at every call. One design is configured by the first
-        dispatch alone, as the firmware skips an unexpanded load of the PDI
-        it has loaded, unless the build is traced or asks to ``reconfigure``.
-        """
-        return len(designs) > 1 or traced or reconfigure
-
     @property
     def identity(self) -> str:
         """What ``text()`` is a function of, so a cache hit costs a hash
-        rather than a composition. ``expands`` reaches the key through the link's
-        flags.
+        rather than a composition.
         """
         h = hashlib.sha256()
         for name, design in self.designs.items():
@@ -112,6 +100,7 @@ class Composition:
             self.packing,
             # Absent when unsplit, so every one-command image keeps its key.
             *([self.commands] if self.commands else []),
+            *(["expands"] if self.expands else []),
         )
         h.update(repr(state).encode())
         return h.hexdigest()[:24]
@@ -232,6 +221,7 @@ class Composition:
         module = Program.compose(
             [*configurations.values(), main],
             entry=entries[0],
+            expand_load_pdis=self.expands or None,
         ).resolve_program()
         return str(module)
 
