@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 from aie.dialects.aie import DMAChannelDir, WireBundle
-from aie.dialects.aiex import _shim_dims
+from aie.dialects.aiex import shim_dims
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     DmaEndpoint,
@@ -810,7 +810,7 @@ class Copy(Operator):
                     f"Copy: {tap} does not fit one descriptor per channel, which a "
                     f"bounded axis needs (its size is patched in place)"
                 )
-            _, sizes, _ = _shim_dims(placed)
+            _, sizes, _ = shim_dims(placed)
             out.append((placed, prod(sizes[(1 if on_d2 else dim) + 1 :])))
         return out
 

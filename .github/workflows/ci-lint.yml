@@ -63,7 +63,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: hunhoffe/mlir-aie
-          ref: eac7fd99c96afdef9cef0ffa7870ead6d8a28f1a
+          ref: f111056fcfab285a6467e51b902a73e2ca65a017
           path: mlir-aie
           sparse-checkout: python
       - name: Install dependencies
