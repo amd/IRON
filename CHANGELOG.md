@@ -21,6 +21,7 @@ public API adds its entry under Unreleased.
   run of rows, from a state to the state after its last valid row.
 - Application `granite_hybrid` (Granite 4.0-H, dense and MoE, on the host),
   judged by device-free toy goldens.
+- Application `resnet` (ResNet-50), judged by a device-free toy golden.
 - Applications `smollm3` (SmolLM3 3B), `ministral3` (Ministral 3's text
   decoder, on drawn weights) and `qwen3_moe` (Qwen3-30B-A3B, on the host),
   each judged by a device-free toy golden.

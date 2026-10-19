@@ -125,6 +125,7 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | LFM2-1.2B | [lfm2](./iron/applications/lfm2/) | `lfm2-1.2b` |
 | SmolVLM-256M-Instruct | [idefics3](./iron/applications/idefics3/) | `smolvlm-256m-instruct` |
 | EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |
+| ResNet-50 | [resnet](./iron/applications/resnet/) | `resnet-50` |
 | YOLOX-Nano | [yolox](./iron/applications/yolox/) | `yolox-nano` |
 | Whisper (toy shape) | [whisper](./iron/applications/whisper/) | none: drawn weights |
 | Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) |
