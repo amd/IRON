@@ -85,10 +85,10 @@ public API adds its entry under Unreleased.
 - `KVCache(c, window=None)`: the cache attends within `window` positions
   before a query, as `MHA` counts them (Hugging Face's `sliding_window`
   minus one).
-- Per-layer RoPE: each `DecoderLayer` turns q and k by the rows of the
-  `Rope` it holds (the model's `rotary_emb` unless a model sets another,
-  None for none), copied once a call per distinct `Rope` into
-  `Call.ropes`. `Rope(c, q_scale=None)` scales a table of q's own,
+- Per-layer RoPE: each `DecoderLayer` turns q and k by the rows its
+  `rope` keys in `Call.ropes` (the model's `rotary_emb`, copied once a
+  call per distinct `Rope`, unless a model sets another key; None for
+  none). `Rope(c, q_scale=None)` scales a table of q's own,
   and `Rope.rows` and `Attention`'s angles are a (q, k) pair.
 - `Attention(norms="v")` RMS-norms each head of v, unweighted; a layer
   that holds another layer's `KVCache` and sets `k_proj` and `v_proj` to
@@ -304,9 +304,9 @@ public API adds its entry under Unreleased.
   each holding a `CrossCache`, in place of `cross_keys` and `cross_values`.
   Whisper and SmolVLM (its text model and vision tower) are built from
   modules.
-- `SmolVLMTextConfig` reads `rope_scaling`, `sliding_window` and
-  `use_sliding_window` under `text_config`, so a nested `rope_scaling` is
-  refused at load and a nested window is honoured.
+- `SmolVLMTextConfig` reads every field under `text_config`
+  (`Config.json_prefix`): a nested `rope_scaling` is refused at load, and
+  a nested window is honoured.
 - `YOLOXNano` is written in `iron.functional`'s CNN functions on modules
   that load the checkpoint's tree, and returns each scale's predictions as
   `(H, W, 144)`, not `(H, W * 144)`. SmolVLM's patch embed is `F.conv2d`.

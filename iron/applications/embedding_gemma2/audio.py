@@ -94,7 +94,7 @@ class ConformerAttention(iron.Graph):
         self.timing, self.dims = c.timing(), (H, D, c.window, c.band)
         self.logit_cap = c.logit_cap
         # The tower's keys, values, scores and probabilities, every layer's.
-        self.buffers = None
+        self._buffers = None
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         """``Graph.load_state_dict``, then the derived tensors.
@@ -130,7 +130,7 @@ class ConformerAttention(iron.Graph):
         relative-position terms keys of the same GEMM.
         """
         T, (H, D, W, B) = h.shape[0], self.dims
-        keys, values, scores, probs = self.buffers
+        keys, values, scores, probs = self._buffers
         K = keys.shape[1]
         h = self.q_proj.clamp(h)
         q = self.q_proj.project(h) * self.q_scale
@@ -196,11 +196,8 @@ class LightConv(iron.Graph):
     def body(self, x):
         start = self.linear_start
         h = start.clamp(self.pre_layer_norm(x))
-        glu, E = start.linear.weight, self.linear_end.linear.out_features
-        a, b = (
-            start.output(F.linear(h, w, precision=start.linear.precision))
-            for w in (glu[:E], glu[E:])
-        )
+        E = self.linear_end.linear.out_features
+        a, b = (start.output(y) for y in start.linear.split(h, E, E))
         h = DepthwiseConv1d.step(a * Sigmoid.step(b), self.planes)
         return x + self.linear_end(F.silu(self.conv_norm(h)))
 
@@ -304,7 +301,7 @@ class AudioTower(Tower):
         self.scores = iron.state((H, T, K), dtype=np.float32)
         self.probs = iron.state((H, T, K))
         for layer in self.layers:
-            layer.self_attn.buffers = self.keys, self.values, self.scores, self.probs
+            layer.self_attn._buffers = self.keys, self.values, self.scores, self.probs
 
     def logmel(self, wave, frames):
         """Write the log-mel features of `wave`'s valid frames to
