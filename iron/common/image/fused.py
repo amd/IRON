@@ -148,27 +148,29 @@ class XclbinChain:
                 ),
             )
         )
-        # One design alone is the xclbin the operator compiled alone builds,
-        # its kernel named by default.
+        # One design alone is the xclbin the operator compiled alone builds.
         named = len(chained) > 1
+
+        def kernel(xclbin, design, name="MLIR_AIE") -> NPUKernel:
+            return NPUKernel(
+                xclbin,
+                design.get_cache_entry().insts,
+                kernel_name=name,
+                dispatch_params=design.dispatch_params,
+                dispatch_lib_path=design.get_dispatch_lib_path(),
+            )
 
         links = []
         for op, config in zip(designs, configs):
             if config is None:
                 own = OperatorDesign(op, full_elf=False).compile(insts_only=True)
-                kernel = op.external.with_instructions(own.get_cache_entry().insts)
-                links.append(Link(own, None, op.name, kernel))
+                shipped = op.external.with_instructions(own.get_cache_entry().insts)
+                links.append(Link(own, None, op.name, shipped))
                 continue
             if config is op:
                 design, image, label = built[id(op)]
-                kernel = NPUKernel(
-                    image,
-                    design.get_cache_entry().insts,
-                    **({"kernel_name": label} if named else {}),
-                    dispatch_params=design.dispatch_params,
-                    dispatch_lib_path=design.get_dispatch_lib_path(),
-                )
-                links.append(Link(design, design, label if named else op.name, kernel))
+                name = label if named else op.name
+                links.append(Link(design, design, name, kernel(image, design, label)))
                 continue
             image = OperatorDesign(config, full_elf=False).compile()
             # On an xclbin a per-call value is a dispatch-time scalar: the
@@ -176,13 +178,8 @@ class XclbinChain:
             own = OperatorDesign(op, full_elf=False).compile(
                 image=None if op.values else image, insts_only=not op.values
             )
-            kernel = NPUKernel(
-                image.get_cache_entry().xclbin,
-                own.get_cache_entry().insts,
-                dispatch_params=own.dispatch_params,
-                dispatch_lib_path=own.get_dispatch_lib_path(),
-            )
-            links.append(Link(own, image, config.name, kernel))
+            xclbin = image.get_cache_entry().xclbin
+            links.append(Link(own, image, config.name, kernel(xclbin, own)))
         for op in seq.unique_operators():
             self.links[id(op)] = links[design_of[id(op)]]
         last = built[id(chained[-1])][1] if chained else links[-1].kernel.xclbin_path
