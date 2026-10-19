@@ -12,6 +12,8 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `CausalLM.rope_start(n, begin)`: the RoPE table row a prompt chunk reads
+  first, which a caller writing `rope_start` itself passes.
 - `iron.lm.checkpoint.subtree(tree, **modules)`: a tree of a checkpoint's
   modules at new names, as a model loads part of a checkpoint.
 - `Session(model)`: one conversation over a `CausalLM`'s loaded versions,
