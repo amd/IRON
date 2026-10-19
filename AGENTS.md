@@ -318,7 +318,7 @@ programs and their autotuning live at the operator and kernel layer, where
 tunables and profiles already do that job.
 
 - `config.py`: `DecoderConfig`, a model's shape from the checkpoint's
-  `config.json`, with `attention(i)` and `layer(i)` giving layer `i`'s parts.
+  `config.json`.
 - `checkpoint.py`: `Checkpoint`, a mapped `.safetensors` (sharded through
   its index, or a PyTorch checkpoint read without torch);
   `tree("read" | "random" | "unread")` is the weights by the checkpoint's

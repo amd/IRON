@@ -74,16 +74,16 @@ def test_from_checkpoint_takes_either_the_file_or_its_directory():
     ids=lambda cls: f"{cls.__module__}.{cls.__name__}",
 )
 def test_from_checkpoint_reads_each_key_and_no_not_json_field(tmp_path, cls):
-    """Every field is read at its key, its own name unless it names another,
-    and one the file leaves null (each converted one here) keeps its
-    default; a ``not_json`` field is neither read nor written, even where
-    the file names it.
+    """Every field is read at its key, its own name under the class's
+    ``json_prefix`` unless it names another, and one the file leaves null
+    (each converted one here) keeps its default; a ``not_json`` field is
+    neither read nor written, even where the file names it.
     """
     fields = dataclasses.fields(cls)
-    keys = {f.metadata.get("json", f.name) for f in fields}
+    keys = {f.metadata.get("json", cls.json_prefix + f.name) for f in fields}
     data, expected, unread = {}, {}, {}
     for f in fields:
-        key = f.metadata.get("json", f.name)
+        key = f.metadata.get("json", cls.json_prefix + f.name)
         if key is None:
             if f.name not in keys:
                 unread[f.name] = 7

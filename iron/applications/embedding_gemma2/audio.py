@@ -32,7 +32,9 @@ class Clipped(iron.Graph):
     """A checkpoint's clipped linear: clamp, project by ``linear``, clamp."""
 
     def __init__(self, in_features: int, out_features: int):
-        self.linear = Linear(in_features, out_features, bias=False)
+        self.linear = Linear(
+            in_features, out_features, bias=False, precision=Precision.HIGHEST
+        )
         bound = partial(iron.param, dtype=np.float32)
         self.input_min, self.input_max = bound(), bound()
         self.output_min, self.output_max = bound(), bound()
@@ -40,11 +42,12 @@ class Clipped(iron.Graph):
     def clamp(self, x):
         return Clamp.step(x, low=float(self.input_min), high=float(self.input_max))
 
-    def project(self, x, weight: np.ndarray | None = None):
-        """``x``, already clamped, projected and clamped."""
-        weight = self.linear.weight if weight is None else weight
-        y = F.linear(x, weight, precision=Precision.HIGHEST)
+    def output(self, y):
         return Clamp.step(y, low=float(self.output_min), high=float(self.output_max))
+
+    def project(self, x):
+        """``x``, already clamped, projected and clamped."""
+        return self.output(self.linear(x))
 
     def body(self, x):
         return self.project(self.clamp(x))
@@ -60,22 +63,22 @@ class FeedForward(iron.Graph):
         self.pre_layer_norm = RMSNorm(E, c.eps)
         self.ffw_layer_1 = Clipped(E, M)
         self.ffw_layer_2 = Clipped(M, E)
-        self.post_layer_norm = SimpleNamespace(weight=iron.param(E))
-        self.residual, self.eps = c.residual_weight, c.eps
+        self.post_layer_norm = RMSNorm(E, c.eps)
+        self.residual = c.residual_weight
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
-        self.post_norm = self.post_layer_norm.weight * bfloat16(self.residual)
+        norm = self.post_layer_norm
+        norm.weight = norm.weight * bfloat16(self.residual)
 
     def body(self, x):
         h = self.ffw_layer_2(F.silu(self.ffw_layer_1(self.pre_layer_norm(x))))
-        return x + F.rms_norm(h, h.shape[-1:], self.post_norm, self.eps)
+        return x + self.post_layer_norm(h)
 
 
 class ConformerAttention(iron.Graph):
-    """A conformer's attention weights, which ``AudioTower.attention``
-    runs, and what it computes from them as they load: the query scale and
-    the relative-position keys.
+    """A conformer's attention, and what it computes from its weights as
+    they load: the query scale and the relative-position keys.
     """
 
     def __init__(self, c: AudioConfig):
@@ -89,6 +92,9 @@ class ConformerAttention(iron.Graph):
         )
         self.per_dim_scale = iron.param(D, dtype=np.float32)
         self.timing, self.dims = c.timing(), (H, D, c.window, c.band)
+        self.logit_cap = c.logit_cap
+        # The tower's keys, values, scores and probabilities, every layer's.
+        self.buffers = None
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         """``Graph.load_state_dict``, then the derived tensors.
@@ -118,6 +124,54 @@ class ConformerAttention(iron.Graph):
         self.q_scale = np.tile(softplus * (q_scale * k_scale), H).astype(bfloat16)
         self.relative = band.astype(bfloat16)
 
+    def body(self, h, tokens):
+        """Attention over ``h``, its first ``tokens`` rows valid: one GEMM
+        a head over every key, of which each query's band is gathered, its
+        relative-position terms keys of the same GEMM.
+        """
+        T, (H, D, W, B) = h.shape[0], self.dims
+        keys, values, scores, probs = self.buffers
+        K = keys.shape[1]
+        h = self.q_proj.clamp(h)
+        q = self.q_proj.project(h) * self.q_scale
+        k, val = self.k_proj.project(h), self.v_proj.project(h)
+        keys[:, W - 1 : W - 1 + T] = k.reshape(T, H, D).transpose(1, 0, 2)
+        R = T + W - 1 + (T + W - 1) % 2
+        keys[:, R : R + 2 * B] = self.relative
+        values[:, W - 1 : W - 1 + T] = val.reshape(T, H, D).transpose(1, 0, 2)
+        q = Copy.step(q.reshape(T, H, D).transpose(1, 0, 2))
+        # Over every key: those past the valid ones are stale but finite, as
+        # only bounded copies write them.
+        for i in range(H):
+            GEMM.step(
+                q[i],
+                keys[i],
+                scores[i],
+                b_col_maj=True,
+                output_dtype=np.float32,
+                precision=Precision.HIGHEST,
+            )
+        # Query t's band starts at the even column of t and t - 1, its
+        # relative terms at R or R + band.
+        pairs = [H, T // 2, 2, B]
+        band = TensorAccessPattern((H, T, K), 0, pairs, [T * K, 2 * K + 2, K, 1])
+        relative = TensorAccessPattern((H, T, K), R, pairs, [T * K, 2 * K, K + B, 1])
+        logits = Copy.step(scores, src=band, dtype=np.float32).reshape(H * T, B)
+        position = Copy.step(scores, src=relative, dtype=np.float32).reshape(H * T, B)
+        probabilities = Softmax.step(
+            logits,
+            addend=position,
+            soft_cap=self.logit_cap,
+            input_dtype=np.float32,
+            window=W,
+            period=T,
+        )
+        Copy.step(probabilities, probs, dst=band)
+        for i in range(H):
+            GEMM.step(probs[i, :tokens], values[i], q[i], precision=Precision.HIGHEST)
+        o = Copy.step(q.transpose(1, 0, 2)).reshape(T, H * D)
+        return self.post(o)
+
 
 class LightConv(iron.Graph):
     """A conformer's light convolution: ``x`` plus a GLU of its clipped
@@ -143,13 +197,18 @@ class LightConv(iron.Graph):
         start = self.linear_start
         h = start.clamp(self.pre_layer_norm(x))
         glu, E = start.linear.weight, self.linear_end.linear.out_features
-        a, b = start.project(h, glu[:E]), start.project(h, glu[E:])
+        a, b = (
+            start.output(F.linear(h, w, precision=start.linear.precision))
+            for w in (glu[:E], glu[E:])
+        )
         h = DepthwiseConv1d.step(a * Sigmoid.step(b), self.planes)
         return x + self.linear_end(F.silu(self.conv_norm(h)))
 
 
 class AudioLayer(iron.Graph):
-    """Conformer layer ``i``'s parts, which ``AudioTower.layer`` runs."""
+    """Conformer layer ``i``: a feed-forward half step, attention, the light
+    convolution and a second half step.
+    """
 
     def __init__(self, c: AudioConfig, i: int):
         E = c.hidden_size
@@ -160,6 +219,12 @@ class AudioLayer(iron.Graph):
         self.lconv1d = LightConv(c)
         self.feed_forward2 = FeedForward(c)
         self.norm_out = RMSNorm(E, c.eps)
+
+    def body(self, x, step):
+        x = self.feed_forward1(x)
+        a = self.self_attn(self.norm_pre_attn(x), step.rows)
+        x = self.lconv1d(x + self.norm_post_attn(a))
+        return self.norm_out(self.feed_forward2(x))
 
 
 class AudioTower(Tower):
@@ -202,7 +267,7 @@ class AudioTower(Tower):
         if c.frame != 2 * c.hop:
             raise ValueError(f"a frame of {c.frame} samples is not two hops")
         super().__init__(config, c.max_tokens, c.max_tokens)
-        self.load_layers(weights, "audio_tower.layers.", None)
+        self.load_layers(weights, "audio_tower.layers.")
         T = c.max_tokens
         H, D, W, B = c.num_attention_heads, c.head_dim, c.window, c.band
         C0, _ = c.channels
@@ -231,13 +296,15 @@ class AudioTower(Tower):
         self.zero = np.zeros((1, self.slots), bfloat16)
         # The keys' rows: the `W - 1` before the first, the T keys, then from
         # an even row the relative-position rows twice, the second a row on.
-        self.width = K = -(-(T + W + 2 * B) // 128) * 128
+        K = -(-(T + W + 2 * B) // 128) * 128
         self.keys = iron.state((H, K, D))
         self.values = iron.state((H, K, D))
         # f32: the scores' chain into Softmax keeps them off bf16's 0.25 ulp
         # at |logit| >= 32 (eg2-audio-bug.md).
         self.scores = iron.state((H, T, K), dtype=np.float32)
         self.probs = iron.state((H, T, K))
+        for layer in self.layers:
+            layer.self_attn.buffers = self.keys, self.values, self.scores, self.probs
 
     def logmel(self, wave, frames):
         """Write the log-mel features of `wave`'s valid frames to
@@ -312,63 +379,8 @@ class AudioTower(Tower):
         x, angles = self.front(wave, n=n, frames=frames, tokens=tokens)
         return self.forward(x, tokens, angles)
 
-    def layer(self, step, i, w, x):
-        """The conformer layer `i`: a feed-forward half step, attention, the
-        light convolution and a second half step.
-        """
-        x = w.feed_forward1(x)
-        a = self.attention(w.self_attn, w.norm_pre_attn(x), step.rows)
-        x = w.lconv1d(x + w.norm_post_attn(a))
-        return w.norm_out(w.feed_forward2(x))
-
     def soft(self, values: dict) -> int:
         return values["tokens"]
-
-    def attention(self, a, h, tokens):
-        c = self.config
-        T, H, D, W, B = h.shape[0], c.num_attention_heads, c.head_dim, c.window, c.band
-        K = self.width
-        keys, values = self.keys, self.values
-        scores, probs = self.scores, self.probs
-        h = a.q_proj.clamp(h)
-        q = a.q_proj.project(h) * a.q_scale
-        k, val = a.k_proj.project(h), a.v_proj.project(h)
-        keys[:, W - 1 : W - 1 + T] = k.reshape(T, H, D).transpose(1, 0, 2)
-        R = T + W - 1 + (T + W - 1) % 2
-        keys[:, R : R + 2 * B] = a.relative
-        values[:, W - 1 : W - 1 + T] = val.reshape(T, H, D).transpose(1, 0, 2)
-        q = Copy.step(q.reshape(T, H, D).transpose(1, 0, 2))
-        # Over every key: those past the valid ones are stale but finite, as
-        # only bounded copies write them.
-        for i in range(H):
-            GEMM.step(
-                q[i],
-                keys[i],
-                scores[i],
-                b_col_maj=True,
-                output_dtype=np.float32,
-                precision=Precision.HIGHEST,
-            )
-        # Query t's band starts at the even column of t and t - 1, its
-        # relative terms at R or R + band.
-        pairs = [H, T // 2, 2, B]
-        band = TensorAccessPattern((H, T, K), 0, pairs, [T * K, 2 * K + 2, K, 1])
-        relative = TensorAccessPattern((H, T, K), R, pairs, [T * K, 2 * K, K + B, 1])
-        logits = Copy.step(scores, src=band, dtype=np.float32).reshape(H * T, B)
-        position = Copy.step(scores, src=relative, dtype=np.float32).reshape(H * T, B)
-        probabilities = Softmax.step(
-            logits,
-            addend=position,
-            soft_cap=c.logit_cap,
-            input_dtype=np.float32,
-            window=W,
-            period=T,
-        )
-        Copy.step(probabilities, probs, dst=band)
-        for i in range(H):
-            GEMM.step(probs[i, :tokens], values[i], q[i], precision=Precision.HIGHEST)
-        o = Copy.step(q.transpose(1, 0, 2)).reshape(T, H * D)
-        return a.post(o)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, `max_tokens` soft tokens."""

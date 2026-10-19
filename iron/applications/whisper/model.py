@@ -80,9 +80,8 @@ class WhisperEncoderConfig(Config):
     ``config.json`` by itself.
     """
 
-    # Every projection biased, every head its own (``Attention``, ``MLP``).
+    # Every projection biased (``Attention``, ``MLP``).
     attention_bias = mlp_bias = True
-    rotary_dim = None
 
     hidden_size: int
     num_hidden_layers: int
@@ -198,6 +197,8 @@ class WhisperDecoderLayer(CrossDecoderLayer):
     ``MLP`` biased, and ``WhisperAttention``s.
     """
 
+    norm = LayerNorm
+
     def __init__(self, c: WhisperConfig, i: int):
         super().__init__(
             c,
@@ -206,10 +207,6 @@ class WhisperDecoderLayer(CrossDecoderLayer):
             MLP(c),
             WhisperCrossAttention(c, i, o_bias=True),
         )
-        E = c.hidden_size
-        self.input_layernorm = LayerNorm(E)
-        self.post_attention_layernorm = LayerNorm(E)
-        self.encoder_attn_layer_norm = LayerNorm(E)
 
 
 class WhisperDecoder(Decoder):

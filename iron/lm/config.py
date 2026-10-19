@@ -77,6 +77,13 @@ class Config:
 
     # Every projection's in iron.lm's blocks; None is ``F.linear``'s.
     precision = None
+    # Unbiased projections, RoPE over whole heads, unless a model says.
+    attention_bias = mlp_bias = False
+    rotary_dim = None
+    # The object of config.json a field read by its own name is in
+    # ("text_config." for a model nested there); a ``metadata["json"]`` path
+    # is from the file's root.
+    json_prefix = ""
 
     eps: float = dataclasses.field(
         default=1e-6, kw_only=True, metadata={"json": "rms_norm_eps"}
@@ -113,7 +120,7 @@ class Config:
         """
         kwargs, missing = {}, []
         for f in dataclasses.fields(cls):
-            key = f.metadata.get("json", f.name)
+            key = f.metadata.get("json", cls.json_prefix + f.name)
             if key is None:
                 continue
             value = _dotted(data, key)
@@ -136,7 +143,8 @@ class Config:
         """
         out = {}
         for f in dataclasses.fields(self):
-            key, value = f.metadata.get("json", f.name), getattr(self, f.name)
+            key = f.metadata.get("json", self.json_prefix + f.name)
+            value = getattr(self, f.name)
             if hasattr(value, "to_json"):
                 value = value.to_json()
             if key is None or not isinstance(

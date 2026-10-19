@@ -7,7 +7,7 @@ rows in, attended bidirectionally, compiled once for every length.
 ``Encoder`` looks up token ids' rows and runs ``forward`` over them: each
 layer, a ``layer_class`` module, the final norm (``final_norm``, none by
 default), ``pool`` and ``head``. A ``Tower`` is an encoder
-whose rows come from a front end, ``front``, and whose output is soft tokens
+whose rows come from a front end and whose output is soft tokens
 in a text model's space.
 """
 
@@ -64,14 +64,14 @@ class Encoder(Model):
         # The norm module after the last layer.
         self.final_norm = None
 
-    def load_layers(self, tree, layers: str, norm: str | None) -> None:
+    def load_layers(self, tree, layers: str, norm: str = "") -> None:
         """Layer ``i`` from ``tree``, renamed by ``renames``, at
-        ``{layers}{i}.``, then ``final_norm`` at ``norm`` (None: none).
+        ``{layers}{i}.``, then ``final_norm``, where there is one, at ``norm``.
         """
         tree = renamed(tree, self.renames)
         for i, layer in enumerate(self.layers):
             layer.load_state_dict(tree, path=f"{layers}{i}.")
-        if norm is not None:
+        if self.final_norm is not None:
             self.final_norm.load_state_dict(tree, path=norm)
 
     def lookup(self, ids):
@@ -164,9 +164,9 @@ class Tower(Encoder):
     and whose output is soft tokens in a text model's space, ``text_dim``
     wide, which take a placeholder's places.
 
-    A subclass gives ``front``, ``inputs`` and ``shapes``, and a
-    ``body`` naming its input and per-call values that runs ``forward`` on
-    what ``front`` gives.
+    A subclass gives ``inputs`` and ``shapes``, and a ``body`` naming its
+    input and per-call values that runs ``forward`` on the rows its front
+    end gives.
 
     Args:
         config: The tower's shape; ``soft_tokens`` reads its ``text_dim``.
@@ -178,12 +178,6 @@ class Tower(Encoder):
     def __init__(self, config, max_tokens: int, soft_rows: int):
         super().__init__(config, max_tokens)
         self.soft_rows = soft_rows
-
-    def front(self, *inputs, **values):
-        """The rows the layers take, bounded, and the angles they rotate by
-        (``EncodeStep.ropes``).
-        """
-        raise NotImplementedError(f"{type(self).__name__} defines no front()")
 
     def inputs(self, *raw) -> tuple[np.ndarray, dict]:
         """A call's input buffer and per-call values for ``raw``."""

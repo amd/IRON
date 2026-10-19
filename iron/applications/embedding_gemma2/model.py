@@ -230,8 +230,7 @@ class EmbeddingGemma(Encoder):
         of ``mrl_dims``.
         """
         ids, values = self.inputs(tokens)
-        rows = self(ids, **values).numpy().reshape(len(self.config.mrl_dims), -1)
-        return np.asarray(rows[self.config.mrl_dims.index(dims), :dims], np.float32)
+        return self.config.truncated(self(ids, **values).numpy(), dims)
 
     def embed(self, text: str, task: str, dims: int = 768) -> np.ndarray:
         """The embedding of `text` for `task`, its first `dims` renormalized."""
@@ -282,8 +281,7 @@ class Multimodal(lm.Multimodal):
         if image is not None:
             vision = self.towers[c.image_token].config
             raw[c.image_token] = (image, vision.image_tokens)
-        rows = self.run(tokens, raw).numpy().reshape(len(c.mrl_dims), -1)
-        return np.asarray(rows[c.mrl_dims.index(dims), :dims], np.float32)
+        return c.truncated(self.run(tokens, raw).numpy(), dims)
 
     def embed(
         self, text: str, task: str, dims: int = 768, audio=None, image=None

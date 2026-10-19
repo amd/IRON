@@ -36,9 +36,8 @@ class VisionConfig(Config):
     ``layer_norm_eps``, which transformers' uses.
     """
 
-    # Every projection biased, every head its own (``Attention``, ``MLP``).
+    # Every projection biased (``Attention``, ``MLP``).
     attention_bias = mlp_bias = True
-    rotary_dim = None
 
     hidden_size: int = dataclasses.field(metadata={"json": "vision_config.hidden_size"})
     num_hidden_layers: int = dataclasses.field(

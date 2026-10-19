@@ -22,42 +22,26 @@ PROFILES = Path(__file__).with_name("profiles")
 
 @dataclasses.dataclass(frozen=True)
 class Config(lm.Config):
-    # Unbiased projections at HIGHEST, RoPE over whole heads (``Attention``,
-    # ``GatedMLP``).
-    attention_bias = mlp_bias = False
-    rotary_dim = None
+    # Every projection at HIGHEST (``Attention``, ``GatedMLP``).
     precision = Precision.HIGHEST
+    json_prefix = "text_config."
 
-    vocab_size: int = dataclasses.field(
-        default=262144, metadata={"json": "text_config.vocab_size"}
-    )
-    hidden_size: int = dataclasses.field(
-        default=512, metadata={"json": "text_config.hidden_size"}
-    )
-    num_hidden_layers: int = dataclasses.field(
-        default=24, metadata={"json": "text_config.num_hidden_layers"}
-    )
-    num_attention_heads: int = dataclasses.field(
-        default=4, metadata={"json": "text_config.num_attention_heads"}
-    )
-    intermediate_size: int = dataclasses.field(
-        default=2048, metadata={"json": "text_config.intermediate_size"}
-    )
+    vocab_size: int = 262144
+    hidden_size: int = 512
+    num_hidden_layers: int = 24
+    num_attention_heads: int = 4
+    intermediate_size: int = 2048
     # A sliding layer's KV groups, head size and RoPE base; a global layer's
     # are its own.
-    num_key_value_heads: int = dataclasses.field(
-        default=2, metadata={"json": "text_config.num_key_value_heads"}
-    )
-    head_dim: int = dataclasses.field(
-        default=256, metadata={"json": "text_config.head_dim"}
-    )
+    num_key_value_heads: int = 2
+    head_dim: int = 256
     rope_theta: float = dataclasses.field(
         default=10000.0,
         metadata={"json": "text_config.rope_parameters.sliding_attention.rope_theta"},
     )
     layer_types: tuple[str, ...] = dataclasses.field(
         default=(("sliding_attention",) * 5 + ("full_attention",)) * 4,
-        metadata={"json": "text_config.layer_types", "convert": tuple},
+        metadata={"convert": tuple},
     )
     global_kv_groups: int = dataclasses.field(
         default=1,
@@ -70,9 +54,7 @@ class Config(lm.Config):
         default=1000000.0,
         metadata={"json": "text_config.rope_parameters.full_attention.rope_theta"},
     )
-    sliding_window: int = dataclasses.field(
-        default=512, metadata={"json": "text_config.sliding_window"}
-    )
+    sliding_window: int = 512
     ple_dim: int = dataclasses.field(
         default=512, metadata={"json": "text_config.hidden_size_per_layer_input"}
     )
@@ -118,6 +100,13 @@ class Config(lm.Config):
     max_tokens: int = lm.not_json(2048)
     # An MHA query block: the mean over the sequence is one query, a block.
     block: int = lm.not_json(64)
+
+    def truncated(self, out, dims: int) -> np.ndarray:
+        """The ``dims`` truncation, one of ``mrl_dims``, of a call's
+        embeddings ``out``, float32.
+        """
+        rows = np.asarray(out).reshape(len(self.mrl_dims), -1)
+        return np.asarray(rows[self.mrl_dims.index(dims), :dims], np.float32)
 
     def heads(self, i: int) -> tuple[int, int, float]:
         """Layer ``i``'s KV groups, head size and RoPE base."""
@@ -210,9 +199,7 @@ class AudioConfig(lm.Config):
 
 @dataclasses.dataclass(frozen=True)
 class VisionConfig(lm.Config):
-    # As the text encoder's, every head its own.
-    attention_bias = mlp_bias = False
-    rotary_dim = None
+    # As the text encoder's.
     precision = Precision.HIGHEST
 
     hidden_size: int = dataclasses.field(

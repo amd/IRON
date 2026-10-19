@@ -86,7 +86,7 @@ class VisionTower(Tower):
         window = c.pool**2
         tokens = -(-(c.patches // window) // c.rows) * c.rows
         super().__init__(config, c.patches, tokens)
-        self.load_layers(weights, "vision_tower.encoder.layers.", None)
+        self.load_layers(weights, "vision_tower.encoder.layers.")
         self.processor = ImagePatches(
             c.patches,
             c.largest,
@@ -135,25 +135,6 @@ class VisionTower(Tower):
         for j in range(c.patches // window):
             pool[j, j * window : (j + 1) * window] = 1
         self.pooling = iron.weight(pool)
-
-    def front(self, rgb, *, n, height, width, out_height, out_width, hk, wk, walked):
-        """The rows of the image ``rgb``'s ``n`` patches, ``height`` by
-        ``width`` pixels resized to ``out_height`` by ``out_width``, ``hk``
-        by ``wk`` windows, with their position embeddings, and each patch's
-        angles; ``walked`` is the rows the walks of ``groups`` move.
-        """
-        pixels, _, _ = self.processor(
-            rgb,
-            height=height,
-            width=width,
-            out_height=out_height,
-            out_width=out_width,
-        )
-        v = self.vision_tower
-        x = AXPY.step(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
-        patch = v.patch_embedder.input_proj.weight
-        h = F.linear(x, patch, precision=Precision.HIGHEST)
-        return self.window_positions(h, n=n, hk=hk, wk=wk, walked=walked)
 
     def window_positions(self, h, *, n, hk, wk, walked):
         """``h`` plus each patch's x and y position embeddings, and its
@@ -243,18 +224,18 @@ class VisionTower(Tower):
         rounded up to whole `rows`; the first `n // pool ** 2` are the
         image's, the rest zero. `walked` is the rows its windows' walks move.
         """
-        x, angles = self.front(
+        pixels, _, _ = self.processor(
             rgb,
-            n=n,
             height=height,
             width=width,
             out_height=out_height,
             out_width=out_width,
-            hk=hk,
-            wk=wk,
-            walked=walked,
         )
-        return self.forward(x, n, angles)
+        x = AXPY.step(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
+        patch = self.vision_tower.patch_embedder.input_proj.weight
+        h = F.linear(x, patch, precision=Precision.HIGHEST)
+        h, angles = self.window_positions(h, n=n, hk=hk, wk=wk, walked=walked)
+        return self.forward(h, n, angles)
 
     def soft(self, values: dict) -> int:
         return values["n"] // self.config.pool**2

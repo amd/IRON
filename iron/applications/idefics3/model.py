@@ -24,7 +24,6 @@ from pathlib import Path
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal, not_json
 from iron.lm.checkpoint import subtree
-from iron.lm.config import RopeScaling, unscaled
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 
 
@@ -34,28 +33,8 @@ class SmolVLMTextConfig(DecoderConfig):
     ``text_config``.
     """
 
-    vocab_size: int = dataclasses.field(metadata={"json": "text_config.vocab_size"})
-    hidden_size: int = dataclasses.field(metadata={"json": "text_config.hidden_size"})
-    num_hidden_layers: int = dataclasses.field(
-        metadata={"json": "text_config.num_hidden_layers"}
-    )
-    num_attention_heads: int = dataclasses.field(
-        metadata={"json": "text_config.num_attention_heads"}
-    )
-    num_key_value_heads: int = dataclasses.field(
-        metadata={"json": "text_config.num_key_value_heads"}
-    )
-    head_dim: int | None = dataclasses.field(
-        default=None, kw_only=True, metadata={"json": "text_config.head_dim"}
-    )
-    intermediate_size: int = dataclasses.field(
-        metadata={"json": "text_config.intermediate_size"}
-    )
-    rope_theta: float = dataclasses.field(metadata={"json": "text_config.rope_theta"})
-    rope_scaling: RopeScaling | None = dataclasses.field(
-        default=None,
-        metadata={"json": "text_config.rope_scaling", "convert": unscaled},
-    )
+    json_prefix = "text_config."
+
     eps: float = dataclasses.field(
         default=1e-5, kw_only=True, metadata={"json": "text_config.rms_norm_eps"}
     )

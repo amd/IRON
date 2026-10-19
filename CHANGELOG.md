@@ -122,11 +122,6 @@ public API adds its entry under Unreleased.
 - Handle arithmetic in graph bodies: `x + y` and `x * y` record an
   elementwise step, or a rowwise one when a row meets a matrix, in either
   order.
-- Model parts in `iron.lm`: `Attention`, `MLP`, `Norm`, `DecoderLayer` and
-  `CrossDecoderLayer`, which each config's `layer()` returns. Every part takes
-  its weights first, as in `Norm(w, x)`.
-- `Model.sanitize(w)`, which renames a checkpoint's modules to the names the
-  parts read, once at load.
 - `iron.lm.TokenizerJson(path)`, a Hugging Face `tokenizer.json` read
   through `tokenizers`: the encoding every loaded model's `Tokenizer` wraps.
 - `iron.lm.Tokenizer(encoding, bos)`, a prompt's tokenizer: called on text
@@ -158,12 +153,9 @@ public API adds its entry under Unreleased.
   construction does.
 - `field(array=True)` and `Auto(array=True)`: an operator's `Array` is
   generated from its declarations, so a field is declared once.
-- `Config.norm()`, the kind of norm a config's layers and final norm share,
-  and `Model.final_norm`, the module that final norm reads.
-- `DecoderLayer.block(x, pre, f, post)`, one residual block; each layer is
-  its list of blocks.
+- `Model.final_norm`, the module a model's final norm reads.
 - `Model.renames`, a class-level table of checkpoint module renames applied
-  before `sanitize`, `renamed(tree, renames)`, which applies one to a copy
+  at load, `renamed(tree, renames)`, which applies one to a copy
   of a tree, and `leaves(tree)`, each weight of a tree by its dotted name.
 - `Config.to_json()`, `from_checkpoint`'s inverse: the fields as
   `config.json` names them, which `HuggingFace.build` configures
@@ -287,8 +279,7 @@ public API adds its entry under Unreleased.
   the list of `Checkpoints` the model's modules hold. `Model.renames`
   keys match a run of names anywhere in a path, and a model with a
   `layer_class` renames its whole tree before loading. `Attention` turns
-  only the config's `rotary_dim` columns, and `AttentionSpec` loses
-  `rotary`.
+  only the config's `rotary_dim` columns.
 - Qwen3 and Granite name their layers, `Qwen3Layer` and `GraniteLayer`,
   in place of `Qwen3Config.attention` and `GraniteConfig.attention` and
   `layer`; Granite's sets
@@ -303,19 +294,14 @@ public API adds its entry under Unreleased.
   `use_sliding_window`, which windows only some layers.
 - `Encoder` and `Tower` build their layers from `layer_class`
   (`EncoderLayer` by default), `Encoder(config, max_tokens)` and
-  `Tower(config, max_tokens, soft_rows)`, a subclass loading them; with
-  `layer_class = None` (EmbeddingGemma 2's, until it moves onto modules)
-  they read `config.layer(i)` on the checkpoint's `layers` as before.
+  `Tower(config, max_tokens, soft_rows)`, a subclass loading them.
   `EncoderDecoder(config, weights, encoder)` builds `CrossDecoderLayer`s,
   each holding a `CrossCache`, in place of `cross_keys` and `cross_values`.
   Whisper and SmolVLM (its text model and vision tower) are built from
-  modules. The spec `MLP` is `MLPSpec`.
+  modules.
 - `SmolVLMTextConfig` reads `rope_scaling`, `sliding_window` and
   `use_sliding_window` under `text_config`, so a nested `rope_scaling` is
   refused at load and a nested window is honoured.
-- The layer descriptions a config's `layer()` returns, `iron.lm.Attention`
-  and `DecoderLayer`, are `AttentionSpec` and `DecoderLayerSpec`, leaving
-  the names to the modules that own their weights.
 - `YOLOXNano` is written in `iron.functional`'s CNN functions on modules
   that load the checkpoint's tree, and returns each scale's predictions as
   `(H, W, 144)`, not `(H, W * 144)`. SmolVLM's patch embed is `F.conv2d`.
@@ -453,11 +439,6 @@ public API adds its entry under Unreleased.
 - An operator's nested `Array` class and `array_config()`: its `build()`,
   `kernel()` and `scalars()` are on the operator itself, and `layout()`
   (mlir-aie's) is the operator as its cores see it.
-- `AttentionSpec`, `MLPSpec`, `DecoderLayerSpec`, `Norm`, `Config.norm`,
-  `Model.sanitize`, and `Encoder`'s `layer_class = None` path (its
-  `layers=` argument and `attend`); EmbeddingGemma 2's `Config.layer` and
-  `VisionConfig.layer`. A module derives a tensor in its own
-  `load_state_dict`.
 - YOLOX's `folded` and `padded`: its modules fold and pad their own weights.
 - `iron.common.field`, `Auto`, `Extent` and `Select`, and `Value(words=)`:
   mlir-aie's `param`, `tunable`, `per_call` and `Select`, and IRON's
@@ -478,9 +459,7 @@ public API adds its entry under Unreleased.
   `caches`, `attend`, `final_norm`, and `Call.angles` (a layer reads
   its own `Rope`'s rows in `Call.ropes`). Also `Encoder.attend`'s
   MHA (it is `NoCache.attend`), `EncoderDecoder.cross` and `layer`,
-  `Config.layer`, `DecoderConfig.attention` and `layer`,
-  `AttentionSpec.keys_values` and `cross`, and the spec
-  `CrossDecoderLayer`.
+  `Config.layer`, `DecoderConfig.attention` and `layer`.
 - Llama's tiktoken tokenizer, `SPECIAL_TOKENS` and `tokenizer()`: Llama
   reads its checkpoint's `tokenizer.json` like every model, and tiktoken is
   no longer a dependency.
@@ -517,7 +496,7 @@ public API adds its entry under Unreleased.
 - GEMM's `round_conv_even` and `use_scalar`, `DequantBFP`'s `tile_n`,
   `decode_layer`'s `sliding_window`, and `lm_head`'s and `prefill_attn`'s
   `trace_size`.
-- `Derived`; computed weights live in `sanitize`'s output or on the model.
+- `Derived`; a module derives a tensor in its own `load_state_dict`.
 - `CausalLM.head` and `Encoder.norm()` overrides, replaced by `final_norm`;
   `CausalLM.embed`.
 - `generate_on_host(show=)`, and its timings: it returns the tokens drawn.

@@ -15,6 +15,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
+from iron import Precision
 from iron.applications.embedding_gemma2.config import Config
 from iron.applications.embedding_gemma2.model import EmbeddingGemma, TextLayer
 from iron.lm import EncodeStep, blocks
@@ -144,6 +145,12 @@ def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
         norm(x, 4)
 
 
+def test_layer_norm_refuses_an_eps_other_than_its_kernel_s():
+    x = SimpleNamespace(shape=(4, WIDTH))
+    with pytest.raises(ValueError, match="takes no epsilon"):
+        F.layer_norm(x, WIDTH, eps=1e-6)
+
+
 def test_gelu_refuses_the_exact_form_it_has_no_operator_for():
     with pytest.raises(ValueError, match="only approximate='tanh'"):
         F.gelu(None)
@@ -151,6 +158,12 @@ def test_gelu_refuses_the_exact_form_it_has_no_operator_for():
 
 # The per-layer input's width, and the rows of the Gemma layer's test.
 PLE, ROWS = 256, 64
+# A Gemma text layer's per-layer input, its parts' shapes.
+PER_LAYER = {
+    "per_layer_input_gate": (PLE, WIDTH),
+    "per_layer_projection": (WIDTH, PLE),
+    "post_per_layer_input_norm": (WIDTH,),
+}
 
 
 class HuggingFaceGemma:
@@ -201,6 +214,36 @@ class HuggingFaceGemma:
         return (y[0] if isinstance(y, tuple) else y)[0].numpy()
 
 
+class Text(iron.Graph):
+    """EmbeddingGemma 2's text layer over the module ``w``, unrotated."""
+
+    def __init__(self, w):
+        config = Config(
+            hidden_size=WIDTH,
+            num_hidden_layers=1,
+            num_attention_heads=HEADS,
+            intermediate_size=HIDDEN,
+            layer_types=("full_attention",),
+            global_kv_groups=GROUPS,
+            global_head_dim=HEAD,
+            ple_dim=PLE,
+        )
+        self.layer = TextLayer(config, 0)
+        self.layer.rope = None
+        self.layer.load_state_dict(w)
+
+    def body(self, x, ple):
+        return self.layer(x, EncodeStep(ROWS, {}, x), ple)
+
+
+def gemma_layer(rng) -> SimpleNamespace:
+    """A Gemma text layer module drawn from ``rng``."""
+    shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN) | PER_LAYER
+    w = module(rng, shape, (*GEMMA, *PER_LAYER), bfloat16)
+    w.layer_scalar = np.array([0.75], bfloat16)
+    return w
+
+
 def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
     golden,
 ):
@@ -209,43 +252,25 @@ def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
     bf16's rounding of each of its steps of Hugging Face's own layer.
     """
     rng = np.random.default_rng(12)
-    per_layer = {
-        "per_layer_input_gate": (PLE, WIDTH),
-        "per_layer_projection": (WIDTH, PLE),
-        "post_per_layer_input_norm": (WIDTH,),
-    }
-    shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN) | per_layer
-    w = module(rng, shape, (*GEMMA, *per_layer), bfloat16)
-    w.layer_scalar = np.array([0.75], bfloat16)
+    w = gemma_layer(rng)
     x = rng.standard_normal((ROWS, WIDTH)).astype(bfloat16)
     ple = rng.standard_normal((ROWS, PLE)).astype(bfloat16)
-    config = Config(
-        hidden_size=WIDTH,
-        num_hidden_layers=1,
-        num_attention_heads=HEADS,
-        intermediate_size=HIDDEN,
-        layer_types=("full_attention",),
-        global_kv_groups=GROUPS,
-        global_head_dim=HEAD,
-        ple_dim=PLE,
-    )
-    layer = TextLayer(config, 0)
-    layer.rope = None
-    layer.load_state_dict(w)
-
-    class Text(iron.Graph):
-        def __init__(self):
-            self.layer = layer
-
-        def body(self, x, ple):
-            return self.layer(x, EncodeStep(ROWS, {}, x), ple)
-
-    got = np.asarray(Text().reference(x, ple), np.float32)
+    got = np.asarray(Text(w).reference(x, ple), np.float32)
     reference = golden("gemma_layer", lambda: HuggingFaceGemma(w, x, ple), w, ple)
     want = reference.logits(x.view(np.uint16))
     # Measured 0.013; 0.073 with the v norm left out.
     error = np.linalg.norm(got - want) / np.linalg.norm(want)
     assert error < 10 * 2**-9, error
+
+
+def test_gemma_s_text_layer_projects_at_highest_precision():
+    steps = (
+        Text(gemma_layer(np.random.default_rng(0)))
+        .record(x=(ROWS, WIDTH), ple=(ROWS, PLE))
+        .steps
+    )
+    gemms = [s.op for s in steps if hasattr(s.op, "precision")]
+    assert gemms and {op.precision for op in gemms} == {Precision.HIGHEST}
 
 
 def test_embeddinggemma_2_loads_a_layer_s_per_layer_input_flat_or_nested():
@@ -268,12 +293,8 @@ def test_embeddinggemma_2_loads_a_layer_s_per_layer_input_flat_or_nested():
         ple_dim=PLE,
         max_tokens=ROWS,
     )
-    ple = "ple_block."
-    shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN) | {
-        f"{ple}per_layer_input_gate": (PLE, WIDTH),
-        f"{ple}per_layer_projection": (WIDTH, PLE),
-        f"{ple}post_per_layer_input_norm": (WIDTH,),
-    }
+    shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN)
+    shape |= {f"ple_block.{n}": s for n, s in PER_LAYER.items()}
     named = {
         "embed_tokens.weight": (c.vocab_size, WIDTH),
         "embedding_projection.weight": (c.out_dim, WIDTH),
@@ -283,7 +304,7 @@ def test_embeddinggemma_2_loads_a_layer_s_per_layer_input_flat_or_nested():
     }
     for i in range(2):
         named[f"layers.{i}.layer_scalar"] = (1,)
-        for name in (*GEMMA, *list(shape)[-3:]):
+        for name in (*GEMMA, *(f"ple_block.{n}" for n in PER_LAYER)):
             named[f"layers.{i}.{name}.weight"] = shape[name]
     tensors = {
         f"language_model.{n}": (rng.standard_normal(s) * 0.05).astype(bfloat16)
