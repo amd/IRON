@@ -806,10 +806,11 @@ class Carry(Mapping[str, "Handle | Affine | int"]):
     __slots__ = ("_next",)
 
     def __init__(self, **next_values: Handle | Affine | PerCall | int):
-        self._next: dict[str, Handle | Affine | int] = {
-            name: v.affine() if isinstance(v, (PerCall, Affine)) else v
-            for name, v in next_values.items()
-        }
+        self._next: dict[str, Handle | Affine | int] = {}
+        for name, v in next_values.items():
+            if isinstance(v, Affine) and not v.linear:
+                raise TypeError(f"{name}: {v} is not linear in {v.value.name}")
+            self._next[name] = v.affine() if isinstance(v, PerCall) else v
 
     def __getitem__(self, name: str) -> Handle | Affine | int:
         return self._next[name]
@@ -827,9 +828,11 @@ class Carry(Mapping[str, "Handle | Affine | int"]):
 
 def _count(n: PerCall | Affine) -> Affine:
     """A per-call count of rows, which may be clamped (``min(p + 1, W)``)."""
-    if isinstance(n, Affine) and n.mod is None and not n.down:
-        return n
-    return n.affine()
+    if isinstance(n, PerCall):
+        return n.affine()
+    if n.mod is not None or n.down:
+        raise TypeError(f"{n} is not linear in {n.value.name}")
+    return n
 
 
 def clamp(x: PerCall | Affine, lo: int | None = None, hi: int | None = None) -> Affine:
