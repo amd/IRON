@@ -416,6 +416,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `iron.tune.measure.others` and `wait_idle`: mlir-aie's
+  `aie.utils.benchmark.other_npu_users` and `wait_idle` replace them.
 - `field(probe=)`: the tuner times each distinct value of such a field, as
   it does every other (Clamp's `low` and `high`).
 - `CausalLM`'s `layer_class = None` path: its `decoder=` argument,

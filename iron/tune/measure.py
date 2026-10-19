@@ -23,8 +23,6 @@ import re
 import statistics
 import subprocess
 import sys
-import tempfile
-import time
 import uuid
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
@@ -32,6 +30,7 @@ from pathlib import Path
 import numpy as np
 from aie.iron import Out
 from aie.utils import bfp
+from aie.utils.benchmark import other_npu_users, wait_idle
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.declare import Operand, Operator
@@ -107,68 +106,10 @@ def pmode() -> str:
     return platform()["Power Mode"]
 
 
-def others(holding: bool = False) -> set[int]:
-    """The processes other than this one holding a context on the NPU, by
-    pid, as ``xrt-smi`` reports them: in the host's pid namespace, so in a
-    container this process cannot tell which is its own.
-
-    Args:
-        holding: Whether this process holds a context. Where its pid is not
-            reported, it is then the one pid when one is reported, and
-            somewhere among them, all returned, when more are.
-    """
-    with tempfile.TemporaryDirectory() as d:
-        report = Path(d) / "partitions.json"
-        subprocess.run(
-            ["xrt-smi", "examine", "-r", "aie-partitions", "-f", "JSON", "-o", report],
-            capture_output=True,
-            check=True,
-        )
-        devices = json.loads(report.read_text())["devices"]
-    pids = {
-        int(context["pid"])
-        for device in devices
-        for partition in device["aie_partitions"].get("partitions", [])
-        for context in partition.get("hw_contexts", [])
-    }
-    if os.getpid() in pids or not holding:
-        return pids - {os.getpid()}
-    return pids if len(pids) > 1 else set()
-
-
-# Seconds between looks at an NPU another process holds, and the most waited.
-IDLE_POLL = 5.0
-IDLE_WAIT = 1800.0
-
 # Kernel work holds the timing thread's core for tens of microseconds, mostly
 # outside the timed window; another process, under lazy preemption, until the
 # core's next tick, hundreds of microseconds on.
 CPU_WAIT_US = 100.0
-
-
-def wait_idle(log: Callable[[str], None] = print, holding: bool = False) -> None:
-    """Return once no other process holds a context on the NPU (``others``).
-
-    Args:
-        holding: Whether this process holds a context (``others``).
-
-    Raises:
-        TimeoutError: Another has held one for ``IDLE_WAIT`` seconds. Two
-            processes measuring at once would each wait for the other.
-    """
-    held, told = others(holding), set()
-    start = time.monotonic()
-    while held:
-        if held != told:
-            log(f"    the NPU is in use by pid {sorted(held)}: waiting")
-            told = held
-        if time.monotonic() - start > IDLE_WAIT:
-            raise TimeoutError(
-                f"pid {sorted(held)} has held the NPU for {IDLE_WAIT:.0f} s; "
-                f"measure once it is idle"
-            )
-        time.sleep(IDLE_POLL)
-        held = others(holding)
 
 
 class Awake:
@@ -516,7 +457,7 @@ def time_interleaved(
                     times.append(run.last_elapsed)
                     waits.append(Awake.waited_us() - start)
                 timed[i] = (statistics.median(times) * 1e6, statistics.median(waits))
-            held = others(holding=True)
+            held = other_npu_users(holding=True)
             if held:
                 log(
                     f"    pid {sorted(held)} used the NPU during a round: timing it again"

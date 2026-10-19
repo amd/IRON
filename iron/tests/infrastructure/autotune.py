@@ -16,6 +16,7 @@ import sys
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.utils.benchmark import other_npu_users
 from ml_dtypes import bfloat16
 
 import iron
@@ -29,7 +30,6 @@ from iron.tune.measure import (
     Standalone,
     Timing,
     measure,
-    others,
     platform,
     time_interleaved,
 )
@@ -207,7 +207,7 @@ def test_timing_waits_for_another_process_to_leave_the_npu():
     )
     assert child.stdout.readline().strip() == "held"
     # In a container xrt-smi reports the child by its host pid, not child.pid.
-    assert len(others()) == 1
+    assert len(other_npu_users()) == 1
     run = Standalone("waits", [SiLU(size=SIZE, tile_size=TILE)])
     logged = []
     time_interleaved([run.callable], Timing(rounds=2, calls=5), log=logged.append)
