@@ -70,14 +70,15 @@ class Encoder:
         return self.encode(tensor, address, valid)
 
 
+@dataclasses.dataclass(frozen=True)
 class Binding:
     """A graph value bound to one operator's value member, written per call
     as ``expression``.
     """
 
-    # Not a dataclass: a field typed as a descriptor (Value) reads as its __get__.
-    def __init__(self, op: Operator, member: Value, expression: Affine):
-        self.op, self.member, self.expression = op, member, expression
+    op: Operator
+    member: Value
+    expression: Affine
 
     @property
     def symbol(self) -> str:
