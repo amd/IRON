@@ -20,7 +20,7 @@ from iron.tests.support.llama_model import small
 from iron.tests.support.lowering import lower, lower_all
 from iron.tests.support.tools import requires, shipped, swiglu
 
-pytestmark = [*requires("aiecc", "peano"), pytest.mark.usefixtures("npu2")]
+pytestmark = [requires("aiecc", "peano"), pytest.mark.usefixtures("npu2")]
 
 
 def test_decode_graph_operators_lower_with_their_values(tmp_path):

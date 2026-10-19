@@ -39,8 +39,9 @@ _MISSING = {
 
 
 def requires(*tools):
-    """Skip marks for a module that needs these tools."""
-    return [pytest.mark.skipif(_MISSING[t][0], reason=_MISSING[t][1]) for t in tools]
+    """A skip mark for a test or a module that needs these tools."""
+    missing = [_MISSING[t][1] for t in tools if _MISSING[t][0]]
+    return pytest.mark.skipif(bool(missing), reason="; ".join(missing))
 
 
 DEVICES = {

@@ -28,7 +28,7 @@ from iron.operators import ElementwiseAdd
 from iron.tests.support.graphs import Adds
 from iron.tests.support.tools import requires
 
-pytestmark = [pytest.mark.usefixtures("npu2"), *requires("aiecc", "peano")]
+pytestmark = [pytest.mark.usefixtures("npu2"), requires("aiecc", "peano")]
 
 SIZE = 1024
 

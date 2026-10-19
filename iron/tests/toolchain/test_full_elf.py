@@ -41,7 +41,7 @@ from iron.operators.gemm import GEMM
 from iron.tests.support import sequences
 from iron.tests.support.tools import DEVICES, requires, swiglu
 
-pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
+pytestmark = [requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
 
 
 def build_elf(graph, **shapes):

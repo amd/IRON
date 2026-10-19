@@ -710,6 +710,8 @@ def test_download_fetches_into_the_cache_not_the_read_only_weights_dir(tmp_path)
     weights.chmod(0o555)
     try:
         first = fetch_in(cache_home, weights, PINNED_URL, PINNED_SHA256)
+        if first.returncode and "urllib.error.URLError" in first.stderr:
+            pytest.skip(f"{PINNED_URL} is unreachable from here")
         assert first.returncode == 0, first.stderr
         fetched = Path(first.stdout.strip())
         assert fetched.is_relative_to(cache_home)

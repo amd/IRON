@@ -48,13 +48,6 @@ TILE = 256
 pytestmark = pytest.mark.usefixtures("npu2")
 
 
-def _builds_elf(test):
-    """Skip ``test`` without Peano and ``aiebu-asm``."""
-    for mark in requires("aiebu", "peano"):
-        test = mark(test)
-    return test
-
-
 def _shim_pinned(col: int, channel: int, name: str) -> Runtime:
     """A pass-through whose input enters on shim ``(col, 0)``, MM2S
     ``channel``, through a fifo named ``name``: its runtime sequence, which
@@ -400,7 +393,7 @@ def test_recorded_graph_packs():
     assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, _ in composed.steps]
 
 
-@_builds_elf
+@requires("aiebu", "peano")
 def test_pack_compiles_to_a_full_elf():
     seq = _sequence(4, lambda add, silu: [[add, silu]])
     seq.compile()
@@ -415,7 +408,7 @@ def test_pack_compiles_to_a_full_elf():
     assert instances == designs
 
 
-@_builds_elf
+@requires("aiebu", "peano")
 def test_graph_compile_forwards_the_packing():
     version = Chain(SIZE, TILE, columns=2).compile(
         full_elf=True, coresident=AdjacentPacking(), a=(SIZE,), b=(SIZE,)

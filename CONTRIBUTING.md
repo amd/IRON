@@ -86,13 +86,14 @@ Hugging Face decoders need a config and a model class; see
 
 4. **Register.** Add the decoder to `APPLICATIONS` in
    `tests/applications/long_context/test.py`, or to `UNHELD` with the
-   reason; a test fails until it is in one. Write its `profiles/` with
+   reason; a test fails unless it is in one. Write its `profiles/` with
    `iron.lm.tune` ("Tune" in the [README](README.md#models)), give the
    package a README, and add a row to the README's model table.
 
 A Llama-shaped decoder (Mistral v0.3, Qwen, SmolLM) needs only these
 steps. Gemma 3 (`iron/applications/gemma3/model.py`) shows a
-sandwich-normed, windowed layer with per-layer RoPE.
+sandwich-normed, windowed layer with per-layer RoPE. Post-norm layers
+(OLMo 2) need new code in `iron/lm/`.
 
 ## Add an operator and kernel
 
