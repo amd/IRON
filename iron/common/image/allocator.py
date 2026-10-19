@@ -19,6 +19,7 @@ by a 32-bit addend to its argument.
 
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from aie.utils.hostruntime.tensor_class import COHERENCE_GRANULE
 
@@ -250,3 +251,116 @@ class ArenaPlan(Pool):
         self._size = max(self._size, top)
         result.update(transients)
         return result
+
+
+class ArgumentSizes(NamedTuple):
+    """Bytes of each runtime-sequence argument of a full ELF, in argument
+    order; ``feedback`` is ``None`` where the image takes no such argument.
+
+    The scratch arena is passed as its banks (``allocator.BANK``), each an
+    argument: ``scratch`` the first, ``scratch_k`` the k-th after it, the
+    last arguments.
+    """
+
+    input: int
+    output: int
+    scratch: int
+    feedback: int | None = None
+
+    @property
+    def bank_kinds(self) -> list[str]:
+        """The scratch arena's arguments, a bank each: ``scratch``, then
+        ``scratch_1`` on.
+        """
+        banks = max(1, -(-self.scratch // BANK))
+        return ["scratch", *(f"scratch_{k}" for k in range(1, banks))]
+
+    def arguments(self) -> dict[str, int]:
+        """Size by kind, in argument order."""
+        kinds = self.bank_kinds
+        banks = [min(BANK, self.scratch - k * BANK) for k in range(len(kinds))]
+        sizes = {"input": self.input, "output": self.output, "scratch": banks[0]}
+        if self.feedback is not None:
+            sizes["feedback"] = self.feedback
+        sizes.update(zip(kinds[1:], banks[1:]))
+        return sizes
+
+    def scratch_argument(self, offset: int, length: int) -> tuple[str, int]:
+        """The argument a scratch buffer of ``length`` bytes at ``offset``
+        is in, and its offset there.
+
+        Raises:
+            ValueError: It crosses from one bank into the next.
+        """
+        k = offset // BANK
+        if length and (offset + length - 1) // BANK != k:
+            raise ValueError(
+                f"a scratch buffer of {length} bytes at {offset} crosses from "
+                f"bank {k} into the next, of {BANK} bytes each"
+            )
+        return self.bank_kinds[k], offset - k * BANK
+
+
+def lay_out(
+    sizes: Mapping[str, int],
+    steps: Steps,
+    host: tuple[Sequence[str], Sequence[str], Sequence[str]],
+    pinned: Iterable[str],
+    arena: Mapping[str, Allocation],
+) -> tuple[dict[str, tuple[str, int, int]], ArgumentSizes]:
+    """Each buffer's ``(argument kind, byte offset, bytes)``, and the bytes
+    of each argument.
+
+    Intermediates whose lifetimes in ``steps`` are disjoint share bytes; a
+    buffer the host addresses (``host``: the inputs, outputs and feedback
+    buffers), or one ``pinned`` because a step names it only in part, is
+    never pooled. A scratch buffer in ``arena`` keeps its place there.
+    """
+    inputs, outputs, feedback = host
+    held = {*inputs, *outputs, *feedback, *pinned}
+    ranges = LiveRange.scan(steps, pinned=held)
+    layout: dict[str, tuple[str, int, int]] = {}
+
+    def place(kind: str, roots: Sequence[str]) -> int:
+        end = 0
+        for root, a in arena.items():
+            if root in roots:
+                layout[root] = (kind, a.offset, a.size)
+                end = max(end, a.end)
+        roots = [r for r in roots if r not in arena]
+        # The caller binds its own memory to the feedback argument: offsets are the contract.
+        offsets = {}
+        if kind != "feedback":
+            mine = {r: ranges[r] for r in roots if r in ranges}
+            allocations, _ = Pool(ALIGNMENT).place(mine, sizes)
+            offsets = {name: a.offset for name, a in allocations.items()}
+        # A host-visible kind is one buffer object, not banks.
+        pool = Pool(ALIGNMENT, BANK if kind == "scratch" else None)
+        cursor = 0
+        pooled = []
+        for root in roots:
+            if root in offsets:
+                pooled.append(root)
+                continue
+            cursor = pool.fit(cursor, sizes[root])
+            layout[root] = (kind, cursor, sizes[root])
+            end = cursor + sizes[root]
+            cursor = pool.align(end)
+        # The pool starts at zero, so it is rebased past the other
+        # buffers, at a bank's start unless it fits the rest of this one.
+        span = max((offsets[r] + sizes[r] for r in pooled), default=0)
+        if pool.bank is not None and span > pool.bank - cursor % pool.bank:
+            cursor = -(-cursor // pool.bank) * pool.bank
+        for root in pooled:
+            at = cursor + offsets[root]
+            layout[root] = (kind, at, sizes[root])
+            end = max(end, at + sizes[root])
+        return end
+
+    hosted = {*inputs, *outputs, *feedback}
+    return layout, ArgumentSizes(
+        place("input", inputs),
+        place("output", outputs),
+        place("scratch", [r for r in sizes if r not in hosted]),
+        place("feedback", feedback) if feedback else None,
+    )

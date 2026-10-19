@@ -23,6 +23,7 @@ from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.coresidence import Packing
 from iron.common.image.compose import Composition
+from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.tests.common import sequences
 from iron.tests.toolchain.tools import requires
@@ -119,7 +120,7 @@ def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
         for b, buf in zip(op.buffers, names):
             (outputs if b.role is Out else inputs).append(buf)
     recording = Recording.of_steps(cls_name, sequences.steps(*runlist), inputs, outputs)
-    seq = Image(recording, full_elf=True)
+    seq = Image(recording, FullELF())
     seq.prepare()
     composed = Composition(seq)
     pack = Packing.device_name(list(composed.designs))

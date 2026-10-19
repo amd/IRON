@@ -36,6 +36,7 @@ import pytest
 
 from iron.common.design import OperatorDesign
 from iron.common.image.compose import Composition
+from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.tests.common.graphs import Adds
 from iron.tests.infrastructure.graph_dispatch import SIZE, _operator
@@ -62,7 +63,7 @@ def test_full_elf_build_does_not_poison_the_standalone_mlir():
     passes whatever happens.
     """
     recording = Adds(_operator(), 1).record(x=(SIZE,), w=(SIZE,))
-    seq = Image(dataclasses.replace(recording, name="poisoning_probe"), full_elf=True)
+    seq = Image(dataclasses.replace(recording, name="poisoning_probe"), FullELF())
     seq.compile()
     composed = set(re.findall(r'link_with\s*=\s*"([^"]+)"', Composition(seq).text()))
 

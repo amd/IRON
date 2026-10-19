@@ -32,6 +32,7 @@ from aie.utils.compile.jit._hash import _python_identity
 from iron.common.image import AdjacentPacking, compose, coresidence
 from iron.common.image.coresidence import Packing
 from iron.common.image.compose import Composition
+from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.common.graph.record import Recording
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
@@ -181,7 +182,7 @@ def _sequence(cols: int, coresident) -> Image:
         ["a", "b"],
         ["y"],
     )
-    seq = Image(recording, full_elf=True, coresident=coresident(add, silu))
+    seq = Image(recording, FullELF(coresident(add, silu)))
     seq.prepare()
     return seq
 
@@ -240,7 +241,7 @@ def test_one_array_joins_two_packs_only_where_their_union_fits():
         ["a", "b", "c", "d"],
         ["y", "z"],
     )
-    seq = Image(recording, full_elf=True, coresident=[[add, silu], [wider, mul]])
+    seq = Image(recording, FullELF([[add, silu], [wider, mul]]))
     seq.prepare()
     composed = Composition(seq)
     a, s, w, m = (name for name, _ in composed.steps)
@@ -266,7 +267,7 @@ def test_designs_of_one_array_share_its_device():
         ["a", "b", "c", "d"],
         ["y", "u"],
     )
-    seq = Image(recording, full_elf=True)
+    seq = Image(recording, FullELF())
     seq.prepare()
     composed = Composition(seq)
     text = composed.text()
@@ -291,7 +292,7 @@ def test_two_arrays_of_one_class_pack():
         ["wa", "wb", "x"],
         ["ya", "yb"],
     )
-    seq = Image(recording, full_elf=True, coresident=[gemvs])
+    seq = Image(recording, FullELF([gemvs]))
     seq.prepare()
     composed = Composition(seq)
     assert fits(composed.designs) is None
@@ -305,24 +306,10 @@ def test_packing_rejects_a_design_in_two_groups():
 
 
 def test_sequence_rejects_a_stray_operator():
-    stray = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=4)
+    stray = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=2)
+    seq = _sequence(4, lambda add, silu: [[add, stray]])
     with pytest.raises(ValueError, match="no step runs"):
-        _sequence(4, lambda add, silu: [[add, stray]])
-
-
-def test_sequence_refuses_a_packing_without_a_full_elf():
-    add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=4)
-    with pytest.raises(ValueError, match="one full-ELF device"):
-        Image(
-            Recording.of_steps(
-                "coresidence_xclbin",
-                sequences.steps((add, "a", "b", "y")),
-                ["a", "b"],
-                ["y"],
-            ),
-            full_elf=False,
-            coresident=AdjacentPacking(),
-        )
+        Composition(seq)
 
 
 def test_a_pack_refuses_two_cores_on_one_tile():
@@ -396,8 +383,8 @@ def test_recorded_graph_packs():
     # Three designs, add and silu recurring: the policy packs all three, so
     # the whole graph is one configure.
     recording = Chain(SIZE, TILE, columns=2).record(a=(SIZE,), b=(SIZE,))
-    temporal = Image(recording, full_elf=True)
-    packed = Image(recording, full_elf=True, coresident=AdjacentPacking())
+    temporal = Image(recording, FullELF())
+    packed = Image(recording, FullELF(AdjacentPacking()))
     temporal.prepare()
     packed.prepare()
     composed = Composition(packed)

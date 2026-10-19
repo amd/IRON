@@ -8,6 +8,7 @@ it keys on what the text is a function of, locks across processes and
 validates the kernels' depfiles, and the image lands in its entry.
 """
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,13 +18,32 @@ from aie.iron import CompileTime
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.npukernel import NPUKernel
 
+from ..declare import Operator
 from ..design import OperatorDesign
+from .artifacts import Design
+from .callable import FullELFCallable, PerStepCallable
 from .compose import Composition
+from .coresidence import AdjacentPacking
 from .packaging import require_device
 
 
 class FullELF:
-    """The full ELF: every design composed into one module (NPU2 only)."""
+    """The full ELF: every design composed into one module (NPU2 only).
+
+    Args:
+        coresident: Groups of operators whose designs share one device
+            configuration, or an ``AdjacentPacking`` that chooses them.
+        reconfigure: Configure the array at every call even where it runs
+            one design, which the first call otherwise configures for all
+            (``Composition.expands``).
+        commands: The steps that start a command of their own after the
+            first's, each command a runtime sequence a call queues after
+            the one before it.
+        shared_words: Design symbol -> the scratchpad word it shares with
+            others that always hold the same number.
+    """
+
+    full_elf = True
 
     # --get-scratchpad-parameters emits the parameter table the host writes
     # through. Without it the ELF is not the same program.
@@ -35,9 +55,24 @@ class FullELF:
     # buffer layout and each design's traced tiles and events.
     TRACE_FLAG = "--get-input-with-addresses"
 
-    def __init__(self):
+    def __init__(
+        self,
+        coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
+        reconfigure: bool = False,
+        commands: Sequence[int] = (),
+        shared_words: Mapping[str, str] | None = None,
+    ):
+        self.coresident = coresident
+        self.reconfigure = reconfigure
+        self.commands = tuple(commands)
+        self.shared_words = dict(shared_words or {})
         self.composition: Composition | None = None
         self.design: CompilableDesign | None = None
+
+    @staticmethod
+    def in_arena(scratch: list[str], residents: Mapping[str, object]) -> list[str]:
+        """The scratch buffers an arena holds: all of them, one argument."""
+        return scratch
 
     def link(self, seq) -> Path:
         """Build the ELF once (idempotent); returns its path.
@@ -87,6 +122,18 @@ class FullELF:
         assert entry is not None and entry.elf is not None, "compile() built it"
         return Path(entry.elf)
 
+    def record(self, designs: list[Operator], sharing: list[tuple[str, ...]]):
+        """The designs' records, the ELF's cache entry, and no one stream."""
+        assert self.design is not None, "link() built the image"
+        records = tuple(
+            Design(name=f"op{i}_{type(op).__name__}", operators=sharing[i])
+            for i, op in enumerate(designs)
+        )
+        return records, self.design.get_cache_entry(), None
+
+    def callable(self, seq, arena):
+        return FullELFCallable(seq, arena=arena)
+
 
 @dataclass(frozen=True)
 class Link:
@@ -117,11 +164,25 @@ class PerStep:
     chain, and only the design's stream is built.
 
     ``links`` is by ``id(op)`` over the sequence's operators.
+
+    Args:
+        check: Check each step against its reference on the NPU's inputs
+            (``callable.check_step``).
     """
 
-    def __init__(self):
+    full_elf = False
+
+    def __init__(self, check: bool = False):
+        self.check = check
         self.image: Path | None = None
         self.links: dict[int, Link] = {}
+
+    @staticmethod
+    def in_arena(scratch: list[str], residents: Mapping[str, object]) -> list[str]:
+        """The scratch buffers an arena holds: the residents, as each other
+        buffer is a buffer object of its own.
+        """
+        return [r for r in scratch if r in residents]
 
     def link(self, seq) -> Path:
         """Build the chain once (idempotent); returns the last link, or the
@@ -185,3 +246,26 @@ class PerStep:
         last = built[id(chained[-1])][1] if chained else links[-1].kernel.xclbin_path
         self.image = Path(last)
         return self.image
+
+    def record(self, designs: list[Operator], sharing: list[tuple[str, ...]]):
+        """The designs' records, the first's cache entry, and its stream
+        where it is the only one.
+        """
+        links = [self.links[id(op)] for op in designs]
+        records = tuple(
+            Design(
+                name=link.name,
+                operators=sharing[i],
+                entry=(
+                    link.design if link.configuration is None else link.configuration
+                ).get_cache_entry(),
+                image=Path(link.kernel.xclbin_path),
+                insts=link.design.get_cache_entry().insts,
+            )
+            for i, link in enumerate(links)
+        )
+        entry = links[0].design.get_cache_entry()
+        return records, entry, entry.insts if len(links) == 1 else None
+
+    def callable(self, seq, arena):
+        return PerStepCallable(seq, check=self.check, arena=arena)

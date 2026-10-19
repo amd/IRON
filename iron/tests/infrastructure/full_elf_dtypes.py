@@ -20,6 +20,7 @@ from ml_dtypes import bfloat16
 
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Composition
+from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators.copy import Copy
@@ -89,7 +90,7 @@ def test_int32_step_at_nonzero_offsets():
         ["a", "b", "table"],
         ["c", "rows"],
     )
-    seq = Image(recording, full_elf=True).compile()
+    seq = Image(recording, FullELF()).compile()
     kinds = {name: seq.layout[name][:2] for name in ("table", "rows")}
     assert kinds["table"][0] == "input" and kinds["table"][1] > 0, kinds
     assert kinds["rows"][0] == "output" and kinds["rows"][1] > 0, kinds
@@ -127,7 +128,7 @@ def test_int32_slice_at_word_offset():
         ["rows"],
         pinned={"packed": TABLE_BYTES + 64},
     )
-    seq = Image(recording, full_elf=True).compile()
+    seq = Image(recording, FullELF()).compile()
     run = seq.get_callable()
     packed = run.get_buffer(BufferRef("packed"))
     assert packed.dtype == np.int32, "a parent of int32 slices is viewed as int32"
@@ -150,7 +151,7 @@ def test_misaligned_buffer_is_rejected():
         ["rows"],
         pinned={"packed": TABLE_BYTES + 64},
     )
-    seq = Image(recording, full_elf=True)
+    seq = Image(recording, FullELF())
     seq.prepare()
     with pytest.raises(ValueError, match="not a multiple of 4"):
         Composition(seq).text()

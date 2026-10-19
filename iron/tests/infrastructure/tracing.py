@@ -17,6 +17,7 @@ from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
 import iron
+from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.common.tracing import dump_traces
@@ -42,7 +43,7 @@ def _layer_norm_run(name, trace):
     f = F()
 
     recording = f.record(x=(1, SIZE))
-    seq = Image(dataclasses.replace(recording, name=name), full_elf=True).compile()
+    seq = Image(dataclasses.replace(recording, name=name), FullELF()).compile()
     run = seq.get_callable()
     x = run.get_buffer(BufferRef("x"))
     x.numpy_view()[:] = np.random.default_rng(0).standard_normal(SIZE).astype(bfloat16)

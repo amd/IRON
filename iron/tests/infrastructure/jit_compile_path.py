@@ -29,6 +29,7 @@ from aie.utils.compile.jit.params import param
 
 from iron.common import Operator
 from iron.common.design import OperatorDesign, runtime
+from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.operators import GEMM, MHA, ElementwiseAdd
 from iron.tests.common.graphs import Adds
@@ -40,7 +41,7 @@ def _captured(name, adds=2, **declared):
     """X + w + w (or as many adds of w) as a graph function, composed and compiled."""
     add = ElementwiseAdd(size=1024, tile_size=128, **declared)
     recording = Adds(add, adds).record(x=(1024,), w=(1024,))
-    return Image(dataclasses.replace(recording, name=name), full_elf=True).compile()
+    return Image(dataclasses.replace(recording, name=name), FullELF()).compile()
 
 
 def test_captured_graph_compiles_to_an_elf():

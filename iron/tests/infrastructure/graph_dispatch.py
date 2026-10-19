@@ -30,6 +30,7 @@ from iron import Scratchpad
 from iron.common.image import AdjacentPacking
 from iron.common.image.compose import Composition
 from iron.common.graph.record import Recording
+from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators import (
@@ -57,14 +58,14 @@ def _operator():
     return ElementwiseAdd(size=SIZE, tile_size=TILE)
 
 
-PACKAGINGS = {"separate": dict(full_elf=False), "composed": dict(full_elf=True)}
+PACKAGINGS = {"separate": PerStep, "composed": FullELF}
 
 
 def _graph(name, packaging="composed"):
     """X + w + w + w, recorded from dataflow, as the sequence it lowers to."""
     recording = Adds(_operator(), 3).record(x=(SIZE,), w=(SIZE,))
     return recording, Image(
-        dataclasses.replace(recording, name=name), **PACKAGINGS[packaging]
+        dataclasses.replace(recording, name=name), PACKAGINGS[packaging]()
     )
 
 
@@ -77,7 +78,7 @@ def _hand_written(name, packaging="composed"):
         (add, "t1", "w", "out"),
     ]
     recording = Recording.of_steps(name, sequences.steps(*runlist), ["x", "w"], ["out"])
-    return Image(recording, **PACKAGINGS[packaging])
+    return Image(recording, PACKAGINGS[packaging]())
 
 
 def test_a_graph_records_the_same_steps_as_a_hand_written_runlist():

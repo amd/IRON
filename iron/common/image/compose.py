@@ -15,8 +15,8 @@ import itertools
 import logging
 import math
 from collections.abc import Collection, Hashable
-from typing import NamedTuple
 
+import aie.utils as aie_utils
 import numpy as np
 from aie import ir
 from aie.dialects import memref
@@ -28,7 +28,6 @@ from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
 from ..design import BuiltArray, OperatorDesign, identities
-from .allocator import BANK
 from .coresidence import AdjacentPacking, CoResidenceError, Packing, fits, pack
 from .step import BufferRef
 
@@ -39,70 +38,23 @@ logger = logging.getLogger(__name__)
 SHIM_ADDRESS_ALIGNMENT = 4
 
 
-class ArgumentSizes(NamedTuple):
-    """Bytes of each runtime-sequence argument of a full ELF, in argument
-    order; ``feedback`` is ``None`` where the image takes no such argument.
-
-    The scratch arena is passed as its banks (``allocator.BANK``), each an
-    argument: ``scratch`` the first, ``scratch_k`` the k-th after it, the
-    last arguments.
-    """
-
-    input: int
-    output: int
-    scratch: int
-    feedback: int | None = None
-
-    @property
-    def bank_kinds(self) -> list[str]:
-        """The scratch arena's arguments, a bank each: ``scratch``, then
-        ``scratch_1`` on.
-        """
-        banks = max(1, -(-self.scratch // BANK))
-        return ["scratch", *(f"scratch_{k}" for k in range(1, banks))]
-
-    def arguments(self) -> dict[str, int]:
-        """Size by kind, in argument order."""
-        kinds = self.bank_kinds
-        banks = [min(BANK, self.scratch - k * BANK) for k in range(len(kinds))]
-        sizes = {"input": self.input, "output": self.output, "scratch": banks[0]}
-        if self.feedback is not None:
-            sizes["feedback"] = self.feedback
-        sizes.update(zip(kinds[1:], banks[1:]))
-        return sizes
-
-    def scratch_argument(self, offset: int, length: int) -> tuple[str, int]:
-        """The argument a scratch buffer of ``length`` bytes at ``offset``
-        is in, and its offset there.
-
-        Raises:
-            ValueError: It crosses from one bank into the next.
-        """
-        k = offset // BANK
-        if length and (offset + length - 1) // BANK != k:
-            raise ValueError(
-                f"a scratch buffer of {length} bytes at {offset} crosses from "
-                f"bank {k} into the next, of {BANK} bytes each"
-            )
-        return self.bank_kinds[k], offset - k * BANK
-
-
 class Composition:
     """An operator sequence's designs, composed into one module.
 
     Each device is named for its design, not its step, so its text is the
-    same in every graph and aiecc's device cache hits. ``seq.coresident``
-    packs designs into one device each. ``seq``'s buffer layout must already
-    be set.
+    same in every graph and aiecc's device cache hits. ``seq.packaging``
+    is its ``FullELF``, and ``seq``'s buffer layout must already be set.
     """
 
     def __init__(self, seq):
+        full_elf = seq.packaging
         designs, design_of = seq.unique_designs()
+        # unique_designs() made one design per identity, so one name is a collision.
         own = [OperatorDesign(op) for op in designs]
         self.designs: dict[str, OperatorDesign] = {}
         for design in own:
             existing = self.designs.setdefault(design.name, design)
-            if existing.identity != design.identity:
+            if existing is not design:
                 raise ValueError(
                     f"{existing.op.name} and {design.op.name} are different designs "
                     f"whose device names collide, {design.name}; a tunable given "
@@ -110,22 +62,24 @@ class Composition:
                 )
         self.steps = [(own[design_of[id(s.op)]].name, s.buffers) for s in seq.steps]
         self.expands = self.expanded(
-            self.designs, traced=seq.traced, reconfigure=seq.reconfigure
+            self.designs, traced=seq.traced, reconfigure=full_elf.reconfigure
         )
         self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
-        self.commands = seq.commands
-        self.shared_words = dict(seq.shared_words or {})
-        self.packing: Packing | AdjacentPacking = (
-            seq.coresident
-            if isinstance(seq.coresident, AdjacentPacking)
-            else Packing(
-                tuple(
-                    tuple(dict.fromkeys(own[design_of[id(op)]].name for op in group))
-                    for group in seq.coresident
-                )
+        self.commands = full_elf.commands
+        self.shared_words = full_elf.shared_words
+        self.packing: Packing | AdjacentPacking = full_elf.coresident
+        if not isinstance(self.packing, AdjacentPacking):
+            # A group names operators as given; a step runs each resolved.
+            dev = aie_utils.get_current_device()
+            groups = tuple(
+                tuple(dict.fromkeys(OperatorDesign(op.resolved(dev)).name for op in g))
+                for g in self.packing
             )
-        )
+            strays = [n for g in groups for n in g if n not in self.designs]
+            if strays:
+                raise ValueError(f"coresident names designs no step runs: {strays}")
+            self.packing = Packing(groups)
 
     @staticmethod
     def expanded(

@@ -219,6 +219,9 @@ public API adds its entry under Unreleased.
   in `fusion`), `FullELF` and `PerStep` in `iron.common.image.link` (were
   `FusedImage` and `XclbinChain` in `fused`), `PerStepCallable`
   (`StepCallable`) and `Image` (`OperatorSequence`).
+- `Image(recording, packaging)` takes `FullELF(coresident, reconfigure,
+  commands, shared_words)` or `PerStep(check)`, as `packaging.plan` picks,
+  in place of those keywords and `full_elf=`.
 - `Value` is mlir-aie's `PerCallMember` bound to one operator, so a
   declared `per_call()` and the value a build gives a device parameter are
   one type; `op.value(name)` returns it, and an extent attribute still reads

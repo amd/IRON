@@ -25,6 +25,7 @@ import iron
 from iron import Profile, Scratchpad
 from iron.common.image import AdjacentPacking
 from iron.common.image.compose import Composition
+from iron.common.image.link import PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators import ElementwiseAdd
@@ -618,7 +619,7 @@ def test_an_input_s_words_for_each_table_follow_the_last_s(npu2, table):
     gathers = [s for s in recording.steps if isinstance(s.op, Gather)]
     assert [s.op.words for s in gathers] == words
     assert recording.pinned["ids"] == 4 * sum(words)
-    sequence = Image(recording)
+    sequence = Image(recording, PerStep())
     sequence.prepare()
     assert sequence.layout["ids"][2] == 4 * sum(words)
     starts = [0, 4 * words[0], 4 * (words[0] + words[1])]

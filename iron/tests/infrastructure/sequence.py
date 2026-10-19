@@ -11,14 +11,14 @@ rather than any single operator.
 
 The ``Image`` packagings and modes covered here are:
 
-* ``full_elf=None``     – a full ELF on NPU2 (Strix), an xclbin chain on
-                          NPU1 (Phoenix).
-* ``full_elf=True``     – single-ELF dispatch (``aiex.configure`` /
-                          ``aiex.run``), NPU2 only.
-* ``full_elf=False``    – one xclbin per operator, chained (works on all
-                          platforms).
-* ``check=True``        – the xclbin chain plus a per-step CPU-reference
-                          check.
+* ``packaging.plan``     – a full ELF on NPU2 (Strix), an xclbin chain on
+                           NPU1 (Phoenix).
+* ``FullELF()``          – single-ELF dispatch (``aiex.configure`` /
+                           ``aiex.run``), NPU2 only.
+* ``PerStep()``          – one xclbin per operator, chained (works on all
+                           platforms).
+* ``PerStep(check=True)`` – the xclbin chain plus a per-step CPU-reference
+                           check.
 """
 
 import logging
@@ -35,9 +35,10 @@ from aie.helpers.taplib import PerCall
 
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Composition
+from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
-from iron.common.image.packaging import Kind
+from iron.common.image.packaging import Kind, plan
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
@@ -48,9 +49,9 @@ from iron.tests.common import sequences
 RELATIVE = Tolerance.relative(0.04, 1e-6)
 
 PACKAGINGS = {
-    "separate": dict(full_elf=False),
-    "composed": dict(full_elf=True),
-    "compare": dict(check=True),
+    "separate": PerStep,
+    "composed": FullELF,
+    "compare": lambda: PerStep(check=True),
 }
 
 
@@ -81,7 +82,7 @@ _ADD_RELU_TILE = 1024
 _ADD_RELU_COLS = 4
 
 
-def _build_add_relu_sequence(name, inputs=("a", "b"), **packaging):
+def _build_add_relu_sequence(name, packaging=None, inputs=("a", "b")):
     """Out = relu(a + b), as a 2-step Image."""
     add = ElementwiseAdd(
         size=_ADD_RELU_SIZE,
@@ -100,7 +101,10 @@ def _build_add_relu_sequence(name, inputs=("a", "b"), **packaging):
         inputs,
         ["out"],
     )
-    return Image(recording, **packaging)
+    if packaging is None:
+        full_elf = plan(aie_utils.get_current_device(), recording).full_elf
+        packaging = FullELF() if full_elf else PerStep()
+    return Image(recording, packaging)
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +115,8 @@ def _build_add_relu_sequence(name, inputs=("a", "b"), **packaging):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("size", [_ADD_RELU_SIZE])
 def test_auto_dispatch_selects_platform_default(size):
-    """``full_elf=None`` must resolve to a full ELF on Strix and to the
-    xclbin chain on Phoenix, and produce the correct result on whichever
+    """``packaging.plan`` must pick a full ELF on Strix and the xclbin
+    chain on Phoenix, and produce the correct result on whichever
     platform the test runs on.
     """
     rng = np.random.default_rng(0)
@@ -123,9 +127,7 @@ def test_auto_dispatch_selects_platform_default(size):
     seq.compile()
 
     expected = aie_utils.get_current_device().dispatches_full_elf
-    assert (
-        seq.full_elf == expected
-    ), f"full_elf resolved to {seq.full_elf}, expected {expected} on this device"
+    assert seq.packaging.full_elf == expected
 
     run = seq.get_callable()
     _set_input(run, "a", a)
@@ -153,7 +155,7 @@ def test_composed_mlir_contains_reconfiguration(sequence, npu2):
     so it needs no device: it builds for NPU2, which the full composed dispatch
     itself requires.
     """
-    seq = _build_add_relu_sequence("infra_full_elf_mlir", full_elf=True)
+    seq = _build_add_relu_sequence("infra_full_elf_mlir", FullELF())
 
     # Generate the composed MLIR directly, bypassing the ELF backend (which is
     # NPU2-only). This mirrors what FullELF.link() feeds to the compiler.
@@ -186,7 +188,7 @@ def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
     fusions = {}
     for commands in ((), (1,)):
         seq = _build_add_relu_sequence(
-            "infra_full_elf_commands", full_elf=True, commands=commands
+            "infra_full_elf_commands", FullELF(commands=commands)
         )
         seq.prepare()
         fusions[commands] = Composition(seq)
@@ -204,20 +206,14 @@ def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
     assert fusions[()].identity != fusions[(1,)].identity
 
 
-def test_commands_need_a_full_elf():
-    """Only a full ELF has a sequence to cut."""
-    with pytest.raises(ValueError, match="commands"):
-        _build_add_relu_sequence("infra_commands_xclbin", full_elf=False, commands=(1,))
-
-
 # ---------------------------------------------------------------------------
 # 3. Every NPU dispatch mode produces bit-identical output.
 # ---------------------------------------------------------------------------
 
 
-def _run_add_relu(a, b, name, **packaging):
+def _run_add_relu(a, b, name, packaging):
     """Out = relu(a + b), returned as a host bf16 tensor."""
-    seq = _build_add_relu_sequence(name, **packaging)
+    seq = _build_add_relu_sequence(name, packaging)
     seq.compile()
     run = seq.get_callable()
     _set_input(run, "a", a)
@@ -244,14 +240,14 @@ def test_dispatch_modes_bit_identical(dispatch):
     a = _centered(rng, _ADD_RELU_SIZE)
     b = _centered(rng, _ADD_RELU_SIZE)
 
-    baseline = _run_add_relu(a, b, "infra_addrelu_parity_separate", full_elf=False)
+    baseline = _run_add_relu(a, b, "infra_addrelu_parity_separate", PerStep())
     out = _run_add_relu(
-        a, b, f"infra_addrelu_parity_{dispatch}", **PACKAGINGS[dispatch]
+        a, b, f"infra_addrelu_parity_{dispatch}", PACKAGINGS[dispatch]()
     )
 
     assert np.array_equal(
         out, baseline
-    ), f"{PACKAGINGS[dispatch]} output is not bit-identical to the separate baseline"
+    ), f"{dispatch} output is not bit-identical to the separate baseline"
 
 
 # ---------------------------------------------------------------------------
@@ -279,10 +275,9 @@ def test_check_mode_judges_each_step_by_its_tolerance():
         Recording.of_steps(
             "infra_check_magnitude", sequences.steps((op, "x", "out")), ["x"], ["out"]
         ),
-        check=True,
+        PerStep(check=True),
     )
     seq.compile()
-    assert seq.check and seq.full_elf is False
 
     run: Any = seq.get_callable()
     _set_input(run, "x", x)
@@ -308,7 +303,7 @@ def test_check_mode_judges_every_output_at_the_calls_values(caplog):
             ["logits", "draws", "tokens"],
             ["token"],
         ),
-        check=True,
+        PerStep(check=True),
     )
     seq.compile()
     run: Any = seq.get_callable()
@@ -354,7 +349,7 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
 
     # b is not an input, so it is held like a weight (in scratch, when composed).
     seq = _build_add_relu_sequence(
-        f"infra_add_weight_relu_{dispatch}", inputs=["a"], **PACKAGINGS[dispatch]
+        f"infra_add_weight_relu_{dispatch}", PACKAGINGS[dispatch](), inputs=["a"]
     )
     seq.compile()
     run = seq.get_callable()
@@ -386,8 +381,7 @@ def _build_one_design_sequence(op, name, reconfigure=False):
     """Out = op(a), as a 1-step composed Image."""
     return Image(
         Recording.of_steps(name, sequences.steps((op, "a", "out")), ["a"], ["out"]),
-        full_elf=True,
-        reconfigure=reconfigure,
+        FullELF(reconfigure=reconfigure),
     )
 
 
@@ -417,21 +411,6 @@ def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
     seq.prepare()
     composition = Composition(seq)
     assert composition.expands == reconfigure
-
-
-def test_reconfigure_needs_a_full_elf():
-    """Only a full ELF has a configure to repeat."""
-    with pytest.raises(ValueError, match="reconfigure"):
-        Image(
-            Recording.of_steps(
-                "infra_separate_reconfigure",
-                sequences.steps((_relu(), "a", "out")),
-                ["a"],
-                ["out"],
-            ),
-            full_elf=False,
-            reconfigure=True,
-        )
 
 
 @pytest.mark.supported_devices("npu1", "npu2")

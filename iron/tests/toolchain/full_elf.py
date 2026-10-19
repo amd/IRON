@@ -34,6 +34,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common.graph.record import Recording
 from iron.common.image.allocator import BANK
+from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.operators import ElementwiseAdd
 from iron.operators.gemm import GEMM
@@ -132,7 +133,7 @@ def test_a_scratch_arena_past_a_bank_links_as_its_banks():
         # most of the second, so t is rebased to the third.
         pinned={"fill": BANK - w, "pad": BANK - 1024},
     )
-    seq = Image(recording, full_elf=True)
+    seq = Image(recording, FullELF())
     seq.compile()
     _, offset, length = seq.layout["t"]
     sizes = seq.buffer_sizes
@@ -152,7 +153,7 @@ def test_no_scratch_buffer_crosses_a_bank():
         ["x"],
         ["out"],
     )
-    seq = Image(recording, full_elf=True)
+    seq = Image(recording, FullELF())
     seq.prepare()
     assert [seq.layout[n][1] for n in ("w", "t")] == [0, BANK]
 

@@ -21,6 +21,7 @@ from ml_dtypes import bfloat16
 
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Composition
+from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators import LayerNorm
@@ -86,7 +87,7 @@ def _feedback_sequence(name, layer_norm=None):
     recording = Recording.of_steps(
         name, sequences.steps(*runlist), inputs, outputs, feedback=["next"]
     )
-    seq = Image(recording, full_elf=True)
+    seq = Image(recording, FullELF())
     return seq, gather
 
 
@@ -229,7 +230,7 @@ def test_feedback_argument_only_when_declared():
             ["b"] if feedback else ["b", "next"],
             feedback=feedback,
         )
-        seq = Image(recording, full_elf=True)
+        seq = Image(recording, FullELF())
         seq.prepare()
         # The main device's runtime sequence is the last one in the module.
         header = [

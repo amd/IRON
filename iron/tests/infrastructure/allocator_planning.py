@@ -23,6 +23,7 @@ from iron.common.image.allocator import (
     LiveRange,
     Pool,
 )
+from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators import ElementwiseAdd, ReLU
@@ -193,7 +194,7 @@ def _two_step_sequence():
         ["x"],
         ["out"],
     )
-    return _laid_out(Image(recording, full_elf=True))
+    return _laid_out(Image(recording, FullELF()))
 
 
 def test_planned_offsets_do_not_collide_with_unplanned():
@@ -238,7 +239,7 @@ def _chain(n_intermediates):
     recording = Recording.of_steps(
         f"chain{n_intermediates}", sequences.steps(*runlist), ["x", "w"], ["out"]
     )
-    layout, sizes = _laid_out(Image(recording, full_elf=True))
+    layout, sizes = _laid_out(Image(recording, FullELF()))
     return layout, sizes.scratch
 
 
@@ -294,7 +295,7 @@ def test_a_buffer_named_in_part_is_never_pooled():
         ["out"],
         pinned={"big": 4096},
     )
-    layout, sizes = _laid_out(Image(recording, full_elf=True))
+    layout, sizes = _laid_out(Image(recording, FullELF()))
     _, big_at, big_len = layout["big"]
     assert big_len == 4096 and half.place(layout) == ("scratch", big_at, 2048)
     # u and v outlive every use of big, so a pooled big would lend them its bytes.
@@ -518,7 +519,8 @@ def _arena_sequence(name, runlist, arena, residents, pinned=None, full_elf=True)
         ["out"],
         pinned=pinned or {n: 2048 for n in residents},
     )
-    return Image(recording, full_elf=full_elf, arena=arena, residents=residents)
+    packaging = FullELF() if full_elf else PerStep()
+    return Image(recording, packaging, arena=arena, residents=residents)
 
 
 def test_two_sequences_in_one_arena_agree_on_residents_and_share_transients():
@@ -615,6 +617,7 @@ def test_residents_need_an_arena():
                 ["x", "w"],
                 ["out"],
             ),
+            PerStep(),
             residents={"w": "W"},
         )
 
@@ -632,6 +635,6 @@ def test_back_to_back_buffers_start_aligned_whatever_their_sizes():
         ["out"],
         pinned={"big": 2048 + 18, "odd": 9},
     )
-    layout, _ = _laid_out(Image(recording, full_elf=True))
+    layout, _ = _laid_out(Image(recording, FullELF()))
     for name, (_, offset, _) in layout.items():
         assert offset % ALIGNMENT == 0, f"{name} at {offset}"

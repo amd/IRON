@@ -17,6 +17,7 @@ from aie.iron.device import from_name
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Composition
+from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, SequenceStep
 from iron.operators import ReLU
@@ -43,7 +44,7 @@ def _sequence(shapes):
             [f"{b}{i}" for i in range(len(shapes)) for b in "wx"],
             [f"y{i}" for i in range(len(shapes))],
         ),
-        full_elf=True,
+        FullELF(),
     )
     seq.prepare()
     return seq
@@ -122,7 +123,7 @@ def test_two_designs_whose_device_names_collide_are_refused():
             ["x0", "x1"],
             ["y0", "y1"],
         ),
-        full_elf=True,
+        FullELF(),
     )
     seq.prepare()
     with pytest.raises(ValueError, match=f"device names collide, {name}"):

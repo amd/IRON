@@ -10,6 +10,7 @@ from typing import Self
 from ..declare import Operator
 from ..graph.record import Recording
 from .artifacts import Artifacts
+from .link import PerStep
 from .sequence import Image
 
 
@@ -28,12 +29,13 @@ class OperatorImage:
     def __init__(self, op: Operator) -> None:
         self.op = op
         self._sequence: Image | None = None
+        self._chain = PerStep()
 
     def compile(self) -> Self:
         """Build the image, once."""
         if self._sequence is None:
             self._sequence = Image(
-                Recording.of_step(self.op.resolved()), full_elf=False
+                Recording.of_step(self.op.resolved()), self._chain
             ).compile()
         return self
 
@@ -51,5 +53,5 @@ class OperatorImage:
         """
         self.compile()
         (step,) = self._sequence.steps
-        _, result = self._sequence.kernel(step.op)(*args, **scalars)
+        _, result = self._chain.links[id(step.op)].kernel(*args, **scalars)
         return result

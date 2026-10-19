@@ -320,7 +320,7 @@ class FullELFCallable(ImageCallable):
                 elf_path=str(seq.image),
                 kernel_name=f"{device_name}:{Composition.sequence_name(k)}",
             )
-            for k in range(1, len(seq.commands) + 1)
+            for k in range(1, len(seq.packaging.commands) + 1)
         ]
         # The kernel the runs are made on, which outlives an evicted handle's.
         self._xrt_kernel: pyxrt.kernel | None = None
@@ -569,7 +569,10 @@ class PerStepCallable(ImageCallable):
             dtype = seq.buffer_dtype(ref)
             self._storage[root] = XRTTensor((_n_elements(length, dtype),), dtype=dtype)
             self._buffers[ref] = self._storage[root]
-        self._steps = [(s.op, seq.kernel(s.op), s.buffers, []) for s in seq.steps]
+        self._steps = [
+            (s.op, seq.packaging.links[id(s.op)].kernel, s.buffers, [])
+            for s in seq.steps
+        ]
         self._follow_arena()
         self._bind_steps()
 

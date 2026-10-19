@@ -43,6 +43,7 @@ from iron.common.declare.value import Value
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.callable import ImageCallable
+from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, SequenceStep
 
@@ -168,13 +169,11 @@ class Standalone:
             SequenceStep(op, tuple(map(BufferRef, self._names(self._slot[k], op))))
             for k, op in enumerate(self.steps)
         ]
+        # Configure the array every call, as a design beside others in a
+        # model's image is, so one timed alone pays that too.
+        packaging = FullELF(coresident, reconfigure=True) if full_elf else PerStep()
         self.sequence = Image(
-            Recording.of_steps(name, steps, in_names, out_names),
-            full_elf=full_elf,
-            coresident=coresident,
-            # Configure the array every call, as a design beside others in a
-            # model's image is, so one timed alone pays that too.
-            reconfigure=full_elf,
+            Recording.of_steps(name, steps, in_names, out_names), packaging
         ).compile()
         self.callable = self.sequence.get_callable()
         rng = np.random.default_rng(seed)

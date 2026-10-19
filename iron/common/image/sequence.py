@@ -6,22 +6,18 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Hashable, Mapping, Sequence
-from pathlib import Path
+from collections.abc import Hashable, Mapping
 from typing import TYPE_CHECKING
 
 import aie.utils as aie_utils
 import numpy as np
 from aie.utils import bfp
-from aie.utils.npukernel import NPUKernel
 
 from ..declare import Operator
-from .allocator import ALIGNMENT, BANK, Allocation, ArenaPlan, LiveRange, Pool
-from .artifacts import Artifacts, Design, Step
-from .callable import BF16, FullELFCallable, ScratchArena, PerStepCallable
-from .coresidence import AdjacentPacking
+from .allocator import Allocation, ArenaPlan, lay_out
+from .artifacts import Artifacts, Step
+from .callable import BF16, ScratchArena
 from .link import FullELF, PerStep
-from .compose import ArgumentSizes
 from .step import BufferRef, SequenceStep
 
 if TYPE_CHECKING:
@@ -44,99 +40,36 @@ class Image:
         recording: The graph: its steps, inputs, outputs, the sizes of the
             buffers a step names only in part (``pinned``) and the buffers
             of its feedback argument.
-        full_elf: One full ELF, else one xclbin per design, a step at a
-            time; ``None`` is a full ELF where the device dispatches one.
-        check: The xclbin chain, each step checked against its reference
-            on the NPU's inputs (``callable.check_step``).
+        packaging: One full ELF, or an xclbin per step, as
+            ``packaging.plan`` picks.
         arena: A shared ``ArenaPlan`` to place the scratch buffers in. The
             full ELF places them all; a step at a time, each buffer is its
             own buffer object, so only the residents are placed there.
         residents: With ``arena``, the scratch buffers resident there, by
             storage key.
-        shared_words: On the full ELF, design symbol -> the scratchpad word
-            it shares with others that always hold the same number.
-        coresident: Groups of operators whose designs share one device
-            configuration in the full ELF, or an ``AdjacentPacking`` that
-            chooses them.
-        reconfigure: On the full ELF, configure the array at every call even
-            where it runs one design, which the first call otherwise
-            configures for all (``Composition.expands``).
-        commands: On the full ELF, the steps that start a command of their
-            own after the first's, each command a runtime sequence a call
-            queues after the one before it.
     """
 
     def __init__(
         self,
         recording: Recording,
-        full_elf: bool | None = None,
-        check: bool = False,
+        packaging: FullELF | PerStep,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
-        shared_words: Mapping[str, str] | None = None,
-        coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
-        reconfigure: bool = False,
-        commands: Sequence[int] = (),
     ):
-        if check:
-            if full_elf:
-                raise ValueError("check=True checks each step of an xclbin chain")
-            full_elf = False
         if residents and arena is None:
             raise ValueError("residents are placed in an arena; pass arena= too")
-        unbuilt = "check=True" if check else "full_elf=False"
-        if recording.feedback and full_elf is False:
-            raise ValueError(
-                f"feedback arguments are an argument of the full ELF; "
-                f"{unbuilt} has none"
-            )
-        if coresident and full_elf is False:
-            raise ValueError(
-                f"co-residence packs designs into one full-ELF device; "
-                f"{unbuilt} builds none"
-            )
-        if reconfigure and full_elf is False:
-            raise ValueError(
-                f"reconfigure configures the full ELF at every call; "
-                f"{unbuilt} builds none"
-            )
-        if commands and full_elf is False:
-            raise ValueError(
-                f"commands split the full ELF's sequence; {unbuilt} dispatches "
-                f"every step on its own"
-            )
         self.steps = [SequenceStep(s.op, s.refs()) for s in recording.steps]
-        if isinstance(coresident, AdjacentPacking):
-            self.coresident: tuple[tuple[Operator, ...], ...] | AdjacentPacking = (
-                coresident
-            )
-        else:
-            stepped = {id(s.op) for s in self.steps}
-            strays = [
-                type(op).__name__
-                for group in coresident
-                for op in group
-                if id(op) not in stepped
-            ]
-            if strays:
-                raise ValueError(f"coresident names operators no step runs: {strays}")
-            self.coresident = tuple(tuple(group) for group in coresident)
         # The chain's kernel instances are named from this label.
         self.name = recording.name
         self.inputs = [h.name for h in recording.inputs]
         self.outputs = [h.name for h in recording.outputs]
         self.feedback = list(recording.feedback)
         self.pinned = dict(recording.pinned)
-        self.reconfigure = reconfigure
-        self.commands = tuple(commands)
+        self.packaging = packaging
         self.arena = arena
         self.residents = dict(residents or {})
-        self.shared_words = dict(shared_words or {})
         self._arena_layout: dict[str, Allocation] | None = None
-        self.full_elf = full_elf
-        self.check = check
         self.layout: dict[str, tuple[str, int, int]] | None = None
-        self._image = None
         self._artifacts: Artifacts | None = None
 
     @property
@@ -193,17 +126,7 @@ class Image:
             uses.append((reads, writes))
         return uses
 
-    def _pool_offsets(self, sizes: Mapping[str, int]) -> dict[str, int]:
-        """Byte offsets letting intermediates with disjoint lifetimes overlap;
-        a buffer the host addresses, or one a step names only in part, is
-        never pooled.
-        """
-        held = {*self.inputs, *self.outputs, *self.feedback, *self.pinned}
-        ranges = LiveRange.scan(self._uses(sizes), pinned=held)
-        allocations, _ = Pool(ALIGNMENT).place(ranges, sizes)
-        return {name: a.offset for name, a in allocations.items()}
-
-    def _place_in_arena(self, sizes: Mapping[str, int]) -> dict[str, Allocation]:
+    def _place_in_arena(self, uses, sizes: Mapping[str, int]) -> dict[str, Allocation]:
         """This sequence's scratch buffers placed in the shared arena, once; a
         part's use is a use of its buffer.
         """
@@ -215,9 +138,7 @@ class Image:
                 f"residents {sorted(missing)} are not scratch buffers of {self.name}"
             )
         assert self.arena is not None, "placed in an arena plan"
-        self._arena_layout = self.arena.place_image(
-            self._uses(sizes), sizes, self.residents
-        )
+        self._arena_layout = self.arena.place_image(uses, sizes, self.residents)
         return self._arena_layout
 
     def _sizes(self) -> dict[str, int]:
@@ -264,61 +185,20 @@ class Image:
             raise ValueError(f"Feedback buffers {sorted(both)} are inputs or outputs")
         return sizes
 
-    def _layout(self) -> tuple[dict[str, tuple[str, int, int]], ArgumentSizes]:
+    def _layout(self):
         """Each buffer's ``(argument kind, byte offset, bytes)``, and the
         bytes of each argument.
         """
         sizes = self._sizes()
-        layout: dict[str, tuple[str, int, int]] = {}
-
-        def place(kind: str, roots: list[str]) -> int:
-            if kind == "scratch" and self.arena is not None:
-                stepwise = self.full_elf is False
-                placed = self._place_in_arena(
-                    {r: sizes[r] for r in roots if not stepwise or r in self.residents}
-                )
-                for root, a in placed.items():
-                    layout[root] = (kind, a.offset, a.size)
-                if not stepwise:
-                    return max((a.end for a in placed.values()), default=0)
-                roots = [r for r in roots if r not in placed]
-            # The caller binds its own memory to the feedback argument: offsets are the contract.
-            offsets = (
-                self._pool_offsets({r: sizes[r] for r in roots})
-                if kind != "feedback"
-                else {}
-            )
-            # A host-visible kind is one buffer object, not banks.
-            pool = Pool(ALIGNMENT, BANK if kind == "scratch" else None)
-            cursor = end = 0
-            pooled = []
-            for root in roots:
-                if root in offsets:
-                    pooled.append(root)
-                    continue
-                cursor = pool.fit(cursor, sizes[root])
-                layout[root] = (kind, cursor, sizes[root])
-                end = cursor + sizes[root]
-                cursor = pool.align(end)
-            # The pool starts at zero, so it is rebased past the other
-            # buffers, at a bank's start unless it fits the rest of this one.
-            span = max((offsets[r] + sizes[r] for r in pooled), default=0)
-            if pool.bank is not None and span > pool.bank - cursor % pool.bank:
-                cursor = -(-cursor // pool.bank) * pool.bank
-            for root in pooled:
-                at = cursor + offsets[root]
-                layout[root] = (kind, at, sizes[root])
-                end = max(end, at + sizes[root])
-            return end
-
-        host = {*self.inputs, *self.outputs, *self.feedback}
-        argument_sizes = ArgumentSizes(
-            place("input", self.inputs),
-            place("output", self.outputs),
-            place("scratch", [r for r in sizes if r not in host]),
-            place("feedback", self.feedback) if self.feedback else None,
-        )
-        return layout, argument_sizes
+        uses = self._uses(sizes)
+        arena = {}
+        if self.arena is not None:
+            hosted = {*self.inputs, *self.outputs, *self.feedback}
+            scratch = [r for r in sizes if r not in hosted]
+            placed = self.packaging.in_arena(scratch, self.residents)
+            arena = self._place_in_arena(uses, {r: sizes[r] for r in placed})
+        host = (self.inputs, self.outputs, self.feedback)
+        return lay_out(sizes, uses, host, self.pinned, arena)
 
     def buffer_dtype(self, ref: BufferRef) -> np.dtype:
         """The host dtype ``ref`` is viewed as: what the first step naming it
@@ -337,20 +217,8 @@ class Image:
         return np.dtype(np.uint8) if parts else BF16
 
     def prepare(self):
-        """Settle the packaging and lay the buffers out, before anything is built."""
+        """Resolve the operators and lay the buffers out, before anything is built."""
         dev = aie_utils.get_current_device()
-        if self.full_elf is None:
-            self.full_elf = dev is not None and dev.dispatches_full_elf
-            if self.feedback and not self.full_elf:
-                raise ValueError(
-                    f"{self.name}: feedback arguments need the full ELF, which "
-                    f"this device does not dispatch"
-                )
-            if self.coresident and not self.full_elf:
-                raise ValueError(
-                    f"{self.name}: co-residence packs designs into one full-ELF "
-                    f"device, which this device does not dispatch"
-                )
         # Resolved before unique_designs() takes identities, so operators that
         # resolve alike are one design.
         resolved: dict[int, Operator] = {}
@@ -358,14 +226,7 @@ class Image:
             if id(s.op) not in resolved:
                 resolved[id(s.op)] = s.op.resolved(dev)
         self.steps = [SequenceStep(resolved[id(s.op)], s.buffers) for s in self.steps]
-        if not isinstance(self.coresident, AdjacentPacking):
-            self.coresident = tuple(
-                tuple(resolved[id(op)] for op in group) for group in self.coresident
-            )
-        # After the packaging check: a sequence that cannot run in its arena must
-        # not place anything there.
         self.layout, self.buffer_sizes = self._layout()
-        self._image = FullELF() if self.full_elf else PerStep()
 
     def compile(self):
         """Build the image ahead of time."""
@@ -377,20 +238,9 @@ class Image:
         """Build this sequence's image, once; sets ``self.image`` and ``artifacts``."""
         if self.layout is None:
             self.prepare()
-        self.image = self._image.link(self)
+        self.image = self.packaging.link(self)
         self._artifacts = self._record()
         return self.image
-
-    def kernel(self, op: Operator) -> NPUKernel:
-        """The kernel a step of ``op`` dispatches on the xclbin chain."""
-        if not isinstance(self._image, PerStep) or self._image.image is None:
-            raise RuntimeError(f"{self.name} is not linked as an xclbin chain")
-        return self._image.links[id(op)].kernel
-
-    @property
-    def elf_path(self):
-        """The full ELF, when that is this sequence's image."""
-        return self.image if isinstance(self._image, FullELF) else None
 
     @property
     def artifacts(self) -> Artifacts:
@@ -407,46 +257,16 @@ class Image:
             tuple(op.name for op in operators if design_of[id(op)] == i)
             for i in range(len(designs))
         ]
-        insts = None
-        if isinstance(self._image, FullELF):
-            assert self._image.design is not None, "link() built the image"
-            entry = self._image.design.get_cache_entry()
-            labels = [f"op{i}_{type(op).__name__}" for i, op in enumerate(designs)]
-            records = tuple(
-                Design(name=labels[i], operators=sharing[i])
-                for i in range(len(designs))
-            )
-            image = self.image
-        else:
-            links = [self._image.links[id(op)] for op in designs]
-            labels = [link.name for link in links]
-            records = tuple(
-                Design(
-                    name=link.name,
-                    operators=sharing[i],
-                    entry=(
-                        link.design
-                        if link.configuration is None
-                        else link.configuration
-                    ).get_cache_entry(),
-                    image=Path(link.kernel.xclbin_path),
-                    insts=link.design.get_cache_entry().insts,
-                )
-                for i, link in enumerate(links)
-            )
-            entry = links[0].design.get_cache_entry()
-            if len(links) == 1:
-                insts = entry.insts
-            image = self._image.image
+        records, entry, insts = self.packaging.record(designs, sharing)
+        labels = [d.name for d in records]
         by_design = {id(op): labels[design_of[id(op)]] for op in operators}
-        assert image is not None, "the image has been built"
         steps = tuple(
             Step(i, s.op.name, by_design[id(s.op)], s.buffers)
             for i, s in enumerate(self.steps)
         )
         return Artifacts(
-            full_elf=self.full_elf,
-            image=image,
+            full_elf=self.packaging.full_elf,
+            image=self.image,
             insts=insts,
             entry=entry,
             designs=records,
@@ -464,6 +284,4 @@ class Image:
         self.link()
         if self.arena is not None and arena is None:
             arena = ScratchArena(self.arena)
-        if not self.full_elf:
-            return PerStepCallable(self, check=self.check, arena=arena)
-        return FullELFCallable(self, arena=arena)
+        return self.packaging.callable(self, arena)

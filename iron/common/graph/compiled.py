@@ -32,12 +32,13 @@ from ..declare.operator import device_fit, graph_recorder
 from ..declare.value import ExtentWord
 from ..declare.precision import Precision
 from ..declare.profile import Profile
-from ..image.allocator import ArenaPlan
+from ..image.allocator import ALIGNMENT, ArenaPlan
 from ..image.artifacts import Parameter
 from ..image.callable import FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import Kind, Plan, plan, require_device
-from ..image.sequence import ALIGNMENT, Image
+from ..image.link import FullELF, PerStep
+from ..image.sequence import Image
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fill import filled
@@ -758,21 +759,17 @@ class CompiledGraph:
         self.words, self.shared = _words(
             recording, share=plan.full_elf, extents=not plan.full_elf
         )
+        packaging = (
+            FullELF(coresident or (), commands=plan.commands, shared_words=self.shared)
+            if plan.full_elf
+            else PerStep(check)
+        )
         placement: dict[str, Any] = (
             {}
             if arena is None
             else dict(arena=arena.plan, residents=recording.residents)
         )
-        if coresident:
-            placement["coresident"] = coresident
-        self.sequence = Image(
-            recording,
-            full_elf=plan.full_elf,
-            check=check,
-            shared_words=self.shared,
-            commands=plan.commands,
-            **placement,
-        ).compile()
+        self.sequence = Image(recording, packaging, **placement).compile()
         self.image = self.sequence.image
         self.artifacts = self.sequence.artifacts
         if plan.full_elf:
