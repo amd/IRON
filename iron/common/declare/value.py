@@ -43,6 +43,10 @@ class Value(PerCallMember):
         ssa: Its value in the sequence body, on an xclbin.
     """
 
+    words: int = 1
+    param: Any = None
+    ssa: Any = None
+
     def __init__(
         self,
         op: Operator,
@@ -57,8 +61,6 @@ class Value(PerCallMember):
         self.op = op
         self.name = name
         self.words = words
-        self.param: Any = None
-        self.ssa = None
 
     @property
     def per_call(self) -> bool:

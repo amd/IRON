@@ -679,14 +679,9 @@ class Operator(jit.Operator, library=True):
         self._values: dict[str, Value] = {}
         for m in self.declaration.members:
             if isinstance(m, PerCallMember):
-                value = Value(
-                    self,
-                    m.name,
-                    dtype=m.dtype,
-                    derive=m.derive,
-                    bounds=m.bounds,
-                    words=getattr(m, "words", 1),
-                )
+                # Bound as mlir-aie binds a member (Member.of), now a Value.
+                value = m.of(self)
+                value.__class__ = Value
                 self._values[m.name] = value
                 self._bound[m.name] = (
                     value if m.bounds is None else vars(self)[m.bounds.name]

@@ -289,6 +289,18 @@ def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one()
     assert [b.name for b in step.op.buffers] == ["x", "s", "y"]
 
 
+def test_a_bound_value_is_its_member_on_the_instance():
+    op = MV(M=1024, K=128)
+    value, member = op.value("count"), MV.count
+    assert type(value) is Value and value is not member and value.op is op
+    assert (value.name, value.dtype, value.derive, value.words) == (
+        member.name,
+        member.dtype,
+        member.derive,
+        1,
+    )
+
+
 def test_a_derived_value_is_written_once_per_build():
     op = MV(M=1024, K=128).resolved(NPU2)
     assert op.residents == {"count": 2, "start": 0} and op.values == []
