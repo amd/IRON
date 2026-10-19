@@ -218,7 +218,6 @@ def test_a_marker_inside_a_union_is_rejected():
         {},
         {"init": False, "default": 1},
         {"init": False, "array": True},
-        {"init": False, "probe": 0},
     ],
 )
 def test_a_dispatch_value_takes_no_field_option(options):
@@ -285,67 +284,6 @@ def test_float_scratchpad_annotation_is_rejected():
         class Bad(iron.Graph):
             def body(self, x, *, scale: Scratchpad[np.float32]):
                 return x
-
-
-def test_a_probe_may_not_be_on_a_field_the_array_reads():
-    with pytest.raises(TypeError, match="probe= on an array field"):
-
-        class Baked(Operator):
-            n: CompileTime[int] = field()
-            alpha: CompileTime[float] = field(probe=1.0, array=True)
-            x = In(n)
-
-    with pytest.raises(TypeError, match="probe= on an array field"):
-
-        class Tiled(Operator):
-            n: CompileTime[int] = field()
-            t: CompileTime[int] = field(probe=16)
-            x = In(n, obj_shape=(t,))
-
-
-def test_a_probe_may_not_be_on_a_field_the_transfers_follow():
-    with pytest.raises(TypeError, match="probe= on a field an operand's shape"):
-
-        class Shaped(Operator):
-            n: CompileTime[int] = field(probe=1024)
-            x = In(n)
-
-    with pytest.raises(TypeError, match="probe= on a field an operand's shape"):
-
-        class Present(Operator):
-            n: CompileTime[int] = field()
-            gated: CompileTime[bool] = field(default=False, probe=False)
-            x = In(n)
-            w = In(n, when=gated)
-
-
-def test_a_probe_may_not_be_on_a_field_the_constructor_cannot_set():
-    with pytest.raises(TypeError, match="probe= on an init=False field"):
-
-        class Fixed(Operator):
-            n: CompileTime[int] = field()
-            low: CompileTime[float] = field(default=0.0, init=False, probe=0.0)
-            x = In(n)
-
-
-def test_probed_sets_each_probe_field_and_nothing_else():
-    class Bounded(Operator):
-        n: CompileTime[int] = field()
-        low: CompileTime[float] = field(probe=-np.inf)
-        cap: CompileTime[tuple | None] = field(default=None, probe=None)
-        x = In(n)
-
-    assert Bounded.declaration.probes == {"low": -np.inf, "cap": None}
-    at = Bounded(n=64, low=-np.inf)
-    assert at._probed() is at
-    off = Bounded(n=64, low=0.5, cap=(0.0, 1.0))
-    probe = off._probed()
-    assert (probe.n, probe.low, probe.cap) == (64, -np.inf, None)
-    assert (off.low, off.cap) == (0.5, (0.0, 1.0))
-    assert probe.design_key() == at.design_key() != off.design_key()
-    assert MV.declaration.probes == {}
-    plain = MV(M=64, K=256)
-    assert plain._probed() is plain
 
 
 # --------------------------------------------------------------------------

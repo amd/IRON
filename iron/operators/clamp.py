@@ -27,8 +27,8 @@ class Clamp(UnaryElementwise):
         draw=lambda op: dict(centered=(op.x,)),
     )
 
-    low: CompileTime[float] = field(probe=-np.inf)
-    high: CompileTime[float] = field(probe=np.inf)
+    low: CompileTime[float] = field()
+    high: CompileTime[float] = field()
 
     low_bits = Value(derive=lambda op: op.bits()[0])
     high_bits = Value(derive=lambda op: op.bits()[1])

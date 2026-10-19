@@ -369,6 +369,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `field(probe=)`: the tuner times each distinct value of such a field, as
+  it does every other (Clamp's `low` and `high`).
 - Llama's tiktoken tokenizer, `SPECIAL_TOKENS` and `tokenizer()`: Llama
   reads its checkpoint's `tokenizer.json` like every model, and tiktoken is
   no longer a dependency.

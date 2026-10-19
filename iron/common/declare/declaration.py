@@ -72,7 +72,6 @@ class Declaration:
         array: The fields the array reads, which its generated ``Array``
             holds: what a stream's tile, its dtype, its replication or its
             presence names, and those declared ``array=True``.
-        probes: Each `field(probe=)` field's probe, by name.
     """
 
     def __init__(self, cls: type, library: type, shipped: bool = False) -> None:
@@ -123,7 +122,6 @@ class Declaration:
                     or f.default is not dataclasses.MISSING
                     or isinstance(spec, AutoSpec)
                     or spec.derive is not None
-                    or spec.probe is not dataclasses.MISSING
                     or spec.array
                 ):
                     raise TypeError(
@@ -318,33 +316,6 @@ class Declaration:
             listed |= set(missing)
         own = fields.keys() - {f.name for f in dataclasses.fields(library)}
         self.array = tuple(n for n in fields if n in listed and n in own)
-        self.probes = {
-            n: s.probe for n, s in params.items() if s.probe is not dataclasses.MISSING
-        }
-        shaped: set[str] = set()
-        for m in members:
-            if isinstance(m, Operand):
-                shaped |= m.dims.names()
-                if m.when is not None:
-                    shaped.add(m.when.name)
-            elif isinstance(m, Extent):
-                shaped.add(m.field.name)
-        for n in self.probes:
-            if n in self.array:
-                raise TypeError(
-                    f"{cls.__name__}.{n}: probe= on an array field; the cores are "
-                    f"built from it, so its cost may follow it"
-                )
-            if n in shaped:
-                raise TypeError(
-                    f"{cls.__name__}.{n}: probe= on a field an operand's shape or "
-                    f"presence names; the transfers follow it"
-                )
-            if not fields[n].init:
-                raise TypeError(
-                    f"{cls.__name__}.{n}: probe= on an init=False field; the tuner "
-                    f"sets the probe through the constructor"
-                )
         if not shipped:
             return
         for m in members:

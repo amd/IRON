@@ -32,14 +32,12 @@ class ParamSpec:
     Attributes:
         derive: The function computing the field's default, or None.
         held: A value given for the field must be what `derive` computes.
-        probe: The value the tuner measures the field at, or ``MISSING``.
         array: The operator's ``Array`` reads the field though no stream
             names it.
     """
 
     derive: Callable[[Any], Any] | None
     held: bool
-    probe: Any
     array: bool
 
     @staticmethod
@@ -75,7 +73,6 @@ def field(
     held: bool = True,
     repr: bool = True,
     init: bool = True,
-    probe: Any = MISSING,
     array: bool = False,
 ) -> Any:
     """A compile-time parameter: given by the caller or inferred from the
@@ -98,13 +95,6 @@ def field(
             ``held=False`` the given value overrides it.
         repr: The field is in the operator's repr.
         init: The field is a constructor argument.
-        probe: The field reaches the device only as the words of `Value`s
-            the cores read: no transfer, trip count, branch or core follows
-            it, so every value of it costs the same. The tuner measures the
-            operator at `probe` and takes that cost for every value. Pick
-            the value that leaves the output most informative (the
-            identity), since a setting judged exact there is taken as exact
-            at every value. `None` is a probe like any other.
         array: The operator's ``Array`` reads the field (a scalar its
             kernel takes, a flag its build branches on), though no stream's
             tile, lanes, dtype or presence names it.
@@ -129,7 +119,6 @@ def field(
             SPEC: ParamSpec(
                 derive=derive,
                 held=held and derive is not None,
-                probe=probe,
                 array=array,
             )
         },
@@ -180,7 +169,6 @@ def Auto(
             SPEC: AutoSpec(
                 derive=None,
                 held=False,
-                probe=MISSING,
                 array=array,
                 default=default,
                 domain=domain,

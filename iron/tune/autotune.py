@@ -275,16 +275,13 @@ class Trial:
 
 class Shape:
     """The operators of the calls one profile entry covers: one class at one
-    set of dimensions (``Profile.dims``), its probed ones aside.
+    set of dimensions (``Profile.dims``).
     """
 
     def __init__(self, op: Operator):
         self.cls = type(op)
-        probes = self.cls.declaration.probes
         given = {f.name: vars(op)[f.name] for f in dataclasses.fields(op)}
-        self.dims = {
-            k: v for k, v in Profile.dims(self.cls, given).items() if k not in probes
-        }
+        self.dims = Profile.dims(self.cls, given)
         # Each operator, where it is timed (``Call.op_points``) and what its
         # inputs hold (``Call.op_inputs``).
         self.members: list[
@@ -326,7 +323,7 @@ def shapes(calls: Sequence[Call], dev) -> list[Shape]:
             shape = Shape(op)
             shape = found.setdefault(shape.key, shape)
             shape.pinned |= op.pinned
-            identity = _identity(op._probed(), dev)
+            identity = _identity(op, dev)
             if identity not in seen:
                 seen.add(identity)
                 shape.members.append((op, call.op_points(op), call.op_inputs(op)))
@@ -354,15 +351,15 @@ def time_shape(
     tunables moves it no further. A setting whose ``least_us`` at
     ``cycles`` is no faster than the fastest taken so far is not timed.
     """
-    found = settings(shape.members[0][0]._probed(), dev, shape.pinned)
+    found = settings(shape.members[0][0], dev, shape.pinned)
     for op, _, _ in shape.members[1:]:
-        own = settings(op._probed(), dev, shape.pinned)
+        own = settings(op, dev, shape.pinned)
         found = [s for s in found if s in own]
     found = [found[0]] + [
         s
         for s in found[1:]
         if all(
-            refusal(op._probed()._with_tunables(**s), fit_cache) is None
+            refusal(op._with_tunables(**s), fit_cache) is None
             for op, _, _ in shape.members
         )
     ]
@@ -425,7 +422,7 @@ def _least(shape: Shape, s: dict[str, Any], cycles, dev) -> float | None:
     """
     total = 0.0
     for op, points, _ in shape.members:
-        moved = op._probed()._with_tunables(**s).resolved(dev)
+        moved = op._with_tunables(**s).resolved(dev)
         for weight, values in points:
             bound = least_us(moved, values, cycles, dev)
             if bound is None:
@@ -453,7 +450,7 @@ def _time(
     variances: list[float | None] = [0.0] * len(found)
     refused: list[str | None] = [None] * len(found)
     for op, points, inputs in shape.members:
-        ops = [op._probed()._with_tunables(**s).resolved() for s in found]
+        ops = [op._with_tunables(**s).resolved() for s in found]
         for weight, values in points:
             ran = measure(
                 ops,

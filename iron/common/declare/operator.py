@@ -502,15 +502,6 @@ class Operator:
             own += (("values", tuple(sorted(names.items()))),)
         return (type(self), own)
 
-    def _probed(self) -> Self:
-        """This operator with each ``field(probe=)`` field at its probe: the
-        one its step time is measured as, for every value of those fields.
-        Itself when they are there already, unresolved otherwise.
-        """
-        if all(vars(self)[n] == v for n, v in self.declaration.probes.items()):
-            return self
-        return dataclasses.replace(self, **self.declaration.probes)
-
     def array_key(self):
         key = (type(self),) + tuple(
             (name, v.value if isinstance(v := vars(self)[name], Enum) else v)
