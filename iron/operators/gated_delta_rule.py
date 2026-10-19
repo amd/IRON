@@ -86,9 +86,7 @@ class GatedDeltaRule(Operator):
         draw=_trained,
     )
 
-    # A long prefill holds more shim BDs than a tile has. Its fills go out
-    # before their drains, so a reclaiming poll could wait on a fill that
-    # only a later drain frees: unchecked on a device (npu-bringup).
+    # A long prefill holds more shim BDs than a tile has (npu-bringup).
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     rows: int = param(array=True)
