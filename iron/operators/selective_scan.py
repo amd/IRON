@@ -142,13 +142,13 @@ class SelectiveScan(Operator):
             )
 
     def resolve(self, dev):
-        columns = self.columns or max(
-            c for c in range(1, dev.cols + 1) if self.heads % c == 0
+        # As many cores as divide the heads and the shim's input channels feed.
+        columns = self.resolve_columns(
+            dev, self.columns, fits=lambda c: self.heads % c == 0
         )
-        if self.heads % columns or columns > dev.cols:
+        if self.heads % columns:
             raise Unresolvable(
-                f"SelectiveScan: {self.heads} heads over {columns} cores, on a "
-                f"device of {dev.cols} columns"
+                f"SelectiveScan: {self.heads} heads over {columns} cores"
             )
         return dataclasses.replace(self, columns=columns)
 
@@ -163,7 +163,7 @@ class SelectiveScan(Operator):
 
         def build(self) -> Built:
             H, P, N, I = self.heads, self.head_dim, self.state_size, self.inner
-            T, per_group, per_head = _block(self), H // self.groups, P // SLICE
+            T, per_group, heads = _block(self), H // self.groups, H // self.columns
             kernel = self.kernel()
             f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
             bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
@@ -199,8 +199,9 @@ class SelectiveScan(Operator):
                 zero, size = arith.constant(0, i32), arith.constant(T, i32)
                 bc, dt = T * SLICE, T * (SLICE + 2 * N)
                 for u in range_(_slices(self)):
-                    h = u // per_head + first
-                    p = (u % per_head) * SLICE + h * P
+                    # Slice u // heads of each of the core's heads in turn.
+                    h = u % heads + first
+                    p = (u // heads) * SLICE + h * P
                     g = (h // per_group) * N + I
                     start, final = of_slice.acquire(1), of_final.acquire(1)
                     for j in range_(self.rows // T):
@@ -225,7 +226,6 @@ class SelectiveScan(Operator):
                     of_slice.release(1)
                     of_final.release(1)
 
-            heads = H // self.columns
             workers = [
                 Worker(
                     core_fn,
@@ -249,9 +249,13 @@ class SelectiveScan(Operator):
         parameters and states, and its slices of ``y`` and ``final``.
         """
         R, H, W, I = self.rows, self.heads, self.width, self.inner
+        P, SN = self.head_dim, SLICE * self.state_size
         S, heads = _slices(self), H // self.columns
-        states = self.heads * self.head_dim * self.state_size
-        run = S * SLICE * self.state_size
+        per, states, run = S // heads, H * P * self.state_size, S * SN
+        # A core's heads' states, a slice of each head in turn.
+        slices = lambda k: TensorAccessPattern(
+            (states,), k * run, [per, heads, SN], [SN, P * self.state_size, 1]
+        )
         tg = TaskGroup()
         for k in range(self.columns):
             self.xbc.fill(
@@ -261,30 +265,21 @@ class SelectiveScan(Operator):
                 TensorAccessPattern((R, H), 0, [S, R, H], [0, H, 1]), lane=k, group=tg
             )
             self.head.fill(
-                TensorAccessPattern(
-                    (H, 3), 3 * k * heads, [heads, S // heads, 3], [3, 0, 1]
-                ),
+                TensorAccessPattern((H, 3), 3 * k * heads, [per, heads, 3], [0, 3, 1]),
                 lane=k,
                 group=tg,
             )
-            self.state.fill(
-                TensorAccessPattern((states,), k * run, [run], [1]), lane=k, group=tg
-            )
+            self.state.fill(slices(k), lane=k, group=tg)
         for k in range(self.columns):
             self.y.drain(
                 TensorAccessPattern(
-                    (R, I), k * S * SLICE, [S, R, SLICE], [SLICE, I, 1]
+                    (R, I), k * heads * P, [per, heads, R, SLICE], [SLICE, P, I, 1]
                 ),
                 lane=k,
                 group=tg,
                 wait=True,
             )
-            self.final.drain(
-                TensorAccessPattern((states,), k * run, [run], [1]),
-                lane=k,
-                group=tg,
-                wait=True,
-            )
+            self.final.drain(slices(k), lane=k, group=tg, wait=True)
         tg.finish()
 
     def tolerance(self):

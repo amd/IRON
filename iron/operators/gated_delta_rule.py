@@ -140,13 +140,13 @@ class GatedDeltaRule(Operator):
             )
 
     def resolve(self, dev):
-        columns = self.columns or max(
-            c for c in range(1, dev.cols + 1) if self.v_heads % c == 0
+        # As many cores as divide the heads and the shim's input channels feed.
+        columns = self.resolve_columns(
+            dev, self.columns, fits=lambda c: self.v_heads % c == 0
         )
-        if self.v_heads % columns or columns > dev.cols:
+        if self.v_heads % columns:
             raise Unresolvable(
-                f"GatedDeltaRule: {self.v_heads} value heads over {columns} "
-                f"cores, on a device of {dev.cols} columns"
+                f"GatedDeltaRule: {self.v_heads} value heads over {columns} cores"
             )
         return dataclasses.replace(self, columns=columns)
 
@@ -161,7 +161,7 @@ class GatedDeltaRule(Operator):
 
         def build(self) -> Built:
             V, Dk, Dv, W = self.v_heads, self.key_dim, self.value_dim, self.width
-            T, per_group, per_head = _block(self), V // self.k_heads, Dv // SLICE
+            T, per_group, heads = _block(self), V // self.k_heads, V // self.columns
             kernel = self.kernel()
             f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
             bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
@@ -199,8 +199,9 @@ class GatedDeltaRule(Operator):
                 k, v = T * Dk, 2 * T * Dk
                 ab = v + T * SLICE
                 for u in range_(_slices(self)):
-                    h = u // per_head + first
-                    p = 2 * V + 2 * self.k_heads * Dk + h * Dv + (u % per_head) * SLICE
+                    # Slice u // heads of each of the core's heads in turn.
+                    h = u % heads + first
+                    p = 2 * V + 2 * self.k_heads * Dk + h * Dv + (u // heads) * SLICE
                     g = 2 * V + (h // per_group) * Dk
                     start, final = of_slice.acquire(1), of_final.acquire(1)
                     for j in range_(self.rows // T):
@@ -224,7 +225,6 @@ class GatedDeltaRule(Operator):
                     of_slice.release(1)
                     of_final.release(1)
 
-            heads = V // self.columns
             workers = [
                 Worker(
                     core_fn,
@@ -250,12 +250,14 @@ class GatedDeltaRule(Operator):
         R, V, W, I = self.rows, self.v_heads, self.width, self.inner
         Dk, Dv = self.key_dim, self.value_dim
         S, heads = _slices(self), V // self.columns
-        # A core's heads' states, slice by slice: each key row's SLICE columns.
+        per = S // heads
+        # A core's heads' states, a slice (each key row's SLICE columns) of
+        # each head in turn.
         slices = lambda k: TensorAccessPattern(
             (V, Dk, Dv),
             k * heads * Dk * Dv,
-            [heads, Dv // SLICE, Dk, SLICE],
-            [Dk * Dv, SLICE, Dv, 1],
+            [per, heads, Dk, SLICE],
+            [SLICE, Dk * Dv, Dv, 1],
         )
         tg = TaskGroup()
         for k in range(self.columns):
@@ -269,9 +271,7 @@ class GatedDeltaRule(Operator):
                 TensorAccessPattern((R, W), 0, [S, R, W], [0, W, 1]), lane=k, group=tg
             )
             self.head.fill(
-                TensorAccessPattern(
-                    (V, 2), 2 * k * heads, [heads, S // heads, 2], [2, 0, 1]
-                ),
+                TensorAccessPattern((V, 2), 2 * k * heads, [per, heads, 2], [0, 2, 1]),
                 lane=k,
                 group=tg,
             )
@@ -279,7 +279,7 @@ class GatedDeltaRule(Operator):
         for k in range(self.columns):
             self.y.drain(
                 TensorAccessPattern(
-                    (R, I), k * heads * Dv, [S, R, SLICE], [SLICE, I, 1]
+                    (R, I), k * heads * Dv, [per, heads, R, SLICE], [SLICE, Dv, I, 1]
                 ),
                 lane=k,
                 group=tg,
