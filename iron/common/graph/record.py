@@ -643,7 +643,8 @@ class Recorder:
             return x.name
         array = x.array if isinstance(x, Weight) else x
         name = self._names.get(id(x)) or self._names.get(id(array))
-        return name or f"{type(x).__name__} {list(getattr(x, 'shape', ()))}"
+        kind = "ndarray" if isinstance(x, np.ndarray) else type(x).__name__
+        return name or f"{kind} {list(getattr(x, 'shape', ()))}"
 
     def _call(self, target, args, kwargs):
         cls = target if isinstance(target, type) else type(target)

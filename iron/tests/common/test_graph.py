@@ -2333,3 +2333,12 @@ def test_a_refused_step_names_the_graph_the_operator_and_the_held_path():
 
     with pytest.raises(ValueError, match=r"^Project: GEMV\(layers\.0\.w, x\): GEMV"):
         Project().record(x=(256,))
+
+
+def test_a_refused_step_shows_an_unheld_param_as_an_array_of_its_shape():
+    class Project(iron.Graph):
+        def body(self, x):
+            return GEMV.step(iron.param(z(256, 512)), x)
+
+    with pytest.raises(ValueError, match=r"^Project: GEMV\(ndarray \[256, 512\], x\)"):
+        Project().record(x=(256,))
