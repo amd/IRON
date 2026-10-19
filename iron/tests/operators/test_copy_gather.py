@@ -49,7 +49,7 @@ def gathered_ids(n_rows: int, n_ids: int) -> np.ndarray:
 class FromWeight(iron.Graph):
     def __init__(self, table, ids):
         self.table = iron.weight(table)
-        self.ids = ids
+        self.ids = iron.param(ids)
 
     def body(self, x):
         rows = Copy.step(self.table[self.ids]).reshape(len(self.ids), WIDTH)
@@ -58,7 +58,7 @@ class FromWeight(iron.Graph):
 
 class FromIntermediate(iron.Graph):
     def __init__(self, ids):
-        self.ids = ids
+        self.ids = iron.param(ids)
 
     def body(self, table):
         table = Copy.step(table).reshape(table.shape)

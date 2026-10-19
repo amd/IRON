@@ -279,7 +279,7 @@ class TwoProjections(iron.Graph):
     """Two GEMVs of one array, the narrower first, each on a vector of its own."""
 
     def __init__(self, narrow, wide):
-        self.narrow, self.wide = narrow, wide
+        self.narrow, self.wide = iron.param(narrow), iron.param(wide)
 
     def body(self, x, y):
         tiles = dict(num_aie_columns=8, tile_size_input=4, tile_size_output=32)
