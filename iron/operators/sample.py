@@ -163,113 +163,106 @@ class Sample(Operator):
             config.select(*run)
         config.combine()
 
-    class Array(Operator.Array):
-        @property
-        def slice_size(self) -> int:
-            return slices(self.vocab, self.cores, self.k_max)[0]
+    @property
+    def runs(self) -> list[tuple[int, int]]:
+        """Each select core's `(logits, chunk)`: the last reads what is left."""
+        size, last = slices(self.vocab, self.cores, self.k_max)
+        tail = self.chunk if last == size else _largest_chunk(last, last // 2)
+        return [(size, self.chunk)] * (self.cores - 1) + [(last, tail)]
 
-        @property
-        def runs(self) -> list[tuple[int, int]]:
-            """Each select core's `(logits, chunk)`: the last reads what is left."""
-            size, last = slices(self.vocab, self.cores, self.k_max)
-            tail = self.chunk if last == size else _largest_chunk(last, last // 2)
-            return [(size, self.chunk)] * (self.cores - 1) + [(last, tail)]
+    def select(self, run: int, chunk: int):
+        return sample.sample_select(slice_size=run, chunk=chunk, k_max=self.k_max)
 
-        def select(self, run: int, chunk: int):
-            return sample.sample_select(slice_size=run, chunk=chunk, k_max=self.k_max)
+    def combine(self):
+        return sample.sample_combine(
+            columns=self.cores, slice_size=self.slice_size, k_max=self.k_max
+        )
 
-        def combine(self):
-            return sample.sample_combine(
-                columns=self.cores, slice_size=self.slice_size, k_max=self.k_max
+    def build(self) -> Built:
+        runs, combine = self.runs, self.combine()
+        selects = {run: self.select(*run) for run in set(runs)}
+        words = sample.summary_words(self.slice_size, self.k_max)
+        # Every core reads the draw row.
+        of_draw = ObjectFifo(self.draws.obj_type, depth=self.draws.depth)
+        self.draws.bind(of_draw.prod())
+        of_token = ObjectFifo(self.token.obj_type, depth=self.token.depth)
+        self.token.bind(of_token.cons())
+        of_record = ObjectFifo(self.tokens.obj_type, depth=self.tokens.depth)
+        self.tokens.bind(of_record.cons())
+        # The summaries meet in a memtile, column 0 first; combine reads a
+        # shorter last one's ties no further than its count.
+        of_summaries = ObjectFifo(
+            np.ndarray[(self.cores * words,), np.dtype[np.int32]],
+            depth=1,
+        )
+        of_summary = of_summaries.prod().join(
+            [words * c for c in range(self.cores)],
+            obj_types=[
+                np.ndarray[(sample.summary_words(run, self.k_max),), np.dtype[np.int32]]
+                for run, _ in runs
+            ],
+            depths=[1] * self.cores,
+        )
+
+        def select_body(of_x, of_row, of_sum, kernel, state, calls):
+            row = of_row.acquire(1)
+            summary = of_sum.acquire(1)
+            for _ in range_(calls):
+                x = of_x.acquire(1)
+                kernel(x, row, state, summary)
+                of_x.release(1)
+            of_sum.release(1)
+            of_row.release(1)
+
+        def combine_body(of_sums, of_row, of_tok, of_rec, kernel):
+            summaries = of_sums.acquire(1)
+            row = of_row.acquire(1)
+            token = of_tok.acquire(1)
+            record = of_rec.acquire(1)
+            kernel(summaries, row, token, record)
+            of_sums.release(1)
+            of_row.release(1)
+            of_tok.release(1)
+            of_rec.release(1)
+
+        workers, logits = [], []
+        for c, (run, chunk) in enumerate(runs):
+            of_x = ObjectFifo(
+                np.ndarray[(chunk,), np.dtype[self.logits.dtype]],
+                depth=self.logits.depth,
             )
-
-        def build(self) -> Built:
-            runs, combine = self.runs, self.combine()
-            selects = {run: self.select(*run) for run in set(runs)}
-            words = sample.summary_words(self.slice_size, self.k_max)
-            # Every core reads the draw row.
-            of_draw = ObjectFifo(self.draws.obj_type, depth=self.draws.depth)
-            self.draws.bind(of_draw.prod())
-            of_token = ObjectFifo(self.token.obj_type, depth=self.token.depth)
-            self.token.bind(of_token.cons())
-            of_record = ObjectFifo(self.tokens.obj_type, depth=self.tokens.depth)
-            self.tokens.bind(of_record.cons())
-            # The summaries meet in a memtile, column 0 first; combine reads a
-            # shorter last one's ties no further than its count.
-            of_summaries = ObjectFifo(
-                np.ndarray[(self.cores * words,), np.dtype[np.int32]],
-                depth=1,
+            logits.append(of_x.prod())
+            state = Buffer(
+                np.ndarray[(sample.SELECT_STATE_WORDS,), np.dtype[np.int32]],
+                initial_value=np.zeros(sample.SELECT_STATE_WORDS, dtype=np.int32),
             )
-            of_summary = of_summaries.prod().join(
-                [words * c for c in range(self.cores)],
-                obj_types=[
-                    np.ndarray[
-                        (sample.summary_words(run, self.k_max),), np.dtype[np.int32]
-                    ]
-                    for run, _ in runs
-                ],
-                depths=[1] * self.cores,
-            )
-
-            def select_body(of_x, of_row, of_sum, kernel, state, calls):
-                row = of_row.acquire(1)
-                summary = of_sum.acquire(1)
-                for _ in range_(calls):
-                    x = of_x.acquire(1)
-                    kernel(x, row, state, summary)
-                    of_x.release(1)
-                of_sum.release(1)
-                of_row.release(1)
-
-            def combine_body(of_sums, of_row, of_tok, of_rec, kernel):
-                summaries = of_sums.acquire(1)
-                row = of_row.acquire(1)
-                token = of_tok.acquire(1)
-                record = of_rec.acquire(1)
-                kernel(summaries, row, token, record)
-                of_sums.release(1)
-                of_row.release(1)
-                of_tok.release(1)
-                of_rec.release(1)
-
-            workers, logits = [], []
-            for c, (run, chunk) in enumerate(runs):
-                of_x = ObjectFifo(
-                    np.ndarray[(chunk,), np.dtype[self.logits.dtype]],
-                    depth=self.logits.depth,
-                )
-                logits.append(of_x.prod())
-                state = Buffer(
-                    np.ndarray[(sample.SELECT_STATE_WORDS,), np.dtype[np.int32]],
-                    initial_value=np.zeros(sample.SELECT_STATE_WORDS, dtype=np.int32),
-                )
-                workers.append(
-                    Worker(
-                        select_body,
-                        [
-                            of_x.cons(),
-                            of_draw.cons(),
-                            of_summary[c].prod(),
-                            selects[run, chunk],
-                            state,
-                            sample.select_streams(run, chunk) * run // chunk,
-                        ],
-                    )
-                )
-            self.logits.bind(logits)
             workers.append(
                 Worker(
-                    combine_body,
+                    select_body,
                     [
-                        of_summaries.cons(),
+                        of_x.cons(),
                         of_draw.cons(),
-                        of_token.prod(),
-                        of_record.prod(),
-                        combine,
+                        of_summary[c].prod(),
+                        selects[run, chunk],
+                        state,
+                        sample.select_streams(run, chunk) * run // chunk,
                     ],
                 )
             )
-            return Built(workers)
+        self.logits.bind(logits)
+        workers.append(
+            Worker(
+                combine_body,
+                [
+                    of_summaries.cons(),
+                    of_draw.cons(),
+                    of_token.prod(),
+                    of_record.prod(),
+                    combine,
+                ],
+            )
+        )
+        return Built(workers)
 
     def sequence(self, rt):
         """One group: the draw and the logits in, then the record and the token."""

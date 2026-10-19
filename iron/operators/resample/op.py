@@ -17,7 +17,6 @@ vision tower's bf16 patches, and `PatchPositions` says where each of the
 tower's rows comes from in them.
 """
 
-
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ExternalFunction, In, ObjectFifo, Out, TaskGroup, Worker
@@ -365,99 +364,98 @@ class ResampleTaps(Operator):
             )
         tg.finish()
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            cores = self.num_aie_columns * self.num_channels
-            peak_ty = np.ndarray[(2,), np.dtype[np.int32]]
-            peak_k = ExternalFunction(
-                "resample_peak",
-                source_string=RESAMPLE,
-                arg_types=[peak_ty, np.int32, np.int32, np.int32, np.int32],
-                compile_flags=[
-                    f"-DWORDS={self.words}",
-                    f"-DCORES={cores}",
-                    f"-DPER={self.slots or 0}",
-                ],
-                symbol_prefix=f"resample_{self.words}_{cores}_{self.slots or 0}",
-            )
-            join_k = peak_k.object_file.bind("resample_join", [peak_ty] * 3)
-            quantize_k = peak_k.object_file.bind(
-                "resample_quantize", [peak_ty, self.table.obj_type] + [np.int32] * 5
-            )
-            of_tables = [ObjectFifo(self.table.obj_type, depth=2) for k in range(cores)]
-            # The peak passes core to core; the last broadcasts it from a memtile.
-            of_chain = [ObjectFifo(peak_ty, depth=1) for k in range(cores - 1)]
-            of_peak = of_all = None
-            if cores > 1:
-                of_peak = ObjectFifo(peak_ty, depth=1)
-                of_all = of_peak.cons().forward(depth=1)
-            local = Buffer(peak_ty, initial_value=np.zeros(2, np.int32))
+    def build(self) -> Built:
+        cores = self.num_aie_columns * self.num_channels
+        peak_ty = np.ndarray[(2,), np.dtype[np.int32]]
+        peak_k = ExternalFunction(
+            "resample_peak",
+            source_string=RESAMPLE,
+            arg_types=[peak_ty, np.int32, np.int32, np.int32, np.int32],
+            compile_flags=[
+                f"-DWORDS={self.words}",
+                f"-DCORES={cores}",
+                f"-DPER={self.slots or 0}",
+            ],
+            symbol_prefix=f"resample_{self.words}_{cores}_{self.slots or 0}",
+        )
+        join_k = peak_k.object_file.bind("resample_join", [peak_ty] * 3)
+        quantize_k = peak_k.object_file.bind(
+            "resample_quantize", [peak_ty, self.table.obj_type] + [np.int32] * 5
+        )
+        of_tables = [ObjectFifo(self.table.obj_type, depth=2) for k in range(cores)]
+        # The peak passes core to core; the last broadcasts it from a memtile.
+        of_chain = [ObjectFifo(peak_ty, depth=1) for k in range(cores - 1)]
+        of_peak = of_all = None
+        if cores > 1:
+            of_peak = ObjectFifo(peak_ty, depth=1)
+            of_all = of_peak.cons().forward(depth=1)
+        local = Buffer(peak_ty, initial_value=np.zeros(2, np.int32))
 
-            counts = [self.count, self.in_length, self.out_length]
-            rtps = [Rtp(counts) for _ in range(cores)]
+        counts = [self.count, self.in_length, self.out_length]
+        rtps = [Rtp(counts) for _ in range(cores)]
 
-            def core_fn(
-                core,
-                table,
-                prior,
-                passed,
-                shared,
-                last,
-                peak_fn,
-                join_fn,
-                quantize_fn,
-                rtp,
-            ):
-                words = rtp.read()
-                n, n_in, n_out = (words[v] for v in counts)
-                mine = last if passed is None else passed.acquire(1)
-                peak_fn(mine, n_in, n_out, core, n)
+        def core_fn(
+            core,
+            table,
+            prior,
+            passed,
+            shared,
+            last,
+            peak_fn,
+            join_fn,
+            quantize_fn,
+            rtp,
+        ):
+            words = rtp.read()
+            n, n_in, n_out = (words[v] for v in counts)
+            mine = last if passed is None else passed.acquire(1)
+            peak_fn(mine, n_in, n_out, core, n)
+            if prior is not None:
+                before = prior.acquire(1)
+                join_fn(before, mine, mine)
+                prior.release(1)
+            if passed is not None:
+                passed.release(1)
+                peak = shared.acquire(1)
+            else:
                 if prior is not None:
-                    before = prior.acquire(1)
-                    join_fn(before, mine, mine)
-                    prior.release(1)
-                if passed is not None:
-                    passed.release(1)
-                    peak = shared.acquire(1)
-                else:
-                    if prior is not None:
-                        out = shared.acquire(1)
-                        join_fn(last, last, out)
-                        shared.release(1)
-                    peak = last
-                for k in range_(n):
-                    chunk = table.acquire(1)
-                    quantize_fn(peak, chunk, n_in, n_out, core, k, n)
-                    table.release(1)
-                if passed is not None:
+                    out = shared.acquire(1)
+                    join_fn(last, last, out)
                     shared.release(1)
+                peak = last
+            for k in range_(n):
+                chunk = table.acquire(1)
+                quantize_fn(peak, chunk, n_in, n_out, core, k, n)
+                table.release(1)
+            if passed is not None:
+                shared.release(1)
 
-            workers = []
-            for k in range(cores):
-                final = k == cores - 1
-                shared = None
-                if of_peak is not None:
-                    shared = of_peak.prod() if final else of_all.cons()
-                workers.append(
-                    Worker(
-                        core_fn,
-                        [
-                            k,
-                            of_tables[k].prod(),
-                            of_chain[k - 1].cons() if k else None,
-                            None if final else of_chain[k].prod(),
-                            shared,
-                            local if final else None,
-                            peak_k,
-                            join_k,
-                            quantize_k,
-                            rtps[k],
-                        ],
-                        stack_size=4096,
-                    )
+        workers = []
+        for k in range(cores):
+            final = k == cores - 1
+            shared = None
+            if of_peak is not None:
+                shared = of_peak.prod() if final else of_all.cons()
+            workers.append(
+                Worker(
+                    core_fn,
+                    [
+                        k,
+                        of_tables[k].prod(),
+                        of_chain[k - 1].cons() if k else None,
+                        None if final else of_chain[k].prod(),
+                        shared,
+                        local if final else None,
+                        peak_k,
+                        join_k,
+                        quantize_k,
+                        rtps[k],
+                    ],
+                    stack_size=4096,
                 )
-            self.table.bind([f.cons() for f in of_tables])
-            return Built(workers, rtps)
+            )
+        self.table.bind([f.cons() for f in of_tables])
+        return Built(workers, rtps)
 
 
 SIDE = 16  # a patch's pixels on each axis, and the outputs of a taps chunk
@@ -1059,102 +1057,101 @@ class Resample(Operator):
                 )
         tg.finish()
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            cores = self.num_aie_columns * self.num_channels
-            counts_ty = np.ndarray[(8,), np.dtype[np.int32]]
-            taps_ty, image_ty, patch_ty = (
-                self.taps_w.obj_type,
-                self.image.obj_type,
-                self.patches.obj_type,
-            )
-            setup_k = ExternalFunction(
-                "resize_setup",
-                source_string=RESIZE,
-                arg_types=[counts_ty] + [np.int32] * 5,
-                compile_flags=[
-                    f"-DWORDS={self.words}",
-                    f"-DCHUNK={self.chunk}",
-                    f"-DCOLS={self.patch_columns}",
-                    f"-DCORES={cores}",
-                ],
-                symbol_prefix=f"resize_{self.words}_{self.chunk}_{self.patch_columns}_{cores}",
-            )
-            lib = setup_k.object_file
-            take_k = lib.bind("resize_take", [taps_ty, np.int32])
-            band_k = lib.bind("resize_band", [taps_ty, counts_ty])
-            consume_k = lib.bind("resize_consume", [image_ty, taps_ty])
-            emit_k = lib.bind("resize_emit", [patch_ty, np.int32])
-            finish_k = lib.bind("resize_finish", [counts_ty])
-            of_image = ObjectFifo(image_ty, depth=2)
-            of_taps = ObjectFifo(taps_ty, depth=2)
-            of_patches = [ObjectFifo(patch_ty, depth=2) for k in range(cores)]
+    def build(self) -> Built:
+        cores = self.num_aie_columns * self.num_channels
+        counts_ty = np.ndarray[(8,), np.dtype[np.int32]]
+        taps_ty, image_ty, patch_ty = (
+            self.taps_w.obj_type,
+            self.image.obj_type,
+            self.patches.obj_type,
+        )
+        setup_k = ExternalFunction(
+            "resize_setup",
+            source_string=RESIZE,
+            arg_types=[counts_ty] + [np.int32] * 5,
+            compile_flags=[
+                f"-DWORDS={self.words}",
+                f"-DCHUNK={self.chunk}",
+                f"-DCOLS={self.patch_columns}",
+                f"-DCORES={cores}",
+            ],
+            symbol_prefix=f"resize_{self.words}_{self.chunk}_{self.patch_columns}_{cores}",
+        )
+        lib = setup_k.object_file
+        take_k = lib.bind("resize_take", [taps_ty, np.int32])
+        band_k = lib.bind("resize_band", [taps_ty, counts_ty])
+        consume_k = lib.bind("resize_consume", [image_ty, taps_ty])
+        emit_k = lib.bind("resize_emit", [patch_ty, np.int32])
+        finish_k = lib.bind("resize_finish", [counts_ty])
+        of_image = ObjectFifo(image_ty, depth=2)
+        of_taps = ObjectFifo(taps_ty, depth=2)
+        of_patches = [ObjectFifo(patch_ty, depth=2) for k in range(cores)]
 
-            sizes = [self.src_rows, self.src_columns, self.dst_rows, self.dst_columns]
-            rtps = [Rtp(sizes) for _ in range(cores)]
+        sizes = [self.src_rows, self.src_columns, self.dst_rows, self.dst_columns]
+        rtps = [Rtp(sizes) for _ in range(cores)]
 
-            def core_fn(
-                core,
-                image,
-                taps,
-                patches,
-                counts,
-                setup_fn,
-                take_fn,
-                band_fn,
-                consume_fn,
-                emit_fn,
-                finish_fn,
-                rtp,
-            ):
-                words = rtp.read()
-                h, w, ho, wo = (words[v] for v in sizes)
-                setup_fn(counts, h, w, ho, wo, core)
-                for k in range_(counts[0]):
-                    chunk = taps.acquire(1)
-                    take_fn(chunk, k)
-                    taps.release(1)
-                for _ in range_(counts[1]):
-                    vt = taps.acquire(1)
-                    band_fn(vt, counts)
-                    for _ in range_(counts[2]):
-                        chunk = image.acquire(1)
-                        consume_fn(chunk, vt)
-                        image.release(1)
-                    for i in range_(counts[3]):
-                        out = patches.acquire(1)
-                        emit_fn(out, i)
-                        patches.release(1)
-                    taps.release(1)
-                finish_fn(counts)
-                for _ in range_(counts[4]):
-                    image.acquire(1)
+        def core_fn(
+            core,
+            image,
+            taps,
+            patches,
+            counts,
+            setup_fn,
+            take_fn,
+            band_fn,
+            consume_fn,
+            emit_fn,
+            finish_fn,
+            rtp,
+        ):
+            words = rtp.read()
+            h, w, ho, wo = (words[v] for v in sizes)
+            setup_fn(counts, h, w, ho, wo, core)
+            for k in range_(counts[0]):
+                chunk = taps.acquire(1)
+                take_fn(chunk, k)
+                taps.release(1)
+            for _ in range_(counts[1]):
+                vt = taps.acquire(1)
+                band_fn(vt, counts)
+                for _ in range_(counts[2]):
+                    chunk = image.acquire(1)
+                    consume_fn(chunk, vt)
                     image.release(1)
+                for i in range_(counts[3]):
+                    out = patches.acquire(1)
+                    emit_fn(out, i)
+                    patches.release(1)
+                taps.release(1)
+            finish_fn(counts)
+            for _ in range_(counts[4]):
+                image.acquire(1)
+                image.release(1)
 
-            workers = [
-                Worker(
-                    core_fn,
-                    [
-                        k,
-                        of_image.cons(),
-                        of_taps.cons(),
-                        of_patches[k].prod(),
-                        Buffer(counts_ty),
-                        setup_k,
-                        take_k,
-                        band_k,
-                        consume_k,
-                        emit_k,
-                        finish_k,
-                        rtps[k],
-                    ],
-                )
-                for k in range(cores)
-            ]
-            self.patches.bind([f.cons() for f in of_patches])
-            self.image.bind(of_image.prod())
-            self.taps_w.bind(of_taps.prod())
-            return Built(workers, rtps)
+        workers = [
+            Worker(
+                core_fn,
+                [
+                    k,
+                    of_image.cons(),
+                    of_taps.cons(),
+                    of_patches[k].prod(),
+                    Buffer(counts_ty),
+                    setup_k,
+                    take_k,
+                    band_k,
+                    consume_k,
+                    emit_k,
+                    finish_k,
+                    rtps[k],
+                ],
+            )
+            for k in range(cores)
+        ]
+        self.patches.bind([f.cons() for f in of_patches])
+        self.image.bind(of_image.prod())
+        self.taps_w.bind(of_taps.prod())
+        return Built(workers, rtps)
 
 
 POSITIONS = """
@@ -1311,44 +1308,43 @@ class PatchPositions(Operator):
         self.order.drain(group=tg, wait=True)
         tg.finish()
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            B = self.block
-            record_ty = np.ndarray[(5 * B,), np.dtype[np.int32]]
-            kernel = ExternalFunction(
-                "patch_positions",
-                source_string=POSITIONS,
-                arg_types=[record_ty] + [np.int32] * 4,
-                compile_flags=[
-                    f"-DSIDE={SIDE}",
-                    f"-DPOOL={self.pool}",
-                    f"-DPOSITIONS={self.positions}",
-                    f"-DCORES={self.cores}",
-                    f"-DBLOCK={B}",
-                ],
-                symbol_prefix=(
-                    f"patch_positions_{self.pool}_{self.positions}_{self.cores}_{B}"
-                ),
-            )
-            outs = (self.xy, self.position_ids, self.order)
-            # A core has two output channels: a memtile splits its record into three.
-            of_record = ObjectFifo(record_ty, depth=2)
-            parts = of_record.cons().split(
-                [0, 2 * B, 4 * B],
-                obj_types=[out.obj_type for out in outs],
-                depths=[2, 2, 2],
-            )
-            counts = [self.count, self.dst_rows, self.dst_columns]
-            rtp = Rtp(counts)
+    def build(self) -> Built:
+        B = self.block
+        record_ty = np.ndarray[(5 * B,), np.dtype[np.int32]]
+        kernel = ExternalFunction(
+            "patch_positions",
+            source_string=POSITIONS,
+            arg_types=[record_ty] + [np.int32] * 4,
+            compile_flags=[
+                f"-DSIDE={SIDE}",
+                f"-DPOOL={self.pool}",
+                f"-DPOSITIONS={self.positions}",
+                f"-DCORES={self.cores}",
+                f"-DBLOCK={B}",
+            ],
+            symbol_prefix=(
+                f"patch_positions_{self.pool}_{self.positions}_{self.cores}_{B}"
+            ),
+        )
+        outs = (self.xy, self.position_ids, self.order)
+        # A core has two output channels: a memtile splits its record into three.
+        of_record = ObjectFifo(record_ty, depth=2)
+        parts = of_record.cons().split(
+            [0, 2 * B, 4 * B],
+            obj_types=[out.obj_type for out in outs],
+            depths=[2, 2, 2],
+        )
+        counts = [self.count, self.dst_rows, self.dst_columns]
+        rtp = Rtp(counts)
 
-            def core_fn(record, kernel_fn, rtp):
-                words = rtp.read()
-                n, ho, wo = (words[v] for v in counts)
-                for b in range_(n):
-                    kernel_fn(record.acquire(1), b, n, ho, wo)
-                    record.release(1)
+        def core_fn(record, kernel_fn, rtp):
+            words = rtp.read()
+            n, ho, wo = (words[v] for v in counts)
+            for b in range_(n):
+                kernel_fn(record.acquire(1), b, n, ho, wo)
+                record.release(1)
 
-            worker = Worker(core_fn, [of_record.prod(), kernel, rtp])
-            for out, part in zip(outs, parts):
-                out.bind(part.cons())
-            return Built([worker], [rtp])
+        worker = Worker(core_fn, [of_record.prod(), kernel, rtp])
+        for out, part in zip(outs, parts):
+            out.bind(part.cons())
+        return Built([worker], [rtp])

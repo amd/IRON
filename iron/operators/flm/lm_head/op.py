@@ -139,92 +139,89 @@ class LMHead(Operator):
     def ops(self) -> int:
         return 2 * self.vocab * self.dim
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            """Each core RMS-normalizes the token once. Each round, it
-            accumulates one weight block per K_TILE in-features into M_TILE
-            out-features and applies the tanh softcap to the sums.
-            """
-            cols, rows, dim = self.cols, self.rows, self.dim
-            rounds = self.vocab // (cols * rows * M_TILE)
-            kernel = flm_gemma4.flm_gemma4_q4nx_lm_head(
-                dim=dim, m_tile=M_TILE, k_tile=K_TILE, group=GROUP
+    def build(self) -> Built:
+        """Each core RMS-normalizes the token once. Each round, it
+        accumulates one weight block per K_TILE in-features into M_TILE
+        out-features and applies the tanh softcap to the sums.
+        """
+        cols, rows, dim = self.cols, self.rows, self.dim
+        rounds = self.vocab // (cols * rows * M_TILE)
+        kernel = flm_gemma4.flm_gemma4_q4nx_lm_head(
+            dim=dim, m_tile=M_TILE, k_tile=K_TILE, group=GROUP
+        )
+        # The kernels' argument types are the x and w fifos' element types
+        # and the core-local scratch.
+        w_blk_ty, x_ty, y_acc_ty, sums_ty, _ = kernel.q4nx_lm_head_block.arg_types()
+        y_blk_ty, _, rtp_ty = kernel.q4nx_lm_head_epilogue.arg_types()
+        # The w fifos move the host's words as bf16 elements. The kernel
+        # reinterprets the bytes.
+        (w_blk,) = np_ndarray_type_get_shape(w_blk_ty)
+        w_col_ty = np.ndarray[(rows, w_blk), np.dtype[bfloat16]]
+
+        def core_fn(x_in, w_in, y_out, k_rms, k_zero, k_block, k_epi, y_acc, sums, rtp):
+            x = x_in.acquire(1)
+            k_rms(x, sums)
+            for _ in range_(rounds):
+                k_zero(y_acc)
+                for k in range_(dim // K_TILE):
+                    w = w_in.acquire(1)
+                    k_block(w, x, y_acc, sums, k)
+                    w_in.release(1)
+                y = y_out.acquire(1)
+                k_epi(y, y_acc, rtp)
+                y_out.release(1)
+            x_in.release(1)
+
+        # The host addresses the DMAs by column. The build therefore pins
+        # the shim tiles. The placer places the other tiles.
+        shim = [Tile(j, 0) for j in range(cols)]
+        of_x = ObjectFifo(x_ty)
+        self.x.bind(of_x.prod(tile=shim[0]))
+
+        workers, ws, ys, softcaps = [], [], [], []
+        for j in range(cols):
+            of_w = ObjectFifo(w_col_ty)
+            ws.append(of_w.prod(tile=shim[j]))
+            w_cores = of_w.cons().split(
+                [w_blk * i for i in range(rows)],
+                obj_types=[w_blk_ty] * rows,
+                names=[f"w{j}_{i}" for i in range(rows)],
             )
-            # The kernels' argument types are the x and w fifos' element types
-            # and the core-local scratch.
-            w_blk_ty, x_ty, y_acc_ty, sums_ty, _ = kernel.q4nx_lm_head_block.arg_types()
-            y_blk_ty, _, rtp_ty = kernel.q4nx_lm_head_epilogue.arg_types()
-            # The w fifos move the host's words as bf16 elements. The kernel
-            # reinterprets the bytes.
-            (w_blk,) = np_ndarray_type_get_shape(w_blk_ty)
-            w_col_ty = np.ndarray[(rows, w_blk), np.dtype[bfloat16]]
 
-            def core_fn(
-                x_in, w_in, y_out, k_rms, k_zero, k_block, k_epi, y_acc, sums, rtp
-            ):
-                x = x_in.acquire(1)
-                k_rms(x, sums)
-                for _ in range_(rounds):
-                    k_zero(y_acc)
-                    for k in range_(dim // K_TILE):
-                        w = w_in.acquire(1)
-                        k_block(w, x, y_acc, sums, k)
-                        w_in.release(1)
-                    y = y_out.acquire(1)
-                    k_epi(y, y_acc, rtp)
-                    y_out.release(1)
-                x_in.release(1)
+            of_y = ObjectFifo(self.y.obj_type)
+            ys.append(of_y.cons(tile=shim[j]))
+            y_cores = of_y.prod().join(
+                [M_TILE * i for i in range(rows)],
+                obj_types=[y_blk_ty] * rows,
+                names=[f"y{j}_{i}" for i in range(rows)],
+            )
 
-            # The host addresses the DMAs by column. The build therefore pins
-            # the shim tiles. The placer places the other tiles.
-            shim = [Tile(j, 0) for j in range(cols)]
-            of_x = ObjectFifo(x_ty)
-            self.x.bind(of_x.prod(tile=shim[0]))
-
-            workers, ws, ys, softcaps = [], [], [], []
-            for j in range(cols):
-                of_w = ObjectFifo(w_col_ty)
-                ws.append(of_w.prod(tile=shim[j]))
-                w_cores = of_w.cons().split(
-                    [w_blk * i for i in range(rows)],
-                    obj_types=[w_blk_ty] * rows,
-                    names=[f"w{j}_{i}" for i in range(rows)],
-                )
-
-                of_y = ObjectFifo(self.y.obj_type)
-                ys.append(of_y.cons(tile=shim[j]))
-                y_cores = of_y.prod().join(
-                    [M_TILE * i for i in range(rows)],
-                    obj_types=[y_blk_ty] * rows,
-                    names=[f"y{j}_{i}" for i in range(rows)],
-                )
-
-                for i in range(rows):
-                    y_acc = Buffer(type=y_acc_ty, name=f"yacc_{i}_{j}")
-                    sums = Buffer(type=sums_ty, name=f"sums_{i}_{j}")
-                    rtp = Buffer(type=rtp_ty, name=f"rtp_{i}_{j}", use_write_rtp=True)
-                    softcaps.append(rtp)
-                    workers.append(
-                        Worker(
-                            core_fn,
-                            [
-                                of_x.cons(),
-                                w_cores[i].cons(),
-                                y_cores[i].prod(),
-                                kernel.q4nx_lm_head_rms,
-                                kernel.q4nx_lm_head_zero,
-                                kernel.q4nx_lm_head_block,
-                                kernel.q4nx_lm_head_epilogue,
-                                y_acc,
-                                sums,
-                                rtp,
-                            ],
-                            stack_size=STACK_SIZE,
-                        )
+            for i in range(rows):
+                y_acc = Buffer(type=y_acc_ty, name=f"yacc_{i}_{j}")
+                sums = Buffer(type=sums_ty, name=f"sums_{i}_{j}")
+                rtp = Buffer(type=rtp_ty, name=f"rtp_{i}_{j}", use_write_rtp=True)
+                softcaps.append(rtp)
+                workers.append(
+                    Worker(
+                        core_fn,
+                        [
+                            of_x.cons(),
+                            w_cores[i].cons(),
+                            y_cores[i].prod(),
+                            kernel.q4nx_lm_head_rms,
+                            kernel.q4nx_lm_head_zero,
+                            kernel.q4nx_lm_head_block,
+                            kernel.q4nx_lm_head_epilogue,
+                            y_acc,
+                            sums,
+                            rtp,
+                        ],
+                        stack_size=STACK_SIZE,
                     )
-            self.w.bind(ws)
-            self.y.bind(ys)
-            return _Built(workers, softcaps=softcaps)
+                )
+        self.w.bind(ws)
+        self.y.bind(ys)
+        return _Built(workers, softcaps=softcaps)
 
     def sequence(self, rt):
         # npu_write_rtp writes i32 words. The softcap travels as its f32 bit

@@ -256,75 +256,74 @@ class GEMV(Operator):
             if rows % tile:
                 raise ValueError(f"GEMV: {name} ({tile}) must divide M/lanes ({rows})")
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            K, lanes = self.K, self.num_aie_columns * self.num_channels
-            tile_size_input, tile_size_output = (
-                self.tile_size_input,
-                self.tile_size_output,
+    def build(self) -> Built:
+        K, lanes = self.K, self.num_aie_columns * self.num_channels
+        tile_size_input, tile_size_output = (
+            self.tile_size_input,
+            self.tile_size_output,
+        )
+
+        # Built here, not at import: CompilableDesign clears earlier ExternalFunctions.
+        matvec = linalg.mv(
+            tile_size_input,
+            K,
+            bfloat16,
+            bfloat16,
+            vectorized=True,
+            vec_size=self.kernel_vector_size,
+            output_rows=tile_size_output,
+        )
+        vector = np.ndarray[(K,), np.dtype[bfloat16]]
+        # A lossless copy of the head tile's first row, B, as 16-bit words.
+        copy = eltwise.passthrough(K, np.int16).object_file.bind(
+            "passThroughLine", [self.A.obj_type, vector, np.int32]
+        )
+
+        A_fifos = [
+            ObjectFifo(self.A.obj_type, depth=self.A.depth) for i in range(lanes)
+        ]
+        C_fifos = [
+            ObjectFifo(self.C.obj_type, depth=self.C.depth) for i in range(lanes)
+        ]
+        vectors = [Buffer(vector) for _ in range(lanes)]
+        rtps = [Rtp([self.tiles, self.batches]) for _ in range(lanes)]
+
+        def core_body(A_fifo, C_fifo, b, matvec, copy, rtp):
+            words = rtp.read()
+            n = words[self.tiles]
+            batches = words[self.batches]
+            for _ in range_(batches):
+                # The batch's head tile carries B.
+                head = A_fifo.acquire(1)
+                copy(head, b, K)
+                A_fifo.release(1)
+                for _ in range_(n):
+                    c = C_fifo.acquire(1)
+                    for j_idx in range_(tile_size_output // tile_size_input):
+                        j_i32: Any = index.casts(T.i32(), j_idx)
+                        output_row_offset = j_i32 * tile_size_input
+                        a = A_fifo.acquire(1)
+                        matvec(tile_size_input, output_row_offset, a, b, c)
+                        A_fifo.release(1)
+                    C_fifo.release(1)
+
+        workers = [
+            Worker(
+                core_body,
+                [
+                    A_fifos[i].cons(),
+                    C_fifos[i].prod(),
+                    vectors[i],
+                    matvec,
+                    copy,
+                    rtps[i],
+                ],
             )
-
-            # Built here, not at import: CompilableDesign clears earlier ExternalFunctions.
-            matvec = linalg.mv(
-                tile_size_input,
-                K,
-                bfloat16,
-                bfloat16,
-                vectorized=True,
-                vec_size=self.kernel_vector_size,
-                output_rows=tile_size_output,
-            )
-            vector = np.ndarray[(K,), np.dtype[bfloat16]]
-            # A lossless copy of the head tile's first row, B, as 16-bit words.
-            copy = eltwise.passthrough(K, np.int16).object_file.bind(
-                "passThroughLine", [self.A.obj_type, vector, np.int32]
-            )
-
-            A_fifos = [
-                ObjectFifo(self.A.obj_type, depth=self.A.depth) for i in range(lanes)
-            ]
-            C_fifos = [
-                ObjectFifo(self.C.obj_type, depth=self.C.depth) for i in range(lanes)
-            ]
-            vectors = [Buffer(vector) for _ in range(lanes)]
-            rtps = [Rtp([self.tiles, self.batches]) for _ in range(lanes)]
-
-            def core_body(A_fifo, C_fifo, b, matvec, copy, rtp):
-                words = rtp.read()
-                n = words[self.tiles]
-                batches = words[self.batches]
-                for _ in range_(batches):
-                    # The batch's head tile carries B.
-                    head = A_fifo.acquire(1)
-                    copy(head, b, K)
-                    A_fifo.release(1)
-                    for _ in range_(n):
-                        c = C_fifo.acquire(1)
-                        for j_idx in range_(tile_size_output // tile_size_input):
-                            j_i32: Any = index.casts(T.i32(), j_idx)
-                            output_row_offset = j_i32 * tile_size_input
-                            a = A_fifo.acquire(1)
-                            matvec(tile_size_input, output_row_offset, a, b, c)
-                            A_fifo.release(1)
-                        C_fifo.release(1)
-
-            workers = [
-                Worker(
-                    core_body,
-                    [
-                        A_fifos[i].cons(),
-                        C_fifos[i].prod(),
-                        vectors[i],
-                        matvec,
-                        copy,
-                        rtps[i],
-                    ],
-                )
-                for i in range(lanes)
-            ]
-            self.A.bind([f.prod() for f in A_fifos])
-            self.C.bind([f.cons() for f in C_fifos])
-            return Built(workers, rtps)
+            for i in range(lanes)
+        ]
+        self.A.bind([f.prod() for f in A_fifos])
+        self.C.bind([f.cons() for f in C_fifos])
+        return Built(workers, rtps)
 
     def sequence(self, rt):
         """Per batch and lane: B's head tile, then A's rows. C drains are

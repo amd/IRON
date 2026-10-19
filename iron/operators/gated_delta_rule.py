@@ -130,98 +130,97 @@ class GatedDeltaRule(Operator):
     def resolve(self, dev):
         return resolve_heads(self, dev, self.v_heads)
 
-    class Array(Operator.Array):
-        def kernel(self):
-            return kernels.ssm.gated_delta_rule(
-                rows=block_rows(self),
-                key_dim=self.key_dim,
-                value_dim=SLICE,
-                blocks=self.rows // block_rows(self),
+    def kernel(self):
+        return kernels.ssm.gated_delta_rule(
+            rows=block_rows(self),
+            key_dim=self.key_dim,
+            value_dim=SLICE,
+            blocks=self.rows // block_rows(self),
+        )
+
+    def build(self) -> Built:
+        V, Dk, Dv, W = self.v_heads, self.key_dim, self.value_dim, self.width
+        T, per_group, heads = block_rows(self), V // self.k_heads, V // self.columns
+        kernel = self.kernel()
+        f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
+        bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
+        # A core takes two streams, a memtile joining each: a row's a
+        # and b then its qkv, and a slice's (dt_bias, A) then its state.
+        rows, starts, ends = [], [], ([], [], [], [], [])
+        for _ in range(self.columns):
+            row = ObjectFifo(bf16(2 * V + W), depth=1)
+            part = row.prod().join(
+                [0, V, 2 * V],
+                obj_types=[self.a.obj_type, self.b.obj_type, self.qkv.obj_type],
             )
+            start = ObjectFifo(f32(2 + self.slice_state), depth=1)
+            part += start.prod().join(
+                [0, 2], obj_types=[self.head.obj_type, self.state.obj_type]
+            )
+            rows.append(row)
+            starts.append(start)
+            for lane, f in zip(ends, part):
+                lane.append(f.prod())
+        for o, lane in zip((self.a, self.b, self.qkv, self.head, self.state), ends):
+            o.bind(lane)
+        of_ys = [ObjectFifo(self.y.obj_type) for _ in range(self.columns)]
+        of_finals = [
+            ObjectFifo(self.final.obj_type, depth=1) for _ in range(self.columns)
+        ]
+        self.y.bind([f.cons() for f in of_ys])
+        self.final.bind([f.cons() for f in of_finals])
+        rtps = [Rtp([self.count]) for _ in range(self.columns)]
 
-        def build(self) -> Built:
-            V, Dk, Dv, W = self.v_heads, self.key_dim, self.value_dim, self.width
-            T, per_group, heads = block_rows(self), V // self.k_heads, V // self.columns
-            kernel = self.kernel()
-            f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
-            bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
-            # A core takes two streams, a memtile joining each: a row's a
-            # and b then its qkv, and a slice's (dt_bias, A) then its state.
-            rows, starts, ends = [], [], ([], [], [], [], [])
-            for _ in range(self.columns):
-                row = ObjectFifo(bf16(2 * V + W), depth=1)
-                part = row.prod().join(
-                    [0, V, 2 * V],
-                    obj_types=[self.a.obj_type, self.b.obj_type, self.qkv.obj_type],
-                )
-                start = ObjectFifo(f32(2 + self.slice_state), depth=1)
-                part += start.prod().join(
-                    [0, 2], obj_types=[self.head.obj_type, self.state.obj_type]
-                )
-                rows.append(row)
-                starts.append(start)
-                for lane, f in zip(ends, part):
-                    lane.append(f.prod())
-            for o, lane in zip((self.a, self.b, self.qkv, self.head, self.state), ends):
-                o.bind(lane)
-            of_ys = [ObjectFifo(self.y.obj_type) for _ in range(self.columns)]
-            of_finals = [
-                ObjectFifo(self.final.obj_type, depth=1) for _ in range(self.columns)
-            ]
-            self.y.bind([f.cons() for f in of_ys])
-            self.final.bind([f.cons() for f in of_finals])
-            rtps = [Rtp([self.count]) for _ in range(self.columns)]
+        def core_fn(of_row, of_slice, of_y, of_final, rule, block, rtp, first):
+            valid = rtp.read()[self.count]
+            i32 = valid.type
+            zero, size = arith.constant(0, i32), arith.constant(T, i32)
+            k, v = T * Dk, 2 * T * Dk
+            ab = v + T * SLICE
+            for u in range_(_slices(self)):
+                # Slice u // heads of each of the core's heads in turn.
+                h = u % heads + first
+                p = 2 * V + 2 * self.k_heads * Dk + h * Dv + (u // heads) * SLICE
+                g = 2 * V + (h // per_group) * Dk
+                start, final = of_slice.acquire(1), of_final.acquire(1)
+                for j in range_(self.rows // T):
+                    # Gather the block: q, k, v, then a and b.
+                    for t in range_(T):
+                        row = of_row.acquire(1)
+                        for i in range_(Dk):
+                            block[t * Dk + i] = row[g + i]
+                            block[k + t * Dk + i] = row[g + self.k_heads * Dk + i]
+                        for i in range_(SLICE):
+                            block[v + t * SLICE + i] = row[p + i]
+                        block[ab + t] = row[h]
+                        block[ab + T + t] = row[V + h]
+                        of_row.release(1)
+                    b = arith.index_cast(j, to=i32)
+                    left = valid - b * size
+                    live = arith.minsi(arith.maxsi(left, zero), size)
+                    y = of_y.acquire(1)
+                    rule(block, start, final, y, live, b)
+                    of_y.release(1)
+                of_slice.release(1)
+                of_final.release(1)
 
-            def core_fn(of_row, of_slice, of_y, of_final, rule, block, rtp, first):
-                valid = rtp.read()[self.count]
-                i32 = valid.type
-                zero, size = arith.constant(0, i32), arith.constant(T, i32)
-                k, v = T * Dk, 2 * T * Dk
-                ab = v + T * SLICE
-                for u in range_(_slices(self)):
-                    # Slice u // heads of each of the core's heads in turn.
-                    h = u % heads + first
-                    p = 2 * V + 2 * self.k_heads * Dk + h * Dv + (u // heads) * SLICE
-                    g = 2 * V + (h // per_group) * Dk
-                    start, final = of_slice.acquire(1), of_final.acquire(1)
-                    for j in range_(self.rows // T):
-                        # Gather the block: q, k, v, then a and b.
-                        for t in range_(T):
-                            row = of_row.acquire(1)
-                            for i in range_(Dk):
-                                block[t * Dk + i] = row[g + i]
-                                block[k + t * Dk + i] = row[g + self.k_heads * Dk + i]
-                            for i in range_(SLICE):
-                                block[v + t * SLICE + i] = row[p + i]
-                            block[ab + t] = row[h]
-                            block[ab + T + t] = row[V + h]
-                            of_row.release(1)
-                        b = arith.index_cast(j, to=i32)
-                        left = valid - b * size
-                        live = arith.minsi(arith.maxsi(left, zero), size)
-                        y = of_y.acquire(1)
-                        rule(block, start, final, y, live, b)
-                        of_y.release(1)
-                    of_slice.release(1)
-                    of_final.release(1)
-
-            workers = [
-                Worker(
-                    core_fn,
-                    [
-                        rows[k].cons(),
-                        starts[k].cons(),
-                        of_ys[k].prod(),
-                        of_finals[k].prod(),
-                        kernel,
-                        Buffer(bf16(T * (2 * Dk + SLICE + 2))),
-                        rtps[k],
-                        k * heads,
-                    ],
-                )
-                for k in range(self.columns)
-            ]
-            return Built(workers, rtps)
+        workers = [
+            Worker(
+                core_fn,
+                [
+                    rows[k].cons(),
+                    starts[k].cons(),
+                    of_ys[k].prod(),
+                    of_finals[k].prod(),
+                    kernel,
+                    Buffer(bf16(T * (2 * Dk + SLICE + 2))),
+                    rtps[k],
+                    k * heads,
+                ],
+            )
+            for k in range(self.columns)
+        ]
+        return Built(workers, rtps)
 
     def sequence(self, rt):
         """Per core, every row of ``a``, ``b`` and ``qkv`` once a slice, its

@@ -95,62 +95,61 @@ class Emit(Operator):
     image = Out(slots, dtype=np.int32, obj_shape=(slots,), depth=1)
     state = Out(carried, dtype=np.int32, obj_shape=(carried,), depth=1)
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            slots, carried = self.slots, self.carried
-            of_program = ObjectFifo(self.program.obj_type, depth=self.program.depth)
-            of_planes = ObjectFifo(self.planes.obj_type, depth=self.planes.depth)
-            of_image = ObjectFifo(self.image.obj_type, depth=self.image.depth)
-            of_state = ObjectFifo(self.state.obj_type, depth=self.state.depth)
-            self.program.bind(of_program.prod())
-            self.planes.bind(of_planes.prod())
-            self.image.bind(of_image.cons())
-            self.state.bind(of_state.cons())
+    def build(self) -> Built:
+        slots, carried = self.slots, self.carried
+        of_program = ObjectFifo(self.program.obj_type, depth=self.program.depth)
+        of_planes = ObjectFifo(self.planes.obj_type, depth=self.planes.depth)
+        of_image = ObjectFifo(self.image.obj_type, depth=self.image.depth)
+        of_state = ObjectFifo(self.state.obj_type, depth=self.state.depth)
+        self.program.bind(of_program.prod())
+        self.planes.bind(of_planes.prod())
+        self.image.bind(of_image.cons())
+        self.state.bind(of_state.cons())
 
-            def core_body(of_p, of_v, of_i, of_s):
-                program = of_p.acquire(1)
-                planes = of_v.acquire(1)
-                image = of_i.acquire(1)
-                state = of_s.acquire(1)
+        def core_body(of_p, of_v, of_i, of_s):
+            program = of_p.acquire(1)
+            planes = of_v.acquire(1)
+            image = of_i.acquire(1)
+            state = of_s.acquire(1)
 
-                def floor_shift(v, k):
-                    # Not arith.shrsi, which lowers to a rounding ups + srs.
-                    i32 = v.type
-                    sign = arith.subi(
-                        arith.constant(0, i32), arith.shrui(v, arith.constant(31, i32))
-                    )
-                    return arith.xori(arith.shrui(arith.xori(v, sign), k), sign)
+            def floor_shift(v, k):
+                # Not arith.shrsi, which lowers to a rounding ups + srs.
+                i32 = v.type
+                sign = arith.subi(
+                    arith.constant(0, i32), arith.shrui(v, arith.constant(31, i32))
+                )
+                return arith.xori(arith.shrui(arith.xori(v, sign), k), sign)
 
-                def row(r):
-                    plane = arith.index_cast(program[r, 0])
-                    index = arith.index_cast(program[r, 1])
-                    v = planes[plane, index] * program[r, 2] + program[r, 3]
-                    v = floor_shift(v, program[r, 4]) * program[r, 5] + program[r, 6]
-                    v = arith.minsi(arith.maxsi(v, program[r, 7]), program[r, 8])
-                    return arith.shli(arith.andi(v, program[r, 9]), program[r, 10])
+            def row(r):
+                plane = arith.index_cast(program[r, 0])
+                index = arith.index_cast(program[r, 1])
+                v = planes[plane, index] * program[r, 2] + program[r, 3]
+                v = floor_shift(v, program[r, 4]) * program[r, 5] + program[r, 6]
+                v = arith.minsi(arith.maxsi(v, program[r, 7]), program[r, 8])
+                return arith.shli(arith.andi(v, program[r, 9]), program[r, 10])
 
-                for r in range_(slots):
-                    image[r] = row(r)
-                for r in range_(carried):
-                    state[r] = row(r + slots)
-                of_p.release(1)
-                of_v.release(1)
-                of_i.release(1)
-                of_s.release(1)
+            for r in range_(slots):
+                image[r] = row(r)
+            for r in range_(carried):
+                state[r] = row(r + slots)
+            of_p.release(1)
+            of_v.release(1)
+            of_i.release(1)
+            of_s.release(1)
 
-            return Built(
-                [
-                    Worker(
-                        core_body,
-                        [
-                            of_program.cons(),
-                            of_planes.cons(),
-                            of_image.prod(),
-                            of_state.prod(),
-                        ],
-                    )
-                ]
-            )
+        return Built(
+            [
+                Worker(
+                    core_body,
+                    [
+                        of_program.cons(),
+                        of_planes.cons(),
+                        of_image.prod(),
+                        of_state.prod(),
+                    ],
+                )
+            ]
+        )
 
     def ops(self) -> int:
         return 0  # a handful of words: its figure is latency

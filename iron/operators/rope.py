@@ -8,7 +8,6 @@ interleaved pairs (Meta's); Llama weights converted to Hugging Face are
 re-permuted for the halves (huggingface/transformers#25199).
 """
 
-
 import numpy as np
 from aie.iron import In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
@@ -121,50 +120,49 @@ class RoPE(Operator):
         """A position's rows at a time, so each core gets its angle row."""
         return self.rows // self.angle_rows if buffer in ("x", "y") else None
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
+    def build(self) -> Built:
 
-            tile = self.x.obj_type
-            n = self.num_aie_columns
-            kernel = self.kernel()
-            of_in = [ObjectFifo(tile) for i in range(n)]
-            of_lut = [ObjectFifo(self.angles.obj_type) for i in range(n)]
-            of_out = [ObjectFifo(tile) for i in range(n)]
-            rtps = [Rtp([self.lut_rows, self.rows_per_lut]) for _ in range(n)]
+        tile = self.x.obj_type
+        n = self.num_aie_columns
+        kernel = self.kernel()
+        of_in = [ObjectFifo(tile) for i in range(n)]
+        of_lut = [ObjectFifo(self.angles.obj_type) for i in range(n)]
+        of_out = [ObjectFifo(tile) for i in range(n)]
+        rtps = [Rtp([self.lut_rows, self.rows_per_lut]) for _ in range(n)]
 
-            def core_body(of_in, of_lut, of_out, rope_kernel, rtp):
-                words = rtp.read()
-                lut_rows, rows_per_lut = words[self.lut_rows], words[self.rows_per_lut]
-                for _ in range_(lut_rows):
-                    elem_lut = of_lut.acquire(1)
-                    for _ in range_(rows_per_lut):
-                        elem_in = of_in.acquire(1)
-                        elem_out = of_out.acquire(1)
-                        rope_kernel(elem_in, elem_lut, elem_out, self.cols)
-                        of_in.release(1)
-                        of_out.release(1)
-                    of_lut.release(1)
+        def core_body(of_in, of_lut, of_out, rope_kernel, rtp):
+            words = rtp.read()
+            lut_rows, rows_per_lut = words[self.lut_rows], words[self.rows_per_lut]
+            for _ in range_(lut_rows):
+                elem_lut = of_lut.acquire(1)
+                for _ in range_(rows_per_lut):
+                    elem_in = of_in.acquire(1)
+                    elem_out = of_out.acquire(1)
+                    rope_kernel(elem_in, elem_lut, elem_out, self.cols)
+                    of_in.release(1)
+                    of_out.release(1)
+                of_lut.release(1)
 
-            workers = [
-                Worker(
-                    core_body,
-                    [
-                        of_in[i].cons(),
-                        of_lut[i].cons(),
-                        of_out[i].prod(),
-                        kernel,
-                        rtps[i],
-                    ],
-                )
-                for i in range(n)
-            ]
-            self.x.bind([f.prod() for f in of_in])
-            self.angles.bind([f.prod() for f in of_lut])
-            self.y.bind([f.cons() for f in of_out])
-            return Built(workers, rtps)
+        workers = [
+            Worker(
+                core_body,
+                [
+                    of_in[i].cons(),
+                    of_lut[i].cons(),
+                    of_out[i].prod(),
+                    kernel,
+                    rtps[i],
+                ],
+            )
+            for i in range(n)
+        ]
+        self.x.bind([f.prod() for f in of_in])
+        self.angles.bind([f.prod() for f in of_lut])
+        self.y.bind([f.cons() for f in of_out])
+        return Built(workers, rtps)
 
-        def kernel(self):
-            return datamovement.rope(self.cols, two_halves=self.two_halves)
+    def kernel(self):
+        return datamovement.rope(self.cols, two_halves=self.two_halves)
 
     def ops(self) -> int:
         return self.array_config().kernel().contract.ops_per_call * self.rows

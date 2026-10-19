@@ -245,56 +245,55 @@ class DequantBFP(Operator):
             base = f"{base}_run{self.run_out_features}p{self.run_period_out_features}"
         return base
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            cols = self.cols
-            qw_col_ty, out_half_ty = self.qw.obj_type, self.out.obj_type
-            qw_blk_ty = np.ndarray[(BLOCK_BYTES,), np.dtype[np.uint8]]
-            out_blk_ty = np.ndarray[(CORE_BLOCKS,), np.dtype[v8bfp16ebs8]]
+    def build(self) -> Built:
+        cols = self.cols
+        qw_col_ty, out_half_ty = self.qw.obj_type, self.out.obj_type
+        qw_blk_ty = np.ndarray[(BLOCK_BYTES,), np.dtype[np.uint8]]
+        out_blk_ty = np.ndarray[(CORE_BLOCKS,), np.dtype[v8bfp16ebs8]]
 
-            # The factory declares both operands in bytes; the output FIFO carries
-            # bfp16ebs8 blocks.
-            kernel = quant.q4nx_dequant(
-                m_tile=M_TILE, k_tile=K_TILE, group=GROUP, ct_k=CT_K, s=S, t=T
-            ).object_file.bind("q4nx_dequant_bfp", [qw_blk_ty, out_blk_ty])
+        # The factory declares both operands in bytes; the output FIFO carries
+        # bfp16ebs8 blocks.
+        kernel = quant.q4nx_dequant(
+            m_tile=M_TILE, k_tile=K_TILE, group=GROUP, ct_k=CT_K, s=S, t=T
+        ).object_file.bind("q4nx_dequant_bfp", [qw_blk_ty, out_blk_ty])
 
-            def core_body(qw_in, out_of, k):
-                qw = qw_in.acquire(1)
-                out = out_of.acquire(1)
-                k(qw, out)
-                qw_in.release(1)
-                out_of.release(1)
+        def core_body(qw_in, out_of, k):
+            qw = qw_in.acquire(1)
+            out = out_of.acquire(1)
+            k(qw, out)
+            qw_in.release(1)
+            out_of.release(1)
 
-            workers, qws, outs = [], [], []
-            for c in range(cols):
-                of_qw = ObjectFifo(qw_col_ty, depth=2)
-                qws.append(of_qw.prod())
-                qw_cores = of_qw.cons().split(
-                    [BLOCK_BYTES * r for r in range(ROWS)],
-                    obj_types=[qw_blk_ty] * ROWS,
+        workers, qws, outs = [], [], []
+        for c in range(cols):
+            of_qw = ObjectFifo(qw_col_ty, depth=2)
+            qws.append(of_qw.prod())
+            qw_cores = of_qw.cons().split(
+                [BLOCK_BYTES * r for r in range(ROWS)],
+                obj_types=[qw_blk_ty] * ROWS,
+            )
+
+            out_cores = []
+            for h in range(HALVES):
+                of_out = ObjectFifo(out_half_ty, depth=2)
+                outs.append(of_out.cons())
+                out_cores += of_out.prod().join(
+                    CORE_JOIN_OFFSETS,
+                    obj_types=[out_blk_ty] * (ROWS // HALVES),
                 )
 
-                out_cores = []
-                for h in range(HALVES):
-                    of_out = ObjectFifo(out_half_ty, depth=2)
-                    outs.append(of_out.cons())
-                    out_cores += of_out.prod().join(
-                        CORE_JOIN_OFFSETS,
-                        obj_types=[out_blk_ty] * (ROWS // HALVES),
-                    )
-
-                # aiecc measures 1216 bytes against the 1024-byte device default.
-                workers += [
-                    Worker(
-                        core_body,
-                        [qw_cores[r].cons(), out_cores[r].prod(), kernel],
-                        stack_size=2048,
-                    )
-                    for r in range(ROWS)
-                ]
-            self.qw.bind(qws)
-            self.out.bind(outs)
-            return Built(workers)
+            # aiecc measures 1216 bytes against the 1024-byte device default.
+            workers += [
+                Worker(
+                    core_body,
+                    [qw_cores[r].cons(), out_cores[r].prod(), kernel],
+                    stack_size=2048,
+                )
+                for r in range(ROWS)
+            ]
+        self.qw.bind(qws)
+        self.out.bind(outs)
+        return Built(workers)
 
     @property
     def column_blocks(self) -> list[int]:

@@ -70,63 +70,62 @@ class DepthwiseConv1d(Operator):
                 f"{cols} runs of at least {TAPS - 1} rows"
             )
 
-    class Array(Operator.Array):
-        def kernel(self):
-            return conv.dwconv1d_channels_last(self.channels, clamp=False)
+    def kernel(self):
+        return conv.dwconv1d_channels_last(self.channels, clamp=False)
 
-        def build(self) -> Built:
-            cols, C = self.num_aie_columns, self.channels
-            plane = self.x.obj_type
-            kernel = self.kernel()
-            of_ins = [ObjectFifo(plane, depth=self.x.depth) for k in range(cols)]
-            of_outs = [ObjectFifo(plane) for k in range(cols)]
-            of_w = ObjectFifo(plane, depth=self.weight.depth)
-            zero = Buffer(plane, initial_value=np.zeros(C, bfloat16))
-            limit = np.ndarray[(1,), np.dtype[np.float32]]
-            rtps = [Rtp([self.steps]) for _ in range(cols)]
+    def build(self) -> Built:
+        cols, C = self.num_aie_columns, self.channels
+        plane = self.x.obj_type
+        kernel = self.kernel()
+        of_ins = [ObjectFifo(plane, depth=self.x.depth) for k in range(cols)]
+        of_outs = [ObjectFifo(plane) for k in range(cols)]
+        of_w = ObjectFifo(plane, depth=self.weight.depth)
+        zero = Buffer(plane, initial_value=np.zeros(C, bfloat16))
+        limit = np.ndarray[(1,), np.dtype[np.float32]]
+        rtps = [Rtp([self.steps]) for _ in range(cols)]
 
-            def core_fn(of_in, of_w, of_out, conv_fn, zero, lo, hi, rtp):
-                n = rtp.read()[self.steps]
-                w = of_w.acquire(TAPS)
-                taps = [w[j] for j in range(TAPS)]
-                if zero is not None:
-                    # The rows before the first are zeros: a window that grows to five.
-                    for held in range(1, TAPS):
-                        got = of_in.acquire(held)
-                        window = [got] if held == 1 else [got[j] for j in range(held)]
-                        y = of_out.acquire(1)
-                        conv_fn(*taps, *[zero] * (TAPS - held), *window, y, lo, hi)
-                        of_out.release(1)
-                    n = arith.subi(n, arith.constant(TAPS - 1, n.type))
-                for _ in range_(n):
-                    window = of_in.acquire(TAPS)
+        def core_fn(of_in, of_w, of_out, conv_fn, zero, lo, hi, rtp):
+            n = rtp.read()[self.steps]
+            w = of_w.acquire(TAPS)
+            taps = [w[j] for j in range(TAPS)]
+            if zero is not None:
+                # The rows before the first are zeros: a window that grows to five.
+                for held in range(1, TAPS):
+                    got = of_in.acquire(held)
+                    window = [got] if held == 1 else [got[j] for j in range(held)]
                     y = of_out.acquire(1)
-                    conv_fn(*taps, *[window[j] for j in range(TAPS)], y, lo, hi)
-                    of_in.release(1)
+                    conv_fn(*taps, *[zero] * (TAPS - held), *window, y, lo, hi)
                     of_out.release(1)
-                of_in.release(TAPS - 1)
-                of_w.release(TAPS)
+                n = arith.subi(n, arith.constant(TAPS - 1, n.type))
+            for _ in range_(n):
+                window = of_in.acquire(TAPS)
+                y = of_out.acquire(1)
+                conv_fn(*taps, *[window[j] for j in range(TAPS)], y, lo, hi)
+                of_in.release(1)
+                of_out.release(1)
+            of_in.release(TAPS - 1)
+            of_w.release(TAPS)
 
-            workers = [
-                Worker(
-                    core_fn,
-                    [
-                        of_ins[k].cons(),
-                        of_w.cons(),
-                        of_outs[k].prod(),
-                        kernel,
-                        zero if k == 0 else None,
-                        Buffer(limit, initial_value=np.zeros(1, np.float32)),
-                        Buffer(limit, initial_value=np.zeros(1, np.float32)),
-                        rtps[k],
-                    ],
-                )
-                for k in range(cols)
-            ]
-            self.x.bind([f.prod() for f in of_ins])
-            self.y.bind([f.cons() for f in of_outs])
-            self.weight.bind(of_w.prod())
-            return Built(workers, rtps)
+        workers = [
+            Worker(
+                core_fn,
+                [
+                    of_ins[k].cons(),
+                    of_w.cons(),
+                    of_outs[k].prod(),
+                    kernel,
+                    zero if k == 0 else None,
+                    Buffer(limit, initial_value=np.zeros(1, np.float32)),
+                    Buffer(limit, initial_value=np.zeros(1, np.float32)),
+                    rtps[k],
+                ],
+            )
+            for k in range(cols)
+        ]
+        self.x.bind([f.prod() for f in of_ins])
+        self.y.bind([f.cons() for f in of_outs])
+        self.weight.bind(of_w.prod())
+        return Built(workers, rtps)
 
     def tolerance(self):
         return self.array_config().kernel().contract.tolerance

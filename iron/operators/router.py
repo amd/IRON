@@ -10,7 +10,6 @@ and a softmax over the chosen logits. A select core reduces each row to a
 weights, a pair of cores for each lane of rows.
 """
 
-
 import numpy as np
 from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
@@ -83,78 +82,77 @@ class TopKRouter(Operator):
         config.select()
         config.route()
 
-    class Array(Operator.Array):
-        def select(self):
-            return sample.sample_select(
-                slice_size=self.experts, chunk=self.experts, k_max=self.top_k
+    def select(self):
+        return sample.sample_select(
+            slice_size=self.experts, chunk=self.experts, k_max=self.top_k
+        )
+
+    def route(self):
+        return moe.router_top_k(slice_size=self.experts, top_k=self.top_k)
+
+    def build(self) -> Built:
+        select, route = self.select(), self.route()
+        words = sample.summary_words(self.experts, self.top_k)
+        summary_ty = np.ndarray[(words,), np.dtype[np.int32]]
+
+        def select_body(of_x, of_sum, kernel, row, state, rtp):
+            n = rtp.read()[self.count]
+            for _ in range_(n):
+                x, summary = of_x.acquire(1), of_sum.acquire(1)
+                kernel(x, row, state, summary)
+                of_x.release(1)
+                of_sum.release(1)
+
+        def route_body(of_sum, of_ids, of_weights, kernel, rtp):
+            n = rtp.read()[self.count]
+            for _ in range_(n):
+                summary = of_sum.acquire(1)
+                ids, weights = of_ids.acquire(1), of_weights.acquire(1)
+                kernel(summary, ids, weights)
+                of_sum.release(1)
+                of_ids.release(1)
+                of_weights.release(1)
+
+        workers, rtps, lanes = [], [], ([], [], [])
+        for _ in range(self.pairs):
+            of_x = ObjectFifo(self.logits.obj_type, depth=self.logits.depth)
+            of_ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
+            of_weights = ObjectFifo(self.weights.obj_type, depth=self.weights.depth)
+            of_sum = ObjectFifo(summary_ty, depth=2)
+            for lane, end in zip(
+                lanes, (of_x.prod(), of_ids.cons(), of_weights.cons())
+            ):
+                lane.append(end)
+            # The select kernel reads only the row's top-k: always this one's.
+            row = Buffer(
+                np.ndarray[(sample.ROW_WORDS,), np.dtype[np.int32]],
+                initial_value=sample.draw_row(1.0, self.top_k, 0),
             )
-
-        def route(self):
-            return moe.router_top_k(slice_size=self.experts, top_k=self.top_k)
-
-        def build(self) -> Built:
-            select, route = self.select(), self.route()
-            words = sample.summary_words(self.experts, self.top_k)
-            summary_ty = np.ndarray[(words,), np.dtype[np.int32]]
-
-            def select_body(of_x, of_sum, kernel, row, state, rtp):
-                n = rtp.read()[self.count]
-                for _ in range_(n):
-                    x, summary = of_x.acquire(1), of_sum.acquire(1)
-                    kernel(x, row, state, summary)
-                    of_x.release(1)
-                    of_sum.release(1)
-
-            def route_body(of_sum, of_ids, of_weights, kernel, rtp):
-                n = rtp.read()[self.count]
-                for _ in range_(n):
-                    summary = of_sum.acquire(1)
-                    ids, weights = of_ids.acquire(1), of_weights.acquire(1)
-                    kernel(summary, ids, weights)
-                    of_sum.release(1)
-                    of_ids.release(1)
-                    of_weights.release(1)
-
-            workers, rtps, lanes = [], [], ([], [], [])
-            for _ in range(self.pairs):
-                of_x = ObjectFifo(self.logits.obj_type, depth=self.logits.depth)
-                of_ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
-                of_weights = ObjectFifo(self.weights.obj_type, depth=self.weights.depth)
-                of_sum = ObjectFifo(summary_ty, depth=2)
-                for lane, end in zip(
-                    lanes, (of_x.prod(), of_ids.cons(), of_weights.cons())
-                ):
-                    lane.append(end)
-                # The select kernel reads only the row's top-k: always this one's.
-                row = Buffer(
-                    np.ndarray[(sample.ROW_WORDS,), np.dtype[np.int32]],
-                    initial_value=sample.draw_row(1.0, self.top_k, 0),
-                )
-                state = Buffer(
-                    np.ndarray[(sample.SELECT_STATE_WORDS,), np.dtype[np.int32]],
-                    initial_value=np.zeros(sample.SELECT_STATE_WORDS, np.int32),
-                )
-                pair = [Rtp([self.count]), Rtp([self.count])]
-                rtps += pair
-                workers += [
-                    Worker(
-                        select_body,
-                        [of_x.cons(), of_sum.prod(), select, row, state, pair[0]],
-                    ),
-                    Worker(
-                        route_body,
-                        [
-                            of_sum.cons(),
-                            of_ids.prod(),
-                            of_weights.prod(),
-                            route,
-                            pair[1],
-                        ],
-                    ),
-                ]
-            for operand, ends in zip((self.logits, self.ids, self.weights), lanes):
-                operand.bind(ends)
-            return Built(workers, rtps)
+            state = Buffer(
+                np.ndarray[(sample.SELECT_STATE_WORDS,), np.dtype[np.int32]],
+                initial_value=np.zeros(sample.SELECT_STATE_WORDS, np.int32),
+            )
+            pair = [Rtp([self.count]), Rtp([self.count])]
+            rtps += pair
+            workers += [
+                Worker(
+                    select_body,
+                    [of_x.cons(), of_sum.prod(), select, row, state, pair[0]],
+                ),
+                Worker(
+                    route_body,
+                    [
+                        of_sum.cons(),
+                        of_ids.prod(),
+                        of_weights.prod(),
+                        route,
+                        pair[1],
+                    ],
+                ),
+            ]
+        for operand, ends in zip((self.logits, self.ids, self.weights), lanes):
+            operand.bind(ends)
+        return Built(workers, rtps)
 
     def ops(self) -> int:
         return 0  # a selection and a small softmax: its figure is latency

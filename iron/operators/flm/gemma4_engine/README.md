@@ -142,7 +142,7 @@ buffer descriptors by hand:
 
 Each is an IRON operator, laid out as
 [Adding an operator](../../../../AGENTS.md#adding-an-operator) describes:
-`ProjectionGEMM` and `DequantBFP` build their array in `Array.build()` and
+`ProjectionGEMM` and `DequantBFP` build their array in `build()` and
 their runtime sequence in `sequence()`; the others return the design in
 their `design.py` through `exported_design()`.
 

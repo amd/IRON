@@ -179,33 +179,32 @@ class Gather(Operator):
     def extent_unit(self, buffer: str) -> int:
         return 0  # a bound shortens y's drains by the drained words, not by tiles
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            shims = [(Tile(2 * k, 0), Tile(2 * k + 1, 0)) for k in range(self.feeds)]
-            drains = [DmaEndpoint(drain, DMAChannelDir.S2MM, 0) for _, drain in shims]
-            self.y.pin(drains)
-            # Per feed, the control packets from the drain shim into the feed
-            # shim's TileControl.
-            controls = [
-                PacketFlow(
-                    Gather.control_id - k,
-                    drain,
-                    feed,
-                    dst_port=WireBundle.TileControl,
-                    # An explicit False drops the header TileControl reads: the run hangs.
-                    keep_pkt_header=True,
-                )
-                for k, (feed, drain) in enumerate(shims)
-            ]
-            feeds = [
-                Flow(feed, drain, src_channel=1, dst_channel=0) for feed, drain in shims
-            ]
-            return _GatherBuilt(
-                [*controls, *feeds, *drains],
-                controls=controls,
-                # The feed shim's MM2S 1, which runs the descriptors the packets push.
-                pushes=[flow.endpoint(feed) for flow, (feed, _) in zip(feeds, shims)],
+    def build(self) -> Built:
+        shims = [(Tile(2 * k, 0), Tile(2 * k + 1, 0)) for k in range(self.feeds)]
+        drains = [DmaEndpoint(drain, DMAChannelDir.S2MM, 0) for _, drain in shims]
+        self.y.pin(drains)
+        # Per feed, the control packets from the drain shim into the feed
+        # shim's TileControl.
+        controls = [
+            PacketFlow(
+                Gather.control_id - k,
+                drain,
+                feed,
+                dst_port=WireBundle.TileControl,
+                # An explicit False drops the header TileControl reads: the run hangs.
+                keep_pkt_header=True,
             )
+            for k, (feed, drain) in enumerate(shims)
+        ]
+        feeds = [
+            Flow(feed, drain, src_channel=1, dst_channel=0) for feed, drain in shims
+        ]
+        return _GatherBuilt(
+            [*controls, *feeds, *drains],
+            controls=controls,
+            # The feed shim's MM2S 1, which runs the descriptors the packets push.
+            pushes=[flow.endpoint(feed) for flow, (feed, _) in zip(feeds, shims)],
+        )
 
     def sequence(self, rt) -> None:
         words = rt.data(self.control)
@@ -410,73 +409,72 @@ class GatherWords(Operator):
             base_hi=address >> self.low_bits,
         )
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            kernel = datamovement.row_addresses(
-                self.rows,
-                self.table_rows,
-                self.row_bytes,
-                low_bits=GatherWords.low_bits,
-                aperture=APERTURE,
-            )
-            ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
-            self.ids.bind(ids.prod())
-            lengths = lengths_kernel = None
-            if self.bounded:
-                lengths_ty = np.ndarray[(self.rows,), np.dtype[np.uint32]]
-                pad = Gather.pad_bytes // 4
-                lengths_kernel = ExternalFunction(
-                    "gather_lengths",
-                    source_string=LENGTHS,
-                    arg_types=[lengths_ty, np.int32],
-                    compile_flags=[
-                        f"-DROWS={self.rows}",
-                        f"-DROW_WORDS={self.row_bytes // 4}",
-                        f"-DPAD_WORDS={pad}",
-                    ],
-                    symbol_prefix=(
-                        f"gather_lengths_{self.rows}_{self.row_bytes // 4}_{pad}"
-                    ),
-                )
-                # A core has two output channels: a memtile joins its two records.
-                control = ObjectFifo(self.control.obj_type, depth=self.control.depth)
-                addresses, lengths = control.prod().join(
-                    [0, self.pairs],
-                    obj_types=[
-                        np.ndarray[(self.pairs,), np.dtype[np.uint32]],
-                        lengths_ty,
-                    ],
-                    depths=[1, 1],
-                )
-                self.control.bind(control.cons())
-            else:
-                addresses = ObjectFifo(self.control.obj_type, depth=self.control.depth)
-                self.control.bind(addresses.cons())
-            read = [self.base_lo, self.base_hi]
-            rtp = Rtp(read + ([self.valid] if self.bounded else []))
-
-            def core(ids, addresses, kernel, rtp, lengths, lengths_kernel):
-                words = rtp.read()
-                i, a = ids.acquire(1), addresses.acquire(1)
-                kernel(i, a, words[self.base_lo], words[self.base_hi])
-                ids.release(1)
-                addresses.release(1)
-                if lengths is not None:
-                    lengths_kernel(lengths.acquire(1), words[self.valid])
-                    lengths.release(1)
-
-            worker = Worker(
-                core,
-                [
-                    ids.cons(),
-                    addresses.prod(),
-                    kernel,
-                    rtp,
-                    None if lengths is None else lengths.prod(),
-                    lengths_kernel,
+    def build(self) -> Built:
+        kernel = datamovement.row_addresses(
+            self.rows,
+            self.table_rows,
+            self.row_bytes,
+            low_bits=GatherWords.low_bits,
+            aperture=APERTURE,
+        )
+        ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
+        self.ids.bind(ids.prod())
+        lengths = lengths_kernel = None
+        if self.bounded:
+            lengths_ty = np.ndarray[(self.rows,), np.dtype[np.uint32]]
+            pad = Gather.pad_bytes // 4
+            lengths_kernel = ExternalFunction(
+                "gather_lengths",
+                source_string=LENGTHS,
+                arg_types=[lengths_ty, np.int32],
+                compile_flags=[
+                    f"-DROWS={self.rows}",
+                    f"-DROW_WORDS={self.row_bytes // 4}",
+                    f"-DPAD_WORDS={pad}",
                 ],
+                symbol_prefix=(
+                    f"gather_lengths_{self.rows}_{self.row_bytes // 4}_{pad}"
+                ),
             )
-            return Built([worker], [rtp])
+            # A core has two output channels: a memtile joins its two records.
+            control = ObjectFifo(self.control.obj_type, depth=self.control.depth)
+            addresses, lengths = control.prod().join(
+                [0, self.pairs],
+                obj_types=[
+                    np.ndarray[(self.pairs,), np.dtype[np.uint32]],
+                    lengths_ty,
+                ],
+                depths=[1, 1],
+            )
+            self.control.bind(control.cons())
+        else:
+            addresses = ObjectFifo(self.control.obj_type, depth=self.control.depth)
+            self.control.bind(addresses.cons())
+        read = [self.base_lo, self.base_hi]
+        rtp = Rtp(read + ([self.valid] if self.bounded else []))
+
+        def core(ids, addresses, kernel, rtp, lengths, lengths_kernel):
+            words = rtp.read()
+            i, a = ids.acquire(1), addresses.acquire(1)
+            kernel(i, a, words[self.base_lo], words[self.base_hi])
+            ids.release(1)
+            addresses.release(1)
+            if lengths is not None:
+                lengths_kernel(lengths.acquire(1), words[self.valid])
+                lengths.release(1)
+
+        worker = Worker(
+            core,
+            [
+                ids.cons(),
+                addresses.prod(),
+                kernel,
+                rtp,
+                None if lengths is None else lengths.prod(),
+                lengths_kernel,
+            ],
+        )
+        return Built([worker], [rtp])
 
     def sequence(self, rt) -> None:
         tg = TaskGroup()
@@ -699,17 +697,16 @@ class Copy(Operator):
         pieces = [prod(p.sizes) // self.num_channels for w in self.walks() for p in w]
         return gcd(*pieces, *self._row_shares())
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            ins, outs = [], []
-            for c in range(self.num_channels):
-                fifo_in = ObjectFifo(self.x.obj_type, depth=self.x.depth)
-                fifo_out = fifo_in.cons().forward(depth=self.y.depth)
-                ins.append(fifo_in.prod())
-                outs.append(fifo_out.cons())
-            self.x.bind(ins)
-            self.y.bind(outs)
-            return Built([])
+    def build(self) -> Built:
+        ins, outs = [], []
+        for c in range(self.num_channels):
+            fifo_in = ObjectFifo(self.x.obj_type, depth=self.x.depth)
+            fifo_out = fifo_in.cons().forward(depth=self.y.depth)
+            ins.append(fifo_in.prod())
+            outs.append(fifo_out.cons())
+        self.x.bind(ins)
+        self.y.bind(outs)
+        return Built([])
 
     def compatible(self) -> None:
         channels = self.num_channels

@@ -80,47 +80,44 @@ class Experts(Operator):
     # Every row is still computed under a bound.
     valid = per_call(bounds=rows)
 
-    class Array(Operator.Array):
-        def kernel(self):
-            return moe.experts(
-                hidden=self.hidden,
-                width=self.width,
-                num_experts=self.experts,
-                top_k=self.top_k,
-                rows=TILE,
-                cols=TILE,
-            )
+    def kernel(self):
+        return moe.experts(
+            hidden=self.hidden,
+            width=self.width,
+            num_experts=self.experts,
+            top_k=self.top_k,
+            rows=TILE,
+            cols=TILE,
+        )
 
-        def build(self) -> Built:
-            H, K = self.hidden, self.top_k
-            steps = 3 * self.width * H // self.tile
-            row = ObjectFifo(np.ndarray[(H + 4 * K,), np.dtype[bfloat16]], depth=1)
-            parts = row.prod().join(
-                [0, H, H + 2 * K],
-                obj_types=[o.obj_type for o in (self.x, self.weights, self.ids)],
-            )
-            for o, f in zip((self.x, self.weights, self.ids), parts):
-                o.bind(f.prod())
-            tiles = ObjectFifo(self.gate_up.obj_type)
-            self.gate_up.bind(tiles.prod())
-            self.down.bind(tiles.prod())
-            of_y = ObjectFifo(self.y.obj_type)
-            self.y.bind(of_y.cons())
+    def build(self) -> Built:
+        H, K = self.hidden, self.top_k
+        steps = 3 * self.width * H // self.tile
+        row = ObjectFifo(np.ndarray[(H + 4 * K,), np.dtype[bfloat16]], depth=1)
+        parts = row.prod().join(
+            [0, H, H + 2 * K],
+            obj_types=[o.obj_type for o in (self.x, self.weights, self.ids)],
+        )
+        for o, f in zip((self.x, self.weights, self.ids), parts):
+            o.bind(f.prod())
+        tiles = ObjectFifo(self.gate_up.obj_type)
+        self.gate_up.bind(tiles.prod())
+        self.down.bind(tiles.prod())
+        of_y = ObjectFifo(self.y.obj_type)
+        self.y.bind(of_y.cons())
 
-            def core_fn(of_row, of_tile, of_y, experts):
-                for _ in range_(self.rows):
-                    row, y = of_row.acquire(1), of_y.acquire(1)
-                    for step in range_(self.experts * steps):
-                        tile = of_tile.acquire(1)
-                        experts(row, tile, y, arith.index_cast(step, to=T.i32()))
-                        of_tile.release(1)
-                    of_row.release(1)
-                    of_y.release(1)
+        def core_fn(of_row, of_tile, of_y, experts):
+            for _ in range_(self.rows):
+                row, y = of_row.acquire(1), of_y.acquire(1)
+                for step in range_(self.experts * steps):
+                    tile = of_tile.acquire(1)
+                    experts(row, tile, y, arith.index_cast(step, to=T.i32()))
+                    of_tile.release(1)
+                of_row.release(1)
+                of_y.release(1)
 
-            worker = Worker(
-                core_fn, [row.cons(), tiles.cons(), of_y.prod(), self.kernel()]
-            )
-            return Built([worker])
+        worker = Worker(core_fn, [row.cons(), tiles.cons(), of_y.prod(), self.kernel()])
+        return Built([worker])
 
     def sequence(self, rt):
         """A row at a time: its inputs, every expert's tiles, its output."""

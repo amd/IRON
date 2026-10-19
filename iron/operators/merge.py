@@ -133,56 +133,55 @@ class Merge(Operator):
     def tolerance(self) -> Tolerance:
         return Tolerance.exact()
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            tokens, at = zip(*self.placeholders)
-            counted = [self.before.obj_type] if self.offset else []
-            kernel = ExternalFunction(
-                "merge_rows",
-                source_string=MERGE,
-                arg_types=[self.ids.obj_type, *counted, self.merge.obj_type, np.int32],
-                compile_flags=[
-                    f"-DPLACEHOLDERS={len(tokens)}",
-                    f"-DTOKENS={{{','.join(map(str, tokens))}}}",
-                    f"-DAT={{{','.join(map(str, at))}}}",
-                    f"-DBLOCK={self.block}",
-                    *(["-DOFFSET"] if self.offset else []),
-                ],
-                symbol_prefix=(
-                    f"merge_{'_'.join(map(str, tokens))}_at_"
-                    f"{'_'.join(map(str, at))}_{self.block}"
-                    + ("_offset" if self.offset else "")
-                ),
-            )
-            of_ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
-            of_merge = ObjectFifo(self.merge.obj_type, depth=self.merge.depth)
-            of_before = None
-            if self.offset:
-                of_before = ObjectFifo(self.before.obj_type, depth=self.before.depth)
-                self.before.bind(of_before.prod())
-            rtp = Rtp([self.count])
+    def build(self) -> Built:
+        tokens, at = zip(*self.placeholders)
+        counted = [self.before.obj_type] if self.offset else []
+        kernel = ExternalFunction(
+            "merge_rows",
+            source_string=MERGE,
+            arg_types=[self.ids.obj_type, *counted, self.merge.obj_type, np.int32],
+            compile_flags=[
+                f"-DPLACEHOLDERS={len(tokens)}",
+                f"-DTOKENS={{{','.join(map(str, tokens))}}}",
+                f"-DAT={{{','.join(map(str, at))}}}",
+                f"-DBLOCK={self.block}",
+                *(["-DOFFSET"] if self.offset else []),
+            ],
+            symbol_prefix=(
+                f"merge_{'_'.join(map(str, tokens))}_at_"
+                f"{'_'.join(map(str, at))}_{self.block}"
+                + ("_offset" if self.offset else "")
+            ),
+        )
+        of_ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
+        of_merge = ObjectFifo(self.merge.obj_type, depth=self.merge.depth)
+        of_before = None
+        if self.offset:
+            of_before = ObjectFifo(self.before.obj_type, depth=self.before.depth)
+            self.before.bind(of_before.prod())
+        rtp = Rtp([self.count])
 
-            def core_fn(of_in, of_out, kernel_fn, rtp, of_before):
-                n = rtp.read()[self.count]
-                before = None if of_before is None else of_before.acquire(1)
-                for b in range_(n):
-                    counts = [] if before is None else [before]
-                    kernel_fn(of_in.acquire(1), *counts, of_out.acquire(1), b)
-                    of_in.release(1)
-                    of_out.release(1)
-                if of_before is not None:
-                    of_before.release(1)
+        def core_fn(of_in, of_out, kernel_fn, rtp, of_before):
+            n = rtp.read()[self.count]
+            before = None if of_before is None else of_before.acquire(1)
+            for b in range_(n):
+                counts = [] if before is None else [before]
+                kernel_fn(of_in.acquire(1), *counts, of_out.acquire(1), b)
+                of_in.release(1)
+                of_out.release(1)
+            if of_before is not None:
+                of_before.release(1)
 
-            worker = Worker(
-                core_fn,
-                [
-                    of_ids.cons(),
-                    of_merge.prod(),
-                    kernel,
-                    rtp,
-                    None if of_before is None else of_before.cons(),
-                ],
-            )
-            self.ids.bind(of_ids.prod())
-            self.merge.bind(of_merge.cons())
-            return Built([worker], [rtp])
+        worker = Worker(
+            core_fn,
+            [
+                of_ids.cons(),
+                of_merge.prod(),
+                kernel,
+                rtp,
+                None if of_before is None else of_before.cons(),
+            ],
+        )
+        self.ids.bind(of_ids.prod())
+        self.merge.bind(of_merge.cons())
+        return Built([worker], [rtp])

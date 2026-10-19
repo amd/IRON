@@ -120,97 +120,96 @@ class SelectiveScan(Operator):
     def resolve(self, dev):
         return resolve_heads(self, dev, self.heads)
 
-    class Array(Operator.Array):
-        def kernel(self):
-            return kernels.ssm.selective_scan(
-                rows=block_rows(self),
-                head_dim=SLICE,
-                state=self.state_size,
-                blocks=self.rows // block_rows(self),
+    def kernel(self):
+        return kernels.ssm.selective_scan(
+            rows=block_rows(self),
+            head_dim=SLICE,
+            state=self.state_size,
+            blocks=self.rows // block_rows(self),
+        )
+
+    def build(self) -> Built:
+        H, P, N, I = self.heads, self.head_dim, self.state_size, self.inner
+        T, per_group, heads = block_rows(self), H // self.groups, H // self.columns
+        kernel = self.kernel()
+        f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
+        bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
+        # A core takes two streams, a memtile joining each: a row's dt
+        # then its xbc, and a slice's (dt_bias, A, D) then its state.
+        rows, starts, ends = [], [], ([], [], [], [])
+        for _ in range(self.columns):
+            row = ObjectFifo(bf16(H + self.width), depth=1)
+            part = row.prod().join(
+                [0, H], obj_types=[self.dt.obj_type, self.xbc.obj_type]
             )
+            start = ObjectFifo(f32(3 + SLICE * N), depth=1)
+            part += start.prod().join(
+                [0, 3], obj_types=[self.head.obj_type, self.state.obj_type]
+            )
+            rows.append(row)
+            starts.append(start)
+            for lane, f in zip(ends, part):
+                lane.append(f.prod())
+        for o, lane in zip((self.dt, self.xbc, self.head, self.state), ends):
+            o.bind(lane)
+        of_ys = [ObjectFifo(self.y.obj_type) for _ in range(self.columns)]
+        of_finals = [
+            ObjectFifo(self.final.obj_type, depth=1) for _ in range(self.columns)
+        ]
+        self.y.bind([f.cons() for f in of_ys])
+        self.final.bind([f.cons() for f in of_finals])
+        rtps = [Rtp([self.count]) for _ in range(self.columns)]
 
-        def build(self) -> Built:
-            H, P, N, I = self.heads, self.head_dim, self.state_size, self.inner
-            T, per_group, heads = block_rows(self), H // self.groups, H // self.columns
-            kernel = self.kernel()
-            f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
-            bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
-            # A core takes two streams, a memtile joining each: a row's dt
-            # then its xbc, and a slice's (dt_bias, A, D) then its state.
-            rows, starts, ends = [], [], ([], [], [], [])
-            for _ in range(self.columns):
-                row = ObjectFifo(bf16(H + self.width), depth=1)
-                part = row.prod().join(
-                    [0, H], obj_types=[self.dt.obj_type, self.xbc.obj_type]
-                )
-                start = ObjectFifo(f32(3 + SLICE * N), depth=1)
-                part += start.prod().join(
-                    [0, 3], obj_types=[self.head.obj_type, self.state.obj_type]
-                )
-                rows.append(row)
-                starts.append(start)
-                for lane, f in zip(ends, part):
-                    lane.append(f.prod())
-            for o, lane in zip((self.dt, self.xbc, self.head, self.state), ends):
-                o.bind(lane)
-            of_ys = [ObjectFifo(self.y.obj_type) for _ in range(self.columns)]
-            of_finals = [
-                ObjectFifo(self.final.obj_type, depth=1) for _ in range(self.columns)
-            ]
-            self.y.bind([f.cons() for f in of_ys])
-            self.final.bind([f.cons() for f in of_finals])
-            rtps = [Rtp([self.count]) for _ in range(self.columns)]
+        def core_fn(of_row, of_slice, of_y, of_final, scan, block, rtp, first):
+            valid = rtp.read()[self.count]
+            i32 = valid.type
+            zero, size = arith.constant(0, i32), arith.constant(T, i32)
+            bc, dt = T * SLICE, T * (SLICE + 2 * N)
+            for u in range_(_slices(self)):
+                # Slice u // heads of each of the core's heads in turn.
+                h = u % heads + first
+                p = (u // heads) * SLICE + h * P
+                g = (h // per_group) * N + I
+                start, final = of_slice.acquire(1), of_final.acquire(1)
+                for j in range_(self.rows // T):
+                    # Gather the block: x, then B and C, then dt.
+                    for t in range_(T):
+                        row = of_row.acquire(1)
+                        block[dt + t] = row[h]
+                        for i in range_(SLICE):
+                            block[t * SLICE + i] = row[H + p + i]
+                        for n in range_(N):
+                            block[bc + t * 2 * N + n] = row[H + g + n]
+                            block[bc + t * 2 * N + N + n] = row[
+                                H + g + self.groups * N + n
+                            ]
+                        of_row.release(1)
+                    b = arith.index_cast(j, to=i32)
+                    left = valid - b * size
+                    live = arith.minsi(arith.maxsi(left, zero), size)
+                    y = of_y.acquire(1)
+                    scan(block, start, final, y, live, b)
+                    of_y.release(1)
+                of_slice.release(1)
+                of_final.release(1)
 
-            def core_fn(of_row, of_slice, of_y, of_final, scan, block, rtp, first):
-                valid = rtp.read()[self.count]
-                i32 = valid.type
-                zero, size = arith.constant(0, i32), arith.constant(T, i32)
-                bc, dt = T * SLICE, T * (SLICE + 2 * N)
-                for u in range_(_slices(self)):
-                    # Slice u // heads of each of the core's heads in turn.
-                    h = u % heads + first
-                    p = (u // heads) * SLICE + h * P
-                    g = (h // per_group) * N + I
-                    start, final = of_slice.acquire(1), of_final.acquire(1)
-                    for j in range_(self.rows // T):
-                        # Gather the block: x, then B and C, then dt.
-                        for t in range_(T):
-                            row = of_row.acquire(1)
-                            block[dt + t] = row[h]
-                            for i in range_(SLICE):
-                                block[t * SLICE + i] = row[H + p + i]
-                            for n in range_(N):
-                                block[bc + t * 2 * N + n] = row[H + g + n]
-                                block[bc + t * 2 * N + N + n] = row[
-                                    H + g + self.groups * N + n
-                                ]
-                            of_row.release(1)
-                        b = arith.index_cast(j, to=i32)
-                        left = valid - b * size
-                        live = arith.minsi(arith.maxsi(left, zero), size)
-                        y = of_y.acquire(1)
-                        scan(block, start, final, y, live, b)
-                        of_y.release(1)
-                    of_slice.release(1)
-                    of_final.release(1)
-
-            workers = [
-                Worker(
-                    core_fn,
-                    [
-                        rows[k].cons(),
-                        starts[k].cons(),
-                        of_ys[k].prod(),
-                        of_finals[k].prod(),
-                        kernel,
-                        Buffer(bf16(T * (SLICE + 2 * N + 1))),
-                        rtps[k],
-                        k * heads,
-                    ],
-                )
-                for k in range(self.columns)
-            ]
-            return Built(workers, rtps)
+        workers = [
+            Worker(
+                core_fn,
+                [
+                    rows[k].cons(),
+                    starts[k].cons(),
+                    of_ys[k].prod(),
+                    of_finals[k].prod(),
+                    kernel,
+                    Buffer(bf16(T * (SLICE + 2 * N + 1))),
+                    rtps[k],
+                    k * heads,
+                ],
+            )
+            for k in range(self.columns)
+        ]
+        return Built(workers, rtps)
 
     def sequence(self, rt):
         """Per core, every row of ``xbc`` and ``dt`` once a slice, its heads'
