@@ -10,8 +10,9 @@ it differs from Granite: Mamba2 mixers in most layers' place of attention,
 a shared MLP, and a mixture of experts in the MoE sizes. The shared library
 is [AGENTS.md](../../../AGENTS.md#language-models).
 
-The Mamba2 scan is `SelectiveScan`, an operator with a reference and no
-kernel yet, so the model has no device run until one lands. Its test is the device-free
+Its scan (`SelectiveScan`) and experts (`Experts`) run first-pass scalar
+kernels, untried on a device, and `Experts` streams every expert's weights
+for each row, too slow to generate with. Its test is the device-free
 `tests/applications/granite_hybrid/reference/`, at an MoE toy and a dense
 one.
 

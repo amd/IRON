@@ -126,8 +126,6 @@ def main() -> None:
     }
 
     cls = getattr(operators, args.operator)
-    if cls.reference_only:
-        p.error(f"{args.operator} is reference-only: it has no kernel to time")
     dev = require_device()
     op = cls(**fields)
     shape = Shape(op)

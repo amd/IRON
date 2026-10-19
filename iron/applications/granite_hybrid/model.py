@@ -14,8 +14,8 @@ nothing unless ``position_embedding_type`` is ``"rope"``.
 
 A Mamba2 mixer projects its input to a gate, ``x``, ``B``, ``C`` and a
 time step per head; ``x``, ``B`` and ``C`` pass a short causal depthwise
-convolution, then a state space scan (``SelectiveScan``, which has no
-kernel yet); the scan's output, gated, is RMS-normed and projected back.
+convolution, then a state space scan (``SelectiveScan``); the scan's
+output, gated, is RMS-normed and projected back.
 The convolution's last rows and the scan's state are the layer's
 ``Checkpoints`` states, as LFM2's convolution is.
 """
@@ -109,13 +109,11 @@ class Mamba(iron.Graph):
 
     def load_state_dict(self, tree, path: str = "") -> None:
         super().load_state_dict(tree, path)
-        # A row per tap; the scan's per-head constants in float32.
+        # A row per tap; each head's (dt_bias, A, D) in float32.
         taps = self.conv1d.weight.reshape(self.channels, -1).T
         self.taps = np.ascontiguousarray(taps)
-        self.A = -np.exp(np.asarray(self.A_log, np.float32))
-        self.dt_bias, self.D = (
-            np.asarray(a, np.float32) for a in (self.dt_bias, self.D)
-        )
+        A = -np.exp(np.asarray(self.A_log, np.float32))
+        self.head = np.stack([self.dt_bias, A, self.D], 1).astype(np.float32)
 
     def body(self, x, step):
         I, C = self.inner, self.channels
@@ -131,9 +129,7 @@ class Mamba(iron.Graph):
         y, final = SelectiveScan.step(
             xbc,
             dt,
-            self.dt_bias,
-            self.A,
-            self.D,
+            self.head,
             Copy.step(read, dtype=np.float32),
             groups=self.groups,
         )

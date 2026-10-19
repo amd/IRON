@@ -239,7 +239,7 @@ class ResNet(iron.Graph):
         # transformers' classifier is a flatten, then the linear.
         self.classifier = [
             None,
-            Linear(config.hidden_sizes[-1], config.num_labels, bias=True),
+            Linear(config.hidden_sizes[-1], config.num_labels),
         ]
         self.load_state_dict(weights)
 

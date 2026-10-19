@@ -18,8 +18,9 @@ public API adds its entry under Unreleased.
 - `Experts`: each row through the gated feed-forwards of the experts
   `TopKRouter` chose for it, weighted, on one core over mlir-aie's scalar
   `expert_gate_up` and `expert_down`, streaming every expert each row.
-- `SelectiveScan`, reference only: Mamba2's state space recurrence over a
-  run of rows, from a state to the state after its last valid row.
+- `SelectiveScan`: Mamba2's state space recurrence over a run of rows,
+  from a state to the state after its last valid row, over mlir-aie's
+  scalar `selective_scan`, a core per run of heads.
 - Application `granite_hybrid` (Granite 4.0-H, dense and MoE, on the host),
   judged by device-free toy goldens.
 - Application `resnet` (ResNet-50), judged by a device-free toy golden.
