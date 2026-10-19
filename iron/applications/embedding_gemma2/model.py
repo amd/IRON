@@ -243,20 +243,20 @@ class EmbeddingGemma(Encoder):
         self.load_layers(weights, "language_model.layers.", "language_model.norm.")
         scale = np.sqrt(np.float32(c.hidden_size))
         embedding = w.embed_tokens.weight.astype(np.float32) * scale
-        self.embed_scaled = embedding.astype(bfloat16)
+        self.embed_scaled = iron.param(embedding.astype(bfloat16))
         self.rope = {
             D: iron.weight(rope_angles(D, c.max_tokens, base).astype(bfloat16))
             for _, D, base in {c.heads(i) for i in range(c.num_hidden_layers)}
         }
-        self.query = np.zeros((c.block, 1, c.hidden_size), bfloat16)
+        self.query = iron.param(np.zeros((c.block, 1, c.hidden_size), bfloat16))
         # A power of four: a row's RMS over it is its norm over a power of two.
         width = 4 ** math.ceil(math.log(c.embedding_dim, 4))
         mrl = np.zeros((len(c.mrl_dims), width, c.hidden_size), bfloat16)
         for j, d in enumerate(c.mrl_dims):
             mrl[j, :d] = w.embedding_projection.weight[:d]
         # Each truncation's rows of the projection, a power of four apart.
-        self.mrl = mrl.reshape(-1, c.hidden_size)
-        self.unit = np.full(width, 1 / np.sqrt(width), bfloat16)
+        self.mrl = iron.param(mrl.reshape(-1, c.hidden_size))
+        self.unit = iron.param(np.full(width, 1 / np.sqrt(width), bfloat16))
 
     def lookup(self, ids):
         table = iron.weight(self.embed_scaled)

@@ -209,7 +209,7 @@ class Gemma4(CausalLM):
         for i, layer in enumerate(m.layers):
             # A layer's own columns, scaled, contiguous: one gather a layer.
             rows = table[:, i * P : (i + 1) * P].astype(np.float32) * scale
-            layer.per_layer_embedding = rows.astype(bfloat16)
+            layer.per_layer_embedding = iron.param(rows.astype(bfloat16))
         m.embed_tokens_per_layer = None
 
     def lookup(self, ids):

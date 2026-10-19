@@ -87,7 +87,9 @@ public API adds its entry under Unreleased.
   dotted path, cast to its dtype, and raises once, naming every missing,
   extra and wrong-shaped tensor; a param held at two paths is tied, bound
   from its first. A param never loaded is named when the graph is recorded,
-  and a second load is refused.
+  and a second load is refused. `iron.param(array)` holds `array` itself
+  as a weight, as torch's `nn.Parameter(tensor)`; a `Checkpoint.tree()`'s
+  tensors are params.
 - Leaf modules in `iron.lm`, graphs that declare their weights as
   transformers names them, with `torch.nn`'s arguments, defaults and
   attribute names: `Linear(in_features, out_features, bias=True)`,
@@ -255,6 +257,9 @@ public API adds its entry under Unreleased.
   and a run may start at a wrapped value (`x[s % R : s % R + W]`), on
   mlir-aie's `Affine` taking a constant after its wrap (PR #50 at
   eac7fd99c or later).
+- A graph's weights are its params and `iron.weight`s only: an array it
+  holds that is neither is no longer one. A model wraps what it derives from
+  its loaded params in `iron.param(...)`.
 - EmbeddingGemma 2's configs take Hugging Face's names where they differ
   only in name (`Config.embedding_dim`, `AudioConfig.attention_logit_cap`)
   and drop the fields nothing read (`bos`, `eos`, `pad`, `video_token`,

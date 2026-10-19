@@ -129,7 +129,7 @@ class FeedForward(iron.Graph):
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
         norm = self.post_layer_norm
-        norm.weight = norm.weight * bfloat16(self.residual)
+        norm.weight = iron.param(norm.weight * bfloat16(self.residual))
 
     def body(self, x):
         h = self.ffw_layer_2(F.silu(self.ffw_layer_1(self.pre_layer_norm(x))))
@@ -181,8 +181,10 @@ class ConformerAttention(iron.Graph):
         band = np.zeros((H, 2 * B, D), np.float32)
         band[:, :W] = relative[::-1].transpose(1, 0, 2) / k_scale
         band[:, B + 1 : B + 1 + W] = band[:, :W]
-        self.q_scale = np.tile(softplus * (q_scale * k_scale), H).astype(bfloat16)
-        self.relative = band.astype(bfloat16)
+        self.q_scale = iron.param(
+            np.tile(softplus * (q_scale * k_scale), H).astype(bfloat16)
+        )
+        self.relative = iron.param(band.astype(bfloat16))
 
     def body(self, h, tokens):
         """Attention over ``h``, its first ``tokens`` rows valid: one GEMM
@@ -253,7 +255,7 @@ class LightConv(iron.Graph):
         super().load_state_dict(tree, path=path)
         # A row per tap, each the row RowwiseMul takes.
         weight = self.depthwise_conv1d.weight
-        self.planes = np.ascontiguousarray(weight[:, 0].T)
+        self.planes = iron.param(np.ascontiguousarray(weight[:, 0].T))
 
     def body(self, x):
         start = self.linear_start
@@ -341,9 +343,9 @@ class AudioTower(Tower):
             c.frame, c.hop, mels=c.mels, sample_rate=c.sample_rate
         )
         self.features = iron.state((4 * T + 2, c.mels))
-        self.zero_mel = np.zeros((1, c.mels), bfloat16)
+        self.zero_mel = iron.param(np.zeros((1, c.mels), bfloat16))
         self.subsampled = iron.state((2 * T + 2, self.slots))
-        self.zero = np.zeros((1, self.slots), bfloat16)
+        self.zero = iron.param(np.zeros((1, self.slots), bfloat16))
         # The keys' rows: the `W - 1` before the first, the T keys, then from
         # an even row the relative-position rows twice, the second a row on.
         K = -(-(T + W + 2 * B) // 128) * 128

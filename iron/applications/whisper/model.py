@@ -252,8 +252,8 @@ class WhisperEncoder(Tower):
         # The second convolution's input: a zero row, then the first's output.
         self.convolved = iron.state((2 * c.rows + 1, c.hidden_size))
         # The position table padded to the rows.
-        self.embed_positions = np.zeros(
-            (c.rows, c.hidden_size), e.embed_positions.weight.dtype
+        self.embed_positions = iron.param(
+            np.zeros((c.rows, c.hidden_size), e.embed_positions.weight.dtype)
         )
         self.embed_positions[: c.positions] = e.embed_positions.weight
 

@@ -119,7 +119,7 @@ class BaseConv(iron.Graph):
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
-        self.weight, self.bias = self.bn.fold(self.conv.weight)
+        self.weight, self.bias = map(iron.param, self.bn.fold(self.conv.weight))
 
     def body(self, x):
         k = self.weight.shape[-1]
@@ -206,7 +206,7 @@ class Prediction(iron.Graph):
         weight = np.zeros((self.width, channels, 1, 1), bfloat16)
         bias = np.zeros(self.width, bfloat16)
         weight[:out], bias[:out] = self.weight, self.bias
-        self.weight, self.bias = weight, bias
+        self.weight, self.bias = iron.param(weight), iron.param(bias)
 
     def body(self, x):
         return F.conv2d(x, self.weight, self.bias)
@@ -224,7 +224,7 @@ class Focus(iron.Graph):
         super().load_state_dict(tree, path=path)
         weight = self.conv.weight.reshape(-1, 4, 3, 3, 3)
         weight = np.pad(weight, ((0, 0), (0, 0), (0, 1), (0, 0), (0, 0)))
-        self.conv.weight = weight.reshape(-1, 16, 3, 3)
+        self.conv.weight = iron.param(weight.reshape(-1, 16, 3, 3))
 
 
 class CSPDarknet(iron.Graph):

@@ -73,13 +73,15 @@ class SparseMoE(iron.Graph):
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
         # As transformers stacks them: each expert's gate over its up.
-        self.gate_up = np.stack(
-            [
-                np.concatenate([e.gate_proj.weight, e.up_proj.weight])
-                for e in self.experts
-            ]
+        self.gate_up = iron.param(
+            np.stack(
+                [
+                    np.concatenate([e.gate_proj.weight, e.up_proj.weight])
+                    for e in self.experts
+                ]
+            )
         )
-        self.down = np.stack([e.down_proj.weight for e in self.experts])
+        self.down = iron.param(np.stack([e.down_proj.weight for e in self.experts]))
 
     def body(self, x):
         n, experts = x.shape[0], self.gate.weight.shape[0]

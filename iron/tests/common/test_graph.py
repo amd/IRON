@@ -1491,6 +1491,7 @@ class _Held(iron.Graph):
 
 def test_a_held_array_is_viewed_in_the_body_under_its_own_path():
     table = np.arange(8 * 256, dtype=np.int32).astype(bfloat16).reshape(8, 256)
+    table = iron.param(table)
     g = _Held(table)
     t = g.record(x=(512,))
     assert [h.name for _, h in t.weights.values()] == ["weights.embed.weight"]
@@ -1837,7 +1838,7 @@ class _HeldStack(iron.Graph):
 
 def test_a_whole_reshape_of_a_held_array_is_gathered_under_its_own_path():
     tables = np.arange(2 * 8 * 256, dtype=np.int32).astype(bfloat16)
-    tables = tables.reshape(2, 8, 256)
+    tables = iron.param(tables.reshape(2, 8, 256))
     g = _HeldStack(tables)
     t = g.record(ids=((4,), np.int32))
     assert [h.name for _, h in t.weights.values()] == ["weights.embed.weight"]
@@ -2311,7 +2312,7 @@ def test_an_assignment_into_a_view_is_the_copy_into_it():
 def test_a_refused_step_names_the_graph_the_operator_and_the_held_path():
     class Project(iron.Graph):
         def __init__(self):
-            self.layers = [SimpleNamespace(w=z(256, 512))]
+            self.layers = [SimpleNamespace(w=iron.param(z(256, 512)))]
 
         def body(self, x):
             return GEMV.step(self.layers[0].w, x)

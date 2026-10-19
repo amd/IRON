@@ -22,6 +22,7 @@ from typing import Any, Literal
 import numpy as np
 from ml_dtypes import bfloat16
 
+from ..common.graph.compiled import param
 from ..common.graph.fill import filled
 from .golden import fingerprint
 
@@ -237,8 +238,8 @@ class Checkpoint:
     def tree(
         self, fill: Literal["read", "random", "unread"] = "read", seed: int = 0
     ) -> SimpleNamespace:
-        """The checkpoint as a tree of its tensors' names, each split at its
-        dots: ``model.layers.3.self_attn.q_proj.weight`` is
+        """The checkpoint as a tree of its tensors, each a ``param``, by
+        their names, each split at its dots: ``model.layers.3.self_attn.q_proj.weight`` is
         ``tree.model.layers[3].self_attn.q_proj.weight``, a run of indices a
         list, an empty module at an index the checkpoint skips (a module
         holding no tensor, as ``nn.Sequential``'s ``Flatten``).
@@ -259,7 +260,7 @@ class Checkpoint:
         if fill != "read":
             named = {n: (t.shape, t.dtype) for n, t in tensors.items()}
             tensors = filled(fill, named, seed)
-        return nest(tensors, file=self.path)
+        return nest({n: param(t) for n, t in tensors.items()}, file=self.path)
 
 
 def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:

@@ -107,7 +107,9 @@ class Mamba(iron.Graph):
         super().load_state_dict(tree, path=path)
         # Each head's (dt_bias, A, D) in float32.
         A = -np.exp(np.asarray(self.A_log, np.float32))
-        self.head = np.stack([self.dt_bias, A, self.D], 1).astype(np.float32)
+        self.head = iron.param(
+            np.stack([self.dt_bias, A, self.D], 1).astype(np.float32)
+        )
 
     def body(self, x, call):
         I, C = self.inner, self.channels

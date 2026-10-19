@@ -306,7 +306,7 @@ def test_tree_arrays_are_the_checkpoints(toy_path):
     checkpoint = Checkpoint(toy_path)
     tree = checkpoint.tree()
     name = "model.layers.1.self_attn.v_proj.weight"
-    assert tree.model.layers[1].self_attn.v_proj.weight is checkpoint.tensors[name]
+    assert tree.model.layers[1].self_attn.v_proj.weight.base is checkpoint.tensors[name]
     ids = [id(at(tree, name)) for name in checkpoint.tensors]
     assert len(set(ids)) == len(ids)
 
@@ -484,7 +484,7 @@ def test_a_filled_tree_has_the_checkpoints_names_shapes_and_dtypes(toy_path, fil
     for name, tensor in checkpoint.tensors.items():
         a = at(tree, name)
         assert (a.shape, a.dtype) == (tensor.shape, tensor.dtype), name
-        assert a.flags.owndata and a is not tensor, name
+        assert a.base.flags.owndata and a.base is not tensor, name
 
 
 def test_random_fill_draws_at_its_seed(toy_path):

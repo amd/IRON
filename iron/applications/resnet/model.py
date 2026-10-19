@@ -80,8 +80,8 @@ class ConvLayer(iron.Graph):
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
-        self.weight, bias = self.normalization.fold(self.convolution.weight)
-        self.bias = bias.astype(bfloat16)
+        weight, bias = self.normalization.fold(self.convolution.weight)
+        self.weight, self.bias = iron.param(weight), iron.param(bias.astype(bfloat16))
 
     def body(self, x):
         k = self.weight.shape[-1]
@@ -141,7 +141,7 @@ class Stem(ConvLayer):
         w[:, :channels, 1:, 1:] = self.weight
         # (out, c, u, p, v, q) to (out, p, q, c, u, v): channel (p, q, c).
         w = w.reshape(out, PIXEL, 4, 2, 4, 2).transpose(0, 3, 5, 1, 2, 4)
-        self.weight = w.reshape(out, 4 * PIXEL, 4, 4)
+        self.weight = iron.param(w.reshape(out, 4 * PIXEL, 4, 4))
 
     def body(self, x):
         y = F.conv2d(x, self.weight, self.bias)

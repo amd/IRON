@@ -139,9 +139,10 @@ class VisionLayer(SandwichLayer):
             [quarter, quarter + half, quarter + half // 2, quarter + 3 * half // 2]
         )
         for p in (a.q_proj, a.k_proj):
-            p.weight = p.weight.reshape(a.heads, a.head_dim, E)[:, order].reshape(E, E)
+            w = p.weight.reshape(a.heads, a.head_dim, E)[:, order]
+            p.weight = iron.param(w.reshape(E, E))
         for norm in (a.q_norm, a.k_norm):
-            norm.weight = norm.weight[order]
+            norm.weight = iron.param(norm.weight[order])
 
 
 class VisionTower(Tower):
@@ -220,7 +221,7 @@ class VisionTower(Tower):
         rope = rope_angles(half, c.position_embedding_size, c.rope_theta).astype(
             bfloat16
         )
-        self.x_angles, self.y_angles = rope[x_ids], rope[y_ids]
+        self.x_angles, self.y_angles = iron.param(rope[x_ids]), iron.param(rope[y_ids])
         self.capacity = max(
             self.walked(hk, wk)
             for hk in range(1, windows + 1)

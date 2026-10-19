@@ -20,7 +20,7 @@ class FeedForward(iron.Graph):
     """
 
     def __init__(self, w_gate, w_up, w_down):
-        self.w_gate, self.w_up, self.w_down = w_gate, w_up, w_down
+        self.w_gate, self.w_up, self.w_down = map(iron.param, (w_gate, w_up, w_down))
 
     def body(self, x):
         gate, up = F.linear(x, self.w_gate), F.linear(x, self.w_up)

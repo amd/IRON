@@ -166,14 +166,23 @@ class _Parameters:
 
 
 class _Param(np.ndarray):
+    """A ``param``: an array a graph holds as a weight."""
+
+
+class _Unbound(_Param):
     """A ``param`` not yet bound: no storage, only its shape and dtype."""
 
 
-def param(*shape: int, dtype=bfloat16) -> np.ndarray:
-    """A weight a graph declares by shape, typed as the array
-    ``Graph.load_state_dict`` binds in its place.
+def param(*shape, dtype=bfloat16) -> np.ndarray:
+    """A weight a graph holds, declared by shape, typed as the array
+    ``Graph.load_state_dict`` binds in its place; or ``param(array)``,
+    ``array`` itself held as one, as torch's ``nn.Parameter(tensor)``. An
+    array a graph holds that is not a param is no weight.
     """
-    return np.broadcast_to(np.zeros((), dtype), shape).view(_Param)
+    if len(shape) == 1 and isinstance(shape[0], np.ndarray):
+        a = shape[0]
+        return a if isinstance(a, _Param) else a.view(_Param)
+    return np.broadcast_to(np.zeros((), dtype), shape).view(_Unbound)
 
 
 def walk(
@@ -307,17 +316,18 @@ class Graph:
         )
 
     def held(self) -> dict[int, tuple[str, Any]]:
-        """Each tensor and state the instance holds, by identity, with its
-        path name.
+        """Each ``param``, ``weight`` and state the instance holds, by
+        identity, with its path name.
 
         Raises:
             TypeError: A ``param`` was never loaded.
         """
         held: dict[int, tuple[str, Any]] = {}
         for path, x, _, _ in walk(self):
-            if isinstance(x, _Param):
+            if isinstance(x, _Unbound):
                 raise TypeError(f"{self.name}: {path} was never loaded")
-            held.setdefault(id(x), (path, x))
+            if isinstance(x, (_Param, Weight, State)):
+                held.setdefault(id(x), (path, x))
         return held
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
@@ -349,10 +359,10 @@ class Graph:
             raise ValueError(f"{self.name}: already loaded")
         tensors = {n: t for n, t, _, _ in walk(tree) if n.startswith(path)}
         tied: dict[int, list[str]] = {}
-        params: dict[str, _Param] = {}
+        params: dict[str, _Unbound] = {}
         shared: list[str] = []
         for n, p, parent, _ in walk(self, shared=shared):
-            if not isinstance(p, _Param):
+            if not isinstance(p, _Unbound):
                 continue
             if isinstance(parent, tuple) or getattr(
                 getattr(parent, "__dataclass_params__", None), "frozen", False
@@ -393,15 +403,15 @@ class Graph:
                 + "; ".join(f"{k} {', '.join(v)}" for k, v in found.items() if v)
             )
         for first, *others in tied.values():
-            tensors[first] = np.asarray(tensors[first]).astype(
-                params[first].dtype, copy=False
+            tensors[first] = param(
+                np.asanyarray(tensors[first]).astype(params[first].dtype, copy=False)
             )
             tensors.update(dict.fromkeys(others, tensors[first]))
         for n, x, parent, key in walk(self, graphs=False):
             if isinstance(x, Graph):
                 if not x.__dict__.get("_bound"):
                     x.load_state_dict(tensors, path=f"{path}{n}.")
-            elif not isinstance(x, _Param):
+            elif not isinstance(x, _Unbound):
                 continue
             elif isinstance(parent, (list, dict)):
                 parent[key] = tensors[path + n]

@@ -149,7 +149,7 @@ class GatedDeltaNet(iron.Graph):
         super().load_state_dict(tree, path=path)
         # Each value head's (dt_bias, A) in float32.
         A = -np.exp(np.asarray(self.A_log, np.float32))
-        self.head = np.stack([self.dt_bias, A], 1).astype(np.float32)
+        self.head = iron.param(np.stack([self.dt_bias, A], 1).astype(np.float32))
 
     def body(self, x, call):
         n, Hv, Dv = x.shape[0], self.head.shape[0], self.norm.weight.size

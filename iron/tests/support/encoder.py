@@ -48,7 +48,7 @@ class SelfAttention(Encoder):
     layer_class = SelfAttend
 
     def __init__(self, table, layers: int, window: int | None = None):
-        self.table = table
+        self.table = iron.param(table)
         self.window = window
         super().__init__(
             Shape(num_hidden_layers=layers, window=window, scale=1.0), ROWS

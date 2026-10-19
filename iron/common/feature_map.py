@@ -99,7 +99,7 @@ class Conv2d(iron.Graph):
                     i = stride * f - padding + b
                     if 0 <= i < width:
                         band[:, i, f + border] = w[:, 0, :, b].T
-            self.matrix = band.reshape(k * width, self.out_line).astype(bfloat16)
+            matrix = band.reshape(k * width, self.out_line)
         elif depthwise:
             band = np.zeros(
                 (k, width, C, self.out_width + 2 * border, C_out), np.float32
@@ -110,10 +110,10 @@ class Conv2d(iron.Graph):
                     i = stride * f - padding + b
                     if 0 <= i < width:
                         band[:, i, channel, f + border, channel] = w[:, 0, :, b].T
-            self.matrix = band.reshape(k * width * C, self.out_line).astype(bfloat16)
+            matrix = band.reshape(k * width * C, self.out_line)
         else:
-            self.matrix = w.transpose(0, 2, 3, 1).reshape(C_out, k * k * C)
-            self.matrix = self.matrix.astype(bfloat16)
+            matrix = w.transpose(0, 2, 3, 1).reshape(C_out, k * k * C)
+        self.matrix = iron.param(matrix.astype(bfloat16))
 
     def body(self, x, y=None, *, rows: Scratchpad[np.int32]):
         k, s, C = self.kernel, self.stride, self.channels
@@ -211,7 +211,7 @@ class MaxPool2d(iron.Graph):
         )
         pad = kernel // 2
         shape = (rows + 2 * pad, (width + 2 * pad) * channels)
-        self.border = np.full(shape, -np.inf, bfloat16)
+        self.border = iron.param(np.full(shape, -np.inf, bfloat16))
         self.padded = iron.state(shape)
 
     def body(self, x):

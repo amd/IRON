@@ -138,7 +138,7 @@ class CausalConv1d(iron.Graph):
         super().load_state_dict(tree, path=path)
         # A row per tap, each the row RowwiseMul takes.
         C, _, K = self.weight.shape
-        self.taps = np.ascontiguousarray(self.weight.reshape(C, K).T)
+        self.taps = iron.param(np.ascontiguousarray(self.weight.reshape(C, K).T))
 
     def body(self, x, call):
         read, write = self.state.at(call)

@@ -104,8 +104,10 @@ class LogMel(iron.Graph):
         dft = np.zeros((frame, 2 * width))
         dft[:, :bins] = window * np.cos(angle)
         dft[:, width : width + bins] = -window * np.sin(angle)
-        self.dft = stacked(dft)
-        self.filterbank = stacked(np.pad(self.filters, ((0, width - bins), (0, 0))))
+        self.dft = iron.param(stacked(dft))
+        self.filterbank = iron.param(
+            stacked(np.pad(self.filters, ((0, width - bins), (0, 0))))
+        )
 
     def body(
         self,
@@ -164,7 +166,9 @@ class Conv1d(iron.Graph):
         self.channels, self.out_channels, self.kernel, self.stride = C, C_out, k, stride
         # Kernel tap as the slower axis, channel the faster: the same order
         # a contiguous k * channels row gather reads them in.
-        self.matrix = w.transpose(2, 1, 0).reshape(k * C, C_out).astype(bfloat16)
+        self.matrix = iron.param(
+            w.transpose(2, 1, 0).reshape(k * C, C_out).astype(bfloat16)
+        )
         self.bias = iron.weight(np.asarray(bias, np.float32).astype(bfloat16))
 
     def body(
@@ -411,7 +415,9 @@ class RMSNorm(iron.Graph):
         """
         for _, weight, norm, _ in list(walk(module)):
             if isinstance(norm, RMSNorm):
-                norm.weight = (weight.astype(np.float32) + 1).astype(bfloat16)
+                norm.weight = iron.param(
+                    (weight.astype(np.float32) + 1).astype(bfloat16)
+                )
 
 
 class LayerNorm(iron.Graph):
@@ -979,7 +985,7 @@ class PleLayer(SandwichLayer):
         super().load_state_dict(tree, path=path)
         # The row RowwiseMul takes.
         scalar, E = self.layer_scalar, self.per_layer_projection.out_features
-        self.scale = np.full(E, scalar[0], scalar.dtype)
+        self.scale = iron.param(np.full(E, scalar[0], scalar.dtype))
 
     def body(  # pyright: ignore[reportIncompatibleMethodOverride]
         self, x: Handle, call, ple: Handle

@@ -125,14 +125,16 @@ def test_a_tied_param_needs_only_its_first_path():
     table = np.ones((512, 256), bfloat16)
     tied = Tied()
     tied.load_state_dict({"embed.weight": table})
-    assert tied.head.weight is tied.embed.weight is table
+    assert tied.head.weight is tied.embed.weight
+    assert tied.embed.weight.base is table
 
 
 def test_a_tied_param_ignores_a_tensor_at_its_other_path():
     first, second = np.ones((512, 256), bfloat16), np.zeros((512, 256), bfloat16)
     tied = Tied()
     tied.load_state_dict({"embed.weight": first, "head.weight": second})
-    assert tied.head.weight is tied.embed.weight is first
+    assert tied.head.weight is tied.embed.weight
+    assert tied.embed.weight.base is first
 
 
 def test_a_graph_held_at_two_paths_skips_the_second_paths_tensors():
@@ -146,7 +148,8 @@ def test_a_graph_held_at_two_paths_skips_the_second_paths_tensors():
     }
     shared = Shared()
     shared.load_state_dict(tensors | {"b.weight": np.ones((4, 4), bfloat16)})
-    assert shared.b.weight is tensors["a.weight"] and shared.d[0] is tensors["c.0"]
+    assert shared.b.weight.base is tensors["a.weight"]
+    assert shared.d[0].base is tensors["c.0"]
 
 
 def test_load_state_dict_binds_params_in_lists_dicts_and_namespaces():
@@ -197,7 +200,7 @@ def test_load_state_dict_keeps_a_tensor_of_the_params_dtype_as_the_view_it_is():
     named = tensors()
     block = Block()
     block.load_state_dict(named)
-    assert block.norm.weight is named["norm.weight"]
+    assert block.norm.weight.base is named["norm.weight"]
 
 
 def test_load_state_dict_refuses_a_change_of_kind():

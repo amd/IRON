@@ -770,7 +770,7 @@ class Weight(_Viewed):
     __slots__ = ("array",)
 
     def __init__(self, array):
-        self.array = np.asarray(array)
+        self.array = np.asanyarray(array)
 
     @property
     def shape(self) -> tuple[int, ...]:

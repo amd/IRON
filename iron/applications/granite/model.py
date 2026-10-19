@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron import lm
+from iron import lm, param
 from iron.lm import CausalLM, DecoderConfig, DecoderLayer
 
 
@@ -72,11 +72,11 @@ class Granite(CausalLM):
         super().__init__(config, weights)
         # The embedding's multiplier as a row every row is multiplied by.
         m = config.embedding_multiplier
-        self.embed_scale = np.full(config.hidden_size, m, bfloat16)
+        self.embed_scale = param(np.full(config.hidden_size, m, bfloat16))
         if config.logits_scaling != 1:
             # The logits' divisor folded into the final norm's loaded weight.
             norm = self.model.norm
-            norm.weight = norm.weight / bfloat16(config.logits_scaling)
+            norm.weight = param(norm.weight / bfloat16(config.logits_scaling))
 
     def lookup(self, ids):
         x = super().lookup(ids)
