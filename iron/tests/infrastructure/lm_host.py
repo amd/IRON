@@ -311,14 +311,20 @@ def test_tree_arrays_are_the_checkpoints(toy_path):
     assert len(set(ids)) == len(ids)
 
 
-def test_tree_rejects_a_skipped_layer(tmp_path):
-    """Layer 0 gone and layer 1 whole: refused, not one layer renumbered."""
+def test_tree_names_a_tensor_of_a_skipped_layer(tmp_path):
+    """Layer 0 gone and layer 1 whole: layer 1 stays layer 1, and layer 0's
+    tensors are missing by their paths, not one layer renumbered.
+    """
     ckpt = {
         k: v for k, v in toy_checkpoint().items() if not k.startswith("model.layers.0.")
     }
-    save_file(ckpt, tmp_path / "skipped.safetensors")
-    with pytest.raises(ValueError, match=r"model\.layers in .*\[1\] skip \[0\]"):
-        Checkpoint(tmp_path / "skipped.safetensors").tree()
+    path = tmp_path / "skipped.safetensors"
+    save_file(ckpt, path)
+    layers = Checkpoint(path).tree().model.layers
+    assert len(layers) == 2
+    message = f"model.layers.0.self_attn is not in {path} (it has nothing)"
+    with pytest.raises(AttributeError, match=re.escape(message)):
+        layers[0].self_attn
 
 
 def test_tree_names_a_missing_tensor_by_its_path_and_file(toy_path):

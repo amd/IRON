@@ -61,10 +61,11 @@ class Head(iron.Graph):
         self.classifier = [None, Linear(256, 128, bias=False)]
 
 
-def test_an_index_a_checkpoint_skips_is_none_and_no_leaf():
+def test_an_index_a_checkpoint_skips_is_empty_and_no_leaf():
     """``nn.Sequential(nn.Flatten(), nn.Linear(...))`` names only ``1``."""
     tree = checkpoint(SMALL, {"classifier.1.weight": (128, 256)}).tree()
-    assert tree.classifier[0] is None
+    with pytest.raises(AttributeError, match=r"classifier\.0\.weight is not in"):
+        tree.classifier[0].weight
     assert [n for n, _ in leaves(tree)] == ["classifier.1.weight"]
     head = Head()
     head.load_state_dict(tree)

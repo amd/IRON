@@ -383,6 +383,11 @@ def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision, request):
         op.pack_B(None)
 
 
+def test_flm_gemm_narrows_its_n_tile_to_a_k_its_chunk_divides(npu2):
+    assert ProjectionGEMM(M=256, K=64, N=256).resolved(npu2).tile_n == 32
+    assert ProjectionGEMM(M=256, K=512, N=256).resolved(npu2).tile_n == 64
+
+
 def test_flm_gemm_at_medium_takes_bf16_macs_on_aie2(npu1):
     op = ProjectionGEMM(M=256, K=512, N=256, precision=Precision.MEDIUM).resolved(npu1)
     assert not op.emulate_bf16_mmul_with_bfp16 and not op.bfp16_b

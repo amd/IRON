@@ -17,6 +17,8 @@ from iron.operators.gemm import GEMM
 
 # What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
 GEMM_ROWS = 16
+# GEMM's default tile_n, which a patches GEMM's pixels are padded to.
+GEMM_COLUMNS = 64
 
 
 class Conv2d(iron.Graph):
@@ -32,8 +34,9 @@ class Conv2d(iron.Graph):
     out as a band over the width; a ragged last block of ``GEMM_ROWS`` rows
     repeats the first row, so its output cannot be given. More channels
     are a GEMM of the output channels, as its rows, by the gathered
-    ``kernel * kernel * channels`` patches. Each GEMM sums in float32 and
-    rounds once.
+    ``kernel * kernel * channels`` patches; pixels short of a whole
+    ``GEMM_COLUMNS`` repeat the first patch, so their output cannot be
+    given either. Each GEMM sums in float32 and rounds once.
 
     Args:
         weight: ``(out_channels, channels_per_group, kernel, kernel)``,
@@ -150,7 +153,18 @@ class Conv2d(iron.Graph):
             [out_rows, self.out_width, k, k * C],
             [s * line, s * C, line, 1],
         )
-        a = Copy.step(x, src=patches).reshape(n, k * k * C)
+        spare = -n % GEMM_COLUMNS
+        if spare and y is not None:
+            raise ValueError(
+                f"Conv2d: {n} output pixels are not whole {GEMM_COLUMNS}-pixel "
+                f"tiles, so the GEMM computes {spare} more than a caller's "
+                f"output holds; take the returned output instead"
+            )
+        src = patches
+        if spare:
+            first = TensorAccessPattern((R, line), 0, [spare, k, k * C], [0, line, 1])
+            src = (patches, first)
+        a = Copy.step(x, src=src).reshape(n + spare, k * k * C)
         # The few output channels as M, so that the patches span every
         # column; every row, as a GEMM bounds no N, and the output after.
         out = [] if y is None else [y.reshape(n, self.out_channels)]
@@ -162,6 +176,8 @@ class Conv2d(iron.Graph):
             c_col_maj=True,
             precision=Precision.HIGHEST,
         )
+        if spare:
+            h = h[:n]
         h = h if y is not None else h[: rows * self.out_width]
         return None if y is not None else h.reshape(out_rows, self.out_line)
 

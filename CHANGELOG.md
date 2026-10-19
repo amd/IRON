@@ -24,6 +24,9 @@ public API adds its entry under Unreleased.
 - Application `granite_hybrid` (Granite 4.0-H, dense and MoE, on the host),
   judged by device-free toy goldens.
 - Application `resnet` (ResNet-50), judged by a device-free toy golden.
+- `Conv2d`'s gathered patches pad to whole 64-pixel GEMM tiles, and
+  `flm.ProjectionGEMM` narrows its default n tile where K is short of its
+  k chunk, so ResNet-50's 7x7 to 28x28 maps and 64-channel 1x1 convs build.
 - Applications `smollm3` (SmolLM3 3B), `ministral3` (Ministral 3's text
   decoder, on drawn weights) and `qwen3_moe` (Qwen3-30B-A3B, on the host),
   each judged by a device-free toy golden.

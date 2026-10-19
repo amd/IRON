@@ -19,7 +19,6 @@ maps; the image is ImageNet-normalized before the graph, and laid out in
 """
 
 import dataclasses
-from pathlib import Path
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -109,12 +108,7 @@ class ConvLayer(iron.Graph):
     def body(self, x):
         k = self.weight.shape[-1]
         y = F.conv2d(x, self.weight, self.bias, self.stride, k // 2)
-        return ReLU.step(y, tile_size=_row(y)) if self.relu else y
-
-
-def _row(x) -> int:
-    """A feature map's elements a row."""
-    return x.shape[1] * x.shape[2]
+        return ReLU.step(y) if self.relu else y
 
 
 class Bottleneck(iron.Graph):
@@ -138,7 +132,7 @@ class Bottleneck(iron.Graph):
         for conv in self.layer:
             y = conv(y)
         residual = x if self.shortcut is None else self.shortcut(x)
-        return ReLU.step(y + residual, tile_size=_row(y))
+        return ReLU.step(y + residual)
 
 
 class Stage(iron.Graph):
@@ -173,7 +167,7 @@ class Stem(ConvLayer):
 
     def body(self, x):
         y = F.conv2d(x, self.weight, self.bias)
-        return ReLU.step(y, tile_size=_row(y))
+        return ReLU.step(y)
 
 
 class Embedder(iron.Graph):
@@ -229,9 +223,6 @@ class ResNet(iron.Graph):
     logits. The global average pool is a depthwise conv of the final map's
     size, every tap its mean's.
     """
-
-    # The 1x1 convs of 64 channels, whose patches no 64-wide n tile reads.
-    profile = Path(__file__).with_name("profiles")
 
     def __init__(self, config: ResNetConfig, weights):
         self.config = config

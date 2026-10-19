@@ -264,14 +264,13 @@ class Checkpoint:
 
 def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:
     """Each leaf of ``tree``, a ``Checkpoint.tree()``'s namespaces and
-    lists, by its dotted name, a skipped index's None left out:
-    ``_nest``'s inverse.
+    lists, by its dotted name: ``_nest``'s inverse.
     """
     if isinstance(tree, (list, SimpleNamespace)):
         items = enumerate(tree) if isinstance(tree, list) else vars(tree).items()
         for name, value in items:
             yield from leaves(value, f"{prefix}{name}.")
-    elif tree is not None:
+    else:
         yield prefix[:-1], tree
 
 
@@ -296,14 +295,16 @@ def _nest(named: Mapping[str, Any], path: str = "", file=_FILE) -> SimpleNamespa
 
 def _tree(node, path: str, file) -> Any:
     """Nested dicts as ``_Module``s, those keyed by indices as ``_Layers``,
-    None at a skipped index.
+    an empty ``_Module`` at a skipped index.
     """
     if not isinstance(node, dict):
         return node
     items = {key: _tree(child, f"{path}{key}.", file) for key, child in node.items()}
     if items and all(key.isdigit() for key in items):
         indices = range(max(map(int, items)) + 1)
-        tree = _Layers(items.get(str(i)) for i in indices)
+        tree = _Layers(
+            items.get(str(i)) or _tree({}, f"{path}{i}.", file) for i in indices
+        )
     else:
         tree = _Module(**items)
     tree._path, tree._file = path, file
@@ -323,7 +324,7 @@ class _Module(SimpleNamespace):
             raise AttributeError(name)
         raise AttributeError(
             f"{self._path}{name} is not in {self._file} "
-            f"(it has {', '.join(vars(self))})"
+            f"(it has {', '.join(vars(self)) or 'nothing'})"
         )
 
 

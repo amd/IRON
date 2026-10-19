@@ -111,6 +111,16 @@ def test_the_graph_classifies_as_transformers(toy):
         assert_close(got, reference.logits((), image))
 
 
+@pytest.mark.parametrize("size", [64, 224])
+def test_every_step_of_resnet50_resolves(size, npu2):
+    """Each step's operator at ResNet-50's depths takes a shape npu2 builds."""
+    c = dataclasses.replace(TOY, depths=(3, 4, 6, 3), image_size=size)
+    S = size // 2 + 3
+    traced = ResNet(c, tree(c)).trace(image=((S, S * 16), bfloat16))
+    for step in traced.steps:
+        step.op.resolved(npu2)
+
+
 def test_another_bottleneck_or_activation_is_refused():
     with pytest.raises(ValueError, match="only ResNet-50's bottleneck"):
         dataclasses.replace(TOY, layer_type="basic")

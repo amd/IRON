@@ -330,7 +330,14 @@ class ProjectionGEMM(Operator):
         bfp16_b = emulate and not self.b_col_maj
         b_elem_bytes = bfp.BLOCK_BYTES / bfp.BLOCK if bfp16_b else 2
         b_group = bfp.BLOCK if bfp16_b else 1
-        tile_n = N_TILE_DEFAULT if self.tile_n is None else self.tile_n
+        tile_n = self.tile_n or next(
+            (
+                n
+                for n in (N_TILE_DEFAULT, 32, 16)
+                if self.K % CT_MAX_K_FOR_N[n] == 0 and self.N % n == 0
+            ),
+            N_TILE_DEFAULT,
+        )
         ct_k = CT_MAX_K_FOR_N[tile_n]
         m_chunk = self.m_chunk
         k_tile = self.k_tile

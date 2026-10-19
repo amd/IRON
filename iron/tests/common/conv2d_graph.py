@@ -121,6 +121,17 @@ def test_an_unaligned_gather_writes_no_callers_output():
         Into(conv, 13).trace(x=(x.shape, bfloat16))
 
 
+def test_patches_short_of_a_tile_compute_a_whole_one():
+    # 3 rows of 8 pixels: 24 patches, 40 more of the first.
+    conv = Conv2d(np.zeros((32, 128, 3, 3), np.float32), 18, stride=2)
+    x = (7, 18 * 128)
+    traced = Subsample(conv).trace(x=(x, bfloat16))
+    gemm = next(s.op for s in traced.steps if isinstance(s.op, GEMM))
+    assert gemm.N == 64
+    with pytest.raises(ValueError, match="not whole 64-pixel tiles"):
+        Into(conv, 3).trace(x=(x, bfloat16))
+
+
 def test_gathered_patches_hold_no_padding():
     with pytest.raises(ValueError, match="hold no zero padding"):
         Conv2d(np.zeros((32, 128, 3, 3), np.float32), 18, stride=2, padding=1)

@@ -15,9 +15,6 @@ transformers' ResNet on drawn weights at ResNet-50's widths; its device
 test, `tests/applications/resnet/test.py`, holds the NPU to the graph's
 own reference on the released checkpoint.
 
-`profiles/npu2.json` gives the 1x1 convs of 64 input channels an n tile
-whose k chunk divides 64; nothing else is tuned yet.
-
 ## Weights
 
 From Hugging Face
