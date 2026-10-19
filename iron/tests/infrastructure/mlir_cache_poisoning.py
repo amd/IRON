@@ -38,10 +38,12 @@ from iron.common.design import OperatorDesign
 from iron.common.image.compose import Composition
 from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
+from iron.operators import ElementwiseAdd
 from iron.tests.support.graphs import Adds
-from iron.tests.infrastructure.graph_dispatch import SIZE, _operator
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+
+SIZE = 1024
 
 
 def _linked_objects(operator):
@@ -62,12 +64,14 @@ def test_full_elf_build_does_not_poison_the_standalone_mlir():
     one reading what the full-ELF build left behind. Doing it the other way round
     passes whatever happens.
     """
-    recording = Adds(_operator(), 1).record(x=(SIZE,), w=(SIZE,))
+    recording = Adds(ElementwiseAdd(size=SIZE, tile_size=128), 1).record(
+        x=(SIZE,), w=(SIZE,)
+    )
     seq = Image(dataclasses.replace(recording, name="poisoning_probe"), FullELF())
     seq.compile()
     composed = set(re.findall(r'link_with\s*=\s*"([^"]+)"', Composition(seq).text()))
 
-    linked = _linked_objects(_operator())
+    linked = _linked_objects(ElementwiseAdd(size=SIZE, tile_size=128))
     assert linked and set(linked) <= composed, (
         f"standalone build links {linked}, the composed one {sorted(composed)}; a "
         "design names different objects depending on what it is composed with"

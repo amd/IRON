@@ -26,6 +26,7 @@ from iron import Profile, Scratchpad
 from iron.common import Built, Operator, Rtp, Unresolvable, Value, Xclbin
 from iron.common.declare.operand import active_runtime, axis_of
 from iron.common.design import OperatorDesign
+from iron.tests.support.declare import Rows
 
 NPU2 = from_name("npu2", n_cols=8)
 
@@ -481,25 +482,6 @@ def test_mha_pads_the_sequence_and_groups_kv():
 # --------------------------------------------------------------------------
 # An extent a graph may bound per call
 # --------------------------------------------------------------------------
-
-
-class Rows(Operator):
-    """Rows of ``cols`` elements over ``lanes`` lanes; ``rows`` may be bounded."""
-
-    rows: int = param()
-    cols: int = param()
-    lanes: int = tunable(default=2, domain=widths)
-    valid = per_call(bounds=rows)
-    count = per_call(derive=lambda op: op.valid // op.lanes)  # reads the extent
-    width = per_call(derive=lambda op: op.cols)  # does not
-    x = In(rows, cols, obj_shape=(1, cols), per=(lanes,))
-    y = Out(rows, cols, obj_shape=(1, cols), per=(lanes,))
-
-    def build(self) -> Built:
-        return Built([])
-
-    def reference(self, x):
-        return x
 
 
 def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():

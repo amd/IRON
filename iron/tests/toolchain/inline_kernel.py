@@ -18,7 +18,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import BinaryElementwise
-from iron.tests.toolchain.lowering import lower
+from iron.tests.support.lowering import lower
 from iron.tests.support.tools import requires
 
 pytestmark = requires("aiecc", "peano")

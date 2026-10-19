@@ -20,40 +20,12 @@ from iron.applications.embedding_gemma2.config import Config
 from iron.applications.embedding_gemma2.model import EmbeddingGemma, TextLayer
 from iron.lm import EncodeStep, blocks
 from iron.lm.checkpoint import nest
+from iron.tests.support.layer import shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
 # A layer at a shape every operator in it records at.
 T, WIDTH, HEADS, GROUPS, HEAD, HIDDEN = 256, 512, 8, 2, 64, 1024
-
-
-def shapes(E, H, G, D, F) -> dict[str, tuple[int, ...]]:
-    """Each part of a layer module of that shape, by its Hugging Face name."""
-    return {
-        "input_layernorm": (E,),
-        "post_attention_layernorm": (E,),
-        "pre_feedforward_layernorm": (E,),
-        "post_feedforward_layernorm": (E,),
-        "self_attn.q_proj": (H * D, E),
-        "self_attn.k_proj": (G * D, E),
-        "self_attn.v_proj": (G * D, E),
-        "self_attn.o_proj": (E, H * D),
-        "self_attn.q_norm": (D,),
-        "self_attn.k_norm": (D,),
-        "mlp.gate_proj": (F, E),
-        "mlp.up_proj": (F, E),
-        "mlp.down_proj": (E, F),
-        "self_attn_layer_norm": (E,),
-        "self_attn.out_proj": (E, H * D),
-        "encoder_attn_layer_norm": (E,),
-        "encoder_attn.q_proj": (H * D, E),
-        "encoder_attn.k_proj": (G * D, E),
-        "encoder_attn.v_proj": (G * D, E),
-        "encoder_attn.out_proj": (E, H * D),
-        "final_layer_norm": (E,),
-        "fc1": (F, E),
-        "fc2": (E, F),
-    }
 
 
 def module(rng, shape, names, dtype) -> SimpleNamespace:
@@ -87,22 +59,6 @@ GEMMA = (
     "post_feedforward_layernorm",
     "self_attn.q_norm",
     "self_attn.k_norm",
-)
-
-WHISPER = (
-    "self_attn_layer_norm",
-    "self_attn.q_proj",
-    "self_attn.k_proj",
-    "self_attn.v_proj",
-    "self_attn.out_proj",
-    "encoder_attn_layer_norm",
-    "encoder_attn.q_proj",
-    "encoder_attn.k_proj",
-    "encoder_attn.v_proj",
-    "encoder_attn.out_proj",
-    "final_layer_norm",
-    "fc1",
-    "fc2",
 )
 
 

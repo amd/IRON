@@ -23,7 +23,7 @@ from iron.lm.testing import assert_close
 from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm as RMSNormOp
 from iron.operators.rope import RoPE
-from iron.tests.common.llama_reference import OnHost
+from iron.tests.support.llama_reference import OnHost
 from iron.tests.support.llama_model import SMALL, checkpoint, small
 
 pytestmark = pytest.mark.usefixtures("npu2")

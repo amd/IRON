@@ -9,7 +9,7 @@ rows of each head: into a fresh output and into a cache given whole, both
 bounded alike, so the drain ends where the fill does. A walk of a table by
 a per-call repeat and length (``Handle.at``) moves the bands and blocks a
 call names, and cut into groups of bands, each group walked in turn by a
-repeat of its own.
+repeat of its own. Each graph's reference is checked device-free too.
 """
 
 import numpy as np
@@ -193,3 +193,48 @@ def test_bounded_rows_past_a_wrap_fill_either_half():
         got = np.asarray(net(x, y, n=n), dtype=np.float32).reshape(ROWS, 2 * HALF)
         want = np.concatenate([x[:n], y[:n]], axis=1).astype(np.float32)
         assert np.array_equal(got[:n], want), f"{n=}"
+
+
+@pytest.mark.parametrize("band_stride", [0, 1])
+def test_a_walk_by_a_per_call_repeat_and_length_is_its_reference(band_stride):
+    table = np.arange(HK * WK * K2 * E, dtype=np.float32)
+    table = table.astype(bfloat16).reshape(-1, E)
+    graph = Walk(table, band_stride)
+    (step,) = graph.record().steps
+    assert (step.op.src_repeat, step.op.src_bound, step.op.dst_bound) == (True, 1, 0)
+    for hk, wk in ((3, 4), (1, 1)):
+        n = hk * wk * K2
+        got = np.asarray(graph.reference(hk=hk, wk=wk, n=n), dtype=np.float32)
+        want = walked(table, band_stride, hk, wk).astype(np.float32)
+        np.testing.assert_array_equal(got, want)
+
+
+@pytest.mark.parametrize("band_stride", [0, 1])
+def test_walks_in_turn_are_their_reference(band_stride):
+    table = np.arange(HK * WK * K2 * E, dtype=np.float32)
+    table = table.astype(bfloat16).reshape(-1, E)
+    graph = Walks(table, band_stride)
+    (step,) = graph.record().steps
+    assert (len(step.op.src), step.op.src_repeat, step.op.src_bound) == (3, True, 1)
+    for hk, wk in ((3, 4), (HK, WK), (1, 1)):
+        values = walks_values(hk, wk)
+        got = np.asarray(graph.reference(**values), dtype=np.float32)
+        want = walks_walked(table, band_stride, hk, wk).astype(np.float32)
+        np.testing.assert_array_equal(got[: values["n"]], want)
+        real = walked(table, band_stride, hk, wk).astype(np.float32)
+        np.testing.assert_array_equal(got[: real.shape[0]], real)
+
+
+def test_bounded_rows_past_a_wrap_halve_the_run():
+    """A bound of more rows than D1 wraps takes D2, the run's halves D1."""
+    graph = Halves()
+    recording = graph.record(x=(ROWS, 32), y=(ROWS, 32))
+    into = [s.op for s in recording.steps][:2]
+    for op in into:
+        ((tap, unit),) = op._taps(op.dst, op.dst_bound, op.y)
+        assert (list(tap.sizes), unit) == ([1, ROWS, 2, 16], 32)
+    x = np.arange(ROWS * 32, dtype=np.float32).reshape(-1, 32)
+    x, y = x.astype(bfloat16), (x + 0.5).astype(bfloat16)
+    got = np.asarray(graph.reference(x, y, n=1500), dtype=np.float32)
+    want = np.concatenate([x[:1500], y[:1500]], axis=1).astype(np.float32)
+    np.testing.assert_array_equal(got[:1500], want)

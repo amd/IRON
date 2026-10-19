@@ -12,7 +12,7 @@ import dataclasses
 
 from iron.applications.llama.model import Llama
 from iron.tests.support.llama_model import SMALL, shapes
-from iron.tests.common.llama_reference import Decoder
+from iron.tests.support.llama_reference import Decoder
 
 
 class TestBiasedLlama(Decoder):

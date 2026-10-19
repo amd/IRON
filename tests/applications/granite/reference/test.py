@@ -10,7 +10,7 @@ scalars, none at its default, and an untied head.
 
 from iron.applications.granite.model import Granite, GraniteConfig
 from iron.tests.support.llama_model import shapes
-from iron.tests.common.llama_reference import Decoder
+from iron.tests.support.llama_reference import Decoder
 
 #: Granite's proportions at toy size, its scalars Granite 3's own but the
 #: attention's, which at 1/64 of a 64-wide head would leave the toy's

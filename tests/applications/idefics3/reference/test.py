@@ -21,7 +21,7 @@ from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.lm import Multimodal
 from iron.lm.testing import LOGITS, assert_close
 from iron.tests.support.llama_model import checkpoint, shapes
-from iron.tests.common.llama_reference import prompt
+from iron.tests.support.llama_reference import prompt
 
 pytestmark = pytest.mark.usefixtures("npu2")
 

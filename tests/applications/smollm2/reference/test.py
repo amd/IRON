@@ -9,7 +9,7 @@ device-free: the shared decoder's tests (``Decoder``).
 
 from iron.applications.llama.model import LlamaConfig
 from iron.applications.smollm2.model import SmolLM2
-from iron.tests.common.llama_reference import Decoder
+from iron.tests.support.llama_reference import Decoder
 
 #: SmolLM2's proportions at toy size: full multi-head attention, its RoPE
 #: base, a tied head.

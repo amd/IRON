@@ -12,7 +12,7 @@ import dataclasses
 import pytest
 
 from iron.applications.smollm3.model import SmolLM3, SmolLM3Config
-from iron.tests.common.llama_reference import Decoder
+from iron.tests.support.llama_reference import Decoder
 
 #: SmolLM3's proportions at toy size: GQA, its RoPE base, every fourth
 #: layer NoPE, a tied head.

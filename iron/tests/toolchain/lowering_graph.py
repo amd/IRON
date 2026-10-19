@@ -17,7 +17,7 @@ from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.mha import MHA
 from iron.tests.support.llama_model import small
-from iron.tests.toolchain.lowering import _lower_all, lower
+from iron.tests.support.lowering import lower, lower_all
 from iron.tests.support.tools import requires, shipped, swiglu
 
 pytestmark = [*requires("aiecc", "peano"), pytest.mark.usefixtures("npu2")]
@@ -28,7 +28,7 @@ def test_decode_graph_operators_lower_with_their_values(tmp_path):
     recording = model.record(**model.shapes()[0])
     bound = {id(b.op) for b in recording.bindings}
     assert bound, "the decode graph binds values"
-    _lower_all(recording, tmp_path)
+    lower_all(recording, tmp_path)
 
 
 def test_prefill_graph_operators_lower_with_their_value(tmp_path):
@@ -38,7 +38,7 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     # RoPE rows by the chunk, and MHA's keys and the draw by the position.
     named = {b.expression.value.name for b in recording.bindings}
     assert named == {"chunk", "rows", "position"}
-    _lower_all(recording, tmp_path)
+    lower_all(recording, tmp_path)
 
 
 @pytest.mark.parametrize("rows", ["decode", "prompt"])
@@ -98,9 +98,9 @@ def test_instructions_compile_alone_against_an_external_image():
 def test_swiglu_graphs_operators_lower(tmp_path):
     fn, E = swiglu()
     (tmp_path / "decode").mkdir()
-    _lower_all(fn.record(x=(1, E)), tmp_path / "decode")
+    lower_all(fn.record(x=(1, E)), tmp_path / "decode")
     (tmp_path / "prefill").mkdir()
-    _lower_all(fn.record(x=(256, E)), tmp_path / "prefill")
+    lower_all(fn.record(x=(256, E)), tmp_path / "prefill")
 
 
 PREFILL = dict(

@@ -16,14 +16,13 @@ import re
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from math import prod
-from typing import NamedTuple
 
 import numpy as np
 import pytest
 from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import PerCall, TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
-from aie.iron import DmaEndpoint, In, ObjectFifo, Out, Program, Worker
+from aie.iron import DmaEndpoint, In, ObjectFifo, Out, Worker
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
 from aie.utils.trace import TraceConfig
@@ -33,7 +32,7 @@ import iron
 import iron.operators.flm.gemm.op as flm_gemm
 from iron import Scratchpad
 from iron.common import Block, Built, Operator, Rtp, Xclbin
-from iron.common.design import BuiltArray, OperatorDesign, OperatorRuntime
+from iron.common.design import BuiltArray, OperatorDesign
 from iron.common.design.design import configuration
 from iron.common.graph.compiled import _words
 from iron.common.image.packaging import Kind
@@ -46,9 +45,10 @@ from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.softmax import Softmax
-from iron.tests.common.declare import Rows
+from iron.tests.support.declare import Rows
 from iron.tests.support.graphs import ProjectAsStored
 from iron.tests.support.shipped import Shipped
+from iron.tests.support.build import built, generated_sequence
 
 # A descriptor's fields are the current device's.
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -68,67 +68,8 @@ class MV(Operator):
     valid = per_call(bounds=M)
 
 
-class Task(NamedTuple):
-    """One shim task of a generated sequence, as its text gives it. The fifos
-    are unnamed (mlir-aie's DeviceConfiguration names them), so a test finds
-    a task by the handle it was built from, or by its argument and offset.
-    """
-
-    ssa: int
-    lane: str
-    arg: int
-    offset: int
-    sizes: str
-    strides: str
-    length_parameter: str  # the patched length's symbol, or ""
-    length_unit: str  # the elements per unit of it, or ""
-    attributes: str
-
-
-_TASK = re.compile(
-    r"%(\d+) = aiex\.dma_configure_task_for @(\w+) (?:repeat %\w+ : \w+ )?\{\s*"
-    r"aie\.dma_bd\(%arg(\d+) : \S+ offset = (\d+) (?:len = %?\w+ )?"
-    r"sizes = \[([^\]]*)\] strides = \[([^\]]*)\]\)"
-    r"(?: \{length_parameter = @(\w+), length_unit = (\d+) : i32\})?"
-    r"\s*aie\.end\s*\}(?: \{([^}]*)\})?"
-)
 # The graph value a test binds an extent to, as ``x[:n]`` does.
 N = PerCall("n", Kind.SCRATCHPAD, np.int32).affine()
-
-
-def _tasks(module) -> tuple[str, list[Task]]:
-    """``module``'s runtime sequence and its shim tasks in order."""
-    text = str(module)
-    text = text[text.index("aie.runtime_sequence") :]
-    return text, [
-        Task(int(ssa), lane, int(arg), int(offset), *rest)
-        for ssa, lane, arg, offset, *rest in _TASK.findall(text)
-    ]
-
-
-def generated_sequence(op, full_elf=True) -> tuple[str, list[Task]]:
-    """The runtime sequence ``op`` builds to, and its shim tasks in order.
-
-    An xclbin's per-call values are its dispatch parameters, which only the
-    design's generator declares, so it is generated as it would be compiled.
-    """
-    if full_elf:
-        return _tasks(OperatorDesign(op).module())
-    return _tasks(OperatorDesign(op, full_elf=False).compilable().generate_mlir())
-
-
-def built(op) -> tuple[str, list[Task], Operator]:
-    """``generated_sequence``'s full ELF build, alongside the resolved copy
-    of ``op`` whose operands' lanes were bound to build it, to match a
-    task's ``lane`` back to the handle that moved it.
-    """
-    array = BuiltArray(OperatorDesign(op))
-    prog = Program(
-        array.op.array_device(),
-        OperatorRuntime(array.op, array.built),
-        workers=array.workers,
-    )
-    return *_tasks(prog.resolve_program()), array.op
 
 
 # --------------------------------------------------------------------------

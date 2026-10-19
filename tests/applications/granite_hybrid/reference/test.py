@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from iron.applications.granite_hybrid.model import GraniteHybrid, GraniteHybridConfig
-from iron.tests.common.llama_reference import Decoder
+from iron.tests.support.llama_reference import Decoder
 
 #: Granite 4.0-H's proportions at toy size: three Mamba2 layers of two
 #: groups and one attention layer without RoPE, a shared MLP, four experts

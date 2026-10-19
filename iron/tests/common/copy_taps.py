@@ -17,7 +17,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.operators.copy import Copy
-from iron.tests.common.build import built, generated_sequence
+from iron.tests.support.build import built, generated_sequence
 
 pytestmark = pytest.mark.usefixtures("npu2")
 

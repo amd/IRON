@@ -35,7 +35,6 @@ from iron.common.image.packaging import Kind, require_device
 import iron.functional as F
 from iron.tests.support.graphs import FeedForward
 from iron.operators.copy import Copy
-from iron.tests.operators import copy_bounded_view
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.emit import UNCLAMPED, reference as emit_reference
@@ -48,7 +47,7 @@ from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
-from iron.tests.common.declare import Rows
+from iron.tests.support.declare import Rows
 from iron.tests.support.graphs import Trail, Walk
 from iron.tests.support.llama_model import llama_1b, small
 
@@ -1986,38 +1985,6 @@ def test_a_version_reads_none_of_the_words_its_image_writes():
     assert recording.reads == {"n"}
 
 
-@pytest.mark.parametrize("band_stride", [0, 1])
-def test_a_walk_by_a_per_call_repeat_and_length_is_its_reference(band_stride):
-    walk = copy_bounded_view
-    table = np.arange(walk.HK * walk.WK * walk.K2 * walk.E, dtype=np.float32)
-    table = table.astype(bfloat16).reshape(-1, walk.E)
-    graph = walk.Walk(table, band_stride)
-    (step,) = graph.record().steps
-    assert (step.op.src_repeat, step.op.src_bound, step.op.dst_bound) == (True, 1, 0)
-    for hk, wk in ((3, 4), (1, 1)):
-        n = hk * wk * walk.K2
-        got = np.asarray(graph.reference(hk=hk, wk=wk, n=n), dtype=np.float32)
-        want = walk.walked(table, band_stride, hk, wk).astype(np.float32)
-        np.testing.assert_array_equal(got, want)
-
-
-@pytest.mark.parametrize("band_stride", [0, 1])
-def test_walks_in_turn_are_their_reference(band_stride):
-    walk = copy_bounded_view
-    table = np.arange(walk.HK * walk.WK * walk.K2 * walk.E, dtype=np.float32)
-    table = table.astype(bfloat16).reshape(-1, walk.E)
-    graph = walk.Walks(table, band_stride)
-    (step,) = graph.record().steps
-    assert (len(step.op.src), step.op.src_repeat, step.op.src_bound) == (3, True, 1)
-    for hk, wk in ((3, 4), (walk.HK, walk.WK), (1, 1)):
-        values = walk.walks_values(hk, wk)
-        got = np.asarray(graph.reference(**values), dtype=np.float32)
-        want = walk.walks_walked(table, band_stride, hk, wk).astype(np.float32)
-        np.testing.assert_array_equal(got[: values["n"]], want)
-        real = walk.walked(table, band_stride, hk, wk).astype(np.float32)
-        np.testing.assert_array_equal(got[: real.shape[0]], real)
-
-
 class _StateRows(iron.Graph):
     """A state's rows, bounded per call, added to an input's."""
 
@@ -2036,23 +2003,6 @@ def test_a_bounded_view_of_a_state_is_its_rows_this_call():
     got = np.asarray(_StateRows().reference(x, n=40), dtype=np.float32)
     want = (2 * x[:40].astype(np.float32)).astype(bfloat16).astype(np.float32)
     np.testing.assert_array_equal(got, want)
-
-
-def test_bounded_rows_past_a_wrap_halve_the_run():
-    """A bound of more rows than D1 wraps takes D2, the run's halves D1."""
-    graph = copy_bounded_view.Halves()
-    recording = graph.record(
-        x=(copy_bounded_view.ROWS, 32), y=(copy_bounded_view.ROWS, 32)
-    )
-    into = [s.op for s in recording.steps][:2]
-    for op in into:
-        ((tap, unit),) = op._taps(op.dst, op.dst_bound, op.y)
-        assert (list(tap.sizes), unit) == ([1, copy_bounded_view.ROWS, 2, 16], 32)
-    x = np.arange(copy_bounded_view.ROWS * 32, dtype=np.float32).reshape(-1, 32)
-    x, y = x.astype(bfloat16), (x + 0.5).astype(bfloat16)
-    got = np.asarray(graph.reference(x, y, n=1500), dtype=np.float32)
-    want = np.concatenate([x[:1500], y[:1500]], axis=1).astype(np.float32)
-    np.testing.assert_array_equal(got[:1500], want)
 
 
 class _BadWalk(iron.Graph):

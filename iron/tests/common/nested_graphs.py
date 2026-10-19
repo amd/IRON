@@ -14,7 +14,7 @@ import iron
 from iron import Carried, Scratchpad
 from iron.lm import LogMel
 from iron.tests.support.graphs import FeedForward
-from iron.tests.lm.log_mel import EVERY, Extractor
+from iron.tests.support.log_mel import EVERY, Extractor
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs

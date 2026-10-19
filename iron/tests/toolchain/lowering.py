@@ -24,57 +24,18 @@ import importlib
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
-from aie.iron import ExternalFunction
-from aie.utils import get_current_device
 from aie.helpers.taplib import PerCall
-from aie.utils.compile import (
-    compile_external_kernels,
-    compile_mlir_module,
-    resolve_target_arch,
-)
 
 import iron
 from iron import Scratchpad
-from iron.common.design import OperatorDesign
 from iron.common.image.packaging import Kind
 from iron.lm import Conv2d, ImagePatches, LogMel
 from iron.operators.copy import Copy
 from iron.tests.support.declared import declared
+from iron.tests.support.lowering import lower, lower_all
 from iron.tests.support.tools import DEVICES, requires
 
 pytestmark = requires("aiecc", "peano")
-
-
-def lower(op, tmp_path, name=None):
-    """Generate the operator's MLIR and lower it to instructions; return both paths."""
-    name = name or op.name
-    src = tmp_path / f"{name}.mlir"
-    # CompilableDesign clears the kernel registry before generating; a bare
-    # generator() call in one process must do the same, or two designs
-    # declaring one kernel with different flags collide. And after, as
-    # compile() does: what stays registered is the next test's collision.
-    ExternalFunction._instances.clear()
-    try:
-        src.write_text(str(OperatorDesign(op).build()))
-        kernels = list(ExternalFunction._instances)
-    finally:
-        ExternalFunction._instances.clear()
-    arch = resolve_target_arch(get_current_device(probe_runtime=False))
-    compile_external_kernels(kernels, str(tmp_path), arch)
-    insts = tmp_path / f"{name}.bin"
-    compile_mlir_module(
-        src.read_text(), insts_path=insts, work_dir=tmp_path, options=op.aiecc_flags
-    )
-    assert insts.stat().st_size > 0
-    return src, insts
-
-
-def _lower_all(recording, tmp_path, device=None):
-    for i, op in enumerate(recording.operators):
-        (tmp_path / str(i)).mkdir()
-        if device is not None:
-            op = op.resolved(device)
-        lower(op, tmp_path / str(i), name=f"{i}_{type(op).__name__}")
 
 
 def _cases():
@@ -180,7 +141,7 @@ def test_a_graph_called_in_a_graph_lowers(device, tmp_path):
     per-call value, lower with the values they read.
     """
     recording = _Features(3072).record(wave=((3073 * 160,), np.float32))
-    _lower_all(recording, tmp_path, device)
+    lower_all(recording, tmp_path, device)
 
 
 class _Subsample(iron.Graph):
@@ -207,7 +168,7 @@ def test_convolutions_called_in_a_graph_lower(device, tmp_path):
         x=((2 * 256 + 2, mels), bfloat16),
         y=((256 + 2, (mels // 2 + 2) * 64), bfloat16),
     )
-    _lower_all(recording, tmp_path, device)
+    lower_all(recording, tmp_path, device)
 
 
 class _Pixels(iron.Graph):
@@ -234,4 +195,4 @@ def test_image_patches_called_in_a_graph_lower(device, tmp_path):
     graph = _Pixels()
     rgb = graph.processor.resample.image_chunks, graph.processor.chunk
     recording = graph.record(rgb=(rgb, np.uint8))
-    _lower_all(recording, tmp_path, device)
+    lower_all(recording, tmp_path, device)

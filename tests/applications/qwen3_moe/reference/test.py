@@ -13,7 +13,7 @@ import pytest
 
 from iron.applications.qwen3_moe.model import Qwen3Moe, Qwen3MoeConfig
 from iron.tests.support.llama_model import shapes
-from iron.tests.common.llama_reference import Decoder
+from iron.tests.support.llama_reference import Decoder
 
 #: Qwen3-MoE's proportions at toy size: GQA, q and k normed, eight experts
 #: of which a token takes two, an untied head.

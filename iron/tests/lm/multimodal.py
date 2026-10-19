@@ -14,7 +14,7 @@ from ml_dtypes import bfloat16
 
 from iron.lm import Sampler
 from iron.lm.testing import LOGITS, assert_close
-from iron.tests.common.multimodal import IMAGE, small_causal
+from iron.tests.support.multimodal import IMAGE, small_causal
 
 
 def gapped(logits: np.ndarray) -> np.ndarray:

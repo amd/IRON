@@ -23,7 +23,7 @@ from iron.applications.ministral3.model import (
 from iron.lm.checkpoint import leaves
 from iron.lm.testing import assert_close
 from iron.tests.support.llama_model import checkpoint
-from iron.tests.common.llama_reference import Decoder
+from iron.tests.support.llama_reference import Decoder
 
 #: Ministral 3's proportions at toy size: GQA, a head_dim of its own, YaRN
 #: from 64 positions, the query temperature, an untied head.

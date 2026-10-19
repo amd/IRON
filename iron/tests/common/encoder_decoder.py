@@ -31,12 +31,12 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
-from iron.tests.common.layer import WHISPER, shapes
+from iron.tests.support.layer import shapes
 from iron.tests.support.llama_model import checkpoint
 from iron.lm.testing import assert_close
-from iron.tests.common.llama_reference import prompt
-from iron.tests.common.encoder import SelfAttend, Shape
-from iron.tests.common.multimodal import Features
+from iron.tests.support.llama_reference import prompt
+from iron.tests.support.encoder import SelfAttend, Shape
+from iron.tests.support.multimodal import Features
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -102,6 +102,24 @@ class HuggingFaceDecoder(HuggingFace):
                 use_cache=False,
             )
         return out.logits[0, -1].numpy()
+
+
+# A Whisper decoder layer's tensors, by their Hugging Face names.
+WHISPER = (
+    "self_attn_layer_norm",
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.out_proj",
+    "encoder_attn_layer_norm",
+    "encoder_attn.q_proj",
+    "encoder_attn.k_proj",
+    "encoder_attn.v_proj",
+    "encoder_attn.out_proj",
+    "final_layer_norm",
+    "fc1",
+    "fc2",
+)
 
 
 def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:

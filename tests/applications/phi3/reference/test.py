@@ -17,7 +17,7 @@ from iron.applications.phi3.model import LongRope, Phi4, Phi4Config
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import LOGITS, assert_close
 from iron.tests.support.llama_model import checkpoint
-from iron.tests.common.llama_reference import Decoder
+from iron.tests.support.llama_reference import Decoder
 
 #: Phi-4-mini-instruct's proportions at toy size: GQA, a fused qkv/gate_up,
 #: partial rotary (half of each head).
