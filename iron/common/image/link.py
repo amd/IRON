@@ -43,8 +43,6 @@ class FullELF:
             others that always hold the same number.
     """
 
-    full_elf = True
-
     # --get-scratchpad-parameters emits the parameter table the host writes
     # through. Without it the ELF is not the same program.
     FLAGS = ("--get-scratchpad-parameters",)
@@ -165,8 +163,6 @@ class PerStep:
         check: Check each step against its reference on the NPU's inputs
             (``callable.check_step``).
     """
-
-    full_elf = False
 
     def __init__(self, check: bool = False):
         self.check = check

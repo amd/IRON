@@ -261,7 +261,7 @@ class Image:
             for i, s in enumerate(self.steps)
         )
         return Artifacts(
-            full_elf=self.packaging.full_elf,
+            full_elf=isinstance(self.packaging, FullELF),
             image=self.image,
             insts=insts,
             entry=entry,

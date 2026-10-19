@@ -127,7 +127,7 @@ def test_auto_dispatch_selects_platform_default(size):
     seq.compile()
 
     expected = aie_utils.get_current_device().dispatches_full_elf
-    assert seq.packaging.full_elf == expected
+    assert isinstance(seq.packaging, FullELF) == expected
 
     run = seq.get_callable()
     _set_input(run, "a", a)
