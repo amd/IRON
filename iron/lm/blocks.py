@@ -637,13 +637,13 @@ class KVCache(iron.Graph):
 
 
 class NoCache(iron.Graph):
-    """No memory: attention over the call's own rows, both ways, within
-    ``window`` positions either side (None: all), what an encoder's layer
-    holds in a ``KVCache``'s place.
+    """No memory: attention over the call's own rows, both ways or, if
+    ``causal``, back only, within ``window`` positions either side (None:
+    all), what an encoder's layer holds in a ``KVCache``'s place.
     """
 
-    def __init__(self, window: int | None = None):
-        self.window = window
+    def __init__(self, window: int | None = None, causal: bool = False):
+        self.window, self.causal = window, causal
 
     def attend(self, call, q, k, v, scale: float | None = None):
         """``q`` ``(rows, heads, head_dim)`` over ``k`` and ``v`` ``(rows,
@@ -657,7 +657,7 @@ class NoCache(iron.Graph):
             v,
             heads_interleaved=True,
             kv_interleaved=True,
-            causal=False,
+            causal=self.causal,
             window=self.window,
             scale=scale,
         )

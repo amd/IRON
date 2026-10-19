@@ -12,6 +12,11 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- Qwen3-Reranker (`Qwen3Reranker.score`: "yes" over "no" after its model
+  card's prompt) and Qwen3-Embedding (`Qwen3Embedding.embed`: the last
+  token's unit-length final hidden state, one compile up to a prompt
+  chunk), each with a toy golden; `NoCache(causal=True)` attends back
+  only, the embedder's.
 - `CausalConv1d`, a depth-wise causal convolution whose rows before a call
   are a `Checkpoints` state, shared by Granite 4.0-H's Mamba, Qwen3.5's
   Gated DeltaNet and LFM2's short conv; and `Weights`, named weights read

@@ -32,6 +32,7 @@ from iron.applications.phi3 import Phi4
 from iron.applications.qwen2 import Qwen2
 from iron.applications.qwen3 import Qwen3
 from iron.applications.qwen3_5 import Qwen35
+from iron.applications.qwen3_reranker import Qwen3Reranker
 from iron.applications.smollm2 import SmolLM2
 from iron.applications.smollm3 import SmolLM3
 from iron.lm import CausalLM, Checkpoint, EncoderDecoder
@@ -137,6 +138,13 @@ APPLICATIONS = {
     ),
     "qwen3.5_0.8b": Application(
         Qwen35, "qwen3.5-0.8b", "model.safetensors", "tokenizer.json", staged=False
+    ),
+    "qwen3_reranker_0.6b": Application(
+        Qwen3Reranker,
+        "qwen3-reranker-0.6b",
+        "model.safetensors",
+        "tokenizer.json",
+        staged=False,
     ),
 }
 
