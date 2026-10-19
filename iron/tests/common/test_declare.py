@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from aie.iron import DispatchTime, In, Out, ScratchpadParameter
+from aie.iron import In, Out, ScratchpadParameter
 from aie.iron.device import from_name
 from aie.utils import bfp
 from aie.utils.compile.jit.params import Select, param, per_call, tunable, widths
@@ -559,15 +559,6 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
 
     with pytest.raises(TypeError, match="MV.A cannot be bounded per call on axis 0"):
         g.record(x=(64, 128))
-
-    class H(iron.Graph):
-        def body(self, x, *, n: DispatchTime[np.int32]):
-            return Rows.step(x[:n])
-
-    h = H()
-
-    with pytest.raises(ValueError, match="only a Scratchpad value can bound"):
-        h.record(x=(64, 8))
 
     class K(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):

@@ -14,7 +14,7 @@ from typing import Any
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.iron import DispatchTime, ceildiv
+from aie.iron import ceildiv
 from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
@@ -379,15 +379,6 @@ def test_keyword_only_parameters_must_be_annotated_as_values():
         class F(iron.Graph):
             def body(self, x, *, n):
                 return x
-
-    class G(iron.Graph):
-        def body(self, x, *, n: DispatchTime[np.int32]):
-            return SiLU.step(x)
-
-    g = G()
-
-    t = g.record(x=(1024,))
-    assert [(v.name, v.marker) for v in t.values] == [("n", Kind.DISPATCH_TIME)]
 
 
 def test_returning_an_input_or_a_slice_is_refused():

@@ -360,11 +360,6 @@ class Handle:
                     )
                 if index_by is not None:
                     raise ValueError("one axis at most is indexed by a per-call value")
-                if start.value.marker is Kind.DISPATCH_TIME:
-                    raise ValueError(
-                        f"{start} is a DispatchTime value; only a Scratchpad value can "
-                        f"start a run, since it moves a transfer's base address"
-                    )
                 if recorder is not None:
                     recorder.limit(start, 0, n, self)
                 index_by = start * prod(self.shape[axis + 1 :])
@@ -380,11 +375,6 @@ class Handle:
                 stop = _count(entry.stop)
                 if entry.start not in (None, 0) or entry.step not in (None, 1):
                     raise ValueError(f"{stop} bounds an axis from its start: [:{stop}]")
-                if stop.value.marker is Kind.DISPATCH_TIME:
-                    raise ValueError(
-                        f"{stop} is a DispatchTime value; only a Scratchpad value can "
-                        f"bound an axis, since it patches a transfer's size"
-                    )
                 if recorder is not None:
                     recorder.limit(stop, 0, n + 1, self)
                 # Keyed by the axis of the result: an index before it drops one.
@@ -397,11 +387,6 @@ class Handle:
                     entry = entry.affine()
                 if index_by is not None:
                     raise ValueError("one axis at most is indexed by a per-call value")
-                if entry.value.marker is Kind.DISPATCH_TIME:
-                    raise ValueError(
-                        f"{entry} is a DispatchTime value; only a Scratchpad value can "
-                        f"index a view, since it moves a transfer's base address"
-                    )
                 if recorder is not None:
                     recorder.limit(entry, 0, n, self)
                 index_by = entry * prod(self.shape[axis + 1 :])

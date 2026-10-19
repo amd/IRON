@@ -517,6 +517,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- A graph body's `aie.iron.DispatchTime[T]` per-call value, which no view
+  could take: a body's per-call value is `Scratchpad[T]` or `Carried[T]`.
 - `Operator.apply`: inside a graph's body an operator instance is called,
   `op(*handles, **values)`, as a graph is.
 - The graph-wide precision floor: `Graph.precision`, `Graph.record(precision=)`,

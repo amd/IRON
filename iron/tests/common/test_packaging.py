@@ -28,19 +28,6 @@ def test_default_is_a_full_elf_on_npu2():
     assert p.reasons == ["one sequence, one configuration set: a full ELF"]
 
 
-def test_a_dispatch_time_value_forces_xclbin_and_names_itself():
-    t = _recorded(PerCall("n", Kind.DISPATCH_TIME, np.int32))
-    with pytest.raises(
-        ValueError, match="full_elf=True is not possible.*n: a DispatchTime"
-    ):
-        plan(NPU2(), t, full_elf=True)
-    p = plan(NPU2(), t, full_elf=False)
-    assert not p.full_elf
-    assert p.values == [
-        ("n", "aie.dispatch_time", "sizes, strides and offsets regenerated per call")
-    ]
-
-
 def test_npu1_forces_xclbin_and_reports_the_scratchpad_lowering():
     t = _recorded(PerCall("pos", Kind.SCRATCHPAD, np.int32))
     with pytest.raises(ValueError, match=r"npu1 \(AIE2\) has no full-ELF dispatch"):

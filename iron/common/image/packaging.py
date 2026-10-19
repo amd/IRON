@@ -3,9 +3,8 @@
 
 """How a recorded graph is packaged: one full ELF, or an xclbin per step.
 
-``full_elf`` is mlir-aie's choice of the same name. ``None`` derives it: a
-``DispatchTime`` value, NPU1 or ``check`` forces an xclbin, one dispatch per
-step; otherwise the image is one full ELF. A full ELF is one command unless a
+``full_elf`` is mlir-aie's choice of the same name. ``None`` derives it:
+NPU1 or ``check`` forces an xclbin, one dispatch per step; otherwise the image is one full ELF. A full ELF is one command unless a
 step's work grows with a carried value, which ends a command (``Plan.commands``).
 """
 
@@ -23,7 +22,6 @@ class Kind(enum.Enum):
 
     SCRATCHPAD = "iron.scratchpad"
     CARRIED = "iron.carried"
-    DISPATCH_TIME = "aie.dispatch_time"
 
 
 @dataclasses.dataclass
@@ -104,12 +102,6 @@ def plan(dev, recording, full_elf: bool | None = None, check: bool = False) -> P
         )
 
     forced: list[str] = []
-    dispatch_values = [v for v in recording.values if v.marker is Kind.DISPATCH_TIME]
-    if dispatch_values:
-        names = ", ".join(v.name for v in dispatch_values)
-        forced.append(
-            f"{names}: a DispatchTime value; the sequence is generated per call"
-        )
     if not dev.dispatches_full_elf:
         forced.append(f"{dev.name} ({dev.arch}) has no full-ELF dispatch")
     if check:
@@ -128,9 +120,7 @@ def plan(dev, recording, full_elf: bool | None = None, check: bool = False) -> P
 
     values = []
     for v in recording.values:
-        if v.marker is Kind.DISPATCH_TIME:
-            lowering = "sizes, strides and offsets regenerated per call"
-        elif full_elf:
+        if full_elf:
             lowering = "patched through the parameter scratchpad"
         else:
             lowering = (

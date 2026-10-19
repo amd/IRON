@@ -149,8 +149,8 @@ class _Parameters:
                 if not kinds:
                     raise TypeError(
                         f"{owner}.body: keyword-only parameter {p.name!r} "
-                        f"is a per-call value and must be annotated Scratchpad[T], "
-                        f"Carried[T] or aie.iron.DispatchTime[T]"
+                        f"is a per-call value and must be annotated Scratchpad[T] "
+                        f"or Carried[T]"
                     )
                 dtype = get_args(ann)[0]
                 if np.dtype(dtype).kind == "f":
