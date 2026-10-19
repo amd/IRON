@@ -56,7 +56,11 @@ class _Shard:
                 raise ValueError(f"{self.path}: {name} is {t['dtype']}")
             begin, end = (8 + length + o for o in t["data_offsets"])
             dtype = np.dtype(self.DTYPES[t["dtype"]])
-            if end - begin != dtype.itemsize * math.prod(t["shape"]) or end > data.size:
+            if (
+                end - begin != dtype.itemsize * math.prod(t["shape"])
+                or begin < 8 + length
+                or end > data.size
+            ):
                 raise ValueError(
                     f"{self.path}: {name} spans bytes {begin} to {end}, not "
                     f"{t['dtype']} {t['shape']} within the file"

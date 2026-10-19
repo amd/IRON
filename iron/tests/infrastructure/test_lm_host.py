@@ -178,11 +178,13 @@ def test_release_leaves_anything_else_alone(toy_path):
 
 
 @pytest.mark.parametrize(
-    "end, data", [(12, 12), (16, 8)], ids=["range-not-the-shape", "range-past-the-end"]
+    "offsets, data",
+    [([0, 12], 12), ([0, 16], 8), ([-16, 0], 16)],
+    ids=["range-not-the-shape", "range-past-the-end", "range-before-the-data"],
 )
-def test_checkpoint_rejects_a_malformed_file(tmp_path, end, data):
+def test_checkpoint_rejects_a_malformed_file(tmp_path, offsets, data):
     """A byte range that is not the shape's is refused on open."""
-    header = {"x": {"dtype": "F32", "shape": [4], "data_offsets": [0, end]}}
+    header = {"x": {"dtype": "F32", "shape": [4], "data_offsets": offsets}}
     blob = json.dumps(header).encode()
     path = tmp_path / "bad.safetensors"
     path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(data))
