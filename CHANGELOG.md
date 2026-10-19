@@ -87,8 +87,7 @@ public API adds its entry under Unreleased.
   dotted path, cast to its dtype, and raises once, naming every missing,
   extra and wrong-shaped tensor; a param held at two paths is tied, bound
   from its first. A param never loaded is named when the graph is recorded,
-  and a second load is refused. `Graph.draw(seed)` and `Graph.unread()` bind
-  them drawn or unwritten.
+  and a second load is refused.
 - Leaf modules in `iron.lm`, graphs that declare their weights as
   transformers names them, with `torch.nn`'s arguments, defaults and
   attribute names: `Linear(in_features, out_features, bias=True)`,
@@ -518,6 +517,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `Graph.draw(seed)` and `Graph.unread()`: `Checkpoint.tree("random", seed)`
+  and `Checkpoint.tree("unread")` fill a model's weights.
 - `Tower.front`: a tower's `body` builds its own rows.
 - An operator's nested `Array` class and `array_config()`: its `build()`,
   `kernel()` and `scalars()` are on the operator itself, and `layout()`

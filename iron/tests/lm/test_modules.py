@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Modules that own their weights, device-free: ``Graph.load_state_dict`` binding each
-``param`` or naming every tensor it cannot, ``draw`` and ``unread``, and
-the leaf modules' references against numpy.
+``param`` or naming every tensor it cannot, and the leaf modules'
+references against numpy.
 """
 
 import dataclasses
@@ -112,33 +112,6 @@ def test_a_param_never_bound_is_named_at_record():
         Block().record(ids=((4,), np.int32))
 
 
-def test_draw_is_the_random_tree_of_a_checkpoint_in_the_same_order():
-    """``Checkpoint.tree("random")`` draws in the file's order, ``draw`` in
-    the graph's: the same tensors where the two orders agree.
-    """
-    block = Block()
-    block.draw(3)
-    named = {n: t.shape for n, t in tensors().items()}
-    tree = checkpoint(SMALL, named).tree("random", 3)
-    for path, x in block.held().values():
-        want = tree
-        for key in path.split("."):
-            want = want[int(key)] if key.isdigit() else getattr(want, key)
-        assert np.array_equal(x.view(np.uint16), want.view(np.uint16)), path
-
-
-def test_unread_allocates_each_param_and_zeroes_a_scalar():
-    class Scaled(Block):
-        def __init__(self):
-            super().__init__()
-            self.scale = iron.param()
-
-    block = Scaled()
-    block.unread()
-    assert all(x.flags.owndata for _, x in block.held().values())
-    assert block.scale.shape == () and block.scale == 0
-
-
 class Tied(iron.Graph):
     """An embedding and a head over one param, as a tied checkpoint has."""
 
@@ -184,7 +157,9 @@ def test_load_state_dict_binds_params_in_lists_dicts_and_namespaces():
             self.space = SimpleNamespace(b=iron.param(2))
 
     held = Held()
-    held.unread()
+    held.load_state_dict(
+        {n: np.zeros(2, bfloat16) for n in ("items.0", "named.a", "space.b")}
+    )
     assert len(held.held()) == 3
 
 
@@ -194,7 +169,7 @@ def test_load_state_dict_refuses_a_param_in_a_tuple():
             self.pair = (iron.param(2), iron.param(2))
 
     with pytest.raises(TypeError, match=r"pair\.0 is in a tuple"):
-        Held().unread()
+        Held().load_state_dict({})
 
 
 def test_load_state_dict_refuses_a_param_in_a_frozen_dataclass():
@@ -207,7 +182,7 @@ def test_load_state_dict_refuses_a_param_in_a_frozen_dataclass():
             self.pair = Pair(iron.param(2))
 
     with pytest.raises(TypeError, match=r"pair\.first is in a tuple or a frozen"):
-        Held().unread()
+        Held().load_state_dict({})
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float16])
@@ -235,7 +210,7 @@ def test_load_state_dict_refuses_a_change_of_kind():
 
 def test_a_second_bind_is_refused():
     block = Block()
-    block.draw(0)
+    block.load_state_dict(tensors())
     with pytest.raises(ValueError, match="already loaded"):
         block.load_state_dict(tensors())
 
@@ -246,8 +221,9 @@ def test_a_path_without_its_trailing_dot_is_refused():
 
 
 def test_leaf_modules_match_numpy():
+    named = {n: t.shape for n, t in tensors().items()}
     block = Block()
-    block.draw(0)
+    block.load_state_dict(checkpoint(SMALL, named).tree("random", 0))
     ids = np.array([3, 17, 511, 0], np.int32)
     f32 = {path: np.asarray(x, np.float32) for path, x in block.held().values()}
 

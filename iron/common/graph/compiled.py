@@ -46,7 +46,6 @@ from ..image.link import FullELF, PerStep
 from ..image.sequence import Image
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
-from .fill import filled
 from .handle import Carry, Dense, Handle, State, Weight, is_operand
 from .record import Recording, Recorder
 
@@ -414,26 +413,6 @@ class Graph:
             else:
                 setattr(parent, key, tensors[path + n])
         self._bound = True
-
-    def draw(self, seed: int) -> None:
-        """Bind each ``param`` drawn at ``seed`` in the order the graph
-        holds them (``filled``).
-        """
-        self.load_state_dict(filled("random", self._shapes(), seed))
-
-    def unread(self) -> None:
-        """Bind each ``param`` allocated and never written (``filled``)."""
-        self.load_state_dict(filled("unread", self._shapes()))
-
-    def _shapes(self) -> dict[str, tuple[tuple[int, ...], Any]]:
-        """Each param's shape and dtype at its first path."""
-        shapes: dict[str, tuple[tuple[int, ...], Any]] = {}
-        seen: set[int] = set()
-        for n, p, _, _ in walk(self):
-            if isinstance(p, _Param) and id(p) not in seen:
-                seen.add(id(p))
-                shapes[n] = (p.shape, p.dtype)
-        return shapes
 
     def record(self, *, precision: Precision | None = None, **shapes) -> Recording:
         """Run ``body`` on handles of the given shapes; an optional input

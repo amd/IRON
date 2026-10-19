@@ -30,6 +30,7 @@ from iron.tests.support.encoder import (
     VOCAB,
     attention,
 )
+from iron.tests.support.llama_model import checkpoint
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -55,6 +56,27 @@ class Encoding(Shape):
     eps: float = 1e-6
 
 
+def _shapes(c: Encoding) -> dict[str, tuple[int, ...]]:
+    """Each tensor of ``c``'s ``EncoderLayer``s, by name."""
+    E, F, Q = c.hidden_size, c.intermediate_size, c.num_attention_heads * c.head_dim
+    layer = {
+        "input_layernorm": (E,),
+        "self_attn.q_proj": (Q, E),
+        "self_attn.k_proj": (Q, E),
+        "self_attn.v_proj": (Q, E),
+        "self_attn.o_proj": (E, Q),
+        "post_attention_layernorm": (E,),
+        "mlp.fc1": (F, E),
+        "mlp.fc2": (E, F),
+    }
+    return {
+        f"layers.{i}.{n}.{p}": shape if p == "weight" else shape[:1]
+        for i in range(c.num_hidden_layers)
+        for n, shape in layer.items()
+        for p in ("weight", "bias")
+    }
+
+
 class Layers(Encoder):
     """The default layer, its weights drawn, at HIGHEST precision."""
 
@@ -63,7 +85,9 @@ class Layers(Encoder):
     def __init__(self, table):
         self.table = table
         super().__init__(Encoding(), ROWS)
-        self.draw(2)
+        self.load_state_dict(
+            checkpoint(Encoding(), _shapes(Encoding())).tree("random", 2)
+        )
 
     def lookup(self, ids):
         return Copy.step(iron.weight(self.table)[ids])
