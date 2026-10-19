@@ -17,6 +17,10 @@ public API adds its entry under Unreleased.
   compiling it raises, and the device catalog skips it.
 - `Experts`, reference only: each row through the gated feed-forwards of
   the experts `TopKRouter` chose for it, weighted.
+- `SelectiveScan`, reference only: Mamba2's state space recurrence over a
+  run of rows, from a state to the state after its last valid row.
+- Application `granite_hybrid` (Granite 4.0-H, dense and MoE, on the host),
+  judged by device-free toy goldens.
 - Applications `smollm3` (SmolLM3 3B), `ministral3` (Ministral 3's text
   decoder, on drawn weights) and `qwen3_moe` (Qwen3-30B-A3B, on the host),
   each judged by a device-free toy golden.

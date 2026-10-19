@@ -28,6 +28,7 @@ from .rms_norm import RMSNorm
 from .rope import RoPE
 from .router import TopKRouter
 from .sample import Sample
+from .selective_scan import SelectiveScan
 from .sigmoid import Sigmoid
 from .silu import SiLU
 from .softmax import Softmax

@@ -50,6 +50,7 @@ _OPERATOR_MODULES = {
     "RowwiseAdd": "elementwise_add",
     "RowwiseMul": "elementwise_mul",
     "Sample": "sample",
+    "SelectiveScan": "selective_scan",
     "Sigmoid": "sigmoid",
     "SiLU": "silu",
     "Softmax": "softmax",

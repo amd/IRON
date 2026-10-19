@@ -120,6 +120,7 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` |
 | SmolLM3 3B | [smollm3](./iron/applications/smollm3/) | `smollm3-3b` |
 | Qwen3-30B-A3B (reference only) | [qwen3_moe](./iron/applications/qwen3_moe/) | `qwen3-30b-a3b` |
+| Granite 4.0-H (reference only) | [granite_hybrid](./iron/applications/granite_hybrid/) | none yet |
 | Ministral 3 text decoder (drawn weights) | [ministral3](./iron/applications/ministral3/) | none yet |
 | LFM2-1.2B | [lfm2](./iron/applications/lfm2/) | `lfm2-1.2b` |
 | SmolVLM-256M-Instruct | [idefics3](./iron/applications/idefics3/) | `smolvlm-256m-instruct` |
