@@ -91,6 +91,31 @@ def test_from_checkpoint_draws_its_weights_at_a_seed(tmp_path):
     )
 
 
+def test_from_checkpoint_downloads_a_sharded_checkpoint_and_its_template(monkeypatch):
+    import huggingface_hub
+    from huggingface_hub.utils import filter_repo_objects
+
+    files = [
+        "config.json",
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "chat_template.jinja",
+        "model.safetensors.index.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+    ]
+    asked = []
+
+    def snapshot_download(repo_id, allow_patterns):
+        asked.extend(filter_repo_objects(files, allow_patterns=allow_patterns))
+        raise SystemExit
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    with pytest.raises(SystemExit):
+        Small.from_checkpoint("org/repo")
+    assert asked == files
+
+
 def test_from_checkpoint_opens_the_tokenizer_beside_it(tmp_path):
     require(TOKENIZER)
     directory = _directory(tmp_path)

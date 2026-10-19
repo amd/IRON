@@ -232,7 +232,12 @@ class Model(iron.Graph):
         if not directory.is_dir():
             from huggingface_hub import snapshot_download
 
-            files = ["*config.json", "model.safetensors*", "tokenizer.json"]
+            files = [
+                "*config.json",
+                "model*.safetensors*",
+                "tokenizer.json",
+                "chat_template.jinja",
+            ]
             directory = Path(snapshot_download(str(path), allow_patterns=files))
         weights = directory / "model.safetensors.index.json"
         if not weights.exists():
