@@ -11,6 +11,7 @@ shapes and random prompts, on a host without the tokenizer, and
 ``--max-seq-len`` at another context.
 """
 
+import aie.utils as aie_utils
 import pytest
 
 from iron.applications.gemma3 import Gemma3
@@ -28,14 +29,15 @@ from iron.lm.testing import (
 
 INDEX = "model.safetensors.index.json"
 
-# Each decoder's class, checkpoint file and long prompt's length.
+# Each decoder's class, checkpoint file, and the lengths of the long and the
+# short prompt it generates from.
 DECODERS = [
-    pytest.param((Gemma3, "gemma-3-1b-it/model.safetensors", 256), id="gemma3"),
-    pytest.param((Gemma4, "gemma-4-e2b-it/model.safetensors", 256), id="gemma4"),
-    pytest.param((SmolLM3, f"smollm3-3b/{INDEX}", 1024), id="smollm3"),
-    pytest.param((Qwen35, "qwen3.5-0.8b/model.safetensors", 1024), id="qwen3_5"),
+    pytest.param((Gemma3, "gemma-3-1b-it/model.safetensors", (256, 13)), id="gemma3"),
+    pytest.param((Gemma4, "gemma-4-e2b-it/model.safetensors", (256, 13)), id="gemma4"),
+    pytest.param((SmolLM3, f"smollm3-3b/{INDEX}", (1024, 13)), id="smollm3"),
+    pytest.param((Qwen35, "qwen3.5-0.8b/model.safetensors", (1024, 13)), id="qwen3_5"),
     pytest.param(
-        (Qwen3Moe, f"qwen3-30b-a3b/{INDEX}", 1024),
+        (Qwen3Moe, f"qwen3-30b-a3b/{INDEX}", (1024, 13)),
         id="qwen3_moe",
         marks=pytest.mark.skip(
             reason="Experts streams every expert a row: too slow to generate"
@@ -48,22 +50,25 @@ pytestmark = pytest.mark.supported_devices("npu2")
 
 @pytest.fixture(scope="module", params=DECODERS)
 def decoder(request):
-    """A decoder, compiled and loaded once, and its long prompt's length."""
-    cls, weights, long = request.param
-    return load_from_flags(request, cls, weights_dir(weights), staged=False)(), long
+    """A decoder, compiled and loaded once, and its prompts' lengths. Its
+    runtime is released before the next decoder loads.
+    """
+    cls, weights, prompts = request.param
+    yield load_from_flags(request, cls, weights_dir(weights), staged=False)(), prompts
+    aie_utils.cleanup_npu_runtime()
 
 
-# Unmeasured on the NPU: Qwen3's bounds until their first run.
+# Qwen3's bounds: none of these decoders has been measured on the NPU.
 MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
 
 
 @pytest.mark.bench
 @pytest.mark.parametrize(
-    "prompt_len,num_tokens", [(None, 40), (13, 1)], ids=["long-40", "13-1"]
+    "prompt,num_tokens", [(0, 40), (1, 1)], ids=["long-40", "short-1"]
 )
-def test_generation(decoder, prompt_len, num_tokens, record_property):
-    model, long = decoder
-    check_generation(model, prompt_len or long, num_tokens, record=record_property)
+def test_generation(decoder, prompt, num_tokens, record_property):
+    model, prompts = decoder
+    check_generation(model, prompts[prompt], num_tokens, record=record_property)
 
 
 @pytest.mark.bench
