@@ -36,6 +36,7 @@ from aie.iron.kernels import eltwise
 from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance, Verdict
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from ml_dtypes import bfloat16
 
 from .declare import Built, Operand, Operator, Rtp, Unresolvable
 from .testing import Case, Testing
@@ -599,6 +600,27 @@ class Rowwise(Elementwise):
         return self.replace(rows=elements // line, bound_values={}, **one)
 
 
+def _admitted(tolerance: Tolerance, ref: np.ndarray) -> np.ndarray:
+    """The largest ``|actual - ref|`` that ``tolerance`` admits at each bf16 ``ref``.
+
+    Raises:
+        ValueError: ``tolerance`` is neither an ulps nor a relative one, or
+            scales with the reference's range.
+    """
+    if tolerance.range_frac is not None:
+        raise ValueError("no element-wise bound for a range_frac tolerance")
+    ref = np.abs(np.asarray(ref, np.float32))
+    if tolerance.kind == "ulps":
+        # n ulps away is furthest upward in magnitude, where the steps grow.
+        bits = ref.astype(bfloat16).view(np.uint16).astype(np.int32)
+        up = (bits + tolerance.ulps).astype(np.uint16).view(bfloat16)
+        return np.maximum(up.astype(np.float32) - ref, tolerance.atol or 0.0)
+    if tolerance.kind == "relative":
+        rtol = tolerance.rtol or 0.0
+        return np.maximum(tolerance.atol or 0.0, 2 * rtol * ref / (1 - rtol))
+    raise ValueError(f"no absolute bound for a {tolerance.kind} tolerance")
+
+
 class WeightedRowwise(Rowwise):
     """A ``Rowwise`` kernel's rows, optionally times a learned ``weight`` row.
 
@@ -667,23 +689,32 @@ class WeightedRowwise(Rowwise):
 
     def tolerance(self) -> Tolerance | None:
         own = super().tolerance()
-        if not self.weighted:
+        if not self.weighted or own is None:
             return own
+        arch = resolve_target_arch(self.dev)
+        mul = eltwise.mul_sized(self.tile_size).contract_for(arch).tolerance
         tiny = float(np.finfo(np.float32).tiny)
 
         def bound(x, weight):
-            # Each kernel's ulp, and the product's of a row one ulp off; or the
-            # first kernel's atol, scaled by the weight that multiplies it.
-            y = np.abs(np.asarray(self.reference(x, weight), np.float32))
-            ulp = np.exp2(np.floor(np.log2(np.maximum(y, tiny))) - 7)
+            # The row's error as its kernel's contract admits, scaled by the
+            # weight; the two products' roundings, each to its own binade; and
+            # what mul_sized's contract admits about the larger product.
+            normed = np.abs(np.asarray(Rowwise.reference(self, x), np.float32))
             w = np.abs(np.asarray(weight, np.float32)).reshape(-1)
-            scaled = (own.atol or 0.0) * np.resize(w, y.size).reshape(y.shape)
-            return np.maximum(2 * ulp, scaled)
+            w = np.resize(w, normed.size).reshape(normed.shape)
+            moved = w * _admitted(own, normed)
+            exact = normed * w
+            reach = exact + moved
+            half = sum(
+                np.exp2(np.floor(np.log2(np.maximum(v, tiny))) - 8)
+                for v in (exact, reach)
+            )
+            return moved + half + _admitted(mul, reach.astype(bfloat16))
 
         return Tolerance.bounded(
             bound,
-            note="the row's kernel then mul_sized, one ulp each; atol is the "
-            "first kernel's times |weight|",
+            note="the row's kernel's contract times |weight|, both products' "
+            "roundings, then mul_sized's contract",
         )
 
     def build(self) -> Built:
