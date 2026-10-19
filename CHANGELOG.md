@@ -206,7 +206,7 @@ public API adds its entry under Unreleased.
 - `Model.generate(prompt, max_tokens, sampler=None)`: text in gives text
   out, token ids give ids, and a list of `{"role", "content"}` messages is
   rendered by the checkpoint's `chat_template` (`Tokenizer.chat`, which
-  needs jinja2: `pip install 'iron[models]'`), each special token it writes its id and
+  needs jinja2, the `models` extra), each special token it writes its id and
   the BOS first once; `sampler=None` is greedy.
   `Model.stream` yields the same pieces as they are drawn, and
   `model.stats` holds the last call's `ttft` and `tokens_per_s`.
@@ -233,7 +233,8 @@ public API adds its entry under Unreleased.
   alone has no profile until given one. Its text `Config` and `PROFILES`
   move into `embedding_gemma2.model`, and `embedding_gemma2.config` goes.
 - The `models` extra installs what `Model.load` imports: huggingface_hub
-  and tokenizers as well as jinja2.
+  and tokenizers as well as jinja2. A missing one fails naming the extra
+  (`pip install -e '.[models]'` from a checkout).
 - `iron.operators` imports every operator on import, with no lazy
   loading or `.pyi` stubs. `iron.operators.CATALOG` maps each operator's
   profile name to its class (flm's as `"flm.<name>"`); `__all__` holds

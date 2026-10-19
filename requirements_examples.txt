@@ -1,13 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-huggingface_hub
-tokenizers
+# The models extra, and what the tests read: safetensors, which checks IRON's
+# checkpoint reader, and the model tests' images and audio.
+-e .[models]
 safetensors
-blobfile
-packaging
 pillow==12.3.0
 soundfile==0.14.0
-matplotlib
-seaborn
-jinja2

@@ -10,6 +10,7 @@ prompt's text to its ids.
 import dataclasses
 import datetime
 import functools
+import importlib
 import json
 import logging
 import math
@@ -49,6 +50,21 @@ def prompt_text(chars: int, skip: int = 0) -> str:
     model's long inputs are drawn from.
     """
     return Path(__file__).with_name("prompt.txt").read_text()[skip : skip + chars]
+
+
+def _models_extra(name: str):
+    """Import ``name``, one of the packages of IRON's ``models`` extra.
+
+    Raises:
+        ImportError: ``name`` is not installed; the message says how to install it.
+    """
+    try:
+        return importlib.import_module(name)
+    except ImportError as e:
+        raise ImportError(
+            f"{name} is in IRON's models extra: pip install -e '.[models]' "
+            "from an IRON checkout"
+        ) from e
 
 
 class Tokenizer:
@@ -91,13 +107,9 @@ class Tokenizer:
         """
         if self.chat_template is None:
             raise ValueError("the checkpoint has no chat template")
-        try:
-            from jinja2 import TemplateError
-            from jinja2.sandbox import ImmutableSandboxedEnvironment
-        except ImportError as e:
-            raise ImportError(
-                "a chat template renders with jinja2: pip install 'iron[models]'"
-            ) from e
+        _models_extra("jinja2")
+        from jinja2 import TemplateError
+        from jinja2.sandbox import ImmutableSandboxedEnvironment
 
         def raise_exception(message):
             raise TemplateError(message)
@@ -127,8 +139,7 @@ class TokenizerJson:
     """
 
     def __init__(self, path):
-        import tokenizers
-
+        tokenizers = _models_extra("tokenizers")
         self._tokenizer = tokenizers.Tokenizer.from_file(str(path))
 
     def encode(self, text: str) -> list[int]:
@@ -232,8 +243,7 @@ class Model(iron.Graph):
         """
         directory = Path(path)
         if not directory.is_dir():
-            from huggingface_hub import snapshot_download
-
+            snapshot_download = _models_extra("huggingface_hub").snapshot_download
             files = [
                 "*config.json",
                 "model*.safetensors*",

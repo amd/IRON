@@ -619,6 +619,14 @@ def test_real_tokenizer_s_added_tokens_are_their_ids():
         assert encoding.encode(added_token.content) == [token]
 
 
+def test_a_missing_models_extra_package_names_the_extra(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "tokenizers", None)
+    with pytest.raises(
+        ImportError, match=r"models extra: pip install -e '\.\[models\]'"
+    ):
+        TokenizerJson(tmp_path / "tokenizer.json")
+
+
 @requires_checkpoint
 def test_real_checkpoint_every_tensor_bitwise():
     tensors = Checkpoint(real_checkpoint).tensors

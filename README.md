@@ -35,11 +35,7 @@ IRON is an open-source & close-to-metal Python API enabling fast and efficient e
 
 ## Quick start
 
-After [installing](#installation-linux) IRON, install what loading a model needs, and give Hugging Face a token for meta-llama's gated repository:
-
-```bash
-pip install 'iron[models]'
-```
+After [installing](#installation-linux) IRON with its `models` extra, and given a Hugging Face token for meta-llama's gated repository:
 
 ```python
 from iron.applications.llama import Llama
@@ -100,8 +96,12 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    pip install -r requirements.txt
    ```
 
-   Loading a model needs the `models` extra (`pip install 'iron[models]'`):
-   huggingface_hub, tokenizers and jinja2.
+   Loading a model needs the `models` extra (huggingface_hub, tokenizers and
+   jinja2); the model tests also read images and audio. From this checkout:
+   ```bash
+   pip install -e '.[models]'               # to load and run models
+   pip install -r requirements_examples.txt # the extra and the model tests' packages
+   ```
 
 1. To test your installation, you can try to build and run the example below:
    ```bash
@@ -139,7 +139,7 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 
 What the text decoders (Llama to LFM2 above) share:
 
-- **Setup**: `pip install -r requirements_examples.txt`. XRT maps every device buffer locked, and a model's weights and caches are banks of at most 3.5 GiB (`iron.common.image.allocator.BANK`), so `ulimit -l` must cover one bank.
+- **Setup**: `requirements_examples.txt`, as [installing](#installation-linux) says. XRT maps every device buffer locked, and a model's weights and caches are banks of at most 3.5 GiB (`iron.common.image.allocator.BANK`), so `ulimit -l` must cover one bank.
 
 - **Run**: `python -m iron.applications.<application>.model <directory or repository id> [--prompt TEXT]`, the directory holding `config.json`, the checkpoint and the tokenizer; `-v` logs each compile; `--help` lists the options, and [Llama's README](./iron/applications/llama/README.md#running) explains them.
 - **Test**: `pytest tests/applications/<application>/` (or `tests/applications/decoders/ -k <application>` for the decoders that share one test) loads the model once and checks throughput, accuracy against transformers' logits recorded in `golden.npz` beside the checkpoint, and determinism. `pytest <test> --record-goldens -p no:xdist` records missing logits where torch and transformers are installed; they are not IRON's requirements.
