@@ -35,7 +35,8 @@ class Qwen3Embedding(Encoder):
     config = DecoderConfig
     profile = Qwen3.profile
     layer_class = Qwen3EmbeddingLayer
-    bos = Qwen3.bos
+    # The end-of-text token each input ends in.
+    end_of_text = 151643
 
     def __init__(self, config: DecoderConfig, weights):
         c = config
@@ -64,7 +65,7 @@ class Qwen3Embedding(Encoder):
         """
         if task is not None:
             text = f"Instruct: {task}\nQuery:{text}"
-        tokens = [*self.tokenizer.encoding.encode(text), self.bos]
+        tokens = [*self.tokenizer.encoding.encode(text), self.end_of_text]
         ids, values = self.inputs(tokens)
         y = np.asarray(self(ids, **values).numpy(), np.float32).reshape(-1)
         return y / np.linalg.norm(y)

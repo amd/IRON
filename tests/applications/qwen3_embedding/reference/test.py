@@ -40,7 +40,7 @@ class Host(Qwen3Embedding):
     """The embedder, its call the graph's reference."""
 
     profile = None
-    bos = EOS
+    end_of_text = EOS
 
     def __call__(self, *tensors, **values):
         return _HostOutput(self.reference(*tensors, **values))
