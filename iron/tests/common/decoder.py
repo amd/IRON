@@ -11,8 +11,8 @@ import dataclasses
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
+from aie.helpers.taplib import Affine
 
-from iron.common.graph.handle import Affine
 import iron.functional as F
 from iron.lm import rope_angles
 from iron.applications.llama.model import Llama

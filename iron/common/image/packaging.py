@@ -113,7 +113,7 @@ def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan
         )
 
     forced: list[str] = []
-    dispatch_values = [v for v in traced.values if v.kind is Kind.DISPATCH_TIME]
+    dispatch_values = [v for v in traced.values if v.marker is Kind.DISPATCH_TIME]
     if dispatch_values:
         names = ", ".join(v.name for v in dispatch_values)
         forced.append(
@@ -136,7 +136,7 @@ def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan
 
     values = []
     for v in traced.values:
-        if v.kind is Kind.DISPATCH_TIME:
+        if v.marker is Kind.DISPATCH_TIME:
             lowering = "sizes, strides and offsets regenerated per call"
         elif full_elf:
             lowering = "patched through the parameter scratchpad"
@@ -146,7 +146,7 @@ def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan
                 "an offset use regenerates the stream, a core-read use is "
                 "written into the array by the sequence"
             )
-        values.append((v.name, v.kind.value, lowering))
+        values.append((v.name, v.marker.value, lowering))
     # A carried-bound step grows with every call; amdxdna stops a command past ~4 s.
     # A version taking no tensor stays one: a loop drains its values into one.
     commands = ()
@@ -155,7 +155,7 @@ def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan
             i + 1
             for i, step in enumerate(traced.steps[:-1])
             if any(
-                b is not None and b.value.kind is Kind.CARRIED
+                b is not None and b.value.marker is Kind.CARRIED
                 for b in step.op.bound_extents.values()
             )
         )

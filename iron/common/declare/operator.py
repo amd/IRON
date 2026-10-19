@@ -42,7 +42,9 @@ from .rtp import Rtp
 from .value import Extent, ExtentWord, Value
 
 if TYPE_CHECKING:
-    from ..graph.handle import Affine, Handle
+    from aie.helpers.taplib import Affine
+
+    from ..graph.handle import Handle
     from ..image.artifacts import Artifacts
     from ..image.standalone import OperatorImage
 

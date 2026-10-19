@@ -16,7 +16,7 @@ import dataclasses
 
 import numpy as np
 import pytest
-from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.taplib import PerCall, TensorAccessPattern
 from aie.passmanager import PassManager
 from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup
 from aie.utils.npukernel import NPUKernel
@@ -26,7 +26,6 @@ import iron
 from iron import Scratchpad
 from iron.common import Built, Extent, Operator, Value, field
 from iron.common.design import OperatorDesign
-from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
 
 WIDTH = 256

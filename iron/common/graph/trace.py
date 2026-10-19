@@ -11,7 +11,7 @@ import math
 from collections.abc import Callable, Hashable, Iterable, Mapping
 
 import numpy as np
-from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.iron import In, InOut, Out
 from aie.utils import bfp
 
@@ -23,15 +23,7 @@ from ..declare.precision import Precision
 from ..declare.profile import Profile
 from ..image.packaging import Kind
 from ..image.step import BufferRef, SequenceStep
-from .handle import (
-    Affine,
-    Handle,
-    PerCall,
-    State,
-    Weight,
-    _rescale_bounds,
-    is_operand,
-)
+from .handle import Handle, State, Weight, _rescale_bounds, is_operand
 
 
 @dataclasses.dataclass
@@ -231,7 +223,7 @@ class TracedGraph:
             ),
         ]
         declared = {v.name for v in self.values}
-        carried = {v.name for v in self.values if v.kind is Kind.CARRIED}
+        carried = {v.name for v in self.values if v.marker is Kind.CARRIED}
         return ({e.value.name for e in expressions} & declared) | carried
 
     @classmethod

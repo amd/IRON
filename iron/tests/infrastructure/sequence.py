@@ -31,8 +31,8 @@ import pytest
 from aie.iron.kernels.sample import draw_row
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
+from aie.helpers.taplib import PerCall
 
-from iron.common.graph.handle import PerCall
 from iron.common.graph.trace import TracedGraph
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence

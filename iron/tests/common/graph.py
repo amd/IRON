@@ -17,7 +17,7 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.iron import DispatchTime, ceildiv
-from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
@@ -27,7 +27,6 @@ from iron.common.graph import Handle
 from iron.common.graph.trace import TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import CompiledGraph, _words
-from iron.common.graph.handle import Affine, PerCall
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef, SequenceStep
 from iron.common.image.artifacts import Parameter
@@ -174,7 +173,7 @@ def test_per_call_values_bind_to_the_operator_and_enable_it():
     (binding,) = t.bindings
     op, value = binding.op, binding.expression.value
     assert type(op) is Copy and binding.member.name == "out_offset"
-    assert value.name == "pos" and value.kind is Kind.SCRATCHPAD
+    assert value.name == "pos" and value.marker is Kind.SCRATCHPAD
     assert op.value("out_offset").per_call and not op.value("in_offset").per_call
     assert [v.name for v in op.values] == ["out_offset"]
 
@@ -389,7 +388,7 @@ def test_keyword_only_parameters_must_be_annotated_as_values():
     g = G()
 
     t = g.trace(x=(1024,))
-    assert [(v.name, v.kind) for v in t.values] == [("n", Kind.DISPATCH_TIME)]
+    assert [(v.name, v.marker) for v in t.values] == [("n", Kind.DISPATCH_TIME)]
 
 
 def test_returning_an_input_or_a_slice_is_refused():
@@ -839,64 +838,15 @@ def test_a_bound_travels_through_reshape_and_transpose():
     assert b[:, 3].bounds == {0: n.affine()} and b[:, 3].shape == (64, 4)
 
 
-def test_per_call_values_are_integer_expressions():
-    """Integer arithmetic on a per-call value is an ``Affine`` of it,
-    which a binding writes and names its word by.
-    """
+def test_an_index_may_floor_and_a_bound_may_not():
+    """A bound patches a length, so it is linear; an index may floor."""
     p = PerCall("p", Kind.SCRATCHPAD, np.int32)
-    assert (p + 1) * 64 == Affine(p, 64, 64) == 64 * (1 + p)
-    assert (p - 1).evaluate({"p": 5}) == 4 and (p * 3 + 2).evaluate({"p": 5}) == 17
-    assert [e.name for e in (p.affine(), p * 64, (p + 1) * 64, p - 1)] == [
-        "p",
-        "p_x64",
-        "p_x64_p64",
-        "p_m1",
-    ]
-    assert str((p + 1) * 64) == "p * 64 + 64"
-    with pytest.raises(TypeError):
-        _ = p * 0.5
     cache = Handle((8, 4), bfloat16, "cache", "state")
-    # An index may floor; a bound, which patches a length, may not.
     assert cache[(p + 1) // 2].index_by == (p + 1) // 2 * 4
     with pytest.raises(TypeError, match="not linear"):
         _ = cache[: (p + 1) // 2]
-    assert 10 - p == Affine(p, -1, 10) and -p == Affine(p, -1)
-    assert (p * 4) // 2 == p // 1 * 2 and p // 2 == Affine(p, 1, 0, 1)
-
-
-def test_a_clamped_expression_carries_its_range_through_integer_arithmetic():
-    """``clamp`` holds an expression to a range; a sum, a product (a negative
-    one swapping the bounds) and a floor division by a power of two carry
-    it, each as numpy computes it at every value tried. An index may be
-    clamped; a bound, which patches a length, may not."""
-    p = PerCall("p", Kind.SCRATCHPAD, np.int32)
-    start = (p - 3).clamp(lo=0)
-    assert start.name == "p_m3_lo0" and str(start) == "clamp(p - 3, 0, None)"
-    cases = {
-        start: lambda v: max(v - 3, 0),
-        start + 5: lambda v: max(v - 3, 0) + 5,
-        start * -2: lambda v: -2 * max(v - 3, 0),
-        (p + 1).clamp(hi=9) // 4: lambda v: min(v + 1, 9) // 4,
-        ((p * 3 + 1) // 2).clamp(lo=-4, hi=20) * 3
-        + 1: lambda v: 3 * min(max((3 * v + 1) // 2, -4), 20)
-        + 1,
-        (p - 3).clamp(lo=0).clamp(lo=-5, hi=6): lambda v: min(max(v - 3, 0), 6),
-    }
-    for e, want in cases.items():
-        assert [e.evaluate({"p": v}) for v in range(-20, 21)] == [
-            want(v) for v in range(-20, 21)
-        ], e
-    with pytest.raises(TypeError, match="not linear"):
-        start.affine()
-    with pytest.raises(TypeError):
-        _ = start + start
-    with pytest.raises(TypeError):
-        _ = start // 3
-    with pytest.raises(ValueError, match="holds no value"):
-        (p + 0).clamp(lo=5, hi=2)
-    assert iron.clamp(p - 3, lo=0) == start
-    cache = Handle((8, 4), bfloat16, "cache", "state")
-    assert cache[start].index_by == start * 4
+    start = iron.clamp(p - 3, lo=0)
+    assert start == (p - 3).clamp(lo=0) and cache[start].index_by == start * 4
     with pytest.raises(TypeError, match="not linear"):
         _ = cache[: (p + 1).clamp(hi=8)]
 
@@ -918,11 +868,6 @@ def test_a_per_call_value_cannot_steer_the_trace():
     for test in (lambda p: p == 0, lambda p: p * 2 != np.float32(2), bool):
         with pytest.raises(TypeError, match="per call"):
             Branches(test).trace(x=(64,))
-    p = PerCall("p", Kind.SCRATCHPAD, np.int32)
-    assert p == p and p != PerCall("p", Kind.SCRATCHPAD, np.int32) and p + 1 == p + 1
-    assert len({p, p}) == 1 and len({p + 1, 1 + p}) == 1
-    with pytest.raises(TypeError, match="not a number"):
-        int(p)
 
 
 def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
@@ -1107,10 +1052,10 @@ def test_the_trace_records_the_range_each_per_call_index_and_bound_holds():
 
     t = Chunked().trace(x=(C, G * D))
     got = {(str(m.expression), m.lo, m.hi) for m in t.limits}
-    assert got == {("rows", 0, C + 1), ("chunk", 0, L // C), ("pos + 1", 0, L)}
+    assert got == {("rows", 0, C + 1), ("chunk", 0, L // C), ("pos_p1", 0, L)}
     for m in t.limits:
         assert m.expression.evaluate(dict(chunk=3, rows=C, pos=L - 2)) < m.hi
-    (outside,) = [m for m in t.limits if str(m.expression) == "pos + 1"]
+    (outside,) = [m for m in t.limits if str(m.expression) == "pos_p1"]
     assert outside.expression.evaluate(dict(pos=L - 1)) == outside.hi
 
 
@@ -1683,7 +1628,7 @@ def test_a_graph_carries_its_next_values():
     successor = np.random.default_rng(0).permutation(16).astype(np.int32)
     walk = Walk(successor)
     t = walk.trace()
-    assert [(v.name, v.kind) for v in t.values] == [
+    assert [(v.name, v.marker) for v in t.values] == [
         ("node", Kind.CARRIED),
         ("steps", Kind.CARRIED),
     ]
@@ -1866,35 +1811,6 @@ def test_a_state_is_indexed_by_a_floored_carried_value(npu2):
 
     with pytest.raises(TypeError, match="not linear"):
         Bounded().trace(x=((64, 32), bfloat16))
-
-
-def test_a_wrapped_expression_is_a_ring_row_and_its_elements():
-    """``% m`` (a power of two) wraps after the clamp, and a positive power of
-    two times a wrapped expression wraps its elements, at every value tried;
-    nothing else follows a wrap."""
-    p = PerCall("p", Kind.SCRATCHPAD, np.int32)
-    ring = p % 16
-    assert ring.name == "p_mod16" and str(ring) == "(p) % 16"
-    cases = {
-        ring: lambda v: v % 16,
-        ring * 64: lambda v: v % 16 * 64,
-        iron.clamp(p - 5, lo=0) % 8: lambda v: max(v - 5, 0) % 8,
-        iron.clamp(p - 5, lo=0) % 8 * 4: lambda v: max(v - 5, 0) % 8 * 4,
-        (p * 3 + 1) // 2 % 32: lambda v: (3 * v + 1) // 2 % 32,
-        ring % 4: lambda v: v % 4,
-    }
-    for e, want in cases.items():
-        assert [e.evaluate({"p": v}) for v in range(-40, 41)] == [
-            want(v) for v in range(-40, 41)
-        ], e
-    for bad in (lambda: p % 12, lambda: ring % 32, lambda: ring * 3, lambda: ring * -2):
-        with pytest.raises(TypeError):
-            bad()
-    for bad in (lambda: ring + 1, lambda: ring // 2, lambda: ring.clamp(lo=0)):
-        with pytest.raises(TypeError):
-            bad()
-    with pytest.raises(TypeError, match="not linear"):
-        ring.affine()
 
 
 def test_a_state_is_written_at_a_wrapped_carried_value(npu2):

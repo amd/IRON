@@ -19,10 +19,11 @@ from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING
 
 import numpy as np
+from aie.helpers.taplib import Affine
 
 from ...operators.emit import ROW, UNCLAMPED, Emit
 from ..image.artifacts import Parameter
-from .handle import Affine, Handle, State
+from .handle import Handle, State
 from .trace import TracedGraph, TracedStep
 
 if TYPE_CHECKING:

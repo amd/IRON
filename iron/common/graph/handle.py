@@ -5,14 +5,13 @@
 
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Iterator, Mapping
 from math import prod
 from typing import Annotated, TypeVar
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
@@ -334,7 +333,7 @@ class Handle:
                     )
                 if index_by is not None:
                     raise ValueError("one axis at most is indexed by a per-call value")
-                if start.value.kind is Kind.DISPATCH_TIME:
+                if start.value.marker is Kind.DISPATCH_TIME:
                     raise ValueError(
                         f"{start} is a DispatchTime value; only a Scratchpad value can "
                         f"start a run, since it moves a transfer's base address"
@@ -354,7 +353,7 @@ class Handle:
                 stop = entry.stop.affine()
                 if entry.start not in (None, 0) or entry.step not in (None, 1):
                     raise ValueError(f"{stop} bounds an axis from its start: [:{stop}]")
-                if stop.value.kind is Kind.DISPATCH_TIME:
+                if stop.value.marker is Kind.DISPATCH_TIME:
                     raise ValueError(
                         f"{stop} is a DispatchTime value; only a Scratchpad value can "
                         f"bound an axis, since it patches a transfer's size"
@@ -371,7 +370,7 @@ class Handle:
                     entry = entry.affine()
                 if index_by is not None:
                     raise ValueError("one axis at most is indexed by a per-call value")
-                if entry.value.kind is Kind.DISPATCH_TIME:
+                if entry.value.marker is Kind.DISPATCH_TIME:
                     raise ValueError(
                         f"{entry} is a DispatchTime value; only a Scratchpad value can "
                         f"index a view, since it moves a transfer's base address"
@@ -826,287 +825,6 @@ def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
         f"cannot reshape {h!r} to {list(shape)}: the bound on its leading axis "
         f"({count}) does not divide into the new leading axis"
     )
-
-
-class PerCall:
-    """A per-call scalar parameter of a graph's body; integer arithmetic on
-    one makes an ``Affine``.
-    """
-
-    __slots__ = ("name", "kind", "dtype")
-
-    def __init__(self, name: str, kind: Kind, dtype):
-        self.name, self.kind, self.dtype = name, kind, dtype
-
-    def affine(self) -> Affine:
-        return Affine(self)
-
-    def __add__(self, k: int) -> Affine:
-        return self.affine() + k
-
-    def __sub__(self, k: int) -> Affine:
-        return self.affine() - k
-
-    def __mul__(self, k: int) -> Affine:
-        return self.affine() * k
-
-    __radd__, __rmul__ = __add__, __mul__
-
-    def __rsub__(self, k: int) -> Affine:
-        return k - self.affine()
-
-    def __neg__(self) -> Affine:
-        return -self.affine()
-
-    def __floordiv__(self, d: int | Affine) -> Affine | int:
-        return self.affine() // d
-
-    def __mod__(self, m: int) -> Affine:
-        return self.affine() % m
-
-    def __eq__(self, other) -> bool:
-        if isinstance(other, (PerCall, Affine)):
-            return self is other
-        raise TypeError(f"{self} has no value to compare: it is given per call")
-
-    __hash__ = object.__hash__
-
-    def __bool__(self):
-        raise TypeError(f"{self} has no truth value: it is given per call")
-
-    def __index__(self):
-        raise TypeError(f"{self} is not a number: it is given per call")
-
-    __int__ = __index__
-
-    def __repr__(self) -> str:
-        return f"PerCall({self.name!r}, {self.kind.name}[{np.dtype(self.dtype).name}])"
-
-
-@dataclasses.dataclass(frozen=True)
-class Affine:
-    """An integer expression in one graph value ``v``, evaluated per call:
-
-    ```text
-    clamp(((v * scale + bias) >> down) * mul + add, lo, hi) % mod
-    ```
-
-    where ``>>`` floors, a bound of None is none and ``mod``, a power of
-    two, wraps (a ring's row) where it is not None. A binding writes a
-    linear one (``down`` 0, kept in ``scale`` and ``bias``, so
-    ``(p + 1) * 64`` is ``Affine(p, 64, 64)``).
-    Sums, products and floor divisions by a power of two (and so
-    ``ceildiv``) with integers are expressions too, which is how an
-    operator's derivation run on its bound gives the Emit row of what it
-    derives. So are the sum and difference of two linear expressions in one
-    value, and the quotient of two that are multiples of one another, an
-    integer where the value cancels (``n - n`` is 0, ``(4 * n) // n`` is 4).
-    ``clamp`` holds one to a range (``(p - 512).clamp(lo=0)``), which a sum,
-    product or floor division by an integer carries. Anything else (a
-    comparison, another divisor, two values) raises ``TypeError``.
-    """
-
-    value: PerCall
-    scale: int = 1
-    bias: int = 0
-    down: int = 0
-    mul: int = 1
-    add: int = 0
-    lo: int | None = None
-    hi: int | None = None
-    mod: int | None = None
-
-    @property
-    def clamped(self) -> bool:
-        return self.lo is not None or self.hi is not None
-
-    def clamp(self, lo: int | None = None, hi: int | None = None) -> Affine:
-        """This expression held to ``[lo, hi]`` as well, a bound of None none."""
-        if self.mod is not None:
-            raise TypeError(f"no expression clamps ({self}) after it wraps")
-        if lo is None or self.lo is not None and self.lo > lo:
-            lo = self.lo
-        if hi is None or self.hi is not None and self.hi < hi:
-            hi = self.hi
-        if lo is not None and hi is not None and lo > hi:
-            raise ValueError(f"{self} held to [{lo}, {hi}] holds no value")
-        return dataclasses.replace(self, lo=lo, hi=hi)
-
-    def __mod__(self, m: int) -> Affine:
-        if isinstance(m, bool) or not isinstance(m, (int, np.integer)):
-            return NotImplemented
-        m = int(m)
-        if m <= 0 or m & (m - 1):
-            raise TypeError(f"no expression for ({self}) % {m}: a ring is 2^k rows")
-        if self.mod is not None and self.mod % m:
-            raise TypeError(f"no expression for ({self}) % {m}")
-        return dataclasses.replace(self, mod=m)
-
-    def affine(self) -> Affine:
-        """This expression, as a binding takes it.
-
-        Raises:
-            TypeError: It floors, is clamped or wraps.
-        """
-        if self.down or self.clamped or self.mod is not None:
-            raise TypeError(f"{self} is not linear in {self.value.name}")
-        return self
-
-    def __add__(self, k: int | Affine) -> Affine | int:
-        if isinstance(k, Affine):
-            if k.value is not self.value or self.down or k.down:
-                return NotImplemented
-            if self.clamped or k.clamped or (self.mod, k.mod) != (None, None):
-                return NotImplemented
-            scale = self.scale + k.scale
-            if not scale:
-                return self.bias + k.bias
-            return Affine(self.value, scale, self.bias + k.bias)
-        if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
-            return NotImplemented
-        k = int(k)
-        if self.mod is not None:
-            return NotImplemented
-        if self.clamped:
-            lo, hi = (None if b is None else b + k for b in (self.lo, self.hi))
-            return (dataclasses.replace(self, lo=None, hi=None) + k).clamp(lo, hi)
-        if self.down:
-            return dataclasses.replace(self, add=self.add + k)
-        return dataclasses.replace(self, bias=self.bias + k)
-
-    def __sub__(self, k: int | Affine) -> Affine | int:
-        return self + (-k)
-
-    def __rsub__(self, k: int) -> Affine:
-        return -self + k
-
-    def __neg__(self) -> Affine:
-        return self * -1
-
-    def __mul__(self, k: int) -> Affine:
-        if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
-            return NotImplemented
-        k = int(k)
-        if self.mod is not None:
-            # (x % m) * k is (x * k) % (m * k) for k > 0, a ring row's elements.
-            if k <= 0 or k & (k - 1):
-                raise TypeError(f"no expression for ({self}) * {k}")
-            return dataclasses.replace(self, mod=None) * k % (self.mod * k)
-        if self.clamped:
-            lo, hi = (None if b is None else b * k for b in (self.lo, self.hi))
-            if k < 0:
-                lo, hi = hi, lo
-            return (dataclasses.replace(self, lo=None, hi=None) * k).clamp(lo, hi)
-        if self.down:
-            return dataclasses.replace(self, mul=self.mul * k, add=self.add * k)
-        return dataclasses.replace(self, scale=self.scale * k, bias=self.bias * k)
-
-    __radd__, __rmul__ = __add__, __mul__
-
-    def __floordiv__(self, d: int | Affine) -> Affine | int:
-        if self.mod is not None:
-            raise TypeError(f"no expression for ({self}) // {d}")
-        if self.clamped:
-            # A floor division by a positive divisor keeps the bounds' order.
-            if isinstance(d, bool) or not isinstance(d, (int, np.integer)) or d <= 0:
-                raise TypeError(f"no expression for ({self}) // {d}")
-            lo, hi = (None if b is None else b // int(d) for b in (self.lo, self.hi))
-            return (dataclasses.replace(self, lo=None, hi=None) // d).clamp(lo, hi)
-        if isinstance(d, Affine):
-            # floor(q u / u) = q, wherever u is not 0
-            linear = not (self.down or d.down) and d.value is self.value
-            if linear and d.scale and self.scale % d.scale == 0:
-                q = self.scale // d.scale
-                if self.bias == q * d.bias:
-                    return q
-            raise TypeError(f"no expression for ({self}) // ({d})")
-        if isinstance(d, bool) or not isinstance(d, (int, np.integer)):
-            return NotImplemented
-        d = int(d)
-        if d < 0:
-            return (-self) // -d
-        if d == 0 or d & (d - 1):
-            raise TypeError(f"no expression for a floor division by {d}")
-        if self.mul != 1:
-            if self.mul % d == 0:  # the floored term divides exactly
-                return dataclasses.replace(self, mul=self.mul // d, add=self.add // d)
-            raise TypeError(f"no expression for ({self}) // {d}")
-        # floor((floor(u / 2^a) + c) / 2^k) = floor((u + c 2^a) / 2^(a+k))
-        scale, bias = self.scale, self.bias + (self.add << self.down)
-        k = self.down + d.bit_length() - 1
-        while k and scale % 2 == 0 and bias % 2 == 0:
-            scale, bias, k = scale // 2, bias // 2, k - 1
-        if scale % (1 << k) == 0:  # floor(s v / 2^k + b / 2^k) is linear
-            return Affine(self.value, scale >> k, bias >> k)
-        return Affine(self.value, scale, bias, k)
-
-    def __eq__(self, other) -> bool:
-        if isinstance(other, Affine):
-            # The value by identity: PerCall has no value to compare.
-            terms = [f.name for f in dataclasses.fields(self)[1:]]
-            return self.value is other.value and all(
-                getattr(self, n) == getattr(other, n) for n in terms
-            )
-        if isinstance(other, (int, float, np.integer, np.floating)):
-            raise TypeError(f"{self} has no value to compare: it is computed per call")
-        return NotImplemented
-
-    def __bool__(self):
-        raise TypeError(f"{self} has no truth value: it is computed per call")
-
-    def __index__(self):
-        raise TypeError(f"{self} is not a number: it is computed per call")
-
-    __int__ = __index__
-
-    @property
-    def dtype(self):
-        return self.value.dtype
-
-    @property
-    def name(self) -> str:
-        """An identifier for the device symbol: ``p``, ``p_x64``, ``p_x64_p64``, ``p_m1``."""
-        text = self.value.name + (f"_x{self.scale}" if self.scale != 1 else "")
-        if self.bias:
-            text += f"_{'p' if self.bias > 0 else 'm'}{abs(self.bias)}"
-        if self.down:
-            if self.mul != 1:
-                text += f"_d{self.down}_x{'m' if self.mul < 0 else ''}{abs(self.mul)}"
-            else:
-                text += f"_d{self.down}"
-            if self.add:
-                text += f"_{'p' if self.add > 0 else 'm'}{abs(self.add)}"
-        for tag, b in (("lo", self.lo), ("hi", self.hi)):
-            if b is not None:
-                text += f"_{tag}{'m' if b < 0 else ''}{abs(b)}"
-        if self.mod is not None:
-            text += f"_mod{self.mod}"
-        return text
-
-    def evaluate(self, values: Mapping[str, int]) -> int:
-        v = int(values[self.value.name])
-        x = ((self.scale * v + self.bias) >> self.down) * self.mul + self.add
-        if self.lo is not None:
-            x = max(x, self.lo)
-        if self.hi is not None:
-            x = min(x, self.hi)
-        return x if self.mod is None else x % self.mod
-
-    def __str__(self) -> str:
-        text = self.value.name + (f" * {self.scale}" if self.scale != 1 else "")
-        if self.bias:
-            text += f" {'+' if self.bias > 0 else '-'} {abs(self.bias)}"
-        if self.down:
-            text = f"({text}) >> {self.down}"
-            if self.mul != 1:
-                text = f"({text}) * {self.mul}"
-            if self.add:
-                text += f" {'+' if self.add > 0 else '-'} {abs(self.add)}"
-        if self.clamped:
-            text = f"clamp({text}, {self.lo}, {self.hi})"
-        if self.mod is not None:
-            text = f"({text}) % {self.mod}"
-        return text
 
 
 class Carry(Mapping[str, "Handle | Affine | int"]):

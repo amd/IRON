@@ -21,7 +21,7 @@ from typing import NamedTuple
 import numpy as np
 import pytest
 from aie.dialects.aie import DMAChannelDir
-from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.taplib import PerCall, TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron import CompileTime, DmaEndpoint, In, ObjectFifo, Out, Program, Worker
 from aie.iron.device import Tile, from_name
@@ -36,7 +36,6 @@ from iron.common import Auto, Built, Extent, Operator, Rtp, Value, Xclbin, field
 from iron.common.design import BuiltArray, OperatorDesign, OperatorRuntime
 from iron.common.design.design import configuration
 from iron.common.graph.compiled import _words
-from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
 from iron.operators.copy import Copy
 from iron.operators.flm.gemm.design import Epilogue

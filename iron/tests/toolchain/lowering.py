@@ -26,6 +26,7 @@ import pytest
 from ml_dtypes import bfloat16
 from aie.iron import ExternalFunction
 from aie.utils import get_current_device
+from aie.helpers.taplib import PerCall
 from aie.utils.compile import (
     compile_external_kernels,
     compile_mlir_module,
@@ -35,7 +36,6 @@ from aie.utils.compile import (
 import iron
 from iron import Scratchpad
 from iron.common.design import OperatorDesign
-from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
 from iron.lm import Conv2d, ImagePatches, LogMel
 from iron.operators.copy import Copy

@@ -25,6 +25,7 @@ import aie.utils as aie_utils
 import numpy as np
 from aie.utils import bfp
 from ml_dtypes import bfloat16
+from aie.helpers.taplib import Affine, PerCall
 
 from ..declare import Operator
 from ..declare.operator import device_fit, graph_tracer
@@ -40,7 +41,7 @@ from ..image.sequence import ALIGNMENT, OperatorSequence
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fill import filled
-from .handle import Affine, Carry, Handle, PerCall, State, Weight, is_operand
+from .handle import Carry, Handle, State, Weight, is_operand
 from .trace import TracedGraph, Tracer
 
 logger = logging.getLogger(__name__)
@@ -1059,7 +1060,7 @@ def _words(
             continue
         e = b.expression
         linear = None
-        if not (e.down or e.clamped or e.mod is not None):
+        if e.linear:
             linear = Linear(
                 e.value.name,
                 Fraction(e.scale),
