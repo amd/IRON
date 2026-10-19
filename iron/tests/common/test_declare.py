@@ -387,6 +387,13 @@ def test_a_profile_reads_as_its_operators():
     assert repr(p) == "Profile(MV)"
 
 
+def test_saving_an_operator_outside_the_catalog_names_it(tmp_path):
+    p = Profile()
+    p.add(MV, columns=4)
+    with pytest.raises(ValueError, match="MV is not in iron.operators.CATALOG"):
+        p.save(tmp_path / "profile.json")
+
+
 def test_a_profile_is_checked_as_it_is_written_and_as_it_is_read():
     p = Profile()
     with pytest.raises(TypeError, match="declares no field"):

@@ -157,12 +157,18 @@ class Profile:
         return profile
 
     def save(self, path: str | Path) -> None:
-        """Write the profile as JSON, one entry to a line."""
+        """Write the profile as JSON, one entry to a line.
+
+        Raises:
+            ValueError: An entry's operator is not in ``iron.operators.CATALOG``.
+        """
         from ...operators import CATALOG  # the operators import this module
 
         names = {cls: name for name, cls in CATALOG.items()}
         lines = []
         for cls, dims, tunables in self._entries:
+            if cls not in names:
+                raise ValueError(f"{cls.__qualname__} is not in iron.operators.CATALOG")
             name = names[cls]
             lines.append(json.dumps({"operator": name, **dims, **tunables}))
         with open(path, "w") as f:

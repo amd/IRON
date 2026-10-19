@@ -171,7 +171,7 @@ CONTRIBUTING.md walks through the common case. The rules:
    `iron/tests/operators/test_catalog.py` runs every declaration; a test with a
    body of its own goes beside the operator as `test.py`.
 7. Import it in `iron/operators/__init__.py` (an flm port in
-   `iron/operators/flm/__init__.py`, and add it to that `__all__`).
+   `iron/operators/flm/__init__.py`).
 
 ### What an operator overrides
 
