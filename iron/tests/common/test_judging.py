@@ -11,9 +11,9 @@ import pytest
 from aie.iron.device import from_name
 
 from iron.common import Elementwise
-from iron.common.elementwise import _interval
 from iron.common.testing import vectors
 from iron.tests.support.declared import declared
+from iron.tests.support.judging import interval
 
 
 def _cases():
@@ -56,7 +56,7 @@ def test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance(
         # One element more than the tolerance lets miss.
         n = int(tolerance.max_mismatch_frac * flat.size) + 1
         moved = finite[np.linspace(0, finite.size - 1, n).astype(int)]
-        lo, hi = _interval(tolerance, [flat.astype(np.float64)], [args], flat.dtype)
+        lo, hi = interval(tolerance, [flat.astype(np.float64)], [args], flat.dtype)
         past = flat.copy()
         wrong = {"past its tolerance": past}
         if np.issubdtype(flat.dtype, np.integer):
