@@ -88,7 +88,7 @@ read by the core once its barrier opens:
 A word is not free: each costs ~66 ns per core and the sequence writes
 `ROWS * COLS` = 32 of them, so **every word is ~2 us of dispatch latency**
 (measured by padding the buffer at a fixed core count). Against a ~107 us
-floor that is most of a short-prefill dispatch, so `Array.build()` lists only the
+floor that is most of a short-prefill dispatch, so `build()` lists only the
 words a configuration's cores read (`Rtp(...)`), and the buffer is sized
 to them. Two groups are therefore conditional or gone:
 
@@ -433,7 +433,7 @@ memtile BDs are device configuration, so a resident fifo would put K (buffer
 size) and M (replay count) into the xclbin every shape shares.
 
 So B does not use an ObjectFifo. The **device** side is shape-independent,
-built in `Array.build()` and returned from it with the Workers (the pool on `rt.built`):
+built in `build()` and returned from it with the Workers (the pool on `rt.built`):
 
 * per column, a memtile pool of `B_SLOTS` k-block slots with one producer and
   one consumer lock per slot, and an L1 ring on each core fed by a static

@@ -31,7 +31,7 @@ from aie.iron import (
     ceildiv,
 )
 from aie.iron.controlflow import range_
-from aie.iron.device import Device, Tile
+from aie.iron.device import Tile
 from aie.iron.kernels import fused_mm
 from aie.utils import bfp
 from aie.utils.verify import Tolerance
@@ -66,7 +66,7 @@ from iron.operators.gemm import GEMM
 
 
 class _BPool(NamedTuple):
-    """B's memtile path as ``Array.build()`` builds it, for ``sequence()`` to program.
+    """B's memtile path as ``build()`` builds it, for ``sequence()`` to program.
 
     Per column: the pool buffer, one prod/cons lock pair per slot, the flow
     from the shim into it and the broadcast out of it. The limits are the
@@ -436,385 +436,382 @@ class ProjectionGEMM(Operator):
             base = f"{base}_epi{self.epilogue}"
         return base
 
-    class Array(Operator.Array):
-        dev: Device
+    def build(self) -> Built:
+        COLS, ROWS = self.cols, self.rows
+        N_TILE, CT_MAX_K, M_CHUNK, T_MA = (
+            self.tile_n,
+            CT_MAX_K_FOR_N[self.tile_n],
+            self.m_chunk,
+            self.tile_ma,
+        )
+        B_GROUP = bfp.BLOCK if self.bfp16_b else 1  # B values per element
+        L1_B_DEPTH, K_TILE = self.l1_b_depth, self.k_tile
+        RHO = M_TILE // T_MA
+        CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
+        CT_A_OBJ = CT_A_LEN * (T_MA // R // 2)  # every z slice of one mmul
+        C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
+        O_CHUNKS = C_SLICE_LEN // CT_OUT_LEN  # C objects an accumulator drains as
+        B_ITERS = K_TILE // CT_MAX_K  # B chunks consumed per k step
+        # Under a row bound the cores read the units it reaches: from the
+        # scratchpad on a full ELF, else from their parameter buffer.
+        bounded = self.value("valid").per_call
+        tm = get_target_model(self.dev.resolve())
 
-        def build(self) -> Built:
-            COLS, ROWS = self.cols, self.rows
-            N_TILE, CT_MAX_K, M_CHUNK, T_MA = (
-                self.tile_n,
-                CT_MAX_K_FOR_N[self.tile_n],
-                self.m_chunk,
-                self.tile_ma,
+        bf16_ty = np.dtype[bfloat16]
+        f32 = np.dtype[np.float32]
+        b_elem_ty = np.dtype[self.b_dtype]
+        # L1 (per compute tile)
+        ct_a_obj_ty = np.ndarray[(CT_A_OBJ,), bf16_ty]
+        ct_b_ty = np.ndarray[(CT_MAX_K * N_TILE // B_GROUP,), b_elem_ty]
+        ct_out_ty = np.ndarray[(CT_OUT_LEN,), bf16_ty]
+        ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
+        # L2 (per memtile): the declared stream tiles.
+        mt_a_ty = self.A.obj_type
+        mt_out_ty = self.C.obj_type
+
+        # Every field that changes the object reaches the factory, so its
+        # object name keys the build. The activation is absent: the cores
+        # select it at run time from the compiled-in modes, and mode 0 is
+        # always compiled in, since the kernel falls back to it. Under
+        # asymmetric tile buffering the k step takes the A band index, as the
+        # core folds RHO A bands into one accumulator.
+        modes = _compiled_modes(self.epilogue_modes)
+        kernel = fused_mm(
+            dim_m=M_TILE,
+            dim_k=K_TILE,
+            dim_n=N_TILE,
+            band_m=T_MA,
+            chunk_k=CT_MAX_K,
+            out_chunk=CT_OUT_LEN,
+            c_depth=C_DEPTH,
+            # 8x8x8 on both architectures: AIE2P lowers it onto one bfp16 mac
+            # or two bf16 ones, AIE2 onto four native bf16 macs.
+            mmul_shape=(R, S, T),
+            bfp16_b=self.bfp16_b,
+            b_col_maj=self.b_col_maj,
+            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+            epilogue_modes=tuple(str(m) for m in modes),
+            rounding=str(self.rounding),
+            gelu=str(self.gelu),
+        )
+        acc_init = kernel.mm_fused_acc_init
+        k_step = kernel.mm_fused_k_step
+        epilogue_chunk = kernel.mm_fused_epilogue_chunk
+
+        # These turn a row-major DDR tile into the blocked layout the mmul
+        # indexes. A mismatch is silently wrong, not a build error.
+        gather_dims = TensorAccessPattern.full((M_TILE, N_TILE)).tile((R, T))
+        a_bands = M_CHUNK * M_TILE // R
+        a_recv_dims = TensorAccessPattern.full((a_bands, K_TILE // S, R, S)).permute(
+            (0, 2, 1, 3)
+        )
+        # Emits (b_iter, mc, band): the order the core acquires A in while
+        # holding a B chunk across the group.
+        # A mem tile's run is bounded in elements; one past the wrap splits.
+        run, wrap = R * CT_MAX_K, (1 << self.dev.get_dma_bd_wrap_bits(0, 1)) - 1
+        a_lo = max(d for d in range(1, min(run, wrap) + 1) if run % d == 0)
+        a_hi = run // a_lo
+        a_send_dims = TensorAccessPattern.full(
+            (a_bands, B_ITERS, R * CT_MAX_K)
+        ).permute((1, 0, 2))
+        if a_hi > 1:
+            a_send_dims = a_send_dims.split(2, a_lo)
+
+        # Column c and row r name logical tiles, and the placer decides
+        # where each lands; only C's shim ends are pinned (below). One object
+        # per logical tile, since tiles are told apart by identity. Typed up
+        # front: Flow reads tile_type to find its shim end, and nothing else
+        # stamps these.
+        shim_tiles = [Tile(tile_type=AIETileType.ShimNOCTile) for _ in range(COLS)]
+        mt_tiles = [Tile(tile_type=AIETileType.MemTile) for _ in range(COLS)]
+        ct_tiles = [
+            [Tile(tile_type=AIETileType.CoreTile) for _ in range(COLS)]
+            for _ in range(ROWS)
+        ]
+
+        # C: one join per column; each of the ROWS cores drops its slice at
+        # its own offset in a single memtile buffer.
+        c_l2l3_fifos, c_prod = [], {}
+        for c in range(COLS):
+            of_c = ObjectFifo(mt_out_ty, depth=C_DEPTH)
+            c_l2l3_fifos.append(of_c)
+            sub = of_c.prod().join(
+                [C_SLICE_LEN * r for r in range(ROWS)],
+                tile=mt_tiles[c],
+                obj_types=[ct_out_ty] * ROWS,
+                from_stream=[gather_dims] * ROWS,
             )
-            B_GROUP = bfp.BLOCK if self.bfp16_b else 1  # B values per element
-            L1_B_DEPTH, K_TILE = self.l1_b_depth, self.k_tile
-            RHO = M_TILE // T_MA
-            CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
-            CT_A_OBJ = CT_A_LEN * (T_MA // R // 2)  # every z slice of one mmul
-            C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
-            O_CHUNKS = C_SLICE_LEN // CT_OUT_LEN  # C objects an accumulator drains as
-            B_ITERS = K_TILE // CT_MAX_K  # B chunks consumed per k step
-            # Under a row bound the cores read the units it reaches: from the
-            # scratchpad on a full ELF, else from their parameter buffer.
-            bounded = self.valid.per_call
-            tm = get_target_model(self.dev.resolve())
-
-            bf16_ty = np.dtype[bfloat16]
-            f32 = np.dtype[np.float32]
-            b_elem_ty = np.dtype[self.b_dtype]
-            # L1 (per compute tile)
-            ct_a_obj_ty = np.ndarray[(CT_A_OBJ,), bf16_ty]
-            ct_b_ty = np.ndarray[(CT_MAX_K * N_TILE // B_GROUP,), b_elem_ty]
-            ct_out_ty = np.ndarray[(CT_OUT_LEN,), bf16_ty]
-            ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
-            # L2 (per memtile): the declared stream tiles.
-            mt_a_ty = self.A.obj_type
-            mt_out_ty = self.C.obj_type
-
-            # Every field that changes the object reaches the factory, so its
-            # object name keys the build. The activation is absent: the cores
-            # select it at run time from the compiled-in modes, and mode 0 is
-            # always compiled in, since the kernel falls back to it. Under
-            # asymmetric tile buffering the k step takes the A band index, as the
-            # core folds RHO A bands into one accumulator.
-            modes = _compiled_modes(self.epilogue_modes)
-            kernel = fused_mm(
-                dim_m=M_TILE,
-                dim_k=K_TILE,
-                dim_n=N_TILE,
-                band_m=T_MA,
-                chunk_k=CT_MAX_K,
-                out_chunk=CT_OUT_LEN,
-                c_depth=C_DEPTH,
-                # 8x8x8 on both architectures: AIE2P lowers it onto one bfp16 mac
-                # or two bf16 ones, AIE2 onto four native bf16 macs.
-                mmul_shape=(R, S, T),
-                bfp16_b=self.bfp16_b,
-                b_col_maj=self.b_col_maj,
-                emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
-                epilogue_modes=tuple(str(m) for m in modes),
-                rounding=str(self.rounding),
-                gelu=str(self.gelu),
-            )
-            acc_init = kernel.mm_fused_acc_init
-            k_step = kernel.mm_fused_k_step
-            epilogue_chunk = kernel.mm_fused_epilogue_chunk
-
-            # These turn a row-major DDR tile into the blocked layout the mmul
-            # indexes. A mismatch is silently wrong, not a build error.
-            gather_dims = TensorAccessPattern.full((M_TILE, N_TILE)).tile((R, T))
-            a_bands = M_CHUNK * M_TILE // R
-            a_recv_dims = TensorAccessPattern.full(
-                (a_bands, K_TILE // S, R, S)
-            ).permute((0, 2, 1, 3))
-            # Emits (b_iter, mc, band): the order the core acquires A in while
-            # holding a B chunk across the group.
-            # A mem tile's run is bounded in elements; one past the wrap splits.
-            run, wrap = R * CT_MAX_K, (1 << self.dev.get_dma_bd_wrap_bits(0, 1)) - 1
-            a_lo = max(d for d in range(1, min(run, wrap) + 1) if run % d == 0)
-            a_hi = run // a_lo
-            a_send_dims = TensorAccessPattern.full(
-                (a_bands, B_ITERS, R * CT_MAX_K)
-            ).permute((1, 0, 2))
-            if a_hi > 1:
-                a_send_dims = a_send_dims.split(2, a_lo)
-
-            # Column c and row r name logical tiles, and the placer decides
-            # where each lands; only C's shim ends are pinned (below). One object
-            # per logical tile, since tiles are told apart by identity. Typed up
-            # front: Flow reads tile_type to find its shim end, and nothing else
-            # stamps these.
-            shim_tiles = [Tile(tile_type=AIETileType.ShimNOCTile) for _ in range(COLS)]
-            mt_tiles = [Tile(tile_type=AIETileType.MemTile) for _ in range(COLS)]
-            ct_tiles = [
-                [Tile(tile_type=AIETileType.CoreTile) for _ in range(COLS)]
-                for _ in range(ROWS)
-            ]
-
-            # C: one join per column; each of the ROWS cores drops its slice at
-            # its own offset in a single memtile buffer.
-            c_l2l3_fifos, c_prod = [], {}
-            for c in range(COLS):
-                of_c = ObjectFifo(mt_out_ty, depth=C_DEPTH)
-                c_l2l3_fifos.append(of_c)
-                sub = of_c.prod().join(
-                    [C_SLICE_LEN * r for r in range(ROWS)],
-                    tile=mt_tiles[c],
-                    obj_types=[ct_out_ty] * ROWS,
-                    from_stream=[gather_dims] * ROWS,
-                )
-                for r in range(ROWS):
-                    c_prod[(r, c)] = sub[r]
-
-            # A: shim -> memtile -> broadcast along the compute row, reblocking on
-            # the forward(). One fifo per row even at M_CHUNK > 1: a second would
-            # want a third core input DMA channel, and a tile has two.
-            a_l3l2_fifos, a_cons = [], {}
             for r in range(ROWS):
-                of_a_in = ObjectFifo(mt_a_ty, depth=A_DEPTH)
-                a_l3l2_fifos.append(of_a_in)
-                of_a = of_a_in.cons(from_stream=a_recv_dims).forward(
-                    tile=mt_tiles[r * COLS // ROWS],
-                    obj_type=ct_a_obj_ty,
-                    depth=A_DEPTH,
-                    to_stream=a_send_dims,
-                )
-                for c in range(COLS):
-                    a_cons[(r, c)] = of_a.cons()
+                c_prod[(r, c)] = sub[r]
 
-            # B: shim -> memtile slot pool -> broadcast down the compute column,
-            # over explicit flows, buffers and locks. The flows name no channel:
-            # the compiler assigns them around A and C, and the DMA programs below
-            # run on each flow's endpoint rather than an index. Everything
-            # declared here is shape-independent, so it lives in the shared
-            # xclbin. What varies per shape -- how the slots are filled and
-            # replayed -- is the sequence's BD programming.
-            #
-            # The pool takes what the memtile has left once A and C are placed,
-            # capped at B_MAX_SLOTS. Budgeted as if every memtile held an A
-            # forward, though only every (COLS // ROWS)-th does, so a slot count
-            # is the same on every column.
-            b_slot_elems = K_TILE * N_TILE // B_GROUP
-            b_slot_bytes = _b_bytes(K_TILE * N_TILE, self.bfp16_b)
-            mt_free = (
-                tm.get_mem_tile_size()
-                - A_DEPTH * M_CHUNK * M_TILE * K_TILE * 2
-                - C_DEPTH * C_SLICE_LEN * ROWS * 2
+        # A: shim -> memtile -> broadcast along the compute row, reblocking on
+        # the forward(). One fifo per row even at M_CHUNK > 1: a second would
+        # want a third core input DMA channel, and a tile has two.
+        a_l3l2_fifos, a_cons = [], {}
+        for r in range(ROWS):
+            of_a_in = ObjectFifo(mt_a_ty, depth=A_DEPTH)
+            a_l3l2_fifos.append(of_a_in)
+            of_a = of_a_in.cons(from_stream=a_recv_dims).forward(
+                tile=mt_tiles[r * COLS // ROWS],
+                obj_type=ct_a_obj_ty,
+                depth=A_DEPTH,
+                to_stream=a_send_dims,
             )
-            B_SLOTS = min(B_MAX_SLOTS, mt_free // b_slot_bytes)
-            if B_SLOTS < 1:
-                raise ValueError(
-                    f"flm.ProjectionGEMM: tile_n ({N_TILE}) leaves no room for a "
-                    f"{b_slot_bytes}-byte B slot in the memtile; {mt_free} bytes "
-                    f"remain after A and C"
-                )
-            b_mt_ty = np.ndarray[(B_SLOTS * b_slot_elems,), b_elem_ty]
-            b_mt_bufs = [Buffer(b_mt_ty, tile=mt_tiles[c]) for c in range(COLS)]
-            # One lock pair per slot, not per pool: a resident slot is consumed
-            # once per unit and refilled only when all of them have, independently
-            # of the other slots, so the next column-block's refill trails the
-            # replay by one slot instead of waiting for the whole block.
-            # Buffers, flows, locks and DMAs only the sequence and descriptors
-            # reach, declared whichever columns a shape's sequence uses.
-            unrouted: list = [*b_mt_bufs]
-            b_mt_prod, b_mt_cons = [], []
             for c in range(COLS):
-                for locks in (b_mt_prod, b_mt_cons):
-                    slots = [Lock(mt_tiles[c], init=0) for _ in range(B_SLOTS)]
-                    locks.append(slots)
-                    unrouted += slots
-            b_shim_flows = [Flow(shim_tiles[c], mt_tiles[c]) for c in range(COLS)]
-            unrouted += b_shim_flows
-            # One source, ROWS destinations: a circuit-switched broadcast.
-            b_bcast_flows = [
-                Flow(mt_tiles[c], [ct_tiles[r][c] for r in range(ROWS)])
+                a_cons[(r, c)] = of_a.cons()
+
+        # B: shim -> memtile slot pool -> broadcast down the compute column,
+        # over explicit flows, buffers and locks. The flows name no channel:
+        # the compiler assigns them around A and C, and the DMA programs below
+        # run on each flow's endpoint rather than an index. Everything
+        # declared here is shape-independent, so it lives in the shared
+        # xclbin. What varies per shape -- how the slots are filled and
+        # replayed -- is the sequence's BD programming.
+        #
+        # The pool takes what the memtile has left once A and C are placed,
+        # capped at B_MAX_SLOTS. Budgeted as if every memtile held an A
+        # forward, though only every (COLS // ROWS)-th does, so a slot count
+        # is the same on every column.
+        b_slot_elems = K_TILE * N_TILE // B_GROUP
+        b_slot_bytes = _b_bytes(K_TILE * N_TILE, self.bfp16_b)
+        mt_free = (
+            tm.get_mem_tile_size()
+            - A_DEPTH * M_CHUNK * M_TILE * K_TILE * 2
+            - C_DEPTH * C_SLICE_LEN * ROWS * 2
+        )
+        B_SLOTS = min(B_MAX_SLOTS, mt_free // b_slot_bytes)
+        if B_SLOTS < 1:
+            raise ValueError(
+                f"flm.ProjectionGEMM: tile_n ({N_TILE}) leaves no room for a "
+                f"{b_slot_bytes}-byte B slot in the memtile; {mt_free} bytes "
+                f"remain after A and C"
+            )
+        b_mt_ty = np.ndarray[(B_SLOTS * b_slot_elems,), b_elem_ty]
+        b_mt_bufs = [Buffer(b_mt_ty, tile=mt_tiles[c]) for c in range(COLS)]
+        # One lock pair per slot, not per pool: a resident slot is consumed
+        # once per unit and refilled only when all of them have, independently
+        # of the other slots, so the next column-block's refill trails the
+        # replay by one slot instead of waiting for the whole block.
+        # Buffers, flows, locks and DMAs only the sequence and descriptors
+        # reach, declared whichever columns a shape's sequence uses.
+        unrouted: list = [*b_mt_bufs]
+        b_mt_prod, b_mt_cons = [], []
+        for c in range(COLS):
+            for locks in (b_mt_prod, b_mt_cons):
+                slots = [Lock(mt_tiles[c], init=0) for _ in range(B_SLOTS)]
+                locks.append(slots)
+                unrouted += slots
+        b_shim_flows = [Flow(shim_tiles[c], mt_tiles[c]) for c in range(COLS)]
+        unrouted += b_shim_flows
+        # One source, ROWS destinations: a circuit-switched broadcast.
+        b_bcast_flows = [
+            Flow(mt_tiles[c], [ct_tiles[r][c] for r in range(ROWS)])
+            for c in range(COLS)
+        ]
+        unrouted += b_bcast_flows
+
+        # The cores' end is static: a ring of L1_B_DEPTH buffers any shape
+        # uses the same way, filled by a looping BD chain and consumed under
+        # the same prod/cons lock pair an ObjectFifo would have generated.
+        b_l1 = {}
+        for r in range(ROWS):
+            for c in range(COLS):
+                tile = ct_tiles[r][c]
+                bufs = [Buffer(ct_b_ty, tile=tile) for _ in range(L1_B_DEPTH)]
+                prod = Lock(tile, init=L1_B_DEPTH)
+                cons = Lock(tile, init=0)
+                b_l1[(r, c)] = (bufs, prod, cons)
+                unrouted += [prod, cons]
+                unrouted.append(
+                    TileDma(
+                        tile,
+                        [
+                            DmaChannel(
+                                DMAChannelDir.S2MM,
+                                b_bcast_flows[c].endpoint(tile),
+                                [
+                                    Bd(
+                                        buf,
+                                        acquires=[Acquire(prod)],
+                                        releases=[Release(cons)],
+                                        next=(d + 1) % L1_B_DEPTH,
+                                    )
+                                    for d, buf in enumerate(bufs)
+                                ],
+                            )
+                        ],
+                    )
+                )
+
+        # What sequence() programs per shape, and the limits it plans against.
+        b_pool = _BPool(
+            mt_tiles=mt_tiles,
+            bufs=b_mt_bufs,
+            prod=b_mt_prod,
+            cons=b_mt_cons,
+            shim_flows=b_shim_flows,
+            bcast_flows=b_bcast_flows,
+            slots=B_SLOTS,
+            slot_elems=b_slot_elems,
+            queue=tm.get_dma_task_queue_depth(),
+            lock_max=tm.get_max_lock_value(),
+            passes=tm.get_max_repeat_count() + 1,
+        )
+
+        # Data, not an immediate folded into the program: the core programs
+        # differ only in symbol names.
+        my_cols = [
+            [
+                Buffer(
+                    np.ndarray[(1,), np.dtype[np.int32]],
+                    initial_value=np.array([c], dtype=np.int32),
+                )
                 for c in range(COLS)
             ]
-            unrouted += b_bcast_flows
+            for r in range(ROWS)
+        ]
+        read = [
+            self.n_val,
+            self.m_row_blocks,
+            self.k_iters,
+            self.mode,
+            self.clamp_min,
+            self.clamp_max,
+        ]
+        if M_CHUNK > 1:
+            read.append(self.n_units)
+        if bounded:
+            read.append(self.units_valid)
+        rtps = [Rtp(read) for _ in range(ROWS * COLS)]
 
-            # The cores' end is static: a ring of L1_B_DEPTH buffers any shape
-            # uses the same way, filled by a looping BD chain and consumed under
-            # the same prod/cons lock pair an ObjectFifo would have generated.
-            b_l1 = {}
-            for r in range(ROWS):
-                for c in range(COLS):
-                    tile = ct_tiles[r][c]
-                    bufs = [Buffer(ct_b_ty, tile=tile) for _ in range(L1_B_DEPTH)]
-                    prod = Lock(tile, init=L1_B_DEPTH)
-                    cons = Lock(tile, init=0)
-                    b_l1[(r, c)] = (bufs, prod, cons)
-                    unrouted += [prod, cons]
-                    unrouted.append(
-                        TileDma(
-                            tile,
-                            [
-                                DmaChannel(
-                                    DMAChannelDir.S2MM,
-                                    b_bcast_flows[c].endpoint(tile),
-                                    [
-                                        Bd(
-                                            buf,
-                                            acquires=[Acquire(prod)],
-                                            releases=[Release(cons)],
-                                            next=(d + 1) % L1_B_DEPTH,
-                                        )
-                                        for d, buf in enumerate(bufs)
-                                    ],
-                                )
-                            ],
-                        )
-                    )
+        def core_fn(
+            accs,
+            o_h,
+            b_bufs,
+            b_prod,
+            b_cons,
+            a_h,
+            init_k,
+            kstep_k,
+            epi_k,
+            rtp,
+            my_col,
+        ):
+            """Core body. Every trip count and the activation come from the
+            runtime parameters, so one core program serves every shape.
+            """
+            # Safe to re-arm before the work: the sequence cannot open the
+            # barrier again until this dispatch's C drains.
+            words = rtp.read()
+            # Derived rather than sent, saving an RTP word: column c has work
+            # in block j iff (j*COLS + c)*N_TILE < N. Both divisors are powers
+            # of two, so this must leave no __divsi3; check the .o.
+            n_tiles = words[self.n_val] // N_TILE
+            n_work = (n_tiles - my_col[0] + COLS - 1) // COLS
+            n_drain = ((n_tiles + COLS - 1) // COLS) - n_work
+            n_row_blocks = words[self.m_row_blocks]
+            n_k_iters = words[self.k_iters]
+            epi_mode = words[self.mode]
+            clamp_min_bits = words[self.clamp_min]
+            clamp_max_bits = words[self.clamp_max]
+            n_units_rt = words[self.n_units] if M_CHUNK > 1 else n_row_blocks
+            # Bounded, m_chunk is 1: a unit is a chunk.
+            n_live = words[self.units_valid] if bounded else n_units_rt
 
-            # What sequence() programs per shape, and the limits it plans against.
-            b_pool = _BPool(
-                mt_tiles=mt_tiles,
-                bufs=b_mt_bufs,
-                prod=b_mt_prod,
-                cons=b_mt_cons,
-                shim_flows=b_shim_flows,
-                bcast_flows=b_bcast_flows,
-                slots=B_SLOTS,
-                slot_elems=b_slot_elems,
-                queue=tm.get_dma_task_queue_depth(),
-                lock_max=tm.get_max_lock_value(),
-                passes=tm.get_max_repeat_count() + 1,
-            )
+            def sweep(group):
+                """One k reduction feeding ``group`` accumulators off a shared B."""
+                for a_acc in group:
+                    init_k(a_acc)
+                for _ in range_(n_k_iters):
+                    # Unrolled by the ring depth, so each buffer is a fixed
+                    # symbol. The DMA's ring and this walk stay in step
+                    # because a k step consumes B_ITERS chunks, which the
+                    # depth divides.
+                    for _ in range_(B_ITERS // L1_B_DEPTH):
+                        for b in b_bufs:
+                            b_cons.acquire(1)
+                            for a_acc in group:
+                                for band in range(RHO):
+                                    a = a_h.acquire(1)
+                                    kstep_k(a, b, a_acc, band)
+                                    a_h.release(1)
+                            b_prod.release(1)
+                # Unrolled by C_DEPTH; a full O_CHUNKS unroll overflows
+                # program memory.
+                for a_acc in group:
+                    for chunk in range_(O_CHUNKS // C_DEPTH):
+                        for half in range(C_DEPTH):
+                            o = o_h.acquire(1)
+                            epi_k(
+                                o,
+                                a_acc,
+                                chunk,
+                                half,
+                                epi_mode,
+                                clamp_min_bits,
+                                clamp_max_bits,
+                            )
+                            o_h.release(1)
 
-            # Data, not an immediate folded into the program: the core programs
-            # differ only in symbol names.
-            my_cols = [
-                [
-                    Buffer(
-                        np.ndarray[(1,), np.dtype[np.int32]],
-                        initial_value=np.array([c], dtype=np.int32),
-                    )
-                    for c in range(COLS)
-                ]
-                for r in range(ROWS)
-            ]
-            read = [
-                self.n_val,
-                self.m_row_blocks,
-                self.k_iters,
-                self.mode,
-                self.clamp_min,
-                self.clamp_max,
-            ]
-            if M_CHUNK > 1:
-                read.append(self.n_units)
-            if bounded:
-                read.append(self.units_valid)
-            rtps = [Rtp(read) for _ in range(ROWS * COLS)]
-
-            def core_fn(
-                accs,
-                o_h,
-                b_bufs,
-                b_prod,
-                b_cons,
-                a_h,
-                init_k,
-                kstep_k,
-                epi_k,
-                rtp,
-                my_col,
-            ):
-                """Core body. Every trip count and the activation come from the
-                runtime parameters, so one core program serves every shape.
-                """
-                # Safe to re-arm before the work: the sequence cannot open the
-                # barrier again until this dispatch's C drains.
-                words = rtp.read()
-                # Derived rather than sent, saving an RTP word: column c has work
-                # in block j iff (j*COLS + c)*N_TILE < N. Both divisors are powers
-                # of two, so this must leave no __divsi3; check the .o.
-                n_tiles = words[self.n_val] // N_TILE
-                n_work = (n_tiles - my_col[0] + COLS - 1) // COLS
-                n_drain = ((n_tiles + COLS - 1) // COLS) - n_work
-                n_row_blocks = words[self.m_row_blocks]
-                n_k_iters = words[self.k_iters]
-                epi_mode = words[self.mode]
-                clamp_min_bits = words[self.clamp_min]
-                clamp_max_bits = words[self.clamp_max]
-                n_units_rt = words[self.n_units] if M_CHUNK > 1 else n_row_blocks
-                # Bounded, m_chunk is 1: a unit is a chunk.
-                n_live = words[self.units_valid] if bounded else n_units_rt
-
-                def sweep(group):
-                    """One k reduction feeding ``group`` accumulators off a shared B."""
-                    for a_acc in group:
-                        init_k(a_acc)
-                    for _ in range_(n_k_iters):
-                        # Unrolled by the ring depth, so each buffer is a fixed
-                        # symbol. The DMA's ring and this walk stay in step
-                        # because a k step consumes B_ITERS chunks, which the
-                        # depth divides.
-                        for _ in range_(B_ITERS // L1_B_DEPTH):
-                            for b in b_bufs:
-                                b_cons.acquire(1)
-                                for a_acc in group:
-                                    for band in range(RHO):
-                                        a = a_h.acquire(1)
-                                        kstep_k(a, b, a_acc, band)
-                                        a_h.release(1)
-                                b_prod.release(1)
-                    # Unrolled by C_DEPTH; a full O_CHUNKS unroll overflows
-                    # program memory.
-                    for a_acc in group:
-                        for chunk in range_(O_CHUNKS // C_DEPTH):
-                            for half in range(C_DEPTH):
-                                o = o_h.acquire(1)
-                                epi_k(
-                                    o,
-                                    a_acc,
-                                    chunk,
-                                    half,
-                                    epi_mode,
-                                    clamp_min_bits,
-                                    clamp_max_bits,
-                                )
-                                o_h.release(1)
-
-                for _ in range_(n_work):
-                    # A unit past the bound has its B replay all the same; every
-                    # replay is the same B, so those go first and the call's
-                    # last C still comes after the cores' last acquire.
-                    if bounded:
-                        for _ in range_(n_units_rt - n_live):
-                            for _ in range_(n_k_iters):
-                                for _ in range_(B_ITERS // L1_B_DEPTH):
-                                    for _ in b_bufs:
-                                        b_cons.acquire(1)
-                                        b_prod.release(1)
-                    for _ in range_(n_live):
-                        sweep(accs)
-
-                # Column-blocks this column sits out. A is broadcast along the
-                # row, so it must still consume its share or the columns that do
-                # have work stall on the fifo. No B and no C; the sequence issues
-                # neither.
-                for _ in range_(n_drain):
-                    for _ in range_(n_live):
+            for _ in range_(n_work):
+                # A unit past the bound has its B replay all the same; every
+                # replay is the same B, so those go first and the call's
+                # last C still comes after the cores' last acquire.
+                if bounded:
+                    for _ in range_(n_units_rt - n_live):
                         for _ in range_(n_k_iters):
                             for _ in range_(B_ITERS // L1_B_DEPTH):
-                                for _ in range(L1_B_DEPTH):
-                                    for _ in range(M_CHUNK * RHO):
-                                        a_h.acquire(1)
-                                        a_h.release(1)
+                                for _ in b_bufs:
+                                    b_cons.acquire(1)
+                                    b_prod.release(1)
+                for _ in range_(n_live):
+                    sweep(accs)
 
-            workers = []
-            for r in range(ROWS):
-                for c in range(COLS):
-                    accs = [Buffer(type=ct_acc_ty) for _ in range(M_CHUNK)]
-                    b_bufs, b_prod, b_cons = b_l1[(r, c)]
-                    workers.append(
-                        Worker(
-                            core_fn,
-                            [
-                                accs,
-                                c_prod[(r, c)].prod(),
-                                b_bufs,
-                                b_prod,
-                                b_cons,
-                                a_cons[(r, c)],
-                                acc_init,
-                                k_step,
-                                epilogue_chunk,
-                                rtps[r * COLS + c],
-                                my_cols[r][c],
-                            ],
-                            tile=ct_tiles[r][c],
-                            stack_size=STACK_SIZE,
-                        )
+            # Column-blocks this column sits out. A is broadcast along the
+            # row, so it must still consume its share or the columns that do
+            # have work stall on the fifo. No B and no C; the sequence issues
+            # neither.
+            for _ in range_(n_drain):
+                for _ in range_(n_live):
+                    for _ in range_(n_k_iters):
+                        for _ in range_(B_ITERS // L1_B_DEPTH):
+                            for _ in range(L1_B_DEPTH):
+                                for _ in range(M_CHUNK * RHO):
+                                    a_h.acquire(1)
+                                    a_h.release(1)
+
+        workers = []
+        for r in range(ROWS):
+            for c in range(COLS):
+                accs = [Buffer(type=ct_acc_ty) for _ in range(M_CHUNK)]
+                b_bufs, b_prod, b_cons = b_l1[(r, c)]
+                workers.append(
+                    Worker(
+                        core_fn,
+                        [
+                            accs,
+                            c_prod[(r, c)].prod(),
+                            b_bufs,
+                            b_prod,
+                            b_cons,
+                            a_cons[(r, c)],
+                            acc_init,
+                            k_step,
+                            epilogue_chunk,
+                            rtps[r * COLS + c],
+                            my_cols[r][c],
+                        ],
+                        tile=ct_tiles[r][c],
+                        stack_size=STACK_SIZE,
                     )
+                )
 
-            self.A.bind([f.prod() for f in a_l3l2_fifos])
-            self.B.bind(b_shim_flows)
-            # C's drains on column c's shim, as the shared image has them: where
-            # the placer chose, a shape whose transfers differ would move them.
-            self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in enumerate(c_l2l3_fifos)])
-            return _Built(workers + unrouted, rtps, b_pool=b_pool)
+        self.A.bind([f.prod() for f in a_l3l2_fifos])
+        self.B.bind(b_shim_flows)
+        # C's drains on column c's shim, as the shared image has them: where
+        # the placer chose, a shape whose transfers differ would move them.
+        self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in enumerate(c_l2l3_fifos)])
+        return _Built(workers + unrouted, rtps, b_pool=b_pool)
 
     @property
     def _m_row_blocks(self) -> int:

@@ -551,7 +551,7 @@ def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(
         return f"{array.tile_m}x{array.tile_k}x{array.tile_n}"
 
     monkeypatch.setattr(
-        GEMM.Array, "matmul", lambda self: type("K", (), {"recipe_key": key(self)})
+        GEMM, "matmul", lambda self: type("K", (), {"recipe_key": key(self)})
     )
     ran = []
 

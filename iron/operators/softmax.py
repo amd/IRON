@@ -31,8 +31,8 @@ _STREAMED_ROWS = 48
 
 
 def _kernel(op, n: int):
-    """The softmax factory over rows of ``n``, with ``op``'s (a Softmax's or
-    its Array's) float32 options: banded, or with a pre-cap addend.
+    """The softmax factory over rows of ``n``, with Softmax ``op``'s float32
+    options: banded, or with a pre-cap addend.
     """
     options = dict(input_dtype=op.input_dtype, soft_cap=op.soft_cap)
     if op.window is not None:
@@ -248,212 +248,201 @@ class Softmax(Operator):
     def extent_unit(self, buffer: str) -> int:
         return 0  # no tiles-per-lane word: the sequence bounds the blocks itself
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            n_cores = self.num_aie_columns * self.num_channels
-            rows_per_core = self.rows // n_cores
-            block = self.block
-            if np.dtype(self.input_dtype) == np.dtype(np.float32):
-                if self.window is not None:
-                    return self._build_f32_banded(n_cores, rows_per_core, block)
-                return self._build_f32(n_cores, rows_per_core, block)
-            tile_ty = self.x.obj_type
-            softmax_k = _kernel(self, block)
-            # The blocked passes and mask_bf16 are exported by the same softmax.cc.
-            obj = softmax_k.object_file
-            mask_k = obj.bind("mask_bf16", [tile_ty, np.int32, np.int32])
-            zero_k = zero(block, ml_dtypes.bfloat16)
-            state_ty = np.ndarray[(_STATE,), np.dtype[np.float32]]
-            of_ins = [ObjectFifo(tile_ty) for k in range(n_cores)]
-            of_outs = [ObjectFifo(tile_ty) for k in range(n_cores)]
-            counts = (
-                [self.valid_cols, self.blocks] if self.streamed else [self.valid_cols]
+    def build(self) -> Built:
+        n_cores = self.num_aie_columns * self.num_channels
+        rows_per_core = self.rows // n_cores
+        block = self.block
+        if np.dtype(self.input_dtype) == np.dtype(np.float32):
+            if self.window is not None:
+                return self._build_f32_banded(n_cores, rows_per_core, block)
+            return self._build_f32(n_cores, rows_per_core, block)
+        tile_ty = self.x.obj_type
+        softmax_k = _kernel(self, block)
+        # The blocked passes and mask_bf16 are exported by the same softmax.cc.
+        obj = softmax_k.object_file
+        mask_k = obj.bind("mask_bf16", [tile_ty, np.int32, np.int32])
+        zero_k = zero(block, ml_dtypes.bfloat16)
+        state_ty = np.ndarray[(_STATE,), np.dtype[np.float32]]
+        of_ins = [ObjectFifo(tile_ty) for k in range(n_cores)]
+        of_outs = [ObjectFifo(tile_ty) for k in range(n_cores)]
+        counts = [self.valid_cols, self.blocks] if self.streamed else [self.valid_cols]
+        rtps = [Rtp(counts) for _ in range(n_cores)]
+
+        def whole(of_in, of_out, softmax, mask, zero, rtp):
+            valid = rtp.read()[self.valid_cols]
+            span = arith.minsi(
+                (valid + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
+                arith.constant(block, valid.type),
             )
-            rtps = [Rtp(counts) for _ in range(n_cores)]
+            for _ in range_(rows_per_core):
+                elem_in = of_in.acquire(1)
+                elem_out = of_out.acquire(1)
+                zero(elem_out)
+                mask(elem_in, valid, span)
+                softmax(elem_in, elem_out, span)
+                of_in.release(1)
+                of_out.release(1)
 
-            def whole(of_in, of_out, softmax, mask, zero, rtp):
-                valid = rtp.read()[self.valid_cols]
-                span = arith.minsi(
-                    (valid + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
-                    arith.constant(block, valid.type),
-                )
-                for _ in range_(rows_per_core):
-                    elem_in = of_in.acquire(1)
-                    elem_out = of_out.acquire(1)
-                    zero(elem_out)
-                    mask(elem_in, valid, span)
-                    softmax(elem_in, elem_out, span)
-                    of_in.release(1)
-                    of_out.release(1)
-
-            def streamed(
-                of_in, of_out, row_max, row_sum, row_scale, mask, zero, rtp, *states
-            ):
-                # Blocks arrive across the core's rows: each row carries its own state.
-                words = rtp.read()
-                valid, blocks = words[self.valid_cols], words[self.blocks]
-                i32 = valid.type
-                for step in range(3):
-                    for b in range_(blocks):
-                        b32 = arith.index_cast(b, to=i32)
-                        in_block = arith.minsi(
-                            valid - b32 * block, arith.constant(block, i32)
-                        )
-                        span = arith.minsi(
-                            (in_block + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
-                            arith.constant(block, i32),
-                        )
-                        for state in states:
-                            elem_in = of_in.acquire(1)
-                            mask(elem_in, in_block, span)
-                            if step == 0:
-                                row_max(
-                                    elem_in, state, arith.extui(i32, b32 == 0), span
-                                )
-                            elif step == 1:
-                                row_sum(elem_in, state, span)
-                            else:
-                                elem_out = of_out.acquire(1)
-                                zero(elem_out)
-                                row_scale(elem_in, elem_out, state, span)
-                                of_out.release(1)
-                            of_in.release(1)
-
-            if self.streamed:
-                kernels = [
-                    obj.bind(
-                        "softmax_max_bf16", [tile_ty, state_ty, np.int32, np.int32]
-                    ),
-                    obj.bind("softmax_sum_bf16", [tile_ty, state_ty, np.int32]),
-                    obj.bind(
-                        "softmax_scale_bf16", [tile_ty, tile_ty, state_ty, np.int32]
-                    ),
-                ]
-                workers = [
-                    Worker(
-                        streamed,
-                        [of_ins[k].cons(), of_outs[k].prod(), *kernels, mask_k, zero_k]
-                        + [rtps[k]]
-                        + [Buffer(state_ty) for r in range(rows_per_core)],
+        def streamed(
+            of_in, of_out, row_max, row_sum, row_scale, mask, zero, rtp, *states
+        ):
+            # Blocks arrive across the core's rows: each row carries its own state.
+            words = rtp.read()
+            valid, blocks = words[self.valid_cols], words[self.blocks]
+            i32 = valid.type
+            for step in range(3):
+                for b in range_(blocks):
+                    b32 = arith.index_cast(b, to=i32)
+                    in_block = arith.minsi(
+                        valid - b32 * block, arith.constant(block, i32)
                     )
-                    for k in range(n_cores)
-                ]
-            else:
-                workers = [
-                    Worker(
-                        whole,
-                        [
-                            of_ins[k].cons(),
-                            of_outs[k].prod(),
-                            softmax_k,
-                            mask_k,
-                            zero_k,
-                            rtps[k],
-                        ],
+                    span = arith.minsi(
+                        (in_block + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
+                        arith.constant(block, i32),
                     )
-                    for k in range(n_cores)
-                ]
-            self.x.bind([f.prod() for f in of_ins])
-            self.y.bind([f.cons() for f in of_outs])
-            return Built(workers, rtps)
+                    for state in states:
+                        elem_in = of_in.acquire(1)
+                        mask(elem_in, in_block, span)
+                        if step == 0:
+                            row_max(elem_in, state, arith.extui(i32, b32 == 0), span)
+                        elif step == 1:
+                            row_sum(elem_in, state, span)
+                        else:
+                            elem_out = of_out.acquire(1)
+                            zero(elem_out)
+                            row_scale(elem_in, elem_out, state, span)
+                            of_out.release(1)
+                        of_in.release(1)
 
-        def _build_f32(self, n_cores: int, rows_per_core: int, block: int) -> Built:
-            """The float32 input path: a row held whole, one call to
-            ``softmax_f32_bf16`` a row, its ``n`` bound to ``block`` at build time.
-            """
-            softmax_k = _kernel(self, block)
-            of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
-            of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
-            of_addends = (
-                [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
-                if self.has_addend
-                else None
-            )
-
-            def whole(of_in, of_out, softmax, *rest):
-                of_addend = rest[0] if self.has_addend else None
-                for _ in range_(rows_per_core):
-                    elem_in = of_in.acquire(1)
-                    args = [elem_in]
-                    if of_addend is not None:
-                        args.append(of_addend.acquire(1))
-                    elem_out = of_out.acquire(1)
-                    softmax(*args, elem_out, block)
-                    of_in.release(1)
-                    if of_addend is not None:
-                        of_addend.release(1)
-                    of_out.release(1)
-
+        if self.streamed:
+            kernels = [
+                obj.bind("softmax_max_bf16", [tile_ty, state_ty, np.int32, np.int32]),
+                obj.bind("softmax_sum_bf16", [tile_ty, state_ty, np.int32]),
+                obj.bind("softmax_scale_bf16", [tile_ty, tile_ty, state_ty, np.int32]),
+            ]
             workers = [
                 Worker(
-                    whole,
-                    [of_ins[k].cons(), of_outs[k].prod(), softmax_k]
-                    + ([of_addends[k].cons()] if of_addends else []),
+                    streamed,
+                    [of_ins[k].cons(), of_outs[k].prod(), *kernels, mask_k, zero_k]
+                    + [rtps[k]]
+                    + [Buffer(state_ty) for r in range(rows_per_core)],
                 )
                 for k in range(n_cores)
             ]
-            self.x.bind([f.prod() for f in of_ins])
-            self.y.bind([f.cons() for f in of_outs])
-            if of_addends is not None:
-                self.addend.bind([f.prod() for f in of_addends])
-            return Built(workers)
-
-        def _build_f32_banded(
-            self, n_cores: int, rows_per_core: int, block: int
-        ) -> Built:
-            """The float32 banded path: one row a call, a real device loop (its
-            row count does not grow the core's code, unlike a resident mask's
-            row-by-row ``Buffer``s would), to ``softmax_rows_banded_f32_bf16``.
-            The band comes from ``window``, ``period`` and the row's own
-            position (the core's ``row_offset`` plus the loop index) computed
-            in the kernel, so there is no mask operand.
-            """
-            banded_k = _kernel(self, block)
-            of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
-            of_addends = [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
-            of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
-
-            def _whole(core_offset):
-                def whole(of_in, of_addend, of_out, fn):
-                    i32 = np_dtype_to_mlir_type(np.int32)
-                    for r in range_(rows_per_core):
-                        elem_in = of_in.acquire(1)
-                        elem_addend = of_addend.acquire(1)
-                        elem_out = of_out.acquire(1)
-                        r32 = arith.index_cast(r, to=i32)
-                        row_offset = arith.addi(r32, arith.constant(core_offset, i32))
-                        fn(
-                            elem_in,
-                            elem_addend,
-                            elem_out,
-                            1,
-                            block,
-                            self.window,
-                            self.period,
-                            row_offset,
-                        )
-                        of_in.release(1)
-                        of_addend.release(1)
-                        of_out.release(1)
-
-                return whole
-
+        else:
             workers = [
                 Worker(
-                    _whole(k * rows_per_core),
+                    whole,
                     [
                         of_ins[k].cons(),
-                        of_addends[k].cons(),
                         of_outs[k].prod(),
-                        banded_k,
+                        softmax_k,
+                        mask_k,
+                        zero_k,
+                        rtps[k],
                     ],
                 )
                 for k in range(n_cores)
             ]
-            self.x.bind([f.prod() for f in of_ins])
+        self.x.bind([f.prod() for f in of_ins])
+        self.y.bind([f.cons() for f in of_outs])
+        return Built(workers, rtps)
+
+    def _build_f32(self, n_cores: int, rows_per_core: int, block: int) -> Built:
+        """The float32 input path: a row held whole, one call to
+        ``softmax_f32_bf16`` a row, its ``n`` bound to ``block`` at build time.
+        """
+        softmax_k = _kernel(self, block)
+        of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
+        of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
+        of_addends = (
+            [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
+            if self.has_addend
+            else None
+        )
+
+        def whole(of_in, of_out, softmax, *rest):
+            of_addend = rest[0] if self.has_addend else None
+            for _ in range_(rows_per_core):
+                elem_in = of_in.acquire(1)
+                args = [elem_in]
+                if of_addend is not None:
+                    args.append(of_addend.acquire(1))
+                elem_out = of_out.acquire(1)
+                softmax(*args, elem_out, block)
+                of_in.release(1)
+                if of_addend is not None:
+                    of_addend.release(1)
+                of_out.release(1)
+
+        workers = [
+            Worker(
+                whole,
+                [of_ins[k].cons(), of_outs[k].prod(), softmax_k]
+                + ([of_addends[k].cons()] if of_addends else []),
+            )
+            for k in range(n_cores)
+        ]
+        self.x.bind([f.prod() for f in of_ins])
+        self.y.bind([f.cons() for f in of_outs])
+        if of_addends is not None:
             self.addend.bind([f.prod() for f in of_addends])
-            self.y.bind([f.cons() for f in of_outs])
-            return Built(workers)
+        return Built(workers)
+
+    def _build_f32_banded(self, n_cores: int, rows_per_core: int, block: int) -> Built:
+        """The float32 banded path: one row a call, a real device loop (its
+        row count does not grow the core's code, unlike a resident mask's
+        row-by-row ``Buffer``s would), to ``softmax_rows_banded_f32_bf16``.
+        The band comes from ``window``, ``period`` and the row's own
+        position (the core's ``row_offset`` plus the loop index) computed
+        in the kernel, so there is no mask operand.
+        """
+        banded_k = _kernel(self, block)
+        of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
+        of_addends = [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
+        of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
+
+        def _whole(core_offset):
+            def whole(of_in, of_addend, of_out, fn):
+                i32 = np_dtype_to_mlir_type(np.int32)
+                for r in range_(rows_per_core):
+                    elem_in = of_in.acquire(1)
+                    elem_addend = of_addend.acquire(1)
+                    elem_out = of_out.acquire(1)
+                    r32 = arith.index_cast(r, to=i32)
+                    row_offset = arith.addi(r32, arith.constant(core_offset, i32))
+                    fn(
+                        elem_in,
+                        elem_addend,
+                        elem_out,
+                        1,
+                        block,
+                        self.window,
+                        self.period,
+                        row_offset,
+                    )
+                    of_in.release(1)
+                    of_addend.release(1)
+                    of_out.release(1)
+
+            return whole
+
+        workers = [
+            Worker(
+                _whole(k * rows_per_core),
+                [
+                    of_ins[k].cons(),
+                    of_addends[k].cons(),
+                    of_outs[k].prod(),
+                    banded_k,
+                ],
+            )
+            for k in range(n_cores)
+        ]
+        self.x.bind([f.prod() for f in of_ins])
+        self.addend.bind([f.prod() for f in of_addends])
+        self.y.bind([f.cons() for f in of_outs])
+        return Built(workers)
 
     def sequence(self, rt):
         """Each lane's rows as ``(block, row, element)``, thrice if streamed."""

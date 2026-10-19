@@ -16,7 +16,7 @@ overlay and ``iron.operators.GEMM``.
 The constants below are the single source of truth: ``op.py`` passes them to
 the ``fused_mm`` kernel factory, so the C++ and the dataflow cannot drift apart.
 
-The array itself is ``ProjectionGEMM.Array.build`` and the runtime sequence is
+The array itself is ``ProjectionGEMM.build`` and the runtime sequence is
 ``ProjectionGEMM.sequence`` in ``op.py``; this module keeps the geometry, the L1 and
 memtile budget helpers and the parameter-buffer layout they and
 the shipped overlay (``iron/tests/common/shipped.py``) share.
@@ -88,7 +88,7 @@ def l1_budget(dev, epilogue_modes) -> int:
 #
 # Slots in the pool, each one k-block. Bounded by the BDs a memtile channel's
 # parity half has left after the static objectfifo BDs, and, below that, by
-# what the memtile has left after A and C; see ProjectionGEMM.Array.build().
+# what the memtile has left after A and C; see ProjectionGEMM.build().
 B_MAX_SLOTS = 8
 
 
