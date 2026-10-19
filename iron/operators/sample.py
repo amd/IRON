@@ -174,8 +174,9 @@ class Sample(Operator):
         return sample.sample_select(slice_size=run, chunk=chunk, k_max=self.k_max)
 
     def combine(self):
+        size, last = slices(self.vocab, self.cores, self.k_max)
         return sample.sample_combine(
-            columns=self.cores, slice_size=self.slice_size, k_max=self.k_max
+            columns=self.cores, slice_size=size, k_max=self.k_max, last_slice=last
         )
 
     def build(self) -> Built:
@@ -189,10 +190,13 @@ class Sample(Operator):
         self.token.bind(of_token.cons())
         of_record = ObjectFifo(self.tokens.obj_type, depth=self.tokens.depth)
         self.tokens.bind(of_record.cons())
-        # The summaries meet in a memtile, column 0 first; combine reads a
-        # shorter last one's ties no further than its count.
+        # The summaries meet in a memtile, column 0 first. A join input fills
+        # its object up to the next offset, so a shorter last summary ends it.
         of_summaries = ObjectFifo(
-            np.ndarray[(self.cores * words,), np.dtype[np.int32]],
+            np.ndarray[
+                (sum(sample.summary_words(run, self.k_max) for run, _ in runs),),
+                np.dtype[np.int32],
+            ],
             depth=1,
         )
         of_summary = of_summaries.prod().join(
