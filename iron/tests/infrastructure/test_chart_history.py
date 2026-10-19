@@ -27,6 +27,11 @@ TESTS = [
         "embedding_gemma2",
     ),
     ("iron/tests/lm/test_conv2d.py::test_conv2d", "case_band-share_1.0", "conv2d"),
+    (
+        "tests/applications/decoders/test.py::test_generation",
+        "gemma3-long-40",
+        "gemma3",
+    ),
 ]
 COLUMNS = ["Commit", "Date", "Test Path", "Test", "Checks", "Bench", "TTFT (mean)"]
 

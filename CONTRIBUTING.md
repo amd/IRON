@@ -75,7 +75,9 @@ Hugging Face decoders need a config and a model class; see
    once into `goldens/` beside the test by the `golden` fixture. See
    `tests/applications/qwen3/reference/test.py`. Record with
    `pytest <test> --record-goldens -p no:xdist` (transformers and torch
-   are needed only then) and commit the `.npz`. The device test goes in
+   are needed only then) and commit the `.npz`. A decoder that needs only
+   the speed, accuracy and determinism checks is a row of `DECODERS` in
+   `tests/applications/decoders/test.py`; any other device test goes in
    `tests/applications/<name>/test.py` and uses `iron.lm.testing`'s
    checks; `check_accuracy` judges the real checkpoint against the
    `golden.npz` recorded beside it. The host run uses each operator's

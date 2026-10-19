@@ -98,23 +98,27 @@ def status_emoji(passed: int, total: int, partial: bool = True) -> str:
     return "🟠" if partial else "❌"
 
 
-# The module that runs every operator declaring its cases. Its parametrize ids
-# lead with the operator: 'GEMV-cols_4-...'.
-CATALOG_TEST_FILE = "iron/tests/operators/test_catalog.py"
+# The modules whose parametrize ids lead with what they test: every declared
+# operator ('GEMV-cols_4-...') and the decoders sharing one test
+# ('gemma3-long-40').
+LEADING_ID_TEST_FILES = (
+    "iron/tests/operators/test_catalog.py",
+    "tests/applications/decoders/test.py",
+)
 
 
 def operator_name(test_path: str, test_name: str = "") -> str:
     """Name the operator a row of 'Test Path' and 'Test' belongs to.
 
     'iron/operators/flm/gemm/test.py::test_gemm' names 'flm/gemm', and
-    'tests/applications/llama/test.py::test_llama' names 'llama'. A
-    catalog row is named by its test's leading id:
+    'tests/applications/llama/test.py::test_llama' names 'llama'. A row of
+    a LEADING_ID_TEST_FILES module is named by its test's leading id:
     'iron/tests/operators/test_catalog.py::test_operator' with test
     'GEMV-cols_4' names 'GEMV'. Any other test is named by its module,
     'test_' dropped.
     """
     file_part = test_path.split("::", 1)[0]
-    if file_part == CATALOG_TEST_FILE:
+    if file_part in LEADING_ID_TEST_FILES:
         return test_name.split("-", 1)[0] or UNKNOWN_OPERATOR
     directory, _ = split_test_path(test_path)
     for prefix in ("iron/operators/", "tests/applications/"):
