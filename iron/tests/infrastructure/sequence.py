@@ -37,7 +37,7 @@ from iron.common.graph.trace import TracedGraph
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef
-from iron.common.image.packaging import Kind, dispatches_full_elf
+from iron.common.image.packaging import Kind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
@@ -122,7 +122,7 @@ def test_auto_dispatch_selects_platform_default(size):
     seq = _build_add_relu_sequence("infra_auto_add_relu")
     seq.compile()
 
-    expected = dispatches_full_elf(aie_utils.get_current_device())
+    expected = aie_utils.get_current_device().dispatches_full_elf
     assert (
         seq.full_elf == expected
     ), f"full_elf resolved to {seq.full_elf}, expected {expected} on this device"
@@ -234,7 +234,7 @@ def test_dispatch_modes_bit_identical(dispatch):
     mechanism differs. The ``separate`` mode is the baseline (it runs on every
     platform).
     """
-    if dispatch == "fused" and not dispatches_full_elf(aie_utils.get_current_device()):
+    if dispatch == "fused" and not aie_utils.get_current_device().dispatches_full_elf:
         pytest.skip("fused dispatch needs a full ELF, which this device lacks")
 
     rng = np.random.default_rng(0)
@@ -343,7 +343,7 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
     the next dispatch, and reads of a non-output buffer after a dispatch see
     what the NPU wrote there, with no explicit ``to()`` from the caller.
     """
-    if dispatch == "fused" and not dispatches_full_elf(aie_utils.get_current_device()):
+    if dispatch == "fused" and not aie_utils.get_current_device().dispatches_full_elf:
         pytest.skip("fused dispatch needs a full ELF, which this device lacks")
 
     # b is not an input, so it is held like a weight (in scratch, when fused).
@@ -433,7 +433,7 @@ def test_one_design_is_configured_once():
     """A fused sequence of one design builds no expanded load, and every
     dispatch after the first still computes on its new inputs.
     """
-    if not dispatches_full_elf(aie_utils.get_current_device()):
+    if not aie_utils.get_current_device().dispatches_full_elf:
         pytest.skip("fused dispatch needs a full ELF, which this device lacks")
     seq = _build_one_design_sequence(_relu(), "infra_fused_relu_once").compile()
     assert not _expanded_pdis(seq)
@@ -454,7 +454,7 @@ def test_one_design_reconfigures_after_another_image():
     """Two one-design images dispatched in turn each configure the array
     again after the other ran, so each still computes its own operator.
     """
-    if not dispatches_full_elf(aie_utils.get_current_device()):
+    if not aie_utils.get_current_device().dispatches_full_elf:
         pytest.skip("fused dispatch needs a full ELF, which this device lacks")
     tanh = Tanh(
         size=_ADD_RELU_SIZE,

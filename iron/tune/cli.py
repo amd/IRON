@@ -28,7 +28,7 @@ from pathlib import Path
 
 from iron import operators
 from iron.common.declare import Profile
-from iron.common.image.packaging import dispatches_full_elf, require_device
+from iron.common.image.packaging import require_device
 from .autotune import Timed, Shape, autotune, kernel_cycles, time_shape
 from .measure import Cache, Timing, pmode
 
@@ -85,7 +85,7 @@ def tune(args: argparse.Namespace, calls: Sequence[Timed], profiles: Path) -> Pa
         calls,
         dev,
         profile,
-        full_elf=dispatches_full_elf(dev),
+        full_elf=dev.dispatches_full_elf,
         cycles=kernel_cycles(dev),
         **_timing(args),
     )
@@ -134,7 +134,7 @@ def main() -> None:
     tried = time_shape(
         shape,
         dev,
-        full_elf=dispatches_full_elf(dev),
+        full_elf=dev.dispatches_full_elf,
         cycles=kernel_cycles(dev),
         **_timing(args),
     )

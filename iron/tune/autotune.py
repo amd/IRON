@@ -43,11 +43,9 @@ EXHAUSTIVE = 32
 
 FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
 
-# The fastest a core's clock may run, in cycles per us: a quarter above the
-# 1.76 GHz mlir-aie's programming guide measured on one npu2 part
-# (section-4d, "Two clocks"), so a faster part's best setting is not skipped.
-# npu1's has not been measured.
-CORE_MHZ = {"npu2": 1760.0 * 1.25}
+# The fastest a core's clock may run, over the one mlir-aie's Device
+# measured (core_mhz), so a faster part's best setting is not skipped.
+CLOCK_HEADROOM = 1.25
 
 KERNEL_CHECKS = "https://xilinx.github.io/mlir-aie/kernel-checks/{npu}/latest.json"
 
@@ -82,13 +80,12 @@ def least_us(op: GEMM, values: Mapping[str, int], cycles, dev) -> float | None:
     core's matmul calls at ``cycles`` per call. None where ``cycles`` does
     not hold its matmul or ``dev``'s core clock is unknown.
     """
-    mhz = CORE_MHZ.get(dev.name)
-    if mhz is None:
+    if dev.core_mhz is None:
         return None
     per_call = cycles.get(op.array_config().matmul().recipe_key)
     if per_call is None:
         return None
-    return op.matmul_calls(values) * per_call / mhz
+    return op.matmul_calls(values) * per_call / (dev.core_mhz * CLOCK_HEADROOM)
 
 
 @dataclasses.dataclass(frozen=True)

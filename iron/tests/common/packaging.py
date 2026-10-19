@@ -5,13 +5,13 @@
 
 import numpy as np
 import pytest
-from aie.iron.device import NPU1, NPU2, NPU1Col1, NPU2Col1, from_name
+from aie.iron.device import NPU1, NPU2, NPU1Col1, from_name
 from aie.helpers.taplib import PerCall
 
 import iron
 from iron import Carried, Scratchpad
 from iron.common.graph.trace import TracedGraph
-from iron.common.image.packaging import Kind, dispatches_full_elf, plan
+from iron.common.image.packaging import Kind, plan
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.tests.common.llama_model import small
@@ -59,8 +59,6 @@ def test_the_architecture_decides_not_the_name():
     assert plan(from_name("npu2", n_cols=4), _traced()).full_elf
     with pytest.raises(ValueError, match=r"npu1_1col \(AIE2\) has no full-ELF"):
         plan(NPU1Col1(), _traced(), full_elf=True)
-    assert dispatches_full_elf(NPU2()) and dispatches_full_elf(NPU2Col1())
-    assert not dispatches_full_elf(NPU1()) and not dispatches_full_elf(NPU1Col1())
 
 
 def test_a_forced_xclbin_is_derived_and_says_why():

@@ -16,7 +16,6 @@ import enum
 import os
 
 import aie.utils as aie_utils
-from aie.dialects.aie import AIEArch
 
 
 class Kind(enum.Enum):
@@ -83,14 +82,6 @@ def require_device():
     return dev
 
 
-def dispatches_full_elf(dev) -> bool:
-    """Whether ``dev``'s architecture dispatches a full ELF."""
-    # Inferred from source, untested on npu1: XRT sends an ELF with .pdi
-    # sections as ERT_START_NPU_PREEMPT_ELF (XRT 2.25 xrt_elf.cpp:1031), which
-    # amdxdna refuses without AIE2_PREEMPT, absent from npu1_regs.c:68-72.
-    return dev.arch is AIEArch.AIE2p
-
-
 def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan:
     """Derive the packaging for ``traced`` on the device.
 
@@ -119,7 +110,7 @@ def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan
         forced.append(
             f"{names}: a DispatchTime value; the sequence is generated per call"
         )
-    if not dispatches_full_elf(dev):
+    if not dev.dispatches_full_elf:
         forced.append(f"{dev.name} ({dev.arch}) has no full-ELF dispatch")
     if check:
         forced.append("check=True: each step its own dispatch, checked")

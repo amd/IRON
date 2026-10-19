@@ -416,6 +416,10 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `iron.common.image.packaging.dispatches_full_elf(dev)`: mlir-aie's
+  `dev.dispatches_full_elf` replaces it.
+- `iron.tune.autotune.CORE_MHZ`: the bound reads mlir-aie's `dev.core_mhz`,
+  times `CLOCK_HEADROOM`.
 - `iron.tune.measure.others` and `wait_idle`: mlir-aie's
   `aie.utils.benchmark.other_npu_users` and `wait_idle` replace them.
 - `field(probe=)`: the tuner times each distinct value of such a field, as

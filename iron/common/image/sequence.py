@@ -22,7 +22,6 @@ from .callable import BF16, FullELFCallable, ScratchArena, StepCallable
 from .coresidence import AdjacentPacking
 from .fused import FusedImage, XclbinChain
 from .fusion import ArgumentSizes
-from .packaging import dispatches_full_elf
 from .step import BufferRef, SequenceStep
 
 if TYPE_CHECKING:
@@ -341,7 +340,7 @@ class OperatorSequence:
         """Settle the packaging and lay the buffers out, before anything is built."""
         dev = aie_utils.get_current_device()
         if self.full_elf is None:
-            self.full_elf = dev is not None and dispatches_full_elf(dev)
+            self.full_elf = dev is not None and dev.dispatches_full_elf
             if self.feedback and not self.full_elf:
                 raise ValueError(
                     f"{self.name}: feedback arguments need the full ELF, which "

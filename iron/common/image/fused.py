@@ -20,7 +20,7 @@ from aie.utils.npukernel import NPUKernel
 
 from ..design import OperatorDesign
 from .fusion import Fusion
-from .packaging import dispatches_full_elf, require_device
+from .packaging import require_device
 
 
 class FusedImage:
@@ -49,7 +49,7 @@ class FusedImage:
         design = self.design
         if design is None:
             dev = require_device()
-            if not dispatches_full_elf(dev):
+            if not dev.dispatches_full_elf:
                 raise RuntimeError(
                     f"{dev.name} ({dev.arch}) does not dispatch a full ELF"
                 )
