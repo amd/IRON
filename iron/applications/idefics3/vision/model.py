@@ -25,7 +25,6 @@ from ml_dtypes import bfloat16
 import iron.functional as F
 from iron import Precision
 from iron.lm import Config, Conv2d, LayerNorm, Tower, not_json
-from iron.lm.checkpoint import renamed
 from iron.operators.copy import Copy
 
 
@@ -110,10 +109,8 @@ class VisionTower(Tower):
         self.connector = weights.model.connector
         super().__init__(c, c.side**2, c.tokens)
         self.final_norm = LayerNorm(c.hidden_size)
-        tree, v = renamed(weights, self.renames), "model.vision_model."
-        for i, layer in enumerate(self.layers):
-            layer.load_state_dict(tree, path=f"{v}encoder.layers.{i}.")
-        self.final_norm.load_state_dict(tree, path=f"{v}post_layernorm.")
+        v = "model.vision_model."
+        self.load_layers(weights, f"{v}encoder.layers.", f"{v}post_layernorm.")
         embeddings = self.vision_model.embeddings
         self.patch_embed = Conv2d(
             embeddings.patch_embedding.weight, c.image_size, stride=c.patch_size

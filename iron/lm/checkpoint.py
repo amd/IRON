@@ -259,12 +259,12 @@ class Checkpoint:
         if fill != "read":
             named = {n: (t.shape, t.dtype) for n, t in tensors.items()}
             tensors = filled(fill, named, seed)
-        return _nest(tensors, file=self.path)
+        return nest(tensors, file=self.path)
 
 
 def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:
     """Each leaf of ``tree``, a ``Checkpoint.tree()``'s namespaces and
-    lists, by its dotted name: ``_nest``'s inverse.
+    lists, by its dotted name: ``nest``'s inverse.
     """
     if isinstance(tree, (list, SimpleNamespace)):
         items = enumerate(tree) if isinstance(tree, list) else vars(tree).items()
@@ -278,7 +278,7 @@ def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:
 _FILE = "the checkpoint"
 
 
-def _nest(named: Mapping[str, Any], path: str = "", file=_FILE) -> SimpleNamespace:
+def nest(named: Mapping[str, Any], path: str = "", file=_FILE) -> SimpleNamespace:
     """Values by dotted name, nested as ``Checkpoint.tree()`` nests them,
     under ``path`` (a dotted prefix) of ``file``, which a missing name
     names.
@@ -368,7 +368,7 @@ def renamed(tree, renames: Mapping[str, str]):
                 return path[:at] + new + path[at + len(old) :]
         return path
 
-    return _nest(
+    return nest(
         {moved(path): value for path, value in leaves(tree)},
         getattr(tree, "_path", ""),
         getattr(tree, "_file", _FILE),

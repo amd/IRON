@@ -25,6 +25,8 @@ import iron
 from iron import Scratchpad
 from iron.lm import (
     MLP,
+    Attention,
+    CrossAttention,
     Config,
     Conv1d,
     CrossDecoderLayer,
@@ -37,9 +39,9 @@ from iron.lm import (
     Tower,
     not_json,
 )
-from iron.lm.blocks import _activation
+from iron.lm.blocks import KVCache, activation
 from iron.lm.causal import Decoder
-from iron.lm.checkpoint import _nest, leaves, renamed, subtree
+from iron.lm.checkpoint import leaves, nest, subtree
 from iron.operators.copy import Copy
 
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.
@@ -51,7 +53,7 @@ def bf16(weights):
     bf16, the device's copy of an fp16 checkpoint (the reference widens the
     float16 itself); any other array as it is.
     """
-    return _nest(
+    return nest(
         {
             name: w.astype(bfloat16) if w.dtype == np.float16 else w
             for name, w in leaves(weights)
@@ -168,39 +170,44 @@ class WhisperConfig(DecoderConfig):
         )
 
 
-def _whisper_biases(*attentions) -> None:
-    """Each of ``attentions``' ``k_proj`` without its bias and ``o_proj``
-    with one, as Whisper's.
-    """
-    for a in attentions:
-        k, o = a.k_proj, a.o_proj
-        a.k_proj = Linear(k.in_features, k.out_features, bias=False)
-        a.o_proj = Linear(o.in_features, o.out_features)
+class WhisperAttention(Attention):
+    """``Attention`` with q, v and o biased and k not, as Whisper's."""
+
+    def projections(self, c) -> None:
+        E, D = c.hidden_size, self.head_dim
+        self.q_proj = Linear(E, self.heads * D)
+        self.k_proj = Linear(E, self.groups * D, bias=False)
+        self.v_proj = Linear(E, self.groups * D)
+
+
+class WhisperCrossAttention(CrossAttention, WhisperAttention):
+    """``CrossAttention`` biased as ``WhisperAttention``."""
 
 
 class WhisperEncoderLayer(EncoderLayer):
-    """``EncoderLayer``, its ``k_proj`` unbiased."""
+    """``EncoderLayer`` on a ``WhisperAttention``."""
 
     def __init__(self, c: WhisperEncoderConfig, i: int):
-        super().__init__(c, i)
-        _whisper_biases(self.self_attn)
+        super().__init__(c, i, WhisperAttention(c, i, o_bias=True))
 
 
 class WhisperDecoderLayer(CrossDecoderLayer):
     """``CrossDecoderLayer`` with each block after a ``LayerNorm``, a plain
-    ``MLP``, and every projection biased but ``k_proj``, though Whisper's
-    ``config.json`` names no ``attention_bias`` or ``mlp_bias``.
+    ``MLP`` biased, and ``WhisperAttention``s.
     """
 
     def __init__(self, c: WhisperConfig, i: int):
-        c = dataclasses.replace(c, attention_bias=True, mlp_bias=True)
-        super().__init__(c, i)
         E = c.hidden_size
         self.input_layernorm = LayerNorm(E)
-        self.encoder_attn_layer_norm = LayerNorm(E)
+        self.self_attn = WhisperAttention(c, i, o_bias=True)
         self.post_attention_layernorm = LayerNorm(E)
-        self.mlp = MLP(c)
-        _whisper_biases(self.self_attn, self.encoder_attn)
+        self.mlp = MLP(dataclasses.replace(c, mlp_bias=True))
+        self.cache = KVCache(c, c.window)
+        self.rope = None
+        self.residual_multiplier = 1.0
+        self.encoder_attn_layer_norm = LayerNorm(E)
+        self.encoder_attn = WhisperCrossAttention(c, i, o_bias=True)
+        self.cross = None
 
 
 class WhisperDecoder(Decoder):
@@ -238,14 +245,11 @@ class WhisperEncoder(Tower):
         c, e = config, weights.model.encoder
         super().__init__(c, c.rows, c.rows)
         self.final_norm = LayerNorm(c.hidden_size)
-        tree = renamed(weights, self.renames)
-        for i, layer in enumerate(self.layers):
-            layer.load_state_dict(tree, path=f"model.encoder.layers.{i}.")
-        self.final_norm.load_state_dict(tree, path="model.encoder.layer_norm.")
+        self.load_layers(weights, "model.encoder.layers.", "model.encoder.layer_norm.")
         self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.num_mel_bins)
         self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
         # The convolutions' GELU is the layers' hidden_act.
-        self.act = _activation(c.hidden_act)
+        self.act = activation(c.hidden_act)
         # The second convolution's input: a zero row, then the first's output.
         self.convolved = iron.state((2 * c.rows + 1, c.hidden_size))
         # The position table padded to the rows.

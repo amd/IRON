@@ -71,6 +71,15 @@ class Encoder(Model):
         # ``config.norm()``).
         self.final_norm = None
 
+    def load_layers(self, tree, layers: str, norm: str) -> None:
+        """Layer ``i`` from ``tree``, renamed by ``renames``, at
+        ``{layers}{i}.``, then ``final_norm`` at ``norm``.
+        """
+        tree = renamed(tree, self.renames)
+        for i, layer in enumerate(self.layers):
+            layer.load_state_dict(tree, path=f"{layers}{i}.")
+        self.final_norm.load_state_dict(tree, path=norm)
+
     def lookup(self, ids):
         """The embedding rows of ``ids``, bounded as ``ids`` is."""
         raise NotImplementedError(f"{type(self).__name__} defines no lookup()")

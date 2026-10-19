@@ -63,12 +63,6 @@ class SmolVLMTextConfig(DecoderConfig):
         metadata={"json": "text_config.max_position_embeddings"}
     )
     tie_word_embeddings: bool = False
-    sliding_window: int | None = dataclasses.field(
-        default=None, kw_only=True, metadata={"json": "text_config.sliding_window"}
-    )
-    use_sliding_window: bool | None = dataclasses.field(
-        default=None, kw_only=True, metadata={"json": "text_config.use_sliding_window"}
-    )
 
 
 #: ``<|im_start|>``, the turn marker every prompt starts with.

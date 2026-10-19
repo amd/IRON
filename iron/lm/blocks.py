@@ -402,7 +402,7 @@ class LayerNorm(iron.Graph):
         return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
 
 
-def _activation(name: str):
+def activation(name: str):
     """The function ``hidden_act`` ``name`` is.
 
     Raises:
@@ -581,8 +581,8 @@ class Attention(iron.Graph):
     rows where given, a pair of q's and k's (``Rope.rows``), only their
     first ``rotary`` columns where the config gives a ``rotary_dim``,
     attended over the layer's ``KVCache``, then ``o_proj``; q, k and v
-    with a bias where the config's ``attention_bias`` says, o never, as
-    Qwen 2's is. ``projections`` builds what ``project`` reads. ``scaling``
+    with a bias where the config's ``attention_bias`` says, o where
+    ``o_bias`` does. ``projections`` builds what ``project`` reads. ``scaling``
     is the logits' scale; None is ``head_dim ** -0.5``. A layer that reads
     another's cache, holding the same ``KVCache``, sets ``k_proj`` and
     ``v_proj`` to None, and projects and writes no keys or values.
@@ -597,7 +597,7 @@ class Attention(iron.Graph):
         ValueError: ``norms`` names other than q, k and v.
     """
 
-    def __init__(self, c, i: int, norms: str = ""):
+    def __init__(self, c, i: int, norms: str = "", o_bias: bool = False):
         if set(norms) - set("qkv"):
             raise ValueError(f"Attention: norms {norms!r} names other than q, k and v")
         H, G, D, E = (
@@ -608,7 +608,7 @@ class Attention(iron.Graph):
         )
         self.heads, self.groups, self.head_dim = H, G, D
         self.projections(c)
-        self.o_proj = Linear(H * D, E, bias=False)
+        self.o_proj = Linear(H * D, E, bias=o_bias)
         self.q_norm = RMSNorm(D, c.eps) if "q" in norms else None
         self.k_norm = RMSNorm(D, c.eps) if "k" in norms else None
         self.v_norm, self.eps = "v" in norms, c.eps
@@ -669,8 +669,8 @@ class CrossAttention(Attention):
     keys and values an encoder's output's, projected once (``keys_values``).
     """
 
-    def project(self, x, **tiles) -> list:
-        return [F.linear(x, self.q_proj.weight, self.q_proj.bias, **tiles), None, None]
+    def project(self, x, **gemv) -> list:
+        return [F.linear(x, self.q_proj.weight, self.q_proj.bias, **gemv), None, None]
 
     def keys_values(self, memory) -> list:
         """The keys and values of ``memory`` ``(rows, width)``, each
@@ -690,7 +690,7 @@ class MLP(iron.Graph):
         E, M, bias = c.hidden_size, c.intermediate_size, c.mlp_bias
         self.fc1 = Linear(E, M, bias=bias)
         self.fc2 = Linear(M, E, bias=bias)
-        self.act = _activation(c.hidden_act)
+        self.act = activation(c.hidden_act)
 
     def body(self, x):
         return self.fc2(self.act(self.fc1(x)))
@@ -707,7 +707,7 @@ class GatedMLP(iron.Graph):
     def __init__(self, c):
         self.projections(c)
         self.down_proj = Linear(c.intermediate_size, c.hidden_size, bias=c.mlp_bias)
-        self.act = _activation(c.hidden_act)
+        self.act = activation(c.hidden_act)
 
     def projections(self, c) -> None:
         """``gate_proj`` and ``up_proj``."""
@@ -751,14 +751,15 @@ class EncoderLayer(DecoderLayer):
     """Layer ``i`` of a pre-norm encoder on ``c``'s shape (SigLIP's,
     Whisper's): ``DecoderLayer``'s two blocks, each after a ``LayerNorm``,
     a plain ``MLP``, attending both ways over the call's rows (``NoCache``),
-    ``o_proj`` biased with q, k and v.
+    ``o_proj`` biased with q, k and v; ``self_attn`` a model's own where
+    given.
     """
 
-    def __init__(self, c, i: int):
+    def __init__(self, c, i: int, self_attn=None):
         self.input_layernorm = LayerNorm(c.hidden_size)
-        self.self_attn = Attention(c, i)
-        o = self.self_attn.o_proj
-        self.self_attn.o_proj = Linear(o.in_features, o.out_features, c.attention_bias)
+        if self_attn is None:
+            self_attn = Attention(c, i, o_bias=c.attention_bias)
+        self.self_attn = self_attn
         self.post_attention_layernorm = LayerNorm(c.hidden_size)
         self.mlp = MLP(c)
         self.cache = NoCache()
@@ -895,10 +896,10 @@ class MLPSpec:
     precision: Precision | None = None
 
     def __post_init__(self):
-        _activation(self.activation)
+        activation(self.activation)
 
     def act(self, x):
-        return _activation(self.activation)(x)
+        return activation(self.activation)(x)
 
     def __call__(self, w, x):
         act = self.act

@@ -17,7 +17,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
 from iron.lm.blocks import KVCache, Rope
-from iron.lm.checkpoint import _nest, leaves
+from iron.lm.checkpoint import nest, leaves
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close
 from iron.operators.mha import MHA
@@ -84,7 +84,7 @@ def test_tensors_at_indices_are_a_list_of_tensors():
     each kept as it is, none taken for an empty module.
     """
     zero, row = np.zeros(1, bfloat16), np.ones(4, bfloat16)
-    tree = _nest({"scales.0": zero, "scales.1": row})
+    tree = nest({"scales.0": zero, "scales.1": row})
     assert tree.scales[0] is zero and tree.scales[1] is row
 
 

@@ -178,15 +178,11 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
     assert_close(logits, reference.logits(tokens, image))
 
 
-def test_the_text_config_s_rope_scaling_and_window_are_read_where_nested():
+def test_a_rope_scaling_nested_in_the_text_config_is_refused():
     """SmolVLM's ``config.json`` nests its text model's keys under
-    ``text_config``: a ``rope_scaling`` there is refused as a flat one is,
-    and a ``sliding_window`` there windows the caches.
+    ``text_config``: a ``rope_scaling`` there is refused as a flat one is.
     """
-    data = {"text_config": TEXT.to_json()["text_config"]}
-    nested = data["text_config"]
+    nested = TEXT.to_json()["text_config"]
     scaling = {"rope_type": "yarn", "factor": 4.0}
     with pytest.raises(ValueError, match=re.escape(f"rope_scaling {scaling}")):
         SmolVLMTextConfig.from_json({"text_config": nested | {"rope_scaling": scaling}})
-    windowed = {"text_config": nested | {"sliding_window": 64}}
-    assert SmolVLMTextConfig.from_json(windowed).window == 63
