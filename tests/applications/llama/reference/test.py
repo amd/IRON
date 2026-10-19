@@ -20,7 +20,6 @@ class TestBiasedLlama(Decoder):
     config = dataclasses.replace(SMALL, attention_bias=True)
     seed = 1
 
-
     @classmethod
     def names(cls):
         c = cls.config

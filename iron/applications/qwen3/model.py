@@ -29,8 +29,7 @@ class Qwen3Layer(DecoderLayer):
     """Llama's layer, its attention norming q and k per head."""
 
     def __init__(self, c: DecoderConfig, i: int):
-        super().__init__(c, i)
-        self.self_attn = Attention(c, i, norms="qk")
+        super().__init__(c, i, Attention(c, i, norms="qk", o_bias=c.attention_bias))
 
 
 class Qwen3(CausalLM):

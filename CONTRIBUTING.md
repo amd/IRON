@@ -48,8 +48,8 @@ Hugging Face decoders need a config and a model class; see
    ```python
    class Qwen3Layer(DecoderLayer):
        def __init__(self, c, i):
-           super().__init__(c, i)
-           self.self_attn = Attention(c, i, norms="qk")
+           attention = Attention(c, i, norms="qk", o_bias=c.attention_bias)
+           super().__init__(c, i, attention)
    ```
 
    Its modules declare their weights by shape under the checkpoint's own

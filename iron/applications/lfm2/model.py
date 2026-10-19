@@ -125,7 +125,8 @@ class Lfm2Layer(DecoderLayer):
 
     def __init__(self, c: Lfm2Config, i: int):
         if i in c.full_attn_idxs:
-            super().__init__(c, i, Attention(c, i, norms="qk"))
+            attention = Attention(c, i, norms="qk", o_bias=c.attention_bias)
+            super().__init__(c, i, attention)
             self.conv = None
             return
         self.input_layernorm = RMSNorm(c.hidden_size, c.eps)

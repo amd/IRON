@@ -20,7 +20,6 @@ public API adds its entry under Unreleased.
   built on them, and its audio tower's conformer layers are modules.
 - `Linear(precision=)`, and `Config.precision`, every projection's in
   `Attention`, `MLP` and `GatedMLP` (None: `F.linear`'s).
-- `DecoderLayer(cache=)`: a model's own memory module for the layer.
 - `iron.lm.checkpoint.subtree(tree, **modules)`: a tree of a checkpoint's
   modules at new names, as a model loads part of a checkpoint.
 - `Session(model)`: one conversation over a `CausalLM`'s loaded versions,
@@ -68,12 +67,15 @@ public API adds its entry under Unreleased.
   eps=None)` (the dtype's machine epsilon) and `LayerNorm(normalized_shape,
   eps=1e-5)`.
 - Decoder blocks as modules in `iron.lm.blocks`, each built from a config
-  and a layer index: `Attention(c, i, norms="")`, `GatedMLP(c)` and
-  `DecoderLayer(c, i, self_attn=None, mlp=None)`, which holds its own
-  `KVCache(c)` and the model's `Rope(c)`, and a model's own attention and
-  feed-forward where given. Their projections are biased where the
-  config's `attention_bias` (q, k and v; o never) and `mlp_bias` say; a
-  subclass with fused projections builds them in `projections(c)`.
+  and a layer index: `Attention(c, i, norms="", o_bias=False)`,
+  `GatedMLP(c)` and `DecoderLayer(c, i, self_attn=None, mlp=None,
+  cache=None)`, which holds its own `KVCache(c)` and the model's `Rope(c)`,
+  and a model's own attention, feed-forward and memory where given. Their
+  projections are biased where the config's `attention_bias` and
+  `mlp_bias` say, o where `o_bias` does (`DecoderLayer`'s by
+  `attention_bias`, as transformers' Llama; Qwen 2's `Qwen2Layer` keeps o
+  unbiased); a subclass with fused projections builds them in
+  `projections(c)`.
   `iron.lm` exports `Attention`, `GatedMLP` and `DecoderLayer`.
 - `KVCache(c, window=None)`: the cache attends within `window` positions
   before a query, as `MHA` counts them (Hugging Face's `sliding_window`
@@ -222,10 +224,6 @@ public API adds its entry under Unreleased.
 - `op.replace(**changes)` copies an operator, in place of
   `dataclasses.replace(op, ...)`; `Operator.shim_columns` and
   `Operator.call_operands` are classmethods, off `declaration`.
-- `DecoderLayer` biases its attention's `o_proj` where the config's
-  `attention_bias` says, as transformers' Llama does, so a Llama-family
-  checkpoint with `attention_bias` loads; Qwen 2's `Qwen2Layer` keeps o
-  unbiased.
 - A graph's per-call values and their expressions are taplib's `PerCall`
   and `Affine` (`aie.helpers.taplib`): `marker` replaces `kind`, and an
   expression prints as its symbol name (`pos_p1`, not `pos + 1`).

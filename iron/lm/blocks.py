@@ -755,9 +755,9 @@ class DecoderLayer(iron.Graph):
 
     def __init__(self, c, i: int, self_attn=None, mlp=None, cache=None):
         self.input_layernorm = RMSNorm(c.hidden_size, c.eps)
-        if self_attn is None:
-            self_attn = Attention(c, i, o_bias=c.attention_bias)
-        self.self_attn = self_attn
+        self.self_attn = (
+            Attention(c, i, o_bias=c.attention_bias) if self_attn is None else self_attn
+        )
         self.post_attention_layernorm = RMSNorm(c.hidden_size, c.eps)
         self.mlp = GatedMLP(c) if mlp is None else mlp
         self.cache = KVCache(c, c.window) if cache is None else cache
@@ -782,9 +782,9 @@ class EncoderLayer(DecoderLayer):
 
     def __init__(self, c, i: int, self_attn=None):
         self.input_layernorm = LayerNorm(c.hidden_size)
-        if self_attn is None:
-            self_attn = Attention(c, i, o_bias=c.attention_bias)
-        self.self_attn = self_attn
+        self.self_attn = (
+            Attention(c, i, o_bias=c.attention_bias) if self_attn is None else self_attn
+        )
         self.post_attention_layernorm = LayerNorm(c.hidden_size)
         self.mlp = MLP(c)
         self.cache = NoCache()
@@ -795,13 +795,17 @@ class EncoderLayer(DecoderLayer):
 class CrossDecoderLayer(DecoderLayer):
     """``DecoderLayer`` with a third block between its two:
     ``encoder_attn`` after ``encoder_attn_layer_norm``, attending over
-    ``cross``, the ``CrossCache`` an ``EncoderDecoder`` gives it.
+    ``cross``, the ``CrossCache`` an ``EncoderDecoder`` gives it;
+    ``encoder_attn`` a model's own where given, as ``DecoderLayer``'s
+    modules.
     """
 
-    def __init__(self, c, i: int):
-        super().__init__(c, i)
+    def __init__(self, c, i: int, self_attn=None, mlp=None, encoder_attn=None):
+        super().__init__(c, i, self_attn, mlp)
         self.encoder_attn_layer_norm = RMSNorm(c.hidden_size, c.eps)
-        self.encoder_attn = CrossAttention(c, i)
+        self.encoder_attn = (
+            CrossAttention(c, i) if encoder_attn is None else encoder_attn
+        )
         self.cross: CrossCache | None = None
 
     def body(self, x, call):

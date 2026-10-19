@@ -39,7 +39,7 @@ from iron.lm import (
     Tower,
     not_json,
 )
-from iron.lm.blocks import KVCache, activation
+from iron.lm.blocks import activation
 from iron.lm.causal import Decoder
 from iron.lm.checkpoint import leaves, nest, subtree
 from iron.operators.copy import Copy
@@ -150,6 +150,8 @@ class WhisperConfig(DecoderConfig):
         default="gelu", metadata={"json": "activation_function"}
     )
     eps: float = not_json(1e-5, kw_only=True)
+    # Every feed-forward projection biased (``MLP``).
+    mlp_bias: bool = not_json(True, kw_only=True)
     encoder_layers: int = dataclasses.field(kw_only=True)
     encoder_attention_heads: int = dataclasses.field(kw_only=True)
     encoder_ffn_dim: int = dataclasses.field(kw_only=True)
@@ -197,17 +199,17 @@ class WhisperDecoderLayer(CrossDecoderLayer):
     """
 
     def __init__(self, c: WhisperConfig, i: int):
+        super().__init__(
+            c,
+            i,
+            WhisperAttention(c, i, o_bias=True),
+            MLP(c),
+            WhisperCrossAttention(c, i, o_bias=True),
+        )
         E = c.hidden_size
         self.input_layernorm = LayerNorm(E)
-        self.self_attn = WhisperAttention(c, i, o_bias=True)
         self.post_attention_layernorm = LayerNorm(E)
-        self.mlp = MLP(dataclasses.replace(c, mlp_bias=True))
-        self.cache = KVCache(c, c.window)
-        self.rope = None
-        self.residual_multiplier = 1.0
         self.encoder_attn_layer_norm = LayerNorm(E)
-        self.encoder_attn = WhisperCrossAttention(c, i, o_bias=True)
-        self.cross = None
 
 
 class WhisperDecoder(Decoder):
