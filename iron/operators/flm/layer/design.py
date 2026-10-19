@@ -252,10 +252,27 @@ def layer_kernels(geometry):
         "proj_layer_embedding": build(
             flm_gemma4.flm_gemma4_decode_proj_layer_embedding, PLE_LOCKS
         ),
+        "proj_layer_embedding_mvm": build(
+            flm_gemma4.flm_gemma4_decode_proj_layer_embedding_mvm, {}
+        ),
+        "proj_layer_embedding_store": build(
+            flm_gemma4.flm_gemma4_decode_proj_layer_embedding_store, {}
+        ),
         "gate_layer_embedding": build(
             flm_gemma4.flm_gemma4_decode_gate_layer_embedding, GLE_LOCKS
         ),
+        "gate_layer_embedding_mvm": build(
+            flm_gemma4.flm_gemma4_decode_gate_layer_embedding_mvm, {}
+        ),
+        "gate_layer_embedding_store": build(
+            flm_gemma4.flm_gemma4_decode_gate_layer_embedding_store, {}
+        ),
         "per_layer_up": build(flm_gemma4.flm_gemma4_decode_per_layer_up, PLU_LOCKS),
+        "per_layer_up_mvm": build(flm_gemma4.flm_gemma4_decode_per_layer_up_mvm, {}),
+        "per_layer_up_store": build(
+            flm_gemma4.flm_gemma4_decode_per_layer_up_store, {}
+        ),
+        "bf16_proj_zero": build(flm_gemma4.flm_gemma4_decode_bf16_proj_zero, {}),
         "glu": build(flm_gemma4.flm_gemma4_decode_glu, GLU_LOCKS),
         "proj_main": build(flm_gemma4.flm_gemma4_decode_proj_main, PROJ_LOCKS),
         "attn_kv": build(
@@ -434,7 +451,8 @@ class _Ctx:
 
     def entry(self, name, symbol):
         """The entry point ``symbol`` of the kernel ``name``, typed by its factory."""
-        return getattr(self.kernels[name], symbol)
+        kernel = self.kernels[name]
+        return kernel if kernel.name == symbol else getattr(kernel, symbol)
 
     def rtp_buffer(self, tile, key, name=None):
         """The RTP buffer of RTP_ADDRESSES key ``key``, pinned at its address."""
@@ -848,9 +866,9 @@ def _build_pl_embedding(ctx, ple_tile):
     D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     ple_name = f"{ple_tile.row}_{ple_tile.col}"
     ple_finish = ctx.entry("proj_layer_embedding", "proj_layer_embedding_finish")
-    ple_zero = ctx.entry("proj_layer_embedding", "bf16_proj_zero")
-    ple_mvm = ctx.entry("proj_layer_embedding", "bf16_proj_mvm")
-    ple_store = ctx.entry("proj_layer_embedding", "bf16_proj_store")
+    ple_zero = ctx.entry("bf16_proj_zero", "bf16_proj_zero")
+    ple_mvm = ctx.entry("proj_layer_embedding_mvm", "proj_layer_embedding_mvm")
+    ple_store = ctx.entry("proj_layer_embedding_store", "proj_layer_embedding_store")
     ple_norm_w_ty, ple_x0_pl_ty, ple_x_proj_ty, ple_y_ty = ple_finish.arg_types()
     w_ty, ple_x0_ty, ple_y_acc_ty, _, _ = ple_mvm.arg_types()
     ple_norm_w = Buffer(type=ple_norm_w_ty, name=f"norm_w_{ple_name}", tile=ple_tile)
@@ -990,9 +1008,9 @@ def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons):
     gle_name = f"{gle_tile.row}_{gle_tile.col}"
     gle_begin = ctx.entry("gate_layer_embedding", "gate_layer_embedding_begin")
     gle_finish = ctx.entry("gate_layer_embedding", "gate_layer_embedding_finish")
-    gle_zero = ctx.entry("gate_layer_embedding", "bf16_proj_zero")
-    gle_mvm = ctx.entry("gate_layer_embedding", "bf16_proj_mvm")
-    gle_store = ctx.entry("gate_layer_embedding", "bf16_proj_store")
+    gle_zero = ctx.entry("bf16_proj_zero", "bf16_proj_zero")
+    gle_mvm = ctx.entry("gate_layer_embedding_mvm", "gate_layer_embedding_mvm")
+    gle_store = ctx.entry("gate_layer_embedding_store", "gate_layer_embedding_store")
     _, gle_y_ty = gle_begin.arg_types()
     w_ty, _, gle_y_acc_ty, _, _ = gle_mvm.arg_types()
     gle_w0 = Buffer(type=w_ty, name=f"proj_w_0_{gle_name}", tile=gle_tile)
@@ -1126,9 +1144,9 @@ def _build_pl_up(ctx, plu_tile):
     plu_name = f"{plu_tile.row}_{plu_tile.col}"
     plu_begin = ctx.entry("per_layer_up", "per_layer_up_begin")
     plu_finish = ctx.entry("per_layer_up", "per_layer_up_finish")
-    plu_zero = ctx.entry("per_layer_up", "bf16_proj_zero")
-    plu_mvm = ctx.entry("per_layer_up", "bf16_proj_mvm")
-    plu_store = ctx.entry("per_layer_up", "bf16_proj_store")
+    plu_zero = ctx.entry("bf16_proj_zero", "bf16_proj_zero")
+    plu_mvm = ctx.entry("per_layer_up_mvm", "per_layer_up_mvm")
+    plu_store = ctx.entry("per_layer_up_store", "per_layer_up_store")
     (plu_dual_x_ty,) = plu_begin.arg_types()
     _, plu_y_ty = plu_finish.arg_types()
     w_ty, _, plu_y_acc_ty, _, _ = plu_mvm.arg_types()
