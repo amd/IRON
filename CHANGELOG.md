@@ -128,8 +128,6 @@ public API adds its entry under Unreleased.
   builds (Whisper's adds its position table and a LayerNorm).
 - `Linear.split(x, *rows)`, a fused projection's outputs: one `F.linear`
   per run of the weight's rows.
-- `Graph.record(precision=)`, which `compile(precision=)` passes on instead of
-  setting `Graph.precision` while it compiles.
 - `iron.lm.testing.load_from_flags`, a model test's `Model.load` at the
   `--random-weights` and `--max-seq-len` pytest was given, its files
   `require`d; `require(staged=False)` skips in CI too.
@@ -160,8 +158,7 @@ public API adds its entry under Unreleased.
   weights they came from. `pytest --record-goldens` (or `IRON_RECORD_GOLDENS`)
   records them.
 - `iron.Precision` and a `precision` tunable on GEMM and flm.ProjectionGEMM,
-  with `torch.set_float32_matmul_precision`'s levels. `Graph.precision` and
-  `compile(precision=)` set a floor.
+  with `torch.set_float32_matmul_precision`'s levels.
 - `python -m iron.lm.tune <application>`, which writes the fastest admissible
   setting of each operator shape to `profiles/<device>.json`.
 
@@ -450,10 +447,8 @@ public API adds its entry under Unreleased.
   axis is refused.
 - `F.linear(precision=)` is the one way to ask for an accurate projection: at
   `Precision.HIGHEST` several rows run core GEMM, whose float32 sums round
-  once, where they ran flm.ProjectionGEMM before, asked for by the call or by
-  a graph's `precision` raising flm.ProjectionGEMM to it, which hands over
-  (`Operator.at_precision`); one row, a GEMV that rounds once, takes any
-  precision. `Attention` and `MLP` take `precision` in place of `accurate`.
+  once, where they ran flm.ProjectionGEMM before; one row, a GEMV that
+  rounds once, takes any precision. `Attention` and `MLP` take `precision` in place of `accurate`.
 - `HuggingFaceWhisper` and `HuggingFaceVLM` move to their applications'
   `hugging_face.py`, as EmbeddingGemma 2's builders are, which only tests
   and golden recording import.
@@ -517,6 +512,11 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- The graph-wide precision floor: `Graph.precision`, `Graph.record(precision=)`,
+  `Graph.compile(precision=)`, `Operator.at_precision` and
+  `Precision.at_least`. A precision is asked for per call
+  (`F.linear(precision=)`) or per layer (`Linear(precision=)`,
+  `Config.precision`).
 - `Graph.draw(seed)` and `Graph.unread()`: `Checkpoint.tree("random", seed)`
   and `Checkpoint.tree("unread")` fill a model's weights.
 - `Tower.front`: a tower's `body` builds its own rows.

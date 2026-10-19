@@ -30,7 +30,6 @@ from aie.helpers.taplib import Affine, PerCall
 from ..declare import Operator
 from ..declare.operator import device_fit, graph_recorder
 from ..declare.value import ExtentWord
-from ..declare.precision import Precision
 from ..declare.profile import Profile
 from ..image.allocator import ALIGNMENT, ArenaPlan
 from ..image.artifacts import Parameter
@@ -230,9 +229,6 @@ class Graph:
     the instance holds, named by attribute path (``self.layers[3].q`` is
     ``layers.3.q``). ``profile`` is a ``Profile`` or a directory of
     ``<device>.json`` ones, the one way a step's tunables come from one.
-    ``precision`` is the
-    most any step may round (``Precision``): a step that would round more
-    is raised to it, and ``compile(precision=)`` overrides it in turn.
 
     Called in another graph's body, on its handles and per-call values, a
     graph's body records into that graph: its steps are the caller's, its
@@ -241,7 +237,6 @@ class Graph:
     """
 
     profile: Profile | Path | None = None
-    precision: Precision | None = None
 
     def body(self, *inputs: Any, **values: Any) -> Any:
         raise NotImplementedError(f"{type(self).__name__} defines no body()")
@@ -414,9 +409,9 @@ class Graph:
                 setattr(parent, key, tensors[path + n])
         self._bound = True
 
-    def record(self, *, precision: Precision | None = None, **shapes) -> Recording:
+    def record(self, **shapes) -> Recording:
         """Run ``body`` on handles of the given shapes; an optional input
-        given none is None. ``precision`` overrides ``self.precision``.
+        given none is None.
         """
         shapes = {k: v for k, v in shapes.items() if v is not None}
         params = self._parameters
@@ -440,11 +435,7 @@ class Graph:
             args.append(inputs[-1])
         values = [PerCall(n, kind, dtype) for n, (kind, dtype) in params.values.items()]
         with Recorder(
-            self.name,
-            self._profile(),
-            self.held(),
-            params.inputs,
-            self.precision if precision is None else precision,
+            self.name, self._profile(), self.held(), params.inputs
         ) as recorder:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
@@ -531,7 +522,6 @@ class Graph:
         self,
         *,
         dev=None,
-        precision: Precision | str | None = None,
         full_elf: bool | None = None,
         check: bool = False,
         feeds: CompiledGraph | None = None,
@@ -546,8 +536,6 @@ class Graph:
         Args:
             dev: The device to compile for, bound for this compile alone;
                 else the current one.
-            precision: The most any step may round, bound for this
-                compile alone; else ``self.precision``.
             full_elf: One full ELF, else an xclbin per step; ``None``
                 derives it (``iron.common.image.packaging``).
             check: Run each step on its own dispatch and hold its outputs to
@@ -563,9 +551,7 @@ class Graph:
             if dev is not None
             else contextlib.nullcontext()
         ):
-            recording = self.record(
-                precision=None if precision is None else Precision(precision), **shapes
-            )
+            recording = self.record(**shapes)
             chosen = plan(require_device(), recording, full_elf, check)
             logger.info("%s", chosen.report(self.name))
             signature = self._signature(

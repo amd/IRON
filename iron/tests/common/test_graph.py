@@ -7,7 +7,6 @@ A graph function run on handles produces a runlist, buffer names and
 sizes, and value bindings; nothing here needs a toolchain.
 """
 
-import gc
 import inspect
 from types import SimpleNamespace
 from typing import Any
@@ -599,53 +598,6 @@ def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
     t = Pointwise(precision).record(x=((256, 128), bfloat16), w=((128, 128), bfloat16))
     (op,) = [op for op in t.operators if type(op) is ProjectionGEMM]
     assert op.resolved(npu2).emulate_bf16_mmul_with_bfp16 is macs
-
-
-class Projections(iron.Graph):
-    """A projection at the profile's precision, one held at HIGHEST, and
-    one instance applied."""
-
-    def __init__(self):
-        self.gemm = GEMM(M=256, K=256, N=256)
-
-    def body(self, x, w):
-        y = GEMM.step(x, w)
-        y = GEMM.step(y, w, precision=Precision.HIGHEST)
-        return self.gemm.apply(y, w)
-
-
-@pytest.mark.parametrize(
-    "floor, levels",
-    [
-        (None, ["medium", "highest", "medium"]),
-        ("high", ["high", "highest", "high"]),
-        ("highest", ["highest"] * 3),
-    ],
-)
-def test_a_graph_s_precision_raises_every_step_that_rounds_more(floor, levels):
-    graph = Projections()
-    graph.precision = floor
-    t = graph.record(x=((256, 256), bfloat16), w=((256, 256), bfloat16))
-    assert [s.op.precision for s in t.steps] == levels
-    assert graph.gemm.precision == Precision.MEDIUM
-
-
-def test_an_instance_dropped_in_a_body_leaves_its_raised_copy_to_no_other():
-    """A later instance at a dropped one's address is raised on its own."""
-
-    class Temporaries(iron.Graph):
-        precision = "high"
-
-        def body(self, x, w, v):
-            for _ in range(8):
-                x = GEMM(M=256, K=256, N=256).apply(x, w)
-                gc.collect()
-            return GEMM(M=256, K=256, N=128).apply(x, v)
-
-    t = Temporaries().record(
-        x=((256, 256), bfloat16), w=((256, 256), bfloat16), v=((256, 128), bfloat16)
-    )
-    assert [s.op.N for s in t.steps] == [256] * 8 + [128]
 
 
 def test_a_profile_gives_a_precision_the_tuner_does_not_search(tmp_path, npu2):
@@ -2103,24 +2055,15 @@ def test_linear_takes_a_precision_for_any_rows_and_gemv_tunables_for_one(
         assert [type(s.op).__name__ for s in t.steps] == steps
 
 
-def test_highest_runs_the_gemm_that_rounds_once_asked_for_by_call_or_by_graph():
+def test_highest_runs_the_gemm_that_rounds_once():
     class Asked(iron.Graph):
         def body(self, x, w):
             return F.linear(x, w, precision=Precision.HIGHEST)
 
-    class Floored(iron.Graph):
-        precision = "highest"
-
-        def body(self, x, w):
-            return F.linear(x, w)
-
     shapes = dict(x=((128, 256), bfloat16), w=((256, 256), bfloat16))
-    asked, floored = (g().record(**shapes).steps for g in (Asked, Floored))
-    # flm.ProjectionGEMM, raised past what it reaches, hands over.
-    assert [repr(s.op) for s in asked] == [repr(s.op) for s in floored]
-    assert [type(s.op) for s in asked] == [GEMM]
-    # The handed-over GEMM takes its own profile entry.
-    tuned = Floored()
+    assert [type(s.op) for s in Asked().record(**shapes).steps] == [GEMM]
+    # The GEMM takes its own profile entry.
+    tuned = Asked()
     tuned.profile = Profile()
     tuned.profile.add(GEMM, tile_n=32)
     assert [s.op.tile_n for s in tuned.record(**shapes).steps] == [32]

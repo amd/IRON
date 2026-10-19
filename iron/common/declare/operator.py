@@ -467,10 +467,6 @@ class Operator(jit.Operator, library=True):
         new._check_complete()
         return new
 
-    def at_precision(self, level: Precision) -> Operator:
-        """This operator rounding at ``level``."""
-        return self._with_tunables(precision=level)
-
     def _with_tunables(self, **tunables: Any) -> Self:
         unknown = [n for n in tunables if n not in self.declaration.tunables]
         if unknown:
@@ -492,7 +488,7 @@ class Operator(jit.Operator, library=True):
         found = {}
         for name in self.declaration.tunables:
             domain = self.declaration.params[name].domain
-            # A precision is the model's to choose (Graph.precision), not a
+            # A precision is the model's to choose (F.linear's), not a
             # step's timing: its output is judged against the model's own.
             if name in self.pinned or domain is None or domain is Precision:
                 continue

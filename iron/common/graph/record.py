@@ -19,7 +19,6 @@ from aie.utils import bfp
 from ..declare import Operator, Value
 from ..declare.operand import param_names
 from ..declare.operator import graph_recorder
-from ..declare.precision import Precision
 from ..declare.profile import Profile
 from ..image.packaging import Kind
 from ..image.step import BufferRef, SequenceStep
@@ -457,14 +456,9 @@ class Recorder:
         profile: Profile | None = None,
         held: Mapping[int, tuple[str, object]] | None = None,
         inputs: Iterable[str] = (),
-        precision: Precision | None = None,
     ) -> None:
         self.name = name
         self.profile = profile
-        self.precision = precision
-        # Each instance applied, held so its id stays its own, and as raised
-        # to the precision.
-        self._raised: dict[int, tuple[Operator, Operator]] = {}
         held = held or {}
         self._held_arrays = [
             x.array if isinstance(x, Weight) else x
@@ -675,9 +669,7 @@ class Recorder:
                 kwargs,
             )
         else:
-            _, op = self._raised.setdefault(
-                id(target), (target, self._at_precision(target))
-            )
+            op = target
             own = self._split_values(type(op), values)
             operands = _take_views(type(op), operands, {}, own)
             if kwargs or values:
@@ -788,33 +780,13 @@ class Recorder:
         )
         given = {**kwargs, **inferred}
         if self.profile is not None:
-            return self._at_precision(self.profile.make(cls, **given))
+            return self.profile.make(cls, **given)
         pinned = frozenset(
             name
             for name, value in given.items()
             if name in cls.declaration.tunables and value is not None
         )
-        return self._at_precision(cls(**given, pinned=pinned))
-
-    def _at_precision(self, op: Operator) -> Operator:
-        """``op``, its precision raised to the graph's where it rounds more."""
-        if self.precision is None or "precision" not in op.declaration.tunables:
-            return op
-        current: Precision = getattr(op, "precision")
-        level = current.at_least(self.precision)
-        if level == current:
-            return op
-        raised = op.at_precision(level)
-        if type(raised) is type(op) or self.profile is None:
-            return raised
-        # An operator handed over to another takes that one's profile entry.
-        cls = type(raised)
-        given = {
-            n: getattr(raised, n)
-            for n, p in cls.declaration.params.items()
-            if not p.tunable
-        }
-        return self.profile.make(cls, **given, precision=level)
+        return cls(**given, pinned=pinned)
 
     def _output_bounds(self, op, buffer, rank: int) -> dict:
         bounds = {}

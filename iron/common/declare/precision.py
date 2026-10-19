@@ -22,8 +22,3 @@ class Precision(StrEnum):
     HIGHEST = "highest"
     HIGH = "high"
     MEDIUM = "medium"
-
-    def at_least(self, floor: str) -> "Precision":
-        """This level, or ``floor`` where that rounds less."""
-        order = list(Precision)
-        return min(self, Precision(floor), key=order.index)

@@ -52,7 +52,7 @@ class Encoding(Shape):
     attention_bias: bool = True
     mlp_bias: bool = True
     rotary_dim: int | None = None
-    precision: None = None
+    precision: Precision = Precision.HIGHEST
     eps: float = 1e-6
 
 
@@ -79,8 +79,6 @@ def _shapes(c: Encoding) -> dict[str, tuple[int, ...]]:
 
 class Layers(Encoder):
     """The default layer, its weights drawn, at HIGHEST precision."""
-
-    precision = Precision.HIGHEST
 
     def __init__(self, table):
         self.table = table

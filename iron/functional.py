@@ -55,10 +55,10 @@ def linear(x: Handle | State, weight, bias=None, *, precision=None, **gemv) -> H
     One row runs on GEMV, which sums in float32 and rounds once, so
     ``precision`` has no effect on it. Several rows run on
     flm.ProjectionGEMM at the given ``precision``. At
-    ``Precision.HIGHEST`` (asked for here, or set on the graph) they run on
-    GEMM instead, which also sums in float32 and handles row counts
-    flm.ProjectionGEMM cannot tile. Nothing is padded: a row count neither
-    operator tiles raises when the graph is recorded.
+    ``Precision.HIGHEST`` they run on GEMM instead, which also sums in
+    float32 and handles row counts flm.ProjectionGEMM cannot tile. Nothing
+    is padded: a row count neither operator tiles raises when the graph is
+    recorded.
 
     ``gemv`` passes tunables to the GEMV, for a call the profile cannot
     tell apart from another call of the same shape.

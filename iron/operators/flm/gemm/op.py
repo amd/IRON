@@ -62,7 +62,6 @@ from iron.operators.flm.gemm.design import (
     l1_tiles,
 )
 from iron.operators.flm.packing import pack_b
-from iron.operators.gemm import GEMM
 
 
 class _BPool(NamedTuple):
@@ -135,8 +134,8 @@ class ProjectionGEMM(Operator):
 
     It is ``F.linear``'s GEMM for a weight operand over two or more rows at
     MEDIUM or HIGH; every other GEMM is ``iron.operators.GEMM`` (HIGHEST,
-    which ``at_precision(Precision.HIGHEST)`` hands over to, an activation
-    times an activation, convolutions, integer types and f32 output).
+    an activation times an activation, convolutions, integer types and f32
+    output).
     """
 
     M: int = param()
@@ -241,26 +240,11 @@ class ProjectionGEMM(Operator):
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened
 
-    def at_precision(self, level: Precision) -> Operator:
-        """This GEMM at ``level``; at ``HIGHEST``, which its per-K-tile
-        rounding cannot reach, the core GEMM whose float32 sums round once.
-        """
-        if level != Precision.HIGHEST:
-            return super().at_precision(level)
-        if self.epilogue_modes != (Epilogue.NONE,):
-            raise ValueError(
-                f"flm.ProjectionGEMM: epilogues {self.epilogue_modes} have no "
-                "GEMM that rounds once"
-            )
-        return GEMM(
-            M=self.M, K=self.K, N=self.N, b_col_maj=self.b_col_maj, precision=level
-        )
-
     def validate(self) -> None:
         if self.precision == Precision.HIGHEST:
             raise ValueError(
                 "flm.ProjectionGEMM: rounds per K tile at best (precision='high'); "
-                "at_precision(Precision.HIGHEST) hands over to the GEMM that rounds once"
+                "iron.operators.GEMM rounds once"
             )
         if self.tile_n is not None and self.tile_n not in CT_MAX_K_FOR_N:
             raise ValueError(
