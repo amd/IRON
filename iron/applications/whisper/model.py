@@ -30,6 +30,7 @@ from iron.lm import (
     Config,
     Conv1d,
     CrossDecoderLayer,
+    Decoder,
     DecoderConfig,
     Embedding,
     EncoderDecoder,
@@ -37,11 +38,11 @@ from iron.lm import (
     LayerNorm,
     Linear,
     Tower,
+    activation,
     not_json,
+    subtree,
 )
-from iron.lm.blocks import activation
-from iron.lm.causal import Decoder
-from iron.lm.checkpoint import leaves, nest, subtree
+from iron.lm.checkpoint import leaves, nest
 from iron.operators.copy import Copy
 
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.

@@ -7,7 +7,7 @@ themselves are applications over it, each a package of
 ``generation`` and ``testing`` need nothing of one but ``logits(tokens)``.
 """
 
-from .checkpoint import Checkpoint
+from .checkpoint import Checkpoint, subtree
 from .config import Config, DecoderConfig, not_json, rope_angles
 from .model import Model, OnHost, Tokenizer, TokenizerJson, prompt_text
 from .cli import main
@@ -24,18 +24,22 @@ from .blocks import (
     EncoderLayer,
     GatedMLP,
     ImagePatches,
+    KVCache,
     LayerNorm,
     Linear,
     LogMel,
     NoCache,
     PleLayer,
     RMSNorm,
+    Rope,
     SandwichLayer,
     Weights,
+    activation,
     filterbank,
+    residual_add,
 )
 from iron.common.feature_map import ConcatChannels, Conv2d, MaxPool2d
-from .causal import Call, CausalConv1d, CausalLM, Checkpoints
+from .causal import Call, CausalConv1d, CausalLM, Checkpoints, Decoder
 from .encoder import EncodeStep, Encoder, Tower
 from .encoder_decoder import EncoderDecoder
 from .golden import Golden, HuggingFace
@@ -65,6 +69,7 @@ __all__ = [
     "Config",
     "Conv1d",
     "Conv2d",
+    "Decoder",
     "DecoderConfig",
     "EncodeStep",
     "Encoder",
@@ -74,6 +79,7 @@ __all__ = [
     "Golden",
     "HuggingFace",
     "ImagePatches",
+    "KVCache",
     "LayerNorm",
     "Linear",
     "LogMel",
@@ -82,17 +88,21 @@ __all__ = [
     "Multimodal",
     "OnHost",
     "RMSNorm",
+    "Rope",
     "Sampler",
     "Session",
     "Tokenizer",
     "TokenizerJson",
     "Tower",
     "accuracy",
+    "activation",
     "determinism",
     "filterbank",
     "generate_on_host",
     "main",
     "not_json",
     "prompt_text",
+    "residual_add",
     "rope_angles",
+    "subtree",
 ]

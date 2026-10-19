@@ -22,8 +22,7 @@ from pathlib import Path
 
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig, Multimodal, not_json
-from iron.lm.checkpoint import subtree
+from iron.lm import CausalLM, DecoderConfig, Multimodal, not_json, subtree
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 
 

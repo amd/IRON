@@ -27,8 +27,15 @@ import numpy as np
 import iron
 import iron.functional as F
 from iron.applications.granite.model import Granite, GraniteConfig, GraniteLayer
-from iron.lm import CausalConv1d, CausalLM, Checkpoints, Linear, RMSNorm, Weights
-from iron.lm.blocks import _add
+from iron.lm import (
+    CausalConv1d,
+    CausalLM,
+    Checkpoints,
+    Linear,
+    RMSNorm,
+    Weights,
+    residual_add,
+)
 from iron.operators.copy import Copy
 from iron.operators.experts import Experts
 from iron.operators.router import TopKRouter
@@ -191,19 +198,18 @@ class GraniteHybridLayer(GraniteLayer):
             del self.self_attn, self.cache
             self.mamba = Mamba(c)
 
+    def mix(self, h, call):
+        return super().mix(h, call) if self.mamba is None else self.mamba(h, call)
+
     def body(self, x, call):
-        h = self.input_layernorm(x)
-        if self.mamba is not None:
-            h = self.mamba(h, call)
-        else:
-            angles = None if self.rope is None else call.ropes[self.rope]
-            h = self.self_attn(h, self.cache, call, angles)
-        x = _add(x, h, self.residual_multiplier)
+        x = residual_add(
+            x, self.mix(self.input_layernorm(x), call), self.residual_multiplier
+        )
         h = self.post_attention_layernorm(x)
         y = self.shared_mlp(h)
         if self.block_sparse_moe is not None:
             y = self.block_sparse_moe(h) + y
-        return _add(x, y, self.residual_multiplier)
+        return residual_add(x, y, self.residual_multiplier)
 
 
 class GraniteHybrid(Granite):

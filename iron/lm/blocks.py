@@ -475,7 +475,7 @@ def activation(name: str):
     )
 
 
-def _add(x, y, residual: float):
+def residual_add(x, y, residual: float):
     """``x`` plus ``y`` times ``residual``, in ``x``'s shape."""
     y = y if y.shape == x.shape else y.reshape(x.shape)
     if residual == 1:
@@ -877,6 +877,9 @@ class DecoderLayer(iron.Graph):
     A model may pass its own ``self_attn``, ``mlp`` and ``cache``. The
     default ``self_attn`` gives o a bias when ``attention_bias`` is set, as
     it does q, k and v.
+
+    A layer that mixes its rows otherwise (a convolution, Mamba)
+    overrides ``mix``.
     """
 
     norm = RMSNorm
@@ -893,11 +896,16 @@ class DecoderLayer(iron.Graph):
         self.residual_multiplier = 1.0
 
     def body(self, x: Handle, call) -> Handle:
-        angles = None if self.rope is None else call.ropes[self.rope]
-        h = self.self_attn(self.input_layernorm(x), self.cache, call, angles)
-        x = _add(x, h, self.residual_multiplier)
+        x = residual_add(
+            x, self.mix(self.input_layernorm(x), call), self.residual_multiplier
+        )
         h = self.mlp(self.post_attention_layernorm(x))
-        return _add(x, h, self.residual_multiplier)
+        return residual_add(x, h, self.residual_multiplier)
+
+    def mix(self, h: Handle, call) -> Handle:
+        """The normed rows ``h`` attending over the layer's ``cache``."""
+        angles = None if self.rope is None else call.ropes[self.rope]
+        return self.self_attn(h, self.cache, call, angles)
 
 
 class EncoderLayer(DecoderLayer):
@@ -937,13 +945,13 @@ class CrossDecoderLayer(DecoderLayer):
         self.cross: CrossCache | None = None
 
     def body(self, x: Handle, call) -> Handle:
-        angles = None if self.rope is None else call.ropes[self.rope]
-        h = self.self_attn(self.input_layernorm(x), self.cache, call, angles)
-        x = _add(x, h, self.residual_multiplier)
+        x = residual_add(
+            x, self.mix(self.input_layernorm(x), call), self.residual_multiplier
+        )
         h = self.encoder_attn(self.encoder_attn_layer_norm(x), self.cross, call)
-        x = _add(x, h, self.residual_multiplier)
+        x = residual_add(x, h, self.residual_multiplier)
         h = self.mlp(self.post_attention_layernorm(x))
-        return _add(x, h, self.residual_multiplier)
+        return residual_add(x, h, self.residual_multiplier)
 
 
 class SandwichLayer(DecoderLayer):
@@ -959,11 +967,12 @@ class SandwichLayer(DecoderLayer):
         self.post_feedforward_layernorm = RMSNorm(c.hidden_size, c.eps)
 
     def body(self, x: Handle, call) -> Handle:
-        angles = None if self.rope is None else call.ropes[self.rope]
-        h = self.self_attn(self.input_layernorm(x), self.cache, call, angles)
-        x = _add(x, self.post_attention_layernorm(h), self.residual_multiplier)
+        h = self.mix(self.input_layernorm(x), call)
+        x = residual_add(x, self.post_attention_layernorm(h), self.residual_multiplier)
         h = self.mlp(self.pre_feedforward_layernorm(x))
-        return _add(x, self.post_feedforward_layernorm(h), self.residual_multiplier)
+        return residual_add(
+            x, self.post_feedforward_layernorm(h), self.residual_multiplier
+        )
 
 
 class PleLayer(SandwichLayer):
@@ -993,4 +1002,4 @@ class PleLayer(SandwichLayer):
         x = super().body(x, call)
         g = self.mlp.act(self.per_layer_input_gate(x)) * ple
         g = self.post_per_layer_input_norm(self.per_layer_projection(g))
-        return _add(x, g, self.residual_multiplier) * self.scale
+        return residual_add(x, g, self.residual_multiplier) * self.scale

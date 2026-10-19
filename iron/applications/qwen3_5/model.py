@@ -30,8 +30,7 @@ import iron
 import iron.functional as F
 from iron import lm
 from iron.lm import Attention, CausalConv1d, CausalLM, Checkpoints, DecoderConfig
-from iron.lm import DecoderLayer, Linear, RMSNorm, Weights
-from iron.lm.checkpoint import subtree
+from iron.lm import DecoderLayer, Linear, RMSNorm, Weights, subtree
 from iron.operators.copy import Copy
 from iron.operators.gated_delta_rule import GatedDeltaRule
 from iron.operators.sigmoid import Sigmoid
@@ -182,11 +181,10 @@ class Qwen35Layer(DecoderLayer):
         del self.self_attn, self.cache
         self.linear_attn = GatedDeltaNet(c)
 
-    def body(self, x, call):
+    def mix(self, h, call):
         if self.linear_attn is None:
-            return super().body(x, call)
-        x = x + self.linear_attn(self.input_layernorm(x), call)
-        return x + self.mlp(self.post_attention_layernorm(x))
+            return super().mix(h, call)
+        return self.linear_attn(h, call)
 
 
 class Qwen35(CausalLM):

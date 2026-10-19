@@ -35,16 +35,17 @@ from iron import lm
 from iron.lm import (
     Attention,
     CausalLM,
+    Decoder,
     DecoderConfig,
     Embedding,
     GatedMLP,
+    KVCache,
     Linear,
     PleLayer,
     RMSNorm,
+    Rope,
+    subtree,
 )
-from iron.lm.blocks import KVCache, Rope
-from iron.lm.causal import Decoder
-from iron.lm.checkpoint import subtree
 from iron.operators.copy import Copy
 from iron.operators.tanh import Tanh
 

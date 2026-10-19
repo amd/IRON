@@ -40,7 +40,6 @@ from iron.lm import (
     RMSNorm,
     not_json,
 )
-from iron.lm.blocks import _add
 
 
 @dataclasses.dataclass(frozen=True)
@@ -119,12 +118,8 @@ class Lfm2Layer(DecoderLayer):
         self.residual_multiplier = 1.0
         self.conv = ShortConv(c)
 
-    def body(self, x, call):
-        if self.conv is None:
-            return super().body(x, call)
-        x = _add(x, self.conv(self.input_layernorm(x), call), self.residual_multiplier)
-        h = self.mlp(self.post_attention_layernorm(x))
-        return _add(x, h, self.residual_multiplier)
+    def mix(self, h, call):
+        return super().mix(h, call) if self.conv is None else self.conv(h, call)
 
 
 class Lfm2(CausalLM):

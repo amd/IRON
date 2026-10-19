@@ -38,10 +38,10 @@ from iron.lm import (
     DecoderLayer,
     GatedMLP,
     Linear,
+    Rope,
     not_json,
     rope_angles,
 )
-from iron.lm.blocks import Rope
 from iron.operators.copy import Copy
 
 

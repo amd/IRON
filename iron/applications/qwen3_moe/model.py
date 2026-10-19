@@ -20,8 +20,7 @@ import numpy as np
 import iron
 import iron.functional as F
 from iron.applications.qwen3.model import Qwen3Layer
-from iron.lm import CausalLM, DecoderConfig, Linear
-from iron.lm.blocks import GatedMLP
+from iron.lm import CausalLM, DecoderConfig, GatedMLP, Linear
 from iron.operators.experts import Experts
 from iron.operators.router import TopKRouter
 

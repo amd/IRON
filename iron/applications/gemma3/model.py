@@ -22,8 +22,15 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron import lm
-from iron.lm import Attention, CausalLM, DecoderConfig, RMSNorm, SandwichLayer
-from iron.lm.blocks import KVCache, Rope
+from iron.lm import (
+    Attention,
+    CausalLM,
+    DecoderConfig,
+    KVCache,
+    RMSNorm,
+    Rope,
+    SandwichLayer,
+)
 from iron.lm.config import unscaled
 
 

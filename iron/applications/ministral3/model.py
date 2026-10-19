@@ -21,9 +21,8 @@ import math
 
 import numpy as np
 
-from iron.lm import CausalLM, DecoderConfig
-from iron.lm.blocks import Rope
-from iron.lm.checkpoint import leaves, subtree
+from iron.lm import CausalLM, DecoderConfig, Rope, subtree
+from iron.lm.checkpoint import leaves
 
 
 @dataclasses.dataclass(frozen=True)

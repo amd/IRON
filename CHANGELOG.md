@@ -21,6 +21,11 @@ public API adds its entry under Unreleased.
   are a `Checkpoints` state, shared by Granite 4.0-H's Mamba, Qwen3.5's
   Gated DeltaNet and LFM2's short conv; and `Weights`, named weights read
   from a checkpoint and computed with elsewhere, from Granite 4.0-H.
+- `iron.lm` exports what the models import: `Rope`, `KVCache`, `Decoder`,
+  `activation`, `subtree` and `residual_add` (blocks' `_add` before).
+- `DecoderLayer.mix(h, call)`, the block between `input_layernorm` and the
+  first residual: attention over the layer's cache unless a layer mixes its
+  rows otherwise (LFM2's convolution, Granite 4.0-H's Mamba).
 - `Config.json_prefix`, the object of `config.json` a config's fields are
   read from: `"text_config."` for EmbeddingGemma 2's text encoder, SmolVLM's
   text model and Gemma 4, `"audio_config."` and `"vision_config."` for

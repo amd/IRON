@@ -35,8 +35,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron.lm import BatchNorm2d
-from iron.lm.checkpoint import subtree
+from iron.lm import BatchNorm2d, subtree
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.sigmoid import Sigmoid
