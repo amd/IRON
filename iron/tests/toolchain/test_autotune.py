@@ -575,13 +575,15 @@ def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(
     cycles = {key(o.layout()): 1 for o in found}
     small = next(o for o in found if key(o.layout()) == "16x64x16")
     calls = small.matmul_calls({})
-    cycles["16x64x16"] = margin * 100.0 * npu2.core_mhz * tuning.CLOCK_HEADROOM / calls
+    mhz = 1800.0
+    cycles["16x64x16"] = margin * 100.0 * mhz * tuning.CLOCK_HEADROOM / calls
     tuning.time_shape(
         shape,
         npu2,
         full_elf=True,
         exhaustive=len(found),
         cycles=cycles,
+        core_mhz=mhz,
         log=lambda _: None,
     )
     assert ("16x64x16" in ran) == timed

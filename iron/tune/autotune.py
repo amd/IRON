@@ -43,8 +43,8 @@ EXHAUSTIVE = 32
 
 FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
 
-# The fastest a core's clock may run, over the one mlir-aie's Device
-# measured (core_mhz), so a faster part's best setting is not skipped.
+# The fastest a core's clock may run, over the one the runtime read
+# (core_mhz), so a faster power mode's best setting is not skipped.
 CLOCK_HEADROOM = 1.25
 
 KERNEL_CHECKS = "https://xilinx.github.io/mlir-aie/kernel-checks/{npu}/latest.json"
@@ -75,17 +75,17 @@ def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
     }
 
 
-def least_us(op: GEMM, values: Mapping[str, int], cycles, dev) -> float | None:
+def least_us(
+    op: GEMM, values: Mapping[str, int], cycles, core_mhz: float
+) -> float | None:
     """A step time ``op`` cannot beat at per-call ``values``: its busiest
-    core's matmul calls at ``cycles`` per call. None where ``cycles`` does
-    not hold its matmul or ``dev``'s core clock is unknown.
+    core's matmul calls at ``cycles`` per call, at ``core_mhz``. None where
+    ``cycles`` does not hold its matmul.
     """
-    if dev.core_mhz is None:
-        return None
     per_call = cycles.get(op.layout().matmul().recipe_key)
     if per_call is None:
         return None
-    return op.matmul_calls(values) * per_call / (dev.core_mhz * CLOCK_HEADROOM)
+    return op.matmul_calls(values) * per_call / (core_mhz * CLOCK_HEADROOM)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -337,6 +337,7 @@ def time_shape(
     remeasure: bool = False,
     exhaustive: int = EXHAUSTIVE,
     cycles: Mapping[str, int] | None = None,
+    core_mhz: float | None = None,
     log: Callable[[str], None] = print,
 ) -> list[Trial]:
     """Each setting of ``shape`` timed, the recorded one first: every setting
@@ -344,7 +345,8 @@ def time_shape(
     ``exhaustive``, else those a coordinate descent tries, each tunable's
     ``line`` through the fastest setting taken so far, until a pass over the
     tunables moves it no further. A setting whose ``least_us`` at
-    ``cycles`` is no faster than the fastest taken so far is not timed.
+    ``cycles`` and ``core_mhz`` is no faster than the fastest taken so far
+    is not timed.
     """
     found = settings(shape.members[0][0], dev, shape.pinned)
     for op, _, _ in shape.members[1:]:
@@ -359,8 +361,8 @@ def time_shape(
         return [Trial(found[0], 0.0, 0.0)]
     tried: dict[tuple, Trial] = {}
     least = (
-        {_frozen(s): _least(shape, s, cycles, dev) for s in found[1:]}
-        if cycles and issubclass(shape.cls, GEMM)
+        {_frozen(s): _least(shape, s, cycles, core_mhz, dev) for s in found[1:]}
+        if cycles and core_mhz and issubclass(shape.cls, GEMM)
         else {}
     )
     recorded_us: float | None = None
@@ -408,7 +410,9 @@ def _frozen(tunables: Mapping[str, Any]) -> tuple:
     return tuple(tunables.items())
 
 
-def _least(shape: Shape, s: dict[str, Any], cycles, dev) -> float | None:
+def _least(
+    shape: Shape, s: dict[str, Any], cycles, core_mhz: float, dev
+) -> float | None:
     """``least_us`` of ``shape`` at setting ``s``, weighted as ``_time``
     weighs its operators' steps; None where any is unknown.
     """
@@ -416,7 +420,7 @@ def _least(shape: Shape, s: dict[str, Any], cycles, dev) -> float | None:
     for op, points, _ in shape.members:
         moved = op._with_tunables(**s).resolved(dev)
         for weight, values in points:
-            bound = least_us(moved, values, cycles, dev)
+            bound = least_us(moved, values, cycles, core_mhz)
             if bound is None:
                 return None
             total += weight * bound
@@ -506,6 +510,7 @@ def autotune(
     cache: Cache | None = None,
     remeasure: bool = False,
     cycles: Mapping[str, int] | None = None,
+    core_mhz: float | None = None,
     log: Callable[[str], None] = print,
 ) -> Profile:
     """``profile`` with an entry for each shape of ``calls`` (``shapes``)
@@ -519,6 +524,8 @@ def autotune(
         cache: Where each time is kept across runs (``Cache.here()``).
         remeasure: Time again what ``cache`` holds.
         cycles: Kernel cycles per call by recipe key (``kernel_cycles``).
+        core_mhz: The cores' clock the runtime reads (``core_mhz``), which
+            ``cycles`` are timed at; None times every setting.
     """
     found = shapes(calls, dev)
     covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
@@ -548,6 +555,7 @@ def autotune(
             cache=cache,
             remeasure=remeasure,
             cycles=cycles,
+            core_mhz=core_mhz,
             log=log,
         )
         gains = [t for t in tried if t.gains]

@@ -26,6 +26,8 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+import aie.utils as aie_utils
+
 from iron import operators
 from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
@@ -87,6 +89,7 @@ def tune(args: argparse.Namespace, calls: Sequence[Timed], profiles: Path) -> Pa
         profile,
         full_elf=dev.dispatches_full_elf,
         cycles=kernel_cycles(dev),
+        core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
         **_timing(args),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,6 +139,7 @@ def main() -> None:
         dev,
         full_elf=dev.dispatches_full_elf,
         cycles=kernel_cycles(dev),
+        core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
         **_timing(args),
     )
     for t in sorted(tried, key=lambda t: t.delta_us):
