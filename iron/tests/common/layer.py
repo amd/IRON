@@ -22,7 +22,7 @@ from iron.lm.checkpoint import nest
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
-# A layer at a shape every operator in it traces at.
+# A layer at a shape every operator in it records at.
 T, WIDTH, HEADS, GROUPS, HEAD, HIDDEN = 256, 512, 8, 2, 64, 1024
 
 
@@ -129,7 +129,7 @@ def test_a_norm_is_its_kernel_weighted_if_given_then_any_bias(norm, steps):
         def body(self, x):
             return norm(x, self.w)
 
-    recorded = Normed().trace(x=(T, WIDTH)).steps
+    recorded = Normed().record(x=(T, WIDTH)).steps
     assert [
         (type(s.op).__name__, getattr(s.op, "weighted", None)) for s in recorded
     ] == steps

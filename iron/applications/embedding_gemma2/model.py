@@ -327,7 +327,7 @@ class Multimodal(lm.Multimodal):
         weights = Checkpoint(args.checkpoint / "model.safetensors").tree("unread")
         graph = cls(Config(), weights)
         return [
-            Timed(graph.trace(**shapes), graph.longest()) for shapes in graph.shapes()
+            Timed(graph.record(**shapes), graph.longest()) for shapes in graph.shapes()
         ]
 
 

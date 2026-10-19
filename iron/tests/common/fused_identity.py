@@ -15,7 +15,7 @@ import pytest
 from aie.iron.device import from_name
 
 from iron.common.design import OperatorDesign
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef, SequenceStep
@@ -37,7 +37,7 @@ def _sequence(shapes):
         for i, (m, k) in enumerate(shapes)
     ]
     seq = OperatorSequence(
-        TracedGraph.of_steps(
+        Recording.of_steps(
             "fused_identity_probe",
             steps,
             [f"{b}{i}" for i in range(len(shapes)) for b in "wx"],
@@ -113,7 +113,7 @@ def test_two_designs_whose_device_names_collide_are_refused():
     else:
         pytest.fail("no two ReLU sizes up to 200k tiles share a device name")
     seq = OperatorSequence(
-        TracedGraph.of_steps(
+        Recording.of_steps(
             "colliding_names",
             [
                 SequenceStep(seen[name], (BufferRef("x0"), BufferRef("y0"))),

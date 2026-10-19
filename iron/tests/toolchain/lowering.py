@@ -69,8 +69,8 @@ def lower(op, tmp_path, name=None):
     return src, insts
 
 
-def _lower_all(traced, tmp_path, device=None):
-    for i, op in enumerate(traced.operators):
+def _lower_all(recording, tmp_path, device=None):
+    for i, op in enumerate(recording.operators):
         (tmp_path / str(i)).mkdir()
         if device is not None:
             op = op.resolved(device)
@@ -176,11 +176,11 @@ class _Features(iron.Graph):
 
 
 def test_a_graph_called_in_a_graph_lowers(device, tmp_path):
-    """Its operators, traced into the caller's and bound by the caller's
+    """Its operators, recorded into the caller's and bound by the caller's
     per-call value, lower with the values they read.
     """
-    traced = _Features(3072).trace(wave=((3073 * 160,), np.float32))
-    _lower_all(traced, tmp_path, device)
+    recording = _Features(3072).record(wave=((3073 * 160,), np.float32))
+    _lower_all(recording, tmp_path, device)
 
 
 class _Subsample(iron.Graph):
@@ -203,11 +203,11 @@ class _Subsample(iron.Graph):
 
 def test_convolutions_called_in_a_graph_lower(device, tmp_path):
     mels = 128
-    traced = _Subsample(mels).trace(
+    recording = _Subsample(mels).record(
         x=((2 * 256 + 2, mels), bfloat16),
         y=((256 + 2, (mels // 2 + 2) * 64), bfloat16),
     )
-    _lower_all(traced, tmp_path, device)
+    _lower_all(recording, tmp_path, device)
 
 
 class _Pixels(iron.Graph):
@@ -233,5 +233,5 @@ class _Pixels(iron.Graph):
 def test_image_patches_called_in_a_graph_lower(device, tmp_path):
     graph = _Pixels()
     rgb = graph.processor.resample.image_chunks, graph.processor.chunk
-    traced = graph.trace(rgb=(rgb, np.uint8))
-    _lower_all(traced, tmp_path, device)
+    recording = graph.record(rgb=(rgb, np.uint8))
+    _lower_all(recording, tmp_path, device)

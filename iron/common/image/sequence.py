@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""OperatorSequence: what one run of a traced graph builds and dispatches."""
+"""OperatorSequence: what one run of a recorded graph builds and dispatches."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .fusion import ArgumentSizes
 from .step import BufferRef, SequenceStep
 
 if TYPE_CHECKING:
-    from ..graph.trace import TracedGraph
+    from ..graph.record import Recording
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +38,10 @@ def _signature(op):
 
 
 class OperatorSequence:
-    """A traced graph's steps, built and dispatched as one image.
+    """A recorded graph's steps, built and dispatched as one image.
 
     Args:
-        traced: The graph: its steps, inputs, outputs, the sizes of the
+        recording: The graph: its steps, inputs, outputs, the sizes of the
             buffers a step names only in part (``pinned``) and the buffers
             of its feedback argument.
         full_elf: One full ELF, else one xclbin per design, a step at a
@@ -68,7 +68,7 @@ class OperatorSequence:
 
     def __init__(
         self,
-        traced: TracedGraph,
+        recording: Recording,
         full_elf: bool | None = None,
         check: bool = False,
         arena: ArenaPlan | None = None,
@@ -85,7 +85,7 @@ class OperatorSequence:
         if residents and arena is None:
             raise ValueError("residents are placed in an arena; pass arena= too")
         unbuilt = "check=True" if check else "full_elf=False"
-        if traced.feedback and full_elf is False:
+        if recording.feedback and full_elf is False:
             raise ValueError(
                 f"feedback arguments are an argument of the full ELF; "
                 f"{unbuilt} has none"
@@ -105,7 +105,7 @@ class OperatorSequence:
                 f"commands split the full ELF's sequence; {unbuilt} dispatches "
                 f"every step on its own"
             )
-        self.steps = [SequenceStep(s.op, s.refs()) for s in traced.steps]
+        self.steps = [SequenceStep(s.op, s.refs()) for s in recording.steps]
         if isinstance(coresident, AdjacentPacking):
             self.coresident: tuple[tuple[Operator, ...], ...] | AdjacentPacking = (
                 coresident
@@ -122,11 +122,11 @@ class OperatorSequence:
                 raise ValueError(f"coresident names operators no step runs: {strays}")
             self.coresident = tuple(tuple(group) for group in coresident)
         # The chain's kernel instances are named from this label.
-        self.name = traced.name
-        self.inputs = [h.name for h in traced.inputs]
-        self.outputs = [h.name for h in traced.outputs]
-        self.feedback = list(traced.feedback)
-        self.pinned = dict(traced.pinned)
+        self.name = recording.name
+        self.inputs = [h.name for h in recording.inputs]
+        self.outputs = [h.name for h in recording.outputs]
+        self.feedback = list(recording.feedback)
+        self.pinned = dict(recording.pinned)
         self.reconfigure = reconfigure
         self.commands = tuple(commands)
         self.arena = arena

@@ -28,7 +28,7 @@ from .model import Model
 class EncodeStep:
     """What each of an encoder's layers is called with."""
 
-    # The rows valid this call, a per-call value in a trace.
+    # The rows valid this call, a per-call value in a recording.
     rows: Any
     # The RoPE angles each layer's ``rope`` names, a pair of q's and k's.
     ropes: Any

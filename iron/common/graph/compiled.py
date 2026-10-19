@@ -28,7 +28,7 @@ from ml_dtypes import bfloat16
 from aie.helpers.taplib import Affine, PerCall
 
 from ..declare import Operator
-from ..declare.operator import device_fit, graph_tracer
+from ..declare.operator import device_fit, graph_recorder
 from ..declare.value import ExtentWord
 from ..declare.precision import Precision
 from ..declare.profile import Profile
@@ -42,7 +42,7 @@ from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fill import filled
 from .handle import Carry, Handle, State, Weight, is_operand
-from .trace import TracedGraph, Tracer
+from .record import Recording, Recorder
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +216,7 @@ def walk(
 
 
 class Graph:
-    """A graph: a subclass whose ``body`` is traced on handles.
+    """A graph: a subclass whose ``body`` is recorded on handles.
 
     ``body``'s positional parameters are the inputs (one defaulting to None
     may be left out), its keyword-only ones the per-call values, and what it
@@ -230,7 +230,7 @@ class Graph:
     is raised to it, and ``compile(precision=)`` overrides it in turn.
 
     Called in another graph's body, on its handles and per-call values, a
-    graph's body traces into that graph: its steps are the caller's, its
+    graph's body records into that graph: its steps are the caller's, its
     weights and states are named by the path the caller holds it at, and
     the caller's one compile covers it.
     """
@@ -258,10 +258,10 @@ class Graph:
             _Parameters.of(cls.__name__, signature.replace(parameters=parameters))
 
     def __repr__(self) -> str:
-        traced = dict.fromkeys([*self._versions, *self._references])
+        recorded = dict.fromkeys([*self._versions, *self._references])
         shapes = "; ".join(
             ", ".join(f"{n}={shape} {dtype}" for n, shape, dtype in signature)
-            for signature in traced
+            for signature in recorded
         )
         return f"{self.name}({shapes})"
 
@@ -278,7 +278,7 @@ class Graph:
         return {}
 
     @functools.cached_property
-    def _references(self) -> dict[Signature, TracedGraph]:
+    def _references(self) -> dict[Signature, Recording]:
         return {}
 
     @functools.cached_property
@@ -429,7 +429,7 @@ class Graph:
                 shapes[n] = (p.shape, p.dtype)
         return shapes
 
-    def trace(self, *, precision: Precision | None = None, **shapes) -> TracedGraph:
+    def record(self, *, precision: Precision | None = None, **shapes) -> Recording:
         """Run ``body`` on handles of the given shapes; an optional input
         given none is None. ``precision`` overrides ``self.precision``.
         """
@@ -454,18 +454,18 @@ class Graph:
             inputs.append(Handle(shape, dtype, name, "input"))
             args.append(inputs[-1])
         values = [PerCall(n, kind, dtype) for n, (kind, dtype) in params.values.items()]
-        with Tracer(
+        with Recorder(
             self.name,
             self._profile(),
             self.held(),
             params.inputs,
             self.precision if precision is None else precision,
-        ) as tracer:
+        ) as recorder:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
-        outputs = self._outputs(items, tracer)
-        return tracer.finish(
-            inputs, outputs, values, self._traced_carry(carry, values, tracer)
+        outputs = self._outputs(items, recorder)
+        return recorder.finish(
+            inputs, outputs, values, self._recorded_carry(carry, values, recorder)
         )
 
     def _split_carry(self, result) -> tuple[list, Carry | None]:
@@ -490,17 +490,17 @@ class Graph:
             )
         return items, carry
 
-    def _traced_carry(
-        self, carry: Carry | None, values: list[PerCall], tracer: Tracer
+    def _recorded_carry(
+        self, carry: Carry | None, values: list[PerCall], recorder: Recorder
     ) -> dict[str, Handle | Affine]:
         """Each next value: an expression of the values, or one element the graph computed."""
         if carry is None:
             return {}
         dtypes = {v.name: v.dtype for v in values}
-        traced: dict[str, Handle | Affine] = {}
+        found: dict[str, Handle | Affine] = {}
         for name, nxt in carry.items():
             if isinstance(nxt, Affine):
-                traced[name] = nxt
+                found[name] = nxt
                 continue
             if not isinstance(nxt, Handle):
                 raise TypeError(
@@ -518,11 +518,11 @@ class Graph:
                     f"is {np.dtype(dtypes[name]).name}"
                 )
             if nxt.role == "intermediate":
-                _rename(tracer, nxt, tracer.fresh(f"carry_{name}"))
-            traced[name] = nxt
-        return traced
+                _rename(recorder, nxt, recorder.fresh(f"carry_{name}"))
+            found[name] = nxt
+        return found
 
-    def _outputs(self, items: list, tracer: Tracer) -> list:
+    def _outputs(self, items: list, recorder: Recorder) -> list:
         outputs = []
         for i, item in enumerate(items):
             if not isinstance(item, Handle) or item.parent is not None:
@@ -536,7 +536,9 @@ class Graph:
                 )
             if item.role == "intermediate":
                 _rename(
-                    tracer, item, tracer.fresh(f"out{i}" if len(items) > 1 else "out")
+                    recorder,
+                    item,
+                    recorder.fresh(f"out{i}" if len(items) > 1 else "out"),
                 )
             outputs.append(item)
         return outputs
@@ -577,17 +579,17 @@ class Graph:
             if dev is not None
             else contextlib.nullcontext()
         ):
-            traced = self.trace(
+            recording = self.record(
                 precision=None if precision is None else Precision(precision), **shapes
             )
-            chosen = plan(require_device(), traced, full_elf, check)
+            chosen = plan(require_device(), recording, full_elf, check)
             logger.info("%s", chosen.report(self.name))
             signature = self._signature(
-                {h.name: (h.shape, h.dtype) for h in traced.inputs}
+                {h.name: (h.shape, h.dtype) for h in recording.inputs}
             )
-            emit, sized = self._emit(traced, chosen, feeds)
+            emit, sized = self._emit(recording, chosen, feeds)
             version = CompiledGraph(
-                traced,
+                recording,
                 chosen,
                 check=check,
                 arena=self._arena,
@@ -606,18 +608,18 @@ class Graph:
             return version
 
     def _emit(
-        self, traced: TracedGraph, chosen: Plan, feeds: CompiledGraph | None
+        self, recording: Recording, chosen: Plan, feeds: CompiledGraph | None
     ) -> tuple[EmitSite | None, list[Word] | None]:
         """The Emit step a full ELF with carried values ends in, appended to
-        ``traced``, sized for ``feeds``' words or, feeding itself, for its
+        ``recording``, sized for ``feeds``' words or, feeding itself, for its
         own; and those own words, or None.
 
         Raises:
             ValueError: ``feeds`` is not a full-ELF version of this graph,
                 or this version does not loop.
         """
-        loops = feeds is not None or not traced.inputs
-        if not (chosen.full_elf and traced.carry and loops):
+        loops = feeds is not None or not recording.inputs
+        if not (chosen.full_elf and recording.carry and loops):
             if feeds is not None:
                 raise ValueError(
                     f"{self.name}: only a full-ELF version with carried values "
@@ -626,7 +628,7 @@ class Graph:
             return None, None
         sized = None
         if feeds is None:
-            sized = _words(traced, share=True, extents=False)[0]
+            sized = _words(recording, share=True, extents=False)[0]
             slots = len(sized)
         elif feeds.emit is None or not any(feeds is v for v in self._versions.values()):
             raise ValueError(
@@ -636,7 +638,7 @@ class Graph:
         else:
             slots = len(feeds.parameters)
         assert self._carry is not None
-        emit = attach_emit(traced, self._parameters.carried, self._carry, slots)
+        emit = attach_emit(recording, self._parameters.carried, self._carry, slots)
         return emit, sized
 
     def _given(self, tensors) -> dict[str, Any]:
@@ -656,7 +658,7 @@ class Graph:
     def __call__(self, *tensors, **values) -> Any:
         given = self._given(tensors)
         _check_values(self.name, self._parameters.values, values)
-        if graph_tracer.get() is not None:
+        if graph_recorder.get() is not None:
             if self._parameters.carried:
                 raise TypeError(
                     f"{self.name}: a graph called in another's body carries "
@@ -676,35 +678,35 @@ class Graph:
         return version(*given.values(), **values)
 
     def inline(self, method: Callable, /, *args, **kwargs) -> Any:
-        """``method``, one of this graph's, traced into the body of the graph
-        being traced, under this graph's profile: its steps are that graph's.
+        """``method``, one of this graph's, recorded into the body of the graph
+        being recorded, under this graph's profile: its steps are that graph's.
         That graph names the values ``method`` takes, carried ones included.
 
         Raises:
-            TypeError: No graph's body is being traced.
+            TypeError: No graph's body is being recorded.
         """
-        tracer = graph_tracer.get()
-        if tracer is None:
-            raise TypeError(f"{self.name}: inline() traces into a graph's body")
+        recorder = graph_recorder.get()
+        if recorder is None:
+            raise TypeError(f"{self.name}: inline() records into a graph's body")
         own = self._profile()
         if own is None:
             return method(*args, **kwargs)
-        previous, tracer.profile = tracer.profile, own
+        previous, recorder.profile = recorder.profile, own
         try:
             return method(*args, **kwargs)
         finally:
-            tracer.profile = previous
+            recorder.profile = previous
 
     def reference(self, *tensors, **values) -> Any:
-        """The graph traced for these tensors' shapes, each step run on the
-        host through its operator's ``reference()`` (``TracedGraph.reference``):
+        """The graph recorded for these tensors' shapes, each step run on the
+        host through its operator's ``reference()`` (``Recording.reference``):
         what a call on the device returns, each output cut to its bounds,
         at any shape the operators take, one no device fits too.
 
         Raises:
             TypeError: An input is missing, or a per-call value is missing or
                 unknown, as a call on the device refuses them; or the body
-                does not trace.
+                does not record.
             IndexError: The values index or bound a view outside it, as a
                 call on the device refuses them.
         """
@@ -712,15 +714,15 @@ class Graph:
         _check_values(self.name, self._parameters.values, values)
         shapes = {n: (t.shape, np.dtype(t.dtype).type) for n, t in given.items()}
         signature = self._signature(shapes)
-        traced = self._references.get(signature)
-        if traced is None:
+        recording = self._references.get(signature)
+        if recording is None:
             token = device_fit.set(False)
             try:
-                traced = self._references[signature] = self.trace(**shapes)
+                recording = self._references[signature] = self.record(**shapes)
             finally:
                 device_fit.reset(token)
-        outputs, carry = traced.reference(given, values)
-        return _results(outputs, Carry(**carry) if traced.carry else None)
+        outputs, carry = recording.reference(given, values)
+        return _results(outputs, Carry(**carry) if recording.carry else None)
 
     def _profile(self) -> Profile | None:
         profile = self.profile
@@ -734,36 +736,38 @@ class Graph:
 
 
 class CompiledGraph:
-    """A traced graph built into an image, ready to call.
+    """A recorded graph built into an image, ready to call.
 
-    A call gives the per-call values this version reads (``TracedGraph.reads``)
+    A call gives the per-call values this version reads (``Recording.reads``)
     and may give the graph's others, which another version reads; they go
     unused.
     """
 
     def __init__(
         self,
-        traced: TracedGraph,
+        recording: Recording,
         plan: Plan,
         check: bool = False,
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
         coresident: AdjacentPacking | list[list[Operator]] | None = None,
     ):
-        self.traced = traced
+        self.recording = recording
         self.plan = plan
         self.arena = arena
         self.emit = emit
         self.words, self.shared = _words(
-            traced, share=plan.full_elf, extents=not plan.full_elf
+            recording, share=plan.full_elf, extents=not plan.full_elf
         )
         placement: dict[str, Any] = (
-            {} if arena is None else dict(arena=arena.plan, residents=traced.residents)
+            {}
+            if arena is None
+            else dict(arena=arena.plan, residents=recording.residents)
         )
         if coresident:
             placement["coresident"] = coresident
         self.sequence = OperatorSequence(
-            traced,
+            recording,
             full_elf=plan.full_elf,
             check=check,
             shared_words=self.shared,
@@ -799,21 +803,22 @@ class CompiledGraph:
 
     def __repr__(self) -> str:
         inputs = ", ".join(
-            f"{h.name}={h.shape} {bfp.dtype_name(h.dtype)}" for h in self.traced.inputs
+            f"{h.name}={h.shape} {bfp.dtype_name(h.dtype)}"
+            for h in self.recording.inputs
         )
-        report = self.plan.report(f"{self.traced.name}({inputs})")
+        report = self.plan.report(f"{self.recording.name}({inputs})")
         if self.artifacts.directory is None:
             return report
         return f"{report}\n  built in {self.artifacts.directory}"
 
     def _ref(self, x) -> BufferRef:
         if isinstance(x, State):
-            return BufferRef(self.traced.states[id(x)][1].name)
+            return BufferRef(self.recording.states[id(x)][1].name)
         if isinstance(x, Handle):
             return x.ref()
         key = id(x.array) if isinstance(x, Weight) else id(x)
-        if key in self.traced.weights:
-            return BufferRef(self.traced.weights[key][1].name)
+        if key in self.recording.weights:
+            return BufferRef(self.recording.weights[key][1].name)
         raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
 
     def _storage(self, x):
@@ -854,7 +859,7 @@ class CompiledGraph:
         piece_bytes: int = UPLOAD_PIECE,
     ) -> None:
         """Copy every closed-over weight into its buffer, once per storage."""
-        for key, (tensor, handle) in self.traced.weights.items():
+        for key, (tensor, handle) in self.recording.weights.items():
             if key not in self._loaded:
                 self._copy_in(handle.name, tensor, release, piece_bytes)
                 self._loaded.add(key)
@@ -872,55 +877,57 @@ class CompiledGraph:
     def __call__(self, *tensors, **values) -> Any:
         self._stage(tensors, values)
         if self.plan.commands:
-            self.callable(idle=self.plan.idle(self.traced.steps, values))
+            self.callable(idle=self.plan.idle(self.recording.steps, values))
         else:
             self.callable()
-        outputs = [self.callable.get_buffer(h.ref()) for h in self.traced.returned]
-        if not self.traced.carry:
+        outputs = [self.callable.get_buffer(h.ref()) for h in self.recording.returned]
+        if not self.recording.carry:
             return _results(outputs, None)
         return _results(outputs, self._next_values(values))
 
     def start(self, run: FullELFRun, /, *tensors, **values) -> None:
         """Start a call of this full ELF on ``run`` without waiting for it."""
         self._stage(tensors, values, run)
-        self.callable.start(run, idle=self.plan.idle(self.traced.steps, values))
+        self.callable.start(run, idle=self.plan.idle(self.recording.steps, values))
 
     def emit_to(self, target: CompiledGraph) -> None:
         """Program this version's Emit to start a call of ``target``."""
         if self.emit is None:
-            raise ValueError(f"{self.traced.name}: this version has no Emit step")
-        if target.traced.addresses:
+            raise ValueError(f"{self.recording.name}: this version has no Emit step")
+        if target.recording.addresses:
             tables = sorted(
-                {buffer for buffer, _, _ in target.traced.addresses.values()}
+                {buffer for buffer, _, _ in target.recording.addresses.values()}
             )
             raise ValueError(
-                f"{target.traced.name}: an Emit cannot start it: its gather by ids "
+                f"{target.recording.name}: an Emit cannot start it: its gather by ids "
                 f"the device made reads the address of {tables}, which the host "
                 f"writes each call and no carried value holds"
             )
-        program = compose(self.emit, self.traced.carry, target.words, target.parameters)
+        program = compose(
+            self.emit, self.recording.carry, target.words, target.parameters
+        )
         self.write(self.emit.program, program)
 
     def _stage(self, tensors, values, run: FullELFRun | None = None) -> None:
-        if len(tensors) != len(self.traced.inputs):
+        if len(tensors) != len(self.recording.inputs):
             raise TypeError(
-                f"{self.traced.name} takes {len(self.traced.inputs)} input(s), "
+                f"{self.recording.name} takes {len(self.recording.inputs)} input(s), "
                 f"got {len(tensors)}"
             )
-        reads = self.traced.reads
+        reads = self.recording.reads
         _check_values(
-            self.traced.name, reads, {n: x for n, x in values.items() if n in reads}
+            self.recording.name, reads, {n: x for n, x in values.items() if n in reads}
         )
-        unknown = set(values) - {v.name for v in self.traced.values}
+        unknown = set(values) - {v.name for v in self.recording.values}
         if unknown:
             raise TypeError(
-                f"{self.traced.name}: per-call values {sorted(unknown)} unknown"
+                f"{self.recording.name}: per-call values {sorted(unknown)} unknown"
             )
-        self.traced.check_limits(values)
-        for handle, tensor in zip(self.traced.inputs, tensors):
+        self.recording.check_limits(values)
+        for handle, tensor in zip(self.recording.inputs, tensors):
             if tuple(tensor.shape) != handle.shape:
                 raise ValueError(
-                    f"{self.traced.name}: input {handle.name} was compiled for "
+                    f"{self.recording.name}: input {handle.name} was compiled for "
                     f"{handle.shape}, got {tuple(tensor.shape)}; a new shape is a "
                     f"new compile"
                 )
@@ -928,12 +935,12 @@ class CompiledGraph:
                 dtype = np.dtype(handle.dtype)
                 module = dtype.type.__module__.replace("numpy", "np")
                 raise TypeError(
-                    f"{self.traced.name}: input {handle.name} is {dtype}, got "
+                    f"{self.recording.name}: input {handle.name} is {dtype}, got "
                     f"{tensor.dtype}; pass {handle.name}.astype({module}.{dtype})"
                 )
         self.upload()
-        for handle, tensor in zip(self.traced.inputs, tensors):
-            held = self.traced.encoders.get(handle.name)
+        for handle, tensor in zip(self.recording.inputs, tensors):
+            held = self.recording.encoders.get(handle.name)
             if held is not None:
                 tensor = np.concatenate(
                     [e(tensor, self._address(e.buffer), values) for e in held]
@@ -955,7 +962,7 @@ class CompiledGraph:
     def _next_values(self, values: Mapping[str, int]) -> Carry:
         nxt: dict[str, int] = {}
         planes = None if self.emit is None else self.read(self.emit.carry)
-        for name, expression in self.traced.carry.items():
+        for name, expression in self.recording.carry.items():
             if isinstance(expression, Affine):
                 nxt[name] = expression.evaluate(values)
             elif planes is not None:
@@ -975,7 +982,7 @@ class CompiledGraph:
         if not self.words:
             return
         values = dict(values)
-        for name, (buffer, address_words, word) in self.traced.addresses.items():
+        for name, (buffer, address_words, word) in self.recording.addresses.items():
             values[name] = address_words(self._address(buffer))[word]
         words = {w.symbol: np.dtype(w.dtype).type(w(values)) for w in self.words}
         (self.callable if run is None else run).write_values(words)
@@ -990,10 +997,10 @@ def _check_values(name: str, declared, values: Mapping[str, Any]) -> None:
         )
 
 
-def _rename(tracer: Tracer, handle: Handle, name: str) -> None:
+def _rename(recorder: Recorder, handle: Handle, name: str) -> None:
     """Make an intermediate, and every view of its buffer, a graph output named ``name``."""
     old = handle.name
-    for step in tracer.steps:
+    for step in recorder.steps:
         for h in step.slots + step.inputs + step.outputs:
             root = h.root  # one buffer may have several roots, one per reshape
             if root.role == "intermediate" and root.name == old:
@@ -1048,14 +1055,14 @@ def _derived_form(op, name: str, counts: Mapping[str, Affine]) -> Affine | None:
 
 
 def _words(
-    traced: TracedGraph, *, share: bool = False, extents: bool = True
+    recording: Recording, *, share: bool = False, extents: bool = True
 ) -> tuple[list[Word], dict[str, str]]:
     """The scratchpad words a call writes, and with ``share`` the symbols
     sharing one: a full ELF has 32 words for its whole image.
     """
     dev = aie_utils.get_current_device()
     words: list[Word] = []
-    for b in traced.bindings:
+    for b in recording.bindings:
         if not extents and b.member.bounds is not None:
             continue
         e = b.expression
@@ -1070,14 +1077,14 @@ def _words(
         words.append(Word(b.symbol, e.dtype, lambda v, e=e: e.evaluate(v), linear, e))
     seen: set[int] = set()
     derived: set[str] = set()
-    for b in traced.bindings:
+    for b in recording.bindings:
         if id(b.op) in seen or b.member.bounds is None:
             continue
         seen.add(id(b.op))
         op = b.op.resolved(dev)
         counts = {
             e.member.name: e.expression
-            for e in traced.bindings
+            for e in recording.bindings
             if e.op is b.op and e.member.bounds is not None
         }
 

@@ -27,8 +27,8 @@ if TYPE_CHECKING:
 class Profile:
     """Tunable values for operators, keyed by their shape.
 
-    A graph's tracer makes every step it constructs with ``make``
-    (``Tracer(name, profile)``); standalone construction calls it
+    A graph's recorder makes every step it constructs with ``make``
+    (``Recorder(name, profile)``); standalone construction calls it
     explicitly, ``profile.make(Cls, **kw)``. A
     tunable a call leaves open comes from the most specific entry naming it;
     entries of equal specificity that disagree raise. A subclass matches its
@@ -44,7 +44,7 @@ class Profile:
 
     def make(self, cls: type, **kwargs: Any) -> Operator:
         """``cls(**kwargs)``, its open tunables filled from this profile's
-        entries: standalone use of what a graph's tracer applies implicitly
+        entries: standalone use of what a graph's recorder applies implicitly
         to every step it constructs.
         """
         pinned = frozenset(

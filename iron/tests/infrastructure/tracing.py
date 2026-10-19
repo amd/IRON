@@ -41,15 +41,15 @@ def _layer_norm_run(name, trace):
 
     f = F()
 
-    traced = f.trace(x=(1, SIZE))
+    recording = f.record(x=(1, SIZE))
     seq = OperatorSequence(
-        dataclasses.replace(traced, name=name), full_elf=True
+        dataclasses.replace(recording, name=name), full_elf=True
     ).compile()
     run = seq.get_callable()
     x = run.get_buffer(BufferRef("x"))
     x.numpy_view()[:] = np.random.default_rng(0).standard_normal(SIZE).astype(bfloat16)
     run()
-    return run, run.get_buffer(traced.outputs[0].ref()).numpy()[:SIZE].copy()
+    return run, run.get_buffer(recording.outputs[0].ref()).numpy()[:SIZE].copy()
 
 
 @pytest.mark.supported_devices("npu2")

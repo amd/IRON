@@ -30,7 +30,7 @@ public API adds its entry under Unreleased.
   session calls are `decode_step`, `prompt_chunk`, `placed_chunk` and
   `placeholders`, as `use` takes them.
 - `Operator.reference_only = True`: an operator that is a declaration plus
-  `reference()`, with no kernel. Graphs trace it and references run it;
+  `reference()`, with no kernel. Graphs record it and references run it;
   compiling it raises, and the device catalog skips it.
 - `Experts`: each row through the gated feed-forwards of the experts
   `TopKRouter` chose for it, weighted, on one core over mlir-aie's scalar
@@ -57,7 +57,7 @@ public API adds its entry under Unreleased.
   and `Graph.load_state_dict(tree, *, path="")`, which binds each one to the tensor at its
   dotted path, cast to its dtype, and raises once, naming every missing,
   extra and wrong-shaped tensor; a param held at two paths is tied, bound
-  from its first. A param never loaded is named when the graph is traced,
+  from its first. A param never loaded is named when the graph is recorded,
   and a second load is refused. `Graph.draw(seed)` and `Graph.unread()` bind
   them drawn or unwritten.
 - Leaf modules in `iron.lm`, graphs that declare their weights as
@@ -100,7 +100,7 @@ public API adds its entry under Unreleased.
   builds (Whisper's adds its position table and a LayerNorm).
 - `Linear.split(x, *rows)`, a fused projection's outputs: one `F.linear`
   per run of the weight's rows.
-- `Graph.trace(precision=)`, which `compile(precision=)` passes on instead of
+- `Graph.record(precision=)`, which `compile(precision=)` passes on instead of
   setting `Graph.precision` while it compiles.
 - `iron.lm.testing.load_from_flags`, a model test's `Model.load` at the
   `--random-weights` and `--max-seq-len` pytest was given, its files
@@ -197,7 +197,7 @@ public API adds its entry under Unreleased.
 - `--prompt TEXT` on a model's command line.
 - `-v` on a model's command line and `python -m iron.lm.tune`, which logs
   iron's INFO lines, such as each compile's.
-- `repr` of a graph names its traced shapes; of a compiled version, its
+- `repr` of a graph names its recorded shapes; of a compiled version, its
   inputs, packaging and build directory; of a `Profile`, its operators; of
   a model, its `max_seq_len` and whether it is loaded.
 - `repr` of an operator's `declaration` lists its fields, tunables with the
@@ -211,6 +211,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- Graph capture is recording, so "trace" means only hardware event tracing:
+  `Graph.record()` (was `trace()`), `Recording` (`TracedGraph`), `Step`
+  (`TracedStep`), `Recorder` (`Tracer`) and `graph_recorder`
+  (`graph_tracer`), in `iron.common.graph.record` (`trace`).
 - The autotuner's matmul bound holds on npu2_1col too: it reads the core
   clock by architecture (mlir-aie's `dev.core_mhz`), not by device name.
 - `EncodeStep.angles` is `EncodeStep.ropes`: the (q, k) angles each
@@ -241,7 +245,7 @@ public API adds its entry under Unreleased.
 - An `Elementwise` operand is split over every core only where it says
   `per=CORES` (`iron.common.elementwise.CORES`); an operand without `per=` is
   one lane.
-- `iron.tune.autotune.Call`, a traced graph's call as the tuner times it,
+- `iron.tune.autotune.Call`, a recorded graph's call as the tuner times it,
   is `Timed`, so `Call` names only `iron.lm.Call`.
 - A tunable's `domain=` is a tuple, an `Enum` or a function
   `(op, dev, start) -> tuple`, such as mlir-aie's `widths` and `divisors`,

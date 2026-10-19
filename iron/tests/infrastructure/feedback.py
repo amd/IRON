@@ -19,7 +19,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.trace import TraceConfig, get_trace_buffer
 from ml_dtypes import bfloat16
 
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef
@@ -83,10 +83,10 @@ def _feedback_sequence(name, layer_norm=None):
     if layer_norm is not None:
         runlist.insert(0, (layer_norm, "x", "y"))
         inputs, outputs = ["x", *inputs], ["y", *outputs]
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         name, sequences.steps(*runlist), inputs, outputs, feedback=["next"]
     )
-    seq = OperatorSequence(traced, full_elf=True)
+    seq = OperatorSequence(recording, full_elf=True)
     return seq, gather
 
 
@@ -222,14 +222,14 @@ def test_feedback_argument_only_when_declared():
     """An image without feedback takes the three arguments it always did."""
     tail = _copy(2, 2, 2)
     for feedback, arguments in (([], 3), (["next"], 4)):
-        traced = TracedGraph.of_steps(
+        recording = Recording.of_steps(
             "infra_feedback_arguments",
             sequences.steps((tail, "a", "b"), (tail, "b", "next")),
             ["a"],
             ["b"] if feedback else ["b", "next"],
             feedback=feedback,
         )
-        seq = OperatorSequence(traced, full_elf=True)
+        seq = OperatorSequence(recording, full_elf=True)
         seq.prepare()
         # The main device's runtime sequence is the last one in the module.
         header = [

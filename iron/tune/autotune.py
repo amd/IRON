@@ -5,7 +5,7 @@
 
 ``autotune`` takes the calls a model runs (``Timed``), finds each operator
 shape in them, times every setting of its tunables
-(``Operator.domains``) the placer takes against the setting it was traced
+(``Operator.domains``) the placer takes against the setting it was recorded
 at, and returns a ``Profile`` naming the fastest for each shape.
 """
 
@@ -28,14 +28,14 @@ from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.coresidence import fits
 from iron.operators.gemm import GEMM
 from .measure import Cache, Standalone, Timing, judge, measure, write
 
 logger = logging.getLogger(__name__)
 
-# Standard errors a setting's step must beat the traced one's by to be taken.
+# Standard errors a setting's step must beat the recorded one's by to be taken.
 CONFIDENCE = 2.0
 
 # Past this many settings, a shape's tunables are searched one at a time.
@@ -103,14 +103,14 @@ class Point:
 
 @dataclasses.dataclass(frozen=True)
 class Timed:
-    """One call of a traced graph, as its operators are timed in: the
+    """One call of a recorded graph, as its operators are timed in: the
     graph's per-call values, and what any buffer whose contents a step's
     time follows holds, by graph buffer name. ``points`` are the values its
     calls run at, where they differ from call to call: an operator whose
     work they change is timed at each (``op_points``).
     """
 
-    traced: TracedGraph
+    recording: Recording
     values: Mapping[str, int] = dataclasses.field(default_factory=dict)
     contents: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
     points: Sequence[Point] = ()
@@ -123,12 +123,12 @@ class Timed:
         """
         # A table's address the graph fills in; a word step alone reads none.
         values = {
-            **dict.fromkeys(self.traced.addresses, 0),
+            **dict.fromkeys(self.recording.addresses, 0),
             **(self.values if values is None else values),
         }
         return {
             b.member.name: b.expression.evaluate(values)
-            for b in self.traced.bindings
+            for b in self.recording.bindings
             if b.op is op
         }
 
@@ -152,7 +152,7 @@ class Timed:
         """What ``op``'s buffers hold in this call, by ``op``'s buffer name."""
         return {
             buf.name: self.contents[ref.root]
-            for step in self.traced.steps
+            for step in self.recording.steps
             if step.op is op
             for buf, ref in zip(op.buffers, step.refs())
             if ref.nbytes is None and ref.root in self.contents
@@ -244,14 +244,14 @@ def line(found: Sequence[dict[str, Any]], through: dict[str, Any], name: str):
 
 @dataclasses.dataclass(frozen=True)
 class Trial:
-    """One setting of a shape, timed against the setting it was traced at.
+    """One setting of a shape, timed against the setting it was recorded at.
 
     Attributes:
         tunables: The setting.
         delta_us: How much longer its steps take, summed over the shape's
             operators and weighted over their points; negative is faster.
         noise_us: The standard error of `delta_us`; None from one round.
-        refused: Why it may not replace the traced setting, or None.
+        refused: Why it may not replace the recorded setting, or None.
     """
 
     tunables: dict[str, Any]
@@ -314,7 +314,7 @@ def shapes(calls: Sequence[Timed], dev) -> list[Shape]:
     found: dict[Hashable, Shape] = {}
     seen: set[str] = set()
     for call in calls:
-        for step in call.traced.steps:
+        for step in call.recording.steps:
             op = step.op
             shape = Shape(op)
             shape = found.setdefault(shape.key, shape)
@@ -340,7 +340,7 @@ def time_shape(
     cycles: Mapping[str, int] | None = None,
     log: Callable[[str], None] = print,
 ) -> list[Trial]:
-    """Each setting of ``shape`` timed, the traced one first: every setting
+    """Each setting of ``shape`` timed, the recorded one first: every setting
     its operators share and the placer takes where there are at most
     ``exhaustive``, else those a coordinate descent tries, each tunable's
     ``line`` through the fastest setting taken so far, until a pass over the
@@ -367,17 +367,17 @@ def time_shape(
         if cycles and issubclass(shape.cls, GEMM)
         else {}
     )
-    traced_us: float | None = None
+    recorded_us: float | None = None
 
     def slower(s: dict[str, Any]) -> bool:
         bound = least.get(_frozen(s))
-        if bound is None or traced_us is None:
+        if bound is None or recorded_us is None:
             return False
         best = min((t.delta_us for t in tried.values() if t.gains), default=0.0)
-        return bound >= traced_us + best
+        return bound >= recorded_us + best
 
     def run(batch: list[dict[str, Any]]) -> None:
-        nonlocal traced_us
+        nonlocal recorded_us
         todo = [found[0]] + [
             s
             for s in batch
@@ -385,7 +385,7 @@ def time_shape(
         ]
         if skipped := sum(1 for s in batch if slower(s) and _frozen(s) not in tried):
             log(f"    {skipped} slower by their kernel alone, not timed")
-        trials, traced_us = _time(
+        trials, recorded_us = _time(
             shape, todo, full_elf, timing, repeats, cache, remeasure, log
         )
         for s, t in zip(todo, trials):
@@ -393,7 +393,7 @@ def time_shape(
 
     if len(found) <= exhaustive:
         if any(b is not None for b in least.values()):
-            run([])  # the traced setting's own time, which a bound is held to
+            run([])  # the recorded setting's own time, which a bound is held to
         run(found)
     else:
         best, moved = found[0], True
@@ -437,11 +437,11 @@ def _time(
     remeasure: bool,
     log: Callable[[str], None],
 ) -> tuple[list[Trial], float]:
-    """``found``'s settings (the traced one first) timed and judged at each
-    point of each of ``shape``'s operators, and the traced one's weighted
+    """``found``'s settings (the recorded one first) timed and judged at each
+    point of each of ``shape``'s operators, and the recorded one's weighted
     step time; one that does not build is refused.
     """
-    traced_us = 0.0
+    recorded_us = 0.0
     deltas = [0.0] * len(found)
     variances: list[float | None] = [0.0] * len(found)
     refused: list[str | None] = [None] * len(found)
@@ -460,7 +460,7 @@ def _time(
                 log=log,
             )
             default = ran[0]
-            traced_us += weight * default.t_step_us
+            recorded_us += weight * default.t_step_us
             for i in range(1, len(found)):
                 if i not in ran:
                     refused[i] = refused[i] or "does not build"
@@ -477,7 +477,7 @@ def _time(
     return [
         Trial(s, d, 0.0 if i == 0 else (None if v is None else math.sqrt(v)), r)
         for i, (s, d, v, r) in enumerate(zip(found, deltas, variances, refused))
-    ], traced_us
+    ], recorded_us
 
 
 def _judged(
@@ -513,12 +513,12 @@ def autotune(
     log: Callable[[str], None] = print,
 ) -> Profile:
     """``profile`` with an entry for each shape of ``calls`` (``shapes``)
-    naming the fastest setting taken (``time_shape``), the traced one where
+    naming the fastest setting taken (``time_shape``), the recorded one where
     none gains. Its entries covering any of those shapes are replaced; the
     rest are kept.
 
     Args:
-        calls: The calls whose graphs were traced under ``profile``.
+        calls: The calls whose graphs were recorded under ``profile``.
         full_elf: How the calls' graphs are packaged.
         cache: Where each time is kept across runs (``Cache.here()``).
         remeasure: Time again what ``cache`` holds.

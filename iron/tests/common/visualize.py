@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pictures of a graph, drawn device-free from its trace: every step is a
+"""Pictures of a graph, drawn device-free from its recording: every step is a
 node, and every buffer a step reads an edge into it from its producer.
 """
 
@@ -27,8 +27,8 @@ def nodes(dot: str) -> set[str]:
     return set(re.findall(r'^\s*"([^"]+)" \[', dot, re.M))
 
 
-def test_a_traced_graph_names_every_step_and_every_edge():
-    t = small().trace()
+def test_a_recorded_graph_names_every_step_and_every_edge():
+    t = small().record()
     dot = t.dot()
     writer, expected = {}, set()
     for i, s in enumerate(t.steps):
@@ -56,7 +56,7 @@ def in_layer(t, n: int) -> set[int]:
 
 
 def test_each_layer_s_steps_are_drawn_in_its_cluster():
-    t = small().trace()
+    t = small().record()
     layer = layers(t)
     assert {
         type(t.steps[i].op).__name__ for i in range(len(t.steps)) if layer[i] is None
@@ -76,7 +76,7 @@ def test_a_towers_layers_are_found_under_its_prefix():
     require(path)
     graph = Multimodal(Config(), Checkpoint(path).tree("unread"))
     _, _, shapes, _ = graph.shapes()
-    t = graph.trace(**shapes)
+    t = graph.record(**shapes)
     drawn = in_layer(t, 1)
     found = set()
     for i, s in enumerate(t.steps):
@@ -93,7 +93,7 @@ def test_a_per_layer_slice_is_drawn_in_its_layer():
     require(path)
     graph = Multimodal(Config(), Checkpoint(path).tree("unread"))
     text, *_ = graph.shapes()
-    t = graph.trace(**text)
+    t = graph.record(**text)
     drawn = in_layer(t, 1)
     shared = "text.language_model.ple.per_layer_model_projection.weight"
     sliced = [

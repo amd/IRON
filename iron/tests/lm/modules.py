@@ -107,9 +107,9 @@ def test_load_state_dict_names_each_kind_in_one_error():
     )
 
 
-def test_a_param_never_bound_is_named_at_trace():
+def test_a_param_never_bound_is_named_at_record():
     with pytest.raises(TypeError, match=r"embed\.weight was never loaded"):
-        Block().trace(ids=((4,), np.int32))
+        Block().record(ids=((4,), np.int32))
 
 
 def test_draw_is_the_random_tree_of_a_checkpoint_in_the_same_order():
@@ -293,7 +293,7 @@ def test_a_cache_attends_within_its_window():
     """
     model = small(sliding_window=65)
     model.model.layers[1].cache = KVCache(model.config)
-    t = model.trace(**model.shapes()[1])
+    t = model.record(**model.shapes()[1])
     assert [s.op.window for s in t.steps if type(s.op) is MHA] == [64, None]
 
 
@@ -306,11 +306,11 @@ def test_each_layer_reads_the_rows_of_its_own_rope():
     layers = model.model.layers
     other = Rope(dataclasses.replace(model.config, rope_theta=1e4))
     layers[1].rope = layers[2].rope = other
-    t = model.trace(**model.shapes()[1])
+    t = model.record(**model.shapes()[1])
     assert {id(model.rotary_emb.table.array), id(other.table.array)} <= t.weights.keys()
     assert sum(type(s.op) is RoPE for s in t.steps) == 6
     layers[0].rope = None
-    t = model.trace(**model.shapes()[1])
+    t = model.record(**model.shapes()[1])
     assert id(model.rotary_emb.table.array) not in t.weights
     assert sum(type(s.op) is RoPE for s in t.steps) == 4
 
@@ -336,7 +336,7 @@ def test_attention_turns_only_the_rotary_columns():
     columns of each head of q and k alone.
     """
     model = small(rotary_dim=32)
-    t = model.trace(**model.shapes()[1])
+    t = model.record(**model.shapes()[1])
     turned = [s.op.cols for s in t.steps if type(s.op) is RoPE]
     assert turned == [32] * 4 and model.config.head_dim == 64
 
@@ -352,7 +352,7 @@ def test_a_v_norm_is_one_unweighted_rms_norm_a_layer():
             layer.self_attn.o_proj,
         )
         layer.self_attn = v
-    t = model.trace(**model.shapes()[1])
+    t = model.record(**model.shapes()[1])
     norms = [s for s in t.steps if type(s.op) is RMSNormOp]
     assert len(norms) == 7 and sum(len(s.inputs) == 1 for s in norms) == 2
 
@@ -389,10 +389,10 @@ def test_a_layer_reading_another_s_cache_projects_and_writes_no_keys(golden):
     """
     model = small()
     first, second = model.model.layers
-    base = model.trace(**model.shapes()[1])
+    base = model.record(**model.shapes()[1])
     second.cache = first.cache
     second.self_attn.k_proj = second.self_attn.v_proj = None
-    t = model.trace(**model.shapes()[1])
+    t = model.record(**model.shapes()[1])
     # The k and v projections, k's RoPE, and the two cache writes.
     dropped = 5
     assert len(t.steps) == len(base.steps) - dropped

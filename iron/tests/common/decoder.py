@@ -81,7 +81,7 @@ def test_by_default_the_table_is_rope_angles_at_head_dim():
 def test_decode_step_reads_the_rope_table_at_its_own_width():
     model = _partial_rotary_small(rotary_dim=32)
     cfg = model.config
-    t = model.trace(**model.shapes()[0])
+    t = model.record(**model.shapes()[0])
     by_op = {id(b.op): b for b in t.bindings}
     angles = t.steps[1].op
     assert by_op[id(angles)].expression == Affine(t.values[1], 32)
@@ -93,7 +93,7 @@ def test_decode_step_reads_the_rope_table_at_its_own_width():
 
 def test_prompt_chunk_reads_the_rope_table_at_its_own_width():
     model = _partial_rotary_small(rotary_dim=32, max_seq_len=256, prefill_chunk=256)
-    t = model.trace(**model.shapes()[1])
+    t = model.record(**model.shapes()[1])
     copies = [s.op for s in t.steps if type(s.op).__name__ == "Copy"]
     angle_copy = next(c for c in copies if c.dst.sizes[-1] == 32)
     assert list(angle_copy.dst.sizes) == [256, 32]
@@ -108,7 +108,7 @@ def test_a_context_no_chunk_divides_is_allocated_exactly():
     model = small(max_seq_len=300)
     cfg = model.config
     assert cfg.angles().shape == (300, cfg.head_dim)
-    t = model.trace(**model.shapes()[1])
+    t = model.record(**model.shapes()[1])
     row = cfg.num_key_value_heads * cfg.head_dim * np.dtype(bfloat16).itemsize
     layers = "model.layers.0.cache.keys", "model.layers.1.cache.values"
     assert t.pinned[layers[0]] == t.pinned[layers[1]] == 300 * row
@@ -121,12 +121,12 @@ def test_a_context_no_chunk_divides_is_allocated_exactly():
     "chunk,rows,inside", [(1, 44, True), (1, 45, False), (0, 256, True), (2, 1, False)]
 )
 def test_a_prompt_chunk_past_the_last_position_is_refused(chunk, rows, inside):
-    """Every limit a prompt chunk's trace records holds where its rows end
+    """Every limit a prompt chunk's recording holds where its rows end
     by position 300, and one fails where they pass it, so the call is
     refused before it is dispatched.
     """
     model = small(max_seq_len=300)
-    t = model.trace(**model.shapes()[1])
+    t = model.record(**model.shapes()[1])
     values = dict(
         start=chunk * 256,
         rope_start=chunk * 256,

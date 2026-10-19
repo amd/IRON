@@ -24,7 +24,7 @@ from aie.helpers.taplib import Affine
 from ...operators.emit import ROW, UNCLAMPED, Emit
 from ..image.artifacts import Parameter
 from .handle import Handle, State
-from .trace import TracedGraph, TracedStep
+from .record import Recording, Step
 
 if TYPE_CHECKING:
     from ..image.callable import FullELFRun
@@ -44,65 +44,69 @@ class EmitSite:
 
 
 def attach_emit(
-    traced: TracedGraph, carried: list[str], carry: State, slots: int
+    recording: Recording, carried: list[str], carry: State, slots: int
 ) -> EmitSite:
-    """Append an Emit step to ``traced`` for a target of ``slots`` values,
+    """Append an Emit step to ``recording`` for a target of ``slots`` values,
     each computed carried element moved into plane 1 of ``carry``.
     """
     if slots < 1:
         raise ValueError(
-            f"{traced.name}: the image its carried values are emitted into takes "
+            f"{recording.name}: the image its carried values are emitted into takes "
             f"no per-call values"
         )
-    taken = {h.name for s in traced.steps for h in s.slots} | set(traced.pinned)
+    taken = {h.name for s in recording.steps for h in s.slots} | set(recording.pinned)
     clash = taken & {CARRY, PROGRAM, IMAGE}
     if clash:
-        raise ValueError(f"{traced.name}: buffer names {sorted(clash)} are the Emit's")
+        raise ValueError(
+            f"{recording.name}: buffer names {sorted(clash)} are the Emit's"
+        )
     n = len(carried)
-    planes = _resident(traced, carry)
+    planes = _resident(recording, carry)
     for j, name in enumerate(carried):
-        nxt = traced.carry[name]
+        nxt = recording.carry[name]
         if isinstance(nxt, Handle):
-            if any(nxt is h for h in traced.returned):
+            if any(nxt is h for h in recording.returned):
                 raise NotImplementedError(
-                    f"{traced.name}: {name} is carried and returned; on a full ELF "
+                    f"{recording.name}: {name} is carried and returned; on a full ELF "
                     f"it is computed into the carry, so read it from the Carry"
                 )
-            _move(traced, nxt, planes, n + j)
+            _move(recording, nxt, planes, n + j)
     program = State((slots + n, ROW), np.int32, PROGRAM)
     image = Handle((slots,), np.int32, IMAGE, "intermediate")
     current = Handle((n,), np.int32, CARRY, planes.role, planes, 0)
-    inputs = [_resident(traced, program), planes]
-    traced.steps.append(
-        TracedStep(
+    inputs = [_resident(recording, program), planes]
+    recording.steps.append(
+        Step(
             Emit(slots=slots, carried=n),
             inputs + [image, current],
             inputs,
             [image, current],
         )
     )
-    traced.feedback = [IMAGE]
+    recording.feedback = [IMAGE]
     return EmitSite(tuple(carried), carry, program, slots)
 
 
-def _resident(traced: TracedGraph, state: State) -> Handle:
+def _resident(recording: Recording, state: State) -> Handle:
     handle = Handle(state.shape, state.dtype, state.name, "state")
-    traced.states[id(state)] = (state, handle)
-    traced.pinned[handle.name] = handle.nbytes
+    recording.states[id(state)] = (state, handle)
+    recording.pinned[handle.name] = handle.nbytes
     return handle
 
 
-def _move(traced: TracedGraph, handle: Handle, parent: Handle, start: int) -> None:
+def _move(recording: Recording, handle: Handle, parent: Handle, start: int) -> None:
     old = handle.name
-    views = [handle] + [h for s in traced.steps for h in s.slots + s.inputs + s.outputs]
+    views = [handle] + [
+        h for s in recording.steps for h in s.slots + s.inputs + s.outputs
+    ]
     for view in views:
         if view.parent is not None and view.parent.name == old:
             raise NotImplementedError(
-                f"{traced.name}: {view!r} slices the carried element {old!r}"
+                f"{recording.name}: {view!r} slices the carried element {old!r}"
             )
         if view.parent is None and view.name == old:
             view.parent, view.start = parent, start
-    traced.outputs = [h for h in traced.outputs if h.name != parent.name]
+    recording.outputs = [h for h in recording.outputs if h.name != parent.name]
 
 
 def compose(
@@ -184,16 +188,16 @@ class CarriedLoop:
         for version in (first, body):
             if version.emit is None:
                 raise ValueError(
-                    f"{version.traced.name}: a full-ELF version with carried values "
+                    f"{version.recording.name}: a full-ELF version with carried values "
                     f"loops; this one has no Emit step (compile one that takes a "
                     f"tensor with feeds= the version it starts)"
                 )
         if first.arena is None or first.arena is not body.arena:
             raise ValueError("first and body are versions of one graph")
-        if body.traced.inputs:
+        if body.recording.inputs:
             raise ValueError(
-                f"{body.traced.name}: the looped version takes no tensor, got "
-                f"{[h.name for h in body.traced.inputs]}"
+                f"{body.recording.name}: the looped version takes no tensor, got "
+                f"{[h.name for h in body.recording.inputs]}"
             )
         if depth < 1:
             raise ValueError(f"depth is at least 1, got {depth}")

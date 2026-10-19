@@ -18,7 +18,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef
@@ -83,13 +83,13 @@ def _check_gathers(run, gather, table):
 def test_int32_step_at_nonzero_offsets():
     add = ElementwiseAdd(size=ADD_SIZE, tile_size=1024, num_aie_columns=4)
     gather = _gather()
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "infra_fused_int32_gather",
         sequences.steps((add, "a", "b", "c"), (gather, "table", "rows")),
         ["a", "b", "table"],
         ["c", "rows"],
     )
-    seq = OperatorSequence(traced, full_elf=True).compile()
+    seq = OperatorSequence(recording, full_elf=True).compile()
     kinds = {name: seq.layout[name][:2] for name in ("table", "rows")}
     assert kinds["table"][0] == "input" and kinds["table"][1] > 0, kinds
     assert kinds["rows"][0] == "output" and kinds["rows"][1] > 0, kinds
@@ -120,14 +120,14 @@ def test_int32_slice_at_word_offset():
     """
     start = 36
     gather = _gather()
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "infra_fused_int32_slice",
         sequences.steps((gather, BufferRef("packed", start, TABLE_BYTES), "rows")),
         ["packed"],
         ["rows"],
         pinned={"packed": TABLE_BYTES + 64},
     )
-    seq = OperatorSequence(traced, full_elf=True).compile()
+    seq = OperatorSequence(recording, full_elf=True).compile()
     run = seq.get_callable()
     packed = run.get_buffer(BufferRef("packed"))
     assert packed.dtype == np.int32, "a parent of int32 slices is viewed as int32"
@@ -143,14 +143,14 @@ def test_misaligned_buffer_is_rejected():
     the device (whose descriptor would drop the low address bits).
     """
     gather = _gather()
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "infra_fused_int32_misaligned",
         sequences.steps((gather, BufferRef("packed", 34, TABLE_BYTES), "rows")),
         ["packed"],
         ["rows"],
         pinned={"packed": TABLE_BYTES + 64},
     )
-    seq = OperatorSequence(traced, full_elf=True)
+    seq = OperatorSequence(recording, full_elf=True)
     seq.prepare()
     with pytest.raises(ValueError, match="not a multiple of 4"):
         Fusion(seq).text()

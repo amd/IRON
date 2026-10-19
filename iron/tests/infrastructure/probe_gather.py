@@ -51,17 +51,17 @@ def table():
 
 
 def test_a_call_gives_the_address_a_word_step_reads(table):
-    traced = DeviceIds(table).trace(ids=((15,), np.int32))
-    call = Timed(traced)
-    words = next(s.op for s in traced.steps if isinstance(s.op, GatherWords))
+    recording = DeviceIds(table).record(ids=((15,), np.int32))
+    call = Timed(recording)
+    words = next(s.op for s in recording.steps if isinstance(s.op, GatherWords))
     assert call.op_values(words) == {"base_lo": 0, "base_hi": 0}
 
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("rows", [15, 256])
 def test_a_gather_alone_reads_the_rows_its_words_name(table, rows):
-    traced = DeviceIds(table).trace(ids=((rows,), np.int32))
-    gather = next(s.op for s in traced.steps if isinstance(s.op, Gather))
+    recording = DeviceIds(table).record(ids=((rows,), np.int32))
+    gather = next(s.op for s in recording.steps if isinstance(s.op, Gather))
     alone = Standalone(f"probe_gather{rows}", [gather])
     words = (
         alone.callable.get_buffer(BufferRef("s0_control")).numpy_view().view(np.uint32)
@@ -86,10 +86,10 @@ def test_a_gather_alone_reads_the_rows_its_words_name(table, rows):
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 def test_a_graph_gathering_by_device_ids_is_timed(table):
-    traced = DeviceIds(table).trace(ids=((15,), np.int32))
-    call = Timed(traced)
-    assert {type(s.op) for s in traced.steps} == {Copy, GatherWords, Gather}
-    for step in traced.steps:
+    recording = DeviceIds(table).record(ids=((15,), np.int32))
+    call = Timed(recording)
+    assert {type(s.op) for s in recording.steps} == {Copy, GatherWords, Gather}
+    for step in recording.steps:
         ran = measure(
             [step.op.resolved()],
             full_elf=True,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Graphs more than one test module traces, tunes or runs."""
+"""Graphs more than one test module records, tunes or runs."""
 
 import numpy as np
 

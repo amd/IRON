@@ -70,7 +70,7 @@ def test_rows_are_masked_to_the_per_call_length(full_elf, rows, seq, block, posi
 
     attend = Attend()
     net = attend.compile(x=(rows, seq), full_elf=full_elf)
-    (step,) = net.traced.steps
+    (step,) = net.recording.steps
     assert step.op.resolved().block == block
     op = Softmax(rows=rows, cols=seq, block=block)
     tolerance = op.tolerance()

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """``iron.lm``'s ``Encoder`` and ``Tower``, device-free: a call's inputs, the
-bounded gather a body traces, each kind's reference, the operators' own,
+bounded gather a body records, each kind's reference, the operators' own,
 against numpy attention over the valid rows, and the default layer, an
 ``EncoderLayer`` attending both ways.
 """
@@ -178,9 +178,9 @@ def test_inputs_refuse_what_no_call_takes(table, tokens, error):
 
 def test_the_gather_reads_only_the_rows_a_call_bounds(table):
     graph = SelfAttention(table, 1)
-    traced = graph.trace(**graph.shapes()[0])
-    assert [type(s.op).__name__ for s in traced.steps] == ["Gather", "MHA"]
-    (gather,) = [s.op for s in traced.steps if isinstance(s.op, Gather)]
+    recording = graph.record(**graph.shapes()[0])
+    assert [type(s.op).__name__ for s in recording.steps] == ["Gather", "MHA"]
+    (gather,) = [s.op for s in recording.steps if isinstance(s.op, Gather)]
     assert "valid_rows" in gather.bound_extents
     assert gather.table_rows == VOCAB
 
@@ -218,8 +218,8 @@ def test_a_tower_takes_no_ids():
 
 def test_the_default_layer_is_an_encoder_layer_attending_both_ways(table):
     graph = Layers(table)
-    traced = graph.trace(**graph.shapes()[0])
-    attention = [s.op for s in traced.steps if isinstance(s.op, MHA)]
+    recording = graph.record(**graph.shapes()[0])
+    attention = [s.op for s in recording.steps if isinstance(s.op, MHA)]
     assert [(op.causal, op.window, op.scale) for op in attention] == [
         (False, None, HEAD_DIM**-0.5)
     ] * 2

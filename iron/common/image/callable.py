@@ -38,7 +38,7 @@ else:
         )
         from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
     except ImportError:
-        # Host stacks without XRT still compile, and trace graphs for reference().
+        # Host stacks without XRT still compile, and record graphs for reference().
         XRTTensor = None
 
 logger = logging.getLogger(__name__)

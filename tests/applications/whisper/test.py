@@ -114,7 +114,7 @@ def reference(clip, golden):
 def test_each_version_resolves(clip, npu2, version):
     weights, _ = clip
     model = Whisper(TOY, weights)
-    for op in model.trace(**model.shapes()[version]).operators:
+    for op in model.record(**model.shapes()[version]).operators:
         op.resolved(npu2)
 
 

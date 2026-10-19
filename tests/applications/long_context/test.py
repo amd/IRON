@@ -163,10 +163,10 @@ def test_nothing_grows_with_the_context(application, version):
     config = app.model.default_config(app.path)
     weights = Checkpoint(app.path).tree("unread")
     C = config.prefill_chunk
-    traces = []
+    records = []
     for chunks in (1, 2, 4):
         model = app.model(dataclasses.replace(config, max_seq_len=chunks * C), weights)
-        traces.append(model.trace(**model.shapes()[0 if version == "decode" else 1]))
+        records.append(model.record(**model.shapes()[0 if version == "decode" else 1]))
 
     def activations(t):
         return {
@@ -176,7 +176,7 @@ def test_nothing_grows_with_the_context(application, version):
             if h.role not in ("weight", "state")
         }
 
-    one, two, four = traces
+    one, two, four = records
     for t in (two, four):
         assert [h.name for h in t.inputs] == [h.name for h in one.inputs]
         assert activations(t) == activations(one)
@@ -187,7 +187,7 @@ def test_nothing_grows_with_the_context(application, version):
     grown = {name for name in one.pinned if four.pinned[name] != one.pinned[name]}
     assert grown, "no state holds the context"
     for name in grown:
-        a, b, c = (t.pinned[name] for t in traces)
+        a, b, c = (t.pinned[name] for t in records)
         assert c - b == 2 * (b - a), f"{name}: {a}, {b}, {c} bytes is no row a position"
 
 

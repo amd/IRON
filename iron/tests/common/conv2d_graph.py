@@ -92,17 +92,17 @@ class Subsample(iron.Graph):
 
 def test_a_caller_bounds_its_rows():
     conv, _, x = draw("band")
-    traced = Subsample(conv).trace(x=(x.shape, bfloat16))
-    assert [type(s.op) for s in traced.steps] == [Copy, GEMM, ReLU]
-    bound = {type(b.op) for b in traced.bindings if b.expression.value.name == "n"}
+    recording = Subsample(conv).record(x=(x.shape, bfloat16))
+    assert [type(s.op) for s in recording.steps] == [Copy, GEMM, ReLU]
+    bound = {type(b.op) for b in recording.bindings if b.expression.value.name == "n"}
     assert ReLU in bound
-    assert {h.name for _, h in traced.weights.values()} == {"conv.matrix"}
+    assert {h.name for _, h in recording.weights.values()} == {"conv.matrix"}
 
 
 def test_an_unaligned_gather_computes_whole_blocks():
     conv, _, x = draw("depthwise_13_rows")
-    traced = Subsample(conv).trace(x=(x.shape, bfloat16))
-    gemm = next(s.op for s in traced.steps if isinstance(s.op, GEMM))
+    recording = Subsample(conv).record(x=(x.shape, bfloat16))
+    gemm = next(s.op for s in recording.steps if isinstance(s.op, GEMM))
     assert gemm.M == 16
 
 
@@ -118,18 +118,18 @@ class Into(iron.Graph):
 def test_an_unaligned_gather_writes_no_callers_output():
     conv, _, x = draw("depthwise_13_rows")
     with pytest.raises(ValueError, match="not whole 16-row blocks"):
-        Into(conv, 13).trace(x=(x.shape, bfloat16))
+        Into(conv, 13).record(x=(x.shape, bfloat16))
 
 
 def test_patches_short_of_a_tile_compute_a_whole_one():
     # 3 rows of 8 pixels: 24 patches, 40 more of the first.
     conv = Conv2d(np.zeros((32, 128, 3, 3), np.float32), 18, stride=2)
     x = (7, 18 * 128)
-    traced = Subsample(conv).trace(x=(x, bfloat16))
-    gemm = next(s.op for s in traced.steps if isinstance(s.op, GEMM))
+    recording = Subsample(conv).record(x=(x, bfloat16))
+    gemm = next(s.op for s in recording.steps if isinstance(s.op, GEMM))
     assert gemm.N == 64
     with pytest.raises(ValueError, match="not whole 64-pixel tiles"):
-        Into(conv, 3).trace(x=(x, bfloat16))
+        Into(conv, 3).record(x=(x, bfloat16))
 
 
 def test_gathered_patches_hold_no_padding():
@@ -201,4 +201,4 @@ def test_functional_conv2d_refuses_what_it_does_not_compute(case):
     x, shape, kwargs, match = REFUSED[case]
     weight = np.zeros(shape, bfloat16)
     with pytest.raises(ValueError, match=match):
-        Apply(lambda x: F.conv2d(x, weight, **kwargs)).trace(x=(x, bfloat16))
+        Apply(lambda x: F.conv2d(x, weight, **kwargs)).record(x=(x, bfloat16))

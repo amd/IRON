@@ -33,7 +33,7 @@ from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 from aie.helpers.taplib import PerCall
 
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef
@@ -94,13 +94,13 @@ def _build_add_relu_sequence(name, inputs=("a", "b"), **packaging):
         num_channels=1,
         tile_size=_ADD_RELU_TILE,
     )
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         name,
         sequences.steps((add, "a", "b", "temp"), (relu, "temp", "out")),
         inputs,
         ["out"],
     )
-    return OperatorSequence(traced, **packaging)
+    return OperatorSequence(recording, **packaging)
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +273,7 @@ def test_check_mode_judges_each_step_by_its_tolerance():
 
     op = Magnitude(rows=rows, width=width, num_aie_columns=1)
     seq = OperatorSequence(
-        TracedGraph.of_steps(
+        Recording.of_steps(
             "infra_check_magnitude", sequences.steps((op, "x", "out")), ["x"], ["out"]
         ),
         check=True,
@@ -299,7 +299,7 @@ def test_check_mode_judges_every_output_at_the_calls_values(caplog):
     op.use_value("row", PerCall("row", Kind.SCRATCHPAD, np.int32).affine())
     op.use_value("at", PerCall("position", Kind.SCRATCHPAD, np.int32).affine())
     seq = OperatorSequence(
-        TracedGraph.of_steps(
+        Recording.of_steps(
             "infra_check_sample",
             sequences.steps((op, "logits", "draws", "tokens", "token")),
             ["logits", "draws", "tokens"],
@@ -379,7 +379,7 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
 def _build_one_design_sequence(op, name, reconfigure=False):
     """Out = op(a), as a 1-step fused OperatorSequence."""
     return OperatorSequence(
-        TracedGraph.of_steps(name, sequences.steps((op, "a", "out")), ["a"], ["out"]),
+        Recording.of_steps(name, sequences.steps((op, "a", "out")), ["a"], ["out"]),
         full_elf=True,
         reconfigure=reconfigure,
     )
@@ -417,7 +417,7 @@ def test_reconfigure_needs_a_full_elf():
     """Only a full ELF has a configure to repeat."""
     with pytest.raises(ValueError, match="reconfigure"):
         OperatorSequence(
-            TracedGraph.of_steps(
+            Recording.of_steps(
                 "infra_separate_reconfigure",
                 sequences.steps((_relu(), "a", "out")),
                 ["a"],

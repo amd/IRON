@@ -9,7 +9,7 @@ configure point for both steps, each step running its own named sequence --
 and through aiecc to a full ELF. The placer-driven policy must find the
 pack a caller would name by hand, and must decline a pair whose union needs
 more shim channels than the array has, or two members pinning one shim DMA
-channel. A traced graph reaches the same packing through
+channel. A recorded graph reaches the same packing through
 ``compile(coresident=)``.
 
 The fit checks run mlir-aie's passes in process; only the ELF builds need
@@ -33,7 +33,7 @@ from iron.common.image import AdjacentPacking, coresidence, fusion
 from iron.common.image.coresidence import Packing
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
 from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tests.common.graphs import Chain
@@ -190,13 +190,13 @@ aie.device(npu2) {{
 def _sequence(cols: int, coresident) -> OperatorSequence:
     add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=cols)
     silu = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=cols)
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "coresidence",
         sequences.steps((add, "a", "b", "t"), (silu, "t", "y")),
         ["a", "b"],
         ["y"],
     )
-    seq = OperatorSequence(traced, full_elf=True, coresident=coresident(add, silu))
+    seq = OperatorSequence(recording, full_elf=True, coresident=coresident(add, silu))
     seq.prepare()
     return seq
 
@@ -244,7 +244,7 @@ def test_one_array_joins_two_packs_only_where_their_union_fits():
     silu = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=4)
     wider = SiLU(size=2 * SIZE, tile_size=TILE, num_aie_columns=4)
     mul = ElementwiseMul(size=2 * SIZE, tile_size=TILE, num_aie_columns=4)
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "joined_packs",
         sequences.steps(
             (add, "a", "b", "t"),
@@ -256,7 +256,7 @@ def test_one_array_joins_two_packs_only_where_their_union_fits():
         ["y", "z"],
     )
     seq = OperatorSequence(
-        traced, full_elf=True, coresident=[[add, silu], [wider, mul]]
+        recording, full_elf=True, coresident=[[add, silu], [wider, mul]]
     )
     seq.prepare()
     fused = Fusion(seq)
@@ -273,7 +273,7 @@ def test_designs_of_one_array_share_its_device():
     # itself, and the steps run on one configure.
     small = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=8)
     large = ElementwiseAdd(size=2 * SIZE, tile_size=TILE, num_aie_columns=8)
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "shared_array",
         sequences.steps(
             (small, "a", "b", "t"),
@@ -283,7 +283,7 @@ def test_designs_of_one_array_share_its_device():
         ["a", "b", "c", "d"],
         ["y", "u"],
     )
-    seq = OperatorSequence(traced, full_elf=True)
+    seq = OperatorSequence(recording, full_elf=True)
     seq.prepare()
     fused = Fusion(seq)
     text = fused.text()
@@ -302,13 +302,13 @@ def test_two_arrays_of_one_class_pack():
         for tile in (32, 16)
     ]
     assert gemvs[0].resolved().array_key() != gemvs[1].resolved().array_key()
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "gemv_pack",
         sequences.steps((gemvs[0], "wa", "x", "ya"), (gemvs[1], "wb", "x", "yb")),
         ["wa", "wb", "x"],
         ["ya", "yb"],
     )
-    seq = OperatorSequence(traced, full_elf=True, coresident=[gemvs])
+    seq = OperatorSequence(recording, full_elf=True, coresident=[gemvs])
     seq.prepare()
     fused = Fusion(seq)
     assert fits(fused.designs) is None
@@ -331,7 +331,7 @@ def test_sequence_refuses_a_packing_without_a_full_elf():
     add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=4)
     with pytest.raises(ValueError, match="one full-ELF device"):
         OperatorSequence(
-            TracedGraph.of_steps(
+            Recording.of_steps(
                 "coresidence_xclbin",
                 sequences.steps((add, "a", "b", "y")),
                 ["a", "b"],
@@ -398,12 +398,12 @@ def test_packing_is_in_the_fused_identity():
     assert temporal.identity != packed.identity
 
 
-def test_traced_graph_packs():
+def test_recorded_graph_packs():
     # Three designs, add and silu recurring: the policy packs all three, so
     # the whole graph is one configure.
-    traced = Chain(SIZE, TILE, columns=2).trace(a=(SIZE,), b=(SIZE,))
-    temporal = OperatorSequence(traced, full_elf=True)
-    packed = OperatorSequence(traced, full_elf=True, coresident=AdjacentPacking())
+    recording = Chain(SIZE, TILE, columns=2).record(a=(SIZE,), b=(SIZE,))
+    temporal = OperatorSequence(recording, full_elf=True)
+    packed = OperatorSequence(recording, full_elf=True, coresident=AdjacentPacking())
     temporal.prepare()
     packed.prepare()
     fused = Fusion(packed)

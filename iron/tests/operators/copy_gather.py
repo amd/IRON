@@ -4,7 +4,7 @@
 
 """A gather of a table's rows, ``Copy(table[ids])``, on a device.
 
-With ``ids`` an array, the ids are known when the graph is traced; each
+With ``ids`` an array, the ids are known when the graph is recorded; each
 row, or each run of rows whose ids step evenly, is one transfer of the
 step's sequence. The table is a weight at EmbeddingGemma 2's size, or an
 intermediate a step before produced. With ``ids`` an input of the graph,
@@ -241,7 +241,7 @@ def test_rows_each_call_names_are_gathered(table, feeds, n_ids):
     graph = PerCall(table, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
     assert net.plan.full_elf
-    (gather,) = [s.op for s in net.traced.steps if isinstance(s.op, Gather)]
+    (gather,) = [s.op for s in net.recording.steps if isinstance(s.op, Gather)]
     assert gather.resolved().feeds == (feeds or (1 if n_ids <= 16 else 4))
     rng = np.random.default_rng(n_ids)
     for call in range(3):
@@ -275,9 +275,9 @@ def test_rows_ids_the_device_made_name_are_gathered(table, feeds, n_ids):
     graph = FromDeviceIds(table, other, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
     assert net.plan.full_elf
-    assert not net.traced.encoders
+    assert not net.recording.encoders
     resolved = {
-        s.op.resolved().feeds for s in net.traced.steps if isinstance(s.op, Gather)
+        s.op.resolved().feeds for s in net.recording.steps if isinstance(s.op, Gather)
     }
     assert resolved == {feeds or (1 if n_ids <= 16 else 4)}
     rng = np.random.default_rng(n_ids)
@@ -303,7 +303,7 @@ def test_the_rows_a_call_bounds_by_ids_the_device_made_are_gathered(
     graph = BoundedDeviceIds(table, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
     assert net.plan.full_elf
-    assert not net.traced.encoders
+    assert not net.recording.encoders
     rng = np.random.default_rng(n_ids)
     for n in sorted({1, 9, n_ids // 2, n_ids - 1, n_ids} - {0}):
         ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
@@ -394,7 +394,7 @@ def test_each_step_gathers_the_rows_an_input_names(table):
     graph = Embedded(table)
     net = graph.compile(ids=((256,), np.int32), x=(256, WIDTH), full_elf=False)
     assert not net.plan.full_elf
-    steps = [type(s.op).__name__ for s in net.traced.steps]
+    steps = [type(s.op).__name__ for s in net.recording.steps]
     assert steps == ["Gather", "ElementwiseAdd"]
     x = np.zeros((256, WIDTH), bfloat16)
     rng = np.random.default_rng(5)
@@ -589,11 +589,13 @@ def test_the_control_words_are_one_layout_for_every_feed_count():
 
 def test_ids_the_device_made_take_a_word_step(npu2, table):
     other = np.zeros((3000, 256), dtype=bfloat16)
-    traced = FromDeviceIds(table, other).trace(ids=((15,), np.int32))
-    steps = [type(s.op).__name__ for s in traced.steps]
+    recording = FromDeviceIds(table, other).record(ids=((15,), np.int32))
+    steps = [type(s.op).__name__ for s in recording.steps]
     assert steps == ["Copy", "GatherWords", "Gather", "GatherWords", "Gather"]
-    assert not traced.encoders
-    assert sorted((buffer, word) for buffer, _, word in traced.addresses.values()) == [
+    assert not recording.encoders
+    assert sorted(
+        (buffer, word) for buffer, _, word in recording.addresses.values()
+    ) == [
         ("other", "base_hi"),
         ("other", "base_lo"),
         ("table", "base_hi"),
@@ -609,21 +611,21 @@ def test_an_input_s_words_for_each_table_follow_the_last_s(npu2, table):
     """
     tables = many_tables(table)
     graph = ManyTables(*tables)
-    traced = graph.trace(ids=((256,), np.int32))
-    held = traced.encoders["ids"]
+    recording = graph.record(ids=((256,), np.int32))
+    held = recording.encoders["ids"]
     assert [e.buffer for e in held] == ["tables.0", "tables.1", "tables.2"]
     words = [e.words for e in held]
-    gathers = [s for s in traced.steps if isinstance(s.op, Gather)]
+    gathers = [s for s in recording.steps if isinstance(s.op, Gather)]
     assert [s.op.words for s in gathers] == words
-    assert traced.pinned["ids"] == 4 * sum(words)
-    sequence = OperatorSequence(traced)
+    assert recording.pinned["ids"] == 4 * sum(words)
+    sequence = OperatorSequence(recording)
     sequence.prepare()
     assert sequence.layout["ids"][2] == 4 * sum(words)
     starts = [0, 4 * words[0], 4 * (words[0] + words[1])]
     assert [s.refs()[1] for s in gathers] == [
         BufferRef("ids", start, 4 * w) for start, w in zip(starts, words)
     ]
-    one = ManyTables(table).trace(ids=((256,), np.int32))
+    one = ManyTables(table).record(ids=((256,), np.int32))
     (gather,) = [s for s in one.steps if isinstance(s.op, Gather)]
     assert gather.refs()[1] == BufferRef("ids") and "ids" not in one.pinned
     ids = np.random.default_rng(5).integers(0, 1000, 256).astype(np.int32)
@@ -640,4 +642,4 @@ def test_an_input_gathers_from_a_table_once(npu2, table):
             return Copy.step(self.table[ids]), Copy.step(self.table[ids])
 
     with pytest.raises(ValueError, match="gathers from 'table' once"):
-        Twice().trace(ids=((16,), np.int32))
+        Twice().record(ids=((16,), np.int32))

@@ -59,7 +59,7 @@ def quiet(_):
 
 
 def ops(op):
-    """``op`` at each of its settings, the traced one first."""
+    """``op`` at each of its settings, the recorded one first."""
     dev = aie_utils.ensure_current_device()
     return [op._with_tunables(**s).resolved(dev) for s in settings(op, dev)]
 
@@ -72,14 +72,14 @@ def _cache(tmp_path):
 @pytest.mark.extensive
 def test_a_value_derived_from_a_bound_extent_follows_the_call():
     # MHA's KV block count follows the context, which the call gives alone.
-    traced = Attend().trace(q=(1, 32, 64), k=(2048, 8, 64), v=(2048, 8, 64))
-    [op] = {s.op for s in traced.steps}
+    recording = Attend().record(q=(1, 32, 64), k=(2048, 8, 64), v=(2048, 8, 64))
+    [op] = {s.op for s in recording.steps}
     t_step = {
         n: measure(
             [op.resolved()],
             full_elf=True,
             timing=Timing(rounds=2, calls=10),
-            values=Timed(traced, dict(n=n)).op_values(op),
+            values=Timed(recording, dict(n=n)).op_values(op),
             log=quiet,
         )[0].t_step_us
         for n in (64, 2048)
@@ -90,7 +90,7 @@ def test_a_value_derived_from_a_bound_extent_follows_the_call():
 @pytest.mark.extensive
 def test_measures_more_settings_than_one_batch_of_contexts():
     # A run that writes a per-call value loads its context when it is built.
-    found = ops(Masked().trace(x=(256, 256)).steps[0].op)
+    found = ops(Masked().record(x=(256, 256)).steps[0].op)
     assert len(found) > CONTEXTS // 2
     ran = measure(
         found,
@@ -139,10 +139,10 @@ def test_a_cached_setting_is_not_timed_again(tmp_path):
 
 @pytest.mark.extensive
 def test_a_tuned_profile_runs_bit_identically(tmp_path):
-    traced = Chain(SIZE, TILE).trace(a=(SIZE,), b=(SIZE,))
+    recording = Chain(SIZE, TILE).record(a=(SIZE,), b=(SIZE,))
     dev = aie_utils.ensure_current_device()
     profile = autotune(
-        [Timed(traced)],
+        [Timed(recording)],
         dev,
         full_elf=True,
         timing=Timing(rounds=2, calls=10),
@@ -182,7 +182,7 @@ def test_one_operator_is_timed_from_the_command_line(tmp_path):
     assert run.returncode == 0, run.stderr
     printed = [line for line in run.stdout.splitlines() if " us" in line]
     assert len(printed) == len(ops(ElementwiseAdd(size=SIZE, tile_size=TILE)))
-    assert sum("(traced)" in line for line in printed) == 1
+    assert sum("(recorded)" in line for line in printed) == 1
 
 
 HOLD = """
@@ -272,8 +272,8 @@ def test_a_step_costs_alike_however_long_the_run():
     # by a short one's, would price a step above a short run's.
     E = 2048
     weights = [np.zeros((E, E), bfloat16) for _ in range(3)]
-    traced = FeedForward(*weights).trace(x=(1, E))
-    gemv = next(s.op for s in traced.steps if isinstance(s.op, GEMV))
+    recording = FeedForward(*weights).record(x=(1, E))
+    gemv = next(s.op for s in recording.steps if isinstance(s.op, GEMV))
     runs = [Standalone(f"long{k}", [gemv] * k) for k in (1, 6, 12)]
     one, six, twelve = (
         t.us

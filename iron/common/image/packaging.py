@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""How a traced graph is packaged: one full ELF, or an xclbin per step.
+"""How a recorded graph is packaged: one full ELF, or an xclbin per step.
 
 ``full_elf`` is mlir-aie's choice of the same name. ``None`` derives it: a
 ``DispatchTime`` value, NPU1 or ``check`` forces an xclbin, one dispatch per
@@ -82,8 +82,8 @@ def require_device():
     return dev
 
 
-def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan:
-    """Derive the packaging for ``traced`` on the device.
+def plan(dev, recording, full_elf: bool | None = None, check: bool = False) -> Plan:
+    """Derive the packaging for ``recording`` on the device.
 
     Args:
         check: Each step is checked against its reference on its own
@@ -93,18 +93,18 @@ def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan
         ValueError: ``full_elf`` is asked for where a value, the device or
             ``check`` forbids it, or the graph runs a shipped image.
     """
-    shipped = [op for op in traced.operators if op.external is not None]
+    shipped = [op for op in recording.operators if op.external is not None]
     if shipped:
         names = ", ".join(
             f"{type(op).__name__} ({op.external.filename})" for op in shipped
         )
         raise ValueError(
-            f"{traced.name}: {names} runs a shipped image, which no graph image "
+            f"{recording.name}: {names} runs a shipped image, which no graph image "
             f"builds; call it on its own, outside a graph"
         )
 
     forced: list[str] = []
-    dispatch_values = [v for v in traced.values if v.marker is Kind.DISPATCH_TIME]
+    dispatch_values = [v for v in recording.values if v.marker is Kind.DISPATCH_TIME]
     if dispatch_values:
         names = ", ".join(v.name for v in dispatch_values)
         forced.append(
@@ -116,7 +116,8 @@ def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan
         forced.append("check=True: each step its own dispatch, checked")
     if full_elf and forced:
         raise ValueError(
-            f"{traced.name}: full_elf=True is not possible here: " + "; ".join(forced)
+            f"{recording.name}: full_elf=True is not possible here: "
+            + "; ".join(forced)
         )
 
     if full_elf is None:
@@ -126,7 +127,7 @@ def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan
         reasons = [f"full_elf={full_elf}: asked for", *forced]
 
     values = []
-    for v in traced.values:
+    for v in recording.values:
         if v.marker is Kind.DISPATCH_TIME:
             lowering = "sizes, strides and offsets regenerated per call"
         elif full_elf:
@@ -141,10 +142,10 @@ def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan
     # A carried-bound step grows with every call; amdxdna stops a command past ~4 s.
     # A version taking no tensor stays one: a loop drains its values into one.
     commands = ()
-    if full_elf and traced.inputs:
+    if full_elf and recording.inputs:
         commands = tuple(
             i + 1
-            for i, step in enumerate(traced.steps[:-1])
+            for i, step in enumerate(recording.steps[:-1])
             if any(
                 b is not None and b.value.marker is Kind.CARRIED
                 for b in step.op.bound_extents.values()

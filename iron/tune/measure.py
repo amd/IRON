@@ -41,7 +41,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 from iron.common.declare import Operand, Operator
 from iron.common.declare.value import Value
 from iron.common.design import OperatorDesign
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.callable import ImageCallable
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef, SequenceStep
@@ -169,7 +169,7 @@ class Standalone:
             for k, op in enumerate(self.steps)
         ]
         self.sequence = OperatorSequence(
-            TracedGraph.of_steps(name, steps, in_names, out_names),
+            Recording.of_steps(name, steps, in_names, out_names),
             full_elf=full_elf,
             coresident=coresident,
             # Configure the array every call, as a design beside others in a

@@ -381,7 +381,7 @@ def test_on_an_xclbin_a_copy_bounded_on_its_innermost_axis_sizes_it(npu2):
         def body(self, x, *, n: Scratchpad[np.int32], pos: Scratchpad[np.int32]):
             Copy.step(Softmax.step(x[:, :n]), cache[:, pos])
 
-    t = G().trace(x=(16, 256))
+    t = G().record(x=(16, 256))
     (op,) = [o for o in t.operators if isinstance(o, Copy)]
     text, _ = generated_sequence(op.resolved(), full_elf=False)
     bds = re.findall(r"aie\.dma_bd\(%arg(\d) .*sizes = \[([^\]]*)\]", text)
@@ -590,8 +590,8 @@ def test_a_bounded_flm_gemm_refuses_a_call_with_no_rows(npu2):
     wait on, and the call is refused as it writes its words, before it is
     dispatched.
     """
-    traced = ProjectAsStored().trace(x=(512, 512), w=(512, 512))
-    words, _ = _words(traced)
+    recording = ProjectAsStored().record(x=(512, 512), w=(512, 512))
+    words, _ = _words(recording)
     assert [w({"n": 1}) for w in words if w.symbol.endswith("units_valid")] == [1]
     with pytest.raises(ValueError, match=r"valid \(0\) must be at least 1"):
         [w({"n": 0}) for w in words]
@@ -678,7 +678,7 @@ def test_concurrent_fetches_of_a_shipped_image_each_get_the_whole_file(tmp_path)
     assert [p.name for p in tmp_path.iterdir()] == [image.filename]
 
 
-def test_one_configuration_traces_at_one_size():
+def test_one_configuration_records_at_one_size():
     arrays = {
         name: BuiltArray(OperatorDesign(op, full_elf=False))
         for name, op in (

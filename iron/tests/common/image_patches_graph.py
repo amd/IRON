@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""iron.lm.ImagePatches device-free: called in a graph, its steps trace into
+"""iron.lm.ImagePatches device-free: called in a graph, its steps record into
 the caller's, bound by the caller's sizes; its reference is the resize, the
 patch order and the gather each computed on their own; and it refuses an
 image a call does not hold.
@@ -42,11 +42,11 @@ class Tower(iron.Graph):
         return pixels
 
 
-def test_a_caller_traces_and_bounds_it():
+def test_a_caller_records_and_bounds_it():
     tower = Tower()
     rgb = tower.processor.resample.image_chunks, tower.processor.chunk
-    traced = tower.trace(rgb=(rgb, np.uint8))
-    assert [type(s.op) for s in traced.steps] == [
+    recording = tower.record(rgb=(rgb, np.uint8))
+    assert [type(s.op) for s in recording.steps] == [
         ResampleTaps,
         ResampleTaps,
         Resample,
@@ -54,9 +54,9 @@ def test_a_caller_traces_and_bounds_it():
         GatherWords,
         Gather,
     ]
-    named = {b.expression.value.name for b in traced.bindings}
+    named = {b.expression.value.name for b in recording.bindings}
     assert {"height", "width", "out_height", "out_width"} <= named
-    assert {h.name for _, h in traced.states.values()} == {"processor.raster"}
+    assert {h.name for _, h in recording.states.values()} == {"processor.raster"}
 
 
 def test_the_reference_is_its_parts_on_their_own():

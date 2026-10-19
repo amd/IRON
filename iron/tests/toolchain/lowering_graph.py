@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What the case table does not cover lowers too: graph-traced operators
+"""What the case table does not cover lowers too: graph-recorded operators
 with bound per-call values, flm/gemm's configuration and shapes, the
 shipped image's sequence, and the swiglu graph functions' operators.
 Same gate as ``lowering.py``: aiecc to an instruction stream.
@@ -25,20 +25,20 @@ pytestmark = [*requires("aiecc", "peano"), pytest.mark.usefixtures("npu2")]
 
 def test_decode_graph_operators_lower_with_their_values(tmp_path):
     model = small(max_seq_len=256)
-    traced = model.trace(**model.shapes()[0])
-    bound = {id(b.op) for b in traced.bindings}
+    recording = model.record(**model.shapes()[0])
+    bound = {id(b.op) for b in recording.bindings}
     assert bound, "the decode graph binds values"
-    _lower_all(traced, tmp_path)
+    _lower_all(recording, tmp_path)
 
 
 def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     model = small()
-    traced = model.trace(**model.shapes()[1])
+    recording = model.record(**model.shapes()[1])
     # Every block is bound by the rows the call runs, the cache writes and the
     # RoPE rows by the chunk, and MHA's keys and the draw by the position.
-    named = {b.expression.value.name for b in traced.bindings}
+    named = {b.expression.value.name for b in recording.bindings}
     assert named == {"chunk", "rows", "position"}
-    _lower_all(traced, tmp_path)
+    _lower_all(recording, tmp_path)
 
 
 @pytest.mark.parametrize("rows", ["decode", "prompt"])
@@ -49,9 +49,9 @@ def test_attention_over_a_128k_cache_lowers(rows, tmp_path):
     cache's writes would step past a descriptor's reach, they still lower.
     """
     model = small(max_seq_len=131072)
-    traced = model.trace(**model.shapes()[0 if rows == "decode" else 1])
+    recording = model.record(**model.shapes()[0 if rows == "decode" else 1])
     attention = {
-        op.design_key(): op for op in traced.operators if type(op) in (Copy, MHA)
+        op.design_key(): op for op in recording.operators if type(op) in (Copy, MHA)
     }
     for i, op in enumerate(attention.values()):
         (tmp_path / str(i)).mkdir()
@@ -98,9 +98,9 @@ def test_instructions_compile_alone_against_an_external_image():
 def test_swiglu_graphs_operators_lower(tmp_path):
     fn, E = swiglu()
     (tmp_path / "decode").mkdir()
-    _lower_all(fn.trace(x=(1, E)), tmp_path / "decode")
+    _lower_all(fn.record(x=(1, E)), tmp_path / "decode")
     (tmp_path / "prefill").mkdir()
-    _lower_all(fn.trace(x=(256, E)), tmp_path / "prefill")
+    _lower_all(fn.record(x=(256, E)), tmp_path / "prefill")
 
 
 PREFILL = dict(

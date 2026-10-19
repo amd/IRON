@@ -41,8 +41,8 @@ if TYPE_CHECKING:
     from ..image.artifacts import Artifacts
     from ..image.standalone import OperatorImage
 
-graph_tracer: ContextVar[Any] = ContextVar("graph_tracer", default=None)
-# False while a graph's reference is traced: a reference runs shapes no
+graph_recorder: ContextVar[Any] = ContextVar("graph_recorder", default=None)
+# False while a graph's reference is recorded: a reference runs shapes no
 # device fits (a small model's), so compatible() is not asked.
 device_fit: ContextVar[bool] = ContextVar("device_fit", default=True)
 
@@ -138,10 +138,10 @@ class Operator(jit.Operator, library=True):
         Raises:
             TypeError: Called outside a graph's body.
         """
-        tracer = graph_tracer.get()
-        if tracer is None:
+        recorder = graph_recorder.get()
+        if recorder is None:
             raise TypeError(f"{cls.__name__}.step() is for a graph's body")
-        return tracer.call(cls, operands, kwargs)
+        return recorder.call(cls, operands, kwargs)
 
     def apply(self, *operands: Any, **values: Any) -> Handle:
         """Record a step applying this already-constructed instance, inside
@@ -150,10 +150,10 @@ class Operator(jit.Operator, library=True):
         Raises:
             TypeError: Called outside a graph's body.
         """
-        tracer = graph_tracer.get()
-        if tracer is None:
+        recorder = graph_recorder.get()
+        if recorder is None:
             raise TypeError(f"{type(self).__name__}.apply() is for a graph's body")
-        return tracer.call(self, operands, values)
+        return recorder.call(self, operands, values)
 
     def __init__(
         self,
@@ -655,7 +655,7 @@ class Operator(jit.Operator, library=True):
         its ``DispatchTime`` values by device symbol. Inside a graph's body,
         call ``op.apply(*operands, **values)`` instead.
         """
-        if graph_tracer.get() is not None:
+        if graph_recorder.get() is not None:
             raise TypeError(
                 f"{type(self).__name__} instance called inside a graph's "
                 f"body; use op.apply(*operands, **values)"

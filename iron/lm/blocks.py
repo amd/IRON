@@ -4,7 +4,7 @@
 """The blocks a model builds from operators, for a graph's body.
 
 A graph here is called in a model's body as it is on its own (``Graph``):
-its steps trace into the model's. Weights are a checkpoint's ``(out, in)``,
+its steps record into the model's. Weights are a checkpoint's ``(out, in)``,
 projected by ``F.linear``.
 """
 

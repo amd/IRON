@@ -39,9 +39,9 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 def _captured(name, adds=2, **declared):
     """X + w + w (or as many adds of w) as a graph function, fused and compiled."""
     add = ElementwiseAdd(size=1024, tile_size=128, **declared)
-    traced = Adds(add, adds).trace(x=(1024,), w=(1024,))
+    recording = Adds(add, adds).record(x=(1024,), w=(1024,))
     return OperatorSequence(
-        dataclasses.replace(traced, name=name), full_elf=True
+        dataclasses.replace(recording, name=name), full_elf=True
     ).compile()
 
 

@@ -305,7 +305,7 @@ class Model(iron.Graph):
         number of prompt chunks that does, logged either way.
 
         The arena is what the model holds, weights and states, measured by
-        tracing its decode step at one and two prompt chunks of context:
+        recording its decode step at one and two prompt chunks of context:
         what grows holds a row a position (``tests/applications/
         long_context``).
         """
@@ -320,7 +320,7 @@ class Model(iron.Graph):
             model = cls(dataclasses.replace(config, max_seq_len=length), tree)
             # What it holds does not follow its tunables, nor need a device.
             model.profile = None
-            held.append(sum(model.trace(**model.shapes()[0]).pinned.values()))
+            held.append(sum(model.record(**model.shapes()[0]).pinned.values()))
         per_position = (held[1] - held[0]) / C
         fixed = held[0] - per_position * C
         budget = host_budget() if budget is None else budget

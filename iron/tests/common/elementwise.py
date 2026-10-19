@@ -78,7 +78,7 @@ def test_a_bounded_operand_makes_the_trip_count_per_call():
 
     g = G()
 
-    t = g.trace(x=(4096,))
+    t = g.record(x=(4096,))
     (op,) = t.operators
     assert {k: e.name for k, e in op.bound_extents.items()} == {"valid": "n"}
     assert [v.name for v in op.values] == ["valid", "count", "valid_x", "valid_y"]

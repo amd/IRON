@@ -178,7 +178,7 @@ def test_a_bounded_axis_past_the_d1_wrap_still_packs():
     assert [t.sizes for t in tasks] == [f"{G}, {N}, 1, {D}"] * 2
 
 
-# A gather of rows of a (V, W) table, ids known at trace time: Copy(table[ids]).
+# A gather of rows of a (V, W) table, ids known at record time: Copy(table[ids]).
 V, W = 64, 32
 
 
@@ -246,7 +246,7 @@ class _Gathers(iron.Graph):
 def test_a_graph_gathers_from_a_weight_and_an_intermediate():
     ids = np.array([4, 0, 4, 63, -1])
     graph = _Gathers(ids)
-    t = graph.trace(x=(V, W))
+    t = graph.record(x=(V, W))
     gathers = [s.op for s in t.steps if isinstance(s.op.src, tuple)]
     assert len(gathers) == 2
     whole = TensorAccessPattern.full((V, W))
@@ -274,7 +274,7 @@ def test_a_gather_refuses_what_it_cannot_lower(index, match):
             return Copy.step(Copy.step(x)[index])
 
     with pytest.raises(IndexError, match=match):
-        Bad().trace(x=(V, W))
+        Bad().record(x=(V, W))
 
 
 CHANNEL_SPLITS = {
@@ -346,7 +346,7 @@ class _Views(iron.Graph):
 
 def test_a_copy_of_a_view_has_the_view_s_shape():
     graph = _Views()
-    t = graph.trace(x=(N, G * D))
+    t = graph.record(x=(N, G * D))
     assert [h.shape for h in t.returned] == [(G, N, D), (G, N, D)]
     x = np.arange(N * G * D, dtype=np.float32).reshape(N, G * D).astype(bfloat16)
     transposed, cached = graph.reference(x)

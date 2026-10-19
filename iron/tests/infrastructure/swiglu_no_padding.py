@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """A gated feed-forward does not pad: a row count its inner GEMM cannot tile is an error
-at trace time, and an aligned one traces with the extents it was given.
+at record time, and an aligned one records with the extents it was given.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def _trace(rows, embedding_dim=2048, hidden_dim=2048):
         z(hidden_dim, embedding_dim),
         z(embedding_dim, hidden_dim),
     )
-    return ffn.trace(x=(rows, embedding_dim))
+    return ffn.record(x=(rows, embedding_dim))
 
 
 def test_non_aligned_row_count_raises_instead_of_being_padded():
@@ -31,7 +31,7 @@ def test_non_aligned_row_count_raises_instead_of_being_padded():
         _trace(rows=300)
 
 
-def test_aligned_row_count_traces_with_the_given_extents():
+def test_aligned_row_count_records_with_the_given_extents():
     t = _trace(rows=512)
     gemms = [s.op for s in t.steps if type(s.op) is ProjectionGEMM]
     assert [(g.M, g.K, g.N) for g in gemms] == [

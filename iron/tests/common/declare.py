@@ -276,7 +276,7 @@ def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one()
         def body(self, x):
             Scaled.step(x, self.y)  # y is written: an output, never the scale
 
-    (step,) = G().trace(x=(64,)).steps
+    (step,) = G().record(x=(64,)).steps
     assert not step.op.scaled
     assert [b.name for b in step.op.buffers] == ["x", "y"]
 
@@ -284,7 +284,7 @@ def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one()
         def body(self, x, s):
             Scaled.step(x, self.y, s=s)
 
-    (step,) = H().trace(x=(64,), s=(64,)).steps
+    (step,) = H().record(x=(64,), s=(64,)).steps
     assert step.op.scaled
     assert [b.name for b in step.op.buffers] == ["x", "s", "y"]
 
@@ -301,7 +301,7 @@ def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
 
     g = G()
 
-    t = g.trace(a=(1024, 128), b=(128,))
+    t = g.record(a=(1024, 128), b=(128,))
     (op,) = t.operators
     assert op.value("start").per_call and op.value("count").per_call
     assert [v.name for v in op.values] == ["count", "start"]
@@ -501,7 +501,7 @@ def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
 
     g = G()
 
-    t = g.trace(x=(64, 8))
+    t = g.record(x=(64, 8))
     a, b = t.operators
     for op in (a, b):
         assert {k: e.name for k, e in op.bound_extents.items()} == {"valid": "n"}
@@ -556,7 +556,7 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
     g = G()
 
     with pytest.raises(TypeError, match="MV.A cannot be bounded per call on axis 0"):
-        g.trace(x=(64, 128))
+        g.record(x=(64, 128))
 
     class H(iron.Graph):
         def body(self, x, *, n: DispatchTime[np.int32]):
@@ -565,7 +565,7 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
     h = H()
 
     with pytest.raises(ValueError, match="only a Scratchpad value can bound"):
-        h.trace(x=(64, 8))
+        h.record(x=(64, 8))
 
     class K(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
@@ -574,7 +574,7 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
     k = K()
 
     with pytest.raises(TypeError, match="axis 1"):
-        k.trace(x=(64, 8))
+        k.record(x=(64, 8))
 
 
 # --------------------------------------------------------------------------

@@ -20,7 +20,7 @@ import pytest
 
 from aie.iron import Out
 from iron.common.design import OperatorDesign
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.coresidence import Packing
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
@@ -118,8 +118,8 @@ def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
         runlist.append((op, *names))
         for b, buf in zip(op.buffers, names):
             (outputs if b.role is Out else inputs).append(buf)
-    traced = TracedGraph.of_steps(cls_name, sequences.steps(*runlist), inputs, outputs)
-    seq = OperatorSequence(traced, full_elf=True)
+    recording = Recording.of_steps(cls_name, sequences.steps(*runlist), inputs, outputs)
+    seq = OperatorSequence(recording, full_elf=True)
     seq.prepare()
     fused = Fusion(seq)
     pack = Packing.device_name(list(fused.designs))

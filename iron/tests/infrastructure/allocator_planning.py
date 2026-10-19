@@ -15,7 +15,7 @@ import random
 
 import pytest
 
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.allocator import (
     ALIGNMENT,
     Allocation,
@@ -187,13 +187,13 @@ def _laid_out(seq):
 def _two_step_sequence():
     """A tiny real sequence: one weight-like buffer plus one intermediate."""
     add = ElementwiseAdd(size=1024, tile_size=128)
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "alloc_layout_probe",
         sequences.steps((add, "w", "x", "t0"), (add, "w", "t0", "out")),
         ["x"],
         ["out"],
     )
-    return _laid_out(OperatorSequence(traced, full_elf=True))
+    return _laid_out(OperatorSequence(recording, full_elf=True))
 
 
 def test_planned_offsets_do_not_collide_with_unplanned():
@@ -235,10 +235,10 @@ def _chain(n_intermediates):
     for prev, nxt in zip(names, names[1:]):
         runlist.append((add, prev, "w", nxt))
     runlist.append((add, names[-1], "w", "out"))
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         f"chain{n_intermediates}", sequences.steps(*runlist), ["x", "w"], ["out"]
     )
-    layout, sizes = _laid_out(OperatorSequence(traced, full_elf=True))
+    layout, sizes = _laid_out(OperatorSequence(recording, full_elf=True))
     return layout, sizes.scratch
 
 
@@ -281,7 +281,7 @@ def test_a_buffer_named_in_part_is_never_pooled():
     """
     add = ElementwiseAdd(size=1024, tile_size=128)
     half = BufferRef("big", 0, 2048)
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "slice_pooling_probe",
         sequences.steps(
             (add, "x", "w", half),
@@ -294,7 +294,7 @@ def test_a_buffer_named_in_part_is_never_pooled():
         ["out"],
         pinned={"big": 4096},
     )
-    layout, sizes = _laid_out(OperatorSequence(traced, full_elf=True))
+    layout, sizes = _laid_out(OperatorSequence(recording, full_elf=True))
     _, big_at, big_len = layout["big"]
     assert big_len == 4096 and half.place(layout) == ("scratch", big_at, 2048)
     # u and v outlive every use of big, so a pooled big would lend them its bytes.
@@ -511,14 +511,16 @@ def _add():
 
 def _arena_sequence(name, runlist, arena, residents, pinned=None, full_elf=True):
 
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         name,
         sequences.steps(*runlist),
         ["x"],
         ["out"],
         pinned=pinned or {n: 2048 for n in residents},
     )
-    return OperatorSequence(traced, full_elf=full_elf, arena=arena, residents=residents)
+    return OperatorSequence(
+        recording, full_elf=full_elf, arena=arena, residents=residents
+    )
 
 
 def test_two_sequences_in_one_arena_agree_on_residents_and_share_transients():
@@ -609,7 +611,7 @@ def test_a_step_at_a_time_places_only_its_residents_in_the_arena():
 def test_residents_need_an_arena():
     with pytest.raises(ValueError, match="pass arena"):
         OperatorSequence(
-            TracedGraph.of_steps(
+            Recording.of_steps(
                 "arena_missing",
                 sequences.steps((_add(), "x", "w", "out")),
                 ["x", "w"],
@@ -625,13 +627,13 @@ def test_back_to_back_buffers_start_aligned_whatever_their_sizes():
     """
     add = _add()
     part = BufferRef("big", 0, 2048)
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "odd_pinned",
         sequences.steps((add, "x", "w", part), (add, part, "w", "out")),
         ["x", "w"],
         ["out"],
         pinned={"big": 2048 + 18, "odd": 9},
     )
-    layout, _ = _laid_out(OperatorSequence(traced, full_elf=True))
+    layout, _ = _laid_out(OperatorSequence(recording, full_elf=True))
     for name, (_, offset, _) in layout.items():
         assert offset % ALIGNMENT == 0, f"{name} at {offset}"

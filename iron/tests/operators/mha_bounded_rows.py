@@ -94,7 +94,7 @@ def test_rows_past_the_valid_length_are_zero(
     )
     attend = Attend()
     net = attend.compile(q=q.shape, k=k.shape, v=v.shape)
-    (mha,) = (s.op for s in net.traced.steps if isinstance(s.op, MHA))
+    (mha,) = (s.op for s in net.recording.steps if isinstance(s.op, MHA))
     for rows, n in calls:
         o = np.asarray(net(q, k, v, rows=rows, n=n), dtype=np.float32)
         o = o.reshape(seq, heads, d)

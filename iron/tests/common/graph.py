@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Graph functions, traced device-free.
+"""Graph functions, recorded device-free.
 
 A graph function run on handles produces a runlist, buffer names and
 sizes, and value bindings; nothing here needs a toolchain.
@@ -23,7 +23,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Carried, Precision, Profile, Scratchpad
 from iron.common.graph import Handle
-from iron.common.graph.trace import TracedGraph, Tracer
+from iron.common.graph.record import Recording, Recorder
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import CompiledGraph, _words
 from iron.common.image.sequence import OperatorSequence
@@ -89,8 +89,8 @@ def _ffn():
 
 def test_tracing_records_the_runlist_with_names_from_roles():
     ffn, refs = _ffn()
-    t = ffn.trace(x=(1, E))
-    assert isinstance(t, TracedGraph)
+    t = ffn.record(x=(1, E))
+    assert isinstance(t, Recording)
     assert [(type(s.op).__name__, *map(str, s.refs())) for s in t.steps] == [
         ("RMSNorm", "x", "w0", "rmsnorm0"),
         ("GEMV", "w1", "rmsnorm0", "gemv1"),
@@ -124,7 +124,7 @@ def test_a_name_the_tracer_makes_up_never_aliases_one_it_was_given():
             Copy.step(SiLU.step(x), self.out)
             return ElementwiseAdd.step(SiLU.step(x), self.silu0)
 
-    t = Held().trace(x=(E,))
+    t = Held().record(x=(E,))
     assert [(type(s.op).__name__, *map(str, s.refs())) for s in t.steps] == [
         ("SiLU", "x", "silu0_1"),
         ("Copy", "silu0_1", "out"),
@@ -140,7 +140,7 @@ def test_a_name_the_tracer_makes_up_never_aliases_one_it_was_given():
         def body(self, out):
             return SiLU.step(out)
 
-    t = Given().trace(out=(E,))
+    t = Given().record(out=(E,))
     assert [h.name for h in t.inputs] == ["out"] and [h.name for h in t.outputs] == [
         "out_1"
     ]
@@ -148,7 +148,7 @@ def test_a_name_the_tracer_makes_up_never_aliases_one_it_was_given():
 
 def test_arrays_are_shared_by_array_key_and_extents_are_not():
     ffn, _ = _ffn()
-    t = ffn.trace(x=(1, E))
+    t = ffn.record(x=(1, E))
     gate, up, down = (s.op for s in t.steps if type(s.op) is GEMV)
     assert (
         gate.array_key() == up.array_key() and gate is not up
@@ -168,7 +168,7 @@ def test_arrays_are_shared_by_array_key_and_extents_are_not():
 
 def test_per_call_values_bind_to_the_operator_and_enable_it():
     ffn, _ = _ffn()
-    t = ffn.trace(x=(1, E))
+    t = ffn.record(x=(1, E))
     (binding,) = t.bindings
     op, value = binding.op, binding.expression.value
     assert type(op) is Copy and binding.member.name == "out_offset"
@@ -177,9 +177,9 @@ def test_per_call_values_bind_to_the_operator_and_enable_it():
     assert [v.name for v in op.values] == ["out_offset"]
 
 
-def test_every_traced_operator_tunes_from_the_device_alone():
+def test_every_recorded_operator_tunes_from_the_device_alone():
     ffn, _ = _ffn()
-    t = ffn.trace(x=(1, E))
+    t = ffn.record(x=(1, E))
     for op in t.operators:
         op.resolved(
             aie_utils.get_current_device()
@@ -196,7 +196,7 @@ def test_every_traced_operator_tunes_from_the_device_alone():
 
 def test_a_state_written_by_one_step_is_pinned_and_readable():
     ffn, refs = _ffn()
-    t = ffn.trace(x=(1, E))
+    t = ffn.record(x=(1, E))
     state, handle = t.states[id(refs["cache"])]
     assert state is refs["cache"]
     assert handle.role == "state" and handle.name == "state0"
@@ -225,7 +225,7 @@ def test_an_input_read_only_through_slices_is_laid_out_whole():
         def body(self, x):
             return SiLU.step(x[E // 2 :]), SiLU.step(x[: E // 2])
 
-    t = Halves().trace(x=(E,))
+    t = Halves().record(x=(E,))
     assert t.pinned == {"x": E * 2}
     seq = OperatorSequence(t)
     seq.prepare()
@@ -250,7 +250,7 @@ def test_alike_instances_bound_to_different_values_are_different_designs():
 
     f = F()
 
-    t = f.trace(x=(4, 16))
+    t = f.record(x=(4, 16))
     by_value = {b.expression.value.name: b for b in t.bindings}
     assert len(t.bindings) == 3 and set(by_value) == {"a", "b"}
     first, second, third = t.bindings
@@ -277,12 +277,12 @@ def test_binding_two_handles_to_one_instance_is_an_error():
     two = Two()
 
     with pytest.raises(ValueError, match="bound to a at an earlier call site"):
-        two.trace(x=(64,))
+        two.record(x=(64,))
 
 
 def test_a_graph_carries_its_profile():
     """A graph's profile reaches every run of the body: the
-    trace and the host reference alike, with a call's own keyword kept.
+    record and the host reference alike, with a call's own keyword kept.
     """
     profile = Profile()
     profile.add(GEMV, tile_size_input=4, tile_size_output=16)
@@ -296,14 +296,14 @@ def test_a_graph_carries_its_profile():
     two = Two()
     two.profile = profile
 
-    a, b = (s.op for s in two.trace(x=(E,)).steps)
+    a, b = (s.op for s in two.record(x=(E,)).steps)
     assert (a.tile_size_input, a.tile_size_output) == (4, 32)  # the call's own
     assert (b.tile_size_input, b.tile_size_output) == (4, E // 8)  # the profile's
     assert two.reference(z(E)).shape == (E,)  # constructs under the profile too
     assert GEMV(M=E, K=256).tile_size_output is None  # nothing outside it
 
 
-def test_a_graph_reads_as_its_name_and_traced_shapes():
+def test_a_graph_reads_as_its_name_and_recorded_shapes():
     w = z(256, E)
 
     class Project(iron.Graph):
@@ -313,7 +313,7 @@ def test_a_graph_reads_as_its_name_and_traced_shapes():
     project = Project()
     project.reference(z(E))
     assert repr(project).startswith(f"Project(x=({E},) ")
-    assert "weights" not in repr(project.trace(x=(E,)))
+    assert "weights" not in repr(project.record(x=(E,)))
 
 
 def test_an_explicit_instance_is_applied_like_the_class():
@@ -327,13 +327,13 @@ def test_an_explicit_instance_is_applied_like_the_class():
             return q.apply(self.w, x)
 
     w = z(256, E)
-    t = Step(w).trace(x=(E,))
+    t = Step(w).record(x=(E,))
     assert t.steps[0].op is q and [h.name for h in t.outputs] == ["out"]
     with pytest.raises(TypeError, match="outside a graph's body on device tensors"):
         q(w, z(E))
     # The weight transposed: the same element count, refused by its shape.
     with pytest.raises(ValueError, match=r"GEMV.A is \(256, 2048\)"):
-        Step(z(E, 256)).trace(x=(E,))
+        Step(z(E, 256)).record(x=(E,))
 
 
 def test_shape_mismatch_and_rank_rules():
@@ -346,7 +346,7 @@ def test_shape_mismatch_and_rank_rules():
     bad = Bad()
 
     with pytest.raises(ValueError, match=r"K is 1024 from B.shape\[0\] but 2048"):
-        bad.trace(x=(E // 2,))
+        bad.record(x=(E // 2,))
     add = ElementwiseAdd
 
     class Flat(iron.Graph):
@@ -355,7 +355,7 @@ def test_shape_mismatch_and_rank_rules():
 
     flat = Flat()
 
-    t = flat.trace(x=(4, 512), y=(4, 512))
+    t = flat.record(x=(4, 512), y=(4, 512))
     assert t.steps[0].op.size == 2048 and t.outputs[0].shape == (4, 512)
 
 
@@ -386,7 +386,7 @@ def test_keyword_only_parameters_must_be_annotated_as_values():
 
     g = G()
 
-    t = g.trace(x=(1024,))
+    t = g.record(x=(1024,))
     assert [(v.name, v.marker) for v in t.values] == [("n", Kind.DISPATCH_TIME)]
 
 
@@ -398,7 +398,7 @@ def test_returning_an_input_or_a_slice_is_refused():
     ident = Ident()
 
     with pytest.raises(TypeError, match="returns its input"):
-        ident.trace(x=(64,))
+        ident.record(x=(64,))
 
     class Part(iron.Graph):
         def body(self, x):
@@ -407,7 +407,7 @@ def test_returning_an_input_or_a_slice_is_refused():
     part = Part()
 
     with pytest.raises(TypeError, match="whole handles"):
-        part.trace(x=(64,))
+        part.record(x=(64,))
 
 
 # --------------------------------------------------------------------------
@@ -426,14 +426,14 @@ def test_a_matvec_whose_columns_are_given_resolves_with_no_device():
 def test_two_spellings_of_one_array_are_one_design():
     """Identity is taken after resolution: a tunable left to resolve and the same
     tunable given its resolved value name one array, and a sequence builds it
-    once. Every operator of a traced graph goes through the same point, so
+    once. Every operator of a recorded graph goes through the same point, so
     the design counts here are the gate on it.
     """
     a = GEMV(M=64, K=256, num_aie_columns=2, tile_size_input=2)
     b = GEMV(M=64, K=256, num_aie_columns=2, tile_size_input=2, tile_size_output=2)
     assert a.design_key() != b.design_key()  # as given
     seq = OperatorSequence(
-        TracedGraph.of_steps(
+        Recording.of_steps(
             "two_spellings",
             [
                 SequenceStep(a, (BufferRef("x"), BufferRef("w"), BufferRef("y"))),
@@ -447,14 +447,14 @@ def test_two_spellings_of_one_array_are_one_design():
     designs, _ = seq.unique_designs()
     assert len(designs) == 1 and designs[0].tile_size_output == 2
     ffn, _ = _ffn()
-    seq = OperatorSequence(ffn.trace(x=(1, E)))
+    seq = OperatorSequence(ffn.record(x=(1, E)))
     seq.prepare()
     assert len(seq.unique_designs()[0]) == 6
 
 
 def test_swiglu_over_a_sequence_reads_the_weights_column_major():
 
-    t = FeedForward(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
+    t = FeedForward(z(H, E), z(H, E), z(E, H)).record(x=(256, E))
     gemms = [s.op for s in t.steps if type(s.op) is ProjectionGEMM]
     assert [(g.M, g.K, g.N) for g in gemms] == [(256, E, H), (256, E, H), (256, H, E)]
     assert all(g.b_col_maj for g in gemms)
@@ -464,16 +464,16 @@ def test_swiglu_over_a_sequence_reads_the_weights_column_major():
 
 
 # --------------------------------------------------------------------------
-# llama decode, traced at a scaled-down configuration
+# llama decode, recorded at a scaled-down configuration
 # --------------------------------------------------------------------------
 
 
-def test_llama_decode_traces_and_tunes():
+def test_llama_decode_records_and_tunes():
 
     L = 256
     model = small(max_seq_len=L)
     cfg = model.config
-    t = model.trace(**model.shapes()[0])
+    t = model.record(**model.shapes()[0])
     # A token takes no tensor. It returns the logits and carries the token
     # it draws and the position after it.
     assert t.inputs == [] and [h.name for h in t.outputs] == ["out", "carry_token"]
@@ -523,11 +523,11 @@ def test_llama_decode_traces_and_tunes():
         op.resolved(aie_utils.get_current_device())
 
 
-def test_llama_prompt_traces_over_the_same_caches():
+def test_llama_prompt_records_over_the_same_caches():
 
     g = small()
     cfg = g.config
-    t = g.trace(**g.shapes()[1])
+    t = g.record(**g.shapes()[1])
     assert [h.name for h in t.inputs] == ["ids"] and [h.name for h in t.outputs] == [
         "out",
         "carry_token",
@@ -547,13 +547,13 @@ def test_llama_prompt_traces_over_the_same_caches():
     }
     # The caches are the states a token's version reads: the same objects,
     # so one arena holds them once for both.
-    token = g.trace(**g.shapes()[0])
+    token = g.record(**g.shapes()[0])
     assert set(t.states) == set(token.states)
     keys = "model.layers.0.cache.keys"
     assert t.residents[keys] == token.residents[keys]
     assert set(t.weights) == set(token.weights)
     # Every projection reads the (out, in) checkpoint layout through the
-    # column-major flag, which the trace carries into shape inference.
+    # column-major flag, which the recording carries into shape inference.
     gemms = [s.op for s in t.steps if type(s.op) is ProjectionGEMM]
     assert all(op.b_col_maj for op in gemms)
     K = {op.K for op in gemms}
@@ -570,7 +570,7 @@ def test_llama_prompt_traces_over_the_same_caches():
 def test_llama_prompt_projects_with_flm_gemm(device, request):
     dev = request.getfixturevalue(device)
     g = llama_1b(num_hidden_layers=1)
-    t = g.trace(**g.shapes()[1])
+    t = g.record(**g.shapes()[1])
     ops = [s.op for s in t.steps]
     assert not any(type(op) is GEMM for op in ops)
     gemms = [op for op in ops if type(op) is ProjectionGEMM]
@@ -594,7 +594,7 @@ class Pointwise(iron.Graph):
 
 @pytest.mark.parametrize("precision,macs", [(None, True), (Precision.HIGH, False)])
 def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
-    t = Pointwise(precision).trace(x=((256, 128), bfloat16), w=((128, 128), bfloat16))
+    t = Pointwise(precision).record(x=((256, 128), bfloat16), w=((128, 128), bfloat16))
     (op,) = [op for op in t.operators if type(op) is ProjectionGEMM]
     assert op.resolved(npu2).emulate_bf16_mmul_with_bfp16 is macs
 
@@ -623,7 +623,7 @@ class Projections(iron.Graph):
 def test_a_graph_s_precision_raises_every_step_that_rounds_more(floor, levels):
     graph = Projections()
     graph.precision = floor
-    t = graph.trace(x=((256, 256), bfloat16), w=((256, 256), bfloat16))
+    t = graph.record(x=((256, 256), bfloat16), w=((256, 256), bfloat16))
     assert [s.op.precision for s in t.steps] == levels
     assert graph.gemm.precision == Precision.MEDIUM
 
@@ -640,7 +640,7 @@ def test_an_instance_dropped_in_a_body_leaves_its_raised_copy_to_no_other():
                 gc.collect()
             return GEMM(M=256, K=256, N=128).apply(x, v)
 
-    t = Temporaries().trace(
+    t = Temporaries().record(
         x=((256, 256), bfloat16), w=((256, 256), bfloat16), v=((256, 128), bfloat16)
     )
     assert [s.op.N for s in t.steps] == [256] * 8 + [128]
@@ -663,7 +663,7 @@ def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
     and every projection shares them.
     """
     g = llama_1b(num_hidden_layers=2)
-    t = g.trace(**g.shapes()[1])
+    t = g.record(**g.shapes()[1])
     words, shared = _words(t, share=True)
     assert len(words) <= 32
     gemms = [op.resolved(npu2) for op in t.operators if type(op) is ProjectionGEMM]
@@ -690,11 +690,11 @@ def test_llama_does_not_grow_with_the_context(step):
     and transposes between them views the DMA walks.
     """
 
-    def trace(max_seq_len):
+    def record(max_seq_len):
         g = small(max_seq_len=max_seq_len)
-        return g.trace(**g.shapes()[0 if step == "decode" else 1])
+        return g.record(**g.shapes()[0 if step == "decode" else 1])
 
-    short, long = trace(256), trace(1024)
+    short, long = record(256), record(1024)
     assert (
         [h.name for h in short.inputs]
         == [h.name for h in long.inputs]
@@ -729,17 +729,17 @@ def test_llama_does_not_grow_with_the_context(step):
 def _resolved_fields(settings):
     """Every field of every step of every setting, resolved for its device.
 
-    A setting is ``(device, trace)``: ``trace`` builds the graph with that
-    device current and traces it. The device is restored afterwards.
+    A setting is ``(device, record)``: ``record`` builds the graph with that
+    device current and records it. The device is restored afterwards.
     """
     out = []
-    for dev, trace in settings:
+    for dev, record in settings:
         with aie_utils.set_current_device(dev):
             out.append(
                 [
                     tuple((n, vars(op)[n]) for n in op.declaration.params)
                     + (op.design_key(),)
-                    for s in trace().steps
+                    for s in record().steps
                     for op in [s.op.resolved(dev)]
                 ]
             )
@@ -751,14 +751,14 @@ def _every_tunable_is_load_bearing(monkeypatch, settings):
     must change some resolved step, or fail, in some setting. A tunable that
     resolution would have picked anyway is noise a reader has to disprove.
     """
-    construct = Tracer._construct
+    construct = Recorder._construct
     passed = set()
 
     def recording(self, cls, inputs, outputs, kwargs):
         passed.update((cls, n) for n in kwargs if n in cls.declaration.tunables)
         return construct(self, cls, inputs, outputs, kwargs)
 
-    monkeypatch.setattr(Tracer, "_construct", recording)
+    monkeypatch.setattr(Recorder, "_construct", recording)
     baseline = _resolved_fields(settings)
     redundant = []
     for cls, name in sorted(passed, key=lambda k: (k[0].__name__, k[1])):
@@ -768,7 +768,7 @@ def _every_tunable_is_load_bearing(monkeypatch, settings):
                 kwargs = {k: v for k, v in kwargs.items() if k != name}
             return construct(self, kls, inputs, outputs, kwargs)
 
-        monkeypatch.setattr(Tracer, "_construct", dropping)
+        monkeypatch.setattr(Recorder, "_construct", dropping)
         try:
             same = _resolved_fields(settings) == baseline
         except Exception:
@@ -782,15 +782,15 @@ def test_llama_names_only_the_tunables_that_matter(monkeypatch):
     """Every keyword the llama graph passes is a choice resolution would not
     have made in some setting the graph is written for: the model's real
     shape at the graph's own defaults, on NPU2 (MHA's) for a decode step and
-    a prompt; and the scaled-down shape the host tests trace, with the
+    a prompt; and the scaled-down shape the host tests record, with the
     parameters that shape needs.
     """
     npu2 = from_name("npu2", n_cols=8)
     real, scaled = llama_1b(num_hidden_layers=1), small()
     settings = [
-        (npu2, lambda: real.trace(**real.shapes()[0])),
-        (npu2, lambda: real.trace(**real.shapes()[1])),
-        (npu2, lambda: scaled.trace(**scaled.shapes()[1])),
+        (npu2, lambda: real.record(**real.shapes()[0])),
+        (npu2, lambda: real.record(**real.shapes()[1])),
+        (npu2, lambda: scaled.record(**scaled.shapes()[1])),
     ]
     _every_tunable_is_load_bearing(monkeypatch, settings)
 
@@ -804,7 +804,7 @@ def test_a_bound_value_survives_tuning():
 
     f = F()
 
-    f.trace(x=(64,))
+    f.record(x=(64,))
     assert [v.name for v in copy.resolved(aie_utils.get_current_device()).values] == [
         "out_offset"
     ]
@@ -850,8 +850,8 @@ def test_an_index_may_floor_and_a_bound_may_not():
         _ = cache[: (p + 1).clamp(hi=8)]
 
 
-def test_a_per_call_value_cannot_steer_the_trace():
-    """A body is traced once for every call, so a branch on a per-call value
+def test_a_per_call_value_cannot_steer_the_record():
+    """A body is recorded once for every call, so a branch on a per-call value
     would take one side for all of them: a comparison or a truth test raises.
     """
 
@@ -866,7 +866,7 @@ def test_a_per_call_value_cannot_steer_the_trace():
 
     for test in (lambda p: p == 0, lambda p: p * 2 != np.float32(2), bool):
         with pytest.raises(TypeError, match="per call"):
-            Branches(test).trace(x=(64,))
+            Branches(test).record(x=(64,))
 
 
 def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
@@ -889,7 +889,7 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
             k = x[:rows].reshape(C, G, D).transpose(1, 0, 2)
             Copy.step(k, keys.reshape(G, L // C, C, D)[:, chunk, :rows])
 
-    t = Chunked().trace(x=(C, G * D))
+    t = Chunked().record(x=(C, G * D))
     (copy,) = t.operators
     assert copy.dst_bound == 1 and {
         k: e.name for k, e in copy.bound_values.items()
@@ -994,11 +994,11 @@ def test_a_run_past_the_buffer_s_end_is_kept_inside_by_each_call():
     def inside(t, **at):
         return all(m.lo <= m.evaluate(at) < m.hi for m in t.limits)
 
-    t = Bounded().trace(x=(100, 16))
+    t = Bounded().record(x=(100, 16))
     assert inside(t, pos=96, rows=4) and inside(t, pos=0, rows=16)
     assert not inside(t, pos=96, rows=5) and not inside(t, pos=-1, rows=1)
     assert not inside(t, pos=0, rows=17)
-    t = Whole().trace(x=(100, 16))
+    t = Whole().record(x=(100, 16))
     assert inside(t, pos=84) and not inside(t, pos=85)
 
 
@@ -1049,7 +1049,7 @@ def test_the_trace_records_the_range_each_per_call_index_and_bound_holds():
             Copy.step(k, keys.reshape(G, L // C, C, D)[:, chunk, :rows])
             return Copy.step(table[pos + 1]).reshape(1, D)
 
-    t = Chunked().trace(x=(C, G * D))
+    t = Chunked().record(x=(C, G * D))
     got = {(str(m.expression), m.lo, m.hi) for m in t.limits}
     assert got == {("rows", 0, C + 1), ("chunk", 0, L // C), ("pos + 1", 0, L)}
     for m in t.limits:
@@ -1068,7 +1068,7 @@ def test_a_bound_rounds_up_to_the_tiles_it_ends_in(npu2):
         def body(self, x, y, *, p: Scratchpad[np.int32]):
             return ElementwiseAdd.step(x[: p + 1], y[: p + 1])
 
-    t = G().trace(x=(64, 512), y=(64, 512))
+    t = G().record(x=(64, 512), y=(64, 512))
     (op,) = t.operators
     op = op.resolved(aie_utils.get_current_device())
     per_word = op.cores * op.tile_size  # elements one word of tiles covers
@@ -1099,7 +1099,7 @@ def test_words_of_one_clamped_expression_share_it(npu2):
                 for view in (self.a[row], self.a[row, :16], self.c[row])
             )
 
-    t = G().trace()
+    t = G().record()
     alone, _ = _words(t)
     words, shared = _words(t, share=True)
     assert (len(alone), len(words)) == (3, 2)
@@ -1133,7 +1133,7 @@ def test_the_reference_writes_a_given_output_of_an_operator_that_returns_one(npu
 
 @pytest.mark.parametrize("view", [False, True])
 def test_a_weight_given_where_an_optional_input_was_meant_is_refused(view):
-    """``RMSNorm(x, w)`` gives the weight as RMSNorm's output: a trace and
+    """``RMSNorm(x, w)`` gives the weight as RMSNorm's output: a recording and
     the reference refuse it, naming the keyword, whatever view of it, and
     the reference leaves the weight as it was.
     """
@@ -1149,7 +1149,7 @@ def test_a_weight_given_where_an_optional_input_was_meant_is_refused(view):
     x = np.ones((1, E), dtype=bfloat16)
     kept = w.copy()
     with pytest.raises(TypeError, match=r"graph weight or a view of one.*\(weight=\)"):
-        Norm().trace(x=(1, E))
+        Norm().record(x=(1, E))
     with pytest.raises(TypeError, match=r"graph weight or a view of one.*\(weight=\)"):
         Norm().reference(x)
     np.testing.assert_array_equal(w, kept)
@@ -1162,7 +1162,7 @@ def test_an_input_given_as_an_output_is_refused():
             return y
 
     with pytest.raises(TypeError, match="graph input or a view of one"):
-        Over().trace(x=(E - 1,), y=(E,))
+        Over().record(x=(E - 1,), y=(E,))
     y = np.ones(E, dtype=bfloat16)
     with pytest.raises(TypeError, match="graph input or a view of one"):
         Over().reference(np.ones(E - 1, dtype=bfloat16), y)
@@ -1182,7 +1182,7 @@ def test_a_given_output_of_another_rank_is_refused_unless_declared_flat():
             return y
 
     with pytest.raises(ValueError, match=r"GEMM.C is \(256, 256\)"):
-        Flat().trace(a=(256, 256), b=(256, 256))
+        Flat().record(a=(256, 256), b=(256, 256))
 
 
 def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
@@ -1228,7 +1228,7 @@ def test_the_reference_computes_the_expressions(npu2):
             Copy.step(x, keys[:, p + 1])
 
     g = Write()
-    t = g.trace(x=(2, 4))
+    t = g.record(x=(2, 4))
     (b,) = t.bindings
     assert b.expression == (t.values[0] + 1) * 4  # a row of the cache is 4 long
     x = np.arange(8, dtype=np.float32).astype(bfloat16).reshape(2, 4)
@@ -1248,7 +1248,7 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
 
     g = G()
 
-    t = g.trace(x=(64, 8))
+    t = g.record(x=(64, 8))
     (op,) = t.operators
     words = {w.symbol: w for w in _words(t)[0]}
     assert set(words) == {
@@ -1334,7 +1334,7 @@ def test_the_packed_decode_words_of_mha_have_emit_forms(npu2):
             )
             return o.reshape(1, 32 * 64)
 
-    words, _ = _words(G().trace(q=(32, 64)), extents=False)
+    words, _ = _words(G().record(q=(32, 64)), extents=False)
     assert words
     for w in words:
         assert w.form is not None and w.form.value.name == "position", w.symbol
@@ -1366,7 +1366,7 @@ def test_words_that_always_hold_one_number_share_it(npu2, bound, names):
                 ElementwiseAdd.step(x[:rows], y[:rows]), y[:rows]
             )
 
-    t = G().trace(x=(64, 512), y=(64, 512))
+    t = G().record(x=(64, 512), y=(64, 512))
     alone, _ = _words(t)
     words, shared = _words(t, share=True)
     assert len(alone) == 10 and len(words) == 2
@@ -1392,7 +1392,7 @@ def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
             Copy.step(k, keys)
             return Copy.step(k)
 
-    t = ByHead().trace(x=(L, G * D))
+    t = ByHead().record(x=(L, G * D))
     (n,) = t.values
     for copy in t.operators:
         assert copy.src_bound == 1 and copy.dst_bound == 1
@@ -1414,11 +1414,11 @@ def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
             Copy.step(x[:n].reshape(L, G, D).transpose(1, 0, 2), keys.reshape(G * L, D))
 
     with pytest.raises(ValueError, match="bound it alike"):
-        Flat().trace(x=(L, G * D))
+        Flat().record(x=(L, G * D))
 
 
 def test_the_reference_copies_a_bounded_call_into_the_rows_it_covers(npu2):
-    """The trace bounds a given view alike (above); the reference, which runs
+    """The recording bounds a given view alike (above); the reference, which runs
     a bounded call on the rows it covers, writes those of the view and
     leaves the rest.
     """
@@ -1463,7 +1463,7 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
 
     g = G()
 
-    t = g.trace(x=(512, 64), w=(256, 64))
+    t = g.record(x=(512, 64), w=(256, 64))
     gemm, mha = t.operators
     assert {k: e.name for k, e in gemm.bound_extents.items()} == {"valid": "n"}
     assert {k: e.name for k, e in mha.bound_extents.items()} == {
@@ -1505,9 +1505,9 @@ class _Gather(iron.Graph):
 def test_an_optional_input_gives_a_version_without_it():
     table = np.arange(4 * 256, dtype=np.int32).astype(bfloat16).reshape(4, 256)
     g = _Gather(table)
-    alone, added = g.trace(), g.trace(x=(256,))
+    alone, added = g.record(), g.record(x=(256,))
     assert alone.inputs == [] and [h.name for h in added.inputs] == ["x"]
-    assert g.trace(x=None).inputs == []
+    assert g.record(x=None).inputs == []
     # The row is a view of the one table, indexed per call.
     (copy,) = alone.operators
     assert list(alone.weights) == [id(g.table.array)]
@@ -1537,7 +1537,7 @@ class _Held(iron.Graph):
 def test_a_held_array_is_viewed_in_the_body_under_its_own_path():
     table = np.arange(8 * 256, dtype=np.int32).astype(bfloat16).reshape(8, 256)
     g = _Held(table)
-    t = g.trace(x=(512,))
+    t = g.record(x=(512,))
     assert [h.name for _, h in t.weights.values()] == ["weights.embed.weight"]
     assert list(t.weights) == [id(table)]
     whole = BufferRef("weights.embed.weight")
@@ -1600,7 +1600,7 @@ def test_a_call_refuses_an_input_numpy_would_not_cast_to_its_dtype():
     def upload():
         raise Staged
 
-    version = SimpleNamespace(traced=g.trace(**g.shapes()[1]), upload=upload)
+    version = SimpleNamespace(recording=g.record(**g.shapes()[1]), upload=upload)
     values = dict(position=C - 1, token=0, start=0, rows=C, rope_start=0)
     with pytest.raises(
         TypeError,
@@ -1626,7 +1626,7 @@ def test_a_refused_compile_restores_the_device_it_was_given_over(npu2):
 def test_a_graph_carries_its_next_values():
     successor = np.random.default_rng(0).permutation(16).astype(np.int32)
     walk = Walk(successor)
-    t = walk.trace()
+    t = walk.record()
     assert [(v.name, v.marker) for v in t.values] == [
         ("node", Kind.CARRIED),
         ("steps", Kind.CARRIED),
@@ -1653,7 +1653,7 @@ def test_a_carried_handle_may_also_be_returned():
             nxt = Copy.step(successor[node], dtype=np.int32)
             return nxt, iron.carry(node=nxt)
 
-    t = Walk().trace()
+    t = Walk().record()
     assert [h.name for h in t.outputs] == ["out"] and t.carry["node"] is t.returned[0]
     out, nxt = Walk().reference(node=7)
     assert out.reshape(-1)[0] == 0 and nxt["node"] == 0
@@ -1668,42 +1668,42 @@ def test_every_carried_value_is_carried_and_nothing_else():
             return iron.carry(a=a + 1)
 
     with pytest.raises(TypeError, match=r"return iron.carry\(b=\.\.\.\)"):
-        Forgets().trace()
+        Forgets().record()
 
     class CarriesAPlainValue(iron.Graph):
         def body(self, *, a: Scratchpad[np.int32]):
             return iron.carry(a=a + 1)
 
     with pytest.raises(TypeError, match="Carried values are"):
-        CarriesAPlainValue().trace()
+        CarriesAPlainValue().record()
 
     class CarriesAConstant(iron.Graph):
         def body(self, *, a: Carried[np.int32]):
             return iron.carry(a=5)
 
     with pytest.raises(TypeError, match="expression of the values"):
-        CarriesAConstant().trace()
+        CarriesAConstant().record()
 
     class CarriesARow(iron.Graph):
         def body(self, *, a: Carried[np.int32]):
             return iron.carry(a=Copy.step(rows[a]))
 
     with pytest.raises(TypeError, match="one whole element"):
-        CarriesARow().trace()
+        CarriesARow().record()
 
     class CarriesTheWrongDtype(iron.Graph):
         def body(self, *, a: Carried[np.int16]):
             return iron.carry(a=Copy.step(table[a], dtype=np.int32))
 
     with pytest.raises(TypeError, match="but a is int16"):
-        CarriesTheWrongDtype().trace()
+        CarriesTheWrongDtype().record()
 
     class CarriesTwice(iron.Graph):
         def body(self, *, a: Carried[np.int32]):
             return iron.carry(a=a + 1), iron.carry(a=a + 2)
 
     with pytest.raises(TypeError, match="returned last"):
-        CarriesTwice().trace()
+        CarriesTwice().record()
 
 
 def test_the_emit_program_follows_the_target_parameters():
@@ -1711,28 +1711,28 @@ def test_the_emit_program_follows_the_target_parameters():
     the target's order and encoding; anything else is refused.
     """
     walk = Trail(np.arange(16, dtype=np.int32), steps=8)
-    traced = walk.trace()
-    assert traced.feedback == []  # tracing alone adds no Emit
+    recording = walk.record()
+    assert recording.feedback == []  # recording alone adds no Emit
     assert walk._carry is not None
-    site = attach_emit(traced, walk._parameters.carried, walk._carry, slots=2)
+    site = attach_emit(recording, walk._parameters.carried, walk._carry, slots=2)
     # The gathered node is computed into the carry's second plane.
-    assert traced.steps[0].refs()[-1] == BufferRef("carry", 8, 4)
-    assert traced.steps[-1].refs() == (
+    assert recording.steps[0].refs()[-1] == BufferRef("carry", 8, 4)
+    assert recording.steps[-1].refs() == (
         BufferRef("emit_program"),
         BufferRef("carry"),
         BufferRef("emit_image"),
         BufferRef("carry", 0, 8),
     )
-    assert traced.feedback == ["emit_image"] and traced.outputs == []
+    assert recording.feedback == ["emit_image"] and recording.outputs == []
 
-    words, _ = _words(traced)
+    words, _ = _words(recording)
     # A target laying the two out the other way, one as a core read.
     by_value = {w.linear.value: w.symbol for w in words if w.linear is not None}
     parameters = [
         Parameter(by_value["steps"], 0, "i32", "core"),
         Parameter(by_value["node"], 1, "i32", "addr"),
     ]
-    program = compose(site, traced.carry, words, parameters)
+    program = compose(site, recording.carry, words, parameters)
     lo, hi = UNCLAMPED
     assert program.tolist() == [
         [0, 1, 1, 1, 0, 1, 0, lo, hi, -1, 2],  # steps + 1, shifted for the core
@@ -1744,12 +1744,12 @@ def test_the_emit_program_follows_the_target_parameters():
     assert image.tolist() == [10 << 2, 33] and state.tolist() == [33, 10]
 
     with pytest.raises(ValueError, match="takes 1"):
-        compose(site, traced.carry, words, parameters[:1])
-    jumped, _ = _words(walk.trace(jump=((16,), np.int32)))
+        compose(site, recording.carry, words, parameters[:1])
+    jumped, _ = _words(walk.record(jump=((16,), np.int32)))
     with pytest.raises(ValueError, match="skip, which is not carried"):
         compose(
             site,
-            traced.carry,
+            recording.carry,
             jumped,
             [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(jumped)],
         )
@@ -1759,14 +1759,14 @@ def _emitted(graph, positions):
     """The words a carried ``position`` writes after each of ``positions``,
     each as the Emit program the device runs between calls computes it.
     """
-    traced = graph.trace()
-    words, _ = _words(traced)
+    recording = graph.record()
+    words, _ = _words(recording)
     assert all(w.linear is None for w in words)
     site = attach_emit(
-        traced, graph._parameters.carried, graph._carry, slots=len(words)
+        recording, graph._parameters.carried, graph._carry, slots=len(words)
     )
     parameters = [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(words)]
-    program = compose(site, traced.carry, words, parameters)
+    program = compose(site, recording.carry, words, parameters)
     out = []
     for p in positions:
         image, state = emit_reference(program, np.array([[p], [0]]), slots=len(words))
@@ -1792,7 +1792,7 @@ def test_a_state_is_indexed_by_a_floored_carried_value(npu2):
             return iron.carry(position=position + 1)
 
     graph = Slots()
-    floored = [b.expression for b in graph.trace().bindings]
+    floored = [b.expression for b in graph.record().bindings]
     assert [e.down for e in floored] == [2, 2]
     assert len({e.name for e in floored}) == 2
     assert _emitted(graph, range(10)) == [
@@ -1809,7 +1809,7 @@ def test_a_state_is_indexed_by_a_floored_carried_value(npu2):
             return Copy.step(x[: n // 4])
 
     with pytest.raises(TypeError, match="not linear"):
-        Bounded().trace(x=((64, 32), bfloat16))
+        Bounded().record(x=((64, 32), bfloat16))
 
 
 def test_a_state_is_written_at_a_wrapped_carried_value(npu2):
@@ -1884,7 +1884,7 @@ def test_a_whole_reshape_of_a_held_array_is_gathered_under_its_own_path():
     tables = np.arange(2 * 8 * 256, dtype=np.int32).astype(bfloat16)
     tables = tables.reshape(2, 8, 256)
     g = _HeldStack(tables)
-    t = g.trace(ids=((4,), np.int32))
+    t = g.record(ids=((4,), np.int32))
     assert [h.name for _, h in t.weights.values()] == ["weights.embed.weight"]
     (gather,) = t.steps
     assert gather.refs()[0] == BufferRef("weights.embed.weight")
@@ -1916,7 +1916,7 @@ class _Summed(iron.Graph):
 def test_a_graph_names_its_inputs_and_values_in_signature(count):
     g = _Summed(count)
     shapes = {f"x{i}": (8, 256) for i in range(count)}
-    t = g.trace(**shapes)
+    t = g.record(**shapes)
     assert [h.name for h in t.inputs] == list(shapes)
     assert [v.name for v in t.values] == ["n"]
     assert len(t.steps) == count - 1
@@ -1946,13 +1946,13 @@ class _TwoBounds(iron.Graph):
 
 def test_a_version_reads_only_the_values_its_steps_read():
     g = _TwoBounds()
-    assert g.trace(x=(8, 256)).reads == {"n"}
-    assert g.trace(y=(8, 256)).reads == {"m"}
-    assert [v.name for v in g.trace(x=(8, 256)).values] == ["n", "m"]
+    assert g.record(x=(8, 256)).reads == {"n"}
+    assert g.record(y=(8, 256)).reads == {"m"}
+    assert [v.name for v in g.record(x=(8, 256)).values] == ["n", "m"]
 
 
-def test_inline_traces_only_into_a_body():
-    with pytest.raises(TypeError, match="traces into a graph's body"):
+def test_inline_records_only_into_a_body():
+    with pytest.raises(TypeError, match="records into a graph's body"):
         _Summed(2).inline(_Summed(2).body)
 
 
@@ -1968,9 +1968,9 @@ class _DeviceIds(iron.Graph):
 
 def test_a_version_reads_none_of_the_words_its_image_writes():
     table = np.zeros((300, 64), dtype=bfloat16)
-    traced = _DeviceIds(table).trace(ids=((64,), np.int32))
-    assert traced.addresses, "the gather's table address is a word the image writes"
-    assert traced.reads == {"n"}
+    recording = _DeviceIds(table).record(ids=((64,), np.int32))
+    assert recording.addresses, "the gather's table address is a word the image writes"
+    assert recording.reads == {"n"}
 
 
 @pytest.mark.parametrize("band_stride", [0, 1])
@@ -1979,7 +1979,7 @@ def test_a_walk_by_a_per_call_repeat_and_length_is_its_reference(band_stride):
     table = np.arange(walk.HK * walk.WK * walk.K2 * walk.E, dtype=np.float32)
     table = table.astype(bfloat16).reshape(-1, walk.E)
     graph = walk.Walk(table, band_stride)
-    (step,) = graph.trace().steps
+    (step,) = graph.record().steps
     assert (step.op.src_repeat, step.op.src_bound, step.op.dst_bound) == (True, 1, 0)
     for hk, wk in ((3, 4), (1, 1)):
         n = hk * wk * walk.K2
@@ -1994,7 +1994,7 @@ def test_walks_in_turn_are_their_reference(band_stride):
     table = np.arange(walk.HK * walk.WK * walk.K2 * walk.E, dtype=np.float32)
     table = table.astype(bfloat16).reshape(-1, walk.E)
     graph = walk.Walks(table, band_stride)
-    (step,) = graph.trace().steps
+    (step,) = graph.record().steps
     assert (len(step.op.src), step.op.src_repeat, step.op.src_bound) == (3, True, 1)
     for hk, wk in ((3, 4), (walk.HK, walk.WK), (1, 1)):
         values = walk.walks_values(hk, wk)
@@ -2028,8 +2028,10 @@ def test_a_bounded_view_of_a_state_is_its_rows_this_call():
 def test_bounded_rows_past_a_wrap_halve_the_run():
     """A bound of more rows than D1 wraps takes D2, the run's halves D1."""
     graph = copy_bounded_view.Halves()
-    traced = graph.trace(x=(copy_bounded_view.ROWS, 32), y=(copy_bounded_view.ROWS, 32))
-    into = [s.op for s in traced.steps][:2]
+    recording = graph.record(
+        x=(copy_bounded_view.ROWS, 32), y=(copy_bounded_view.ROWS, 32)
+    )
+    into = [s.op for s in recording.steps][:2]
     for op in into:
         ((tap, unit),) = op._taps(op.dst, op.dst_bound, op.y)
         assert (list(tap.sizes), unit) == ([1, copy_bounded_view.ROWS, 2, 16], 32)
@@ -2064,7 +2066,7 @@ class _BadWalk(iron.Graph):
 )
 def test_a_walk_one_descriptor_cannot_hold_is_refused(sizes, strides, bounded, match):
     with pytest.raises(ValueError, match=match):
-        _BadWalk(sizes, strides, bounded).trace()
+        _BadWalk(sizes, strides, bounded).record()
 
 
 class _UnpairedWalks(iron.Graph):
@@ -2081,7 +2083,7 @@ class _UnpairedWalks(iron.Graph):
 
 def test_walks_in_turn_take_a_repeat_each():
     with pytest.raises(ValueError, match="take a repeat each"):
-        _UnpairedWalks().trace()
+        _UnpairedWalks().record()
 
 
 def test_a_handle_adds_and_multiplies_by_elementwise_and_rowwise_steps():
@@ -2097,14 +2099,14 @@ def test_a_handle_adds_and_multiplies_by_elementwise_and_rowwise_steps():
         def body(self, x, y, row):
             return (x + y) * self.w + x, row * x, x * row, x[0] * self.m
 
-    t = Arithmetic().trace(x=(2, E), y=(2, E), row=(E,))
+    t = Arithmetic().record(x=(2, E), y=(2, E), row=(E,))
     assert [type(s.op).__name__ for s in t.steps] == [
         "ElementwiseAdd",
         "RowwiseMul",
         "ElementwiseAdd",
     ] + ["RowwiseMul"] * 3
     with pytest.raises(TypeError, match="a row of"):
-        Arithmetic().trace(x=(2, E), y=(2, E // 2), row=(E,))
+        Arithmetic().record(x=(2, E), y=(2, E // 2), row=(E,))
 
 
 @pytest.mark.parametrize(
@@ -2127,9 +2129,9 @@ def test_linear_takes_a_precision_for_any_rows_and_gemv_tunables_for_one(
 
     if steps is None:
         with pytest.raises(ValueError, match="take no GEMV"):
-            Linear().trace(x=(rows, E))
+            Linear().record(x=(rows, E))
     else:
-        t = Linear().trace(x=(rows, E))
+        t = Linear().record(x=(rows, E))
         assert [type(s.op).__name__ for s in t.steps] == steps
 
 
@@ -2145,7 +2147,7 @@ def test_highest_runs_the_gemm_that_rounds_once_asked_for_by_call_or_by_graph():
             return F.linear(x, w)
 
     shapes = dict(x=((128, 256), bfloat16), w=((256, 256), bfloat16))
-    asked, floored = (g().trace(**shapes).steps for g in (Asked, Floored))
+    asked, floored = (g().record(**shapes).steps for g in (Asked, Floored))
     # flm.ProjectionGEMM, raised past what it reaches, hands over.
     assert [repr(s.op) for s in asked] == [repr(s.op) for s in floored]
     assert [type(s.op) for s in asked] == [GEMM]
@@ -2153,7 +2155,7 @@ def test_highest_runs_the_gemm_that_rounds_once_asked_for_by_call_or_by_graph():
     tuned = Floored()
     tuned.profile = Profile()
     tuned.profile.add(GEMM, tile_n=32)
-    assert [s.op.tile_n for s in tuned.trace(**shapes).steps] == [32]
+    assert [s.op.tile_n for s in tuned.record(**shapes).steps] == [32]
 
 
 def test_linear_takes_one_row_or_several():
@@ -2164,7 +2166,7 @@ def test_linear_takes_one_row_or_several():
     with pytest.raises(
         ValueError, match=r"x \(2, 4, 256\) is not \(in,\) or \(rows, in\)"
     ):
-        Batched().trace(x=((2, 4, 256), bfloat16), w=((256, 256), bfloat16))
+        Batched().record(x=((2, 4, 256), bfloat16), w=((256, 256), bfloat16))
 
 
 def test_the_reference_runs_the_trace_so_held_state_takes_arithmetic():
@@ -2239,12 +2241,12 @@ def test_interpolate_is_the_exact_2x_nearest_upsampling_only(keywords, doubles):
     x = (np.arange(3 * 5 * 4) % 11).reshape(3, 5, 4).astype(bfloat16)
     if not doubles:
         with pytest.raises(ValueError, match="only the exact 2x nearest"):
-            Upsample().trace(x=(x.shape, bfloat16))
+            Upsample().record(x=(x.shape, bfloat16))
         return
     got = np.asarray(Upsample().reference(x)).reshape(6, 10, 4)
     np.testing.assert_array_equal(got, x.repeat(2, 0).repeat(2, 1))
     with pytest.raises(ValueError, match="not a map"):
-        Upsample().trace(x=((3, 20), bfloat16))
+        Upsample().record(x=((3, 20), bfloat16))
 
 
 def _steps(t) -> list[str]:
@@ -2260,7 +2262,7 @@ def test_a_number_on_either_side_is_a_row_of_it():
         def body(self, x):
             return 0.5 * x + 1, x * 0.5, -x, x / 4
 
-    t = Scalars().trace(x=(2, 64))
+    t = Scalars().record(x=(2, 64))
     assert _steps(t) == ["RowwiseMul", "RowwiseAdd"] + ["RowwiseMul"] * 3
     assert len(t.weights) == 4  # 0.5, 1, -1, 0.25: 0.5 once
     x = (np.arange(128) % 8).reshape(2, 64).astype(bfloat16)
@@ -2275,7 +2277,7 @@ def test_a_difference_is_one_axpy_and_a_number_less_a_handle_two_steps():
         def body(self, x, y):
             return x - y, 3 - x
 
-    t = Differences().trace(x=(2, 64), y=(2, 64))
+    t = Differences().record(x=(2, 64), y=(2, 64))
     assert _steps(t) == ["AXPY", "RowwiseMul", "RowwiseAdd"]
     x = (np.arange(128) % 8).reshape(2, 64).astype(bfloat16)
     y = np.ones((2, 64), bfloat16)
@@ -2293,7 +2295,7 @@ def test_a_state_is_subtracted_as_it_is_added():
             return x - self.s
 
     graph = LessState()
-    assert _steps(graph.trace(x=(2, 64))) == ["AXPY"]
+    assert _steps(graph.record(x=(2, 64))) == ["AXPY"]
     x = (np.arange(128) % 8).reshape(2, 64).astype(bfloat16)
     graph.s.host = np.ones((2, 64), bfloat16)
     got = np.asarray(graph.reference(x), np.float32)
@@ -2306,7 +2308,7 @@ def test_a_handle_is_divided_by_a_number_alone():
             return x / y
 
     with pytest.raises(TypeError, match="divided by a number"):
-        Divide().trace(x=(64,), y=(64,))
+        Divide().record(x=(64,), y=(64,))
 
 
 @pytest.mark.parametrize(
@@ -2332,7 +2334,7 @@ def test_matmul_by_a_weight_s_transpose_is_linear(rows, op, held):
             assert v.T.shape == (E, 128) and v.T.tap == v.transpose(1, 0).tap
             return x @ self.w.T
 
-    assert _steps(Project().trace(x=(rows, E), v=(128, E))) == [op]
+    assert _steps(Project().record(x=(rows, E), v=(128, E))) == [op]
 
 
 def test_a_weight_times_a_row_is_linear_and_a_plain_matrix_is_refused():
@@ -2352,9 +2354,9 @@ def test_a_weight_times_a_row_is_linear_and_a_plain_matrix_is_refused():
         def body(self, x):
             return x @ self.w
 
-    assert _steps(Left().trace(x=(E,))) == ["GEMV"]
+    assert _steps(Left().record(x=(E,))) == ["GEMV"]
     with pytest.raises(TypeError, match=r"x @ W.T with W \(out, in\)"):
-        Plain().trace(x=(1, 128))
+        Plain().record(x=(1, 128))
 
 
 def test_a_numpy_function_on_a_handle_says_what_to_call():
@@ -2363,12 +2365,12 @@ def test_a_numpy_function_on_a_handle_says_what_to_call():
             return np.exp(x)
 
     with pytest.raises(TypeError, match="numpy's exp cannot compute"):
-        Exp().trace(x=(64,))
+        Exp().record(x=(64,))
 
 
 def test_an_assignment_into_a_view_is_the_copy_into_it():
     """``cache[pos] = x`` records the step ``Copy.step(x, cache[pos])`` does,
-    traced and in the reference; a handle's slice takes one too.
+    recorded and in the reference; a handle's slice takes one too.
     """
     cache = iron.state((8, 64), name="cache")
 
@@ -2386,7 +2388,7 @@ def test_an_assignment_into_a_view_is_the_copy_into_it():
             Copy.step(x[0:32], y[1])
             return y
 
-    a, b = (g().trace(x=(64,)) for g in (Store, Spelled))
+    a, b = (g().record(x=(64,)) for g in (Store, Spelled))
     assert _steps(a) == _steps(b) == ["Copy"] * 3
     assert [s.refs() for s in a.steps] == [s.refs() for s in b.steps]
     x = (np.arange(64) % 16).astype(bfloat16)
@@ -2404,4 +2406,4 @@ def test_a_refused_step_names_the_graph_the_operator_and_the_held_path():
             return GEMV.step(self.layers[0].w, x)
 
     with pytest.raises(ValueError, match=r"^Project: GEMV\(layers\.0\.w, x\): GEMV"):
-        Project().trace(x=(256,))
+        Project().record(x=(256,))

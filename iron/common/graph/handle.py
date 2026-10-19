@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What a traced graph passes around in place of a buffer."""
+"""What a recorded graph passes around in place of a buffer."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 from ..declare.operand import slots
-from ..declare.operator import graph_tracer
+from ..declare.operator import graph_recorder
 from ..image.packaging import Kind
 from ..image.step import BufferRef
 
@@ -38,11 +38,11 @@ it only to seed the first call.
 
 
 class Handle:
-    """A traced tensor: a buffer of the graph, with a shape and a dtype.
+    """A recorded tensor: a buffer of the graph, with a shape and a dtype.
 
     ``h[key]`` takes numpy's basic indexing, on one axis a per-call
     value (``keys[:, pos]``), and on the leading axis an integer array
-    of rows fixed when the graph is traced (``table[ids]``) or a 1-D integer
+    of rows fixed when the graph is recorded (``table[ids]``) or a 1-D integer
     handle naming the rows each call takes. A contiguous static region is a
     slice any operator takes; any other view, a gather included, is an
     access pattern only a copy takes.
@@ -217,10 +217,10 @@ class Handle:
                 f"call from its start, [:n], and take every other axis whole"
             )
         stop = run.stop.affine()
-        tracer = graph_tracer.get()
-        if tracer is not None:
-            tracer.limit(stop, 0, width + 1, self)
-            tracer.limit(start, 0, n + 1, self, stop)
+        recorder = graph_recorder.get()
+        if recorder is not None:
+            recorder.limit(stop, 0, width + 1, self)
+            recorder.limit(start, 0, n + 1, self, stop)
         return Handle(
             self.shape,
             self.dtype,
@@ -310,7 +310,7 @@ class Handle:
                 )
         index_by = window = None
         static, shape, bounds = [], [], {}
-        tracer = graph_tracer.get()
+        recorder = graph_recorder.get()
         for axis, (entry, n) in enumerate(zip(entries, self.shape)):
             if isinstance(entry, slice) and isinstance(entry.start, (PerCall, Affine)):
                 # x[s : s + W]: a fixed width W from a per-call start s.
@@ -338,8 +338,8 @@ class Handle:
                         f"{start} is a DispatchTime value; only a Scratchpad value can "
                         f"start a run, since it moves a transfer's base address"
                     )
-                if tracer is not None:
-                    tracer.limit(start, 0, n, self)
+                if recorder is not None:
+                    recorder.limit(start, 0, n, self)
                 index_by = start * prod(self.shape[axis + 1 :])
                 window = (len(shape), start, width, n)
                 static.append(slice(0, width))
@@ -358,8 +358,8 @@ class Handle:
                         f"{stop} is a DispatchTime value; only a Scratchpad value can "
                         f"bound an axis, since it patches a transfer's size"
                     )
-                if tracer is not None:
-                    tracer.limit(stop, 0, n + 1, self)
+                if recorder is not None:
+                    recorder.limit(stop, 0, n + 1, self)
                 # Keyed by the axis of the result: an index before it drops one.
                 bounds[len(shape)] = stop
                 static.append(slice(None))
@@ -375,8 +375,8 @@ class Handle:
                         f"{entry} is a DispatchTime value; only a Scratchpad value can "
                         f"index a view, since it moves a transfer's base address"
                     )
-                if tracer is not None:
-                    tracer.limit(entry, 0, n, self)
+                if recorder is not None:
+                    recorder.limit(entry, 0, n, self)
                 index_by = entry * prod(self.shape[axis + 1 :])
                 static.append(0)
             elif isinstance(entry, slice):
@@ -499,13 +499,13 @@ class Handle:
                     for r in (repeat if isinstance(tap, tuple) else (repeat,))
                 )
             length = None if length is None else length.affine()
-            tracer = graph_tracer.get()
-            if tracer is not None:
+            recorder = graph_recorder.get()
+            if recorder is not None:
                 for walk, r in zip(walks, repeats or ()):
-                    tracer.limit(r, 1, walk.sizes[0] + 1, self)
+                    recorder.limit(r, 1, walk.sizes[0] + 1, self)
                 if length is not None:
                     hi = min(walk.sizes[1] for walk in walks)
-                    tracer.limit(length, 1, hi + 1, self)
+                    recorder.limit(length, 1, hi + 1, self)
             return Handle(
                 shape,
                 self.dtype,
@@ -566,7 +566,7 @@ class Handle:
                 return getattr(self, f"__r{name}__")(a)
         raise TypeError(
             f"numpy's {ufunc.__name__} cannot compute {self!r}: a handle is a "
-            f"buffer of a traced graph. Use + - * / @ on it, iron.functional, "
+            f"buffer of a recorded graph. Use + - * / @ on it, iron.functional, "
             f"or an operator's step()"
         )
 
@@ -691,10 +691,10 @@ def _broadcast(whole, rowwise, x: Handle, y) -> Handle:
         TypeError: ``y`` is neither.
     """
     if _is_number(y):
-        tracer = graph_tracer.get()
-        y = tracer.constant(y, x.shape[-1] if x.shape else 1, x.dtype)
+        recorder = graph_recorder.get()
+        y = recorder.constant(y, x.shape[-1] if x.shape else 1, x.dtype)
     if len(x.shape) == 1 and len(getattr(y, "shape", ())) > 1:
-        x, y = (y if isinstance(y, Handle) else graph_tracer.get().operand(y)), x
+        x, y = (y if isinstance(y, Handle) else graph_recorder.get().operand(y)), x
     shape = tuple(getattr(y, "shape", ()))
     if len(x.shape) > 1 and shape == x.shape[-1:]:
         rows = x.elements // shape[0]
@@ -714,15 +714,15 @@ def _write(view: Handle, value) -> None:
 
 
 class _Viewed:
-    """A tensor the graph holds, viewed inside its body as the tracer says."""
+    """A tensor the graph holds, viewed inside its body as the recorder says."""
 
     __slots__ = ()
 
     def _as_operand(self) -> Handle:
-        tracer = graph_tracer.get()
-        if tracer is None:
+        recorder = graph_recorder.get()
+        if recorder is None:
             raise TypeError(f"{self!r} is viewed inside a graph's body")
-        return tracer.operand(self)
+        return recorder.operand(self)
 
     def __getitem__(self, key):
         if isinstance(key, _Viewed):  # a gather by the ids a state holds
@@ -744,7 +744,7 @@ class _Viewed:
         return self._as_operand().T
 
     def at(self, tap, shape, *, bounds=None, repeat=None, length=None):
-        """``Handle.at`` of the tensor as the tracer views it."""
+        """``Handle.at`` of the tensor as the recorder views it."""
         return self._as_operand().at(
             tap, shape, bounds=bounds, repeat=repeat, length=length
         )
@@ -828,7 +828,7 @@ def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
 
 
 class Carry(Mapping[str, "Handle | Affine | int"]):
-    """The next values of a graph's carried values, by name: traced, an
+    """The next values of a graph's carried values, by name: recorded, an
     ``Affine`` or a one-element ``Handle``; returned from a call, a number.
     """
 

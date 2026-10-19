@@ -135,8 +135,8 @@ def test_a_bounded_gather_of_rows_not_whole_16_byte_units_is_refused(npu2):
     six bf16 (12 bytes) cannot be bounded, though it gathers whole.
     """
     table = np.zeros((64, 6), dtype=bfloat16)
-    traced = _BoundedGather(table).trace(ids=((16,), np.int32))
-    (gather,) = [s.op for s in traced.steps if isinstance(s.op, Gather)]
+    recording = _BoundedGather(table).record(ids=((16,), np.int32))
+    (gather,) = [s.op for s in recording.steps if isinstance(s.op, Gather)]
     with pytest.raises(ValueError, match="16-byte units"):
         gather.resolved(npu2)
     Gather(rows=16, table_rows=64, row=6).resolved(npu2)
@@ -364,7 +364,7 @@ def test_a_float32_softmax_under_a_per_call_bound_is_refused(npu2):
         def body(self, x, *, n: Scratchpad[np.int32]):
             return Softmax.step(x[:, :n], input_dtype=np.float32)
 
-    (step,) = Attend().trace(x=((32, 1024), np.float32)).steps
+    (step,) = Attend().record(x=((32, 1024), np.float32)).steps
     with pytest.raises(ValueError, match="takes no per-call bound"):
         step.op.resolved()
 

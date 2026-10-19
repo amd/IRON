@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A graph function must compile and run, not merely trace.
+"""A graph function must compile and run, not merely record.
 
-The device-free tests stop at the trace: the runlist, the names, the plan.
-This file checks the claim that matters -- that a graph traced from
+The device-free tests stop at the recording: the runlist, the names, the plan.
+This file checks the claim that matters -- that a graph recorded from
 ordinary Python dataflow produces the same numbers as the hand-written
 runlist for the same computation -- both ahead of time (``compile()``
 before any dispatch) and just in time (dispatching without compiling).
@@ -29,7 +29,7 @@ import iron
 from iron import Scratchpad
 from iron.common.image import AdjacentPacking
 from iron.common.image.fusion import Fusion
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef
 from iron.operators import (
@@ -61,10 +61,10 @@ PACKAGINGS = {"separate": dict(full_elf=False), "fused": dict(full_elf=True)}
 
 
 def _graph(name, packaging="fused"):
-    """X + w + w + w, traced from dataflow, as the sequence it lowers to."""
-    traced = Adds(_operator(), 3).trace(x=(SIZE,), w=(SIZE,))
-    return traced, OperatorSequence(
-        dataclasses.replace(traced, name=name), **PACKAGINGS[packaging]
+    """X + w + w + w, recorded from dataflow, as the sequence it lowers to."""
+    recording = Adds(_operator(), 3).record(x=(SIZE,), w=(SIZE,))
+    return recording, OperatorSequence(
+        dataclasses.replace(recording, name=name), **PACKAGINGS[packaging]
     )
 
 
@@ -76,8 +76,8 @@ def _hand_written(name, packaging="fused"):
         (add, "t0", "w", "t1"),
         (add, "t1", "w", "out"),
     ]
-    traced = TracedGraph.of_steps(name, sequences.steps(*runlist), ["x", "w"], ["out"])
-    return OperatorSequence(traced, **PACKAGINGS[packaging])
+    recording = Recording.of_steps(name, sequences.steps(*runlist), ["x", "w"], ["out"])
+    return OperatorSequence(recording, **PACKAGINGS[packaging])
 
 
 def test_a_graph_records_the_same_steps_as_a_hand_written_runlist():
@@ -99,9 +99,9 @@ def test_a_graph_records_the_same_steps_as_a_hand_written_runlist():
 
 
 def test_a_graph_names_its_io_from_the_function():
-    traced, seq = _graph("graph_io")
-    assert [h.name for h in traced.inputs] == ["x", "w"]
-    assert [h.name for h in traced.outputs] == ["out"]
+    recording, seq = _graph("graph_io")
+    assert [h.name for h in recording.inputs] == ["x", "w"]
+    assert [h.name for h in recording.outputs] == ["out"]
     assert seq.inputs == ["x", "w"] and seq.outputs == ["out"]
 
 
@@ -134,7 +134,7 @@ def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispat
     expected = _run(hand, (x, w))
     assert np.array_equal(got, expected), (
         "a graph must compute exactly what the hand-written runlist computes; "
-        "a difference here means the traced wiring or the planned layout is wrong"
+        "a difference here means the recorded wiring or the planned layout is wrong"
     )
 
 
@@ -153,7 +153,7 @@ def test_check_mode_holds_each_step_to_its_reference(caplog):
     with caplog.at_level(logging.INFO, logger="iron.common.image.callable"):
         got = np.array(checked(a, b).numpy()[:SIZE])
     judged = sorted({int(i) for i in re.findall(r"\[check step (\d+)\]", caplog.text)})
-    assert judged == list(range(len(checked.traced.steps))), caplog.text
+    assert judged == list(range(len(checked.recording.steps))), caplog.text
     plain = Chain(SIZE, TILE).compile(full_elf=True, a=(SIZE,), b=(SIZE,))
     want = np.array(plain(a, b).numpy()[:SIZE])
     assert got.view(np.uint16).tolist() == want.view(np.uint16).tolist()

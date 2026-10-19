@@ -4,7 +4,7 @@
 """Tuning on this NPU from the command line.
 
 A model's profile is tuned by a module built on this one: it takes
-``parser``, adds the arguments its calls follow from, traces the calls
+``parser``, adds the arguments its calls follow from, records the calls
 (``autotune.Timed``) and passes them to ``tune`` with its profiles'
 directory, whose ``<device>.json`` it rewrites. A model's is ``iron.lm.tune``
 (``python -m iron.lm.tune <application>``).
@@ -141,7 +141,7 @@ def main() -> None:
     for t in sorted(tried, key=lambda t: t.delta_us):
         noise = "" if t.noise_us is None else f" ± {t.noise_us:.2f}"
         why = "" if t.refused is None else f"  refused: {t.refused}"
-        mark = "  (traced)" if t is tried[0] else ""
+        mark = "  (recorded)" if t is tried[0] else ""
         print(f"{t.tunables}: {t.delta_us:+9.2f}{noise} us{mark}{why}")
 
 

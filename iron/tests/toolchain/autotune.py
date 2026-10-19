@@ -73,8 +73,8 @@ def test_settings_give_each_design_once():
     dev = from_name("npu1", n_cols=4)
     with aie_utils.set_current_device(dev):
         model = llama_1b(num_hidden_layers=1)
-        traced = model.trace(**model.shapes()[0])
-        [mha] = {s.op for s in traced.steps if isinstance(s.op, MHA)}
+        recording = model.record(**model.shapes()[0])
+        [mha] = {s.op for s in recording.steps if isinstance(s.op, MHA)}
         found = designs(mha, dev)
         assert len(identities(found, dev)) == len(found)
         assert all(d.num_pipelines <= dev.cols for _, d in found)
@@ -108,8 +108,8 @@ class PinnedTwin(iron.Graph):
 
 
 def test_a_shape_keeps_a_tunable_any_of_its_calls_pins(npu2):
-    traced = PinnedTwin().trace(a=(SIZE,), b=(SIZE,))
-    [shape] = tuning.shapes([Timed(traced)], npu2)
+    recording = PinnedTwin().record(a=(SIZE,), b=(SIZE,))
+    [shape] = tuning.shapes([Timed(recording)], npu2)
     assert "num_aie_columns" in shape.pinned and len(shape.members) == 1
     free = shape.members[0][0]
     found = settings(free, npu2, shape.pinned)
@@ -119,7 +119,7 @@ def test_a_shape_keeps_a_tunable_any_of_its_calls_pins(npu2):
 def test_settings_keep_a_width_whose_bounded_tile_count_moves_to_d2(npu2):
     # Two lanes round-robin 1024 one-row tiles each, past D1's 1023 wrap; a
     # tile split over D1 and D0 keeps the count on D2, which has none.
-    op = Rotate().trace(x=(2048, 64), angles=(2048, 64)).steps[0].op
+    op = Rotate().record(x=(2048, 64), angles=(2048, 64)).steps[0].op
     assert [s["num_aie_columns"] for s in settings(op, npu2)] == [8, 4, 2, 1]
 
 
@@ -424,7 +424,7 @@ def test_an_exact_gate_or_a_short_bound_admits_only_bit_identical(npu2):
     relu = ReLU(size=64, num_aie_columns=1, tile_size=64)
     v = vectors(relu)
     assert "bit-identical" in judge(relu, relu, v.inputs, v.outputs)
-    rope = Rotate().trace(x=(64, 64), angles=(64, 64)).steps[0].op
+    rope = Rotate().record(x=(64, 64), angles=(64, 64)).steps[0].op
     v = vectors(rope)
     full = dict(valid=64, valid_angles=64)
     assert judge(rope, rope, v.inputs, v.outputs, full) is None
@@ -460,24 +460,24 @@ def _fake(monkeypatch, step_us, output=lambda op: "same"):
     monkeypatch.setattr(tuning, "refusal", lambda op, fit_cache=None: None)
 
 
-def _tune(traced, dev, profile=None):
-    return autotune([Timed(traced)], dev, profile, full_elf=True, log=lambda _: None)
+def _tune(recording, dev, profile=None):
+    return autotune([Timed(recording)], dev, profile, full_elf=True, log=lambda _: None)
 
 
 def test_autotune_writes_the_fastest_setting_per_shape(monkeypatch, npu2):
     # Fewer columns are faster here, SiLU's by more.
     _fake(monkeypatch, lambda op: op.num_aie_columns * (2 if type(op) is SiLU else 1))
-    traced = Chain().trace(a=(SIZE,), b=(SIZE,))
-    profile = _tune(traced, npu2)
+    recording = Chain().record(a=(SIZE,), b=(SIZE,))
+    profile = _tune(recording, npu2)
     add = profile.make(ElementwiseAdd, size=SIZE, tile_size=TILE).resolved(npu2)
     silu = profile.make(SiLU, size=SIZE, tile_size=TILE).resolved(npu2)
     assert add.num_aie_columns == 1 and silu.num_aie_columns == 1
 
 
-def test_a_setting_that_gains_nothing_keeps_the_traced_one(monkeypatch, npu2):
+def test_a_setting_that_gains_nothing_keeps_the_recorded_one(monkeypatch, npu2):
     _fake(monkeypatch, lambda op: 1.0)
-    traced = Chain().trace(a=(SIZE,), b=(SIZE,))
-    profile = _tune(traced, npu2)
+    recording = Chain().record(a=(SIZE,), b=(SIZE,))
+    profile = _tune(recording, npu2)
     for cls in (ElementwiseAdd, SiLU):
         op = profile.make(cls, size=SIZE, tile_size=TILE).resolved(npu2)
         assert op.num_aie_columns == 8
@@ -492,8 +492,8 @@ def test_a_faster_setting_whose_output_differs_is_judged(monkeypatch, npu2):
         return "refused by the test"
 
     monkeypatch.setattr(tuning, "_judged", refuse)
-    traced = Chain().trace(a=(SIZE,), b=(SIZE,))
-    profile = _tune(traced, npu2)
+    recording = Chain().record(a=(SIZE,), b=(SIZE,))
+    profile = _tune(recording, npu2)
     assert judged
     op = profile.make(ElementwiseAdd, size=SIZE, tile_size=TILE).resolved(npu2)
     assert op.num_aie_columns == 8
@@ -504,8 +504,8 @@ def test_a_tuned_profile_replaces_the_entries_it_covers(monkeypatch, npu2):
     old = Profile()
     old.add(ElementwiseAdd, num_aie_columns=4)
     old.add(GEMV, tile_size_output=32)
-    traced = Chain().trace(a=(SIZE,), b=(SIZE,))
-    profile = _tune(traced, npu2, old)
+    recording = Chain().record(a=(SIZE,), b=(SIZE,))
+    profile = _tune(recording, npu2, old)
     entries = {(cls, tuple(matched)) for cls, matched, _ in profile}
     assert (ElementwiseAdd, ()) not in entries and (GEMV, ()) in entries
     # The add's new entry gives it the one column the made-up times favour.
@@ -525,7 +525,7 @@ def test_an_operator_is_timed_at_each_point_its_extents_move(monkeypatch, npu2):
     monkeypatch.setattr(tuning, "measure", measure)
     monkeypatch.setattr(tuning, "refusal", lambda op, fit_cache=None: None)
     call = Timed(
-        Rotate().trace(x=(64, 64), angles=(64, 64)),
+        Rotate().record(x=(64, 64), angles=(64, 64)),
         points=[Point(0.5, {"n": 16}), Point(0.5, {"n": 64})],
     )
     [shape] = tuning.shapes([call], npu2)
@@ -645,7 +645,7 @@ def test_retuning_keeps_what_the_profile_set_that_the_search_does_not_move(
     old.add(GEMM, precision=Precision.HIGH)
     graph = Projection()
     graph.profile = old
-    traced = graph.trace(x=(256, 256), w=(256, 256))
-    profile = _tune(traced, npu2, old)
+    recording = graph.record(x=(256, 256), w=(256, 256))
+    profile = _tune(recording, npu2, old)
     op = profile.make(GEMM, M=256, K=256, N=256)
     assert op.precision is Precision.HIGH and op.resolved(npu2).tile_n == 16

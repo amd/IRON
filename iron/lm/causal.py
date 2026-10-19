@@ -43,7 +43,7 @@ class Call:
     """One call's values, built once in ``body`` and read by every module
     that keeps memory from call to call (``KVCache``, ``Checkpoints``,
     ``Rope``): a prompt chunk's ``rows`` from ``start``, or the decode
-    step's one at ``position``. Each is a per-call value in a trace and its
+    step's one at ``position``. Each is a per-call value in a recording and its
     number in the reference.
     """
 
@@ -306,7 +306,7 @@ class CausalLM(Model):
         placeholders: tuple[int, ...] = (),
     ) -> None:
         """Run ``logits`` and ``generate`` on these versions: this model's
-        own, or those of a graph tracing it in their bodies (a multimodal
+        own, or those of a graph recording it in their bodies (a multimodal
         model's), in one arena, each prompt version feeding ``decode``.
 
         Args:

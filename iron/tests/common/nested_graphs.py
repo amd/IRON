@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A graph called in another graph's body, device-free: its steps trace into
+"""A graph called in another graph's body, device-free: its steps record into
 the caller's, its weights take the caller's path to it, the caller's per-call
 values bound its steps, and the caller's reference runs it.
 """
@@ -66,10 +66,10 @@ class Features(iron.Graph):
         return Copy.step(self.features)
 
 
-def test_a_called_graph_traces_into_its_caller():
+def test_a_called_graph_records_into_its_caller():
     block = Block()
-    called = block.trace(x=((256, E), bfloat16))
-    inline = Inline(block.ffn).trace(x=((256, E), bfloat16))
+    called = block.record(x=((256, E), bfloat16))
+    inline = Inline(block.ffn).record(x=((256, E), bfloat16))
     assert [s.op.design_key() for s in called.steps] == [
         s.op.design_key() for s in inline.steps
     ]
@@ -78,8 +78,8 @@ def test_a_called_graph_traces_into_its_caller():
 
 
 def test_a_called_graph_writes_a_given_output_bounded_by_its_callers_value():
-    traced = Features().trace(wave=((SAMPLES,), np.float32))
-    assert [type(s.op) for s in traced.steps] == [
+    recording = Features().record(wave=((SAMPLES,), np.float32))
+    assert [type(s.op) for s in recording.steps] == [
         Copy,
         Limbs,
         GEMM,
@@ -89,10 +89,12 @@ def test_a_called_graph_writes_a_given_output_bounded_by_its_callers_value():
         Log,
         Copy,
     ]
-    bound = {type(b.op) for b in traced.bindings if b.expression.value.name == "frames"}
+    bound = {
+        type(b.op) for b in recording.bindings if b.expression.value.name == "frames"
+    }
     assert {Limbs, GEMM, Magnitude, Log} <= bound
-    assert traced.steps[6].outputs[0].parent.name == "features"
-    names = {h.name for _, h in traced.weights.values()}
+    assert recording.steps[6].outputs[0].parent.name == "features"
+    names = {h.name for _, h in recording.weights.values()}
     assert {"log_mel.dft", "log_mel.filterbank"} <= names
 
 
@@ -138,9 +140,9 @@ class CallsWithoutValue(iron.Graph):
 
 def test_a_called_graph_takes_every_value_and_carries_none():
     with pytest.raises(TypeError, match="carries no values"):
-        CallsCounter().trace(x=((256, E), bfloat16))
+        CallsCounter().record(x=((256, E), bfloat16))
     with pytest.raises(TypeError, match="per-call values"):
-        CallsWithoutValue().trace(x=((256, E), bfloat16))
+        CallsWithoutValue().record(x=((256, E), bfloat16))
 
 
 def test_log_mel_holds_to_the_extractor(golden):

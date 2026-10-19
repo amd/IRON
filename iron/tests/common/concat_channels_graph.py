@@ -44,7 +44,7 @@ def test_an_odd_channel_count_is_refused():
 def test_the_inputs_given_are_the_inputs_declared():
     cat = ConcatChannels(rows=ROWS, width=WIDTH, channels=(4, 4, 4))
     with pytest.raises(TypeError, match="2 inputs given, 3 declared"):
-        cat.trace(x0=((ROWS, WIDTH * 4), bfloat16), x1=((ROWS, WIDTH * 4), bfloat16))
+        cat.record(x0=((ROWS, WIDTH * 4), bfloat16), x1=((ROWS, WIDTH * 4), bfloat16))
 
 
 def test_functional_cat_joins_feature_maps_along_their_channels_only():
@@ -61,6 +61,6 @@ def test_functional_cat_joins_feature_maps_along_their_channels_only():
     got = np.asarray(Cat(-1).reference(a, b)).reshape(ROWS, WIDTH, 10)
     assert np.array_equal(got, np.concatenate([a, b], -1))
     with pytest.raises(ValueError, match="only the channels"):
-        Cat(0).trace(a=(a.shape, bfloat16), b=(b.shape, bfloat16))
+        Cat(0).record(a=(a.shape, bfloat16), b=(b.shape, bfloat16))
     with pytest.raises(ValueError, match="not a map"):
-        Cat(-1).trace(a=(a.shape, bfloat16), b=((ROWS, WIDTH * 2), bfloat16))
+        Cat(-1).record(a=(a.shape, bfloat16), b=((ROWS, WIDTH * 2), bfloat16))

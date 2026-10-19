@@ -29,7 +29,7 @@ IRON is an open-source & close-to-metal Python API enabling fast and efficient e
 **Key Features:**
 
 - An operator library (GEMM, MHA, RMSNorm, RoPE, activations, ...) over mlir-aie's `aie.iron`, each operator one declared class
-- Graphs: a model's operators traced once per input shape and compiled into one image, so intermediate values stay on the device
+- Graphs: a model's operators recorded once per input shape and compiled into one image, so intermediate values stay on the device
 - Autotuning of each operator's tunables into a per-device profile
 - End-to-end models on the NPU, from Llama 3.2 1B to a vision-language model (see [Models](#models))
 
@@ -142,7 +142,7 @@ What the text decoders (Llama to LFM2 above) share:
 
 1. **Operators** (`iron/operators/`): each operator is one class, listed by name in `_OPERATOR_MODULES` in [iron/operators/\_\_init\_\_.py](./iron/operators/__init__.py); its docstring says what it computes. Its parameters are declared with mlir-aie's `param()` (a tunable with `tunable()`, a per-call value with `per_call()`); its operands are aie.iron's `In`/`Out`/`InOut`, declared by shape. Its `build()` builds the array with ObjectFIFOs and Workers around a kernel; the library derives the runtime sequence unless the operator writes it. Its `reference()` and `test = Testing(...)` are what `iron/tests/operators/catalog.py` checks it by.
 2. **Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): C++ compute kernels, vectorized with the AIE API, reached through mlir-aie's kernel factories (`aie.iron.kernels`), which also carry each kernel's reference and tolerance. IRON hosts no kernels.
-3. **Graphs and images** (`iron/common/`): a graph is traced on handles and lowered onto an image: its buffers placed in one arena, and on NPU2 its operators' designs fused into one full ELF that runs them in turn (on NPU1, an xclbin per step), run through XRT.
+3. **Graphs and images** (`iron/common/`): a graph is recorded on handles and lowered onto an image: its buffers placed in one arena, and on NPU2 its operators' designs fused into one full ELF that runs them in turn (on NPU1, an xclbin per step), run through XRT.
 4. **Models** (`iron/lm/`, `iron/applications/`): see [Models](#models).
 
 ## Community and Support

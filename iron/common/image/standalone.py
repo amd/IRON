@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Self
 
 from ..declare import Operator
-from ..graph.trace import TracedGraph
+from ..graph.record import Recording
 from .artifacts import Artifacts
 from .sequence import OperatorSequence
 
@@ -33,7 +33,7 @@ class OperatorImage:
         """Build the image, once."""
         if self._sequence is None:
             self._sequence = OperatorSequence(
-                TracedGraph.of_step(self.op.resolved()), full_elf=False
+                Recording.of_step(self.op.resolved()), full_elf=False
             ).compile()
         return self
 

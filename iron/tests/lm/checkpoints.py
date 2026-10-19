@@ -146,20 +146,20 @@ def test_a_decode_step_names_its_slots_by_a_floored_position(npu2, sequences):
     """
     sequence, _ = sequences
     window = Window(sequence, C, K)
-    traced = window.trace()
+    recording = window.record()
     slot = (K - 1) * W
-    floored = {b.symbol: b.expression for b in traced.bindings if b.expression.down}
-    assert len(floored) == 2, traced.bindings
+    floored = {b.symbol: b.expression for b in recording.bindings if b.expression.down}
+    assert len(floored) == 2, recording.bindings
     for p in (1, C - 1, C, C + 1, LAST):
         offsets = sorted(e.evaluate(dict(position=p)) for e in floored.values())
         assert offsets == sorted([((p - 1) // C + 1) * slot, (p // C + 1) * slot]), p
 
-    words, _ = _words(traced)
+    words, _ = _words(recording)
     site = attach_emit(
-        traced, window._parameters.carried, window._carry, slots=len(words)
+        recording, window._parameters.carried, window._carry, slots=len(words)
     )
     parameters = [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(words)]
-    program = compose(site, traced.carry, words, parameters)
+    program = compose(site, recording.carry, words, parameters)
     for p in (C - 1, C, LAST):
         image, state = emit_reference(
             program, np.array([[p - 1], [0]]), slots=len(words)

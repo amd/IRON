@@ -21,7 +21,7 @@ def filled(
             ``in`` its width), anything of fewer than two axes normal with
             deviation 0.1, about zero if it is a bias and about one
             otherwise (a norm), so that swapping two changes the output.
-            ``"unread"``: allocated and never written, for tracing,
+            ``"unread"``: allocated and never written, for recording,
             building and measuring a model, none of which reads a weight;
             the pages are reserved, not touched, and a scalar is zero,
             since a graph may read one as it is built (a clamp's bounds).

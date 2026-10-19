@@ -87,7 +87,7 @@ def test_each_call_softmaxes_its_columns_and_copies_them_into_its_slot():
     g, cache, shape = _graph()
     net = g.compile(full_elf=False, x=shape)
     assert not net.plan.full_elf
-    (softmax,) = [s.op for s in net.traced.steps if isinstance(s.op, Softmax)]
+    (softmax,) = [s.op for s in net.recording.steps if isinstance(s.op, Softmax)]
     tolerance = softmax.resolved().tolerance()
     rows, cols = shape
     slots = np.asarray(net.read(cache)).size // (rows * cols)

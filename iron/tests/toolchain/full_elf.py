@@ -4,7 +4,7 @@
 """The fused image itself: graph functions build to a full ELF.
 
 One step past ``lowering.py``. Where that gate stops at the instruction
-stream, this one runs the whole of aiecc's full-ELF pipeline on a traced
+stream, this one runs the whole of aiecc's full-ELF pipeline on a recorded
 graph: every operator's kernels compile with Peano, every core links, each
 design's PDI is generated, and ``aiebu-asm`` assembles the per-device
 instruction streams and the PDIs into the one ELF ``xrt::module`` loads.
@@ -18,7 +18,7 @@ through. The decode graph binds two, so its table must name both.
 
 The swiglu graph goes through ``GraphFunction.compile`` itself, so the one
 build also checks the packaging surface end to end: ``compile(dev=,
-full_elf=True)`` traces, builds and links the ELF, and the
+full_elf=True)`` records, builds and links the ELF, and the
 runtime that would load it is not made until the first call. A build host
 with the toolchain and no device compiles ahead of time and hands the
 image on.
@@ -32,7 +32,7 @@ from aie.iron import ExternalFunction
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.record import Recording
 from iron.common.image.allocator import BANK
 from iron.common.image.sequence import OperatorSequence
 from iron.operators import ElementwiseAdd
@@ -83,7 +83,7 @@ def _assert_values_in_table(version):
     # ... and every per-call index the graph bound is one, in the word it
     # shares with the symbols that always hold its number. A bound extent
     # the designs read only through its derivations has none of its own.
-    for b in version.traced.bindings:
+    for b in version.recording.bindings:
         if b.member.bounds is not None:
             continue
         word = version.shared.get(b.symbol, b.symbol)
@@ -99,8 +99,8 @@ def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
     version = build_elf(model, **model.shapes()[0])
     _assert_values_in_table(version)
     # A call names every value and no other, refused before the device.
-    tensors = [np.zeros(h.shape, h.dtype) for h in version.traced.inputs]
-    values = {v.name: 0 for v in version.traced.values}
+    tensors = [np.zeros(h.shape, h.dtype) for h in version.recording.inputs]
+    values = {v.name: 0 for v in version.recording.values}
     with pytest.raises(TypeError, match=r"\['row'\] unknown"):
         version(*tensors, **values, row=0)
     with pytest.raises(TypeError, match=r"per-call values \[.+\] missing"):
@@ -123,7 +123,7 @@ def test_a_scratch_arena_past_a_bank_links_as_its_banks():
     """
     add = ElementwiseAdd(size=1024, tile_size=128)
     w = 1024 * 2
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "past_a_bank",
         sequences.steps((add, "x", "w", "t"), (add, "t", "w", "out")),
         ["x"],
@@ -132,7 +132,7 @@ def test_a_scratch_arena_past_a_bank_links_as_its_banks():
         # most of the second, so t is rebased to the third.
         pinned={"fill": BANK - w, "pad": BANK - 1024},
     )
-    seq = OperatorSequence(traced, full_elf=True)
+    seq = OperatorSequence(recording, full_elf=True)
     seq.compile()
     _, offset, length = seq.layout["t"]
     sizes = seq.buffer_sizes
@@ -146,13 +146,13 @@ def test_no_scratch_buffer_crosses_a_bank():
     buffers are the first bank's start and the second's.
     """
     add = ElementwiseAdd(size=1 << 30, tile_size=4096)
-    traced = TracedGraph.of_steps(
+    recording = Recording.of_steps(
         "across_a_bank",
         sequences.steps((add, "x", "w", "t"), (add, "t", "w", "out")),
         ["x"],
         ["out"],
     )
-    seq = OperatorSequence(traced, full_elf=True)
+    seq = OperatorSequence(recording, full_elf=True)
     seq.prepare()
     assert [seq.layout[n][1] for n in ("w", "t")] == [0, BANK]
 
@@ -171,7 +171,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     version = build_elf(model, **model.shapes()[1])
     # The chunk's embedding rows and RoPE rows, the block, the last row,
     # norm, head and draw.
-    assert len(version.traced.steps) == 2 + 18 + 4
+    assert len(version.recording.steps) == 2 + 18 + 4
     _assert_values_in_table(version)
 
 

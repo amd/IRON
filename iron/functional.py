@@ -54,7 +54,7 @@ def linear(x, weight, bias=None, *, precision=None, **gemv):
     for here or by the graph raising flm.ProjectionGEMM, they are the GEMM
     whose float32 sums round once, which also tiles row counts
     flm.ProjectionGEMM cannot. Nothing is padded: a row count neither tiles
-    is an error at trace time. ``gemv`` is the GEMV's tunables, for a call
+    is an error at record time. ``gemv`` is the GEMV's tunables, for a call
     the profile cannot tell from another of its shape.
 
     Raises:

@@ -87,7 +87,7 @@ class Session:
         rows = np.zeros((L, ROW_WORDS), dtype=np.int32)
         k_max = next(
             s.op.k_max
-            for s in model.decode_step.traced.steps
+            for s in model.decode_step.recording.steps
             if isinstance(s.op, Sample)
         )
         rows[n - 1 : n - 1 + max_tokens] = sampler.rows(max_tokens, k_max)

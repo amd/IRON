@@ -70,7 +70,7 @@ Formatting and licence checks are in CONTRIBUTING.md.
   bound operands and `Value`s a build reads, `Xclbin`, `Profile`, `Precision`.
 - `iron/common/design/`: an operator's MLIR module (`OperatorDesign`) and
   its runtime sequence (`OperatorRuntime`).
-- `iron/common/graph/`: `iron.Graph`, tracing and `compile`.
+- `iron/common/graph/`: `iron.Graph`, recording and `compile`.
 - `iron/common/image/`: what a graph lowers onto: the step sequence, the
   buffer allocator, image fusion (several designs in one image),
   packaging, and an operator called on its own. All internal.
@@ -183,14 +183,14 @@ CONTRIBUTING.md walks through the common case. The rules:
 | `xclbin_operator()` | no (itself) | locating the xclbin a shipped subclass runs |
 | `exported_design()` | no (the derived module) | compiling a hand-placed design in its place |
 
-Construction is keyword-only (`GEMV(M=..., K=...)`) and never traces.
+Construction is keyword-only (`GEMV(M=..., K=...)`) and never records.
 Inside a graph's `body()`, `GEMV.step(w, h, **kw)` records a step and
 returns a handle; an instance is applied with `op.apply(...)`. Outside a
 graph, `op(*tensors)` compiles once and runs on the device.
 
 ## Graphs
 
-A graph is a subclass of `iron.Graph` whose `body()` is traced on handles,
+A graph is a subclass of `iron.Graph` whose `body()` is recorded on handles,
 once per input shape, compiled to one image per shape (a version) and
 called per token. Its docstring and `compile`'s say how inputs, per-call
 values, weights, state and profiles are named. The rules:
@@ -213,7 +213,7 @@ values, weights, state and profiles are named. The rules:
   `reference()` on the host.
 
 `iron/applications/llama/model.py` is the worked example;
-`iron/tests/common/graph.py` traces it device-free and
+`iron/tests/common/graph.py` records it device-free and
 `iron/tests/toolchain/` builds it.
 
 ## Design rationale and known limits
@@ -308,7 +308,7 @@ model. This is the one description of that structure; the model READMEs
 link here.
 
 The model layer is JAX-shaped and torch-named. A model is a pure function,
-traced into a graph, over an explicit tree of weights; it keeps torch's and
+recorded into a graph, over an explicit tree of weights; it keeps torch's and
 transformers' names so checkpoints load and references compare by name.
 `iron.functional` gets a function only once a kernel computes it. Per-tile
 programs and their autotuning live at the operator and kernel layer, where

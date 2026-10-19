@@ -145,13 +145,13 @@ def calls(
     ]
     out = []
     for shapes, values, timed in versions:
-        traced = model.trace(**shapes)
+        recording = model.record(**shapes)
         # Sample's work follows its draw row's temperature and top-k: measure
         # it at the rows generation writes, not at random words.
-        [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
-        _, draws = traced.states[id(model.draws)]
+        [k_max] = {s.op.k_max for s in recording.steps if isinstance(s.op, Sample)}
+        _, draws = recording.states[id(model.draws)]
         rows = sampler.rows(L, k_max)
-        out.append(Timed(traced, values, {draws.name: rows}, timed))
+        out.append(Timed(recording, values, {draws.name: rows}, timed))
     return out
 
 

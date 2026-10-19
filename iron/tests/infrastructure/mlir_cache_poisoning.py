@@ -61,9 +61,9 @@ def test_fused_build_does_not_poison_the_standalone_mlir():
     one reading what the fused build left behind. Doing it the other way round
     passes whatever happens.
     """
-    traced = Adds(_operator(), 1).trace(x=(SIZE,), w=(SIZE,))
+    recording = Adds(_operator(), 1).record(x=(SIZE,), w=(SIZE,))
     seq = OperatorSequence(
-        dataclasses.replace(traced, name="poisoning_probe"), full_elf=True
+        dataclasses.replace(recording, name="poisoning_probe"), full_elf=True
     )
     seq.compile()
     fused = set(re.findall(r'link_with\s*=\s*"([^"]+)"', Fusion(seq).text()))

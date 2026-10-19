@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Graphs: a ``Graph`` subclass's ``body`` traced on handles.
+"""Graphs: a ``Graph`` subclass's ``body`` recorded on handles.
 
 A ``Carried[T]`` value is one the graph computes for its own next call:
 ``return logits, iron.carry(pos=pos + 1)``; on a full ELF the device can

@@ -302,7 +302,7 @@ def test_each_checkpoint_tensor_lands_on_its_name_bitwise(toy_path):
 
 
 def test_tree_arrays_are_the_checkpoints(toy_path):
-    """The tracer names a weight by id(), so each is one array, as read."""
+    """The recorder names a weight by id(), so each is one array, as read."""
     checkpoint = Checkpoint(toy_path)
     tree = checkpoint.tree()
     name = "model.layers.1.self_attn.v_proj.weight"

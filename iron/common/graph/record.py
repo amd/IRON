@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tracing a graph: the handles it threads and the steps it records."""
+"""Recording a graph: the handles it threads and the steps it records."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from aie.utils import bfp
 
 from ..declare import Operator, Value
 from ..declare.operand import param_names
-from ..declare.operator import graph_tracer
+from ..declare.operator import graph_recorder
 from ..declare.precision import Precision
 from ..declare.profile import Profile
 from ..image.packaging import Kind
@@ -26,7 +26,7 @@ from .handle import Handle, State, Weight, _rescale_bounds, is_operand
 
 
 @dataclasses.dataclass
-class TracedStep:
+class Step:
     op: Operator
     slots: list  # one handle per declared buffer
     inputs: list
@@ -167,8 +167,8 @@ def _take_views(cls, operands, kwargs, values):
 
 
 @dataclasses.dataclass
-class TracedGraph:
-    """What tracing a graph for given shapes produced.
+class Recording:
+    """What recording a graph for given shapes produced.
 
     ``weights`` and ``states`` hold the object they are keyed by the
     identity of, so the key stays its own. ``carry`` is the next value of
@@ -176,7 +176,7 @@ class TracedGraph:
     """
 
     name: str
-    steps: list[TracedStep]
+    steps: list[Step]
     inputs: list[Handle]
     outputs: list[Handle]  # returned, then carried handles not returned
     # buffer name -> nbytes, for weights, states and slice parents
@@ -234,7 +234,7 @@ class TracedGraph:
         outputs: Iterable[str],
         pinned: Mapping[str, int] | None = None,
         feedback: Iterable[str] = (),
-    ) -> TracedGraph:
+    ) -> Recording:
         """A graph of ``steps`` over buffers known by name alone, as bytes.
 
         Args:
@@ -248,7 +248,7 @@ class TracedGraph:
         """
         pinned = dict(pinned or {})
         roots: dict[str, Handle] = {}
-        traced = []
+        recording = []
         for step in steps:
             slots = []
             for ref in step.buffers:
@@ -267,8 +267,8 @@ class TracedGraph:
                     )
                 )
             declared = list(zip(slots, step.op.buffers))
-            traced.append(
-                TracedStep(
+            recording.append(
+                Step(
                     step.op,
                     slots,
                     [h for h, b in declared if b.fills],
@@ -277,7 +277,7 @@ class TracedGraph:
             )
         return cls(
             name,
-            traced,
+            recording,
             [Handle((), np.uint8, n, "input") for n in inputs],
             [Handle((), np.uint8, n, "output") for n in outputs],
             pinned,
@@ -285,7 +285,7 @@ class TracedGraph:
         )
 
     @classmethod
-    def of_step(cls, op: Operator) -> TracedGraph:
+    def of_step(cls, op: Operator) -> Recording:
         """``op`` alone, over its own buffers by their declared names: the
         host writes what it reads and reads what it only writes.
         """
@@ -299,7 +299,7 @@ class TracedGraph:
     @property
     def residents(self) -> dict[str, Hashable]:
         """Buffer name -> storage key of every weight and state, the same in
-        every trace so each version addresses one copy.
+        every recording so each version addresses one copy.
         """
         found: dict[str, Hashable] = {
             h.name: key for key, (_, h) in self.weights.items()
@@ -429,7 +429,7 @@ class TracedGraph:
         return list(seen.values())
 
 
-def _gather_reference(step: TracedStep, ids: np.ndarray, view) -> None:
+def _gather_reference(step: Step, ids: np.ndarray, view) -> None:
     """A per-call gather's step, on the host: the table's rows ``ids``
     names, each clipped to the table where the device made them.
     """
@@ -441,7 +441,7 @@ def _gather_reference(step: TracedStep, ids: np.ndarray, view) -> None:
     out.reshape(-1, table.shape[1])[: len(rows)] = table[rows]
 
 
-class Tracer:
+class Recorder:
     """Records operator calls on handles while a graph's body runs."""
 
     def __init__(
@@ -464,7 +464,7 @@ class Tracer:
             for _, x in held.values()
             if isinstance(x, (Weight, np.ndarray))
         ]
-        self.steps: list[TracedStep] = []
+        self.steps: list[Step] = []
         self.weights: dict[int, tuple[object, Handle]] = {}
         self.states: dict[int, tuple[State, Handle]] = {}
         self.bindings: list[Binding] = []
@@ -486,7 +486,7 @@ class Tracer:
 
     def fresh(self, name: str) -> str:
         """``name``, or the first of ``name_1``, ``name_2``, ... no buffer of
-        the graph has: a name the tracer makes up never aliases one it was
+        the graph has: a name the recorder makes up never aliases one it was
         given.
         """
         candidates = (f"{name}_{k}" for k in itertools.count(1))
@@ -506,11 +506,11 @@ class Tracer:
         return self._constants[key]
 
     def __enter__(self):
-        self._token = graph_tracer.set(self)
+        self._token = graph_recorder.set(self)
         return self
 
     def __exit__(self, *exc):
-        graph_tracer.reset(self._token)
+        graph_recorder.reset(self._token)
 
     def operand(self, x) -> Handle:
         if isinstance(x, Handle):
@@ -929,7 +929,7 @@ class Tracer:
                 slots.append(h)
                 outputs.append(h)
         self.steps.append(
-            TracedStep(op, slots, operands[: len(ins)], outputs + list(given_outs))
+            Step(op, slots, operands[: len(ins)], outputs + list(given_outs))
         )
         if not outputs:
             return None
@@ -941,8 +941,8 @@ class Tracer:
         outputs,
         values,
         carry: Mapping[str, Handle | Affine] | None = None,
-    ) -> TracedGraph:
-        """The traced graph; ``carry`` is the next value of each carried
+    ) -> Recording:
+        """The recorded graph; ``carry`` is the next value of each carried
         value, whose handles are outputs too.
         """
         next_values = dict(carry or {})
@@ -965,7 +965,7 @@ class Tracer:
             for h in step.inputs + step.outputs:
                 if h.parent is not None:
                     pinned.setdefault(h.parent.name, h.parent.nbytes)
-        return TracedGraph(
+        return Recording(
             self.name,
             self.steps,
             inputs,

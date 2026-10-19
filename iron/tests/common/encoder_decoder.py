@@ -4,7 +4,7 @@
 """``iron.lm.EncoderDecoder``, device-free, on a tiny Whisper-shaped
 decoder (tanh GELU, no RoPE, a learned position table, a tied head) over a
 tower whose output is the rows it is given: its signature and versions,
-what each traces, and each version's reference in turn, the encoder's keys
+what each recordings, and each version's reference in turn, the encoder's keys
 and values carried in states to the prompt chunks and the decode step,
 against Hugging Face's own Whisper decoder in float32 over the same
 weights and encoder rows, its logits recorded in ``goldens/``.
@@ -176,25 +176,25 @@ def test_its_signature_and_versions_are_the_decoder_s_and_the_encoder_s(whisper)
 
 def test_the_encode_version_writes_each_layer_s_keys_and_values(whisper):
     model, *_ = whisper
-    traced = model.trace(**model.shapes()[2])
-    names = [type(s.op).__name__ for s in traced.steps]
+    recording = model.record(**model.shapes()[2])
+    names = [type(s.op).__name__ for s in recording.steps]
     # The tower's copy, then per layer k and v projected and written.
     assert names.count("ProjectionGEMM") == 4 and "MHA" not in names
-    assert sorted(traced.reads) == ["encoder_rows", "position", "source", "token"]
+    assert sorted(recording.reads) == ["encoder_rows", "position", "source", "token"]
 
 
 @pytest.mark.parametrize("version", [0, 1])
 def test_a_decoder_version_attends_over_the_source_rows_it_carries(whisper, version):
     model, *_ = whisper
-    traced = model.trace(**model.shapes()[version])
+    recording = model.record(**model.shapes()[version])
     dev = aie_utils.get_current_device()
-    for s in traced.steps:
+    for s in recording.steps:
         s.op.resolved(dev)
-    attention = [s.op for s in traced.steps if isinstance(s.op, MHA)]
+    attention = [s.op for s in recording.steps if isinstance(s.op, MHA)]
     # Per layer, the causal attention over the caches, then the cross.
     assert [op.causal for op in attention] == [True, False] * 2
-    assert not any(isinstance(s.op, RoPE) for s in traced.steps)
-    assert "source" in traced.reads
+    assert not any(isinstance(s.op, RoPE) for s in recording.steps)
+    assert "source" in recording.reads
 
 
 def test_each_version_s_reference_in_turn_is_hugging_face_s(whisper):

@@ -5,7 +5,7 @@
 path and flags to ``from_checkpoint``, its ``-v``, the model
 ``from_checkpoint`` builds with drawn weights or a real tokenizer (skipped
 without the real checkpoint's), the context ``fit`` chooses, the BOS, and the golden
-beside a checkpoint. No NPU (the fit tests trace under a bound npu2, as
+beside a checkpoint. No NPU (the fit tests record under a bound npu2, as
 Llama's profile is per device); the checkpoint is synthetic, of
 ``SMALL``'s shape, a concrete ``Config`` instance so no config.json is
 read.
@@ -110,11 +110,11 @@ def test_from_checkpoint_lowers_the_context_and_refuses_to_raise_it(tmp_path):
 
 
 def _held(config, length: int) -> int:
-    """What the model holds at ``length`` positions: its arena, traced."""
+    """What the model holds at ``length`` positions: its arena, recorded."""
     config = dataclasses.replace(config, max_seq_len=length)
     model = Llama(config, checkpoint(config).tree("unread"))
     model.profile = None
-    return sum(model.trace(**model.shapes()[0]).pinned.values())
+    return sum(model.record(**model.shapes()[0]).pinned.values())
 
 
 def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2):
@@ -132,7 +132,7 @@ def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2):
 
 
 def test_a_model_fits_its_context_with_no_device_bound(tmp_path):
-    """``fit`` traces the model, whose profile is per device; it measures
+    """``fit`` records the model, whose profile is per device; it measures
     what the model holds, which needs none.
     """
 

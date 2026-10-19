@@ -401,7 +401,7 @@ def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
     model = Placed(config, cpu.weights, table)
     assert model.rotary_emb is None
     for version in model.shapes():
-        steps = model.trace(**version).steps
+        steps = model.record(**version).steps
         assert not any(isinstance(s.op, RoPE) for s in steps)
     tokens = np.random.default_rng(10).integers(0, config.vocab_size, 300)
     prompted = model.logits(tokens)

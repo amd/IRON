@@ -136,8 +136,8 @@ def test_every_step_of_resnet50_resolves(size, npu2):
     """Each step's operator at ResNet-50's depths takes a shape npu2 builds."""
     c = dataclasses.replace(TOY, depths=(3, 4, 6, 3), image_size=size)
     S = size // 2 + 3
-    traced = ResNet(c, tree(c)).trace(image=((S, S * 16), bfloat16))
-    for step in traced.steps:
+    recording = ResNet(c, tree(c)).record(image=((S, S * 16), bfloat16))
+    for step in recording.steps:
         step.op.resolved(npu2)
 
 
