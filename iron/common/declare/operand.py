@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from aie.dialects.aie import DMAChannelDir
-from aie.dialects.aiex import _shim_dims
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import DmaEndpoint
 from aie.utils import bfp
@@ -286,13 +285,10 @@ class Operand:
 
     def fits(self, tap: TensorAccessPattern) -> bool:
         """Whether one buffer descriptor of a lane's shim tile holds
-        ``tap``, a pattern over this operand, padded as the shim lowering
-        pads it (mlir-aie's ``aiex._shim_dims``).
+        ``tap``, a pattern over this operand.
         """
-        _, sizes, strides = _shim_dims(tap)
-        padded = TensorAccessPattern(tap.tensor_dims, tap.offset, sizes, strides)
         # Every shim tile's descriptor is alike; column 0's stands for a lane's.
-        return self.op.dev.dma_bd_fits(0, 0, padded, self.dtype)
+        return self.op.dev.dma_bd_fits(0, 0, tap, self.dtype)
 
     def split(self, elements: int) -> tuple[int, int] | None:
         """A contiguous run of ``elements`` of this operand as ``(d1, d0)``:

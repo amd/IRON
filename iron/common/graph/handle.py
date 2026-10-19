@@ -12,7 +12,6 @@ from typing import Annotated, Any, TypeVar
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.dialects.aiex import _shim_dims
 from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.utils import bfp
 from ml_dtypes import bfloat16
@@ -462,12 +461,10 @@ class Handle:
             return self._view(tap, shape, None, bounds or {})
         dev = aie_utils.get_current_device()
         for walk in walks:
-            _, sizes, strides = _shim_dims(walk)
-            padded = TensorAccessPattern(walk.tensor_dims, walk.offset, sizes, strides)
             if (
                 walk.rank != 4
                 or dev is None
-                or not dev.dma_bd_fits(0, 0, padded, self.dtype)
+                or not dev.dma_bd_fits(0, 0, walk, self.dtype)
             ):
                 raise ValueError(
                     f"{walk} takes a per-call repeat or length as one shim "

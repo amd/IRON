@@ -374,3 +374,10 @@ def test_the_reference_writes_a_copy_into_a_strided_view_through_it():
     got = np.asarray(_IntoColumns(columns).reference(x)).reshape(N, 2 * D)
     assert (got[:, :D] == columns).all()
     assert (got[:, D:] == x[:, D:]).all()
+
+
+def test_a_padded_pattern_does_not_fit_a_shim_descriptor():
+    op = Copy(**LAST_ROW)
+    tap = TensorAccessPattern.full((E,))
+    assert op.x.fits(tap)
+    assert not op.x.fits(tap.pad([(0, 8)]))
