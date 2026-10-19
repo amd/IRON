@@ -223,24 +223,19 @@ def test_mha_whose_pipelines_do_not_fill_the_rows_is_refused(npu2):
     [
         (dict(d=96), "multiple of 64"),
         (dict(causal=False, window=0), r"window \(0\) must be positive"),
-        (dict(causal=False, window=500), "whole 64-row blocks"),
-        (dict(d=256, causal=False, window=520), "whole 16-row blocks"),
         (dict(scale=-1.0), "scale"),
         (dict(B_q=128), "divide 64"),
     ],
     ids=[
         "head_not_whole_64",
         "empty_window",
-        "window_not_whole_blocks",
-        "window_not_whole_small_blocks",
         "negative_scale",
         "block_past_the_padding",
     ],
 )
 def test_mha_band_and_head_that_do_not_tile_are_refused(kwargs, why, npu2):
-    """mha.cc keeps or skips whole key blocks for a whole query block, so a
-    window is whole blocks; d=256 resolves to 16-row blocks, the largest
-    whose P*V core fits L1.
+    """A head is whole 64-column tiles, a window at least one key, the scale
+    not negative, and a query block within the 64-row padding.
     """
     with pytest.raises(ValueError, match=why):
         MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(npu2)
@@ -307,25 +302,19 @@ def test_mha_whose_pv_split_does_not_route_is_refused(kwargs, why, npu2):
 @pytest.mark.parametrize(
     "kwargs,why",
     [
-        (
-            dict(num_heads=8, num_KV_heads=2, num_pipelines=2, causal=False, window=64),
-            "window",
-        ),
         (dict(num_heads=24, num_KV_heads=1, num_pipelines=1, B_q=16), "hold"),
         (dict(num_heads=32, num_KV_heads=8, num_pipelines=8), "at most 4"),
         (dict(num_heads=24, num_KV_heads=6, num_pipelines=4), "dividing"),
     ],
     ids=[
-        "windowed",
         "group_past_a_block",
         "more_than_four_pipelines",
         "uneven_groups",
     ],
 )
 def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why, npu2):
-    """One query packs each KV group's heads into a block's rows, past every
-    key block, where a window would mask them; and each pipeline reads its own
-    groups' K and V through its own column's memtile.
+    """One query packs each KV group's heads into a block's rows, and each
+    pipeline reads its own groups' K and V through its own column's memtile.
     """
     with pytest.raises(ValueError, match=why):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(npu2)

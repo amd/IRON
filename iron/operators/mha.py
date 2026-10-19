@@ -196,6 +196,8 @@ class MHA(Operator):
     # Keys more than this many positions from a query are masked.
     window: int | None = param(default=None, array=True)
     scale: float = param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
+    # One query, a KV group's heads packed as a block's rows.
+    packed: bool = param(derive=lambda op: op.seq_len == 1, repr=False, array=True)
     B_q: int = tunable(domain=block_sizes)
     B_kv: int = tunable(repr=False, init=False)
     num_pipelines: int = tunable(default=1, domain=widths)
@@ -262,11 +264,6 @@ class MHA(Operator):
     )
     s_kv = per_call(derive=lambda op: op.kv_tokens)
     q_start = per_call(derive=lambda op: op.first_query_block)
-
-    @property
-    def packed(self) -> bool:
-        """One query, a KV group's heads packed as a block's rows."""
-        return self.seq_len == 1
 
     @property
     def q_tokens(self) -> int:
@@ -359,12 +356,6 @@ class MHA(Operator):
                         f"MHA: {name} ({vars(self)[name]}) must be a multiple of "
                         f"{'P*V' if pv else 'QK^T'}'s micro-tile {mac}"
                     )
-        # A row whose window misses a key block another row of its query
-        # block keeps would weigh its masked keys 1 (mha.cc).
-        if self.window and self.window % self.B_q:
-            raise ValueError(
-                f"MHA: window ({self.window}) must be whole {self.B_q}-row blocks"
-            )
         if not self.packed and self.seq_pad % (64 * self.num_pipelines):
             raise ValueError(
                 f"MHA: seq_pad ({self.seq_pad}) must be whole rounds of 64 rows on "
@@ -392,11 +383,6 @@ class MHA(Operator):
                 f"a pipeline's scores and P"
             )
         if self.packed:
-            if self.window:
-                raise ValueError(
-                    "MHA: one query packed sits past every key block, where a "
-                    "window would mask them"
-                )
             if self.pv_cores > 1:
                 raise ValueError(
                     "MHA: one query packed reads K and V over its pipeline's own "
@@ -550,6 +536,7 @@ class MHA(Operator):
             accurate_exp2=accurate_exp2,
             causal=self.causal,
             window=self.window or 0,
+            packed=self.packed,
         )
         mha_object = matmul_QK.object_file
 
@@ -586,6 +573,7 @@ class MHA(Operator):
                 b_col_maj=True,
                 causal=self.causal,
                 window=self.window or 0,
+                packed=self.packed,
             ).object_file
         )
         matmul_PV = pv_object.bind(

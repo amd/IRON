@@ -20,8 +20,8 @@ from iron.tests.support.llama_reference import Decoder
 
 #: Gemma 4 E2B's proportions at toy size: one KV head, sliding and global
 #: layers alternating, the last two sharing caches (a sliding and a
-#: global), a window past every test's context, a tied head and logits
-#: capped where the toy's reach.
+#: global), a window that every prompt and decode step but the first few
+#: slides, a tied head and logits capped where the toy's reach.
 TOY = Gemma4Config(
     vocab_size=1024,
     hidden_size=512,
@@ -33,7 +33,7 @@ TOY = Gemma4Config(
     rope_theta=10000.0,
     max_seq_len=256,
     prefill_chunk=256,
-    sliding_window=1024,
+    sliding_window=8,
     layer_types=("sliding_attention", "full_attention") * 3,
     global_head_dim=256,
     num_kv_shared_layers=2,
@@ -112,29 +112,30 @@ class TestGemma4(Decoder):
         return tree
 
 
-def test_a_context_past_the_sliding_window_is_refused():
-    with pytest.raises(ValueError, match="max_seq_len 2048 is past sliding_window"):
-        dataclasses.replace(TOY, max_seq_len=2048)
-
-
-def test_a_checkpoint_s_native_context_is_cut_to_the_sliding_window():
-    data = TOY.to_json()
-    data["text_config"]["max_position_embeddings"] = 131072
-    config = Gemma4Config.from_json(data)
-    assert (config.max_seq_len, config.window) == (1024, None)
-
-
 @pytest.mark.parametrize(
     "text",
     [
         {"attention_k_eq_v": True},
         {"enable_moe_block": True},
         {"use_bidirectional_attention": "all"},
+        {"attn_logit_softcapping": 50.0},
+        {"vocab_size_per_layer_input": 512},
         {"rope_parameters": {"full_attention": {"rope_type": "default"}}},
     ],
 )
 def test_what_is_not_built_is_refused(text):
     data = TOY.to_json()
     data["text_config"] |= text
-    with pytest.raises(ValueError, match="is not built here"):
+    with pytest.raises(ValueError, match="not built here"):
         Gemma4Config.from_json(data)
+
+
+def test_bidirectional_attention_for_images_alone_is_text_s_causal():
+    data = TOY.to_json()
+    data["text_config"]["use_bidirectional_attention"] = "vision"
+    assert Gemma4Config.from_json(data).layer_types == TOY.layer_types
+
+
+def test_a_shared_layer_with_no_earlier_layer_of_its_kind_is_refused():
+    with pytest.raises(ValueError, match="shared layer 0 has no earlier layer"):
+        dataclasses.replace(TOY, num_kv_shared_layers=6).owner(0)

@@ -56,9 +56,10 @@ public API adds its entry under Unreleased.
   `flm.ProjectionGEMM` narrows its default n tile where K is short of its
   k chunk, so ResNet-50's 7x7 to 28x28 maps and 64-channel 1x1 convs build.
 - Applications `gemma3` (Gemma 3 1B) and `gemma4` (Gemma 4 E2B's text
-  decoder), each judged by a device-free toy golden; their context is
-  capped at `sliding_window` until MHA keeps Hugging Face's window and
-  windows a decode step.
+  decoder), each judged by a device-free toy golden, their sliding layers
+  within Hugging Face's window.
+- `MHA` takes a window of any width, and windows one query packed (a
+  decode step), on mlir-aie PR #50 at 3a4a9e0b8 or later.
 - `Call.ids` and `Call.embeddings`, a call's token ids and the embedding
   rows its layers start from, which `CausalLM.layer` may read.
 - Applications `smollm3` (SmolLM3 3B), `ministral3` (Ministral 3's text

@@ -19,8 +19,8 @@ from iron.tests.support.llama_model import shapes
 from iron.tests.support.llama_reference import Decoder
 
 #: Gemma 3's proportions at toy size: one KV head, an attention scale other
-#: than head_dim's, sliding and global layers, a window past every test's
-#: context, a tied head.
+#: than head_dim's, sliding and global layers, a window that every prompt
+#: and decode step but the first few slides, a tied head.
 TOY = Gemma3Config(
     vocab_size=1024,
     hidden_size=512,
@@ -32,7 +32,7 @@ TOY = Gemma3Config(
     rope_theta=1000000.0,
     max_seq_len=256,
     prefill_chunk=256,
-    sliding_window=1024,
+    sliding_window=8,
     layer_types=("sliding_attention", "full_attention") * 2,
 )
 
@@ -64,22 +64,6 @@ class TestGemma3(Decoder):
             if name.endswith("norm.weight"):
                 weight[...] = weight.astype(np.float32) - 1
         return tree
-
-
-def test_a_context_past_the_sliding_window_is_refused():
-    with pytest.raises(ValueError, match="max_seq_len 2048 is past sliding_window"):
-        dataclasses.replace(TOY, max_seq_len=2048)
-
-
-def test_a_checkpoint_s_native_context_is_cut_to_the_sliding_window():
-    data = TOY.to_json() | {"max_position_embeddings": 32768}
-    config = Gemma3Config.from_json(data)
-    # The prompt chunk, IRON's own (not in config.json), cut with it.
-    assert (config.max_seq_len, config.prefill_chunk, config.window) == (
-        1024,
-        1024,
-        None,
-    )
 
 
 def test_a_transformers_5_config_gives_both_rope_bases():

@@ -10,21 +10,17 @@ iron.applications.gemma4.model``.
 Gemma 4 is a sandwich-normed layer with a per-layer input gated in after
 its MLP (``PleLayer``), q, k and v normed per head (v unweighted),
 attention unscaled, GELU-tanh, the embedding scaled by
-``sqrt(hidden_size)``, a tied head and its logits soft-capped. Global
-layers have heads of ``global_head_dim`` and a RoPE table of their own
-base, of which only the first ``partial_rotary_factor`` of the pairs
-turn. The last ``num_kv_shared_layers`` layers project no keys or values:
+``sqrt(hidden_size)``, a tied head and its logits soft-capped. Sliding
+layers attend to their own query and the ``sliding_window - 1`` keys
+before it; global layers to every key, with heads of
+``global_head_dim`` and a RoPE table of their own base, of which only the
+first ``partial_rotary_factor`` of the pairs turn. The last ``num_kv_shared_layers`` layers project no keys or values:
 each attends over the cache of the last earlier layer of its kind, and
 has an MLP twice as wide where ``use_double_wide_mlp``.
 
-Each layer's input is the mean, scaled by ``sqrt(2)``, of its slice of a
+Each layer's input is (projection + table row) * 2 ** -0.5: its slice of a
 projection of the embedding, normed, and its row of a second token table
 (``embed_tokens_per_layer``, held a layer's columns at a time).
-
-The context is at most ``sliding_window``, where a sliding layer sees
-every position, until MHA keeps HF's window and windows a decode step: a
-checkpoint's longer native context is cut to it, a longer one asked for
-refused.
 """
 
 import dataclasses
@@ -61,9 +57,6 @@ def _text(name: str, **kwargs):
 class Gemma4Config(DecoderConfig):
     """``DecoderConfig`` under ``text_config``, the global layers' heads and
     RoPE, the shared caches, the per-layer inputs and the logits' cap.
-
-    Raises:
-        ValueError: ``max_seq_len`` is past ``sliding_window``.
     """
 
     json_prefix = "text_config."
@@ -87,36 +80,30 @@ class Gemma4Config(DecoderConfig):
     ple_dim: int = _text("hidden_size_per_layer_input", default=256)
     final_logit_softcapping: float | None = None
 
-    def __post_init__(self):
-        super().__post_init__()
-        if self.sliding_window is not None:
-            if self.max_seq_len > self.sliding_window:
-                raise ValueError(
-                    f"Gemma4Config: max_seq_len {self.max_seq_len} is past "
-                    f"sliding_window {self.sliding_window}, which MHA cannot window"
-                )
-            L = min(self.prefill_chunk, self.max_seq_len)
-            object.__setattr__(self, "prefill_chunk", L)
-
     @classmethod
     def from_json(cls, data: dict, source="config.json") -> "Gemma4Config":
-        """``DecoderConfig.from_json``, the native context cut to
-        ``sliding_window``.
+        """``DecoderConfig.from_json``.
 
         Raises:
             ValueError: ``data`` asks for what is not built: keys equal to
-                values, experts, bidirectional attention, or RoPE other than
-                the sliding layers' default and the global ones'
+                values, experts, an attention soft-cap, bidirectional text,
+                a per-layer vocabulary other than the embedding's, or RoPE
+                other than the sliding layers' default and the global ones'
                 proportional.
         """
         text = dict(data.get("text_config", {}))
-        for key in (
-            "attention_k_eq_v",
-            "enable_moe_block",
-            "use_bidirectional_attention",
-        ):
+        for key in ("attention_k_eq_v", "enable_moe_block", "attn_logit_softcapping"):
             if text.get(key):
                 raise ValueError(f"{source}: {key} {text[key]!r} is not built here")
+        # "vision" makes only image tokens bidirectional; text has none.
+        if text.get("use_bidirectional_attention") == "all":
+            raise ValueError(f"{source}: bidirectional attention is not built here")
+        per_layer = text.get("vocab_size_per_layer_input", text.get("vocab_size"))
+        if per_layer != text.get("vocab_size"):
+            raise ValueError(
+                f"{source}: vocab_size_per_layer_input {per_layer} other than "
+                f"vocab_size {text.get('vocab_size')} is not built here"
+            )
         rope = text.get("rope_parameters", {})
         for kind, built in (
             ("sliding_attention", "default"),
@@ -125,9 +112,6 @@ class Gemma4Config(DecoderConfig):
             got = rope.get(kind, {}).get("rope_type", built)
             if got != built:
                 raise ValueError(f"{source}: {kind} RoPE {got!r} is not built here")
-        window, native = text.get("sliding_window"), text.get("max_position_embeddings")
-        if window is not None and native is not None:
-            text["max_position_embeddings"] = min(native, window)
         return super().from_json({**data, "text_config": text}, source)
 
     def full(self, i: int) -> bool:
@@ -141,7 +125,12 @@ class Gemma4Config(DecoderConfig):
         first = self.num_hidden_layers - self.num_kv_shared_layers
         if i < first:
             return i
-        return max(j for j in range(first) if self.full(j) == self.full(i))
+        owners = [j for j in range(first) if self.full(j) == self.full(i)]
+        if not owners:
+            raise ValueError(
+                f"Gemma4Config: shared layer {i} has no earlier layer of its kind"
+            )
+        return owners[-1]
 
 
 class Gemma4Decoder(Decoder):
@@ -158,9 +147,10 @@ class Gemma4Decoder(Decoder):
 
 
 class Gemma4Layer(PleLayer):
-    """Layer ``i``: unscaled attention over normed q, k and v, its heads a
-    global layer's where it is one, and an MLP twice as wide on a shared
-    layer where ``use_double_wide_mlp``.
+    """Layer ``i``: unscaled attention over normed q, k and v, its heads and
+    whole context a global layer's where it is one, else within the
+    window, and an MLP twice as wide on a shared layer where
+    ``use_double_wide_mlp``.
     """
 
     def __init__(self, c: Gemma4Config, i: int):
@@ -171,7 +161,8 @@ class Gemma4Layer(PleLayer):
                 dataclasses.replace(c, intermediate_size=2 * c.intermediate_size)
             )
         attention = Attention(heads, i, norms="qkv")
-        super().__init__(c, i, attention, mlp, KVCache(heads))
+        cache = KVCache(heads, None if c.full(i) else c.window)
+        super().__init__(c, i, attention, mlp, cache)
         self.self_attn.scaling = 1.0
 
 
