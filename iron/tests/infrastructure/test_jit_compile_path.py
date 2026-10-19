@@ -11,8 +11,9 @@ from dataflow comes out the other side as a linked full ELF, a second
 identical build is a cache hit rather than another aiecc run, and the keys
 distinguish what must be distinguished.
 
-Needs a device, since the composed path is NPU2-only and the ELF is genuinely
-built here rather than mocked.
+The tests that build need aiecc and Peano, since the ELF is genuinely built
+here rather than mocked. The composed path is NPU2-only, so the ``npu2``
+fixture binds one; no device runs anything.
 """
 
 import dataclasses
@@ -33,8 +34,16 @@ from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.operators import GEMM, MHA, ElementwiseAdd
 from iron.tests.support.graphs import Adds
+from iron.tests.support.tools import requires
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+
+
+def _builds(test):
+    """Skip ``test`` without aiecc and Peano."""
+    for mark in requires("aiecc", "peano"):
+        test = mark(test)
+    return test
 
 
 def _captured(name, adds=2, **declared):
@@ -44,6 +53,7 @@ def _captured(name, adds=2, **declared):
     return Image(dataclasses.replace(recording, name=name), FullELF()).compile()
 
 
+@_builds
 def test_captured_graph_compiles_to_an_elf():
     """The load-bearing claim: it links, and the ELF is real."""
     artifacts = _captured("jitpath_elf").artifacts
@@ -56,6 +66,7 @@ def test_captured_graph_compiles_to_an_elf():
     assert artifacts.params is not None and artifacts.params.exists()
 
 
+@_builds
 def test_kernel_objects_land_in_the_entry_under_bare_names():
     """The composed MLIR's link_with names objects without a directory.
 
@@ -67,6 +78,7 @@ def test_kernel_objects_land_in_the_entry_under_bare_names():
     assert all("/" not in p.name for p in objects)
 
 
+@_builds
 def test_two_graphs_get_distinct_cache_keys():
     """Identity rides in compile_kwargs because the key ignores closures.
 
@@ -80,6 +92,7 @@ def test_two_graphs_get_distinct_cache_keys():
     assert two != three
 
 
+@_builds
 def test_identical_sequences_reuse_the_compiled_elf():
     """A fresh, independently-built sequence with the same recipe must not
     pay a second aiecc compile: same entry, untouched.
@@ -93,6 +106,7 @@ def test_identical_sequences_reuse_the_compiled_elf():
     ), "identical recipe recompiled the ELF instead of reusing the cache hit"
 
 
+@_builds
 def test_identical_operators_reuse_the_compiled_xclbin():
     """The same, for an operator on its own (the separate-dispatch path)."""
 
@@ -107,6 +121,7 @@ def test_identical_operators_reuse_the_compiled_xclbin():
     assert second.image.stat().st_mtime_ns == mtime
 
 
+@_builds
 def test_an_operator_builds_its_own_image_once():
     """An operator called outside a graph keeps the image it built; an equal
     operator builds its own, from the cache.
@@ -116,6 +131,7 @@ def test_an_operator_builds_its_own_image_once():
     assert ElementwiseAdd(size=1024, tile_size=128).compile() is not op.compile()
 
 
+@_builds
 def test_a_traced_build_carries_the_lowered_module():
     """--get-input-with-addresses is what the trace parser reads; the flag
     reaching aiecc is checked by that file being in the entry, not by the

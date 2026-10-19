@@ -9,10 +9,10 @@ directly, and a kernel is named for its recipe rather than its position, so a
 design names the same objects whether it is built alone or composed. The last
 is what is checked here, end to end.
 
-Needs a device: the full-ELF build runs for real, because the whole point is
-what it leaves lying around; the standalone side only needs a device to
-generate its own MLIR at all (device-specialized designs read the current
-device), not to compile anything.
+Needs aiecc and Peano: the full-ELF build runs for real, because the whole
+point is what it leaves lying around. The ``npu2`` fixture binds a device
+only so the standalone side can generate its MLIR (device-specialized designs
+read the current device); no device runs anything.
 """
 
 import dataclasses
@@ -26,8 +26,9 @@ from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.operators import ElementwiseAdd
 from iron.tests.support.graphs import Adds
+from iron.tests.support.tools import requires
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+pytestmark = [pytest.mark.usefixtures("npu2"), *requires("aiecc", "peano")]
 
 SIZE = 1024
 
