@@ -55,9 +55,9 @@ def folded(m) -> tuple[np.ndarray, np.ndarray]:
     folded in, float32.
     """
     bn = m.bn
-    scale = bn.weight / np.sqrt(bn.running_var + np.float32(BN_EPS))
-    weight = m.conv.weight * scale[:, None, None, None]
-    return weight.astype(np.float32), (bn.bias - bn.running_mean * scale)
+    return F.fuse_conv_bn_weights(
+        m.conv.weight, None, bn.running_mean, bn.running_var, BN_EPS, bn.weight, bn.bias
+    )
 
 
 def preprocess(image: np.ndarray, size: int = INPUT_SIZE) -> np.ndarray:

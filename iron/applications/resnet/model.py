@@ -21,14 +21,12 @@ maps; the image is ImageNet-normalized before the graph, and laid out in
 import dataclasses
 
 import numpy as np
-from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
 from iron.lm import Linear
 from iron.lm.config import Config, not_json
-from iron.operators.copy import Copy
 from iron.operators.relu import ReLU
 
 #: nn.BatchNorm2d's default, which transformers' ResNet keeps.
@@ -70,12 +68,13 @@ class ResNetConfig(Config):
             )
 
 
-class Weights(iron.Graph):
-    """Weights of these shapes, by name, as the checkpoint holds them."""
+class Convolution(iron.Graph):
+    """A bias-free conv's float32 weight, as the checkpoint holds it, for
+    its BatchNorm to fold into before it rounds.
+    """
 
-    def __init__(self, **shapes: tuple[int, ...]):
-        for name, shape in shapes.items():
-            setattr(self, name, iron.param(*shape))
+    def __init__(self, *shape: int):
+        self.weight = iron.param(*shape, dtype=np.float32)
 
 
 class BatchNorm(iron.Graph):
@@ -93,17 +92,23 @@ class ConvLayer(iron.Graph):
     """
 
     def __init__(self, cin, cout, k=1, stride=1, relu=True):
-        self.convolution = Weights(weight=(cout, cin, k, k))
+        self.convolution = Convolution(cout, cin, k, k)
         self.normalization = BatchNorm(cout)
         self.stride, self.relu = stride, relu
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
         bn = self.normalization
-        scale = bn.weight / np.sqrt(bn.running_var + np.float32(BN_EPS))
-        weight = self.convolution.weight.astype(np.float32)
-        self.weight = weight * scale[:, None, None, None]
-        self.bias = (bn.bias - bn.running_mean * scale).astype(bfloat16)
+        self.weight, bias = F.fuse_conv_bn_weights(
+            self.convolution.weight,
+            None,
+            bn.running_mean,
+            bn.running_var,
+            BN_EPS,
+            bn.weight,
+            bn.bias,
+        )
+        self.bias = bias.astype(bfloat16)
 
     def body(self, x):
         k = self.weight.shape[-1]
@@ -171,22 +176,13 @@ class Stem(ConvLayer):
 
 
 class Embedder(iron.Graph):
-    """The stem and its 3x3 stride-2 max pool: at stride 1, then every
-    other pixel of every other row, which is the same pool.
-    """
+    """The stem and its 3x3 stride-2 max pool."""
 
     def __init__(self, c: ResNetConfig):
         self.embedder = Stem(c)
 
     def body(self, x):
-        x = F.max_pool2d(self.embedder(x), 3, 1, 1)
-        H, W, C = x.shape
-        line = W * C
-        every_other = TensorAccessPattern(
-            (H, line), 0, [H // 2, W // 2, C], [2 * line, 2 * C, 1]
-        )
-        y = Copy.step(x.reshape(H, line), src=every_other)
-        return y.reshape(H // 2, W // 2, C)
+        return F.max_pool2d(self.embedder(x), 3, 2, 1)
 
 
 class Encoder(iron.Graph):

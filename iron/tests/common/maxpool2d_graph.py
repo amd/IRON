@@ -52,7 +52,7 @@ def test_an_even_kernel_is_refused():
         MaxPool2d(rows=13, width=13, channels=128, kernel=4)
 
 
-def test_functional_max_pool2d_is_the_max_pooling_at_stride_1_only():
+def test_functional_max_pool2d_is_the_max_pooling_at_its_stride():
     rows, width, channels, kernel = CASES["wide"]
     rng = np.random.default_rng(0)
     x = rng.standard_normal((rows, width, channels)).astype(bfloat16)
@@ -65,9 +65,10 @@ def test_functional_max_pool2d_is_the_max_pooling_at_stride_1_only():
             return F.max_pool2d(x, kernel, self.stride, kernel // 2)
 
     want = windowed(x, rows, width, channels, kernel)
-    got = np.asarray(Pool(1).reference(x), np.float32).reshape(want.shape)
-    assert np.array_equal(got, want)
-    with pytest.raises(ValueError, match="only stride=1"):
-        Pool(None).trace(x=(x.shape, bfloat16))
+    for stride in (1, 2, None):
+        step = stride or kernel
+        strided = want.reshape(rows, width, channels)[::step, ::step]
+        got = np.asarray(Pool(stride).reference(x), np.float32)
+        assert np.array_equal(got.reshape(strided.shape), strided)
     with pytest.raises(ValueError, match="not a map"):
         Pool(1).trace(x=((rows, width * channels), bfloat16))

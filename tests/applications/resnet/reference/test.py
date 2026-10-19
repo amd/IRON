@@ -21,12 +21,13 @@ from iron.tests.common.llama_model import checkpoint
 pytestmark = pytest.mark.usefixtures("npu2")
 
 #: ResNet-50's widths, its stages one bottleneck deep but the first, of
-#: two, the second's shortcut the identity, on a 64-pixel image.
+#: two, the second's shortcut the identity, on a 96-pixel image, so the
+#: average pool takes a 3x3 map.
 TOY = ResNetConfig(
     embedding_size=64,
     hidden_sizes=(256, 512, 1024, 2048),
     depths=(2, 1, 1, 1),
-    image_size=64,
+    image_size=96,
     num_labels=10,
 )
 
@@ -74,16 +75,20 @@ def names(c: ResNetConfig) -> dict[str, tuple[int, ...]]:
 def tree(c: ResNetConfig):
     """Random weights of ``c``'s shape, each BatchNorm's running mean about
     zero rather than the draw's one, which would leave every ReLU of a
-    random net dead, and its count of batches beside them.
+    random net dead, its running variance log-uniform down to 1e-4, where
+    its epsilon counts, and its count of batches beside them.
     """
     named = names(c)
     weights = checkpoint(c, named).tree("random")
+    rng = np.random.default_rng(1)
     for name in named:
         if name.endswith("normalization.weight"):
             node = weights
             for part in name.split(".")[:-1]:
                 node = node[int(part)] if part.isdigit() else getattr(node, part)
             node.running_mean -= 1
+            var = np.exp(rng.uniform(np.log(1e-4), 0, node.running_var.shape))
+            node.running_var[:] = var
             node.num_batches_tracked = np.zeros((), np.int64)
     return weights
 

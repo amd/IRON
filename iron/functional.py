@@ -277,21 +277,39 @@ def conv2d(x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
 
 
 def max_pool2d(x, kernel_size, stride=None, padding=0):
-    """The feature map ``x``'s max over each ``kernel_size`` square window,
-    each channel its own: ``MaxPool2d``, which pools at stride 1 inside
-    ``-inf`` padding of half the window, so the map keeps its shape.
+    """The feature map ``x``'s max over each ``kernel_size`` square window
+    at ``stride`` (``kernel_size`` where None), each channel its own:
+    ``MaxPool2d``, which pools at stride 1 inside ``-inf`` padding of half
+    the window, then every ``stride``-th pixel of every ``stride``-th row.
 
     Raises:
-        ValueError: ``x`` is not a map, or another ``stride`` or ``padding``.
+        ValueError: ``x`` is not a map, or another ``padding``.
     """
     H, W, C = _feature_map("max_pool2d", x)
-    if stride != 1 or padding != kernel_size // 2:
+    stride = kernel_size if stride is None else stride
+    if padding != kernel_size // 2:
         raise ValueError(
-            f"max_pool2d(): only stride=1, padding={kernel_size // 2} has an "
-            f"operator, not stride={stride}, padding={padding}"
+            f"max_pool2d(): only padding={kernel_size // 2} has an operator, "
+            f"not padding={padding}"
         )
     y = MaxPool2d(H, W, C, kernel_size)(x.reshape(H, W * C))
-    return y.reshape(H, W, C)
+    if stride == 1:
+        return y.reshape(H, W, C)
+    rows, width = (H - 1) // stride + 1, (W - 1) // stride + 1
+    strided = TensorAccessPattern(
+        (H, W * C), 0, [rows, width, C], [stride * W * C, stride * C, 1]
+    )
+    return Copy.step(y, src=strided).reshape(rows, width, C)
+
+
+def fuse_conv_bn_weights(conv_w, conv_b, bn_rm, bn_rv, bn_eps, bn_w, bn_b):
+    """``torch.nn.utils.fusion.fuse_conv_bn_weights``: a conv's weight and
+    bias with the BatchNorm after it folded in, float32.
+    """
+    scale = bn_w / np.sqrt(bn_rv + np.float32(bn_eps))
+    weight = np.asarray(conv_w, np.float32) * scale[:, None, None, None]
+    bias = -bn_rm if conv_b is None else conv_b - bn_rm
+    return weight, (bias * scale + bn_b).astype(np.float32)
 
 
 def interpolate(x, size=None, scale_factor=None, mode="nearest", align_corners=None):
