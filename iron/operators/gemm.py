@@ -33,12 +33,12 @@ from aie.iron.device import (
     Tile,
 )
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import divisors, widths
 from ml_dtypes import bfloat16
 
 from iron.common import (
     Auto,
     Built,
-    Divisors,
     Extent,
     Operator,
     Precision,
@@ -138,9 +138,8 @@ class GEMM(Operator):
     N: CompileTime[int] = field()
     # None: the widest of 64, 32, 16, 8 that splits M and the m block divides.
     tile_m: CompileTime[int] = Auto(
-        domain=Divisors(
-            of=lambda op, dev: op.M // op.n_aie_rows,
-            step=lambda op, dev: op.mac_block(dev)[0],
+        domain=lambda op, dev, t: divisors(
+            t, of=op.M // op.n_aie_rows, step=op.mac_block(dev)[0]
         ),
         array=True,
     )
@@ -148,26 +147,28 @@ class GEMM(Operator):
     # tile, so tile_k changes the result.
     tile_k: CompileTime[int] = Auto(
         default=64,
-        domain=Divisors(
-            of=K,
-            step=lambda op, dev: op.mac_block(dev)[1],
-            when=lambda op, dev: op.precision == Precision.HIGHEST,
+        domain=lambda op, dev, t: (
+            divisors(t, of=op.K, step=op.mac_block(dev)[1])
+            if op.precision == Precision.HIGHEST
+            else ()
         ),
         array=True,
     )
     tile_n: CompileTime[int] = Auto(
         default=64,
-        domain=Divisors(of=N, step=lambda op, dev: op.mac_block(dev)[2]),
+        domain=lambda op, dev, t: divisors(t, of=op.N, step=op.mac_block(dev)[2]),
         array=True,
     )
     # None: the most columns the shim budget allows that split N into tiles.
-    num_aie_columns: CompileTime[int] = Auto()
+    num_aie_columns: CompileTime[int] = Auto(domain=widths)
     placement: CompileTime[GEMMPlacement] = Auto(
-        default=GEMMPlacement.SHIMS, array=True
+        default=GEMMPlacement.SHIMS, domain=GEMMPlacement, array=True
     )
     b_col_maj: CompileTime[bool] = field(default=False, array=True)
     c_col_maj: CompileTime[bool] = field(default=False, array=True)
-    precision: CompileTime[Precision] = Auto(default=Precision.MEDIUM, array=True)
+    precision: CompileTime[Precision] = Auto(
+        default=Precision.MEDIUM, domain=Precision, array=True
+    )
     input_dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
     output_dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
     # Filled by resolve.

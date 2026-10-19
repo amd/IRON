@@ -19,9 +19,10 @@ from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Out, TaskGroup,
 from aie.iron.controlflow import range_
 from aie.iron.kernels import sample
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import divisors, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Divisors, Operator, Unresolvable, Value, field
+from iron.common import Auto, Built, Operator, Unresolvable, Value, field
 from iron.common.testing import Case, Testing
 
 # A select core's logits object: no more than this, and even (4-byte DMA).
@@ -115,10 +116,12 @@ class Sample(Operator):
     k_max: CompileTime[int] = field(default=64, array=True)
     # Positions the draws and the record hold; the sequence picks one.
     steps: CompileTime[int] = field(default=1)
-    cores: CompileTime[int] = Auto(default=4)
+    cores: CompileTime[int] = Auto(default=4, domain=widths)
     # Logits per select call.
     chunk: CompileTime[int] = Auto(
-        domain=Divisors(of=lambda op, dev: op.slice_size, step=2, cap=_CHUNK_LIMIT)
+        domain=lambda op, dev, t: divisors(
+            t, of=op.slice_size, step=2, cap=_CHUNK_LIMIT
+        )
     )
 
     logits = In(vocab, obj_shape=(chunk,), per=(cores,))

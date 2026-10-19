@@ -21,6 +21,7 @@ from aie.iron import (
 )
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import widths
 from ml_dtypes import bfloat16
 
 from iron.common import Auto, Built, Extent, Operator, Rtp, Unresolvable, Value, field
@@ -95,7 +96,7 @@ class SelectiveScan(Operator):
     head_dim: CompileTime[int] = field(array=True)
     state_size: CompileTime[int] = field(array=True)
     groups: CompileTime[int] = field(default=1, array=True)
-    columns: CompileTime[int] = Auto()
+    columns: CompileTime[int] = Auto(domain=widths)
     inner: CompileTime[int] = field(
         derive=lambda op: op.heads * op.head_dim, repr=False, array=True
     )

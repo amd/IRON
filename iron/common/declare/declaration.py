@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import dataclasses
-import enum
 import inspect
 import math
 import types
@@ -15,7 +14,6 @@ from typing import Annotated, Any, ClassVar, Union, get_args, get_origin
 
 from aie.iron import In, InOut, Out
 
-from .domain import Divisors, Domain
 from .field import AutoSpec, ParamSpec
 from .member import Member
 from .operand import Operand
@@ -269,26 +267,11 @@ class Declaration:
         self.held = tuple(n for n, s in params.items() if s.held)
         self.autos = tuple(autos)
         self.tunables = tuple(n for n in autos if fields[n].init)
-        # A tunable given no domain and annotated with an Enum is searched
-        # over that Enum's members.
-        self.domains = {}
-        for n, s in autos.items():
-            if n not in self.tunables:
-                continue
-            domain = s.domain
-            if domain is None:
-                hint = hints.get(n)
-                if isinstance(hint, type) and issubclass(hint, enum.Enum):
-                    domain = hint
-            if domain is not None:
-                self.domains[n] = domain
-        for n, domain in self.domains.items():
-            when = domain.when if isinstance(domain, Domain) else None
-            if when is not None and not callable(when):
-                raise TypeError(
-                    f"{cls.__name__}.{n}: when={when!r} must be a callable of "
-                    f"(op, dev), the flag the tunable is searched under"
-                )
+        self.domains = {
+            n: s.domain
+            for n, s in autos.items()
+            if n in self.tunables and s.domain is not None
+        }
         # The array tier (``array`` above).
         named: set[str] = set()
         for m in members:
@@ -578,27 +561,13 @@ class Declaration:
         return bound
 
 
-def _bound(bound) -> str:
-    if isinstance(bound, dataclasses.Field):
-        return bound.name
-    return "f(op, dev)" if callable(bound) else repr(bound)
-
-
 def _domain(domain) -> str:
     """``domain`` in a few words."""
     if isinstance(domain, type):
         return "{" + ", ".join(m.name for m in domain) + "}"
-    if not isinstance(domain, Domain):
+    if isinstance(domain, tuple):
         return "{" + ", ".join(map(repr, domain)) + "}"
-    text = type(domain).__name__
-    if isinstance(domain, Divisors):
-        parts = [f"of {_bound(domain.of)}"]
-        if domain.step != 1:
-            parts.append(f"step {_bound(domain.step)}")
-        if domain.cap is not None:
-            parts.append(f"cap {_bound(domain.cap)}")
-        text += f"({', '.join(parts)})"
-    return text + (" when f(op, dev)" if domain.when is not None else "")
+    return "f(op, dev)" if domain.__name__ == "<lambda>" else domain.__name__
 
 
 def _member(m) -> str:

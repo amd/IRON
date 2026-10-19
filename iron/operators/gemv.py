@@ -14,9 +14,10 @@ from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import eltwise, linalg
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import divisors, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Divisors, Extent, Operator, Rtp, Value, field
+from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
 
 
@@ -100,21 +101,20 @@ class GEMV(Operator):
             None if op.num_batches is None else op.num_batches // op.repeat
         )
     )
-    num_aie_columns: CompileTime[int] = Auto()
-    num_channels: CompileTime[int] = Auto()
+    num_aie_columns: CompileTime[int] = Auto(domain=widths)
+    num_channels: CompileTime[int] = Auto(domain=widths)
     # None: two rows where they fit one L1 programmer bank, else one.
     tile_size_input: CompileTime[int] = Auto(
-        domain=Divisors(
-            of=lambda op, dev: op.M,
-            cap=lambda op, dev: dev.core_memory_bytes
+        domain=lambda op, dev, t: divisors(
+            t,
+            of=op.M,
+            cap=dev.core_memory_bytes
             // (op.A.depth * op.K * np.dtype(bfloat16).itemsize),
         )
     )
     # At least two rows: the shim moves C in 4-byte granules.
     tile_size_output: CompileTime[int] = Auto(
-        domain=Divisors(
-            of=lambda op, dev: op.M, step=lambda op, dev: op.tile_size_input, span=3
-        )
+        domain=lambda op, dev, t: divisors(t, of=op.M, step=op.tile_size_input, span=3)
     )
     kernel_vector_size: CompileTime[int] = Auto(repr=False, array=True)
 

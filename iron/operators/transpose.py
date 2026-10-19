@@ -11,9 +11,10 @@ from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import divisors, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Divisors, Operator, Rtp, Value, field
+from iron.common import Auto, Built, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
 
 
@@ -67,23 +68,15 @@ class Transpose(Operator):
     num_batches: CompileTime[int | None] = field(default=None)
     m: CompileTime[int] = Auto(
         default=64,
-        domain=Divisors(
-            of=lambda op, dev: op.M,
-            step=lambda op, dev: op.s,
-            cap=lambda op, dev: 8192 // op.n,
-        ),
+        domain=lambda op, dev, t: divisors(t, of=op.M, step=op.s, cap=8192 // op.n),
     )
     n: CompileTime[int] = Auto(
         default=64,
-        domain=Divisors(
-            of=lambda op, dev: op.N,
-            step=lambda op, dev: op.s,
-            cap=lambda op, dev: 8192 // op.m,
-        ),
+        domain=lambda op, dev, t: divisors(t, of=op.N, step=op.s, cap=8192 // op.m),
     )
     s: CompileTime[int] = Auto(default=8, domain=(8, 4), array=True)
-    num_aie_columns: CompileTime[int] = Auto()
-    num_channels: CompileTime[int] = Auto(default=1)
+    num_aie_columns: CompileTime[int] = Auto(domain=widths)
+    num_channels: CompileTime[int] = Auto(default=1, domain=widths)
 
     x = In(num_batches, M, N, obj_shape=(m, n), per=(num_aie_columns, num_channels))
     y = Out(num_batches, N, M, obj_shape=(m, n), per=(num_aie_columns, num_channels))

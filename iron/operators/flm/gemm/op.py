@@ -36,12 +36,12 @@ from aie.iron.device import Device, Tile
 from aie.iron.kernels import fused_mm
 from aie.utils import bfp
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import divisors
 from ml_dtypes import bfloat16
 
 from iron.common import (
     Auto,
     Built,
-    Divisors,
     Extent,
     Operator,
     Precision,
@@ -166,18 +166,21 @@ class ProjectionGEMM(Operator):
     tile_n: CompileTime[int] = Auto(array=True)
     # k tile. K must be a multiple of it, and it of the compute tile's k slice.
     k_tile: CompileTime[int] = Auto(
-        domain=Divisors(of=K, step=lambda op, dev: op.ct_max_k, cap=K_TILE), array=True
+        domain=lambda op, dev, t: divisors(t, of=op.K, step=op.ct_max_k, cap=K_TILE),
+        array=True,
     )
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
-    tile_ma: CompileTime[int] = Auto(domain=Divisors(of=M_TILE, step=2 * R), array=True)
+    tile_ma: CompileTime[int] = Auto(
+        domain=lambda op, dev, t: divisors(t, of=M_TILE, step=2 * R), array=True
+    )
     # Row-blocks a core folds into one B fetch, cutting B's DDR reads by
     # m_chunk at the cost of that many L1 accumulators. 1 by default: it must
     # divide m_row_blocks (M % 512 == 0), and a shape that cannot use it would
     # fork config_name. See README.md.
     m_chunk: CompileTime[int] = Auto(
         default=1,
-        domain=Divisors(of=lambda op, dev: op.M // (M_TILE * op.rows)),
+        domain=lambda op, dev, t: divisors(t, of=op.M // (M_TILE * op.rows)),
         array=True,
     )
     # The activations the epilogue can select between at run time. Each one
@@ -193,7 +196,7 @@ class ProjectionGEMM(Operator):
     b_col_maj: CompileTime[bool] = field(default=False, array=True)
     # MEDIUM multiplies on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8
     # (the port's arithmetic); above it, or on AIE2, on bf16 macs.
-    precision: CompileTime[Precision] = Auto(default=Precision.MEDIUM)
+    precision: CompileTime[Precision] = Auto(default=Precision.MEDIUM, domain=Precision)
     # Filled by resolve, from the device: the macs, the grid, B's storage,
     # the L2 tiles.
     emulate_bf16_mmul_with_bfp16: CompileTime[bool] = Auto(

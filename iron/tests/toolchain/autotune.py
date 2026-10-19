@@ -47,15 +47,6 @@ def identities(found, dev):
     return {tuning._identity(d, dev) for _, d in found}
 
 
-def test_widths_are_the_settable_per_tunables(npu2):
-    # SiLU fixes its channel count (init=False), so only its columns narrow.
-    assert SiLU(size=SIZE, tile_size=TILE)._widths == {"num_aie_columns": None}
-    assert ElementwiseAdd(size=SIZE, tile_size=TILE).resolved(npu2)._widths == {
-        "num_aie_columns": 8,
-        "num_channels": 1,
-    }
-
-
 def test_settings_range_over_every_width_the_shims_allow(npu2):
     found = designs(ElementwiseAdd(size=SIZE, tile_size=TILE), npu2)
     widths = [(s["num_aie_columns"], s["num_channels"]) for s, _ in found]
@@ -137,14 +128,13 @@ def test_derived_fields_are_not_widths(npu2):
     # whatever it is given, so a width there would be timed once per value
     # and built alike.
     gemm = GEMM(M=512, K=512, N=512)
-    assert gemm.resolved(npu2)._widths == {"num_aie_columns": 8}
+    assert "n_shim_mem_a" not in gemm.resolved(npu2)._domains(npu2)
     # n_shim_mem_a resolves to at most the columns: many settings, one design.
     found = designs(GEMM(M=2560, K=768, N=3072, b_col_maj=True), npu2)
     assert len(identities(found, npu2)) == len(found)
     widths = [s["num_aie_columns"] for s, _ in found]
     assert list(dict.fromkeys(widths)) == [8, 4, 2, 1]
     mha = MHA(num_heads=8, seq_pad=256).resolved(npu2)
-    assert mha._widths == {"num_pipelines": 1}
     assert mha._domains(npu2) == {
         "num_pipelines": (8, 4, 2, 1),
         "B_q": (64, 32, 16),

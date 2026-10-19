@@ -28,12 +28,12 @@ from aie.iron import (
 from aie.iron.device import Tile
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import divisors, widths
 from ml_dtypes import bfloat16
 
 from iron.common import (
     Auto,
     Built,
-    Divisors,
     Extent,
     Operand,
     Operator,
@@ -109,7 +109,7 @@ class Gather(Operator):
         + (3 if op.rows % op.chain else 0),
         repr=False,
     )
-    feeds: CompileTime[int] = Auto()
+    feeds: CompileTime[int] = Auto(domain=widths)
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
@@ -620,9 +620,10 @@ class Copy(Operator):
     # The source's first axis runs a per-call count of times (Handle.at's repeat).
     src_repeat: CompileTime[bool] = field(default=False)
     tile_size: CompileTime[int] = Auto(
-        domain=Divisors(
-            of=lambda op, dev: op.channel_share,
-            cap=lambda op, dev: op.object_bytes // np.dtype(op.dtype).itemsize,
+        domain=lambda op, dev, t: divisors(
+            t,
+            of=op.channel_share,
+            cap=op.object_bytes // np.dtype(op.dtype).itemsize,
             span=3,
         )
     )
@@ -630,7 +631,7 @@ class Copy(Operator):
     object_bytes: ClassVar[int] = 64 * 1024
     # The patterns a repeated source walks in turn: a repeat word each.
     max_walks: ClassVar[int] = 8
-    num_channels: CompileTime[int] = Auto(default=1)
+    num_channels: CompileTime[int] = Auto(default=1, domain=widths)
     dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
 
     x = In(

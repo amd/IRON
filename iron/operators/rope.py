@@ -16,6 +16,7 @@ from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import widths
 from ml_dtypes import bfloat16
 
 from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
@@ -77,7 +78,7 @@ class RoPE(Operator):
     angle_rows: CompileTime[int] = field(
         derive=lambda op: op.rows, held=False
     )  # one row per position
-    num_aie_columns: CompileTime[int] = Auto()
+    num_aie_columns: CompileTime[int] = Auto(domain=widths)
     two_halves: CompileTime[bool] = field(default=True, array=True)
 
     x = In(rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))

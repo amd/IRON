@@ -8,6 +8,7 @@ from aie.extras.dialects import arith
 from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import conv
+from aie.utils.compile.jit.params import widths
 from ml_dtypes import bfloat16
 
 from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
@@ -36,7 +37,7 @@ class DepthwiseConv1d(Operator):
 
     rows: CompileTime[int] = field()
     channels: CompileTime[int] = field()
-    num_aie_columns: CompileTime[int] = Auto()
+    num_aie_columns: CompileTime[int] = Auto(domain=widths)
 
     x = In(
         rows, channels, obj_shape=(channels,), per=(num_aie_columns,), depth=TAPS + 1

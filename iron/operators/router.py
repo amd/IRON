@@ -17,6 +17,7 @@ from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import moe, sample
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import widths
 from ml_dtypes import bfloat16
 
 from iron.common import Auto, Built, Extent, Operator, Rtp, Unresolvable, Value, field
@@ -52,7 +53,7 @@ class TopKRouter(Operator):
     top_k: CompileTime[int] = field()
     rows: CompileTime[int] = field(default=1)
     weights_width: CompileTime[int] = field(derive=lambda op: 2 * op.top_k, repr=False)
-    pairs: CompileTime[int] = Auto()
+    pairs: CompileTime[int] = Auto(domain=widths)
 
     logits = In(rows, experts, obj_shape=(experts,), per=(pairs,))
     ids = Out(rows, top_k, dtype=np.int32, obj_shape=(top_k,), per=(pairs,))

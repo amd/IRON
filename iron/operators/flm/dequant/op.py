@@ -11,6 +11,7 @@ from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.kernels import quant
 from aie.utils import bfp
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import widths
 
 from iron.common import Auto, Built, Operator, Unresolvable, field
 from iron.common.testing import Case, Testing
@@ -182,7 +183,7 @@ class DequantBFP(Operator):
     # cols follows the device. ROWS is baked into the split offsets and the
     # join, so it is not a field; halves is, because a stream's replication
     # count must be declared to be indexed, but the join bakes it too.
-    cols: CompileTime[int] = Auto(repr=False)
+    cols: CompileTime[int] = Auto(repr=False, domain=widths)
     halves: CompileTime[int] = Auto(default=HALVES, repr=False, init=False)
 
     # One q4nx block per core, delivered as one per-column object the cores

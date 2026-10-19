@@ -17,8 +17,6 @@ import dataclasses
 from dataclasses import MISSING
 from typing import Any, Callable
 
-from .domain import Domain
-
 # The key of a field's ``ParamSpec`` in its metadata.
 SPEC = "iron"
 
@@ -67,7 +65,7 @@ class AutoSpec(ParamSpec):
     """
 
     default: Any
-    domain: Domain | tuple[Any, ...] | None
+    domain: Any
 
 
 def field(
@@ -141,7 +139,7 @@ def field(
 def Auto(
     *,
     default: Any = None,
-    domain: Domain | tuple[Any, ...] | None = None,
+    domain: Any = None,
     repr: bool = True,
     init: bool = True,
     array: bool = False,
@@ -163,11 +161,9 @@ def Auto(
             (always ``None``, whatever is given): a caller leaving the
             tunable open must still read as "nothing given" in
             ``Operator.__post_init__``, before it fills this in.
-        domain: The values a tuner searches the field over: a `Width`, a
-            `Divisors`, a fixed tuple, or (left out, on an `Enum`-annotated
-            field) that `Enum`'s members. Left out otherwise, a tunable a
-            streamed ``per=`` names is searched as a `Width` and any other
-            is not searched.
+        domain: The values a tuner searches the field over: a tuple, an
+            `Enum` class, or a function ``(op, dev, start) -> tuple`` such
+            as mlir-aie's ``widths``. Left out, it is not searched.
         repr: The field is in the operator's repr.
         init: The field is a constructor argument.
         array: As ``field``'s.

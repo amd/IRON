@@ -12,6 +12,7 @@ from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernels import flm_gemma4
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import widths
 from ml_dtypes import bfloat16
 
 from iron.common import Auto, Built, Operator, Unresolvable, field
@@ -97,7 +98,7 @@ class LMHead(Operator):
         derive=lambda op: packed_bytes(op.vocab * op.dim) // 4, repr=False
     )
     x_len: CompileTime[int] = field(derive=lambda op: 2 * op.dim, repr=False)
-    cols: CompileTime[int] = Auto(repr=False)
+    cols: CompileTime[int] = Auto(repr=False, domain=widths)
     rows: CompileTime[int] = Auto(repr=False)
 
     # The runtime sequence's argument order. A w or y column object holds one

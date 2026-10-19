@@ -27,6 +27,7 @@ from aie.iron import CompileTime, DmaEndpoint, In, ObjectFifo, Out, Program, Wor
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
 from aie.utils.trace import TraceConfig
+from aie.utils.compile.jit.params import widths
 
 import iron
 import iron.operators.flm.gemm.op as flm_gemm
@@ -60,7 +61,7 @@ class MV(Operator):
     M: CompileTime[int] = field()
     K: CompileTime[int] = field()
     num_batches: CompileTime[int | None] = field(default=None)
-    cols: CompileTime[int] = Auto(default=2)
+    cols: CompileTime[int] = Auto(default=2, domain=widths)
     tile_out: CompileTime[int] = Auto(default=64)
     A = In(num_batches, M, K, obj_shape=(tile_out, K), per=(cols,))
     B = In(num_batches, K, obj_shape=(K,))

@@ -23,8 +23,9 @@ from aie.iron import (
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import divisors, widths
 
-from iron.common import Auto, Built, Divisors, Extent, Operator, Rtp, Value, field
+from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
 
 # softmax_bf16's vector step: its loops cover only whole steps.
@@ -123,10 +124,12 @@ class Softmax(Operator):
 
     rows: CompileTime[int] = field(array=True)
     cols: CompileTime[int] = field()
-    num_aie_columns: CompileTime[int] = Auto()
-    num_channels: CompileTime[int] = Auto(default=1)
+    num_aie_columns: CompileTime[int] = Auto(domain=widths)
+    num_channels: CompileTime[int] = Auto(default=1, domain=widths)
     block: CompileTime[int] = Auto(
-        domain=Divisors(of=lambda op, dev: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
+        domain=lambda op, dev, t: divisors(
+            t, of=op.cols, step=_VECTOR_STEP, cap=_ROW_CAP
+        )
     )
     streamed: CompileTime[bool] = Auto(domain=(False, True), array=True)
     input_dtype: CompileTime[Any] = field(default=ml_dtypes.bfloat16, repr=False)

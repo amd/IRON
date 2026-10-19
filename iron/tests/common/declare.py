@@ -20,6 +20,7 @@ import pytest
 from aie.iron.device import from_name
 from aie.utils import bfp
 from aie.utils.trace import TraceConfig
+from aie.utils.compile.jit.params import widths
 from ml_dtypes import bfloat16
 
 import iron
@@ -27,14 +28,12 @@ from iron import Profile, Scratchpad
 from iron.common import (
     Auto,
     Built,
-    Divisors,
     Extent,
     Operator,
     Rtp,
     Select,
     Unresolvable,
     Value,
-    Width,
     field,
 )
 from iron.common.declare.field import AutoSpec, ParamSpec
@@ -64,7 +63,7 @@ class MV(Operator):
     M: CompileTime[int] = field()
     K: CompileTime[int] = field()
     num_batches: CompileTime[int | None] = field(default=None)
-    columns: CompileTime[int | None] = Auto()
+    columns: CompileTime[int | None] = Auto(domain=widths)
     tile_out: CompileTime[int] = Auto(default=64)
     vec: CompileTime[int | None] = Auto(repr=False)
     epilogue: CompileTime[str] = field(default="none", array=True)
@@ -117,7 +116,7 @@ def test_a_declaration_prints_what_it_inferred():
             "MV",
             "  fields:   M, K, num_batches, epilogue",
             "  derived:  -",
-            "  tunables: columns, tile_out, vec",
+            "  tunables: columns in widths, tile_out, vec",
             "  resolved: -",
             "  In        A [num_batches, M, K] per [columns]",
             "  In        B [num_batches, K]",
@@ -940,7 +939,7 @@ class Rows(Operator):
 
     rows: CompileTime[int] = field()
     cols: CompileTime[int] = field()
-    lanes: CompileTime[int] = Auto(default=2)
+    lanes: CompileTime[int] = Auto(default=2, domain=widths)
     valid = Extent(rows)
     count = Value(derive=lambda op: op.valid // op.lanes)  # reads the extent
     width = Value(derive=lambda op: op.cols)  # does not
@@ -1059,34 +1058,8 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
 
 
 # --------------------------------------------------------------------------
-# Tuning domains, runtime parameters and shapes through a Select
+# Runtime parameters and shapes through a Select
 # --------------------------------------------------------------------------
-
-
-def test_a_width_is_the_value_and_every_power_of_two_up_to_the_columns():
-    assert Width().values(None, NPU2, 3) == (8, 4, 3, 2, 1)
-    assert Width().values(None, NPU2, 8) == (8, 4, 2, 1)
-
-
-@pytest.mark.parametrize(
-    "domain,expected",
-    [
-        (Divisors(of=64), (64, 32, 16, 8, 4, 2, 1)),
-        (Divisors(of=64, cap=16), (16, 8, 4, 2, 1)),  # the cap bounds above
-        (Divisors(of=64, step=4), (64, 32, 16, 8, 4)),  # the step bounds below
-        (Divisors(of=64, span=1), (16, 8, 4)),  # one octave either side
-        (Divisors(of=24), (8, 4, 2, 1)),  # 16 does not divide 24
-        (Divisors(of=lambda op, dev: dev.cols * 4), (32, 16, 8, 4, 2, 1)),
-    ],
-    ids=["plain", "cap", "step", "span", "not_dividing", "callable"],
-)
-def test_divisors_are_the_value_times_powers_of_two_within_the_bounds(domain, expected):
-    assert domain.values(None, NPU2, 8) == expected
-
-
-def test_divisors_read_a_field_off_the_operator():
-    op = MV(M=1024, K=256)
-    assert Divisors(of=MV.K, cap=64).values(op, NPU2, 32) == (64, 32, 16, 8, 4, 2, 1)
 
 
 def _value(name, **kw):

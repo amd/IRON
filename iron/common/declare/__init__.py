@@ -8,7 +8,6 @@ inference stays a lookup (``Declaration.infer``); a tile's may also be a
 tunable, since inference never reads one.
 """
 
-from .domain import Divisors, Width
 from .field import Auto, Unresolvable, field
 from .shape import Select
 from .operand import Operand
@@ -21,7 +20,6 @@ from .xclbin import Xclbin
 
 __all__ = [
     "Built",
-    "Divisors",
     "Extent",
     "Operand",
     "Operator",
@@ -30,7 +28,6 @@ __all__ = [
     "Rtp",
     "Unresolvable",
     "Value",
-    "Width",
     "Xclbin",
     "Auto",
     "field",

@@ -35,7 +35,6 @@ from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
 from .declaration import Declaration
-from .domain import Domain, Width
 from .field import Auto, ParamSpec, Unresolvable, field
 from .operand import Operand
 from .precision import Precision
@@ -589,59 +588,32 @@ class Operator:
             raise TypeError(f"{type(self).__name__} has no tunable {unknown}")
         return dataclasses.replace(self, **tunables)
 
-    @property
-    def _widths(self) -> dict[str, int | None]:
-        """The tunables searched as a `Width`, and their values: those that
-        declare one, and those a streamed ``per=`` names that declare no
-        other domain.
-        """
-        found = {
-            n: vars(self)[n]
-            for n, domain in self.declaration.domains.items()
-            if isinstance(domain, Width)
-        }
-        for b in self.buffers:
-            for ref in b.per.dims if b.streamed and b.per else ():
-                if (
-                    ParamSpec.of(ref) is not None
-                    and ref.name in self.declaration.tunables
-                    and ref.name not in self.declaration.domains
-                ):
-                    found.setdefault(ref.name, vars(self)[ref.name])
-        return found
-
     def _domains(self, dev) -> dict[str, tuple[Any, ...]]:
         """The values the tuner tries for each tunable it searches, asked of
-        the resolved operator: the field's declared domain where its
-        ``when`` flag holds, a `Width` for one of `widths`, and nothing for
-        any other. A combination the operator cannot resolve at is left
-        out by the tuner. A ``pinned`` tunable is not searched.
+        the resolved operator. A combination the operator cannot resolve at
+        is left out by the tuner. A ``pinned`` tunable is not searched, nor
+        one whose domain gives no values here.
 
         A fixed tuple is the resolved value's own, the resolved one first if
-        it is not already there; an `Enum`-annotated field with no domain is
-        searched over that `Enum`'s members, the resolved one first (GEMM's
-        placement: a hand-found default tried before the rest).
+        it is not already there; an `Enum` is its members, the resolved one
+        first (GEMM's placement: a hand-found default tried before the rest).
         """
-        widths = self._widths
         found = {}
-        for name in dict.fromkeys([*widths, *self.declaration.tunables]):
-            domain = self.declaration.domains.get(
-                name, Width() if name in widths else None
-            )
+        for name in self.declaration.tunables:
+            domain = self.declaration.domains.get(name)
             # A precision is the model's to choose (Graph.precision), not a
             # step's timing: its output is judged against the model's own.
             if name in self.pinned or domain is None or domain is Precision:
                 continue
-            when = domain.when if isinstance(domain, Domain) else None
-            if when is not None and not when(self, dev):
-                continue
             start = vars(self)[name]
             if isinstance(domain, tuple):
-                found[name] = domain if start in domain else (start, *domain)
-            elif isinstance(domain, type):  # an Enum, auto-detected
-                found[name] = (start, *(m for m in domain if m != start))
+                values = domain if start in domain else (start, *domain)
+            elif isinstance(domain, type):
+                values = (start, *(m for m in domain if m != start))
             else:
-                found[name] = domain.values(self, dev, start)
+                values = domain(self, dev, start)
+            if values:
+                found[name] = values
         return found
 
     @property

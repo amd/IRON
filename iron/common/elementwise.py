@@ -37,12 +37,12 @@ from aie.iron import kernels
 from aie.iron.kernels import eltwise
 from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance, Verdict, round_to
+from aie.utils.compile.jit.params import divisors, widths
 from ml_dtypes import bfloat16
 
 from .declare import (
     Auto,
     Built,
-    Divisors,
     Extent,
     Operand,
     Operator,
@@ -255,14 +255,11 @@ class Elementwise(Operator):
     largest line the kernel holds.
     """
 
-    num_aie_columns: CompileTime[int] = Auto(array=True)
-    num_channels: CompileTime[int] = Auto(default=1, array=True)
+    num_aie_columns: CompileTime[int] = Auto(domain=widths, array=True)
+    num_channels: CompileTime[int] = Auto(default=1, domain=widths, array=True)
     tile_size: CompileTime[int] = Auto(
-        domain=Divisors(
-            of=lambda op, dev: op.outputs[0].elements,
-            step=64,
-            cap=lambda op, dev: op.tile_cap,
-            span=3,
+        domain=lambda op, dev, t: divisors(
+            t, of=op.outputs[0].elements, step=64, cap=op.tile_cap, span=3
         ),
         array=True,
     )

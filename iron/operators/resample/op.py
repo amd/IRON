@@ -33,6 +33,7 @@ from aie.iron import (
 )
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import widths
 from ml_dtypes import bfloat16
 
 from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
@@ -248,8 +249,8 @@ class ResampleTaps(Operator):
         ),
         held=False,
     )
-    num_aie_columns: CompileTime[int] = Auto()
-    num_channels: CompileTime[int] = Auto(default=2)
+    num_aie_columns: CompileTime[int] = Auto(domain=widths)
+    num_channels: CompileTime[int] = Auto(default=2, domain=widths)
 
     table = Out(
         chunks,
@@ -856,8 +857,8 @@ class Resample(Operator):
         derive=lambda op: 16 * -(-op.out_height // (16 * SIDE)), held=False
     )
     patch_rows: CompileTime[int] = field(derive=lambda op: op.padded_rows(), held=False)
-    num_aie_columns: CompileTime[int] = Auto()
-    num_channels: CompileTime[int] = Auto(default=2)
+    num_aie_columns: CompileTime[int] = Auto(domain=widths)
+    num_channels: CompileTime[int] = Auto(default=2, domain=widths)
 
     rows = Extent(height)
     columns = Extent(width)

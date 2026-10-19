@@ -32,19 +32,18 @@ from aie.iron.controlflow import range_
 from aie.iron.device import AnyComputeTile, AnyMemTile, AnyShimTile, Device, Tile
 from aie.iron.kernels.linalg import mm_stream_dims
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import divisors, widths
 from ml_dtypes import bfloat16
 
 from iron.common import (
     Auto,
     Built,
-    Divisors,
     Extent,
     Operator,
     Rtp,
     Select,
     Unresolvable,
     Value,
-    Width,
     field,
 )
 from iron.common.testing import Case, Testing
@@ -77,10 +76,11 @@ class SplitColumns:
 
 
 # Whole in seq_pad's 64-row unit, up to the largest whose cores fit L1.
-BLOCK_SIZES = Divisors(
-    of=lambda op, dev: op.kv_len,
-    step=16,
-    cap=lambda op, dev: max(
+def block_sizes(op, dev, start: int) -> tuple[int, ...]:
+    """Return the query blocks to try: whole in seq_pad's 64-row unit, up to
+    the largest whose cores fit L1.
+    """
+    cap = max(
         (
             b
             for b in (16, 32, 64)
@@ -88,8 +88,8 @@ BLOCK_SIZES = Divisors(
             <= dev.core_memory_bytes
         ),
         default=16,
-    ),
-)
+    )
+    return divisors(start, of=op.kv_len, step=16, cap=cap)
 
 
 # At NPU2's eight pipelines; _cases halves them on a narrower array.
@@ -213,9 +213,9 @@ class MHA(Operator):
     scale: CompileTime[float] = field(
         derive=lambda op: float(1 / np.sqrt(op.d)), held=False, array=True
     )
-    B_q: CompileTime[int] = Auto(domain=BLOCK_SIZES, array=True)
+    B_q: CompileTime[int] = Auto(domain=block_sizes, array=True)
     B_kv: CompileTime[int] = Auto(repr=False, init=False)
-    num_pipelines: CompileTime[int] = Auto(default=1, domain=Width(), array=True)
+    num_pipelines: CompileTime[int] = Auto(default=1, domain=widths, array=True)
     # Filled by resolve.
     q_shims: CompileTime[int] = Auto(repr=False, init=False)
     join_rows: CompileTime[int] = Auto(repr=False, init=False)

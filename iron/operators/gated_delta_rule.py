@@ -20,6 +20,7 @@ from aie.iron import (
 )
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import widths
 from ml_dtypes import bfloat16
 
 from iron.common import Auto, Built, Extent, Operator, Rtp, Unresolvable, Value, field
@@ -91,7 +92,7 @@ class GatedDeltaRule(Operator):
     v_heads: CompileTime[int] = field(array=True)
     key_dim: CompileTime[int] = field(array=True)
     value_dim: CompileTime[int] = field(array=True)
-    columns: CompileTime[int] = Auto()
+    columns: CompileTime[int] = Auto(domain=widths)
     width: CompileTime[int] = field(
         derive=lambda op: 2 * op.k_heads * op.key_dim + op.v_heads * op.value_dim,
         repr=False,
