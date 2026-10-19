@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A full-ELF build must not leave its MLIR in the standalone operator's slot.
+"""A design links the same kernel objects built alone as composed.
 
 A full-ELF build once renamed each design's kernels by position:
 
@@ -57,7 +57,7 @@ def _linked_objects(operator):
     return sorted(set(re.findall(r'link_with\s*=\s*"([^"]+)"', mlir)))
 
 
-def test_full_elf_build_does_not_poison_the_standalone_mlir():
+def test_a_design_links_the_same_objects_alone_or_composed():
     """Build composed, then standalone, and check both name the same objects.
 
     Order matters: the standalone build has to come second, since it is the
