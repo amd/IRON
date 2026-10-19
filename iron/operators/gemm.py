@@ -111,9 +111,10 @@ class GEMM(Operator):
     across rows of cores, B split across columns and broadcast across rows,
     C joined across rows and split across columns.
 
-    Every GEMM but ``F.linear``'s weight GEMM (``flm.ProjectionGEMM``) is
-    this one: Precision.HIGHEST, an activation times an activation,
-    convolutions, integer types and f32 output.
+    ``flm.ProjectionGEMM`` is ``F.linear``'s GEMM for a weight operand over
+    two or more rows at MEDIUM or HIGH; every other GEMM is this one:
+    Precision.HIGHEST, an activation times an activation, convolutions,
+    integer types and f32 output.
     """
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A,)))

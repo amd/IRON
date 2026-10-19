@@ -134,8 +134,9 @@ class ProjectionGEMM(Operator):
     ``tile_ma`` and ``m_chunk`` are filled from the device's L1.
 
     It is ``F.linear``'s GEMM for a weight operand over two or more rows at
-    MEDIUM or HIGH; every other GEMM is ``iron.operators.GEMM``, which
-    ``at_precision(Precision.HIGHEST)`` hands over to.
+    MEDIUM or HIGH; every other GEMM is ``iron.operators.GEMM`` (HIGHEST,
+    which ``at_precision(Precision.HIGHEST)`` hands over to, an activation
+    times an activation, convolutions, integer types and f32 output).
     """
 
     M: int = param()
