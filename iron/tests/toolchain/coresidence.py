@@ -313,7 +313,8 @@ def test_sequence_rejects_a_stray_operator():
 
 
 def test_a_pack_refuses_two_cores_on_one_tile():
-    # Two GEMM arrays, each with its cores pinned from tile (0, 2).
+    # Two GEMM arrays, each with its cores pinned from tile (0, 2); they
+    # differ in b_col_maj only so that they are two distinct designs.
     def gemm(b_col_maj):
         op = GEMM(
             M=256,
