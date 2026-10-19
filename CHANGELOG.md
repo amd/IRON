@@ -222,7 +222,7 @@ public API adds its entry under Unreleased.
   `(op, dev, start) -> tuple`, such as mlir-aie's `widths` and `divisors`,
   which replace `Width` and `Divisors`; a tunable is searched only where its
   domain says so, a `per=` count or an `Enum` included.
-- `Call` replaces `DecodeStep`: one call's values, built once in
+- `Call` replaces `DecodeStep`: one call's values, keyword-only, built once in
   `CausalLM.body` and handed whole to `forward(x, call)`, `Rope.rows(call)`,
   `KVCache.attend(call, ...)` and `Checkpoints.at(call)`, in place of their
   keyword lists. LongRoPE's stacked table and `table_start` moved out of

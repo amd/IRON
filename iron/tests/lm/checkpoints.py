@@ -63,7 +63,12 @@ class Window(iron.Graph):
         prompt = x is not None
         first = C - (K - 1)
         flat = self.window.reshape(2 * C, W)
-        call = Call(prompt, start if prompt else position, rows, position)
+        call = Call(
+            prompt=prompt,
+            start=start if prompt else position,
+            rows=rows,
+            position=position,
+        )
         read, write = self.tail.at(call)
         Copy.step(read, flat[first:C])
         if not prompt:

@@ -38,7 +38,7 @@ from .session import Session
 logger = logging.getLogger(__name__)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(kw_only=True)
 class Call:
     """One call's values, built once in ``body`` and read by every module
     that keeps memory from call to call (``KVCache``, ``Checkpoints``,
@@ -198,18 +198,28 @@ class CausalLM(Model):
         rows: Scratchpad[np.int32],
         rope_start: Scratchpad[np.int32],
     ):
+        at = dict(rows=rows, position=position, rope_start=rope_start)
         if ids is not None:
             x = self.lookup(ids[:rows])
-            return self.forward(x, Call(True, start, rows, position, rope_start))
+            return self.forward(x, Call(prompt=True, start=start, **at))
         x = self.lookup(token).reshape(1, self.config.hidden_size)
-        return self.forward(x, Call(False, position, rows, position, rope_start))
+        return self.forward(x, Call(prompt=False, start=position, **at))
 
     def from_rows(self, x, *, token, position, start, rows, rope_start):
         """A prompt chunk's call on its embedding rows ``x``, bounded to
         ``rows``, in place of its ids' lookup; ``token`` is the decode
         step's, unread here.
         """
-        return self.forward(x, Call(True, start, rows, position, rope_start))
+        return self.forward(
+            x,
+            Call(
+                prompt=True,
+                start=start,
+                rows=rows,
+                position=position,
+                rope_start=rope_start,
+            ),
+        )
 
     def forward(self, x, call: Call):
         """The layers, the head and the draw over ``x``, the rows ``call``
