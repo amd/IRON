@@ -32,11 +32,6 @@ def test_a_decoder_is_timed_at_halving_contexts_up_to_the_last():
         assert rows.shape[0] == 1024 and rows.any()
 
 
-def test_a_context_past_max_seq_len_is_refused():
-    with pytest.raises(ValueError, match="context 512 is past max_seq_len 256"):
-        tune.calls(small(), 5, 3, 512, 3, Sampler())
-
-
 def test_an_application_s_model_is_the_one_naming_its_calls():
     assert tune.application_model("llama") is Llama
     assert tune.application_model("embedding_gemma2") is Multimodal

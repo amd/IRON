@@ -109,13 +109,10 @@ def calls(
     Sample on the draw rows ``sampler`` gives. Each is timed over
     ``contexts`` up to ``context``, ``points`` of them: the decode step at
     their last position, the prompt chunk as the whole chunk ending there.
-
-    Raises:
-        ValueError: ``context`` is past the model's ``max_seq_len``.
+    ``context`` is whole prompt chunks within ``max_seq_len``
+    (``CausalLM.tune_calls`` checks it).
     """
     L, C = model.config.max_seq_len, model.config.prefill_chunk
-    if context > L:
-        raise ValueError(f"context {context} is past max_seq_len {L}")
     decode_shapes, prompt_shapes = model.shapes()
     versions = [
         (
