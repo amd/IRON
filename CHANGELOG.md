@@ -12,8 +12,8 @@ public API adds its entry under Unreleased.
 
 ### Added
 
-- `CausalLM.rope_start(n, begin)`: the RoPE table row a prompt chunk reads
-  first, which a caller writing `rope_start` itself passes.
+- `CausalLM.rope_row(n, begin)`: the RoPE table row a prompt chunk reads
+  first, which a caller writing the `rope_start` value itself passes.
 - `SandwichLayer` (Gemma's: each block's output normed again before its
   residual) and `PleLayer` (Gemma 4's: a per-layer input gated in, the sum
   scaled by `layer_scalar`). EmbeddingGemma 2's text and vision layers are

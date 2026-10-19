@@ -176,7 +176,7 @@ class Session:
                 position=end - 1,
                 start=begin,
                 rows=end - begin,
-                rope_start=model.rope_start(n, begin),
+                rope_start=model.rope_row(n, begin),
             )
             placed = np.isin(tokens[begin:end], placeholders).any()
             if model.placed_chunk is None or not placed:

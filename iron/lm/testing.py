@@ -353,7 +353,7 @@ def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, reco
         position=begin + rows - 1,
         start=begin,
         rows=rows,
-        rope_start=model.rope_start(begin + rows, begin),
+        rope_start=model.rope_row(begin + rows, begin),
     )
     with _fill_caches(model, len(tokens), begin):
         start = time.perf_counter()

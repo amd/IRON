@@ -127,7 +127,13 @@ def calls(
         ),
         (
             prompt_shapes,
-            dict(position=C - 1, token=token, start=0, rows=C, rope_start=0),
+            dict(
+                position=C - 1,
+                token=token,
+                start=0,
+                rows=C,
+                rope_start=model.rope_row(C, 0),
+            ),
             [
                 Point(
                     w,
@@ -136,7 +142,7 @@ def calls(
                         token=token,
                         start=c - C,
                         rows=C,
-                        rope_start=c - C,
+                        rope_start=model.rope_row(c, c - C),
                     ),
                 )
                 for w, c in contexts(context, points, C)

@@ -257,7 +257,7 @@ class CausalLM(Model):
         """``rotary_emb``, the RoPE table every layer holds: ``Rope``'s."""
         return Rope(config)
 
-    def rope_start(self, n: int, begin: int) -> int:
+    def rope_row(self, n: int, begin: int) -> int:
         """The RoPE table row a chunk from ``begin`` of an ``n``-token prompt
         reads first (``Rope.table_start``).
         """
