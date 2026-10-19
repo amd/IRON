@@ -97,7 +97,9 @@ def test_a_per_layer_slice_is_drawn_in_its_layer():
     drawn = in_layer(t, 1)
     shared = "text.language_model.ple.per_layer_model_projection.weight"
     sliced = [
-        i for i, s in enumerate(t.steps) if any(h.buffer.name == shared for h in s.inputs)
+        i
+        for i, s in enumerate(t.steps)
+        if any(h.buffer.name == shared for h in s.inputs)
     ]
     projection, norm = sliced[1], sliced[1] + 1
     assert {projection, norm} <= drawn
