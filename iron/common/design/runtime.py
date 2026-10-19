@@ -10,6 +10,7 @@ from math import prod
 from typing import Any
 
 from aie.dialects.aie import shim_dma_allocation
+from aie.dialects.aiex import _shim_dims
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
@@ -29,7 +30,7 @@ from aie.iron import (
 from aie.iron.runtime.dmatask import emit_shim_transfer
 
 from ..declare import Built, Operator, Value
-from ..declare.operand import Operand, active_runtime, slots
+from ..declare.operand import Operand, active_runtime
 
 
 class OperatorRuntime(Runtime):
@@ -215,7 +216,7 @@ class OperatorRuntime(Runtime):
                 f"{length_parameter.name} is a DispatchTime value; a per-call "
                 f"length is a scratchpad word patched into the descriptor"
             )
-        sizes, strides = slots(tap.sizes, tap.strides)
+        _, sizes, strides = _shim_dims(tap)
         dim = scale = None
         if length_parameter is not None:
             # A patched descriptor's length ends at its outermost dimension

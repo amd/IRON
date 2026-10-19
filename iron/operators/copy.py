@@ -11,6 +11,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 from aie.dialects.aie import DMAChannelDir, WireBundle
+from aie.dialects.aiex import _shim_dims
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     DmaEndpoint,
@@ -31,7 +32,6 @@ from aie.utils.compile.jit.params import divisors, param, per_call, tunable, wid
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operand, Operator, Rtp, Unresolvable
-from iron.common.declare.operand import slots
 from iron.common.testing import Case, Testing
 
 # kDDRAIEAddrOffset (TxnEncoding.h)
@@ -810,7 +810,7 @@ class Copy(Operator):
                     f"Copy: {tap} does not fit one descriptor per channel, which a "
                     f"bounded axis needs (its size is patched in place)"
                 )
-            sizes, _ = slots(placed.sizes, placed.strides)
+            _, sizes, _ = _shim_dims(placed)
             out.append((placed, prod(sizes[(1 if on_d2 else dim) + 1 :])))
         return out
 

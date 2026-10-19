@@ -12,11 +12,11 @@ from typing import Annotated, Any, TypeVar
 
 import aie.utils as aie_utils
 import numpy as np
+from aie.dialects.aiex import _shim_dims
 from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from ..declare.operand import slots
 from ..declare.operator import graph_recorder
 from ..image.packaging import Kind
 from ..image.step import BufferRef
@@ -462,7 +462,7 @@ class Handle:
             return self._view(tap, shape, None, bounds or {})
         dev = aie_utils.get_current_device()
         for walk in walks:
-            sizes, strides = slots(walk.sizes, walk.strides)
+            _, sizes, strides = _shim_dims(walk)
             padded = TensorAccessPattern(walk.tensor_dims, walk.offset, sizes, strides)
             if (
                 walk.rank != 4

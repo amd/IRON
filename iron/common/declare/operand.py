@@ -8,12 +8,12 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from aie.dialects.aie import DMAChannelDir
+from aie.dialects.aiex import _shim_dims
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import DmaEndpoint
 from aie.utils import bfp
@@ -30,31 +30,6 @@ if TYPE_CHECKING:
 active_runtime: ContextVar[OperatorRuntime | None] = ContextVar(
     "active_runtime", default=None
 )
-
-
-def slots(sizes: Sequence[Any], strides: Sequence[Any]) -> tuple[list, list]:
-    """``sizes`` and ``strides`` padded to a shim descriptor's four
-    dimensions, as the shim lowering pads them.
-
-    Unit dimensions go in front, except after a leading re-read: a stride
-    of 0 is only encodable in the iteration dimension.
-
-    Returns:
-        The sizes and strides, outermost first.
-    """
-    sizes, strides = list(sizes), list(strides)
-    reread = (
-        2 <= len(sizes) < 4
-        and isinstance(sizes[0], (int, np.integer))
-        and sizes[0] > 1
-        and isinstance(strides[0], (int, np.integer))
-        and strides[0] == 0
-    )
-    at = 1 if reread else 0
-    while len(sizes) < 4:
-        sizes.insert(at, 1)
-        strides.insert(at, 0)
-    return sizes, strides
 
 
 class Operand:
@@ -312,9 +287,9 @@ class Operand:
     def fits(self, tap: TensorAccessPattern) -> bool:
         """Whether one buffer descriptor of a lane's shim tile holds
         ``tap``, a pattern over this operand, padded as the shim lowering
-        pads it (``slots``).
+        pads it (mlir-aie's ``aiex._shim_dims``).
         """
-        sizes, strides = slots(tap.sizes, tap.strides)
+        _, sizes, strides = _shim_dims(tap)
         padded = TensorAccessPattern(tap.tensor_dims, tap.offset, sizes, strides)
         # Every shim tile's descriptor is alike; column 0's stands for a lane's.
         return self.op.dev.dma_bd_fits(0, 0, padded, self.dtype)
