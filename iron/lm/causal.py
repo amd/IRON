@@ -124,13 +124,15 @@ class CausalConv1d(iron.Graph):
     scratch ``F.causal_conv1d`` stages a call in (``window``, ``tail``).
     """
 
+    window: State
+    tail: State
+
     def __init__(self, c, channels: int, kernel: int, bias: bool = False):
         self.weight = iron.param(channels, 1, kernel)
         self.bias = iron.param(channels) if bias else None
         self.state = Checkpoints.of(
             (kernel - 1, channels), c.max_seq_len, c.prefill_chunk
         )
-        self.window = self.tail = None
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
