@@ -5,8 +5,8 @@
 
 """Ministral 3's text decoder on the shared decoder (``iron.lm``), its shape
 that of Hugging Face's ``ministral3`` text model. The released checkpoints
-are Mistral 3's vision-language model, its text config and weights nested
-under it, which nothing here reads yet.
+are Mistral 3's vision-language model, the text config and weights nested
+under it: both are read here, the vision tower left unread.
 
 Ministral 3 is Llama's layer under YaRN's RoPE (``YarnRopeScaling``), its
 queries scaled by position past the context it was trained at: by ``1 +
@@ -17,7 +17,10 @@ queries turn by a second table, the first one times that scale
 """
 
 import dataclasses
+import json
 import math
+import tempfile
+from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -26,6 +29,7 @@ import iron
 import iron.functional as F
 from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
 from iron.lm.blocks import Rope
+from iron.lm.checkpoint import leaves
 
 
 @dataclasses.dataclass(frozen=True)
@@ -120,6 +124,21 @@ class Ministral3Config(DecoderConfig):
             scale = self.rope_scaling.cos_sin_scale()
             object.__setattr__(self, "rope_attention_scaling", scale)
 
+    @classmethod
+    def from_checkpoint(cls, path) -> "Ministral3Config":
+        """``DecoderConfig.from_checkpoint``, from the ``text_config`` of a
+        Mistral 3 checkpoint's ``config.json`` where it has one.
+        """
+        path = Path(path)
+        if path.name != "config.json":
+            path = (path if path.is_dir() else path.parent) / "config.json"
+        text = json.loads(path.read_text()).get("text_config")
+        if text is None:
+            return super().from_checkpoint(path)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text(json.dumps(text))
+            return super().from_checkpoint(d)
+
     def to_json(self) -> dict:
         out = super().to_json()
         # rope_scaling's dict replaced the one rope_theta was written into.
@@ -187,16 +206,50 @@ class Ministral3Layer(DecoderLayer):
         self.self_attn = Ministral3Attention(c, i)
 
 
+def text_weights(weights):
+    """The text decoder's tensors of ``weights`` at ``model.*`` and
+    ``lm_head.*``: a Mistral 3 checkpoint holds them at
+    ``language_model.model.*`` and ``language_model.lm_head.*`` as
+    transformers 4 saved it, or ``model.language_model.*`` and
+    ``lm_head.*`` as transformers 5 does. A text checkpoint is returned as
+    it is.
+
+    Raises:
+        ValueError: The checkpoint is FP8 (a ``weight_scale_inv``).
+    """
+    named = weights if isinstance(weights, dict) else dict(leaves(weights))
+    if any(n.endswith("weight_scale_inv") for n in named):
+        raise ValueError(
+            "Ministral3: an FP8 checkpoint (weight_scale_inv) is not read; "
+            "take a Base (bf16) one"
+        )
+    if any(n.startswith("model.language_model.") for n in named):
+        moves = {"model.language_model.": "model.", "lm_head.": "lm_head."}
+    elif any(n.startswith("language_model.") for n in named):
+        moves = {
+            "language_model.model.": "model.",
+            "language_model.lm_head.": "lm_head.",
+        }
+    else:
+        return weights
+    return {
+        new + n[len(old) :]: t
+        for n, t in named.items()
+        for old, new in moves.items()
+        if n.startswith(old)
+    }
+
+
 class Ministral3(CausalLM):
     """Ministral 3's text decoder on ``config``'s shape and a checkpoint's
-    ``weights``, its (untied) output head ``lm_head``.
+    ``weights`` (``text_weights``), its (untied) output head ``lm_head``.
     """
 
     config = Ministral3Config
     layer_class = Ministral3Layer
 
     def __init__(self, config: Ministral3Config, weights):
-        super().__init__(config, weights)
+        super().__init__(config, text_weights(weights))
         if config.llama_4_scaling_beta:
             rope = QueryRope(config)
             for layer in self.layers:

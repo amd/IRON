@@ -9,6 +9,7 @@ at 64 positions, so YaRN stretches it and a query past 64 is scaled.
 """
 
 import dataclasses
+import json
 import math
 
 import numpy as np
@@ -19,7 +20,9 @@ from iron.applications.ministral3.model import (
     Ministral3Config,
     YarnRopeScaling,
 )
+from iron.lm.checkpoint import leaves
 from iron.lm.testing import assert_close
+from iron.tests.common.llama_model import checkpoint
 from iron.tests.common.llama_reference import Decoder
 
 #: Ministral 3's proportions at toy size: GQA, a head_dim of its own, YaRN
@@ -70,3 +73,40 @@ def test_yarn_scales_cos_and_sin_by_its_attention_factor_else_by_its_factor():
 def test_a_query_temperature_without_yarn_is_refused():
     with pytest.raises(ValueError, match="there is no YaRN"):
         dataclasses.replace(TOY, rope_scaling=None)
+
+
+#: Mistral 3's text decoder, as transformers 4 and 5 nest it.
+NESTED = {
+    "transformers 4": ("language_model.model.", "language_model.lm_head."),
+    "transformers 5": ("model.language_model.", "lm_head."),
+}
+
+
+@pytest.mark.parametrize("saved", NESTED)
+def test_a_mistral_3_checkpoint_reads_its_text_decoder(saved, npu2):
+    model, head = NESTED[saved]
+    named = {
+        (head + n[8:] if n.startswith("lm_head.") else model + n[6:]): s
+        for n, s in TestMinistral3.names().items()
+    }
+    named["model.vision_tower.patch_conv.weight"] = (8, 3, 4, 4)
+    tree = checkpoint(TOY, named).tree("random", 0)
+    want = dict(leaves(tree))
+    got = Ministral3(TOY, tree)
+    assert got.lm_head.weight is want[head + "weight"]
+    assert got.model.norm.weight is want[model + "norm.weight"]
+
+
+def test_an_fp8_checkpoint_is_refused(npu2):
+    named = TestMinistral3.names() | {"model.norm.weight_scale_inv": (1,)}
+    with pytest.raises(ValueError, match="FP8 checkpoint"):
+        Ministral3(TOY, checkpoint(TOY, named).tree("random", 0))
+
+
+def test_the_config_reads_from_a_mistral_3_text_config(tmp_path):
+    text = TOY.to_json()
+    (tmp_path / "config.json").write_text(json.dumps(text))
+    flat = Ministral3Config.from_checkpoint(tmp_path)
+    nested = {"model_type": "mistral3", "text_config": text, "vision_config": {}}
+    (tmp_path / "config.json").write_text(json.dumps(nested))
+    assert Ministral3Config.from_checkpoint(tmp_path) == flat
