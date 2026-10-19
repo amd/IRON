@@ -14,4 +14,4 @@ class ReLU(UnaryElementwise):
     test = Testing(Sweep(), draw=lambda op: dict(centered=(op.x,)))  # both signs
 
     def kernel(self):
-        return eltwise.relu_sized(self.tile_size)
+        return eltwise.relu(self.tile_size)

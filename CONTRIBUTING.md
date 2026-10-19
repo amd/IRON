@@ -105,7 +105,7 @@ class ReLU(UnaryElementwise):
     test = Testing(Sweep(), draw=lambda op: dict(centered=(op.x,)))
 
     def kernel(self):
-        return eltwise.relu_sized(self.tile_size)
+        return eltwise.relu(self.tile_size)
 ```
 
 1. **Kernel.** If no factory in mlir-aie's `aie.iron.kernels` computes
@@ -113,7 +113,7 @@ class ReLU(UnaryElementwise):
    specifics in `*_aie2.h` / `*_aie2p.h`) and a factory beside the others
    in `python/iron/kernels/<family>.py`. The factory's `KernelContract`
    carries the numpy reference and the tolerance, so the operator needs
-   neither (see `relu_sized` in `eltwise.py`), and it checks the vector
+   neither (see `relu` in `eltwise.py`), and it checks the vector
    alignment its tile needs. IRON sees the factory once `requirements.txt`
    pins an mlir-aie wheel that has it.
 2. **Operator.** Subclass the closest family (`UnaryElementwise`,

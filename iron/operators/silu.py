@@ -19,4 +19,4 @@ class SiLU(UnaryElementwise):
 
     def kernel(self):
         # vtanh's error was most of Llama 3.2 3B's divergence; the table costs nothing.
-        return activation.silu_sized(self.tile_size, use_lut=True)
+        return activation.silu(self.tile_size, use_lut=True)
