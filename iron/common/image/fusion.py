@@ -19,7 +19,8 @@ from typing import NamedTuple
 
 import numpy as np
 from aie import ir
-from aie.dialects import arith, memref
+from aie.dialects import memref
+from aie.extras.dialects.arith import constant
 from aie.helpers.npdtypes import np_ndarray_type_get_dtype, np_ndarray_type_get_shape
 from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import DeviceConfiguration, Program, Runtime
@@ -252,7 +253,7 @@ class Fusion:
                                     memref.view(
                                         np_ndarray_type_to_memref_type(view_type),
                                         held[kind].op,
-                                        arith.constant(ir.IndexType.get(), offset),
+                                        constant(offset, index=True),
                                         [],
                                     )
                                     for kind, offset, view_type in views
