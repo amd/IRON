@@ -208,6 +208,12 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `Handle` is a frozen record of `buffer` (a `Buffer`, which every handle
+  on it shares), `shape`, `dtype`, `valid` (was `bounds`) and `layout`:
+  `Dense(offset)`, `Strided(tap, offset, repeat, length, window)` or
+  `Gather(rows)`, in place of `parent`, `start`, `tap`, `index_by`,
+  `gather_by`, `repeat`, `length` and `window`. `Handle.whole(shape, dtype,
+  name, role)` makes a new buffer's handle.
 - Image composition is named for what it makes, so "fused" means only
   kernel fusion: `Composition` in `iron.common.image.compose` (was `Fusion`
   in `fusion`), `FullELF` and `PerStep` in `iron.common.image.link` (were

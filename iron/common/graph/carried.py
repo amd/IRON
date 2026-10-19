@@ -23,7 +23,7 @@ from aie.helpers.taplib import Affine
 
 from ...operators.emit import ROW, UNCLAMPED, Emit
 from ..image.artifacts import Parameter
-from .handle import Handle, State
+from .handle import Dense, Handle, State
 from .record import Recording, Step
 
 if TYPE_CHECKING:
@@ -72,8 +72,8 @@ def attach_emit(
                 )
             _move(recording, nxt, planes, n + j)
     program = State((slots + n, ROW), np.int32, PROGRAM)
-    image = Handle((slots,), np.int32, IMAGE, "intermediate")
-    current = Handle((n,), np.int32, CARRY, planes.role, planes, 0)
+    image = Handle.whole((slots,), np.int32, IMAGE, "intermediate")
+    current = Handle(planes.buffer, (n,), np.int32, {}, Dense(0))
     inputs = [_resident(recording, program), planes]
     recording.steps.append(
         Step(
@@ -88,25 +88,33 @@ def attach_emit(
 
 
 def _resident(recording: Recording, state: State) -> Handle:
-    handle = Handle(state.shape, state.dtype, state.name, "state")
+    handle = Handle.whole(state.shape, state.dtype, state.name, "state")
     recording.states[id(state)] = (state, handle)
     recording.pinned[handle.name] = handle.nbytes
     return handle
 
 
-def _move(recording: Recording, handle: Handle, parent: Handle, start: int) -> None:
-    old = handle.name
-    views = [handle] + [
-        h for s in recording.steps for h in s.slots + s.inputs + s.outputs
-    ]
-    for view in views:
-        if view.parent is not None and view.parent.name == old:
+def _move(recording: Recording, handle: Handle, planes: Handle, start: int) -> None:
+    """Put ``handle``'s buffer, a carried element, at element ``start`` of
+    ``planes``'s, in every step and in the carry.
+    """
+    old = handle.buffer
+
+    def moved(h):
+        if not isinstance(h, Handle) or h.buffer is not old:
+            return h
+        if h.layout != Dense():
             raise NotImplementedError(
-                f"{recording.name}: {view!r} slices the carried element {old!r}"
+                f"{recording.name}: {h!r} slices the carried element {old.name!r}"
             )
-        if view.parent is None and view.name == old:
-            view.parent, view.start = parent, start
-    recording.outputs = [h for h in recording.outputs if h.name != parent.name]
+        return dataclasses.replace(h, buffer=planes.buffer, layout=Dense(start))
+
+    for s in recording.steps:
+        s.slots, s.inputs, s.outputs = (
+            [moved(h) for h in hs] for hs in (s.slots, s.inputs, s.outputs)
+        )
+    recording.carry = {k: moved(v) for k, v in recording.carry.items()}
+    recording.outputs = [h for h in recording.outputs if h.buffer is not old]
 
 
 def compose(

@@ -180,7 +180,7 @@ def causal_conv1d(x, taps, state: ConvState):
     flat = window.reshape(2 * C, x.shape[1])
     first = C - (K - 1)
     flat[first:C] = read
-    rows = x.bounds.get(0)
+    rows = x.valid.get(0)
     if rows is None:
         flat[C] = x.reshape(x.shape[1])
         y = x * taps[K - 1]

@@ -22,7 +22,16 @@ from ..declare.precision import Precision
 from ..declare.profile import Profile
 from ..image.packaging import Kind
 from ..image.step import BufferRef, SequenceStep
-from .handle import Handle, State, Weight, _rescale_bounds, is_operand
+from .handle import (
+    Dense,
+    Gather,
+    Handle,
+    State,
+    Strided,
+    Weight,
+    _rescale_bounds,
+    is_operand,
+)
 
 
 @dataclasses.dataclass
@@ -95,14 +104,6 @@ class Limit:
         return str(self.expression) + ("" if self.plus is None else f" + {self.plus}")
 
 
-def _unbounded(h: Handle) -> Handle:
-    if not h.bounds:
-        return h
-    return Handle(
-        h.shape, h.dtype, h.name, h.role, h.parent, h.start, h.tap, h.index_by
-    )
-
-
 def _take_views(cls, operands, kwargs, values):
     """Hand each view operand's pattern to the operator (``cls.accept_views``)
     and stand its parent in.
@@ -114,11 +115,11 @@ def _take_views(cls, operands, kwargs, values):
     them itself, and its ``bounds`` hold the others.
     """
     given = operands[: len(cls.accept_views)]
-    held = next((h for h in given if h.bounds), None)
-    if held is not None and len(held.bounds) == 1:
-        ((axis, count),) = held.bounds.items()
+    held = next((h for h in given if h.valid), None)
+    if held is not None and len(held.valid) == 1:
+        ((axis, count),) = held.valid.items()
         for i, (param, _) in enumerate(cls.accept_views):
-            if i < len(given) and given[i].bounds:
+            if i < len(given) and given[i].valid:
                 continue
             if i >= len(given):
                 kwargs.setdefault(param, TensorAccessPattern.full(held.shape))
@@ -131,38 +132,42 @@ def _take_views(cls, operands, kwargs, values):
             values[f"{param}_valid"] = count
     out = []
     for i, h in enumerate(operands):
-        if i < len(cls.accept_views):
-            param, offset_member = cls.accept_views[i]
-            tap = TensorAccessPattern.full(h.shape or (1,)) if h.tap is None else h.tap
-            kwargs.setdefault(param, tap)
-            if h.repeat is not None or h.length is not None:
-                if i:
-                    raise ValueError(
-                        f"{h!r}: a per-call repeat or length is a source's"
-                    )
-                if h.length is not None:
-                    kwargs.setdefault(f"{param}_bound", 1)
-                    values[f"{param}_valid"] = h.length
-                if h.repeat is not None:
-                    kwargs.setdefault(f"{param}_repeat", True)
-                    for k, r in enumerate(h.repeat):
-                        values[f"{param}_repeats{k}"] = r - 1
-            elif h.bounds:
-                (axis, count), *more = h.bounds.items()
-                if more:
-                    raise ValueError(f"{h!r}: a copy takes one bounded axis")
-                kwargs.setdefault(f"{param}_bound", axis)
-                values[f"{param}_valid"] = count
-            if h.index_by is not None:
-                values[offset_member] = h.index_by
-            out.append(_unbounded(h.parent if h.tap is not None else h))
-        elif h.tap is not None:
-            raise TypeError(
-                f"{cls.__name__} takes a contiguous operand at position {i}, not "
-                f"the view {h!r}; Copy takes views"
-            )
-        else:
+        view = h.layout if isinstance(h.layout, Strided) else None
+        if i >= len(cls.accept_views):
+            if view is not None:
+                raise TypeError(
+                    f"{cls.__name__} takes a contiguous operand at position {i}, "
+                    f"not the view {h!r}; Copy takes views"
+                )
             out.append(h)
+            continue
+        param, offset_member = cls.accept_views[i]
+        tap = TensorAccessPattern.full(h.shape or (1,)) if view is None else view.tap
+        kwargs.setdefault(param, tap)
+        if view is not None and (view.repeat is not None or view.length is not None):
+            if i:
+                raise ValueError(f"{h!r}: a per-call repeat or length is a source's")
+            if view.length is not None:
+                kwargs.setdefault(f"{param}_bound", 1)
+                values[f"{param}_valid"] = view.length
+            if view.repeat is not None:
+                kwargs.setdefault(f"{param}_repeat", True)
+                for k, r in enumerate(view.repeat):
+                    values[f"{param}_repeats{k}"] = r - 1
+        elif h.valid:
+            (axis, count), *more = h.valid.items()
+            if more:
+                raise ValueError(f"{h!r}: a copy takes one bounded axis")
+            kwargs.setdefault(f"{param}_bound", axis)
+            values[f"{param}_valid"] = count
+        if view is None:
+            out.append(dataclasses.replace(h, valid={}))
+            continue
+        if view.offset is not None:
+            values[offset_member] = view.offset
+        # What the pattern walks: the whole buffer, in the pattern's shape.
+        walked = view.tap[0] if isinstance(view.tap, tuple) else view.tap
+        out.append(Handle(h.buffer, walked.tensor_dims, h.dtype))
     return out
 
 
@@ -254,7 +259,7 @@ class Recording:
             for ref in step.buffers:
                 root = roots.setdefault(
                     ref.root,
-                    Handle(
+                    Handle.whole(
                         (pinned.get(ref.root, 0),), np.uint8, ref.root, "intermediate"
                     ),
                 )
@@ -262,9 +267,7 @@ class Recording:
                     slots.append(root)
                     continue
                 slots.append(
-                    Handle(
-                        (ref.nbytes,), np.uint8, ref.root, root.role, root, ref.start
-                    )
+                    Handle(root.buffer, (ref.nbytes,), np.uint8, {}, Dense(ref.start))
                 )
             declared = list(zip(slots, step.op.buffers))
             recording.append(
@@ -278,8 +281,8 @@ class Recording:
         return cls(
             name,
             recording,
-            [Handle((), np.uint8, n, "input") for n in inputs],
-            [Handle((), np.uint8, n, "output") for n in outputs],
+            [Handle.whole((), np.uint8, n, "input") for n in inputs],
+            [Handle.whole((), np.uint8, n, "output") for n in outputs],
             pinned,
             feedback=list(feedback),
         )
@@ -364,13 +367,13 @@ class Recording:
         def view(h: Handle) -> np.ndarray:
             ref = h.ref()
             if ref.root not in buffers:
-                buffers[ref.root] = np.zeros(h.root.nbytes, np.uint8)
+                buffers[ref.root] = np.zeros(h.buffer.nbytes, np.uint8)
             raw = buffers[ref.root][ref.start : ref.start + h.nbytes]
             return raw if bfp.is_bfp(h.dtype) else raw.view(h.dtype).reshape(h.shape)
 
         def valid(h: Handle) -> tuple:
             key = [slice(None)] * len(h.shape)
-            for axis, count in h.bounds.items():
+            for axis, count in h.valid.items():
                 key[axis] = slice(count.evaluate(values))
             return tuple(key)
 
@@ -514,9 +517,9 @@ class Recorder:
 
     def operand(self, x) -> Handle:
         if isinstance(x, Handle):
-            if x.window is not None:
+            if isinstance(x.layout, Strided) and x.layout.window is not None:
                 # A run from a per-call start taken whole ends inside its axis.
-                _, start, width, n = x.window
+                _, start, width, n = x.layout.window
                 self.limit(start + width, 0, n + 1, x)
             return x
         if isinstance(x, State):
@@ -528,7 +531,7 @@ class Recorder:
                     or self.fresh(f"state{len(self.states)}")
                 )
                 self._taken.add(x.name)
-                self.states[key] = (x, Handle(x.shape, x.dtype, x.name, "state"))
+                self.states[key] = (x, Handle.whole(x.shape, x.dtype, x.name, "state"))
             return self.states[key][1]
         if is_operand(x):
             array = x.array if isinstance(x, Weight) else x
@@ -542,7 +545,9 @@ class Recorder:
                 name = name or self.fresh(f"w{len(self.weights)}")
                 self.weights[key] = (
                     array,
-                    Handle(array.shape, np.dtype(array.dtype).type, name, "weight"),
+                    Handle.whole(
+                        array.shape, np.dtype(array.dtype).type, name, "weight"
+                    ),
                 )
             return self.weights[key][1]
         raise TypeError(f"{x!r} is not a graph handle, a state, or a tensor")
@@ -651,7 +656,7 @@ class Recorder:
             for k in list(kwargs)
             if isinstance(kwargs[k], (PerCall, Affine))
         }
-        if any(h.gather_by is not None for h in operands):
+        if any(isinstance(h.layout, Gather) for h in operands):
             return self._gather(target, operands, kwargs or values)
         called = operands
         if isinstance(target, type):
@@ -689,7 +694,10 @@ class Recorder:
         them into its template first.
         """
         view = operands[0]
-        ids, table = view.gather_by, view.parent
+        assert isinstance(view.layout, Gather), "a gather"
+        ids, row = view.layout.rows, math.prod(view.shape[1:])
+        rows = view.buffer.nbytes // (row * bfp.itemsize(view.dtype))
+        table = Handle(view.buffer, (rows, *view.shape[1:]), view.dtype)
         if (
             not isinstance(target, type)
             or target.per_call_gather is None
@@ -703,7 +711,7 @@ class Recorder:
         given = dict(
             rows=ids.shape[0],
             table_rows=table.shape[0],
-            row=math.prod(table.shape[1:]),
+            row=row,
             dtype=table.dtype,
         )
         gather = target.per_call_gather
@@ -711,7 +719,7 @@ class Recorder:
             op = gather(**given)
         else:
             op = self.profile.make(gather, **given)
-        bound = ids.bounds.get(0)
+        bound = ids.valid.get(0)
         if bound is not None:
             self._bind(op, "valid_rows", bound)
         if ids.role == "input":
@@ -723,7 +731,7 @@ class Recorder:
             # Each table's words follow the last's in the input's buffer, each
             # then a part of it, the first's too.
             start = sum(e.words for e in held)
-            control = Handle((start + op.words,), np.uint32, ids.name, "input")
+            control = Handle.whole((start + op.words,), np.uint32, ids.name, "input")
             if not held:
                 self._controls[ids.name] = control
             else:
@@ -875,7 +883,7 @@ class Recorder:
                     f"operand {h!r} is {bfp.dtype_name(h.dtype)}"
                 )
             bounds = (
-                h.bounds if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
+                h.valid if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
             )
             for axis, count in bounds.items():
                 extent = next(
@@ -916,16 +924,12 @@ class Recorder:
                     )
                     if like is not None:
                         shape = called[like].shape
-                        bounds = dict(called[like].bounds)
+                        bounds = dict(called[like].valid)
                 if not bounds:
                     bounds = self._output_bounds(op, b, len(shape))
-                h = Handle(
-                    shape,
-                    b.dtype,
-                    self.fresh(f"{type(op).__name__.lower()}{next(self._counter)}"),
-                    "intermediate",
-                    bounds=bounds,
-                )
+                name = self.fresh(f"{type(op).__name__.lower()}{next(self._counter)}")
+                h = Handle.whole(shape, b.dtype, name, "intermediate")
+                h = dataclasses.replace(h, valid=bounds)
                 slots.append(h)
                 outputs.append(h)
         self.steps.append(
@@ -963,8 +967,8 @@ class Recorder:
         # A slice's parent needs an explicit size: no step may name it whole.
         for step in self.steps:
             for h in step.inputs + step.outputs:
-                if h.parent is not None:
-                    pinned.setdefault(h.parent.name, h.parent.nbytes)
+                if h.layout != Dense():
+                    pinned.setdefault(h.name, h.buffer.nbytes)
         return Recording(
             self.name,
             self.steps,

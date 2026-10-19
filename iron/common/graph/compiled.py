@@ -41,7 +41,7 @@ from ..image.sequence import ALIGNMENT, Image
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fill import filled
-from .handle import Carry, Handle, State, Weight, is_operand
+from .handle import Carry, Dense, Handle, State, Weight, is_operand
 from .record import Recording, Recorder
 
 logger = logging.getLogger(__name__)
@@ -451,7 +451,7 @@ class Graph:
                 args.append(None)
                 continue
             shape, dtype = _shape_and_dtype(shapes[name])
-            inputs.append(Handle(shape, dtype, name, "input"))
+            inputs.append(Handle.whole(shape, dtype, name, "input"))
             args.append(inputs[-1])
         values = [PerCall(n, kind, dtype) for n, (kind, dtype) in params.values.items()]
         with Recorder(
@@ -507,7 +507,7 @@ class Graph:
                     f"{self.name}: the next {name} is {nxt!r}; carry an "
                     f"expression of the values or a handle the graph computed"
                 )
-            if nxt.parent is not None or nxt.role == "input" or nxt.elements != 1:
+            if nxt.layout != Dense() or nxt.role == "input" or nxt.elements != 1:
                 raise TypeError(
                     f"{self.name}: the next {name} is {nxt!r}; a carried "
                     f"handle is one whole element the graph computed"
@@ -518,14 +518,14 @@ class Graph:
                     f"is {np.dtype(dtypes[name]).name}"
                 )
             if nxt.role == "intermediate":
-                _rename(recorder, nxt, recorder.fresh(f"carry_{name}"))
+                _rename(nxt, recorder.fresh(f"carry_{name}"))
             found[name] = nxt
         return found
 
     def _outputs(self, items: list, recorder: Recorder) -> list:
         outputs = []
         for i, item in enumerate(items):
-            if not isinstance(item, Handle) or item.parent is not None:
+            if not isinstance(item, Handle) or item.layout != Dense():
                 raise TypeError(
                     f"{self.name} returned {item!r}; a graph returns whole "
                     f"handles produced inside it"
@@ -536,7 +536,6 @@ class Graph:
                 )
             if item.role == "intermediate":
                 _rename(
-                    recorder,
                     item,
                     recorder.fresh(f"out{i}" if len(items) > 1 else "out"),
                 )
@@ -997,15 +996,9 @@ def _check_values(name: str, declared, values: Mapping[str, Any]) -> None:
         )
 
 
-def _rename(recorder: Recorder, handle: Handle, name: str) -> None:
+def _rename(handle: Handle, name: str) -> None:
     """Make an intermediate, and every view of its buffer, a graph output named ``name``."""
-    old = handle.name
-    for step in recorder.steps:
-        for h in step.slots + step.inputs + step.outputs:
-            root = h.root  # one buffer may have several roots, one per reshape
-            if root.role == "intermediate" and root.name == old:
-                root.name, root.role = name, "output"
-    handle.name, handle.role = name, "output"
+    handle.buffer.name, handle.buffer.role = name, "output"
 
 
 def _results(outputs: list, carry: Carry | None):

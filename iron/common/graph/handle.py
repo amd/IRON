@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator, Mapping
 from math import prod
-from typing import Annotated, TypeVar
+from typing import Annotated, Any, TypeVar
 
 import aie.utils as aie_utils
 import numpy as np
@@ -37,98 +38,117 @@ it only to seed the first call.
 """
 
 
+@dataclasses.dataclass(eq=False)
+class Buffer:
+    """A buffer of the graph, which every handle on it shares: renaming it
+    (a returned intermediate becoming ``out``) renames them all.
+
+    Attributes:
+        name: What a step calls it (``BufferRef``).
+        role: input, output, weight, state or intermediate.
+        shape: Its shape as made, before any reshape.
+        dtype: Its element type as made.
+    """
+
+    name: str
+    role: str
+    shape: tuple[int, ...]
+    dtype: Any
+
+    @property
+    def nbytes(self) -> int:
+        return (prod(self.shape) if self.shape else 1) * bfp.itemsize(self.dtype)
+
+
+@dataclasses.dataclass(frozen=True)
+class Dense:
+    """A contiguous run of the buffer from element ``offset``, which any
+    operator takes; None is the whole buffer, in any shape.
+    """
+
+    offset: int | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class Strided:
+    """What ``tap`` walks of the buffer, which only a copy takes.
+
+    Attributes:
+        tap: The pattern over the buffer seen as its ``tensor_dims``, or
+            several walked in turn (a gather's rows, fixed when recorded).
+        offset: A per-call element offset (``keys[:, pos]``), or None.
+        repeat: Per walk, the runs of its first dimension each call
+            (``Handle.at``), or None.
+        length: The entries of each walk's second dimension each call, or
+            None.
+        window: For a run from a per-call start, ``x[s : s + W]``: its axis,
+            ``s``, ``W`` and the axis's length, which a bound (``[:n]``)
+            keeps the run inside; else None.
+    """
+
+    tap: TensorAccessPattern | tuple[TensorAccessPattern, ...]
+    offset: Affine | None = None
+    repeat: tuple[Affine, ...] | None = None
+    length: Affine | None = None
+    window: tuple[int, Affine, int, int] | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class Gather:
+    """The rows of a whole table the 1-D integer handle ``rows`` names each
+    call (``table[ids]``), which only ``Copy`` of it alone takes.
+    """
+
+    rows: Handle
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
 class Handle:
-    """A recorded tensor: a buffer of the graph, with a shape and a dtype.
+    """A recorded tensor: where it is in a buffer of the graph, its shape,
+    its dtype, and the leading entries of each axis valid this call.
 
     ``h[key]`` takes numpy's basic indexing, on one axis a per-call
     value (``keys[:, pos]``), and on the leading axis an integer array
     of rows fixed when the graph is recorded (``table[ids]``) or a 1-D integer
     handle naming the rows each call takes. A contiguous static region is a
-    slice any operator takes; any other view, a gather included, is an
-    access pattern only a copy takes.
+    slice any operator takes (``Dense``); any other view, a gather included,
+    is an access pattern only a copy takes (``Strided``, ``Gather``).
+
+    Attributes:
+        buffer: The buffer it is, or is a part or view of.
+        shape: Its shape.
+        dtype: Its element type.
+        valid: Axis -> its leading entries valid this call (``x[:n]``).
+        layout: Where in ``buffer`` it is.
     """
 
-    __slots__ = (
-        "shape",
-        "dtype",
-        "_name",
-        "_role",
-        "parent",
-        "start",
-        "tap",
-        "index_by",
-        "bounds",
-        "gather_by",
-        "repeat",
-        "length",
-        "window",
-    )
+    buffer: Buffer
+    shape: tuple[int, ...]
+    dtype: Any
+    valid: Mapping[int, Affine] = dataclasses.field(default_factory=dict)
+    layout: Dense | Strided | Gather = Dense()
 
-    def __init__(
-        self,
-        shape,
-        dtype,
-        name,
-        role,
-        parent=None,
-        start=0,
-        tap=None,
-        index_by=None,
-        bounds=None,
-        gather_by=None,
-        repeat=None,
-        length=None,
-        window=None,
-    ):
-        self.shape = tuple(int(s) for s in shape)
-        self.dtype = dtype
-        self.name = name
-        self.role = role
-        self.parent = parent
-        self.start = start  # a slice's element offset into the parent
-        # a gather's is one pattern per row
-        self.tap: TensorAccessPattern | tuple[TensorAccessPattern, ...] | None = tap
-        self.index_by: Affine | None = index_by  # a view's per-call element offset
-        # axis -> its leading entries valid this call (``x[:n]``)
-        self.bounds: dict[int, Affine] = {
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "shape", tuple(int(s) for s in self.shape))
+        valid = {
             axis: n.affine() if isinstance(n, PerCall) else n
-            for axis, n in (bounds or {}).items()
+            for axis, n in self.valid.items()
         }
-        # The handle whose ids pick the rows each call, for a gather.
-        self.gather_by: Handle | None = gather_by
-        # A view's runs of each walk's first dimension, and entries of its
-        # second, each call (``at``).
-        self.repeat: tuple[Affine, ...] | None = repeat
-        self.length: Affine | None = length
-        # A run from a per-call start, ``x[s : s + W]``: its axis, s, W and
-        # the axis's length, until a bound (``[:n]``) keeps it inside.
-        self.window: tuple[int, Affine, int, int] | None = window
+        object.__setattr__(self, "valid", valid)
 
-    @property
-    def root(self) -> Handle:
-        """The whole buffer this handle is, or is a slice or view of."""
-        h = self
-        while h.parent is not None:
-            h = h.parent
-        return h
+    @classmethod
+    def whole(cls, shape, dtype, name: str, role: str) -> Handle:
+        """A new buffer ``name`` of ``shape``, whole."""
+        shape = tuple(int(s) for s in shape)
+        return cls(Buffer(name, role, shape, dtype), shape, dtype)
 
     @property
     def name(self) -> str:
-        """The name of the buffer: its root's."""
-        return self.root._name
-
-    @name.setter
-    def name(self, name: str) -> None:
-        self._name = name
+        return self.buffer.name
 
     @property
     def role(self) -> str:
-        """input, output, weight, state or intermediate: its root's."""
-        return self.root._role
-
-    @role.setter
-    def role(self, role: str) -> None:
-        self._role = role
+        return self.buffer.role
 
     @property
     def elements(self) -> int:
@@ -139,41 +159,55 @@ class Handle:
         return self.elements * bfp.itemsize(self.dtype)
 
     def ref(self) -> BufferRef:
-        """Where a step finds this handle: a slice is part of its parent's
-        buffer, a view all of it.
+        """Where a step finds this handle: a part of its buffer for a
+        contiguous run, else all of it.
         """
-        if self.parent is None:
-            return BufferRef(self.name)
-        parent = self.parent.ref()
-        if self.tap is not None:
-            return parent
-        start = parent.start + self.start * bfp.itemsize(self.dtype)
-        return BufferRef(parent.root, start, self.nbytes)
+        match self.layout:
+            case Dense(offset=int(offset)):
+                return BufferRef(
+                    self.name, offset * bfp.itemsize(self.dtype), self.nbytes
+                )
+        return BufferRef(self.name)
 
-    def reshape(self, *shape) -> "Handle":
+    def _start(self) -> int:
+        """The element this contiguous handle starts at in its buffer."""
+        assert isinstance(self.layout, Dense), "a contiguous handle"
+        return self.layout.offset or 0
+
+    def _over_buffer(self, tap):
+        """``tap`` (or each of several) over this handle, as over its
+        buffer: unchanged on the whole buffer, else moved by where this part
+        starts in it, over the buffer's shape as made (flat in another dtype).
+        """
+        if self.layout == Dense():
+            return tap
+        buffer, start = self.buffer, self._start()
+        dims = buffer.shape
+        if bfp.dtype_name(buffer.dtype) != bfp.dtype_name(self.dtype):
+            dims = (buffer.nbytes // bfp.itemsize(self.dtype),)
+
+        def moved(t):
+            return TensorAccessPattern(dims, t.offset + start, t.sizes, t.strides)
+
+        return tuple(map(moved, tap)) if isinstance(tap, tuple) else moved(tap)
+
+    def reshape(self, *shape) -> Handle:
         """The same buffer seen with another shape (no data moves)."""
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
         if prod(shape) != self.elements:
             raise ValueError(f"cannot reshape {self!r} to {list(shape)}")
-        if self.tap is not None or self.gather_by is not None:
+        if not isinstance(self.layout, Dense):
             raise ValueError(f"cannot reshape a view {self!r}; reshape what it views")
-        bounds = _rescale_bounds(self, shape)
-        return Handle(
-            shape,
-            self.dtype,
-            self.name,
-            self.role,
-            self.parent,
-            self.start,
-            bounds=bounds,
+        return dataclasses.replace(
+            self, shape=shape, valid=_rescale_bounds(self, shape)
         )
 
-    def transpose(self, *axes) -> "Handle":
+    def transpose(self, *axes) -> Handle:
         """The same buffer walked with its axes permuted (no data moves)."""
         if len(axes) == 1 and isinstance(axes[0], (tuple, list)):
             axes = tuple(axes[0])
-        if self.tap is not None or self.gather_by is not None:
+        if not isinstance(self.layout, Dense):
             raise ValueError(
                 f"cannot transpose a view {self!r}; transpose what it views"
             )
@@ -183,21 +217,22 @@ class Handle:
             )
         shape = tuple(self.shape[a] for a in axes)
         tap = TensorAccessPattern.full(self.shape).permute(axes)
-        bounds = {axes.index(axis): b for axis, b in self.bounds.items()}
+        valid = {axes.index(axis): b for axis, b in self.valid.items()}
         return Handle(
-            shape, self.dtype, self.name, self.role, self, 0, tap, bounds=bounds
+            self.buffer, shape, self.dtype, valid, Strided(self._over_buffer(tap))
         )
 
     @property
-    def T(self) -> "Handle":
+    def T(self) -> Handle:
         """``transpose(1, 0)``, as numpy's ``.T`` of a matrix."""
         return self.transpose(1, 0)
 
-    def _bound(self, key) -> "Handle":
+    def _bounded_run(self, key) -> Handle:
         """A run from a per-call start bounded per call, ``x[s : s + W][:n]``:
         every call keeps ``s + n`` inside the axis, checked before it.
         """
-        axis, start, width, n = self.window
+        assert isinstance(self.layout, Strided) and self.layout.window is not None
+        axis, start, width, n = self.layout.window
         entries = list(key) if isinstance(key, tuple) else [key]
         entries += [slice(None)] * (len(self.shape) - len(entries))
         run = entries[axis]
@@ -221,31 +256,22 @@ class Handle:
         if recorder is not None:
             recorder.limit(stop, 0, width + 1, self)
             recorder.limit(start, 0, n + 1, self, stop)
-        return Handle(
-            self.shape,
-            self.dtype,
-            self.name,
-            self.role,
-            self.parent,
-            self.start,
-            self.tap,
-            self.index_by,
-            {**self.bounds, axis: stop},
-        )
+        layout = dataclasses.replace(self.layout, window=None)
+        valid = {**self.valid, axis: stop}
+        return dataclasses.replace(self, valid=valid, layout=layout)
 
-    def __getitem__(self, key) -> "Handle":
-        if self.window is not None:
-            return self._bound(key)
-        if self.tap is not None:
-            raise TypeError(
-                f"{self!r} is a view, which only a copy takes; index what it views"
-            )
-        if self.parent is not None:
-            # A slice: indexed as a buffer of its own, then placed in its parent.
-            whole = Handle(
-                self.shape, self.dtype, self.name, self.role, bounds=self.bounds
-            )
-            return whole[key]._placed(self.parent, self.start)
+    def __getitem__(self, key) -> Handle:
+        match self.layout:
+            case Strided(window=tuple()):
+                return self._bounded_run(key)
+            case Strided() | Gather():
+                raise TypeError(
+                    f"{self!r} is a view, which only a copy takes; index what it views"
+                )
+            case Dense(offset=int()):
+                # A part: indexed as a buffer of its own, then placed in its buffer.
+                whole = dataclasses.replace(self, layout=Dense())
+                return whole[key]._within(self)
         entries = list(key) if isinstance(key, tuple) else [key]
         rank = len(self.shape)
         # By identity: an array entry compares elementwise.
@@ -264,7 +290,7 @@ class Handle:
         if isinstance(entries[0], Handle):
             ids = entries[0]
             if (
-                ids.tap is not None
+                not isinstance(ids.layout, Dense)
                 or len(ids.shape) != 1
                 or not np.issubdtype(np.dtype(ids.dtype), np.integer)
                 or rank < 2
@@ -276,15 +302,13 @@ class Handle:
                 )
             if not all(isinstance(e, slice) and e == slice(None) for e in entries[1:]):
                 raise IndexError("a gather takes the whole of every axis but the first")
-            if self.role not in ("weight", "state") or self.bounds:
+            if self.role not in ("weight", "state") or self.valid:
                 raise TypeError(
                     f"a gather per call reads a whole table the graph holds, not "
                     f"{self!r}"
                 )
             shape = (ids.shape[0], *self.shape[1:])
-            return Handle(
-                shape, self.dtype, self.name, self.role, self, 0, gather_by=ids
-            )
+            return Handle(self.buffer, shape, self.dtype, layout=Gather(ids))
         if isinstance(entries[0], np.ndarray):
             ids, n = entries[0], self.shape[0]
             if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer) or rank < 2:
@@ -294,22 +318,22 @@ class Handle:
                 )
             if not all(isinstance(e, slice) and e == slice(None) for e in entries[1:]):
                 raise IndexError("a gather takes the whole of every axis but the first")
-            if self.bounds:
+            if self.valid:
                 raise TypeError(f"{self!r} is bounded per call; gather what it bounds")
             if not len(ids) or ((ids < -n) | (ids >= n)).any():
                 raise IndexError(f"gathering {ids} from the {n} rows of {self!r}")
             whole = TensorAccessPattern.full(self.shape)
             rows = tuple(whole[int(i) % n] for i in ids)
             shape = (len(ids), *self.shape[1:])
-            return Handle(shape, self.dtype, self.name, self.role, self, 0, rows)
-        for axis in self.bounds:
+            return Handle(self.buffer, shape, self.dtype, layout=Strided(rows))
+        for axis in self.valid:
             if isinstance(entries[axis], slice) and entries[axis] != slice(None):
                 raise TypeError(
                     f"{self!r} is bounded per call on axis {axis}; index it, take "
                     f"all of it, or slice what it bounds"
                 )
         index_by = window = None
-        static, shape, bounds = [], [], {}
+        static, shape, valid = [], [], {}
         recorder = graph_recorder.get()
         for axis, (entry, n) in enumerate(zip(entries, self.shape)):
             if isinstance(entry, slice) and isinstance(entry.start, (PerCall, Affine)):
@@ -345,8 +369,8 @@ class Handle:
                 static.append(slice(0, width))
                 shape.append(width)
                 continue
-            if axis in self.bounds and isinstance(entry, slice):
-                bounds[len(shape)] = self.bounds[axis]
+            if axis in self.valid and isinstance(entry, slice):
+                valid[len(shape)] = self.valid[axis]
                 static.append(entry)
                 shape.append(n)
             elif isinstance(entry, slice) and isinstance(entry.stop, (PerCall, Affine)):
@@ -361,7 +385,7 @@ class Handle:
                 if recorder is not None:
                     recorder.limit(stop, 0, n + 1, self)
                 # Keyed by the axis of the result: an index before it drops one.
-                bounds[len(shape)] = stop
+                valid[len(shape)] = stop
                 static.append(slice(None))
                 shape.append(n)
             elif isinstance(entry, (PerCall, Affine)):
@@ -387,58 +411,31 @@ class Handle:
             else:
                 static.append(int(entry))
         tap = TensorAccessPattern.full(self.shape)[tuple(static)]
-        if bounds and index_by is None and tuple(shape) == self.shape:
-            return Handle(
-                self.shape,
-                self.dtype,
-                self.name,
-                self.role,
-                self.parent,
-                self.start,
-                bounds=bounds,
-            )
-        view = self._view(tap, shape, index_by, bounds)
-        view.window = window
-        return view
+        if valid and index_by is None and tuple(shape) == self.shape:
+            return dataclasses.replace(self, valid=valid)
+        return self._view(tap, shape, index_by, valid, window)
 
     def __setitem__(self, key, value) -> None:
         """``self[key] = value``: a copy of ``value`` into that view."""
         _write(self[key], value)
 
-    def _placed(self, parent: Handle, start: int) -> Handle:
-        """This handle of a buffer of its own, as the run of ``parent``
-        from its element ``start``.
+    def _within(self, part: Handle) -> Handle:
+        """This handle of ``part`` seen as a buffer of its own, as where it is
+        in ``part``'s buffer.
 
         Raises:
             TypeError: It gathers per call, which reads a whole table.
         """
-        if self.gather_by is not None:
-            raise TypeError(
-                f"a gather per call reads a whole table, not a slice of {parent!r}"
-            )
-        tap = None
-        if self.parent is not None and self.tap is None:
-            start += self.start
-        elif self.tap is not None:
-            taps = self.tap if isinstance(self.tap, tuple) else (self.tap,)
-            moved = tuple(
-                TensorAccessPattern(parent.shape, t.offset + start, t.sizes, t.strides)
-                for t in taps
-            )
-            start, tap = 0, moved if isinstance(self.tap, tuple) else moved[0]
-        placed = Handle(
-            self.shape,
-            self.dtype,
-            parent.name,
-            parent.role,
-            parent,
-            start,
-            tap,
-            self.index_by,
-            self.bounds,
-        )
-        placed.window = self.window
-        return placed
+        match self.layout:
+            case Gather():
+                raise TypeError(
+                    f"a gather per call reads a whole table, not a slice of {part!r}"
+                )
+            case Strided(tap=tap):
+                layout = dataclasses.replace(self.layout, tap=part._over_buffer(tap))
+            case _:
+                layout = Dense(part._start() + self._start())
+        return dataclasses.replace(self, buffer=part.buffer, layout=layout)
 
     def at(
         self,
@@ -462,6 +459,8 @@ class Handle:
                 dimensions one shim descriptor holds, the patterns and
                 repeats differ in number, or no ``bounds``.
         """
+        if not isinstance(self.layout, Dense):
+            raise ValueError(f"cannot walk a view {self!r}; walk what it views")
         walks = tap if isinstance(tap, tuple) else (tap,)
         if isinstance(tap, tuple) and (
             not isinstance(repeat, tuple) or len(repeat) != len(tap)
@@ -469,58 +468,60 @@ class Handle:
             raise ValueError(
                 f"{len(tap)} patterns walked in turn take a repeat each, not {repeat}"
             )
-        if repeat is not None or length is not None:
-            dev = aie_utils.get_current_device()
-            for walk in walks:
-                sizes, strides = slots(walk.sizes, walk.strides)
-                padded = TensorAccessPattern(
-                    walk.tensor_dims, walk.offset, sizes, strides
-                )
-                if (
-                    walk.rank != 4
-                    or dev is None
-                    or not dev.dma_bd_fits(0, 0, padded, self.dtype)
-                ):
-                    raise ValueError(
-                        f"{walk} takes a per-call repeat or length as one shim "
-                        f"descriptor: four dimensions, the repeated first, within "
-                        f"a descriptor's limits"
-                    )
-            if not bounds:
+        if repeat is None and length is None:
+            return self._view(tap, shape, None, bounds or {})
+        dev = aie_utils.get_current_device()
+        for walk in walks:
+            sizes, strides = slots(walk.sizes, walk.strides)
+            padded = TensorAccessPattern(walk.tensor_dims, walk.offset, sizes, strides)
+            if (
+                walk.rank != 4
+                or dev is None
+                or not dev.dma_bd_fits(0, 0, padded, self.dtype)
+            ):
                 raise ValueError(
-                    f"a walk of {tap} by a per-call repeat or length bounds the "
-                    f"rows it moves a call: give bounds"
+                    f"{walk} takes a per-call repeat or length as one shim "
+                    f"descriptor: four dimensions, the repeated first, within "
+                    f"a descriptor's limits"
                 )
-            repeats = None
-            if repeat is not None:
-                # A repeat count may be clamped; a length patches a size, linear.
-                repeats = tuple(
-                    r if isinstance(r, Affine) else r.affine()
-                    for r in (repeat if isinstance(tap, tuple) else (repeat,))
-                )
-            length = None if length is None else length.affine()
-            recorder = graph_recorder.get()
-            if recorder is not None:
-                for walk, r in zip(walks, repeats or ()):
-                    recorder.limit(r, 1, walk.sizes[0] + 1, self)
-                if length is not None:
-                    hi = min(walk.sizes[1] for walk in walks)
-                    recorder.limit(length, 1, hi + 1, self)
-            return Handle(
-                shape,
-                self.dtype,
-                self.name,
-                self.role,
-                self,
-                0,
-                tap,
-                bounds=bounds,
-                repeat=repeats,
-                length=length,
+        if not bounds:
+            raise ValueError(
+                f"a walk of {tap} by a per-call repeat or length bounds the "
+                f"rows it moves a call: give bounds"
             )
-        return self._view(tap, shape, None, bounds)
+        repeats = None
+        if repeat is not None:
+            # A repeat count may be clamped; a length patches a size, linear.
+            repeats = tuple(
+                r if isinstance(r, Affine) else r.affine()
+                for r in (repeat if isinstance(tap, tuple) else (repeat,))
+            )
+        length = None if length is None else length.affine()
+        recorder = graph_recorder.get()
+        if recorder is not None:
+            for walk, r in zip(walks, repeats or ()):
+                recorder.limit(r, 1, walk.sizes[0] + 1, self)
+            if length is not None:
+                hi = min(walk.sizes[1] for walk in walks)
+                recorder.limit(length, 1, hi + 1, self)
+        layout = Strided(self._over(tap), repeat=repeats, length=length)
+        return Handle(self.buffer, shape, self.dtype, bounds, layout)
 
-    def _view(self, tap: TensorAccessPattern, shape, index_by, bounds) -> Handle:
+    def _over(self, tap):
+        """``tap`` over this handle as over its buffer: given over the whole
+        buffer in another shape, over this one's.
+        """
+        if self.layout != Dense():
+            return self._over_buffer(tap)
+
+        def shaped(t):
+            if tuple(t.tensor_dims) == self.shape:
+                return t
+            return TensorAccessPattern(self.shape, t.offset, t.sizes, t.strides)
+
+        return tuple(map(shaped, tap)) if isinstance(tap, tuple) else shaped(tap)
+
+    def _view(self, tap, shape, index_by, valid, window=None) -> Handle:
         """What ``tap`` walks from the per-call element offset ``index_by``:
         a slice if contiguous and not offset per call, else a view.
         """
@@ -532,26 +533,10 @@ class Handle:
             and dense.rank == 1
             and 1 in (dense.sizes[0], dense.strides[0])
         ):
-            return Handle(
-                shape,
-                self.dtype,
-                self.name,
-                self.role,
-                self,
-                int(offset),
-                bounds=bounds,
-            )
-        return Handle(
-            shape,
-            self.dtype,
-            self.name,
-            self.role,
-            self,
-            0,
-            tap,
-            index_by,
-            bounds=bounds,
-        )
+            layout = Dense(self._start() + int(offset))
+        else:
+            layout = Strided(self._over(tap), index_by, window=window)
+        return Handle(self.buffer, shape, self.dtype, valid, layout)
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
         """A held array on the left of an operator defers to the handle;
@@ -661,18 +646,20 @@ def _untransposed(x: Handle, w) -> Handle | np.ndarray:
         w = w._as_operand()
     if (
         isinstance(w, Handle)
-        and w.parent is not None
-        and w.tap is not None
+        and isinstance(w.layout, Strided)
+        and isinstance(w.layout.tap, TensorAccessPattern)
+        and w.layout.offset is None
         and len(w.shape) == 2
-        and w.parent.shape == w.shape[::-1]
+        and tuple(w.layout.tap.tensor_dims) == w.shape[::-1]
     ):
-        flipped = TensorAccessPattern.full(w.parent.shape).permute((1, 0))
-        if (w.tap.offset, w.tap.sizes, w.tap.strides) == (
+        tap = w.layout.tap
+        flipped = TensorAccessPattern.full(w.shape[::-1]).permute((1, 0))
+        if (tap.offset, tap.sizes, tap.strides) == (
             flipped.offset,
             flipped.sizes,
             flipped.strides,
         ):
-            return w.parent
+            return Handle(w.buffer, w.shape[::-1], w.dtype)
     raise TypeError(
         f"{x!r} @ w takes w a weight's transpose, x @ W.T with W (out, in) as "
         f"torch.nn.Linear stores it; got {w!r:.80}"
@@ -807,9 +794,9 @@ def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
     """The bounds of ``h`` reshaped to ``shape``: a leading-axis bound,
     rescaled as that axis merges or splits.
     """
-    if not h.bounds:
+    if not h.valid:
         return {}
-    (axis, count), *more = h.bounds.items()
+    (axis, count), *more = h.valid.items()
     if more or axis != 0:
         raise ValueError(
             f"cannot reshape {h!r}: a bound is carried through a reshape on the "

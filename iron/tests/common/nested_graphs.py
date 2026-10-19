@@ -93,7 +93,7 @@ def test_a_called_graph_writes_a_given_output_bounded_by_its_callers_value():
         type(b.op) for b in recording.bindings if b.expression.value.name == "frames"
     }
     assert {Limbs, GEMM, Magnitude, Log} <= bound
-    assert recording.steps[6].outputs[0].parent.name == "features"
+    assert recording.steps[6].outputs[0].name == "features"
     names = {h.name for _, h in recording.weights.values()}
     assert {"log_mel.dft", "log_mel.filterbank"} <= names
 

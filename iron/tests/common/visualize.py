@@ -33,13 +33,13 @@ def test_a_recorded_graph_names_every_step_and_every_edge():
     writer, expected = {}, set()
     for i, s in enumerate(t.steps):
         for h in s.inputs:
-            root = h.root
+            root = h.buffer
             source = (
                 f"s{writer[root.name]}" if root.name in writer else f"b_{root.name}"
             )
             expected.add((source, f"s{i}"))
         for h in s.outputs:
-            root = h.root
+            root = h.buffer
             if root.role == "state":
                 expected.add((f"s{i}", f"b_{root.name}"))
             else:
@@ -80,7 +80,7 @@ def test_a_towers_layers_are_found_under_its_prefix():
     drawn = in_layer(t, 1)
     found = set()
     for i, s in enumerate(t.steps):
-        names = [h.root.name for h in s.inputs]
+        names = [h.buffer.name for h in s.inputs]
         if any(".encoder.layers.1." in n for n in names):
             found.add(i)
         if any(".encoder.layers.0." in n or ".encoder.layers.2." in n for n in names):
@@ -97,7 +97,7 @@ def test_a_per_layer_slice_is_drawn_in_its_layer():
     drawn = in_layer(t, 1)
     shared = "text.language_model.ple.per_layer_model_projection.weight"
     sliced = [
-        i for i, s in enumerate(t.steps) if any(h.root.name == shared for h in s.inputs)
+        i for i, s in enumerate(t.steps) if any(h.buffer.name == shared for h in s.inputs)
     ]
     projection, norm = sliced[1], sliced[1] + 1
     assert {projection, norm} <= drawn

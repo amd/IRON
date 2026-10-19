@@ -23,6 +23,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Carried, Precision, Profile, Scratchpad
 from iron.common.graph import Handle
+from iron.common.graph.handle import Dense
 from iron.common.graph.record import Recording, Recorder
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import CompiledGraph, _words
@@ -204,7 +205,7 @@ def test_a_state_written_by_one_step_is_pinned_and_readable():
 
 
 def test_slices_are_views_into_the_parent_in_bytes():
-    h = Handle((8, 64), bfloat16, "acts", "intermediate")
+    h = Handle.whole((8, 64), bfloat16, "acts", "intermediate")
     part = h[2:4]
     assert part.shape == (2, 64) and part.ref() == BufferRef("acts", 256, 256)
     assert h[3].shape == (64,) and h[3].ref() == BufferRef("acts", 384, 128)
@@ -818,34 +819,34 @@ def test_a_bound_value_survives_tuning():
 def test_a_bound_travels_through_reshape_and_transpose():
 
     n = PerCall("n", Kind.SCRATCHPAD, np.int32)
-    x = Handle((64, 8, 4), bfloat16, "x", "input")
+    x = Handle.whole((64, 8, 4), bfloat16, "x", "input")
     b = x[:n]
-    assert b.shape == x.shape and b.bounds == {0: n.affine()} and b.tap is None
-    assert b.reshape(512, 4).bounds == {0: n * 8}  # merged with the axis after it
-    assert b.reshape(64 * 8 * 4).bounds == {0: n * 32}
-    assert b.reshape(512, 4).reshape(64, 8, 4).bounds == {0: n.affine()}  # split back
-    assert b.transpose(1, 0, 2).bounds == {1: n.affine()}
+    assert b.shape == x.shape and b.valid == {0: n.affine()} and b.layout == Dense()
+    assert b.reshape(512, 4).valid == {0: n * 8}  # merged with the axis after it
+    assert b.reshape(64 * 8 * 4).valid == {0: n * 32}
+    assert b.reshape(512, 4).reshape(64, 8, 4).valid == {0: n.affine()}  # split back
+    assert b.transpose(1, 0, 2).valid == {1: n.affine()}
     with pytest.raises(ValueError, match="does not divide"):
         b.reshape(32, 16, 4)  # a leading axis no run of the others makes
-    assert b[0].bounds == {} and b[0].shape == (8, 4)  # one row: no bound
+    assert b[0].valid == {} and b[0].shape == (8, 4)  # one row: no bound
     with pytest.raises(TypeError, match="bounded per call on axis 0"):
         b[0:2]
     with pytest.raises(ValueError, match="from its start"):
         x[2:n]
     v = b[:, 2:6]  # all of the bounded axis: the bound stays on it
-    assert v.shape == (64, 4, 4) and v.bounds == {0: n.affine()}
-    assert b[:, 3].bounds == {0: n.affine()} and b[:, 3].shape == (64, 4)
+    assert v.shape == (64, 4, 4) and v.valid == {0: n.affine()}
+    assert b[:, 3].valid == {0: n.affine()} and b[:, 3].shape == (64, 4)
 
 
 def test_an_index_may_floor_and_a_bound_may_not():
     """A bound patches a length, so it is linear; an index may floor."""
     p = PerCall("p", Kind.SCRATCHPAD, np.int32)
-    cache = Handle((8, 4), bfloat16, "cache", "state")
-    assert cache[(p + 1) // 2].index_by == (p + 1) // 2 * 4
+    cache = Handle.whole((8, 4), bfloat16, "cache", "state")
+    assert cache[(p + 1) // 2].layout.offset == (p + 1) // 2 * 4
     with pytest.raises(TypeError, match="not linear"):
         _ = cache[: (p + 1) // 2]
     start = iron.clamp(p - 3, lo=0)
-    assert start == (p - 3).clamp(lo=0) and cache[start].index_by == start * 4
+    assert start == (p - 3).clamp(lo=0) and cache[start].layout.offset == start * 4
     with pytest.raises(TypeError, match="not linear"):
         _ = cache[: (p + 1).clamp(hi=8)]
 
@@ -877,10 +878,10 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
     chunk = PerCall("chunk", Kind.SCRATCHPAD, np.int32)
     rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
     G, L, C, D = 2, 64, 16, 8
-    cache = Handle((G, L // C, C, D), bfloat16, "cache", "state")
+    cache = Handle.whole((G, L // C, C, D), bfloat16, "cache", "state")
     v = cache[:, chunk, : rows + 1]
-    assert v.shape == (G, C, D) and v.bounds == {1: rows + 1}
-    assert v.index_by == chunk * (C * D)
+    assert v.shape == (G, C, D) and v.valid == {1: rows + 1}
+    assert v.layout.offset == chunk * (C * D)
 
     keys = iron.state((G, L, D), name="keys")
 
@@ -906,19 +907,19 @@ def test_a_run_from_a_per_call_start_is_its_whole_chunk_s_view():
     """
     chunk = PerCall("chunk", Kind.SCRATCHPAD, np.int32)
     rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
-    cache = Handle((64, 2, 8), bfloat16, "cache", "state")
+    cache = Handle.whole((64, 2, 8), bfloat16, "cache", "state")
     a = cache[chunk * 16 : chunk * 16 + 16][:rows]
     b = cache.reshape(4, 16, 2, 8)[chunk, :rows]
-    assert (a.shape, a.bounds, a.index_by, a.ref()) == (
+    assert (a.shape, a.valid, a.layout.offset, a.ref()) == (
         b.shape,
-        b.bounds,
-        b.index_by,
+        b.valid,
+        b.layout.offset,
         b.ref(),
     )
-    assert (a.tap.offset, a.tap.sizes, a.tap.strides) == (
-        b.tap.offset,
-        b.tap.sizes,
-        b.tap.strides,
+    assert (a.layout.tap.offset, a.layout.tap.sizes, a.layout.tap.strides) == (
+        b.layout.tap.offset,
+        b.layout.tap.sizes,
+        b.layout.tap.strides,
     )
 
 
@@ -929,16 +930,16 @@ def test_a_run_from_a_per_call_start_takes_any_start_on_any_axis():
     """
     pos = PerCall("pos", Kind.SCRATCHPAD, np.int32)
     rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
-    cache = Handle((100, 2, 8), bfloat16, "cache", "state")
+    cache = Handle.whole((100, 2, 8), bfloat16, "cache", "state")
     v = cache[pos : pos + 16][:rows]
-    assert v.shape == (16, 2, 8) and v.bounds == {0: rows.affine()}
-    assert v.index_by == pos * 16
+    assert v.shape == (16, 2, 8) and v.valid == {0: rows.affine()}
+    assert v.layout.offset == pos * 16
     floored = pos // 64 * 64
-    assert cache[floored : floored + 64].index_by == floored * 16
-    keys = Handle((2, 100, 8), bfloat16, "keys", "state")
+    assert cache[floored : floored + 64].layout.offset == floored * 16
+    keys = Handle.whole((2, 100, 8), bfloat16, "keys", "state")
     w = keys[:, pos : pos + 16][:, :rows]
-    assert w.shape == (2, 16, 8) and w.bounds == {1: rows.affine()}
-    assert w.index_by == pos * 8
+    assert w.shape == (2, 16, 8) and w.valid == {1: rows.affine()}
+    assert w.layout.offset == pos * 8
 
 
 def test_a_run_as_wide_as_its_axis_keeps_its_start_under_a_bound():
@@ -947,8 +948,8 @@ def test_a_run_as_wide_as_its_axis_keeps_its_start_under_a_bound():
     """
     s = PerCall("s", Kind.SCRATCHPAD, np.int32)
     n = PerCall("n", Kind.SCRATCHPAD, np.int32)
-    v = Handle((8, 256), bfloat16, "x", "state")[:n][:, s : s + 256]
-    assert v.index_by == s.affine() and v.bounds == {0: n.affine()}
+    v = Handle.whole((8, 256), bfloat16, "x", "state")[:n][:, s : s + 256]
+    assert v.layout.offset == s.affine() and v.valid == {0: n.affine()}
 
 
 @pytest.mark.parametrize(
@@ -964,7 +965,7 @@ def test_a_run_as_wide_as_its_axis_keeps_its_start_under_a_bound():
 def test_a_run_from_a_per_call_start_has_a_fixed_width_and_one_start(key, error):
     pos = PerCall("pos", Kind.SCRATCHPAD, np.int32)
     n = PerCall("n", Kind.SCRATCHPAD, np.int32)
-    cache = Handle((100, 100), bfloat16, "cache", "state")
+    cache = Handle.whole((100, 100), bfloat16, "cache", "state")
     with pytest.raises((IndexError, ValueError), match=error):
         cache[key(pos, n)]
 
@@ -972,7 +973,7 @@ def test_a_run_from_a_per_call_start_has_a_fixed_width_and_one_start(key, error)
 def test_a_run_is_bounded_from_its_start_on_its_own_axis():
     pos = PerCall("pos", Kind.SCRATCHPAD, np.int32)
     rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
-    run = Handle((100, 2, 8), bfloat16, "cache", "state")[pos : pos + 16]
+    run = Handle.whole((100, 2, 8), bfloat16, "cache", "state")[pos : pos + 16]
     for key in (np.s_[2:rows], np.s_[:4], np.s_[:, :rows]):
         with pytest.raises(IndexError, match="bound its axis 0"):
             run[key]
@@ -1407,7 +1408,7 @@ def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
     assert all(b.expression == n.affine() for b in t.bindings)
     assert list(t.operators[1].dst.sizes) == [G, L, D]
     (out,) = t.outputs
-    assert out.shape == (G, L, D) and out.bounds == {1: n.affine()}
+    assert out.shape == (G, L, D) and out.valid == {1: n.affine()}
 
     class Flat(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
@@ -1483,7 +1484,7 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
     # Bound alike, the queries start at 0 on every call: written once.
     assert mha.residents["q_start"] == 0 and mha.value("s_q").per_call
     (out,) = t.outputs
-    assert out.bounds == {0: t.values[0].affine()}  # O is bounded like Q
+    assert out.valid == {0: t.values[0].affine()}  # O is bounded like Q
 
 
 # --------------------------------------------------------------------------
@@ -2331,7 +2332,7 @@ def test_matmul_by_a_weight_s_transpose_is_linear(rows, op, held):
             self.w = held(z(128, E))
 
         def body(self, x, v):
-            assert v.T.shape == (E, 128) and v.T.tap == v.transpose(1, 0).tap
+            assert v.T.shape == (E, 128) and v.T.layout == v.transpose(1, 0).layout
             return x @ self.w.T
 
     assert _steps(Project().record(x=(rows, E), v=(128, E))) == [op]

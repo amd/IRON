@@ -10,7 +10,7 @@ import re
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
-from .handle import Handle
+from .handle import Buffer, Handle, Strided
 
 if TYPE_CHECKING:
     from .record import Recording
@@ -30,33 +30,33 @@ def layers(recording: Recording) -> dict[int, int | None]:
     steps = recording.steps
     own = {}
     for i, s in enumerate(steps):
-        found = [LAYERED.search(h.root.name) for h in s.inputs + s.outputs]
+        found = [LAYERED.search(h.buffer.name) for h in s.inputs + s.outputs]
         own[i] = next((int(m.group(1)) for m in found if m), None)
     placed = [i for i, n in own.items() if n is not None]
     layer, made = {}, {}
     for i, s in enumerate(steps):
         layer[i] = own[i]
-        held = any(h.root.role in ("weight", "state") for h in s.inputs + s.outputs)
+        held = any(h.buffer.role in ("weight", "state") for h in s.inputs + s.outputs)
         if own[i] is None and placed and placed[0] < i and (i < placed[-1] or not held):
-            found = [made.get(h.root.name) for h in s.inputs]
+            found = [made.get(h.buffer.name) for h in s.inputs]
             layer[i] = max((n for n in found if n is not None), default=None)
         for h in s.outputs:
-            made[h.root.name] = layer[i]
+            made[h.buffer.name] = layer[i]
     # One reading only a slice of a shared tensor and what came before
     # the layers (a per-layer projection) is in the layer of its readers.
     read: dict[str, int] = {}
     for i in reversed(range(len(steps))):
         s = steps[i]
         if layer[i] is None and placed and placed[0] < i < placed[-1]:
-            found = [read.get(h.root.name) for h in s.outputs]
+            found = [read.get(h.buffer.name) for h in s.outputs]
             layer[i] = min((n for n in found if n is not None), default=None)
         if layer[i] is not None:
             for h in s.inputs:
-                read[h.root.name] = layer[i]
+                read[h.buffer.name] = layer[i]
     return layer
 
 
-def _shape(h: Handle) -> str:
+def _shape(h: Handle | Buffer) -> str:
     return "×".join(str(n) for n in h.shape) or "1"
 
 
@@ -67,7 +67,7 @@ def _box(recording: Recording, i: int, values: dict[int, list[str]]) -> str:
     s = recording.steps[i]
     op = s.op
     lines = [f"<b>{html.escape(type(op).__name__)}</b>"]
-    shapes = ", ".join(_shape(h) for h in s.outputs if h.root.role != "state")
+    shapes = ", ".join(_shape(h) for h in s.outputs if h.buffer.role != "state")
     if shapes:
         lines.append(shapes)
     lines += [f"<i>{html.escape(v)}</i>" for v in values.get(id(op), [])]
@@ -85,8 +85,8 @@ def dot(recording: Recording) -> str:
     writer = {}
     for i, s in enumerate(steps):
         for h in s.outputs:
-            if h.root.role in ("intermediate", "output"):
-                writer[h.root.name] = i
+            if h.buffer.role in ("intermediate", "output"):
+                writer[h.buffer.name] = i
     values = defaultdict(list)
     for b in recording.bindings:
         values[id(b.op)].append(f"{b.member.name} = {b.expression}")
@@ -96,7 +96,7 @@ def dot(recording: Recording) -> str:
     named: set[str] = set()
 
     def source(h: Handle, at: int | None) -> str:
-        r = h.root
+        r = h.buffer
         if r.name in writer:
             return f"s{writer[r.name]}"
         node = f"b_{r.name}"
@@ -115,18 +115,19 @@ def dot(recording: Recording) -> str:
             f"label=<{_box(recording, i, values)}>];"
         )
         for h in s.inputs:
-            bounded = " bounded" if h.bounds or h.index_by is not None else ""
+            per_call = isinstance(h.layout, Strided) and h.layout.offset is not None
+            bounded = " bounded" if h.valid or per_call else ""
             edges.append(
                 f'  "{source(h, layer[i])}" -> "s{i}" [label="{_shape(h)}{bounded}"];'
             )
         for h in s.outputs:
-            if h.root.role == "state":
+            if h.buffer.role == "state":
                 edges.append(
                     f'  "s{i}" -> "{source(h, layer[i])}" [label="write {_shape(h)}"];'
                 )
-    returned = {h.root.name for h in recording.returned}
+    returned = {h.buffer.name for h in recording.returned}
     for h in recording.outputs:
-        r = h.root
+        r = h.buffer
         if r.name not in writer:
             continue
         kind = "returned" if r.name in returned else "carried"
@@ -136,7 +137,7 @@ def dot(recording: Recording) -> str:
         )
         edges.append(f'  "s{writer[r.name]}" -> "o_{r.name}";')
         for name, nxt in recording.carry.items():
-            if isinstance(nxt, Handle) and nxt.root.name == r.name:
+            if isinstance(nxt, Handle) and nxt.buffer.name == r.name:
                 nodes[None].append(
                     f'  "v_{name}" [shape=plain, '
                     f"label=<<i>{html.escape(name)}</i>, next call>];"
