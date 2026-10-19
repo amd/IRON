@@ -726,13 +726,16 @@ class DecoderLayer(iron.Graph):
     then ``mlp`` after ``post_attention_layernorm``, each block's output
     added to its residual times ``residual_multiplier``. ``rope`` is the
     ``Rope`` whose rows of the call (``Call.ropes``) turn q and k, the
-    model's unless a model sets another; None: no RoPE. ``self_attn`` and
-    ``mlp`` are a model's own where given.
+    model's unless a model sets another; None: no RoPE. ``self_attn``, its
+    o biased with q, k and v where ``attention_bias`` says, and ``mlp`` are
+    a model's own where given.
     """
 
     def __init__(self, c, i: int, self_attn=None, mlp=None):
         self.input_layernorm = RMSNorm(c.hidden_size, c.eps)
-        self.self_attn = Attention(c, i) if self_attn is None else self_attn
+        if self_attn is None:
+            self_attn = Attention(c, i, o_bias=c.attention_bias)
+        self.self_attn = self_attn
         self.post_attention_layernorm = RMSNorm(c.hidden_size, c.eps)
         self.mlp = GatedMLP(c) if mlp is None else mlp
         self.cache = KVCache(c, c.window)

@@ -200,6 +200,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `DecoderLayer` biases its attention's `o_proj` where the config's
+  `attention_bias` says, as transformers' Llama does, so a Llama-family
+  checkpoint with `attention_bias` loads; Qwen 2's `Qwen2Layer` keeps o
+  unbiased.
 - A graph's per-call values and their expressions are taplib's `PerCall`
   and `Affine` (`aie.helpers.taplib`): `marker` replaces `kind`, and an
   expression prints as its symbol name (`pos_p1`, not `pos + 1`).
