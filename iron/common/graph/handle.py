@@ -457,16 +457,18 @@ class Handle:
         Raises:
             ValueError: With ``repeat`` or ``length``, a pattern is not four
                 dimensions one shim descriptor holds, the patterns and
-                repeats differ in number, or no ``bounds``.
+                repeats differ in number (a tuple of either takes a tuple of the
+                other), or no ``bounds``.
         """
         if not isinstance(self.layout, Dense):
             raise ValueError(f"cannot walk a view {self!r}; walk what it views")
         walks = tap if isinstance(tap, tuple) else (tap,)
-        if isinstance(tap, tuple) and (
-            not isinstance(repeat, tuple) or len(repeat) != len(tap)
+        each: tuple = repeat if isinstance(repeat, tuple) else (repeat,)
+        if isinstance(repeat, tuple) != isinstance(tap, tuple) or len(each) != len(
+            walks
         ):
             raise ValueError(
-                f"{len(tap)} patterns walked in turn take a repeat each, not {repeat}"
+                f"{len(walks)} pattern(s) take a repeat each, not {repeat}"
             )
         if repeat is None and length is None:
             return self._view(tap, shape, None, bounds or {})
@@ -492,10 +494,7 @@ class Handle:
         repeats = None
         if repeat is not None:
             # A repeat count may be clamped; a length patches a size, linear.
-            repeats = tuple(
-                r if isinstance(r, Affine) else r.affine()
-                for r in (repeat if isinstance(repeat, tuple) else (repeat,))
-            )
+            repeats = tuple(r if isinstance(r, Affine) else r.affine() for r in each)
         length = None if length is None else length.affine()
         recorder = graph_recorder.get()
         if recorder is not None:

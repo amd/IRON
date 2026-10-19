@@ -2083,20 +2083,24 @@ def test_a_walk_one_descriptor_cannot_hold_is_refused(sizes, strides, bounded, m
 
 
 class _UnpairedWalks(iron.Graph):
-    """Two patterns walked in turn with one repeat between them."""
+    """``taps`` patterns walked in turn with ``repeats`` repeats."""
 
-    def __init__(self):
+    def __init__(self, taps: int, repeats: int):
         self.table = iron.weight(np.zeros((64, 64), dtype=bfloat16))
+        self.taps, self.repeats = taps, repeats
 
     def body(self, *, k: Scratchpad[np.int32]):
         tap = TensorAccessPattern(self.table.shape, 0, [4, 4, 4, 64], [0, 256, 64, 1])
-        rows = self.table.at((tap, tap), (128, 64), bounds={0: k}, repeat=k)
+        taps = (tap,) * self.taps if self.taps > 1 else tap
+        repeat = (k,) * self.repeats if self.repeats > 1 else k
+        rows = self.table.at(taps, (128, 64), bounds={0: k}, repeat=repeat)
         return Copy.step(rows)
 
 
-def test_walks_in_turn_take_a_repeat_each():
+@pytest.mark.parametrize("taps, repeats", [(2, 1), (1, 2)])
+def test_walks_take_a_repeat_each(taps, repeats):
     with pytest.raises(ValueError, match="take a repeat each"):
-        _UnpairedWalks().record()
+        _UnpairedWalks(taps, repeats).record()
 
 
 def test_a_handle_adds_and_multiplies_by_elementwise_and_rowwise_steps():
