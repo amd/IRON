@@ -35,7 +35,9 @@ from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.graph.record import Recording
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
-from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
+from iron.common.design import OperatorDesign
+from iron.operators import GEMM, GEMV, ElementwiseAdd, ElementwiseMul, SiLU
+from iron.operators.gemm import GEMMPlacement
 from iron.tests.common.graphs import Chain
 from iron.tests.common import sequences
 from iron.tests.toolchain.tools import requires
@@ -102,27 +104,10 @@ class _Allocated(Runtime):
         super().resolve(loc, ip, device=device, **options)
 
 
-def _core_pinned(name: str) -> tuple[Worker, Runtime]:
-    """A core on tile (0, 2) draining a fifo named ``name``, and the
-    runtime filling it.
-    """
-    line = np.ndarray[(256,), np.dtype[np.int32]]
-    of = ObjectFifo(line, name=name)
-
-    def core(c):
-        c.acquire(1)
-        c.release(1)
-
-    def sequence(a, h):
-        h.fill(a)
-
-    return Worker(core, [of.cons()], tile=Tile(0, 2)), Runtime(
-        sequence, [line, of.prod()]
-    )
-
-
 def _places(*members: Runtime | Worker) -> str | None:
-    """``places``'s verdict on ``members`` in one device configuration."""
+    """``places``'s verdict on ``members`` composed into one device
+    configuration, which must itself resolve.
+    """
     runtimes = [m for m in members if isinstance(m, Runtime)]
     workers = [m for m in members if isinstance(m, Worker)]
     configured = DeviceConfiguration("pack", NPU2(), workers=workers, runtimes=runtimes)
@@ -343,10 +328,21 @@ def test_sequence_refuses_a_packing_without_a_full_elf():
 
 
 def test_a_pack_refuses_two_cores_on_one_tile():
-    # mlir-aie's core verifier refuses it as the pack resolves, before placement.
-    assert _places(*_core_pinned("x")) is None
-    with pytest.raises(ir.MLIRError, match="already has a core"):
-        _places(*_core_pinned("x"), *_core_pinned("y"))
+    # Two GEMM arrays, each with its cores pinned from tile (0, 2).
+    def gemm(b_col_maj):
+        op = GEMM(
+            M=256,
+            K=256,
+            N=256,
+            num_aie_columns=1,
+            b_col_maj=b_col_maj,
+            placement=GEMMPlacement.TILES,
+        )
+        return OperatorDesign(op.resolved())
+
+    assert fits({"a": gemm(False)}) is None
+    reason = fits({"a": gemm(False), "b": gemm(True)})
+    assert reason is not None and "already has a core" in reason
 
 
 def test_two_pins_on_one_shim_channel_do_not_fit():
