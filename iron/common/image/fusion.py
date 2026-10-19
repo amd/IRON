@@ -168,9 +168,10 @@ class Fusion:
 
         Raises:
             CoResidenceError: A pack holds a design another tool exports, or
-                two of its arrays program one pinned tile.
+                an array that routes a shim channel by hand unallocated.
             ValueError: A buffer's layout disagrees with the sequence it is
-                handed to, or a shared word names an exported design's own.
+                handed to, a shared word names an exported design's own, or
+                two arrays of a pack program one pinned tile's DMA.
         """
         words = self.shared_words
         arrays: dict[str, BuiltArray] = {}

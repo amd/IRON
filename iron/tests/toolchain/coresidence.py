@@ -53,20 +53,6 @@ def _builds_elf(test):
     return test
 
 
-# A core pinned to a tile: two such arrays are a conflict no placer can
-# resolve, which a pack must refuse before placement is asked.
-_PINNED = """
-aie.device(npu2) {
-  %t = aie.tile(0, 2)
-  %c = aie.core(%t) {
-    aie.end
-  }
-  aie.runtime_sequence @sequence() {
-  }
-}
-"""
-
-
 def _shim_pinned(col: int, channel: int, name: str) -> Runtime:
     """A pass-through whose input enters on shim ``(col, 0)``, MM2S
     ``channel``, through a fifo named ``name``: its runtime sequence, which
@@ -177,19 +163,6 @@ aie.device(npu2) {{
   aie.runtime_sequence @sequence() {{
   }}
 }}
-"""
-
-
-# A static DMA program on shim (0, 0).
-_SHIM_PROGRAM = """
-aie.device(npu2) {
-  %t = aie.tile(0, 0)
-  %dma = aie.shim_dma(%t) {
-    aie.end
-  }
-  aie.runtime_sequence @sequence() {
-  }
-}
 """
 
 
@@ -322,14 +295,6 @@ def test_two_arrays_of_one_class_pack():
     assert fifos and len(fifos) == len(set(fifos))
 
 
-def test_a_pack_refuses_two_cores_on_one_tile():
-    # A buffer makes the arrays differ, so the cores are not one array's.
-    other = _PINNED.replace("%c =", "%b = aie.buffer(%t) : memref<4xi32>\n  %c =")
-    assert _conflict(x=_PINNED) is None
-    reason = _conflict(x=_PINNED, y=other)
-    assert reason is not None and "aie.core" in reason and "(0, 2)" in reason
-
-
 def test_packing_rejects_a_design_in_two_groups():
     with pytest.raises(ValueError, match="two groups"):
         Packing((("a", "b"), ("b", "c")))
@@ -391,12 +356,6 @@ def test_an_allocated_route_holds_its_channels(col, channel, taken):
         assert reason is not None and "already in use" in reason
     else:
         assert reason is None
-
-
-@pytest.mark.parametrize("logical", [False, True], ids=["physical", "logical"])
-def test_a_tile_control_route_claims_the_dma_program(logical):
-    reason = _conflict(x=_routed(allocated=True, logical=logical), y=_SHIM_PROGRAM)
-    assert reason is not None and "TileControl" in reason and "(0, 0)" in reason
 
 
 def test_packing_is_in_the_fused_identity():

@@ -10,10 +10,11 @@ cores idle on the lock its own sequence sets while another runs; dataflow
 between members still goes through DDR. Members share the device's symbol
 table, which aie.iron names their unnamed fifos and buffers into. Two
 members may share a pinned tile unless both program its core or its DMA, which a route
-into its TileControl does too (``conflicts``); a logical tile given its
-column and row is pinned. The fifo lowering allocates shim channels around
+into its TileControl does too: the core verifier and mlir-aie's
+``DeviceConfiguration`` refuse those; a logical tile given its column and
+row is pinned. The fifo lowering allocates shim channels around
 ``aie.shim_dma_allocation`` ops alone, so a member routing a pinned shim
-channel by hand must allocate it. Whether the union fits is for aiecc's
+channel by hand must allocate it (``conflicts``). Whether the union fits is for aiecc's
 placer, fifo lowering and router to say (``fits``).
 """
 
@@ -29,8 +30,6 @@ from aie.iron import DeviceConfiguration, Program
 from aie.passmanager import PassManager
 
 from ..design import BuiltArray, OperatorDesign, configuration, identities
-
-_EXCLUSIVE_PER_TILE = ("aie.core", "aie.mem", "aie.memtile_dma", "aie.shim_dma")
 
 # aiecc's resource stages, in its order (tools/aiecc/IRTransforms.h). The whole
 # stateful transform, since allocate alone on unsplit fifos checks nothing.
@@ -191,38 +190,24 @@ def _route_ends(op: ir.OpView):
 
 def conflicts(devices: Mapping[str, aie.DeviceOp]) -> None:
     """Refuse ``devices`` (design name -> its own device, each another
-    array) co-resident where two program one pinned tile or one leaves a
-    hand-routed shim channel to the fifo lowering.
+    array) co-resident where one leaves a hand-routed shim channel to the
+    fifo lowering.
 
     Raises:
-        CoResidenceError: Two put an exclusive op on one pinned tile, or one
-            routes a shim DMA channel by hand with no
+        CoResidenceError: One routes a shim DMA channel by hand with no
             ``aie.shim_dma_allocation`` for it.
     """
-    exclusive: dict[tuple[str, tuple[int, int]], tuple[str, str]] = {}
     for member, device in devices.items():
         routed: set[tuple[tuple[int, int], aie.DMAChannelDir, int]] = set()
         allocated: set[tuple[tuple[int, int], aie.DMAChannelDir, int]] = set()
         for op in _body(device):
-            claims: list[tuple[str, tuple[int, int], str]] = []
-            if op.operation.name in _EXCLUSIVE_PER_TILE:
-                placed = _pinned_tile(op.operation.operands[0].owner)
-                if placed is not None:
-                    claims.append(
-                        (op.operation.name, placed, f"an {op.operation.name}")
-                    )
             for tile, direction, bundle, channel in _route_ends(op):
                 placed = _pinned_tile(tile)
-                if placed is None:
-                    continue
-                if bundle == aie.WireBundle.TileControl:
-                    kind = (
-                        "aie.shim_dma"
-                        if tile.is_shim_tile()
-                        else "aie.memtile_dma" if tile.is_mem_tile() else "aie.mem"
-                    )
-                    claims.append((kind, placed, "a TileControl route"))
-                elif bundle == aie.WireBundle.DMA and tile.is_shim_tile():
+                if (
+                    placed is not None
+                    and bundle == aie.WireBundle.DMA
+                    and tile.is_shim_tile()
+                ):
                     routed.add((placed, direction, channel))
             if isinstance(op, aie.ShimDMAAllocationOp):
                 placed = _pinned_tile(op.tile.owner)
@@ -234,15 +219,6 @@ def conflicts(devices: Mapping[str, aie.DeviceOp]) -> None:
                             ir.IntegerAttr(op.channel_index).value,
                         )
                     )
-            for kind, placed, what in claims:
-                key = (kind, placed)
-                if key in exclusive and exclusive[key][0] != member:
-                    holder, held = exclusive[key]
-                    raise CoResidenceError(
-                        f"{holder} puts {held} and {member} puts {what} "
-                        f"on tile {placed}, which carries one {kind}"
-                    )
-                exclusive[key] = (member, what)
         if routed - allocated:
             placed, direction, channel = min(routed - allocated)
             raise CoResidenceError(
@@ -257,8 +233,8 @@ def pack(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfiguration:
     (``design.configuration``).
 
     Raises:
-        CoResidenceError: Two of its arrays program one pinned tile
-            (``conflicts``).
+        CoResidenceError: One of its arrays routes a shim channel by hand
+            without allocating it (``conflicts``).
     """
     distinct: dict[Hashable, BuiltArray] = {}
     of = identities(arrays)
