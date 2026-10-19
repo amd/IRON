@@ -483,8 +483,9 @@ class Model(iron.Graph):
         full_elf: bool | None = None,
         dev=None,
     ) -> "Model":
-        """Compile and load every version before the first call, in one
-        arena, then hand them to ``loaded``.
+        """Compile every version, then load each, in one arena, and hand
+        them to ``loaded``: every version is placed before the arena's
+        buffers are made, so none grows them, which would copy them.
 
         Args:
             release: Given each piece of each weight once it is on the device.
@@ -499,10 +500,11 @@ class Model(iron.Graph):
             version = self.compile(
                 dev=dev, feeds=decode if prompt else None, full_elf=full_elf, **shapes
             )
-            version.load(release=release)
             if not shapes and version.emit is not None:
                 decode = version
             compiled.append(version)
+        for version in compiled:
+            version.load(release=release)
         self.loaded(compiled)
         return self
 
