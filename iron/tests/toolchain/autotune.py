@@ -11,6 +11,7 @@ import dataclasses
 import json
 
 import aie.utils as aie_utils
+import aie.utils.benchmark as benchmark
 import numpy as np
 import pytest
 from aie.iron.device import from_name
@@ -28,7 +29,7 @@ from iron.tests.common.graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
 from iron.tune import autotune as tuning
 from iron.tune.autotune import Point, Shape, Timed, autotune, line, refusal, settings
-from iron.tune.measure import Cache, Measurement, judge
+from iron.tune.measure import Cache, Measurement, Timing, judge, time_interleaved
 
 SIZE = 8192
 TILE = 256
@@ -649,3 +650,16 @@ def test_retuning_keeps_what_the_profile_set_that_the_search_does_not_move(
     profile = _tune(recording, npu2, old)
     op = profile.make(GEMM, M=256, K=256, N=256)
     assert op.precision is Precision.HIGH and op.resolved(npu2).tile_n == 16
+
+
+def test_a_run_is_timed_by_the_time_its_image_took(monkeypatch):
+    class Run:
+        last_elapsed = 0.0
+
+        def __call__(self):
+            self.last_elapsed = 12.5e-6
+
+    monkeypatch.setattr(benchmark, "other_npu_users", lambda holding=False: set())
+    monkeypatch.setattr(benchmark, "cpu_wait_us", lambda: None)
+    (timed,) = time_interleaved([Run()], Timing(rounds=2, calls=3))
+    assert timed.round_us == (12.5, 12.5)
