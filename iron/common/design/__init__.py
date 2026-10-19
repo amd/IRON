@@ -6,7 +6,7 @@
 ``OperatorDesign.module`` resolves the operator, runs its ``build()`` and
 builds aie.iron's ``Program`` around an ``OperatorRuntime``: the preamble,
 then the sequence derived from the operands or the operator's own
-``sequence(rt)``. For a fused image, ``configuration`` puts ``BuiltArray`` s
+``sequence(rt)``. For a full ELF, ``configuration`` puts ``BuiltArray`` s
 and their sequences into one ``DeviceConfiguration`` for ``Program.compose``.
 """
 

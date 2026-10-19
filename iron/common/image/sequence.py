@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""OperatorSequence: what one run of a recorded graph builds and dispatches."""
+"""Image: what one run of a recorded graph builds and dispatches."""
 
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ from aie.utils.npukernel import NPUKernel
 from ..declare import Operator
 from .allocator import ALIGNMENT, BANK, Allocation, ArenaPlan, LiveRange, Pool
 from .artifacts import Artifacts, Design, Step
-from .callable import BF16, FullELFCallable, ScratchArena, StepCallable
+from .callable import BF16, FullELFCallable, ScratchArena, PerStepCallable
 from .coresidence import AdjacentPacking
-from .fused import FusedImage, XclbinChain
-from .fusion import ArgumentSizes
+from .link import FullELF, PerStep
+from .compose import ArgumentSizes
 from .step import BufferRef, SequenceStep
 
 if TYPE_CHECKING:
@@ -37,7 +37,7 @@ def _signature(op):
     ]
 
 
-class OperatorSequence:
+class Image:
     """A recorded graph's steps, built and dispatched as one image.
 
     Args:
@@ -60,7 +60,7 @@ class OperatorSequence:
             chooses them.
         reconfigure: On the full ELF, configure the array at every call even
             where it runs one design, which the first call otherwise
-            configures for all (``Fusion.expands``).
+            configures for all (``Composition.expands``).
         commands: On the full ELF, the steps that start a command of their
             own after the first's, each command a runtime sequence a call
             queues after the one before it.
@@ -365,7 +365,7 @@ class OperatorSequence:
         # After the packaging check: a sequence that cannot run in its arena must
         # not place anything there.
         self.layout, self.buffer_sizes = self._layout()
-        self._image = FusedImage() if self.full_elf else XclbinChain()
+        self._image = FullELF() if self.full_elf else PerStep()
 
     def compile(self):
         """Build the image ahead of time."""
@@ -383,14 +383,14 @@ class OperatorSequence:
 
     def kernel(self, op: Operator) -> NPUKernel:
         """The kernel a step of ``op`` dispatches on the xclbin chain."""
-        if not isinstance(self._image, XclbinChain) or self._image.image is None:
+        if not isinstance(self._image, PerStep) or self._image.image is None:
             raise RuntimeError(f"{self.name} is not linked as an xclbin chain")
         return self._image.links[id(op)].kernel
 
     @property
     def elf_path(self):
-        """The fused ELF, when that is this sequence's image."""
-        return self.image if isinstance(self._image, FusedImage) else None
+        """The full ELF, when that is this sequence's image."""
+        return self.image if isinstance(self._image, FullELF) else None
 
     @property
     def artifacts(self) -> Artifacts:
@@ -408,7 +408,7 @@ class OperatorSequence:
             for i in range(len(designs))
         ]
         insts = None
-        if isinstance(self._image, FusedImage):
+        if isinstance(self._image, FullELF):
             assert self._image.design is not None, "link() built the image"
             entry = self._image.design.get_cache_entry()
             labels = [f"op{i}_{type(op).__name__}" for i, op in enumerate(designs)]
@@ -465,5 +465,5 @@ class OperatorSequence:
         if self.arena is not None and arena is None:
             arena = ScratchArena(self.arena)
         if not self.full_elf:
-            return StepCallable(self, check=self.check, arena=arena)
+            return PerStepCallable(self, check=self.check, arena=arena)
         return FullELFCallable(self, arena=arena)

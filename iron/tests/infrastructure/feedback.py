@@ -20,8 +20,8 @@ from aie.utils.trace import TraceConfig, get_trace_buffer
 from ml_dtypes import bfloat16
 
 from iron.common.graph.record import Recording
-from iron.common.image.fusion import Fusion
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.compose import Composition
+from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators import LayerNorm
 from iron.operators.copy import Copy
@@ -86,7 +86,7 @@ def _feedback_sequence(name, layer_norm=None):
     recording = Recording.of_steps(
         name, sequences.steps(*runlist), inputs, outputs, feedback=["next"]
     )
-    seq = OperatorSequence(recording, full_elf=True)
+    seq = Image(recording, full_elf=True)
     return seq, gather
 
 
@@ -229,12 +229,12 @@ def test_feedback_argument_only_when_declared():
             ["b"] if feedback else ["b", "next"],
             feedback=feedback,
         )
-        seq = OperatorSequence(recording, full_elf=True)
+        seq = Image(recording, full_elf=True)
         seq.prepare()
         # The main device's runtime sequence is the last one in the module.
         header = [
             line
-            for line in Fusion(seq).text().splitlines()
+            for line in Composition(seq).text().splitlines()
             if "aie.runtime_sequence" in line
         ][-1]
         assert header.count("memref<") == arguments, header

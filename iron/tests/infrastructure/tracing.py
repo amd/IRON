@@ -17,7 +17,7 @@ from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.common.tracing import dump_traces
 from iron.operators import LayerNorm
@@ -26,7 +26,7 @@ SIZE = 2048
 
 
 def _layer_norm_run(name, trace):
-    """A dispatched one-step fused sequence, and its output."""
+    """A dispatched one-step full-ELF sequence, and its output."""
     layer_norm = LayerNorm(
         rows=1,
         num_aie_columns=1,
@@ -42,9 +42,7 @@ def _layer_norm_run(name, trace):
     f = F()
 
     recording = f.record(x=(1, SIZE))
-    seq = OperatorSequence(
-        dataclasses.replace(recording, name=name), full_elf=True
-    ).compile()
+    seq = Image(dataclasses.replace(recording, name=name), full_elf=True).compile()
     run = seq.get_callable()
     x = run.get_buffer(BufferRef("x"))
     x.numpy_view()[:] = np.random.default_rng(0).standard_normal(SIZE).astype(bfloat16)

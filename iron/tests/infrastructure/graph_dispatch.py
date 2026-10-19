@@ -28,9 +28,9 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Scratchpad
 from iron.common.image import AdjacentPacking
-from iron.common.image.fusion import Fusion
+from iron.common.image.compose import Composition
 from iron.common.graph.record import Recording
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators import (
     GEMV,
@@ -57,18 +57,18 @@ def _operator():
     return ElementwiseAdd(size=SIZE, tile_size=TILE)
 
 
-PACKAGINGS = {"separate": dict(full_elf=False), "fused": dict(full_elf=True)}
+PACKAGINGS = {"separate": dict(full_elf=False), "composed": dict(full_elf=True)}
 
 
-def _graph(name, packaging="fused"):
+def _graph(name, packaging="composed"):
     """X + w + w + w, recorded from dataflow, as the sequence it lowers to."""
     recording = Adds(_operator(), 3).record(x=(SIZE,), w=(SIZE,))
-    return recording, OperatorSequence(
+    return recording, Image(
         dataclasses.replace(recording, name=name), **PACKAGINGS[packaging]
     )
 
 
-def _hand_written(name, packaging="fused"):
+def _hand_written(name, packaging="composed"):
     """The same computation, with the buffer names written out."""
     add = _operator()
     runlist = [
@@ -77,7 +77,7 @@ def _hand_written(name, packaging="fused"):
         (add, "t1", "w", "out"),
     ]
     recording = Recording.of_steps(name, sequences.steps(*runlist), ["x", "w"], ["out"])
-    return OperatorSequence(recording, **PACKAGINGS[packaging])
+    return Image(recording, **PACKAGINGS[packaging])
 
 
 def test_a_graph_records_the_same_steps_as_a_hand_written_runlist():
@@ -211,7 +211,7 @@ def test_a_packed_graph_computes_what_the_temporal_one_does():
         version = Chain(SIZE, TILE, columns=2).compile(
             full_elf=True, coresident=coresident, a=(SIZE,), b=(SIZE,)
         )
-        text = Fusion(version.sequence).text()
+        text = Composition(version.sequence).text()
         configures.append(len(re.findall(r"aiex\.configure", text)))
         outputs.append(np.array(version(a, b).numpy()[:SIZE]))
     # A configure per change of design and the reset, against one pack and
@@ -238,7 +238,7 @@ def test_designs_of_one_array_run_on_one_configure():
     c, d = ((rng.random(2 * SIZE) * 4 - 2).astype(bfloat16) for _ in range(2))
     shapes = dict(a=(SIZE,), b=(SIZE,), c=(2 * SIZE,), d=(2 * SIZE,))
     shared = TwoExtents().compile(full_elf=True, **shapes)
-    text = Fusion(shared.sequence).text()
+    text = Composition(shared.sequence).text()
     # Against small, large, small and the reset, were each design its own device.
     assert len(re.findall(r"aiex\.configure", text)) == 2
     assert len(re.findall(r"aiex\.run", text)) == 3
@@ -283,7 +283,7 @@ def test_each_design_of_one_array_runs_on_its_own_values():
     )
     graph = TwoProjections(narrow, wide)
     net = graph.compile(full_elf=True, x=(K,), y=(K,))
-    text = Fusion(net.sequence).text()
+    text = Composition(net.sequence).text()
     assert (
         len(re.findall(r"aiex\.configure", text)) == 2
     )  # the shared device, the reset
@@ -309,7 +309,7 @@ def test_each_merge_of_one_array_runs_on_its_own_count():
     rng = np.random.default_rng(0)
     graph = TwoMerges()
     net = graph.compile(full_elf=True, ids=((64,), np.int32), more=((192,), np.int32))
-    text = Fusion(net.sequence).text()
+    text = Composition(net.sequence).text()
     assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
     assert len(re.findall(r"aiex\.run", text)) == 2
     for _ in range(2):
@@ -342,7 +342,7 @@ class TwoTables(iron.Graph):
 def test_each_table_of_one_array_runs_on_its_own_sizes():
     graph = TwoTables()
     net = graph.compile(full_elf=True)
-    text = Fusion(net.sequence).text()
+    text = Composition(net.sequence).text()
     assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
     assert len(re.findall(r"aiex\.run", text)) == 2
     for _ in range(2):
@@ -376,7 +376,7 @@ class TwoPositions(iron.Graph):
 def test_each_position_table_of_one_array_runs_on_its_own_rows():
     graph = TwoPositions()
     net = graph.compile(full_elf=True)
-    text = Fusion(net.sequence).text()
+    text = Composition(net.sequence).text()
     assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
     assert len(re.findall(r"aiex\.run", text)) == 2
     for sizes in (
@@ -422,7 +422,7 @@ def test_each_resize_of_one_array_runs_on_its_own_sizes():
             for name, t in zip(("rgb", "taps_w", "taps_h", "wide_w"), (rgb, *taps))
         },
     )
-    text = Fusion(net.sequence).text()
+    text = Composition(net.sequence).text()
     assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
     assert len(re.findall(r"aiex\.run", text)) == 2
     for _ in range(2):

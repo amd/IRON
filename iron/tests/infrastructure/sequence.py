@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Infrastructure tests for ``OperatorSequence``.
+"""Infrastructure tests for ``Image``.
 
 It exercises the
-sequencing infrastructure itself (dispatch-mode selection, fused-MLIR
+sequencing infrastructure itself (dispatch-mode selection, composed-MLIR
 generation, cross-packaging output parity and the check mode's self-check)
 rather than any single operator.
 
-The ``OperatorSequence`` packagings and modes covered here are:
+The ``Image`` packagings and modes covered here are:
 
 * ``full_elf=None``     – a full ELF on NPU2 (Strix), an xclbin chain on
                           NPU1 (Phoenix).
@@ -34,8 +34,8 @@ from ml_dtypes import bfloat16
 from aie.helpers.taplib import PerCall
 
 from iron.common.graph.record import Recording
-from iron.common.image.fusion import Fusion
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.compose import Composition
+from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.common.image.packaging import Kind
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -49,7 +49,7 @@ RELATIVE = Tolerance.relative(0.04, 1e-6)
 
 PACKAGINGS = {
     "separate": dict(full_elf=False),
-    "fused": dict(full_elf=True),
+    "composed": dict(full_elf=True),
     "compare": dict(check=True),
 }
 
@@ -82,7 +82,7 @@ _ADD_RELU_COLS = 4
 
 
 def _build_add_relu_sequence(name, inputs=("a", "b"), **packaging):
-    """Out = relu(a + b), as a 2-step OperatorSequence."""
+    """Out = relu(a + b), as a 2-step Image."""
     add = ElementwiseAdd(
         size=_ADD_RELU_SIZE,
         tile_size=_ADD_RELU_TILE,
@@ -100,7 +100,7 @@ def _build_add_relu_sequence(name, inputs=("a", "b"), **packaging):
         inputs,
         ["out"],
     )
-    return OperatorSequence(recording, **packaging)
+    return Image(recording, **packaging)
 
 
 # ---------------------------------------------------------------------------
@@ -139,40 +139,40 @@ def test_auto_dispatch_selects_platform_default(size):
 
 
 # ---------------------------------------------------------------------------
-# 2. Compilation-only: the fused single-ELF MLIR is well formed.
+# 2. Compilation-only: the composed single-ELF MLIR is well formed.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("sequence", ["add_relu"])
-def test_fused_mlir_contains_reconfiguration(sequence, npu2):
-    """The single-dispatch (fused) path emits one ``aie.device`` per operator
+def test_composed_mlir_contains_reconfiguration(sequence, npu2):
+    """The single-dispatch (composed) path emits one ``aie.device`` per operator
     plus a top-level device whose runtime sequence reconfigures the array
     between operators via ``aiex.configure`` / ``aiex.run``.
 
     Only the *generated MLIR* is inspected here (no ELF backend is invoked),
-    so it needs no device: it builds for NPU2, which the full fused dispatch
+    so it needs no device: it builds for NPU2, which the full composed dispatch
     itself requires.
     """
-    seq = _build_add_relu_sequence("infra_fused_mlir", full_elf=True)
+    seq = _build_add_relu_sequence("infra_full_elf_mlir", full_elf=True)
 
-    # Generate the fused MLIR directly, bypassing the ELF backend (which is
-    # NPU2-only). This mirrors what FusedImage.link() feeds to the compiler.
+    # Generate the composed MLIR directly, bypassing the ELF backend (which is
+    # NPU2-only). This mirrors what FullELF.link() feeds to the compiler.
     seq.prepare()
-    fusion = Fusion(seq)
-    assert fusion.expands
-    text = fusion.text()
+    composition = Composition(seq)
+    assert composition.expands
+    text = composition.text()
 
     # Reconfiguration + dispatch ops between temporal steps.
-    assert "aiex.configure" in text, "missing aiex.configure in fused MLIR"
-    assert "aiex.run @sequence" in text, "missing aiex.run in fused MLIR"
+    assert "aiex.configure" in text, "missing aiex.configure in composed MLIR"
+    assert "aiex.run @sequence" in text, "missing aiex.run in composed MLIR"
     # Typed views of the byte arguments, handed to each operator's runtime sequence.
-    assert "memref.view" in text, "missing buffer view in fused MLIR"
+    assert "memref.view" in text, "missing buffer view in composed MLIR"
     # One inlined device per unique operator plus the top-level driver device,
     # each named for its class and its design, not its position.
     names = re.findall(r"aie\.device\(\w+\) @(\w+)", text)
     assert any(re.fullmatch(r"ElementwiseAdd_[0-9a-f]{8}", n) for n in names) and any(
         re.fullmatch(r"ReLU_[0-9a-f]{8}", n) for n in names
-    ), f"operator devices not inlined into fused module: {names}"
+    ), f"operator devices not inlined into composed module: {names}"
     assert (
         text.count("aie.device") >= 3
     ), "expected two operator devices plus a top-level device"
@@ -186,10 +186,10 @@ def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
     fusions = {}
     for commands in ((), (1,)):
         seq = _build_add_relu_sequence(
-            "infra_fused_commands", full_elf=True, commands=commands
+            "infra_full_elf_commands", full_elf=True, commands=commands
         )
         seq.prepare()
-        fusions[commands] = Fusion(seq)
+        fusions[commands] = Composition(seq)
     whole, cut = (fusions[c].text() for c in ((), (1,)))
     device = re.compile(r"^  aie\.device\(\w+\) @(\w+) \{$.*?^  \}$", re.M | re.S)
     designs = {m.group(1): m.group(0) for m in device.finditer(whole)}
@@ -199,7 +199,7 @@ def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
     main = cut[cut.rindex("aie.device(") :]
     commands = re.split(r"aie\.runtime_sequence", main)[1:]
     names = [re.match(r" @(\w+)", text) for text in commands]
-    assert names[0] is None and names[1].group(1) == Fusion.sequence_name(1)
+    assert names[0] is None and names[1].group(1) == Composition.sequence_name(1)
     assert whole[whole.rindex("aie.device(") :].count("aie.runtime_sequence") == 1
     assert fusions[()].identity != fusions[(1,)].identity
 
@@ -234,8 +234,11 @@ def test_dispatch_modes_bit_identical(dispatch):
     mechanism differs. The ``separate`` mode is the baseline (it runs on every
     platform).
     """
-    if dispatch == "fused" and not aie_utils.get_current_device().dispatches_full_elf:
-        pytest.skip("fused dispatch needs a full ELF, which this device lacks")
+    if (
+        dispatch == "composed"
+        and not aie_utils.get_current_device().dispatches_full_elf
+    ):
+        pytest.skip("composed dispatch needs a full ELF, which this device lacks")
 
     rng = np.random.default_rng(0)
     a = _centered(rng, _ADD_RELU_SIZE)
@@ -272,7 +275,7 @@ def test_check_mode_judges_each_step_by_its_tolerance():
     x = (rng.standard_normal((rows, width)) * 10.0).astype(np.float32)
 
     op = Magnitude(rows=rows, width=width, num_aie_columns=1)
-    seq = OperatorSequence(
+    seq = Image(
         Recording.of_steps(
             "infra_check_magnitude", sequences.steps((op, "x", "out")), ["x"], ["out"]
         ),
@@ -298,7 +301,7 @@ def test_check_mode_judges_every_output_at_the_calls_values(caplog):
     op = Sample(vocab=4096, cores=4, steps=steps)
     op.use_value("row", PerCall("row", Kind.SCRATCHPAD, np.int32).affine())
     op.use_value("at", PerCall("position", Kind.SCRATCHPAD, np.int32).affine())
-    seq = OperatorSequence(
+    seq = Image(
         Recording.of_steps(
             "infra_check_sample",
             sequences.steps((op, "logits", "draws", "tokens", "token")),
@@ -337,16 +340,19 @@ def test_check_mode_judges_every_output_at_the_calls_values(caplog):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("dispatch", ["separate", "fused"])
+@pytest.mark.parametrize("dispatch", ["separate", "composed"])
 def test_non_input_buffers_sync_without_explicit_flush(dispatch):
     """Host writes through get_buffer() to a non-input buffer reach the NPU at
     the next dispatch, and reads of a non-output buffer after a dispatch see
     what the NPU wrote there, with no explicit ``to()`` from the caller.
     """
-    if dispatch == "fused" and not aie_utils.get_current_device().dispatches_full_elf:
-        pytest.skip("fused dispatch needs a full ELF, which this device lacks")
+    if (
+        dispatch == "composed"
+        and not aie_utils.get_current_device().dispatches_full_elf
+    ):
+        pytest.skip("composed dispatch needs a full ELF, which this device lacks")
 
-    # b is not an input, so it is held like a weight (in scratch, when fused).
+    # b is not an input, so it is held like a weight (in scratch, when composed).
     seq = _build_add_relu_sequence(
         f"infra_add_weight_relu_{dispatch}", inputs=["a"], **PACKAGINGS[dispatch]
     )
@@ -377,8 +383,8 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
 
 
 def _build_one_design_sequence(op, name, reconfigure=False):
-    """Out = op(a), as a 1-step fused OperatorSequence."""
-    return OperatorSequence(
+    """Out = op(a), as a 1-step composed Image."""
+    return Image(
         Recording.of_steps(name, sequences.steps((op, "a", "out")), ["a"], ["out"]),
         full_elf=True,
         reconfigure=reconfigure,
@@ -402,21 +408,21 @@ def _expanded_pdis(seq):
 
 @pytest.mark.parametrize("reconfigure", [False, True])
 def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
-    """One design's fusion leaves its load unexpanded, unless the sequence
+    """One design's composition leaves its load unexpanded, unless the sequence
     asks to reconfigure at every call, as a probe timing a design's entry does.
     """
     seq = _build_one_design_sequence(
-        _relu(), f"infra_fused_relu_reconfigure_{reconfigure}", reconfigure
+        _relu(), f"infra_full_elf_relu_reconfigure_{reconfigure}", reconfigure
     )
     seq.prepare()
-    fusion = Fusion(seq)
-    assert fusion.expands == reconfigure
+    composition = Composition(seq)
+    assert composition.expands == reconfigure
 
 
 def test_reconfigure_needs_a_full_elf():
     """Only a full ELF has a configure to repeat."""
     with pytest.raises(ValueError, match="reconfigure"):
-        OperatorSequence(
+        Image(
             Recording.of_steps(
                 "infra_separate_reconfigure",
                 sequences.steps((_relu(), "a", "out")),
@@ -430,12 +436,12 @@ def test_reconfigure_needs_a_full_elf():
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_one_design_is_configured_once():
-    """A fused sequence of one design builds no expanded load, and every
+    """A full-ELF sequence of one design builds no expanded load, and every
     dispatch after the first still computes on its new inputs.
     """
     if not aie_utils.get_current_device().dispatches_full_elf:
-        pytest.skip("fused dispatch needs a full ELF, which this device lacks")
-    seq = _build_one_design_sequence(_relu(), "infra_fused_relu_once").compile()
+        pytest.skip("composed dispatch needs a full ELF, which this device lacks")
+    seq = _build_one_design_sequence(_relu(), "infra_full_elf_relu_once").compile()
     assert not _expanded_pdis(seq)
 
     run = seq.get_callable()
@@ -455,7 +461,7 @@ def test_one_design_reconfigures_after_another_image():
     again after the other ran, so each still computes its own operator.
     """
     if not aie_utils.get_current_device().dispatches_full_elf:
-        pytest.skip("fused dispatch needs a full ELF, which this device lacks")
+        pytest.skip("composed dispatch needs a full ELF, which this device lacks")
     tanh = Tanh(
         size=_ADD_RELU_SIZE,
         num_aie_columns=_ADD_RELU_COLS,
@@ -465,7 +471,7 @@ def test_one_design_reconfigures_after_another_image():
     images = {"relu": _relu(), "tanh": tanh}
     runs = {}
     for name, op in images.items():
-        seq = _build_one_design_sequence(op, f"infra_fused_{name}_turns").compile()
+        seq = _build_one_design_sequence(op, f"infra_full_elf_{name}_turns").compile()
         assert not _expanded_pdis(seq), name
         runs[name] = seq.get_callable()
 

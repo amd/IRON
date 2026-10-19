@@ -4,8 +4,8 @@
 """What a design becomes once it is built, and how it is called.
 
 ``sequence`` drives one run: ``packaging`` picks the image, ``allocator``
-places its buffers, ``fusion`` and ``coresidence`` compose the designs,
-``fused`` compiles them and ``callable`` runs the result; ``standalone`` is
+places its buffers, ``compose`` and ``coresidence`` compose the designs,
+``link`` compiles them and ``callable`` runs the result; ``standalone`` is
 one operator on its own (``Operator.compile``).
 """
 

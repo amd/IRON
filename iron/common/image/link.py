@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The image an operator sequence builds: one fused ELF, or a chain of xclbins.
+"""The image an operator sequence builds: one full ELF, or a chain of xclbins.
 
 Both compile through mlir-aie's ``CompilableDesign``, which owns the cache:
 it keys on what the text is a function of, locks across processes and
@@ -18,17 +18,17 @@ from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.npukernel import NPUKernel
 
 from ..design import OperatorDesign
-from .fusion import Fusion
+from .compose import Composition
 from .packaging import require_device
 
 
-class FusedImage:
-    """The full ELF: every design fused into one module (NPU2 only)."""
+class FullELF:
+    """The full ELF: every design composed into one module (NPU2 only)."""
 
     # --get-scratchpad-parameters emits the parameter table the host writes
     # through. Without it the ELF is not the same program.
     FLAGS = ("--get-scratchpad-parameters",)
-    # Only when the fusion expands its loads (``Fusion.expands``): what makes
+    # Only when the composition expands its loads (``Composition.expands``): what makes
     # a multi-device runlist switch PDIs between steps.
     EXPAND_FLAG = "--expand-load-pdis"
     # Only when tracing: the trace parser reads the lowered module for the
@@ -36,14 +36,14 @@ class FusedImage:
     TRACE_FLAG = "--get-input-with-addresses"
 
     def __init__(self):
-        self.fusion: Fusion | None = None
+        self.composition: Composition | None = None
         self.design: CompilableDesign | None = None
 
     def link(self, seq) -> Path:
         """Build the ELF once (idempotent); returns its path.
 
-        Keyed on ``Fusion.identity``, so a hit generates nothing: the
-        designs are fused, inside ``compile()``, only on a miss.
+        Keyed on ``Composition.identity``, so a hit generates nothing: the
+        designs are composed, inside ``compile()``, only on a miss.
         """
         design = self.design
         if design is None:
@@ -52,9 +52,9 @@ class FusedImage:
                 raise RuntimeError(
                     f"{dev.name} ({dev.arch}) does not dispatch a full ELF"
                 )
-            fusion = self.fusion = Fusion(seq)
+            composition = self.composition = Composition(seq)
             flags = [
-                *([self.EXPAND_FLAG] if fusion.expands else []),
+                *([self.EXPAND_FLAG] if composition.expands else []),
                 *self.FLAGS,
                 *([self.TRACE_FLAG] if seq.traced else []),
             ]
@@ -62,11 +62,11 @@ class FusedImage:
             # The cache follows the modules a generator reaches, not the state
             # of what it closes over, so the identity is one.
             def generator(key: CompileTime[str]) -> ir.Module:
-                return ir.Module.parse(fusion.text())
+                return ir.Module.parse(composition.text())
 
             design = CompilableDesign(
                 generator,
-                compile_kwargs={"key": fusion.identity},
+                compile_kwargs={"key": composition.identity},
                 full_elf=True,
                 aiecc_flags=list(
                     dict.fromkeys(
@@ -106,7 +106,7 @@ class Link:
     kernel: NPUKernel
 
 
-class XclbinChain:
+class PerStep:
     """One xclbin and instruction stream per design, each linked onto the
     previous (mlir-aie's ``CompilableDesign.chain``): the last link of each
     chain carries its kernels, ``image`` the last chain's.

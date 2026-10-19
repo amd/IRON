@@ -59,7 +59,7 @@ def dump_traces(
     Returns the JSON paths written, empty on an untraced build.
 
     The text goes to ``trace_file`` and the JSON beside it, under its stem: a
-    fused sequence shares the buffer between the designs it configures, and each
+    full-ELF sequence shares the buffer between the designs it configures, and each
     gets its own ``<stem>_<index>_<device>_<sequence>.json``; otherwise the JSON
     is ``<stem>.json``.
 

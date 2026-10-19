@@ -20,7 +20,7 @@ from aie.utils.trace import get_trace_buffer
 
 from ..declare import Operator
 from .allocator import ALIGNMENT, BANK, ArenaPlan, Pool
-from .fusion import Fusion
+from .compose import Composition
 from .step import BufferRef
 
 if TYPE_CHECKING:
@@ -318,7 +318,7 @@ class FullELFCallable(ImageCallable):
         self.later = [
             NPUKernel(
                 elf_path=str(seq.image),
-                kernel_name=f"{device_name}:{Fusion.sequence_name(k)}",
+                kernel_name=f"{device_name}:{Composition.sequence_name(k)}",
             )
             for k in range(1, len(seq.commands) + 1)
         ]
@@ -547,8 +547,8 @@ class FullELFCallable(ImageCallable):
         self.last_elapsed = time.perf_counter() - t0
 
 
-class StepCallable(ImageCallable):
-    """Runs an ``XclbinChain`` one step at a time, its buffers shared by name.
+class PerStepCallable(ImageCallable):
+    """Runs an ``PerStep`` one step at a time, its buffers shared by name.
 
     ``check`` holds each dispatched step to its reference on the NPU's
     inputs, by the step's ``tolerance()`` (``check_step``), so each

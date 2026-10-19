@@ -3,7 +3,7 @@
 
 """Co-residence: designs packed into one device configuration.
 
-``y = silu(a + b)`` as a fused sequence, each op on half the columns, so the
+``y = silu(a + b)`` as a full-ELF sequence, each op on half the columns, so the
 pair can share the array. Checked at the MLIR level -- one pack device, one
 configure point for both steps, each step running its own named sequence --
 and through aiecc to a full ELF. The placer-driven policy must find the
@@ -29,10 +29,10 @@ from aie.iron import DeviceConfiguration, Flow, ObjectFifo, Program, Runtime, Wo
 from aie.iron.device import NPU2, AnyShimTile, Tile
 from aie.utils.compile.jit._hash import _python_identity
 
-from iron.common.image import AdjacentPacking, coresidence, fusion
+from iron.common.image import AdjacentPacking, compose, coresidence
 from iron.common.image.coresidence import Packing
-from iron.common.image.fusion import Fusion
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.compose import Composition
+from iron.common.image.sequence import Image
 from iron.common.graph.record import Recording
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
 from iron.common.design import OperatorDesign
@@ -172,7 +172,7 @@ aie.device(npu2) {{
 """
 
 
-def _sequence(cols: int, coresident) -> OperatorSequence:
+def _sequence(cols: int, coresident) -> Image:
     add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=cols)
     silu = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=cols)
     recording = Recording.of_steps(
@@ -181,7 +181,7 @@ def _sequence(cols: int, coresident) -> OperatorSequence:
         ["a", "b"],
         ["y"],
     )
-    seq = OperatorSequence(recording, full_elf=True, coresident=coresident(add, silu))
+    seq = Image(recording, full_elf=True, coresident=coresident(add, silu))
     seq.prepare()
     return seq
 
@@ -192,29 +192,29 @@ def _devices(text: str) -> list[str]:
 
 def test_manual_pack_shares_one_configure():
     seq = _sequence(4, lambda add, silu: [[add, silu]])
-    fused = Fusion(seq)
-    text = fused.text()
+    composed = Composition(seq)
+    text = composed.text()
 
-    pack = Packing.device_name(list(fused.designs))
-    assert fused.packing == Packing((tuple(fused.designs),))
+    pack = Packing.device_name(list(composed.designs))
+    assert composed.packing == Packing((tuple(composed.designs),))
     # The pack (main is left unnamed).
     assert _devices(text) == [pack]
     assert re.findall(r"aiex\.configure @(\w+)", text) == [pack]
-    assert re.findall(r"aiex\.run @(\w+)", text) == list(fused.designs)
+    assert re.findall(r"aiex\.run @(\w+)", text) == list(composed.designs)
 
 
 def test_policy_finds_the_manual_pack():
-    manual = Fusion(_sequence(4, lambda add, silu: [[add, silu]])).text()
-    auto = Fusion(_sequence(4, lambda add, silu: AdjacentPacking())).text()
+    manual = Composition(_sequence(4, lambda add, silu: [[add, silu]])).text()
+    auto = Composition(_sequence(4, lambda add, silu: AdjacentPacking())).text()
     assert auto == manual
 
 
 def test_policy_declines_what_does_not_fit():
-    fused = Fusion(_sequence(8, lambda add, silu: []))
-    for name, design in fused.designs.items():
+    composed = Composition(_sequence(8, lambda add, silu: []))
+    for name, design in composed.designs.items():
         assert fits({name: design}) is None
     packing, stopped = AdjacentPacking().pack(
-        [n for n, _ in fused.steps], fused.designs
+        [n for n, _ in composed.steps], composed.designs
     )
     assert packing == Packing()
     [reason] = stopped.values()
@@ -240,16 +240,14 @@ def test_one_array_joins_two_packs_only_where_their_union_fits():
         ["a", "b", "c", "d"],
         ["y", "z"],
     )
-    seq = OperatorSequence(
-        recording, full_elf=True, coresident=[[add, silu], [wider, mul]]
-    )
+    seq = Image(recording, full_elf=True, coresident=[[add, silu], [wider, mul]])
     seq.prepare()
-    fused = Fusion(seq)
-    a, s, w, m = (name for name, _ in fused.steps)
-    assert fits({n: fused.designs[n] for n in (a, s)}) is None
-    assert fits({n: fused.designs[n] for n in (w, m)}) is None
-    assert fits(fused.designs) is not None
-    devices = _devices(fused.text())
+    composed = Composition(seq)
+    a, s, w, m = (name for name, _ in composed.steps)
+    assert fits({n: composed.designs[n] for n in (a, s)}) is None
+    assert fits({n: composed.designs[n] for n in (w, m)}) is None
+    assert fits(composed.designs) is not None
+    devices = _devices(composed.text())
     assert devices[:2] == [Packing.device_name([a, s]), Packing.device_name([w, m])]
 
 
@@ -268,16 +266,16 @@ def test_designs_of_one_array_share_its_device():
         ["a", "b", "c", "d"],
         ["y", "u"],
     )
-    seq = OperatorSequence(recording, full_elf=True)
+    seq = Image(recording, full_elf=True)
     seq.prepare()
-    fused = Fusion(seq)
-    text = fused.text()
-    pack = Packing.device_name(list(fused.designs))
+    composed = Composition(seq)
+    text = composed.text()
+    pack = Packing.device_name(list(composed.designs))
     assert _devices(text) == [pack]
     assert re.findall(r"aiex\.configure @(\w+)", text) == [pack]
-    assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, _ in fused.steps]
+    assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, _ in composed.steps]
     assert text.count("aie.core(") == 8
-    assert fits(fused.designs) is None
+    assert fits(composed.designs) is None
 
 
 def test_two_arrays_of_one_class_pack():
@@ -293,11 +291,11 @@ def test_two_arrays_of_one_class_pack():
         ["wa", "wb", "x"],
         ["ya", "yb"],
     )
-    seq = OperatorSequence(recording, full_elf=True, coresident=[gemvs])
+    seq = Image(recording, full_elf=True, coresident=[gemvs])
     seq.prepare()
-    fused = Fusion(seq)
-    assert fits(fused.designs) is None
-    fifos = re.findall(r"aie\.objectfifo @(\w+)\(", fused.text())
+    composed = Composition(seq)
+    assert fits(composed.designs) is None
+    fifos = re.findall(r"aie\.objectfifo @(\w+)\(", composed.text())
     assert fifos and len(fifos) == len(set(fifos))
 
 
@@ -315,7 +313,7 @@ def test_sequence_rejects_a_stray_operator():
 def test_sequence_refuses_a_packing_without_a_full_elf():
     add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=4)
     with pytest.raises(ValueError, match="one full-ELF device"):
-        OperatorSequence(
+        Image(
             Recording.of_steps(
                 "coresidence_xclbin",
                 sequences.steps((add, "a", "b", "y")),
@@ -382,14 +380,14 @@ def test_an_allocated_route_holds_its_channels(col, channel, taken):
         assert reason is None
 
 
-def test_packing_is_in_the_fused_identity():
-    # The fused generator closes over its Fusion, so the key follows the
+def test_packing_is_in_the_composed_identity():
+    # The composed generator closes over its Composition, so the key follows the
     # modules a pack is built and chosen in; and the packing itself is part
     # of the identity.
-    temporal = Fusion(_sequence(4, lambda add, silu: []))
-    packed = Fusion(_sequence(4, lambda add, silu: [[add, silu]]))
+    temporal = Composition(_sequence(4, lambda add, silu: []))
+    packed = Composition(_sequence(4, lambda add, silu: [[add, silu]]))
     reached = _python_identity([temporal])
-    for module in (fusion, coresidence):
+    for module in (compose, coresidence):
         assert f"{module.__name__}@".encode() in reached
     assert temporal.identity != packed.identity
 
@@ -398,28 +396,28 @@ def test_recorded_graph_packs():
     # Three designs, add and silu recurring: the policy packs all three, so
     # the whole graph is one configure.
     recording = Chain(SIZE, TILE, columns=2).record(a=(SIZE,), b=(SIZE,))
-    temporal = OperatorSequence(recording, full_elf=True)
-    packed = OperatorSequence(recording, full_elf=True, coresident=AdjacentPacking())
+    temporal = Image(recording, full_elf=True)
+    packed = Image(recording, full_elf=True, coresident=AdjacentPacking())
     temporal.prepare()
     packed.prepare()
-    fused = Fusion(packed)
-    assert len(fused.designs) == 3 and len(fused.steps) == 5
+    composed = Composition(packed)
+    assert len(composed.designs) == 3 and len(composed.steps) == 5
 
     # Temporal: a configure per step that changes design.
-    assert len(re.findall(r"aiex\.configure", Fusion(temporal).text())) == 5
+    assert len(re.findall(r"aiex\.configure", Composition(temporal).text())) == 5
     # Packed: one pack named for all three designs, each step its own run.
-    text = fused.text()
+    text = composed.text()
     assert re.findall(r"aiex\.configure @(\w+)", text) == [
-        Packing.device_name(list(fused.designs))
+        Packing.device_name(list(composed.designs))
     ]
-    assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, _ in fused.steps]
+    assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, _ in composed.steps]
 
 
 @_builds_elf
 def test_pack_compiles_to_a_full_elf():
     seq = _sequence(4, lambda add, silu: [[add, silu]])
     seq.compile()
-    designs = list(Fusion(seq).designs)
+    designs = list(Composition(seq).designs)
     assert seq.elf_path is not None
     config = json.loads((seq.elf_path.parent / "full_elf_config.json").read_text())
     instances = [
@@ -437,7 +435,7 @@ def test_graph_compile_forwards_the_packing():
         full_elf=True, coresident=AdjacentPacking(), a=(SIZE,), b=(SIZE,)
     )
     assert version.sequence.coresident == AdjacentPacking()
-    fused = Fusion(version.sequence)
-    assert re.findall(r"aiex\.configure @(\w+)", fused.text()) == [
-        Packing.device_name(list(fused.designs))
+    composed = Composition(version.sequence)
+    assert re.findall(r"aiex\.configure @(\w+)", composed.text()) == [
+        Packing.device_name(list(composed.designs))
     ]

@@ -23,7 +23,7 @@ from iron.common.image.allocator import (
     LiveRange,
     Pool,
 )
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators import ElementwiseAdd, ReLU
 from iron.tests.common import sequences
@@ -173,7 +173,7 @@ def test_empty_graph():
     assert allocations == {} and pool == 0
 
 
-# --- integration with OperatorSequence's arena layout -----------------------
+# --- integration with Image's arena layout -----------------------
 
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
@@ -193,7 +193,7 @@ def _two_step_sequence():
         ["x"],
         ["out"],
     )
-    return _laid_out(OperatorSequence(recording, full_elf=True))
+    return _laid_out(Image(recording, full_elf=True))
 
 
 def test_planned_offsets_do_not_collide_with_unplanned():
@@ -238,7 +238,7 @@ def _chain(n_intermediates):
     recording = Recording.of_steps(
         f"chain{n_intermediates}", sequences.steps(*runlist), ["x", "w"], ["out"]
     )
-    layout, sizes = _laid_out(OperatorSequence(recording, full_elf=True))
+    layout, sizes = _laid_out(Image(recording, full_elf=True))
     return layout, sizes.scratch
 
 
@@ -294,7 +294,7 @@ def test_a_buffer_named_in_part_is_never_pooled():
         ["out"],
         pinned={"big": 4096},
     )
-    layout, sizes = _laid_out(OperatorSequence(recording, full_elf=True))
+    layout, sizes = _laid_out(Image(recording, full_elf=True))
     _, big_at, big_len = layout["big"]
     assert big_len == 4096 and half.place(layout) == ("scratch", big_at, 2048)
     # u and v outlive every use of big, so a pooled big would lend them its bytes.
@@ -501,7 +501,7 @@ def test_random_images_keep_every_invariant(seed):
         assert_no_overlap(transients, ranges)
 
 
-# --- OperatorSequence in a shared arena ----------------------------------------
+# --- Image in a shared arena ----------------------------------------
 
 
 def _add():
@@ -518,9 +518,7 @@ def _arena_sequence(name, runlist, arena, residents, pinned=None, full_elf=True)
         ["out"],
         pinned=pinned or {n: 2048 for n in residents},
     )
-    return OperatorSequence(
-        recording, full_elf=full_elf, arena=arena, residents=residents
-    )
+    return Image(recording, full_elf=full_elf, arena=arena, residents=residents)
 
 
 def test_two_sequences_in_one_arena_agree_on_residents_and_share_transients():
@@ -610,7 +608,7 @@ def test_a_step_at_a_time_places_only_its_residents_in_the_arena():
 
 def test_residents_need_an_arena():
     with pytest.raises(ValueError, match="pass arena"):
-        OperatorSequence(
+        Image(
             Recording.of_steps(
                 "arena_missing",
                 sequences.steps((_add(), "x", "w", "out")),
@@ -634,6 +632,6 @@ def test_back_to_back_buffers_start_aligned_whatever_their_sizes():
         ["out"],
         pinned={"big": 2048 + 18, "odd": 9},
     )
-    layout, _ = _laid_out(OperatorSequence(recording, full_elf=True))
+    layout, _ = _laid_out(Image(recording, full_elf=True))
     for name, (_, offset, _) in layout.items():
         assert offset % ALIGNMENT == 0, f"{name} at {offset}"

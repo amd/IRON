@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Temporal fusion: a sequence's designs as one module, mlir-aie's
+"""Composition: a sequence's designs as one module, mlir-aie's
 ``Program.compose``: a ``DeviceConfiguration`` per array (designs of one
 array each run their own sequence over it) or per pack of arrays
 (``coresidence``), and a main one whose runtime sequence configures and
@@ -40,7 +40,7 @@ SHIM_ADDRESS_ALIGNMENT = 4
 
 
 class ArgumentSizes(NamedTuple):
-    """Bytes of each runtime-sequence argument of a fused image, in argument
+    """Bytes of each runtime-sequence argument of a full ELF, in argument
     order; ``feedback`` is ``None`` where the image takes no such argument.
 
     The scratch arena is passed as its banks (``allocator.BANK``), each an
@@ -87,8 +87,8 @@ class ArgumentSizes(NamedTuple):
         return self.bank_kinds[k], offset - k * BANK
 
 
-class Fusion:
-    """An operator sequence's designs, fused into one module.
+class Composition:
+    """An operator sequence's designs, composed into one module.
 
     Each device is named for its design, not its step, so its text is the
     same in every graph and aiecc's device cache hits. ``seq.coresident``
@@ -144,7 +144,7 @@ class Fusion:
     @property
     def identity(self) -> str:
         """What ``text()`` is a function of, so a cache hit costs a hash
-        rather than a fusion. ``expands`` reaches the key through the link's
+        rather than a composition. ``expands`` reaches the key through the link's
         flags.
         """
         h = hashlib.sha256()
@@ -163,7 +163,7 @@ class Fusion:
         return h.hexdigest()[:24]
 
     def text(self) -> str:
-        """The fused module: a device configuration per array or pack, and a
+        """The composed module: a device configuration per array or pack, and a
         main one whose runtime sequence configures each in runlist order and
         runs its steps there.
 
@@ -181,7 +181,7 @@ class Fusion:
             if design.op.exported_design() is None:
                 arrays[name] = BuiltArray(design, words)
                 continue
-            # The fusion configures each device; a child that also loads its
+            # The composition configures each device; a child that also loads its
             # own links fine and hangs at dispatch (ERT_CMD_STATE_TIMEOUT).
             with compile_context(_iron_full_elf=False):
                 exported[name] = str(design.build())
@@ -311,7 +311,7 @@ class Fusion:
     def _views(
         self, name: str, buffers: tuple[BufferRef, ...], types
     ) -> list[tuple[str, int, type]]:
-        """Where step ``name``'s buffers are in the fused image's arguments:
+        """Where step ``name``'s buffers are in the full ELF's arguments:
         ``(argument, byte offset, type)`` each, ``type`` that of its
         sequence's argument.
 

@@ -24,8 +24,8 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Profile, Scratchpad
 from iron.common.image import AdjacentPacking
-from iron.common.image.fusion import Fusion
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.compose import Composition
+from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators import ElementwiseAdd
 from iron.operators.copy import Copy, Gather, GatherWords
@@ -326,7 +326,7 @@ def test_packed_word_steps_of_one_array_each_read_their_own_table():
     )
     graph = FromDeviceIds(table, other)
     net = graph.compile(coresident=AdjacentPacking(), ids=((256,), np.int32))
-    text = Fusion(net.sequence).text()
+    text = Composition(net.sequence).text()
     assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
     for call in range(3):
         ids = rng.integers(0, len(table), 256).astype(np.int32)
@@ -618,7 +618,7 @@ def test_an_input_s_words_for_each_table_follow_the_last_s(npu2, table):
     gathers = [s for s in recording.steps if isinstance(s.op, Gather)]
     assert [s.op.words for s in gathers] == words
     assert recording.pinned["ids"] == 4 * sum(words)
-    sequence = OperatorSequence(recording)
+    sequence = Image(recording)
     sequence.prepare()
     assert sequence.layout["ids"][2] == 4 * sum(words)
     starts = [0, 4 * words[0], 4 * (words[0] + words[1])]

@@ -57,7 +57,7 @@ class Artifacts:
     """The record of one image.
 
     Attributes:
-        full_elf: One fused image, else an xclbin per design, chained
+        full_elf: One full ELF, else an xclbin per design, chained
             (``image`` is the last link).
         entry: The cache entry holding the parameter table and lowered module.
         buffers: Each buffer to ``(argument kind, byte offset, bytes)``.

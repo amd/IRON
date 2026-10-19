@@ -4,7 +4,7 @@
 
 """Buffers keep their own dtype in a full ELF.
 
-The fused runtime sequence takes each argument as bytes and hands every
+The composed runtime sequence takes each argument as bytes and hands every
 buffer to its sub-design as a view of the type that design declares. Here an
 int32 gather runs after a bf16 add, so its buffers sit at non-zero offsets of
 the input and output arguments, and its per-call offsets are element counts
@@ -19,8 +19,8 @@ from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
 from iron.common.graph.record import Recording
-from iron.common.image.fusion import Fusion
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.compose import Composition
+from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -84,12 +84,12 @@ def test_int32_step_at_nonzero_offsets():
     add = ElementwiseAdd(size=ADD_SIZE, tile_size=1024, num_aie_columns=4)
     gather = _gather()
     recording = Recording.of_steps(
-        "infra_fused_int32_gather",
+        "infra_full_elf_int32_gather",
         sequences.steps((add, "a", "b", "c"), (gather, "table", "rows")),
         ["a", "b", "table"],
         ["c", "rows"],
     )
-    seq = OperatorSequence(recording, full_elf=True).compile()
+    seq = Image(recording, full_elf=True).compile()
     kinds = {name: seq.layout[name][:2] for name in ("table", "rows")}
     assert kinds["table"][0] == "input" and kinds["table"][1] > 0, kinds
     assert kinds["rows"][0] == "output" and kinds["rows"][1] > 0, kinds
@@ -121,13 +121,13 @@ def test_int32_slice_at_word_offset():
     start = 36
     gather = _gather()
     recording = Recording.of_steps(
-        "infra_fused_int32_slice",
+        "infra_full_elf_int32_slice",
         sequences.steps((gather, BufferRef("packed", start, TABLE_BYTES), "rows")),
         ["packed"],
         ["rows"],
         pinned={"packed": TABLE_BYTES + 64},
     )
-    seq = OperatorSequence(recording, full_elf=True).compile()
+    seq = Image(recording, full_elf=True).compile()
     run = seq.get_callable()
     packed = run.get_buffer(BufferRef("packed"))
     assert packed.dtype == np.int32, "a parent of int32 slices is viewed as int32"
@@ -139,18 +139,18 @@ def test_int32_slice_at_word_offset():
 
 
 def test_misaligned_buffer_is_rejected():
-    """A buffer the shim DMA cannot start on fails at fusion, not silently on
+    """A buffer the shim DMA cannot start on fails at composition, not silently on
     the device (whose descriptor would drop the low address bits).
     """
     gather = _gather()
     recording = Recording.of_steps(
-        "infra_fused_int32_misaligned",
+        "infra_full_elf_int32_misaligned",
         sequences.steps((gather, BufferRef("packed", 34, TABLE_BYTES), "rows")),
         ["packed"],
         ["rows"],
         pinned={"packed": TABLE_BYTES + 64},
     )
-    seq = OperatorSequence(recording, full_elf=True)
+    seq = Image(recording, full_elf=True)
     seq.prepare()
     with pytest.raises(ValueError, match="not a multiple of 4"):
-        Fusion(seq).text()
+        Composition(seq).text()

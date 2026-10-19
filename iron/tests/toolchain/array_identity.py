@@ -9,7 +9,7 @@ is built for one extent or twice it, with the same tunables. Each case
 compiles an operator at two extents (the real build: an insts-only
 lowering compiles no core) and compares the per-core ELFs the build
 leaves, byte for byte. Compiles are cheap enough for this to run
-device-free. A fusion of the two extents
+device-free. A composition of the two extents
 holds one device, so their sequences run on one configured array.
 """
 
@@ -22,8 +22,8 @@ from aie.iron import Out
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.coresidence import Packing
-from iron.common.image.fusion import Fusion
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.compose import Composition
+from iron.common.image.sequence import Image
 from iron.tests.common import sequences
 from iron.tests.toolchain.tools import requires
 
@@ -119,9 +119,9 @@ def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
         for b, buf in zip(op.buffers, names):
             (outputs if b.role is Out else inputs).append(buf)
     recording = Recording.of_steps(cls_name, sequences.steps(*runlist), inputs, outputs)
-    seq = OperatorSequence(recording, full_elf=True)
+    seq = Image(recording, full_elf=True)
     seq.prepare()
-    fused = Fusion(seq)
-    pack = Packing.device_name(list(fused.designs))
-    devices = re.findall(r"^  aie\.device\(\w+\) @(\w+) \{$", fused.text(), re.M)
+    composed = Composition(seq)
+    pack = Packing.device_name(list(composed.designs))
+    devices = re.findall(r"^  aie\.device\(\w+\) @(\w+) \{$", composed.text(), re.M)
     assert devices == [pack]

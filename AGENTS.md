@@ -75,7 +75,7 @@ Formatting and licence checks are in CONTRIBUTING.md.
   its runtime sequence (`OperatorRuntime`).
 - `iron/common/graph/`: `iron.Graph`, recording and `compile`.
 - `iron/common/image/`: what a graph lowers onto: the step sequence, the
-  buffer allocator, image fusion (several designs in one image),
+  buffer allocator, image composition (several designs in one image),
   packaging, and an operator called on its own. All internal.
 - `iron/common/feature_map.py`: `Conv2d`, `MaxPool2d` and `ConcatChannels`,
   the graphs `iron.functional`'s CNN functions are built on.

@@ -37,7 +37,7 @@ from ..image.artifacts import Parameter
 from ..image.callable import FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import Kind, Plan, plan, require_device
-from ..image.sequence import ALIGNMENT, OperatorSequence
+from ..image.sequence import ALIGNMENT, Image
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fill import filled
@@ -766,7 +766,7 @@ class CompiledGraph:
         )
         if coresident:
             placement["coresident"] = coresident
-        self.sequence = OperatorSequence(
+        self.sequence = Image(
             recording,
             full_elf=plan.full_elf,
             check=check,

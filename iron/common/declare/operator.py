@@ -101,7 +101,7 @@ class Operator(jit.Operator, library=True):
     test: ClassVar[Testing | None] = None
     # True when sequence() calls rt.preamble() itself, behind its first fills.
     own_preamble: ClassVar[bool] = False
-    # A fused image lowers every operator's sequence under the union.
+    # A full ELF lowers every operator's sequence under the union.
     aiecc_flags: ClassVar[tuple[str, ...]] = ()
     # Per leading operand that may be a view: the param holding its pattern
     # and the per-call value a dynamic index binds.

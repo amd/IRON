@@ -11,7 +11,7 @@ from dataflow comes out the other side as a linked full ELF, a second
 identical build is a cache hit rather than another aiecc run, and the keys
 distinguish what must be distinguished.
 
-Needs a device, since the fused path is NPU2-only and the ELF is genuinely
+Needs a device, since the composed path is NPU2-only and the ELF is genuinely
 built here rather than mocked.
 """
 
@@ -29,7 +29,7 @@ from aie.utils.compile.jit.params import param
 
 from iron.common import Operator
 from iron.common.design import OperatorDesign, runtime
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.sequence import Image
 from iron.operators import GEMM, MHA, ElementwiseAdd
 from iron.tests.common.graphs import Adds
 
@@ -37,12 +37,10 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
 def _captured(name, adds=2, **declared):
-    """X + w + w (or as many adds of w) as a graph function, fused and compiled."""
+    """X + w + w (or as many adds of w) as a graph function, composed and compiled."""
     add = ElementwiseAdd(size=1024, tile_size=128, **declared)
     recording = Adds(add, adds).record(x=(1024,), w=(1024,))
-    return OperatorSequence(
-        dataclasses.replace(recording, name=name), full_elf=True
-    ).compile()
+    return Image(dataclasses.replace(recording, name=name), full_elf=True).compile()
 
 
 def test_captured_graph_compiles_to_an_elf():
@@ -58,10 +56,10 @@ def test_captured_graph_compiles_to_an_elf():
 
 
 def test_kernel_objects_land_in_the_entry_under_bare_names():
-    """The fused MLIR's link_with names objects without a directory.
+    """The composed MLIR's link_with names objects without a directory.
 
     The designs declare ExternalFunctions and CompilableDesign compiles them
-    straight into the entry; a fused link must find them by bare name.
+    straight into the entry; a composed link must find them by bare name.
     """
     objects = _captured("jitpath_stage").artifacts.entry.objects
     assert objects, "no kernel objects in the cache entry"
@@ -202,7 +200,7 @@ def test_a_field_the_repr_leaves_out_still_keys_the_build():
     """Two operators alike but for a repr=False field build different designs.
 
     The repr leaves such a field out, so a key spelled from it once handed
-    a fused GEMV+GELU the plain GEMV's cached binary, and the output came
+    a composed GEMV+GELU the plain GEMV's cached binary, and the output came
     back un-GELU'd with nothing reporting it.
     """
     plain = GEMM(M=256, K=256, N=256)

@@ -10,7 +10,7 @@ from typing import Self
 from ..declare import Operator
 from ..graph.record import Recording
 from .artifacts import Artifacts
-from .sequence import OperatorSequence
+from .sequence import Image
 
 
 class OperatorImage:
@@ -19,7 +19,7 @@ class OperatorImage:
     with the operator's buffers as device tensors, in declaration order.
 
     It is the one-step sequence of the operator as an xclbin chain
-    (``XclbinChain``), so the xclbin is the operator's
+    (``PerStep``), so the xclbin is the operator's
     ``Operator.configuration``'s: an operator whose array serves every
     shape (flm.ProjectionGEMM) compiles only an instruction stream per shape, and
     on a shipped image (``image=``) it is the download.
@@ -27,12 +27,12 @@ class OperatorImage:
 
     def __init__(self, op: Operator) -> None:
         self.op = op
-        self._sequence: OperatorSequence | None = None
+        self._sequence: Image | None = None
 
     def compile(self) -> Self:
         """Build the image, once."""
         if self._sequence is None:
-            self._sequence = OperatorSequence(
+            self._sequence = Image(
                 Recording.of_step(self.op.resolved()), full_elf=False
             ).compile()
         return self

@@ -43,7 +43,7 @@ from iron.common.declare.value import Value
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.callable import ImageCallable
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, SequenceStep
 
 
@@ -168,7 +168,7 @@ class Standalone:
             SequenceStep(op, tuple(map(BufferRef, self._names(self._slot[k], op))))
             for k, op in enumerate(self.steps)
         ]
-        self.sequence = OperatorSequence(
+        self.sequence = Image(
             Recording.of_steps(name, steps, in_names, out_names),
             full_elf=full_elf,
             coresident=coresident,

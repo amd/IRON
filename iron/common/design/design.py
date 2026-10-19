@@ -108,7 +108,7 @@ class OperatorDesign:
 
     @property
     def name(self) -> str:
-        """The design's device symbol in a fused image, stable across source edits."""
+        """The design's device symbol in a full ELF, stable across source edits."""
         return f"{type(self.op).__name__}_{self.identity[:8]}"
 
     def compilable(self, **options) -> CompilableDesign:

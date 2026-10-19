@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The fused image itself: graph functions build to a full ELF.
+"""The full ELF itself: graph functions build to a full ELF.
 
 One step past ``lowering.py``. Where that gate stops at the instruction
 stream, this one runs the whole of aiecc's full-ELF pipeline on a recorded
@@ -34,7 +34,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common.graph.record import Recording
 from iron.common.image.allocator import BANK
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.sequence import Image
 from iron.operators import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.tests.common import sequences
@@ -132,7 +132,7 @@ def test_a_scratch_arena_past_a_bank_links_as_its_banks():
         # most of the second, so t is rebased to the third.
         pinned={"fill": BANK - w, "pad": BANK - 1024},
     )
-    seq = OperatorSequence(recording, full_elf=True)
+    seq = Image(recording, full_elf=True)
     seq.compile()
     _, offset, length = seq.layout["t"]
     sizes = seq.buffer_sizes
@@ -152,7 +152,7 @@ def test_no_scratch_buffer_crosses_a_bank():
         ["x"],
         ["out"],
     )
-    seq = OperatorSequence(recording, full_elf=True)
+    seq = Image(recording, full_elf=True)
     seq.prepare()
     assert [seq.layout[n][1] for n in ("w", "t")] == [0, BANK]
 
@@ -161,7 +161,7 @@ def test_no_scratch_buffer_crosses_a_bank():
 def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     """Every prefill design at Llama 3.2 1B's shape (2048 tokens, 32 heads
     over 8, the 8192-wide FFN) compiles and links into one image. One layer:
-    the designs are the same for sixteen, and aiecc's lowering of the fused
+    the designs are the same for sixteen, and aiecc's lowering of the composed
     sequence grows with its DMA tasks (about 1,800 per layer against decode's
     430), past this gate's memory at the full depth.
     """

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A fused image names its kernels, its devices and itself by content, not
+"""A full ELF names its kernels, its devices and itself by content, not
 by position, so one build reuses another's work. No toolchain and no NPU.
 """
 
@@ -16,8 +16,8 @@ from aie.iron.device import from_name
 
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
-from iron.common.image.fusion import Fusion
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.compose import Composition
+from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, SequenceStep
 from iron.operators import ReLU
 from iron.operators.gemv import GEMV
@@ -36,7 +36,7 @@ def _sequence(shapes):
         SequenceStep(GEMV(M=m, K=k), tuple(map(BufferRef, (f"w{i}", f"x{i}", f"y{i}"))))
         for i, (m, k) in enumerate(shapes)
     ]
-    seq = OperatorSequence(
+    seq = Image(
         Recording.of_steps(
             "fused_identity_probe",
             steps,
@@ -50,7 +50,7 @@ def _sequence(shapes):
 
 
 def _identity(shapes):
-    return Fusion(_sequence(shapes)).identity
+    return Composition(_sequence(shapes)).identity
 
 
 SHAPES = [(512, 1024), (256, 1024), (512, 2048)]
@@ -58,8 +58,8 @@ SHAPES = [(512, 1024), (256, 1024), (512, 2048)]
 
 def _objects_by_step(shapes):
     """Each step's design name and the kernel objects its device links."""
-    fusion = Fusion(_sequence(shapes))
-    devices = re.split(r"(?=aie\.device\()", fusion.text())
+    composition = Composition(_sequence(shapes))
+    devices = re.split(r"(?=aie\.device\()", composition.text())
     linked = {}
     for body in devices:
         name = re.match(r"aie\.device\(\w+\) @(\w+)", body)
@@ -71,7 +71,7 @@ def _objects_by_step(shapes):
                 *re.findall(r"runtime_sequence @(\w+)", body),
             ]:
                 linked[design] = objects
-    return [(name, linked[name]) for name, _ in fusion.steps]
+    return [(name, linked[name]) for name, _ in composition.steps]
 
 
 def test_equal_kernel_recipes_share_one_object_across_designs():
@@ -101,7 +101,7 @@ def test_identity_is_what_the_text_is_a_function_of():
 
 def test_two_designs_whose_device_names_collide_are_refused():
     """A device is named by eight hex digits of its design's identity, so two
-    designs can share one; the fusion refuses rather than run one design for both.
+    designs can share one; the composition refuses rather than run one design for both.
     """
     seen = {}
     for size in range(1024, 1024 * 200_000, 1024):
@@ -112,7 +112,7 @@ def test_two_designs_whose_device_names_collide_are_refused():
         seen[name] = op
     else:
         pytest.fail("no two ReLU sizes up to 200k tiles share a device name")
-    seq = OperatorSequence(
+    seq = Image(
         Recording.of_steps(
             "colliding_names",
             [
@@ -126,7 +126,7 @@ def test_two_designs_whose_device_names_collide_are_refused():
     )
     seq.prepare()
     with pytest.raises(ValueError, match=f"device names collide, {name}"):
-        Fusion(seq)
+        Composition(seq)
 
 
 def test_identity_holds_across_processes():

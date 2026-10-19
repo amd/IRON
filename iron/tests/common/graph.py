@@ -26,7 +26,7 @@ from iron.common.graph import Handle
 from iron.common.graph.record import Recording, Recorder
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import CompiledGraph, _words
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, SequenceStep
 from iron.common.image.artifacts import Parameter
 from iron.common.image.packaging import Kind, require_device
@@ -227,7 +227,7 @@ def test_an_input_read_only_through_slices_is_laid_out_whole():
 
     t = Halves().record(x=(E,))
     assert t.pinned == {"x": E * 2}
-    seq = OperatorSequence(t)
+    seq = Image(t)
     seq.prepare()
     assert seq.layout["x"] == ("input", 0, E * 2)
     assert [s.buffers[0] for s in seq.steps] == [
@@ -432,7 +432,7 @@ def test_two_spellings_of_one_array_are_one_design():
     a = GEMV(M=64, K=256, num_aie_columns=2, tile_size_input=2)
     b = GEMV(M=64, K=256, num_aie_columns=2, tile_size_input=2, tile_size_output=2)
     assert a.design_key() != b.design_key()  # as given
-    seq = OperatorSequence(
+    seq = Image(
         Recording.of_steps(
             "two_spellings",
             [
@@ -447,7 +447,7 @@ def test_two_spellings_of_one_array_are_one_design():
     designs, _ = seq.unique_designs()
     assert len(designs) == 1 and designs[0].tile_size_output == 2
     ffn, _ = _ffn()
-    seq = OperatorSequence(ffn.record(x=(1, E)))
+    seq = Image(ffn.record(x=(1, E)))
     seq.prepare()
     assert len(seq.unique_designs()[0]) == 6
 

@@ -208,6 +208,11 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- Image composition is named for what it makes, so "fused" means only
+  kernel fusion: `Composition` in `iron.common.image.compose` (was `Fusion`
+  in `fusion`), `FullELF` and `PerStep` in `iron.common.image.link` (were
+  `FusedImage` and `XclbinChain` in `fused`), `PerStepCallable`
+  (`StepCallable`) and `Image` (`OperatorSequence`).
 - `Value` is mlir-aie's `PerCallMember` bound to one operator, so a
   declared `per_call()` and the value a build gives a device parameter are
   one type; `op.value(name)` returns it, and an extent attribute still reads
