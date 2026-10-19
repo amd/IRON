@@ -50,6 +50,13 @@ def test_the_binary_sweep_and_an_all_extensive_sweep():
     )
 
 
+def test_a_channel_count_no_column_fits_adds_no_grid():
+    # 17 channels a column overrun NPU2's 16 shim input channels.
+    assert Sweep(channels=(1, 17), bench=None)(GELU, NPU2) == Sweep(
+        channels=(1,), bench=None
+    )(GELU, NPU2)
+
+
 def test_testing_resolves_cases_and_callables_of_the_class():
     t = Testing([Case(dict(size=8)), Case(dict(size=16), extensive=True)])
     assert [c.kwargs for c in t.resolve(GELU, NPU2)] == [{"size": 8}, {"size": 16}]

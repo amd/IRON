@@ -176,11 +176,17 @@ class Sweep:
 
     def __call__(self, cls, dev: Device) -> list[Case]:
         cap = cls.tile_cap if self.tile_cap is None else self.tile_cap
+        most = {}
+        for chans in self.channels or (1,):
+            try:
+                most[chans] = cls.shim_columns(dev, chans, self.extra)
+            except Unresolvable:  # no column fits: no grid at this count
+                most[chans] = 0
         grids = [
             (length, cols, chans, min(length // (cols * chans), cap))
             for length in self.lengths
-            for chans in self.channels or (1,)
-            for cols in range(1, cls.shim_columns(dev, chans, self.extra) + 1)
+            for chans in most
+            for cols in range(1, most[chans] + 1)
         ]
         grids = [g for g in grids if g[1] * g[2] * g[3] == g[0]]
         regular = [g for g in grids if g[0] == self.regular]
