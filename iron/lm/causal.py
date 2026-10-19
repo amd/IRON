@@ -210,17 +210,17 @@ class CausalLM(Model):
                 conv.window, conv.tail = scratch[K, C]
 
     @property
-    def recurrent(self) -> list:
+    def recurrent(self) -> list[Checkpoints | KVCache]:
         """Each state a layer carries from position to position, which
         restarts only at some (``restart``): ``Checkpoints``, and a
-        ``KVCache`` within a window.
+        ``KVCache`` keeping a ring.
         """
         found = {}
         for _, _, p, _ in walk(self):
             if (
                 isinstance(p, Checkpoints)
                 or isinstance(p, KVCache)
-                and p.window is not None
+                and p.ring is not None
             ):
                 found.setdefault(id(p), p)
         return list(found.values())

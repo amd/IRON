@@ -31,7 +31,10 @@ TOY = Gemma4Config(
     head_dim=128,
     intermediate_size=512,
     rope_theta=10000.0,
-    max_seq_len=256,
+    # A context past three rings of 128, so the sliding layers keep a ring;
+    # a chunk of 64 builds for the device only at HIGHEST, as
+    # flm.ProjectionGEMM tiles 256 rows.
+    max_seq_len=512,
     prefill_chunk=64,
     sliding_window=8,
     layer_types=("sliding_attention", "full_attention") * 3,

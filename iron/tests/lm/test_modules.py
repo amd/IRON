@@ -269,6 +269,40 @@ def test_a_cache_attends_within_its_window():
     assert [s.op.window for s in t.steps if type(s.op) is MHA] == [64, None]
 
 
+def test_a_ring_restarts_at_the_chunk_while_it_holds_the_window_before():
+    """A ring of 128 positions, a window of 7 and a chunk of 64: positions
+    from 70 change after 185 ran restart at 64, whose window from 57 the
+    ring still holds, and after 186 at the first.
+    """
+    cache = KVCache(dataclasses.replace(SMALL, prefill_chunk=64, max_seq_len=512), 7)
+    assert cache.ring == 128
+    assert [cache.restart(70, ran) for ran in (70, 185, 186)] == [70, 64, 0]
+
+
+def test_a_window_keeps_every_position_where_a_ring_takes_as_many_rows():
+    """A ring and its staging take three rings' rows: at a context of three
+    rings or fewer the cache keeps every position, at any chunk, a short
+    context's whole one among them.
+    """
+    for L, C in ((384, 64), (200, 200)):
+        config = dataclasses.replace(SMALL, prefill_chunk=C, max_seq_len=L)
+        cache = KVCache(config, 7)
+        assert cache.ring is None and cache.keys.shape[0] == L
+
+
+def test_a_ring_s_chunk_attends_from_its_valid_rows_alone():
+    """A chunk's queries over a ring are its whole chunk, the rows past
+    ``rows`` masked; the output is bounded to ``rows`` again, so ``o_proj``
+    runs on them alone.
+    """
+    model = small(sliding_window=8, max_seq_len=4096)
+    assert model.model.layers[0].cache.ring == 512
+    t = model.record(**model.shapes()[1])
+    bounded = {id(b.op) for b in t.bindings if b.member.bounds is not None}
+    after = [s.op for s in t.steps][[type(s.op) for s in t.steps].index(MHA) + 1 :]
+    assert id(next(op for op in after if "GEMM" in type(op).__name__)) in bounded
+
+
 def test_each_layer_reads_the_rows_of_its_own_rope():
     """A layer holding another ``Rope`` turns q and k by its table's rows,
     copied once a call however many layers hold it; one holding none turns

@@ -373,18 +373,25 @@ def _fill_caches(model, n: int, position: int):
     """The caches' first ``n`` rows, a prompt's, repeated up to ``position``
     on the device and as the graph reference's state (the device buffers'
     own host memory, filled in place), for the body of the ``with``; the
-    prompt's own rows stay as it wrote them. A state checkpointed at each
+    prompt's own rows stay as it wrote them. A ring holds the ``ring``
+    positions before ``position`` so filled; past ``ring``, a prompt's
+    positions in it are as it left them. A state checkpointed at each
     chunk boundary (``Checkpoints``) holds, in the slot a call at
     ``position`` reads, the state the prompt left.
     """
     version = next(iter(model.versions.values()))
-    caches = [
-        x for _, x, p, _ in walk(model) if isinstance(p, KVCache) and p.window is None
-    ]
-    for cache in caches:
+    caches = [(x, p) for _, x, p, _ in walk(model) if isinstance(p, KVCache)]
+    for cache, p in caches:
         rows = version.read(cache)
-        for start in range(n, position, n):
-            rows[start : min(start + n, position)] = rows[: min(n, position - start)]
+        if p.ring is None:
+            for start in range(n, position, n):
+                rows[start : min(start + n, position)] = rows[
+                    : min(n, position - start)
+                ]
+        elif n < p.ring:
+            held = rows[:n].copy()
+            for q in range(max(n, position - p.ring), position):
+                rows[q % p.ring] = rows[p.ring + q % p.ring] = held[q % n]
         version.push(cache)
         cache.host = rows
     checkpoints = [c for c in model.recurrent if isinstance(c, Checkpoints)]
@@ -396,6 +403,6 @@ def _fill_caches(model, n: int, position: int):
     try:
         yield
     finally:
-        for state in [*caches, *(c.slots for c in checkpoints)]:
+        for state in [*(x for x, _ in caches), *(c.slots for c in checkpoints)]:
             version.push(state)
             state.host = None

@@ -252,10 +252,11 @@ public API adds its entry under Unreleased.
   the steps' in turn (`Runtime.merge`), cut where it would pass the kernel
   more than 16 buffers. A design taking a per-call value packs with none
   there, and `check=True` with `coresident` raises.
-- `KVCache` within a window keeps only a ring of the last `ring` positions
-  (a window and a chunk, to a power of two), each held twice so the
+- `KVCache` within a window, where its ring and staging (three rings'
+  rows) are fewer than `max_seq_len`, keeps only a ring of the last `ring`
+  positions (a window and a chunk, to a power of two), each held twice so the
   positions a call reads are one run, copied to `staged` for `MHA`: a
-  decode step streams its window, not the context. A windowed cache is in
+  decode step streams its window, not the context. A ring is in
   `CausalLM.recurrent`, so a call stays within a chunk and restarts where
   the ring still holds the window before it (`KVCache.restart`).
 - A per-call bound (`x[:n]`) may be clamped (`iron.clamp(p + 1, hi=W)`),

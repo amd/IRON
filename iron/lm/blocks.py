@@ -527,15 +527,16 @@ class KVCache(iron.Graph):
     where the chunk does not divide ``max_seq_len``; a decode step attends
     with ``MHA`` of one query, which costs the context, not the cache.
 
-    Without a window, keys and values are each ``(max_seq_len,
-    num_key_value_heads, head_dim)``, so no descriptor steps by the context.
-    Within one, they keep only the last ``ring`` positions, ``ring`` the
-    power of two holding a window and a chunk: position ``p`` at rows ``p %
-    ring`` and ``ring + p % ring``, so any ``ring`` positions in a row are
-    one run. A call copies the run it attends over to ``staged``: a chunk's
-    ``ring`` positions ending at its last row, a decode step's window. A
-    call stays within a chunk and restarts where the ring still holds the
-    window before it (``restart``).
+    Keys and values are each ``(max_seq_len, num_key_value_heads,
+    head_dim)``, so no descriptor steps by the context. Within a window
+    whose ring and staging, three rings' rows, are fewer than that, they
+    keep only the last ``ring`` positions, ``ring`` the power of two holding
+    a window and a chunk: position ``p`` at rows ``p % ring`` and ``ring +
+    p % ring``, so any ``ring`` positions in a row are one run. A call
+    copies the run it attends over to ``staged``: a chunk's ``ring``
+    positions ending at its last row, a decode step's window. A call stays
+    within a chunk and restarts where the ring still holds the window
+    before it (``restart``).
 
     Args:
         c: The decoder's shape.
@@ -545,18 +546,20 @@ class KVCache(iron.Graph):
             ``sliding_window - 1``.
 
     Raises:
-        ValueError: A window with a chunk of other than a power of two.
+        ValueError: A ring with a chunk of other than a power of two.
     """
 
     def __init__(self, c, window: int | None = None):
         G, D, C = c.num_key_value_heads, c.head_dim, c.prefill_chunk
         self.chunk, self.window, rows = C, window, c.max_seq_len
-        if window is not None:
+        self.ring = None if window is None else 1 << (window + C - 1).bit_length()
+        if self.ring is not None and 3 * self.ring < rows:
             if C & (C - 1):
                 raise ValueError(f"KVCache: a {C}-position chunk is no power of two")
-            self.ring = 1 << (window + C - 1).bit_length()
             self.staged = iron.state((self.ring, G, D)), iron.state((self.ring, G, D))
             rows = 2 * self.ring
+        else:
+            self.ring = None
         self.keys, self.values = iron.state((rows, G, D)), iron.state((rows, G, D))
 
     def restart(self, held: int, ran: int) -> int:
@@ -567,6 +570,7 @@ class KVCache(iron.Graph):
         """
         if held == ran:
             return held
+        assert self.ring is not None and self.window is not None, "a ring's"
         start = held // self.chunk * self.chunk
         return start if ran - (start - self.window) <= self.ring else 0
 
@@ -578,7 +582,7 @@ class KVCache(iron.Graph):
         (MHA's ``1 / sqrt(head_dim)`` if None); ``(rows, heads * head_dim)``.
         """
         C, (_, G, D), (n, H, _) = self.chunk, self.keys.shape, q.shape
-        if self.window is None:
+        if self.ring is None:
             for x, cache in ((k, self.keys), (v, self.values)):
                 if x is None:
                     continue
@@ -588,7 +592,8 @@ class KVCache(iron.Graph):
                     cache[call.position] = x.reshape(G, D)
             keys, values = (x[: call.position + 1] for x in (self.keys, self.values))
         else:
-            keys, values, q = self._ring(call, self.window, q, k, v)
+            assert self.window is not None, "a ring's"
+            keys, values, q = self._ring(call, self.ring, self.window, q, k, v)
         o = MHA.step(
             q,
             keys,
@@ -598,17 +603,19 @@ class KVCache(iron.Graph):
             window=self.window,
             scale=scale,
         )
-        if call.prompt and self.window is not None:
+        if call.prompt and self.ring is not None:
             o = o[: call.rows]
         return o.reshape(n, H * D)
 
-    def _ring(self, call, W: int, q, k, v):
-        """``attend``'s keys, values and queries within a window: a chunk
-        attends from all its rows (those past ``rows`` are later than every
-        query's, so masked) over the ``ring`` positions ending at its last; a
-        decode step over its window, ``W``.
+    def _ring(self, call, R: int, W: int, q, k, v):
+        """``attend``'s keys, values and queries within the window ``W``:
+        a chunk attends from all its rows (those past ``rows`` are later
+        than every query's, so masked) over the ``R`` positions of the ring
+        ending at its last; a decode step over its window. A layer reading
+        another's cache (``k`` None) reads its ``staged``, which that layer,
+        earlier in the call, copied.
         """
-        R, C = self.ring, self.chunk
+        C = self.chunk
         if call.prompt:
             at, width = call.start % R, C
             first, read = iron.clamp(call.start + C - R, lo=0) % R, R

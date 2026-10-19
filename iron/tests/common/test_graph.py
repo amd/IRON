@@ -1787,6 +1787,28 @@ def test_a_state_is_written_at_a_wrapped_carried_value(npu2):
         assert (graph.rows.host[written] == rows[read]).all()
 
 
+def test_an_extent_bounded_by_a_clamped_carried_count_stays_clamped(npu2):
+    """A ReLU over ``min(position + 1, 40)`` rows: its tiles per lane follow
+    the clamp, growing up to the bound and then holding, and take no linear
+    form, which would drop it.
+    """
+
+    class Window(iron.Graph):
+        def __init__(self):
+            self.rows = iron.state((64, 64), bfloat16)
+
+        def body(self, *, position: Carried[np.int32]):
+            n = iron.clamp(position + 1, hi=40)
+            ReLU.step(Copy.step(self.rows[:n]))
+            return iron.carry(position=position + 1)
+
+    words, _ = _words(Window().record())
+    tiles = [w for w in words if w.symbol.endswith(("valid_x", "valid_y"))]
+    assert tiles and all(w.linear is None for w in tiles)
+    for w in tiles:
+        assert [w(dict(position=p)) for p in (0, 39, 50)] == [1, 2, 2]
+
+
 def test_a_state_is_indexed_by_a_clamped_carried_value(npu2):
     """``max(0, position - 3)`` and ``min((position + 1) // 2, 7)`` index a
     state's rows: each word is clamped on the host and in the Emit program

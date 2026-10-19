@@ -31,7 +31,10 @@ TOY = Gemma3Config(
     head_dim=128,
     intermediate_size=1024,
     rope_theta=1000000.0,
-    max_seq_len=256,
+    # A context past three rings of 128, so the sliding layers keep a ring;
+    # a chunk of 64 builds for the device only at HIGHEST, as
+    # flm.ProjectionGEMM tiles 256 rows.
+    max_seq_len=512,
     prefill_chunk=64,
     sliding_window=8,
     layer_types=("sliding_attention", "full_attention") * 2,
@@ -71,7 +74,7 @@ class TestGemma3(Decoder):
         layers' ring (128 positions) no longer holds the window before the
         chunk at 64, so the call reruns from 0.
         """
-        config = dataclasses.replace(cpu.config, max_seq_len=256)
+        config = cpu.config
         model = self.host(config, cpu.weights)
         tokens = np.random.default_rng(5).integers(0, config.vocab_size, 200)
         model.logits(tokens)
