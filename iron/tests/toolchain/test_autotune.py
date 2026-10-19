@@ -654,12 +654,15 @@ def test_retuning_keeps_what_the_profile_set_that_the_search_does_not_move(
 
 def test_a_run_is_timed_by_the_time_its_image_took(monkeypatch):
     class Run:
+        """Its image takes a microsecond longer each call: 1, 2, ..."""
+
         last_elapsed = 0.0
 
         def __call__(self):
-            self.last_elapsed = 12.5e-6
+            self.last_elapsed += 1e-6
 
     monkeypatch.setattr(benchmark, "other_npu_users", lambda holding=False: set())
     monkeypatch.setattr(benchmark, "cpu_wait_us", lambda: None)
     (timed,) = time_interleaved([Run()], Timing(rounds=2, calls=3))
-    assert timed.round_us == (12.5, 12.5)
+    # Two untimed calls, then each round's median of its three: 4, then 7.
+    assert timed.round_us == pytest.approx((4.0, 7.0))
