@@ -769,7 +769,7 @@ class CompiledGraph:
         packaging = (
             FullELF(coresident or (), commands=plan.commands, shared_words=self.shared)
             if plan.full_elf
-            else PerStep(check)
+            else PerStep(check, coresident or ())
         )
         placement: dict[str, Any] = (
             {}

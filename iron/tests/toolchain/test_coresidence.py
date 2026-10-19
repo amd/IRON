@@ -10,7 +10,8 @@ and through aiecc to a full ELF. The placer-driven policy must find the
 pack a caller would name by hand, and must decline a pair whose union needs
 more shim channels than the array has, or two members pinning one shim DMA
 channel. A recorded graph reaches the same packing through
-``compile(coresident=)``.
+``compile(coresident=)``. On NPU1's xclbin, a pack's back-to-back steps
+are one sequence over the pack's arrays.
 
 The fit checks run mlir-aie's passes in process; only the ELF builds need
 Peano and ``aiebu-asm``. Nothing dispatches.
@@ -31,7 +32,7 @@ from aie.utils.compile.jit._hash import _python_identity
 from iron.common.image import AdjacentPacking, compose, coresidence
 from iron.common.image.coresidence import Packing
 from iron.common.image.compose import Composition
-from iron.common.image.link import FullELF
+from iron.common.image.link import FullELF, PerStep, _run
 from iron.common.image.sequence import Image
 from iron.common.graph.record import Recording
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
@@ -418,3 +419,37 @@ def test_graph_compile_forwards_the_packing():
     assert re.findall(r"aiex\.configure @(\w+)", composed.text()) == [
         Packing.device_name(list(composed.designs))
     ]
+
+
+def _runs(coresident) -> tuple[list[str], dict]:
+    """The NPU1 ``Chain``'s designs by step, and its runs on ``coresident``."""
+    seq = Image(
+        Chain(SIZE, TILE, columns=1).record(a=(SIZE,), b=(SIZE,)),
+        PerStep(coresident=coresident),
+    )
+    seq._prepare()
+    designs, design_of = seq.unique_designs()
+    names = [OperatorDesign(op, full_elf=False).name for op in designs]
+    order = [names[design_of[id(s.op)]] for s in seq.steps]
+    return order, seq.packaging._runs(order, dict(zip(names, designs)))
+
+
+def test_an_npu1_pack_runs_its_steps_as_one_sequence(npu1):
+    order, runs = _runs(AdjacentPacking())
+    assert list(runs) == [(0, 5)]
+    text = str(_run(runs[0, 5], tuple(order)).generate_mlir())
+    assert len(re.findall(r"aie\.device\(npu1\)", text)) == 1
+    (sequence,) = re.findall(r"aie\.runtime_sequence\((.*)\) \{", text)
+    # Each step's two inputs and output, the steps' buffers in turn.
+    assert sequence.count("memref<") == 13
+
+
+def test_an_npu1_pack_member_between_others_runs_alone(npu1):
+    graph = Chain(SIZE, TILE, columns=1)
+    order, runs = _runs([[graph.add, graph.silu]])
+    assert order[2].startswith("ElementwiseMul") and list(runs) == [(0, 2), (3, 5)]
+
+
+def test_check_packs_nothing():
+    with pytest.raises(ValueError, match="packs none"):
+        PerStep(check=True, coresident=AdjacentPacking())

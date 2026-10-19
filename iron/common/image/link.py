@@ -8,22 +8,24 @@ it keys on what the text is a function of, locks across processes and
 validates the kernels' depfiles, and the image lands in its entry.
 """
 
+import hashlib
+import itertools
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import aie.utils as aie_utils
 from aie import ir
-from aie.iron import CompileTime
+from aie.iron import CompileTime, Program
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.npukernel import NPUKernel
 
 from ..declare import Operator
-from ..design import OperatorDesign
+from ..design import BuiltArray, OperatorDesign
 from .artifacts import Design
 from .callable import FullELFCallable, PerStepCallable
 from .compose import Composition
-from .coresidence import AdjacentPacking
+from .coresidence import AdjacentPacking, Packing, pack
 from .packaging import require_device
 
 
@@ -157,17 +159,36 @@ class PerStep:
     shipped image (``image=``) is the download: neither is linked into the
     chain, and only the design's stream is built.
 
-    ``links`` is by ``id(op)`` over the sequence's operators.
+    Steps that run back to back on one pack of ``coresident`` are one link
+    instead, the pack's arrays and one sequence running theirs in turn
+    (``Runtime.merge``), so a dispatch configures the array once for them;
+    a step of a pack between steps of others runs its own design.
+
+    ``links`` is by ``id(op)`` over the sequence's operators, and ``runs``
+    by a run's first step: its end and link.
 
     Args:
         check: Check each step against its reference on the NPU's inputs
             (``callable.check_step``).
+        coresident: Groups of operators whose steps run as one, or an
+            ``AdjacentPacking`` that chooses them.
+
+    Raises:
+        ValueError: Both are given, as ``check`` dispatches each step alone.
     """
 
-    def __init__(self, check: bool = False):
+    def __init__(
+        self,
+        check: bool = False,
+        coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
+    ):
+        if check and coresident:
+            raise ValueError("check=True dispatches each step alone; it packs none")
         self.check = check
+        self.coresident = coresident
         self.image: Path | None = None
         self.links: dict[int, Link] = {}
+        self.runs: dict[int, tuple[int, Link]] = {}
 
     @staticmethod
     def in_arena(scratch: list[str], residents: Mapping[str, object]) -> list[str]:
@@ -186,23 +207,33 @@ class PerStep:
         # reporting one design_key generate one module, so they link one
         # xclbin and run one instruction stream.
         designs, design_of = seq.unique_designs()
+        names = [OperatorDesign(op, full_elf=False).name for op in designs]
+        order = [names[design_of[id(s.op)]] for s in seq.steps]
+        runs = self._runs(order, dict(zip(names, designs)))
+        merged = {i for start, end in runs for i in range(start, end)}
+        alone = {
+            design_of[id(s.op)] for i, s in enumerate(seq.steps) if i not in merged
+        }
         configs = [
             op.xclbin_operator() if op.external is None else None for op in designs
         ]
-        chained = [op for op, config in zip(designs, configs) if config is op]
+        chained = [
+            op
+            for i, (op, config) in enumerate(zip(designs, configs))
+            if config is op and i in alone
+        ]
+        packs = {tuple(order[a:b]): runs[a, b] for a, b in runs}
         # The key reads the current device: bound first, keys before and after agree.
         aie_utils.ensure_current_device()
-        built = dict(
-            zip(
-                map(id, chained),
-                CompilableDesign.chain(
-                    [OperatorDesign(op, full_elf=False).compilable() for op in chained],
-                    seq.name,
-                ),
-            )
+        built = CompilableDesign.chain(
+            [
+                *(OperatorDesign(op, full_elf=False).compilable() for op in chained),
+                *(_run(group, steps) for steps, group in packs.items()),
+            ],
+            seq.name,
         )
         # One design alone is the xclbin the operator compiled alone builds.
-        named = len(chained) > 1
+        named = len(built) > 1
 
         def kernel(xclbin, design, name="MLIR_AIE") -> NPUKernel:
             return NPUKernel(
@@ -213,31 +244,67 @@ class PerStep:
                 dispatch_lib_path=design.get_dispatch_lib_path(),
             )
 
-        links = []
-        for op, config in zip(designs, configs):
+        def linked(design, image, label, name) -> Link:
+            return Link(
+                design, design, label if named else name, kernel(image, design, label)
+            )
+
+        by_pack = {
+            steps: linked(*b, Packing.device_name(packs[steps]))
+            for steps, b in zip(packs, built[len(chained) :])
+        }
+        ops = dict(zip(map(id, chained), built))
+        links: dict[int, Link] = {}
+        for i, (op, config) in enumerate(zip(designs, configs)):
+            if i not in alone:
+                continue
             if config is None:
                 own = OperatorDesign(op, full_elf=False).compile(insts_only=True)
                 shipped = op.external.with_instructions(own.get_cache_entry().insts)
-                links.append(Link(own, None, op.name, shipped))
-                continue
-            if config is op:
-                design, image, label = built[id(op)]
-                name = label if named else op.name
-                links.append(Link(design, design, name, kernel(image, design, label)))
-                continue
-            image = OperatorDesign(config, full_elf=False).compile()
-            # On an xclbin a per-call value is a dispatch-time scalar: the
-            # stream is generated per call, by a library only a full build has.
-            own = OperatorDesign(op, full_elf=False).compile(
-                image=None if op.values else image, insts_only=not op.values
-            )
-            xclbin = image.get_cache_entry().xclbin
-            links.append(Link(own, image, config.name, kernel(xclbin, own)))
+                links[i] = Link(own, None, op.name, shipped)
+            elif config is op:
+                links[i] = linked(*ops[id(op)], op.name)
+            else:
+                image = OperatorDesign(config, full_elf=False).compile()
+                # On an xclbin a per-call value is a dispatch-time scalar: the
+                # stream is generated per call, by a library only a full build has.
+                own = OperatorDesign(op, full_elf=False).compile(
+                    image=None if op.values else image, insts_only=not op.values
+                )
+                xclbin = image.get_cache_entry().xclbin
+                links[i] = Link(own, image, config.name, kernel(xclbin, own))
+        self.runs = {a: (b, by_pack[tuple(order[a:b])]) for a, b in runs}
         for op in seq.unique_operators():
-            self.links[id(op)] = links[design_of[id(op)]]
-        last = built[id(chained[-1])][1] if chained else links[-1].kernel.xclbin_path
+            d = design_of[id(op)]
+            self.links[id(op)] = links.get(d) or next(
+                link for a, (b, link) in self.runs.items() if names[d] in order[a:b]
+            )
+        last = built[-1][1] if built else list(links.values())[-1].kernel.xclbin_path
         self.image = Path(last)
         return self.image
+
+    def _runs(
+        self, order: list[str], designs: Mapping[str, Operator]
+    ) -> dict[tuple[int, int], dict[str, OperatorDesign]]:
+        """Each run of two or more steps back to back on one pack, by its
+        ``(first, end)`` steps: the pack's designs, by name.
+        """
+        if not self.coresident:
+            return {}
+        own = {n: OperatorDesign(op, full_elf=False) for n, op in designs.items()}
+        if isinstance(self.coresident, AdjacentPacking):
+            packing, _ = self.coresident.pack(order, own)
+        else:
+            packing = Packing.of(self.coresident, own, full_elf=False)
+        runs = {}
+        for device, steps in itertools.groupby(
+            enumerate(order), key=lambda step: packing.device_of(step[1])
+        ):
+            first, *rest = steps
+            if rest and device not in designs:
+                group = packing.group_of(first[1])
+                runs[first[0], rest[-1][0] + 1] = {n: own[n] for n in group}
+        return runs
 
     def record(self, designs: list[Operator], sharing: list[tuple[str, ...]]):
         """The designs' records, the first's cache entry, and its stream
@@ -261,3 +328,30 @@ class PerStep:
 
     def callable(self, seq, arena) -> PerStepCallable:
         return PerStepCallable(seq, check=self.check, arena=arena)
+
+
+def _run(
+    group: Mapping[str, OperatorDesign], steps: tuple[str, ...]
+) -> CompilableDesign:
+    """``group``'s arrays in one device whose one sequence runs ``steps``'
+    in turn, keyed on what its text is a function of.
+    """
+    h = hashlib.sha256(
+        repr(([d.compilable().recipe_hash for d in group.values()], steps)).encode()
+    )
+
+    def generator(key: CompileTime[str]) -> ir.Module:
+        configured = pack(
+            Composition.device, {n: BuiltArray(d) for n, d in group.items()}, steps
+        )
+        return Program.compose(
+            [configured], entry=configured.runtimes[0]
+        ).resolve_program()
+
+    return CompilableDesign(
+        generator,
+        compile_kwargs={"key": h.hexdigest()[:24]},
+        aiecc_flags=list(
+            dict.fromkeys(f for d in group.values() for f in d.op.aiecc_flags)
+        ),
+    )

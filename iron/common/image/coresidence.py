@@ -22,13 +22,15 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Hashable, Iterable, Mapping, Sequence
 
+import aie.utils as aie_utils
 from aie import ir
 from aie.dialects import aie
 from aie.iron import DeviceConfiguration, Program
 from aie.passmanager import PassManager
 
+from ..declare import Operator
 from ..design import BuiltArray, OperatorDesign, configuration, identities
 
 # aiecc's resource stages, in its order (tools/aiecc/IRTransforms.h). The whole
@@ -69,21 +71,47 @@ class Packing:
                     raise ValueError(f"{design} is packed into two groups")
                 seen.add(design)
 
-    def _group_of(self, design: str) -> tuple[str, ...]:
+    def group_of(self, design: str) -> tuple[str, ...]:
         for group in self.groups:
             if design in group and len(group) > 1:
                 return group
         return (design,)
 
+    @classmethod
+    def of(
+        cls,
+        coresident: Sequence[Sequence[Operator]],
+        designs: Collection[str],
+        full_elf: bool = True,
+    ) -> Packing:
+        """Groups of operators as the names of the designs they run as.
+
+        Raises:
+            ValueError: A group names a design none of ``designs`` is.
+        """
+        dev = aie_utils.get_current_device()
+        groups = tuple(
+            tuple(
+                dict.fromkeys(
+                    OperatorDesign(op.resolved(dev), full_elf).name for op in group
+                )
+            )
+            for group in coresident
+        )
+        strays = [n for g in groups for n in g if n not in designs]
+        if strays:
+            raise ValueError(f"coresident names designs no step runs: {strays}")
+        return cls(groups)
+
     def device_of(self, design: str) -> str:
-        group = self._group_of(design)
+        group = self.group_of(design)
         return design if len(group) == 1 else self.device_name(group)
 
     def devices(self, designs: Iterable[str]) -> dict[str, tuple[str, ...]]:
         """Each device symbol and the designs it carries, in first-use order."""
         out: dict[str, tuple[str, ...]] = {}
         for design in designs:
-            out.setdefault(self.device_of(design), self._group_of(design))
+            out.setdefault(self.device_of(design), self.group_of(design))
         return out
 
     def sharing(
@@ -228,9 +256,11 @@ def conflicts(devices: Mapping[str, aie.DeviceOp]) -> None:
             )
 
 
-def pack(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfiguration:
-    """``arrays`` co-resident in one device configuration named ``name``
-    (``design.configuration``).
+def pack(
+    name: str, arrays: Mapping[str, BuiltArray], steps: Sequence[str] = ()
+) -> DeviceConfiguration:
+    """``arrays`` co-resident in one device configuration named ``name``,
+    running ``steps`` (``design.configuration``).
 
     Raises:
         CoResidenceError: One of its arrays routes a shim channel by hand
@@ -251,7 +281,7 @@ def pack(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfiguration:
                 for member, m in modules.items()
             }
         )
-    return configuration(name, arrays)
+    return configuration(name, arrays, steps)
 
 
 def places(module: ir.Module) -> str | None:

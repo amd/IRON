@@ -10,7 +10,7 @@ import functools
 import hashlib
 import inspect
 import re
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 
 import aie.utils as aie_utils
 from aie import ir
@@ -29,7 +29,7 @@ from aie.iron import (
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from ..declare import Operator
-from .runtime import OperatorRuntime
+from .runtime import MergedRuntime, OperatorRuntime
 
 
 class OperatorDesign:
@@ -243,7 +243,7 @@ class BuiltArray:
                         op.operation.walk(read)
         return frozenset(words)
 
-    def runtime(self, other: BuiltArray, name: str) -> OperatorRuntime:
+    def runtime(self, other: BuiltArray, name: str | None) -> OperatorRuntime:
         """``other``'s runtime sequence over this array, named ``name``.
 
         Raises:
@@ -286,10 +286,14 @@ def identities(arrays: Mapping[str, BuiltArray]) -> dict[str, Hashable]:
     }
 
 
-def configuration(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfiguration:
+def configuration(
+    name: str, arrays: Mapping[str, BuiltArray], steps: Sequence[str] = ()
+) -> DeviceConfiguration:
     """``arrays`` as one device configuration named ``name``: one array per
     identity, and each entry's runtime sequence over it, named
-    ``sequence`` where there is one, else for its key.
+    ``sequence`` where there is one, else for its key. Given ``steps``,
+    keys of ``arrays``, its one sequence, ``sequence``, runs theirs in
+    that order instead.
 
     Raises:
         ValueError: The arrays are built for different devices, or traced
@@ -309,10 +313,18 @@ def configuration(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfigur
             f"{name}: its traced arrays ask for trace sizes {sorted(sizes)}; one "
             f"configuration has one trace buffer, so give them one size"
         )
-    runtimes = [
-        owners[of[key]].runtime(array, "sequence" if len(arrays) == 1 else key)
-        for key, array in arrays.items()
-    ]
+    runtimes = (
+        [
+            MergedRuntime.merge(
+                [owners[of[k]].runtime(arrays[k], None) for k in steps], "sequence"
+            )
+        ]
+        if steps
+        else [
+            owners[of[key]].runtime(array, "sequence" if len(arrays) == 1 else key)
+            for key, array in arrays.items()
+        ]
+    )
     first = next(iter(owners.values()))
     configured = DeviceConfiguration(
         name,

@@ -123,16 +123,21 @@ class OperatorRuntime(Runtime):
                 task.await_()
 
     def resolve(self, loc=None, ip=None, *, device=None, **options) -> None:
-        # aie.iron names a shim channel through the route it starts or ends,
-        # and places a buffer through the worker that reads it; these have
-        # neither, so they are declared at device scope ahead of the sequence.
+        self.declare(device)
+        super().resolve(loc, ip, device=device, **options)
+
+    def declare(self, device) -> None:
+        """Its pins and buffers, at ``device`` scope ahead of the sequence:
+        aie.iron names a shim channel through the route it starts or ends,
+        and places a buffer through the worker that reads it, and these
+        have neither.
+        """
         for symbol, end in self.pins.items():
             device.resolve_tile(end.tile)
             shim_dma_allocation(symbol, end.tile.op, end.direction, end.channel)
         for buffer in self.buffers:
             device.resolve_tile(buffer.tile)
             buffer.resolve()
-        super().resolve(loc, ip, device=device, **options)
 
     def run(self) -> None:
         if self.op.has_sequence_override():
@@ -355,3 +360,24 @@ class OperatorRuntime(Runtime):
             sync_parameters()
         for rtp in self.built.rtps:
             rtp.barrier.set(1)
+
+
+class MergedRuntime(Runtime):
+    """Operator runtimes run back to back as one sequence
+    (``Runtime.merge``), declaring each array's pins and buffers once.
+    """
+
+    runtimes: list[OperatorRuntime]
+
+    @classmethod
+    def merge(cls, runtimes, name=None) -> MergedRuntime:
+        merged = super().merge(runtimes, name)
+        assert isinstance(merged, MergedRuntime)
+        merged.runtimes = list(runtimes)
+        return merged
+
+    def resolve(self, loc=None, ip=None, *, device=None, **options) -> None:
+        # Steps of one design share its array: one runtime declares it.
+        for runtime in {id(r.op): r for r in self.runtimes}.values():
+            runtime.declare(device)
+        super().resolve(loc, ip, device=device, **options)

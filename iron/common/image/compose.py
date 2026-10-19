@@ -16,7 +16,6 @@ import logging
 import math
 from collections.abc import Hashable
 
-import aie.utils as aie_utils
 import numpy as np
 from aie import ir
 from aie.dialects import memref
@@ -73,16 +72,7 @@ class Composition:
         self.shared_words = full_elf.shared_words
         self.packing: Packing | AdjacentPacking = full_elf.coresident
         if not isinstance(self.packing, AdjacentPacking):
-            # A group names operators as given; a step runs each resolved.
-            dev = aie_utils.get_current_device()
-            groups = tuple(
-                tuple(dict.fromkeys(OperatorDesign(op.resolved(dev)).name for op in g))
-                for g in self.packing
-            )
-            strays = [n for g in groups for n in g if n not in self.designs]
-            if strays:
-                raise ValueError(f"coresident names designs no step runs: {strays}")
-            self.packing = Packing(groups)
+            self.packing = Packing.of(self.packing, self.designs)
 
     @property
     def identity(self) -> str:

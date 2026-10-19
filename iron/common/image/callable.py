@@ -546,7 +546,8 @@ class FullELFCallable(ImageCallable):
 
 
 class PerStepCallable(ImageCallable):
-    """Runs an ``PerStep`` one step at a time, its buffers shared by name.
+    """Runs a ``PerStep`` one step, or one run of a pack, at a time, its
+    buffers shared by name.
 
     ``check`` holds each dispatched step to its reference on the NPU's
     inputs, by the step's ``tolerance()`` (``check_step``), so each
@@ -567,10 +568,15 @@ class PerStepCallable(ImageCallable):
             dtype = seq.buffer_dtype(ref)
             self._storage[root] = XRTTensor((_n_elements(length, dtype),), dtype=dtype)
             self._buffers[ref] = self._storage[root]
-        self._steps = [
-            (s.op, seq.packaging.links[id(s.op)].kernel, s.buffers, [])
-            for s in seq.steps
-        ]
+        # A run of a pack is one dispatch, over its steps' buffers in turn.
+        self._steps = []
+        i = 0
+        while i < len(seq.steps):
+            op = seq.steps[i].op
+            end, link = seq.packaging.runs.get(i, (i + 1, seq.packaging.links[id(op)]))
+            refs = tuple(r for s in seq.steps[i:end] for r in s.buffers)
+            self._steps.append((op, link.kernel, refs, []))
+            i = end
         self._follow_arena()
         self._bind_steps()
 

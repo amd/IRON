@@ -222,6 +222,23 @@ def test_a_packed_graph_computes_what_the_temporal_one_does():
     assert temporal.view(np.uint16).tolist() == packed.view(np.uint16).tolist()
 
 
+@pytest.mark.supported_devices("npu1")
+def test_an_npu1_pack_computes_what_its_steps_do_alone():
+    """On an xclbin, a pack's steps are one dispatch, and compute the same."""
+    rng = np.random.default_rng(0)
+    a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
+    b = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
+    outputs = []
+    for coresident in (None, AdjacentPacking()):
+        version = Chain(SIZE, TILE, columns=1).compile(
+            coresident=coresident, a=(SIZE,), b=(SIZE,)
+        )
+        outputs.append(np.array(version(a, b).numpy()[:SIZE]))
+    assert list(version.sequence.packaging.runs) == [0]
+    alone, packed = outputs
+    assert alone.view(np.uint16).tolist() == packed.view(np.uint16).tolist()
+
+
 class TwoExtents(iron.Graph):
     """One full-width add at two extents: two designs, one array."""
 

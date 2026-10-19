@@ -234,6 +234,10 @@ public API adds its entry under Unreleased.
   loading or `.pyi` stubs. `iron.operators.CATALOG` maps each operator's
   profile name to its class (flm's as `"flm.<name>"`); `__all__` holds
   bare names only, and `catalog_name` is gone.
+- `compile(coresident=)` packs on an xclbin too (NPU1): steps that run back
+  to back on one pack are one dispatch, its arrays and one sequence running
+  the steps' in turn (`Runtime.merge`); `check=True` with `coresident`
+  raises.
 - EmbeddingGemma 2's configs take Hugging Face's names where they differ
   only in name (`Config.embedding_dim`, `AudioConfig.attention_logit_cap`)
   and drop the fields nothing read (`bos`, `eos`, `pad`, `video_token`,
