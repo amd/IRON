@@ -398,7 +398,7 @@ def judge(
         return "only a bit-identical output is admitted"
     values = values or {}
     for extent in op.bound_extents:
-        if values.get(extent) != vars(op)[op.value(extent).field.name]:
+        if values.get(extent) != vars(op)[op.value(extent).bounds.name]:
             return "only a bit-identical output is admitted under a bound"
     want = op._call_reference(inputs, values=values)
     for which, gate in gates.items():

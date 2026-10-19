@@ -32,7 +32,6 @@ from aie.iron import ExternalFunction
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.declare import Extent
 from iron.common.graph.trace import TracedGraph
 from iron.common.image.allocator import BANK
 from iron.common.image.sequence import OperatorSequence
@@ -85,7 +84,7 @@ def _assert_values_in_table(version):
     # shares with the symbols that always hold its number. A bound extent
     # the designs read only through its derivations has none of its own.
     for b in version.traced.bindings:
-        if isinstance(b.member, Extent):
+        if b.member.bounds is not None:
             continue
         word = version.shared.get(b.symbol, b.symbol)
         assert (
