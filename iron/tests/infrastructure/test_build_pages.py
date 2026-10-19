@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """CI's pages script, run as publish-pages.yml runs it, draws one chart per
-runner for each operator's nightly results.
+runner for each operator's, or each shared-test decoder's, nightly results.
 """
 
 import csv
