@@ -38,3 +38,16 @@ def test_each_core_reads_at_most_two_streams(cls, case, npu2):
             if isinstance(a, ObjectFifoHandle) and not a._is_prod
         ]
         assert len(reads) <= 2
+
+
+@pytest.mark.parametrize(
+    "cls,case", CASES, ids=[f"{c.__name__}-{i}" for i, (c, _) in enumerate(CASES)]
+)
+@pytest.mark.parametrize("device", ["npu1", "npu2"])
+def test_the_columns_resolved_fit_the_shims_input_channels(cls, case, device, request):
+    """Every lane of every input is a shim stream: two to a shim, so
+    SelectiveScan's four and GatedDeltaRule's five a core cap the cores.
+    """
+    dev = request.getfixturevalue(device)
+    op = cls(**case.kwargs).resolved(dev)
+    assert sum(o.lanes for o in op.inputs) <= dev.shim_dma_channels_in
