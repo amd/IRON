@@ -8,11 +8,10 @@ it keys on what the text is a function of, locks across processes and
 validates the kernels' depfiles, and the image lands in its entry.
 """
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
 
+import aie.utils as aie_utils
 from aie import ir
 from aie.iron import CompileTime
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
@@ -109,8 +108,8 @@ class Link:
 
 class XclbinChain:
     """One xclbin and instruction stream per design, each linked onto the
-    previous (``--xclbin-input``), ``KERNELS`` designs to a chain: the last
-    link of each carries its kernels, ``image`` the last chain's.
+    previous (mlir-aie's ``CompilableDesign.chain``): the last link of each
+    chain carries its kernels, ``image`` the last chain's.
 
     A design whose ``Operator.configuration`` is another operator runs that
     configuration's own xclbin, built once for every shape it serves, and a
@@ -119,9 +118,6 @@ class XclbinChain:
 
     ``links`` is by ``id(op)`` over the sequence's operators.
     """
-
-    # amdxdna's MAX_NUM_CUS: the kernels one hardware context configures.
-    KERNELS: ClassVar[int] = 32
 
     def __init__(self):
         self.image: Path | None = None
@@ -133,9 +129,6 @@ class XclbinChain:
         """
         if self.image is not None:
             return self.image
-        # Short hash keeps kernel names under xclbinutil's 64-char "name:name" limit.
-        name_hash = hashlib.sha1(seq.name.encode()).hexdigest()[:6]
-
         # One kernel instance per design, not per operator: operators
         # reporting one design_key generate one module, so they link one
         # xclbin and run one instruction stream.
@@ -144,31 +137,20 @@ class XclbinChain:
             op.xclbin_operator() if op.external is None else None for op in designs
         ]
         chained = [op for op, config in zip(designs, configs) if config is op]
-        images, built = [], {}
+        # The key reads the current device: bound first, keys before and after agree.
+        aie_utils.ensure_current_device()
+        built = dict(
+            zip(
+                map(id, chained),
+                CompilableDesign.chain(
+                    [OperatorDesign(op, full_elf=False).compilable() for op in chained],
+                    seq.name,
+                ),
+            )
+        )
         # One design alone is the xclbin the operator compiled alone builds,
         # its kernel named by default.
         named = len(chained) > 1
-        for idx, op in enumerate(chained):
-            label = f"f{name_hash}_op{idx}" if named else op.name
-            flags = (
-                [
-                    f"--xclbin-kernel-name={label}",
-                    f"--xclbin-instance-name={label}",
-                    f"--xclbin-kernel-id=0x{0x901 + idx:x}",
-                ]
-                if named
-                else []
-            )
-            if idx % self.KERNELS:
-                # The predecessor is part of what this image is, and reaches
-                # the key through the flags.
-                flags.append(f"--xclbin-input={images[-1].resolve()}")
-            design = OperatorDesign(op, full_elf=False).compile(aiecc_flags=flags)
-            entry = design.get_cache_entry()
-            assert entry is not None and entry.xclbin is not None
-            images.append(Path(entry.xclbin))
-            last = min(idx // self.KERNELS * self.KERNELS + self.KERNELS, len(chained))
-            built[id(op)] = (design, label, last - 1)
 
         links = []
         for op, config in zip(designs, configs):
@@ -178,15 +160,15 @@ class XclbinChain:
                 links.append(Link(own, None, op.name, kernel))
                 continue
             if config is op:
-                design, label, last = built[id(op)]
+                design, image, label = built[id(op)]
                 kernel = NPUKernel(
-                    images[last],
+                    image,
                     design.get_cache_entry().insts,
                     **({"kernel_name": label} if named else {}),
                     dispatch_params=design.dispatch_params,
                     dispatch_lib_path=design.get_dispatch_lib_path(),
                 )
-                links.append(Link(design, design, label, kernel))
+                links.append(Link(design, design, label if named else op.name, kernel))
                 continue
             image = OperatorDesign(config, full_elf=False).compile()
             # On an xclbin a per-call value is a dispatch-time scalar: the
@@ -203,5 +185,6 @@ class XclbinChain:
             links.append(Link(own, image, config.name, kernel))
         for op in seq.unique_operators():
             self.links[id(op)] = links[design_of[id(op)]]
-        self.image = Path(images[-1] if images else links[-1].kernel.xclbin_path)
+        last = built[id(chained[-1])][1] if chained else links[-1].kernel.xclbin_path
+        self.image = Path(last)
         return self.image

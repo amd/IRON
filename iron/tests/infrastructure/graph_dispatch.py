@@ -21,6 +21,7 @@ import dataclasses
 
 import numpy as np
 import pytest
+from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
@@ -31,7 +32,6 @@ from iron.common.image.fusion import Fusion
 from iron.common.graph.trace import TracedGraph
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef
-from iron.common.image.fused import XclbinChain
 from iron.operators import (
     GEMV,
     Copy,
@@ -439,7 +439,7 @@ def test_a_chain_of_more_designs_than_a_context_configures_runs():
     """Past the kernels one hardware context configures, the steps' designs
     go into a second xclbin, and every step still runs.
     """
-    n = XclbinChain.KERNELS + 2
+    n = CompilableDesign.XCLBIN_KERNELS + 2
 
     class Prefixes(iron.Graph):
         def body(self, x):
