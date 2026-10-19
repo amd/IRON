@@ -30,6 +30,7 @@ _OPERATOR_MODULES = {
     "ElementwiseMul": "elementwise_mul",
     "Emit": "emit",
     "Experts": "experts",
+    "GatedDeltaRule": "gated_delta_rule",
     "Gather": "copy",
     "GatherWords": "copy",
     "GELU": "gelu",
