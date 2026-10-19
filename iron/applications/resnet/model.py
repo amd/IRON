@@ -19,6 +19,7 @@ maps; the image is ImageNet-normalized before the graph, and laid out in
 """
 
 import dataclasses
+from types import SimpleNamespace
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -29,8 +30,6 @@ from iron.lm import BatchNorm2d, Linear
 from iron.lm.config import Config, not_json
 from iron.operators.relu import ReLU
 
-#: nn.BatchNorm2d's default, which transformers' ResNet keeps.
-BN_EPS = 1e-5
 #: An image pixel's channels as the graph takes them: RGB and a zero.
 PIXEL = 4
 
@@ -68,23 +67,15 @@ class ResNetConfig(Config):
             )
 
 
-class Convolution(iron.Graph):
-    """A bias-free conv's float32 weight, as the checkpoint holds it, for
-    its BatchNorm to fold into before it rounds.
-    """
-
-    def __init__(self, *shape: int):
-        self.weight = iron.param(*shape, dtype=np.float32)
-
-
 class ConvLayer(iron.Graph):
     """A ``k``-square conv at ``stride``, same padding, its BatchNorm
     folded in as it loads, then ReLU where ``relu``.
     """
 
     def __init__(self, cin, cout, k=1, stride=1, relu=True):
-        self.convolution = Convolution(cout, cin, k, k)
-        self.normalization = BatchNorm2d(cout, BN_EPS)
+        shape = (cout, cin, k, k)
+        self.convolution = SimpleNamespace(weight=iron.param(*shape, dtype=np.float32))
+        self.normalization = BatchNorm2d(cout)
         self.stride, self.relu = stride, relu
 
     def load_state_dict(self, tree, *, path: str = "") -> None:

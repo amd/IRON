@@ -302,19 +302,6 @@ def max_pool2d(x, kernel_size, stride=None, padding=0):
     return Copy.step(y, src=strided).reshape(rows, width, C)
 
 
-def fuse_conv_bn_weights(conv_w, conv_b, bn_rm, bn_rv, bn_eps, bn_w, bn_b):
-    """``torch.nn.utils.fusion.fuse_conv_bn_weights``: a conv's weight and
-    bias with the BatchNorm after it folded in. Unlike torch's, it takes no
-    ``transpose=`` (no model here folds a transposed conv) and returns
-    float32 whatever the conv's dtype, so a bf16 weight rounds once, after
-    the fold.
-    """
-    scale = bn_w / np.sqrt(bn_rv + np.float32(bn_eps))
-    weight = np.asarray(conv_w, np.float32) * scale[:, None, None, None]
-    bias = -bn_rm if conv_b is None else conv_b - bn_rm
-    return weight, (bias * scale + bn_b).astype(np.float32)
-
-
 def interpolate(x, size=None, scale_factor=None, mode="nearest", align_corners=None):
     """The feature map ``x`` upsampled 2x, each pixel a 2x2 block: each row
     read twice into a held map, which is then written twice, into the even

@@ -422,17 +422,13 @@ class BatchNorm2d(iron.Graph):
 
     def fold(self, weight, bias=None) -> tuple[np.ndarray, np.ndarray]:
         """The conv ``weight`` and ``bias`` with this norm folded in,
-        float32 (``F.fuse_conv_bn_weights``).
+        float32 whatever the conv's dtype, so a bf16 weight rounds once,
+        after the fold.
         """
-        return F.fuse_conv_bn_weights(
-            weight,
-            bias,
-            self.running_mean,
-            self.running_var,
-            self.eps,
-            self.weight,
-            self.bias,
-        )
+        scale = self.weight / np.sqrt(self.running_var + np.float32(self.eps))
+        weight = np.asarray(weight, np.float32) * scale[:, None, None, None]
+        bias = -self.running_mean if bias is None else bias - self.running_mean
+        return weight, (bias * scale + self.bias).astype(np.float32)
 
 
 def activation(name: str):

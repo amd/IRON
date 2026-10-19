@@ -7,7 +7,8 @@
 detector: one graph from an image to its three scales' predictions on the
 NPU (``YOLOXNano``), read from the release's PyTorch checkpoint by its
 own names, and the image preprocessing and box decode around it. Its tests
-check it against a float32 forward pass on the host (``oracle.py`` there).
+check it against a float32 forward pass on the host (``YOLOXNanoOracle``
+in its ``test.py``).
 
 A CSPDarknet backbone (a ``Focus`` stem, 2x2 space-to-depth then a 3x3
 conv; four stride-2 stages, each a depthwise-separable downsample into a
@@ -94,17 +95,6 @@ def decode(scales: list[np.ndarray]) -> np.ndarray:
     return np.concatenate(rows)
 
 
-def base_conv(x, weight, bias, stride: int = 1):
-    """A ``BaseConv`` of the feature map ``x`` by its folded ``weight`` and
-    ``bias``, same padding, depthwise if ``weight`` reads one channel, then
-    SiLU.
-    """
-    out, per_group, k, _ = weight.shape
-    groups = out if per_group == 1 else 1
-    y = F.conv2d(x, weight, bias.astype(bfloat16), stride, k // 2, groups=groups)
-    return SiLU.step(y, tile_size=_row(y))
-
-
 def _row(x) -> int:
     """A feature map's elements a row."""
     return x.shape[1] * x.shape[2]
@@ -117,22 +107,25 @@ def sigmoid(x):
 
 class BaseConv(iron.Graph):
     """A bias-free ``k``-square conv at ``stride``, depthwise over
-    ``groups``, its BatchNorm folded in as it loads, then SiLU
-    (``base_conv``).
+    ``groups``, same padding, its BatchNorm folded in as it loads, then
+    SiLU.
     """
 
     def __init__(self, cin: int, cout: int, k: int = 1, stride: int = 1, groups=1):
         shape = (cout, cin // groups, k, k)
         self.conv = SimpleNamespace(weight=iron.param(*shape, dtype=np.float32))
         self.bn = BatchNorm2d(cout, BN_EPS)
-        self.stride = stride
+        self.stride, self.groups = stride, groups
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
         self.weight, self.bias = self.bn.fold(self.conv.weight)
 
     def body(self, x):
-        return base_conv(x, self.weight, self.bias, self.stride)
+        k = self.weight.shape[-1]
+        bias = self.bias.astype(bfloat16)
+        y = F.conv2d(x, self.weight, bias, self.stride, k // 2, groups=self.groups)
+        return SiLU.step(y, tile_size=_row(y))
 
 
 class DWConv(iron.Graph):
@@ -147,9 +140,18 @@ class DWConv(iron.Graph):
 
 
 class Bottleneck(iron.Graph):
-    def __init__(self, channels: int):
+    """A 1x1 ``BaseConv`` then a ``DWConv``, added to its input where
+    ``shortcut``.
+    """
+
+    def __init__(self, channels: int, shortcut: bool):
         self.conv1 = BaseConv(channels, channels)
         self.conv2 = DWConv(channels, channels)
+        self.shortcut = shortcut
+
+    def body(self, x):
+        y = self.conv2(self.conv1(x))
+        return ElementwiseAdd.step(y, x, tile_size=_row(x)) if self.shortcut else y
 
 
 class CSPLayer(iron.Graph):
@@ -163,14 +165,12 @@ class CSPLayer(iron.Graph):
         self.conv1 = BaseConv(cin, hidden)
         self.conv2 = BaseConv(cin, hidden)
         self.conv3 = BaseConv(2 * hidden, cout)
-        self.m = [Bottleneck(hidden) for _ in range(depth)]
-        self.shortcut = shortcut
+        self.m = [Bottleneck(hidden, shortcut) for _ in range(depth)]
 
     def body(self, x):
         y = self.conv1(x)
         for b in self.m:
-            z = b.conv2(b.conv1(y))
-            y = ElementwiseAdd.step(z, y, tile_size=_row(y)) if self.shortcut else z
+            y = b(y)
         return self.conv3(F.cat([y, self.conv2(x)], dim=-1))
 
 
@@ -228,12 +228,12 @@ class Focus(iron.Graph):
 
 
 class CSPDarknet(iron.Graph):
-    """YOLOX-Nano's backbone (``dark2`` to ``dark5`` after the stem),
-    ``width`` channels from the stem.
+    """YOLOX-Nano's backbone (``dark2`` to ``dark5`` after the stem), 16
+    channels from the stem.
     """
 
-    def __init__(self, width: int = 16):
-        w = width
+    def __init__(self):
+        w = 16
         self.stem = Focus(w)
         self.dark2 = [DWConv(w, 2 * w, 3, 2), CSPLayer(2 * w, 2 * w, 1)]
         self.dark3 = [DWConv(2 * w, 4 * w, 3, 2), CSPLayer(4 * w, 4 * w, 3)]
@@ -247,12 +247,12 @@ class CSPDarknet(iron.Graph):
 
 class PAFPN(iron.Graph):
     """The backbone, then the neck: top-down then bottom-up over its last
-    three maps, ``width`` channels at the finest.
+    three maps, 64 channels at the finest.
     """
 
-    def __init__(self, width: int = 64):
-        w = width
-        self.backbone = CSPDarknet(w // 4)
+    def __init__(self):
+        w = 64
+        self.backbone = CSPDarknet()
         self.lateral_conv0 = BaseConv(4 * w, 2 * w)
         self.C3_p4 = CSPLayer(4 * w, 2 * w, 1, shortcut=False)
         self.reduce_conv1 = BaseConv(2 * w, w)
@@ -264,12 +264,14 @@ class PAFPN(iron.Graph):
 
 
 class Head(iron.Graph):
-    """The decoupled head over the neck's maps, ``widths`` channels each:
-    per scale a 1x1 stem, two-conv classification and regression
-    branches, and their 1x1 predictions.
+    """The decoupled head over the neck's maps of 64, 128 and 256
+    channels: per scale a 1x1 stem to 64, two-conv classification and
+    regression branches, and their 1x1 predictions of 80 classes, the box
+    and objectness.
     """
 
-    def __init__(self, widths=(64, 128, 256), hidden: int = 64, classes: int = 80):
+    def __init__(self):
+        widths, hidden, classes = (64, 128, 256), 64, 80
         self.stems = [BaseConv(w, hidden) for w in widths]
         self.cls_convs = [[DWConv(hidden, hidden) for _ in "ab"] for _ in widths]
         self.reg_convs = [[DWConv(hidden, hidden) for _ in "ab"] for _ in widths]
@@ -279,6 +281,10 @@ class Head(iron.Graph):
 
 
 class YOLOX(iron.Graph):
+    """The checkpoint's ``model``: the neck over its backbone, then the
+    head.
+    """
+
     def __init__(self):
         self.backbone = PAFPN()
         self.head = Head()

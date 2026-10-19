@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.applications.resnet.model import BN_EPS, ResNet, ResNetConfig
+from iron.applications.resnet.model import ResNet, ResNetConfig
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close
 from iron.tests.common.llama_model import checkpoint
@@ -125,7 +125,7 @@ def test_a_float32_conv_weight_rounds_only_after_its_fold():
     layer = ResNet(TOY, weights).resnet.encoder.stages[0].layers[0].layer[0]
     w = weights.resnet.encoder.stages[0].layers[0].layer[0]
     bn = {k: np.asarray(v, np.float64) for k, v in vars(w.normalization).items()}
-    scale = bn["weight"] / np.sqrt(bn["running_var"] + BN_EPS)
+    scale = bn["weight"] / np.sqrt(bn["running_var"] + layer.normalization.eps)
     want = np.asarray(w.convolution.weight, np.float64) * scale[:, None, None, None]
     # float32's rounding, where a bf16 weight before the fold is 2^-9 off.
     np.testing.assert_allclose(layer.weight, want, rtol=1e-6)
