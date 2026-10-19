@@ -150,8 +150,8 @@ public API adds its entry under Unreleased.
   Hugging Face repository's files, a local directory or a repository id
   downloaded once, fitted, compiled and loaded, its tokenizer as
   `model.tokenizer`; `Model.from_checkpoint` is the same, not yet loaded.
-  The model class names its `config` and `hugging_face`; `fit`,
-  `default_config`, `tune_arguments` and `tune_calls` are its classmethods,
+  The model class names its `config` and `hugging_face`; `fit` and
+  `default_config` are its classmethods,
   and `prompt` and `cpu_reference` its methods. Each application's package exports its model class.
 - `lm.main(Model)`, a model's command line, whose positional argument is
   the path or repository id `load` takes.
@@ -180,6 +180,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- A decoder's tuning calls are `iron.lm.tune.calls(model, position, token,
+  context, points, sampler)`, on the flags `iron.lm.tune.arguments` adds,
+  not `CausalLM.tune_calls` and `tune_arguments`; `contexts` moved with
+  them. A model of another kind still names its own `tune_calls`.
 - `Tokenizer.chat` puts the BOS where the chat template writes it, and only
   there, as transformers' `apply_chat_template` does; it no longer adds one.
   The template may call `strftime_now` and writes `tokenizer_config.json`'s

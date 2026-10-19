@@ -11,12 +11,10 @@ Where the decode step is not a full ELF (NPU1, or ``full_elf=False``) there
 is no device loop: the host starts each step on the token the last one drew.
 """
 
-import argparse
 import dataclasses
 import logging
 from collections.abc import Iterator
 from functools import partial
-from pathlib import Path
 from typing import Any, ClassVar
 
 import numpy as np
@@ -29,36 +27,16 @@ from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.compiled import _leaves
 from iron.common.graph.handle import State
-from iron.tune.autotune import Call, Point
 from iron.operators.copy import Copy
 from iron.operators.sample import Sample
 
 from .blocks import DecoderLayer, Embedding, KVCache, Linear, RMSNorm, Rope
-from .checkpoint import Checkpoint, renamed
+from .checkpoint import renamed
 from .config import DecoderConfig
 from .model import Model
-from .cli import sampling_arguments
 from .generation import Sampler
 
 logger = logging.getLogger(__name__)
-
-
-def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
-    """At most ``count`` contexts halving down from ``top``, multiples of
-    ``unit``, ascending, each weighted by the share of a uniform context in
-    ``(0, top]`` nearest it (the trapezoid rule): the weights sum to 1.
-
-    Raises:
-        ValueError: ``top`` is not a positive multiple of ``unit``.
-    """
-    if top < unit or top % unit:
-        raise ValueError(f"the context {top} is not a multiple of {unit}")
-    found = [top]
-    while len(found) < count and found[-1] // 2 >= unit and found[-1] // 2 % unit == 0:
-        found.append(found[-1] // 2)
-    found.reverse()
-    edges = [0] + [(a + b) / 2 for a, b in zip(found, found[1:])] + [top]
-    return [((hi - lo) / top, c) for lo, hi, c in zip(edges, edges[1:], found)]
 
 
 @dataclasses.dataclass
@@ -427,108 +405,6 @@ class CausalLM(Model):
         if self._decode is None:
             raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         return self._decode.emit is not None
-
-    @classmethod
-    def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
-        """The flags ``tune_calls`` follows from: the checkpoint whose header
-        gives the weights' shapes, the decode step's position and token, the
-        contexts attention over the cache is timed at, and the sampling
-        Sample is timed at.
-        """
-        parser.add_argument(
-            "--checkpoint",
-            type=Path,
-            required=True,
-            help="the .safetensors checkpoint, or a sharded one's "
-            "model.safetensors.index.json, of which only the header is read",
-        )
-        parser.add_argument(
-            "--position",
-            type=int,
-            default=256,
-            help="the decode position the decode step's designs are timed at: "
-            "what their per-call values follow from (default: 256)",
-        )
-        parser.add_argument(
-            "--token",
-            type=int,
-            default=0,
-            help="the token the step embeds (default: 0)",
-        )
-        parser.add_argument(
-            "--context",
-            type=int,
-            default=8192,
-            help="the longest context a design whose work follows it is timed "
-            "at, a multiple of the prompt chunk (default: 8192)",
-        )
-        parser.add_argument(
-            "--points",
-            type=int,
-            default=6,
-            help="how many contexts up to --context it is timed at, each "
-            "timed per setting: their cost grows with it (default: 6)",
-        )
-        sampling_arguments(parser)
-
-    @classmethod
-    def tune_calls(
-        cls, parser: argparse.ArgumentParser, args: argparse.Namespace
-    ) -> list[Call]:
-        """The calls the model's designs are timed in, on weights it never
-        reads (``tune_arguments``'s flags): the decode step at ``--position``
-        and ``--token``, and the prompt chunk at a whole first chunk, Sample
-        on the draw rows the sampling gives. Each is timed over ``contexts``
-        up to ``--context``, ``--points`` of them: the decode step at their
-        last position, the prompt chunk as the whole chunk ending there.
-        """
-        config = cls.default_config(args.checkpoint)
-        if args.context > config.max_seq_len:
-            parser.error(
-                f"--context {args.context} is past max_seq_len {config.max_seq_len}"
-            )
-        model = cls(config, Checkpoint(args.checkpoint).tree("unread"))
-        sample = Sampler(args.temperature, args.top_k)
-        position, token = args.position, args.token
-        C = model.config.prefill_chunk
-        decode_shapes, prompt_shapes = model.shapes()
-        versions = [
-            (
-                decode_shapes,
-                dict(position=position, token=token),
-                [
-                    Point(w, dict(position=c - 1, token=token))
-                    for w, c in contexts(args.context, args.points, 1)
-                ],
-            ),
-            (
-                prompt_shapes,
-                dict(position=C - 1, token=token, start=0, rows=C, rope_start=0),
-                [
-                    Point(
-                        w,
-                        dict(
-                            position=c - 1,
-                            token=token,
-                            start=c - C,
-                            rows=C,
-                            rope_start=c - C,
-                        ),
-                    )
-                    for w, c in contexts(args.context, args.points, C)
-                ],
-            ),
-        ]
-        out = []
-        for shapes, values, points in versions:
-            traced = model.trace(**shapes)
-            # Sample's work follows its draw row's temperature and top-k: measure
-            # it at the rows generation writes, not at random words.
-            [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
-            _, draws = traced.states[id(model.draws)]
-            rows = sample.rows(model.config.max_seq_len, k_max)
-            out.append(Call(traced, values, {draws.name: rows}, points))
-        return out
 
     def logits(self, tokens) -> np.ndarray:
         """The logits after the last of ``tokens``, the whole history.
