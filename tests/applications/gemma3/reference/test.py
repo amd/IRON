@@ -15,6 +15,7 @@ import pytest
 
 from iron.applications.gemma3.model import Gemma3, Gemma3Config
 from iron.lm.checkpoint import leaves
+from iron.lm.testing import assert_close
 from iron.tests.support.llama_model import shapes
 from iron.tests.support.llama_reference import Decoder
 
@@ -31,7 +32,7 @@ TOY = Gemma3Config(
     intermediate_size=1024,
     rope_theta=1000000.0,
     max_seq_len=256,
-    prefill_chunk=256,
+    prefill_chunk=64,
     sliding_window=8,
     layer_types=("sliding_attention", "full_attention") * 2,
 )
@@ -64,6 +65,20 @@ class TestGemma3(Decoder):
             if name.endswith("norm.weight"):
                 weight[...] = weight.astype(np.float32) - 1
         return tree
+
+    def test_an_edit_past_the_ring_reruns_from_the_first_position(self, cpu):
+        """Tokens changed from position 70 after 200 ran: the sliding
+        layers' ring (128 positions) no longer holds the window before the
+        chunk at 64, so the call reruns from 0.
+        """
+        config = dataclasses.replace(cpu.config, max_seq_len=256)
+        model = self.host(config, cpu.weights)
+        tokens = np.random.default_rng(5).integers(0, config.vocab_size, 200)
+        model.logits(tokens)
+        assert model.session.resume(70) == 0
+        edit = np.random.default_rng(6).integers(0, config.vocab_size, 130)
+        tokens = np.concatenate([tokens[:70], edit])
+        assert_close(model.logits(tokens), cpu.golden.logits(tokens))
 
 
 def test_a_transformers_5_config_gives_both_rope_bases():

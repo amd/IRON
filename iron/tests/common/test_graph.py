@@ -839,8 +839,10 @@ def test_a_bound_travels_through_reshape_and_transpose():
     assert b[:, 3].valid == {0: n.affine()} and b[:, 3].shape == (64, 4)
 
 
-def test_an_index_may_floor_and_a_bound_may_not():
-    """A bound patches a length, so it is linear; an index may floor."""
+def test_an_index_may_floor_and_a_bound_may_only_clamp():
+    """A bound patches a length, so it is linear or clamped (a window's
+    ``min(p + 1, 8)``); an index may floor.
+    """
     p = PerCall("p", Kind.SCRATCHPAD, np.int32)
     cache = Handle.whole((8, 4), bfloat16, "cache", "state")
     assert cache[(p + 1) // 2].layout.offset == (p + 1) // 2 * 4
@@ -848,8 +850,7 @@ def test_an_index_may_floor_and_a_bound_may_not():
         _ = cache[: (p + 1) // 2]
     start = iron.clamp(p - 3, lo=0)
     assert start == (p - 3).clamp(lo=0) and cache[start].layout.offset == start * 4
-    with pytest.raises(TypeError, match="not linear"):
-        _ = cache[: (p + 1).clamp(hi=8)]
+    assert cache[: (p + 1).clamp(hi=8)].valid == {0: (p + 1).clamp(hi=8)}
 
 
 def test_a_per_call_value_cannot_steer_the_record():

@@ -22,6 +22,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 from iron.common.graph.compiled import walk
 
 from .blocks import KVCache
+from .causal import Checkpoints
 from .generation import (
     SEED,
     Sampler,
@@ -377,14 +378,16 @@ def _fill_caches(model, n: int, position: int):
     ``position`` reads, the state the prompt left.
     """
     version = next(iter(model.versions.values()))
-    caches = [x for _, x, p, _ in walk(model) if isinstance(p, KVCache)]
+    caches = [
+        x for _, x, p, _ in walk(model) if isinstance(p, KVCache) and p.window is None
+    ]
     for cache in caches:
         rows = version.read(cache)
         for start in range(n, position, n):
             rows[start : min(start + n, position)] = rows[: min(n, position - start)]
         version.push(cache)
         cache.host = rows
-    checkpoints = model.recurrent
+    checkpoints = [c for c in model.recurrent if isinstance(c, Checkpoints)]
     for c in checkpoints:
         slots = version.read(c.slots)
         slots[c.slot(position)] = slots[c.slot(n)]

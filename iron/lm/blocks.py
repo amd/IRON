@@ -8,6 +8,7 @@ its steps record into the model's. Weights are a checkpoint's ``(out, in)``,
 projected by ``F.linear``.
 """
 
+import dataclasses
 import math
 from collections.abc import Hashable
 from functools import partial
@@ -527,12 +528,20 @@ class Rope(iron.Graph):
 
 
 class KVCache(iron.Graph):
-    """A layer's keys and values, each ``(max_seq_len, num_key_value_heads,
-    head_dim)`` so no descriptor steps by the context, and causal attention
-    over them (``attend``). A prompt chunk writes a run of rows
-    (``cache[s : s + C][:rows]``), the last one short where the chunk does
-    not divide ``max_seq_len``; a decode step attends with ``MHA`` of one
-    query, which costs the context, not the cache.
+    """A layer's keys and values and causal attention over them
+    (``attend``). A prompt chunk writes a run of rows, the last one short
+    where the chunk does not divide ``max_seq_len``; a decode step attends
+    with ``MHA`` of one query, which costs the context, not the cache.
+
+    Without a window, keys and values are each ``(max_seq_len,
+    num_key_value_heads, head_dim)``, so no descriptor steps by the context.
+    Within one, they keep only the last ``ring`` positions, ``ring`` the
+    power of two holding a window and a chunk: position ``p`` at rows ``p %
+    ring`` and ``ring + p % ring``, so any ``ring`` positions in a row are
+    one run. A call copies the run it attends over to ``staged``: a chunk's
+    ``ring`` positions ending at its last row, a decode step's window. A
+    call stays within a chunk and restarts where the ring still holds the
+    window before it (``restart``).
 
     Args:
         c: The decoder's shape.
@@ -540,39 +549,91 @@ class KVCache(iron.Graph):
             as ``MHA`` counts them; None is all. Hugging Face's
             ``sliding_window`` counts the query's own, so a model passes
             ``sliding_window - 1``.
+
+    Raises:
+        ValueError: A window with a chunk of other than a power of two.
     """
 
     def __init__(self, c, window: int | None = None):
-        shape = (c.max_seq_len, c.num_key_value_heads, c.head_dim)
-        self.keys, self.values = iron.state(shape), iron.state(shape)
-        self.chunk, self.window = c.prefill_chunk, window
+        G, D, C = c.num_key_value_heads, c.head_dim, c.prefill_chunk
+        self.chunk, self.window, rows = C, window, c.max_seq_len
+        if window is not None:
+            if C & (C - 1):
+                raise ValueError(f"KVCache: a {C}-position chunk is no power of two")
+            self.ring = 1 << (window + C - 1).bit_length()
+            self.staged = iron.state((self.ring, G, D)), iron.state((self.ring, G, D))
+            rows = 2 * self.ring
+        self.keys, self.values = iron.state((rows, G, D)), iron.state((rows, G, D))
+
+    def restart(self, held: int, ran: int) -> int:
+        """Where a call may start to change the positions from ``held`` on,
+        after ``ran`` positions ran: there where the last call ended, else at
+        the boundary before it while the ring holds the window before that,
+        else at the first.
+        """
+        if held == ran:
+            return held
+        start = held // self.chunk * self.chunk
+        return start if ran - (start - self.window) <= self.ring else 0
 
     def attend(self, call, q, k, v, scale: float | None = None):
         """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` at ``call``'s
-        positions, unless None (a layer reading another's cache), and attend ``q`` ``(rows, heads, head_dim)`` over every
-        position up to its last, causally and within ``window``, the logits
-        scaled by ``scale`` (MHA's ``1 / sqrt(head_dim)`` if None); ``(rows,
-        heads * head_dim)``.
+        positions, unless None (a layer reading another's cache), and attend
+        ``q`` ``(rows, heads, head_dim)`` over every position up to its
+        last, causally and within ``window``, the logits scaled by ``scale``
+        (MHA's ``1 / sqrt(head_dim)`` if None); ``(rows, heads * head_dim)``.
         """
         C, (_, G, D), (n, H, _) = self.chunk, self.keys.shape, q.shape
-        for x, cache in ((k, self.keys), (v, self.values)):
-            if x is None:
-                continue
-            if call.prompt:
-                cache[call.start : call.start + C][: call.rows] = x
-            else:
-                cache[call.position] = x.reshape(G, D)
-        span = np.s_[: call.position + 1]
+        if self.window is None:
+            for x, cache in ((k, self.keys), (v, self.values)):
+                if x is None:
+                    continue
+                if call.prompt:
+                    cache[call.start : call.start + C][: call.rows] = x
+                else:
+                    cache[call.position] = x.reshape(G, D)
+            keys, values = (x[: call.position + 1] for x in (self.keys, self.values))
+        else:
+            keys, values, q = self._ring(call, self.window, q, k, v)
         o = MHA.step(
             q,
-            self.keys[span],
-            self.values[span],
+            keys,
+            values,
             heads_interleaved=True,
             kv_interleaved=True,
             window=self.window,
             scale=scale,
         )
+        if call.prompt and self.window is not None:
+            o = o[: call.rows]
         return o.reshape(n, H * D)
+
+    def _ring(self, call, W: int, q, k, v):
+        """``attend``'s keys, values and queries within a window: a chunk
+        attends from all its rows (those past ``rows`` are later than every
+        query's, so masked) over the ``ring`` positions ending at its last; a
+        decode step over its window, ``W``.
+        """
+        R, C = self.ring, self.chunk
+        if call.prompt:
+            at, width = call.start % R, C
+            first, read = iron.clamp(call.start + C - R, lo=0) % R, R
+            n = iron.clamp(call.start + C, hi=R)
+            q = dataclasses.replace(q, valid={})
+        else:
+            at, width = call.position % R, None
+            first, read = iron.clamp(call.position - W, lo=0) % R, W + 1
+            n = iron.clamp(call.position + 1, hi=W + 1)
+        for x, ring, staged in zip((k, v), (self.keys, self.values), self.staged):
+            if x is None:
+                continue
+            for row in (at, at + R):
+                if width is None:
+                    ring[row] = x.reshape(ring.shape[1:])
+                else:
+                    ring[row : row + width][: call.rows] = x
+            Copy.step(ring[first : first + read][:n], staged[:read])
+        return (*(staged[:n] for staged in self.staged), q)
 
 
 class NoCache(iron.Graph):

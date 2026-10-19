@@ -243,6 +243,16 @@ public API adds its entry under Unreleased.
   to back on one pack are one dispatch, its arrays and one sequence running
   the steps' in turn (`Runtime.merge`); `check=True` with `coresident`
   raises.
+- `KVCache` within a window keeps only a ring of the last `ring` positions
+  (a window and a chunk, to a power of two), each held twice so the
+  positions a call reads are one run, copied to `staged` for `MHA`: a
+  decode step streams its window, not the context. A windowed cache is in
+  `CausalLM.recurrent`, so a call stays within a chunk and restarts where
+  the ring still holds the window before it (`KVCache.restart`).
+- A per-call bound (`x[:n]`) may be clamped (`iron.clamp(p + 1, hi=W)`),
+  and a run may start at a wrapped value (`x[s % R : s % R + W]`), on
+  mlir-aie's `Affine` taking a constant after its wrap (PR #50 at
+  eac7fd99c or later).
 - EmbeddingGemma 2's configs take Hugging Face's names where they differ
   only in name (`Config.embedding_dim`, `AudioConfig.attention_logit_cap`)
   and drop the fields nothing read (`bos`, `eos`, `pad`, `video_token`,

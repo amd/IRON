@@ -30,6 +30,7 @@ from .handle import (
     State,
     Strided,
     Weight,
+    _count,
     _rescale_bounds,
     is_operand,
 )
@@ -831,9 +832,10 @@ class Recorder:
                 f"{type(op).__name__}.{name} takes a per-call value handle (a "
                 f"keyword-only parameter of the graph's body), got {value!r}"
             )
-        # An offset may floor; an extent's derived words take a linear one.
+        # An offset may floor; an extent's derived words take a linear or
+        # clamped one.
         if isinstance(value, PerCall) or op.value(name).bounds is not None:
-            value = value.affine()
+            value = _count(value)
         bound = self._bound.setdefault(id(op), {})
         if name in bound and bound[name] != value:
             raise ValueError(

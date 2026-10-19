@@ -29,7 +29,7 @@ from iron.common.graph.handle import State
 from iron.operators.copy import Copy
 from iron.operators.sample import Sample
 
-from .blocks import DecoderLayer, Embedding, Linear, RMSNorm, Rope
+from .blocks import DecoderLayer, Embedding, KVCache, Linear, RMSNorm, Rope
 from .checkpoint import Checkpoint, renamed
 from .config import DecoderConfig
 from .model import Model
@@ -210,9 +210,20 @@ class CausalLM(Model):
                 conv.window, conv.tail = scratch[K, C]
 
     @property
-    def recurrent(self) -> list[Checkpoints]:
-        """Each state a layer carries from position to position."""
-        return [p for _, _, p, _ in walk(self) if isinstance(p, Checkpoints)]
+    def recurrent(self) -> list:
+        """Each state a layer carries from position to position, which
+        restarts only at some (``restart``): ``Checkpoints``, and a
+        ``KVCache`` within a window.
+        """
+        found = {}
+        for _, _, p, _ in walk(self):
+            if (
+                isinstance(p, Checkpoints)
+                or isinstance(p, KVCache)
+                and p.window is not None
+            ):
+                found.setdefault(id(p), p)
+        return list(found.values())
 
     def layer(self, call: Call, i: int, w, x):
         """Layer ``i``, the module ``w``, on ``x``."""

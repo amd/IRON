@@ -251,7 +251,7 @@ class Handle:
                 f"{self!r} runs from a per-call start: bound its axis {axis} per "
                 f"call from its start, [:n], and take every other axis whole"
             )
-        stop = run.stop.affine()
+        stop = _count(run.stop)
         recorder = graph_recorder.get()
         if recorder is not None:
             recorder.limit(stop, 0, width + 1, self)
@@ -344,9 +344,12 @@ class Handle:
                 stop = stop.affine() if isinstance(stop, PerCall) else stop
                 width = None
                 if isinstance(stop, Affine) and entry.step in (None, 1):
-                    width = (
-                        stop.add - start.add if start.down else stop.bias - start.bias
-                    )
+                    if start.mod is not None:
+                        width = stop.post - start.post
+                    elif start.down:
+                        width = stop.add - start.add
+                    else:
+                        width = stop.bias - start.bias
                     if stop != start + width:
                         width = None
                 if width is None or not 0 < width <= n:
@@ -374,7 +377,7 @@ class Handle:
                 static.append(entry)
                 shape.append(n)
             elif isinstance(entry, slice) and isinstance(entry.stop, (PerCall, Affine)):
-                stop = entry.stop.affine()
+                stop = _count(entry.stop)
                 if entry.start not in (None, 0) or entry.step not in (None, 1):
                     raise ValueError(f"{stop} bounds an axis from its start: [:{stop}]")
                 if stop.value.marker is Kind.DISPATCH_TIME:
@@ -838,6 +841,13 @@ class Carry(Mapping[str, "Handle | Affine | int"]):
     def __repr__(self) -> str:
         items = ", ".join(f"{k}={v!r}" for k, v in self._next.items())
         return f"Carry({items})"
+
+
+def _count(n: PerCall | Affine) -> Affine:
+    """A per-call count of rows, which may be clamped (``min(p + 1, W)``)."""
+    if isinstance(n, Affine) and n.mod is None and not n.down:
+        return n
+    return n.affine()
 
 
 def clamp(x: PerCall | Affine, lo: int | None = None, hi: int | None = None) -> Affine:

@@ -1101,8 +1101,9 @@ def _words(
             derived.add(symbol)
             linear = None
             spec = word
-            if isinstance(spec, ExtentWord) and spec.extent in counts:
-                count, divisor = counts[spec.extent], spec.divisor(op)
+            count = counts.get(getattr(spec, "extent", None))
+            if isinstance(spec, ExtentWord) and count is not None and count.linear:
+                divisor = spec.divisor(op)
                 linear = Linear(
                     count.value.name,
                     Fraction(count.scale, divisor),
