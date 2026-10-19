@@ -556,7 +556,7 @@ def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(
     ran = []
 
     def measure(ops, **_):
-        ran.extend(key(op.array_config()) for op in ops)
+        ran.extend(key(op.layout()) for op in ops)
         return {
             i: Measurement(
                 100.0, (100.0,) * 3, "same", "run", "turbo", 50, (100.0,) * 3
@@ -572,8 +572,8 @@ def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(
     found = [op._with_tunables(**s).resolved(npu2) for s in settings(op, npu2)]
     # Every tile but 16 rows by 16 columns runs at 1 cycle a call, that one
     # at what puts its bound just over or just under the 100 us step.
-    cycles = {key(o.array_config()): 1 for o in found}
-    small = next(o for o in found if key(o.array_config()) == "16x64x16")
+    cycles = {key(o.layout()): 1 for o in found}
+    small = next(o for o in found if key(o.layout()) == "16x64x16")
     calls = small.matmul_calls({})
     cycles["16x64x16"] = margin * 100.0 * npu2.core_mhz * tuning.CLOCK_HEADROOM / calls
     tuning.time_shape(

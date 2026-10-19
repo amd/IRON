@@ -65,8 +65,9 @@ Formatting and licence checks are in CONTRIBUTING.md.
   operators are also catalogued under dotted names (`"flm.ProjectionGEMM"`),
   which is how a `Profile` names them. `flm.ProjectionGEMM` is not
   `iron.operators.GEMM`.
-- `iron/common/declare/`: the declaration layer: `Operator`, `field()` and
-  `Auto()`, operands, `Value`, `Xclbin`, `Profile`, `Precision`.
+- `iron/common/declare/`: IRON's `Operator` over mlir-aie's declaration
+  (`aie.utils.compile.jit`'s `param()`, `tunable()`, `per_call()`), the
+  bound operands and `Value`s a build reads, `Xclbin`, `Profile`, `Precision`.
 - `iron/common/design/`: an operator's MLIR module (`OperatorDesign`) and
   its runtime sequence (`OperatorRuntime`).
 - `iron/common/graph/`: `iron.Graph`, tracing and `compile`.
@@ -110,30 +111,30 @@ CONTRIBUTING.md walks through the common case. The rules:
 1. One module, `iron/operators/<name>.py`; a package with `op.py` only when
    it needs more than one module.
 2. Declare `class X(Operator)`:
-   - Fields are annotated aie.iron's `CompileTime[T]`. A host shape's
-     dimension is `field()`
-     (`M: CompileTime[int] = field()`); a tunable is `Auto()`, which a call,
-     a profile or `resolve(dev)` fills, in that order, then its default.
+   - Parameters are mlir-aie's `param()`. A host shape's dimension is one
+     (`M: int = param()`); a tunable is `tunable()`, which a call, a profile
+     or `resolve(dev)` fills, in that order, then its default.
      Identity (`array_key`, `design_key`) is taken after resolution.
    - Operands are aie.iron's `In`/`Out`/`InOut`, declared by shape. An
      operand with `obj_shape=` (in the units a core reads; `per=` a column
      count) is its own stream into the array. `when=flag` makes an operand
-     exist only where a bool field is true.
-   - Every trip count a core reads is a `Value(derive=...)`, so the array
+     exist only where a bool parameter is true.
+   - Every trip count a core reads is a `per_call(derive=...)`, so the array
      never depends on an extent. Anything else the array bakes is declared
      `array=True`.
-   - A quantity computed from other fields is:
+   - A quantity computed from other parameters is:
 
      | Read by | Declare |
      |---|---|
      | host Python only | `@property` |
-     | a compile-time field held to its formula | `field(derive=lambda op: ...)` |
-     | a compile-time field a caller may override | `field(derive=..., held=False)` |
-     | a tunable `resolve(dev)` always fills | `Auto(init=False)` |
-     | a core | `Value(derive=...)` |
+     | a compile-time parameter held to its formula | `param(derive=lambda op: ...)` |
+     | a compile-time parameter a caller may override | `param(default=lambda op: ...)` |
+     | a tunable `resolve(dev)` always fills | `tunable(init=False)` |
+     | a core | `per_call(derive=...)` |
 
-   - `class Array(Operator.Array)`: the array tier, generated from the
-     fields it reads. `build()` makes ObjectFIFOs and Workers, uses
+   - `build()`, on the operator as its cores see it (`layout()`): the
+     array tier, generated from the parameters it reads. It makes
+     ObjectFIFOs and Workers, uses
      `range_()` (not `range`) for core loops, binds each streamed operand's
      lanes to fifo ends, gives each core an `Rtp` for its values and
      returns `Built(objects, rtps)`. It sees the array tier alone.
@@ -141,10 +142,10 @@ CONTRIBUTING.md walks through the common case. The rules:
      wanted (`gemm.py`, `mha.py`).
 3. A shipped binary is a subclass declared with its image,
    `class Shipped(X, image=Xclbin(url=, sha256=, filename=))`, whose
-   `Array.build()` pins each operand's lanes to the image's shim channels
+   `build()` pins each operand's lanes to the image's shim channels
    (`operand.pin([...])`) and builds no cores. It cannot run inside a graph.
 4. The kernel comes from an `aie.iron.kernels` factory. A scalar it takes at
-   run time is the `Array`'s `scalars()`, in the kernel's order. A kernel no
+   run time is the operator's `scalars()`, in the kernel's order. A kernel no
    factory covers is an `ExternalFunction` with `symbol_prefix=` naming its
    configuration and a `contract=KernelContract(...)`;
    `iron/tests/toolchain/inline_kernel.py` is the example. A new C++ kernel
@@ -169,9 +170,9 @@ CONTRIBUTING.md walks through the common case. The rules:
 
 | Hook | Required | Runs |
 |---|---|---|
-| `Array.build()` | yes, unless an `Elementwise` base builds it from `kernel()`/`chain()` | once per build |
+| `build()` | yes, unless an `Elementwise` base builds it from `kernel()`/`chain()` | once per build |
 | `reference(*inputs)` | unless a kernel's contract already is one | in tests and the graph reference |
-| `resolve(dev)` | if the class declares an `Auto()` tunable | the first time it meets a device |
+| `resolve(dev)` | if the class declares a `tunable()` | the first time it meets a device |
 | `validate()` | no | at construction |
 | `compatible()` | no | once every tunable is resolved |
 | `sequence(rt)` | no | building the runtime sequence |
@@ -221,8 +222,8 @@ Check the code before relying on a line here; it is the authority.
 
 ### Rationale
 
-- **One array, every extent.** `Array.build()` sees only the array tier, and
-  trip counts are `Value`s the sequence writes, so one build serves many
+- **One array, every extent.** `build()` sees only the array tier, and
+  trip counts are per-call values the sequence writes, so one build serves many
   shapes. `iron/tests/toolchain/array_identity.py` compares core ELFs built
   at two extents.
 - **Length-free extents.** A per-call bound (`x[:n]`) is mlir-aie's runtime

@@ -82,7 +82,7 @@ def least_us(op: GEMM, values: Mapping[str, int], cycles, dev) -> float | None:
     """
     if dev.core_mhz is None:
         return None
-    per_call = cycles.get(op.array_config().matmul().recipe_key)
+    per_call = cycles.get(op.layout().matmul().recipe_key)
     if per_call is None:
         return None
     return op.matmul_calls(values) * per_call / (dev.core_mhz * CLOCK_HEADROOM)

@@ -54,7 +54,7 @@ class Clamp(UnaryElementwise):
 
     def chain(self) -> tuple[KernelCall, ...]:
         # The bounds are words a core reads, not part of the array.
-        return (KernelCall(self.array_config().kernel(), self.bits(), (self.x,)),)
+        return (KernelCall(self.layout().kernel(), self.bits(), (self.x,)),)
 
     def kernel(self):
         return eltwise.clamp(self.tile_size)

@@ -157,7 +157,7 @@ class BuiltArray:
     Attributes:
         design: The design built.
         op: The copy, its array built and its operands' lanes bound.
-        built: What its ``Array.build`` made.
+        built: What its ``build()`` made.
         workers: The workers among them.
         traced: The workers a traced operator traces, else none.
 
@@ -177,7 +177,7 @@ class BuiltArray:
         dispatch = dispatch or {}
         self._words, self._dispatch = words, dispatch
         op = design.op.resolved(design.op.dev).copy()  # a build binds streams
-        # Before Array.build(), which may hand a core-read value to a worker.
+        # Before build(), which may hand a core-read value to a worker.
         for value in op.values:
             if design.full_elf and not value.dispatch:
                 value.param = ScratchpadParameter(
@@ -196,7 +196,7 @@ class BuiltArray:
                 )
             else:
                 value.param = dispatch[value.symbol]
-        self.built = op.array_config().build()
+        self.built = op.layout().build()
         self.design = design
         self.op = op
         self.workers = [w for w in self.built.objects if isinstance(w, Worker)]

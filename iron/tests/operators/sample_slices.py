@@ -22,7 +22,7 @@ CASES = [("npu2", v, c) for v in (51866, 128256) for c in (2, 4)]
 @pytest.mark.parametrize("device, vocab, cores", [*CASES, ("npu1", 51866, 2)])
 def test_each_core_reads_its_slice_once_a_pass(device, vocab, cores, request):
     op = Sample(vocab=vocab, cores=cores).resolved(request.getfixturevalue(device))
-    runs = op.array_config().runs
+    runs = op.layout().runs
     starts = np.cumsum([0] + [run for run, _ in runs])
     assert starts[-1] == vocab and all(
         s == c * op.slice_size for c, s in enumerate(starts[:-1])

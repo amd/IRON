@@ -301,7 +301,7 @@ class Elementwise(Operator):
         ``reference`` and ``judge`` follow: ``kernel()`` over the inputs,
         unless an operator with an array of its own makes more.
         """
-        config = self.array_config()
+        config = self.layout()
         return (KernelCall(config.kernel(), config.scalars(), tuple(self.inputs)),)
 
     def over(self, elements: int, line: int) -> Self:
@@ -314,13 +314,13 @@ class Elementwise(Operator):
         raise ValueError(f"{type(self).__name__} is not a run of lines")
 
     def tolerance(self) -> Tolerance | None:
-        kernel = self.array_config().kernel()
+        kernel = self.layout().kernel()
         if kernel.contract is None:
             return None
         return kernel.contract_for(resolve_target_arch(self.dev)).tolerance
 
     def ops(self) -> int:
-        contract = self.array_config().kernel().contract
+        contract = self.layout().kernel().contract
         per_call = None if contract is None else contract.ops_per_call
         return super().ops() if per_call is None else per_call * self.lines
 
@@ -349,7 +349,7 @@ class Elementwise(Operator):
         op, lines, scalars = self._kernel_arguments(inputs)
         (out,) = op.outputs
         y = (
-            op.array_config()
+            op.layout()
             .kernel()
             .expected(lines, scalars=scalars, arch=resolve_target_arch(op.dev))
         )
@@ -375,7 +375,7 @@ class Elementwise(Operator):
         _, lines, scalars = self._kernel_arguments([inputs[b.name] for b in op.inputs])
         (out,) = op.outputs
         verdict = (
-            op.array_config()
+            op.layout()
             .kernel()
             .judge(
                 written[out.name],
@@ -397,7 +397,7 @@ class Elementwise(Operator):
             NotImplementedError: The kernel declares no reference.
         """
         op = self.resolved()
-        config = op.array_config()
+        config = op.layout()
         kernel = config.kernel()
         arch = resolve_target_arch(op.dev)
         contract = None if kernel.contract is None else kernel.contract_for(arch)
@@ -722,7 +722,7 @@ class WeightedRowwise(Rowwise):
     def chain(self) -> tuple[KernelCall, ...]:
         if not self.weighted:
             return super().chain()
-        config = self.array_config()
+        config = self.layout()
         return (
             KernelCall(config.kernel(), config.scalars(), (self.x,)),
             KernelCall(eltwise.mul_sized(self.tile_size), (), (None, self.weight)),

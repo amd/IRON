@@ -284,7 +284,7 @@ class GEMM(Operator):
         m, k, n = tile_m, self.tile_k, self.tile_n
         din = np.dtype(self.input_dtype).itemsize
         dout = np.dtype(self.output_dtype).itemsize
-        wider = self.replace(tile_m=m).array_config().wider_accumulator
+        wider = self.replace(tile_m=m).layout().wider_accumulator
         c = m * n * (dout + 4 if wider else FIFO_DEPTH * dout)
         return FIFO_DEPTH * (m * k + k * n) * din + c + STACK_BYTES
 

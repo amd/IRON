@@ -158,7 +158,7 @@ class Sample(Operator):
 
     def compatible(self) -> None:
         # The factories' own checks: chunk divides the slice, k_max fits.
-        config = self.array_config()
+        config = self.layout()
         for run in config.runs:
             config.select(*run)
         config.combine()
@@ -270,7 +270,7 @@ class Sample(Operator):
         at = self.at if self.at.per_call else None
         tg = TaskGroup()
         self.draws.fill(self.draws[0], group=tg, offset_parameter=row)
-        for c, (run, chunk) in enumerate(self.array_config().runs):
+        for c, (run, chunk) in enumerate(self.layout().runs):
             # Core c's slice, once per select stream.
             streams = sample.select_streams(run, chunk)
             start = c * self.slice_size

@@ -128,7 +128,7 @@ class DepthwiseConv1d(Operator):
         return Built(workers, rtps)
 
     def tolerance(self):
-        return self.array_config().kernel().contract.tolerance
+        return self.layout().kernel().contract.tolerance
 
     def ops(self) -> int:
         return 2 * TAPS * self.rows * self.channels

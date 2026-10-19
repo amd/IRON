@@ -23,7 +23,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile, Scratchpad
-from iron.common import Built, Operator, Rtp, Unresolvable, Value
+from iron.common import Built, Operator, Rtp, Unresolvable, Value, Xclbin
 from iron.common.declare.operand import active_runtime, axis_of
 from iron.common.design import OperatorDesign
 
@@ -69,9 +69,8 @@ class MV(Operator):
         if self.M % unit:
             raise ValueError(f"M={self.M} is not a multiple of {unit}")
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            return Built([self.K, self.columns, self.tile_out, self.epilogue])
+    def build(self) -> Built:
+        return Built([self.K, self.columns, self.tile_out, self.epilogue])
 
     def reference(self, A, B):
         return A @ B
@@ -245,9 +244,8 @@ class Scaled(Operator):
     s = In(N, obj_shape=(N,), when=scaled)
     y = Out(N, obj_shape=(N,))
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            return Built([self.scaled])
+    def build(self) -> Built:
+        return Built([self.scaled])
 
 
 def test_an_operand_declared_when_a_flag_exists_only_where_it_is_true():
@@ -316,15 +314,14 @@ def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
 
 def test_array_sees_the_array_tier_alone():
     class Leaky(MV):
-        class Array(MV.Array):
-            def build(self) -> Built:
-                return Built([self.M // self.tile_out])
+        def build(self) -> Built:
+            return Built([self.M // self.tile_out])
 
     op = MV(M=1024, K=128).resolved(NPU2)
     assert MV.declaration.key == ("K", "columns", "tile_out", "vec", "epilogue")
-    assert op.array_config().build() == Built([128, 8, 64, "none"])
+    assert op.layout().build() == Built([128, 8, 64, "none"])
     with pytest.raises(AttributeError, match="reads M, which is not in the"):
-        Leaky(M=1024, K=128).resolved(NPU2).array_config().build()
+        Leaky(M=1024, K=128).resolved(NPU2).layout().build()
 
 
 def test_a_field_resolve_computes_is_kept_by_copies_and_checked_once_known():
@@ -479,9 +476,8 @@ class Rows(Operator):
     x = In(rows, cols, obj_shape=(1, cols), per=(lanes,))
     y = Out(rows, cols, obj_shape=(1, cols), per=(lanes,))
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            return Built([])
+    def build(self) -> Built:
+        return Built([])
 
     def reference(self, x):
         return x
@@ -642,10 +638,8 @@ def test_a_reference_only_operator_runs_its_reference_and_does_not_compile(npu2)
         Doubled(rows=4).compile()
 
 
-def test_a_reference_only_operator_takes_no_build():
-    with pytest.raises(TypeError, match="Builds is reference-only, so it takes no"):
+def test_a_reference_only_operator_takes_no_image():
+    with pytest.raises(TypeError, match="Shipped is reference-only, so it takes no"):
 
-        class Builds(Doubled):
-            class Array(Operator.Array):
-                def build(self) -> Built:
-                    return Built([])
+        class Shipped(Doubled, image=Xclbin(url="u", sha256="0" * 64, filename="f")):
+            pass

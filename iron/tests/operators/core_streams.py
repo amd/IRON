@@ -49,7 +49,7 @@ def test_each_core_reads_at_most_two_streams(cls, case, npu2):
     if kernel is None or params - inspect.signature(kernel).parameters.keys():
         pytest.skip(f"mlir-aie has no kernels.{module}.{name} taking {sorted(params)}")
     op = cls(**case.kwargs).resolved(npu2)
-    built = op.array_config().build()
+    built = op.layout().build()
     for operand in (*op.inputs, *op.outputs):
         assert operand.handles
     for worker in (o for o in built.objects if isinstance(o, Worker)):

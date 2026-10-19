@@ -78,7 +78,7 @@ class TopKRouter(Operator):
         return self.replace(pairs=pairs)
 
     def compatible(self) -> None:
-        config = self.array_config()
+        config = self.layout()
         config.select()
         config.route()
 

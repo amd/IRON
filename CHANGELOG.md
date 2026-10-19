@@ -430,6 +430,9 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- An operator's nested `Array` class and `array_config()`: its `build()`,
+  `kernel()` and `scalars()` are on the operator itself, and `layout()`
+  (mlir-aie's) is the operator as its cores see it.
 - `iron.common.field`, `Auto`, `Extent` and `Select`, and `Value(words=)`:
   mlir-aie's `param`, `tunable`, `per_call` and `Select`, and IRON's
   `Block(words)` for a shipped image's block of words, replace them.

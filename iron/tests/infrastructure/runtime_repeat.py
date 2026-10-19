@@ -48,13 +48,12 @@ class RepeatTile(Operator):
     def resolve(self, dev):
         return self.replace()
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            fifo_in = ObjectFifo(self.x.obj_type, depth=2)
-            fifo_out = fifo_in.cons().forward(depth=2)
-            self.x.bind(fifo_in.prod())
-            self.y.bind(fifo_out.cons())
-            return Built([])
+    def build(self) -> Built:
+        fifo_in = ObjectFifo(self.x.obj_type, depth=2)
+        fifo_out = fifo_in.cons().forward(depth=2)
+        self.x.bind(fifo_in.prod())
+        self.y.bind(fifo_out.cons())
+        return Built([])
 
     def sequence(self, rt):
         width, max_k = self.width, self.max_k

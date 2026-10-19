@@ -165,7 +165,7 @@ class RoPE(Operator):
         return datamovement.rope(self.cols, two_halves=self.two_halves)
 
     def ops(self) -> int:
-        return self.array_config().kernel().contract.ops_per_call * self.rows
+        return self.layout().kernel().contract.ops_per_call * self.rows
 
     def reference(self, x, angles):
         """``datamovement.rope_ref`` on the packed ``angles`` buffer, each angle row

@@ -34,7 +34,7 @@ class Rtp(tuple):
     A Worker takes it as one argument: mlir-aie registers a tuple
     argument's leaves (the barrier, the buffer and each
     ``ScratchpadParameter``) and hands the core the tuple itself, whose
-    function calls ``read``. ``Array.build`` makes one per core.
+    function calls ``read``. ``build()`` makes one per core.
 
     Args:
         values: The values the core reads, each a ``Value`` of the operator.

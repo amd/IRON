@@ -56,9 +56,8 @@ def test_the_trip_count_is_a_resident_the_build_writes():
 
 def test_an_operator_written_by_inheritance_inherits_the_sweep():
     class Neg(UnaryElementwise):
-        class Array(UnaryElementwise.Array):
-            def kernel(self):
-                raise NotImplementedError
+        def kernel(self):
+            raise NotImplementedError
 
         def reference(self, x):
             return -x
@@ -139,7 +138,7 @@ def test_an_interval_is_what_compare_admits(tol):
 def test_an_activation_is_judged_by_its_devices_row(request, device, cls):
     dev = request.getfixturevalue(device)
     op = cls(size=2048).resolved(dev)
-    kernel = op.array_config().kernel()
+    kernel = op.layout().kernel()
     row = kernel.contract_for(resolve_target_arch(dev))
     assert op.tolerance() == row.tolerance
     v = vectors(op)

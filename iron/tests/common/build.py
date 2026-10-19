@@ -243,18 +243,17 @@ class Words(Operator):
     last = per_call(derive=lambda op: op.n // op.tile)
     pos = per_call()
 
-    class Array(Operator.Array):
-        def build(self) -> Built:
-            fifo = ObjectFifo(self.A.obj_type)
-            self.A.bind(fifo.prod())
-            rtp = Rtp([self.first, self.block, self.last, self.pos])
+    def build(self) -> Built:
+        fifo = ObjectFifo(self.A.obj_type)
+        self.A.bind(fifo.prod())
+        rtp = Rtp([self.first, self.block, self.last, self.pos])
 
-            def core(of, rtp):
-                rtp.read()
-                of.acquire(1)
-                of.release(1)
+        def core(of, rtp):
+            rtp.read()
+            of.acquire(1)
+            of.release(1)
 
-            return Built([Worker(core, [fifo.cons(), rtp])], [rtp])
+        return Built([Worker(core, [fifo.cons(), rtp])], [rtp])
 
 
 def rtp_writes(text: str) -> list[tuple[int, int | str]]:

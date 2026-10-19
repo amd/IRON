@@ -97,9 +97,8 @@ mlir-aie. An elementwise operator is a few lines (`iron/operators/relu.py`):
 class ReLU(UnaryElementwise):
     test = Testing(Sweep(), draw=lambda op: dict(centered=(op.x,)))
 
-    class Array(UnaryElementwise.Array):
-        def kernel(self):
-            return eltwise.relu_sized(self.tile_size)
+    def kernel(self):
+        return eltwise.relu_sized(self.tile_size)
 ```
 
 1. **Kernel.** If no factory in mlir-aie's `aie.iron.kernels` computes
@@ -112,8 +111,8 @@ class ReLU(UnaryElementwise):
    pins an mlir-aie wheel that has it.
 2. **Operator.** Subclass the closest family (`UnaryElementwise`,
    `BinaryElementwise`, ... in `iron/common/elementwise.py`) and return the
-   factory from `Array.kernel()`. A new data layout needs its own
-   `Operator` with `In`/`Out` operands and `Array.build()`; `gemm.py` and
+   factory from `kernel()`. A new data layout needs its own
+   `Operator` with `In`/`Out` operands and `build()`; `gemm.py` and
    `mha.py` are the worked examples.
 3. **Test.** Declare `test = Testing(...)` on the class;
    `iron/tests/operators/catalog.py` runs every operator's cases. Every

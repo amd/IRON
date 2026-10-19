@@ -69,7 +69,7 @@ def spelled(v: Any) -> str:
 
 @dataclasses.dataclass(frozen=True)
 class Built:
-    """What an operator's ``Array.build`` made: what the array declares,
+    """What an operator's ``build()`` made: what the array declares,
     and the runtime parameters its cores read, which the sequence writes.
 
     An array whose sequence programs more of what it built keeps that on a
@@ -85,25 +85,6 @@ class Built:
     rtps: list[Rtp] = dataclasses.field(default_factory=list)
 
 
-class Array:
-    """The array tier of an operator: what its cores are built from.
-
-    It reads the operator as its cores see it (``Operator.layout``): the
-    parameters of the core-layout key and the members, each member the
-    operand or ``Value`` bound to it.
-    """
-
-    def __init__(self, layout: Operator) -> None:
-        self._layout = layout
-
-    def __getattr__(self, name: str) -> Any:
-        layout = vars(self)["_layout"]
-        bound = layout._bound
-        if name in bound:
-            return bound.member(name)
-        return getattr(layout, name)
-
-
 class Operator(jit.Operator, library=True):
     """An operator. Subclass it; each subclass's body is its declaration
     (mlir-aie's ``param()``, ``tunable()``, ``per_call()`` and aie.iron's
@@ -116,14 +97,10 @@ class Operator(jit.Operator, library=True):
             profile's and resolve()'s are starting points it may move.
     """
 
-    Array: ClassVar[type[Array]] = Array
     _external: ClassVar[Any] = None
     test: ClassVar[Testing | None] = None
     # True when sequence() calls rt.preamble() itself, behind its first fills.
     own_preamble: ClassVar[bool] = False
-    # A declaration and a reference() with no kernel yet: graphs trace it and
-    # references run it, but nothing compiles it and the device catalog skips it.
-    reference_only: ClassVar[bool] = False
     # A fused image lowers every operator's sequence under the union.
     aiecc_flags: ClassVar[tuple[str, ...]] = ()
     # Per leading operand that may be a view: the param holding its pattern
@@ -144,17 +121,9 @@ class Operator(jit.Operator, library=True):
         super().__init_subclass__(**kwargs)
         if image is not None:
             cls._external = image
-        if cls.reference_only and (
-            image is not None
-            or getattr(cls.Array, "build", Operator.build) is not Operator.build
-            or cls.build is not Operator.build
-            or cls.sequence is not Operator.sequence
-            or cls.exported_design is not Operator.exported_design
-        ):
-            raise TypeError(
-                f"{cls.__name__} is reference-only, so it takes no image=, "
-                "build(), sequence() or exported_design()"
-            )
+        # mlir-aie refuses a reference-only class's build() or sequence().
+        if cls.reference_only and image is not None:
+            raise TypeError(f"{cls.__name__} is reference-only, so it takes no image=")
         for m in cls.declaration.per_calls if image is not None else ():
             if m.derive is None:
                 raise TypeError(
@@ -221,10 +190,6 @@ class Operator(jit.Operator, library=True):
         reading ``Value``s its runtime parameters (``Rtp``).
         """
         raise NotImplementedError(f"{type(self).__name__}.build() is not implemented")
-
-    def array_config(self) -> Array:
-        """This operator's ``Array``: what its array is built from."""
-        return type(self).Array(self.layout())
 
     def tolerance(self) -> Tolerance | None:
         """What each output of the resolved operator is judged by; None where

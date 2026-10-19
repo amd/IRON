@@ -139,7 +139,7 @@ class Operand:
         return 1 if obj_bytes > bank else 2
 
     def bind(self, handles) -> None:
-        """Bind each lane to the fifo end ``Array.build()`` built for it.
+        """Bind each lane to the fifo end ``build()`` built for it.
 
         Args:
             handles: One handle per lane, in lane order, or the handle of a
@@ -161,8 +161,8 @@ class Operand:
 
     def pin(self, endpoints: list[DmaEndpoint]) -> None:
         """Pin each lane to a shim DMA channel of routes built elsewhere (a
-        shipped image's, or two shims an ``Array.build()`` joins): a transfer of
-        the lane is a shim DMA task on it. ``Array.build()`` returns the endpoints
+        shipped image's, or two shims an ``build()`` joins): a transfer of
+        the lane is a shim DMA task on it. ``build()`` returns the endpoints
         among what it built.
 
         Args:
@@ -187,7 +187,7 @@ class Operand:
     def handles(self) -> list[Any]:
         if not self.lane_handles:
             raise ValueError(
-                f"{self.name} was never bound: Array.build() must bind() every "
+                f"{self.name} was never bound: build() must bind() every "
                 f"streamed operand"
             )
         return self.lane_handles

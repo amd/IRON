@@ -45,7 +45,7 @@ class OperatorRuntime(Runtime):
     Args:
         op: The resolved operator, its array built and its operands' lanes
             bound or pinned.
-        built: What its ``Array.build`` made: its workers, and the flows,
+        built: What its ``build()`` made: its workers, and the flows,
             locks, tile DMAs, pinned endpoints and buffers only the sequence
             reaches, and its cores' runtime parameters.
         name: The sequence's symbol; the Program names it when None.
@@ -73,7 +73,7 @@ class OperatorRuntime(Runtime):
         self.pins = {f"{b.name}_{i}": h for b, i, h in lanes if id(h) in ours}
         if len(self.pins) != len(ours):
             raise TypeError(
-                f"{type(op).__name__}.Array.build() makes a DmaEndpoint no operand "
+                f"{type(op).__name__}.build() makes a DmaEndpoint no operand "
                 f"is pinned to"
             )
         handles = [h for _, _, h in lanes if not isinstance(h, DmaEndpoint)]
@@ -96,7 +96,7 @@ class OperatorRuntime(Runtime):
                 self.add_tile_dma(obj)
             elif not isinstance(obj, (Worker, DmaEndpoint, Buffer)):
                 raise TypeError(
-                    f"{type(op).__name__}.Array.build() makes Workers, Flows, "
+                    f"{type(op).__name__}.build() makes Workers, Flows, "
                     f"PacketFlows, Locks, TileDmas, the DmaEndpoints it pinned "
                     f"and Buffers; got {obj!r}"
                 )
