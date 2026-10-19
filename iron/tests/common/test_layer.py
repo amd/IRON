@@ -17,7 +17,7 @@ import iron
 import iron.functional as F
 from iron import Precision
 from iron.applications.embedding_gemma2.model import Config, EmbeddingGemma, TextLayer
-from iron.lm import EncodeStep, blocks
+from iron.lm import Call, blocks
 from iron.lm.checkpoint import nest
 from iron.tests.support.layer import shapes
 
@@ -188,7 +188,8 @@ class Text(iron.Graph):
         self.layer.load_state_dict(w)
 
     def body(self, x, ple):
-        return self.layer(x, EncodeStep(ROWS, {}, x), ple)
+        call = Call(prompt=True, start=0, rows=ROWS, position=None, embeddings=x)
+        return self.layer(x, call, ple)
 
 
 def gemma_layer(rng) -> SimpleNamespace:

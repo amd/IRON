@@ -11,7 +11,6 @@ whose rows come from a front end and whose output is soft tokens
 in a text model's space.
 """
 
-import dataclasses
 from typing import Any, ClassVar
 
 import numpy as np
@@ -20,20 +19,9 @@ from iron import Scratchpad
 from iron.common.graph import Handle
 
 from .blocks import EncoderLayer
+from .causal import Call
 from .checkpoint import renamed
 from .model import Model
-
-
-@dataclasses.dataclass
-class EncodeStep:
-    """What each of an encoder's layers is called with."""
-
-    # The rows valid this call, a per-call value in a recording.
-    rows: Any
-    # The RoPE angles each layer's ``rope`` names, a pair of q's and k's.
-    ropes: Any
-    # The rows ``forward`` took, before any positions.
-    embeddings: Any
 
 
 class Encoder(Model):
@@ -81,19 +69,19 @@ class Encoder(Model):
 
     def angles(self, rows):
         """The RoPE angles of the first ``rows`` positions, by the ``rope``
-        each layer names (``EncodeStep.ropes``); None: no RoPE.
+        each layer names (``Call.ropes``); None: no RoPE.
         """
         return None
 
-    def positions(self, x, step: EncodeStep):
-        """``x``, the rows ``step`` runs, with the model's absolute positions
+    def positions(self, x, call: Call):
+        """``x``, the rows ``call`` runs, with the model's absolute positions
         placed; unchanged by default.
         """
         return x
 
-    def layer(self, step: EncodeStep, i: int, weights, x):
+    def layer(self, call: Call, i: int, weights, x):
         """Layer ``i``, the module ``weights``, on ``x``."""
-        return weights(x, step)
+        return weights(x, call)
 
     def pool(self, x, rows):
         """The rows ``head`` reads from the ``rows`` valid rows of ``x``; all
@@ -107,12 +95,14 @@ class Encoder(Model):
     def forward(self, x: Handle, rows, ropes):
         """The layers, the final norm, ``pool`` and ``head`` over the rows
         ``x``, bounded to their first ``rows``, rotated by ``ropes``
-        (``EncodeStep.ropes``).
+        (``Call.ropes``): one prompt of ``rows`` from position 0.
         """
-        step = EncodeStep(rows, ropes, x)
-        x = self.positions(x, step)
+        call = Call(
+            prompt=True, start=0, rows=rows, position=None, ropes=ropes, embeddings=x
+        )
+        x = self.positions(x, call)
         for i, weights in enumerate(self.layers):
-            x = self.layer(step, i, weights, x)
+            x = self.layer(call, i, weights, x)
         if self.final_norm is not None:
             x = self.final_norm(x)
         return self.head(self.pool(x, rows))

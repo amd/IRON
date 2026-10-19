@@ -240,7 +240,7 @@ class VisionTower(Tower):
 
     def window_positions(self, h, *, n, hk, wk, walked):
         """``h`` plus each patch's x and y position embeddings, and its
-        angles by head size (``EncodeStep.ropes``), for an image of ``hk`` by
+        angles by head size (``Call.ropes``), for an image of ``hk`` by
         ``wk`` windows, ``n`` patches.
         """
         c = self.config

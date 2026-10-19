@@ -522,6 +522,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `iron.lm.EncodeStep`: an encoder's layers are called with a `Call`, one
+  prompt of `rows` from position 0, its `ropes` and `embeddings` as before.
 - A graph body's `aie.iron.DispatchTime[T]` per-call value, which no view
   could take: a body's per-call value is `Scratchpad[T]` or `Carried[T]`.
 - `Operator.apply`: inside a graph's body an operator instance is called,
