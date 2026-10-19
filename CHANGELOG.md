@@ -12,6 +12,11 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `Config.json_prefix`, where in `config.json` a field read by its own
+  name is: `"text_config."` for EmbeddingGemma 2's text encoder and
+  SmolVLM's text model.
+- `DecoderLayer.norm`, the class its norms are built from: `RMSNorm`, or
+  Whisper's decoder's `LayerNorm`.
 - `CausalLM.rope_row(n, begin)`: the RoPE table row a prompt chunk reads
   first, which a caller writing the `rope_start` value itself passes.
 - `SandwichLayer` (Gemma's: each block's output normed again before its
@@ -436,6 +441,7 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `Tower.front`: a tower's `body` builds its own rows.
 - An operator's nested `Array` class and `array_config()`: its `build()`,
   `kernel()` and `scalars()` are on the operator itself, and `layout()`
   (mlir-aie's) is the operator as its cores see it.
