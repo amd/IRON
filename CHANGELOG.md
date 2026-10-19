@@ -223,6 +223,11 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- EmbeddingGemma 2's audio and vision towers, `AudioTower` and
+  `VisionTower` with their `AudioConfig` and `VisionConfig`, are Gemma 4's
+  and move to `iron.applications.gemma4.audio` and `.vision`; a tower built
+  alone has no profile until given one. Its text `Config` and `PROFILES`
+  move into `embedding_gemma2.model`, and `embedding_gemma2.config` goes.
 - The `models` extra installs what `Model.load` imports: huggingface_hub
   and tokenizers as well as jinja2.
 - `iron.operators` imports every operator on import, with no lazy

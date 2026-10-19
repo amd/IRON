@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""EmbeddingGemma 2's vision tower on the NPU: the image processor's resize
-into patches, the tower and its projection into the text model's space, as
-one graph.
+"""Gemma 4's vision tower on the NPU: the image processor's resize into
+patches, the tower and its projection into the text model's space, as one
+graph: Hugging Face's ``Gemma4VisionModel`` and ``embed_vision``, its shape
+``VisionConfig``.
 """
 
+import dataclasses
+import math
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,12 +17,103 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron import Precision, Scratchpad
+from iron import Precision, Scratchpad, lm
 from iron.lm import Attention, ImagePatches, NoCache, SandwichLayer, Tower, rope_angles
 from iron.operators.axpy import AXPY
 from iron.operators.gemm import GEMM
 
-from .config import PROFILES, VisionConfig
+
+@dataclasses.dataclass(frozen=True)
+class VisionConfig(lm.Config):
+    # As EmbeddingGemma 2's text encoder's.
+    precision = Precision.HIGHEST
+    json_prefix = "vision_config."
+
+    hidden_size: int = 768
+    num_hidden_layers: int = 16
+    num_attention_heads: int = 12
+    head_dim: int = 64
+    intermediate_size: int = 3072
+    # A patch's side in pixels, and a soft token's side in patches.
+    patch_size: int = 16
+    pooling_kernel_size: int = 3
+    # The rows of each axis's position-embedding table.
+    position_embedding_size: int = 10240
+    rope_theta: float = dataclasses.field(
+        default=100.0, metadata={"json": "rope_parameters.rope_theta"}
+    )
+    hidden_act: str = dataclasses.field(
+        default="gelu_pytorch_tanh", metadata={"json": "hidden_activation"}
+    )
+    text_dim: int = lm.not_json(512)
+    # The processor's soft-token budget.
+    image_tokens: int = dataclasses.field(
+        default=280, metadata={"json": "/vision_soft_tokens_per_image"}
+    )
+    # The patch rows of a call, an image's budget, and the largest image it
+    # takes either way up, 12.6 MP.
+    patches: int = lm.not_json(2560)
+    largest: tuple[int, int] = lm.not_json((3072, 4096))
+    # A GEMM's row block at its default tile: the pooled rows are whole blocks.
+    rows: int = lm.not_json(256)
+    # The bytes of an image row Resample receives at a time, and a core's
+    # patch columns, as many as its memory holds: 127 across on 16 cores.
+    chunk: int = lm.not_json(4096)
+    patch_columns: int = lm.not_json(8)
+
+    @property
+    def num_key_value_heads(self) -> int:
+        return self.num_attention_heads
+
+    def size(self, height: int, width: int, max_tokens: int) -> tuple[int, int]:
+        """The `(height, width)` the processor resizes an image to: the
+        largest whole `pool * patch` blocks within `max_tokens` soft tokens
+        at the image's aspect ratio.
+
+        Args:
+            height: The image's height in pixels.
+            width: The image's width in pixels.
+            max_tokens: The processor's `max_soft_tokens`.
+
+        Returns:
+            The resized `(height, width)`.
+
+        Raises:
+            ValueError: Both sides round to no block, or the size exceeds
+                the budget.
+        """
+        side = self.pooling_kernel_size * self.patch_size
+        max_patches = max_tokens * self.pooling_kernel_size**2
+        target_px = max_patches * self.patch_size**2
+        factor = math.sqrt(target_px / (height * width))
+        out_height = int(math.floor(factor * height / side)) * side
+        out_width = int(math.floor(factor * width / side)) * side
+        if out_height == 0 and out_width == 0:
+            raise ValueError(
+                f"a {height}x{width} image rounds to no {side}-pixel block"
+            )
+        max_side = max_tokens * side
+        if out_height == 0:
+            out_height = side
+            out_width = min(int(math.floor(width / height)) * side, max_side)
+        elif out_width == 0:
+            out_width = side
+            out_height = min(int(math.floor(height / width)) * side, max_side)
+        if out_height * out_width > target_px:
+            raise ValueError(
+                f"resizing {height}x{width} to {out_height}x{out_width} exceeds "
+                f"{max_patches} patches"
+            )
+        return out_height, out_width
+
+    def tokens(self, height: int, width: int, max_tokens: int) -> int:
+        """The soft tokens an image of `height` by `width` pixels gives at
+        the processor's `max_tokens`.
+        """
+        out_height, out_width = self.size(height, width, max_tokens)
+        return (
+            out_height * out_width // (self.pooling_kernel_size * self.patch_size) ** 2
+        )
 
 
 class VisionLayer(SandwichLayer):
@@ -76,7 +170,6 @@ class VisionTower(Tower):
         weights: The checkpoint's; the vision tower's tree is read.
     """
 
-    profile = PROFILES
     layer_class = VisionLayer
 
     def __init__(self, config: VisionConfig, weights: SimpleNamespace):

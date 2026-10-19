@@ -31,18 +31,15 @@ from PIL import Image
 
 import iron
 from iron import Scratchpad
-from iron.applications.embedding_gemma2.audio import AudioTower
-from iron.applications.embedding_gemma2.config import (
-    AudioConfig,
-    Config,
-    VisionConfig,
-)
 from iron.applications.embedding_gemma2.model import (
+    PROFILES,
+    Config,
     EmbeddingGemma,
     Multimodal,
     Tokenizer,
 )
-from iron.applications.embedding_gemma2.vision import VisionTower
+from iron.applications.gemma4.audio import AudioConfig, AudioTower
+from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.lm import Checkpoint, prompt_text, rope_angles
 from iron.lm.golden import Golden
 from iron.lm.testing import Download, cache_dir, check_embedding, require, weights_dir
@@ -398,7 +395,10 @@ class TestAudio:
 
     @pytest.fixture(scope="class")
     def audio(self, weights):
-        yield from loaded(AudioTower(AudioConfig(), weights))
+        tower = AudioTower(AudioConfig(), weights)
+        # EmbeddingGemma 2's tuning, which its towers take inlined.
+        tower.profile = PROFILES
+        yield from loaded(tower)
 
     @pytest.mark.parametrize("name", list(CLIPS))
     def test_audio_features(self, audio, reference, name, record_property):
@@ -446,7 +446,10 @@ class TestVision:
 
     @pytest.fixture(scope="class")
     def vision(self, weights):
-        yield from loaded(VisionTower(VisionConfig(), weights))
+        tower = VisionTower(VisionConfig(), weights)
+        # EmbeddingGemma 2's tuning, which its towers take inlined.
+        tower.profile = PROFILES
+        yield from loaded(tower)
 
     @pytest.fixture(scope="class")
     def processor(self, vision):

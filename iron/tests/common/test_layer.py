@@ -16,8 +16,7 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision
-from iron.applications.embedding_gemma2.config import Config
-from iron.applications.embedding_gemma2.model import EmbeddingGemma, TextLayer
+from iron.applications.embedding_gemma2.model import Config, EmbeddingGemma, TextLayer
 from iron.lm import EncodeStep, blocks
 from iron.lm.checkpoint import nest
 from iron.tests.support.layer import shapes

@@ -10,8 +10,7 @@ import re
 import pytest
 
 from iron.common.graph.visualize import layers
-from iron.applications.embedding_gemma2.config import Config
-from iron.applications.embedding_gemma2.model import Multimodal
+from iron.applications.embedding_gemma2.model import Config, Multimodal
 from iron.lm import Checkpoint
 from iron.lm.testing import require, weights_dir
 from iron.tests.support.llama_model import small

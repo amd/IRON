@@ -13,11 +13,9 @@ import re
 
 import pytest
 
-from iron.applications.embedding_gemma2.config import (
-    AudioConfig,
-    Config as EmbeddingGemmaConfig,
-    VisionConfig,
-)
+from iron.applications.embedding_gemma2.model import Config as EmbeddingGemmaConfig
+from iron.applications.gemma4.audio import AudioConfig
+from iron.applications.gemma4.vision import VisionConfig
 from iron.applications.granite.model import GraniteConfig
 from iron.applications.idefics3.model import SmolVLMTextConfig
 from iron.applications.idefics3.vision import model as smolvlm_vision

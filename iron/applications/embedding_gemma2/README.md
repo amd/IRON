@@ -13,15 +13,15 @@ and a unit-length embedding of 768 comes out, or its first 512, 256 or 128
 renormalized. Each graph is checked against Hugging Face's own model of the
 same part in float32. The shared library is [AGENTS.md](../../../AGENTS.md#language-models).
 
-- `config.py`: each part's shape and the largest call each graph is
-  compiled for
-- `model.py`: the text encoder (which `python -m iron.lm.tune
+- `model.py`: the text encoder's shape, the largest call each graph is
+  compiled for, the encoder (which `python -m iron.lm.tune
   embedding_gemma2` times), `Multimodal`, the tokenizer and the command line
-- `audio.py`, `vision.py`: the towers, each an `iron.lm.Tower`
-- `blocks.py`: Gemma's sandwich-normed layer and the audio tower's clipped
-  projections
 - `hugging_face.py`: Hugging Face's processors and model, what the goldens
   are recorded from
+
+Its audio and vision towers are Gemma 4's, in
+[`gemma4/audio.py` and `gemma4/vision.py`](../gemma4/), each an
+`iron.lm.Tower` tuned by this application's profiles.
 
 ## Weights and tokenizer
 

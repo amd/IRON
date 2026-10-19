@@ -5,8 +5,10 @@
 
 """EmbeddingGemma 2 on the NPU: the text encoder as one graph
 (``EmbeddingGemma``), and over text, audio and an image (``Multimodal``),
-the towers' soft tokens in their placeholders' places. Text goes in behind
-its task's prefix and a unit-length embedding comes out:
+Gemma 4's towers' soft tokens in their placeholders' places. Its shape is
+the checkpoint's ``config.json`` (``Config``); ``PROFILES`` holds every
+graph's tunables, one profile per device, as ``iron.lm.tune`` writes them.
+Text goes in behind its task's prefix and a unit-length embedding comes out:
 
     python -m iron.applications.embedding_gemma2.model /path/to/embeddinggemma-2 \\
         --query "What causes the northern lights?" \\
@@ -28,6 +30,8 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, lm
+from iron.applications.gemma4.audio import AudioConfig, AudioTower
+from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.tune.autotune import Timed
 from iron.lm import (
     Attention,
@@ -42,9 +46,84 @@ from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 
-from .audio import AudioTower
-from .config import PROFILES, AudioConfig, Config, VisionConfig
-from .vision import VisionTower
+PROFILES = Path(__file__).with_name("profiles")
+
+
+@dataclasses.dataclass(frozen=True)
+class Config(lm.Config):
+    # Every projection at HIGHEST (``Attention``, ``GatedMLP``).
+    precision = Precision.HIGHEST
+    json_prefix = "text_config."
+
+    vocab_size: int = 262144
+    hidden_size: int = 512
+    num_hidden_layers: int = 24
+    num_attention_heads: int = 4
+    intermediate_size: int = 2048
+    # A sliding layer's KV groups, head size and RoPE base; a global layer's
+    # are its own.
+    num_key_value_heads: int = 2
+    head_dim: int = 256
+    rope_theta: float = dataclasses.field(
+        default=10000.0,
+        metadata={"json": "rope_parameters.sliding_attention.rope_theta"},
+    )
+    layer_types: tuple[str, ...] = dataclasses.field(
+        default=(("sliding_attention",) * 5 + ("full_attention",)) * 4,
+        metadata={"convert": tuple},
+    )
+    global_kv_groups: int = dataclasses.field(
+        default=1,
+        metadata={"json": "per_layer_config.05.num_key_value_heads"},
+    )
+    global_head_dim: int = dataclasses.field(
+        default=512, metadata={"json": "per_layer_config.05.head_dim"}
+    )
+    global_rope_theta: float = dataclasses.field(
+        default=1000000.0,
+        metadata={"json": "rope_parameters.full_attention.rope_theta"},
+    )
+    sliding_window: int = 512
+    ple_dim: int = dataclasses.field(
+        default=512, metadata={"json": "hidden_size_per_layer_input"}
+    )
+    embedding_dim: int = 768
+    hidden_act: str = dataclasses.field(
+        default="gelu_pytorch_tanh", metadata={"json": "hidden_activation"}
+    )
+    # The Matryoshka truncations, each renormalized.
+    mrl_dims: tuple[int, ...] = lm.not_json((768, 512, 256, 128))
+    # The placeholders an image's or a clip's soft tokens take the place of,
+    # and the markers either side of a run of them.
+    image_token: int = dataclasses.field(
+        default=258880, metadata={"json": "/image_token_id"}
+    )
+    audio_token: int = dataclasses.field(
+        default=258881, metadata={"json": "/audio_token_id"}
+    )
+    boi: int = dataclasses.field(default=255999, metadata={"json": "/boi_token_id"})
+    eoi: int = dataclasses.field(default=258882, metadata={"json": "/eoi_token_id"})
+    boa: int = dataclasses.field(default=256000, metadata={"json": "/boa_token_id"})
+    # Hugging Face's own config.json spells this one an "index", unlike every
+    # other marker's "id".
+    eoa: int = dataclasses.field(default=258883, metadata={"json": "/eoa_token_index"})
+    # The longest sequence a call takes, soft tokens included.
+    max_tokens: int = lm.not_json(2048)
+    # An MHA query block: the mean over the sequence is one query, a block.
+    block: int = lm.not_json(64)
+
+    def truncated(self, out, dims: int) -> np.ndarray:
+        """The ``dims`` truncation, one of ``mrl_dims``, of a call's
+        embeddings ``out``, float32.
+        """
+        rows = np.asarray(out).reshape(len(self.mrl_dims), -1)
+        return np.asarray(rows[self.mrl_dims.index(dims), :dims], np.float32)
+
+    def heads(self, i: int) -> tuple[int, int, float]:
+        """Layer ``i``'s KV groups, head size and RoPE base."""
+        if self.layer_types[i] == "full_attention":
+            return self.global_kv_groups, self.global_head_dim, self.global_rope_theta
+        return self.num_key_value_heads, self.head_dim, self.rope_theta
 
 
 class Tokenizer:

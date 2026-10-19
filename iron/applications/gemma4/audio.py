@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""EmbeddingGemma 2's audio tower and its projection into the text model's
-space on the NPU, as one graph.
+"""Gemma 4's audio tower and its projection into the text model's space on
+the NPU, as one graph: Hugging Face's ``Gemma4AudioModel`` and
+``embed_audio``, its shape ``AudioConfig``.
 """
 
+import dataclasses
 import math
 from functools import partial
 from types import SimpleNamespace
@@ -15,7 +17,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron import Precision, Scratchpad
+from iron import Precision, Scratchpad, lm
 from iron.lm import Conv2d, Linear, RMSNorm, Tower, blocks
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
@@ -25,7 +27,63 @@ from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.softmax import Softmax
 
-from .config import PROFILES, AudioConfig
+
+@dataclasses.dataclass(frozen=True)
+class AudioConfig(lm.Config):
+    json_prefix = "audio_config."
+
+    hidden_size: int = 1024
+    num_hidden_layers: int = 12
+    num_attention_heads: int = 8
+    intermediate_size: int = lm.not_json(4096)
+    mels: int = lm.not_json(128)
+    # The two subsampling convolutions' output channels.
+    subsampling_conv_channels: tuple[int, int] = dataclasses.field(
+        default=(128, 32), metadata={"convert": tuple}
+    )
+    # A query attends to itself and the `window - 1` positions before it.
+    window: int = lm.not_json(12)
+    # The key columns a query's band spans: its window, then the zeros that
+    # make the row a whole Softmax line.
+    band: int = lm.not_json(32)
+    attention_logit_cap: float = 50.0
+    conv_kernel_size: int = 5
+    residual_weight: float = 0.5
+    text_dim: int = lm.not_json(512)
+    # The feature extractor's: samples per second, per frame and per hop.
+    sample_rate: int = lm.not_json(16000)
+    frame: int = lm.not_json(320)
+    hop: int = lm.not_json(160)
+    max_samples: int = lm.not_json(480000)
+    # The soft tokens a call takes at most: 30 s of audio gives 750.
+    max_tokens: int = lm.not_json(768)
+
+    @property
+    def head_dim(self) -> int:
+        return self.hidden_size // self.num_attention_heads
+
+    def tokens(self, frames: int) -> int:
+        """The soft tokens `frames` valid feature frames give: each
+        subsampling convolution keeps every other row.
+        """
+        rows = -(-frames // 2)
+        return -(-rows // 2)
+
+    def frames(self, samples: int) -> int:
+        """The valid feature frames of a clip of `samples`: those whose last
+        sample is audio, after `frame // 2` zeros in front.
+        """
+        audio = min(samples, self.max_samples) - (self.frame - self.frame // 2)
+        return max(0, -(-audio // self.hop))
+
+    def timing(self) -> np.ndarray:
+        """The `(window, hidden_size)` float32 timing signal of each distance a
+        query reaches back: sines, then cosines.
+        """
+        n = self.hidden_size // 2
+        rates = np.exp(np.arange(n) * -(math.log(1e4) / (n - 1))).astype(np.float32)
+        angles = np.arange(self.window, dtype=np.float32)[:, None] * rates
+        return np.concatenate([np.sin(angles), np.cos(angles)], axis=-1)
 
 
 class Clipped(iron.Graph):
@@ -255,7 +313,6 @@ class AudioTower(Tower):
         weights: The checkpoint's; the audio tower's tree is read.
     """
 
-    profile = PROFILES
     layer_class = AudioLayer
 
     def __init__(self, config: AudioConfig, weights: SimpleNamespace):
