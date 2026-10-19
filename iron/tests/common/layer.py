@@ -16,8 +16,9 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron.applications.embedding_gemma2.config import Config
-from iron.applications.embedding_gemma2.model import TextLayer
+from iron.applications.embedding_gemma2.model import EmbeddingGemma, TextLayer
 from iron.lm import EncodeStep, blocks
+from iron.lm.checkpoint import nest
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -245,3 +246,52 @@ def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
     # Measured 0.013; 0.073 with the v norm left out.
     error = np.linalg.norm(got - want) / np.linalg.norm(want)
     assert error < 10 * 2**-9, error
+
+
+def test_embeddinggemma_2_loads_a_layer_s_per_layer_input_flat_or_nested():
+    """Its per-layer input's weights as IRON's checkpoint names them, or
+    under ``ple_block`` as transformers 5 saves them: the same encoder.
+    """
+    rng = np.random.default_rng(5)
+    c = Config(
+        vocab_size=64,
+        hidden_size=WIDTH,
+        num_hidden_layers=2,
+        num_attention_heads=HEADS,
+        intermediate_size=HIDDEN,
+        num_key_value_heads=GROUPS,
+        head_dim=HEAD,
+        layer_types=("sliding_attention", "full_attention"),
+        global_kv_groups=GROUPS,
+        global_head_dim=HEAD,
+        sliding_window=32,
+        ple_dim=PLE,
+        max_tokens=ROWS,
+    )
+    ple = "ple_block."
+    shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN) | {
+        f"{ple}per_layer_input_gate": (PLE, WIDTH),
+        f"{ple}per_layer_projection": (WIDTH, PLE),
+        f"{ple}post_per_layer_input_norm": (WIDTH,),
+    }
+    named = {
+        "embed_tokens.weight": (c.vocab_size, WIDTH),
+        "embedding_projection.weight": (c.out_dim, WIDTH),
+        "norm.weight": (WIDTH,),
+        "ple.per_layer_model_projection.weight": (2 * PLE, WIDTH),
+        "ple.per_layer_projection_norm.weight": (PLE,),
+    }
+    for i in range(2):
+        named[f"layers.{i}.layer_scalar"] = (1,)
+        for name in (*GEMMA, *list(shape)[-3:]):
+            named[f"layers.{i}.{name}.weight"] = shape[name]
+    tensors = {
+        f"language_model.{n}": (rng.standard_normal(s) * 0.05).astype(bfloat16)
+        for n, s in sorted(named.items())
+    }
+    encoder = EmbeddingGemma(c, nest(tensors))
+    ids, values = encoder.inputs(rng.integers(3, c.vocab_size, 9))
+    got = np.asarray(encoder.reference(ids, **values), np.float32)
+    assert np.isfinite(got).all()
+    flat = {n.replace(".ple_block.", "."): t for n, t in tensors.items()}
+    assert np.array_equal(got, EmbeddingGemma(c, nest(flat)).reference(ids, **values))

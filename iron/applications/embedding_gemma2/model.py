@@ -140,6 +140,15 @@ class EmbeddingGemma(Encoder):
 
     profile = PROFILES
     layer_class = TextLayer
+    # Transformers 5 saves a layer's per-layer input under ``ple_block``.
+    renames = {
+        f"ple_block.{name}": name
+        for name in (
+            "per_layer_input_gate",
+            "per_layer_projection",
+            "post_per_layer_input_norm",
+        )
+    }
 
     def __init__(
         self,
