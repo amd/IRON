@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from aie.iron import CompileTime
 from aie.iron.kernels import activation
+from aie.utils.compile.jit.params import tunable
 
-from iron.common import Auto, UnaryElementwise
+from iron.common import UnaryElementwise
 from iron.common.elementwise import Sweep
 from iron.common.testing import Testing
 
@@ -15,7 +15,7 @@ class SiLU(UnaryElementwise):
     test = Testing(Sweep(channels=None))
 
     # One channel per column: the LUT-based kernel is sized for it.
-    num_channels: CompileTime[int] = Auto(default=1, repr=False, init=False)
+    num_channels: int = tunable(default=1, repr=False, init=False)
 
     class Array(UnaryElementwise.Array):
         def kernel(self):

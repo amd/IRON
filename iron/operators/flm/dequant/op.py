@@ -1,19 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import dataclasses
 
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
-from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.kernels import quant
 from aie.utils import bfp
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import widths
+from aie.utils.compile.jit.params import param, tunable, widths
 
-from iron.common import Auto, Built, Operator, Unresolvable, field
+from iron.common import Built, Operator, Unresolvable
 from iron.common.testing import Case, Testing
 from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
 
@@ -162,29 +161,25 @@ class DequantBFP(Operator):
         draw=_draw,
     )
 
-    K: CompileTime[int] = field()
-    N: CompileTime[int] = field()
+    K: int = param()
+    N: int = param()
     # A projection interleaved with another in the same buffer: this one
     # occupies ``run_out_features`` of every ``run_period_out_features``.
-    run_out_features: CompileTime[int | None] = field(default=None)
-    run_period_out_features: CompileTime[int | None] = field(default=None)
+    run_out_features: int | None = param(default=None)
+    run_period_out_features: int | None = param(default=None)
     # Each buffer is declared in the unit its transfers count in. The q4nx
     # input is bytes, because a block interleaves three tables at 5 bits per
     # weight and the fill walks it bytewise. The output is bfp16ebs8 blocks,
     # because the drains index blocks; declared in its 9-byte equivalent,
     # every offset and length would address a ninth of what it names.
     # Filled by validate() from K, N and the interleave.
-    quantized_bytes: CompileTime[int] = field(
-        derive=lambda op: op.quantized_size(), repr=False
-    )
-    packed_blocks: CompileTime[int] = field(
-        derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False
-    )
+    quantized_bytes: int = param(derive=lambda op: op.quantized_size(), repr=False)
+    packed_blocks: int = param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # cols follows the device. ROWS is baked into the split offsets and the
     # join, so it is not a field; halves is, because a stream's replication
     # count must be declared to be indexed, but the join bakes it too.
-    cols: CompileTime[int] = Auto(repr=False, domain=widths)
-    halves: CompileTime[int] = Auto(default=HALVES, repr=False, init=False)
+    cols: int = tunable(repr=False, domain=widths)
+    halves: int = tunable(default=HALVES, repr=False, init=False)
 
     # One q4nx block per core, delivered as one per-column object the cores
     # split; one packed half-tile out per (column, n-half), joined from the
@@ -217,8 +212,7 @@ class DequantBFP(Operator):
             )
         if dev.arch != AIEArch.AIE2p:
             raise Unresolvable("DequantBFP: bfp16ebs8 exists only on AIE2P")
-        return dataclasses.replace(
-            self,
+        return self.replace(
             cols=dev.cols if self.cols is None else self.cols,
         )
 
@@ -370,8 +364,7 @@ class DequantBFP(Operator):
         per shape, as flm.ProjectionGEMM's.
         """
         K, N = self._reference_shape
-        return dataclasses.replace(
-            self,
+        return self.replace(
             K=K,
             N=N,
             run_out_features=None,

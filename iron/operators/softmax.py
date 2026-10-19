@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-import dataclasses
 from typing import Any
 
 import ml_dtypes
@@ -10,22 +9,13 @@ import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import np_dtype_to_mlir_type
-from aie.iron import (
-    Buffer,
-    CompileTime,
-    In,
-    ObjectFifo,
-    Out,
-    TaskGroup,
-    Worker,
-    ceildiv,
-)
+from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import divisors, widths
+from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
 
-from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
+from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 
 # softmax_bf16's vector step: its loops cover only whole steps.
@@ -122,29 +112,29 @@ class Softmax(Operator):
         draw=_draw,
     )
 
-    rows: CompileTime[int] = field(array=True)
-    cols: CompileTime[int] = field()
-    num_aie_columns: CompileTime[int] = Auto(domain=widths)
-    num_channels: CompileTime[int] = Auto(default=1, domain=widths)
-    block: CompileTime[int] = Auto(
+    rows: int = param(array=True)
+    cols: int = param()
+    num_aie_columns: int = tunable(domain=widths)
+    num_channels: int = tunable(default=1, domain=widths)
+    block: int = tunable(
         domain=lambda op, dev, t: divisors(
             t, of=op.cols, step=_VECTOR_STEP, cap=_ROW_CAP
         )
     )
-    streamed: CompileTime[bool] = Auto(domain=(False, True), array=True)
-    input_dtype: CompileTime[Any] = field(default=ml_dtypes.bfloat16, repr=False)
+    streamed: bool = tunable(domain=(False, True))
+    input_dtype: Any = param(default=ml_dtypes.bfloat16, repr=False)
     # Float input only, mlir-aie's softmax_f32_bf16: a pre-cap addend and
     # cap * tanh(x / cap).
-    soft_cap: CompileTime[float | None] = field(default=None, array=True)
-    has_addend: CompileTime[bool] = field(default=False)
+    soft_cap: float | None = param(default=None, array=True)
+    has_addend: bool = param(default=False)
     # Float input only, softmax_rows_banded_f32_bf16: a band computed from
     # these two in the core (window, and the row's own query position,
     # wrapped every period rows), not a mask operand -- a core has two
     # input DMA channels, and x and addend already take both.
-    window: CompileTime[int | None] = field(default=None, array=True)
-    period: CompileTime[int | None] = field(default=None, array=True)
+    window: int | None = param(default=None, array=True)
+    period: int | None = param(default=None, array=True)
 
-    length = Extent(cols)  # cols, or fewer per call
+    length = per_call(bounds=cols)  # cols, or fewer per call
 
     x = In(
         rows,
@@ -163,9 +153,11 @@ class Softmax(Operator):
         when=has_addend,
     )
     y = Out(rows, cols, obj_shape=(block,), per=(num_aie_columns, num_channels))
-    valid_cols = Value(derive=lambda op: op.length)
+    valid_cols = per_call(derive=lambda op: op.length)
     # A row held whole is one block, which the bound does not change.
-    blocks = Value(derive=lambda op: ceildiv(op.length, op.block) if op.streamed else 1)
+    blocks = per_call(
+        derive=lambda op: ceildiv(op.length, op.block) if op.streamed else 1
+    )
 
     def validate(self) -> None:
         if self.rows % 16 != 0:
@@ -200,9 +192,7 @@ class Softmax(Operator):
         if np.dtype(self.input_dtype) == np.dtype(np.float32):
             if self.streamed:
                 raise ValueError("Softmax: the float32 input path does not stream")
-            return dataclasses.replace(
-                self, num_aie_columns=cols, block=self.cols, streamed=False
-            )
+            return self.replace(num_aie_columns=cols, block=self.cols, streamed=False)
         block = self.block
         if block is None:
             bounded = "length" in self.bound_extents
@@ -221,9 +211,7 @@ class Softmax(Operator):
                 else self.cols
             )
         streamed = block < self.cols if self.streamed is None else self.streamed
-        return dataclasses.replace(
-            self, num_aie_columns=cols, block=block, streamed=streamed
-        )
+        return self.replace(num_aie_columns=cols, block=block, streamed=streamed)
 
     @property
     def cores(self) -> int:

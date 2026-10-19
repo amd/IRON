@@ -20,20 +20,12 @@ import dataclasses
 import numpy as np
 from aie.dialects.aie import AIEArch, DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, CompileTime, DmaEndpoint, In, Lock, Out
+from aie.iron import Buffer, DmaEndpoint, In, Lock, Out
 from aie.iron.device import Device, Tile
+from aie.utils.compile.jit.params import Select, tunable
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Operator,
-    Precision,
-    Select,
-    Unresolvable,
-    Value,
-    Xclbin,
-)
+from iron.common import Block, Built, Operator, Precision, Unresolvable, Xclbin
 from iron.operators.flm.gemm.design import (
     K_TILE,
     M_TILE,
@@ -108,26 +100,20 @@ class Shipped(
 
     # The port's tunables, fixed by the binary. B is bf16 (no bfp16 on this
     # image), one row-block per B fetch, and the whole of K in one slice.
-    tile_n: CompileTime[int] = Auto(default=N_TILE, repr=False, init=False)
-    k_tile: CompileTime[int] = Auto(default=K_TILE, repr=False, init=False)
-    tile_ma: CompileTime[int] = Auto(default=M_TILE, repr=False, init=False)
-    m_chunk: CompileTime[int] = Auto(default=1, repr=False, init=False)
-    rows: CompileTime[int] = Auto(default=ROWS, repr=False, init=False)
-    cols: CompileTime[int] = Auto(default=COLS, repr=False, init=False)
-    precision: CompileTime[Precision] = Auto(
-        default=Precision.MEDIUM, repr=False, init=False
-    )
-    emulate_bf16_mmul_with_bfp16: CompileTime[bool] = Auto(
-        default=True, repr=False, init=False
-    )
-    bfp16_b: CompileTime[bool] = Auto(default=False, repr=False, init=False)
-    b_dtype: CompileTime[object] = Auto(default=bfloat16, repr=False, init=False)
-    l1_b_depth: CompileTime[int] = Auto(default=QUEUE_DEPTH, repr=False, init=False)
-    a_l2: CompileTime[int] = Auto(default=M_TILE * K_TILE, repr=False, init=False)
-    b_l2: CompileTime[int] = Auto(default=K_TILE * N_TILE, repr=False, init=False)
-    c_l2: CompileTime[int] = Auto(
-        default=ROWS * M_TILE * N_TILE, repr=False, init=False
-    )
+    tile_n: int = tunable(default=N_TILE, repr=False, init=False)
+    k_tile: int = tunable(default=K_TILE, repr=False, init=False)
+    tile_ma: int = tunable(default=M_TILE, repr=False, init=False)
+    m_chunk: int = tunable(default=1, repr=False, init=False)
+    rows: int = tunable(default=ROWS, repr=False, init=False)
+    cols: int = tunable(default=COLS, repr=False, init=False)
+    precision: Precision = tunable(default=Precision.MEDIUM, repr=False, init=False)
+    emulate_bf16_mmul_with_bfp16: bool = tunable(default=True, repr=False, init=False)
+    bfp16_b: bool = tunable(default=False, repr=False, init=False)
+    b_dtype: object = tunable(default=bfloat16, repr=False, init=False)
+    l1_b_depth: int = tunable(default=QUEUE_DEPTH, repr=False, init=False)
+    a_l2: int = tunable(default=M_TILE * K_TILE, repr=False, init=False)
+    b_l2: int = tunable(default=K_TILE * N_TILE, repr=False, init=False)
+    c_l2: int = tunable(default=ROWS * M_TILE * N_TILE, repr=False, init=False)
 
     # One (M_TILE x K_TILE) block per object, broadcast along a compute row.
     A = In(
@@ -160,7 +146,7 @@ class Shipped(
     # eight words behind a lock, written once per shape.
     n_val = m_row_blocks = k_iters = mode = clamp_min = clamp_max = None
     n_units = units_valid = units_repeat = valid = None
-    parameters = Value(derive=_parameter_words, words=PARAMETER_WORDS)
+    parameters = Block(PARAMETER_WORDS, derive=_parameter_words)
 
     class Array(Operator.Array):
         dev: Device
@@ -203,7 +189,7 @@ class Shipped(
                 f"columns of NPU2 (aie2p); got {dev.name!r} ({dev.arch}) with "
                 f"{dev.cols} columns"
             )
-        return dataclasses.replace(self)
+        return self.replace()
 
     def pack_B(self, B):
         """A row-major ``(K, N)`` B in the overlay's own order: bf16, a whole

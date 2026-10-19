@@ -17,26 +17,16 @@ vision tower's bf16 patches, and `PatchPositions` says where each of the
 tower's rows comes from in them.
 """
 
-import dataclasses
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import (
-    Buffer,
-    CompileTime,
-    ExternalFunction,
-    In,
-    ObjectFifo,
-    Out,
-    TaskGroup,
-    Worker,
-)
+from aie.iron import Buffer, ExternalFunction, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import widths
+from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
+from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 
 from .reference import resize, taps, window
@@ -235,22 +225,21 @@ class ResampleTaps(Operator):
         ],
     )
 
-    in_size: CompileTime[int] = field()
-    out_size: CompileTime[int] = field()
-    words: CompileTime[int] = field(default=256)
+    in_size: int = param()
+    out_size: int = param()
+    words: int = param(default=256)
     # The slots of a chunk, or None for as many as the window lets fit.
-    slots: CompileTime[int | None] = field(default=None, array=True)
+    slots: int | None = param(default=None, array=True)
     # A multiple of 16, so every core count up to it divides.
-    chunks: CompileTime[int] = field(
-        derive=lambda op: 16
+    chunks: int = param(
+        default=lambda op: 16
         * -(
             -op.out_size
             // (16 * max(1, per_chunk(op.in_size, op.out_size, op.words, op.slots)))
         ),
-        held=False,
     )
-    num_aie_columns: CompileTime[int] = Auto(domain=widths)
-    num_channels: CompileTime[int] = Auto(default=2, domain=widths)
+    num_aie_columns: int = tunable(domain=widths)
+    num_channels: int = tunable(default=2, domain=widths)
 
     table = Out(
         chunks,
@@ -259,14 +248,14 @@ class ResampleTaps(Operator):
         obj_shape=(words,),
         per=(num_aie_columns, num_channels),
     )
-    in_samples = Extent(in_size)
-    out_samples = Extent(out_size)
+    in_samples = per_call(bounds=in_size)
+    out_samples = per_call(bounds=out_size)
 
-    count = Value(
+    count = per_call(
         derive=lambda op: -(-op.filled(op.in_samples, op.out_samples) // op.cores),
     )
-    in_length = Value(derive=lambda op: op.in_samples)
-    out_length = Value(derive=lambda op: op.out_samples)
+    in_length = per_call(derive=lambda op: op.in_samples)
+    out_length = per_call(derive=lambda op: op.out_samples)
 
     @property
     def cores(self) -> int:
@@ -305,7 +294,7 @@ class ResampleTaps(Operator):
             self.num_channels,
             fits=lambda c: self.chunks % (c * self.num_channels) == 0,
         )
-        return dataclasses.replace(self, num_aie_columns=cols)
+        return self.replace(num_aie_columns=cols)
 
     def compatible(self) -> None:
         if self.chunks % self.cores:
@@ -834,36 +823,32 @@ class Resample(Operator):
         ),
     )
 
-    height: CompileTime[int] = field()
-    width: CompileTime[int] = field()
-    out_height: CompileTime[int] = field()
-    out_width: CompileTime[int] = field()
+    height: int = param()
+    width: int = param()
+    out_height: int = param()
+    out_width: int = param()
     # Every chunk is a handshake with every core: few and large ones.
-    chunk: CompileTime[int] = field(default=4096)
+    chunk: int = param(default=4096)
     # A 39-tap window: a scale of up to 9.5.
-    words: CompileTime[int] = field(default=356)
+    words: int = param(default=356)
     # A floor of 8, so two resizes of one image that need no more share an array.
-    patch_columns: CompileTime[int] = field(
-        derive=lambda op: max(8, op.default_patch_columns()), held=False, array=True
+    patch_columns: int = param(
+        default=lambda op: max(8, op.default_patch_columns()), array=True
     )
-    image_chunks: CompileTime[int] = field(
-        derive=lambda op: op.height * -(-3 * op.width // op.chunk), held=False
+    image_chunks: int = param(
+        default=lambda op: op.height * -(-3 * op.width // op.chunk)
     )
     # Multiples of 16, as ResampleTaps's are.
-    width_chunks: CompileTime[int] = field(
-        derive=lambda op: 16 * -(-op.out_width // (16 * SIDE)), held=False
-    )
-    height_chunks: CompileTime[int] = field(
-        derive=lambda op: 16 * -(-op.out_height // (16 * SIDE)), held=False
-    )
-    patch_rows: CompileTime[int] = field(derive=lambda op: op.padded_rows(), held=False)
-    num_aie_columns: CompileTime[int] = Auto(domain=widths)
-    num_channels: CompileTime[int] = Auto(default=2, domain=widths)
+    width_chunks: int = param(default=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
+    height_chunks: int = param(default=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
+    patch_rows: int = param(default=lambda op: op.padded_rows())
+    num_aie_columns: int = tunable(domain=widths)
+    num_channels: int = tunable(default=2, domain=widths)
 
-    rows = Extent(height)
-    columns = Extent(width)
-    out_rows = Extent(out_height)
-    out_columns = Extent(out_width)
+    rows = per_call(bounds=height)
+    columns = per_call(bounds=width)
+    out_rows = per_call(bounds=out_height)
+    out_columns = per_call(bounds=out_width)
 
     image = In(image_chunks, chunk, dtype=np.uint8, obj_shape=(chunk,))
     taps_w = In(width_chunks, words, dtype=np.int32, obj_shape=(words,))
@@ -877,14 +862,14 @@ class Resample(Operator):
         per=(num_aie_columns, num_channels),
     )
 
-    src_rows = Value(derive=lambda op: op.rows)
-    src_columns = Value(derive=lambda op: op.columns)
-    dst_rows = Value(derive=lambda op: op.out_rows)
-    dst_columns = Value(derive=lambda op: op.out_columns)
-    image_count = Value(derive=lambda op: op.rows * -(-3 * op.columns // op.chunk))
-    width_count = Value(derive=lambda op: op.out_columns // SIDE)
-    height_count = Value(derive=lambda op: op.out_rows // SIDE)
-    patch_count = Value(
+    src_rows = per_call(derive=lambda op: op.rows)
+    src_columns = per_call(derive=lambda op: op.columns)
+    dst_rows = per_call(derive=lambda op: op.out_rows)
+    dst_columns = per_call(derive=lambda op: op.out_columns)
+    image_count = per_call(derive=lambda op: op.rows * -(-3 * op.columns // op.chunk))
+    width_count = per_call(derive=lambda op: op.out_columns // SIDE)
+    height_count = per_call(derive=lambda op: op.out_rows // SIDE)
+    patch_count = per_call(
         derive=lambda op: op.out_rows // SIDE * (op.out_columns // SIDE // op.cores + 1)
     )
 
@@ -953,7 +938,7 @@ class Resample(Operator):
             self.num_channels,
             fits=lambda c: self.patch_rows % (c * self.num_channels) == 0,
         )
-        return dataclasses.replace(self, num_aie_columns=cols)
+        return self.replace(num_aie_columns=cols)
 
     def compatible(self) -> None:
         cap = self.window_cap
@@ -1245,26 +1230,26 @@ class PatchPositions(Operator):
         ],
     )
 
-    rows: CompileTime[int] = field()
-    out_height: CompileTime[int] = field()
-    out_width: CompileTime[int] = field()
-    pool: CompileTime[int] = field(default=3, array=True)
+    rows: int = param()
+    out_height: int = param()
+    out_width: int = param()
+    pool: int = param(default=3, array=True)
     # The rows of each axis's position-embedding table.
-    positions: CompileTime[int] = field(default=10240, array=True)
+    positions: int = param(default=10240, array=True)
     # Resample's cores, which its raster's columns are padded past.
-    cores: CompileTime[int] = field(default=16, array=True)
-    block: CompileTime[int] = field(default=256)
+    cores: int = param(default=16, array=True)
+    block: int = param(default=256)
 
-    out_rows = Extent(out_height)
-    out_columns = Extent(out_width)
+    out_rows = per_call(bounds=out_height)
+    out_columns = per_call(bounds=out_width)
 
     xy = Out(rows, 2, dtype=np.int32, obj_shape=(block, 2))
     position_ids = Out(2, rows, dtype=np.int32, obj_shape=(2, block))
     order = Out(rows, dtype=np.int32, obj_shape=(block,))
 
-    count = Value(derive=lambda op: op.rows // op.block)
-    dst_rows = Value(derive=lambda op: op.out_rows)
-    dst_columns = Value(derive=lambda op: op.out_columns)
+    count = per_call(derive=lambda op: op.rows // op.block)
+    dst_rows = per_call(derive=lambda op: op.out_rows)
+    dst_columns = per_call(derive=lambda op: op.out_columns)
 
     def validate(self) -> None:
         side = SIDE * self.pool

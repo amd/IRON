@@ -6,22 +6,13 @@
 import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import (
-    Buffer,
-    CompileTime,
-    In,
-    ObjectFifo,
-    Out,
-    TaskGroup,
-    Worker,
-    kernels,
-)
+from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, kernels
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import widths
+from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
+from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 from iron.operators.state_slices import SLICE, block_rows, resolve_heads
 
@@ -85,25 +76,21 @@ class GatedDeltaRule(Operator):
         draw=_trained,
     )
 
-    rows: CompileTime[int] = field(array=True)
-    k_heads: CompileTime[int] = field(array=True)
-    v_heads: CompileTime[int] = field(array=True)
-    key_dim: CompileTime[int] = field(array=True)
-    value_dim: CompileTime[int] = field(array=True)
-    columns: CompileTime[int] = Auto(domain=widths)
-    width: CompileTime[int] = field(
+    rows: int = param(array=True)
+    k_heads: int = param(array=True)
+    v_heads: int = param(array=True)
+    key_dim: int = param(array=True)
+    value_dim: int = param(array=True)
+    columns: int = tunable(domain=widths)
+    width: int = param(
         derive=lambda op: 2 * op.k_heads * op.key_dim + op.v_heads * op.value_dim,
         repr=False,
     )
-    inner: CompileTime[int] = field(
+    inner: int = param(
         derive=lambda op: op.v_heads * op.value_dim, repr=False, array=True
     )
-    block: CompileTime[int] = field(
-        derive=lambda op: block_rows(op) * SLICE, repr=False
-    )
-    slice_state: CompileTime[int] = field(
-        derive=lambda op: op.key_dim * SLICE, repr=False
-    )
+    block: int = param(derive=lambda op: block_rows(op) * SLICE, repr=False)
+    slice_state: int = param(derive=lambda op: op.key_dim * SLICE, repr=False)
 
     qkv = In(rows, width, obj_shape=(width,), per=(columns,))
     a = In(rows, v_heads, obj_shape=(v_heads,), per=(columns,))
@@ -128,8 +115,8 @@ class GatedDeltaRule(Operator):
         per=(columns,),
         depth=1,
     )
-    valid = Extent(rows)
-    count = Value(derive=lambda op: op.valid)
+    valid = per_call(bounds=rows)
+    count = per_call(derive=lambda op: op.valid)
 
     def validate(self) -> None:
         if self.value_dim % SLICE or self.v_heads % self.k_heads or self.v_heads % 2:

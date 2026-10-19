@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import dataclasses
 import math
 from typing import Any, ClassVar
 
@@ -9,15 +8,15 @@ import aie.dialects.index as index
 import numpy as np
 from aie.dialects.aie import T
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, Worker, ceildiv
+from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import eltwise, linalg
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import divisors, widths
+from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
+from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 
 
@@ -90,21 +89,21 @@ class GEMV(Operator):
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A, op.B)))
 
-    M: CompileTime[int] = field()
-    K: CompileTime[int] = field()
+    M: int = param()
+    K: int = param()
     # None: a single batch, with no batch dimension.
-    num_batches: CompileTime[int | None] = field(default=None)
+    num_batches: int | None = param(default=None)
     # Batches per matrix of A (grouped-query scores): no repeated copy.
-    repeat: CompileTime[int] = field(default=1)
-    num_matrices: CompileTime[int | None] = field(
+    repeat: int = param(default=1)
+    num_matrices: int | None = param(
         derive=lambda op: (
             None if op.num_batches is None else op.num_batches // op.repeat
         )
     )
-    num_aie_columns: CompileTime[int] = Auto(domain=widths)
-    num_channels: CompileTime[int] = Auto(domain=widths)
+    num_aie_columns: int = tunable(domain=widths)
+    num_channels: int = tunable(domain=widths)
     # None: two rows where they fit one L1 programmer bank, else one.
-    tile_size_input: CompileTime[int] = Auto(
+    tile_size_input: int = tunable(
         domain=lambda op, dev, t: divisors(
             t,
             of=op.M,
@@ -113,10 +112,10 @@ class GEMV(Operator):
         )
     )
     # At least two rows: the shim moves C in 4-byte granules.
-    tile_size_output: CompileTime[int] = Auto(
+    tile_size_output: int = tunable(
         domain=lambda op, dev, t: divisors(t, of=op.M, step=op.tile_size_input, span=3)
     )
-    kernel_vector_size: CompileTime[int] = Auto(repr=False, array=True)
+    kernel_vector_size: int = tunable(repr=False)
 
     A = In(
         num_matrices,
@@ -134,13 +133,13 @@ class GEMV(Operator):
         per=(num_aie_columns, num_channels),
         depth=2,
     )
-    valid = Extent(M)
-    tiles = Value(
+    valid = per_call(bounds=M)
+    tiles = per_call(
         derive=lambda op: ceildiv(
             op.valid, op.num_aie_columns * op.num_channels * op.tile_size_output
         ),
     )
-    batches = Value(derive=lambda op: op.num_batches or 1)
+    batches = per_call(derive=lambda op: op.num_batches or 1)
 
     def extent_unit(self, buffer: str) -> int | None:
         # A in output tiles, so its rows and C's line up under the round-robin split.
@@ -218,8 +217,7 @@ class GEMV(Operator):
             channels,
             fits=lambda c: self.M % (c * channels * unit) == 0,
         )
-        new = dataclasses.replace(
-            self,
+        new = self.replace(
             num_aie_columns=cols,
             num_channels=channels,
             tile_size_input=rows,

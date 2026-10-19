@@ -7,7 +7,6 @@ A graph function run on handles produces a runlist, buffer names and
 sizes, and value bindings; nothing here needs a toolchain.
 """
 
-import dataclasses
 import gc
 import inspect
 from types import SimpleNamespace
@@ -738,7 +737,7 @@ def _resolved_fields(settings):
         with aie_utils.set_current_device(dev):
             out.append(
                 [
-                    tuple((f.name, vars(op)[f.name]) for f in dataclasses.fields(op))
+                    tuple((n, vars(op)[n]) for n in op.declaration.params)
                     + (op.design_key(),)
                     for s in trace().steps
                     for op in [s.op.resolved(dev)]
@@ -747,16 +746,16 @@ def _resolved_fields(settings):
     return out
 
 
-def _every_keyword_is_load_bearing(monkeypatch, settings):
-    """Drop each keyword the graphs pass, one (class, name) at a time; each
-    must change some resolved step, or fail, in some setting. A keyword that
+def _every_tunable_is_load_bearing(monkeypatch, settings):
+    """Drop each tunable the graphs pass, one (class, name) at a time; each
+    must change some resolved step, or fail, in some setting. A tunable that
     resolution would have picked anyway is noise a reader has to disprove.
     """
     construct = Tracer._construct
     passed = set()
 
     def recording(self, cls, inputs, outputs, kwargs):
-        passed.update((cls, name) for name in kwargs)
+        passed.update((cls, n) for n in kwargs if n in cls.declaration.tunables)
         return construct(self, cls, inputs, outputs, kwargs)
 
     monkeypatch.setattr(Tracer, "_construct", recording)
@@ -793,7 +792,7 @@ def test_llama_names_only_the_tunables_that_matter(monkeypatch):
         (npu2, lambda: real.trace(**real.shapes()[1])),
         (npu2, lambda: scaled.trace(**scaled.shapes()[1])),
     ]
-    _every_keyword_is_load_bearing(monkeypatch, settings)
+    _every_tunable_is_load_bearing(monkeypatch, settings)
 
 
 def test_a_bound_value_survives_tuning():

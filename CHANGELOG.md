@@ -200,6 +200,15 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- An operator declares itself with mlir-aie's declaration
+  (`aie.utils.compile.jit.params`): `param()` for a compile-time parameter,
+  `tunable()` for one resolution or the tuner picks, `per_call()` for a
+  per-call value (`per_call(bounds=X)` for an extent) and mlir-aie's
+  `Select`; `Operator` is mlir-aie's library operator underneath, and
+  `Unresolvable` is mlir-aie's.
+- `op.replace(**changes)` copies an operator, in place of
+  `dataclasses.replace(op, ...)`; `Operator.shim_columns` and
+  `Operator.call_operands` are classmethods, off `declaration`.
 - `DecoderLayer` biases its attention's `o_proj` where the config's
   `attention_bias` says, as transformers' Llama does, so a Llama-family
   checkpoint with `attention_bias` loads; Qwen 2's `Qwen2Layer` keeps o
@@ -421,6 +430,9 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `iron.common.field`, `Auto`, `Extent` and `Select`, and `Value(words=)`:
+  mlir-aie's `param`, `tunable`, `per_call` and `Select`, and IRON's
+  `Block(words)` for a shipped image's block of words, replace them.
 - `iron.common.image.packaging.dispatches_full_elf(dev)`: mlir-aie's
   `dev.dispatches_full_elf` replaces it.
 - `iron.tune.autotune.CORE_MHZ`: the bound reads mlir-aie's `dev.core_mhz`,

@@ -8,18 +8,17 @@ interleaved pairs (Meta's); Llama weights converted to Hugging Face are
 re-permuted for the halves (huggingface/transformers#25199).
 """
 
-import dataclasses
 
 import numpy as np
-from aie.iron import CompileTime, In, ObjectFifo, Out, Worker, ceildiv
+from aie.iron import In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import widths
+from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
+from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 
 
@@ -73,22 +72,20 @@ class RoPE(Operator):
 
     test = Testing(_cases, draw=_angles)
 
-    rows: CompileTime[int] = field()
-    cols: CompileTime[int] = field()
-    angle_rows: CompileTime[int] = field(
-        derive=lambda op: op.rows, held=False
-    )  # one row per position
-    num_aie_columns: CompileTime[int] = Auto(domain=widths)
-    two_halves: CompileTime[bool] = field(default=True, array=True)
+    rows: int = param()
+    cols: int = param()
+    angle_rows: int = param(default=lambda op: op.rows)  # one row per position
+    num_aie_columns: int = tunable(domain=widths)
+    two_halves: bool = param(default=True, array=True)
 
     x = In(rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))
     angles = In(angle_rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))
     y = Out(rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))
     # Either row count may be bounded per call: x[:n] and angles[:m].
-    valid = Extent(rows)
-    valid_angles = Extent(angle_rows)
-    lut_rows = Value(derive=lambda op: ceildiv(op.valid_angles, op.num_aie_columns))
-    rows_per_lut = Value(derive=lambda op: op.valid // op.valid_angles)
+    valid = per_call(bounds=rows)
+    valid_angles = per_call(bounds=angle_rows)
+    lut_rows = per_call(derive=lambda op: ceildiv(op.valid_angles, op.num_aie_columns))
+    rows_per_lut = per_call(derive=lambda op: op.valid // op.valid_angles)
 
     def validate(self) -> None:
         if not (self.cols % 32 == 0 and self.cols >= 32):
@@ -106,7 +103,7 @@ class RoPE(Operator):
             self.num_aie_columns,
             fits=lambda c: self.rows % c == 0 and self.angle_rows % c == 0,
         )
-        return dataclasses.replace(self, num_aie_columns=cols)
+        return self.replace(num_aie_columns=cols)
 
     def compatible(self) -> None:
         n = self.num_aie_columns

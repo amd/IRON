@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import CompileTime, In, Out
+from aie.iron import In, Out
 from aie.iron.kernels import eltwise
+from aie.utils.compile.jit.params import param
 
-from iron.common import Rowwise, field
+from iron.common import Rowwise
 from iron.common.elementwise import CORES
 from iron.common.testing import Case, Testing
 
@@ -31,8 +32,8 @@ class Magnitude(Rowwise):
         ),
     )
 
-    width: CompileTime[int] = field()
-    tile_size: CompileTime[int] = field(derive=lambda op: op.width // 2)
+    width: int = param()
+    tile_size: int = param(derive=lambda op: op.width // 2)
 
     x = In(
         Rowwise.rows,

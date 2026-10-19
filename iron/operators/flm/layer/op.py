@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import dataclasses
 import functools
 
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.iron import CompileTime, DispatchTime, In, InOut
+from aie.iron import In, InOut
 from aie.iron.kernels import FlmGemma4DecodeGeometry
+from aie.utils.compile.jit.params import param, per_call
 from ml_dtypes import bfloat16
 
-from iron.common import Operator, Unresolvable, field
+from iron.common import Operator, Unresolvable
 from iron.operators.flm.layer import reference
 from iron.operators.flm.layer.design import (
     GEOMETRIES,
@@ -28,23 +28,15 @@ class DecodeLayer(Operator):
     See README.md for the parameters, the buffers and the dispatch parameters.
     """
 
-    geometry: CompileTime[FlmGemma4DecodeGeometry] = field()
-    layer_type: CompileTime[LayerType | str] = field()
-    x_len: CompileTime[int] = field(
-        derive=lambda op: arg_sizes(op.geometry)["x"], repr=False
-    )
-    proj_len: CompileTime[int] = field(
-        derive=lambda op: arg_sizes(op.geometry)["proj"], repr=False
-    )
-    rms_len: CompileTime[int] = field(
-        derive=lambda op: arg_sizes(op.geometry)["rms"], repr=False
-    )
-    rope_rms_len: CompileTime[int] = field(
+    geometry: FlmGemma4DecodeGeometry = param()
+    layer_type: LayerType | str = param()
+    x_len: int = param(derive=lambda op: arg_sizes(op.geometry)["x"], repr=False)
+    proj_len: int = param(derive=lambda op: arg_sizes(op.geometry)["proj"], repr=False)
+    rms_len: int = param(derive=lambda op: arg_sizes(op.geometry)["rms"], repr=False)
+    rope_rms_len: int = param(
         derive=lambda op: arg_sizes(op.geometry)["rope_rms"], repr=False
     )
-    kv_len: CompileTime[int] = field(
-        derive=lambda op: arg_sizes(op.geometry)["kv"], repr=False
-    )
+    kv_len: int = param(derive=lambda op: arg_sizes(op.geometry)["kv"], repr=False)
 
     # The runtime sequence's argument order.
     x = InOut(x_len, dtype=bfloat16)
@@ -52,8 +44,8 @@ class DecodeLayer(Operator):
     rms = In(rms_len, dtype=bfloat16)
     rope_rms = In(rope_rms_len, dtype=bfloat16)
     kv = InOut(kv_len, dtype=bfloat16)
-    context_len: DispatchTime[np.int32] = field(init=False)
-    max_l: DispatchTime[np.int32] = field(init=False)
+    context_len = per_call(np.int32)
+    max_l = per_call(np.int32)
 
     def validate(self) -> None:
         if self.geometry not in GEOMETRIES:
@@ -74,7 +66,7 @@ class DecodeLayer(Operator):
             raise Unresolvable(
                 "DecodeLayer: the flm_gemma4_decode kernels are AIE2P only"
             )
-        return dataclasses.replace(self)
+        return self.replace()
 
     @property
     def dims(self) -> LayerDims:
@@ -83,7 +75,7 @@ class DecodeLayer(Operator):
 
     def xclbin_operator(self):
         # The four layer types share one array; they differ in their sequences.
-        return dataclasses.replace(self, layer_type=LayerType.GLOBAL)
+        return self.replace(layer_type=LayerType.GLOBAL)
 
     def exported_design(self):
         return functools.partial(

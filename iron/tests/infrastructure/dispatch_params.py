@@ -10,26 +10,17 @@ loop and sets the offset of each transfer. The design has no cores, so the
 test needs no kernel.
 """
 
-import dataclasses
 import functools
 
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.iron import (
-    CompileTime,
-    DispatchTime,
-    In,
-    ObjectFifo,
-    Out,
-    Program,
-    Runtime,
-    require,
-)
+from aie.iron import DispatchTime, In, ObjectFifo, Out, Program, Runtime, require
 from aie.iron.controlflow import range_
 from aie.utils.hostruntime.hostruntime import HostRuntimeError
+from aie.utils.compile.jit.params import param, per_call
 
-from iron.common import Operator, field
+from iron.common import Operator
 from iron.common.design import OperatorDesign
 
 CHUNK = 1024
@@ -59,15 +50,15 @@ def chunk_copy(dev, max_chunks, *, n: DispatchTime[np.int32]):
 
 
 class ChunkCopy(Operator):
-    max_chunks: CompileTime[int] = field()
-    size: CompileTime[int] = field(derive=lambda op: op.max_chunks * CHUNK, repr=False)
+    max_chunks: int = param()
+    size: int = param(derive=lambda op: op.max_chunks * CHUNK, repr=False)
 
     src = In(size, dtype=np.int32)
     dst = Out(size, dtype=np.int32)
-    n: DispatchTime[np.int32] = field(init=False)
+    n = per_call(np.int32)
 
     def resolve(self, dev):
-        return dataclasses.replace(self)
+        return self.replace()
 
     def exported_design(self):
         return functools.partial(chunk_copy, self.dev, self.max_chunks)

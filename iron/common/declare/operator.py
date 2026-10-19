@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The operator: one class declaring the array, the buffers and the sequence.
+"""The operator: mlir-aie's declaration, plus IRON's build, graph and tuning.
 
-The fields its ``Array`` reads (``Declaration.array``) configure the array,
+The parameters its cores read (``declaration.key``) configure the array,
 which serves every extent; the rest reach only the runtime sequence.
 """
 
@@ -16,30 +16,23 @@ import hashlib
 import inspect
 from collections.abc import Mapping
 from contextvars import ContextVar
-from enum import Enum
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    ClassVar,
-    Self,
-    dataclass_transform,
-)
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Self
 
 import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.hostruntime.tensor_class import NpuTensor
+from aie.utils.compile.jit import operator as jit
+from aie.utils.compile.jit.operator import Unresolvable
+from aie.utils.compile.jit.params import PerCallMember
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
-from .declaration import Declaration
-from .field import Auto, ParamSpec, Unresolvable, field
 from .operand import Operand
 from .precision import Precision
 from .rtp import Rtp
-from .value import Extent, ExtentWord, Value
+from .value import Bound, ExtentWord, Value
 
 if TYPE_CHECKING:
     from aie.helpers.taplib import Affine
@@ -92,20 +85,23 @@ class Built:
     rtps: list[Rtp] = dataclasses.field(default_factory=list)
 
 
-@dataclass_transform(kw_only_default=True, frozen_default=True)
 class Array:
-    """The array tier of an operator, which its array is built from alone.
-    Each subclass is a frozen dataclass, made so as its body finishes, of
-    the fields of ``Declaration.array`` and every member.
+    """The array tier of an operator: what its cores are built from.
 
-    Besides those, an ``Array`` annotates only its operands (``buffers``,
-    ``inputs``, ``outputs``) and ``dev``; a property of the operator it may
-    not, since what it reads would be outside the array's identity.
+    It reads the operator as its cores see it (``Operator.layout``): the
+    parameters of the core-layout key and the members, each member the
+    operand or ``Value`` bound to it.
     """
 
-    def __init_subclass__(cls, **kwargs) -> None:
-        super().__init_subclass__(**kwargs)
-        dataclasses.dataclass(cls, frozen=True, kw_only=True)  # in place
+    def __init__(self, layout: Operator) -> None:
+        self._layout = layout
+
+    def __getattr__(self, name: str) -> Any:
+        layout = vars(self)["_layout"]
+        bound = layout._bound
+        if name in bound:
+            return bound.member(name)
+        return getattr(layout, name)
 
     def build(self) -> Built:
         """Build the array for the bound device.
@@ -118,12 +114,18 @@ class Array:
         )
 
 
-@dataclass_transform(kw_only_default=True, field_specifiers=(field, Auto))
-@dataclasses.dataclass(eq=False, repr=True)
-class Operator:
-    """An operator. Subclass it; every subclass is a dataclass checked as its body finishes."""
+class Operator(jit.Operator, library=True):
+    """An operator. Subclass it; each subclass's body is its declaration
+    (mlir-aie's ``param()``, ``tunable()``, ``per_call()`` and aie.iron's
+    ``In``/``Out``/``InOut``), read as the body finishes.
 
-    declaration: ClassVar[Declaration]
+    Attributes:
+        bound_values: The graph expressions bound to per-call values, by
+            member name.
+        pinned: The tunables its caller gave, which the tuner holds; a
+            profile's and resolve()'s are starting points it may move.
+    """
+
     Array: ClassVar[type[Array]] = Array
     _external: ClassVar[Any] = None
     test: ClassVar[Testing | None] = None
@@ -142,22 +144,11 @@ class Operator:
     # ``dtype``, and ``control_words(ids, address)`` encoding each call's ids.
     per_call_gather: ClassVar[type[Operator] | None] = None
 
-    trace: TraceConfig | None = dataclasses.field(
-        default=None, repr=False, kw_only=True
-    )
-    # The graph expressions bound to per-call values, by member name;
-    # design_key adds their names, since a dict does not hash.
-    bound_values: dict[str, Affine | None] = dataclasses.field(
-        default_factory=dict, repr=False, compare=False, kw_only=True
-    )
-    # The tunables its caller gave, which the tuner holds; a profile's and
-    # resolve()'s are starting points it may move. None until __post_init__
-    # computes it from the Auto fields not None at construction, unless the
-    # profile path (Tracer._construct, Profile.make) already worked that out
-    # from its own pre-merge kwargs and passed it here itself.
-    pinned: frozenset[str] | None = dataclasses.field(
-        default=None, repr=False, compare=False, kw_only=True
-    )
+    trace: TraceConfig | None = None
+    # Rebound, never updated: a copy shares its operator's dict.
+    bound_values: dict[str, Affine | None] = {}
+    pinned: frozenset[str] = frozenset()
+    _image: OperatorImage | None = None
 
     def __init_subclass__(cls, image=None, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -173,7 +164,12 @@ class Operator:
                 f"{cls.__name__} is reference-only, so it takes no image=, "
                 "build(), sequence() or exported_design()"
             )
-        cls.declaration = Declaration(cls, Operator, shipped=image is not None)
+        for m in cls.declaration.per_calls if image is not None else ():
+            if m.derive is None:
+                raise TypeError(
+                    f"{cls.__name__}.{m.name}: a shipped image takes no per-call "
+                    f"value; its stream is built once per shape"
+                )
 
     @classmethod
     def step(cls, *operands: Any, **kwargs: Any) -> Handle:
@@ -199,107 +195,36 @@ class Operator:
             raise TypeError(f"{type(self).__name__}.apply() is for a graph's body")
         return tracer.call(self, operands, values)
 
-    def __post_init__(self) -> None:
-        # dataclass reads an init=False default through the class, where the field is.
-        for f in dataclasses.fields(self):
-            if not f.init and f.default is not dataclasses.MISSING:
-                vars(self).setdefault(f.name, f.default)
-        self._resolved = False
-        self._image: OperatorImage | None = None
-        self._library_values: tuple[Value, ...] = ()
-        # An Enum-domain tunable (GEMM's placement) takes its own Enum
-        # alone, or None (left for resolve() to fill): a string names one
-        # in a profile's JSON, which Profile.load converts before it
-        # reaches here.
-        for name, domain in self.declaration.domains.items():
-            value = vars(self)[name]
-            if (
-                isinstance(domain, type)
-                and issubclass(domain, Enum)
-                and value is not None
-                and not isinstance(value, domain)
-            ):
-                raise TypeError(
-                    f"{type(self).__name__}: {name} ({value!r}) must be a "
-                    f"{domain.__name__}"
-                )
-        if self.pinned is None:
-            self.pinned = frozenset(
-                name
-                for name in self.declaration.tunables
-                if vars(self)[name] is not None
+    def __init__(
+        self,
+        *,
+        bound_values: dict[str, Affine | None] | None = None,
+        pinned: frozenset[str] | None = None,
+        **given: Any,
+    ) -> None:
+        if bound_values:
+            self.bound_values = bound_values
+        super().__init__(**given)
+        if pinned is None:
+            pinned = frozenset(
+                n for n in self.declaration.tunables if given.get(n) is not None
             )
-        for name in self.declaration.autos:
-            spec = ParamSpec.of(vars(type(self))[name])
-            if vars(self)[name] is None and spec.default is not None:
-                setattr(self, name, spec.default)
-        self._derive_params()
-        self.validate()
-        self._bind()
+        self.pinned = pinned
         self._check_complete()
 
     def _check_complete(self) -> None:
         """Run ``compatible()`` once every tunable is known, where the
         device fit is checked.
         """
+        params = self.declaration.params
         if device_fit.get() and not any(
-            vars(self)[n] is None for n in self.declaration.autos
+            p.tunable and vars(self)[n] is None for n, p in params.items()
         ):
             self.compatible()
 
-    def _derive_params(self) -> None:
-        given = [n for n in self.declaration.held if vars(self)[n] is not None]
-        for name, derive in self.declaration.derived.items():
-            if vars(self)[name] is None:
-                value = derive(self)
-                # A T | None field's formula may answer None itself (GEMV's
-                # num_matrices, following num_batches): that is the computed
-                # value, not an unset one.
-                if value is None and name not in self.declaration.nullable:
-                    raise ValueError(
-                        f"{type(self).__name__}: {name} (None) must be given: "
-                        f"nothing computes it"
-                    )
-                setattr(self, name, value)
-        for name in given:
-            expected = self.declaration.derived[name](self)
-            if vars(self)[name] != expected:
-                raise ValueError(
-                    f"{type(self).__name__}: {name} ({vars(self)[name]!r}) must be "
-                    f"{expected!r}, what its other fields make it"
-                )
-
-    def validate(self) -> None:
-        """Check the sequence-tier fields on their own. Runs at construction."""
-
-    def compatible(self) -> None:
-        """Check the extents against the resolved tunables; raise ``ValueError``."""
-
-    def resolve(self, dev) -> Self:
-        """Return a copy with every ``Auto()`` filled from ``dev`` and the extents.
-
-        Raises:
-            Unresolvable: No legal value exists on ``dev``.
-        """
-        return dataclasses.replace(self)
-
     def array_config(self) -> Array:
-        """This operator's ``Array``: what its array is built from, read off
-        the operator by the names the ``Array`` declares. A member absent
-        on this instance (``when=`` False) is None.
-        """
-        array = type(self).Array
-        members = {m.name for m in self.declaration.members}
-        return array(
-            **{
-                f.name: (
-                    self._bound.get(f.name)
-                    if f.name in members
-                    else getattr(self, f.name)
-                )
-                for f in dataclasses.fields(array)
-            }
-        )
+        """This operator's ``Array``: what its array is built from."""
+        return type(self).Array(self.layout())
 
     def tolerance(self) -> Tolerance | None:
         """What each output of the resolved operator is judged by; None where
@@ -329,8 +254,69 @@ class Operator:
         """The design another tool exports for this operator; ``None`` derives it."""
         return None
 
+    @classmethod
+    def shim_columns(
+        cls, dev, num_channels: int = 1, flags: Mapping[str, Any] | None = None
+    ) -> int:
+        """How many of ``dev``'s columns fit the class's streams in the shim DMA budget.
+
+        A ``replicate`` stream is paid once per channel rather than per column,
+        and a stream with no ``per=`` once. A ``when=`` flag ``flags`` leaves
+        out is its default.
+
+        Raises:
+            Unresolvable: Not even one column's streams fit.
+        """
+        flags = flags or {}
+        streams = [
+            m
+            for m in cls.declaration.operands
+            if m.streamed and (m.when is None or flags.get(m.when.name, m.when.default))
+        ]
+        cols = dev.cols
+        for drains, budget in (
+            (False, dev.shim_dma_channels_in),
+            (True, dev.shim_dma_channels_out),
+        ):
+            ours = [m for m in streams if m.drains == drains]
+            lanes = [m for m in ours if m.per is not None]
+            per_core = sum(not m.replicate for m in lanes) * num_channels
+            once = len(ours) - len(lanes)
+            shared = sum(m.replicate for m in lanes) * num_channels + once
+            if per_core:
+                cols = min(cols, (budget - shared) // per_core)
+        if cols < 1:
+            raise Unresolvable(
+                f"{cls.__name__}: one column's streams exceed this device's shim DMA budget"
+            )
+        return cols
+
+    @classmethod
+    def call_operands(cls, args, kwargs) -> tuple[dict[str, Any], list, dict[str, Any]]:
+        """Bind a call's operands as ``(x, ..., [outputs...], *, weight=None,
+        ...)`` would: an optional input is a keyword, so an output is never
+        taken for it.
+
+        Returns:
+            The inputs by name, in declaration order; the outputs; the other
+            keywords.
+        """
+        ins = [m for m in cls.declaration.operands if m.fills]
+        required = [m.name for m in ins if m.when is None]
+        optional = {m.name for m in ins if m.when is not None}
+        given = {k: v for k, v in kwargs.items() if k in optional and v is not None}
+        if len(args) < len(required):
+            raise TypeError(
+                f"{cls.__name__} takes {len(required)} positional operand(s) "
+                f"({', '.join(required)}), got {len(args)}"
+            )
+        bound = {**dict(zip(required, args)), **given}
+        inputs = {m.name: bound[m.name] for m in ins if m.name in bound}
+        rest = {k: v for k, v in kwargs.items() if k not in optional}
+        return inputs, list(args[len(required) :]), rest
+
     def check_shim_columns(self, dev, cols: int, num_channels: int = 1) -> None:
-        allowed = self.declaration.shim_columns(dev, num_channels, vars(self))
+        allowed = self.shim_columns(dev, num_channels, vars(self))
         if cols > allowed:
             raise Unresolvable(
                 f"{type(self).__name__} with {cols} columns x {num_channels} "
@@ -359,7 +345,7 @@ class Operator:
                 f"{type(self).__name__}: the column count defaults from the "
                 f"device; none is bound and none was given"
             )
-        budget = self.declaration.shim_columns(dev, num_channels, vars(self))
+        budget = self.shim_columns(dev, num_channels, vars(self))
         return next((c for c in range(budget, 0, -1) if fits is None or fits(c)), 1)
 
     def addressed_inputs(
@@ -487,63 +473,20 @@ class Operator:
         return cls.sequence is not Operator.sequence
 
     def design_key(self):
-        """Identity for sharing a build: equal keys generate byte-identical MLIR.
-
-        An Enum field (GEMM's placement) is its own value, not the member:
-        a rename must not move a design's key.
+        """Identity for sharing a build: equal keys generate byte-identical
+        MLIR. A graph's bound per-call values add their names.
         """
-        own = tuple(
-            (f.name, v.value if isinstance(v := vars(self)[f.name], Enum) else v)
-            for f in dataclasses.fields(self)
-            if f.compare
-        )
+        cls, own = super().design_key()
         if self.bound_values:
             names = {
                 k: None if v is None else v.name for k, v in self.bound_values.items()
             }
             own += (("values", tuple(sorted(names.items()))),)
-        return (type(self), own)
-
-    def array_key(self):
-        key = (type(self),) + tuple(
-            (name, v.value if isinstance(v := vars(self)[name], Enum) else v)
-            for name in self.declaration.array
-        )
-        if self.trace is not None:
-            key += (("trace", self.trace),)
-        return key
+        return cls, own
 
     def resolved(self, dev=None) -> Self:
-        """This operator resolved for ``dev`` (the bound device unless given),
-        checked as the copy ``resolve`` returns was made (``validate``, then
-        ``compatible`` where the device fit is checked). ``dev`` is bound
-        only while it resolves, so what the operator's operands read of the
-        device then (``Operand.split``) is ``dev``'s; the result does not
-        record it, and what it reads of a device later (``dev``, ``name``)
-        is the current one's.
-        """
-        if self._resolved:
-            return self
-        if dev is None:
-            dev = self.dev
-        with aie_utils.set_current_device(dev):
-            new = self.resolve(dev)
-            if new is self:
-                raise TypeError(
-                    f"{type(self).__name__}.resolve() must return a copy, "
-                    f"dataclasses.replace(self, ...), not self"
-                )
-            if not isinstance(new, type(self)):
-                raise TypeError(
-                    f"{type(self).__name__}.resolve() must return a {type(self).__name__}"
-                )
-            missing = [n for n in self.declaration.autos if vars(new)[n] is None]
-            if missing:
-                raise Unresolvable(
-                    f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
-                )
-            new._resolved = True
-            return new
+        """This operator resolved for ``dev``, the bound device unless given."""
+        return super().resolved(self.dev if dev is None else dev)
 
     def copy(self) -> Self:
         """A fresh instance for one build, keeping resolution and bound values."""
@@ -552,22 +495,14 @@ class Operator:
         return new
 
     def replace(self, **changes: Any) -> Self:
-        """``dataclasses.replace`` that also takes and keeps the ``init=False``
-        fields, which it would refuse and reset: what ``resolve`` returns,
-        ``self.replace(tile=..., derived=...)``. A held ``field(derive=)`` field
-        not in ``changes`` is computed again from the new fields.
-        A ``held=False`` field keeps its value, so pass it again when you
-        change what it reads.
+        """A copy with ``changes``, which may name any parameter, the
+        ``bound_values`` or the ``pinned`` tunables; checked against the
+        device once complete.
         """
-        changes = {n: None for n in self.declaration.held} | changes
-        fixed = {
-            f.name: changes.pop(f.name, vars(self)[f.name])
-            for f in dataclasses.fields(self)
-            if not f.init
-        }
-        new = dataclasses.replace(self, **changes)
-        vars(new).update(fixed)
-        new._bind()
+        bound_values = changes.pop("bound_values", self.bound_values)
+        pinned = changes.pop("pinned", self.pinned)
+        new = super().replace(**changes)
+        new.bound_values, new.pinned = bound_values, pinned
         new._check_complete()
         return new
 
@@ -579,7 +514,9 @@ class Operator:
         unknown = [n for n in tunables if n not in self.declaration.tunables]
         if unknown:
             raise TypeError(f"{type(self).__name__} has no tunable {unknown}")
-        return dataclasses.replace(self, **tunables)
+        # What resolve() computes is computed again.
+        fixed = {n: None for n, p in self.declaration.params.items() if not p.init}
+        return self.replace(**fixed, **tunables)
 
     def _domains(self, dev) -> dict[str, tuple[Any, ...]]:
         """The values the tuner tries for each tunable it searches, asked of
@@ -593,7 +530,7 @@ class Operator:
         """
         found = {}
         for name in self.declaration.tunables:
-            domain = self.declaration.domains.get(name)
+            domain = self.declaration.params[name].domain
             # A precision is the model's to choose (Graph.precision), not a
             # step's timing: its output is judged against the model's own.
             if name in self.pinned or domain is None or domain is Precision:
@@ -611,7 +548,7 @@ class Operator:
 
     @property
     def buffers(self) -> list[Operand]:
-        return [self._bound[m.name] for m in self._members_io()]
+        return [self._bound.member(m.name) for m in self._members_io()]
 
     @property
     def inputs(self) -> list[Operand]:
@@ -624,28 +561,28 @@ class Operator:
     @property
     def values(self) -> list[Value]:
         """The per-call values: each gets a device parameter."""
-        values = [self._bound[m.name] for m in self._value_members]
-        return [v for v in values if v.per_call]
+        return [v for v in self._value_members if v.per_call]
 
     @property
     def residents(self) -> dict[str, Any]:
         """What the preamble writes once per build, by name."""
         fixed = self._derived_under_bound
-        return {
-            m.name: m.derive(self) if fixed.get(m.name) is None else fixed[m.name]
-            for m in self.declaration.members
-            if isinstance(m, Value)
-            and m.derive is not None
-            and not self._bound[m.name].per_call
-        }
+        out = {}
+        for m in self.declaration.per_calls:
+            v = self._bound.member(m.name)
+            if v.derive is not None and not v.per_call:
+                out[m.name] = (
+                    v.derive(self) if fixed.get(m.name) is None else fixed[m.name]
+                )
+        return out
 
     @property
     def bound_extents(self) -> dict[str, Affine | None]:
         bound = self.bound_values
         return {
             m.name: bound[m.name]
-            for m in self.declaration.members
-            if isinstance(m, Extent) and m.name in bound
+            for m in self.declaration.per_calls
+            if m.bounds is not None and m.name in bound
         }
 
     def _per_call_derived(self) -> frozenset[str]:
@@ -666,10 +603,10 @@ class Operator:
         forms = None if None in bound.values() else bound
         out: dict[str, int | None] = {}
         for m in self._value_members:
-            if not (isinstance(m, Value) and m.derive is not None):
+            if m.derive is None:
                 continue
             reads: set[str] = set()
-            vars(probe)["_extent_reads"] = reads
+            vars(probe)["_bound"] = self._bound.recording(reads)
             try:
                 m.derive(probe)
             except (TypeError, ValueError, AttributeError):
@@ -690,21 +627,21 @@ class Operator:
     def derived_at(self, name: str, **extents: int) -> Any:
         """The word the host writes for ``name`` with the extents at the given bounds."""
         member = next((m for m in self._value_members if m.name == name), None)
-        if not (isinstance(member, Value) and member.derive is not None):
+        if member is None or member.derive is None:
             raise TypeError(f"{type(self).__name__}.{name} is not a derived value")
         unknown = set(extents) - {
-            m.name for m in self.declaration.members if isinstance(m, Extent)
+            m.name for m in self.declaration.per_calls if m.bounds is not None
         }
         if unknown:
             raise TypeError(
-                f"{type(self).__name__} declares no Extent {sorted(unknown)}"
+                f"{type(self).__name__} declares no extent {sorted(unknown)}"
             )
         return member.derive(self._at_extents(**extents))
 
     def _at_extents(self, **extents: int) -> Self:
-        """A copy whose ``Extent`` attributes read as the given numbers."""
+        """A copy whose extents (``per_call(bounds=)``) read as the given numbers."""
         at = copy.copy(self)
-        vars(at)["_extents"] = {**self.__dict__.get("_extents", {}), **extents}
+        vars(at)["_bound"] = self._bound.at(**extents)
         return at
 
     def extent_unit(self, buffer: str) -> int | None:
@@ -715,9 +652,9 @@ class Operator:
         return None
 
     def value(self, name: str) -> Value:
-        """The device word of value ``name`` (an ``Extent`` attribute reads as an integer)."""
+        """The device word of value ``name`` (an extent attribute reads as an integer)."""
         try:
-            return self._bound[name]
+            return self._bound.member(name)
         except KeyError:
             raise TypeError(
                 f"{type(self).__name__} declares no value {name!r}"
@@ -770,32 +707,36 @@ class Operator:
 
     def _bind(self) -> None:
         vars(self).pop("_derived_under_bound", None)
-        bound: dict[str, Any] = {}
-        for m in self._members_io():
-            bound[m.name] = m.of(self)
+        members: dict[str, Any] = {}
         for m in self.declaration.members:
-            if isinstance(m, Value):
-                bound[m.name] = m.of(self)
-        self._bound = bound
+            if isinstance(m, PerCallMember):
+                members[m.name] = Value(
+                    self,
+                    m.name,
+                    dtype=m.dtype,
+                    derive=m.derive,
+                    bounds=m.bounds,
+                    words=getattr(m, "words", 1),
+                )
+            elif m.when is None or vars(self)[m.when.name]:
+                members[m.name] = Operand(m, self)
+        self._bound = Bound(self, members)
         # The values the library adds: tiles per bound operand.
-        words: list[Value] = []
-        for e in self.declaration.members:
-            if not isinstance(e, Extent):
+        for e in self.declaration.per_calls:
+            if e.bounds is None:
                 continue
-            for b in self._members_io():
-                # Asked first: an unshortened shape may Select on an Auto() field.
+            for b in self.buffers:
+                # Asked first: an unshortened shape may Select on a tunable.
                 if b.streamed and self.extent_unit(b.name) != 0:
-                    axis = bound[b.name].extent_axis(e)
+                    axis = b.extent_axis(e)
                     if axis is not None:
-                        words.append(ExtentWord(type(self), e, b.name, axis))
-        for word in words:
-            bound[word.name] = word.of(self)
-        self._library_values = tuple(words)
+                        word = ExtentWord(self, e.name, b.name, axis)
+                        dict.__setitem__(self._bound, word.name, word)
 
     @property
     def _value_members(self) -> list[Value]:
-        own = [m for m in self.declaration.members if isinstance(m, Value)]
-        return own + list(self._library_values)
+        """Every per-call value: the declared ones, then the library's."""
+        return [v for v in dict.values(self._bound) if isinstance(v, Value)]
 
     @property
     def dev(self):
@@ -811,23 +752,15 @@ class Operator:
             )
         op = self.resolved(dev)
         own = [
-            f"{f.name}{spelled(vars(op)[f.name])}"
-            for f in dataclasses.fields(op)
-            if f.repr and vars(op)[f.name] is not None
+            f"{n}{spelled(vars(op)[n])}"
+            for n, p in op.declaration.params.items()
+            if p.repr and vars(op)[n] is not None
         ]
         return "_".join([type(self).__name__, *own, dev.name])
 
-    def _members_io(self) -> list[Operand]:
+    def _members_io(self) -> list:
         return [
             m
-            for m in self.declaration.members
-            if isinstance(m, Operand) and (m.when is None or vars(self)[m.when.name])
+            for m in self.declaration.operands
+            if m.when is None or vars(self)[m.when.name]
         ]
-
-    def __repr__(self) -> str:
-        own = ", ".join(
-            f"{f.name}={vars(self)[f.name]!r}"
-            for f in dataclasses.fields(self)
-            if f.repr
-        )
-        return f"{type(self).__name__}({own})"

@@ -30,7 +30,6 @@ from aie.iron.runtime.dmatask import emit_shim_transfer
 
 from ..declare import Built, Operator, Value
 from ..declare.operand import Operand, active_runtime, slots
-from ..declare.value import DispatchValue
 
 
 class OperatorRuntime(Runtime):
@@ -206,7 +205,7 @@ class OperatorRuntime(Runtime):
                     f"{value.name} has no device parameter: it is not per call "
                     f"here (Value.per_call), or the build has not created it yet"
                 )
-        if isinstance(length_parameter, DispatchValue):
+        if length_parameter is not None and length_parameter.dispatch:
             raise ValueError(
                 f"{length_parameter.name} is a DispatchTime value; a per-call "
                 f"length is a scratchpad word patched into the descriptor"

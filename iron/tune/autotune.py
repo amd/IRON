@@ -172,8 +172,7 @@ def settings(
     """
     if pinned - op.pinned:
         resolved = op.resolved(dev)
-        op = dataclasses.replace(
-            op,
+        op = op.replace(
             pinned=op.pinned | pinned,
             **{name: vars(resolved)[name] for name in pinned - op.pinned},
         )
@@ -277,7 +276,7 @@ class Shape:
 
     def __init__(self, op: Operator):
         self.cls = type(op)
-        given = {f.name: vars(op)[f.name] for f in dataclasses.fields(op)}
+        given = {n: vars(op)[n] for n in op.declaration.params}
         self.dims = Profile.dims(self.cls, given)
         # Each operator, where it is timed (``Timed.op_points``) and what its
         # inputs hold (``Timed.op_inputs``).

@@ -19,11 +19,12 @@ that does not wrap a ``mask`` of -1.
 
 import numpy as np
 from aie.extras.dialects import arith
-from aie.iron import CompileTime, In, ObjectFifo, Out, Worker
+from aie.iron import In, ObjectFifo, Out, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import param
 
-from iron.common import Built, Operator, field
+from iron.common import Built, Operator
 from iron.common.testing import Case, Testing
 
 # A program row: (plane, index, scale, bias, down, mul, add, lo, hi, mask, shift).
@@ -85,9 +86,9 @@ class Emit(Operator):
         draw=_program,
     )
 
-    slots: CompileTime[int] = field()
-    carried: CompileTime[int] = field()
-    rows: CompileTime[int] = field(derive=lambda op: op.slots + op.carried, repr=False)
+    slots: int = param()
+    carried: int = param()
+    rows: int = param(derive=lambda op: op.slots + op.carried, repr=False)
 
     program = In(rows, ROW, dtype=np.int32, obj_shape=(rows, ROW), depth=1)
     planes = In(2, carried, dtype=np.int32, obj_shape=(2, carried), depth=1)

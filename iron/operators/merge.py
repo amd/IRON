@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import CompileTime, ExternalFunction, In, ObjectFifo, Out, Worker
+from aie.iron import ExternalFunction, In, ObjectFifo, Out, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import param, per_call
 
-from iron.common import Built, Operator, Rtp, Value, field
+from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 
 # EmbeddingGemma 2's placeholders, (id, row), the towers' rows past 2048 text rows.
@@ -91,18 +92,18 @@ class Merge(Operator):
         ),
     )
 
-    rows: CompileTime[int] = field()
+    rows: int = param()
     # Each placeholder's (token id, first row of its soft tokens).
-    placeholders: CompileTime[tuple[tuple[int, int], ...]] = field(array=True)
-    block: CompileTime[int] = field(default=64)
-    offset: CompileTime[bool] = field(default=False)
-    kinds: CompileTime[int] = field(derive=lambda op: len(op.placeholders), repr=False)
+    placeholders: tuple[tuple[int, int], ...] = param(array=True)
+    block: int = param(default=64)
+    offset: bool = param(default=False)
+    kinds: int = param(derive=lambda op: len(op.placeholders), repr=False)
 
     ids = In(rows, dtype=np.int32, obj_shape=(block,))
     before = In(kinds, dtype=np.int32, obj_shape=(kinds,), depth=1, when=offset)
     merge = Out(rows, dtype=np.int32, obj_shape=(block,))
 
-    count = Value(derive=lambda op: op.rows // op.block)
+    count = per_call(derive=lambda op: op.rows // op.block)
 
     def validate(self) -> None:
         tokens = [t for t, _ in self.placeholders]

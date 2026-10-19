@@ -1,38 +1,40 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The scalars an operator's array reads that no operand carries."""
+"""The per-call values an operator's cores read, as one operator holds them.
+
+An operator's body declares them with mlir-aie's ``per_call()``; ``Value``
+is one on an operator instance, with the device parameter a build gives it.
+"""
 
 from __future__ import annotations
 
-import copy
-from typing import TYPE_CHECKING, Any, Callable, Self, overload
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 from aie.iron import ScratchpadParameter, ceildiv
 
-from .member import Member
-
 if TYPE_CHECKING:
+    from aie.utils.compile.jit.params import Param
+
     from .operator import Operator
 
 
-class Value(Member["Value"]):
-    """A value the array reads: per call when a graph binds it, else written
-    once per build before the first DMA.
+class Value:
+    """A per-call value on one operator: per call when a graph binds it,
+    else written once per build before the first DMA.
 
-    Declared in an operator's body; on an instance, ``self.count`` is the
-    value bound to it (`of`), which a build gives its device parameter and
-    a core reads through its ``Rtp``.
-
-    Args:
-        dtype: An integer type: the scratchpad encoding has no floating point.
-        derive: The once-per-build value, from the operator: a word, or
-            ``words`` of them.
-        words: The words it holds in a core's runtime parameters; a block
-            of several is written once per build.
+    On an instance, ``op.value("count")`` is it; a build gives it its device
+    parameter and a core reads it through its ``Rtp``.
 
     Attributes:
+        name: Its member's name.
+        dtype: Its integer type.
+        derive: The once-per-build value, from the operator: a word, or
+            ``words`` of them; None for one every call gives.
+        bounds: The ``param()`` it bounds per call (``per_call(bounds=)``),
+            an extent, or None.
+        words: The words it holds in a core's runtime parameters.
         param: The build's parameter: on a full ELF the ``ScratchpadParameter``,
             on an xclbin (no scratchpad) a dispatch-time scalar.
         ssa: Its value in the sequence body, on an xclbin.
@@ -40,38 +42,47 @@ class Value(Member["Value"]):
 
     def __init__(
         self,
+        op: Operator,
+        name: str,
         *,
         dtype: Any = np.int32,
         derive: Callable[[Any], Any] | None = None,
+        bounds: Param | None = None,
         words: int = 1,
     ) -> None:
-        if np.dtype(dtype).kind == "f":
-            raise TypeError(
-                f"{type(self).__name__} values cannot be floating point: the "
-                f"scratchpad encoding zeroes the top two bits of the value"
-            )
+        self.op = op
+        self.name = name
         self.dtype = dtype
         self.derive = derive
+        self.bounds = bounds
         self.words = words
-        self.op: Operator | None = None
         self.param: Any = None
         self.ssa = None
-
-    def of(self, op: Operator) -> Self:
-        """This value on ``op``, with no parameter yet."""
-        bound = copy.copy(self)
-        bound.op = op
-        return bound
 
     @property
     def per_call(self) -> bool:
         """A call gives this value: a graph binds it, or its ``derive``
-        reads an extent a graph bounds. A value with no ``derive`` always is.
+        reads an extent a graph bounds. A value with no ``derive`` and no
+        ``bounds`` always is.
         """
+        op = self.op
+        if self.bounds is not None:
+            return self.name in op.bound_values
         if self.derive is None:
             return True
-        op = self.op
         return self.name in op.bound_values or self.name in op._per_call_derived()
+
+    @property
+    def dispatch(self) -> bool:
+        """The instruction stream is regenerated around this value every
+        call: one every call gives, on an operator with an exported design.
+        A full ELF cannot carry it.
+        """
+        return (
+            self.derive is None
+            and self.bounds is None
+            and self.op.exported_design() is not None
+        )
 
     @property
     def symbol(self) -> str:
@@ -94,55 +105,7 @@ class Value(Member["Value"]):
         return isinstance(self.param, ScratchpadParameter)
 
     def __repr__(self) -> str:
-        if self.op is None:
-            return f"{type(self).__name__}({np.dtype(self.dtype).name})"
         return f"<{type(self).__name__} {self.name} {np.dtype(self.dtype).name}>"
-
-
-class DispatchValue(Value):
-    """A per-call value the instruction stream is regenerated around:
-    declared ``name: DispatchTime[T] = field(init=False)`` (aie.iron's
-    marker), ``T`` its dtype.
-
-    Can change DMA sizes, strides and offsets; costs a stream regeneration
-    and a buffer allocation per call; cannot be packaged as a full ELF.
-    """
-
-
-class Extent(Value):
-    """A ``field()`` shape field a graph may bound per call.
-
-    ``valid = Extent(size)`` reads as ``size`` until a graph bounds an
-    operand the field sizes (``x[:n]``); then it, and every ``Value`` whose
-    ``derive`` reads it, is per call. The image is built for the full value.
-    """
-
-    def __init__(self, field: Any, *, dtype: Any = np.int32) -> None:
-        super().__init__(dtype=dtype)
-        self.field = field
-
-    @property
-    def per_call(self) -> bool:
-        return self.name in self.op.bound_values
-
-    @overload
-    def __get__(self, instance: None, owner: type | None = None) -> Self: ...
-    @overload
-    def __get__(self, instance: object, owner: type | None = None) -> int: ...
-    def __get__(self, instance, owner=None):
-        if instance is None:
-            return self
-        # The extents a derive reads, recorded on the copy Operator._per_call_derived probes.
-        reads = instance.__dict__.get("_extent_reads")
-        if reads is not None:
-            reads.add(self.name)
-        bound = instance.__dict__.get("_extents", {}).get(self.name)
-        if bound is not None:
-            return bound
-        return vars(instance)[self.field.name]
-
-    def __repr__(self) -> str:
-        return f"Extent({self.field.name})"
 
 
 class ExtentWord(Value):
@@ -150,15 +113,13 @@ class ExtentWord(Value):
     tiles: a value the library adds per bound operand.
     """
 
-    def __init__(self, owner: type, extent: Extent, buffer: str, axis: int) -> None:
-        super().__init__(derive=self.tiles)
-        self.owner = owner
-        self.name = f"{extent.name}_{buffer}"
+    def __init__(self, op: Operator, extent: str, buffer: str, axis: int) -> None:
+        super().__init__(op, f"{extent}_{buffer}", derive=self.tiles)
         self.extent, self.buffer, self.axis = extent, buffer, axis
 
     def tiles(self, op) -> int:
         """The word on ``op``; reads the extent first, which makes it per call."""
-        extent = self.extent.__get__(op)
+        extent = getattr(op, self.extent)
         return ceildiv(extent, self.divisor(op))
 
     def divisor(self, op) -> int:
@@ -167,4 +128,47 @@ class ExtentWord(Value):
         return lanes * b.extent_unit(self.axis)
 
     def __repr__(self) -> str:
-        return f"<tiles per lane of {self.buffer} under {self.extent.name}>"
+        return f"<tiles per lane of {self.buffer} under {self.extent}>"
+
+
+class Bound(dict):
+    """What an operator's members are bound to, by name, as mlir-aie's
+    members read them (``op.x`` is ``op._bound["x"]``).
+
+    An extent (``per_call(bounds=)``) reads as an integer: the parameter it
+    bounds, or the number `at` gives it. A copy made by `recording` notes
+    each extent read, which tells which derived values follow a bound.
+    """
+
+    def __init__(
+        self,
+        op: Operator,
+        members: dict[str, Any],
+        extents: dict[str, Any] | None = None,
+        reads: set[str] | None = None,
+    ) -> None:
+        super().__init__(dict.items(members))
+        self.op = op
+        self.extents = extents or {}
+        self.reads = reads
+
+    def __getitem__(self, name: str) -> Any:
+        member = super().__getitem__(name)
+        if not (isinstance(member, Value) and member.bounds is not None):
+            return member
+        if self.reads is not None:
+            self.reads.add(name)
+        at = self.extents.get(name)
+        return vars(self.op)[member.bounds.name] if at is None else at
+
+    def member(self, name: str) -> Any:
+        """The operand or ``Value`` bound to ``name``, an extent's too."""
+        return super().__getitem__(name)
+
+    def at(self, **extents: Any) -> Bound:
+        """These members, with the given extents reading as the given numbers."""
+        return Bound(self.op, self, {**self.extents, **extents}, self.reads)
+
+    def recording(self, reads: set[str]) -> Bound:
+        """These members, each extent read noted in ``reads``."""
+        return Bound(self.op, self, self.extents, reads)

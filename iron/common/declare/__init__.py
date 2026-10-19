@@ -1,26 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The declaration layer: operators and their members.
+"""IRON's half of an operator: building, graphs and tuning.
 
-A host buffer's dimension is a ``field()`` or an integer literal, so
-inference stays a lookup (``Declaration.infer``); a tile's may also be a
-tunable, since inference never reads one.
+The declaration itself (``param``, ``tunable``, ``per_call``, ``Select``
+and the base operator) is mlir-aie's, in ``aie.utils.compile.jit``.
 """
 
-from .field import Auto, Unresolvable, field
-from .shape import Select
+from aie.utils.compile.jit.operator import Unresolvable
+
 from .operand import Operand
 from .operator import Built, Operator
 from .precision import Precision
 from .profile import Profile
-from .rtp import Rtp
-from .value import Extent, Value
+from .rtp import Block, Rtp
+from .value import Value
 from .xclbin import Xclbin
 
 __all__ = [
+    "Block",
     "Built",
-    "Extent",
     "Operand",
     "Operator",
     "Precision",
@@ -29,7 +28,4 @@ __all__ = [
     "Unresolvable",
     "Value",
     "Xclbin",
-    "Auto",
-    "field",
-    "Select",
 ]

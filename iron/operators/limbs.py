@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import CompileTime, In
+from aie.iron import In
 from aie.iron.kernels import datamovement
+from aie.utils.compile.jit.params import param
 
-from iron.common import Rowwise, field
+from iron.common import Rowwise
 from iron.common.elementwise import CORES
 from iron.common.testing import Case, Testing
 
@@ -34,8 +35,8 @@ class Limbs(Rowwise):
         draw=lambda op: dict(normal=(op.x,)),
     )
 
-    line: CompileTime[int] = field()
-    tile_size: CompileTime[int] = field(derive=lambda op: 6 * op.line)
+    line: int = param()
+    tile_size: int = param(derive=lambda op: 6 * op.line)
 
     x = In(
         Rowwise.rows,

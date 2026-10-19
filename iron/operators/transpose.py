@@ -2,19 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-import dataclasses
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import divisors, widths
+from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Operator, Rtp, Value, field
+from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 
 
@@ -63,26 +62,26 @@ class Transpose(Operator):
 
     test = Testing(_cases)
 
-    M: CompileTime[int] = field()
-    N: CompileTime[int] = field()
-    num_batches: CompileTime[int | None] = field(default=None)
-    m: CompileTime[int] = Auto(
+    M: int = param()
+    N: int = param()
+    num_batches: int | None = param(default=None)
+    m: int = tunable(
         default=64,
         domain=lambda op, dev, t: divisors(t, of=op.M, step=op.s, cap=8192 // op.n),
     )
-    n: CompileTime[int] = Auto(
+    n: int = tunable(
         default=64,
         domain=lambda op, dev, t: divisors(t, of=op.N, step=op.s, cap=8192 // op.m),
     )
-    s: CompileTime[int] = Auto(default=8, domain=(8, 4), array=True)
-    num_aie_columns: CompileTime[int] = Auto(domain=widths)
-    num_channels: CompileTime[int] = Auto(default=1, domain=widths)
+    s: int = tunable(default=8, domain=(8, 4))
+    num_aie_columns: int = tunable(domain=widths)
+    num_channels: int = tunable(default=1, domain=widths)
 
     x = In(num_batches, M, N, obj_shape=(m, n), per=(num_aie_columns, num_channels))
     y = Out(num_batches, N, M, obj_shape=(m, n), per=(num_aie_columns, num_channels))
-    batches = Value(derive=lambda op: op.num_batches or 1)
-    col_tiles = Value(derive=lambda op: op.N // op.n // op.num_aie_columns)
-    chan_tiles = Value(derive=lambda op: op.M // op.m // op.num_channels)
+    batches = per_call(derive=lambda op: op.num_batches or 1)
+    col_tiles = per_call(derive=lambda op: op.N // op.n // op.num_aie_columns)
+    chan_tiles = per_call(derive=lambda op: op.M // op.m // op.num_channels)
 
     def validate(self) -> None:
         if self.m % self.s != 0:
@@ -114,7 +113,7 @@ class Transpose(Operator):
             self.num_channels,
             fits=lambda c: self.N % c == 0 and (self.N // c) % self.n == 0,
         )
-        return dataclasses.replace(self, num_aie_columns=cols)
+        return self.replace(num_aie_columns=cols)
 
     def compatible(self) -> None:
         cols, chans = self.num_aie_columns, self.num_channels

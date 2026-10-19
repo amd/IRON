@@ -29,7 +29,6 @@ from aie.iron import (
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from ..declare import Operator
-from ..declare.value import DispatchValue
 from .runtime import OperatorRuntime
 
 
@@ -180,7 +179,7 @@ class BuiltArray:
         op = design.op.resolved(design.op.dev).copy()  # a build binds streams
         # Before Array.build(), which may hand a core-read value to a worker.
         for value in op.values:
-            if design.full_elf and not isinstance(value, DispatchValue):
+            if design.full_elf and not value.dispatch:
                 value.param = ScratchpadParameter(
                     words.get(value.symbol, value.symbol), value.dtype
                 )

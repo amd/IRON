@@ -6,22 +6,13 @@
 import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import (
-    Buffer,
-    CompileTime,
-    In,
-    ObjectFifo,
-    Out,
-    TaskGroup,
-    Worker,
-    kernels,
-)
+from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, kernels
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import widths
+from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
+from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 from iron.operators.state_slices import SLICE, block_rows, resolve_heads
 
@@ -79,24 +70,18 @@ class SelectiveScan(Operator):
         draw=_trained,
     )
 
-    rows: CompileTime[int] = field(array=True)
-    heads: CompileTime[int] = field(array=True)
-    head_dim: CompileTime[int] = field(array=True)
-    state_size: CompileTime[int] = field(array=True)
-    groups: CompileTime[int] = field(default=1, array=True)
-    columns: CompileTime[int] = Auto(domain=widths)
-    inner: CompileTime[int] = field(
-        derive=lambda op: op.heads * op.head_dim, repr=False, array=True
-    )
-    width: CompileTime[int] = field(
+    rows: int = param(array=True)
+    heads: int = param(array=True)
+    head_dim: int = param(array=True)
+    state_size: int = param(array=True)
+    groups: int = param(default=1, array=True)
+    columns: int = tunable(domain=widths)
+    inner: int = param(derive=lambda op: op.heads * op.head_dim, repr=False, array=True)
+    width: int = param(
         derive=lambda op: op.inner + 2 * op.groups * op.state_size, repr=False
     )
-    block: CompileTime[int] = field(
-        derive=lambda op: block_rows(op) * SLICE, repr=False
-    )
-    slice_state: CompileTime[int] = field(
-        derive=lambda op: SLICE * op.state_size, repr=False
-    )
+    block: int = param(derive=lambda op: block_rows(op) * SLICE, repr=False)
+    slice_state: int = param(derive=lambda op: SLICE * op.state_size, repr=False)
 
     xbc = In(rows, width, obj_shape=(width,), per=(columns,))
     dt = In(rows, heads, obj_shape=(heads,), per=(columns,))
@@ -120,8 +105,8 @@ class SelectiveScan(Operator):
         per=(columns,),
         depth=1,
     )
-    valid = Extent(rows)
-    count = Value(derive=lambda op: op.valid)
+    valid = per_call(bounds=rows)
+    count = per_call(derive=lambda op: op.valid)
 
     def validate(self) -> None:
         if self.head_dim % SLICE or self.heads % self.groups or self.heads % 2:

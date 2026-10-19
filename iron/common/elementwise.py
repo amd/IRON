@@ -29,7 +29,7 @@ from collections.abc import Iterable, Mapping
 from typing import ClassVar, Self
 
 import numpy as np
-from aie.iron import CompileTime, In, ObjectFifo, Out, Worker, ceildiv
+from aie.iron import In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
@@ -37,20 +37,10 @@ from aie.iron import kernels
 from aie.iron.kernels import eltwise
 from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance, Verdict, round_to
-from aie.utils.compile.jit.params import divisors, widths
+from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from .declare import (
-    Auto,
-    Built,
-    Extent,
-    Operand,
-    Operator,
-    Rtp,
-    Unresolvable,
-    Value,
-    field,
-)
+from .declare import Built, Operand, Operator, Rtp, Unresolvable
 from .testing import Case, Testing
 
 # Small enough to divide any extent a model has, at some DMA efficiency.
@@ -192,9 +182,7 @@ class Sweep:
             (length, cols, chans, min(length // (cols * chans), cap))
             for length in self.lengths
             for chans in self.channels or (1,)
-            for cols in range(
-                1, cls.declaration.shim_columns(dev, chans, self.extra) + 1
-            )
+            for cols in range(1, cls.shim_columns(dev, chans, self.extra) + 1)
         ]
         grids = [g for g in grids if g[1] * g[2] * g[3] == g[0]]
         regular = [g for g in grids if g[0] == self.regular]
@@ -216,9 +204,7 @@ class Sweep:
             tile = min(BENCH_TILE, cap)
             cols = next(
                 c
-                for c in range(
-                    cls.declaration.shim_columns(dev, chans, self.extra), 0, -1
-                )
+                for c in range(cls.shim_columns(dev, chans, self.extra), 0, -1)
                 if self.bench % (c * chans * tile) == 0
             )
             out.append(
@@ -254,16 +240,15 @@ class Elementwise(Operator):
     is the largest line the kernel holds.
     """
 
-    num_aie_columns: CompileTime[int] = Auto(domain=widths, array=True)
-    num_channels: CompileTime[int] = Auto(default=1, domain=widths, array=True)
-    tile_size: CompileTime[int] = Auto(
+    num_aie_columns: int = tunable(domain=widths)
+    num_channels: int = tunable(default=1, domain=widths)
+    tile_size: int = tunable(
         domain=lambda op, dev, t: divisors(
             t, of=op.outputs[0].elements, step=64, cap=op.tile_cap, span=3
         ),
-        array=True,
     )
 
-    count = Value(
+    count = per_call(
         derive=lambda op: ceildiv(op.valid_elements, op.cores * op.tile_size),
     )
 
@@ -284,7 +269,7 @@ class Elementwise(Operator):
             self.num_channels,
             fits=lambda c: out.elements % (c * self.num_channels * tile_size) == 0,
         )
-        return dataclasses.replace(self, num_aie_columns=cols, tile_size=tile_size)
+        return self.replace(num_aie_columns=cols, tile_size=tile_size)
 
     def compatible(self) -> None:
         (out,) = self.outputs
@@ -595,8 +580,8 @@ class UnaryElementwise(Elementwise):
     """A flat buffer in, a flat buffer of the same size out."""
 
     test = Testing(Sweep())
-    size: CompileTime[int] = field()
-    valid = Extent(size)
+    size: int = param()
+    valid = per_call(bounds=size)
 
     x = In(
         size,
@@ -619,17 +604,15 @@ class UnaryElementwise(Elementwise):
             for n in ("num_aie_columns", "num_channels")
             if n in self.declaration.tunables
         }
-        return dataclasses.replace(
-            self, size=elements, tile_size=line, bound_values={}, **one
-        )
+        return self.replace(size=elements, tile_size=line, bound_values={}, **one)
 
 
 class BinaryElementwise(Elementwise):
     """Two flat buffers in, one of the same size out."""
 
     test = Testing(Sweep(channels=None))
-    size: CompileTime[int] = field()
-    valid = Extent(size)
+    size: int = param()
+    valid = per_call(bounds=size)
 
     a = In(
         size,
@@ -662,9 +645,9 @@ class Rowwise(Elementwise):
 
     test = Testing(Sweep(rows=True))
 
-    rows: CompileTime[int] = field()
-    valid = Extent(rows)
-    tile_size: CompileTime[int] = field(array=True)
+    rows: int = param()
+    valid = per_call(bounds=rows)
+    tile_size: int = param(array=True)
 
     tile_cap: ClassVar[int] = 8192
 
@@ -696,7 +679,7 @@ class Rowwise(Elementwise):
             for n in ("num_aie_columns", "num_channels")
             if n in self.declaration.tunables
         }
-        return dataclasses.replace(self, rows=elements // line, bound_values={}, **one)
+        return self.replace(rows=elements // line, bound_values={}, **one)
 
 
 class WeightedRowwise(Rowwise):
@@ -717,7 +700,7 @@ class WeightedRowwise(Rowwise):
         ]
     )
 
-    weighted: CompileTime[bool] = field(default=False)
+    weighted: bool = param(default=False)
 
     x = In(
         Rowwise.rows,
@@ -892,8 +875,8 @@ class RowBroadcast(Rowwise):
         ]
     )
 
-    segments: CompileTime[int] = Auto(init=False, array=True)
-    line: CompileTime[int] = Auto(init=False)
+    segments: int = tunable(init=False)
+    line: int = tunable(init=False)
 
     x = In(
         Rowwise.rows,

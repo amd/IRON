@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import CompileTime, ObjectFifo, Worker
+from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise
+from aie.utils.compile.jit.params import param, per_call
 from ml_dtypes import bfloat16
 
-from iron.common import Built, KernelCall, Rtp, UnaryElementwise, Value, field
+from iron.common import Built, KernelCall, Rtp, UnaryElementwise
 from iron.common.elementwise import Sweep
 from iron.common.testing import Case, Testing
 
@@ -27,11 +28,11 @@ class Clamp(UnaryElementwise):
         draw=lambda op: dict(centered=(op.x,)),
     )
 
-    low: CompileTime[float] = field()
-    high: CompileTime[float] = field()
+    low: float = param()
+    high: float = param()
 
-    low_bits = Value(derive=lambda op: op.bits()[0])
-    high_bits = Value(derive=lambda op: op.bits()[1])
+    low_bits = per_call(derive=lambda op: op.bits()[0])
+    high_bits = per_call(derive=lambda op: op.bits()[1])
 
     def validate(self) -> None:
         if not np.float32(self.low) <= np.float32(self.high):

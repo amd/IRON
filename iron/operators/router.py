@@ -10,17 +10,16 @@ and a softmax over the chosen logits. A select core reduces each row to a
 weights, a pair of cores for each lane of rows.
 """
 
-import dataclasses
 
 import numpy as np
-from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, Worker, ceildiv
+from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import moe, sample
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import widths
+from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Extent, Operator, Rtp, Unresolvable, Value, field
+from iron.common import Built, Operator, Rtp, Unresolvable
 from iron.common.testing import Case, Testing
 
 
@@ -49,17 +48,17 @@ class TopKRouter(Operator):
         draw=_logits,
     )
 
-    experts: CompileTime[int] = field()
-    top_k: CompileTime[int] = field()
-    rows: CompileTime[int] = field(default=1)
-    weights_width: CompileTime[int] = field(derive=lambda op: 2 * op.top_k, repr=False)
-    pairs: CompileTime[int] = Auto(domain=widths)
+    experts: int = param()
+    top_k: int = param()
+    rows: int = param(default=1)
+    weights_width: int = param(derive=lambda op: 2 * op.top_k, repr=False)
+    pairs: int = tunable(domain=widths)
 
     logits = In(rows, experts, obj_shape=(experts,), per=(pairs,))
     ids = Out(rows, top_k, dtype=np.int32, obj_shape=(top_k,), per=(pairs,))
     weights = Out(rows, weights_width, obj_shape=(weights_width,), per=(pairs,))
-    valid = Extent(rows)
-    count = Value(derive=lambda op: ceildiv(op.valid, op.pairs))
+    valid = per_call(bounds=rows)
+    count = per_call(derive=lambda op: ceildiv(op.valid, op.pairs))
 
     def validate(self) -> None:
         if not 1 <= self.top_k <= self.experts:
@@ -77,7 +76,7 @@ class TopKRouter(Operator):
                 f"TopKRouter: {self.rows} rows over {pairs} pairs of cores, on a "
                 f"device of {dev.cols} columns"
             )
-        return dataclasses.replace(self, pairs=pairs)
+        return self.replace(pairs=pairs)
 
     def compatible(self) -> None:
         config = self.array_config()

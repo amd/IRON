@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import dataclasses
 import functools
 from typing import ClassVar
 
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.iron import CompileTime, DispatchTime, ExternalFunction, In, Out
+from aie.iron import ExternalFunction, In, Out
+from aie.utils.compile.jit.params import param, per_call
 from ml_dtypes import bfloat16
 
-from iron.common import Operator, Unresolvable, field
+from iron.common import Operator, Unresolvable
 from iron.operators.flm.prefill_attn import reference
 from iron.operators.flm.prefill_attn.design import (
     CAUSAL,
@@ -34,16 +34,14 @@ class _PrefillAttentionBase(Operator):
     # query.
     window = None
 
-    max_context: CompileTime[int] = field()
-    num_heads: CompileTime[int] = field()
-    num_kv_heads: CompileTime[int] = field()
-    head_dim: CompileTime[int] = field(
-        derive=lambda op: Geometry.of(op.kernel()).dh, repr=False
-    )
-    qo_len: CompileTime[int] = field(
+    max_context: int = param()
+    num_heads: int = param()
+    num_kv_heads: int = param()
+    head_dim: int = param(derive=lambda op: Geometry.of(op.kernel()).dh, repr=False)
+    qo_len: int = param(
         derive=lambda op: op.max_context * op.num_heads * op.head_dim, repr=False
     )
-    kv_len: CompileTime[int] = field(
+    kv_len: int = param(
         derive=lambda op: 2 * op.max_context * op.num_kv_heads * op.head_dim,
         repr=False,
     )
@@ -52,9 +50,9 @@ class _PrefillAttentionBase(Operator):
     o = Out(qo_len, dtype=bfloat16)
     q = In(qo_len, dtype=bfloat16)
     kv = In(kv_len, dtype=bfloat16)
-    L_begin: DispatchTime[np.int32] = field(init=False)
-    L_end: DispatchTime[np.int32] = field(init=False)
-    max_l: DispatchTime[np.int32] = field(init=False)
+    L_begin = per_call(np.int32)
+    L_end = per_call(np.int32)
+    max_l = per_call(np.int32)
 
     def kernel(self) -> ExternalFunction:
         """The variant's kernel."""
@@ -89,7 +87,7 @@ class _PrefillAttentionBase(Operator):
             raise Unresolvable(
                 f"{type(self).__name__}: the {self.variant.factory.__name__} kernel is AIE2P only"
             )
-        return dataclasses.replace(self)
+        return self.replace()
 
     def exported_design(self):
         return functools.partial(
@@ -128,4 +126,4 @@ class PrefillSlidingAttention(_PrefillAttentionBase):
     """Sliding-window causal prefill attention with a head dim of 256, from a KV cache."""
 
     variant = SLIDING
-    window: CompileTime[int] = field(default=512)
+    window: int = param(default=512)

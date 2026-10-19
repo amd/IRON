@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import dataclasses
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
@@ -10,17 +9,7 @@ import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import (
-    Buffer,
-    CompileTime,
-    In,
-    ObjectFifo,
-    Out,
-    TaskGroup,
-    Worker,
-    ceildiv,
-    kernels,
-)
+from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv, kernels
 from aie.iron.controlflow import if_, range_
 from aie.iron.device import (
     NPU1,
@@ -33,21 +22,17 @@ from aie.iron.device import (
     Tile,
 )
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import divisors, widths
+from aie.utils.compile.jit.params import (
+    Select,
+    divisors,
+    param,
+    per_call,
+    tunable,
+    widths,
+)
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Extent,
-    Operator,
-    Precision,
-    Rtp,
-    Select,
-    Unresolvable,
-    Value,
-    field,
-)
+from iron.common import Built, Operator, Precision, Rtp, Unresolvable
 from iron.common.testing import Case, Testing
 
 # fmt: off
@@ -133,50 +118,45 @@ class GEMM(Operator):
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A,)))
 
-    M: CompileTime[int] = field()
-    K: CompileTime[int] = field()
-    N: CompileTime[int] = field()
+    M: int = param()
+    K: int = param()
+    N: int = param()
     # None: the widest of 64, 32, 16, 8 that splits M and the m block divides.
-    tile_m: CompileTime[int] = Auto(
+    tile_m: int = tunable(
         domain=lambda op, dev, t: divisors(
             t, of=op.M // op.n_aie_rows, step=op.mac_block(dev)[0]
         ),
-        array=True,
     )
     # Searched at HIGHEST alone: below it C rounds to bf16 after every K
     # tile, so tile_k changes the result.
-    tile_k: CompileTime[int] = Auto(
+    tile_k: int = tunable(
         default=64,
         domain=lambda op, dev, t: (
             divisors(t, of=op.K, step=op.mac_block(dev)[1])
             if op.precision == Precision.HIGHEST
             else ()
         ),
-        array=True,
     )
-    tile_n: CompileTime[int] = Auto(
+    tile_n: int = tunable(
         default=64,
         domain=lambda op, dev, t: divisors(t, of=op.N, step=op.mac_block(dev)[2]),
-        array=True,
     )
     # None: the most columns the shim budget allows that split N into tiles.
-    num_aie_columns: CompileTime[int] = Auto(domain=widths)
-    placement: CompileTime[GEMMPlacement] = Auto(
-        default=GEMMPlacement.SHIMS, domain=GEMMPlacement, array=True
+    num_aie_columns: int = tunable(domain=widths)
+    placement: GEMMPlacement = tunable(
+        default=GEMMPlacement.SHIMS, domain=GEMMPlacement
     )
-    b_col_maj: CompileTime[bool] = field(default=False, array=True)
-    c_col_maj: CompileTime[bool] = field(default=False, array=True)
-    precision: CompileTime[Precision] = Auto(
-        default=Precision.MEDIUM, domain=Precision, array=True
-    )
-    input_dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
-    output_dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
+    b_col_maj: bool = param(default=False, array=True)
+    c_col_maj: bool = param(default=False, array=True)
+    precision: Precision = tunable(default=Precision.MEDIUM, domain=Precision)
+    input_dtype: Any = param(default=bfloat16, repr=False)
+    output_dtype: Any = param(default=bfloat16, repr=False)
     # Filled by resolve.
-    n_aie_rows: CompileTime[int] = Auto(repr=False, init=False, array=True)
-    n_shim_mem_a: CompileTime[int] = Auto(repr=False, init=False)
-    a_l2: CompileTime[int] = Auto(repr=False, init=False)
-    b_l2: CompileTime[int] = Auto(repr=False, init=False)
-    c_l2: CompileTime[int] = Auto(repr=False, init=False)
+    n_aie_rows: int = tunable(repr=False, init=False)
+    n_shim_mem_a: int = tunable(repr=False, init=False)
+    a_l2: int = tunable(repr=False, init=False)
+    b_l2: int = tunable(repr=False, init=False)
+    c_l2: int = tunable(repr=False, init=False)
 
     A = In(M, K, dtype=input_dtype, obj_shape=(a_l2,), per=(n_shim_mem_a,))
     B = In(
@@ -192,18 +172,18 @@ class GEMM(Operator):
         per=(num_aie_columns,),
     )
     # A bound limits the compute, not the DMAs: A's pattern fills all four BD dims.
-    valid = Extent(M)
+    valid = per_call(bounds=M)
     # The last K tile zeroes A's columns and B's rows past the bound.
-    valid_k = Extent(K)
+    valid_k = per_call(bounds=K)
     # Reduction steps per output tile, and output tiles per core.
-    k_div_k = Value(derive=lambda op: op.K // op.tile_k)
-    n_tiles = Value(
+    k_div_k = per_call(derive=lambda op: op.K // op.tile_k)
+    n_tiles = per_call(
         derive=lambda op: (op.M // op.mem_tile_m_c) * (op.N // op.mem_tile_n),
     )
     # Under a bound: the row blocks it covers, and the column tiles of each.
-    row_blocks_valid = Value(derive=lambda op: ceildiv(op.valid, op.mem_tile_m_c))
-    col_tiles = Value(derive=lambda op: op.N // op.mem_tile_n)
-    k_valid = Value(derive=lambda op: op.valid_k)
+    row_blocks_valid = per_call(derive=lambda op: ceildiv(op.valid, op.mem_tile_m_c))
+    col_tiles = per_call(derive=lambda op: op.N // op.mem_tile_n)
+    k_valid = per_call(derive=lambda op: op.valid_k)
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened: the cores bound their compute
@@ -304,7 +284,7 @@ class GEMM(Operator):
         m, k, n = tile_m, self.tile_k, self.tile_n
         din = np.dtype(self.input_dtype).itemsize
         dout = np.dtype(self.output_dtype).itemsize
-        wider = dataclasses.replace(self, tile_m=m).array_config().wider_accumulator
+        wider = self.replace(tile_m=m).array_config().wider_accumulator
         c = m * n * (dout + 4 if wider else FIFO_DEPTH * dout)
         return FIFO_DEPTH * (m * k + k * n) * din + c + STACK_BYTES
 

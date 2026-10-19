@@ -3,15 +3,16 @@
 
 """What an operator is written with.
 
-The declaration vocabulary (``declare``): ``Operator`` and the
-fields, operands and values a class body declares. The elementwise templates
+IRON's operator (``declare``), on mlir-aie's declaration: a class body
+declares with ``aie.utils.compile.jit``'s ``param``, ``tunable`` and
+``per_call`` and aie.iron's ``In``/``Out``/``InOut``. The elementwise templates
 (``elementwise``), which own the array and the sequence of an operator
 that names only its kernel.
 """
 
 from .declare import (
+    Block,
     Built,
-    Extent,
     Operand,
     Operator,
     Precision,
@@ -19,9 +20,6 @@ from .declare import (
     Unresolvable,
     Value,
     Xclbin,
-    Auto,
-    field,
-    Select,
 )
 from .elementwise import (
     BinaryElementwise,
@@ -34,23 +32,20 @@ from .elementwise import (
 )
 
 __all__ = [
+    "Block",
     "BinaryElementwise",
     "Built",
     "Elementwise",
-    "Extent",
     "KernelCall",
     "Operand",
     "Operator",
     "Rtp",
     "RowBroadcast",
     "Rowwise",
-    "Select",
     "UnaryElementwise",
     "Precision",
     "Unresolvable",
     "Value",
     "WeightedRowwise",
     "Xclbin",
-    "Auto",
-    "field",
 ]

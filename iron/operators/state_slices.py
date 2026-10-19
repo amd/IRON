@@ -6,8 +6,6 @@
 over whole heads.
 """
 
-import dataclasses
-
 from iron.common import Unresolvable
 
 #: The rows (SelectiveScan) or columns (GatedDeltaRule) of a head's state a
@@ -32,4 +30,4 @@ def resolve_heads(op, dev, heads: int):
     columns = op.resolve_columns(dev, op.columns, fits=lambda c: heads % c == 0)
     if heads % columns:
         raise Unresolvable(f"{type(op).__name__}: {heads} heads over {columns} cores")
-    return dataclasses.replace(op, columns=columns)
+    return op.replace(columns=columns)

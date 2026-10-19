@@ -1,56 +1,38 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The declaration layer, device-free.
+"""IRON's operator over mlir-aie's declaration, device-free.
 
-Everything here runs without a device and without generating MLIR: what
-class creation records and rejects, how bound members resolve on instances,
-how inference binds fields from operand shapes, and how resolution behaves.
-The design-generating half is ``iron/common/design/`` and needs the
-toolchain.
+Everything here runs without a device and without generating MLIR: how
+bound operands and per-call values behave on instances, the array tier a
+build reads, profiles, extents a graph bounds, and runtime parameters. The
+declaration itself (class creation, inference, resolution, identity) is
+mlir-aie's and tested there. The design-generating half is
+``iron/common/design/`` and needs the toolchain.
 """
 
-import dataclasses
 from types import SimpleNamespace
 
-import aie.utils as aie_utils
-from aie.iron import CompileTime, DispatchTime, In, Out, ScratchpadParameter
 import numpy as np
 import pytest
+from aie.iron import DispatchTime, In, Out, ScratchpadParameter
 from aie.iron.device import from_name
 from aie.utils import bfp
-from aie.utils.trace import TraceConfig
-from aie.utils.compile.jit.params import widths
+from aie.utils.compile.jit.params import Select, param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile, Scratchpad
-from iron.common import (
-    Auto,
-    Built,
-    Extent,
-    Operator,
-    Rtp,
-    Select,
-    Unresolvable,
-    Value,
-    field,
-)
-from iron.common.declare.field import AutoSpec, ParamSpec
-from iron.common.declare.operand import active_runtime
-from iron.common.declare.value import DispatchValue
+from iron.common import Built, Operator, Rtp, Unresolvable, Value
+from iron.common.declare.operand import active_runtime, axis_of
 from iron.common.design import OperatorDesign
-from iron.operators import ReLU as LibraryReLU
-from iron.operators import Tanh
 
 NPU2 = from_name("npu2", n_cols=8)
 
 
 def from_operands(cls, *operand_shapes, **overrides):
     """``cls`` constructed from operand shapes, an optional input's by keyword."""
-    inputs, outputs, overrides = cls.declaration.call_operands(
-        operand_shapes, overrides
-    )
+    inputs, outputs, overrides = cls.call_operands(operand_shapes, overrides)
     return cls(**{**overrides, **cls.declaration.infer(inputs, outputs, **overrides)})
 
 
@@ -60,26 +42,26 @@ def from_operands(cls, *operand_shapes, **overrides):
 
 
 class MV(Operator):
-    M: CompileTime[int] = field()
-    K: CompileTime[int] = field()
-    num_batches: CompileTime[int | None] = field(default=None)
-    columns: CompileTime[int | None] = Auto(domain=widths)
-    tile_out: CompileTime[int] = Auto(default=64)
-    vec: CompileTime[int | None] = Auto(repr=False)
-    epilogue: CompileTime[str] = field(default="none", array=True)
+    M: int = param()
+    K: int = param()
+    num_batches: int | None = param(default=None)
+    columns: int | None = tunable(domain=widths)
+    tile_out: int = tunable(default=64)
+    vec: int | None = tunable(repr=False)
+    epilogue: str = param(default="none", array=True)
 
     A = In(num_batches, M, K, obj_shape=(tile_out, K), per=columns)
     B = In(num_batches, K, obj_shape=(K,))
     C = Out(num_batches, M, obj_shape=(tile_out,), per=columns)
-    count = Value(derive=lambda op: op.M // (op.columns * op.tile_out))
-    start = Value(derive=lambda op: 0)  # per call when a graph binds it
+    count = per_call(derive=lambda op: op.M // (op.columns * op.tile_out))
+    start = per_call(derive=lambda op: 0)  # per call when a graph binds it
 
     def resolve(self, dev):
         cols = self.columns or dev.cols
         vec = self.vec or next((w for w in (64, 32, 16) if self.K % w == 0), None)
         if vec is None:
             raise Unresolvable(f"K={self.K}: no vector width divides it")
-        return dataclasses.replace(self, columns=cols, vec=vec)
+        return self.replace(columns=cols, vec=vec)
 
     def compatible(self):
         assert self.columns is not None
@@ -96,36 +78,8 @@ class MV(Operator):
 
 
 # --------------------------------------------------------------------------
-# Class creation: names, order, re-attached fields
+# The catalog's declarations
 # --------------------------------------------------------------------------
-
-
-def test_fields_are_their_own_references_and_instances_shadow_them():
-    fields = {f.name: f for f in dataclasses.fields(MV)}
-    assert MV.K is fields["K"] and MV.K.name == "K"
-    assert type(ParamSpec.of(MV.K)) is ParamSpec
-    assert MV.tile_out is fields["tile_out"]
-    assert isinstance(ParamSpec.of(MV.tile_out), AutoSpec)
-    op = MV(M=64, K=256, columns=2)
-    assert op.K == 256 and op.columns == 2 and MV.K is fields["K"]
-
-
-def test_a_declaration_prints_what_it_inferred():
-    assert repr(MV.declaration) == "\n".join(
-        [
-            "MV",
-            "  fields:   M, K, num_batches, epilogue",
-            "  derived:  -",
-            "  tunables: columns in widths, tile_out, vec",
-            "  resolved: -",
-            "  In        A [num_batches, M, K] per [columns]",
-            "  In        B [num_batches, K]",
-            "  Out       C [num_batches, M] per [columns]",
-            "  Value     count",
-            "  Value     start",
-            "  array:    (K, columns, tile_out, epilogue)",
-        ]
-    )
 
 
 def test_every_catalog_operator_s_declaration_prints():
@@ -139,133 +93,6 @@ def test_every_catalog_operator_s_declaration_prints():
             else getattr(catalog, name)
         )
         assert repr(cls.declaration).startswith(cls.__name__)
-
-
-def test_members_keep_declaration_order_and_names():
-    assert [m.name for m in MV.declaration.members] == ["A", "B", "C", "count", "start"]
-    assert MV.A.role is In and MV.C.role is Out
-
-
-def test_shapes_captured_bare_names_resolve_to_refs():
-    # ``M`` and ``num_batches`` were the fields themselves in the class body.
-    dims = MV.A.dims.dims
-    assert dims[0].name == "num_batches"
-    assert dims[1] is MV.M and dims[2] is MV.K
-    assert MV.A.obj_dims.dims == (MV.tile_out, MV.K)
-    assert MV.A.per.dims == (MV.columns,)
-
-
-# --------------------------------------------------------------------------
-# Rules rejected at class creation
-# --------------------------------------------------------------------------
-
-
-def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
-    assert MV.A.obj_dims.dims[0] is MV.tile_out
-    with pytest.raises(TypeError, match="host shape may not depend on tuning"):
-
-        class Bad(Operator):
-            M: CompileTime[int] = field()
-            t: CompileTime[int] = Auto(default=64)
-            A = In(M, t)
-
-
-def test_a_field_without_a_marker_is_rejected():
-    with pytest.raises(
-        TypeError,
-        match=r"Bad\.n: annotated <class 'int'>; a field is annotated "
-        r"aie\.iron's CompileTime\[T\] or DispatchTime\[T\]",
-    ):
-
-        class Bad(Operator):
-            n: int = field()
-
-
-def test_a_marked_field_not_declared_with_field_is_rejected():
-    # A plain default would be the literal a shape in the body captures.
-    with pytest.raises(TypeError, match="Bad.n: declare a CompileTime field"):
-
-        class Bad(Operator):
-            n: CompileTime[int] = 4
-
-    with pytest.raises(TypeError, match="Unset.n: declare a DispatchTime value"):
-
-        class Unset(Operator):
-            n: DispatchTime[np.int32]
-
-
-def test_a_marker_inside_a_union_is_rejected():
-    # CompileTime[int] | None would read as int and lose the None.
-    with pytest.raises(TypeError, match=r"Bad\.n: .*CompileTime\[int \| None\]"):
-
-        class Bad(Operator):
-            n: CompileTime[int] | None = field(default=None)
-
-
-@pytest.mark.parametrize(
-    "options",
-    [
-        {},
-        {"init": False, "default": 1},
-        {"init": False, "array": True},
-    ],
-)
-def test_a_dispatch_value_takes_no_field_option(options):
-    with pytest.raises(TypeError, match="Bad.n: declare a DispatchTime value"):
-
-        class Bad(Operator):
-            n: DispatchTime[np.int32] = field(**options)
-
-
-def test_expression_in_a_shape_is_rejected():
-    with pytest.raises(TypeError, match="Expressions are not allowed"):
-
-        class Bad(Operator):
-            n: CompileTime[int] = field()
-            x = In("n // 2")
-
-
-def test_annotated_member_is_rejected():
-    with pytest.raises(TypeError, match="without an annotation"):
-
-        class Bad(Operator):
-            M: CompileTime[int] = field()
-            A: In = In(M)
-
-
-def test_a_member_hiding_the_operators_own_attribute_is_rejected():
-    with pytest.raises(TypeError, match="hides Operator.values"):
-
-        class Bad(Operator):
-            n: CompileTime[int] = field()
-            values = In(n)
-
-
-def test_a_field_hiding_the_operators_own_attribute_is_rejected():
-    with pytest.raises(TypeError, match="hides Operator.inputs"):
-
-        class Bad(Operator):
-            inputs: CompileTime[int] = field()
-
-    with pytest.raises(TypeError, match="hides Operator.name"):
-
-        class Worse(Operator):
-            name: CompileTime[str] = field()
-
-
-def test_a_field_may_replace_an_operator_bases_own_attribute():
-    class Base(Operator):
-        window = None
-
-    class Windowed(Base):
-        window: CompileTime[int] = field(default=512)
-
-    assert Windowed().window == 512
-
-
-def test_float_value_is_rejected():
-    with pytest.raises(TypeError, match="floating point"):
-        Value(dtype=np.float32)
 
 
 def test_float_scratchpad_annotation_is_rejected():
@@ -304,41 +131,19 @@ def test_a_t_or_none_dim_is_omitted_when_none_and_may_sit_anywhere():
     assert MV(M=64, K=256, num_batches=3).C.shape == (3, 64)
 
     class Stack(Operator):
-        rows: CompileTime[int] = field()
-        cols: CompileTime[int] = field()
-        seq: CompileTime[int | None] = field(default=None)
+        rows: int = param()
+        cols: int = param()
+        seq: int | None = param(default=None)
         x = In(rows, seq, cols)
         y = Out(rows, seq, cols)
 
-    assert Stack.declaration.infer({"x": (8, 64)}) == {
-        "rows": 8,
-        "cols": 64,
-        "seq": None,
-    }
-    assert Stack.declaration.infer({"x": (8, 16, 64)}) == {
-        "rows": 8,
-        "cols": 64,
-        "seq": 16,
-    }
-    with pytest.raises(ValueError, match="rank 4"):
-        Stack.declaration.infer({"x": (8, 2, 16, 64)})
     assert Stack(rows=8, cols=64).x.shape == (8, 64)
     assert Stack(rows=8, cols=64, seq=16).y.shape == (8, 16, 64)
 
 
-def test_an_unresolved_tile_dimension_refuses_to_resolve():
-    class Tiled(Operator):
-        n: CompileTime[int] = field()
-        t: CompileTime[int] = Auto()
-        x = In(n, obj_shape=(t,))
-
-    with pytest.raises(ValueError, match="t is None.*Resolve the operator first"):
-        Tiled(n=64).x.obj_type
-
-
 def test_a_block_float_tile_is_sized_by_its_blocks(npu2):
     class Blocks(Operator):
-        n: CompileTime[int] = field()
+        n: int = param()
         x = In(n, dtype=bfp.v8bfp16ebs8, obj_shape=(4096,))
 
     # 4096 blocks of 9 bytes: past half a core memory bank, so one deep.
@@ -359,7 +164,7 @@ def test_a_stream_binds_a_handle_per_lane():
         MV(M=1024, K=256, columns=2).A.bind("h")
 
     class NoObjType(Operator):
-        n: CompileTime[int] = field()
+        n: int = param()
         x = In(n)
 
     with pytest.raises(TypeError, match="without an obj_shape"):
@@ -381,38 +186,25 @@ def test_an_operand_fills_only_inside_its_operators_sequence():
 
 def test_per_call_values_bind_on_the_operator():
     class Copy(Operator):
-        n: CompileTime[int] = field()
+        n: int = param()
         src = In(n, obj_shape=(n,))
-        off = Value()
-        live: DispatchTime[np.int32] = field(init=False)
+        off = per_call()
+
+        def exported_design(self):
+            return None if self.n < 512 else (lambda: "module {}")
 
     op = Copy(n=256)
-    assert [v.name for v in op.values] == ["off", "live"]
-    assert type(op.off) is Value and op.off.op is op
-    assert isinstance(op.live, DispatchValue) and op.live is not Copy.live
-
-
-# --------------------------------------------------------------------------
-# Inference
-# --------------------------------------------------------------------------
-
-
-def test_infer_reports_conflicts_naming_both_operands():
-    with pytest.raises(
-        ValueError, match=r"K is 128 from B.shape\[0\] but 256 from A.shape\[1\]"
-    ):
-        MV.declaration.infer({"A": (1024, 256), "B": (128,)})
-    with pytest.raises(ValueError, match="rank"):
-        MV.declaration.infer({"A": (1, 2, 3, 4), "B": (256,)})
-    with pytest.raises(ValueError, match="K is 512 from A.shape"):
-        MV.declaration.infer({"A": (1024, 512), "B": (512,)}, K=256)
+    assert [v.name for v in op.values] == ["off"]
+    assert type(op.off) is Value and op.off.op is op and op.off is not Copy.off
+    # A value every call gives regenerates an exported design's stream.
+    assert not op.off.dispatch and Copy(n=512).off.dispatch
 
 
 def test_an_exported_design_replaces_the_derived_one():
     # The design is another tool's text; the operands are declared as any
     # operator's are.
     class Exported(Operator):
-        n: CompileTime[int] = field()
+        n: int = param()
         x = In(n)
         y = Out(n)
 
@@ -446,8 +238,8 @@ def test_an_operand_with_a_tile_is_its_own_stream():
 class Scaled(Operator):
     """``x`` times a scale row when ``scaled``, else a copy of it."""
 
-    N: CompileTime[int] = field()
-    scaled: CompileTime[bool] = field(default=False)
+    N: int = param()
+    scaled: bool = param(default=False)
 
     x = In(N, obj_shape=(N,))
     s = In(N, obj_shape=(N,), when=scaled)
@@ -466,7 +258,7 @@ def test_an_operand_declared_when_a_flag_exists_only_where_it_is_true():
     with pytest.raises(AttributeError, match="declared when=scaled"):
         plain.s
     # The flag decides the streams, so it is of the array tier.
-    assert "scaled" in Scaled.declaration.array
+    assert "scaled" in Scaled.declaration.key
     assert plain.array_key() != scaled.array_key()
     # A call gives the optional input by keyword, which sets its flag.
     assert not from_operands(Scaled, (64,)).scaled
@@ -499,15 +291,6 @@ def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one()
     assert [b.name for b in step.op.buffers] == ["x", "s", "y"]
 
 
-def test_when_names_a_param():
-    with pytest.raises(TypeError, match=r"must be a field\(\)"):
-
-        class Bad(Operator):
-            N: CompileTime[int] = field()
-            flag: CompileTime[bool] = Auto(default=False)
-            s = In(N, when=flag)
-
-
 def test_a_derived_value_is_written_once_per_build():
     op = MV(M=1024, K=128).resolved(NPU2)
     assert op.residents == {"count": 2, "start": 0} and op.values == []
@@ -531,37 +314,6 @@ def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
     assert op.design_key() != MV(M=1024, K=128, columns=8).design_key()
 
 
-def test_identity_is_the_array_tier_for_sharing_and_every_field_for_a_build():
-    a = MV(M=1024, K=128).resolved(NPU2)
-    b = MV(M=2048, K=128).resolved(NPU2)
-    assert a.array_key() == b.array_key()
-    assert a.design_key() != b.design_key()
-    assert a.array_key() == (
-        MV,
-        ("K", 128),
-        ("columns", 8),
-        ("tile_out", 64),
-        ("epilogue", "none"),
-    )
-
-
-class ReLU(Tanh):
-    """A ReLU of this module's own, which runs tanh."""
-
-
-def test_two_operators_of_one_name_are_two_designs():
-    given = dict(size=4096, num_aie_columns=1, num_channels=1, tile_size=1024)
-    ours, theirs = ReLU(**given), LibraryReLU(**given)
-    assert ours.array_key() != theirs.array_key()
-    assert ours.design_key() != theirs.design_key()
-
-
-def test_a_traced_operator_is_not_the_untraced_ones_array():
-    given = dict(size=4096, num_aie_columns=1, num_channels=1, tile_size=1024)
-    traced = Tanh(**given, trace=TraceConfig(trace_size=8192))
-    assert traced.array_key() != Tanh(**given).array_key()
-
-
 def test_array_sees_the_array_tier_alone():
     class Leaky(MV):
         class Array(MV.Array):
@@ -569,69 +321,15 @@ def test_array_sees_the_array_tier_alone():
                 return Built([self.M // self.tile_out])
 
     op = MV(M=1024, K=128).resolved(NPU2)
-    assert MV.declaration.array == ("K", "columns", "tile_out", "epilogue")
+    assert MV.declaration.key == ("K", "columns", "tile_out", "vec", "epilogue")
     assert op.array_config().build() == Built([128, 8, 64, "none"])
-    with pytest.raises(AttributeError, match="'M'"):
+    with pytest.raises(AttributeError, match="reads M, which is not in the"):
         Leaky(M=1024, K=128).resolved(NPU2).array_config().build()
-
-
-def test_an_array_reads_what_names_its_streams_and_nothing_else():
-    # Generated: the fields a stream names, those declared array=True, and
-    # every member, with no annotation of its own.
-    fields = [f.name for f in dataclasses.fields(MV.Array)]
-    assert fields == [
-        "K",
-        "columns",
-        "tile_out",
-        "epilogue",
-        "A",
-        "B",
-        "C",
-        "count",
-        "start",
-    ]
-
-    # By hand it annotates only the library's views: a field, a member or
-    # anything else is refused.
-    for name in ("K", "A", "work"):
-        with pytest.raises(TypeError, match=rf"annotates \['{name}'\], but"):
-            type(
-                "Listed",
-                (MV,),
-                {"Array": type("Array", (MV.Array,), {"__annotations__": {name: int}})},
-            )
-
-
-def test_resolution_fills_every_tunable_or_says_which_it_left():
-    with pytest.raises(Unresolvable, match="no vector width"):
-        MV(M=1024, K=24).resolved(NPU2)
-    with pytest.raises(ValueError, match="not a multiple"):
-        MV(M=1000, K=128).resolved(NPU2)
-    ok = MV(M=1024, K=128, columns=2)
-    assert not ok._resolved
-    r = ok.resolved(NPU2)
-    assert r._resolved and r.resolved(NPU2) is r and (r.columns, r.vec) == (2, 64)
-    assert ok.columns == 2 and ok.vec is None  # the original is untouched
-
-
-def test_resolving_for_a_device_binds_it_while_it_resolves():
-    seen = []
-
-    class Reads(MV):
-        def resolve(self, dev):
-            seen.append(self.dev)
-            return super().resolve(dev)
-
-    with aie_utils.set_current_device(None):
-        Reads(M=1024, K=128).resolved(NPU2)
-        assert (
-            seen == [NPU2] and aie_utils.get_current_device(probe_runtime=False) is None
-        )
 
 
 def test_a_field_resolve_computes_is_kept_by_copies_and_checked_once_known():
     class Derived(MV):
-        half: CompileTime[int] = Auto(init=False)
+        half: int = tunable(init=False)
 
         def resolve(self, dev):
             new = super().resolve(dev)
@@ -691,32 +389,6 @@ def test_a_profile_is_checked_as_it_is_written_and_as_it_is_read():
         p.make(MV, M=1024, K=128)
 
 
-def test_resolve_must_return_a_copy():
-    class InPlace(MV):
-        def resolve(self, dev):
-            self.columns = 1
-            return self
-
-    op = InPlace(M=1024, K=128)
-    with pytest.raises(TypeError, match="must return a copy"):
-        op.resolved(NPU2)
-    assert not op._resolved
-
-
-def test_overriding_an_inherited_field_needs_an_annotation():
-    with pytest.raises(
-        TypeError, match=r"tile_out: CompileTime\[int\] = Auto\(default=32\)"
-    ):
-
-        class Pinned(MV):
-            tile_out = 32  # dataclass would keep the base's 64 in silence
-
-    class Annotated(MV):
-        tile_out: CompileTime[int] = Auto(default=32)
-
-    assert Annotated(M=64, K=64).tile_out == 32
-
-
 def test_resolve_columns_is_the_count_given_or_the_most_that_fit():
     op = MV(M=96, K=64)
     dev = NPU2  # the shim budget is the device's
@@ -742,87 +414,16 @@ def test_a_stream_with_no_lanes_is_paid_once_in_the_shim_budget():
 
     # 16 input channels: A's and scale's lanes per column (or A's two
     # channels a column), B once.
-    assert MV.declaration.shim_columns(NPU2) == 8
+    assert MV.shim_columns(NPU2) == 8
     assert NPU2.shim_dma_channels_in == 16
-    assert Scaled.declaration.shim_columns(NPU2) == (16 - 1) // 2
-    assert MV.declaration.shim_columns(NPU2, num_channels=2) == (16 - 1) // 2
-
-
-def test_a_computed_default_is_inferred_from_a_shape_or_computed():
-    class Rep(Operator):
-        rows: CompileTime[int] = field()
-        repeat: CompileTime[int] = field()
-        out_rows: CompileTime[int] = field(derive=lambda op: op.rows * op.repeat)
-        cap: CompileTime[int] = field(derive=lambda op: op.out_rows, held=False)
-        x = In(rows, 8)
-        y = Out(out_rows, 8)
-
-    assert Rep(rows=2, repeat=3).out_rows == 6  # computed
-    assert Rep(rows=2, repeat=3, out_rows=6).out_rows == 6  # given, agrees
-    with pytest.raises(ValueError, match=r"out_rows \(5\) must be 6"):
-        Rep(rows=2, repeat=3, out_rows=5)  # a derived field is held to its formula
-    assert Rep.declaration.infer({"x": (2, 8)}, [(6, 8)]) == {"rows": 2, "out_rows": 6}
-    # held=False: computed after the fields before it, or given and kept.
-    assert Rep(rows=2, repeat=3).cap == 6
-    assert Rep(rows=2, repeat=3, cap=8).cap == 8
-    # replace computes a held field again from the fields it changes.
-    assert Rep(rows=2, repeat=3).replace(repeat=4).out_rows == 8
-    assert Rep(rows=2, repeat=3, cap=8).replace(repeat=4).cap == 8
-
-
-def test_a_computed_default_of_none_must_be_given():
-    class Unknown(Operator):
-        n: CompileTime[int] = field(derive=lambda op: None, held=False)
-
-    with pytest.raises(ValueError, match=r"n \(None\) must be given"):
-        Unknown()
-    assert Unknown(n=2).n == 2
-
-
-def test_a_field_gives_a_default_or_a_derive_not_both_and_holds_only_a_derive():
-    with pytest.raises(TypeError, match="give one, not both"):
-        field(default=1, derive=lambda op: 1)
-    with pytest.raises(TypeError, match=r"only a derive= field is held"):
-        field(held=False)
-
-
-def test_a_select_picks_a_layout_within_a_storage():
-    class Weights(Operator):
-        K: CompileTime[int] = field()
-        N: CompileTime[int] = field()
-        blocks: CompileTime[int] = field(default=0)
-        packed: CompileTime[bool] = field(default=False)
-        transposed: CompileTime[bool] = field(default=False)
-        w = In(Select(packed, (blocks,), (Select(transposed, (N, K), (K, N)),)))
-
-    assert Weights.declaration.infer({"w": (64, 32)}, transposed=True) == {
-        "transposed": True,
-        "N": 64,
-        "K": 32,
-    }
-    assert Weights.declaration.infer({"w": (64, 32)}) == {"K": 64, "N": 32}
-    assert Weights(K=32, N=64, transposed=True).buffers[0].shape == (64, 32)
-    assert Weights(K=32, N=64, blocks=8, packed=True).buffers[0].shape == (8,)
+    assert Scaled.shim_columns(NPU2) == (16 - 1) // 2
+    assert MV.shim_columns(NPU2, num_channels=2) == (16 - 1) // 2
 
 
 def test_compatible_runs_at_construction_once_every_tunable_is_known():
     with pytest.raises(ValueError, match="not a multiple"):
         MV(M=1000, K=128, columns=8, tile_out=64, vec=64)  # nothing left to resolve
     MV(M=1000, K=128)  # a tunable is open: compatible() waits for resolution
-
-
-def test_inference_binds_the_fields_from_the_operands():
-    op = from_operands(
-        MV,
-        (3, 1024, 128),
-        (
-            3,
-            128,
-        ),
-    )
-    assert (op.M, op.K, op.num_batches) == (1024, 128, 3)
-    assert op.A.shape == (3, 1024, 128)
-    assert from_operands(MV, (1024, 128), (128,)).num_batches is None
 
 
 # --------------------------------------------------------------------------
@@ -854,9 +455,7 @@ def test_mha_pads_the_sequence_and_groups_kv():
     assert grouped[1].shape == (2, 128, 64)
     assert plain[1].shape == plain[0].shape
     assert [spec.role for spec in grouped] == [In] * 3 + [Out]
-    inputs, _, _ = MHA.declaration.call_operands(
-        ((8, 128, 64), (2, 128, 64), (2, 128, 64)), {}
-    )
+    inputs, _, _ = MHA.call_operands(((8, 128, 64), (2, 128, 64), (2, 128, 64)), {})
     op = MHA(**MHA.declaration.infer(inputs))
     assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
     with pytest.raises(ValueError, match=r"seq_pad \(100\)"):
@@ -871,17 +470,14 @@ def test_mha_pads_the_sequence_and_groups_kv():
 class Rows(Operator):
     """Rows of ``cols`` elements over ``lanes`` lanes; ``rows`` may be bounded."""
 
-    rows: CompileTime[int] = field()
-    cols: CompileTime[int] = field()
-    lanes: CompileTime[int] = Auto(default=2, domain=widths)
-    valid = Extent(rows)
-    count = Value(derive=lambda op: op.valid // op.lanes)  # reads the extent
-    width = Value(derive=lambda op: op.cols)  # does not
+    rows: int = param()
+    cols: int = param()
+    lanes: int = tunable(default=2, domain=widths)
+    valid = per_call(bounds=rows)
+    count = per_call(derive=lambda op: op.valid // op.lanes)  # reads the extent
+    width = per_call(derive=lambda op: op.cols)  # does not
     x = In(rows, cols, obj_shape=(1, cols), per=(lanes,))
     y = Out(rows, cols, obj_shape=(1, cols), per=(lanes,))
-
-    def resolve(self, dev):
-        return dataclasses.replace(self)
 
     class Array(Operator.Array):
         def build(self) -> Built:
@@ -893,18 +489,12 @@ class Rows(Operator):
 
 def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
     op = Rows(rows=64, cols=8)
-    assert op.valid == 64 and Rows.valid.field is Rows.rows
+    assert op.valid == 64 and Rows.valid.bounds is Rows.rows
     assert not op.value("valid").per_call and not op.value("count").per_call
     assert op.residents == {"count": 32, "width": 8}
     assert op.derived_at("count", valid=16) == 8 and op.valid == 64  # unchanged
-    with pytest.raises(TypeError, match="no Extent \\['n'\\]"):
+    with pytest.raises(TypeError, match="no extent \\['n'\\]"):
         op.derived_at("count", n=1)
-    with pytest.raises(TypeError, match=r"must name a field\(\)"):
-
-        class Bad(Operator):
-            n: CompileTime[int] = Auto(default=4)
-            valid = Extent(n)
-            x = In(n)
 
 
 def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
@@ -939,7 +529,7 @@ def test_what_a_bound_makes_per_call_is_worked_out_once_per_binding():
     calls = []
 
     class Counted(Rows):
-        count = Value(derive=lambda op: calls.append(1) or op.valid // op.lanes)
+        count = per_call(derive=lambda op: calls.append(1) or op.valid // op.lanes)
 
     op = Counted(rows=64, cols=8)
     op.use_value("valid")
@@ -954,7 +544,7 @@ def test_what_a_bound_makes_per_call_is_worked_out_once_per_binding():
 
 def test_a_derive_that_fails_for_another_reason_than_resolution_raises():
     class Buggy(Rows):
-        count = Value(derive=lambda op: op.valid and {}["typo"])
+        count = per_call(derive=lambda op: op.valid and {}["typo"])
 
     op = Buggy(rows=64, cols=8)
     op.use_value("valid")
@@ -965,7 +555,7 @@ def test_a_derive_that_fails_for_another_reason_than_resolution_raises():
 def test_a_bound_is_refused_where_no_extent_takes_it():
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
-            return MV.step(x[:n], x[0])  # M is not an Extent of MV
+            return MV.step(x[:n], x[0])  # M bounds no per-call value of MV
 
     g = G()
 
@@ -983,7 +573,7 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
 
     class K(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
-            return Rows.step(x[:, :n])  # cols is not an Extent
+            return Rows.step(x[:, :n])  # nothing bounds cols
 
     k = K()
 
@@ -997,9 +587,7 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
 
 
 def _value(name, **kw):
-    value = Value(**kw)
-    value.name = name
-    return value
+    return Value(None, name, **kw)
 
 
 def test_runtime_parameters_lay_out_the_buffer_words_and_skip_scratchpad_ones():
@@ -1021,13 +609,13 @@ def test_a_scratchpad_parameter_holds_one_word():
 
 def test_an_axis_is_found_through_the_branch_a_select_takes():
     class Laid(Operator):
-        rows: CompileTime[int] = field()
-        cols: CompileTime[int] = field()
-        flip: CompileTime[bool] = field(default=False)
+        rows: int = param()
+        cols: int = param()
+        flip: bool = param(default=False)
         x = In(Select(flip, (cols, rows), (rows, cols)))
 
-    assert Laid.x.dims.axis_of("rows", Laid(rows=4, cols=8)) == 0
-    assert Laid.x.dims.axis_of("rows", Laid(rows=4, cols=8, flip=True)) == 1
+    assert axis_of(Laid.x.dims, "rows", Laid(rows=4, cols=8)) == 0
+    assert axis_of(Laid.x.dims, "rows", Laid(rows=4, cols=8, flip=True)) == 1
     assert Laid(rows=4, cols=8, flip=True).x.shape == (8, 4)
 
 
@@ -1035,7 +623,7 @@ class Doubled(Operator):
     """Doubles its input, with a reference and no kernel."""
 
     reference_only = True
-    rows: CompileTime[int] = field()
+    rows: int = param()
     x = In(rows, 8)
     y = Out(rows, 8)
 

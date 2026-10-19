@@ -7,15 +7,15 @@ import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernels import flm_gemma4
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import widths
+from aie.utils.compile.jit.params import param, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Operator, Unresolvable, field
+from iron.common import Built, Operator, Unresolvable
 from iron.common.testing import Case, Testing
 from iron.operators.flm.lm_head import reference
 from iron.operators.flm.q4nx import BLOCK_BYTES, GROUP, K_TILE, M_TILE, packed_bytes
@@ -91,15 +91,15 @@ class LMHead(Operator):
         draw=_draw,
     )
 
-    dim: CompileTime[int] = field(array=True)
-    vocab: CompileTime[int] = field(array=True)
-    softcap: CompileTime[float] = field()
-    w_words: CompileTime[int] = field(
+    dim: int = param(array=True)
+    vocab: int = param(array=True)
+    softcap: float = param()
+    w_words: int = param(
         derive=lambda op: packed_bytes(op.vocab * op.dim) // 4, repr=False
     )
-    x_len: CompileTime[int] = field(derive=lambda op: 2 * op.dim, repr=False)
-    cols: CompileTime[int] = Auto(repr=False, domain=widths)
-    rows: CompileTime[int] = Auto(repr=False)
+    x_len: int = param(derive=lambda op: 2 * op.dim, repr=False)
+    cols: int = tunable(repr=False, domain=widths)
+    rows: int = tunable(repr=False)
 
     # The runtime sequence's argument order. A w or y column object holds one
     # block per core row, which the cores split or join. One broadcast sends
@@ -123,8 +123,7 @@ class LMHead(Operator):
             )
         if dev.arch != AIEArch.AIE2p:
             raise Unresolvable("LMHead: the q4nx_lm_head kernel is AIE2P only")
-        return dataclasses.replace(
-            self,
+        return self.replace(
             cols=dev.cols if self.cols is None else self.cols,
             rows=len(dev.core_rows) if self.rows is None else self.rows,
         )

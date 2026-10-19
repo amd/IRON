@@ -308,9 +308,7 @@ class ImagePatches(iron.Graph):
                 f"{self.patches} patches or {a}x{b} image"
             )
         # Resample's own checks refuse a size it cannot resize.
-        dataclasses.replace(
-            op, height=H, width=W, out_height=out_height, out_width=out_width
-        )
+        op.replace(height=H, width=W, out_height=out_height, out_width=out_width)
         buffer = np.zeros((op.image_chunks, self.chunk), np.uint8)
         rows = buffer.reshape(-1)[: H * line].reshape(H, line)
         rows[:, : 3 * W] = image.reshape(H, 3 * W)

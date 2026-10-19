@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from aie.iron import CompileTime
 from aie.iron.kernels import datamovement
+from aie.utils.compile.jit.params import param
 
-from iron.common import BinaryElementwise, field
+from iron.common import BinaryElementwise
 from iron.common.elementwise import Sweep
 from iron.common.testing import Case, Testing
 
@@ -22,7 +22,7 @@ class AXPY(BinaryElementwise):
         ]
     )
 
-    scalar_factor: CompileTime[float] = field(default=3.0, array=True)
+    scalar_factor: float = param(default=3.0, array=True)
 
     class Array(BinaryElementwise.Array):
         def kernel(self):

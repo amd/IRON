@@ -29,7 +29,7 @@ from aie.helpers.taplib import Affine, PerCall
 
 from ..declare import Operator
 from ..declare.operator import device_fit, graph_tracer
-from ..declare.value import Extent, ExtentWord
+from ..declare.value import ExtentWord
 from ..declare.precision import Precision
 from ..declare.profile import Profile
 from ..image.allocator import ArenaPlan
@@ -1056,7 +1056,7 @@ def _words(
     dev = aie_utils.get_current_device()
     words: list[Word] = []
     for b in traced.bindings:
-        if not extents and isinstance(b.member, Extent):
+        if not extents and b.member.bounds is not None:
             continue
         e = b.expression
         linear = None
@@ -1071,14 +1071,14 @@ def _words(
     seen: set[int] = set()
     derived: set[str] = set()
     for b in traced.bindings:
-        if id(b.op) in seen or not isinstance(b.member, Extent):
+        if id(b.op) in seen or b.member.bounds is None:
             continue
         seen.add(id(b.op))
         op = b.op.resolved(dev)
         counts = {
             e.member.name: e.expression
             for e in traced.bindings
-            if e.op is b.op and isinstance(e.member, Extent)
+            if e.op is b.op and e.member.bounds is not None
         }
 
         def at(v, counts=counts):
@@ -1092,8 +1092,8 @@ def _words(
             derived.add(symbol)
             linear = None
             spec = word
-            if isinstance(spec, ExtentWord) and spec.extent.name in counts:
-                count, divisor = counts[spec.extent.name], spec.divisor(op)
+            if isinstance(spec, ExtentWord) and spec.extent in counts:
+                count, divisor = counts[spec.extent], spec.divisor(op)
                 linear = Linear(
                     count.value.name,
                     Fraction(count.scale, divisor),

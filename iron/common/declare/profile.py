@@ -11,9 +11,10 @@ given (``seq_pad``).
 
 from __future__ import annotations
 
-import dataclasses
 import json
+from dataclasses import MISSING
 from enum import Enum
+from types import FunctionType
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
@@ -33,8 +34,8 @@ class Profile:
     entries of equal specificity that disagree raise. A subclass matches its
     base's entries.
 
-    Each entry is ``(cls, dims, tunables)``: the ``field()`` values it
-    matches (a dimension left out matches any) and the ``Auto()`` values it
+    Each entry is ``(cls, dims, tunables)``: the ``param()`` values it
+    matches (a dimension left out matches any) and the ``tunable()`` values it
     gives, one line of the JSON file ``load`` reads and ``save`` writes.
     """
 
@@ -55,16 +56,17 @@ class Profile:
         return cls(**given, pinned=pinned)
 
     def add(self, cls: type, **fields: Any) -> None:
-        """Add an entry for ``cls``: ``field()`` fields to match (one left out
-        matches any value) and ``Auto()`` fields to give.
+        """Add an entry for ``cls``: ``param()`` values to match (one left out
+        matches any value) and ``tunable()`` values to give.
         """
         dims, tunables, unknown, fixed = {}, {}, [], []
         for name, value in fields.items():
+            param = cls.declaration.params.get(name)
             if name in cls.declaration.tunables:
                 tunables[name] = value
-            elif name in cls.declaration.autos:
+            elif param is not None and param.tunable:
                 fixed.append(name)
-            elif name in cls.declaration.params:
+            elif param is not None:
                 dims[name] = value
             else:
                 unknown.append(name)
@@ -102,19 +104,20 @@ class Profile:
 
     @staticmethod
     def dims(cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
-        """Every dimension (``field()``) of the ``cls`` a call with
-        ``given`` keywords makes, as an entry is matched against.
+        """Every dimension (``param()``) of the ``cls`` a call with
+        ``given`` keywords makes, as an entry is matched against: one it
+        leaves out is its default, None where a function computes it.
         """
         dims = {}
-        for f in dataclasses.fields(cls):
-            if f.name not in cls.declaration.params:
+        for name, p in cls.declaration.params.items():
+            if p.tunable:
                 continue
-            if f.name in given:
-                dims[f.name] = given[f.name]
-            elif f.default is not dataclasses.MISSING:
-                dims[f.name] = f.default
-            elif f.default_factory is not dataclasses.MISSING:
-                dims[f.name] = f.default_factory()
+            if name in given:
+                dims[name] = given[name]
+            elif p.derive is not None or isinstance(p.default, FunctionType):
+                dims[name] = None
+            elif p.default is not MISSING:
+                dims[name] = p.default
         return dims
 
     @staticmethod
@@ -138,7 +141,8 @@ class Profile:
             op_cls = getattr(operators, name)
             # An Enum-domain tunable is JSON's string, its member's value
             # (should 1: a Pinned member's own value, not its ordinal).
-            for key, domain in op_cls.declaration.domains.items():
+            for key, param in op_cls.declaration.params.items():
+                domain = param.domain
                 if (
                     key in fields
                     and isinstance(domain, type)

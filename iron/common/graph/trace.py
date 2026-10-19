@@ -15,9 +15,8 @@ from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.iron import In, InOut, Out
 from aie.utils import bfp
 
-from .. import declare
-from ..declare import Operand, Operator
-from ..declare.value import Extent
+from ..declare import Operator, Value
+from ..declare.operand import param_names
 from ..declare.operator import graph_tracer
 from ..declare.precision import Precision
 from ..declare.profile import Profile
@@ -68,7 +67,7 @@ class Binding:
     """
 
     op: Operator
-    member: declare.Value
+    member: Value
     expression: Affine
 
     @property
@@ -601,8 +600,8 @@ class Tracer:
                 continue
             keywords = [
                 f"{m.name}="
-                for m in cls.declaration.members
-                if isinstance(m, Operand) and m.fills and m.when is not None
+                for m in cls.declaration.operands
+                if m.fills and m.when is not None
             ]
             hint = f"; an optional input is given by keyword ({', '.join(keywords)})"
             raise TypeError(
@@ -643,7 +642,7 @@ class Tracer:
 
     def _call(self, target, args, kwargs):
         cls = target if isinstance(target, type) else type(target)
-        inputs, outputs, kwargs = cls.declaration.call_operands(args, kwargs)
+        inputs, outputs, kwargs = cls.call_operands(args, kwargs)
         self.check_outputs(cls, outputs)
         names = list(inputs)
         operands = [self.operand(a) for a in [*inputs.values(), *outputs]]
@@ -760,10 +759,8 @@ class Tracer:
 
     @staticmethod
     def _split_values(op_cls, kwargs) -> dict:
-        names = {
-            m.name for m in op_cls.declaration.members if isinstance(m, declare.Value)
-        }
-        return {k: kwargs.pop(k) for k in list(kwargs) if k in names}
+        values = {m.name for m in op_cls.declaration.per_calls}
+        return {k: kwargs.pop(k) for k in list(kwargs) if k in values}
 
     def _construct(self, cls, inputs, outputs, kwargs) -> Operator:
         inferred = cls.declaration.infer(
@@ -793,13 +790,17 @@ class Tracer:
             return raised
         # An operator handed over to another takes that one's profile entry.
         cls = type(raised)
-        given = {n: getattr(raised, n) for n in cls.declaration.params}
+        given = {
+            n: getattr(raised, n)
+            for n, p in cls.declaration.params.items()
+            if not p.tunable
+        }
         return self.profile.make(cls, **given, precision=level)
 
     def _output_bounds(self, op, buffer, rank: int) -> dict:
         bounds = {}
         for binding in self.bindings:
-            if binding.op is not op or not isinstance(binding.member, Extent):
+            if binding.op is not op or binding.member.bounds is None:
                 continue
             axis = buffer.extent_axis(binding.member)
             if axis is not None:
@@ -813,7 +814,7 @@ class Tracer:
                 f"keyword-only parameter of the graph's body), got {value!r}"
             )
         # An offset may floor; an extent's derived words take a linear one.
-        if isinstance(value, PerCall) or isinstance(op.value(name), Extent):
+        if isinstance(value, PerCall) or op.value(name).bounds is not None:
             value = value.affine()
         bound = self._bound.setdefault(id(op), {})
         if name in bound and bound[name] != value:
@@ -833,11 +834,12 @@ class Tracer:
         call gave them, a view where ``operands`` holds its buffer.
         """
         called = operands if called is None else called
-        # A shape that Selects on an Auto() field is the device's: resolve()
+        # A shape that Selects on a tunable() is the device's: resolve()
         # gives it, unchecked, so a profile may still tune the op.
-        unset = {n for n in type(op).declaration.autos if vars(op)[n] is None}
+        params = type(op).declaration.params
+        unset = {n for n, p in params.items() if p.tunable and vars(op)[n] is None}
         shaped = op
-        if any(unset & m.dims.names() for m in op._members_io()):
+        if any(unset & param_names(m.dims) for m in op._members_io()):
             shaped = op.resolve(op.dev)
         buffers = shaped.buffers
         ins = [b for b in buffers if b.fills]
@@ -879,15 +881,15 @@ class Tracer:
                 extent = next(
                     (
                         m
-                        for m in type(op).declaration.members
-                        if isinstance(m, Extent) and b.extent_axis(m) == axis
+                        for m in type(op).declaration.per_calls
+                        if m.bounds is not None and b.extent_axis(m) == axis
                     ),
                     None,
                 )
                 if extent is None:
                     raise TypeError(
                         f"{type(op).__name__}.{b.name} cannot be bounded per call on "
-                        f"axis {axis} ({count}): it declares no Extent for the "
+                        f"axis {axis} ({count}): it declares no per_call(bounds=) for the "
                         f"field sizing it"
                     )
                 self._bind(op, extent.name, count)

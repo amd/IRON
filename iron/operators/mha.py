@@ -17,35 +17,22 @@ from typing import ClassVar
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import (
-    Buffer,
-    CompileTime,
-    In,
-    ObjectFifo,
-    Out,
-    TaskGroup,
-    Worker,
-    ceildiv,
-    kernels,
-)
+from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import AnyComputeTile, AnyMemTile, AnyShimTile, Device, Tile
 from aie.iron.kernels.linalg import mm_stream_dims
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import divisors, widths
+from aie.utils.compile.jit.params import (
+    Select,
+    divisors,
+    param,
+    per_call,
+    tunable,
+    widths,
+)
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Extent,
-    Operator,
-    Rtp,
-    Select,
-    Unresolvable,
-    Value,
-    field,
-)
+from iron.common import Built, Operator, Rtp, Unresolvable
 from iron.common.testing import Case, Testing
 
 STACK_SIZE = 0xD00
@@ -195,35 +182,31 @@ class MHA(Operator):
 
     test = Testing(_cases)
 
-    num_heads: CompileTime[int] = field()
-    num_KV_heads: CompileTime[int] = field(derive=lambda op: op.num_heads, held=False)
-    seq_len: CompileTime[int] = field(derive=lambda op: op.seq_pad, held=False)
-    seq_pad: CompileTime[int] = field(
-        derive=lambda op: op.seq_padding(op.seq_len), repr=False
-    )
+    num_heads: int = param()
+    num_KV_heads: int = param(default=lambda op: op.num_heads)
+    seq_len: int = param(default=lambda op: op.seq_pad)
+    seq_pad: int = param(derive=lambda op: op.seq_padding(op.seq_len), repr=False)
     # A cache longer than the queries, whose last rows the queries are.
-    kv_len: CompileTime[int] = field(derive=lambda op: op.seq_pad, held=False)
+    kv_len: int = param(default=lambda op: op.seq_pad)
     # ``(seq, heads, d)`` as a projection writes it, so no copy reorders the heads.
-    heads_interleaved: CompileTime[bool] = field(default=False)
-    kv_interleaved: CompileTime[bool] = field(default=False)
-    d: CompileTime[int] = field(default=64)
-    causal: CompileTime[bool] = field(default=True, array=True)
+    heads_interleaved: bool = param(default=False)
+    kv_interleaved: bool = param(default=False)
+    d: int = param(default=64)
+    causal: bool = param(default=True, array=True)
     # Keys more than this many positions from a query are masked.
-    window: CompileTime[int | None] = field(default=None, array=True)
-    scale: CompileTime[float] = field(
-        derive=lambda op: float(1 / np.sqrt(op.d)), held=False, array=True
-    )
-    B_q: CompileTime[int] = Auto(domain=block_sizes, array=True)
-    B_kv: CompileTime[int] = Auto(repr=False, init=False)
-    num_pipelines: CompileTime[int] = Auto(default=1, domain=widths, array=True)
+    window: int | None = param(default=None, array=True)
+    scale: float = param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
+    B_q: int = tunable(domain=block_sizes)
+    B_kv: int = tunable(repr=False, init=False)
+    num_pipelines: int = tunable(default=1, domain=widths)
     # Filled by resolve.
-    q_shims: CompileTime[int] = Auto(repr=False, init=False)
-    join_rows: CompileTime[int] = Auto(repr=False, init=False)
-    kv_lanes: CompileTime[int] = Auto(repr=False, init=False)
-    width: CompileTime[int] = Auto(repr=False, init=False, array=True)
+    q_shims: int = tunable(repr=False, init=False)
+    join_rows: int = tunable(repr=False, init=False)
+    kv_lanes: int = tunable(repr=False, init=False)
+    width: int = tunable(repr=False, init=False)
     # Two P*V cores, by halves of the head, where one's L1 holds no block.
-    pv_cores: CompileTime[int] = Auto(repr=False, domain=(1, 2))
-    pv_width: CompileTime[int] = Auto(repr=False, init=False)
+    pv_cores: int = tunable(repr=False, domain=(1, 2))
+    pv_width: int = tunable(repr=False, init=False)
 
     # The array widths MHA is placed on, each with the most pipelines one
     # query packed takes, a K and a V lane each.
@@ -254,31 +237,31 @@ class MHA(Operator):
         per=(q_shims, pv_cores),
     )
     # A bound on the queries limits the compute; Q and O stream every row.
-    valid = Extent(seq_pad)
+    valid = per_call(bounds=seq_pad)
     # A bound on the keys limits K's and V's blocks: the work follows the context.
-    kv_valid = Extent(kv_len)
+    kv_valid = per_call(bounds=kv_len)
     # One query packed sits past every key block: no causal skip, no diagonal.
-    heads = Value(
+    heads = per_call(
         derive=lambda op: (
             op.num_KV_heads // op.num_pipelines if op.packed else op.num_heads
         ),
     )
-    q_blocks_per_pipeline = Value(
+    q_blocks_per_pipeline = per_call(
         derive=lambda op: ceildiv(op.seq_pad, op.B_q * op.num_pipelines)
     )
-    q_blocks_valid = Value(
+    q_blocks_valid = per_call(
         derive=lambda op: ceildiv(op.q_tokens, op.B_q * op.num_pipelines)
     )
-    kv_blocks = Value(derive=lambda op: ceildiv(op.kv_tokens, op.B_kv))
-    s_q = Value(
+    kv_blocks = per_call(derive=lambda op: ceildiv(op.kv_tokens, op.B_kv))
+    s_q = per_call(
         derive=lambda op: (
             (op.first_query_block + op.num_pipelines) * op.B_q
             if op.packed
             else op.first_query_block * op.B_q + op.q_tokens
         ),
     )
-    s_kv = Value(derive=lambda op: op.kv_tokens)
-    q_start = Value(derive=lambda op: op.first_query_block)
+    s_kv = per_call(derive=lambda op: op.kv_tokens)
+    q_start = per_call(derive=lambda op: op.first_query_block)
 
     @property
     def packed(self) -> bool:

@@ -7,24 +7,20 @@
 
 from __future__ import annotations
 
-import copy
 import math
-from dataclasses import Field
 from collections.abc import Sequence
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import DmaEndpoint, In, Out
+from aie.iron import DmaEndpoint
 from aie.utils import bfp
-from ml_dtypes import bfloat16
 
-from .field import ParamSpec
-from .shape import Shape, _DimSpec
-from .member import Member
-from .value import Extent, Value
+from aie.utils.compile.jit.params import Param, PerCallMember, Select, resolve
+
+from .value import Value
 
 if TYPE_CHECKING:
     from ..design import OperatorRuntime
@@ -61,101 +57,44 @@ def slots(sizes: Sequence[Any], strides: Sequence[Any]) -> tuple[list, list]:
     return sizes, strides
 
 
-class Operand(Member["Operand"]):
-    """A host buffer: shape in extents, a dtype, and the stream it moves through.
+class Operand:
+    """An operand as one operator holds it: the host buffer its body declares
+    (aie.iron's ``In``, ``Out`` or ``InOut``) resolved on the operator, and
+    the stream lanes a build binds.
 
-    Declared in an operator's body by calling aie.iron's ``In``, ``Out`` or
-    ``InOut`` with these arguments after ``role``; on an instance, ``op.x``
-    is the operand bound to it (`of`), its shape and tile resolved.
-
-    Args:
-        role: aie.iron's ``In`` (the host fills it, the array reads it),
-            ``Out`` (the array writes it, the host reads it) or ``InOut``
-            (the host fills it, the array writes it in place; what the
-            stream does not drain stays as the host gave it).
-        dims: The host shape.
-        dtype: The element type.
-        obj_shape: What one fifo element holds, in the units a core reads
-            (the shape of upstream's `ObjectFifo.obj_type`). With one the
-            buffer is its own stream; without one it is an argument of a
-            hand-written `Operator.sequence`.
-        per: The field (or fields, multiplied) the stream is replicated over.
-        depth: The fifo depth.
-        replicate: Every `per=` lane gets the whole buffer, not a share.
-        when: A bool `field()`; the operand and its stream exist only where
-            it is true, and a call giving the operand by keyword sets it.
+    ``In`` the host fills and the array reads; ``Out`` the array writes and
+    the host reads; ``InOut`` the host fills and the array writes in place
+    (what the stream does not drain stays as the host gave it). On an
+    instance, ``op.x`` is it.
 
     Attributes:
-        dims: The declared host shape.
-        obj_dims: The declared ``obj_shape=``, or None.
+        member: The declared operand, on the class.
+        op: The operator.
     """
 
-    def __init__(
-        self,
-        role: type,
-        *dims: _DimSpec,
-        dtype: Any = bfloat16,
-        obj_shape: Any = None,
-        per: _DimSpec | None = None,
-        depth: int = 2,
-        replicate: bool = False,
-        when: _DimSpec | None = None,
-    ) -> None:
-        self.role = role
-        self.fills = role is not Out
-        self.drains = role is not In
-        if replicate and per is None:
-            raise TypeError(
-                "replicate=True needs per=<dim>: every slot receives the whole buffer"
-            )
-        self.dims = Shape(tuple(dims))
-        self.declared_dtype = dtype
-        self.when = when
-        self.obj_dims = (
-            None
-            if obj_shape is None
-            else Shape(
-                tuple(obj_shape)
-                if isinstance(obj_shape, (tuple, list))
-                else (obj_shape,)
-            )
-        )
-        self.per = (
-            None if per is None else Shape(per if isinstance(per, tuple) else (per,))
-        )
-        self.depth = depth
-        self.replicate = replicate
-        self.op: Operator | None = None
+    def __init__(self, member: Any, op: Operator) -> None:
+        self.member = member
+        self.op = op
         self.lane_handles: list[Any] = []
+        self._decl = member.of(op)
 
-    def of(self, op: Operator) -> Self:
-        """This operand on ``op``: its shape resolved there, its lanes unbound."""
-        bound = copy.copy(self)
-        bound.op = op
-        bound.lane_handles = []
-        return bound
-
-    def _resolve(self, shape: Shape) -> tuple[int, ...]:
-        try:
-            return shape.resolve(self.op)
-        except ValueError as e:
-            raise ValueError(
-                f"{self.name}: {e}. Resolve the operator first (resolved(dev))"
-            ) from None
-
+    name = property(lambda self: self.member.name)
+    role = property(lambda self: type(self.member))
+    fills = property(lambda self: self.member.fills)
+    drains = property(lambda self: self.member.drains)
+    dims = property(lambda self: self.member.dims)
+    obj_dims = property(lambda self: self.member.obj_dims)
+    per = property(lambda self: self.member.per)
+    depth = property(lambda self: self.member.depth)
+    replicate = property(lambda self: self.member.replicate)
+    when = property(lambda self: self.member.when)
     # Resolved on use: a shape may depend on a tunable the device fills.
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return self.dims.resolve(self.op)
-
-    @property
-    def dtype(self):
-        dtype = self.declared_dtype
-        return vars(self.op)[dtype.name] if isinstance(dtype, Field) else dtype
-
-    @property
-    def elements(self) -> int:
-        return int(np.prod(self.shape)) if self.shape else 1
+    shape = property(lambda self: self._decl.shape)
+    dtype = property(lambda self: self._decl.dtype)
+    elements = property(lambda self: self._decl.elements)
+    streamed = property(lambda self: self._decl.streamed)
+    obj_shape = property(lambda self: self._decl.obj_shape)
+    lanes = property(lambda self: self._decl.lanes)
 
     @property
     def tap(self) -> TensorAccessPattern:
@@ -183,16 +122,6 @@ class Operand(Member["Operand"]):
         return np.ndarray[(self.elements,), np.dtype[self.dtype]]
 
     @property
-    def streamed(self) -> bool:
-        return self.obj_dims is not None
-
-    @property
-    def obj_shape(self) -> tuple[int, ...]:
-        if self.obj_dims is None:
-            raise TypeError(f"{self.name} is declared without an obj_shape=: no stream")
-        return self._resolve(self.obj_dims)
-
-    @property
     def obj_type(self):
         """The fifo element type: ``np.ndarray[shape, dtype]``."""
         return np.ndarray[self.obj_shape, np.dtype[self.dtype]]
@@ -208,13 +137,6 @@ class Operand(Member["Operand"]):
         bank = dev.core_memory_bytes // (2 * dev.core_memory_banks)
         obj_bytes = math.prod(self.obj_shape) * bfp.itemsize(self.dtype)
         return 1 if obj_bytes > bank else 2
-
-    @property
-    def lanes(self) -> int:
-        """The stream's lanes (fifos)."""
-        if self.obj_dims is None:
-            raise TypeError(f"{self.name} is declared without an obj_shape=: no stream")
-        return 1 if self.per is None else math.prod(self._resolve(self.per))
 
     def bind(self, handles) -> None:
         """Bind each lane to the fifo end ``Array.build()`` built for it.
@@ -376,17 +298,20 @@ class Operand(Member["Operand"]):
     @property
     def batch_axes(self) -> int:
         """1 if a leading ``T | None`` dimension is present on this instance, else 0."""
-        dims = self.dims.dims
+        dims = self.dims
         if (
             dims
-            and ParamSpec.of(dims[0]) is not None
+            and isinstance(dims[0], Param)
             and dims[0].name in self.op.declaration.nullable
         ):
             return 1 if vars(self.op)[dims[0].name] is not None else 0
         return 0
 
-    def extent_axis(self, extent: Extent) -> int | None:
-        return self.dims.axis_of(extent.field.name, self.op)
+    def extent_axis(self, extent: PerCallMember) -> int | None:
+        """The axis of the resolved shape the parameter ``extent`` bounds
+        sizes, or None.
+        """
+        return axis_of(self.dims, extent.bounds.name, self.op)
 
     def fits(self, tap: TensorAccessPattern) -> bool:
         """Whether one buffer descriptor of a lane's shim tile holds
@@ -430,14 +355,13 @@ class Operand(Member["Operand"]):
         return obj_shape[k] if k >= 0 else 1
 
     @property
-    def bounded(self) -> tuple[Extent, int, Value] | None:
+    def bounded(self) -> tuple[Value, int, Value] | None:
         """``(extent, axis, word)`` when a bound extent sizes an axis, ``word``
         the per-call tiles per lane.
         """
         op = self.op
         for name in op.bound_extents:
             extent = op.value(name)
-            assert isinstance(extent, Extent)
             axis = self.extent_axis(extent)
             if axis is not None:
                 return extent, axis, op.value(f"{name}_{self.name}")
@@ -533,6 +457,38 @@ class Operand(Member["Operand"]):
         return TensorAccessPattern.full(self.shape)[index]
 
     def __repr__(self) -> str:
-        if self.op is None:
-            return f"{self.role.__name__}({self.dims})"
-        return f"<{self.role.__name__} {self.name} {self.shape} {bfp.dtype_name(self.dtype)}>"
+        return repr(self._decl)
+
+
+def axis_of(dims: tuple, name: str, op) -> int | None:
+    """The axis of ``dims`` resolved on ``op`` that the parameter ``name``
+    sizes, or None. A ``T | None`` dimension that is None is left out, and a
+    ``Select`` is the branch its flag picks.
+    """
+    axis = 0
+    for d in dims:
+        if isinstance(d, Select):
+            branch = d.branch(op)
+            inner = axis_of(branch, name, op)
+            if inner is not None:
+                return axis + inner
+            axis += len(resolve(branch, op))
+            continue
+        if isinstance(d, Param):
+            if d.name in op.declaration.nullable and vars(op)[d.name] is None:
+                continue
+            if d.name == name:
+                return axis
+        axis += 1
+    return None
+
+
+def param_names(dims: tuple) -> set[str]:
+    """The parameters ``dims`` name, through ``Select``."""
+    out: set[str] = set()
+    for d in dims:
+        if isinstance(d, Param):
+            out.add(d.name)
+        elif isinstance(d, Select):
+            out |= param_names((d.flag, *d.when_true, *d.when_false))
+    return out

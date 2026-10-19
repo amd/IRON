@@ -9,13 +9,14 @@ import numpy as np
 from aie.dialects.aie import T
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import moe
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.params import param, per_call
 from ml_dtypes import bfloat16
 
-from iron.common import Built, Extent, Operator, field
+from iron.common import Built, Operator
 from iron.common.testing import Case, Testing
 
 #: The rows and columns of a weight tile, so that at Qwen3's shapes a
@@ -61,14 +62,14 @@ class Experts(Operator):
         draw=_routed,
     )
 
-    rows: CompileTime[int] = field(array=True)
-    hidden: CompileTime[int] = field()
-    width: CompileTime[int] = field(array=True)
-    experts: CompileTime[int] = field(array=True)
-    top_k: CompileTime[int] = field()
-    weights_width: CompileTime[int] = field(derive=lambda op: 2 * op.top_k, repr=False)
-    gate_up_width: CompileTime[int] = field(derive=lambda op: 2 * op.width, repr=False)
-    tile: CompileTime[int] = field(derive=lambda op: TILE * TILE, repr=False)
+    rows: int = param(array=True)
+    hidden: int = param()
+    width: int = param(array=True)
+    experts: int = param(array=True)
+    top_k: int = param()
+    weights_width: int = param(derive=lambda op: 2 * op.top_k, repr=False)
+    gate_up_width: int = param(derive=lambda op: 2 * op.width, repr=False)
+    tile: int = param(derive=lambda op: TILE * TILE, repr=False)
 
     x = In(rows, hidden, obj_shape=(hidden,))
     ids = In(rows, top_k, dtype=np.int32, obj_shape=(top_k,))
@@ -77,7 +78,7 @@ class Experts(Operator):
     down = In(experts, hidden, width, obj_shape=(tile,))
     y = Out(rows, hidden, obj_shape=(hidden,))
     # Every row is still computed under a bound.
-    valid = Extent(rows)
+    valid = per_call(bounds=rows)
 
     class Array(Operator.Array):
         def kernel(self):

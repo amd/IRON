@@ -19,7 +19,6 @@ from aie.iron import (
     Acquire,
     Bd,
     Buffer,
-    CompileTime,
     DmaChannel,
     Flow,
     In,
@@ -36,21 +35,10 @@ from aie.iron.device import Device, Tile
 from aie.iron.kernels import fused_mm
 from aie.utils import bfp
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import divisors
+from aie.utils.compile.jit.params import Select, divisors, param, per_call, tunable
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Extent,
-    Operator,
-    Precision,
-    Rtp,
-    Select,
-    Unresolvable,
-    Value,
-    field,
-)
+from iron.common import Built, Operator, Precision, Rtp, Unresolvable
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
     B_MAX_SLOTS,
@@ -150,68 +138,58 @@ class ProjectionGEMM(Operator):
     ``at_precision(Precision.HIGHEST)`` hands over to.
     """
 
-    M: CompileTime[int] = field()
-    K: CompileTime[int] = field()
-    N: CompileTime[int] = field()
+    M: int = param()
+    K: int = param()
+    N: int = param()
     # The activation, selected at run time from the compiled-in modes; its
     # gelu is x * sigmoid(1.702x), the port's own arithmetic.
-    epilogue: CompileTime[Epilogue | str] = field(default=Epilogue.NONE)
+    epilogue: Epilogue | str = param(default=Epilogue.NONE)
     # B's packed block count on AIE2P: blocks, not bytes, since B's
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
     # into the byte count pack_B returns.
-    packed_blocks: CompileTime[int] = field(
-        derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False
-    )
+    packed_blocks: int = param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # 64 halves the mmul's accumulator traffic per mac; 128 halves A fetches.
-    tile_n: CompileTime[int] = Auto(array=True)
+    tile_n: int = tunable()
     # k tile. K must be a multiple of it, and it of the compute tile's k slice.
-    k_tile: CompileTime[int] = Auto(
+    k_tile: int = tunable(
         domain=lambda op, dev, t: divisors(t, of=op.K, step=op.ct_max_k, cap=K_TILE),
-        array=True,
     )
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
-    tile_ma: CompileTime[int] = Auto(
-        domain=lambda op, dev, t: divisors(t, of=M_TILE, step=2 * R), array=True
-    )
+    tile_ma: int = tunable(domain=lambda op, dev, t: divisors(t, of=M_TILE, step=2 * R))
     # Row-blocks a core folds into one B fetch, cutting B's DDR reads by
     # m_chunk at the cost of that many L1 accumulators. 1 by default: it must
     # divide m_row_blocks (M % 512 == 0), and a shape that cannot use it would
     # fork config_name. See README.md.
-    m_chunk: CompileTime[int] = Auto(
+    m_chunk: int = tunable(
         default=1,
         domain=lambda op, dev, t: divisors(t, of=op.M // (M_TILE * op.rows)),
-        array=True,
     )
     # The activations the epilogue can select between at run time. Each one
     # compiled in costs
     # program memory, so a deployment that dispatches two should compile two.
-    epilogue_modes: CompileTime[tuple] = field(default=tuple(Epilogue), array=True)
-    rounding: CompileTime[Rounding | str] = field(
-        default=Rounding.CONV_EVEN, array=True
-    )
-    gelu: CompileTime[Gelu | str] = field(default=Gelu.FP32, array=True)
+    epilogue_modes: tuple = param(default=tuple(Epilogue), array=True)
+    rounding: Rounding | str = param(default=Rounding.CONV_EVEN, array=True)
+    gelu: Gelu | str = param(default=Gelu.FP32, array=True)
     # B as stored (N, K), a checkpoint's layout, read as is: the memtile lays
     # out the k panels the kernel reads as B^T blocks, so no packed copy.
-    b_col_maj: CompileTime[bool] = field(default=False, array=True)
+    b_col_maj: bool = param(default=False, array=True)
     # MEDIUM multiplies on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8
     # (the port's arithmetic); above it, or on AIE2, on bf16 macs.
-    precision: CompileTime[Precision] = Auto(default=Precision.MEDIUM, domain=Precision)
+    precision: Precision = tunable(default=Precision.MEDIUM, domain=Precision)
     # Filled by resolve, from the device: the macs, the grid, B's storage,
     # the L2 tiles.
-    emulate_bf16_mmul_with_bfp16: CompileTime[bool] = Auto(
-        repr=False, init=False, array=True
-    )
-    rows: CompileTime[int] = Auto(repr=False, init=False)
-    cols: CompileTime[int] = Auto(repr=False, init=False)
-    bfp16_b: CompileTime[bool] = Auto(repr=False, init=False, array=True)
+    emulate_bf16_mmul_with_bfp16: bool = tunable(repr=False, init=False)
+    rows: int = tunable(repr=False, init=False)
+    cols: int = tunable(repr=False, init=False)
+    bfp16_b: bool = tunable(repr=False, init=False)
     # B's element type, on the array and in DDR alike; the host holds a
     # block-float B as bytes (Operand.host_dtype).
-    b_dtype: CompileTime[Any] = Auto(repr=False, init=False)
-    l1_b_depth: CompileTime[int] = Auto(repr=False, init=False, array=True)
-    a_l2: CompileTime[int] = Auto(repr=False, init=False)
-    b_l2: CompileTime[int] = Auto(repr=False, init=False)
-    c_l2: CompileTime[int] = Auto(repr=False, init=False)
+    b_dtype: Any = tunable(repr=False, init=False)
+    l1_b_depth: int = tunable(repr=False, init=False)
+    a_l2: int = tunable(repr=False, init=False)
+    b_l2: int = tunable(repr=False, init=False)
+    c_l2: int = tunable(repr=False, init=False)
 
     # The sequence writes the cores' parameters itself, behind the first
     # block's fills and once per slab; see sequence().
@@ -241,23 +219,23 @@ class ProjectionGEMM(Operator):
     # reaches; past them the cores drain each column-block's B replay
     # uncomputed, since its count is in the memtile's lock values, which no
     # per-call word reaches. B moves as it does unbounded.
-    valid = Extent(M)
+    valid = per_call(bounds=M)
     # The parameter words every core reads once a call. The unit counts are
     # read only at m_chunk > 1: the sequence writes a word per core, ~2 us of
     # dispatch latency against a ~107 us floor. The clamp bounds are read
     # always, the identity: the kernel's clamp is not compiled out.
-    n_val = Value(derive=lambda op: op.N)
-    m_row_blocks = Value(derive=lambda op: op._m_row_blocks)
-    k_iters = Value(derive=lambda op: op._k_iters)
-    mode = Value(derive=lambda op: op.epilogue.mode)
-    clamp_min = Value(derive=lambda op: CLAMP_BITS[0])
-    clamp_max = Value(derive=lambda op: CLAMP_BITS[1])
-    n_units = Value(derive=lambda op: op._n_units)
+    n_val = per_call(derive=lambda op: op.N)
+    m_row_blocks = per_call(derive=lambda op: op._m_row_blocks)
+    k_iters = per_call(derive=lambda op: op._k_iters)
+    mode = per_call(derive=lambda op: op.epilogue.mode)
+    clamp_min = per_call(derive=lambda op: CLAMP_BITS[0])
+    clamp_max = per_call(derive=lambda op: CLAMP_BITS[1])
+    n_units = per_call(derive=lambda op: op._n_units)
     # Under a bound, the units it reaches: the cores' trip count and C's
     # length, in row blocks.
-    units_valid = Value(derive=_units_valid)
+    units_valid = per_call(derive=_units_valid)
     # A's repeat count on a full ELF: the units less one.
-    units_repeat = Value(derive=lambda op: _units_valid(op) - 1)
+    units_repeat = per_call(derive=lambda op: _units_valid(op) - 1)
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened
@@ -1145,8 +1123,7 @@ class ProjectionGEMM(Operator):
         xclbin every shape sharing it runs, each with its own instruction stream.
         """
         M, K, N = self._reference_shape
-        return dataclasses.replace(
-            self,
+        return self.replace(
             M=M,
             K=K,
             N=N,

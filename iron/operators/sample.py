@@ -9,20 +9,19 @@ writes ahead of time per position. Each column's core reduces its slice of
 the logits to a top-k summary; one combine core draws the token from them.
 """
 
-import dataclasses
 from functools import cache
 
 import numpy as np
 from aie.dialects.aie import WireBundle, get_target_model
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import Buffer, In, InOut, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import sample
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import divisors, widths
+from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Operator, Unresolvable, Value, field
+from iron.common import Built, Operator, Unresolvable
 from iron.common.testing import Case, Testing
 
 # A select core's logits object: no more than this, and even (4-byte DMA).
@@ -112,13 +111,13 @@ class Sample(Operator):
         draw=_logits,
     )
 
-    vocab: CompileTime[int] = field(array=True)
-    k_max: CompileTime[int] = field(default=64, array=True)
+    vocab: int = param(array=True)
+    k_max: int = param(default=64, array=True)
     # Positions the draws and the record hold; the sequence picks one.
-    steps: CompileTime[int] = field(default=1)
-    cores: CompileTime[int] = Auto(default=4, domain=widths)
+    steps: int = param(default=1)
+    cores: int = tunable(default=4, domain=widths)
     # Logits per select call.
-    chunk: CompileTime[int] = Auto(
+    chunk: int = tunable(
         domain=lambda op, dev, t: divisors(
             t, of=op.slice_size, step=2, cap=_CHUNK_LIMIT
         )
@@ -131,8 +130,8 @@ class Sample(Operator):
     tokens = InOut(steps, dtype=np.int32, obj_shape=(1,), depth=1)
     token = Out(1, dtype=np.int32, obj_shape=(1,), depth=1)
     # Element offsets of this position's draw row and record.
-    row = Value(derive=lambda op: 0)
-    at = Value(derive=lambda op: 0)
+    row = per_call(derive=lambda op: 0)
+    at = per_call(derive=lambda op: 0)
 
     @property
     def slice_size(self) -> int:
@@ -155,7 +154,7 @@ class Sample(Operator):
                 f"takes {joined}"
             )
         chunk = self.chunk or _largest_chunk(self.slice_size, self.slice_size // 2)
-        return dataclasses.replace(self, chunk=chunk)
+        return self.replace(chunk=chunk)
 
     def compatible(self) -> None:
         # The factories' own checks: chunk divides the slice, k_max fits.

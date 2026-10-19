@@ -12,19 +12,18 @@ generates; on a full ELF it is a scratchpad word the queue push is updated
 from. One image serves every `k`.
 """
 
-import dataclasses
-
 import numpy as np
 import pytest
 from aie.helpers.taplib import PerCall, TensorAccessPattern
 from aie.passmanager import PassManager
-from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup
+from aie.iron import In, ObjectFifo, Out, TaskGroup
 from aie.utils.npukernel import NPUKernel
 from aie.utils.txn_trace import trace
+from aie.utils.compile.jit.params import param, per_call
 
 import iron
 from iron import Scratchpad
-from iron.common import Built, Extent, Operator, Value, field
+from iron.common import Built, Operator
 from iron.common.design import OperatorDesign
 from iron.common.image.packaging import Kind
 
@@ -37,17 +36,17 @@ IMAGES = {"elf": True, "xclbin": False}
 class RepeatTile(Operator):
     """`y[:valid]` is `valid` copies of `x`; past it, `y` is untouched."""
 
-    width: CompileTime[int] = field()
-    max_k: CompileTime[int] = field()
+    width: int = param()
+    max_k: int = param()
 
-    valid = Extent(max_k)
-    reps = Value(derive=lambda op: op.valid - 1)
+    valid = per_call(bounds=max_k)
+    reps = per_call(derive=lambda op: op.valid - 1)
 
     x = In(width, dtype=np.int32, obj_shape=(width,))
     y = Out(max_k, width, dtype=np.int32, obj_shape=(width,))
 
     def resolve(self, dev):
-        return dataclasses.replace(self)
+        return self.replace()
 
     class Array(Operator.Array):
         def build(self) -> Built:

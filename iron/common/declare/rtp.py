@@ -10,8 +10,20 @@ from typing import Any
 
 import numpy as np
 from aie.iron import Buffer, WorkerRuntimeBarrier
+from aie.utils.compile.jit.params import PerCallMember
 
 from .value import Value
+
+
+class Block(PerCallMember):
+    """A block of ``words`` words a core reads, written once per build:
+    ``derive`` computes them from the operator. A shipped image's parameters
+    are one.
+    """
+
+    def __init__(self, words: int, *, derive: Any) -> None:
+        super().__init__(np.int32, derive, None)
+        self.words = words
 
 
 class Rtp(tuple):

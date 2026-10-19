@@ -1,17 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import dataclasses
 
 import numpy as np
 from aie.extras.dialects import arith
-from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import conv
-from aie.utils.compile.jit.params import widths
+from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
+from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 
 TAPS = 5
@@ -35,9 +34,9 @@ class DepthwiseConv1d(Operator):
         draw=lambda op: dict(centered=(op.x, op.weight)),
     )
 
-    rows: CompileTime[int] = field()
-    channels: CompileTime[int] = field()
-    num_aie_columns: CompileTime[int] = Auto(domain=widths)
+    rows: int = param()
+    channels: int = param()
+    num_aie_columns: int = tunable(domain=widths)
 
     x = In(
         rows, channels, obj_shape=(channels,), per=(num_aie_columns,), depth=TAPS + 1
@@ -45,8 +44,8 @@ class DepthwiseConv1d(Operator):
     weight = In(TAPS, channels, obj_shape=(channels,), depth=TAPS)
     y = Out(rows, channels, obj_shape=(channels,), per=(num_aie_columns,))
     # Every row is still computed under a bound: a row reads only those before it.
-    valid = Extent(rows)
-    steps = Value(derive=lambda op: op.rows // op.num_aie_columns)
+    valid = per_call(bounds=rows)
+    steps = per_call(derive=lambda op: op.rows // op.num_aie_columns)
 
     def validate(self) -> None:
         if self.channels % 32:
@@ -61,7 +60,7 @@ class DepthwiseConv1d(Operator):
             self.num_aie_columns,
             fits=lambda c: self.rows % c == 0 and self.rows // c >= TAPS - 1,
         )
-        return dataclasses.replace(self, num_aie_columns=cols)
+        return self.replace(num_aie_columns=cols)
 
     def compatible(self) -> None:
         cols = self.num_aie_columns

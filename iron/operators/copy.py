@@ -13,7 +13,6 @@ import numpy as np
 from aie.dialects.aie import DMAChannelDir, WireBundle
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
-    CompileTime,
     DmaEndpoint,
     ExternalFunction,
     Flow,
@@ -28,20 +27,10 @@ from aie.iron import (
 from aie.iron.device import Tile
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.params import divisors, widths
+from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Extent,
-    Operand,
-    Operator,
-    Rtp,
-    Unresolvable,
-    Value,
-    field,
-)
+from iron.common import Built, Operand, Operator, Rtp, Unresolvable
 from iron.common.declare.operand import slots
 from iron.common.testing import Case, Testing
 
@@ -98,28 +87,28 @@ class Gather(Operator):
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
     pad_bytes: ClassVar[int] = 16
 
-    rows: CompileTime[int] = field()
-    table_rows: CompileTime[int] = field()
-    row: CompileTime[int] = field()
-    dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
-    words: CompileTime[int] = field(
+    rows: int = param()
+    table_rows: int = param()
+    row: int = param()
+    dtype: Any = param(default=bfloat16, repr=False)
+    words: int = param(
         derive=lambda op: 20 * op.chain
         + 6 * op.rows
         + 3 * len(op.batches)
         + (3 if op.rows % op.chain else 0),
         repr=False,
     )
-    feeds: CompileTime[int] = Auto(domain=widths)
+    feeds: int = tunable(domain=widths)
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
     y = Out(rows, row, dtype=dtype, obj_shape=(row,), per=(feeds,))
-    valid_rows = Extent(rows)
+    valid_rows = per_call(bounds=rows)
     # Per feed, the 16-byte units it drains under a bound.
-    drained0 = Value(derive=lambda op: op.drained(0))
-    drained1 = Value(derive=lambda op: op.drained(1))
-    drained2 = Value(derive=lambda op: op.drained(2))
-    drained3 = Value(derive=lambda op: op.drained(3))
+    drained0 = per_call(derive=lambda op: op.drained(0))
+    drained1 = per_call(derive=lambda op: op.drained(1))
+    drained2 = per_call(derive=lambda op: op.drained(2))
+    drained3 = per_call(derive=lambda op: op.drained(3))
 
     @property
     def batches(self) -> list[int]:
@@ -165,7 +154,7 @@ class Gather(Operator):
                 f"Gather: a gather feeds from 1 to {dev.cols // 2} pairs of shim "
                 f"columns on a device of {dev.cols}, not {feeds}"
             )
-        return dataclasses.replace(self, feeds=feeds)
+        return self.replace(feeds=feeds)
 
     def compatible(self) -> None:
         if (
@@ -393,25 +382,23 @@ class GatherWords(Operator):
 
     low_bits: ClassVar[int] = 29
 
-    rows: CompileTime[int] = field()
-    table_rows: CompileTime[int] = field(array=True)
-    row_bytes: CompileTime[int] = field(array=True)
-    words: CompileTime[int] = field()
-    pairs: CompileTime[int] = field(
-        derive=lambda op: 2 * op.rows, repr=False, array=True
-    )
-    bounded: CompileTime[bool] = field(default=False, array=True)
+    rows: int = param()
+    table_rows: int = param(array=True)
+    row_bytes: int = param(array=True)
+    words: int = param()
+    pairs: int = param(derive=lambda op: 2 * op.rows, repr=False, array=True)
+    bounded: bool = param(default=False, array=True)
     # The words a call writes: the address pairs, then if bounded the lengths.
-    record: CompileTime[int] = field(
+    record: int = param(
         derive=lambda op: op.pairs + (op.rows if op.bounded else 0), repr=False
     )
 
     ids = In(rows, dtype=np.int32, obj_shape=(rows,), depth=1)
     control = Out(words, dtype=np.uint32, obj_shape=(record,), depth=1)
-    base_lo = Value()
-    base_hi = Value()
-    valid_rows = Extent(rows)
-    valid = Value(derive=lambda op: op.valid_rows)
+    base_lo = per_call()
+    base_hi = per_call()
+    valid_rows = per_call(bounds=rows)
+    valid = per_call(derive=lambda op: op.valid_rows)
 
     def ops(self) -> int:
         return 0
@@ -588,13 +575,13 @@ class Copy(Operator):
         ],
     )
 
-    input_buffer_size: CompileTime[int] = field(repr=False)
-    src: CompileTime[TensorAccessPattern | tuple[TensorAccessPattern, ...]] = field(
-        derive=lambda op: TensorAccessPattern.full((op.input_buffer_size,)), held=False
+    input_buffer_size: int = param(repr=False)
+    src: TensorAccessPattern | tuple[TensorAccessPattern, ...] = param(
+        default=lambda op: TensorAccessPattern.full((op.input_buffer_size,))
     )
     # A repeated source's walk is its capacity: the destination's rows are the copy's.
-    output_buffer_size: CompileTime[int] = field(
-        derive=lambda op: sum(
+    output_buffer_size: int = param(
+        default=lambda op: sum(
             prod(p.sizes)
             for p in (
                 (op.dst,)
@@ -602,24 +589,22 @@ class Copy(Operator):
                 else op.src if isinstance(op.src, tuple) else (op.src,)
             )
         ),
-        held=False,
         repr=False,
     )
     # Rows as wide as the source's innermost axis: the channels split both alike.
-    dst: CompileTime[TensorAccessPattern | tuple[TensorAccessPattern, ...]] = field(
-        derive=lambda op: TensorAccessPattern.full(
+    dst: TensorAccessPattern | tuple[TensorAccessPattern, ...] = param(
+        default=lambda op: TensorAccessPattern.full(
             (op.output_buffer_size // op.src.sizes[-1], op.src.sizes[-1])
             if isinstance(op.src, TensorAccessPattern)
             else (op.output_buffer_size // op.src[0].sizes[-1], op.src[0].sizes[-1])
         ),
-        held=False,
     )
     # The axis of each pattern a graph bounds per call.
-    src_bound: CompileTime[int | None] = field(default=None)
-    dst_bound: CompileTime[int | None] = field(default=None)
+    src_bound: int | None = param(default=None)
+    dst_bound: int | None = param(default=None)
     # The source's first axis runs a per-call count of times (Handle.at's repeat).
-    src_repeat: CompileTime[bool] = field(default=False)
-    tile_size: CompileTime[int] = Auto(
+    src_repeat: bool = param(default=False)
+    tile_size: int = tunable(
         domain=lambda op, dev, t: divisors(
             t,
             of=op.channel_share,
@@ -631,8 +616,8 @@ class Copy(Operator):
     object_bytes: ClassVar[int] = 64 * 1024
     # The patterns a repeated source walks in turn: a repeat word each.
     max_walks: ClassVar[int] = 8
-    num_channels: CompileTime[int] = Auto(default=1, domain=widths)
-    dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
+    num_channels: int = tunable(default=1, domain=widths)
+    dtype: Any = param(default=bfloat16, repr=False)
 
     x = In(
         input_buffer_size,
@@ -649,19 +634,19 @@ class Copy(Operator):
         depth=1,
     )
     # In elements.
-    in_offset = Value(derive=lambda op: 0)
-    out_offset = Value(derive=lambda op: 0)
-    src_valid = Value(derive=lambda op: op.src_bound)
-    dst_valid = Value(derive=lambda op: op.dst_bound)
+    in_offset = per_call(derive=lambda op: 0)
+    out_offset = per_call(derive=lambda op: 0)
+    src_valid = per_call(derive=lambda op: op.src_bound)
+    dst_valid = per_call(derive=lambda op: op.dst_bound)
     # Each walk's runs past the first, as a task queue's repeat count counts them.
-    src_repeats0 = Value(derive=lambda op: 0)
-    src_repeats1 = Value(derive=lambda op: 0)
-    src_repeats2 = Value(derive=lambda op: 0)
-    src_repeats3 = Value(derive=lambda op: 0)
-    src_repeats4 = Value(derive=lambda op: 0)
-    src_repeats5 = Value(derive=lambda op: 0)
-    src_repeats6 = Value(derive=lambda op: 0)
-    src_repeats7 = Value(derive=lambda op: 0)
+    src_repeats0 = per_call(derive=lambda op: 0)
+    src_repeats1 = per_call(derive=lambda op: 0)
+    src_repeats2 = per_call(derive=lambda op: 0)
+    src_repeats3 = per_call(derive=lambda op: 0)
+    src_repeats4 = per_call(derive=lambda op: 0)
+    src_repeats5 = per_call(derive=lambda op: 0)
+    src_repeats6 = per_call(derive=lambda op: 0)
+    src_repeats7 = per_call(derive=lambda op: 0)
 
     def walks(self) -> list[tuple[TensorAccessPattern, ...]]:
         """The patterns each side walks in turn, ``[src, dst]``."""
@@ -706,7 +691,7 @@ class Copy(Operator):
             for d in (i, whole // i)
             if d <= cap
         )
-        return dataclasses.replace(self, tile_size=tile_size)
+        return self.replace(tile_size=tile_size)
 
     @property
     def channel_share(self) -> int:
