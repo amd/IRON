@@ -698,9 +698,10 @@ class Recorder:
         return self._record(op, operands, called)
 
     def _gather(self, target, operands: list[Handle], extra) -> Handle:
-        """``Copy(table[ids])`` with ``ids`` per call: a ``Gather``. For ids an input the host encodes its control words from
-        the ids each call; for ids the device made, its word source writes
-        them into its template first.
+        """``Copy(table[ids])`` with ``ids`` per call: a ``Gather``. For ids an
+        input the host encodes its control words from the ids each call; for
+        ids the device made, its word source writes them into its template
+        first.
         """
         from iron.operators.copy import Copy
         from iron.operators.copy import Gather as GatherRows
