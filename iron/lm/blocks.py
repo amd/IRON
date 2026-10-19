@@ -570,7 +570,7 @@ class KVCache(iron.Graph):
         """
         if held == ran:
             return held
-        assert self.ring is not None and self.window is not None, "a ring's"
+        assert self.ring is not None and self.window is not None, "restart needs a ring"
         start = held // self.chunk * self.chunk
         return start if ran - (start - self.window) <= self.ring else 0
 
@@ -592,7 +592,7 @@ class KVCache(iron.Graph):
                     cache[call.position] = x.reshape(G, D)
             keys, values = (x[: call.position + 1] for x in (self.keys, self.values))
         else:
-            assert self.window is not None, "a ring's"
+            assert self.window is not None, "a ring has a window"
             keys, values, q = self._ring(call, self.ring, self.window, q, k, v)
         o = MHA.step(
             q,
