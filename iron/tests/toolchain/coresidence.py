@@ -406,8 +406,7 @@ def test_pack_compiles_to_a_full_elf():
     seq = _sequence(4, lambda add, silu: [[add, silu]])
     seq.compile()
     designs = list(Composition(seq).designs)
-    assert seq.elf_path is not None
-    config = json.loads((seq.elf_path.parent / "full_elf_config.json").read_text())
+    config = json.loads((seq.image.parent / "full_elf_config.json").read_text())
     instances = [
         instance["id"]
         for kernel in config["xrt-kernels"]
@@ -422,7 +421,7 @@ def test_graph_compile_forwards_the_packing():
     version = Chain(SIZE, TILE, columns=2).compile(
         full_elf=True, coresident=AdjacentPacking(), a=(SIZE,), b=(SIZE,)
     )
-    assert version.sequence.coresident == AdjacentPacking()
+    assert version.sequence.packaging.coresident == AdjacentPacking()
     composed = Composition(version.sequence)
     assert re.findall(r"aiex\.configure @(\w+)", composed.text()) == [
         Packing.device_name(list(composed.designs))

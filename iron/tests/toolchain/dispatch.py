@@ -61,8 +61,7 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
     assert (
         "dispatch-time scalar" in kinds["n"] and "dispatch-time scalar" in kinds["pos"]
     )
-    chain = net.sequence._image
-    assert chain is not None
+    chain = net.sequence.packaging
     designs = {
         type(op).__name__: chain.links[id(op)].design
         for op in net.sequence.unique_operators()
