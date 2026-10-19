@@ -900,11 +900,15 @@ class Recorder:
                 slots.append(next(given))
             else:
                 shape = b.shape
-                # A flat output the size of the first operand has its shape
-                # and bounds: (rows, cols) stays (rows, cols) through SiLU,
-                # and a copy of a view has the view's shape.
+                # An Out(like=x) has x's shape and bounds as the call gave
+                # x: (rows, cols) stays (rows, cols) through SiLU. A flat
+                # output the size of the first operand has its shape and
+                # bounds: a copy of a view has the view's shape.
                 bounds: dict = {}
-                if len(shape) == 1 and called and called[0].elements == b.elements:
+                if b.like is not None:
+                    like = called[[i.name for i in ins].index(b.like.name)]
+                    shape, bounds = like.shape, dict(like.valid)
+                elif len(shape) == 1 and called and called[0].elements == b.elements:
                     shape, bounds = called[0].shape, dict(called[0].valid)
                 if not bounds:
                     bounds = self._output_bounds(op, b, len(shape))
