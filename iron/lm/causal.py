@@ -278,13 +278,16 @@ class CausalLM(Model):
 
         config = cls.default_config(args.checkpoint)
         model = cls(config, Checkpoint(args.checkpoint).tree("unread"))
-        sampler = Sampler(args.temperature, args.top_k)
-        try:
-            return calls(
-                model, args.position, args.token, args.context, args.points, sampler
+        L, C = config.max_seq_len, config.prefill_chunk
+        if not C <= args.context <= L or args.context % C:
+            parser.error(
+                f"--context {args.context} is not whole {C}-token chunks within "
+                f"max_seq_len {L}"
             )
-        except ValueError as e:  # the context is no whole chunks within the caches
-            parser.error(str(e))
+        sampler = Sampler(args.temperature, args.top_k)
+        return calls(
+            model, args.position, args.token, args.context, args.points, sampler
+        )
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the decode step's (none), then

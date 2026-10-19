@@ -73,8 +73,8 @@ def test_main_tunes_a_decoder_s_calls_on_its_flags(toy):
 @pytest.mark.parametrize(
     "context, refusal",
     [
-        (300, "the context 300 is not a multiple of 256"),
-        (2048, "past max_seq_len 1024"),
+        (300, "--context 300 is not whole 256-token chunks within max_seq_len 1024"),
+        (2048, "--context 2048 is not whole 256-token chunks"),
     ],
 )
 def test_main_refuses_a_context_that_is_no_whole_chunks_within_the_caches(
