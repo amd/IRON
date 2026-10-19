@@ -74,8 +74,9 @@ def test_from_checkpoint_takes_either_the_file_or_its_directory():
     ids=lambda cls: f"{cls.__module__}.{cls.__name__}",
 )
 def test_from_checkpoint_reads_each_key_and_no_not_json_field(tmp_path, cls):
-    """Every field is read at its key, its own name under the class's
-    ``json_prefix`` unless it names another, and one the file leaves null
+    """Every field is read at its key (``json_key``), its own name or the
+    path it names, under ``json_prefix`` unless the path starts at the
+    root; one the file leaves null
     (each converted one here) keeps its default; a ``not_json`` field is
     neither read nor written, even where the file names it.
     """

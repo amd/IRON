@@ -50,7 +50,7 @@ class Config(lm.Config):
     global_head_dim: int = dataclasses.field(
         default=512, metadata={"json": "per_layer_config.05.head_dim"}
     )
-    global_rope_base: float = dataclasses.field(
+    global_rope_theta: float = dataclasses.field(
         default=1000000.0,
         metadata={"json": "rope_parameters.full_attention.rope_theta"},
     )
@@ -93,7 +93,7 @@ class Config(lm.Config):
     def heads(self, i: int) -> tuple[int, int, float]:
         """Layer ``i``'s KV groups, head size and RoPE base."""
         if self.layer_types[i] == "full_attention":
-            return self.global_kv_groups, self.global_head_dim, self.global_rope_base
+            return self.global_kv_groups, self.global_head_dim, self.global_rope_theta
         return self.num_key_value_heads, self.head_dim, self.rope_theta
 
 
@@ -107,12 +107,8 @@ class AudioConfig(lm.Config):
     intermediate_size: int = lm.not_json(4096)
     mels: int = lm.not_json(128)
     # The two subsampling convolutions' output channels.
-    channels: tuple[int, int] = dataclasses.field(
-        default=(128, 32),
-        metadata={
-            "json": "subsampling_conv_channels",
-            "convert": tuple,
-        },
+    subsampling_conv_channels: tuple[int, int] = dataclasses.field(
+        default=(128, 32), metadata={"convert": tuple}
     )
     # A query attends to itself and the `window - 1` positions before it.
     window: int = lm.not_json(12)
@@ -120,9 +116,7 @@ class AudioConfig(lm.Config):
     # make the row a whole Softmax line.
     band: int = lm.not_json(32)
     attention_logit_cap: float = 50.0
-    conv_kernel: int = dataclasses.field(
-        default=5, metadata={"json": "conv_kernel_size"}
-    )
+    conv_kernel_size: int = 5
     residual_weight: float = 0.5
     text_dim: int = lm.not_json(512)
     # The feature extractor's: samples per second, per frame and per hop.
@@ -173,12 +167,10 @@ class VisionConfig(lm.Config):
     head_dim: int = 64
     intermediate_size: int = 3072
     # A patch's side in pixels, and a soft token's side in patches.
-    patch: int = dataclasses.field(default=16, metadata={"json": "patch_size"})
-    pool: int = dataclasses.field(default=3, metadata={"json": "pooling_kernel_size"})
+    patch_size: int = 16
+    pooling_kernel_size: int = 3
     # The rows of each axis's position-embedding table.
-    positions: int = dataclasses.field(
-        default=10240, metadata={"json": "position_embedding_size"}
-    )
+    position_embedding_size: int = 10240
     rope_theta: float = dataclasses.field(
         default=100.0, metadata={"json": "rope_parameters.rope_theta"}
     )
@@ -222,9 +214,9 @@ class VisionConfig(lm.Config):
             ValueError: Both sides round to no block, or the size exceeds
                 the budget.
         """
-        side = self.pool * self.patch
-        max_patches = max_tokens * self.pool**2
-        target_px = max_patches * self.patch**2
+        side = self.pooling_kernel_size * self.patch_size
+        max_patches = max_tokens * self.pooling_kernel_size**2
+        target_px = max_patches * self.patch_size**2
         factor = math.sqrt(target_px / (height * width))
         out_height = int(math.floor(factor * height / side)) * side
         out_width = int(math.floor(factor * width / side)) * side
@@ -251,4 +243,6 @@ class VisionConfig(lm.Config):
         the processor's `max_tokens`.
         """
         out_height, out_width = self.size(height, width, max_tokens)
-        return out_height * out_width // (self.pool * self.patch) ** 2
+        return (
+            out_height * out_width // (self.pooling_kernel_size * self.patch_size) ** 2
+        )

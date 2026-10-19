@@ -183,7 +183,9 @@ class LightConv(iron.Graph):
         E = c.hidden_size
         self.pre_layer_norm = RMSNorm(E, c.eps)
         self.linear_start = Clipped(E, 2 * E)
-        self.depthwise_conv1d = SimpleNamespace(weight=iron.param(E, 1, c.conv_kernel))
+        self.depthwise_conv1d = SimpleNamespace(
+            weight=iron.param(E, 1, c.conv_kernel_size)
+        )
         self.conv_norm = RMSNorm(E, c.eps)
         self.linear_end = Clipped(E, E)
 
@@ -265,7 +267,7 @@ class AudioTower(Tower):
         self.load_layers(weights, "audio_tower.layers.")
         T = c.max_tokens
         H, D, W, B = c.num_attention_heads, c.head_dim, c.window, c.band
-        C0, _ = c.channels
+        C0, _ = c.subsampling_conv_channels
         F0 = c.mels // 2
         # The first convolution's output row: each frequency's channels in a
         # slot of their own, with a zero slot either side, the second's padding.
@@ -276,7 +278,9 @@ class AudioTower(Tower):
         )
         self.conv0 = Conv2d(w0 - w0.mean(axis=0), c.mels, stride=2, padding=1, border=1)
         self.conv1 = Conv2d(w1 - w1.mean(axis=0), F0 + 2, stride=2)
-        self.log_mel = blocks.LogMel(c.frame, c.hop, mels=c.mels)
+        self.log_mel = blocks.LogMel(
+            c.frame, c.hop, mels=c.mels, sample_rate=c.sample_rate
+        )
         self.features = iron.state((4 * T + 2, c.mels))
         self.zero_mel = np.zeros((1, c.mels), bfloat16)
         self.subsampled = iron.state((2 * T + 2, self.slots))
@@ -333,7 +337,7 @@ class AudioTower(Tower):
             tokens: The per-call `config.tokens(frames)`.
         """
         c = self.config
-        C0, C1 = c.channels
+        C0, C1 = c.subsampling_conv_channels
         F1 = c.mels // 4
         T = c.max_tokens
         # The first row of each convolution's input is its zero padding in time.

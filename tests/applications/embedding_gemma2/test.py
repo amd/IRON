@@ -308,14 +308,18 @@ def windows(config, pixel_values, positions):
         ``(2 * rows,)`` int32, every patch's x, then every patch's y plus
         ``positions``.
     """
-    c, P, rows = config, config.positions, config.patches
+    c, P, rows = config, config.position_embedding_size, config.patches
     real = np.flatnonzero((positions >= 0).all(axis=-1))
     x, y = positions[real].T
-    token = x // c.pool + (x.max() + 1) // c.pool * (y // c.pool)
-    order = real[np.lexsort((x % c.pool, y % c.pool, token))]
+    token = x // c.pooling_kernel_size + (x.max() + 1) // c.pooling_kernel_size * (
+        y // c.pooling_kernel_size
+    )
+    order = real[
+        np.lexsort((x % c.pooling_kernel_size, y % c.pooling_kernel_size, token))
+    ]
     n = order.size
     x, y = positions[order].T
-    pixels = np.zeros((rows, 3 * c.patch**2), bfloat16)
+    pixels = np.zeros((rows, 3 * c.patch_size**2), bfloat16)
     pixels[:n] = pixel_values[order]
     xy = np.full(2 * rows, P, np.int32)
     xy.reshape(rows, 2)[:n] = np.stack([x, y], axis=-1)
@@ -676,7 +680,7 @@ def test_vision_window_positions_are_each_patch_rows(npu2, hk, wk):
     weights = Checkpoint(DIRECTORY / "model.safetensors").tree()
     tower = VisionTower(VisionConfig(), weights)
     c = tower.config
-    k, n = c.pool, c.pool**2 * hk * wk
+    k, n = c.pooling_kernel_size, c.pooling_kernel_size**2 * hk * wk
     rng = np.random.default_rng(hk * 100 + wk)
     h = rng.standard_normal((c.patches, c.hidden_size)).astype(bfloat16)
     got, angles = WindowPositions(tower).reference(
@@ -691,7 +695,9 @@ def test_vision_window_positions_are_each_patch_rows(npu2, hk, wk):
     np.testing.assert_array_equal(
         np.asarray(got)[:n].view(np.uint16), want.view(np.uint16)
     )
-    rope = rope_angles(c.head_dim // 2, c.positions, c.rope_theta).astype(bfloat16)
+    rope = rope_angles(c.head_dim // 2, c.position_embedding_size, c.rope_theta).astype(
+        bfloat16
+    )
     np.testing.assert_array_equal(
         np.asarray(angles)[:n].view(np.uint16),
         np.concatenate([rope[x], rope[y]], axis=1).view(np.uint16),

@@ -142,7 +142,7 @@ class Config:
         """Where ``config.json`` holds field ``f``; None: nowhere."""
         key = f.metadata.get("json", f.name)
         if key is None or key.startswith("/"):
-            return key and key[1:]
+            return None if key is None else key[1:]
         return cls.json_prefix + key
 
     def to_json(self) -> dict:

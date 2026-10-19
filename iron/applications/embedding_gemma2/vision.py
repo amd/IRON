@@ -83,20 +83,24 @@ class VisionTower(Tower):
         c = config
         tree = self.vision_tower = weights.vision_tower
         self.embed_vision = weights.embed_vision
-        window = c.pool**2
+        window = c.pooling_kernel_size**2
         tokens = -(-(c.patches // window) // c.rows) * c.rows
         super().__init__(config, c.patches, tokens)
         self.load_layers(weights, "vision_tower.encoder.layers.")
         self.processor = ImagePatches(
             c.patches,
             c.largest,
-            pool=c.pool,
-            positions=c.positions,
+            pool=c.pooling_kernel_size,
+            positions=c.position_embedding_size,
             patch_columns=c.patch_columns,
             chunk=c.chunk,
         )
         half = c.head_dim // 2
-        k, windows, across = c.pool, c.patches // window, self.processor.across
+        k, windows, across = (
+            c.pooling_kernel_size,
+            c.patches // window,
+            self.processor.across,
+        )
         # Window rows in groups a descriptor walks, at most 64, doubling from
         # 8 so each group's y blocks are about as wide as the widest image
         # that reaches it: `pitch` blocks a window row from block `base`.
@@ -118,7 +122,9 @@ class VisionTower(Tower):
         y_ids = [k * ty + wy for ty in blocks for wy in range(k) for _ in range(k)]
         table = tree.patch_embedder.position_embedding_table
         self.x_windows, self.y_windows = table[0][x_ids], table[1][y_ids]
-        rope = rope_angles(half, c.positions, c.rope_theta).astype(bfloat16)
+        rope = rope_angles(half, c.position_embedding_size, c.rope_theta).astype(
+            bfloat16
+        )
         self.x_angles, self.y_angles = rope[x_ids], rope[y_ids]
         self.capacity = max(
             self.walked(hk, wk)
@@ -168,7 +174,7 @@ class VisionTower(Tower):
         """The window blocks of ``table``, x's by window column or y's by
         window row, each group's ``repeat`` window rows of ``wk`` in turn.
         """
-        k, across = self.config.pool, self.processor.across
+        k, across = self.config.pooling_kernel_size, self.processor.across
         width = table.shape[1]
         block = k * k * width
         return iron.weight(table).at(
@@ -200,7 +206,7 @@ class VisionTower(Tower):
         c = self.config
         # The mean's 1 / pool ** 2 and the sqrt(hidden_size) scale folded into
         # the norm's epsilon: RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
-        s2 = c.hidden_size / c.pool**4
+        s2 = c.hidden_size / c.pooling_kernel_size**4
         x = F.rms_norm(x, x.shape[-1:], eps=c.eps / s2)
         projection = self.embed_vision.embedding_projection.weight
         return F.linear(x, projection, precision=Precision.HIGHEST)
@@ -238,7 +244,7 @@ class VisionTower(Tower):
         return self.forward(h, n, angles)
 
     def soft(self, values: dict) -> int:
-        return values["n"] // self.config.pool**2
+        return values["n"] // self.config.pooling_kernel_size**2
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, the largest image's."""
@@ -249,7 +255,7 @@ class VisionTower(Tower):
         """The per-call values of the largest image, its patches filled."""
         c = self.config
         _, values = self.inputs(
-            np.zeros((*c.largest, 3), np.uint8), c.patches // c.pool**2
+            np.zeros((*c.largest, 3), np.uint8), c.patches // c.pooling_kernel_size**2
         )
         return values
 
@@ -268,10 +274,10 @@ class VisionTower(Tower):
         c = self.config
         out_height, out_width = c.size(*np.shape(image)[:2], max_tokens)
         rgb, values = self.processor.pack(image, out_height, out_width)
-        side = c.pool * c.patch
+        side = c.pooling_kernel_size * c.patch_size
         hk, wk = out_height // side, out_width // side
         return rgb, dict(
-            n=out_height // c.patch * (out_width // c.patch),
+            n=out_height // c.patch_size * (out_width // c.patch_size),
             hk=hk,
             wk=wk,
             walked=self.walked(hk, wk),
@@ -283,4 +289,4 @@ class VisionTower(Tower):
         windows: each group's window rows of it, or past it one.
         """
         rows = sum(max(1, min(hk - first, r)) for first, r, *_ in self.groups)
-        return self.config.pool**2 * wk * rows
+        return self.config.pooling_kernel_size**2 * wk * rows
