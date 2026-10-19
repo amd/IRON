@@ -133,6 +133,7 @@ UNHELD = {
     "qwen3_moe": "Experts streams every expert a row: too slow to generate",
     "ministral3": "its released checkpoints nest the text decoder, unread",
     "gemma3": "its context is capped at its sliding window until MHA windows",
+    "gemma4": "its context is capped at its sliding window until MHA windows",
 }
 
 

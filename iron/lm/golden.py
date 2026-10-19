@@ -175,7 +175,7 @@ class HuggingFace:
     @classmethod
     def build(cls, model_type: str, config, weights, **json) -> "HuggingFace":
         """``model_type``'s model on ``config``'s fields as its
-        ``config.json`` names them, and ``json``'s, over ``weights`` named as
+        ``config.json`` names them, ``json``'s merged in, over ``weights`` named as
         the model's checkpoints name them: written to a checkpoint and
         loaded, so transformers renames (and stacks) them as it loads one.
 
@@ -189,7 +189,9 @@ class HuggingFace:
         import transformers
         from safetensors.torch import save_file
 
-        hf = transformers.AutoConfig.for_model(model_type, **(config.to_json() | json))
+        hf = transformers.AutoConfig.for_model(
+            model_type, **_merged(config.to_json(), json)
+        )
         auto = getattr(transformers, cls.model_class)
         with tempfile.TemporaryDirectory() as directory:
             hf.save_pretrained(directory)
@@ -213,6 +215,14 @@ class HuggingFace:
         with torch.no_grad():
             out = self.model(torch.tensor([list(tokens)]), use_cache=False)
         return out.logits[0, -1].numpy()
+
+
+def _merged(a: dict, b: dict) -> dict:
+    """``a`` with ``b``'s keys, an object in both merged key by key."""
+    return a | {
+        k: _merged(a[k], v) if isinstance(v, dict) and isinstance(a.get(k), dict) else v
+        for k, v in b.items()
+    }
 
 
 def flat(tree):

@@ -59,6 +59,11 @@ class Call:
     source: Any = None
     # By each Rope a layer holds, its rows of the call (Rope.rows).
     ropes: dict = dataclasses.field(default_factory=dict)
+    # The token ids the call embeds, a prompt chunk's rows or the decode
+    # step's token; None for embedding rows given (``from_rows``).
+    ids: Any = None
+    # The embedding rows the layers start from (``forward``).
+    embeddings: Any = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -205,9 +210,10 @@ class CausalLM(Model):
             rows=rows,
             position=position,
             rope_start=rope_start,
+            ids=ids[:rows] if prompt else token,
         )
         if prompt:
-            return self.forward(self.lookup(ids[:rows]), call)
+            return self.forward(self.lookup(call.ids), call)
         return self.forward(
             self.lookup(token).reshape(1, self.config.hidden_size), call
         )
@@ -233,6 +239,7 @@ class CausalLM(Model):
         runs, each memory module reading ``call``.
         """
         c = self.config
+        call.embeddings = x
         for rope in (layer.rope for layer in self.layers):
             if rope is not None and rope not in call.ropes:
                 call.ropes[rope] = rope.rows(call)
