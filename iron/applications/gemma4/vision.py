@@ -25,7 +25,7 @@ from iron.operators.gemm import GEMM
 
 @dataclasses.dataclass(frozen=True)
 class VisionConfig(lm.Config):
-    # As EmbeddingGemma 2's text encoder's.
+    # Every projection at HIGHEST (``Attention``, ``GatedMLP``).
     precision = Precision.HIGHEST
     json_prefix = "vision_config."
 
@@ -45,7 +45,9 @@ class VisionConfig(lm.Config):
     hidden_act: str = dataclasses.field(
         default="gelu_pytorch_tanh", metadata={"json": "hidden_activation"}
     )
-    text_dim: int = lm.not_json(512)
+    text_dim: int = dataclasses.field(
+        default=512, metadata={"json": "/text_config.hidden_size"}
+    )
     # The processor's soft-token budget.
     image_tokens: int = dataclasses.field(
         default=280, metadata={"json": "/vision_soft_tokens_per_image"}

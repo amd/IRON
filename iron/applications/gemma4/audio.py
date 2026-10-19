@@ -49,7 +49,9 @@ class AudioConfig(lm.Config):
     attention_logit_cap: float = 50.0
     conv_kernel_size: int = 5
     residual_weight: float = 0.5
-    text_dim: int = lm.not_json(512)
+    text_dim: int = dataclasses.field(
+        default=512, metadata={"json": "/text_config.hidden_size"}
+    )
     # The feature extractor's: samples per second, per frame and per hop.
     sample_rate: int = lm.not_json(16000)
     frame: int = lm.not_json(320)
