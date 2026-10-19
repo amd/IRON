@@ -240,7 +240,8 @@ class Checkpoint:
         """The checkpoint as a tree of its tensors' names, each split at its
         dots: ``model.layers.3.self_attn.q_proj.weight`` is
         ``tree.model.layers[3].self_attn.q_proj.weight``, a run of indices a
-        list.
+        list, None at an index the checkpoint skips (a module holding no
+        tensor, as ``nn.Sequential``'s ``Flatten``).
 
         Args:
             fill: What the arrays hold. ``"read"``: the tensors, views of the
@@ -250,8 +251,7 @@ class Checkpoint:
             seed: The seed ``"random"`` draws at.
 
         Raises:
-            ValueError: ``fill`` is none of these, or a run of indices skips
-                one.
+            ValueError: ``fill`` is none of these.
         """
         if fill not in ("read", "random", "unread"):
             raise ValueError(f"fill is read, random or unread, not {fill!r}")
@@ -264,13 +264,14 @@ class Checkpoint:
 
 def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:
     """Each leaf of ``tree``, a ``Checkpoint.tree()``'s namespaces and
-    lists, by its dotted name: ``_nest``'s inverse.
+    lists, by its dotted name, a skipped index's None left out:
+    ``_nest``'s inverse.
     """
     if isinstance(tree, (list, SimpleNamespace)):
         items = enumerate(tree) if isinstance(tree, list) else vars(tree).items()
         for name, value in items:
             yield from leaves(value, f"{prefix}{name}.")
-    else:
+    elif tree is not None:
         yield prefix[:-1], tree
 
 
@@ -294,23 +295,15 @@ def _nest(named: Mapping[str, Any], path: str = "", file=_FILE) -> SimpleNamespa
 
 
 def _tree(node, path: str, file) -> Any:
-    """Nested dicts as ``_Module``s, those keyed by indices as ``_Layers``.
-
-    Raises:
-        ValueError: A run of indices skips one.
+    """Nested dicts as ``_Module``s, those keyed by indices as ``_Layers``,
+    None at a skipped index.
     """
     if not isinstance(node, dict):
         return node
     items = {key: _tree(child, f"{path}{key}.", file) for key, child in node.items()}
     if items and all(key.isdigit() for key in items):
         indices = range(max(map(int, items)) + 1)
-        missing = sorted(set(indices) - {int(key) for key in items})
-        if missing:
-            raise ValueError(
-                f"{path[:-1]} in {file}: indices {sorted(map(int, items))} "
-                f"skip {missing}"
-            )
-        tree = _Layers(items[str(i)] for i in indices)
+        tree = _Layers(items.get(str(i)) for i in indices)
     else:
         tree = _Module(**items)
     tree._path, tree._file = path, file

@@ -16,6 +16,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.lm import Embedding, LayerNorm, Linear, RMSNorm
+from iron.lm.checkpoint import leaves
 from iron.tests.common.llama_model import SMALL, checkpoint
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -53,6 +54,21 @@ def test_load_binds_each_param_to_its_tensor():
     block = Block()
     block.load(tree, "model.")
     assert block.layers[0].bias is tree.model.layers[0].bias and block.held()
+
+
+class Head(iron.Graph):
+    def __init__(self):
+        self.classifier = [None, Linear(256, 128)]
+
+
+def test_an_index_a_checkpoint_skips_is_none_and_no_leaf():
+    """``nn.Sequential(nn.Flatten(), nn.Linear(...))`` names only ``1``."""
+    tree = checkpoint(SMALL, {"classifier.1.weight": (128, 256)}).tree()
+    assert tree.classifier[0] is None
+    assert [n for n, _ in leaves(tree)] == ["classifier.1.weight"]
+    head = Head()
+    head.load(tree)
+    assert head.classifier[1].weight is tree.classifier[1].weight
 
 
 def test_load_names_every_missing_tensor():
