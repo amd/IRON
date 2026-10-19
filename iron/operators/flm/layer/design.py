@@ -521,13 +521,15 @@ def _sequence(
     len_arg,
     max_l_arg,
     pli_prods,
+    y_cons,
 ):
     """The runtime sequence of one ``layer_type`` dispatch.
 
     The sequence writes the RTPs, then starts the shim DMA legs in the order of
     the engine's gen_layer_seq. Offsets and lengths count bf16 elements. L
     counts the tokens up to and including this one. ``pli_prods`` holds the
-    producer end of each PLI_WEIGHTS fifo, in that order.
+    producer end of each PLI_WEIGHTS fifo, in that order. ``y_cons`` holds the
+    consumer end of the layer output.
     """
     IS_SWA = layer_type in ("swa", "swa_skip")
     IS_SKIP = layer_type in ("global_skip", "swa_skip")
@@ -538,6 +540,7 @@ def _sequence(
     DH = g.swa_dh if IS_SWA else g.dh
     DK = g.num_kv_heads * DH
     weights = weight_layout(g, layer_type)
+    arg_lens = arg_sizes(g)
 
     for c in PROJ_COLS:
         for r in (2, 3, 4, 5):
@@ -608,8 +611,12 @@ def _sequence(
     # type's RoPE tile.
     rope_sym = "send_rms" if IS_SWA else "send_x"
     emit(leg(rope_sym, rope_rms_arg.op, 0, 3 * DH, pkt=_ShimPkt.to_rope))
-    recv_y, _ = leg("recv_y", x_arg.op, 0, D)
-    dma_start_task(recv_y)
+    recv_y = y_cons.drain(
+        x_arg,
+        tap=TensorAccessPattern((arg_lens["x"],), 0, [1, 1, 1, D], [0, 0, 0, 1]),
+        wait=True,
+        managed=False,
+    )
 
     def move_weights(w):
         """The engine's _move_weights: a round is 2 legs to each proj column."""
@@ -627,7 +634,6 @@ def _sequence(
                     )
             emit(*legs)
 
-    proj_len = arg_sizes(g)["proj"]
     pli_prod = dict(zip([name for name, *_ in PLI_WEIGHTS], pli_prods))
 
     def pli_leg(name):
@@ -640,7 +646,7 @@ def _sequence(
         task = pli_prod[name].fill(
             proj_arg,
             tap=TensorAccessPattern(
-                (proj_len,), w.offset, [1, 1, 1, w.size], [0, 0, 0, 1]
+                (arg_lens["proj"],), w.offset, [1, 1, 1, w.size], [0, 0, 0, 1]
             ),
             wait=True,
             managed=False,
@@ -704,8 +710,8 @@ def _sequence(
     emit_started(pli_leg("pli_gate"))
     emit_started(pli_leg("pli_up"))
     flush(force=True)
-    dma_await_task(recv_y)
-    dma_free_task(recv_y)
+    recv_y.await_()
+    recv_y.free()
 
 
 def _build_rms(ctx, rms_tile, sync):
@@ -1127,11 +1133,11 @@ def _build_pl_merge(ctx, plm_tile):
     )
 
 
-def _build_pl_up(ctx, plu_tile, w_fifo):
+def _build_pl_up(ctx, plu_tile, w_fifo, y_fifo):
     """Per-layer-input up projection.
 
     x arrives on S2MM 0, the weights through w_fifo on S2MM 1. The layer
-    output leaves on MM2S 0.
+    output leaves through y_fifo on MM2S 0, which the sequence drains.
     """
     D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     plu_name = f"{plu_tile.row}_{plu_tile.col}"
@@ -1141,19 +1147,15 @@ def _build_pl_up(ctx, plu_tile, w_fifo):
     plu_mvm = ctx.entry("per_layer_up_mvm", "per_layer_up_mvm")
     plu_store = ctx.entry("per_layer_up_store", "per_layer_up_store")
     (plu_dual_x_ty,) = plu_begin.arg_types()
-    _, plu_y_ty = plu_finish.arg_types()
     _, _, plu_y_acc_ty, _, _ = plu_mvm.arg_types()
     plu_x = Buffer(type=plu_dual_x_ty, name=f"x_{plu_name}", tile=plu_tile)
-    plu_y = Buffer(type=plu_y_ty, name=f"y_{plu_name}", tile=plu_tile)
     plu_y_acc = Buffer(type=plu_y_acc_ty, name=f"y_acc_{plu_name}", tile=plu_tile)
-    plu_x_prod, plu_x_cons, plu_y_prod, plu_y_cons = ctx.add_locks(
-        plu_tile, [1, 0, 1, 0]
-    )
+    plu_x_prod, plu_x_cons = ctx.add_locks(plu_tile, [1, 0])
 
     def plu_body(
         x,
         w_h,
-        y,
+        y_h,
         y_acc,
         begin,
         finish,
@@ -1162,7 +1164,7 @@ def _build_pl_up(ctx, plu_tile, w_fifo):
         store,
     ):
         plu_x_cons.acquire(1)
-        plu_y_prod.acquire(1)
+        y = y_h.acquire(1)
         begin(x)
         _bf16_proj(
             y,
@@ -1178,7 +1180,7 @@ def _build_pl_up(ctx, plu_tile, w_fifo):
             store,
         )
         finish(x, y)
-        plu_y_cons.release(1)
+        y_h.release(1)
         plu_x_prod.release(1)
 
     ctx.workers.append(
@@ -1187,7 +1189,7 @@ def _build_pl_up(ctx, plu_tile, w_fifo):
             [
                 plu_x,
                 w_fifo.cons(channel=1),
-                plu_y,
+                y_fifo.prod(channel=0),
                 plu_y_acc,
                 plu_begin,
                 plu_finish,
@@ -1204,7 +1206,6 @@ def _build_pl_up(ctx, plu_tile, w_fifo):
             plu_tile,
             [
                 _single_bd(DMAChannelDir.S2MM, 0, plu_x, plu_x_prod, plu_x_cons),
-                _single_bd(DMAChannelDir.MM2S, 0, plu_y, plu_y_cons, plu_y_prod),
             ],
         )
     )
@@ -1940,8 +1941,6 @@ def _route(rt, grid, t, proj_send_tiles):
     _connect(rt, t["pl_embedding"], 1, t["pl_merge"], 0)
     _connect(rt, t["pl_gate"], 1, t["pl_merge"], 1)
     _connect(rt, t["pl_merge"], 0, t["pl_up"], 0)
-    # The layer output, out to x.
-    _connect(rt, t["pl_up"], 0, x_shim, 0, shim_symbol="recv_y")
 
 
 def decode_layer(
@@ -1989,6 +1988,8 @@ def decode_layer(
         name: ObjectFifo(kernels[kern].arg_types()[0], name=f"{name}_w", depth=2)
         for name, kern, _, _ in PLI_WEIGHTS
     }
+    # The layer output. One buffer, as the engine's single y BD has.
+    y_of = ObjectFifo(np.ndarray[(g.model_dim,), _BF16], name="layer_y", depth=1)
     rt = Runtime(
         partial(_sequence, g, rtp, layer_type, sliding_window, sync),
         [
@@ -2003,6 +2004,7 @@ def decode_layer(
                 pli_w[name].prod(tile=t[shim], channel=ch)
                 for name, _, shim, ch in PLI_WEIGHTS
             ],
+            y_of.cons(tile=t["x_shim"], channel=0),
         ],
     )
     workers = []
@@ -2020,7 +2022,7 @@ def decode_layer(
     _build_pl_embedding(ctx, t["pl_embedding"], pli_w["pli_down"])
     _build_pl_gate(ctx, t["pl_gate"], rms_y_out, out_prod, out_cons, pli_w["pli_gate"])
     _build_pl_merge(ctx, t["pl_merge"])
-    _build_pl_up(ctx, t["pl_up"], pli_w["pli_up"])
+    _build_pl_up(ctx, t["pl_up"], pli_w["pli_up"], y_of)
     _build_glu(ctx, t["glu"], sync["glu"])
 
     proj_send_tiles = _build_proj_cores(ctx, grid, sync["proj"])
