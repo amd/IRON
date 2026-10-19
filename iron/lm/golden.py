@@ -118,7 +118,9 @@ def fingerprint(*values) -> str:
 
 def _text(value) -> str:
     """``repr(value)``, but a dataclass names only its fields off their
-    defaults, so a field added with a default changes no fingerprint.
+    defaults, so a field added with a default changes no fingerprint. A
+    changed default changes no fingerprint either: a golden recorded under
+    the old default is still accepted for a config left at the new one.
     """
     if not dataclasses.is_dataclass(value) or isinstance(value, type):
         return repr(value)
