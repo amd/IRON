@@ -336,7 +336,6 @@ def time_shape(
     cache: Cache | None = None,
     remeasure: bool = False,
     exhaustive: int = EXHAUSTIVE,
-    fit_cache: Path = FIT_CACHE,
     cycles: Mapping[str, int] | None = None,
     log: Callable[[str], None] = print,
 ) -> list[Trial]:
@@ -354,10 +353,7 @@ def time_shape(
     found = [found[0]] + [
         s
         for s in found[1:]
-        if all(
-            refusal(op._with_tunables(**s), fit_cache) is None
-            for op, _, _ in shape.members
-        )
+        if all(refusal(op._with_tunables(**s)) is None for op, _, _ in shape.members)
     ]
     if len(found) == 1:
         return [Trial(found[0], 0.0, 0.0)]

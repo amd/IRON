@@ -470,7 +470,7 @@ def _fake(monkeypatch, step_us, output=lambda op: "same"):
         }
 
     monkeypatch.setattr(tuning, "measure", measure)
-    monkeypatch.setattr(tuning, "refusal", lambda op, fit_cache=None: None)
+    monkeypatch.setattr(tuning, "refusal", lambda op: None)
 
 
 def _tune(recording, dev, profile=None):
@@ -536,7 +536,7 @@ def test_an_operator_is_timed_at_each_point_its_extents_move(monkeypatch, npu2):
         }
 
     monkeypatch.setattr(tuning, "measure", measure)
-    monkeypatch.setattr(tuning, "refusal", lambda op, fit_cache=None: None)
+    monkeypatch.setattr(tuning, "refusal", lambda op: None)
     call = Timed(
         Rotate().record(x=(64, 64), angles=(64, 64)),
         points=[Point(0.5, {"n": 16}), Point(0.5, {"n": 64})],
@@ -578,7 +578,7 @@ def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(
         }
 
     monkeypatch.setattr(tuning, "measure", measure)
-    monkeypatch.setattr(tuning, "refusal", lambda op, fit_cache=None: None)
+    monkeypatch.setattr(tuning, "refusal", lambda op: None)
     op = GEMM(M=256, K=256, N=256, precision=Precision.HIGH)
     shape = Shape(op)
     shape.members.append((op, [(1.0, {})], {}))

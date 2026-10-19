@@ -370,8 +370,6 @@ class AdjacentPacking:
     Greedy: a design recurring far apart is packed where it first appears.
     """
 
-    max_members: int | None = None
-
     def pack(
         self,
         order: Sequence[str],
@@ -392,13 +390,8 @@ class AdjacentPacking:
                     current = []
                 continue
             candidate = current + [design]
-            full = self.max_members is not None and len(candidate) > self.max_members
             verdict = (
-                "max_members"
-                if full
-                else (
-                    fits({d: designs[d] for d in candidate}, words) if current else None
-                )
+                fits({d: designs[d] for d in candidate}, words) if current else None
             )
             if verdict is None:
                 current = candidate
