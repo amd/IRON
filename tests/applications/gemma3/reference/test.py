@@ -11,6 +11,7 @@ q and k normed per head and two RoPE bases.
 import dataclasses
 
 import numpy as np
+import pytest
 
 from iron.applications.gemma3.model import Gemma3, Gemma3Config
 from iron.lm.checkpoint import leaves
@@ -65,10 +66,47 @@ class TestGemma3(Decoder):
         return tree
 
 
-def test_the_context_is_capped_at_the_sliding_window():
-    config = dataclasses.replace(TOY, max_seq_len=4096, prefill_chunk=2048)
+def test_a_context_past_the_sliding_window_is_refused():
+    with pytest.raises(ValueError, match="max_seq_len 2048 is past sliding_window"):
+        dataclasses.replace(TOY, max_seq_len=2048)
+
+
+def test_a_checkpoint_s_native_context_is_cut_to_the_sliding_window():
+    data = TOY.to_json() | {"max_position_embeddings": 32768}
+    config = Gemma3Config.from_json(data)
+    # The prompt chunk, IRON's own (not in config.json), cut with it.
     assert (config.max_seq_len, config.prefill_chunk, config.window) == (
         1024,
         1024,
         None,
     )
+
+
+def test_a_transformers_5_config_gives_both_rope_bases():
+    data = TOY.to_json()
+    del data["rope_theta"]
+    data["rope_parameters"] = {
+        "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+        "full_attention": {"rope_type": "default", "rope_theta": 1000000.0},
+    }
+    config = Gemma3Config.from_json(data)
+    assert (config.rope_theta, config.rope_local_base_freq) == (1000000.0, 10000.0)
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("final_logit_softcapping", 30.0),
+        ("attn_logit_softcapping", 50.0),
+        ("use_bidirectional_attention", True),
+    ],
+)
+def test_what_is_not_built_is_refused(key, value):
+    with pytest.raises(ValueError, match=key):
+        Gemma3Config.from_json(TOY.to_json() | {key: value})
+
+
+def test_without_layer_types_every_sixth_layer_is_global():
+    config = dataclasses.replace(TOY, num_hidden_layers=24, layer_types=None)
+    full = [i for i, kind in enumerate(config.layer_types) if kind == "full_attention"]
+    assert full == [5, 11, 17, 23]
