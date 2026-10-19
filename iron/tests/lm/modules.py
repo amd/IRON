@@ -26,7 +26,7 @@ class Block(iron.Graph):
     def __init__(self):
         self.embed = Embedding(512, 256)
         self.norm = RMSNorm(256, 1e-5)
-        self.layers = [Linear(256, 128, bias=True), Linear(128, 256)]
+        self.layers = [Linear(256, 128), Linear(128, 256, bias=False)]
         self.out = LayerNorm(256)
 
     def body(self, ids):
@@ -58,7 +58,7 @@ def test_bind_binds_each_param_to_its_tensor():
 
 class Head(iron.Graph):
     def __init__(self):
-        self.classifier = [None, Linear(256, 128)]
+        self.classifier = [None, Linear(256, 128, bias=False)]
 
 
 def test_an_index_a_checkpoint_skips_is_none_and_no_leaf():
@@ -127,7 +127,7 @@ class Tied(iron.Graph):
 
     def __init__(self):
         self.embed = Embedding(512, 256)
-        self.head = Linear(256, 512)
+        self.head = Linear(256, 512, bias=False)
         self.head.weight = self.embed.weight
 
 
@@ -148,7 +148,7 @@ def test_a_tied_param_ignores_a_tensor_at_its_other_path():
 def test_a_graph_held_at_two_paths_skips_the_second_paths_tensors():
     class Shared(iron.Graph):
         def __init__(self):
-            self.a = self.b = Linear(4, 4)
+            self.a = self.b = Linear(4, 4, bias=False)
             self.c = self.d = [iron.param(2)]
 
     tensors = {
@@ -244,3 +244,13 @@ def test_leaf_modules_match_numpy():
     want = norm(x, f32["out.weight"], f32["out.bias"], centre=True)
     got = np.asarray(block.reference(ids), np.float32)
     assert np.abs(got - want).max() < 0.05 * np.abs(want).max()
+
+
+def test_leaf_modules_take_torch_nn_s_names_and_defaults():
+    linear, embedding = Linear(4, 8), Embedding(16, 4)
+    rms, layer = RMSNorm(4), LayerNorm(4)
+    assert (linear.in_features, linear.out_features) == (4, 8)
+    assert linear.bias.shape == (8,) and Linear(4, 8, bias=False).bias is None
+    assert (embedding.num_embeddings, embedding.embedding_dim) == (16, 4)
+    assert (rms.normalized_shape, rms.eps) == ((4,), None)
+    assert (layer.normalized_shape, layer.eps) == ((4,), 1e-5)

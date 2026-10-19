@@ -182,7 +182,7 @@ class CausalLM(Model):
             self.model = Decoder(config, self.layer_class)
             for layer in self.model.layers:
                 layer.rope = self.rope
-            self.lm_head = Linear(config.hidden_size, config.vocab_size)
+            self.lm_head = Linear(config.hidden_size, config.vocab_size, bias=False)
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
             self.load_state_dict(weights)

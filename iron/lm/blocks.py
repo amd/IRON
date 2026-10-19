@@ -320,48 +320,53 @@ class ImagePatches(iron.Graph):
 
 
 class Linear(iron.Graph):
-    """A linear module: ``x @ weight.T``, plus ``bias`` where it holds one."""
+    """``torch.nn.Linear``: ``x @ weight.T``, plus ``bias`` where it holds one."""
 
-    def __init__(self, d_in: int, d_out: int, bias: bool = False):
-        self.weight = iron.param(d_out, d_in)
-        self.bias = iron.param(d_out) if bias else None
+    def __init__(self, in_features: int, out_features: int, bias: bool = True):
+        self.in_features, self.out_features = in_features, out_features
+        self.weight = iron.param(out_features, in_features)
+        self.bias = iron.param(out_features) if bias else None
 
     def body(self, x):
         return F.linear(x, self.weight, self.bias)
 
 
 class Embedding(iron.Graph):
-    """An embedding module: the rows of ``weight`` that ``ids`` name."""
+    """``torch.nn.Embedding``: the rows of ``weight`` that ``ids`` name."""
 
-    def __init__(self, vocab: int, dim: int):
-        self.weight = iron.param(vocab, dim)
+    def __init__(self, num_embeddings: int, embedding_dim: int):
+        self.num_embeddings, self.embedding_dim = num_embeddings, embedding_dim
+        self.weight = iron.param(num_embeddings, embedding_dim)
 
     def body(self, ids):
         return Copy.step(iron.weight(self.weight)[ids])
 
 
 class RMSNorm(iron.Graph):
-    """An RMS norm module over the last axis, times ``weight``."""
+    """``torch.nn.RMSNorm`` over the last axis, times ``weight``; ``eps``
+    None is the input dtype's machine epsilon.
+    """
 
-    def __init__(self, dim: int, eps: float):
-        self.weight = iron.param(dim)
-        self.eps = eps
+    def __init__(self, normalized_shape: int, eps: float | None = None):
+        self.normalized_shape, self.eps = (normalized_shape,), eps
+        self.weight = iron.param(normalized_shape)
 
     def body(self, x):
-        return F.rms_norm(x, x.shape[-1:], self.weight, self.eps)
+        return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
 
 
 class LayerNorm(iron.Graph):
-    """A LayerNorm module over the last axis, times ``weight`` plus ``bias``,
-    at the kernel's own epsilon (``F.layer_norm``).
+    """``torch.nn.LayerNorm`` over the last axis, times ``weight`` plus
+    ``bias``; the kernel takes only its own ``eps`` (``F.layer_norm``).
     """
 
-    def __init__(self, dim: int):
-        self.weight = iron.param(dim)
-        self.bias = iron.param(dim)
+    def __init__(self, normalized_shape: int, eps: float = 1e-5):
+        self.normalized_shape, self.eps = (normalized_shape,), eps
+        self.weight = iron.param(normalized_shape)
+        self.bias = iron.param(normalized_shape)
 
     def body(self, x):
-        return F.layer_norm(x, x.shape[-1:], self.weight, self.bias)
+        return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
 
 
 def _activation(name: str):
@@ -479,7 +484,7 @@ class Attention(iron.Graph):
         self.q_proj = Linear(E, H * D, bias=bias)
         self.k_proj = Linear(E, G * D, bias=bias)
         self.v_proj = Linear(E, G * D, bias=bias)
-        self.o_proj = Linear(H * D, E)
+        self.o_proj = Linear(H * D, E, bias=False)
         self.q_norm = RMSNorm(D, c.eps) if "q" in norms else None
         self.k_norm = RMSNorm(D, c.eps) if "k" in norms else None
         self.scale = None
@@ -518,8 +523,9 @@ class GatedMLP(iron.Graph):
 
     def __init__(self, c):
         E, M = c.hidden_size, c.intermediate_size
-        self.gate_proj, self.up_proj = Linear(E, M), Linear(E, M)
-        self.down_proj = Linear(M, E)
+        self.gate_proj = Linear(E, M, bias=False)
+        self.up_proj = Linear(E, M, bias=False)
+        self.down_proj = Linear(M, E, bias=False)
         self.act = _activation(c.hidden_act)
 
     def body(self, x):

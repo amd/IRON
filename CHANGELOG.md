@@ -144,6 +144,11 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `iron.lm`'s leaf modules take `torch.nn`'s names and defaults:
+  `Linear(in_features, out_features, bias=True)`,
+  `Embedding(num_embeddings, embedding_dim)`, `RMSNorm(normalized_shape,
+  eps=None)` (the dtype's machine epsilon) and `LayerNorm(normalized_shape,
+  eps=1e-5)`, holding those as attributes.
 - `Tokenizer.chat` puts the BOS where the chat template writes it, and only
   there, as transformers' `apply_chat_template` does; it no longer adds one.
   The template may call `strftime_now` and writes `tokenizer_config.json`'s

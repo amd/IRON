@@ -65,7 +65,7 @@ class SparseMoE(iron.Graph):
     """
 
     def __init__(self, c: Qwen3MoeConfig):
-        self.gate = Linear(c.hidden_size, c.num_experts)
+        self.gate = Linear(c.hidden_size, c.num_experts, bias=False)
         expert = dataclasses.replace(c, intermediate_size=c.moe_intermediate_size)
         self.experts = [GatedMLP(expert) for _ in range(c.num_experts)]
         self.top_k = c.num_experts_per_tok
