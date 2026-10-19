@@ -284,9 +284,9 @@ class AudioLayer(iron.Graph):
         self.feed_forward2 = FeedForward(c)
         self.norm_out = RMSNorm(E, c.eps)
 
-    def body(self, x, step):
+    def body(self, x, call):
         x = self.feed_forward1(x)
-        a = self.self_attn(self.norm_pre_attn(x), step.rows)
+        a = self.self_attn(self.norm_pre_attn(x), call.rows)
         x = self.lconv1d(x + self.norm_post_attn(a))
         return self.norm_out(self.feed_forward2(x))
 

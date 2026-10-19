@@ -180,13 +180,13 @@ class Placed(OnHost):
         super().__init__(config, weights)
         self.table = iron.weight(table)
 
-    def positions(self, x, step):
+    def positions(self, x, call):
         c = self.config
         C, E = c.prefill_chunk, c.hidden_size
-        if step.prompt:
-            rows = Copy.step(self.table[step.start : step.start + C][: step.rows])
+        if call.prompt:
+            rows = Copy.step(self.table[call.start : call.start + C][: call.rows])
         else:
-            rows = Copy.step(self.table[step.position]).reshape(1, E)
+            rows = Copy.step(self.table[call.position]).reshape(1, E)
         return ElementwiseAdd.step(x, rows)
 
 

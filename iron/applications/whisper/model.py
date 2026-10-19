@@ -320,12 +320,12 @@ class Whisper(EncoderDecoder):
         encoder = WhisperEncoder(config.encoder(), weights)
         super().__init__(config, decoder_weights(weights), encoder)
 
-    def positions(self, x, step):
+    def positions(self, x, call):
         c = self.config
         table = iron.weight(self.model.embed_positions.weight)
-        if step.prompt:
+        if call.prompt:
             C = c.prefill_chunk
-            rows = Copy.step(table[step.start : step.start + C][: step.rows])
+            rows = Copy.step(table[call.start : call.start + C][: call.rows])
         else:
-            rows = Copy.step(table[step.position]).reshape(1, c.hidden_size)
+            rows = Copy.step(table[call.position]).reshape(1, c.hidden_size)
         return x + rows

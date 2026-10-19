@@ -181,8 +181,8 @@ class Positioned(SelfAttention):
         super().__init__(table, 1)
         self.position_table = iron.weight(positions)
 
-    def positions(self, x, step):
-        return ElementwiseAdd.step(x, Copy.step(self.position_table[: step.rows]))
+    def positions(self, x, call):
+        return ElementwiseAdd.step(x, Copy.step(self.position_table[: call.rows]))
 
 
 @pytest.mark.parametrize("n", [9, ROWS])

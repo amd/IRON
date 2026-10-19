@@ -52,7 +52,8 @@ class Call:
     # The first position the call runs; a decode step's is its ``position``.
     start: Any
     rows: Any
-    # The last position the call runs.
+    # The last position the call runs; None for an encoder's, which no cache
+    # reads (``Encoder.forward``).
     position: Any
     # The row a prompt chunk's first position reads of a stacked RoPE table.
     rope_start: Any = None

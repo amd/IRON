@@ -26,7 +26,7 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 class _PartialRotaryLlama(Llama):
     """Llama's shape, but only ``q``'s rotary prefix goes through RoPE."""
 
-    def layer(self, step, i, w, x):
+    def layer(self, call, i, w, x):
         c, n = self.config, x.shape[0]
         H, D, A = c.num_attention_heads, c.head_dim, c.rope_width
         h = RMSNorm.step(x, weight=w.input_layernorm.weight)
@@ -35,7 +35,7 @@ class _PartialRotaryLlama(Llama):
             H * A, c.hidden_size
         )
         q_rot = F.linear(h, q_rot_weight)
-        RoPE.step(q_rot.reshape(n * H, A), step.ropes[w.rope][1])
+        RoPE.step(q_rot.reshape(n * H, A), call.ropes[w.rope][1])
         return x
 
 

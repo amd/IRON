@@ -35,10 +35,10 @@ class SelfAttend(iron.Graph):
         self.heads, self.scale = c.num_attention_heads, c.scale
         self.cache = NoCache(c.window)
 
-    def body(self, x, step):
+    def body(self, x, call):
         n, E = x.shape
         q = x.reshape(n, self.heads, E // self.heads)
-        return self.cache.attend(step, q, q, q, scale=self.scale)
+        return self.cache.attend(call, q, q, q, scale=self.scale)
 
 
 class SelfAttention(Encoder):

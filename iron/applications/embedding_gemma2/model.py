@@ -265,19 +265,19 @@ class EmbeddingGemma(Encoder):
     def angles(self, n):
         return {D: (table[:n],) * 2 for D, table in self.rope.items()}
 
-    def layer(self, step, i, layer, x):
+    def layer(self, call, i, layer, x):
         """Layer ``i`` on ``x``, its per-layer input projected from the
-        step's embeddings.
+        call's embeddings.
         """
         c = self.config
         # The projection's E ** -0.5 scale folded into the norm's epsilon:
         # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         P, tree = c.ple_dim, self.language_model.ple
         projection = tree.per_layer_model_projection.weight[i * P : (i + 1) * P]
-        ple = F.linear(step.embeddings, projection, precision=c.precision)
+        ple = F.linear(call.embeddings, projection, precision=c.precision)
         norm = tree.per_layer_projection_norm.weight
         ple = F.rms_norm(ple, ple.shape[-1:], norm, c.eps * c.hidden_size)
-        return layer(x, step, ple)
+        return layer(x, call, ple)
 
     def pool(self, x, n):
         """The mean of the ``n`` rows of ``x``: one zero query at scale 0

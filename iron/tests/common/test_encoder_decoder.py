@@ -70,14 +70,14 @@ class Whisper(EncoderDecoder):
     layer_class = WhisperDecoderLayer
     renames = RENAMES
 
-    def positions(self, x, step):
+    def positions(self, x, call):
         c = self.config
         C, E = c.prefill_chunk, c.hidden_size
         table = iron.weight(self.model.embed_positions.weight)
-        if step.prompt:
-            rows = Copy.step(table[step.start : step.start + C][: step.rows])
+        if call.prompt:
+            rows = Copy.step(table[call.start : call.start + C][: call.rows])
         else:
-            rows = Copy.step(table[step.position]).reshape(1, E)
+            rows = Copy.step(table[call.position]).reshape(1, E)
         return ElementwiseAdd.step(x, rows)
 
     def head(self, x):
