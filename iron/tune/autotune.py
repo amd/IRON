@@ -209,13 +209,13 @@ def _identity(op: Operator, dev) -> str:
     return OperatorDesign(op.resolved(dev)).identity
 
 
-def refusal(op: Operator, fit_cache: Path = FIT_CACHE) -> str | None:
+def refusal(op: Operator) -> str | None:
     """Why the placer refuses ``op`` alone on a device, or None if it fits;
-    kept under ``fit_cache``, keyed on its recipe.
+    kept under ``FIT_CACHE``, keyed on its recipe.
     """
     design = OperatorDesign(op.resolved())
     record = (
-        fit_cache
+        FIT_CACHE
         / hashlib.sha256(design.compilable().recipe_hash.encode()).hexdigest()[:24]
     )
     if record.exists():

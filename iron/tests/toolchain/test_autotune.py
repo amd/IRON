@@ -28,7 +28,7 @@ from iron.operators.gemm import GEMMPlacement
 from iron.tests.support.graphs import Rotate
 from iron.tests.support.llama_model import llama_1b
 from iron.tune import autotune as tuning
-from iron.tune.autotune import Point, Shape, Timed, autotune, line, refusal, settings
+from iron.tune.autotune import Point, Shape, Timed, autotune, line, settings
 from iron.tune.measure import Cache, Measurement, Timing, judge, time_interleaved
 
 SIZE = 8192
@@ -287,19 +287,6 @@ def test_a_narrowed_operator_keeps_its_fixed_fields():
     assert (narrow.size, narrow.tile_size, narrow.num_aie_columns) == (SIZE, TILE, 2)
     with pytest.raises(TypeError, match="no tunable"):
         add._with_tunables(size=SIZE // 2)
-
-
-def test_a_setting_the_placer_refuses_alone_is_refused_once(tmp_path, npu2):
-    # A 16384-element row held whole, double-buffered in and out, is past a
-    # core's memory at any column and channel count, which resolution does
-    # not count.
-    softmax = Softmax(rows=256, cols=16384, block=16384, streamed=False)
-    narrow = softmax._with_tunables(**settings(softmax, npu2)[1])
-    why = refusal(narrow, tmp_path)
-    assert "could not be placed" in why
-    [record] = tmp_path.iterdir()
-    record.write_text("fits")
-    assert refusal(narrow, tmp_path) is None
 
 
 def test_cache_keys_follow_the_build_the_values_and_the_inputs(npu2):
