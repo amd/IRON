@@ -46,13 +46,6 @@ jobs:
         with:
           env_name: ci_env
 
-      - name: Patch this runner's Llama config.json (temporary)
-        if: matrix.runner == 'krackan'
-        shell: bash
-        run: >-
-          python3 ci/scripts/hotfix_llama_config.py --weights /srv
-          --out "$RUNNER_TEMP/weights" --github-env "$GITHUB_ENV"
-
       - name: Run every application test
         id: test
         continue-on-error: true
