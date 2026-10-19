@@ -441,8 +441,9 @@ class _Array:
     by name, ``rtps`` each RTP buffer by (key, stage) and ``sync_locks``
     each sync lock by stage. The RMS, GLU, attention kv and projection cores
     acquire their sync lock before they read their RTPs; the sequence sets
-    it after it writes them. The RoPE and attention qk cores read their RTPs
-    after data from the projection cores arrives.
+    it after it writes them, an attention kv core's only in a dispatch of its
+    layer type. The RoPE and attention qk cores read their RTPs after data
+    from the projection cores arrives.
     """
 
     rt: Runtime
@@ -1460,7 +1461,9 @@ def _sequence(
     write("rope", "rope_skip_kv", int(dims.skip))
     write("swa_rope", "swa_rope_skip_kv", int(dims.skip))
     write("glu", "glu_skip", int(dims.skip and g.double_wide_mlp))
-    for stage in ("rms", "glu", "attn_kv", "swa_attn_kv"):
+    # Only this layer type's kv core may start: the other one would read this
+    # dispatch's L, which differs from its own qk core's past the window.
+    for stage in ("rms", "glu", "swa_attn_kv" if dims.swa else "attn_kv"):
         sync_locks[stage].set(1)
 
     # The sequence keeps two rounds of legs in flight, as the engine's

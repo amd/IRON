@@ -171,6 +171,21 @@ def test_matches_reference(geometry, layer_type, context_len, record_property):
 
 
 @pytest.mark.supported_devices("npu2")
+def test_layer_types_take_turns():
+    """Global and sliding-window layers past the window, one after another on
+    one loaded array, as the engine's runlist runs them.
+    """
+    context_len = 700
+    for layer_type in ("global", "swa", "global"):
+        op = _layer(FLM_GEMMA4_E2B_DECODE, layer_type)
+        inputs = generate_inputs(op.dims, context_len, MAX_L, seed=context_len)
+        bufs = _tensors(op, inputs)
+        full = [b.numpy().copy() for b in bufs]
+        op(*bufs, context_len=context_len, max_l=MAX_L)
+        check_outputs(op, context_len, MAX_L, full, bufs[0].numpy(), bufs[4].numpy())
+
+
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "layer_type, context_len, max_l, match",
     [
