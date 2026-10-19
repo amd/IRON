@@ -83,15 +83,9 @@ class MV(Operator):
 
 
 def test_every_catalog_operator_s_declaration_prints():
-    import iron.operators as catalog
-    import iron.operators.flm as flm
+    from iron.operators import CATALOG
 
-    for name in catalog._OPERATOR_MODULES:
-        cls = (
-            getattr(flm, name[4:])
-            if name.startswith("flm.")
-            else getattr(catalog, name)
-        )
+    for cls in CATALOG.values():
         assert repr(cls.declaration).startswith(cls.__name__)
 
 

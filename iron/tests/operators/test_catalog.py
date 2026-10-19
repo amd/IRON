@@ -69,15 +69,6 @@ def test_operator(
     assert not failed, f"{cls.__name__}({case.label}) failed: {failed}"
 
 
-@pytest.mark.parametrize("package", ["iron.operators", "iron.operators.flm"])
-def test_the_stub_names_every_catalog_entry(package):
-    """A checker reads ``__init__.pyi``; the runtime reads the catalog."""
-    module = importlib.import_module(package)
-    stub = ast.parse(Path(module.__file__).with_suffix(".pyi").read_text())
-    names = {a.name for node in stub.body for a in getattr(node, "names", ())}
-    assert names == {n for n in module.__all__ if "." not in n}
-
-
 def test_every_operator_is_in_the_catalog():
     """Every class at the top of a module under ``iron/operators``, named
     without a leading underscore, that subclasses ``Operator`` is a catalog
@@ -85,7 +76,7 @@ def test_every_operator_is_in_the_catalog():
     that declare a ``Testing``.
     """
     root = Path(catalog.__file__).parent
-    catalogued = {getattr(catalog, name) for name in catalog.__all__}
+    catalogued = set(catalog.CATALOG.values())
     missing = []
     for path in sorted(root.rglob("*.py")):
         names = [
@@ -103,4 +94,4 @@ def test_every_operator_is_in_the_catalog():
             if issubclass(getattr(module, name), Operator)
             and getattr(module, name) not in catalogued
         ]
-    assert not missing, f"not in iron.operators._OPERATOR_MODULES: {missing}"
+    assert not missing, f"not in iron.operators.CATALOG: {missing}"

@@ -18,8 +18,6 @@ from types import FunctionType
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, TypeVar
 
-from ... import operators
-
 if TYPE_CHECKING:
     from .operator import Operator
 
@@ -132,6 +130,8 @@ class Profile:
     @classmethod
     def load(cls, path: str | Path) -> Profile:
         """The profile ``save`` wrote to ``path``."""
+        from ...operators import CATALOG  # the operators import this module
+
         with open(path) as f:
             data = json.load(f)
         if not isinstance(data, dict) or set(data) != {"entries"}:
@@ -140,9 +140,9 @@ class Profile:
         for entry in data["entries"]:
             fields = dict(entry)
             name = fields.pop("operator")
-            if name not in operators.__all__:
+            if name not in CATALOG:
                 raise ValueError(f"{path}: no operator {name!r} in iron.operators")
-            op_cls = getattr(operators, name)
+            op_cls = CATALOG[name]
             # An Enum-domain tunable is JSON's string, its member's value
             # (should 1: a Pinned member's own value, not its ordinal).
             for key, param in op_cls.declaration.params.items():
@@ -158,9 +158,12 @@ class Profile:
 
     def save(self, path: str | Path) -> None:
         """Write the profile as JSON, one entry to a line."""
+        from ...operators import CATALOG  # the operators import this module
+
+        names = {cls: name for name, cls in CATALOG.items()}
         lines = []
         for cls, dims, tunables in self._entries:
-            name = operators.catalog_name(cls)
+            name = names[cls]
             lines.append(json.dumps({"operator": name, **dims, **tunables}))
         with open(path, "w") as f:
             f.write('{"entries": [\n  ' + ",\n  ".join(lines) + "\n]}\n")

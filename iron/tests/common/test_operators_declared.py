@@ -13,8 +13,8 @@ import iron.operators as ops
 from iron.common import Operator
 
 
-@pytest.mark.parametrize("name", sorted(ops._OPERATOR_MODULES))
+@pytest.mark.parametrize("name", sorted(ops.CATALOG))
 def test_exported_operator_is_declared(name):
-    cls = getattr(ops, name)
+    cls = ops.CATALOG[name]
     assert isinstance(cls, type) and issubclass(cls, Operator), name
     assert cls.declaration.operands, name

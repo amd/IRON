@@ -123,8 +123,7 @@ class ReLU(UnaryElementwise):
    rule 6 of "Adding an operator" in [AGENTS.md](AGENTS.md) says which
    cases it needs. A shape it must refuse goes in
    `iron/tests/operators/test_rejected_shapes.py`.
-4. **Register.** Add the name to `_OPERATOR_MODULES` in
-   `iron/operators/__init__.py` and to `__init__.pyi`.
+4. **Register.** Import it in `iron/operators/__init__.py`.
 5. **Use it.** Inside a graph's `body()`, `ReLU.step(x)` records a step.
    If models will call it, add a function to `iron/functional.py`.
 

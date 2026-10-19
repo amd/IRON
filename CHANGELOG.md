@@ -223,6 +223,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `iron.operators` imports every operator on import, with no lazy
+  loading or `.pyi` stubs. `iron.operators.CATALOG` maps each operator's
+  profile name to its class (flm's as `"flm.<name>"`); `__all__` holds
+  bare names only, and `catalog_name` is gone.
 - EmbeddingGemma 2's configs take Hugging Face's names where they differ
   only in name (`Config.embedding_dim`, `AudioConfig.attention_logit_cap`)
   and drop the fields nothing read (`bos`, `eos`, `pad`, `video_token`,

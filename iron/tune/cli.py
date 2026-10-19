@@ -98,7 +98,7 @@ def tune(args: argparse.Namespace, calls: Sequence[Timed], profiles: Path) -> Pa
 def main() -> None:
     """Time one operator at each of its settings and print them."""
     p = parser("Time one operator at every setting it tunes to")
-    p.add_argument("operator", choices=operators.__all__)
+    p.add_argument("operator", choices=operators.CATALOG)
     p.add_argument(
         "fields",
         nargs="*",
@@ -125,7 +125,7 @@ def main() -> None:
         name: int(text) for name, _, text in (v.partition("=") for v in args.value)
     }
 
-    cls = getattr(operators, args.operator)
+    cls = operators.CATALOG[args.operator]
     dev = require_device()
     op = cls(**fields)
     shape = Shape(op)

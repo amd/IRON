@@ -27,8 +27,7 @@ def declared(dev):
     """
     with aie_utils.set_current_device(dev):
         cases = []
-        for name in sorted(catalog._OPERATOR_MODULES):
-            cls = getattr(catalog, name)
+        for name, cls in sorted(catalog.CATALOG.items()):
             if cls.test is None or cls.reference_only:
                 continue
             for case in cls.test.resolve(cls, dev):
