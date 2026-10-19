@@ -3,6 +3,8 @@
 
 """SelectiveScan: Mamba2's state space recurrence over a run of rows."""
 
+from typing import ClassVar
+
 import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
@@ -66,9 +68,22 @@ class SelectiveScan(Operator):
                 dict(rows=64, heads=16, head_dim=64, state_size=64, groups=2),
                 bench=True,
             ),
+            # Granite 4.0-H Small's prefill: too many shim BDs at once
+            # without reclaiming them.
+            Case(
+                dict(rows=2048, heads=128, head_dim=64, state_size=128),
+                id="granite_small_prefill",
+                extensive=True,
+                lower=True,
+            ),
         ],
         draw=_trained,
     )
+
+    # A long prefill holds more shim BDs than a tile has. Its fills go out
+    # before their drains, so a reclaiming poll could wait on a fill that
+    # only a later drain frees: unchecked on a device (npu-bringup).
+    aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     rows: int = param(array=True)
     heads: int = param(array=True)

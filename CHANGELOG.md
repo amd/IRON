@@ -215,6 +215,8 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `SelectiveScan` and `GatedDeltaRule` compile with
+  `--reclaim-runtime-bds`, so a 2048-row prefill lowers.
 - An operator's output declared `Out(like=x)` (mlir-aie's) takes the shape
   and valid rows the call gave `x`, as the elementwise operators' outputs
   do; a flat output no longer takes its first operand's shape by matching

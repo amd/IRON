@@ -3,6 +3,8 @@
 
 """GatedDeltaRule: Gated DeltaNet's recurrence over a run of rows."""
 
+from typing import ClassVar
+
 import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
@@ -72,9 +74,22 @@ class GatedDeltaRule(Operator):
                 dict(rows=64, k_heads=8, v_heads=16, key_dim=64, value_dim=64),
                 bench=True,
             ),
+            # Qwen3.5's prefill: too many shim BDs at once without
+            # reclaiming them.
+            Case(
+                dict(rows=2048, k_heads=16, v_heads=32, key_dim=128, value_dim=128),
+                id="qwen35_prefill",
+                extensive=True,
+                lower=True,
+            ),
         ],
         draw=_trained,
     )
+
+    # A long prefill holds more shim BDs than a tile has. Its fills go out
+    # before their drains, so a reclaiming poll could wait on a fill that
+    # only a later drain frees: unchecked on a device (npu-bringup).
+    aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     rows: int = param(array=True)
     k_heads: int = param(array=True)
