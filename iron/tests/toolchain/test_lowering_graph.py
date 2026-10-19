@@ -35,9 +35,9 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     model = small()
     recording = model.record(**model.shapes()[1])
     # Every block is bound by the rows the call runs, the cache writes and the
-    # RoPE rows by the chunk, and MHA's keys and the draw by the position.
+    # RoPE rows by where it starts, and MHA's keys and the draw by the position.
     named = {b.expression.value.name for b in recording.bindings}
-    assert named == {"chunk", "rows", "position"}
+    assert named == {"start", "rows", "position"}
     lower_all(recording, tmp_path)
 
 
