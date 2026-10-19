@@ -46,7 +46,7 @@ def _sequence(shapes):
         ),
         FullELF(),
     )
-    seq.prepare()
+    seq._prepare()
     return seq
 
 
@@ -125,7 +125,7 @@ def test_two_designs_whose_device_names_collide_are_refused():
         ),
         FullELF(),
     )
-    seq.prepare()
+    seq._prepare()
     with pytest.raises(ValueError, match=f"device names collide, {name}"):
         Composition(seq)
 

@@ -231,7 +231,7 @@ def test_feedback_argument_only_when_declared():
             feedback=feedback,
         )
         seq = Image(recording, FullELF())
-        seq.prepare()
+        seq._prepare()
         # The main device's runtime sequence is the last one in the module.
         header = [
             line

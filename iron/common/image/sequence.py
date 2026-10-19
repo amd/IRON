@@ -141,10 +141,13 @@ class Image:
         self._arena_layout = self.arena.place_image(uses, sizes, self.residents)
         return self._arena_layout
 
-    def _sizes(self) -> dict[str, int]:
-        """Each buffer's bytes: those steps name whole first, in first-use
-        order, by what they declare unless ``pinned`` sizes them, then the
-        rest of ``pinned``.
+    def _layout(self):
+        """Each buffer's ``(argument kind, byte offset, bytes)``, and the
+        bytes of each argument.
+
+        A buffer's bytes are what the steps that name it whole declare,
+        unless ``pinned`` sizes it; ``pinned`` also sizes the buffers no
+        step names whole.
         """
         sizes: dict[str, int] = {}
         declared: dict[str, object] = {}
@@ -183,13 +186,6 @@ class Image:
         both = set(self.feedback) & {*self.inputs, *self.outputs}
         if both:
             raise ValueError(f"Feedback buffers {sorted(both)} are inputs or outputs")
-        return sizes
-
-    def _layout(self):
-        """Each buffer's ``(argument kind, byte offset, bytes)``, and the
-        bytes of each argument.
-        """
-        sizes = self._sizes()
         uses = self._uses(sizes)
         arena = {}
         if self.arena is not None:
@@ -216,7 +212,7 @@ class Image:
             return parts.pop()
         return np.dtype(np.uint8) if parts else BF16
 
-    def prepare(self):
+    def _prepare(self):
         """Resolve the operators and lay the buffers out, before anything is built."""
         dev = aie_utils.get_current_device()
         # Resolved before unique_designs() takes identities, so operators that
@@ -230,21 +226,21 @@ class Image:
 
     def compile(self):
         """Build the image ahead of time."""
-        self.prepare()
-        self.link()
+        self._prepare()
+        self._link()
         return self
 
-    def link(self):
+    def _link(self):
         """Build this sequence's image, once; sets ``self.image`` and ``artifacts``."""
         if self.layout is None:
-            self.prepare()
+            self._prepare()
         self.image = self.packaging.link(self)
         self._artifacts = self._record()
         return self.image
 
     @property
     def artifacts(self) -> Artifacts:
-        """The record of what ``link`` produced."""
+        """The record of what ``compile`` produced."""
         if self._artifacts is None:
             raise RuntimeError(f"{self.name} is not linked; compile() first")
         return self._artifacts
@@ -283,7 +279,7 @@ class Image:
         """
         if self.layout is None:
             self.compile()
-        self.link()
+        self._link()
         if self.arena is not None and arena is None:
             arena = ScratchArena(self.arena)
         return self.packaging.callable(self, arena)

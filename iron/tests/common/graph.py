@@ -230,7 +230,7 @@ def test_an_input_read_only_through_slices_is_laid_out_whole():
     t = Halves().record(x=(E,))
     assert t.pinned == {"x": E * 2}
     seq = Image(t, PerStep())
-    seq.prepare()
+    seq._prepare()
     assert seq.layout["x"] == ("input", 0, E * 2)
     assert [s.buffers[0] for s in seq.steps] == [
         BufferRef("x", E, E),
@@ -446,12 +446,12 @@ def test_two_spellings_of_one_array_are_one_design():
         ),
         PerStep(),
     )
-    seq.prepare()
+    seq._prepare()
     designs, _ = seq.unique_designs()
     assert len(designs) == 1 and designs[0].tile_size_output == 2
     ffn, _ = _ffn()
     seq = Image(ffn.record(x=(1, E)), PerStep())
-    seq.prepare()
+    seq._prepare()
     assert len(seq.unique_designs()[0]) == 6
 
 

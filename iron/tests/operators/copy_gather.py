@@ -620,7 +620,7 @@ def test_an_input_s_words_for_each_table_follow_the_last_s(npu2, table):
     assert [s.op.words for s in gathers] == words
     assert recording.pinned["ids"] == 4 * sum(words)
     sequence = Image(recording, PerStep())
-    sequence.prepare()
+    sequence._prepare()
     assert sequence.layout["ids"][2] == 4 * sum(words)
     starts = [0, 4 * words[0], 4 * (words[0] + words[1])]
     assert [s.refs()[1] for s in gathers] == [

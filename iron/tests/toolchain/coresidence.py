@@ -183,7 +183,7 @@ def _sequence(cols: int, coresident) -> Image:
         ["y"],
     )
     seq = Image(recording, FullELF(coresident(add, silu)))
-    seq.prepare()
+    seq._prepare()
     return seq
 
 
@@ -242,7 +242,7 @@ def test_one_array_joins_two_packs_only_where_their_union_fits():
         ["y", "z"],
     )
     seq = Image(recording, FullELF([[add, silu], [wider, mul]]))
-    seq.prepare()
+    seq._prepare()
     composed = Composition(seq)
     a, s, w, m = (name for name, _ in composed.steps)
     assert fits({n: composed.designs[n] for n in (a, s)}) is None
@@ -268,7 +268,7 @@ def test_designs_of_one_array_share_its_device():
         ["y", "u"],
     )
     seq = Image(recording, FullELF())
-    seq.prepare()
+    seq._prepare()
     composed = Composition(seq)
     text = composed.text()
     pack = Packing.device_name(list(composed.designs))
@@ -293,7 +293,7 @@ def test_two_arrays_of_one_class_pack():
         ["ya", "yb"],
     )
     seq = Image(recording, FullELF([gemvs]))
-    seq.prepare()
+    seq._prepare()
     composed = Composition(seq)
     assert fits(composed.designs) is None
     fifos = re.findall(r"aie\.objectfifo @(\w+)\(", composed.text())
@@ -386,8 +386,8 @@ def test_recorded_graph_packs():
     recording = Chain(SIZE, TILE, columns=2).record(a=(SIZE,), b=(SIZE,))
     temporal = Image(recording, FullELF())
     packed = Image(recording, FullELF(AdjacentPacking()))
-    temporal.prepare()
-    packed.prepare()
+    temporal._prepare()
+    packed._prepare()
     composed = Composition(packed)
     assert len(composed.designs) == 3 and len(composed.steps) == 5
 

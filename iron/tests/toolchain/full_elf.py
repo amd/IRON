@@ -154,7 +154,7 @@ def test_no_scratch_buffer_crosses_a_bank():
         ["out"],
     )
     seq = Image(recording, FullELF())
-    seq.prepare()
+    seq._prepare()
     assert [seq.layout[n][1] for n in ("w", "t")] == [0, BANK]
 
 

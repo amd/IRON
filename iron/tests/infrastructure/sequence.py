@@ -159,7 +159,7 @@ def test_composed_mlir_contains_reconfiguration(sequence, npu2):
 
     # Generate the composed MLIR directly, bypassing the ELF backend (which is
     # NPU2-only). This mirrors what FullELF.link() feeds to the compiler.
-    seq.prepare()
+    seq._prepare()
     composition = Composition(seq)
     assert composition.expands
     text = composition.text()
@@ -190,7 +190,7 @@ def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
         seq = _build_add_relu_sequence(
             "infra_full_elf_commands", FullELF(commands=commands)
         )
-        seq.prepare()
+        seq._prepare()
         fusions[commands] = Composition(seq)
     whole, cut = (fusions[c].text() for c in ((), (1,)))
     device = re.compile(r"^  aie\.device\(\w+\) @(\w+) \{$.*?^  \}$", re.M | re.S)
@@ -408,7 +408,7 @@ def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
     seq = _build_one_design_sequence(
         _relu(), f"infra_full_elf_relu_reconfigure_{reconfigure}", reconfigure
     )
-    seq.prepare()
+    seq._prepare()
     composition = Composition(seq)
     assert composition.expands == reconfigure
 

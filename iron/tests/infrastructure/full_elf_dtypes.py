@@ -152,6 +152,6 @@ def test_misaligned_buffer_is_rejected():
         pinned={"packed": TABLE_BYTES + 64},
     )
     seq = Image(recording, FullELF())
-    seq.prepare()
+    seq._prepare()
     with pytest.raises(ValueError, match="not a multiple of 4"):
         Composition(seq).text()

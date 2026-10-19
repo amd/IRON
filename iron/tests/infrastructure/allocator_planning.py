@@ -182,7 +182,7 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
 def _laid_out(seq):
-    seq.prepare()
+    seq._prepare()
     return seq.layout, seq.buffer_sizes
 
 
@@ -591,7 +591,7 @@ def test_residents_must_be_scratch_buffers():
         "arena_bad_resident", [(add, "x", "w", "out")], ArenaPlan(), {"x": "X"}
     )
     with pytest.raises(ValueError, match="not scratch buffers"):
-        seq.prepare()
+        seq._prepare()
 
 
 def test_a_step_at_a_time_places_only_its_residents_in_the_arena():

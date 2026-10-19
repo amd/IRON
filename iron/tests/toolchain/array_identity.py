@@ -121,7 +121,7 @@ def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
             (outputs if b.role is Out else inputs).append(buf)
     recording = Recording.of_steps(cls_name, sequences.steps(*runlist), inputs, outputs)
     seq = Image(recording, FullELF())
-    seq.prepare()
+    seq._prepare()
     composed = Composition(seq)
     pack = Packing.device_name(list(composed.designs))
     devices = re.findall(r"^  aie\.device\(\w+\) @(\w+) \{$", composed.text(), re.M)
