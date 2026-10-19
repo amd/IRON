@@ -58,6 +58,8 @@ def main(name: str, model: type[Model], argv: Sequence[str] | None = None) -> No
     profiles directory.
     """
     parser = tune_cli.parser(f"Tune {name}'s profile")
+    if model.profile is None:
+        parser.error(f"{name} has no profiles directory to tune into")
     model.tune_arguments(parser)
     args = parse_args(parser, argv)
     tune_cli.tune(args, model.tune_calls(parser, args), Path(model.profile))

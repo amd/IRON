@@ -10,16 +10,19 @@ states carry across chunk boundaries and into decode steps.
 """
 
 import dataclasses
+import json
 
 import numpy as np
 import pytest
 
 from iron.applications.granite_hybrid.model import GraniteHybrid, GraniteHybridConfig
+from iron.lm import tune
 from iron.tests.common.llama_reference import Decoder
 
 #: Granite 4.0-H's proportions at toy size: three Mamba2 layers of two
 #: groups and one attention layer without RoPE, a shared MLP, four experts
-#: of which a token takes two, and Granite's scalars.
+#: of which a token takes two, and Granite's scalars; its head untied, as
+#: Granite's toy, so the logits are not the embedding of the last token.
 TOY = GraniteHybridConfig(
     vocab_size=1024,
     hidden_size=512,
@@ -34,6 +37,7 @@ TOY = GraniteHybridConfig(
     residual_multiplier=0.22,
     embedding_multiplier=12.0,
     logits_scaling=8.0,
+    tie_word_embeddings=False,
     layer_types=("mamba", "attention", "mamba", "mamba"),
     position_embedding_type="nope",
     shared_intermediate_size=512,
@@ -51,9 +55,8 @@ def golden(golden):
     """The toy's golden, its weights first redrawn in place where the
     shared draw would leave a layer inert: each stacked expert at its own
     matrix's scale, not the whole stack's; the time steps and decays as
-    Mamba2 initializes them, so a state lasts many positions; the skip
-    ``D`` a tenth of the draw's, so the state carries the scan's output; and
-    the convolution's bias ten times the draw's, at its taps' scale.
+    Mamba2 initializes them, so a state lasts many positions; and the
+    convolution's bias ten times the draw's, at its taps' scale.
     """
 
     def recorded(name, build, config, weights):
@@ -68,7 +71,6 @@ def golden(golden):
                 m.A_log[:] = np.log(rng.uniform(1, 16, H))
                 dt = np.exp(rng.uniform(np.log(1e-3), np.log(1e-1), H))
                 m.dt_bias[:] = dt + np.log(-np.expm1(-dt))
-                m.D[:] *= 0.1
                 m.conv1d.bias[:] *= 10
         return golden(name, build, config, weights)
 
@@ -78,7 +80,7 @@ def golden(golden):
 class TestGraniteHybrid(Decoder):
     model, config, model_type, name = GraniteHybrid, TOY, "granitemoehybrid", "toy"
     json = {"mamba_expand": 2}
-    seed = 0
+    seed = 2
 
     @classmethod
     def names(cls):
@@ -91,6 +93,7 @@ class TestGraniteHybrid(Decoder):
         out = {
             "model.embed_tokens.weight": (c.vocab_size, E),
             "model.norm.weight": (E,),
+            "lm_head.weight": (c.vocab_size, E),
         }
         for i in range(c.num_hidden_layers):
             p = f"model.layers.{i}"
@@ -134,6 +137,17 @@ class TestGraniteHybridDense(TestGraniteHybrid):
     @classmethod
     def names(cls):
         return {k: v for k, v in super().names().items() if "block_sparse_moe" not in k}
+
+
+def test_tuning_is_refused_without_a_profiles_directory(capsys):
+    with pytest.raises(SystemExit):
+        tune.main("granite_hybrid", GraniteHybrid, [])
+    assert "no profiles directory" in capsys.readouterr().err
+
+
+def test_a_config_without_rope_reads_back_from_its_json(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps(TOY.to_json()))
+    assert GraniteHybridConfig.from_checkpoint(tmp_path).to_json() == TOY.to_json()
 
 
 def test_layer_types_short_of_the_layers_are_refused():

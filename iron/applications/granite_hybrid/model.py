@@ -9,7 +9,7 @@ its checkpoint's ``config.json``.
 Granite 4.0-H is Granite's layer (its four scalars, ``GraniteConfig``)
 with most layers' attention replaced by a Mamba2 mixer (``Mamba``) and its
 feed-forward a shared gated MLP (``SharedMLP``), plus a mixture of experts
-where the config has experts (``GraniteMoE``). The attention layers turn
+where the config has experts (``GraniteMoE``). The attention layers rotate
 nothing unless ``position_embedding_type`` is ``"rope"``.
 
 A Mamba2 mixer projects its input to a gate, ``x``, ``B``, ``C`` and a
@@ -21,6 +21,7 @@ The convolution's last rows and the scan's state are the layer's
 """
 
 import dataclasses
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -42,6 +43,8 @@ class GraniteHybridConfig(GraniteConfig):
     wide.
     """
 
+    # None, as __post_init__ leaves it but under "rope", reads back absent.
+    rope_theta: float | None = dataclasses.field(default=None, kw_only=True)
     layer_types: tuple[str, ...] = dataclasses.field(
         kw_only=True, metadata={"convert": tuple}
     )
@@ -64,6 +67,13 @@ class GraniteHybridConfig(GraniteConfig):
             )
         if self.position_embedding_type != "rope":
             object.__setattr__(self, "rope_theta", None)
+
+    @property
+    def conv_channels(self) -> int:
+        """A Mamba2 mixer's convolved channels: ``x``, then ``B`` and ``C``."""
+        return self.mamba_n_heads * self.mamba_d_head + 2 * (
+            self.mamba_n_groups * self.mamba_d_state
+        )
 
     def attends(self, i: int) -> bool:
         """Whether layer ``i`` is attention (``"attention"``, or transformers'
@@ -92,7 +102,7 @@ class Mamba(iron.Graph):
     def __init__(self, c: GraniteHybridConfig):
         E, H, K = c.hidden_size, c.mamba_n_heads, c.mamba_d_conv
         self.inner = I = H * c.mamba_d_head
-        self.channels = I + 2 * c.mamba_n_groups * c.mamba_d_state
+        self.channels = c.conv_channels
         self.groups = c.mamba_n_groups
         self.in_proj = Linear(E, I + self.channels + H, bias=False)
         self.conv1d = Weights(weight=(self.channels, 1, K), bias=(self.channels,))
@@ -103,9 +113,8 @@ class Mamba(iron.Graph):
         chunk = c.prefill_chunk
         self.conv_state = Checkpoints.of((K - 1, self.channels), c.max_seq_len, chunk)
         self.ssm_state = Checkpoints.of(state, c.max_seq_len, chunk, np.float32)
-        # Scratch F.causal_conv1d stages a call's window and tail in.
-        self.window = iron.state((2, chunk, self.channels))
-        self.tail = iron.state((K - 1, self.channels))
+        # Every layer's scratch, one for the model (GraniteHybrid).
+        self.scratch = None
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
@@ -123,7 +132,7 @@ class Mamba(iron.Graph):
             F.linear(x, part) for part in (w[:I], w[I : I + C], w[I + C :])
         )
         read, write = self.conv_state.at(step)
-        state = F.ConvState(read, write, self.window, self.tail)
+        state = F.ConvState(read, write, self.scratch.window, self.scratch.tail)
         xbc = F.silu(F.causal_conv1d(xbc, self.taps, state) + self.conv1d.bias)
         read, write = self.ssm_state.at(step)
         y, final = SelectiveScan.step(
@@ -155,6 +164,8 @@ class SharedMLP(iron.Graph):
 
 
 class Router(iron.Graph):
+    """The experts' router: ``layer``, a linear to a logit per expert."""
+
     def __init__(self, c: GraniteHybridConfig):
         self.layer = Linear(c.hidden_size, c.num_local_experts, bias=False)
 
@@ -223,7 +234,14 @@ class GraniteHybrid(Granite):
 
     def __init__(self, config: GraniteHybridConfig, weights):
         super().__init__(config, weights)
+        # Scratch F.causal_conv1d stages a call's window and tail in.
+        channels = config.conv_channels
+        scratch = SimpleNamespace(
+            window=iron.state((2, config.prefill_chunk, channels)),
+            tail=iron.state((config.mamba_d_conv - 1, channels)),
+        )
         for i, layer in enumerate(self.layers):
             if layer.mamba is not None:
                 m = layer.mamba
+                m.scratch = scratch
                 self.recurrent[i] = {"conv": m.conv_state, "ssm": m.ssm_state}
