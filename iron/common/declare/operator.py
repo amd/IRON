@@ -30,7 +30,6 @@ from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
 from .operand import Operand
-from .precision import Precision
 from .rtp import Rtp
 from .value import ExtentWord, Value
 
@@ -476,9 +475,7 @@ class Operator(jit.Operator, library=True):
         found = {}
         for name in self.declaration.tunables:
             domain = self.declaration.params[name].domain
-            # A precision is the model's to choose (F.linear's), not a
-            # step's timing: its output is judged against the model's own.
-            if name in self.pinned or domain is None or domain is Precision:
+            if name in self.pinned or domain is None:
                 continue
             start = vars(self)[name]
             if isinstance(domain, tuple):

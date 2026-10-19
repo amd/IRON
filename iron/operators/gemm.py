@@ -149,7 +149,7 @@ class GEMM(Operator):
     )
     b_col_maj: bool = param(default=False, array=True)
     c_col_maj: bool = param(default=False, array=True)
-    precision: Precision = tunable(default=Precision.MEDIUM, domain=Precision)
+    precision: Precision = param(default=Precision.MEDIUM, array=True)
     input_dtype: Any = param(default=bfloat16, repr=False)
     output_dtype: Any = param(default=bfloat16, repr=False)
     # Filled by resolve.

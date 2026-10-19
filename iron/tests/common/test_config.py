@@ -13,6 +13,7 @@ import re
 
 import pytest
 
+from iron import Precision
 from iron.applications.embedding_gemma2.model import Config as EmbeddingGemmaConfig
 from iron.applications.gemma4.audio import AudioConfig
 from iron.applications.gemma4.vision import VisionConfig
@@ -155,6 +156,13 @@ def test_head_dim_falls_back_and_max_seq_len_is_the_native_context(tmp_path):
     assert (cfg.head_dim, cfg.max_seq_len) == (1536 // 12, 40960)
     path.write_text(json.dumps(fields | {"head_dim": 64}))
     assert DecoderConfig.from_checkpoint(path).head_dim == 64
+
+
+def test_llama_projects_at_high_from_3b_s_width_unless_given():
+    wide = dataclasses.replace(REAL_1B, hidden_size=3072)
+    assert REAL_1B.precision is None and wide.precision is Precision.HIGH
+    given = dataclasses.replace(wide, precision=Precision.MEDIUM)
+    assert given.precision is Precision.MEDIUM
 
 
 def test_from_checkpoint_raises_with_no_config_json_beside_the_path(tmp_path):

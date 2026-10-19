@@ -30,6 +30,8 @@ from iron.operators.softmax import Softmax
 
 @dataclasses.dataclass(frozen=True)
 class AudioConfig(lm.Config):
+    # Every projection and attention matmul at HIGHEST.
+    precision = Precision.HIGHEST
     json_prefix = "audio_config."
 
     hidden_size: int = 1024
@@ -89,12 +91,12 @@ class AudioConfig(lm.Config):
 
 
 class Clipped(iron.Graph):
-    """A checkpoint's clipped linear: clamp, project by ``linear``, clamp."""
+    """A checkpoint's clipped linear: clamp, project by ``linear`` at
+    ``c.precision``, clamp.
+    """
 
-    def __init__(self, in_features: int, out_features: int):
-        self.linear = Linear(
-            in_features, out_features, bias=False, precision=Precision.HIGHEST
-        )
+    def __init__(self, c: AudioConfig, in_features: int, out_features: int):
+        self.linear = Linear(in_features, out_features, False, c.precision)
         bound = partial(iron.param, dtype=np.float32)
         self.input_min, self.input_max = bound(), bound()
         self.output_min, self.output_max = bound(), bound()
@@ -121,8 +123,8 @@ class FeedForward(iron.Graph):
     def __init__(self, c: AudioConfig):
         E, M = c.hidden_size, c.intermediate_size
         self.pre_layer_norm = RMSNorm(E, c.eps)
-        self.ffw_layer_1 = Clipped(E, M)
-        self.ffw_layer_2 = Clipped(M, E)
+        self.ffw_layer_1 = Clipped(c, E, M)
+        self.ffw_layer_2 = Clipped(c, M, E)
         self.post_layer_norm = RMSNorm(E, c.eps)
         self.residual = c.residual_weight
 
@@ -144,7 +146,7 @@ class ConformerAttention(iron.Graph):
     def __init__(self, c: AudioConfig):
         E, H, D = c.hidden_size, c.num_attention_heads, c.head_dim
         self.q_proj, self.k_proj, self.v_proj, self.post = (
-            Clipped(E, E) for _ in range(4)
+            Clipped(c, E, E) for _ in range(4)
         )
         # Read on the host only, in float32.
         self.relative_k_proj = SimpleNamespace(
@@ -153,6 +155,7 @@ class ConformerAttention(iron.Graph):
         self.per_dim_scale = iron.param(D, dtype=np.float32)
         self.timing, self.dims = c.timing(), (H, D, c.window, c.band)
         self.logit_cap = c.attention_logit_cap
+        self.precision = c.precision
         # The tower's keys, values, scores and probabilities, every layer's.
         self._buffers = None
 
@@ -211,7 +214,7 @@ class ConformerAttention(iron.Graph):
                 scores[i],
                 b_col_maj=True,
                 output_dtype=np.float32,
-                precision=Precision.HIGHEST,
+                precision=self.precision,
             )
         # Query t's band starts at the even column of t and t - 1, its
         # relative terms at R or R + band.
@@ -230,7 +233,7 @@ class ConformerAttention(iron.Graph):
         )
         Copy.step(probabilities, probs, dst=band)
         for i in range(H):
-            GEMM.step(probs[i, :tokens], values[i], q[i], precision=Precision.HIGHEST)
+            GEMM.step(probs[i, :tokens], values[i], q[i], precision=self.precision)
         o = Copy.step(q.transpose(1, 0, 2)).reshape(T, H * D)
         return self.post(o)
 
@@ -244,12 +247,12 @@ class LightConv(iron.Graph):
     def __init__(self, c: AudioConfig):
         E = c.hidden_size
         self.pre_layer_norm = RMSNorm(E, c.eps)
-        self.linear_start = Clipped(E, 2 * E)
+        self.linear_start = Clipped(c, E, 2 * E)
         self.depthwise_conv1d = SimpleNamespace(
             weight=iron.param(E, 1, c.conv_kernel_size)
         )
         self.conv_norm = RMSNorm(E, c.eps)
-        self.linear_end = Clipped(E, E)
+        self.linear_end = Clipped(c, E, E)
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
@@ -374,10 +377,10 @@ class AudioTower(Tower):
     def head(self, x):
         c = self.config
         out = self.audio_tower.output_proj
-        x = F.linear(x, out.weight, out.bias, precision=Precision.HIGHEST)
+        x = F.linear(x, out.weight, out.bias, precision=c.precision)
         x = F.rms_norm(x, x.shape[-1:], eps=c.eps)
         projection = self.embed_audio.embedding_projection.weight
-        return F.linear(x, projection, precision=Precision.HIGHEST)
+        return F.linear(x, projection, precision=c.precision)
 
     def body(
         self,
@@ -420,7 +423,7 @@ class AudioTower(Tower):
         x = F.linear(
             h.reshape(T, F1 * C1),
             sub.input_proj_linear.weight,
-            precision=Precision.HIGHEST,
+            precision=c.precision,
         )
         return self.forward(x, tokens, None)
 

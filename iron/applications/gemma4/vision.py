@@ -296,7 +296,7 @@ class VisionTower(Tower):
     }
 
     def pool(self, x, n):
-        return GEMM.step(self.pooling[:, :n], x, precision=Precision.HIGHEST)
+        return GEMM.step(self.pooling[:, :n], x, precision=self.config.precision)
 
     def head(self, x):
         c = self.config
@@ -305,7 +305,7 @@ class VisionTower(Tower):
         s2 = c.hidden_size / c.pooling_kernel_size**4
         x = F.rms_norm(x, x.shape[-1:], eps=c.eps / s2)
         projection = self.embed_vision.embedding_projection.weight
-        return F.linear(x, projection, precision=Precision.HIGHEST)
+        return F.linear(x, projection, precision=c.precision)
 
     def body(
         self,
@@ -335,7 +335,7 @@ class VisionTower(Tower):
         )
         x = AXPY.step(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
         patch = self.vision_tower.patch_embedder.input_proj.weight
-        h = F.linear(x, patch, precision=Precision.HIGHEST)
+        h = F.linear(x, patch, precision=self.config.precision)
         h, angles = self.window_positions(h, n=n, hk=hk, wk=wk, walked=walked)
         return self.forward(h, n, angles)
 

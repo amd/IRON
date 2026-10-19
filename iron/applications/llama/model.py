@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from iron import lm
+from iron import Precision, lm
 from iron.lm import CausalLM, DecoderConfig
 
 
@@ -77,11 +77,21 @@ class Llama3RopeScaling:
 
 @dataclasses.dataclass(frozen=True)
 class LlamaConfig(DecoderConfig):
-    """``DecoderConfig`` and Llama 3's own ``rope_scaling``."""
+    """``DecoderConfig``, Llama 3's own ``rope_scaling``, and every
+    projection's ``precision``: a caller's, else ``Precision.HIGH`` from
+    3B's width up, else ``F.linear``'s.
+    """
 
     rope_scaling: Llama3RopeScaling | None = dataclasses.field(
         default=None, metadata={"convert": Llama3RopeScaling.from_dict}
     )
+    precision: Precision | None = lm.not_json(None, kw_only=True)
+
+    def __post_init__(self):
+        super().__post_init__()
+        # 3B's accuracy needs bf16 macs on its projections (decision 40).
+        if self.precision is None and self.hidden_size >= 3072:
+            object.__setattr__(self, "precision", Precision.HIGH)
 
 
 class Llama(CausalLM):

@@ -522,7 +522,8 @@ def autotune(
     """
     found = shapes(calls, dev)
     covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
-    # What the covering entries set that the search does not move, as precision.
+    # What the covering entries set that the search does not move, as
+    # GEMM's tile_k below HIGHEST.
     held: dict[Hashable, dict[str, Any]] = {s.key: {} for s in found}
     out = Profile()
     for cls, matched, tunables in profile or ():

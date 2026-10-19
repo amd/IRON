@@ -22,7 +22,7 @@ from aie.dialects.aie import AIEArch, DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, DmaEndpoint, In, Lock, Out
 from aie.iron.device import Tile
-from aie.utils.compile.jit.params import Select, tunable
+from aie.utils.compile.jit.params import Select, param, tunable
 from ml_dtypes import bfloat16
 
 from iron.common import Block, Built, Precision, Unresolvable, Xclbin
@@ -106,7 +106,9 @@ class Shipped(
     m_chunk: int = tunable(default=1, repr=False, init=False)
     rows: int = tunable(default=ROWS, repr=False, init=False)
     cols: int = tunable(default=COLS, repr=False, init=False)
-    precision: Precision = tunable(default=Precision.MEDIUM, repr=False, init=False)
+    precision: Precision = param(
+        default=Precision.MEDIUM, array=True, repr=False, init=False
+    )
     emulate_bf16_mmul_with_bfp16: bool = tunable(default=True, repr=False, init=False)
     bfp16_b: bool = tunable(default=False, repr=False, init=False)
     b_dtype: object = tunable(default=bfloat16, repr=False, init=False)

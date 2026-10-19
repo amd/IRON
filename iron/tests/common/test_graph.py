@@ -591,17 +591,6 @@ def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
     assert op.resolved(npu2).emulate_bf16_mmul_with_bfp16 is macs
 
 
-def test_a_profile_gives_a_precision_the_tuner_does_not_search(tmp_path, npu2):
-    path = tmp_path / "npu2.json"
-    path.write_text(
-        '{"entries": [{"operator": "flm.ProjectionGEMM", "K": 512, "precision": "high"}]}'
-    )
-    op = Profile.load(path).make(ProjectionGEMM, M=256, K=512, N=256)
-    assert op.precision is Precision.HIGH
-    assert not op.resolved(npu2).emulate_bf16_mmul_with_bfp16
-    assert "precision" not in op.resolved(npu2)._domains(npu2)
-
-
 def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
     """Each projection of a prompt chunk derives two per-call words from its
     rows, the 256-row units they reach and that less one, A's repeat count,

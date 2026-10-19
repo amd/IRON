@@ -176,7 +176,7 @@ class ProjectionGEMM(Operator):
     b_col_maj: bool = param(default=False, array=True)
     # MEDIUM multiplies on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8
     # (the port's arithmetic); above it, or on AIE2, on bf16 macs.
-    precision: Precision = tunable(default=Precision.MEDIUM, domain=Precision)
+    precision: Precision = param(default=Precision.MEDIUM, array=True)
     # Filled by resolve, from the device: the macs, the grid, B's storage,
     # the L2 tiles.
     emulate_bf16_mmul_with_bfp16: bool = tunable(repr=False, init=False)

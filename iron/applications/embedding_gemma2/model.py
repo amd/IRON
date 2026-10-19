@@ -274,7 +274,7 @@ class EmbeddingGemma(Encoder):
         # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         P, tree = c.ple_dim, self.language_model.ple
         projection = tree.per_layer_model_projection.weight[i * P : (i + 1) * P]
-        ple = F.linear(step.embeddings, projection, precision=Precision.HIGHEST)
+        ple = F.linear(step.embeddings, projection, precision=c.precision)
         norm = tree.per_layer_projection_norm.weight
         ple = F.rms_norm(ple, ple.shape[-1:], norm, c.eps * c.hidden_size)
         return layer(x, step, ple)

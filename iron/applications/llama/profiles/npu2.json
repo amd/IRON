@@ -26,7 +26,5 @@
   {"operator": "GEMV", "M": 128256, "K": 3072, "tile_size_input": 2, "tile_size_output": 32},
   {"operator": "RMSNorm", "weighted": true, "rows": 2048, "tile_size": 3072, "num_aie_columns": 8},
   {"operator": "MHA", "num_heads": 24, "num_KV_heads": 8, "d": 128, "seq_pad": 2048, "num_pipelines": 8},
-  {"operator": "ElementwiseAdd", "size": 6291456, "tile_size": 2048},
-  {"operator": "flm.ProjectionGEMM", "K": 3072, "precision": "high"},
-  {"operator": "flm.ProjectionGEMM", "K": 8192, "N": 3072, "precision": "high"}
+  {"operator": "ElementwiseAdd", "size": 6291456, "tile_size": 2048}
 ]}

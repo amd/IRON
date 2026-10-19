@@ -655,13 +655,13 @@ def test_retuning_keeps_what_the_profile_set_that_the_search_does_not_move(
 ):
     _fake(monkeypatch, lambda op: op.tile_n)  # the narrowest tile_n is fastest
     old = Profile()
-    old.add(GEMM, precision=Precision.HIGH)
+    old.add(GEMM, tile_k=32)
     graph = Projection()
     graph.profile = old
     recording = graph.record(x=(256, 256), w=(256, 256))
     profile = _tune(recording, npu2, old)
     op = profile.make(GEMM, M=256, K=256, N=256)
-    assert op.precision is Precision.HIGH and op.resolved(npu2).tile_n == 16
+    assert op.tile_k == 32 and op.resolved(npu2).tile_n == 16
 
 
 def test_a_run_is_timed_by_the_time_its_image_took(monkeypatch):

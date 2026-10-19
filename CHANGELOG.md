@@ -164,7 +164,7 @@ public API adds its entry under Unreleased.
 - Goldens recorded from transformers, with a fingerprint of the config and
   weights they came from. `pytest --record-goldens` (or `IRON_RECORD_GOLDENS`)
   records them.
-- `iron.Precision` and a `precision` tunable on GEMM and flm.ProjectionGEMM,
+- `iron.Precision` and a `precision` parameter on GEMM and flm.ProjectionGEMM,
   with `torch.set_float32_matmul_precision`'s levels.
 - `python -m iron.lm.tune <application>`, which writes the fastest admissible
   setting of each operator shape to `profiles/<device>.json`.
@@ -235,6 +235,8 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- A projection's precision is its model config's (`Config.precision`; Llama's
+  is `HIGH` from 3B's width), not a tunable a profile sets or the tuner tries.
 - EmbeddingGemma 2's audio and vision towers, `AudioTower` and
   `VisionTower` with their `AudioConfig` and `VisionConfig`, are Gemma 4's
   and move to `iron.applications.gemma4.audio` and `.vision`; a tower built
