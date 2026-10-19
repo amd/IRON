@@ -18,6 +18,8 @@ import iron
 from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
 from iron.lm.blocks import KVCache, Rope
 from iron.lm.checkpoint import leaves
+from iron.lm.golden import HuggingFace
+from iron.lm.testing import assert_close
 from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm as RMSNormOp
 from iron.operators.rope import RoPE
@@ -346,9 +348,35 @@ def test_a_v_norm_is_one_unweighted_rms_norm_a_layer():
     assert len(norms) == 7 and sum(len(s.inputs) == 1 for s in norms) == 2
 
 
-def test_a_layer_reading_another_s_cache_projects_and_writes_no_keys():
+class SharedKeys(HuggingFace):
+    """transformers' Llama, its layer 1 attending over layer 0's keys and
+    values: layer 1's k and v projections return layer 0's, which RoPE
+    turns at the same positions.
+    """
+
+    @classmethod
+    def build(cls, config, weights) -> "SharedKeys":
+        import torch
+
+        model = super().build("llama", config, weights).model
+        first, second = (layer.self_attn for layer in model.model.layers)
+
+        class Held(torch.nn.Module):
+            def __init__(self, source):
+                super().__init__()
+                source.register_forward_hook(lambda _, x, y: vars(self).update(y=y))
+
+            def forward(self, x):
+                return self.y
+
+        second.k_proj, second.v_proj = Held(first.k_proj), Held(first.v_proj)
+        return cls(model)
+
+
+def test_a_layer_reading_another_s_cache_projects_and_writes_no_keys(golden):
     """A layer holding layer 0's ``KVCache``, without k and v projections,
-    attends over the keys layer 0 wrote and writes none.
+    attends over the keys layer 0 wrote and writes none: within bf16's
+    tolerance of transformers' Llama sharing them the same way.
     """
     model = small()
     first, second = model.model.layers
@@ -356,13 +384,20 @@ def test_a_layer_reading_another_s_cache_projects_and_writes_no_keys():
     second.cache = first.cache
     second.self_attn.k_proj = second.self_attn.v_proj = None
     t = model.trace(**model.shapes()[1])
-    # No k or v projection, k's RoPE, or write of either.
-    assert len(t.steps) == len(base.steps) - 5
+    # The k and v projections, k's RoPE, and the two cache writes.
+    dropped = 5
+    assert len(t.steps) == len(base.steps) - dropped
     keys = [s.inputs[1].name for s in t.steps if type(s.op) is MHA]
     assert keys[0] == keys[1]
-    tokens = np.arange(9)
     host = OnHost(model.config, model.weights)
     host.model.layers[1].cache = host.model.layers[0].cache
     host.model.layers[1].self_attn.k_proj = None
     host.model.layers[1].self_attn.v_proj = None
-    assert np.isfinite(host.logits(tokens)).all()
+    reference = golden(
+        "shared_keys",
+        lambda: SharedKeys.build(model.config, model.weights),
+        model.config,
+        model.weights,
+    )
+    tokens = np.arange(9)
+    assert_close(host.logits(tokens), reference.logits(tokens))
