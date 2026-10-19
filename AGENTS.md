@@ -140,7 +140,7 @@ CONTRIBUTING.md walks through the common case. The rules:
      ObjectFIFOs and Workers, uses
      `range_()` (not `range`) for core loops, binds each streamed operand's
      lanes to fifo ends, gives each core an `Rtp` for its values and
-     returns `Built(objects, rtps)`. It sees the array tier alone.
+     returns `Built(objects, rtps)`.
    - `sequence(rt)` only when the derived runtime sequence is not the one
      wanted (`gemm.py`, `mha.py`).
 3. A shipped binary is a subclass declared with its image,
@@ -225,7 +225,7 @@ Check the code before relying on a line here; it is the authority.
 
 ### Rationale
 
-- **One array, every extent.** `build()` sees only the array tier, and
+- **One array, every extent.** `build()` sees only the key's parameters, and
   trip counts are per-call values the sequence writes, so one build serves many
   shapes. `iron/tests/toolchain/array_identity.py` compares core ELFs built
   at two extents.

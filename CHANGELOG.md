@@ -199,7 +199,7 @@ public API adds its entry under Unreleased.
   a model, its `max_seq_len` and whether it is loaded.
 - `repr` of an operator's `declaration` lists its fields, tunables with the
   values each is searched over, members with their symbolic shapes, and the
-  array tier its cores are built from.
+  key's parameters its cores are built from.
 - flm.DequantBFP and flm.LMHead declare `Testing` cases, so the catalog runs
   them; `DecodeLayer.reference()` and `DecodeLayer.dims`, a typed `LayerDims`
   with the layer type's dimensions, weight blob and KV rows; and

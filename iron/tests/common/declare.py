@@ -4,10 +4,10 @@
 """IRON's operator over mlir-aie's declaration, device-free.
 
 Everything here runs without a device and without generating MLIR: how
-bound operands and per-call values behave on instances, the array tier a
-build reads, profiles, extents a graph bounds, and runtime parameters. The
-declaration itself (class creation, inference, resolution, identity) is
-mlir-aie's and tested there. The design-generating half is
+bound operands and per-call values behave on instances, the key's
+parameters a build reads, profiles, extents a graph bounds, and runtime
+parameters. The declaration itself (class creation, inference, resolution,
+identity) is mlir-aie's and tested there. The design-generating half is
 ``iron/common/design/`` and needs the toolchain.
 """
 
@@ -224,7 +224,7 @@ def test_an_exported_design_replaces_the_derived_one():
 
 
 # --------------------------------------------------------------------------
-# The array tier, resolution, identity
+# The key's parameters, resolution, identity
 # --------------------------------------------------------------------------
 
 
@@ -262,7 +262,7 @@ def test_an_operand_declared_when_a_flag_exists_only_where_it_is_true():
     assert scaled.s.shape == (64,)
     with pytest.raises(AttributeError, match="declared when=scaled"):
         plain.s
-    # The flag decides the streams, so it is of the array tier.
+    # The flag decides the streams, so it is one of the key's parameters.
     assert "scaled" in Scaled.declaration.key
     assert plain.array_key() != scaled.array_key()
     # A call gives the optional input by keyword, which sets its flag.
