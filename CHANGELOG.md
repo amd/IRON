@@ -12,6 +12,10 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `CausalConv1d`, a depth-wise causal convolution whose rows before a call
+  are a `Checkpoints` state, shared by Granite 4.0-H's Mamba, Qwen3.5's
+  Gated DeltaNet and LFM2's short conv; and `Weights`, named weights read
+  from a checkpoint and computed with elsewhere, from Granite 4.0-H.
 - `Config.json_prefix`, the object of `config.json` a config's fields are
   read from: `"text_config."` for EmbeddingGemma 2's text encoder, SmolVLM's
   text model and Gemma 4, `"audio_config."` and `"vision_config."` for

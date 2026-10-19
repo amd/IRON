@@ -31,10 +31,11 @@ from .blocks import (
     PleLayer,
     RMSNorm,
     SandwichLayer,
+    Weights,
     filterbank,
 )
 from iron.common.feature_map import ConcatChannels, Conv2d, MaxPool2d
-from .causal import Call, CausalLM, Checkpoints
+from .causal import Call, CausalConv1d, CausalLM, Checkpoints
 from .encoder import EncodeStep, Encoder, Tower
 from .encoder_decoder import EncoderDecoder
 from .golden import Golden, HuggingFace
@@ -54,7 +55,9 @@ __all__ = [
     "NoCache",
     "PleLayer",
     "SandwichLayer",
+    "Weights",
     "Call",
+    "CausalConv1d",
     "CausalLM",
     "Checkpoint",
     "Checkpoints",

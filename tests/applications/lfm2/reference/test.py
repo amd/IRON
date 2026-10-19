@@ -124,7 +124,7 @@ def test_attention_layers_hold_caches_and_conv_layers_a_checkpointed_tail(ran):
     C, K, E = TOY.prefill_chunk, TOY.conv_kernel, TOY.hidden_size
     layers = model.layers
     assert [i for i, w in enumerate(layers) if "cache" in vars(w)] == [1, 3]
-    assert model.recurrent == [layers[0].conv.state, layers[2].conv.state]
+    assert model.recurrent == [layers[0].conv.conv.state, layers[2].conv.conv.state]
     slots = (TOY.max_seq_len - 1) // C + 2
     for state in model.recurrent:
         assert state.slots.shape == (slots, K - 1, E)

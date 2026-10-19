@@ -29,9 +29,8 @@ import numpy as np
 import iron
 import iron.functional as F
 from iron import lm
-from iron.applications.granite_hybrid.model import Weights
-from iron.lm import Attention, CausalLM, Checkpoints, DecoderConfig, DecoderLayer
-from iron.lm import Linear, RMSNorm
+from iron.lm import Attention, CausalConv1d, CausalLM, Checkpoints, DecoderConfig
+from iron.lm import DecoderLayer, Linear, RMSNorm, Weights
 from iron.lm.checkpoint import subtree
 from iron.operators.copy import Copy
 from iron.operators.gated_delta_rule import GatedDeltaRule
@@ -136,31 +135,25 @@ class GatedDeltaNet(iron.Graph):
         self.in_proj_qkv = Linear(E, self.channels, False)
         self.in_proj_z = Linear(E, Hv * Dv, False)
         self.in_proj_b, self.in_proj_a = Linear(E, Hv, False), Linear(E, Hv, False)
-        self.conv1d = Weights(weight=(self.channels, 1, K))
+        self.conv1d = CausalConv1d(c, self.channels, K)
         self.dt_bias, self.A_log = iron.param(Hv), iron.param(Hv)
         # Plain: not one of the norms that scale by 1 + weight.
         self.norm = Weights(weight=(Dv,))
         self.out_proj = Linear(Hv * Dv, E, False)
         state = (Hv, c.linear_key_head_dim, Dv)
-        chunk = c.prefill_chunk
-        self.conv_state = Checkpoints.of((K - 1, self.channels), c.max_seq_len, chunk)
-        self.ssm_state = Checkpoints.of(state, c.max_seq_len, chunk, np.float32)
-        # The scratch every layer shares, set by the model (Qwen35).
-        self.window = self.tail = None
+        self.ssm_state = Checkpoints.of(
+            state, c.max_seq_len, c.prefill_chunk, np.float32
+        )
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
-        # A row per tap; each value head's (dt_bias, A) in float32.
-        taps = self.conv1d.weight.reshape(self.channels, -1).T
-        self.taps = np.ascontiguousarray(taps)
+        # Each value head's (dt_bias, A) in float32.
         A = -np.exp(np.asarray(self.A_log, np.float32))
         self.head = np.stack([self.dt_bias, A], 1).astype(np.float32)
 
     def body(self, x, call):
         n, Hv, Dv = x.shape[0], self.head.shape[0], self.norm.weight.size
-        read, write = self.conv_state.at(call)
-        state = F.ConvState(read, write, self.window, self.tail)
-        qkv = F.silu(F.causal_conv1d(self.in_proj_qkv(x), self.taps, state))
+        qkv = F.silu(self.conv1d(self.in_proj_qkv(x), call))
         read, write = self.ssm_state.at(call)
         y, final = GatedDeltaRule.step(
             qkv,
@@ -211,12 +204,6 @@ class Qwen35(CausalLM):
         head = {} if config.tie_word_embeddings else {"lm_head": weights.lm_head}
         text = subtree(weights, model=weights.model.language_model, **head)
         super().__init__(config, text)
-        # Scratch F.causal_conv1d stages a call's window and tail in.
-        C, K = config.conv_channels, config.linear_conv_kernel_dim
-        window, tail = iron.state((2, config.prefill_chunk, C)), iron.state((K - 1, C))
-        for layer in self.layers:
-            if layer.linear_attn is not None:
-                layer.linear_attn.window, layer.linear_attn.tail = window, tail
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)

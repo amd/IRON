@@ -328,6 +328,16 @@ class ImagePatches(iron.Graph):
         )
 
 
+class Weights(iron.Graph):
+    """Weights of these shapes, by name, read where the checkpoint holds
+    them and computed with elsewhere.
+    """
+
+    def __init__(self, **shapes: tuple[int, ...]):
+        for name, shape in shapes.items():
+            setattr(self, name, iron.param(*shape))
+
+
 class Linear(iron.Graph):
     """``torch.nn.Linear``: ``x @ weight.T``, plus ``bias`` where it holds one,
     at ``precision`` (None: ``F.linear``'s).

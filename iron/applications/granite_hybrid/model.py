@@ -27,7 +27,7 @@ import numpy as np
 import iron
 import iron.functional as F
 from iron.applications.granite.model import Granite, GraniteConfig, GraniteLayer
-from iron.lm import CausalLM, Checkpoints, Linear, RMSNorm
+from iron.lm import CausalConv1d, CausalLM, Checkpoints, Linear, RMSNorm, Weights
 from iron.lm.blocks import _add
 from iron.operators.copy import Copy
 from iron.operators.experts import Experts
@@ -81,16 +81,6 @@ class GraniteHybridConfig(GraniteConfig):
         return self.layer_types[i] in ("attention", "full_attention")
 
 
-class Weights(iron.Graph):
-    """Weights of these shapes, by name, read where the checkpoint holds
-    them and computed with elsewhere.
-    """
-
-    def __init__(self, **shapes: tuple[int, ...]):
-        for name, shape in shapes.items():
-            setattr(self, name, iron.param(*shape))
-
-
 class Mamba(iron.Graph):
     """A Mamba2 mixer on ``c``'s shape: ``in_proj`` to the gate, ``x``,
     ``B``, ``C`` and ``dt``; ``conv1d`` over ``x``, ``B`` and ``C``, then
@@ -104,22 +94,18 @@ class Mamba(iron.Graph):
         self.channels = c.conv_channels
         self.groups = c.mamba_n_groups
         self.in_proj = Linear(E, I + self.channels + H, bias=False)
-        self.conv1d = Weights(weight=(self.channels, 1, K), bias=(self.channels,))
+        self.conv1d = CausalConv1d(c, self.channels, K, bias=True)
         self.dt_bias, self.A_log, self.D = (iron.param(H) for _ in range(3))
         self.norm = RMSNorm(I, c.eps)
         self.out_proj = Linear(I, E, bias=False)
         state = (H, c.mamba_d_head, c.mamba_d_state)
-        chunk = c.prefill_chunk
-        self.conv_state = Checkpoints.of((K - 1, self.channels), c.max_seq_len, chunk)
-        self.ssm_state = Checkpoints.of(state, c.max_seq_len, chunk, np.float32)
-        # The scratch every layer shares, set by the model (GraniteHybrid).
-        self.window = self.tail = None
+        self.ssm_state = Checkpoints.of(
+            state, c.max_seq_len, c.prefill_chunk, np.float32
+        )
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
-        # A row per tap; each head's (dt_bias, A, D) in float32.
-        taps = self.conv1d.weight.reshape(self.channels, -1).T
-        self.taps = np.ascontiguousarray(taps)
+        # Each head's (dt_bias, A, D) in float32.
         A = -np.exp(np.asarray(self.A_log, np.float32))
         self.head = np.stack([self.dt_bias, A, self.D], 1).astype(np.float32)
 
@@ -130,9 +116,7 @@ class Mamba(iron.Graph):
         gate, xbc, dt = (
             F.linear(x, part) for part in (w[:I], w[I : I + C], w[I + C :])
         )
-        read, write = self.conv_state.at(call)
-        state = F.ConvState(read, write, self.window, self.tail)
-        xbc = F.silu(F.causal_conv1d(xbc, self.taps, state) + self.conv1d.bias)
+        xbc = F.silu(self.conv1d(xbc, call))
         read, write = self.ssm_state.at(call)
         y, final = SelectiveScan.step(
             xbc,
@@ -230,12 +214,3 @@ class GraniteHybrid(Granite):
     layer_class = GraniteHybridLayer
     # The checkpoint's, not Granite 4.2's.
     bos = CausalLM.bos
-
-    def __init__(self, config: GraniteHybridConfig, weights):
-        super().__init__(config, weights)
-        # Scratch F.causal_conv1d stages a call's window and tail in.
-        C, K = config.conv_channels, config.mamba_d_conv
-        window, tail = iron.state((2, config.prefill_chunk, C)), iron.state((K - 1, C))
-        for layer in self.layers:
-            if layer.mamba is not None:
-                layer.mamba.window, layer.mamba.tail = window, tail

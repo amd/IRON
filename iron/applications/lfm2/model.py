@@ -16,7 +16,7 @@ moves LFM2's modules to the names the layers give them before they load.
 
 A conv layer's three per-channel taps, a row each (derived once it loads),
 read a window that spans the current call and the ``conv_kernel - 1``
-gated rows before it. Those rows are its ``ShortConv``'s ``Checkpoints``
+gated rows before it. Those rows are its ``CausalConv1d``'s ``Checkpoints``
 state (``iron.lm``), a slot per chunk boundary, so a
 prompt may resume from any chunk (a chat turn), after positions a decode
 step wrote; slot 0, never written, is zero, "before the sequence".
@@ -26,17 +26,13 @@ The operators' tunables are the graph's profile, ``profiles/<device>.json``.
 
 import dataclasses
 from pathlib import Path
-from types import SimpleNamespace
-
-import numpy as np
 
 import iron
-import iron.functional as F
 from iron import lm
 from iron.lm import (
     Attention,
+    CausalConv1d,
     CausalLM,
-    Checkpoints,
     DecoderConfig,
     DecoderLayer,
     GatedMLP,
@@ -90,32 +86,20 @@ class Lfm2Config(DecoderConfig):
 class ShortConv(iron.Graph):
     """The gated short conv in place of attention: a depth-wise causal FIR
     of ``conv_kernel`` taps over a call's rows, each channel its own tap
-    weights, gated on both sides by rows of ``in_proj``, then ``out_proj``.
-    The ``conv_kernel - 1`` gated rows before a call are its ``state``, a
-    slot per prompt-chunk boundary; ``window`` and ``tail`` are the scratch
-    the model's conv layers share.
+    weights (``CausalConv1d``), gated on both sides by rows of
+    ``in_proj``, then ``out_proj``.
     """
 
     def __init__(self, c: Lfm2Config):
         E, K = c.hidden_size, c.conv_kernel
         self.in_proj = Linear(E, 3 * E, bias=False)
-        self.conv = SimpleNamespace(weight=iron.param(E, 1, K))
+        self.conv = CausalConv1d(c, E, K)
         self.out_proj = Linear(E, E, bias=False)
-        self.state = Checkpoints.of((K - 1, E), c.max_seq_len, c.prefill_chunk)
-        self.window = self.tail = None
-
-    def load_state_dict(self, tree, *, path: str = "") -> None:
-        super().load_state_dict(tree, path=path)
-        # A row per tap, each the row RowwiseMul takes.
-        E, _, K = self.conv.weight.shape
-        self.taps = np.ascontiguousarray(self.conv.weight.reshape(E, K).T)
 
     def body(self, h, call):
         n, E = h.shape[0], self.out_proj.weight.shape[0]
         b, c, x = (y.reshape(n, E) for y in self.in_proj.split(h, E, E, E))
-        read, write = self.state.at(call)
-        state = F.ConvState(read, write, self.window, self.tail)
-        return self.out_proj(c * F.causal_conv1d(b * x, self.taps, state))
+        return self.out_proj(c * self.conv(b * x, call))
 
 
 class Lfm2Layer(DecoderLayer):
@@ -164,14 +148,6 @@ class Lfm2(CausalLM):
         "self_attn.q_layernorm": "self_attn.q_norm",
         "self_attn.k_layernorm": "self_attn.k_norm",
     }
-
-    def __init__(self, config: Lfm2Config, weights):
-        super().__init__(config, weights)
-        E, K, C = config.hidden_size, config.conv_kernel, config.prefill_chunk
-        window, tail = iron.state((2, C, E)), iron.state((K - 1, E))
-        for layer in self.layers:
-            if layer.conv is not None:
-                layer.conv.window, layer.conv.tail = window, tail
 
 
 if __name__ == "__main__":
