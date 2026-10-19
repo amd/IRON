@@ -108,10 +108,10 @@ class ShortConv(iron.Graph):
         E, _, K = self.conv.weight.shape
         self.taps = np.ascontiguousarray(self.conv.weight.reshape(E, K).T)
 
-    def body(self, h, step):
+    def body(self, h, call):
         n, E = h.shape[0], self.out_proj.weight.shape[0]
         b, c, x = (y.reshape(n, E) for y in self.in_proj.split(h, E, E, E))
-        read, write = self.state.at(step)
+        read, write = self.state.at(call)
         state = F.ConvState(read, write, self.window, self.tail)
         return self.out_proj(c * F.causal_conv1d(b * x, self.taps, state))
 
@@ -129,10 +129,10 @@ class Lfm2Layer(DecoderLayer):
         del self.self_attn, self.cache
         self.conv = ShortConv(c)
 
-    def body(self, x, step):
+    def body(self, x, call):
         if "conv" not in vars(self):
-            return super().body(x, step)
-        x = _add(x, self.conv(self.input_layernorm(x), step), self.residual_multiplier)
+            return super().body(x, call)
+        x = _add(x, self.conv(self.input_layernorm(x), call), self.residual_multiplier)
         h = self.mlp(self.post_attention_layernorm(x))
         return _add(x, h, self.residual_multiplier)
 

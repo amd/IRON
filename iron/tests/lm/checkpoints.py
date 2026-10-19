@@ -25,7 +25,7 @@ from iron import Carried, Scratchpad
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
 from iron.common.image.artifacts import Parameter
-from iron.lm import Checkpoints, DecodeStep
+from iron.lm import Call, Checkpoints
 from iron.operators.copy import Copy
 from iron.operators.emit import reference as emit_reference
 
@@ -63,8 +63,8 @@ class Window(iron.Graph):
         prompt = x is not None
         first = C - (K - 1)
         flat = self.window.reshape(2 * C, W)
-        step = DecodeStep(prompt, None, start if prompt else position, rows, position)
-        read, write = self.tail.at(step)
+        call = Call(prompt, start if prompt else position, rows, position)
+        read, write = self.tail.at(call)
         Copy.step(read, flat[first:C])
         if not prompt:
             Copy.step(self.sequence[position], flat[C])

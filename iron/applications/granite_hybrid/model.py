@@ -124,17 +124,17 @@ class Mamba(iron.Graph):
         A = -np.exp(np.asarray(self.A_log, np.float32))
         self.head = np.stack([self.dt_bias, A, self.D], 1).astype(np.float32)
 
-    def body(self, x, step):
+    def body(self, x, call):
         I, C = self.inner, self.channels
         w = self.in_proj.weight
         # Three projections, not one split three ways, as LFM2's conv.
         gate, xbc, dt = (
             F.linear(x, part) for part in (w[:I], w[I : I + C], w[I + C :])
         )
-        read, write = self.conv_state.at(step)
+        read, write = self.conv_state.at(call)
         state = F.ConvState(read, write, self.scratch.window, self.scratch.tail)
         xbc = F.silu(F.causal_conv1d(xbc, self.taps, state) + self.conv1d.bias)
-        read, write = self.ssm_state.at(step)
+        read, write = self.ssm_state.at(call)
         y, final = SelectiveScan.step(
             xbc,
             dt,
@@ -206,13 +206,13 @@ class GraniteHybridLayer(GraniteLayer):
             del self.self_attn, self.cache
             self.mamba = Mamba(c)
 
-    def body(self, x, step):
+    def body(self, x, call):
         h = self.input_layernorm(x)
         if self.mamba is not None:
-            h = self.mamba(h, step)
+            h = self.mamba(h, call)
         else:
-            angles = None if self.rope is None else step.ropes[self.rope]
-            h = self.self_attn(h, self.cache, step, angles)
+            angles = None if self.rope is None else call.ropes[self.rope]
+            h = self.self_attn(h, self.cache, call, angles)
         x = _add(x, h, self.residual_multiplier)
         h = self.post_attention_layernorm(x)
         y = self.shared_mlp(h)

@@ -40,22 +40,27 @@ logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
-class DecodeStep:
+class Call:
+    """One call's values, built once in ``body`` and read by every module
+    that keeps memory from call to call (``KVCache``, ``Checkpoints``,
+    ``Rope``): a prompt chunk's ``rows`` from ``start``, or the decode
+    step's one at ``position``. Each is a per-call value in a trace and its
+    number in the reference.
+    """
+
     prompt: bool
-    # The k rows of the model's rotary_emb, which a layer on config.layer(i)
-    # reads; None: no RoPE.
-    angles: Handle | None
-    # The first position the call runs: a per-call value in a trace, its
-    # number in the reference.
+    # The first position the call runs; a decode step's is its ``position``.
     start: Any
     rows: Any
+    # The last position the call runs.
     position: Any
+    # The row a prompt chunk's first position reads of a stacked RoPE table.
+    rope_start: Any = None
     # The encoder's rows a cross attention reads (``EncoderDecoder``).
     source: Any = None
-    # The rows the embedding gave, and the ids (a prompt chunk's, bounded) or
-    # the token (a decode step's) they are of; None for rows given.
-    embeddings: Any = None
-    ids: Any = None
+    # The k rows of the model's rotary_emb, which a layer on config.layer(i)
+    # reads; None: no RoPE.
+    angles: Handle | None = None
     # By each Rope a layer holds, its rows of the call (Rope.rows).
     ropes: dict = dataclasses.field(default_factory=dict)
 
@@ -88,13 +93,13 @@ class Checkpoints:
         slots = (max_seq_len - 1) // chunk + 2
         return cls(iron.state((slots, *shape), dtype), chunk)
 
-    def at(self, step: DecodeStep) -> tuple[Handle, Handle]:
-        """The slot ``step`` reads, the state before its first position, and
+    def at(self, call: Call) -> tuple[Handle, Handle]:
+        """The slot ``call`` reads, the state before its first position, and
         the slot it writes, the state after its last, in a graph's body. A
         call ends within the chunk it starts in (``CausalLM`` splits them).
         """
         C = self.chunk
-        return self.slots[(step.start - 1) // C + 1], self.slots[step.position // C + 1]
+        return self.slots[(call.start - 1) // C + 1], self.slots[call.position // C + 1]
 
     def restart(self, held: int, ran: int) -> int:
         """Where a call may start to change the positions from ``held`` on,
@@ -188,15 +193,15 @@ class CausalLM(Model):
         """Each state a layer carries from position to position."""
         return [p for _, _, p, _ in _leaves(self) if isinstance(p, Checkpoints)]
 
-    def layer(self, step: DecodeStep, i: int, w, x):
+    def layer(self, call: Call, i: int, w, x):
         """Layer ``i`` on ``x``: the module ``w`` itself, or with no
         ``layer_class`` ``config.layer(i)`` on its weights ``w``, attending
         over ``caches``.
         """
         if self.layer_class is not None:
-            return w(x, step)
-        attend = partial(self.attend, step, i)
-        return self.config.layer(i)(w, x, attend, step.angles)
+            return w(x, call)
+        attend = partial(self.attend, call, i)
+        return self.config.layer(i)(w, x, attend, call.angles)
 
     def head(self, x):
         """The final norm, then the output head (the embedding, if tied)."""
@@ -208,8 +213,8 @@ class CausalLM(Model):
             return F.linear(x, self.decoder.embed_tokens.weight)
         return F.linear(x, self.weights.lm_head.weight)
 
-    def positions(self, x, step: DecodeStep):
-        """``x``, the rows ``step`` runs, with the model's absolute positions
+    def positions(self, x, call: Call):
+        """``x``, the rows ``call`` runs, with the model's absolute positions
         placed; unchanged by default.
         """
         return x
@@ -233,80 +238,36 @@ class CausalLM(Model):
         rope_start: Scratchpad[np.int32],
     ):
         if ids is not None:
-            bounded = ids[:rows]
-            return self.forward(
-                self.lookup(bounded),
-                prompt=True,
-                position=position,
-                start=start,
-                rows=rows,
-                rope_start=rope_start,
-                ids=bounded,
-            )
+            x = self.lookup(ids[:rows])
+            return self.forward(x, Call(True, start, rows, position, rope_start))
         x = self.lookup(token).reshape(1, self.config.hidden_size)
-        return self.forward(
-            x,
-            prompt=False,
-            position=position,
-            start=start,
-            rows=rows,
-            rope_start=rope_start,
-            ids=token,
-        )
+        return self.forward(x, Call(False, position, rows, position, rope_start))
 
     def from_rows(self, x, *, token, position, start, rows, rope_start):
         """A prompt chunk's call on its embedding rows ``x``, bounded to
         ``rows``, in place of its ids' lookup; ``token`` is the decode
         step's, unread here.
         """
-        return self.forward(
-            x,
-            prompt=True,
-            position=position,
-            start=start,
-            rows=rows,
-            rope_start=rope_start,
-        )
+        return self.forward(x, Call(True, start, rows, position, rope_start))
 
-    def forward(
-        self,
-        x,
-        *,
-        prompt: bool,
-        position,
-        start,
-        rows,
-        rope_start,
-        source=None,
-        ids=None,
-    ):
-        """The layers, the head and the draw over ``x``: a prompt call's rows
-        from ``start``, else the decode step's one at ``position``; ``source``
-        and ``ids`` are the step's (``DecodeStep``).
+    def forward(self, x, call: Call):
+        """The layers, the head and the draw over ``x``, the rows ``call``
+        runs, each memory module reading ``call``.
         """
         c = self.config
         held = [self.rotary_emb]
         if self.layer_class is not None:
             held = [layer.rope for layer in self.layers]
-        ropes = {}
         for rope in held:
-            if rope is not None and rope not in ropes:
-                ropes[rope] = rope.rows(
-                    prompt=prompt,
-                    position=position,
-                    start=start,
-                    rows=rows,
-                    rope_start=rope_start,
-                )
-        angles = ropes[self.rotary_emb][1] if self.rotary_emb in ropes else None
-        # A decode step's one position is its start.
-        start = start if prompt else position
-        step = DecodeStep(prompt, angles, start, rows, position, source, x, ids, ropes)
-        x = self.positions(x, step)
+            if rope is not None and rope not in call.ropes:
+                call.ropes[rope] = rope.rows(call)
+        if self.rotary_emb in call.ropes:
+            call.angles = call.ropes[self.rotary_emb][1]
+        x = self.positions(x, call)
         for i, weights in enumerate(self.layers):
-            x = self.layer(step, i, weights, x)
-        if prompt:
-            x = Copy.step(x[rows - 1]).reshape(
+            x = self.layer(call, i, weights, x)
+        if call.prompt:
+            x = Copy.step(x[call.rows - 1]).reshape(
                 1, c.hidden_size
             )  # the last row's logits alone
         logits = self.head(x)
@@ -314,14 +275,14 @@ class CausalLM(Model):
             logits.reshape(c.vocab_size),
             self.draws,
             self.drawn,
-            row=position * ROW_WORDS,
-            at=position,
+            row=call.position * ROW_WORDS,
+            at=call.position,
         )
-        return logits, iron.carry(token=drawn, position=position + 1)
+        return logits, iron.carry(token=drawn, position=call.position + 1)
 
     def attend(
         self,
-        step: DecodeStep,
+        call: Call,
         i: int,
         q,
         k,
@@ -333,7 +294,7 @@ class CausalLM(Model):
         """Layer ``i``'s ``KVCache.attend``, built with its layer's
         ``window``.
         """
-        return self.caches[i].attend(step, q, k, v, scale)
+        return self.caches[i].attend(call, q, k, v, scale)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the decode step's (none), then
@@ -543,21 +504,14 @@ class CausalLM(Model):
         ids[: tokens.size] = tokens
         return ids
 
-    def table_start(self, n: int) -> int:
-        """The row of the RoPE angles a sequence of ``n`` tokens reads from:
-        past ``long_past``, the second table's, ``max_seq_len`` rows on.
-        """
-        past = None if self.rotary_emb is None else self.rotary_emb.long_past
-        return self.config.max_seq_len if past is not None and n > past else 0
-
     def _chunks(self, tokens: np.ndarray, start: int) -> Iterator[tuple]:
         """Each prompt call from ``start``: its inputs, ``ids`` and for a call
         holding a placeholder ``before``, and its per-call values. With
         recurrent state a call ends at the next chunk boundary, the slot it
         writes.
         """
-        n, C = tokens.size, self.config.prefill_chunk
-        table = self.table_start(n)
+        n, C, rope = tokens.size, self.config.prefill_chunk, self.rotary_emb
+        table = 0 if rope is None else rope.table_start(n)
         end = start
         while end < n:
             begin, end = end, min(end + C, n)

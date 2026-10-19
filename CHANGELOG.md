@@ -62,7 +62,7 @@ public API adds its entry under Unreleased.
 - Per-layer RoPE: each `DecoderLayer` turns q and k by the rows of the
   `Rope` it holds (the model's `rotary_emb` unless a model sets another,
   None for none), copied once a call per distinct `Rope` into
-  `DecodeStep.ropes`. `Rope(c, q_scale=None)` scales a table of q's own,
+  `Call.ropes`. `Rope(c, q_scale=None)` scales a table of q's own,
   and `Rope.rows` and `Attention`'s angles are a (q, k) pair.
 - `Attention(norms="v")` RMS-norms each head of v, unweighted; a layer
   that holds another layer's `KVCache` and sets `k_proj` and `v_proj` to
@@ -180,6 +180,12 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `Call` replaces `DecodeStep`: one call's values, built once in
+  `CausalLM.body` and handed whole to `forward(x, call)`, `Rope.rows(call)`,
+  `KVCache.attend(call, ...)` and `Checkpoints.at(call)`, in place of their
+  keyword lists. LongRoPE's stacked table and `table_start` moved out of
+  `Rope`, `CausalLM` and `DecoderConfig.long_angles` into Phi-4's
+  `LongRopeTable`; `Rope.table_start(n)` is 0.
 - A decoder's tuning calls are `iron.lm.tune.calls(model, position, token,
   context, points, sampler)`, on the flags `iron.lm.tune.arguments` adds,
   not `CausalLM.tune_calls` and `tune_arguments`; `contexts` moved with

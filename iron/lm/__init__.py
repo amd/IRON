@@ -30,7 +30,7 @@ from .blocks import (
     filterbank,
 )
 from iron.common.feature_map import ConcatChannels, Conv2d, MaxPool2d
-from .causal import CausalLM, Checkpoints, DecodeStep
+from .causal import Call, CausalLM, Checkpoints
 from .encoder import EncodeStep, Encoder, Tower
 from .encoder_decoder import EncoderDecoder
 from .golden import Golden, HuggingFace
@@ -45,6 +45,7 @@ __all__ = [
     "DecoderLayerSpec",
     "MLP",
     "Norm",
+    "Call",
     "CausalLM",
     "Checkpoint",
     "Checkpoints",
@@ -52,7 +53,6 @@ __all__ = [
     "Config",
     "Conv1d",
     "Conv2d",
-    "DecodeStep",
     "DecoderConfig",
     "EncodeStep",
     "Encoder",

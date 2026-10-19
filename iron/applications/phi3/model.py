@@ -19,10 +19,9 @@ Phi-4-mini is Llama's layer with three differences:
   ``original_max_position_embeddings`` (4096) rotates by the
   ``long_factor`` frequencies, any other by the ``short_factor`` ones, and
   every one carries LongRoPE's constant amplitude scale; rows a cache holds
-  keep the rotation they were written with. ``long_angles`` gives the
-  long table, which a prompt passing 4096 reads (``CausalLM``), and
-  ``angles`` the one a decode step reads at its position: short below
-  4096, long from it.
+  keep the rotation they were written with. ``LongRopeTable`` stacks the
+  long table, which a prompt passing 4096 reads, after ``angles``, the one
+  a decode step reads at its position: short below 4096, long from it.
 """
 
 import dataclasses
@@ -30,7 +29,9 @@ import math
 from pathlib import Path
 
 import numpy as np
+from ml_dtypes import bfloat16
 
+import iron
 from iron import lm
 from iron.lm import (
     Attention,
@@ -42,6 +43,8 @@ from iron.lm import (
     not_json,
     rope_angles,
 )
+from iron.lm.blocks import Rope
+from iron.operators.copy import Copy
 
 
 @dataclasses.dataclass(frozen=True)
@@ -131,10 +134,36 @@ class Phi4Config(DecoderConfig):
         angles[past:] = self._table(self.longrope.long)[past:]
         return angles
 
-    def long_angles(self) -> tuple[int, np.ndarray] | None:
-        if self.longrope is None:
-            return None
-        return self.original_max_position_embeddings, self._table(self.longrope.long)
+    def long_angles(self) -> np.ndarray:
+        """The table a prompt passing ``original_max_position_embeddings``
+        reads: long throughout.
+        """
+        return self._table(self.longrope.long)
+
+
+class LongRopeTable(Rope):
+    """``Rope`` with LongRoPE's long table stacked after the decode step's,
+    ``max_seq_len`` rows on: a prompt chunk of a sequence passing
+    ``long_past`` reads its rows there, from the call's ``rope_start``
+    (``table_start``).
+    """
+
+    def __init__(self, c: Phi4Config):
+        super().__init__(c)
+        self.long_past, self.length = c.original_max_position_embeddings, c.max_seq_len
+        table = np.concatenate([c.angles(), c.long_angles()])
+        self.table = iron.weight(table.astype(bfloat16))
+
+    def rows(self, call) -> tuple:
+        if not call.prompt:
+            return super().rows(call)
+        start = call.rope_start
+        k = Copy.step(self.table[start : start + self.chunk][: call.rows])
+        return k, k
+
+    def table_start(self, n: int) -> int:
+        """The long table's first row past ``long_past`` tokens, else 0."""
+        return self.length if n > self.long_past else 0
 
 
 class Phi4Attention(Attention):
@@ -183,6 +212,13 @@ class Phi4(CausalLM):
     config = Phi4Config
     profile = Path(__file__).with_name("profiles")
     layer_class = Phi4Layer
+
+    def __init__(self, config: Phi4Config, weights):
+        super().__init__(config, weights)
+        if config.longrope is not None:
+            self.rotary_emb = LongRopeTable(config)
+            for layer in self.layers:
+                layer.rope = self.rotary_emb
 
 
 if __name__ == "__main__":

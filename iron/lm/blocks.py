@@ -427,20 +427,14 @@ def _add(x, y, residual: float):
 
 
 class Rope(iron.Graph):
-    """A decoder's RoPE table, a row a position (``DecoderConfig.angles``),
-    with LongRoPE's long table stacked after it where the config gives one
-    (``long_angles``), which a prompt passing ``long_past`` reads; k's, and
-    q's too unless ``q_scale``, a factor for each row of the table (the
-    stacked one where long), scales a table of q's own. A model copies a
-    call's rows of each ``Rope`` its layers hold once (``rows``), and every
-    layer holding it reads them.
+    """A decoder's RoPE table, a row a position (``DecoderConfig.angles``):
+    k's, and q's too unless ``q_scale``, a factor for each row of the table,
+    scales a table of q's own. A model copies a call's rows of each ``Rope``
+    its layers hold once (``rows``), and every layer holding it reads them.
     """
 
     def __init__(self, c, q_scale: np.ndarray | None = None):
-        angles, long = c.angles(), c.long_angles()
-        self.long_past = None if long is None else long[0]
-        if long is not None:
-            angles = np.concatenate([angles, long[1]])
+        angles = c.angles()
         self.table = iron.weight(angles.astype(bfloat16))
         self.q_table = None
         if q_scale is not None:
@@ -448,21 +442,26 @@ class Rope(iron.Graph):
             self.q_table = iron.weight(q.astype(bfloat16))
         self.chunk, self.width = c.prefill_chunk, c.rope_width
 
-    def rows(self, *, prompt: bool, position, start, rows, rope_start) -> tuple:
-        """A call's rows of q's table and of k's, the same rows where they
-        share one: a prompt call's from ``start``, or from ``rope_start``
-        where a long table is stacked, else the decode step's at
-        ``position``.
+    def rows(self, call) -> tuple:
+        """``call``'s rows of q's table and of k's, the same rows where they
+        share one: a prompt chunk's from its ``start``, else the decode
+        step's at its ``position``.
         """
 
         def read(table):
-            if prompt:
-                begin = start if self.long_past is None else rope_start
-                return Copy.step(table[begin : begin + self.chunk][:rows])
-            return Copy.step(table[position]).reshape(1, self.width)
+            if call.prompt:
+                start = call.start
+                return Copy.step(table[start : start + self.chunk][: call.rows])
+            return Copy.step(table[call.position]).reshape(1, self.width)
 
         k = read(self.table)
         return (k if self.q_table is None else read(self.q_table)), k
+
+    def table_start(self, n: int) -> int:
+        """The row of the table a prompt of ``n`` tokens reads its first
+        position from: 0, the table's first.
+        """
+        return 0
 
 
 class KVCache(iron.Graph):
@@ -486,8 +485,8 @@ class KVCache(iron.Graph):
         self.keys, self.values = iron.state(shape), iron.state(shape)
         self.chunk, self.window = c.prefill_chunk, window
 
-    def attend(self, step, q, k, v, scale: float | None = None):
-        """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` at ``step``'s
+    def attend(self, call, q, k, v, scale: float | None = None):
+        """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` at ``call``'s
         positions, unless None (a layer reading another's cache), and attend ``q`` ``(rows, heads, head_dim)`` over every
         position up to its last, causally and within ``window``, the logits
         scaled by ``scale`` (MHA's ``1 / sqrt(head_dim)`` if None); ``(rows,
@@ -497,11 +496,11 @@ class KVCache(iron.Graph):
         for x, cache in ((k, self.keys), (v, self.values)):
             if x is None:
                 continue
-            if step.prompt:
-                cache[step.start : step.start + C][: step.rows] = x
+            if call.prompt:
+                cache[call.start : call.start + C][: call.rows] = x
             else:
-                cache[step.position] = x.reshape(G, D)
-        span = np.s_[: step.position + 1]
+                cache[call.position] = x.reshape(G, D)
+        span = np.s_[: call.position + 1]
         o = MHA.step(
             q,
             self.keys[span],
@@ -574,7 +573,7 @@ class Attention(iron.Graph):
         x[:, : self.rotary] = F.rope(Copy.step(x[:, : self.rotary]), angles)
         return x
 
-    def body(self, x, cache, step, angles=None):
+    def body(self, x, cache, call, angles=None):
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         # One row's GEMV tiles half a head. Given here, not by the profile:
         # q's shape is o's when heads * head_dim is the width.
@@ -594,7 +593,7 @@ class Attention(iron.Graph):
             k = None if k is None else self.rotate(k, angles[1])
         if k is not None:
             k, v = k.reshape(n, G, D), v.reshape(n, G, D)
-        o = cache.attend(step, q.reshape(n, H, D), k, v, scale=self.scaling)
+        o = cache.attend(call, q.reshape(n, H, D), k, v, scale=self.scaling)
         return self.o_proj(o)
 
 
@@ -622,7 +621,7 @@ class DecoderLayer(iron.Graph):
     after ``input_layernorm``, attending over the layer's own ``cache``,
     then ``mlp`` after ``post_attention_layernorm``, each block's output
     added to its residual times ``residual_multiplier``. ``rope`` is the
-    ``Rope`` whose rows of the call (``DecodeStep.ropes``) turn q and k, the
+    ``Rope`` whose rows of the call (``Call.ropes``) turn q and k, the
     model's unless a model sets another; None: no RoPE.
     """
 
@@ -635,9 +634,9 @@ class DecoderLayer(iron.Graph):
         self.rope: Rope | None = None
         self.residual_multiplier = 1.0
 
-    def body(self, x, step):
-        angles = None if self.rope is None else step.ropes[self.rope]
-        h = self.self_attn(self.input_layernorm(x), self.cache, step, angles)
+    def body(self, x, call):
+        angles = None if self.rope is None else call.ropes[self.rope]
+        h = self.self_attn(self.input_layernorm(x), self.cache, call, angles)
         x = _add(x, h, self.residual_multiplier)
         h = self.mlp(self.post_attention_layernorm(x))
         return _add(x, h, self.residual_multiplier)

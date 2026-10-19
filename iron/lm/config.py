@@ -230,12 +230,6 @@ class DecoderConfig(Config):
         """
         return self.rotary_dim or self.head_dim
 
-    def long_angles(self) -> tuple[int, np.ndarray] | None:
-        """The position a prompt's sequence must pass to take a second RoPE
-        table, and that table (LongRoPE's long one); None by default.
-        """
-        return None
-
     def angles(self) -> np.ndarray | None:
         """The RoPE table, a row per position; None with no ``rope_theta``."""
         if self.rope_theta is None:

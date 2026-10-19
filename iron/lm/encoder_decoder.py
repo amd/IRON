@@ -19,7 +19,7 @@ from iron import Carried
 from iron.operators.mha import MHA
 
 from .config import DecoderConfig
-from .causal import CausalLM, DecodeStep
+from .causal import Call, CausalLM
 from .encoder import Encoder
 
 
@@ -99,37 +99,31 @@ class EncoderDecoder(CausalLM):
                 self.cross_values[i][: v.shape[0]] = v
             return iron.carry(**{n: values[n] for n in self._parameters.carried})
         ids, rows, source = given["ids"], values["rows"], values["source"]
-        prompt = ids is not None
-        if prompt:
+        position, rope_start = values["position"], values["rope_start"]
+        if ids is not None:
             x = self.lookup(ids[:rows])
+            call = Call(True, values["start"], rows, position, rope_start, source)
         else:
             x = self.lookup(values["token"]).reshape(1, self.config.hidden_size)
-        logits, carry = self.forward(
-            x,
-            prompt=prompt,
-            position=values["position"],
-            start=values["start"],
-            rope_start=values["rope_start"],
-            rows=rows,
-            source=source,
-        )
+            call = Call(False, position, rows, position, rope_start, source)
+        logits, carry = self.forward(x, call)
         return logits, iron.carry(**carry, source=source)
 
-    def layer(self, step: DecodeStep, i: int, weights, x):
+    def layer(self, call: Call, i: int, weights, x):
         """Layer ``i`` on ``x``: ``config.layer(i)``, attending over the
         caches and over the encoder's output.
         """
-        attend = partial(self.attend, step, i)
-        cross = partial(self.cross, step, i)
-        return self.config.layer(i)(weights, x, attend, step.angles, cross)
+        attend = partial(self.attend, call, i)
+        cross = partial(self.cross, call, i)
+        return self.config.layer(i)(weights, x, attend, call.angles, cross)
 
-    def cross(self, step: DecodeStep, i: int, q, *, scale: float | None = None):
-        """``q`` ``(rows, heads, head_dim)`` over the first ``step.source``
+    def cross(self, call: Call, i: int, q, *, scale: float | None = None):
+        """``q`` ``(rows, heads, head_dim)`` over the first ``call.source``
         rows of layer ``i``'s cross keys and values, the logits scaled by
         ``scale`` (MHA's ``1 / sqrt(head_dim)`` if None).
         """
         n, H, D = q.shape
-        span = np.s_[: step.source]
+        span = np.s_[: call.source]
         o = MHA.step(
             q,
             self.cross_keys[i][span],
