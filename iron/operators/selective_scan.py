@@ -4,6 +4,7 @@
 """SelectiveScan: Mamba2's state space recurrence over a run of rows."""
 
 import dataclasses
+import math
 
 import numpy as np
 from aie.extras.dialects import arith
@@ -27,6 +28,13 @@ from iron.common.testing import Case, Testing
 
 #: The rows of a head's state a kernel call carries.
 SLICE = 16
+
+
+def _block(op) -> int:
+    """The rows a kernel call takes: up to 32, so a head's blocks stay
+    within a shim BD's 64 repeats.
+    """
+    return math.gcd(op.rows, 32)
 
 
 def _slices(op) -> int:
@@ -63,10 +71,11 @@ class SelectiveScan(Operator):
     Float32 throughout, ``y`` rounded once.
 
     Each of ``columns`` cores takes whole heads, ``SLICE`` rows of a head's
-    state at a time, and gathers each row's ``x``, ``B`` and ``C`` for the
-    slice from the whole row of ``xbc``, which a memtile joins to the row's
-    ``dt``; another joins each slice's state to its head's ``head``, so a
-    core reads two streams. Scalar.
+    state at a time, and gathers a block of rows' ``x``, ``B``, ``C`` and
+    ``dt`` for the slice from whole rows of ``xbc``, which a memtile joins
+    to each row's ``dt``; another joins each slice's state to its head's
+    ``head``, so a core reads two streams. The kernel keeps the state from
+    block to block. Scalar.
     """
 
     test = Testing(
@@ -93,6 +102,7 @@ class SelectiveScan(Operator):
     width: CompileTime[int] = field(
         derive=lambda op: op.inner + 2 * op.groups * op.state_size, repr=False
     )
+    block: CompileTime[int] = field(derive=lambda op: _block(op) * SLICE, repr=False)
     slice_state: CompileTime[int] = field(
         derive=lambda op: SLICE * op.state_size, repr=False
     )
@@ -109,7 +119,7 @@ class SelectiveScan(Operator):
         per=(columns,),
         depth=1,
     )
-    y = Out(rows, inner, obj_shape=(SLICE,), per=(columns,))
+    y = Out(rows, inner, obj_shape=(block,), per=(columns,))
     final = Out(
         heads,
         head_dim,
@@ -145,12 +155,15 @@ class SelectiveScan(Operator):
     class Array(Operator.Array):
         def kernel(self):
             return kernels.ssm.selective_scan(
-                rows=1, head_dim=SLICE, state=self.state_size
+                rows=_block(self),
+                head_dim=SLICE,
+                state=self.state_size,
+                blocks=self.rows // _block(self),
             )
 
         def build(self) -> Built:
             H, P, N, I = self.heads, self.head_dim, self.state_size, self.inner
-            SN, per_group, per_head = SLICE * N, H // self.groups, P // SLICE
+            T, per_group, per_head = _block(self), H // self.groups, P // SLICE
             kernel = self.kernel()
             f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
             bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
@@ -162,7 +175,7 @@ class SelectiveScan(Operator):
                 part = row.prod().join(
                     [0, H], obj_types=[self.dt.obj_type, self.xbc.obj_type]
                 )
-                start = ObjectFifo(f32(3 + SN), depth=1)
+                start = ObjectFifo(f32(3 + SLICE * N), depth=1)
                 part += start.prod().join(
                     [0, 3], obj_types=[self.head.obj_type, self.state.obj_type]
                 )
@@ -180,49 +193,36 @@ class SelectiveScan(Operator):
             self.final.bind([f.cons() for f in of_finals])
             rtps = [Rtp([self.count]) for _ in range(self.columns)]
 
-            def core_fn(of_row, of_slice, of_y, of_final, scan, *rest):
-                x, bc, dt, head, a, b, rtp, first = rest
+            def core_fn(of_row, of_slice, of_y, of_final, scan, block, rtp, first):
                 valid = rtp.read()[self.count]
                 i32 = valid.type
-                zero, one = arith.constant(0, i32), arith.constant(1, i32)
-
-                def call(t, state, final):
-                    """Row ``t`` of the slice from ``state`` into ``final``."""
-                    row, y = of_row.acquire(1), of_y.acquire(1)
-                    dt[0] = row[h]
-                    for i in range_(SLICE):
-                        x[i] = row[H + p + i]
-                    for n in range_(N):
-                        bc[n] = row[H + g + n]
-                        bc[N + n] = row[H + g + self.groups * N + n]
-                    left = valid - arith.index_cast(t, to=i32)
-                    live = arith.minsi(arith.maxsi(left, zero), one)
-                    scan(x, bc, dt, head, state, final, y, live)
-                    of_row.release(1)
-                    of_y.release(1)
-
+                zero, size = arith.constant(0, i32), arith.constant(T, i32)
+                bc, dt = T * SLICE, T * (SLICE + 2 * N)
                 for u in range_(_slices(self)):
                     h = u // per_head + first
                     p = (u % per_head) * SLICE + h * P
                     g = (h // per_group) * N + I
-                    start = of_slice.acquire(1)
-                    for i in range(3):
-                        head[i] = start[i]
-                    for i in range_(SN):
-                        a[i] = start[3 + i]
+                    start, final = of_slice.acquire(1), of_final.acquire(1)
+                    for j in range_(self.rows // T):
+                        # Gather the block: x, then B and C, then dt.
+                        for t in range_(T):
+                            row = of_row.acquire(1)
+                            block[dt + t] = row[h]
+                            for i in range_(SLICE):
+                                block[t * SLICE + i] = row[H + p + i]
+                            for n in range_(N):
+                                block[bc + t * 2 * N + n] = row[H + g + n]
+                                block[bc + t * 2 * N + N + n] = row[
+                                    H + g + self.groups * N + n
+                                ]
+                            of_row.release(1)
+                        b = arith.index_cast(j, to=i32)
+                        left = valid - b * size
+                        live = arith.minsi(arith.maxsi(left, zero), size)
+                        y = of_y.acquire(1)
+                        scan(block, start, final, y, live, b)
+                        of_y.release(1)
                     of_slice.release(1)
-                    # Each call's final the next one's state, two buffers in turn.
-                    if self.rows > 1:
-                        for t in range_(self.rows // 2):
-                            call(2 * t, a, b)
-                            call(2 * t + 1, b, a)
-                    last = a
-                    if self.rows % 2:
-                        call(self.rows - 1, a, b)
-                        last = b
-                    final = of_final.acquire(1)
-                    for i in range_(SN):
-                        final[i] = last[i]
                     of_final.release(1)
 
             heads = H // self.columns
@@ -235,12 +235,7 @@ class SelectiveScan(Operator):
                         of_ys[k].prod(),
                         of_finals[k].prod(),
                         kernel,
-                        Buffer(bf16(SLICE)),
-                        Buffer(bf16(2 * N)),
-                        Buffer(bf16(1)),
-                        Buffer(f32(3)),
-                        Buffer(f32(SN)),
-                        Buffer(f32(SN)),
+                        Buffer(bf16(T * (SLICE + 2 * N + 1))),
                         rtps[k],
                         k * heads,
                     ],
