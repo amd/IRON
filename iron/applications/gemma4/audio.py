@@ -153,7 +153,7 @@ class ConformerAttention(iron.Graph):
             weight=iron.param(E, E, dtype=np.float32)
         )
         self.per_dim_scale = iron.param(D, dtype=np.float32)
-        self.timing, self.dims = c.timing(), (H, D, c.window, c.band)
+        self._timing, self.dims = c.timing(), (H, D, c.window, c.band)
         self.logit_cap = c.attention_logit_cap
         self.precision = c.precision
         # The tower's keys, values, scores and probabilities, every layer's.
@@ -178,7 +178,7 @@ class ConformerAttention(iron.Graph):
         q_scale = D**-0.5 / math.log(2)
         k_scale = math.log(1 + math.e) / math.log(2)
         softplus = np.logaddexp(0, self.per_dim_scale)
-        relative = self.timing @ self.relative_k_proj.weight.T
+        relative = self._timing @ self.relative_k_proj.weight.T
         relative = relative.reshape(W, H, D)
         # Distance W - 1 - j at band column j, then at j + 1.
         band = np.zeros((H, 2 * B, D), np.float32)
