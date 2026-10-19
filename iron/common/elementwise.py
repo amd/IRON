@@ -583,7 +583,7 @@ class UnaryElementwise(Elementwise):
         per=CORES,
     )
     y = Out(
-        size,
+        like=x,
         obj_shape=(Elementwise.tile_size,),
         per=CORES,
     )
@@ -619,7 +619,7 @@ class BinaryElementwise(Elementwise):
         per=CORES,
     )
     y = Out(
-        size,
+        like=a,
         obj_shape=(Elementwise.tile_size,),
         per=CORES,
     )
