@@ -329,35 +329,16 @@ def time_interleaved(
     fastest: float = math.inf,
     log: Callable[[str], None] = print,
 ) -> list[Timed]:
-    """Each loaded image's per-round medians, microseconds: mlir-aie's
-    ``run_interleaved`` with the completions' cores held, each round timed
-    again if another process held the NPU, and each call's figure the time
-    the image itself took (``last_elapsed``).
-
-    Args:
-        groups: Per run, the setting it measures, where the runs are
-            settings of one design; a setting is timed no further once its
-            slowest run is past ``timing.cutoff`` times the fastest
-            setting's (``Timing``). None marks a run never stopped. Every
-            run is timed every round if not given.
-        fastest: The slowest run of the fastest setting timed before these.
-        log: Where waiting for the NPU, or a round timed again, is reported.
-
-    Raises:
-        RuntimeError: A run's middle call waited for a CPU past
-            ``CPU_WAIT_US`` (``cpu_wait_us``) in its median round: the
-            host was busy enough to hold completions off a core.
+    """Each loaded image's per-round medians, microseconds, each call's
+    figure the time the image itself took (``last_elapsed``): mlir-aie's
+    ``run_interleaved``, whose arguments and errors these are.
     """
-
-    def timed(run: ImageCallable) -> Callable[[], SimpleNamespace]:
-        def call() -> SimpleNamespace:
-            run()
-            return SimpleNamespace(npu_time=run.last_elapsed * 1e9)
-
-        return call
-
     stats = run_interleaved(
-        [timed(run) for run in runs],
+        # It reads a call's figure off the second of what the call returns.
+        [
+            lambda run=run: (run(), SimpleNamespace(npu_time=run.last_elapsed * 1e9))
+            for run in runs
+        ],
         rounds=timing.rounds,
         calls=timing.calls,
         settle=timing.settle,
