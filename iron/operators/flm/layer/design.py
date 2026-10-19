@@ -166,7 +166,7 @@ PLE_LOCKS = dict(
     y_prod_lock=(6, 1),
     y_cons_lock=(7, 0),
 )
-# final_x_* are locks of the RMS tile, to the left of the gate tile.
+# final_x_* are locks of the RMS tile, which holds the gate's x.
 GLE_LOCKS = dict(
     x_prod_lock=(0, 1),
     x_cons_lock=(1, 0),
