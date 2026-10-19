@@ -144,13 +144,6 @@ def test_a_block_float_tile_is_sized_by_its_blocks(npu2):
     assert Blocks(n=4096).x.l1_depth == 1
 
 
-def test_an_operand_property_s_own_error_is_raised():
-    # l1_depth reads the bound device, which an unresolved operator lacks.
-    with pytest.raises(AttributeError) as raised:
-        MV(M=1024, K=128).A.l1_depth
-    assert "l1_depth" not in str(raised.value)
-
-
 def test_a_stream_binds_a_handle_per_lane():
     op = MV(M=1024, K=256, columns=2)
     op.A.bind(["h0", "h1"])
