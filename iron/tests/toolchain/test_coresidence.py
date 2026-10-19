@@ -13,8 +13,7 @@ channel. A recorded graph reaches the same packing through
 ``compile(coresident=)``.
 
 The fit checks run mlir-aie's passes in process; only the ELF builds need
-Peano and ``aiebu-asm``. Nothing dispatches: hardware checks the numbers
-(``iron/tests/infrastructure/coresidence.py``).
+Peano and ``aiebu-asm``. Nothing dispatches.
 """
 
 import json
