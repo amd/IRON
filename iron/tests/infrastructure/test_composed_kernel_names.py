@@ -4,24 +4,10 @@
 
 """A design links the same kernel objects built alone as composed.
 
-A full-ELF build once renamed each design's kernels by position:
-
-```python
-generator.kwargs["func_prefix"] = f"op{idx}_"
-```
-
-on a generator that was also an artifact the full-ELF build compiled to disk --
-to the exact path a standalone build of the same operator reads. The cache
-keyed only on filename and mtime, so a later standalone build trusted the
-prefixed file and asked the linker for ``op0_add.o``, which a standalone
-build never produces. The failure surfaced as an undefined symbol at link
-time, in a build that did nothing wrong, possibly in a different process from
-the full-ELF build that poisoned it.
-
-Nothing is left to poison now: composed MLIR is not an artifact, standalone
-builds call their generator directly, and a kernel is named for its recipe
-rather than its position, so a design names the same objects whether it is
-built alone or composed. The last is what is checked here, end to end.
+Composed MLIR is not an artifact, standalone builds call their generator
+directly, and a kernel is named for its recipe rather than its position, so a
+design names the same objects whether it is built alone or composed. The last
+is what is checked here, end to end.
 
 Needs a device: the full-ELF build runs for real, because the whole point is
 what it leaves lying around; the standalone side only needs a device to
