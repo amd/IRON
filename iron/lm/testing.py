@@ -348,14 +348,12 @@ def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, reco
     chunk = np.resize(tokens, rows)
     ids = model.session.prompt_ids(chunk)
     begin = deepest * C
-    rope = model.rotary_emb
-    table = 0 if rope is None else rope.table_start(begin + rows)
     values = dict(
         token=int(chunk[-1]),
         position=begin + rows - 1,
         start=begin,
         rows=rows,
-        rope_start=table + begin,
+        rope_start=model.rope_start(begin + rows, begin),
     )
     with _fill_caches(model, len(tokens), begin):
         start = time.perf_counter()

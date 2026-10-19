@@ -26,7 +26,7 @@ from pathlib import Path
 
 from iron.operators.sample import Sample
 from iron.tune import cli as tune_cli
-from iron.tune.autotune import Timed, Point
+from iron.tune.autotune import Point, Timed
 
 from .causal import CausalLM
 from .cli import parse_args, sampling_arguments

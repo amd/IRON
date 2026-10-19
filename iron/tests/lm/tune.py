@@ -45,21 +45,18 @@ def test_an_application_s_model_is_the_one_naming_its_calls():
 
 
 class Toy(Llama):
-    """The toy at ``LONG``, traced under ``PROFILE``; its profiles
-    directory is a test's.
-    """
+    """The toy at ``LONG``."""
 
     config = dataclasses.replace(SMALL, **LONG)
-
-    def __init__(self, config, weights):
-        super().__init__(config, weights)
-        self.profile = PROFILE
 
 
 @pytest.fixture
 def toy(tmp_path, monkeypatch):
-    """``Toy`` with a profiles directory, and the calls ``main`` tunes."""
+    """``Toy`` with a profiles directory holding ``PROFILE``, and the calls
+    ``main`` tunes.
+    """
     tuned = []
+    PROFILE.save(tmp_path / "npu2.json")
     monkeypatch.setattr(Toy, "profile", tmp_path)
     monkeypatch.setattr(tune.tune_cli, "tune", lambda *a: tuned.append(a))
     path = checkpoint(Toy.config).path
@@ -73,16 +70,20 @@ def test_main_tunes_a_decoder_s_calls_on_its_flags(toy):
     assert [len(c.points) for c in calls] == [2, 2] and args.context == 512
 
 
-@pytest.mark.parametrize("context", [300, 2048])
+@pytest.mark.parametrize(
+    "context, refusal",
+    [
+        (300, "the context 300 is not a multiple of 256"),
+        (2048, "past max_seq_len 1024"),
+    ],
+)
 def test_main_refuses_a_context_that_is_no_whole_chunks_within_the_caches(
-    toy, context, capsys
+    toy, context, refusal, capsys
 ):
     argv, tuned = toy
     with pytest.raises(SystemExit):
         tune.main("toy", Toy, [*argv, "--context", str(context)])
-    assert f"--context {context} is not a multiple of 256 to 1024" in (
-        capsys.readouterr().err
-    )
+    assert refusal in capsys.readouterr().err
     assert not tuned
 
 

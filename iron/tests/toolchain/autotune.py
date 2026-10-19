@@ -27,7 +27,7 @@ from iron.operators.gemm import GEMMPlacement
 from iron.tests.common.graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
 from iron.tune import autotune as tuning
-from iron.tune.autotune import Timed, Point, Shape, autotune, line, refusal, settings
+from iron.tune.autotune import Point, Shape, Timed, autotune, line, refusal, settings
 from iron.tune.measure import Cache, Measurement, judge
 
 SIZE = 8192

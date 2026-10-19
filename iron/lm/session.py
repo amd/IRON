@@ -162,8 +162,7 @@ class Session:
         writes.
         """
         model = self.lm
-        n, C, rope = tokens.size, model.config.prefill_chunk, model.rotary_emb
-        table = 0 if rope is None else rope.table_start(n)
+        n, C = tokens.size, model.config.prefill_chunk
         placeholders = model.placeholders
         end = start
         while end < n:
@@ -177,7 +176,7 @@ class Session:
                 position=end - 1,
                 start=begin,
                 rows=end - begin,
-                rope_start=table + begin,
+                rope_start=model.rope_start(n, begin),
             )
             placed = np.isin(tokens[begin:end], placeholders).any()
             if model.placed_chunk is None or not placed:

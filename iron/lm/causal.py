@@ -198,12 +198,19 @@ class CausalLM(Model):
         rows: Scratchpad[np.int32],
         rope_start: Scratchpad[np.int32],
     ):
-        at = dict(rows=rows, position=position, rope_start=rope_start)
-        if ids is not None:
-            x = self.lookup(ids[:rows])
-            return self.forward(x, Call(prompt=True, start=start, **at))
-        x = self.lookup(token).reshape(1, self.config.hidden_size)
-        return self.forward(x, Call(prompt=False, start=position, **at))
+        prompt = ids is not None
+        call = Call(
+            prompt=prompt,
+            start=start if prompt else position,
+            rows=rows,
+            position=position,
+            rope_start=rope_start,
+        )
+        if prompt:
+            return self.forward(self.lookup(ids[:rows]), call)
+        return self.forward(
+            self.lookup(token).reshape(1, self.config.hidden_size), call
+        )
 
     def from_rows(self, x, *, token, position, start, rows, rope_start):
         """A prompt chunk's call on its embedding rows ``x``, bounded to
@@ -250,6 +257,13 @@ class CausalLM(Model):
         """``rotary_emb``, the RoPE table every layer holds: ``Rope``'s."""
         return Rope(config)
 
+    def rope_start(self, n: int, begin: int) -> int:
+        """The RoPE table row a chunk from ``begin`` of an ``n``-token prompt
+        reads first (``Rope.table_start``).
+        """
+        rope = self.rotary_emb
+        return begin + (0 if rope is None else rope.table_start(n))
+
     @classmethod
     def tune_arguments(cls, parser) -> None:
         """The flags ``tune_calls`` follows from (``tune.arguments``)."""
@@ -263,14 +277,14 @@ class CausalLM(Model):
         from .tune import calls
 
         config = cls.default_config(args.checkpoint)
-        L, C = config.max_seq_len, config.prefill_chunk
-        if not 0 < args.context <= L or args.context % C:
-            parser.error(f"--context {args.context} is not a multiple of {C} to {L}")
         model = cls(config, Checkpoint(args.checkpoint).tree("unread"))
         sampler = Sampler(args.temperature, args.top_k)
-        return calls(
-            model, args.position, args.token, args.context, args.points, sampler
-        )
+        try:
+            return calls(
+                model, args.position, args.token, args.context, args.points, sampler
+            )
+        except ValueError as e:  # the context is no whole chunks within the caches
+            parser.error(str(e))
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the decode step's (none), then

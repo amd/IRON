@@ -29,7 +29,7 @@ from pathlib import Path
 from iron import operators
 from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
-from .autotune import Timed, Shape, autotune, kernel_cycles, time_shape
+from .autotune import Shape, Timed, autotune, kernel_cycles, time_shape
 from .measure import Cache, Timing, pmode
 
 

@@ -91,13 +91,19 @@ class EncoderDecoder(CausalLM):
             return iron.carry(**{n: values[n] for n in self._parameters.carried})
         ids, rows, source = given["ids"], values["rows"], values["source"]
         position, rope_start = values["position"], values["rope_start"]
-        at = dict(rows=rows, position=position, rope_start=rope_start, source=source)
-        if ids is not None:
+        prompt = ids is not None
+        call = Call(
+            prompt=prompt,
+            start=values["start"] if prompt else position,
+            rows=rows,
+            position=position,
+            rope_start=rope_start,
+            source=source,
+        )
+        if prompt:
             x = self.lookup(ids[:rows])
-            call = Call(prompt=True, start=values["start"], **at)
         else:
             x = self.lookup(values["token"]).reshape(1, self.config.hidden_size)
-            call = Call(prompt=False, start=position, **at)
         logits, carry = self.forward(x, call)
         return logits, iron.carry(**carry, source=source)
 

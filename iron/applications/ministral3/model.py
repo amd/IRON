@@ -171,7 +171,9 @@ class Ministral3(CausalLM):
 
     def __init__(self, config: Ministral3Config, weights):
         super().__init__(config, text_weights(weights))
+
+    def rotary(self, config: Ministral3Config) -> Rope:
+        """``Rope``'s table, its queries scaled where Llama 4 scaling is on."""
         if config.llama_4_scaling_beta:
-            self.rotary_emb = Rope(config, q_scale=config.query_scale())
-            for layer in self.layers:
-                layer.rope = self.rotary_emb
+            return Rope(config, q_scale=config.query_scale())
+        return Rope(config)
