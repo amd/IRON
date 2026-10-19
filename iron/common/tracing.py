@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 from aie.utils.trace import TraceConfig, print_cycles_summary
 
-from .image.callable import FullELFCallable, StepCallable
+from .image.callable import FullELFCallable, ImageCallable
 
 __all__ = ["dump_traces"]
 
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 
 def dump_traces(
-    run: FullELFCallable | StepCallable,
+    run: ImageCallable,
     trace_file: str | Path,
     *,
     colshift: int | None = None,

@@ -38,7 +38,7 @@ from iron.common.declare import Operand, Operator
 from iron.common.declare.value import Value
 from iron.common.design import OperatorDesign
 from iron.common.graph.trace import TracedGraph
-from iron.common.image.callable import FullELFCallable, StepCallable
+from iron.common.image.callable import ImageCallable
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef, SequenceStep
 
@@ -468,7 +468,7 @@ def judge(
 
 
 def time_interleaved(
-    runs: Sequence[FullELFCallable | StepCallable],
+    runs: Sequence[ImageCallable],
     timing: Timing,
     groups: Sequence[Hashable | None] = (),
     fastest: float = math.inf,

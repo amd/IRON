@@ -225,7 +225,42 @@ class FullELFRun:
                 raise RuntimeError(f"{self.name}: the run ended in {state}")
 
 
-class FullELFCallable:
+def _line_view(parent: XRTTensor, offset: int, length: int, dtype) -> XRTTensor:
+    """``length`` bytes of ``parent`` from ``offset``, and the rest of their
+    last coherence line, which no other buffer holds, as ``dtype``: an exact
+    view of bytes that do not end on a line cannot be synchronized.
+    """
+    stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
+    return parent.subview(offset, ((stop - offset) // dtype.itemsize,), dtype)
+
+
+class ImageCallable:
+    """What a caller invokes once a sequence ``op`` has an image: write the
+    per-call values (``write_values``), call it, and read a buffer by its
+    ref (``get_buffer``) or whole (``get_storage``); ``last_elapsed`` is
+    the last call's seconds. The residents a sequence placed in an arena
+    plan are views of ``arena``'s banks, made again once it has grown.
+    """
+
+    # The trace buffer a traced build fills; only a full ELF allocates one.
+    trace_buffer: XRTTensor | None = None
+
+    def __init__(self, seq, arena: ScratchArena | None):
+        _require_xrt()
+        self.op = seq
+        self.arena = arena
+        self.last_elapsed = 0.0
+        self._arena_generation: int | None = None
+
+    def _arena_grew(self) -> bool:
+        """Whether the arena grew since the views were made, now made again."""
+        if self.arena is None or self.arena.generation == self._arena_generation:
+            return False
+        self._arena_generation = self.arena.generation
+        return True
+
+
+class FullELFCallable(ImageCallable):
     """The full ELF (NPU2): every operator shares consolidated buffers addressed by offset.
 
     A call dispatches ``run``; ``new_run`` makes more over the same buffers.
@@ -251,7 +286,7 @@ class FullELFCallable:
         sequence_name="sequence",
         arena: ScratchArena | None = None,
     ):
-        _require_xrt()
+        super().__init__(seq, arena)
         if (arena is None) != (seq.arena is None):
             raise ValueError(
                 f"{seq.name} was placed in "
@@ -260,11 +295,8 @@ class FullELFCallable:
             )
         if arena is not None and arena.plan is not seq.arena:
             raise ValueError(f"{seq.name} was placed in another arena plan")
-        self.op = seq
-        self.arena = arena
         self.device_name = device_name
         self.sequence_name = sequence_name
-        self.last_elapsed = 0.0
         self.kernel = NPUKernel(
             elf_path=str(seq.image), kernel_name=f"{device_name}:{sequence_name}"
         )
@@ -300,7 +332,6 @@ class FullELFCallable:
         if sizes.feedback is not None:
             self.feedback_buffer = XRTTensor((sizes.feedback,), dtype=np.uint8)
         # The trace buffer's argument and size are read from the lowered module.
-        self.trace_buffer: XRTTensor | None = None
         self._trace_arg: int | None = None
         if seq.traced:
             layout = get_trace_buffer(
@@ -435,28 +466,22 @@ class FullELFCallable:
         return self._buffer_cache[ref]
 
     def get_storage(self, root: str):
-        """The buffer and the rest of its last coherence line, which no other buffer holds.
-
-        An exact view of a buffer that does not end on a line cannot be synchronized.
-        """
+        """The buffer and the rest of its last coherence line (``_line_view``)."""
         self._follow_arena()
         if root not in self._storage_cache:
             kind, offset, length = self.op.layout[root]
             if kind == "scratch":
                 kind, offset = self.op.buffer_sizes.scratch_argument(offset, length)
             dtype = self.op.buffer_dtype(BufferRef(root))
-            parent = self._arguments()[kind]
-            stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
-            self._storage_cache[root] = parent.subview(
-                offset, ((stop - offset) // dtype.itemsize,), dtype
+            self._storage_cache[root] = _line_view(
+                self._arguments()[kind], offset, length, dtype
             )
         return self._storage_cache[root]
 
     def _follow_arena(self) -> None:
-        if self.arena is None or self.arena.generation == self._arena_generation:
+        if not self._arena_grew():
             return
         self.scratch_banks = self.arena.banks
-        self._arena_generation = self.arena.generation
         arguments = self._arguments()
         for run in self._runs:
             for kind in self.op.buffer_sizes.bank_kinds:
@@ -499,38 +524,28 @@ class FullELFCallable:
                 f"write between calls, or start the next run through start()"
             )
 
-    def __call__(self, *runs: FullELFRun, idle: Collection[int] = ()):
-        """Dispatch ``run``, or ``runs`` queued back to back, each but its
-        ``idle`` commands.
-        """
-        runs = runs or (self.run,)
+    def __call__(self, idle: Collection[int] = ()):
+        """Dispatch ``run``, each but its ``idle`` commands."""
         self._sync_inputs()
         t0 = time.perf_counter()
-        for run in runs:
-            run.start(idle)
-        for run in runs:
-            run.wait()
+        self.run.start(idle)
+        self.run.wait()
         self.last_elapsed = time.perf_counter() - t0
 
 
-class StepCallable:
+class StepCallable(ImageCallable):
     """Runs an ``XclbinChain`` one step at a time, its buffers shared by name.
 
     ``check`` holds each dispatched step to its reference on the NPU's
     inputs, by the step's ``tolerance()`` (``check_step``), so each
-    comparison isolates one operator. The residents a sequence placed in an
-    arena plan are views of ``arena``'s buffer, so every version of a graph
-    reads one copy.
+    comparison isolates one operator. Every version of a graph reads one
+    copy of the residents, in the arena.
     """
 
     def __init__(self, seq, check: bool = False, arena: ScratchArena | None = None):
-        _require_xrt()
-        self.op = seq
+        super().__init__(seq, arena)
         self.check = check
-        self.last_elapsed = 0.0
         self.dispatch_values: dict[str, np.generic] = {}
-        self.arena = arena
-        self._arena_generation: int | None = None
         self._buffers: dict[BufferRef, XRTTensor] = {}
         self._storage: dict[str, XRTTensor] = {}
         for root, (_, _, length) in seq.layout.items():
@@ -561,21 +576,15 @@ class StepCallable:
 
     def _follow_arena(self) -> None:
         """View the residents in the arena's banks, again once it has grown."""
-        if self.arena is None or self.arena.generation == self._arena_generation:
+        if not self._arena_grew():
             return
         banks = self.arena.banks
-        self._arena_generation = self.arena.generation
         for root in self.op.residents:
             _, offset, length = self.op.layout[root]
             bank, offset = divmod(offset, BANK)
-            parent = banks[bank]
             dtype = self.op.buffer_dtype(BufferRef(root))
-            stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
-            # A step takes the storage: an exact view of a resident whose
-            # bytes are not whole coherence lines cannot be made.
-            self._storage[root] = parent.subview(
-                offset, ((stop - offset) // dtype.itemsize,), dtype
-            )
+            # A step takes the storage, whole coherence lines (``_line_view``).
+            self._storage[root] = _line_view(banks[bank], offset, length, dtype)
         self._buffers = {
             ref: view
             for ref, view in self._buffers.items()
