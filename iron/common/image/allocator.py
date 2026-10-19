@@ -344,8 +344,8 @@ def lay_out(
                 continue
             cursor = pool.fit(cursor, sizes[root])
             layout[root] = (kind, cursor, sizes[root])
-            end = cursor + sizes[root]
-            cursor = pool.align(end)
+            end = max(end, cursor + sizes[root])
+            cursor = pool.align(cursor + sizes[root])
         # The pool starts at zero, so it is rebased past the other
         # buffers, at a bank's start unless it fits the rest of this one.
         span = max((offsets[r] + sizes[r] for r in pooled), default=0)

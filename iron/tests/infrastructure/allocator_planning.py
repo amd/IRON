@@ -22,6 +22,7 @@ from iron.common.image.allocator import (
     ArenaPlan,
     LiveRange,
     Pool,
+    lay_out,
 )
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
@@ -638,3 +639,11 @@ def test_back_to_back_buffers_start_aligned_whatever_their_sizes():
     layout, _ = _laid_out(Image(recording, FullELF()))
     for name, (_, offset, _) in layout.items():
         assert offset % ALIGNMENT == 0, f"{name} at {offset}"
+
+
+def test_an_argument_ends_past_the_arena_buffer_placed_last():
+    # "kept" sits in the arena past "x", the one buffer laid out after it.
+    arena = {"kept": Allocation("kept", 8192, 64)}
+    steps = [((), ("kept", "x")), (("kept", "x"), ())]
+    _, args = lay_out({"kept": 64, "x": 64}, steps, ((), (), ()), {"x"}, arena)
+    assert args.scratch == 8256
