@@ -25,17 +25,12 @@ import subprocess
 import uuid
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from aie.iron import Out
 from aie.utils import bfp
-from aie.utils.benchmark import (
-    CPU_WAIT_US,
-    CompletionCores,
-    cpu_wait_us,
-    other_npu_users,
-    wait_idle,
-)
+from aie.utils.benchmark import run_interleaved
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.declare import Operand, Operator
@@ -334,9 +329,10 @@ def time_interleaved(
     fastest: float = math.inf,
     log: Callable[[str], None] = print,
 ) -> list[Timed]:
-    """Each loaded image's median of per-round medians, microseconds, each
-    round timed while no other process holds the NPU (``wait_idle``) and the
-    completions' cores are held (``CompletionCores``).
+    """Each loaded image's per-round medians, microseconds: mlir-aie's
+    ``run_interleaved`` with the completions' cores held, each round timed
+    again if another process held the NPU, and each call's figure the time
+    the image itself took (``last_elapsed``).
 
     Args:
         groups: Per run, the setting it measures, where the runs are
@@ -352,61 +348,27 @@ def time_interleaved(
             ``CPU_WAIT_US`` (``cpu_wait_us``) in its median round: the
             host was busy enough to hold completions off a core.
     """
-    for run in runs:
-        run()  # warm: first-run setup lands on nobody's figure
-    # Which interrupts a call raises, its first one's setup aside.
-    before = CompletionCores.interrupts()
-    for run in runs:
-        run()
-    medians: list[list[float]] = [[] for _ in runs]
-    waited: list[list[float]] = [[] for _ in runs]
-    live = set(range(len(runs)))
-    wait_idle(log, holding=True)
-    r = 0
-    with CompletionCores(before):
-        while r < timing.rounds:
-            timed = {}
-            for i, run in enumerate(runs):
-                if i not in live:
-                    continue
-                times, waits = [], []
-                for _ in range(timing.calls):
-                    start = cpu_wait_us()
-                    run()
-                    times.append(run.last_elapsed)
-                    end = cpu_wait_us()
-                    if start is not None and end is not None:
-                        waits.append(end - start)
-                timed[i] = (
-                    statistics.median(times) * 1e6,
-                    statistics.median(waits) if waits else 0.0,
-                )
-            held = other_npu_users(holding=True)
-            if held:
-                log(
-                    f"    pid {sorted(held)} used the NPU during a round: timing it again"
-                )
-                wait_idle(log, holding=True)
-                continue
-            for i, (us, wait) in timed.items():
-                medians[i].append(us)
-                waited[i].append(wait)
-            r += 1
-            if not groups or r < timing.settle:
-                continue
-            slowest: dict[Hashable, float] = {}
-            for i in live:
-                us = statistics.median(medians[i])
-                slowest[groups[i]] = max(slowest.get(groups[i], 0.0), us)
-            bar = timing.cutoff * min([fastest, *slowest.values()])
-            live = {i for i in live if groups[i] is None or slowest[groups[i]] <= bar}
-    late = max(statistics.median(w) for w in waited)
-    if late > CPU_WAIT_US:
-        raise RuntimeError(
-            f"a run's middle call waited {late:.0f} us for a CPU in its median "
-            f"round; measure with the host otherwise idle"
-        )
-    return [Timed(tuple(m)) for m in medians]
+
+    def timed(run: ImageCallable) -> Callable[[], SimpleNamespace]:
+        def call() -> SimpleNamespace:
+            run()
+            return SimpleNamespace(npu_time=run.last_elapsed * 1e9)
+
+        return call
+
+    stats = run_interleaved(
+        [timed(run) for run in runs],
+        rounds=timing.rounds,
+        calls=timing.calls,
+        settle=timing.settle,
+        cutoff=timing.cutoff,
+        groups=list(groups) or None,
+        fastest_us=fastest,
+        completion_cores=True,
+        idle=True,
+        log=log,
+    )
+    return [Timed(tuple(s.samples_us)) for s in stats]
 
 
 # The device contexts the driver holds at once; each run timed keeps one.
