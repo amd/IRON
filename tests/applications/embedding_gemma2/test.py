@@ -669,9 +669,11 @@ class WindowPositions(iron.Graph):
         walked: Scratchpad[np.int32],
     ):
         tower = self.tower
-        return tower.inline(
+        h, ropes = tower.inline(
             tower.window_positions, h[:n], n=n, hk=hk, wk=wk, walked=walked
         )
+        angles, _ = ropes[tower.config.head_dim]
+        return h, Copy.step(angles)
 
 
 @pytest.mark.parametrize(
