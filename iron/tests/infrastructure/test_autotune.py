@@ -276,7 +276,7 @@ def test_a_step_costs_alike_however_long_the_run():
     gemv = next(s.op for s in recording.steps if isinstance(s.op, GEMV))
     runs = [Standalone(f"long{k}", [gemv] * k) for k in (1, 6, 12)]
     one, six, twelve = (
-        t.us
+        t.median_us
         for t in time_interleaved(
             [r.callable for r in runs], Timing(rounds=4, calls=20)
         )

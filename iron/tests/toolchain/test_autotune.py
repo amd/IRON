@@ -380,8 +380,8 @@ def test_each_setting_pairs_with_the_default_timed_in_its_own_batch(monkeypatch)
         # A batch's long runs are slower the later the batch, its short ones free.
         n = len(runs) // 2
         return [
-            measuring.Timed(
-                (0.0 if i < n else 10.0 * len(batches) + i,) * timing.rounds
+            benchmark.Stats.from_samples(
+                [0.0 if i < n else 10.0 * len(batches) + i] * timing.rounds
             )
             for i in range(len(runs))
         ]
@@ -677,4 +677,4 @@ def test_a_run_is_timed_by_the_time_its_image_took(monkeypatch):
     monkeypatch.setattr(benchmark, "cpu_wait_us", lambda: None)
     (timed,) = time_interleaved([Run()], Timing(rounds=2, calls=3))
     # Two untimed calls, then each round's median of its three: 4, then 7.
-    assert timed.round_us == pytest.approx((4.0, 7.0))
+    assert timed.samples_us == pytest.approx([4.0, 7.0])

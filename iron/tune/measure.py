@@ -30,7 +30,7 @@ from types import SimpleNamespace
 import numpy as np
 from aie.iron import Out
 from aie.utils import bfp
-from aie.utils.benchmark import run_interleaved
+from aie.utils.benchmark import Stats, run_interleaved
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.declare import Operand, Operator
@@ -58,28 +58,13 @@ class Timing:
     cutoff: float = 1.5
 
 
-@dataclasses.dataclass(frozen=True)
-class Timed:
-    """A run's per-round medians, microseconds, and their median ``us``."""
-
-    round_us: tuple[float, ...]
-
-    @property
-    def us(self) -> float:
-        return statistics.median(self.round_us)
-
-    @property
-    def rounds(self) -> int:
-        return len(self.round_us)
-
-
 def standard_error(samples: Sequence[float]) -> float | None:
-    """The standard error of the median of ``samples``, taken as normal
-    (sqrt(pi / 2) times the mean's); None from fewer than two.
+    """``Stats``' standard error of the median of ``samples``; None from
+    fewer than two.
     """
     if len(samples) < 2:
         return None
-    return math.sqrt(math.pi / 2) * statistics.stdev(samples) / math.sqrt(len(samples))
+    return Stats.from_samples(list(samples)).median_se_us
 
 
 def platform() -> dict[str, str]:
@@ -328,12 +313,12 @@ def time_interleaved(
     groups: Sequence[Hashable | None] = (),
     fastest: float = math.inf,
     log: Callable[[str], None] = print,
-) -> list[Timed]:
-    """Each loaded image's per-round medians, microseconds, each call's
-    figure the time the image itself took (``last_elapsed``): mlir-aie's
-    ``run_interleaved``, whose arguments and errors these are.
+) -> list[Stats]:
+    """Each loaded image's per-round medians, microseconds (``samples_us``),
+    each call's figure the time the image itself took (``last_elapsed``):
+    mlir-aie's ``run_interleaved``, whose arguments and errors these are.
     """
-    stats = run_interleaved(
+    return run_interleaved(
         # It reads a call's figure off the second of what the call returns.
         [
             lambda run=run: (run(), SimpleNamespace(npu_time=run.last_elapsed * 1e9))
@@ -349,7 +334,6 @@ def time_interleaved(
         idle=True,
         log=log,
     )
-    return [Timed(tuple(s.samples_us)) for s in stats]
 
 
 # The device contexts the driver holds at once; each run timed keeps one.
@@ -593,7 +577,7 @@ def measure(
         steps = [
             tuple(
                 (many - one) / (repeats - 1)
-                for one, many in zip(times[j].round_us, times[n + j].round_us)
+                for one, many in zip(times[j].samples_us, times[n + j].samples_us)
             )
             for j in range(n)
         ]
@@ -609,7 +593,7 @@ def measure(
             )
             if cache is not None:
                 cache.put(keys[i], out[i])
-        fastest = min(fastest, *(times[n + j].us for j in range(n)))
+        fastest = min(fastest, *(times[n + j].median_us for j in range(n)))
         # A probe holds its context while it lives; the next batch needs them.
         del short, long
     return out
