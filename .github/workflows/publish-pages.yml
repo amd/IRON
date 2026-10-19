@@ -12,14 +12,10 @@ name: Publish Benchmark History
 on:
   workflow_run:
     workflows:
-      - Krackan - Small Benchmark/Test Suite
-      - Krackan - Extensive Benchmark/Test Suite
-      - Krackan - Test Example Applications
-      - Phoenix - Small Benchmark/Test Suite
-      - Phoenix - Extensive Benchmark/Test Suite
-      - Phoenix - Test Example Applications
-      - Krackan - Nightly Applications
-      - Phoenix - Nightly Applications
+      - Small Benchmark/Test Suite
+      - Extensive Benchmark/Test Suite
+      - Test Example Applications
+      - Nightly Applications
     types:
       - completed
   workflow_dispatch:

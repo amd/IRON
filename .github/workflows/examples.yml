@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Phoenix - Test Example Applications
+name: Test Example Applications
 
 on:
   workflow_dispatch:
@@ -21,9 +21,13 @@ permissions:
   contents: write
 
 jobs:
-  test_examples_on_phoenix:
-    name: Test Examples on Phoenix
-    runs-on: [self-hosted, phoenix]
+  test_examples:
+    name: Test Examples on ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [phoenix, krackan]
+    runs-on: [self-hosted, "${{ matrix.runner }}"]
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -38,6 +42,13 @@ jobs:
         uses: ./.github/actions/prereqs
         with:
           env_name: ci_env
+
+      - name: Patch this runner's Llama config.json (temporary)
+        if: matrix.runner == 'krackan'
+        shell: bash
+        run: >-
+          python3 ci/scripts/hotfix_llama_config.py --weights /srv
+          --out "$RUNNER_TEMP/weights" --github-env "$GITHUB_ENV"
 
       - name: Print mlir-aie version
         shell: bash
@@ -68,6 +79,7 @@ jobs:
         uses: ./.github/actions/test
         env:
           PYTHONUNBUFFERED: "1"
+          FLM_MODEL_PATH: /srv/fastflowlm
         with:
           env_name: ci_env
           test_suite: "applications"
@@ -76,13 +88,13 @@ jobs:
         uses: ./.github/actions/commit_results
         id: commit_results
         with:
-          dir: phoenix/examples
+          dir: ${{ matrix.runner }}/examples
           pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' -o pretty.md"
 
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: results-phoenix-examples
+          name: results-${{ matrix.runner }}-examples
           path: ${{ steps.commit_results.outputs.results_dir }}
           retention-days: 14
 
@@ -90,7 +102,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: mlir-artifacts
+          name: mlir-artifacts-${{ matrix.runner }}
           path: |
             ${{ env.NPU_CACHE_HOME }}/*/*.mlir
           retention-days: 14

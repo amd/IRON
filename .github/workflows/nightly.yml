@@ -5,7 +5,7 @@
 # README's quick start among them), each night. A time worse than the night
 # before's by the gate below fails the run.
 
-name: Phoenix - Nightly Applications
+name: Nightly Applications
 
 on:
   workflow_dispatch:
@@ -21,9 +21,13 @@ permissions:
   contents: write
 
 jobs:
-  test_nightly_on_phoenix:
-    name: Test Applications Nightly on Phoenix
-    runs-on: [self-hosted, phoenix]
+  test_nightly:
+    name: Test Applications Nightly on ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [phoenix, krackan]
+    runs-on: [self-hosted, "${{ matrix.runner }}"]
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -39,12 +43,20 @@ jobs:
         with:
           env_name: ci_env
 
+      - name: Patch this runner's Llama config.json (temporary)
+        if: matrix.runner == 'krackan'
+        shell: bash
+        run: >-
+          python3 ci/scripts/hotfix_llama_config.py --weights /srv
+          --out "$RUNNER_TEMP/weights" --github-env "$GITHUB_ENV"
+
       - name: Run every application test
         id: test
         continue-on-error: true
         uses: ./.github/actions/test
         env:
           PYTHONUNBUFFERED: "1"
+          FLM_MODEL_PATH: /srv/fastflowlm
         with:
           env_name: ci_env
           extensive: "true"
@@ -54,13 +66,13 @@ jobs:
         uses: ./.github/actions/commit_results
         id: commit_results
         with:
-          dir: phoenix/nightly
+          dir: ${{ matrix.runner }}/nightly
           pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' --metric='MaxKL (mean)' --metric='Top1Mismatches (mean)' -o pretty.md"
 
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: results-phoenix-nightly
+          name: results-${{ matrix.runner }}-nightly
           path: ${{ steps.commit_results.outputs.results_dir }}
           retention-days: 14
 

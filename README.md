@@ -12,7 +12,7 @@ SPDX-License-Identifier: Apache-2.0
 <a href="https://tooomm.github.io/github-release-stats/?username=amd&repository=iron">
    <img src="https://img.shields.io/github/downloads/amd/iron/total.svg" alt="GitHub downloads" /></a>
 <a href="https://github.com/amd/iron/actions" title="Check out our tests">
-   <img src="https://github.com/amd/iron/actions/workflows/krackan-small.yml/badge.svg" alt="Iron Tests" /></a>
+   <img src="https://github.com/amd/iron/actions/workflows/small.yml/badge.svg" alt="Iron Tests" /></a>
 <a href="https://github.com/amd/iron/blob/main/CONTRIBUTING.md" title="Contribution Guide">
     <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
 <a href="https://github.com/amd/iron/blob/main/LICENSE">

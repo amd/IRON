@@ -193,10 +193,8 @@ jobs:
           # Trigger CI workflows
           echo "Triggering CI workflows..."
           gh workflow run ci-lint.yml --ref $new_branch
-          gh workflow run phoenix-small.yml --ref $new_branch
-          gh workflow run krackan-small.yml --ref $new_branch
-          gh workflow run phoenix-test-examples.yml --ref $new_branch
-          gh workflow run krackan-examples.yml --ref $new_branch
+          gh workflow run small.yml --ref $new_branch
+          gh workflow run examples.yml --ref $new_branch
 
       - name: No new version found
         if: steps.target.outputs.proceed != 'true'

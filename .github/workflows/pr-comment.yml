@@ -16,10 +16,8 @@ name: Comment on PR with Test Results
 on:
   workflow_run:
     workflows:
-      - Krackan - Small Benchmark/Test Suite
-      - Krackan - Test Example Applications
-      - Phoenix - Small Benchmark/Test Suite
-      - Phoenix - Test Example Applications
+      - Small Benchmark/Test Suite
+      - Test Example Applications
     types:
       - completed
 
@@ -70,19 +68,18 @@ jobs:
 
             // Artifact name -> suite directory. A name outside this map is
             // ignored, which keeps the fork from choosing a path.
-            const ARTIFACT_MAP = {
-              'results-phoenix-small':    'phoenix/small',
-              'results-phoenix-examples': 'phoenix/examples',
-              'results-small':            'krackan/small',
-              'results-examples':         'krackan/examples',
-            };
+            const RUNNERS = ['phoenix', 'krackan'];
+            const ARTIFACT_MAP = {};
+            for (const runner of RUNNERS) {
+              for (const suite of ['small', 'examples']) {
+                ARTIFACT_MAP[`results-${runner}-${suite}`] = `${runner}/${suite}`;
+              }
+            }
 
-            // Workflow name -> the suite it reports.
+            // Workflow name -> the suite each runner's job reports.
             const WORKFLOWS = {
-              'Krackan - Small Benchmark/Test Suite': 'krackan/small',
-              'Krackan - Test Example Applications': 'krackan/examples',
-              'Phoenix - Small Benchmark/Test Suite': 'phoenix/small',
-              'Phoenix - Test Example Applications': 'phoenix/examples',
+              'Small Benchmark/Test Suite': 'small',
+              'Test Example Applications': 'examples',
             };
 
             const root = path.join(process.env.RUNNER_TEMP, 'results');
@@ -99,7 +96,7 @@ jobs:
               per_page: 100,
             });
 
-            for (const [wf, suite] of Object.entries(WORKFLOWS)) {
+            for (const [wf, name] of Object.entries(WORKFLOWS)) {
               const matching = runs.data.workflow_runs.filter(r => r.name === wf);
               if (matching.length === 0) {
                 core.info(`No completed run found for "${wf}" at ${headSha}`);
@@ -107,8 +104,18 @@ jobs:
               }
 
               const run = matching[0]; // most recent
-              status[suite] = run.conclusion || 'unknown';
               core.info(`Found run ${run.id} for "${wf}" (${run.conclusion})`);
+
+              // Each runner's job ends its name with the runner.
+              const jobs = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: run.id,
+              });
+              for (const runner of RUNNERS) {
+                const job = jobs.data.jobs.find(j => j.name.endsWith(` on ${runner}`));
+                status[`${runner}/${name}`] = job?.conclusion || 'unknown';
+              }
 
               const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
                 owner: context.repo.owner,
@@ -118,7 +125,7 @@ jobs:
 
               for (const artifact of artifacts.data.artifacts) {
                 const dir = ARTIFACT_MAP[artifact.name];
-                if (dir !== suite) continue;
+                if (!dir || !dir.endsWith(`/${name}`)) continue;
 
                 core.info(`Downloading artifact "${artifact.name}" -> ${dir}`);
 
