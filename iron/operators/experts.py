@@ -6,19 +6,21 @@ experts ``TopKRouter`` chose for it.
 """
 
 import numpy as np
+from aie.dialects.aie import T
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
-from aie.iron import kernels
-from aie.iron.controlflow import if_, range_
+from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron.controlflow import range_
 from aie.iron.kernels import moe
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Extent, Operator, field
 from iron.common.testing import Case, Testing
 
-#: The rows of ``width`` each kernel call takes.
-TILE = 2
+#: The rows and columns of a weight tile, so that at Qwen3's shapes a
+#: shim BD repeats an expert's row blocks at most 64 times.
+TILE = 32
 
 
 def _routed(op: "Experts") -> dict:
@@ -45,9 +47,10 @@ class Experts(Operator):
     ``TopKRouter``'s; ``gate_up`` and ``down`` stack the experts as
     transformers holds them.
 
-    One core, scalar: every row streams every expert's weights in tiles of
-    ``TILE`` rows of ``width``, and the core computes the tiles of the
-    experts the row chose, summing in float32.
+    One core, scalar, reading two streams: a row's ``x``, ``weights`` and
+    ``ids``, which a memtile joins, and every expert's ``gate_up`` then
+    ``down`` in ``TILE`` x ``TILE`` tiles, streamed for each row. The
+    kernel skips the tiles of experts the row did not choose.
     """
 
     test = Testing(
@@ -58,114 +61,102 @@ class Experts(Operator):
         draw=_routed,
     )
 
-    rows: CompileTime[int] = field()
+    rows: CompileTime[int] = field(array=True)
     hidden: CompileTime[int] = field()
-    width: CompileTime[int] = field()
-    experts: CompileTime[int] = field()
+    width: CompileTime[int] = field(array=True)
+    experts: CompileTime[int] = field(array=True)
     top_k: CompileTime[int] = field()
     weights_width: CompileTime[int] = field(derive=lambda op: 2 * op.top_k, repr=False)
     gate_up_width: CompileTime[int] = field(derive=lambda op: 2 * op.width, repr=False)
-    gate_up_tile: CompileTime[int] = field(
-        derive=lambda op: 2 * TILE * op.hidden, repr=False
-    )
-    down_tile: CompileTime[int] = field(derive=lambda op: TILE * op.hidden, repr=False)
+    tile: CompileTime[int] = field(derive=lambda op: TILE * TILE, repr=False)
 
     x = In(rows, hidden, obj_shape=(hidden,))
     ids = In(rows, top_k, dtype=np.int32, obj_shape=(top_k,))
-    # A row's weights, one object per expert: the router's pair.
-    weights = In(rows, weights_width, obj_shape=(2,), depth=top_k)
-    gate_up = In(experts, gate_up_width, hidden, obj_shape=(gate_up_tile,), depth=1)
-    down = In(experts, hidden, width, obj_shape=(down_tile,), depth=1)
+    weights = In(rows, weights_width, obj_shape=(weights_width,))
+    gate_up = In(experts, gate_up_width, hidden, obj_shape=(tile,))
+    down = In(experts, hidden, width, obj_shape=(tile,))
     y = Out(rows, hidden, obj_shape=(hidden,))
     # Every row is still computed under a bound.
     valid = Extent(rows)
 
     def validate(self) -> None:
-        if self.width % TILE:
+        if self.hidden % TILE or self.width % TILE:
             raise ValueError(
-                f"Experts: width ({self.width}) is not a whole number of {TILE}-row tiles"
+                f"Experts: hidden ({self.hidden}) and width ({self.width}) "
+                f"must be whole {TILE}-wide tiles"
             )
 
     class Array(Operator.Array):
-        def gate_up_kernel(self):
-            return moe.expert_gate_up(rows=TILE, hidden=self.hidden)
-
-        def down_kernel(self):
-            # A tile of TILE of down's columns, every row of hidden.
-            return moe.expert_down(rows=self.hidden, width=TILE)
+        def kernel(self):
+            return moe.experts(
+                hidden=self.hidden,
+                width=self.width,
+                num_experts=self.experts,
+                top_k=self.top_k,
+                rows=TILE,
+                cols=TILE,
+            )
 
         def build(self) -> Built:
             H, K = self.hidden, self.top_k
-            ins = (self.x, self.ids, self.weights, self.gate_up, self.down)
-            of_ins = [ObjectFifo(o.obj_type, depth=o.depth) for o in ins]
-            of_y = ObjectFifo(self.y.obj_type, depth=self.y.depth)
-            f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
+            steps = 3 * self.width * H // self.tile
+            row = ObjectFifo(np.ndarray[(H + 4 * K,), np.dtype[bfloat16]], depth=1)
+            parts = row.prod().join(
+                [0, H, H + 2 * K],
+                obj_types=[o.obj_type for o in (self.x, self.weights, self.ids)],
+            )
+            for o, f in zip((self.x, self.weights, self.ids), parts):
+                o.bind(f.prod())
+            tiles = ObjectFifo(self.gate_up.obj_type)
+            self.gate_up.bind(tiles.prod())
+            self.down.bind(tiles.prod())
+            of_y = ObjectFifo(self.y.obj_type)
+            self.y.bind(of_y.cons())
 
-            def core_fn(of_x, of_ids, of_w, of_gu, of_dn, of_y, *fns):
-                gate_up, down, zero, convert, acc, h = fns
+            def core_fn(of_row, of_tile, of_y, experts):
                 for _ in range_(self.rows):
-                    x, ids, w = of_x.acquire(1), of_ids.acquire(1), of_w.acquire(K)
-                    pairs = [w] if K == 1 else [w[j] for j in range(K)]
-                    zero(acc)
-                    for e in range_(self.experts):
-                        for _ in range_(self.width // TILE):
-                            gu, dn = of_gu.acquire(1), of_dn.acquire(1)
-                            for j in range(K):
-                                with if_(arith.index_cast(e, to=ids[j].type) == ids[j]):
-                                    gate_up(x, gu, h)
-                                    down(h, dn, pairs[j], acc)
-                            of_gu.release(1)
-                            of_dn.release(1)
-                    y = of_y.acquire(1)
-                    convert(acc, y, H)
+                    row, y = of_row.acquire(1), of_y.acquire(1)
+                    for step in range_(self.experts * steps):
+                        tile = of_tile.acquire(1)
+                        experts(row, tile, y, arith.index_cast(step, to=T.i32()))
+                        of_tile.release(1)
+                    of_row.release(1)
                     of_y.release(1)
-                    of_x.release(1)
-                    of_ids.release(1)
-                    of_w.release(K)
 
             worker = Worker(
-                core_fn,
-                [
-                    *(f.cons() for f in of_ins),
-                    of_y.prod(),
-                    self.gate_up_kernel(),
-                    self.down_kernel(),
-                    kernels.zero(H, np.float32),
-                    kernels.datamovement.convert_copy(H),
-                    Buffer(f32(H)),
-                    Buffer(f32(TILE)),
-                ],
+                core_fn, [row.cons(), tiles.cons(), of_y.prod(), self.kernel()]
             )
-            for operand, f in zip(ins, of_ins):
-                operand.bind(f.prod())
-            self.y.bind(of_y.cons())
             return Built([worker])
 
     def sequence(self, rt):
         """A row at a time: its inputs, every expert's tiles, its output."""
-        X, H, I = self.experts, self.hidden, self.width
-        # Each tile of an expert's gate rows, then the up rows they pair with.
-        gate_up = TensorAccessPattern(
-            (X, 2 * I, H),
-            0,
-            [X, I // TILE, 2, TILE * H],
-            [2 * I * H, TILE * H, I * H, 1],
-        )
-        # Each tile of TILE of an expert's down columns, row by row.
-        down = TensorAccessPattern(
-            (X, H, I), 0, [X, I // TILE, H, TILE], [H * I, TILE, I, 1]
-        )
+        H, I = self.hidden, self.width
+
+        def tiles(e, rows, cols):
+            """Expert ``e``'s ``rows`` x ``cols`` matrix, tile by tile."""
+            return TensorAccessPattern(
+                (self.experts, rows, cols),
+                e * rows * cols,
+                [rows // TILE, cols // TILE, TILE, TILE],
+                [TILE * cols, TILE, cols, 1],
+            )
+
         for r in range(self.rows):
             tg = TaskGroup()
-            for operand in (self.x, self.ids, self.weights):
+            for operand in (self.x, self.weights, self.ids):
                 operand.fill(operand[r : r + 1], group=tg)
-            self.gate_up.fill(gate_up, group=tg)
-            self.down.fill(down, group=tg)
+            for e in range(self.experts):
+                expert = TaskGroup()
+                self.gate_up.fill(tiles(e, 2 * I, H), group=expert)
+                self.down.fill(tiles(e, H, I), group=expert, wait=True)
+                expert.finish()
             self.y.drain(self.y[r : r + 1], group=tg, wait=True)
             tg.finish()
 
     def tolerance(self):
-        return self.array_config().down_kernel().contract.tolerance
+        return Tolerance.relative(
+            8e-3, range_frac=1e-3, note="f32 throughout, rounded once: a bf16 ulp"
+        )
 
     def ops(self) -> int:
         return 6 * self.rows * self.top_k * self.width * self.hidden
