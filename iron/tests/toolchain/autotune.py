@@ -27,7 +27,7 @@ from iron.operators.gemm import GEMMPlacement
 from iron.tests.common.graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
 from iron.tune import autotune as tuning
-from iron.tune.autotune import Call, Point, Shape, autotune, line, refusal, settings
+from iron.tune.autotune import Timed, Point, Shape, autotune, line, refusal, settings
 from iron.tune.measure import Cache, Measurement, judge
 
 SIZE = 8192
@@ -109,7 +109,7 @@ class PinnedTwin(iron.Graph):
 
 def test_a_shape_keeps_a_tunable_any_of_its_calls_pins(npu2):
     traced = PinnedTwin().trace(a=(SIZE,), b=(SIZE,))
-    [shape] = tuning.shapes([Call(traced)], npu2)
+    [shape] = tuning.shapes([Timed(traced)], npu2)
     assert "num_aie_columns" in shape.pinned and len(shape.members) == 1
     free = shape.members[0][0]
     found = settings(free, npu2, shape.pinned)
@@ -461,7 +461,7 @@ def _fake(monkeypatch, step_us, output=lambda op: "same"):
 
 
 def _tune(traced, dev, profile=None):
-    return autotune([Call(traced)], dev, profile, full_elf=True, log=lambda _: None)
+    return autotune([Timed(traced)], dev, profile, full_elf=True, log=lambda _: None)
 
 
 def test_autotune_writes_the_fastest_setting_per_shape(monkeypatch, npu2):
@@ -524,7 +524,7 @@ def test_an_operator_is_timed_at_each_point_its_extents_move(monkeypatch, npu2):
 
     monkeypatch.setattr(tuning, "measure", measure)
     monkeypatch.setattr(tuning, "refusal", lambda op, fit_cache=None: None)
-    call = Call(
+    call = Timed(
         Rotate().trace(x=(64, 64), angles=(64, 64)),
         points=[Point(0.5, {"n": 16}), Point(0.5, {"n": 64})],
     )

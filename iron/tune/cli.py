@@ -5,7 +5,7 @@
 
 A model's profile is tuned by a module built on this one: it takes
 ``parser``, adds the arguments its calls follow from, traces the calls
-(``autotune.Call``) and passes them to ``tune`` with its profiles'
+(``autotune.Timed``) and passes them to ``tune`` with its profiles'
 directory, whose ``<device>.json`` it rewrites. A model's is ``iron.lm.tune``
 (``python -m iron.lm.tune <application>``).
 
@@ -29,7 +29,7 @@ from pathlib import Path
 from iron import operators
 from iron.common.declare import Profile
 from iron.common.image.packaging import dispatches_full_elf, require_device
-from .autotune import Call, Shape, autotune, kernel_cycles, time_shape
+from .autotune import Timed, Shape, autotune, kernel_cycles, time_shape
 from .measure import Cache, Timing, pmode
 
 
@@ -73,7 +73,7 @@ def _timing(args: argparse.Namespace) -> dict:
     )
 
 
-def tune(args: argparse.Namespace, calls: Sequence[Call], profiles: Path) -> Path:
+def tune(args: argparse.Namespace, calls: Sequence[Timed], profiles: Path) -> Path:
     """Rewrite ``profiles/<device>.json`` with the settings ``calls`` time
     fastest at (``autotune``), timed as ``args`` says; return its path.
     """

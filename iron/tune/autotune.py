@@ -3,7 +3,7 @@
 
 """Choosing each operator's tunables by timing them, written as a profile.
 
-``autotune`` takes the calls a model runs (``Call``), finds each operator
+``autotune`` takes the calls a model runs (``Timed``), finds each operator
 shape in them, times every setting of its tunables
 (``Operator.domains``) the placer takes against the setting it was traced
 at, and returns a ``Profile`` naming the fastest for each shape.
@@ -105,7 +105,7 @@ class Point:
 
 
 @dataclasses.dataclass(frozen=True)
-class Call:
+class Timed:
     """One call of a traced graph, as its operators are timed in: the
     graph's per-call values, and what any buffer whose contents a step's
     time follows holds, by graph buffer name. ``points`` are the values its
@@ -282,8 +282,8 @@ class Shape:
         self.cls = type(op)
         given = {f.name: vars(op)[f.name] for f in dataclasses.fields(op)}
         self.dims = Profile.dims(self.cls, given)
-        # Each operator, where it is timed (``Call.op_points``) and what its
-        # inputs hold (``Call.op_inputs``).
+        # Each operator, where it is timed (``Timed.op_points``) and what its
+        # inputs hold (``Timed.op_inputs``).
         self.members: list[
             tuple[Operator, list[tuple[float, dict[str, int]]], dict[str, np.ndarray]]
         ] = []
@@ -311,7 +311,7 @@ class Shape:
         return f"{self.cls.__name__} {dims}".strip()
 
 
-def shapes(calls: Sequence[Call], dev) -> list[Shape]:
+def shapes(calls: Sequence[Timed], dev) -> list[Shape]:
     """The shapes of ``calls``' operators that have a tunable to search, in
     the order the calls first run them, each operator design once.
     """
@@ -504,7 +504,7 @@ def _judged(
 
 
 def autotune(
-    calls: Sequence[Call],
+    calls: Sequence[Timed],
     dev,
     profile: Profile | None = None,
     *,

@@ -22,7 +22,7 @@ import iron
 from iron import Scratchpad
 from iron.operators import GEMV, MHA, ElementwiseAdd, SiLU, Softmax
 from iron.tests.common.graphs import Chain, FeedForward
-from iron.tune.autotune import Call, autotune, settings
+from iron.tune.autotune import Timed, autotune, settings
 from iron.tune.measure import (
     CONTEXTS,
     Cache,
@@ -79,7 +79,7 @@ def test_a_value_derived_from_a_bound_extent_follows_the_call():
             [op.resolved()],
             full_elf=True,
             timing=Timing(rounds=2, calls=10),
-            values=Call(traced, dict(n=n)).op_values(op),
+            values=Timed(traced, dict(n=n)).op_values(op),
             log=quiet,
         )[0].t_step_us
         for n in (64, 2048)
@@ -142,7 +142,7 @@ def test_a_tuned_profile_runs_bit_identically(tmp_path):
     traced = Chain(SIZE, TILE).trace(a=(SIZE,), b=(SIZE,))
     dev = aie_utils.ensure_current_device()
     profile = autotune(
-        [Call(traced)],
+        [Timed(traced)],
         dev,
         full_elf=True,
         timing=Timing(rounds=2, calls=10),

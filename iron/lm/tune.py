@@ -26,7 +26,7 @@ from pathlib import Path
 
 from iron.operators.sample import Sample
 from iron.tune import cli as tune_cli
-from iron.tune.autotune import Call, Point
+from iron.tune.autotune import Timed, Point
 
 from .causal import CausalLM
 from .cli import parse_args, sampling_arguments
@@ -102,7 +102,7 @@ def calls(
     context: int,
     points: int,
     sampler: Sampler,
-) -> list[Call]:
+) -> list[Timed]:
     """The calls a decoder's designs are timed in: the decode step at
     ``position`` and ``token``, and the prompt chunk at a whole first chunk,
     Sample on the draw rows ``sampler`` gives. Each is timed over
@@ -151,7 +151,7 @@ def calls(
         [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
         _, draws = traced.states[id(model.draws)]
         rows = sampler.rows(L, k_max)
-        out.append(Call(traced, values, {draws.name: rows}, timed))
+        out.append(Timed(traced, values, {draws.name: rows}, timed))
     return out
 
 

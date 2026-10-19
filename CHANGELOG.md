@@ -213,6 +213,8 @@ public API adds its entry under Unreleased.
 - An `Elementwise` operand is split over every core only where it says
   `per=CORES` (`iron.common.elementwise.CORES`); an operand without `per=` is
   one lane.
+- `iron.tune.autotune.Call`, a traced graph's call as the tuner times it,
+  is `Timed`, so `Call` names only `iron.lm.Call`.
 - A tunable's `domain=` is a tuple, an `Enum` or a function
   `(op, dev, start) -> tuple`, such as mlir-aie's `widths` and `divisors`,
   which replace `Width` and `Divisors`; a tunable is searched only where its

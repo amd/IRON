@@ -28,7 +28,7 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, lm
-from iron.tune.autotune import Call
+from iron.tune.autotune import Timed
 from iron.lm import Checkpoint, Encoder, rope_angles
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
@@ -299,7 +299,7 @@ class Multimodal(lm.Multimodal):
     @classmethod
     def tune_calls(
         cls, parser: argparse.ArgumentParser, args: argparse.Namespace
-    ) -> list[Call]:
+    ) -> list[Timed]:
         """Every version (the text encoder, each tower and the merge) at its
         longest call, on weights it never reads, unread from the shapes the
         checkpoint's header gives. The towers' graphs alone run designs
@@ -308,7 +308,7 @@ class Multimodal(lm.Multimodal):
         weights = Checkpoint(args.checkpoint / "model.safetensors").tree("unread")
         graph = cls(Config(), weights)
         return [
-            Call(graph.trace(**shapes), graph.longest()) for shapes in graph.shapes()
+            Timed(graph.trace(**shapes), graph.longest()) for shapes in graph.shapes()
         ]
 
 
