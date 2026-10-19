@@ -359,6 +359,40 @@ def test_a_per_call_length_counts_a_dimension_by_a_word(length, error, match):
         OperatorDesign(op).module()
 
 
+def _rows(sizes, strides) -> TensorAccessPattern:
+    return TensorAccessPattern((256, 64), 0, sizes, strides)
+
+
+@pytest.mark.parametrize(
+    "walk, unit, sizes, strides",
+    [
+        # A repeat leads; the unit row's stride, zeroed, takes the run's.
+        (_rows([4, 1, 64], [0, 128, 1]), 64, "4, n, 1, 64", "0, 64, 0, 1"),
+        # Five dimensions coalesce to sixteen runs of 512, 1024 apart.
+        (
+            _rows([2, 2, 4, 8, 64], [8192, 4096, 1024, 64, 1]),
+            512,
+            "1, 1, n, 512",
+            "0, 0, 1024, 1",
+        ),
+    ],
+    ids=["repeat_led", "five_dimensions"],
+)
+def test_on_an_xclbin_a_per_call_length_sizes_the_coalesced_descriptor(
+    walk, unit, sizes, strides, npu2
+):
+    class Patched(GEMV):
+        def sequence(self, rt):
+            self.A.fill(
+                walk, lane=0, length_parameter=self.value("valid_A"), length_unit=unit
+            )
+
+    op = Patched(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=8)
+    op.use_value("valid", N)
+    _, (task,) = generated_sequence(op.resolved(), full_elf=False)
+    assert (re.sub(r"%\d+", "n", task.sizes), task.strides) == (sizes, strides)
+
+
 # --------------------------------------------------------------------------
 # flm/gemm: the configuration/shape split, device-free
 # --------------------------------------------------------------------------
