@@ -21,17 +21,14 @@ def filled(
             ``in`` its width), anything of fewer than two axes normal with
             deviation 0.1, about zero if it is a bias and about one
             otherwise (a norm), so that swapping two changes the output.
-            ``"unread"``: allocated and never written, for recording,
-            building and measuring a model, none of which reads a weight;
-            the pages are reserved, not touched, and a scalar is zero,
-            since a graph may read one as it is built (a clamp's bounds).
+            ``"unread"``: zeros, for recording, building and measuring a
+            model; the pages are reserved, not touched. A graph may read
+            one as it is built (a clamp's bounds, a weight a
+            ``load_state_dict`` derives another from).
         seed: The seed ``"random"`` draws at.
     """
     if fill == "unread":
-        return {
-            n: np.zeros((), dtype) if not shape else np.empty(shape, dtype)
-            for n, (shape, dtype) in named.items()
-        }
+        return {n: np.zeros(shape, dtype) for n, (shape, dtype) in named.items()}
     rng = np.random.default_rng(seed)
     out = {}
     for n, (shape, dtype) in named.items():
