@@ -86,7 +86,7 @@ class GatedDeltaRule(Operator):
         draw=_trained,
     )
 
-    # A long prefill holds more shim BDs than a tile has (npu-bringup).
+    # A long prefill holds more shim BDs than a tile has.
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     rows: int = param(array=True)

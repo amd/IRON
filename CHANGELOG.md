@@ -81,7 +81,7 @@ public API adds its entry under Unreleased.
   decoder), each judged by a device-free toy golden, their sliding layers
   within Hugging Face's window.
 - `MHA` takes a window of any width, and windows one query packed (a
-  decode step), on mlir-aie PR #50 at 3a4a9e0b8 or later.
+  decode step), with Xilinx/mlir-aie#3940.
 - `Call.ids` and `Call.embeddings`, a call's token ids and the embedding
   rows its layers start from, which `CausalLM.layer` may read.
 - Applications `smollm3` (SmolLM3 3B), `ministral3` (Ministral 3's text
@@ -260,8 +260,7 @@ public API adds its entry under Unreleased.
   the ring still holds the window before it (`KVCache.restart`).
 - A per-call bound (`x[:n]`) may be clamped (`iron.clamp(p + 1, hi=W)`),
   and a run may start at a wrapped value (`x[s % R : s % R + W]`), on
-  mlir-aie's `Affine` taking a constant after its wrap (PR #50 at
-  eac7fd99c or later).
+  mlir-aie's `Affine` taking a constant after its wrap (Xilinx/mlir-aie#3940).
 - A graph's weights are its params and `iron.weight`s only: an array it
   holds that is neither is no longer one. A model wraps what it derives from
   its loaded params in `iron.param(...)`.

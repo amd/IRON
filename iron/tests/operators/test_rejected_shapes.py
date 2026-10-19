@@ -581,7 +581,7 @@ def test_flm_dequant_rejects_unservable_shapes(K, N, match, npu2):
 )
 @pytest.mark.skipif(
     "attn_qk_chunk" not in flm_gemma4._PrefillKernel.__annotations__,
-    reason="needs mlir-aie's prefill kernel with attn_qk_chunk (PR #50)",
+    reason="needs mlir-aie's prefill kernel with attn_qk_chunk (Xilinx/mlir-aie#3940)",
 )
 def test_flm_prefill_attention_rejects_unservable_shapes(cls, kwargs, match, npu2):
     with pytest.raises(ValueError, match=match):
