@@ -138,10 +138,8 @@ class EncoderDecoder(CausalLM):
             raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         buffer, values = self.encoder.inputs(*raw)
         self._source = self.encoder.soft(values)
-        name = f"encoder_{self.encoder_input}"
-        inputs = [buffer if n == name else None for n in self._parameters.inputs]
         named = {f"encoder_{v}": x for v, x in values.items()}
-        self._encode(*inputs, token=0, position=0, source=self._source, **named)
+        self._encode(buffer, token=0, position=0, source=self._source, **named)
         self.forget(0)
 
     def call_values(self) -> dict:
