@@ -275,17 +275,13 @@ def test_attention_refuses_a_norm_of_other_than_q_k_and_v():
         Attention(SMALL, 0, norms="qo")
 
 
-def test_a_cache_refuses_a_sliding_window():
-    with pytest.raises(ValueError, match="use_sliding_window is set"):
-        KVCache(dataclasses.replace(SMALL, use_sliding_window=True))
-
-
 def test_a_cache_attends_within_its_window():
-    """A layer's cache built with a window gives its MHA that window; the
-    others attend to every position before the query.
+    """Each layer's cache attends within the config's ``sliding_window``, the
+    query's own position not counted; one built with no window attends to
+    every position before the query.
     """
-    model = small()
-    model.model.layers[0].cache = KVCache(model.config, window=64)
+    model = small(sliding_window=65)
+    model.model.layers[1].cache = KVCache(model.config)
     t = model.trace(**model.shapes()[1])
     assert [s.op.window for s in t.steps if type(s.op) is MHA] == [64, None]
 

@@ -39,6 +39,7 @@ from iron.lm import (
     DecoderLayer,
     GatedMLP,
     Linear,
+    not_json,
     rope_angles,
 )
 
@@ -86,6 +87,8 @@ class Phi4Config(DecoderConfig):
     LongRoPE.
     """
 
+    # LongRoPE's, read as longrope.
+    rope_scaling: None = not_json(None)
     longrope: LongRope | None = dataclasses.field(
         default=None,
         kw_only=True,

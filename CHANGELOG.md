@@ -209,8 +209,12 @@ public API adds its entry under Unreleased.
   `Attention.scaling` and `DecoderLayer.residual_multiplier`. Qwen3
   reads `DecoderConfig`, and `Qwen3Config` is gone; Qwen 2 reads
   `Qwen2Config`, whose `attention_bias` is set.
-- `DecoderConfig` reads `attention_bias`, `mlp_bias` and
-  `use_sliding_window` from `config.json`; `KVCache` refuses the last.
+- `DecoderConfig` reads `attention_bias`, `mlp_bias`, `sliding_window`
+  and `use_sliding_window` from `config.json`. Each `DecoderLayer`'s cache
+  attends within `sliding_window` (`DecoderConfig.window`). A config
+  refuses at load a `rope_scaling` it builds no table for (any but
+  `"default"`; `LlamaConfig`'s, any but `"llama3"`) and a set
+  `use_sliding_window`, which windows only some layers.
 - The layer descriptions a config's `layer()` returns, `iron.lm.Attention`
   and `DecoderLayer`, are `AttentionSpec` and `DecoderLayerSpec`, leaving
   the names to the modules that own their weights.

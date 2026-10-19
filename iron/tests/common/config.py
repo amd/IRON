@@ -9,6 +9,7 @@ outside CI where the checkpoint is not there, failed in CI), and that
 
 import dataclasses
 import json
+import re
 
 import pytest
 
@@ -99,6 +100,34 @@ def test_from_checkpoint_reads_each_key_and_no_not_json_field(tmp_path, cls):
     assert {name: getattr(config, name) for name in expected} == expected
     assert 7 not in [getattr(config, name) for name in unread]
     assert not unread.keys() & config.to_json().keys()
+
+
+@pytest.mark.parametrize(
+    "cls,scaling",
+    [
+        (DecoderConfig, {"rope_type": "yarn", "factor": 4.0}),
+        (LlamaConfig, {"rope_type": "linear", "factor": 2.0}),
+    ],
+)
+def test_from_checkpoint_refuses_a_rope_scaling_it_builds_no_table_for(
+    tmp_path, cls, scaling
+):
+    (tmp_path / "config.json").write_text(
+        json.dumps(REAL_1B.to_json() | {"rope_scaling": scaling})
+    )
+    with pytest.raises(ValueError, match=re.escape(f"rope_scaling {scaling}")):
+        cls.from_checkpoint(tmp_path)
+
+
+def test_a_sliding_window_some_layers_take_is_refused():
+    """``use_sliding_window`` (Qwen's, SmolLM3's) windows a per-model choice
+    of layers; set, with a window under the context, it is refused.
+    """
+    with pytest.raises(ValueError, match="use_sliding_window with sliding_window 64"):
+        dataclasses.replace(REAL_1B, sliding_window=64, use_sliding_window=True)
+    assert dataclasses.replace(REAL_1B, sliding_window=64).window == 63
+    off = dataclasses.replace(REAL_1B, sliding_window=64, use_sliding_window=False)
+    assert off.window is None
 
 
 def test_head_dim_falls_back_and_max_seq_len_is_the_native_context(tmp_path):

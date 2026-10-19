@@ -52,6 +52,17 @@ def _dotted(data: dict, path: str):
     return node
 
 
+def unscaled(rope_scaling: dict) -> None:
+    """A checkpoint's ``rope_scaling`` that leaves RoPE as it is: None.
+
+    Raises:
+        ValueError: It scales RoPE, which this config builds no table for.
+    """
+    kind = rope_scaling.get("rope_type", rope_scaling.get("type"))
+    if kind != "default":
+        raise ValueError(f"rope_scaling {rope_scaling}: no RoPE table here builds it")
+
+
 def not_json(default, **kwargs) -> dataclasses.Field:
     """A field ``config.json`` does not set, an IRON choice: kept at
     ``default`` by ``from_checkpoint`` and left out by ``to_json``.
@@ -168,7 +179,9 @@ class DecoderConfig(Config):
     # None: no RoPE, a decoder of absolute positions (``positions``).
     rope_theta: float | None
     max_seq_len: int = dataclasses.field(metadata={"json": "max_position_embeddings"})
-    rope_scaling: RopeScaling | None = not_json(None)
+    rope_scaling: RopeScaling | None = dataclasses.field(
+        default=None, metadata={"convert": unscaled}
+    )
     # The rotated prefix of head_dim (partial rotary, e.g. Phi's 0.75): None
     # rotates the whole head, as every full-rotary model does.
     rotary_dim: int | None = not_json(None)
@@ -182,14 +195,33 @@ class DecoderConfig(Config):
     # Whether q, k, v and o, and every feed-forward projection, add a bias.
     attention_bias: bool = dataclasses.field(default=False, kw_only=True)
     mlp_bias: bool = dataclasses.field(default=False, kw_only=True)
-    # Refused by KVCache when set.
-    use_sliding_window: bool = dataclasses.field(default=False, kw_only=True)
+    # The positions each layer attends to, its own included, where under
+    # max_seq_len. A checkpoint gating it by use_sliding_window (Qwen's,
+    # SmolLM3's) picks its layers per model, so there it must be false.
+    sliding_window: int | None = dataclasses.field(default=None, kw_only=True)
+    use_sliding_window: bool | None = dataclasses.field(default=None, kw_only=True)
 
     def __post_init__(self):
         if self.head_dim is None:
             object.__setattr__(
                 self, "head_dim", self.hidden_size // self.num_attention_heads
             )
+        if self.use_sliding_window and self.window is not None:
+            raise ValueError(
+                f"{type(self).__name__}: use_sliding_window with sliding_window "
+                f"{self.sliding_window} windows only some layers; none here does"
+            )
+
+    @property
+    def window(self) -> int | None:
+        """The positions before a query each layer attends to (``KVCache``'s
+        ``window``), ``sliding_window`` less the query's own; None is all.
+        """
+        if self.use_sliding_window is False or self.sliding_window is None:
+            return None
+        if self.sliding_window >= self.max_seq_len:
+            return None
+        return self.sliding_window - 1
 
     @property
     def rope_width(self) -> int:

@@ -62,7 +62,12 @@ class Llama3RopeScaling:
     def from_dict(cls, data: dict) -> "Llama3RopeScaling":
         """``data`` as the checkpoint's own ``rope_scaling``, its
         ``rope_type`` (every size's is ``"llama3"``) dropped.
+
+        Raises:
+            ValueError: Its ``rope_type`` is another.
         """
+        if data.get("rope_type") != "llama3":
+            raise ValueError(f"rope_scaling {data}: no RoPE table here builds it")
         return cls(**{k: v for k, v in data.items() if k != "rope_type"})
 
     def to_json(self) -> dict:

@@ -479,14 +479,9 @@ class KVCache(iron.Graph):
             as ``MHA`` counts them; None is all. Hugging Face's
             ``sliding_window`` counts the query's own, so a model passes
             ``sliding_window - 1``.
-
-    Raises:
-        ValueError: The config's ``use_sliding_window`` is set.
     """
 
     def __init__(self, c, window: int | None = None):
-        if c.use_sliding_window:
-            raise ValueError("KVCache: use_sliding_window is set; none attends in one")
         shape = (c.max_seq_len, c.num_key_value_heads, c.head_dim)
         self.keys, self.values = iron.state(shape), iron.state(shape)
         self.chunk, self.window = c.prefill_chunk, window
@@ -636,7 +631,7 @@ class DecoderLayer(iron.Graph):
         self.self_attn = Attention(c, i)
         self.post_attention_layernorm = RMSNorm(c.hidden_size, c.eps)
         self.mlp = GatedMLP(c)
-        self.cache = KVCache(c)
+        self.cache = KVCache(c, c.window)
         self.rope: Rope | None = None
         self.residual_multiplier = 1.0
 
