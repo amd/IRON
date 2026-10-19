@@ -25,7 +25,7 @@ import iron
 import iron.functional as F
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
-from iron.common.graph.compiled import _leaves
+from iron.common.graph.compiled import walk
 from iron.common.graph.handle import State
 from iron.operators.copy import Copy
 from iron.operators.sample import Sample
@@ -195,7 +195,7 @@ class CausalLM(Model):
     @property
     def recurrent(self) -> list[Checkpoints]:
         """Each state a layer carries from position to position."""
-        return [p for _, _, p, _ in _leaves(self) if isinstance(p, Checkpoints)]
+        return [p for _, _, p, _ in walk(self) if isinstance(p, Checkpoints)]
 
     def layer(self, call: Call, i: int, w, x):
         """Layer ``i`` on ``x``: the module ``w`` itself, or with no

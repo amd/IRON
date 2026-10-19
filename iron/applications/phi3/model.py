@@ -173,9 +173,9 @@ class Phi4Attention(Attention):
         H, G, D = self.heads, self.groups, self.head_dim
         self.qkv_proj = Linear(c.hidden_size, (H + 2 * G) * D, bias=False)
 
-    def project(self, x, **tiles) -> list:
+    def project(self, x, **gemv) -> list:
         H, G, D = self.heads, self.groups, self.head_dim
-        return self.qkv_proj.split(x, H * D, G * D, G * D, **tiles)
+        return self.qkv_proj.split(x, H * D, G * D, G * D, **gemv)
 
 
 class Phi4MLP(GatedMLP):

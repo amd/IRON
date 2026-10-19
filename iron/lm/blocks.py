@@ -560,12 +560,12 @@ class Attention(iron.Graph):
         self.k_proj = Linear(E, self.groups * D, bias=bias)
         self.v_proj = Linear(E, self.groups * D, bias=bias)
 
-    def project(self, x, **tiles) -> list:
-        """q, k and v of ``x``, each projection given the GEMV ``tiles``;
+    def project(self, x, **gemv) -> list:
+        """q, k and v of ``x``, each projection given the GEMV's ``gemv``;
         None for a projection the layer does not hold.
         """
         return [
-            None if p is None else F.linear(x, p.weight, p.bias, **tiles)
+            None if p is None else F.linear(x, p.weight, p.bias, **gemv)
             for p in (self.q_proj, self.k_proj, self.v_proj)
         ]
 

@@ -171,7 +171,7 @@ def param(*shape: int, dtype=bfloat16) -> np.ndarray:
     return np.broadcast_to(np.zeros((), dtype), shape).view(_Param)
 
 
-def _leaves(
+def walk(
     root, graphs: bool = True, shared: list[str] | None = None
 ) -> Iterator[tuple[str, Any, Any, Any]]:
     """Each state and tensor under ``root``, by its dotted path from it, with
@@ -183,7 +183,7 @@ def _leaves(
     """
     seen: set[int] = set()
 
-    def walk(x, path, parent, key):
+    def visit(x, path, parent, key):
         if (
             isinstance(x, State)
             or (is_operand(x) and not isinstance(x, Handle))
@@ -209,9 +209,9 @@ def _leaves(
             return
         seen.add(id(x))
         for k, item in items:
-            yield from walk(item, f"{path}.{k}" if path else str(k), x, k)
+            yield from visit(item, f"{path}.{k}" if path else str(k), x, k)
 
-    return walk(root, "", None, None)
+    return visit(root, "", None, None)
 
 
 class Graph:
@@ -313,7 +313,7 @@ class Graph:
             TypeError: A ``param`` was never loaded.
         """
         held: dict[int, tuple[str, Any]] = {}
-        for path, x, _, _ in _leaves(self):
+        for path, x, _, _ in walk(self):
             if isinstance(x, _Param):
                 raise TypeError(f"{self.name}: {path} was never loaded")
             held.setdefault(id(x), (path, x))
@@ -346,11 +346,11 @@ class Graph:
             )
         if self.__dict__.get("_bound"):
             raise ValueError(f"{self.name}: already loaded")
-        tensors = {n: t for n, t, _, _ in _leaves(tree) if n.startswith(path)}
+        tensors = {n: t for n, t, _, _ in walk(tree) if n.startswith(path)}
         tied: dict[int, list[str]] = {}
         params: dict[str, _Param] = {}
         shared: list[str] = []
-        for n, p, parent, _ in _leaves(self, shared=shared):
+        for n, p, parent, _ in walk(self, shared=shared):
             if not isinstance(p, _Param):
                 continue
             if isinstance(parent, tuple) or getattr(
@@ -396,7 +396,7 @@ class Graph:
                 params[first].dtype, copy=False
             )
             tensors.update(dict.fromkeys(others, tensors[first]))
-        for n, x, parent, key in _leaves(self, graphs=False):
+        for n, x, parent, key in walk(self, graphs=False):
             if isinstance(x, Graph):
                 if not x.__dict__.get("_bound"):
                     x.load_state_dict(tensors, path=f"{path}{n}.")
@@ -422,7 +422,7 @@ class Graph:
         """Each param's shape and dtype at its first path."""
         shapes: dict[str, tuple[tuple[int, ...], Any]] = {}
         seen: set[int] = set()
-        for n, p, _, _ in _leaves(self):
+        for n, p, _, _ in walk(self):
             if isinstance(p, _Param) and id(p) not in seen:
                 seen.add(id(p))
                 shapes[n] = (p.shape, p.dtype)

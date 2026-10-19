@@ -20,7 +20,6 @@ A feature map is one image, channels last: ``(H, W, C)``, not torch's
 import dataclasses
 import math
 
-
 import ml_dtypes
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern

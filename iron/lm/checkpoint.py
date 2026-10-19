@@ -348,8 +348,8 @@ class _Layers(list):
 def renamed(tree, renames: Mapping[str, str]):
     """A copy of ``tree`` with each leaf under a run of whole dotted names
     among ``renames``' keys, anywhere in its path, moved to the run its value
-    names, the rest where they are: its namespaces new, so a ``sanitize``
-    may change them.
+    names, the rest where they are: its namespaces new, so a caller may
+    change them and leave ``tree`` as it was.
     """
 
     def moved(path):

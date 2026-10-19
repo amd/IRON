@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 from aie.utils.compile import NPU_CACHE_HOME
 
-from iron.common.graph.compiled import _leaves
+from iron.common.graph.compiled import walk
 
 from .blocks import KVCache
 from .generation import (
@@ -377,7 +377,7 @@ def _fill_caches(model, n: int, position: int):
     ``position`` reads, the state the prompt left.
     """
     version = next(iter(model.versions.values()))
-    caches = [x for _, x, p, _ in _leaves(model) if isinstance(p, KVCache)]
+    caches = [x for _, x, p, _ in walk(model) if isinstance(p, KVCache)]
     for cache in caches:
         rows = version.read(cache)
         for start in range(n, position, n):
