@@ -118,6 +118,7 @@ class TestGemma4(Decoder):
         {"attention_k_eq_v": True},
         {"enable_moe_block": True},
         {"use_bidirectional_attention": "all"},
+        {"use_bidirectional_attention": True},
         {"attn_logit_softcapping": 50.0},
         {"vocab_size_per_layer_input": 512},
         {"rope_parameters": {"full_attention": {"rope_type": "default"}}},

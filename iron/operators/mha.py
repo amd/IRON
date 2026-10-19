@@ -111,6 +111,23 @@ _CASES = [
         ),
         lower=True,
     ),
+    # Gemma 3 1B's sliding decode and prompt chunk: a window not whole blocks.
+    *(
+        Case(
+            dict(
+                num_heads=4,
+                num_KV_heads=1,
+                d=256,
+                seq_len=seq_len,
+                kv_len=2048,
+                window=511,
+                num_pipelines=pipelines,
+                heads_interleaved=True,
+            ),
+            lower=True,
+        )
+        for seq_len, pipelines in ((1, 1), (512, 8))
+    ),
     # Groups that do not divide a block: Granite 4.2-3B's and Llama 3.2 3B's.
     *(
         Case(
@@ -166,7 +183,11 @@ def _cases(cls, dev: Device):
     share = 1 if dev.cols >= max(cls.PACKED_PIPELINES) else 2
     return [
         dataclasses.replace(
-            c, kwargs={**c.kwargs, "num_pipelines": c.kwargs["num_pipelines"] // share}
+            c,
+            kwargs={
+                **c.kwargs,
+                "num_pipelines": max(1, c.kwargs["num_pipelines"] // share),
+            },
         )
         for c in _CASES
     ]
@@ -197,7 +218,9 @@ class MHA(Operator):
     window: int | None = param(default=None, array=True)
     scale: float = param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
     # One query, a KV group's heads packed as a block's rows.
-    packed: bool = param(derive=lambda op: op.seq_len == 1, repr=False, array=True)
+    packed: bool = param(
+        derive=lambda op: op.seq_len == 1, repr=False, array=True, init=False
+    )
     B_q: int = tunable(domain=block_sizes)
     B_kv: int = tunable(repr=False, init=False)
     num_pipelines: int = tunable(default=1, domain=widths)
@@ -536,7 +559,8 @@ class MHA(Operator):
             accurate_exp2=accurate_exp2,
             causal=self.causal,
             window=self.window or 0,
-            packed=self.packed,
+            # Unwindowed decode runs as it has, without mha.cc's packed path.
+            packed=self.packed and self.window is not None,
         )
         mha_object = matmul_QK.object_file
 
@@ -573,7 +597,7 @@ class MHA(Operator):
                 b_col_maj=True,
                 causal=self.causal,
                 window=self.window or 0,
-                packed=self.packed,
+                packed=self.packed and self.window is not None,
             ).object_file
         )
         matmul_PV = pv_object.bind(

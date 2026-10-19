@@ -22,6 +22,8 @@ import aie.utils as aie_utils
 import pytest
 
 import iron.applications
+from iron.applications.gemma3 import Gemma3
+from iron.applications.gemma4 import Gemma4
 from iron.applications.granite import Granite
 from iron.applications.idefics3 import SmolVLMText
 from iron.applications.lfm2 import Lfm2
@@ -126,6 +128,12 @@ APPLICATIONS = {
     "smollm3_3b": Application(
         SmolLM3, "smollm3-3b", INDEX, "tokenizer.json", staged=False
     ),
+    "gemma3_1b": Application(
+        Gemma3, "gemma-3-1b-it", "model.safetensors", "tokenizer.json", staged=False
+    ),
+    "gemma4_e2b": Application(
+        Gemma4, "gemma-4-e2b-it", "model.safetensors", "tokenizer.json", staged=False
+    ),
     "qwen3.5_0.8b": Application(
         Qwen35, "qwen3.5-0.8b", "model.safetensors", "tokenizer.json", staged=False
     ),
@@ -136,8 +144,6 @@ UNHELD = {
     "granite_hybrid": "Experts streams every expert a row: too slow to generate",
     "qwen3_moe": "Experts streams every expert a row: too slow to generate",
     "ministral3": "its released checkpoints nest the text decoder, unread",
-    "gemma3": "its checkpoint is not staged yet",
-    "gemma4": "its checkpoint is not staged yet",
 }
 
 

@@ -14,9 +14,10 @@ attention unscaled, GELU-tanh, the embedding scaled by
 layers attend to their own query and the ``sliding_window - 1`` keys
 before it; global layers to every key, with heads of
 ``global_head_dim`` and a RoPE table of their own base, of which only the
-first ``partial_rotary_factor`` of the pairs turn. The last ``num_kv_shared_layers`` layers project no keys or values:
-each attends over the cache of the last earlier layer of its kind, and
-has an MLP twice as wide where ``use_double_wide_mlp``.
+first ``partial_rotary_factor`` of the pairs turn. The last
+``num_kv_shared_layers`` layers project no keys or values: each attends
+over the cache of the last earlier layer of its kind, and has an MLP twice
+as wide where ``use_double_wide_mlp``.
 
 Each layer's input is (projection + table row) * 2 ** -0.5: its slice of a
 projection of the embedding, normed, and its row of a second token table
@@ -97,8 +98,11 @@ class Gemma4Config(DecoderConfig):
             if text.get(key):
                 raise ValueError(f"{source}: {key} {text[key]!r} is not built here")
         # "vision" makes only image tokens bidirectional; text has none.
-        if text.get("use_bidirectional_attention") == "all":
-            raise ValueError(f"{source}: bidirectional attention is not built here")
+        bidirectional = text.get("use_bidirectional_attention")
+        if bidirectional not in (None, False, "vision"):
+            raise ValueError(
+                f"{source}: bidirectional attention {bidirectional!r} is not built here"
+            )
         per_layer = text.get("vocab_size_per_layer_input", text.get("vocab_size"))
         if per_layer != text.get("vocab_size"):
             raise ValueError(
