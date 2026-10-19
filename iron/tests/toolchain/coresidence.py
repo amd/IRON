@@ -25,7 +25,7 @@ import pytest
 from aie import ir
 from aie.dialects import aie as aie_dialect
 from aie.dialects.aie import DMAChannelDir, shim_dma_allocation
-from aie.iron import DeviceConfiguration, Flow, ObjectFifo, Program, Runtime
+from aie.iron import DeviceConfiguration, Flow, ObjectFifo, Program, Runtime, Worker
 from aie.iron.device import NPU2, AnyShimTile, Tile
 from aie.utils.compile.jit._hash import _python_identity
 
@@ -102,9 +102,30 @@ class _Allocated(Runtime):
         super().resolve(loc, ip, device=device, **options)
 
 
-def _places(*runtimes: Runtime) -> str | None:
-    """``places``'s verdict on ``runtimes`` in one device configuration."""
-    configured = DeviceConfiguration("pack", NPU2(), runtimes=list(runtimes))
+def _core_pinned(name: str) -> tuple[Worker, Runtime]:
+    """A core on tile (0, 2) draining a fifo named ``name``, and the
+    runtime filling it.
+    """
+    line = np.ndarray[(256,), np.dtype[np.int32]]
+    of = ObjectFifo(line, name=name)
+
+    def core(c):
+        c.acquire(1)
+        c.release(1)
+
+    def sequence(a, h):
+        h.fill(a)
+
+    return Worker(core, [of.cons()], tile=Tile(0, 2)), Runtime(
+        sequence, [line, of.prod()]
+    )
+
+
+def _places(*members: Runtime | Worker) -> str | None:
+    """``places``'s verdict on ``members`` in one device configuration."""
+    runtimes = [m for m in members if isinstance(m, Runtime)]
+    workers = [m for m in members if isinstance(m, Worker)]
+    configured = DeviceConfiguration("pack", NPU2(), workers=workers, runtimes=runtimes)
     module = Program.compose([configured], entry=runtimes[0]).resolve_program()
     return places(module)
 
@@ -319,6 +340,13 @@ def test_sequence_refuses_a_packing_without_a_full_elf():
             full_elf=False,
             coresident=AdjacentPacking(),
         )
+
+
+def test_a_pack_refuses_two_cores_on_one_tile():
+    # mlir-aie's core verifier refuses it as the pack resolves, before placement.
+    assert _places(*_core_pinned("x")) is None
+    with pytest.raises(ir.MLIRError, match="already has a core"):
+        _places(*_core_pinned("x"), *_core_pinned("y"))
 
 
 def test_two_pins_on_one_shim_channel_do_not_fit():
