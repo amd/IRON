@@ -26,15 +26,17 @@ from .step import BufferRef
 if TYPE_CHECKING:
     import pyxrt
     from aie.utils.hostruntime.xrtruntime.hostruntime import XRTKernelHandle
+    from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
+        ParameterScratchpad,
+    )
     from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
-
-    from .xrt import ParameterBlock
 else:
     try:
         import pyxrt
+        from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
+            ParameterScratchpad,
+        )
         from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
-
-        from .xrt import ParameterBlock
     except ImportError:
         # Host stacks without XRT still compile, and trace graphs for reference().
         XRTTensor = None
@@ -135,7 +137,7 @@ class FullELFRun:
             self.bind(index, tensor.buffer_object())
         self._feedback_arg = feedback_arg
         self._params_path = params_path
-        self._params: list[ParameterBlock] | None = None
+        self._params: list[ParameterScratchpad] | None = None
         # Bound to or from another run's scratchpad: a loop holds it.
         self.wired = False
 
@@ -157,7 +159,7 @@ class FullELFRun:
         self.wired = True
 
     @property
-    def params(self) -> list[ParameterBlock] | None:
+    def params(self) -> list[ParameterScratchpad] | None:
         """Each command's parameter scratchpad; ``None`` when ``params.txt``
         counts none.
         """
@@ -167,7 +169,7 @@ class FullELFRun:
             return None
         if self._params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
-        self._params = [ParameterBlock(h, self._params_path) for h in self.handles]
+        self._params = [ParameterScratchpad(h, self._params_path) for h in self.handles]
         return self._params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
@@ -440,7 +442,7 @@ class FullELFCallable(ImageCallable):
         return made
 
     @property
-    def params(self) -> ParameterBlock | None:
+    def params(self) -> ParameterScratchpad | None:
         return self.run.params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
