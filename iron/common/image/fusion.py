@@ -19,9 +19,9 @@ from typing import NamedTuple
 
 import numpy as np
 from aie import ir
-from aie.dialects import aie, arith, memref
+from aie.dialects import arith, memref
 from aie.helpers.npdtypes import np_ndarray_type_get_dtype, np_ndarray_type_get_shape
-from aie.helpers.util import mlir_type_to_np_dtype, np_ndarray_type_to_memref_type
+from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import DeviceConfiguration, Program, Runtime
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
@@ -295,21 +295,7 @@ class Fusion:
             ValueError: A shared word names one of its parameters.
         """
         with ir.Context(), ir.Location.unknown():
-            foreign = ir.Module.parse(text)
-            configured = DeviceConfiguration.from_module(symbol, foreign)
-            (device_op,) = [
-                op for op in foreign.body.operations if isinstance(op, aie.DeviceOp)
-            ]
-            (sequence_op,) = [
-                op
-                for op in device_op.body_region.blocks[0].operations
-                if isinstance(op, aie.RuntimeSequenceOp)
-            ]
-            types = []
-            for arg in sequence_op.body.blocks[0].arguments:
-                memref_type = ir.MemRefType(arg.type)
-                dtype = mlir_type_to_np_dtype(memref_type.element_type)
-                types.append(np.ndarray[tuple(memref_type.shape), np.dtype[dtype]])
+            configured = DeviceConfiguration.from_module(symbol, ir.Module.parse(text))
         (runtime,) = configured.runtimes
         renamed = sorted(
             {p.name for p in runtime.scratchpad_parameters} & set(self.shared_words)
@@ -319,7 +305,7 @@ class Fusion:
                 f"{name} is exported by another tool, so its scratchpad words "
                 f"{renamed} are its own to name; none is shared"
             )
-        return configured, types
+        return configured, runtime.arg_types
 
     def _views(
         self, name: str, buffers: tuple[BufferRef, ...], types
