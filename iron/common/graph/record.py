@@ -679,6 +679,12 @@ class Recorder:
                     f"{type(op).__name__} instance called with unexpected keyword "
                     f"arguments {sorted(kwargs) + sorted(values)}"
                 )
+            params = type(op).declaration.params
+            type(op).declaration.infer(
+                {name: h.shape for name, h in zip(names, operands)},
+                [h.shape for h in operands[len(names) :]],
+                **{n: vars(op)[n] for n in params if vars(op)[n] is not None},
+            )
         if values:
             raise TypeError(
                 f"{type(op).__name__} has no per-call value {sorted(values)}"
@@ -852,31 +858,9 @@ class Recorder:
         buffers = shaped.buffers
         ins = [b for b in buffers if b.fills]
         outs = [b for b in buffers if b.role is Out]
-        if len(operands) == len(ins):
-            given_outs = []
-        elif len(operands) == len(ins) + len(outs):
-            given_outs = operands[len(ins) :]
-        else:
-            raise TypeError(
-                f"{type(op).__name__} takes {len(ins)} operand(s) "
-                f"({', '.join(b.name for b in ins)}), optionally followed by "
-                f"{len(outs)} output(s); got {len(operands)}"
-            )
-        for i, (h, b) in enumerate(zip(operands, ins + outs)):
-            # Another rank matches on the count, for an output only a flat
-            # one; the same rank must match the shape, or a transposed weight
-            # would pass.
+        given_outs = operands[len(ins) :]
+        for h, b in zip(operands, ins + outs):
             shape = tuple(b.shape)
-            wrong = (
-                tuple(h.shape) != shape
-                if len(h.shape) == len(shape)
-                else h.elements != b.elements or (i >= len(ins) and len(shape) != 1)
-            )
-            if wrong:
-                raise ValueError(
-                    f"{type(op).__name__}.{b.name} is {shape} "
-                    f"({b.elements} elements); operand {h!r} is {tuple(h.shape)}"
-                )
             if bfp.dtype_name(h.dtype) != bfp.dtype_name(b.dtype):
                 raise TypeError(
                     f"{type(op).__name__}.{b.name} is {bfp.dtype_name(b.dtype)}; "
@@ -913,18 +897,12 @@ class Recorder:
                 slots.append(next(given))
             else:
                 shape = b.shape
-                # A flat output keeps the shape and bounds of the operand it
-                # is the size of: (rows, cols) stays (rows, cols) through SiLU,
+                # A flat output the size of the first operand has its shape
+                # and bounds: (rows, cols) stays (rows, cols) through SiLU,
                 # and a copy of a view has the view's shape.
                 bounds: dict = {}
-                if len(shape) == 1:
-                    like = next(
-                        (i for i, h in enumerate(called) if h.elements == b.elements),
-                        None,
-                    )
-                    if like is not None:
-                        shape = called[like].shape
-                        bounds = dict(called[like].valid)
+                if len(shape) == 1 and called and called[0].elements == b.elements:
+                    shape, bounds = called[0].shape, dict(called[0].valid)
                 if not bounds:
                     bounds = self._output_bounds(op, b, len(shape))
                 name = self.fresh(f"{type(op).__name__.lower()}{next(self._counter)}")

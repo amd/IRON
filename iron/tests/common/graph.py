@@ -333,7 +333,7 @@ def test_an_explicit_instance_is_applied_like_the_class():
     with pytest.raises(TypeError, match="outside a graph's body on device tensors"):
         q(w, z(E))
     # The weight transposed: the same element count, refused by its shape.
-    with pytest.raises(ValueError, match=r"GEMV.A is \(256, 2048\)"):
+    with pytest.raises(ValueError, match=r"M is 2048 from A.shape\[0\] but 256"):
         Step(z(E, 256)).record(x=(E,))
 
 
@@ -1182,7 +1182,7 @@ def test_a_given_output_of_another_rank_is_refused_unless_declared_flat():
             gemm.apply(a, b, y)
             return y
 
-    with pytest.raises(ValueError, match=r"GEMM.C is \(256, 256\)"):
+    with pytest.raises(ValueError, match="operand C has rank 1"):
         Flat().record(a=(256, 256), b=(256, 256))
 
 
