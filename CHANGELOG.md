@@ -227,7 +227,8 @@ public API adds its entry under Unreleased.
   `KVCache.attend(call, ...)` and `Checkpoints.at(call)`, in place of their
   keyword lists. LongRoPE's stacked table and `table_start` moved out of
   `Rope`, `CausalLM` and `DecoderConfig.long_angles` into Phi-4's
-  `LongRopeTable`; `Rope.table_start(n)` is 0.
+  `Phi4Config.angles` and `LongRopeTable`, which Phi-4's
+  `CausalLM.rotary(config)` returns; `Rope.table_start(n)` is 0.
 - A decoder's tuning calls are `iron.lm.tune.calls(model, position, token,
   context, points, sampler)`, on the flags `iron.lm.tune.arguments` adds;
   `contexts` moved with them. `CausalLM.tune_calls` and `tune_arguments`,

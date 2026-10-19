@@ -139,7 +139,7 @@ class CausalLM(Model):
     def __init__(self, config: DecoderConfig, weights):
         self.config = config
         self.weights = weights
-        self.rotary_emb = None if config.rope_theta is None else Rope(config)
+        self.rotary_emb = None if config.rope_theta is None else self.rotary(config)
         # Zero until the host writes draws: a row of zeros is greedy.
         self.draws = iron.state((config.max_seq_len, ROW_WORDS), np.int32)
         self.drawn = iron.state((config.max_seq_len,), np.int32)
@@ -235,6 +235,10 @@ class CausalLM(Model):
             at=call.position,
         )
         return logits, iron.carry(token=drawn, position=call.position + 1)
+
+    def rotary(self, config: DecoderConfig) -> Rope:
+        """``rotary_emb``, the RoPE table every layer holds: ``Rope``'s."""
+        return Rope(config)
 
     @classmethod
     def tune_arguments(cls, parser) -> None:
