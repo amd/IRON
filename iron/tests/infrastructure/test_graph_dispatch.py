@@ -215,9 +215,9 @@ def test_a_packed_graph_computes_what_the_temporal_one_does():
         text = Composition(version.sequence).text()
         configures.append(len(re.findall(r"aiex\.configure", text)))
         outputs.append(np.array(version(a, b).numpy()[:SIZE]))
-    # A configure per change of design and the reset, against one pack and
-    # the reset: the policy must have packed, or this compares two temporals.
-    assert configures == [6, 2]
+    # A configure per change of design, against one pack: the policy must
+    # have packed, or this compares two temporals.
+    assert configures == [5, 1]
     temporal, packed = outputs
     assert temporal.view(np.uint16).tolist() == packed.view(np.uint16).tolist()
 
@@ -257,8 +257,8 @@ def test_designs_of_one_array_run_on_one_configure():
     shapes = dict(a=(SIZE,), b=(SIZE,), c=(2 * SIZE,), d=(2 * SIZE,))
     shared = TwoExtents().compile(full_elf=True, **shapes)
     text = Composition(shared.sequence).text()
-    # Against small, large, small and the reset, were each design its own device.
-    assert len(re.findall(r"aiex\.configure", text)) == 2
+    # Against small, large, small, were each design its own device.
+    assert len(re.findall(r"aiex\.configure", text)) == 1
     assert len(re.findall(r"aiex\.run", text)) == 3
 
     alone = TwoExtents().compile(full_elf=False, **shapes)
@@ -302,9 +302,7 @@ def test_each_design_of_one_array_runs_on_its_own_values():
     graph = TwoProjections(narrow, wide)
     net = graph.compile(full_elf=True, x=(K,), y=(K,))
     text = Composition(net.sequence).text()
-    assert (
-        len(re.findall(r"aiex\.configure", text)) == 2
-    )  # the shared device, the reset
+    assert len(re.findall(r"aiex\.configure", text)) == 1  # the shared device
     assert len(re.findall(r"aiex\.run", text)) == 2
     tolerance = net.sequence.steps[0].op.resolved().tolerance()
     for _ in range(2):
