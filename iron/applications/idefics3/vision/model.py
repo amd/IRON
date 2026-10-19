@@ -5,8 +5,8 @@
 
 """SmolVLM's vision tower: a SigLIP ViT (``Idefics3VisionTransformer``) and
 its ``Idefics3Connector`` (pixel-shuffle, then a bias-free projection into
-the text model's space), an ``iron.lm.Tower`` of ``DecoderLayerSpec``s over
-SigLIP's modules (``layer_norm1``/``layer_norm2``, biased attention, a
+the text model's space), an ``iron.lm.Tower`` of ``EncoderLayer``s loaded
+from SigLIP's modules (``layer_norm1``/``layer_norm2``, biased attention, a
 GELU-tanh ``fc1``/``fc2``).
 
 One 512x512 image, no splitting (``do_image_splitting=False``), resized and
@@ -24,17 +24,8 @@ from ml_dtypes import bfloat16
 
 import iron.functional as F
 from iron import Precision
-from iron.functional import LAYER_NORM_EPS
-from iron.lm import (
-    MLP,
-    AttentionSpec,
-    Config,
-    Conv2d,
-    DecoderLayerSpec,
-    Norm,
-    Tower,
-    not_json,
-)
+from iron.lm import Config, Conv2d, LayerNorm, Tower, not_json
+from iron.lm.checkpoint import renamed
 from iron.operators.copy import Copy
 
 
@@ -42,7 +33,13 @@ from iron.operators.copy import Copy
 class VisionConfig(Config):
     """SmolVLM's vision tower and connector's shape, from the checkpoint's
     ``vision_config``, ``text_config`` and top-level ``scale_factor``.
+    Its norms take the kernel's LayerNorm eps, not the checkpoint's
+    ``layer_norm_eps``, which transformers' uses.
     """
+
+    # Every projection biased, every head its own (``Attention``, ``MLP``).
+    attention_bias = mlp_bias = True
+    rotary_dim = None
 
     hidden_size: int = dataclasses.field(metadata={"json": "vision_config.hidden_size"})
     num_hidden_layers: int = dataclasses.field(
@@ -76,6 +73,10 @@ class VisionConfig(Config):
             )
 
     @property
+    def num_key_value_heads(self) -> int:
+        return self.num_attention_heads
+
+    @property
     def side(self) -> int:
         """The patches along each side of the image."""
         return self.image_size // self.patch_size
@@ -84,17 +85,6 @@ class VisionConfig(Config):
     def tokens(self) -> int:
         """The soft tokens an image gives."""
         return (self.side // self.scale_factor) ** 2
-
-    def layer(self, i: int) -> DecoderLayerSpec:
-        H, D = self.num_attention_heads, self.head_dim
-        return DecoderLayerSpec(
-            AttentionSpec(H, H, D), MLP(self.hidden_act, gated=False), self.norm()
-        )
-
-    def norm(self) -> Norm:
-        # The kernel's LayerNorm eps, not the checkpoint's layer_norm_eps,
-        # which transformers' uses.
-        return Norm(LAYER_NORM_EPS, bias=True)
 
 
 class VisionTower(Tower):
@@ -108,13 +98,22 @@ class VisionTower(Tower):
     """
 
     profile = Path(__file__).with_name("profiles")
+    renames = {
+        "layer_norm1": "input_layernorm",
+        "self_attn.out_proj": "self_attn.o_proj",
+        "layer_norm2": "post_attention_layernorm",
+    }
 
     def __init__(self, config: VisionConfig, weights):
         c = config
         self.vision_model = weights.model.vision_model
         self.connector = weights.model.connector
-        super().__init__(c, self.vision_model.encoder.layers, c.side**2, c.tokens)
-        self.final_norm = self.vision_model.post_layernorm
+        super().__init__(c, c.side**2, c.tokens)
+        self.final_norm = LayerNorm(c.hidden_size)
+        tree, v = renamed(weights, self.renames), "model.vision_model."
+        for i, layer in enumerate(self.layers):
+            layer.load_state_dict(tree, path=f"{v}encoder.layers.{i}.")
+        self.final_norm.load_state_dict(tree, path=f"{v}post_layernorm.")
         embeddings = self.vision_model.embeddings
         self.patch_embed = Conv2d(
             embeddings.patch_embedding.weight, c.image_size, stride=c.patch_size
@@ -125,12 +124,6 @@ class VisionTower(Tower):
         c, e = self.config, self.vision_model.embeddings
         h = self.patch_embed(rgb, rows=c.side).reshape(c.side**2, c.hidden_size)
         return h + e.patch_embedding.bias + e.position_embedding.weight, None
-
-    renames = {
-        "layer_norm1": "input_layernorm",
-        "self_attn.out_proj": "self_attn.o_proj",
-        "layer_norm2": "post_attention_layernorm",
-    }
 
     def pool(self, x, n):
         c = self.config

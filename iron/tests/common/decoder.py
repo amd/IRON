@@ -35,7 +35,7 @@ class _PartialRotaryLlama(Llama):
             H * A, c.hidden_size
         )
         q_rot = F.linear(h, q_rot_weight)
-        RoPE.step(q_rot.reshape(n * H, A), step.angles)
+        RoPE.step(q_rot.reshape(n * H, A), step.ropes[w.rope][1])
         return x
 
 

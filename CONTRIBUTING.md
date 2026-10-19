@@ -60,9 +60,7 @@ Hugging Face decoders need a config and a model class; see
    the module's `load_state_dict` after `super().load_state_dict()`
    (`iron/applications/lfm2/model.py`); a fused projection is one `Linear`
    whose rows `Linear.split` projects by in turn
-   (`iron/applications/phi3/model.py`). A model still on `config.layer(i)`
-   (`layer_class = None`) reads each layer's modules after `renames` and
-   `sanitize(w)`. Write the model
+   (`iron/applications/phi3/model.py`). Write the model
    body with `iron.functional as F` and handle arithmetic (`x + y`), the
    way you would with `torch.nn.functional`. End the file with
    `lm.main(Qwen3)` on your class, its command line, and export it from the

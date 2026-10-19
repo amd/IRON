@@ -6,8 +6,8 @@
 """Whisper over ``iron.lm``: a bidirectional audio encoder (``WhisperEncoder``,
 an ``iron.lm.Tower``) feeding a causal text decoder through cross attention
 (``Whisper``, an ``iron.lm.EncoderDecoder``), judged by Hugging Face's own
-model in float32 (``hugging_face.py``). Both are ``iron.lm``'s layer parts over
-Whisper's modules renamed once at load (``RENAMES``); nothing rotates:
+model in float32 (``hugging_face.py``). Both are ``iron.lm``'s layer modules,
+loaded from Whisper's renamed once at load (``RENAMES``); nothing rotates:
 the encoder adds a fixed position table after its two convolutions, the
 decoder a learned one after its embedding. The shape is read from the
 checkpoint's ``config.json``.
@@ -25,18 +25,21 @@ import iron
 from iron import Scratchpad
 from iron.lm import (
     MLP,
-    AttentionSpec,
     Config,
     Conv1d,
     CrossDecoderLayer,
     DecoderConfig,
-    DecoderLayerSpec,
+    Embedding,
     EncoderDecoder,
-    Norm,
+    EncoderLayer,
+    LayerNorm,
+    Linear,
     Tower,
     not_json,
 )
-from iron.lm.checkpoint import _nest, leaves
+from iron.lm.blocks import _activation
+from iron.lm.causal import Decoder
+from iron.lm.checkpoint import _nest, _tree, leaves, renamed
 from iron.operators.copy import Copy
 
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.
@@ -56,8 +59,9 @@ def bf16(weights):
     )
 
 
-#: A Whisper layer's paths under the names ``iron.lm``'s parts read.
+#: Whisper's paths under the names ``iron.lm``'s modules read.
 RENAMES = {
+    "model.layer_norm": "model.norm",
     "self_attn_layer_norm": "input_layernorm",
     "self_attn.out_proj": "self_attn.o_proj",
     "encoder_attn.out_proj": "encoder_attn.o_proj",
@@ -74,6 +78,10 @@ class WhisperEncoderConfig(Config):
     ``config.json`` by itself.
     """
 
+    # Every projection biased, every head its own (``Attention``, ``MLP``).
+    attention_bias = mlp_bias = True
+    rotary_dim = None
+
     hidden_size: int
     num_hidden_layers: int
     num_attention_heads: int
@@ -82,6 +90,14 @@ class WhisperEncoderConfig(Config):
     positions: int
     hidden_act: str
     eps: float = dataclasses.field(default=1e-5, kw_only=True)
+
+    @property
+    def num_key_value_heads(self) -> int:
+        return self.num_attention_heads
+
+    @property
+    def head_dim(self) -> int:
+        return self.hidden_size // self.num_attention_heads
 
     @property
     def text_dim(self) -> int:
@@ -106,17 +122,6 @@ class WhisperEncoderConfig(Config):
         output rows.
         """
         return -(-self.frames // BLOCK) * BLOCK
-
-    def norm(self) -> Norm:
-        return Norm(self.eps, bias=True)
-
-    def layer(self, i: int) -> DecoderLayerSpec:
-        H = self.num_attention_heads
-        return DecoderLayerSpec(
-            AttentionSpec(H, H, self.hidden_size // H),
-            MLP(self.hidden_act, gated=False),
-            self.norm(),
-        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -149,17 +154,6 @@ class WhisperConfig(DecoderConfig):
     num_mel_bins: int = dataclasses.field(kw_only=True)
     max_source_positions: int = dataclasses.field(kw_only=True)
 
-    def norm(self) -> Norm:
-        return Norm(self.eps, bias=True)
-
-    def layer(self, i: int) -> CrossDecoderLayer:
-        H = self.num_attention_heads
-        return CrossDecoderLayer(
-            AttentionSpec(H, H, self.head_dim),
-            MLP(self.hidden_act, gated=False),
-            self.norm(),
-        )
-
     def encoder(self) -> WhisperEncoderConfig:
         """The encoder's shape."""
         return WhisperEncoderConfig(
@@ -174,6 +168,57 @@ class WhisperConfig(DecoderConfig):
         )
 
 
+def _whisper_biases(*attentions) -> None:
+    """Each of ``attentions``' ``k_proj`` without its bias and ``o_proj``
+    with one, as Whisper's.
+    """
+    for a in attentions:
+        k, o = a.k_proj, a.o_proj
+        a.k_proj = Linear(k.in_features, k.out_features, bias=False)
+        a.o_proj = Linear(o.in_features, o.out_features)
+
+
+class WhisperEncoderLayer(EncoderLayer):
+    """``EncoderLayer``, its ``k_proj`` unbiased."""
+
+    def __init__(self, c: WhisperEncoderConfig, i: int):
+        super().__init__(c, i)
+        _whisper_biases(self.self_attn)
+
+
+class WhisperDecoderLayer(CrossDecoderLayer):
+    """``CrossDecoderLayer`` with each block after a ``LayerNorm``, a plain
+    ``MLP``, and every projection biased but ``k_proj``, though Whisper's
+    ``config.json`` names no ``attention_bias`` or ``mlp_bias``.
+    """
+
+    def __init__(self, c: WhisperConfig, i: int):
+        c = dataclasses.replace(c, attention_bias=True, mlp_bias=True)
+        super().__init__(c, i)
+        E = c.hidden_size
+        self.input_layernorm = LayerNorm(E)
+        self.encoder_attn_layer_norm = LayerNorm(E)
+        self.post_attention_layernorm = LayerNorm(E)
+        self.mlp = MLP(c)
+        _whisper_biases(self.self_attn, self.encoder_attn)
+
+
+class WhisperDecoder(Decoder):
+    """``Decoder`` with a learned position table, ``embed_positions``, and
+    a ``LayerNorm`` its final norm.
+    """
+
+    def __init__(self, c: WhisperConfig, layer):
+        super().__init__(c, layer)
+        self.embed_positions = Embedding(c.max_seq_len, c.hidden_size)
+        self.norm = LayerNorm(c.hidden_size)
+
+
+def decoder_weights(weights):
+    """The decoder's modules of a Whisper checkpoint's tree, as ``model``."""
+    return _tree({"model": weights.model.decoder}, "", weights._file)
+
+
 class WhisperEncoder(Tower):
     """Whisper's audio encoder over one clip's log-mel features: two
     convolutions, each then a GELU, the second at stride 2, the position
@@ -186,14 +231,21 @@ class WhisperEncoder(Tower):
             read.
     """
 
+    layer_class = WhisperEncoderLayer
+    renames = RENAMES
+
     def __init__(self, config: WhisperEncoderConfig, weights):
         c, e = config, weights.model.encoder
-        super().__init__(c, e.layers, c.rows, c.rows)
-        self.final_norm = e.layer_norm
+        super().__init__(c, c.rows, c.rows)
+        self.final_norm = LayerNorm(c.hidden_size)
+        tree = renamed(weights, self.renames)
+        for i, layer in enumerate(self.layers):
+            layer.load_state_dict(tree, path=f"model.encoder.layers.{i}.")
+        self.final_norm.load_state_dict(tree, path="model.encoder.layer_norm.")
         self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.num_mel_bins)
         self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
         # The convolutions' GELU is the layers' hidden_act.
-        self.act = MLP(c.hidden_act).act
+        self.act = _activation(c.hidden_act)
         # The second convolution's input: a zero row, then the first's output.
         self.convolved = iron.state((2 * c.rows + 1, c.hidden_size))
         # The position table padded to the rows.
@@ -212,8 +264,6 @@ class WhisperEncoder(Tower):
         h = self.act(self.conv2(self.convolved, rows=rows))
         table = iron.weight(self.embed_positions)
         return h + table[:rows], None
-
-    renames = RENAMES
 
     def head(self, x):
         return x
@@ -257,20 +307,21 @@ class Whisper(EncoderDecoder):
     head tied to the embedding.
     """
 
+    decoder_class = WhisperDecoder
+    layer_class = WhisperDecoderLayer
+    renames = RENAMES
+
     def __init__(self, config: WhisperConfig, weights):
         weights = bf16(weights)
         encoder = WhisperEncoder(config.encoder(), weights)
-        super().__init__(config, weights, encoder, weights.model.decoder)
-        self.final_norm = self.decoder.layer_norm
+        super().__init__(config, decoder_weights(weights), encoder)
 
     def positions(self, x, step):
         c = self.config
-        table = iron.weight(self.decoder.embed_positions.weight)
+        table = iron.weight(self.model.embed_positions.weight)
         if step.prompt:
             C = c.prefill_chunk
             rows = Copy.step(table[step.start : step.start + C][: step.rows])
         else:
             rows = Copy.step(table[step.position]).reshape(1, c.hidden_size)
         return x + rows
-
-    renames = RENAMES

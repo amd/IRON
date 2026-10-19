@@ -513,6 +513,68 @@ class KVCache(iron.Graph):
         return o.reshape(n, H * D)
 
 
+class NoCache(iron.Graph):
+    """No memory: attention over the call's own rows, both ways, within
+    ``window`` positions either side (None: all), what an encoder's layer
+    holds in a ``KVCache``'s place.
+    """
+
+    def __init__(self, window: int | None = None):
+        self.window = window
+
+    def attend(self, call, q, k, v, scale: float | None = None):
+        """``q`` ``(rows, heads, head_dim)`` over ``k`` and ``v`` ``(rows,
+        groups, head_dim)``, the logits scaled by ``scale`` (MHA's ``1 /
+        sqrt(head_dim)`` if None); ``(rows, heads * head_dim)``.
+        """
+        n, H, D = q.shape
+        o = MHA.step(
+            q,
+            k,
+            v,
+            heads_interleaved=True,
+            kv_interleaved=True,
+            causal=False,
+            window=self.window,
+            scale=scale,
+        )
+        return o.reshape(n, H * D)
+
+
+class CrossCache(iron.Graph):
+    """A layer's keys and values of an encoder's output, each ``(rows,
+    num_key_value_heads, head_dim)``, written once an encoding (``write``)
+    and attended over by every call after, their first ``call.source``
+    rows.
+    """
+
+    def __init__(self, c, rows: int):
+        shape = (rows, c.num_key_value_heads, c.head_dim)
+        self.keys, self.values = iron.state(shape), iron.state(shape)
+
+    def write(self, k, v):
+        """``k`` and ``v`` ``(rows, groups, head_dim)`` from the first row."""
+        self.keys[: k.shape[0]] = k
+        self.values[: v.shape[0]] = v
+
+    def attend(self, call, q, k, v, scale: float | None = None):
+        """``q`` ``(rows, heads, head_dim)`` over the first ``call.source``
+        rows, both ways; ``k`` and ``v`` are None (``CrossAttention``).
+        """
+        n, H, D = q.shape
+        span = np.s_[: call.source]
+        o = MHA.step(
+            q,
+            self.keys[span],
+            self.values[span],
+            heads_interleaved=True,
+            kv_interleaved=True,
+            causal=False,
+            scale=scale,
+        )
+        return o.reshape(n, H * D)
+
+
 class Attention(iron.Graph):
     """Layer ``i``'s self-attention on ``c``'s shape: ``q_proj``, ``k_proj``
     and ``v_proj`` of the layer's input, q and k turned by the call's RoPE
@@ -602,6 +664,38 @@ class Attention(iron.Graph):
         return self.o_proj(o)
 
 
+class CrossAttention(Attention):
+    """``Attention`` over a ``CrossCache``: a call projects q alone, the
+    keys and values an encoder's output's, projected once (``keys_values``).
+    """
+
+    def project(self, x, **tiles) -> list:
+        return [F.linear(x, self.q_proj.weight, self.q_proj.bias, **tiles), None, None]
+
+    def keys_values(self, memory) -> list:
+        """The keys and values of ``memory`` ``(rows, width)``, each
+        ``(rows, groups, head_dim)``.
+        """
+        n, G, D = memory.shape[0], self.groups, self.head_dim
+        return [p(memory).reshape(n, G, D) for p in (self.k_proj, self.v_proj)]
+
+
+class MLP(iron.Graph):
+    """A feed-forward on ``c``'s shape: ``fc2(act(fc1(x)))``, ``act`` its
+    ``hidden_act``, each projection with a bias where the config's
+    ``mlp_bias`` says.
+    """
+
+    def __init__(self, c):
+        E, M, bias = c.hidden_size, c.intermediate_size, c.mlp_bias
+        self.fc1 = Linear(E, M, bias=bias)
+        self.fc2 = Linear(M, E, bias=bias)
+        self.act = _activation(c.hidden_act)
+
+    def body(self, x):
+        return self.fc2(self.act(self.fc1(x)))
+
+
 class GatedMLP(iron.Graph):
     """A gated feed-forward on ``c``'s shape:
     ``down_proj(act(gate_proj(x)) * up_proj(x))``, ``act`` its
@@ -648,6 +742,47 @@ class DecoderLayer(iron.Graph):
     def body(self, x, call):
         angles = None if self.rope is None else call.ropes[self.rope]
         h = self.self_attn(self.input_layernorm(x), self.cache, call, angles)
+        x = _add(x, h, self.residual_multiplier)
+        h = self.mlp(self.post_attention_layernorm(x))
+        return _add(x, h, self.residual_multiplier)
+
+
+class EncoderLayer(DecoderLayer):
+    """Layer ``i`` of a pre-norm encoder on ``c``'s shape (SigLIP's,
+    Whisper's): ``DecoderLayer``'s two blocks, each after a ``LayerNorm``,
+    a plain ``MLP``, attending both ways over the call's rows (``NoCache``),
+    ``o_proj`` biased with q, k and v.
+    """
+
+    def __init__(self, c, i: int):
+        self.input_layernorm = LayerNorm(c.hidden_size)
+        self.self_attn = Attention(c, i)
+        o = self.self_attn.o_proj
+        self.self_attn.o_proj = Linear(o.in_features, o.out_features, c.attention_bias)
+        self.post_attention_layernorm = LayerNorm(c.hidden_size)
+        self.mlp = MLP(c)
+        self.cache = NoCache()
+        self.rope = None
+        self.residual_multiplier = 1.0
+
+
+class CrossDecoderLayer(DecoderLayer):
+    """``DecoderLayer`` with a third block between its two:
+    ``encoder_attn`` after ``encoder_attn_layer_norm``, attending over
+    ``cross``, the ``CrossCache`` an ``EncoderDecoder`` gives it.
+    """
+
+    def __init__(self, c, i: int):
+        super().__init__(c, i)
+        self.encoder_attn_layer_norm = RMSNorm(c.hidden_size, c.eps)
+        self.encoder_attn = CrossAttention(c, i)
+        self.cross: CrossCache | None = None
+
+    def body(self, x, call):
+        angles = None if self.rope is None else call.ropes[self.rope]
+        h = self.self_attn(self.input_layernorm(x), self.cache, call, angles)
+        x = _add(x, h, self.residual_multiplier)
+        h = self.encoder_attn(self.encoder_attn_layer_norm(x), self.cross, call)
         x = _add(x, h, self.residual_multiplier)
         h = self.mlp(self.post_attention_layernorm(x))
         return _add(x, h, self.residual_multiplier)
@@ -743,28 +878,9 @@ class AttentionSpec:
         """
         return dict(tile_size_output=self.head_dim // 2) if rows == 1 else {}
 
-    def keys_values(self, w, memory) -> tuple:
-        """The keys and values ``w`` projects from an encoder's output
-        ``memory`` ``(rows, width)``, each ``(rows, groups, head_dim)``.
-        """
-        n, G, D = memory.shape[0], self.groups, self.head_dim
-        return tuple(
-            _linear(memory, p, precision=self.precision).reshape(n, G, D)
-            for p in (w.k_proj, w.v_proj)
-        )
-
-    def cross(self, w, x, cross):
-        """The block on ``x`` attending over an encoder's keys and values:
-        ``cross(q, scale=)`` on ``(rows, heads, head_dim)``.
-        """
-        n, H, D = x.shape[0], self.heads, self.head_dim
-        q = _linear(x, w.q_proj, precision=self.precision, **self.head_tiles(n))
-        o = cross(q.reshape(n, H, D), scale=self.scale)
-        return _linear(o, w.o_proj, precision=self.precision)
-
 
 @dataclasses.dataclass(frozen=True)
-class MLP:
+class MLPSpec:
     """A feed-forward module's: ``down_proj(act(gate_proj(x)) * up_proj(x))``,
     or plain, ``fc2(act(fc1(x)))``.
 
@@ -802,7 +918,7 @@ class DecoderLayerSpec:
     """
 
     attention: AttentionSpec
-    mlp: MLP
+    mlp: MLPSpec
     norm: Norm
     residual: float = 1.0
 
@@ -824,27 +940,3 @@ class DecoderLayerSpec:
     def add(self, x, y):
         """``x`` plus ``y`` times ``residual``, in ``x``'s shape."""
         return _add(x, y, self.residual)
-
-
-@dataclasses.dataclass(frozen=True)
-class CrossDecoderLayer(DecoderLayerSpec):
-    """``DecoderLayerSpec`` with a third block between its two: ``encoder_attn``
-    after ``encoder_attn_layer_norm``, attending over an encoder's output.
-    """
-
-    def __call__(self, w, x, attend, angles, cross):
-        x = self.block(
-            x,
-            w.input_layernorm,
-            partial(self.attention, w.self_attn, attend=attend, angles=angles),
-        )
-        x = self.block(
-            x,
-            w.encoder_attn_layer_norm,
-            partial(self.attention.cross, w.encoder_attn, cross=cross),
-        )
-        return self.block(x, w.post_attention_layernorm, partial(self.mlp, w.mlp))
-
-    def keys_values(self, w, memory) -> tuple:
-        """The keys and values ``encoder_attn`` projects from ``memory``."""
-        return self.attention.keys_values(w.encoder_attn, memory)

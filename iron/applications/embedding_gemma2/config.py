@@ -141,7 +141,7 @@ class Config(lm.Config):
                 window=window,
                 precision=Precision.HIGHEST,
             ),
-            lm.MLP(self.hidden_act, precision=Precision.HIGHEST),
+            lm.MLPSpec(self.hidden_act, precision=Precision.HIGHEST),
             self.norm(),
         )
 
@@ -297,7 +297,7 @@ class VisionConfig(lm.Config):
                 scale=1.0,
                 precision=Precision.HIGHEST,
             ),
-            lm.MLP(self.hidden_act, precision=Precision.HIGHEST),
+            lm.MLPSpec(self.hidden_act, precision=Precision.HIGHEST),
             self.norm(),
         )
 

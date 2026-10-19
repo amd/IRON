@@ -216,7 +216,7 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
         TOY,
         weights,
     )
-    assert model.decoder.embed_tokens.weight.dtype == bfloat16
+    assert model.model.embed_tokens.weight.dtype == bfloat16
     features = np.random.default_rng(1).uniform(
         -1, 1, (TOY.num_mel_bins, 2 * TOY.max_source_positions)
     )

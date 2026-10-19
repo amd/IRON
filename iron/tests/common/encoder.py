@@ -3,8 +3,8 @@
 
 """``iron.lm``'s ``Encoder`` and ``Tower``, device-free: a call's inputs, the
 bounded gather a body traces, each kind's reference, the operators' own,
-against numpy attention over the valid rows, and the default layer, its
-config's ``DecoderLayerSpec`` attending both ways.
+against numpy attention over the valid rows, and the default layer, an
+``EncoderLayer`` attending both ways.
 """
 
 import dataclasses
@@ -16,19 +16,10 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Precision, Scratchpad
-from iron.lm import (
-    MLP,
-    AttentionSpec,
-    DecoderLayerSpec,
-    Encoder,
-    Norm,
-    Tower,
-    rope_angles,
-)
+from iron.lm import Encoder, NoCache, Tower
 from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.mha import MHA
-from iron.tests.common.layer import LLAMA, module, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -44,42 +35,53 @@ class Shape:
     vocab_size: int = VOCAB
     hidden_size: int = HEADS * HEAD_DIM
     text_dim: int = HEADS * HEAD_DIM
+    num_hidden_layers: int = 1
+    num_attention_heads: int = HEADS
+    window: int | None = None
+    scale: float | None = None
+
+
+class SelfAttend(iron.Graph):
+    """A layer of the rows attending to themselves per head, within the
+    config's ``window``, the logits scaled by its ``scale``."""
+
+    def __init__(self, c, i: int):
+        self.heads, self.scale = c.num_attention_heads, c.scale
+        self.cache = NoCache(c.window)
+
+    def body(self, x, step):
+        n, E = x.shape
+        q = x.reshape(n, self.heads, E // self.heads)
+        return self.cache.attend(step, q, q, q, scale=self.scale)
 
 
 @dataclasses.dataclass(frozen=True)
-class Windowed(Shape):
-    """A Llama-shaped layer each, at HIGHEST precision, the first unscaled within 64
-    positions."""
+class Encoding(Shape):
+    """Two ``EncoderLayer``s, SigLIP's shape."""
 
-    def layer(self, i: int) -> DecoderLayerSpec:
-        first = i == 0
-        attention = AttentionSpec(
-            HEADS,
-            1,
-            HEAD_DIM,
-            scale=1.0 if first else None,
-            window=64 if first else None,
-            precision=Precision.HIGHEST,
-        )
-        return DecoderLayerSpec(attention, MLP(precision=Precision.HIGHEST), Norm(1e-6))
+    num_hidden_layers: int = 2
+    num_key_value_heads: int = HEADS
+    head_dim: int = HEAD_DIM
+    intermediate_size: int = 256
+    hidden_act: str = "gelu_pytorch_tanh"
+    attention_bias: bool = True
+    mlp_bias: bool = True
+    rotary_dim: int | None = None
+    eps: float = 1e-6
 
 
 class Layers(Encoder):
-    """The default layer over Llama-shaped modules, rotated from the first
-    position."""
+    """The default layer, its weights drawn, at HIGHEST precision."""
 
-    def __init__(self, table, layers: list):
+    precision = Precision.HIGHEST
+
+    def __init__(self, table):
         self.table = table
-        self.modules = layers
-        angles = rope_angles(HEAD_DIM, ROWS, 10000.0).astype(bfloat16)
-        self.rope = iron.weight(angles)
-        super().__init__(Windowed(), layers, ROWS)
+        super().__init__(Encoding(), ROWS)
+        self.draw(2)
 
     def lookup(self, ids):
         return Copy.step(iron.weight(self.table)[ids])
-
-    def angles(self, n):
-        return self.rope[:n]
 
     def head(self, x):
         return x
@@ -89,17 +91,17 @@ class SelfAttention(Encoder):
     """Each layer the rows attending to themselves, unscaled, within
     ``window`` positions."""
 
+    layer_class = SelfAttend
+
     def __init__(self, table, layers: int, window: int | None = None):
         self.table = table
         self.window = window
-        super().__init__(Shape(), [None] * layers, ROWS)
+        super().__init__(
+            Shape(num_hidden_layers=layers, window=window, scale=1.0), ROWS
+        )
 
     def lookup(self, ids):
         return Copy.step(iron.weight(self.table)[ids])
-
-    def layer(self, step, i, weights, x):
-        q = x.reshape(x.shape[0], HEADS, HEAD_DIM)
-        return self.attend(step, i, q, q, q, scale=1.0, window=self.window)
 
     def head(self, x):
         return x
@@ -108,15 +110,13 @@ class SelfAttention(Encoder):
 class Rows(Tower):
     """A tower whose front end is the rows it is given, one soft token each."""
 
+    layer_class = SelfAttend
+
     def __init__(self):
-        super().__init__(Shape(), [None], ROWS, ROWS)
+        super().__init__(Shape(), ROWS, ROWS)
 
     def front(self, x, *, rows):
         return Copy.step(x)[:rows], None
-
-    def layer(self, step, i, weights, x):
-        q = x.reshape(x.shape[0], HEADS, HEAD_DIM)
-        return self.attend(step, i, q, q, q)
 
     def head(self, x):
         return x
@@ -215,16 +215,13 @@ def test_a_tower_takes_no_ids():
         Rows().lookup(None)
 
 
-def test_the_default_layer_is_the_config_s_attending_both_ways(table):
-    rng = np.random.default_rng(2)
-    shape = shapes(HEADS * HEAD_DIM, HEADS, 1, HEAD_DIM, 256)
-    graph = Layers(table, [module(rng, shape, LLAMA, bfloat16) for _ in range(2)])
+def test_the_default_layer_is_an_encoder_layer_attending_both_ways(table):
+    graph = Layers(table)
     traced = graph.trace(**graph.shapes()[0])
     attention = [s.op for s in traced.steps if isinstance(s.op, MHA)]
     assert [(op.causal, op.window, op.scale) for op in attention] == [
-        (False, 64, 1.0),
-        (False, None, HEAD_DIM**-0.5),
-    ]
+        (False, None, HEAD_DIM**-0.5)
+    ] * 2
     ids, values = graph.inputs(np.arange(9))
     assert np.shape(graph.reference(ids, **values)) == (9, HEADS * HEAD_DIM)
 

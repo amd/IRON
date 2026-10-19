@@ -57,6 +57,8 @@ class AudioTower(Tower):
     """
 
     profile = PROFILES
+    # On the old layer path until EmbeddingGemma 2 moves onto modules.
+    layer_class = None
 
     def __init__(self, config: AudioConfig, weights: SimpleNamespace):
         c = config
@@ -65,7 +67,7 @@ class AudioTower(Tower):
         sub = tree.subsample_conv_projection
         if c.frame != 2 * c.hop:
             raise ValueError(f"a frame of {c.frame} samples is not two hops")
-        super().__init__(config, tree.layers, c.max_tokens, c.max_tokens)
+        super().__init__(config, c.max_tokens, c.max_tokens, tree.layers)
         T = c.max_tokens
         H, D, W, B = c.num_attention_heads, c.head_dim, c.window, c.band
         C0, _ = c.channels

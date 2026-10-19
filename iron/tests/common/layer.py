@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``iron.lm``'s layer parts (``AttentionSpec``, ``MLP``, ``Norm``,
+"""``iron.lm``'s layer parts (``AttentionSpec``, ``MLPSpec``, ``Norm``,
 ``DecoderLayerSpec``), device-free: the steps each traces as it is configured,
 and EmbeddingGemma 2's text layer, the parts at their fullest, through its
 operators' references against Hugging Face's own Gemma 4 layer.
@@ -17,7 +17,7 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision
-from iron.lm import MLP, AttentionSpec, DecoderLayerSpec, Norm
+from iron.lm import AttentionSpec, DecoderLayerSpec, MLPSpec, Norm
 from iron.applications.embedding_gemma2.blocks import SandwichLayer, TextLayer
 from iron.operators.mha import MHA
 
@@ -158,7 +158,7 @@ def ops(layer, names, **parts) -> Counter:
 def llama(residual=1.0) -> DecoderLayerSpec:
     return DecoderLayerSpec(
         AttentionSpec(HEADS, GROUPS, HEAD, precision=Precision.HIGHEST),
-        MLP(precision=Precision.HIGHEST),
+        MLPSpec(precision=Precision.HIGHEST),
         Norm(1e-6),
         residual,
     )
@@ -179,7 +179,7 @@ def test_the_parts_decide_the_steps():
             v_norm=True,
             precision=Precision.HIGHEST,
         ),
-        MLP(precision=Precision.HIGHEST),
+        MLPSpec(precision=Precision.HIGHEST),
         Norm(1e-6),
     )
     # Sandwich norms, q and k norms and the v norm.
@@ -210,7 +210,7 @@ def test_a_one_row_step_keeps_its_rows_through_the_residual(residual):
 
 def test_an_activation_with_no_operator_is_refused():
     with pytest.raises(ValueError, match="no operator for hidden_act 'gelu'"):
-        MLP("gelu")
+        MLPSpec("gelu")
 
 
 def test_a_layer_norm_at_another_epsilon_than_its_kernels_is_refused():
@@ -344,7 +344,7 @@ def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
             scale=1.0,
             precision=Precision.HIGHEST,
         ),
-        MLP("gelu_pytorch_tanh", precision=Precision.HIGHEST),
+        MLPSpec("gelu_pytorch_tanh", precision=Precision.HIGHEST),
         Norm(1e-6),
     )
 

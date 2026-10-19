@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """SmolVLM-256M-Instruct over ``iron.lm``: its text model (``SmolVLMText``,
-a ``CausalLM`` of Llama's ``DecoderLayerSpec``, 9 heads over 3 KV groups, with an untied
+a ``CausalLM`` of Llama's ``DecoderLayer``, 9 heads over 3 KV groups, with an untied
 ``lm_head``), its vision tower (``vision/``, an ``iron.lm.Tower``), and the
 two as one ``iron.lm.Multimodal`` (``SmolVLM``), whose image
 placeholders take the tower's soft tokens, judged by transformers' own
@@ -23,6 +23,8 @@ from pathlib import Path
 
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal, not_json
+from iron.lm.checkpoint import _tree
+from iron.lm.config import RopeScaling, unscaled
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 
 
@@ -50,6 +52,10 @@ class SmolVLMTextConfig(DecoderConfig):
         metadata={"json": "text_config.intermediate_size"}
     )
     rope_theta: float = dataclasses.field(metadata={"json": "text_config.rope_theta"})
+    rope_scaling: RopeScaling | None = dataclasses.field(
+        default=None,
+        metadata={"json": "text_config.rope_scaling", "convert": unscaled},
+    )
     eps: float = dataclasses.field(
         default=1e-5, kw_only=True, metadata={"json": "text_config.rms_norm_eps"}
     )
@@ -57,6 +63,12 @@ class SmolVLMTextConfig(DecoderConfig):
         metadata={"json": "text_config.max_position_embeddings"}
     )
     tie_word_embeddings: bool = False
+    sliding_window: int | None = dataclasses.field(
+        default=None, kw_only=True, metadata={"json": "text_config.sliding_window"}
+    )
+    use_sliding_window: bool | None = dataclasses.field(
+        default=None, kw_only=True, metadata={"json": "text_config.use_sliding_window"}
+    )
 
 
 #: ``<|im_start|>``, the turn marker every prompt starts with.
@@ -74,10 +86,10 @@ class SmolVLMText(CausalLM):
     config = SmolVLMTextConfig
     profile = Path(__file__).with_name("profiles")
     bos = BOS
-    layer_class = None
 
     def __init__(self, config, weights):
-        super().__init__(config, weights, decoder=weights.model.text_model)
+        text = {"model": weights.model.text_model, "lm_head": weights.lm_head}
+        super().__init__(config, _tree(text, "", weights._file))
 
     @property
     def hugging_face(self):
@@ -126,7 +138,7 @@ class SmolVLM(Multimodal):
     hugging_face = SmolVLMText.hugging_face
 
     def __init__(self, config: SmolVLMConfig, weights):
-        self.config = config
+        self.config, self.weights = config, weights
         tower = VisionTower(config.vision, weights)
         super().__init__(
             SmolVLMText(config, weights), {config.vision.image_token: tower}
@@ -140,7 +152,7 @@ class SmolVLM(Multimodal):
         if self.seed is None:
             return super().cpu_reference()
         return self.hugging_face.build(
-            "idefics3", self.config.vision, self.text.weights, **self.config.to_json()
+            "idefics3", self.config.vision, self.weights, **self.config.to_json()
         )
 
 

@@ -411,26 +411,6 @@ def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
         assert_close(prompted, cpu.golden.logits(tokens))
 
 
-def test_a_decoder_nested_in_its_checkpoint_is_read_where_it_is(cpu):
-    """A checkpoint holding its decoder's embedding, layers and final norm
-    under ``model.decoder``: with no ``layer_class``, ``decoder=`` reads
-    them there, and the model gives the flat checkpoint's logits bit for
-    bit.
-    """
-
-    class Nested(OnHost):
-        layer_class = None
-
-    m = cpu.weights.model
-    decoder = SimpleNamespace(embed_tokens=m.embed_tokens, layers=m.layers, norm=m.norm)
-    nested = SimpleNamespace(model=SimpleNamespace(decoder=decoder))
-    model = Nested(cpu.config, nested, decoder)
-    assert model.decoder is decoder
-    np.testing.assert_array_equal(
-        model.logits(cpu.prompt), OnHost(cpu.config, cpu.weights).logits(cpu.prompt)
-    )
-
-
 def test_a_turn_runs_from_its_first_new_token(cpu):
     """Decision 50: a turn changing the history at 270, past the boundary at
     256, calls from 270 alone; the caches' rows before it are the first

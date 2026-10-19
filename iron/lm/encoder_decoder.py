@@ -4,28 +4,28 @@
 """A decoder whose layers also attend over an encoder's output, as one graph.
 
 ``EncoderDecoder`` is a ``CausalLM`` holding its encoder. Its encode version
-runs the encoder and projects the output into each layer's cross keys and
-values, states the decode step and the prompt chunks read, bounded to the
-call's ``source`` rows.
+runs the encoder and projects the output into each layer's ``CrossCache``,
+which the decode step and the prompt chunks read, bounded to the call's
+``source`` rows.
 """
 
 import inspect
-from functools import partial
 
 import numpy as np
 
 import iron
 from iron import Carried
-from iron.operators.mha import MHA
 
+from .blocks import CrossCache, CrossDecoderLayer
 from .config import DecoderConfig
 from .causal import Call, CausalLM
 from .encoder import Encoder
 
 
 class EncoderDecoder(CausalLM):
-    """A decoder on ``config``'s shape over the output of ``encoder``; a
-    subclass gives ``head`` as a ``CausalLM``'s does.
+    """A decoder on ``config``'s shape over the output of ``encoder``, of
+    ``CrossDecoderLayer`` layers, each given a ``CrossCache`` of the
+    encoder's rows.
 
     Its versions are the decoder's own and the encode version, which takes
     the encoder's input and per-call values, each named with ``encoder_``
@@ -34,19 +34,18 @@ class EncoderDecoder(CausalLM):
 
     Args:
         config: The decoder's shape.
-        weights: The checkpoint's tree.
+        weights: The decoder's checkpoint tree (``CausalLM``).
         encoder: The encoder, its weights its own.
-        decoder: The decoder's module of ``weights`` (``CausalLM``).
 
     Raises:
         TypeError: The encoder takes other than one input.
         ValueError: The encoder's rows are fewer than a prompt chunk's.
     """
 
-    layer_class = None
+    layer_class = CrossDecoderLayer
 
-    def __init__(self, config: DecoderConfig, weights, encoder: Encoder, decoder=None):
-        super().__init__(config, weights, decoder)
+    def __init__(self, config: DecoderConfig, weights, encoder: Encoder):
+        super().__init__(config, weights)
         self.encoder = encoder
         rows = encoder.soft_rows
         if rows < config.prefill_chunk:
@@ -55,14 +54,8 @@ class EncoderDecoder(CausalLM):
                 f"EncoderDecoder: the encoder's {rows} rows are fewer than a "
                 f"{config.prefill_chunk}-row prompt chunk's queries"
             )
-        shapes = [
-            (rows, a.groups, a.head_dim)
-            for a in (
-                config.layer(i).attention for i in range(config.num_hidden_layers)
-            )
-        ]
-        self.cross_keys = [iron.state(shape) for shape in shapes]
-        self.cross_values = [iron.state(shape) for shape in shapes]
+        for layer in self.layers:
+            layer.cross = CrossCache(config, rows)
         P = inspect.Parameter
         parameters = list(encoder.signature().parameters.values())
         inputs = [p.name for p in parameters if p.kind is not P.KEYWORD_ONLY]
@@ -93,10 +86,8 @@ class EncoderDecoder(CausalLM):
         if encoded is not None:
             own = {v: values[f"encoder_{v}"] for v in self.encoder_values}
             memory = self.encoder.inline(self.encoder.body, encoded, **own)
-            for i, w in enumerate(self.layers):
-                k, v = self.config.layer(i).keys_values(w, memory)
-                self.cross_keys[i][: k.shape[0]] = k
-                self.cross_values[i][: v.shape[0]] = v
+            for layer in self.layers:
+                layer.cross.write(*layer.encoder_attn.keys_values(memory))
             return iron.carry(**{n: values[n] for n in self._parameters.carried})
         ids, rows, source = given["ids"], values["rows"], values["source"]
         position, rope_start = values["position"], values["rope_start"]
@@ -108,32 +99,6 @@ class EncoderDecoder(CausalLM):
             call = Call(False, position, rows, position, rope_start, source)
         logits, carry = self.forward(x, call)
         return logits, iron.carry(**carry, source=source)
-
-    def layer(self, call: Call, i: int, weights, x):
-        """Layer ``i`` on ``x``: ``config.layer(i)``, attending over the
-        caches and over the encoder's output.
-        """
-        attend = partial(self.attend, call, i)
-        cross = partial(self.cross, call, i)
-        return self.config.layer(i)(weights, x, attend, call.angles, cross)
-
-    def cross(self, call: Call, i: int, q, *, scale: float | None = None):
-        """``q`` ``(rows, heads, head_dim)`` over the first ``call.source``
-        rows of layer ``i``'s cross keys and values, the logits scaled by
-        ``scale`` (MHA's ``1 / sqrt(head_dim)`` if None).
-        """
-        n, H, D = q.shape
-        span = np.s_[: call.source]
-        o = MHA.step(
-            q,
-            self.cross_keys[i][span],
-            self.cross_values[i][span],
-            heads_interleaved=True,
-            kv_interleaved=True,
-            causal=False,
-            scale=scale,
-        )
-        return o.reshape(n, H * D)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the decoder's, then the

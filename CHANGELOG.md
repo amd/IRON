@@ -63,8 +63,7 @@ public API adds its entry under Unreleased.
   `iron.lm` exports `Attention`, `GatedMLP` and `DecoderLayer`.
 - `KVCache(c, window=None)`: the cache attends within `window` positions
   before a query, as `MHA` counts them (Hugging Face's `sliding_window`
-  minus one). A layer on `config.layer(i)` gets its attention's window
-  this way, in place of `CausalLM.attend`'s refusal.
+  minus one).
 - Per-layer RoPE: each `DecoderLayer` turns q and k by the rows of the
   `Rope` it holds (the model's `rotary_emb` unless a model sets another,
   None for none), copied once a call per distinct `Rope` into
@@ -73,6 +72,16 @@ public API adds its entry under Unreleased.
 - `Attention(norms="v")` RMS-norms each head of v, unweighted; a layer
   that holds another layer's `KVCache` and sets `k_proj` and `v_proj` to
   None attends over that cache, projecting and writing no keys or values.
+- Encoder and cross-attention blocks as modules: `NoCache(window=None)`,
+  attention both ways over a call's own rows; `CrossCache(c, rows)`, an
+  encoder's keys and values, written once an encoding and attended over
+  their first `source` rows; `CrossAttention(c, i)`, which projects only q
+  a call and the keys and values once (`keys_values`); `MLP(c)`, the plain
+  `fc2(act(fc1(x)))`; `EncoderLayer(c, i)`, SigLIP's and Whisper's
+  pre-LayerNorm layer over a `NoCache`; and `CrossDecoderLayer(c, i)`,
+  `DecoderLayer` with `encoder_attn` over the `CrossCache` an
+  `EncoderDecoder` gives it. `CausalLM.decoder_class` is the `Decoder` it
+  builds (Whisper's adds its position table and a LayerNorm).
 - `Linear.split(x, *rows)`, a fused projection's outputs: one `F.linear`
   per run of the weight's rows.
 - `Graph.trace(precision=)`, which `compile(precision=)` passes on instead of
@@ -207,10 +216,8 @@ public API adds its entry under Unreleased.
   `chat_template.jinja` when `tokenizer_config.json` has none.
 - `CausalLM` builds its modules, `model` (a `Decoder` of `layer_class`
   layers, `DecoderLayer` by default) and `lm_head` (the embedding where
-  tied), and binds them to the checkpoint's tree with `Graph.load_state_dict`. A
-  model with `layer_class = None` reads `config.layer(i)` as before, its
-  caches in `caches`, a `KVCache` per attention layer, in place of `keys`
-  and `values`. The RoPE table is `CausalLM.rotary_emb`, a `Rope`, whose `rows`
+  tied), and binds them to the checkpoint's tree with `Graph.load_state_dict`.
+  The RoPE table is `CausalLM.rotary_emb`, a `Rope`, whose `rows`
   replaces `CausalLM.angles` and whose `long_past` replaces
   `CausalLM.long_past`.
 - Phi-4 and LFM2 are built from modules: `Phi4Layer`, whose fused
@@ -235,6 +242,18 @@ public API adds its entry under Unreleased.
   refuses at load a `rope_scaling` it builds no table for (any but
   `"default"`; `LlamaConfig`'s, any but `"llama3"`) and a set
   `use_sliding_window`, which windows only some layers.
+- `Encoder` and `Tower` build their layers from `layer_class`
+  (`EncoderLayer` by default), `Encoder(config, max_tokens)` and
+  `Tower(config, max_tokens, soft_rows)`, a subclass loading them; with
+  `layer_class = None` (EmbeddingGemma 2's, until it moves onto modules)
+  they read `config.layer(i)` on the checkpoint's `layers` as before.
+  `EncoderDecoder(config, weights, encoder)` builds `CrossDecoderLayer`s,
+  each holding a `CrossCache`, in place of `cross_keys` and `cross_values`.
+  Whisper and SmolVLM (its text model and vision tower) are built from
+  modules. The spec `MLP` is `MLPSpec`.
+- `SmolVLMTextConfig` reads `rope_scaling`, `sliding_window` and
+  `use_sliding_window` under `text_config`, so a nested `rope_scaling` is
+  refused at load and a nested window is honoured.
 - The layer descriptions a config's `layer()` returns, `iron.lm.Attention`
   and `DecoderLayer`, are `AttentionSpec` and `DecoderLayerSpec`, leaving
   the names to the modules that own their weights.
@@ -373,6 +392,13 @@ public API adds its entry under Unreleased.
 
 - `field(probe=)`: the tuner times each distinct value of such a field, as
   it does every other (Clamp's `low` and `high`).
+- `CausalLM`'s `layer_class = None` path: its `decoder=` argument,
+  `caches`, `attend`, `final_norm`, and `Call.angles` (a layer reads
+  its own `Rope`'s rows in `Call.ropes`). Also `Encoder.attend`'s
+  MHA (it is `NoCache.attend`), `EncoderDecoder.cross` and `layer`,
+  `Config.layer`, `DecoderConfig.attention` and `layer`,
+  `AttentionSpec.keys_values` and `cross`, and the spec
+  `CrossDecoderLayer`.
 - Llama's tiktoken tokenizer, `SPECIAL_TOKENS` and `tokenizer()`: Llama
   reads its checkpoint's `tokenizer.json` like every model, and tiktoken is
   no longer a dependency.

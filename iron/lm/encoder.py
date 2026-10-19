@@ -5,21 +5,22 @@
 rows in, attended bidirectionally, compiled once for every length.
 
 ``Encoder`` looks up token ids' rows and runs ``forward`` over them: each
-layer, the final norm (``final_norm``, none by default), ``pool`` and
-``head``. A ``Tower`` is an encoder
+layer, a ``layer_class`` module, the final norm (``final_norm``, none by
+default), ``pool`` and ``head``. A ``Tower`` is an encoder
 whose rows come from a front end, ``front``, and whose output is soft tokens
 in a text model's space.
 """
 
 import dataclasses
 from functools import partial
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
+import iron
 from iron import Scratchpad
-from iron.operators.mha import MHA
 
+from .blocks import EncoderLayer, NoCache
 from .checkpoint import renamed
 from .model import Model
 
@@ -37,28 +38,37 @@ class EncodeStep:
 
 class Encoder(Model):
     """An encoder over ``max_tokens`` rows at most, one compile for every
-    length; a subclass gives ``lookup`` and ``head``, and its config
-    ``layer(i)``.
+    length: ``layers``, a ``layer_class(config, i)`` each, which a subclass
+    loads from its checkpoint; it gives ``lookup`` and ``head``.
 
     A call takes the token ids, padded to ``max_tokens`` with 0, and
     ``rows``, the real rows, which bound the embedding gather and every
     operator after it.
 
     Args:
-        config: The model's shape: its ``layer(i)`` is each layer, and
+        config: The model's shape: ``num_hidden_layers`` layers, and
             ``inputs`` reads its ``vocab_size``.
-        layers: The checkpoint's layers, which the subclass holds by their
-            checkpoint path before this is called.
         max_tokens: The longest sequence a call takes.
+        layers: With no ``layer_class`` (EmbeddingGemma 2's, until it is on
+            modules), the checkpoint's layers, each ``config.layer(i)`` on
+            its weights.
     """
 
-    def __init__(self, config, layers: list, max_tokens: int):
+    layer_class: ClassVar[type[iron.Graph] | None] = EncoderLayer
+
+    def __init__(self, config, max_tokens: int, layers: list = ()):
         self.config = config
-        self.layers = [self.sanitize(renamed(w, self.renames)) for w in layers]
+        if self.layer_class is None:
+            self.layers = [self.sanitize(renamed(w, self.renames)) for w in layers]
+        else:
+            self.layers = [
+                self.layer_class(config, i) for i in range(config.num_hidden_layers)
+            ]
         self.max_tokens = max_tokens
         # The rows a call gives, the first ``soft(values)`` of them valid.
         self.soft_rows = max_tokens
-        # The norm module after the last layer, by ``config.norm()``.
+        # The norm module after the last layer (with no ``layer_class``, by
+        # ``config.norm()``).
         self.final_norm = None
 
     def lookup(self, ids):
@@ -78,7 +88,12 @@ class Encoder(Model):
         return x
 
     def layer(self, step: EncodeStep, i: int, weights, x):
-        """Layer ``i`` on ``x``: ``config.layer(i)``, attending bidirectionally."""
+        """Layer ``i``, the module ``weights``, on ``x``; with no
+        ``layer_class``, ``config.layer(i)`` on its weights, attending
+        bidirectionally (``attend``).
+        """
+        if self.layer_class is not None:
+            return weights(x, step)
         attend = partial(self.attend, step, i)
         return self.config.layer(i)(weights, x, attend, step.angles)
 
@@ -93,23 +108,8 @@ class Encoder(Model):
         scale: float | None = None,
         window: int | None = None,
     ):
-        """``q`` ``(rows, heads, head_dim)`` over every row of ``k`` and
-        ``v`` ``(rows, groups, head_dim)``, or within ``window`` positions
-        either side, the logits scaled by ``scale`` (MHA's
-        ``1 / sqrt(head_dim)`` if None).
-        """
-        n, H, D = q.shape
-        o = MHA.step(
-            q,
-            k,
-            v,
-            heads_interleaved=True,
-            kv_interleaved=True,
-            causal=False,
-            window=window,
-            scale=scale,
-        )
-        return o.reshape(n, H * D)
+        """``NoCache(window).attend``, for a layer with no ``layer_class``."""
+        return NoCache(window).attend(step, q, k, v, scale)
 
     def pool(self, x, rows):
         """The rows ``head`` reads from the ``rows`` valid rows of ``x``; all
@@ -128,8 +128,10 @@ class Encoder(Model):
         x = self.positions(x, step)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
-        if self.final_norm is not None:
+        if self.final_norm is not None and self.layer_class is None:
             x = self.config.norm()(self.final_norm, x)
+        elif self.final_norm is not None:
+            x = self.final_norm(x)
         return self.head(self.pool(x, rows))
 
     def from_rows(self, x, *, rows):
@@ -186,14 +188,14 @@ class Tower(Encoder):
 
     Args:
         config: The tower's shape; ``soft_tokens`` reads its ``text_dim``.
-        layers: As ``Encoder`` takes them.
         max_tokens: The rows its layers take.
         soft_rows: The rows of soft tokens a call returns, the first
             ``soft`` of them valid.
+        layers: As ``Encoder`` takes them.
     """
 
-    def __init__(self, config, layers: list, max_tokens: int, soft_rows: int):
-        super().__init__(config, layers, max_tokens)
+    def __init__(self, config, max_tokens: int, soft_rows: int, layers: list = ()):
+        super().__init__(config, max_tokens, layers)
         self.soft_rows = soft_rows
 
     def front(self, *inputs, **values):

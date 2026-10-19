@@ -17,7 +17,13 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron.applications.whisper.model import RENAMES, WhisperConfig
+from iron.applications.whisper.model import (
+    RENAMES,
+    WhisperConfig,
+    WhisperDecoder,
+    WhisperDecoderLayer,
+    decoder_weights,
+)
 from iron.lm import EncoderDecoder
 from iron.lm.golden import HuggingFace
 from iron.operators.copy import Copy
@@ -29,6 +35,7 @@ from iron.tests.common.layer import WHISPER, shapes
 from iron.tests.common.llama_model import checkpoint
 from iron.lm.testing import assert_close
 from iron.tests.common.llama_reference import prompt
+from iron.tests.common.encoder import SelfAttend, Shape
 from iron.tests.common.multimodal import Features
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -59,22 +66,24 @@ class Whisper(EncoderDecoder):
     head the final LayerNorm and the embedding.
     """
 
+    decoder_class = WhisperDecoder
+    layer_class = WhisperDecoderLayer
+    renames = RENAMES
+
     def positions(self, x, step):
         c = self.config
         C, E = c.prefill_chunk, c.hidden_size
-        table = iron.weight(self.decoder.embed_positions.weight)
+        table = iron.weight(self.model.embed_positions.weight)
         if step.prompt:
             rows = Copy.step(table[step.start : step.start + C][: step.rows])
         else:
             rows = Copy.step(table[step.position]).reshape(1, E)
         return ElementwiseAdd.step(x, rows)
 
-    renames = RENAMES
-
     def head(self, x):
-        n = self.decoder.layer_norm
+        n = self.model.norm
         h = F.layer_norm(x, x.shape[-1:], n.weight, n.bias, self.config.eps)
-        return GEMV.step(self.decoder.embed_tokens.weight, h)
+        return GEMV.step(self.model.embed_tokens.weight, h)
 
 
 class HuggingFaceDecoder(HuggingFace):
@@ -141,7 +150,7 @@ def whisper(reference):
     """
     weights = tree()
     encoder = Features(CONFIG.hidden_size, SOURCE)
-    model = Whisper(CONFIG, weights, encoder, weights.model.decoder)
+    model = Whisper(CONFIG, decoder_weights(weights), encoder)
     rng = np.random.default_rng(1)
     clip = (rng.standard_normal((200, CONFIG.hidden_size)) / 2).astype(bfloat16)
     tokens = rng.integers(0, CONFIG.vocab_size, 300)
@@ -162,7 +171,7 @@ def test_its_signature_and_versions_are_the_decoder_s_and_the_encoder_s(whisper)
         "encoder_rows",
     ]
     assert [sorted(s) for s in model.shapes()] == [[], ["ids"], ["encoder_features"]]
-    assert [s.shape for s in model.cross_keys] == [(SOURCE, 8, 64)] * 2
+    assert [layer.cross.keys.shape for layer in model.layers] == [(SOURCE, 8, 64)] * 2
 
 
 def test_the_encode_version_writes_each_layer_s_keys_and_values(whisper):
@@ -225,11 +234,8 @@ class Attending(Features):
 
     def __init__(self, width: int, rows: int):
         super().__init__(width, rows)
-        self.layers = [None]
-
-    def layer(self, step, i, weights, x):
-        q = x.reshape(x.shape[0], CONFIG.num_attention_heads, CONFIG.head_dim)
-        return self.attend(step, i, q, q, q)
+        heads = CONFIG.num_attention_heads
+        self.layers = [SelfAttend(Shape(num_attention_heads=heads), 0)]
 
 
 def attended(rows) -> np.ndarray:
@@ -272,10 +278,7 @@ def test_padded_encoder_rows_reach_neither_attention(reference):
 
     def model():
         return Whisper(
-            CONFIG,
-            weights,
-            Attending(CONFIG.hidden_size, SOURCE),
-            weights.model.decoder,
+            CONFIG, decoder_weights(weights), Attending(CONFIG.hidden_size, SOURCE)
         )
 
     fresh = model()
@@ -301,6 +304,4 @@ def test_an_encoder_shorter_than_a_prompt_chunk_is_refused():
     """
     weights = tree()
     with pytest.raises(ValueError, match="fewer than a 256-row prompt chunk"):
-        Whisper(
-            CONFIG, weights, Features(CONFIG.hidden_size, 128), weights.model.decoder
-        )
+        Whisper(CONFIG, decoder_weights(weights), Features(CONFIG.hidden_size, 128))

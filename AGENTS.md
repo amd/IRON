@@ -321,10 +321,12 @@ tunables and profiles already do that job.
   own names.
 - `blocks.py`: the leaf modules that declare their weights with
   `iron.param` (`Linear`, `Embedding`, `RMSNorm`, `LayerNorm`), the blocks
-  a decoder layer is made of (`Attention`, `GatedMLP`, `DecoderLayer`), the
-  memory a layer owns (`KVCache`) and the model's `Rope`; the descriptions
-  the models not yet on modules read (`Norm`, `AttentionSpec`, `MLP`,
-  `DecoderLayerSpec`, `CrossDecoderLayer`); and the front-end graphs.
+  a layer is made of (`Attention`, `CrossAttention`, `GatedMLP`, `MLP`,
+  `DecoderLayer`, `EncoderLayer`, `CrossDecoderLayer`), the memory a layer
+  owns (`KVCache`, `NoCache`, `CrossCache`) and the model's `Rope`; the
+  descriptions EmbeddingGemma 2, not yet on modules, reads (`Norm`,
+  `AttentionSpec`, `MLPSpec`, `DecoderLayerSpec`); and the front-end
+  graphs.
 - `model.py`: `Model`, which loads from a checkpoint's directory or
   repository id (`Model.load`, its context fitted to the host by
   `Model.fit`) and generates (`generate(prompt, max_tokens, sampler=None)`,

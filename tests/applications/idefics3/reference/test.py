@@ -4,10 +4,12 @@
 
 """SmolVLM's graphs against transformers' own SmolVLM in float32 over the
 same random weights, its outputs recorded in ``goldens/``, device-free (no
-checkpoint, no NPU), at a toy shape: the vision tower on ``DecoderLayerSpec``'s
-SigLIP names, and the tower and the text model as one
+checkpoint, no NPU), at a toy shape: the vision tower's ``EncoderLayer``s on
+SigLIP's names, and the tower and the text model as one
 ``iron.lm.Multimodal``, its soft tokens placed across a chunk boundary.
 """
+
+import re
 
 import numpy as np
 import pytest
@@ -174,3 +176,17 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)
     assert_close(logits, reference.logits(tokens, image))
+
+
+def test_the_text_config_s_rope_scaling_and_window_are_read_where_nested():
+    """SmolVLM's ``config.json`` nests its text model's keys under
+    ``text_config``: a ``rope_scaling`` there is refused as a flat one is,
+    and a ``sliding_window`` there windows the caches.
+    """
+    data = {"text_config": TEXT.to_json()["text_config"]}
+    nested = data["text_config"]
+    scaling = {"rope_type": "yarn", "factor": 4.0}
+    with pytest.raises(ValueError, match=re.escape(f"rope_scaling {scaling}")):
+        SmolVLMTextConfig.from_json({"text_config": nested | {"rope_scaling": scaling}})
+    windowed = {"text_config": nested | {"sliding_window": 64}}
+    assert SmolVLMTextConfig.from_json(windowed).window == 63

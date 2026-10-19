@@ -105,13 +105,14 @@ def test_placeholders_that_are_not_the_soft_tokens_are_refused(table):
 class Width:
     hidden_size: int
     text_dim: int
+    num_hidden_layers: int = 0
 
 
 class Features(Tower):
     """A tower whose soft tokens are the rows it is given."""
 
     def __init__(self, width: int, rows: int):
-        super().__init__(Width(width, width), [], rows, rows)
+        super().__init__(Width(width, width), rows, rows)
 
     def front(self, features, *, rows):
         return Copy.step(features)[:rows], None

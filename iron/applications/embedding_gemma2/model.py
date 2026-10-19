@@ -115,6 +115,8 @@ class EmbeddingGemma(Encoder):
     """
 
     profile = PROFILES
+    # On the old layer path until EmbeddingGemma 2 moves onto modules.
+    layer_class = None
 
     def __init__(
         self,
@@ -125,7 +127,7 @@ class EmbeddingGemma(Encoder):
         c = config
         self.tokenizer = tokenizer
         w = self.language_model = weights.language_model
-        super().__init__(config, w.layers, c.max_tokens)
+        super().__init__(config, c.max_tokens, w.layers)
         self.final_norm = w.norm
         scale = np.sqrt(np.float32(c.hidden_size))
         embedding = w.embed_tokens.weight.astype(np.float32) * scale

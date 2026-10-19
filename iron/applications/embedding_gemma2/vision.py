@@ -51,6 +51,8 @@ class VisionTower(Tower):
     """
 
     profile = PROFILES
+    # On the old layer path until EmbeddingGemma 2 moves onto modules.
+    layer_class = None
 
     def __init__(self, config: VisionConfig, weights: SimpleNamespace):
         c = config
@@ -58,7 +60,7 @@ class VisionTower(Tower):
         self.embed_vision = weights.embed_vision
         window = c.pool**2
         tokens = -(-(c.patches // window) // c.rows) * c.rows
-        super().__init__(config, tree.encoder.layers, c.patches, tokens)
+        super().__init__(config, c.patches, tokens, tree.encoder.layers)
         self.processor = ImagePatches(
             c.patches,
             c.largest,

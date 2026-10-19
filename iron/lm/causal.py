@@ -14,7 +14,6 @@ is no device loop: the host starts each step on the token the last one drew.
 import dataclasses
 import logging
 from collections.abc import Iterator
-from functools import partial
 from typing import Any, ClassVar
 
 import numpy as np
@@ -22,7 +21,6 @@ from aie.iron.kernels.sample import ROW_WORDS
 from ml_dtypes import bfloat16
 
 import iron
-import iron.functional as F
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.compiled import walk
@@ -30,7 +28,7 @@ from iron.common.graph.handle import State
 from iron.operators.copy import Copy
 from iron.operators.sample import Sample
 
-from .blocks import DecoderLayer, Embedding, KVCache, Linear, RMSNorm, Rope
+from .blocks import DecoderLayer, Embedding, Linear, RMSNorm, Rope
 from .checkpoint import renamed
 from .config import DecoderConfig
 from .model import Model
@@ -59,9 +57,6 @@ class Call:
     rope_start: Any = None
     # The encoder's rows a cross attention reads (``EncoderDecoder``).
     source: Any = None
-    # The k rows of the model's rotary_emb, which a layer on config.layer(i)
-    # reads; None: no RoPE.
-    angles: Handle | None = None
     # By each Rope a layer holds, its rows of the call (Rope.rows).
     ropes: dict = dataclasses.field(default_factory=dict)
 
@@ -127,7 +122,7 @@ class Decoder(iron.Graph):
 
 
 class CausalLM(Model):
-    """A decoder on ``config``'s shape: ``model``, a ``Decoder`` of
+    """A decoder on ``config``'s shape: ``model``, a ``decoder_class`` of
     ``layer_class`` layers, each holding its own ``KVCache``; ``lm_head``,
     the embedding where tied, loaded from ``weights``; and ``rotary_emb``,
     the RoPE table (``Rope``), None with no ``rope_theta``.
@@ -135,21 +130,13 @@ class CausalLM(Model):
     Args:
         config: The decoder's shape.
         weights: The checkpoint's tree (``Checkpoint.tree``).
-        decoder: With no ``layer_class``, the decoder's module of
-            ``weights``, whose ``embed_tokens``, ``layers`` and ``norm`` are
-            read here; None is ``weights.model``.
-
-    With no ``layer_class``, a model's layers are ``config.layer(i)`` on the
-    checkpoint's own modules, ``caches`` holding each attention layer's
-    ``KVCache``, and ``final_norm``, the norm module ``head`` reads, is
-    ``decoder.norm``; a subclass sets it where the checkpoint names it
-    otherwise.
     """
 
-    layer_class: ClassVar[type[iron.Graph] | None] = DecoderLayer
+    decoder_class: ClassVar[type[Decoder]] = Decoder
+    layer_class: ClassVar[type[iron.Graph]] = DecoderLayer
     layers: list
 
-    def __init__(self, config: DecoderConfig, weights, decoder=None):
+    def __init__(self, config: DecoderConfig, weights):
         self.config = config
         self.weights = weights
         self.rotary_emb = None if config.rope_theta is None else Rope(config)
@@ -166,31 +153,14 @@ class CausalLM(Model):
         # and ``generate`` run in.
         self._holder: Session | None = None
         self.session = Session(self)
-        if self.layer_class is not None:
-            self.model = Decoder(config, self.layer_class)
-            for layer in self.model.layers:
-                layer.rope = self.rotary_emb
-            self.lm_head = Linear(config.hidden_size, config.vocab_size, bias=False)
-            if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
-            self.load_state_dict(renamed(weights, self.renames))
-            self.layers = self.model.layers
-            return
-        self.decoder = weights.model if decoder is None else decoder
-        self.layers = [
-            self.sanitize(renamed(w, self.renames)) for w in self.decoder.layers
-        ]
-        self.final_norm = getattr(self.decoder, "norm", None)
-        if len(self.layers) != config.num_hidden_layers:
-            raise ValueError(
-                f"the checkpoint has {len(self.layers)} layers, the config "
-                f"{config.num_hidden_layers}"
-            )
-        self.caches = {
-            i: KVCache(config, config.layer(i).attention.window)
-            for i, w in enumerate(self.layers)
-            if "self_attn" in vars(w)
-        }
+        self.model = self.decoder_class(config, self.layer_class)
+        for layer in self.model.layers:
+            layer.rope = self.rotary_emb
+        self.lm_head = Linear(config.hidden_size, config.vocab_size, bias=False)
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
+        self.load_state_dict(renamed(weights, self.renames))
+        self.layers = self.model.layers
 
     @property
     def recurrent(self) -> list[Checkpoints]:
@@ -198,24 +168,12 @@ class CausalLM(Model):
         return [p for _, _, p, _ in walk(self) if isinstance(p, Checkpoints)]
 
     def layer(self, call: Call, i: int, w, x):
-        """Layer ``i`` on ``x``: the module ``w`` itself, or with no
-        ``layer_class`` ``config.layer(i)`` on its weights ``w``, attending
-        over ``caches``.
-        """
-        if self.layer_class is not None:
-            return w(x, call)
-        attend = partial(self.attend, call, i)
-        return self.config.layer(i)(w, x, attend, call.angles)
+        """Layer ``i``, the module ``w``, on ``x``."""
+        return w(x, call)
 
     def head(self, x):
         """The final norm, then the output head (the embedding, if tied)."""
-        if self.layer_class is not None:
-            return self.lm_head(self.model.norm(x))
-        c = self.config
-        x = c.norm()(self.final_norm, x)
-        if c.tie_word_embeddings:
-            return F.linear(x, self.decoder.embed_tokens.weight)
-        return F.linear(x, self.weights.lm_head.weight)
+        return self.lm_head(self.model.norm(x))
 
     def positions(self, x, call: Call):
         """``x``, the rows ``call`` runs, with the model's absolute positions
@@ -227,9 +185,7 @@ class CausalLM(Model):
         """The embedding rows of ``ids``, bounded as ``ids`` is, or of the
         decode step's token.
         """
-        if self.layer_class is not None:
-            return self.model.embed_tokens(ids)
-        return Copy.step(iron.weight(self.decoder.embed_tokens.weight)[ids])
+        return self.model.embed_tokens(ids)
 
     def body(
         self,
@@ -259,14 +215,9 @@ class CausalLM(Model):
         runs, each memory module reading ``call``.
         """
         c = self.config
-        held = [self.rotary_emb]
-        if self.layer_class is not None:
-            held = [layer.rope for layer in self.layers]
-        for rope in held:
+        for rope in (layer.rope for layer in self.layers):
             if rope is not None and rope not in call.ropes:
                 call.ropes[rope] = rope.rows(call)
-        if self.rotary_emb in call.ropes:
-            call.angles = call.ropes[self.rotary_emb][1]
         x = self.positions(x, call)
         for i, weights in enumerate(self.layers):
             x = self.layer(call, i, weights, x)
@@ -283,22 +234,6 @@ class CausalLM(Model):
             at=call.position,
         )
         return logits, iron.carry(token=drawn, position=call.position + 1)
-
-    def attend(
-        self,
-        call: Call,
-        i: int,
-        q,
-        k,
-        v,
-        *,
-        scale: float | None = None,
-        window: int | None = None,
-    ):
-        """Layer ``i``'s ``KVCache.attend``, built with its layer's
-        ``window``.
-        """
-        return self.caches[i].attend(call, q, k, v, scale)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the decode step's (none), then
