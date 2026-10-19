@@ -4,8 +4,9 @@
 """How a recorded graph is packaged: one full ELF, or an xclbin per step.
 
 ``full_elf`` is mlir-aie's choice of the same name. ``None`` derives it:
-NPU1 or ``check`` forces an xclbin, one dispatch per step; otherwise the image is one full ELF. A full ELF is one command unless a
-step's work grows with a carried value, which ends a command (``Plan.commands``).
+NPU1 or ``check`` forces an xclbin, one dispatch per step; otherwise the
+image is one full ELF. A full ELF is one command unless a step's work grows
+with a carried value, which ends a command (``Plan.commands``).
 """
 
 from __future__ import annotations
