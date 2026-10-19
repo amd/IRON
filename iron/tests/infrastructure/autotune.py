@@ -221,7 +221,8 @@ import subprocess
 import sys
 
 import aie.utils as aie_utils
-from iron.tune.measure import Awake, Standalone, Timing, time_interleaved
+from aie.utils.benchmark import CompletionCores
+from iron.tune.measure import Standalone, Timing, time_interleaved
 from iron.operators import SiLU
 
 SPIN = (
@@ -233,11 +234,11 @@ SPIN = (
 
 aie_utils.ensure_current_device()
 run = Standalone("starved", [SiLU(size=8192, tile_size=256)])
-before = Awake.interrupts()
+before = CompletionCores.interrupts()
 run.callable()
 # The cores timing holds the thread on, or where no completion interrupt is
 # visible (/proc/interrupts in some containers) one core it is left on.
-cores = Awake(before).cpus or {min(os.sched_getaffinity(0))}
+cores = CompletionCores(before).cpus or {min(os.sched_getaffinity(0))}
 os.sched_setaffinity(0, cores)
 spinners = [
     subprocess.Popen([sys.executable, "-c", SPIN, str(cpu)], stdout=subprocess.PIPE, text=True)

@@ -22,7 +22,6 @@ import os
 import re
 import statistics
 import subprocess
-import sys
 import uuid
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
@@ -30,7 +29,13 @@ from pathlib import Path
 import numpy as np
 from aie.iron import Out
 from aie.utils import bfp
-from aie.utils.benchmark import other_npu_users, wait_idle
+from aie.utils.benchmark import (
+    CPU_WAIT_US,
+    CompletionCores,
+    cpu_wait_us,
+    other_npu_users,
+    wait_idle,
+)
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.declare import Operand, Operator
@@ -104,91 +109,6 @@ def platform() -> dict[str, str]:
 def pmode() -> str:
     """The NPU's power mode, as ``xrt-smi`` reports it."""
     return platform()["Power Mode"]
-
-
-# Kernel work holds the timing thread's core for tens of microseconds, mostly
-# outside the timed window; another process, under lazy preemption, until the
-# core's next tick, hundreds of microseconds on.
-CPU_WAIT_US = 100.0
-
-
-class Awake:
-    """While entered, the calling thread on the CPUs the NPU's completions
-    interrupted since ``before`` (``interrupts``), and a spinner at nice 19
-    on each of their SMT siblings: a busy sibling keeps the core out of deep
-    idle, whose exit latency would land only on the runs with long gaps
-    between completions.
-    """
-
-    IRQ = "xdna_mailbox"
-
-    def __init__(self, before: Mapping[str, int]):
-        # A container's cpuset may leave out the cores the completions
-        # interrupt: only the ones it allows can be held.
-        allowed = os.sched_getaffinity(0)
-        self.cpus: set[int] = set()
-        for irq, count in self.interrupts().items():
-            if count > before.get(irq, 0):
-                self.cpus |= self._cpus(f"/proc/irq/{irq}/effective_affinity_list")
-        self.cpus &= allowed
-        self.siblings: set[int] = set()
-        for cpu in self.cpus:
-            self.siblings |= self._cpus(
-                f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
-            )
-        self.siblings = (self.siblings & allowed) - self.cpus
-        self._affinity: set[int] | None = None
-        self._spinners: list[subprocess.Popen] = []
-
-    @classmethod
-    def interrupts(cls) -> dict[str, int]:
-        """Each NPU completion interrupt's count over every CPU, by number."""
-        counts = {}
-        for line in Path("/proc/interrupts").read_text().splitlines():
-            fields = line.split()
-            if fields and fields[-1] == cls.IRQ:
-                counts[fields[0].rstrip(":")] = sum(
-                    int(f) for f in fields[1:] if f.isdigit()
-                )
-        return counts
-
-    @staticmethod
-    def waited_us() -> float:
-        """How long the calling thread has waited, runnable, for a CPU,
-        microseconds in all (``/proc/thread-self/schedstat``)."""
-        return int(Path("/proc/thread-self/schedstat").read_text().split()[1]) / 1e3
-
-    @staticmethod
-    def _cpus(path: str) -> set[int]:
-        cpus = set()
-        for part in Path(path).read_text().strip().split(","):
-            first, _, last = part.partition("-")
-            cpus.update(range(int(first), int(last or first) + 1))
-        return cpus
-
-    def __enter__(self) -> Awake:
-        if self.cpus:
-            self._affinity = os.sched_getaffinity(0)
-            os.sched_setaffinity(0, self.cpus)
-        try:
-            for cpu in sorted(self.siblings):
-                spinner = subprocess.Popen([sys.executable, "-c", "while True: pass"])
-                self._spinners.append(spinner)
-                os.sched_setaffinity(spinner.pid, {cpu})
-                os.setpriority(os.PRIO_PROCESS, spinner.pid, 19)
-        except BaseException:
-            self.__exit__()
-            raise
-        return self
-
-    def __exit__(self, *exc) -> None:
-        for spinner in self._spinners:
-            spinner.kill()
-            spinner.wait()
-        self._spinners.clear()
-        if self._affinity is not None:
-            os.sched_setaffinity(0, self._affinity)
-            self._affinity = None
 
 
 def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
@@ -417,7 +337,7 @@ def time_interleaved(
 ) -> list[Timed]:
     """Each loaded image's median of per-round medians, microseconds, each
     round timed while no other process holds the NPU (``wait_idle``) and the
-    completions' cores are held ``Awake``.
+    completions' cores are held (``CompletionCores``).
 
     Args:
         groups: Per run, the setting it measures, where the runs are
@@ -430,13 +350,13 @@ def time_interleaved(
 
     Raises:
         RuntimeError: A run's middle call waited for a CPU past
-            ``CPU_WAIT_US`` (``Awake.waited_us``) in its median round: the
+            ``CPU_WAIT_US`` (``cpu_wait_us``) in its median round: the
             host was busy enough to hold completions off a core.
     """
     for run in runs:
         run()  # warm: first-run setup lands on nobody's figure
     # Which interrupts a call raises, its first one's setup aside.
-    before = Awake.interrupts()
+    before = CompletionCores.interrupts()
     for run in runs:
         run()
     medians: list[list[float]] = [[] for _ in runs]
@@ -444,7 +364,7 @@ def time_interleaved(
     live = set(range(len(runs)))
     wait_idle(log, holding=True)
     r = 0
-    with Awake(before):
+    with CompletionCores(before):
         while r < timing.rounds:
             timed = {}
             for i, run in enumerate(runs):
@@ -452,11 +372,15 @@ def time_interleaved(
                     continue
                 times, waits = [], []
                 for _ in range(timing.calls):
-                    start = Awake.waited_us()
+                    start = cpu_wait_us()
                     run()
                     times.append(run.last_elapsed)
-                    waits.append(Awake.waited_us() - start)
-                timed[i] = (statistics.median(times) * 1e6, statistics.median(waits))
+                    if start is not None:
+                        waits.append(cpu_wait_us() - start)
+                timed[i] = (
+                    statistics.median(times) * 1e6,
+                    statistics.median(waits) if waits else 0.0,
+                )
             held = other_npu_users(holding=True)
             if held:
                 log(
