@@ -403,7 +403,7 @@ class RMSNorm(iron.Graph):
         return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
 
     @staticmethod
-    def centered(module) -> None:
+    def plus_one(module) -> None:
         """Every ``RMSNorm`` of ``module``, loaded, scaling by ``1 + weight``
         (Gemma's, Qwen3.5's), the sum in float32 rounded to bf16 (Hugging
         Face keeps it float32).

@@ -9,6 +9,8 @@ prompts span several of the toy's 64-row chunks, so the Gated DeltaNet
 layers' states carry across chunk boundaries and into decode steps.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -20,7 +22,7 @@ from iron.tests.support.llama_reference import Decoder
 #: many value heads as key heads, and gated attention layers of one KV head
 #: turning a quarter of each head, alternating (Qwen3.5's three to one
 #: puts the toy's bf16 error at 3.4% of its logits, transformers' own
-#: bf16 at 2.8%); its head untied.
+#: bf16 at 2.8%); its head tied, as the small checkpoints' are.
 TOY = Qwen35Config(
     vocab_size=1024,
     hidden_size=512,
@@ -33,6 +35,7 @@ TOY = Qwen35Config(
     max_seq_len=256,
     prefill_chunk=64,
     layer_types=("linear_attention", "full_attention") * 2,
+    linear_conv_kernel_dim=4,
     linear_key_head_dim=64,
     linear_value_head_dim=64,
     linear_num_key_heads=2,
@@ -56,7 +59,6 @@ class TestQwen35(Decoder):
         out = {
             f"{model}.embed_tokens.weight": (V, E),
             f"{model}.norm.weight": (E,),
-            "lm_head.weight": (V, E),
         }
         for i, kind in enumerate(c.layer_types):
             p = f"{model}.layers.{i}"
@@ -124,6 +126,19 @@ def test_what_is_not_built_is_refused(text):
     data["text_config"] |= text
     with pytest.raises(ValueError, match="not built here"):
         Qwen35Config.from_json(data)
+
+
+def test_a_tied_head_is_read_from_the_root_where_the_text_config_lacks_it():
+    data = TOY.to_json()
+    del data["text_config"]["tie_word_embeddings"]
+    assert not Qwen35Config.from_json(
+        data | {"tie_word_embeddings": False}
+    ).tie_word_embeddings
+
+
+def test_layer_types_other_than_its_two_are_refused():
+    with pytest.raises(ValueError, match="layer_types"):
+        dataclasses.replace(TOY, layer_types=("attention",) * 4)
 
 
 def test_a_config_reads_back_from_its_json():

@@ -9,7 +9,7 @@ iron.applications.qwen3_5.model``.
 
 Qwen3.5 is Llama's layer with most layers' attention replaced by a Gated
 DeltaNet (``GatedDeltaNet``), every norm scaling by ``1 + weight``
-(``RMSNorm.centered``). The attention layers norm q and k per head, turn
+(``RMSNorm.plus_one``). The attention layers norm q and k per head, turn
 only the first ``partial_rotary_factor`` of each head, and gate their
 output by a sigmoid of a second projection of the input, q's rows each
 head's [q | gate] in the checkpoint (``GatedAttention``).
@@ -49,7 +49,6 @@ class Qwen35Config(DecoderConfig):
     rope_theta: float = dataclasses.field(
         metadata={"json": "rope_parameters.rope_theta"}
     )
-    tie_word_embeddings: bool = False
     layer_types: tuple[str, ...] = dataclasses.field(
         kw_only=True, metadata={"convert": tuple}
     )
@@ -58,14 +57,20 @@ class Qwen35Config(DecoderConfig):
         kw_only=True,
         metadata={"json": "rope_parameters.partial_rotary_factor"},
     )
-    linear_conv_kernel_dim: int = dataclasses.field(default=4, kw_only=True)
-    linear_key_head_dim: int = dataclasses.field(default=128, kw_only=True)
-    linear_value_head_dim: int = dataclasses.field(default=128, kw_only=True)
-    linear_num_key_heads: int = dataclasses.field(default=16, kw_only=True)
-    linear_num_value_heads: int = dataclasses.field(default=32, kw_only=True)
+    linear_conv_kernel_dim: int = dataclasses.field(kw_only=True)
+    linear_key_head_dim: int = dataclasses.field(kw_only=True)
+    linear_value_head_dim: int = dataclasses.field(kw_only=True)
+    linear_num_key_heads: int = dataclasses.field(kw_only=True)
+    linear_num_value_heads: int = dataclasses.field(kw_only=True)
 
     def __post_init__(self):
         super().__post_init__()
+        kinds = set(self.layer_types) - {"full_attention", "linear_attention"}
+        if len(self.layer_types) != self.num_hidden_layers or kinds:
+            raise ValueError(
+                f"Qwen35Config: layer_types {self.layer_types} are not "
+                f"{self.num_hidden_layers} of full_attention and linear_attention"
+            )
         rotary = int(self.head_dim * self.partial_rotary_factor)
         object.__setattr__(self, "rotary_dim", rotary)
 
@@ -77,13 +82,16 @@ class Qwen35Config(DecoderConfig):
             ValueError: ``data`` asks for what is not built: biased
                 attention or a scaled RoPE.
         """
-        text = data.get("text_config", {})
+        text = dict(data.get("text_config", {}))
+        # Its own, else the file's root, where a released checkpoint has it.
+        if "tie_word_embeddings" in data:
+            text.setdefault("tie_word_embeddings", data["tie_word_embeddings"])
         if text.get("attention_bias"):
             raise ValueError(f"{source}: attention_bias is not built here")
         kind = text.get("rope_parameters", {}).get("rope_type", "default")
         if kind != "default":
             raise ValueError(f"{source}: RoPE {kind!r} is not built here")
-        return super().from_json(data, source)
+        return super().from_json({**data, "text_config": text}, source)
 
     @property
     def conv_channels(self) -> int:
@@ -107,6 +115,7 @@ class GatedAttention(Attention):
         # Each head's [q | gate] rows, as every q's then every gate's.
         w = self.q_proj.weight.reshape(H, 2, D, -1).transpose(1, 0, 2, 3)
         self.q_proj.weight, self.gate = w.reshape(2, H * D, -1)
+        self.q_proj.out_features = H * D
 
     def output(self, o, x):
         return self.o_proj(o * Sigmoid.step(F.linear(x, self.gate)))
@@ -211,7 +220,7 @@ class Qwen35(CausalLM):
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
-        RMSNorm.centered(self)
+        RMSNorm.plus_one(self)
 
 
 if __name__ == "__main__":

@@ -59,7 +59,7 @@ public API adds its entry under Unreleased.
   k chunk, so ResNet-50's 7x7 to 28x28 maps and 64-channel 1x1 convs build.
 - Application `qwen3_5` (Qwen3.5's text decoder), judged by a device-free
   toy golden.
-- `RMSNorm.centered(module)`: every `RMSNorm` of a loaded module scaling by
+- `RMSNorm.plus_one(module)`: every `RMSNorm` of a loaded module scaling by
   `1 + weight`, as Gemma's and Qwen3.5's do.
 - `Attention.output(o, x)`, the block's output from its heads: `o_proj`,
   or a model's own, as Qwen3.5's gates it.

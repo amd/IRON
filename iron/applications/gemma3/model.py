@@ -9,7 +9,7 @@ iron.applications.gemma3.model``.
 
 Gemma 3 is a sandwich-normed layer (``SandwichLayer``) with q and k normed
 per head, GELU-tanh, attention scaled by ``query_pre_attn_scalar ** -0.5``,
-every norm scaling by ``1 + weight`` (``RMSNorm.centered``), the embedding
+every norm scaling by ``1 + weight`` (``RMSNorm.plus_one``), the embedding
 scaled by ``sqrt(hidden_size)`` and the output head tied to it. Its
 sliding layers attend to their own query and the ``sliding_window - 1``
 keys before it, and turn q and k by a RoPE table of their own base
@@ -108,7 +108,7 @@ class Gemma3(CausalLM):
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
-        RMSNorm.centered(self)
+        RMSNorm.plus_one(self)
 
     def lookup(self, ids):
         # The embedding times sqrt(hidden_size) in the weights' dtype.

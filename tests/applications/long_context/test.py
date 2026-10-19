@@ -128,6 +128,7 @@ APPLICATIONS = {
     "smollm3_3b": Application(
         SmolLM3, "smollm3-3b", INDEX, "tokenizer.json", staged=False
     ),
+    # Unmeasured: DEEP_KL until each one's first run.
     "gemma3_1b": Application(
         Gemma3, "gemma-3-1b-it", "model.safetensors", "tokenizer.json", staged=False
     ),

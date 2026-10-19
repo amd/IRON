@@ -15,6 +15,7 @@ import pytest
 
 from iron.applications.gemma3 import Gemma3
 from iron.applications.gemma4 import Gemma4
+from iron.applications.qwen3_5 import Qwen35
 from iron.applications.qwen3_moe import Qwen3Moe
 from iron.applications.smollm3 import SmolLM3
 from iron.lm.testing import (
@@ -32,6 +33,7 @@ DECODERS = [
     pytest.param((Gemma3, "gemma-3-1b-it/model.safetensors", 256), id="gemma3"),
     pytest.param((Gemma4, "gemma-4-e2b-it/model.safetensors", 256), id="gemma4"),
     pytest.param((SmolLM3, f"smollm3-3b/{INDEX}", 1024), id="smollm3"),
+    pytest.param((Qwen35, "qwen3.5-0.8b/model.safetensors", 1024), id="qwen3_5"),
     pytest.param(
         (Qwen3Moe, f"qwen3-30b-a3b/{INDEX}", 1024),
         id="qwen3_moe",
