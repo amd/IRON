@@ -223,6 +223,8 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- The `models` extra installs what `Model.load` imports: huggingface_hub
+  and tokenizers as well as jinja2.
 - `iron.operators` imports every operator on import, with no lazy
   loading or `.pyi` stubs. `iron.operators.CATALOG` maps each operator's
   profile name to its class (flm's as `"flm.<name>"`); `__all__` holds

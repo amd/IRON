@@ -35,7 +35,11 @@ IRON is an open-source & close-to-metal Python API enabling fast and efficient e
 
 ## Quick start
 
-After [installing](#installation-linux) IRON and `pip install -r requirements_examples.txt`, given a Hugging Face token for meta-llama's gated repository:
+After [installing](#installation-linux) IRON, install what loading a model needs, and give Hugging Face a token for meta-llama's gated repository:
+
+```bash
+pip install 'iron[models]'
+```
 
 ```python
 from iron.applications.llama import Llama
@@ -96,8 +100,8 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    pip install -r requirements.txt
    ```
 
-   A model's chat template renders with jinja2, the `models` extra:
-   `pip install '.[models]'` from this checkout.
+   Loading a model needs the `models` extra (`pip install 'iron[models]'`):
+   huggingface_hub, tokenizers and jinja2.
 
 1. To test your installation, you can try to build and run the example below:
    ```bash

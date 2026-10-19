@@ -18,8 +18,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Chat messages rendered by a checkpoint's chat_template.
-models = ["jinja2"]
+# Model.load: a Hugging Face download, its tokenizer and its chat template.
+models = ["huggingface_hub", "jinja2", "tokenizers"]
 
 [tool.setuptools.packages.find]
 include = ["iron*"]
