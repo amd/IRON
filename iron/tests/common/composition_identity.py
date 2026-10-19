@@ -39,7 +39,7 @@ def _sequence(shapes):
     ]
     seq = Image(
         Recording.of_steps(
-            "fused_identity_probe",
+            "composition_identity_probe",
             steps,
             [f"{b}{i}" for i in range(len(shapes)) for b in "wx"],
             [f"y{i}" for i in range(len(shapes))],

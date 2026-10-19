@@ -210,7 +210,6 @@ public API adds its entry under Unreleased.
 
 - `Image.prepare()` and `Image.link()` are private; `compile()` builds.
 - `Operator.per_call_gather` is gone: a gather by input ids is `Copy`'s alone.
-- `lm.main(model_class)`, was `lm.main(model)`.
 - `Handle` is a frozen record of `buffer` (a `Buffer`, which every handle
   on it shares), `shape`, `dtype`, `valid` (was `bounds`) and `layout`:
   `Dense(offset)`, `Strided(tap, offset, repeat, length, window)` or
@@ -474,8 +473,9 @@ public API adds its entry under Unreleased.
   `aie.utils.benchmark.other_npu_users` and `wait_idle` replace them.
 - `iron.tune.measure.CPU_WAIT_US` and `Awake`: mlir-aie's
   `aie.utils.benchmark.CPU_WAIT_US` and `CompletionCores` replace them.
-- `XclbinChain.KERNELS`: mlir-aie's `CompilableDesign.chain` splits a chain
-  at the hardware context's kernel limit.
+- `PerStep.KERNELS` (`XclbinChain`'s, before its rename): mlir-aie's
+  `CompilableDesign.chain` splits a chain at the hardware context's kernel
+  limit.
 - `field(probe=)`: the tuner times each distinct value of such a field, as
   it does every other (Clamp's `low` and `high`).
 - `CausalLM`'s `layer_class = None` path: its `decoder=` argument,

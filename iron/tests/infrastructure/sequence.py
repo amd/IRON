@@ -185,14 +185,14 @@ def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
     ``main`` over the uncut image's designs, byte for byte; only the cut
     image's key moves.
     """
-    fusions = {}
+    compositions = {}
     for commands in ((), (1,)):
         seq = _build_add_relu_sequence(
             "infra_full_elf_commands", FullELF(commands=commands)
         )
         seq._prepare()
-        fusions[commands] = Composition(seq)
-    whole, cut = (fusions[c].text() for c in ((), (1,)))
+        compositions[commands] = Composition(seq)
+    whole, cut = (compositions[c].text() for c in ((), (1,)))
     device = re.compile(r"^  aie\.device\(\w+\) @(\w+) \{$.*?^  \}$", re.M | re.S)
     designs = {m.group(1): m.group(0) for m in device.finditer(whole)}
     assert len(designs) == 2
@@ -203,7 +203,7 @@ def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
     names = [re.match(r" @(\w+)", text) for text in commands]
     assert names[0] is None and names[1].group(1) == Composition.sequence_name(1)
     assert whole[whole.rindex("aie.device(") :].count("aie.runtime_sequence") == 1
-    assert fusions[()].identity != fusions[(1,)].identity
+    assert compositions[()].identity != compositions[(1,)].identity
 
 
 # ---------------------------------------------------------------------------
