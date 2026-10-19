@@ -14,7 +14,7 @@ from typing import Annotated, Any, ClassVar, Union, get_args, get_origin
 
 from aie.iron import In, InOut, Out
 
-from .field import AutoSpec, ParamSpec
+from .field import AutoSpec, ParamSpec, Unresolvable
 from .member import Member
 from .operand import Operand
 from .shape import Select, Shape
@@ -360,6 +360,9 @@ class Declaration:
 
         A ``replicate`` stream is paid once per channel rather than per column,
         and a stream with no ``per=`` once.
+
+        Raises:
+            Unresolvable: Not even one column's streams fit.
         """
         streams = [
             m
@@ -378,7 +381,11 @@ class Declaration:
             shared = sum(m.replicate for m in lanes) * num_channels + once
             if per_core:
                 cols = min(cols, (budget - shared) // per_core)
-        return max(1, cols)
+        if cols < 1:
+            raise Unresolvable(
+                f"{self.name}: one column's streams exceed this device's shim DMA budget"
+            )
+        return cols
 
     def call_operands(
         self, args, kwargs

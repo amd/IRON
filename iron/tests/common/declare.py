@@ -730,6 +730,12 @@ def test_resolve_columns_is_the_count_given_or_the_most_that_fit():
         op.resolve_columns(None, None)
 
 
+def test_no_column_count_resolves_when_one_column_overruns_the_shim():
+    # 16 input channels: A's 16 a column and B's one.
+    with pytest.raises(Unresolvable, match="one column's streams exceed"):
+        MV(M=96, K=64).resolve_columns(NPU2, None, num_channels=16)
+
+
 def test_a_stream_with_no_lanes_is_paid_once_in_the_shim_budget():
     class Scaled(MV):
         scale = In(MV.M, obj_shape=(MV.tile_out,), per=MV.columns)
