@@ -25,7 +25,8 @@ public API adds its entry under Unreleased.
   `activation`, `subtree` and `residual_add` (blocks' `_add` before).
 - `DecoderLayer.mix(h, call)`, the block between `input_layernorm` and the
   first residual: attention over the layer's cache unless a layer mixes its
-  rows otherwise (LFM2's convolution, Granite 4.0-H's Mamba).
+  rows otherwise (LFM2's convolution, Granite 4.0-H's Mamba, Qwen3.5's
+  Gated DeltaNet).
 - `Config.json_prefix`, the object of `config.json` a config's fields are
   read from: `"text_config."` for EmbeddingGemma 2's text encoder, SmolVLM's
   text model and Gemma 4, `"audio_config."` and `"vision_config."` for
@@ -303,8 +304,6 @@ public API adds its entry under Unreleased.
   (`graph_tracer`), in `iron.common.graph.record` (`trace`).
 - The autotuner's matmul bound holds on npu2_1col too: it reads the core
   clock by architecture (mlir-aie's `dev.core_mhz`), not by device name.
-- `EncodeStep.angles` is `EncodeStep.ropes`: the (q, k) angles each
-  layer's `rope` names, as `Call.ropes` holds a decoder's.
 - An operator declares itself with mlir-aie's declaration
   (`aie.utils.compile.jit.params`): `param()` for a compile-time parameter,
   `tunable()` for one resolution or the tuner picks, `per_call()` for a
@@ -460,7 +459,12 @@ public API adds its entry under Unreleased.
 - `F.linear(precision=)` is the one way to ask for an accurate projection: at
   `Precision.HIGHEST` several rows run core GEMM, whose float32 sums round
   once, where they ran flm.ProjectionGEMM before; one row, a GEMV that
-  rounds once, takes any precision. `Attention` and `MLP` take `precision` in place of `accurate`.
+  rounds once, takes any precision. `Attention` and `MLP` take `precision`
+  in place of `accurate`.
+- `time_interleaved` returns mlir-aie's `Stats` for each image, its
+  per-round medians in `samples_us`, in place of `measure.Timed`.
+- `RMSNorm` and `LayerNorm` no longer check `normalized_shape` or `eps` as
+  they are built: `F.rms_norm` and `F.layer_norm` refuse them when recorded.
 - `HuggingFaceWhisper` and `HuggingFaceVLM` move to their applications'
   `hugging_face.py`, as EmbeddingGemma 2's builders are, which only tests
   and golden recording import.
@@ -524,6 +528,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `AdjacentPacking(max_members=)`: a pack grows while the placer takes it.
+  `time_shape(fit_cache=)`: it reads the default `FIT_CACHE`.
 - `iron.lm.EncodeStep`: an encoder's layers are called with a `Call`, one
   prompt of `rows` from position 0, its `ropes` and `embeddings` as before.
 - A graph body's `aie.iron.DispatchTime[T]` per-call value, which no view
