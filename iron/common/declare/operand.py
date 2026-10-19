@@ -67,34 +67,26 @@ class Operand:
     (what the stream does not drain stays as the host gave it). On an
     instance, ``op.x`` is it.
 
+    Every attribute it does not define is the resolved ``In``, ``Out`` or
+    ``InOut``'s (``shape``, ``dtype``, ``lanes``, ...), read on use: a shape
+    may depend on a tunable the device fills.
+
     Attributes:
-        member: The declared operand, on the class.
         op: The operator.
+        lane_handles: The fifo end ``build()`` bound to each lane.
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
-        self.member = member
         self.op = op
         self.lane_handles: list[Any] = []
         self._decl = member.of(op)
 
-    name = property(lambda self: self.member.name)
-    role = property(lambda self: type(self.member))
-    fills = property(lambda self: self.member.fills)
-    drains = property(lambda self: self.member.drains)
-    dims = property(lambda self: self.member.dims)
-    obj_dims = property(lambda self: self.member.obj_dims)
-    per = property(lambda self: self.member.per)
-    depth = property(lambda self: self.member.depth)
-    replicate = property(lambda self: self.member.replicate)
-    when = property(lambda self: self.member.when)
-    # Resolved on use: a shape may depend on a tunable the device fills.
-    shape = property(lambda self: self._decl.shape)
-    dtype = property(lambda self: self._decl.dtype)
-    elements = property(lambda self: self._decl.elements)
-    streamed = property(lambda self: self._decl.streamed)
-    obj_shape = property(lambda self: self._decl.obj_shape)
-    lanes = property(lambda self: self._decl.lanes)
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):  # unset while a copy is made
+            raise AttributeError(name)
+        return getattr(self._decl, name)
+
+    role = property(lambda self: type(self._decl))
 
     @property
     def tap(self) -> TensorAccessPattern:
