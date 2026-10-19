@@ -89,7 +89,16 @@ class Config:
         path = Path(path)
         if path.name != "config.json":
             path = (path if path.is_dir() else path.parent) / "config.json"
-        data = json.loads(path.read_text())
+        return cls.from_json(json.loads(path.read_text()), path)
+
+    @classmethod
+    def from_json(cls, data: dict, source="config.json") -> "Config":
+        """``from_checkpoint`` on ``data``, a ``config.json`` already
+        parsed; ``source`` names it in an error.
+
+        Raises:
+            ValueError: ``data`` lacks a field that has no default.
+        """
         kwargs, missing = {}, []
         for f in dataclasses.fields(cls):
             key = f.metadata.get("json", f.name)
@@ -105,7 +114,7 @@ class Config:
             convert = f.metadata.get("convert")
             kwargs[f.name] = convert(value) if convert else value
         if missing:
-            raise ValueError(f"{path} lacks {missing}")
+            raise ValueError(f"{source} lacks {missing}")
         return cls(**kwargs)
 
     def to_json(self) -> dict:

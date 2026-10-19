@@ -17,10 +17,7 @@ queries turn by a second table, the first one times that scale
 """
 
 import dataclasses
-import json
 import math
-import tempfile
-from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -29,7 +26,7 @@ import iron
 import iron.functional as F
 from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
 from iron.lm.blocks import Rope
-from iron.lm.checkpoint import leaves
+from iron.lm.checkpoint import _tree, leaves
 
 
 @dataclasses.dataclass(frozen=True)
@@ -125,19 +122,11 @@ class Ministral3Config(DecoderConfig):
             object.__setattr__(self, "rope_attention_scaling", scale)
 
     @classmethod
-    def from_checkpoint(cls, path) -> "Ministral3Config":
-        """``DecoderConfig.from_checkpoint``, from the ``text_config`` of a
-        Mistral 3 checkpoint's ``config.json`` where it has one.
+    def from_json(cls, data: dict, source="config.json") -> "Ministral3Config":
+        """``DecoderConfig.from_json``, on the ``text_config`` of a Mistral 3
+        checkpoint's ``config.json`` where it has one.
         """
-        path = Path(path)
-        if path.name != "config.json":
-            path = (path if path.is_dir() else path.parent) / "config.json"
-        text = json.loads(path.read_text()).get("text_config")
-        if text is None:
-            return super().from_checkpoint(path)
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "config.json").write_text(json.dumps(text))
-            return super().from_checkpoint(d)
+        return super().from_json(data.get("text_config", data), source)
 
     def to_json(self) -> dict:
         out = super().to_json()
@@ -207,37 +196,27 @@ class Ministral3Layer(DecoderLayer):
 
 
 def text_weights(weights):
-    """The text decoder's tensors of ``weights`` at ``model.*`` and
-    ``lm_head.*``: a Mistral 3 checkpoint holds them at
-    ``language_model.model.*`` and ``language_model.lm_head.*`` as
-    transformers 4 saved it, or ``model.language_model.*`` and
-    ``lm_head.*`` as transformers 5 does. A text checkpoint is returned as
-    it is.
+    """The text decoder's modules of a checkpoint's tree, as ``model`` and
+    ``lm_head``: a Mistral 3 checkpoint holds them at
+    ``language_model.model`` and ``language_model.lm_head`` as
+    transformers 4 saved it, or ``model.language_model`` and ``lm_head`` as
+    transformers 5 does. A text checkpoint is returned as it is.
 
     Raises:
         ValueError: The checkpoint is FP8 (a ``weight_scale_inv``).
     """
-    named = weights if isinstance(weights, dict) else dict(leaves(weights))
-    if any(n.endswith("weight_scale_inv") for n in named):
+    if any(n.endswith("weight_scale_inv") for n, _ in leaves(weights)):
         raise ValueError(
             "Ministral3: an FP8 checkpoint (weight_scale_inv) is not read; "
             "take a Base (bf16) one"
         )
-    if any(n.startswith("model.language_model.") for n in named):
-        moves = {"model.language_model.": "model.", "lm_head.": "lm_head."}
-    elif any(n.startswith("language_model.") for n in named):
-        moves = {
-            "language_model.model.": "model.",
-            "language_model.lm_head.": "lm_head.",
-        }
+    if hasattr(getattr(weights, "model", None), "language_model"):
+        model, head = weights.model.language_model, weights.lm_head
+    elif hasattr(weights, "language_model"):
+        model, head = weights.language_model.model, weights.language_model.lm_head
     else:
         return weights
-    return {
-        new + n[len(old) :]: t
-        for n, t in named.items()
-        for old, new in moves.items()
-        if n.startswith(old)
-    }
+    return _tree({"model": model, "lm_head": head}, "", weights._file)
 
 
 class Ministral3(CausalLM):
