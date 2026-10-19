@@ -14,9 +14,9 @@ its task's prefix and a unit-length embedding comes out:
 """
 
 import argparse
+import dataclasses
 import math
 import time
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
@@ -29,7 +29,15 @@ import iron
 import iron.functional as F
 from iron import Precision, lm
 from iron.tune.autotune import Timed
-from iron.lm import Checkpoint, Encoder, rope_angles
+from iron.lm import (
+    Attention,
+    Checkpoint,
+    Encoder,
+    NoCache,
+    PleLayer,
+    RMSNorm,
+    rope_angles,
+)
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
@@ -97,6 +105,22 @@ class Tokenizer:
         return out
 
 
+class TextLayer(PleLayer):
+    """Layer ``i``: unscaled attention over RMS-normed q, k and v, its own
+    KV groups and head size (``Config.heads``), turned by its head size's
+    RoPE table, a sliding layer's within ``sliding_window`` positions.
+    """
+
+    def __init__(self, c: Config, i: int):
+        G, D, _ = c.heads(i)
+        heads = dataclasses.replace(c, num_key_value_heads=G, head_dim=D)
+        sliding = c.layer_types[i] != "full_attention"
+        window = NoCache(c.sliding_window if sliding else None)
+        super().__init__(c, i, Attention(heads, i, norms="qkv"), cache=window)
+        self.self_attn.scaling = 1.0
+        self.rope = D
+
+
 class EmbeddingGemma(Encoder):
     """The text encoder over ``max_tokens`` rows at most, one compile for
     every length.
@@ -115,8 +139,7 @@ class EmbeddingGemma(Encoder):
     """
 
     profile = PROFILES
-    # On the old layer path until EmbeddingGemma 2 moves onto modules.
-    layer_class = None
+    layer_class = TextLayer
 
     def __init__(
         self,
@@ -127,8 +150,9 @@ class EmbeddingGemma(Encoder):
         c = config
         self.tokenizer = tokenizer
         w = self.language_model = weights.language_model
-        super().__init__(config, c.max_tokens, w.layers)
-        self.final_norm = w.norm
+        super().__init__(config, c.max_tokens)
+        self.final_norm = RMSNorm(c.hidden_size, c.eps)
+        self.load_layers(weights, "language_model.layers.", "language_model.norm.")
         scale = np.sqrt(np.float32(c.hidden_size))
         embedding = w.embed_tokens.weight.astype(np.float32) * scale
         self.embed_scaled = embedding.astype(bfloat16)
@@ -146,20 +170,14 @@ class EmbeddingGemma(Encoder):
         self.mrl = mrl.reshape(-1, c.hidden_size)
         self.unit = np.full(width, 1 / np.sqrt(width), bfloat16)
 
-    def sanitize(self, w):
-        """``w`` and its ``layer_scalar`` as the row RowwiseMul takes."""
-        scalar = w.layer_scalar
-        row = np.full(self.config.hidden_size, scalar[0], scalar.dtype)
-        return SimpleNamespace(**vars(w), scale=row)
-
     def lookup(self, ids):
         table = iron.weight(self.embed_scaled)
         return Copy.step(table[ids])
 
     def angles(self, n):
-        return {D: table[:n] for D, table in self.rope.items()}
+        return {D: (table[:n],) * 2 for D, table in self.rope.items()}
 
-    def layer(self, step, i, w, x):
+    def layer(self, step, i, layer, x):
         """Layer ``i`` on ``x``, its per-layer input projected from the
         step's embeddings.
         """
@@ -171,15 +189,7 @@ class EmbeddingGemma(Encoder):
         ple = F.linear(step.embeddings, projection, precision=Precision.HIGHEST)
         norm = tree.per_layer_projection_norm.weight
         ple = F.rms_norm(ple, ple.shape[-1:], norm, c.eps * c.hidden_size)
-        layer = c.layer(i)
-        return layer(
-            w,
-            x,
-            partial(self.attend, step, i),
-            step.angles[layer.attention.head_dim],
-            ple=ple,
-            scale=w.scale,
-        )
+        return layer(x, step, ple)
 
     def pool(self, x, n):
         """The mean of the ``n`` rows of ``x``: one zero query at scale 0

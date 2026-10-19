@@ -510,7 +510,7 @@ def test_random_fill_draws_a_bias_about_zero(tmp_path):
     assert abs(tree.norm.weight.mean() - 1) < 0.1 and abs(tree.proj.bias.mean()) < 0.1
 
 
-def test_renamed_is_a_copy_a_sanitize_may_change(toy_path):
+def test_renamed_is_a_copy_a_caller_may_change(toy_path):
     tree = Checkpoint(toy_path).tree("unread")
     layer = tree.model.layers[0]
     renamed(layer, {}).input_layernorm = None

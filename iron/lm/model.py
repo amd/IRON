@@ -172,8 +172,7 @@ class Model(iron.Graph):
     """
 
     # The checkpoint's runs of dotted names, matched anywhere in a path, that
-    # the model's modules (or its config's ``layer``, in a layer) read under
-    # another name, by that name.
+    # the model's modules read under another name, by that name.
     renames: ClassVar[dict[str, str]] = {}
     # What loads the checkpoint into transformers to record its goldens.
     hugging_face: type = HuggingFace
@@ -462,13 +461,6 @@ class Model(iron.Graph):
         later = len(drawn) - 1
         rate = later / (last - first) if later else math.nan
         self.stats = Stats(first - began, rate)
-
-    def sanitize(self, w):
-        """The checkpoint's layer module ``w``, after ``renames``, as its
-        config's ``layer`` reads it (mlx-lm's ``sanitize``); ``w`` itself by
-        default.
-        """
-        return w
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version, the decode step (no input)

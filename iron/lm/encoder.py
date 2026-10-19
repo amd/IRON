@@ -12,7 +12,6 @@ in a text model's space.
 """
 
 import dataclasses
-from functools import partial
 from typing import Any, ClassVar
 
 import numpy as np
@@ -20,7 +19,7 @@ import numpy as np
 import iron
 from iron import Scratchpad
 
-from .blocks import EncoderLayer, NoCache
+from .blocks import EncoderLayer
 from .checkpoint import renamed
 from .model import Model
 
@@ -31,7 +30,8 @@ class EncodeStep:
 
     # The rows valid this call, a per-call value in a trace.
     rows: Any
-    angles: Any
+    # The RoPE angles each layer's ``rope`` names, a pair of q's and k's.
+    ropes: Any
     # The rows ``forward`` took, before any positions.
     embeddings: Any
 
@@ -49,44 +49,38 @@ class Encoder(Model):
         config: The model's shape: ``num_hidden_layers`` layers, and
             ``inputs`` reads its ``vocab_size``.
         max_tokens: The longest sequence a call takes.
-        layers: With no ``layer_class`` (EmbeddingGemma 2's, until it is on
-            modules), the checkpoint's layers, each ``config.layer(i)`` on
-            its weights.
     """
 
-    layer_class: ClassVar[type[iron.Graph] | None] = EncoderLayer
+    layer_class: ClassVar[type[iron.Graph]] = EncoderLayer
 
-    def __init__(self, config, max_tokens: int, layers: list = ()):
+    def __init__(self, config, max_tokens: int):
         self.config = config
-        if self.layer_class is None:
-            self.layers = [self.sanitize(renamed(w, self.renames)) for w in layers]
-        else:
-            self.layers = [
-                self.layer_class(config, i) for i in range(config.num_hidden_layers)
-            ]
+        self.layers = [
+            self.layer_class(config, i) for i in range(config.num_hidden_layers)
+        ]
         self.max_tokens = max_tokens
         # The rows a call gives, the first ``soft(values)`` of them valid.
         self.soft_rows = max_tokens
-        # The norm module after the last layer (with no ``layer_class``, by
-        # ``config.norm()``).
+        # The norm module after the last layer.
         self.final_norm = None
 
-    def load_layers(self, tree, layers: str, norm: str) -> None:
+    def load_layers(self, tree, layers: str, norm: str | None) -> None:
         """Layer ``i`` from ``tree``, renamed by ``renames``, at
-        ``{layers}{i}.``, then ``final_norm`` at ``norm``.
+        ``{layers}{i}.``, then ``final_norm`` at ``norm`` (None: none).
         """
         tree = renamed(tree, self.renames)
         for i, layer in enumerate(self.layers):
             layer.load_state_dict(tree, path=f"{layers}{i}.")
-        self.final_norm.load_state_dict(tree, path=norm)
+        if norm is not None:
+            self.final_norm.load_state_dict(tree, path=norm)
 
     def lookup(self, ids):
         """The embedding rows of ``ids``, bounded as ``ids`` is."""
         raise NotImplementedError(f"{type(self).__name__} defines no lookup()")
 
     def angles(self, rows):
-        """The RoPE angles of the first ``rows`` positions, as ``layer`` reads
-        them; None: no RoPE.
+        """The RoPE angles of the first ``rows`` positions, by the ``rope``
+        each layer names (``EncodeStep.ropes``); None: no RoPE.
         """
         return None
 
@@ -97,28 +91,8 @@ class Encoder(Model):
         return x
 
     def layer(self, step: EncodeStep, i: int, weights, x):
-        """Layer ``i``, the module ``weights``, on ``x``; with no
-        ``layer_class``, ``config.layer(i)`` on its weights, attending
-        bidirectionally (``attend``).
-        """
-        if self.layer_class is not None:
-            return weights(x, step)
-        attend = partial(self.attend, step, i)
-        return self.config.layer(i)(weights, x, attend, step.angles)
-
-    def attend(
-        self,
-        step: EncodeStep,
-        i: int,
-        q,
-        k,
-        v,
-        *,
-        scale: float | None = None,
-        window: int | None = None,
-    ):
-        """``NoCache(window).attend``, for a layer with no ``layer_class``."""
-        return NoCache(window).attend(step, q, k, v, scale)
+        """Layer ``i``, the module ``weights``, on ``x``."""
+        return weights(x, step)
 
     def pool(self, x, rows):
         """The rows ``head`` reads from the ``rows`` valid rows of ``x``; all
@@ -129,17 +103,16 @@ class Encoder(Model):
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
 
-    def forward(self, x, rows, angles):
+    def forward(self, x, rows, ropes):
         """The layers, the final norm, ``pool`` and ``head`` over the rows
-        ``x``, bounded to their first ``rows``, rotated by ``angles``.
+        ``x``, bounded to their first ``rows``, rotated by ``ropes``
+        (``EncodeStep.ropes``).
         """
-        step = EncodeStep(rows, angles, x)
+        step = EncodeStep(rows, ropes, x)
         x = self.positions(x, step)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
-        if self.final_norm is not None and self.layer_class is None:
-            x = self.config.norm()(self.final_norm, x)
-        elif self.final_norm is not None:
+        if self.final_norm is not None:
             x = self.final_norm(x)
         return self.head(self.pool(x, rows))
 
@@ -200,15 +173,16 @@ class Tower(Encoder):
         max_tokens: The rows its layers take.
         soft_rows: The rows of soft tokens a call returns, the first
             ``soft`` of them valid.
-        layers: As ``Encoder`` takes them.
     """
 
-    def __init__(self, config, max_tokens: int, soft_rows: int, layers: list = ()):
-        super().__init__(config, max_tokens, layers)
+    def __init__(self, config, max_tokens: int, soft_rows: int):
+        super().__init__(config, max_tokens)
         self.soft_rows = soft_rows
 
     def front(self, *inputs, **values):
-        """The rows the layers take, bounded, and the angles they rotate by."""
+        """The rows the layers take, bounded, and the angles they rotate by
+        (``EncodeStep.ropes``).
+        """
         raise NotImplementedError(f"{type(self).__name__} defines no front()")
 
     def inputs(self, *raw) -> tuple[np.ndarray, dict]:

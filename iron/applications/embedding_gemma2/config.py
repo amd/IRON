@@ -17,13 +17,17 @@ import numpy as np
 
 from iron import Precision, lm
 
-from .blocks import SandwichLayer, TextLayer
-
 PROFILES = Path(__file__).with_name("profiles")
 
 
 @dataclasses.dataclass(frozen=True)
 class Config(lm.Config):
+    # Unbiased projections at HIGHEST, RoPE over whole heads (``Attention``,
+    # ``GatedMLP``).
+    attention_bias = mlp_bias = False
+    rotary_dim = None
+    precision = Precision.HIGHEST
+
     vocab_size: int = dataclasses.field(
         default=262144, metadata={"json": "text_config.vocab_size"}
     )
@@ -121,30 +125,6 @@ class Config(lm.Config):
             return self.global_kv_groups, self.global_head_dim, self.global_rope_base
         return self.num_key_value_heads, self.head_dim, self.rope_theta
 
-    def layer(self, i: int) -> TextLayer:
-        """Layer ``i``: unscaled attention over RMS-normed values, a sliding
-        layer's within ``sliding_window`` positions.
-        """
-        G, D, _ = self.heads(i)
-        window = (
-            None if self.layer_types[i] == "full_attention" else self.sliding_window
-        )
-        return TextLayer(
-            lm.AttentionSpec(
-                self.num_attention_heads,
-                G,
-                D,
-                self.eps,
-                qk_norm=True,
-                v_norm=True,
-                scale=1.0,
-                window=window,
-                precision=Precision.HIGHEST,
-            ),
-            lm.MLPSpec(self.hidden_act, precision=Precision.HIGHEST),
-            self.norm(),
-        )
-
 
 @dataclasses.dataclass(frozen=True)
 class AudioConfig(lm.Config):
@@ -230,6 +210,11 @@ class AudioConfig(lm.Config):
 
 @dataclasses.dataclass(frozen=True)
 class VisionConfig(lm.Config):
+    # As the text encoder's, every head its own.
+    attention_bias = mlp_bias = False
+    rotary_dim = None
+    precision = Precision.HIGHEST
+
     hidden_size: int = dataclasses.field(
         default=768, metadata={"json": "vision_config.hidden_size"}
     )
@@ -283,23 +268,9 @@ class VisionConfig(lm.Config):
     chunk: int = lm.not_json(4096)
     patch_columns: int = lm.not_json(8)
 
-    def layer(self, i: int) -> SandwichLayer:
-        """Layer ``i``: unscaled attention over RMS-normed values."""
-        H = self.num_attention_heads
-        return SandwichLayer(
-            lm.AttentionSpec(
-                H,
-                H,
-                self.head_dim,
-                self.eps,
-                qk_norm=True,
-                v_norm=True,
-                scale=1.0,
-                precision=Precision.HIGHEST,
-            ),
-            lm.MLPSpec(self.hidden_act, precision=Precision.HIGHEST),
-            self.norm(),
-        )
+    @property
+    def num_key_value_heads(self) -> int:
+        return self.num_attention_heads
 
     def size(self, height: int, width: int, max_tokens: int) -> tuple[int, int]:
         """The `(height, width)` the processor resizes an image to: the

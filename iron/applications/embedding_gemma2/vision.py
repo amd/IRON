@@ -15,11 +15,37 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, Scratchpad
-from iron.lm import ImagePatches, Tower, rope_angles
+from iron.lm import Attention, ImagePatches, NoCache, SandwichLayer, Tower, rope_angles
 from iron.operators.axpy import AXPY
 from iron.operators.gemm import GEMM
 
 from .config import PROFILES, VisionConfig
+
+
+class VisionLayer(SandwichLayer):
+    """Layer ``i``: unscaled attention over RMS-normed q, k and v, each
+    head's channels of q and k reordered as they load, so that the axial
+    RoPE turns halves rather than each half of a head.
+    """
+
+    def __init__(self, c: VisionConfig, i: int):
+        super().__init__(c, i, Attention(c, i, norms="qkv"), cache=NoCache())
+        self.self_attn.scaling = 1.0
+        self.rope = c.head_dim
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        a = self.self_attn
+        half, E = a.head_dim // 2, a.q_proj.in_features
+        quarter = np.arange(half // 2)
+        # The x half's first and second quarters, then the y half's.
+        order = np.concatenate(
+            [quarter, quarter + half, quarter + half // 2, quarter + 3 * half // 2]
+        )
+        for p in (a.q_proj, a.k_proj):
+            p.weight = p.weight.reshape(a.heads, a.head_dim, E)[:, order].reshape(E, E)
+        for norm in (a.q_norm, a.k_norm):
+            norm.weight = norm.weight[order]
 
 
 class VisionTower(Tower):
@@ -51,8 +77,7 @@ class VisionTower(Tower):
     """
 
     profile = PROFILES
-    # On the old layer path until EmbeddingGemma 2 moves onto modules.
-    layer_class = None
+    layer_class = VisionLayer
 
     def __init__(self, config: VisionConfig, weights: SimpleNamespace):
         c = config
@@ -60,7 +85,8 @@ class VisionTower(Tower):
         self.embed_vision = weights.embed_vision
         window = c.pool**2
         tokens = -(-(c.patches // window) // c.rows) * c.rows
-        super().__init__(config, c.patches, tokens, tree.encoder.layers)
+        super().__init__(config, c.patches, tokens)
+        self.load_layers(weights, "vision_tower.encoder.layers.", None)
         self.processor = ImagePatches(
             c.patches,
             c.largest,
@@ -131,7 +157,8 @@ class VisionTower(Tower):
 
     def window_positions(self, h, *, n, hk, wk, walked):
         """``h`` plus each patch's x and y position embeddings, and its
-        angles, for an image of ``hk`` by ``wk`` windows, ``n`` patches.
+        angles by head size (``EncodeStep.ropes``), for an image of ``hk`` by
+        ``wk`` windows, ``n`` patches.
         """
         c = self.config
         T = c.patches
@@ -153,7 +180,8 @@ class VisionTower(Tower):
             walk = self.walk(table, x_side, repeat=repeat, wk=wk, walked=walked)
             self.angle_rows[:walked, cut] = walk
         angles = TensorAccessPattern.full(self.angle_rows.shape)[:T]
-        return h, self.angle_rows.at(angles, (T, c.head_dim), bounds={0: n})
+        angles = self.angle_rows.at(angles, (T, c.head_dim), bounds={0: n})
+        return h, {c.head_dim: (angles, angles)}
 
     def walk(self, table, x_side: bool, *, repeat, wk, walked):
         """The window blocks of ``table``, x's by window column or y's by
@@ -183,30 +211,6 @@ class VisionTower(Tower):
         for module, ps in (("self_attn", "qkvo"), ("mlp", ("gate", "up", "down")))
         for p in ps
     }
-
-    def sanitize(self, w):
-        """``w`` with each head's channels of q and k reordered: RoPE turns
-        halves, not each half of a head.
-        """
-        c = self.config
-        half, E = c.head_dim // 2, c.hidden_size
-        quarter = np.arange(half // 2)
-        # The x half's first and second quarters, then the y half's.
-        order = np.concatenate(
-            [quarter, quarter + half, quarter + half // 2, quarter + 3 * half // 2]
-        )
-        heads = (c.num_attention_heads, c.head_dim, E)
-
-        def reordered(p):
-            return SimpleNamespace(
-                weight=p.weight.reshape(heads)[:, order].reshape(E, E)
-            )
-
-        a = w.self_attn
-        a.q_proj, a.k_proj = reordered(a.q_proj), reordered(a.k_proj)
-        a.q_norm = SimpleNamespace(weight=a.q_norm.weight[order])
-        a.k_norm = SimpleNamespace(weight=a.k_norm.weight[order])
-        return w
 
     def pool(self, x, n):
         return GEMM.step(self.pooling[:, :n], x, precision=Precision.HIGHEST)

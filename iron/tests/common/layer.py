@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``iron.lm``'s layer parts (``AttentionSpec``, ``MLPSpec``, ``Norm``,
-``DecoderLayerSpec``), device-free: the steps each traces as it is configured,
-and EmbeddingGemma 2's text layer, the parts at their fullest, through its
-operators' references against Hugging Face's own Gemma 4 layer.
+"""The norms and GELU ``F`` refuses, device-free, and EmbeddingGemma 2's
+text layer (``SandwichLayer`` and ``PleLayer``, the shared blocks at their
+fullest) through its operators' references against Hugging Face's own
+Gemma 4 layer.
 """
 
-from collections import Counter
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,10 +15,9 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron import Precision
-from iron.lm import AttentionSpec, DecoderLayerSpec, MLPSpec, Norm
-from iron.applications.embedding_gemma2.blocks import SandwichLayer, TextLayer
-from iron.operators.mha import MHA
+from iron.applications.embedding_gemma2.config import Config
+from iron.applications.embedding_gemma2.model import TextLayer
+from iron.lm import EncodeStep, blocks
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -56,30 +54,24 @@ def shapes(E, H, G, D, F) -> dict[str, tuple[int, ...]]:
     }
 
 
-def module(rng, shape, names, dtype=np.float32, bias=False, norm_bias=False, **parts):
-    """A layer module of ``names`` at ``shape`` drawn from ``rng`` (a
-    matrix's deviation ``1/sqrt(in)``), each projection with a bias if
-    ``bias``, each norm if ``norm_bias``, then ``parts`` by name.
+def module(rng, shape, names, dtype) -> SimpleNamespace:
+    """A layer module of ``names`` at ``shape`` drawn from ``rng``, a
+    matrix's deviation ``1/sqrt(in)``.
     """
     root = SimpleNamespace()
-    drawn = {}
     for name in names:
         size = shape[name]
         weight = rng.standard_normal(size) / np.sqrt(size[-1] if len(size) == 2 else 1)
-        part = SimpleNamespace(weight=weight.astype(dtype))
-        if (bias and len(size) == 2) or (norm_bias and len(size) == 1):
-            part.bias = (rng.standard_normal(size[0]) * 0.1).astype(dtype)
-        drawn[name] = part
-    for name, part in {**drawn, **parts}.items():
         *parents, leaf = name.split(".")
         node = root
         for key in parents:
             node = vars(node).setdefault(key, SimpleNamespace())
-        vars(node)[leaf] = part
+        vars(node)[leaf] = SimpleNamespace(weight=weight.astype(dtype))
     return root
 
 
-LLAMA = (
+# In the order the golden's weights were drawn.
+GEMMA = (
     "input_layernorm",
     "post_attention_layernorm",
     "self_attn.q_proj",
@@ -89,14 +81,12 @@ LLAMA = (
     "mlp.gate_proj",
     "mlp.up_proj",
     "mlp.down_proj",
-)
-GEMMA = (
-    *LLAMA,
     "pre_feedforward_layernorm",
     "post_feedforward_layernorm",
     "self_attn.q_norm",
     "self_attn.k_norm",
 )
+
 WHISPER = (
     "self_attn_layer_norm",
     "self_attn.q_proj",
@@ -114,109 +104,9 @@ WHISPER = (
 )
 
 
-def attending(rows):
-    """Attention over every row, as an encoder's."""
-
-    def attend(q, k, v, *, scale, window):
-        o = MHA.step(
-            q,
-            k,
-            v,
-            heads_interleaved=True,
-            kv_interleaved=True,
-            causal=False,
-            window=window,
-            scale=scale,
-        )
-        return o.reshape(rows, HEADS * HEAD)
-
-    return attend
-
-
-class Model(iron.Graph):
-    """``layer`` on the module ``weights``, every row attending to every
-    other, turned by zero angles.
-    """
-
-    def __init__(self, layer, weights, rows=T):
-        self.part, self.weights, self.rows = layer, weights, rows
-        self.angles = iron.weight(np.zeros((rows, HEAD), bfloat16))
-
-    def body(self, x):
-        return self.part(self.weights, x, attending(self.rows), self.angles)
-
-
-def ops(layer, names, **parts) -> Counter:
-    """The operators ``layer`` traces on a module of ``names`` and ``parts``."""
-    rng = np.random.default_rng(3)
-    shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN)
-    w = module(rng, shape, names, bfloat16, **parts)
-    steps = Model(layer, w).trace(x=(T, WIDTH)).steps
-    return Counter(type(s.op).__name__ for s in steps)
-
-
-def llama(residual=1.0) -> DecoderLayerSpec:
-    return DecoderLayerSpec(
-        AttentionSpec(HEADS, GROUPS, HEAD, precision=Precision.HIGHEST),
-        MLPSpec(precision=Precision.HIGHEST),
-        Norm(1e-6),
-        residual,
-    )
-
-
-def test_the_parts_decide_the_steps():
-    plain = ops(llama(), LLAMA)
-    assert plain == Counter(
-        GEMM=7, RMSNorm=2, RoPE=2, MHA=1, ElementwiseAdd=2, SiLU=1, ElementwiseMul=1
-    )
-    gemma = SandwichLayer(
-        AttentionSpec(
-            HEADS,
-            GROUPS,
-            HEAD,
-            1e-6,
-            qk_norm=True,
-            v_norm=True,
-            precision=Precision.HIGHEST,
-        ),
-        MLPSpec(precision=Precision.HIGHEST),
-        Norm(1e-6),
-    )
-    # Sandwich norms, q and k norms and the v norm.
-    assert ops(gemma, GEMMA) - plain == Counter(RMSNorm=5)
-    bias = SimpleNamespace(
-        weight=np.zeros((HEADS * HEAD, WIDTH), bfloat16),
-        bias=np.zeros(HEADS * HEAD, bfloat16),
-    )
-    biased = ops(llama(), LLAMA, **{"self_attn.q_proj": bias})
-    assert biased - plain == Counter(RowwiseAdd=1)
-    scaled = ops(llama(residual=0.25), LLAMA)
-    assert plain - scaled == Counter(ElementwiseAdd=2)
-    assert scaled - plain == Counter(AXPY=2)
-
-
-@pytest.mark.parametrize("residual", [1.0, 0.25])
-def test_a_one_row_step_keeps_its_rows_through_the_residual(residual):
-    """One row projects by GEMV, whose reference output is flat: the
-    residual keeps the layer's input shape, scaled or not.
-    """
-    rng = np.random.default_rng(8)
-    w = module(rng, shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN), LLAMA, bfloat16)
-    model = Model(llama(residual), w, rows=1)
-    got = np.asarray(model.reference(np.ones((1, WIDTH), bfloat16)))
-    assert got.shape == (1, WIDTH)
-    assert [tuple(h.shape) for h in model.trace(x=(1, WIDTH)).outputs] == [(1, WIDTH)]
-
-
 def test_an_activation_with_no_operator_is_refused():
     with pytest.raises(ValueError, match="no operator for hidden_act 'gelu'"):
-        MLPSpec("gelu")
-
-
-def test_a_layer_norm_at_another_epsilon_than_its_kernels_is_refused():
-    norm = SimpleNamespace(weight=np.ones(WIDTH), bias=np.zeros(WIDTH))
-    with pytest.raises(ValueError, match="the kernel takes no epsilon but"):
-        Norm(1e-6, bias=True)(norm, SimpleNamespace(shape=(1, WIDTH)))
+        blocks.activation("gelu")
 
 
 @pytest.mark.parametrize(
@@ -251,11 +141,6 @@ def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
         ValueError, match=rf"\[4\] is not the last axis of input \[4, {WIDTH}\]"
     ):
         norm(x, 4)
-
-
-def test_a_q_k_or_v_norm_needs_its_epsilon():
-    with pytest.raises(ValueError, match="needs its eps"):
-        AttentionSpec(HEADS, GROUPS, HEAD, qk_norm=True)
 
 
 def test_gelu_refuses_the_exact_form_it_has_no_operator_for():
@@ -333,29 +218,26 @@ def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
     w.layer_scalar = np.array([0.75], bfloat16)
     x = rng.standard_normal((ROWS, WIDTH)).astype(bfloat16)
     ple = rng.standard_normal((ROWS, PLE)).astype(bfloat16)
-    layer = TextLayer(
-        AttentionSpec(
-            HEADS,
-            GROUPS,
-            HEAD,
-            1e-6,
-            qk_norm=True,
-            v_norm=True,
-            scale=1.0,
-            precision=Precision.HIGHEST,
-        ),
-        MLPSpec("gelu_pytorch_tanh", precision=Precision.HIGHEST),
-        Norm(1e-6),
+    config = Config(
+        hidden_size=WIDTH,
+        num_hidden_layers=1,
+        num_attention_heads=HEADS,
+        intermediate_size=HIDDEN,
+        layer_types=("full_attention",),
+        global_kv_groups=GROUPS,
+        global_head_dim=HEAD,
+        ple_dim=PLE,
     )
+    layer = TextLayer(config, 0)
+    layer.rope = None
+    layer.load_state_dict(w)
 
     class Text(iron.Graph):
         def __init__(self):
-            self.weights = w
-            self.scale = np.full(WIDTH, w.layer_scalar[0], bfloat16)
+            self.layer = layer
 
         def body(self, x, ple):
-            attend = attending(ROWS)
-            return layer(self.weights, x, attend, None, ple=ple, scale=self.scale)
+            return self.layer(x, EncodeStep(ROWS, {}, x), ple)
 
     got = np.asarray(Text().reference(x, ple), np.float32)
     reference = golden("gemma_layer", lambda: HuggingFaceGemma(w, x, ple), w, ple)

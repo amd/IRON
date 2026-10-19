@@ -67,6 +67,7 @@ class Encoding(Shape):
     attention_bias: bool = True
     mlp_bias: bool = True
     rotary_dim: int | None = None
+    precision: None = None
     eps: float = 1e-6
 
 

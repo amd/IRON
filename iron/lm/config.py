@@ -13,8 +13,6 @@ from pathlib import Path
 
 import numpy as np
 
-from .blocks import Norm
-
 RopeScaling = Callable[[np.ndarray], np.ndarray]
 
 
@@ -76,6 +74,9 @@ class Config:
     (``from_checkpoint``). ``DecoderConfig`` and EmbeddingGemma 2's config
     subclass it; ``eps`` is every model's RMS norm epsilon.
     """
+
+    # Every projection's in iron.lm's blocks; None is ``F.linear``'s.
+    precision = None
 
     eps: float = dataclasses.field(
         default=1e-6, kw_only=True, metadata={"json": "rms_norm_eps"}
@@ -148,10 +149,6 @@ class Config:
                 node = node.setdefault(part, {})
             node[leaf] = list(value) if isinstance(value, tuple) else value
         return out
-
-    def norm(self) -> Norm:
-        """Every norm's kind: RMS at ``eps``."""
-        return Norm(self.eps)
 
 
 @dataclasses.dataclass(frozen=True)

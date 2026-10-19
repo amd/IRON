@@ -323,16 +323,14 @@ tunables and profiles already do that job.
 - `blocks.py`: the leaf modules that declare their weights with
   `iron.param` (`Linear`, `Embedding`, `RMSNorm`, `LayerNorm`), the blocks
   a layer is made of (`Attention`, `CrossAttention`, `GatedMLP`, `MLP`,
-  `DecoderLayer`, `EncoderLayer`, `CrossDecoderLayer`), the memory a layer
-  owns (`KVCache`, `NoCache`, `CrossCache`) and the model's `Rope`; the
-  descriptions EmbeddingGemma 2, not yet on modules, reads (`Norm`,
-  `AttentionSpec`, `MLPSpec`, `DecoderLayerSpec`); and the front-end
-  graphs.
+  `DecoderLayer`, `EncoderLayer`, `CrossDecoderLayer`, `SandwichLayer`,
+  `PleLayer`), the memory a layer owns (`KVCache`, `NoCache`,
+  `CrossCache`) and the model's `Rope`; and the front-end graphs.
 - `model.py`: `Model`, which loads from a checkpoint's directory or
   repository id (`Model.load`, its context fitted to the host by
   `Model.fit`) and generates (`generate(prompt, max_tokens, sampler=None)`,
-  `stream`, timings on `model.stats`); its `sanitize(w)` maps a
-  checkpoint's module names to the parts'. `Model.cpu_reference()` is what
+  `stream`, timings on `model.stats`); its `renames` maps a checkpoint's
+  module names to the parts'. `Model.cpu_reference()` is what
   a model is judged by: transformers' logits recorded in `golden.npz`
   beside the checkpoint (`golden.py`), or with drawn weights the graph's
   own reference on the host (`OnHost`, which runs it in place of the

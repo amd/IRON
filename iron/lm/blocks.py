@@ -8,7 +8,6 @@ its steps trace into the model's. Weights are a checkpoint's ``(out, in)``,
 projected by ``F.linear``.
 """
 
-import dataclasses
 import math
 from functools import partial
 
@@ -318,15 +317,24 @@ class ImagePatches(iron.Graph):
 
 
 class Linear(iron.Graph):
-    """``torch.nn.Linear``: ``x @ weight.T``, plus ``bias`` where it holds one."""
+    """``torch.nn.Linear``: ``x @ weight.T``, plus ``bias`` where it holds one,
+    at ``precision`` (None: ``F.linear``'s).
+    """
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = True):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        precision: Precision | None = None,
+    ):
         self.in_features, self.out_features = in_features, out_features
         self.weight = iron.param(out_features, in_features)
         self.bias = iron.param(out_features) if bias else None
+        self.precision = precision
 
     def body(self, x):
-        return F.linear(x, self.weight, self.bias)
+        return F.linear(x, self.weight, self.bias, precision=self.precision)
 
     def split(self, x, *rows: int, **gemv) -> list:
         """``x`` through each run of ``rows`` of the weight in turn, one
@@ -340,6 +348,7 @@ class Linear(iron.Graph):
                 x,
                 self.weight[end - n : end],
                 None if self.bias is None else self.bias[end - n : end],
+                precision=self.precision,
                 **gemv,
             )
             for n, end in zip(rows, ends)
@@ -580,10 +589,11 @@ class Attention(iron.Graph):
     first ``rotary`` columns where the config gives a ``rotary_dim``,
     attended over the layer's ``KVCache``, then ``o_proj``; q, k and v
     with a bias where the config's ``attention_bias`` says, o where
-    ``o_bias`` does. ``projections`` builds what ``project`` reads. ``scaling``
-    is the logits' scale; None is ``head_dim ** -0.5``. A layer that reads
-    another's cache, holding the same ``KVCache``, sets ``k_proj`` and
-    ``v_proj`` to None, and projects and writes no keys or values.
+    ``o_bias`` does, each at the config's ``precision``. ``projections``
+    builds what ``project`` reads. ``scaling`` is the logits' scale; None
+    is ``head_dim ** -0.5``. A layer that reads another's cache, holding
+    the same ``KVCache``, sets ``k_proj`` and ``v_proj`` to None, and
+    projects and writes no keys or values.
 
     Args:
         c: The decoder's shape.
@@ -606,7 +616,7 @@ class Attention(iron.Graph):
         )
         self.heads, self.groups, self.head_dim = H, G, D
         self.projections(c)
-        self.o_proj = Linear(H * D, E, bias=o_bias)
+        self.o_proj = Linear(H * D, E, bias=o_bias, precision=c.precision)
         self.q_norm = RMSNorm(D, c.eps) if "q" in norms else None
         self.k_norm = RMSNorm(D, c.eps) if "k" in norms else None
         self.v_norm, self.eps = "v" in norms, c.eps
@@ -615,17 +625,22 @@ class Attention(iron.Graph):
 
     def projections(self, c) -> None:
         """``q_proj``, ``k_proj`` and ``v_proj``."""
-        E, D, bias = c.hidden_size, self.head_dim, c.attention_bias
-        self.q_proj = Linear(E, self.heads * D, bias=bias)
-        self.k_proj = Linear(E, self.groups * D, bias=bias)
-        self.v_proj = Linear(E, self.groups * D, bias=bias)
+        E, D = c.hidden_size, self.head_dim
+        linear = partial(Linear, bias=c.attention_bias, precision=c.precision)
+        self.q_proj = linear(E, self.heads * D)
+        self.k_proj = linear(E, self.groups * D)
+        self.v_proj = linear(E, self.groups * D)
 
     def project(self, x, **gemv) -> list:
         """q, k and v of ``x``, each projection given the GEMV's ``gemv``;
         None for a projection the layer does not hold.
         """
         return [
-            None if p is None else F.linear(x, p.weight, p.bias, **gemv)
+            (
+                None
+                if p is None
+                else F.linear(x, p.weight, p.bias, precision=p.precision, **gemv)
+            )
             for p in (self.q_proj, self.k_proj, self.v_proj)
         ]
 
@@ -668,7 +683,12 @@ class CrossAttention(Attention):
     """
 
     def project(self, x, **gemv) -> list:
-        return [F.linear(x, self.q_proj.weight, self.q_proj.bias, **gemv), None, None]
+        q = self.q_proj
+        return [
+            F.linear(x, q.weight, q.bias, precision=q.precision, **gemv),
+            None,
+            None,
+        ]
 
     def keys_values(self, memory) -> list:
         """The keys and values of ``memory`` ``(rows, width)``, each
@@ -681,13 +701,14 @@ class CrossAttention(Attention):
 class MLP(iron.Graph):
     """A feed-forward on ``c``'s shape: ``fc2(act(fc1(x)))``, ``act`` its
     ``hidden_act``, each projection with a bias where the config's
-    ``mlp_bias`` says.
+    ``mlp_bias`` says, at its ``precision``.
     """
 
     def __init__(self, c):
-        E, M, bias = c.hidden_size, c.intermediate_size, c.mlp_bias
-        self.fc1 = Linear(E, M, bias=bias)
-        self.fc2 = Linear(M, E, bias=bias)
+        E, M = c.hidden_size, c.intermediate_size
+        linear = partial(Linear, bias=c.mlp_bias, precision=c.precision)
+        self.fc1 = linear(E, M)
+        self.fc2 = linear(M, E)
         self.act = activation(c.hidden_act)
 
     def body(self, x):
@@ -698,20 +719,23 @@ class GatedMLP(iron.Graph):
     """A gated feed-forward on ``c``'s shape:
     ``down_proj(act(gate_proj(x)) * up_proj(x))``, ``act`` its
     ``hidden_act``, each projection with a bias where the config's
-    ``mlp_bias`` says. ``projections`` builds what ``body`` reads besides
-    ``down_proj``.
+    ``mlp_bias`` says, at its ``precision``. ``projections`` builds what
+    ``body`` reads besides ``down_proj``.
     """
 
     def __init__(self, c):
         self.projections(c)
-        self.down_proj = Linear(c.intermediate_size, c.hidden_size, bias=c.mlp_bias)
+        self.down_proj = Linear(
+            c.intermediate_size, c.hidden_size, c.mlp_bias, c.precision
+        )
         self.act = activation(c.hidden_act)
 
     def projections(self, c) -> None:
         """``gate_proj`` and ``up_proj``."""
-        E, M, bias = c.hidden_size, c.intermediate_size, c.mlp_bias
-        self.gate_proj = Linear(E, M, bias=bias)
-        self.up_proj = Linear(E, M, bias=bias)
+        E, M = c.hidden_size, c.intermediate_size
+        linear = partial(Linear, bias=c.mlp_bias, precision=c.precision)
+        self.gate_proj = linear(E, M)
+        self.up_proj = linear(E, M)
 
     def body(self, x):
         gate, up = self.gate_proj(x), self.up_proj(x)
@@ -725,18 +749,18 @@ class DecoderLayer(iron.Graph):
     added to its residual times ``residual_multiplier``. ``rope`` is the
     ``Rope`` whose rows of the call (``Call.ropes``) turn q and k, the
     model's unless a model sets another; None: no RoPE. ``self_attn``, its
-    o biased with q, k and v where ``attention_bias`` says, and ``mlp`` are
-    a model's own where given.
+    o biased with q, k and v where ``attention_bias`` says, ``mlp`` and
+    ``cache`` are a model's own where given.
     """
 
-    def __init__(self, c, i: int, self_attn=None, mlp=None):
+    def __init__(self, c, i: int, self_attn=None, mlp=None, cache=None):
         self.input_layernorm = RMSNorm(c.hidden_size, c.eps)
         if self_attn is None:
             self_attn = Attention(c, i, o_bias=c.attention_bias)
         self.self_attn = self_attn
         self.post_attention_layernorm = RMSNorm(c.hidden_size, c.eps)
         self.mlp = GatedMLP(c) if mlp is None else mlp
-        self.cache = KVCache(c, c.window)
+        self.cache = KVCache(c, c.window) if cache is None else cache
         self.rope: Rope | None = None
         self.residual_multiplier = 1.0
 
@@ -790,155 +814,49 @@ class CrossDecoderLayer(DecoderLayer):
         return _add(x, h, self.residual_multiplier)
 
 
-def _linear(x, p, **kw):
-    """``x`` through the linear module ``p``: its ``weight``, and its
-    ``bias`` where it holds one.
-    """
-    return F.linear(x, p.weight, vars(p).get("bias"), **kw)
-
-
-@dataclasses.dataclass(frozen=True)
-class Norm:
-    """A norm module's: an RMS norm by its ``weight``, or with ``bias`` an
-    affine LayerNorm.
+class SandwichLayer(DecoderLayer):
+    """``DecoderLayer`` with each block's output normed again before its
+    residual, by ``post_attention_layernorm`` and
+    ``post_feedforward_layernorm``, and ``mlp``'s input by
+    ``pre_feedforward_layernorm`` (Gemma's).
     """
 
-    eps: float
-    bias: bool = False
+    def __init__(self, c, i: int, self_attn=None, mlp=None, cache=None):
+        super().__init__(c, i, self_attn, mlp, cache)
+        self.pre_feedforward_layernorm = RMSNorm(c.hidden_size, c.eps)
+        self.post_feedforward_layernorm = RMSNorm(c.hidden_size, c.eps)
 
-    def __call__(self, w, x):
-        if self.bias:
-            return F.layer_norm(x, x.shape[-1:], w.weight, w.bias, self.eps)
-        return F.rms_norm(x, x.shape[-1:], w.weight, self.eps)
+    def body(self, x, call):
+        angles = None if self.rope is None else call.ropes[self.rope]
+        h = self.self_attn(self.input_layernorm(x), self.cache, call, angles)
+        x = _add(x, self.post_attention_layernorm(h), self.residual_multiplier)
+        h = self.mlp(self.pre_feedforward_layernorm(x))
+        return _add(x, self.post_feedforward_layernorm(h), self.residual_multiplier)
 
 
-@dataclasses.dataclass(frozen=True)
-class AttentionSpec:
-    """Self-attention over an attention module's ``q_proj``, ``k_proj``,
-    ``v_proj`` and ``o_proj``, each with its bias where it holds one. A
-    model kind gives the attention itself: ``attend(q, k, v, scale=,
-    window=)`` on ``(rows, heads, head_dim)`` returns ``(rows, heads *
-    head_dim)``.
-
-    Args:
-        heads: The query heads.
-        groups: The key and value heads.
-        head_dim: A head's width.
-        eps: The q, k and v norms' epsilon, needed where one is set.
-        qk_norm: Whether each head of q and k is RMS-normed by the module's
-            ``q_norm`` and ``k_norm``.
-        v_norm: Whether each head of v is RMS-normed, unweighted.
-        scale: The logits' scale; None is ``head_dim ** -0.5``.
-        window: The positions a query reaches either side; None is all.
-        precision: Every projection's ``Precision``; None is ``F.linear``'s.
+class PleLayer(SandwichLayer):
+    """``SandwichLayer``, then its per-layer input ``ple`` ``(rows,
+    ple_dim)`` gated in (``per_layer_input_gate``, ``per_layer_projection``,
+    ``post_per_layer_input_norm``) and the sum scaled by ``layer_scalar``
+    (Gemma 4's).
     """
 
-    heads: int
-    groups: int
-    head_dim: int
-    eps: float | None = None
-    qk_norm: bool = False
-    v_norm: bool = False
-    scale: float | None = None
-    window: int | None = None
-    precision: Precision | None = None
+    def __init__(self, c, i: int, self_attn=None, mlp=None, cache=None):
+        super().__init__(c, i, self_attn, mlp, cache)
+        E, P = c.hidden_size, c.ple_dim
+        self.per_layer_input_gate = Linear(E, P, False, c.precision)
+        self.per_layer_projection = Linear(P, E, False, c.precision)
+        self.post_per_layer_input_norm = RMSNorm(E, c.eps)
+        self.layer_scalar = iron.param(1)
 
-    def __post_init__(self):
-        if (self.qk_norm or self.v_norm) and self.eps is None:
-            raise ValueError("AttentionSpec: a q, k or v norm needs its eps")
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        # The row RowwiseMul takes.
+        scalar, E = self.layer_scalar, self.per_layer_projection.out_features
+        self.scale = np.full(E, scalar[0], scalar.dtype)
 
-    def __call__(self, w, x, attend, angles):
-        """The block on ``x`` ``(rows, width)``; ``angles``, a row per
-        position, turns q and k (None: no RoPE).
-        """
-        n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
-        q, k, v = (
-            _linear(x, p, precision=self.precision, **self.head_tiles(n))
-            for p in (w.q_proj, w.k_proj, w.v_proj)
-        )
-        q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
-        if self.qk_norm:
-            q = F.rms_norm(q, (D,), w.q_norm.weight, self.eps)
-            k = F.rms_norm(k, (D,), w.k_norm.weight, self.eps)
-        if self.v_norm:
-            v = F.rms_norm(v, (D,), eps=self.eps)
-        if angles is not None:
-            q, k = F.rope(q, angles), F.rope(k, angles)
-        o = attend(
-            q.reshape(n, H, D),
-            k.reshape(n, G, D),
-            v.reshape(n, G, D),
-            scale=self.scale,
-            window=self.window,
-        )
-        return _linear(o, w.o_proj, precision=self.precision)
-
-    def head_tiles(self, rows: int) -> dict:
-        """For one row, GEMV tiles of half a head. Set here, not in the
-        profile: q's shape is o's when ``heads * head_dim`` is the width, so
-        the profile cannot tell them apart.
-        """
-        return dict(tile_size_output=self.head_dim // 2) if rows == 1 else {}
-
-
-@dataclasses.dataclass(frozen=True)
-class MLPSpec:
-    """A feed-forward module's: ``down_proj(act(gate_proj(x)) * up_proj(x))``,
-    or plain, ``fc2(act(fc1(x)))``.
-
-    Args:
-        activation: ``hidden_act``, ``"silu"`` or ``"gelu_pytorch_tanh"``.
-        gated: Whether it is gated.
-        precision: Every projection's ``Precision``; None is ``F.linear``'s.
-    """
-
-    activation: str = "silu"
-    gated: bool = True
-    precision: Precision | None = None
-
-    def __post_init__(self):
-        activation(self.activation)
-
-    def act(self, x):
-        return activation(self.activation)(x)
-
-    def __call__(self, w, x):
-        act = self.act
-        if not self.gated:
-            h = act(_linear(x, w.fc1, precision=self.precision))
-            return _linear(h, w.fc2, precision=self.precision)
-        gate = _linear(x, w.gate_proj, precision=self.precision)
-        up = _linear(x, w.up_proj, precision=self.precision)
-        return _linear(act(gate) * up, w.down_proj, precision=self.precision)
-
-
-@dataclasses.dataclass(frozen=True)
-class DecoderLayerSpec:
-    """A pre-norm transformer layer module's: ``self_attn`` after
-    ``input_layernorm``, then ``mlp`` after ``post_attention_layernorm``,
-    each block's output added to its residual times ``residual``.
-    """
-
-    attention: AttentionSpec
-    mlp: MLPSpec
-    norm: Norm
-    residual: float = 1.0
-
-    def __call__(self, w, x, attend, angles):
-        x = self.block(
-            x,
-            w.input_layernorm,
-            partial(self.attention, w.self_attn, attend=attend, angles=angles),
-        )
-        return self.block(x, w.post_attention_layernorm, partial(self.mlp, w.mlp))
-
-    def block(self, x, pre, f, post=None):
-        """``x`` plus ``f`` on ``x`` normed by the norm module ``pre``, its
-        output normed again by ``post`` where given (``add``).
-        """
-        h = f(self.norm(pre, x))
-        return self.add(x, h if post is None else self.norm(post, h))
-
-    def add(self, x, y):
-        """``x`` plus ``y`` times ``residual``, in ``x``'s shape."""
-        return _add(x, y, self.residual)
+    def body(self, x, call, ple):
+        x = super().body(x, call)
+        g = self.mlp.act(self.per_layer_input_gate(x)) * ple
+        g = self.post_per_layer_input_norm(self.per_layer_projection(g))
+        return _add(x, g, self.residual_multiplier) * self.scale

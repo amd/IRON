@@ -14,6 +14,13 @@ public API adds its entry under Unreleased.
 
 - `CausalLM.rope_start(n, begin)`: the RoPE table row a prompt chunk reads
   first, which a caller writing `rope_start` itself passes.
+- `SandwichLayer` (Gemma's: each block's output normed again before its
+  residual) and `PleLayer` (Gemma 4's: a per-layer input gated in, the sum
+  scaled by `layer_scalar`). EmbeddingGemma 2's text and vision layers are
+  built on them, and its audio tower's conformer layers are modules.
+- `Linear(precision=)`, and `Config.precision`, every projection's in
+  `Attention`, `MLP` and `GatedMLP` (None: `F.linear`'s).
+- `DecoderLayer(cache=)`: a model's own memory module for the layer.
 - `iron.lm.checkpoint.subtree(tree, **modules)`: a tree of a checkpoint's
   modules at new names, as a model loads part of a checkpoint.
 - `Session(model)`: one conversation over a `CausalLM`'s loaded versions,
@@ -204,6 +211,8 @@ public API adds its entry under Unreleased.
 
 - The autotuner's matmul bound holds on npu2_1col too: it reads the core
   clock by architecture (mlir-aie's `dev.core_mhz`), not by device name.
+- `EncodeStep.angles` is `EncodeStep.ropes`: the (q, k) angles each
+  layer's `rope` names, as `Call.ropes` holds a decoder's.
 - An operator declares itself with mlir-aie's declaration
   (`aie.utils.compile.jit.params`): `param()` for a compile-time parameter,
   `tunable()` for one resolution or the tuner picks, `per_call()` for a
@@ -437,6 +446,11 @@ public API adds its entry under Unreleased.
 - An operator's nested `Array` class and `array_config()`: its `build()`,
   `kernel()` and `scalars()` are on the operator itself, and `layout()`
   (mlir-aie's) is the operator as its cores see it.
+- `AttentionSpec`, `MLPSpec`, `DecoderLayerSpec`, `Norm`, `Config.norm`,
+  `Model.sanitize`, and `Encoder`'s `layer_class = None` path (its
+  `layers=` argument and `attend`); EmbeddingGemma 2's `Config.layer` and
+  `VisionConfig.layer`. A module derives a tensor in its own
+  `load_state_dict`.
 - `iron.common.field`, `Auto`, `Extent` and `Select`, and `Value(words=)`:
   mlir-aie's `param`, `tunable`, `per_call` and `Select`, and IRON's
   `Block(words)` for a shipped image's block of words, replace them.

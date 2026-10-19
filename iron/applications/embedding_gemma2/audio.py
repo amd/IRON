@@ -6,6 +6,7 @@ space on the NPU, as one graph.
 """
 
 import math
+from functools import partial
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,7 +16,8 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, Scratchpad
-from iron.lm import Conv2d, Tower, blocks
+from iron.lm import Conv2d, Linear, RMSNorm, Tower, blocks
+from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
 from iron.operators.gemm import GEMM
@@ -23,8 +25,141 @@ from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.softmax import Softmax
 
-from .blocks import Clipped
 from .config import PROFILES, AudioConfig
+
+
+class Clipped(iron.Graph):
+    """A checkpoint's clipped linear: clamp, project by ``linear``, clamp."""
+
+    def __init__(self, in_features: int, out_features: int):
+        self.linear = Linear(in_features, out_features, bias=False)
+        bound = partial(iron.param, dtype=np.float32)
+        self.input_min, self.input_max = bound(), bound()
+        self.output_min, self.output_max = bound(), bound()
+
+    def clamp(self, x):
+        return Clamp.step(x, low=float(self.input_min), high=float(self.input_max))
+
+    def project(self, x, weight: np.ndarray | None = None):
+        """``x``, already clamped, projected and clamped."""
+        weight = self.linear.weight if weight is None else weight
+        y = F.linear(x, weight, precision=Precision.HIGHEST)
+        return Clamp.step(y, low=float(self.output_min), high=float(self.output_max))
+
+    def body(self, x):
+        return self.project(self.clamp(x))
+
+
+class FeedForward(iron.Graph):
+    """A conformer's half step: ``x`` plus its clipped SiLU feed-forward
+    between RMS norms, the post norm's weight times ``residual_weight``.
+    """
+
+    def __init__(self, c: AudioConfig):
+        E, M = c.hidden_size, c.intermediate_size
+        self.pre_layer_norm = RMSNorm(E, c.eps)
+        self.ffw_layer_1 = Clipped(E, M)
+        self.ffw_layer_2 = Clipped(M, E)
+        self.post_layer_norm = SimpleNamespace(weight=iron.param(E))
+        self.residual, self.eps = c.residual_weight, c.eps
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        self.post_norm = self.post_layer_norm.weight * bfloat16(self.residual)
+
+    def body(self, x):
+        h = self.ffw_layer_2(F.silu(self.ffw_layer_1(self.pre_layer_norm(x))))
+        return x + F.rms_norm(h, h.shape[-1:], self.post_norm, self.eps)
+
+
+class ConformerAttention(iron.Graph):
+    """A conformer's attention weights, which ``AudioTower.attention``
+    runs, and what it computes from them as they load: the query scale and
+    the relative-position keys.
+    """
+
+    def __init__(self, c: AudioConfig):
+        E, H, D = c.hidden_size, c.num_attention_heads, c.head_dim
+        self.q_proj, self.k_proj, self.v_proj, self.post = (
+            Clipped(E, E) for _ in range(4)
+        )
+        # Read on the host only, in float32.
+        self.relative_k_proj = SimpleNamespace(
+            weight=iron.param(E, E, dtype=np.float32)
+        )
+        self.per_dim_scale = iron.param(D, dtype=np.float32)
+        self.timing, self.dims = c.timing(), (H, D, c.window, c.band)
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        """``Graph.load_state_dict``, then the derived tensors.
+
+        Raises:
+            ValueError: q, k and v are clamped to different input bounds.
+        """
+        super().load_state_dict(tree, path=path)
+        H, D, W, B = self.dims
+        if not (
+            (self.q_proj.input_min, self.q_proj.input_max)
+            == (self.k_proj.input_min, self.k_proj.input_max)
+            == (self.v_proj.input_min, self.v_proj.input_max)
+        ):
+            raise ValueError("q, k and v are clamped to different input bounds")
+        # The key scale moved to the queries; the soft cap and the band
+        # (window, period) are Softmax's own.
+        q_scale = D**-0.5 / math.log(2)
+        k_scale = math.log(1 + math.e) / math.log(2)
+        softplus = np.logaddexp(0, self.per_dim_scale)
+        relative = self.timing @ self.relative_k_proj.weight.T
+        relative = relative.reshape(W, H, D)
+        # Distance W - 1 - j at band column j, then at j + 1.
+        band = np.zeros((H, 2 * B, D), np.float32)
+        band[:, :W] = relative[::-1].transpose(1, 0, 2) / k_scale
+        band[:, B + 1 : B + 1 + W] = band[:, :W]
+        self.q_scale = np.tile(softplus * (q_scale * k_scale), H).astype(bfloat16)
+        self.relative = band.astype(bfloat16)
+
+
+class LightConv(iron.Graph):
+    """A conformer's light convolution: ``x`` plus a GLU of its clipped
+    projection, a depthwise convolution, an RMS norm, SiLU and a clipped
+    projection.
+    """
+
+    def __init__(self, c: AudioConfig):
+        E = c.hidden_size
+        self.pre_layer_norm = RMSNorm(E, c.eps)
+        self.linear_start = Clipped(E, 2 * E)
+        self.depthwise_conv1d = SimpleNamespace(weight=iron.param(E, 1, c.conv_kernel))
+        self.conv_norm = RMSNorm(E, c.eps)
+        self.linear_end = Clipped(E, E)
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        # A row per tap, each the row RowwiseMul takes.
+        weight = self.depthwise_conv1d.weight
+        self.planes = np.ascontiguousarray(weight[:, 0].T)
+
+    def body(self, x):
+        start = self.linear_start
+        h = start.clamp(self.pre_layer_norm(x))
+        glu, E = start.linear.weight, self.linear_end.linear.out_features
+        a, b = start.project(h, glu[:E]), start.project(h, glu[E:])
+        h = DepthwiseConv1d.step(a * Sigmoid.step(b), self.planes)
+        return x + self.linear_end(F.silu(self.conv_norm(h)))
+
+
+class AudioLayer(iron.Graph):
+    """Conformer layer ``i``'s parts, which ``AudioTower.layer`` runs."""
+
+    def __init__(self, c: AudioConfig, i: int):
+        E = c.hidden_size
+        self.feed_forward1 = FeedForward(c)
+        self.norm_pre_attn = RMSNorm(E, c.eps)
+        self.self_attn = ConformerAttention(c)
+        self.norm_post_attn = RMSNorm(E, c.eps)
+        self.lconv1d = LightConv(c)
+        self.feed_forward2 = FeedForward(c)
+        self.norm_out = RMSNorm(E, c.eps)
 
 
 class AudioTower(Tower):
@@ -57,8 +192,7 @@ class AudioTower(Tower):
     """
 
     profile = PROFILES
-    # On the old layer path until EmbeddingGemma 2 moves onto modules.
-    layer_class = None
+    layer_class = AudioLayer
 
     def __init__(self, config: AudioConfig, weights: SimpleNamespace):
         c = config
@@ -67,7 +201,8 @@ class AudioTower(Tower):
         sub = tree.subsample_conv_projection
         if c.frame != 2 * c.hop:
             raise ValueError(f"a frame of {c.frame} samples is not two hops")
-        super().__init__(config, c.max_tokens, c.max_tokens, tree.layers)
+        super().__init__(config, c.max_tokens, c.max_tokens)
+        self.load_layers(weights, "audio_tower.layers.", None)
         T = c.max_tokens
         H, D, W, B = c.num_attention_heads, c.head_dim, c.window, c.band
         C0, _ = c.channels
@@ -103,56 +238,6 @@ class AudioTower(Tower):
         # at |logit| >= 32 (eg2-audio-bug.md).
         self.scores = iron.state((H, T, K), dtype=np.float32)
         self.probs = iron.state((H, T, K))
-
-    def sanitize(self, w):
-        """``w`` and what its layer computes from it once: attention's
-        query scale and relative-position keys, each feed-forward's post norm
-        times ``residual_weight``, the light convolution's tap planes.
-
-        Raises:
-            ValueError: q, k and v are clamped to different input bounds.
-        """
-        c = self.config
-        H, D, W, B = c.num_attention_heads, c.head_dim, c.window, c.band
-        a, conv = w.self_attn, w.lconv1d
-        if not (
-            (a.q_proj.input_min, a.q_proj.input_max)
-            == (a.k_proj.input_min, a.k_proj.input_max)
-            == (a.v_proj.input_min, a.v_proj.input_max)
-        ):
-            raise ValueError("q, k and v are clamped to different input bounds")
-        # The key scale moved to the queries; the soft cap and the band
-        # (window, period) are Softmax's own.
-        q_scale = D**-0.5 / math.log(2)
-        k_scale = math.log(1 + math.e) / math.log(2)
-        softplus = np.logaddexp(0, np.asarray(a.per_dim_scale, np.float32))
-        relative = c.timing() @ np.asarray(a.relative_k_proj.weight, np.float32).T
-        relative = relative.reshape(W, H, D)
-        # Distance W - 1 - j at band column j, then at j + 1.
-        band = np.zeros((H, 2 * B, D), np.float32)
-        band[:, :W] = relative[::-1].transpose(1, 0, 2) / k_scale
-        band[:, B + 1 : B + 1 + W] = band[:, :W]
-        residual = bfloat16(c.residual_weight)
-        f1, f2 = (
-            SimpleNamespace(**vars(f), post_norm=f.post_layer_norm.weight * residual)
-            for f in (w.feed_forward1, w.feed_forward2)
-        )
-        a = SimpleNamespace(
-            **vars(a),
-            q_scale=np.tile(softplus * (q_scale * k_scale), H).astype(bfloat16),
-            relative=band.astype(bfloat16),
-        )
-        planes = np.ascontiguousarray(conv.depthwise_conv1d.weight[:, 0].T)
-        conv = SimpleNamespace(**vars(conv), planes=planes)
-        return SimpleNamespace(
-            **{
-                **vars(w),
-                "self_attn": a,
-                "feed_forward1": f1,
-                "feed_forward2": f2,
-                "lconv1d": conv,
-            }
-        )
 
     def logmel(self, wave, frames):
         """Write the log-mel features of `wave`'s valid frames to
@@ -231,29 +316,13 @@ class AudioTower(Tower):
         """The conformer layer `i`: a feed-forward half step, attention, the
         light convolution and a second half step.
         """
-        c = self.config
-        x = self.feed_forward(w.feed_forward1, x)
-        h = F.rms_norm(x, x.shape[-1:], w.norm_pre_attn.weight, c.eps)
-        a = F.rms_norm(
-            self.attention(w.self_attn, h, step.rows),
-            x.shape[-1:],
-            w.norm_post_attn.weight,
-            c.eps,
-        )
-        h = self.light_conv(w.lconv1d, x + a)
-        x = self.feed_forward(w.feed_forward2, h)
-        return F.rms_norm(x, x.shape[-1:], w.norm_out.weight, c.eps)
+        x = w.feed_forward1(x)
+        a = self.attention(w.self_attn, w.norm_pre_attn(x), step.rows)
+        x = w.lconv1d(x + w.norm_post_attn(a))
+        return w.norm_out(w.feed_forward2(x))
 
     def soft(self, values: dict) -> int:
         return values["tokens"]
-
-    def feed_forward(self, f, x):
-        c = self.config
-        h = Clipped(f.ffw_layer_1)(
-            F.rms_norm(x, x.shape[-1:], f.pre_layer_norm.weight, c.eps)
-        )
-        h = Clipped(f.ffw_layer_2)(F.silu(h))
-        return x + F.rms_norm(h, h.shape[-1:], f.post_norm, c.eps)
 
     def attention(self, a, h, tokens):
         c = self.config
@@ -261,10 +330,9 @@ class AudioTower(Tower):
         K = self.width
         keys, values = self.keys, self.values
         scores, probs = self.scores, self.probs
-        q_proj = Clipped(a.q_proj)
-        h = q_proj.clamp(h)
-        q = q_proj.project(h) * a.q_scale
-        k, val = Clipped(a.k_proj).project(h), Clipped(a.v_proj).project(h)
+        h = a.q_proj.clamp(h)
+        q = a.q_proj.project(h) * a.q_scale
+        k, val = a.k_proj.project(h), a.v_proj.project(h)
         keys[:, W - 1 : W - 1 + T] = k.reshape(T, H, D).transpose(1, 0, 2)
         R = T + W - 1 + (T + W - 1) % 2
         keys[:, R : R + 2 * B] = a.relative
@@ -300,17 +368,7 @@ class AudioTower(Tower):
         for i in range(H):
             GEMM.step(probs[i, :tokens], values[i], q[i], precision=Precision.HIGHEST)
         o = Copy.step(q.transpose(1, 0, 2)).reshape(T, H * D)
-        return Clipped(a.post)(o)
-
-    def light_conv(self, conv, x):
-        c = self.config
-        start = Clipped(conv.linear_start)
-        h = start.clamp(F.rms_norm(x, x.shape[-1:], conv.pre_layer_norm.weight, c.eps))
-        glu, E = conv.linear_start.linear.weight, c.hidden_size
-        a, b = start.project(h, glu[:E]), start.project(h, glu[E:])
-        h = DepthwiseConv1d.step(a * Sigmoid.step(b), conv.planes)
-        h = F.silu(F.rms_norm(h, h.shape[-1:], conv.conv_norm.weight, c.eps))
-        return x + Clipped(conv.linear_end)(h)
+        return a.post(o)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, `max_tokens` soft tokens."""
