@@ -17,7 +17,7 @@ aie = pytest.importorskip("aie")
 import aie.utils.config as aie_config  # noqa: E402
 from aie.iron.device import NPU2, from_name  # noqa: E402
 
-from iron.tests.common.graphs import FeedForward  # noqa: E402
+from iron.tests.support.graphs import FeedForward  # noqa: E402
 
 try:
     AIECC = Path(aie_config.aiecc_path())
@@ -57,6 +57,6 @@ def swiglu():
 
 
 def shipped(**kwargs):
-    from iron.tests.common.shipped import Shipped
+    from iron.tests.support.shipped import Shipped
 
     return Shipped(**kwargs)

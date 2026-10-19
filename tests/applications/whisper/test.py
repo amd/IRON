@@ -20,7 +20,7 @@ from ml_dtypes import bfloat16
 from iron.applications.whisper.hugging_face import HuggingFaceWhisper
 from iron.applications.whisper.model import Whisper, WhisperConfig, WhisperEncoder
 from iron.lm.testing import LOGITS, assert_close
-from iron.tests.common.llama_model import checkpoint
+from iron.tests.support.llama_model import checkpoint
 from iron.tests.common.llama_reference import prompt
 
 #: Whisper's proportions at toy size: 200 source positions, padded to 256,

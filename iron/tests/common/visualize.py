@@ -14,7 +14,7 @@ from iron.applications.embedding_gemma2.config import Config
 from iron.applications.embedding_gemma2.model import Multimodal
 from iron.lm import Checkpoint
 from iron.lm.testing import require, weights_dir
-from iron.tests.common.llama_model import small
+from iron.tests.support.llama_model import small
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 

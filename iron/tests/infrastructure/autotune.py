@@ -22,7 +22,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Scratchpad
 from iron.operators import GEMV, MHA, ElementwiseAdd, SiLU, Softmax
-from iron.tests.common.graphs import Chain, FeedForward
+from iron.tests.support.graphs import Chain, FeedForward
 from iron.tune.autotune import Timed, autotune, settings
 from iron.tune.measure import (
     CONTEXTS,

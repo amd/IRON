@@ -17,7 +17,7 @@ from aie.utils.probe import npu_unavailable_reason
 
 from iron.lm.cli import FLAGS
 from iron.lm.golden import RECORD, Golden
-from iron.tests.toolchain.tools import DEVICES
+from iron.tests.support.tools import DEVICES
 
 
 def _bound_device(name: str):

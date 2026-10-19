@@ -24,7 +24,7 @@ import pytest
 import iron.operators as catalog
 from iron.common import Operator
 from iron.common.testing import Case, Testing, run_test, vectors
-from iron.tests.common.declared import declared
+from iron.tests.support.declared import declared
 
 DEVICE = aie_utils.get_current_device()
 

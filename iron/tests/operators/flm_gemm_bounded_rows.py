@@ -19,7 +19,7 @@ from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
 from iron.operators.flm.gemm.op import ProjectionGEMM
-from iron.tests.common.graphs import ProjectAsStored
+from iron.tests.support.graphs import ProjectAsStored
 
 SHORT = (512, 1, 300, 256, 257, 512, 17, 3)
 # A Llama 3.2 1B q projection's shape, at a prompt chunk's bounds.

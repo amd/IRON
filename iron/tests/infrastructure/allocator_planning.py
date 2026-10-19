@@ -28,7 +28,7 @@ from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators import ElementwiseAdd, ReLU
-from iron.tests.common import sequences
+from iron.tests.support import sequences
 
 
 def steps_of(runlist):

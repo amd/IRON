@@ -19,7 +19,7 @@ from iron.applications.llama.model import Llama
 from iron.lm import Multimodal, Tower
 from iron.lm.golden import HuggingFace
 from iron.operators.copy import Copy
-from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint
+from iron.tests.support.llama_model import PROFILE, SMALL, checkpoint
 from iron.lm.testing import assert_close
 from iron.tests.common.llama_reference import prompt
 from iron.tests.common.encoder import (

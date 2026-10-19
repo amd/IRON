@@ -39,8 +39,8 @@ from iron.common.design import OperatorDesign
 from iron.common.image.packaging import Kind
 from iron.lm import Conv2d, ImagePatches, LogMel
 from iron.operators.copy import Copy
-from iron.tests.common.declared import declared
-from iron.tests.toolchain.tools import DEVICES, requires
+from iron.tests.support.declared import declared
+from iron.tests.support.tools import DEVICES, requires
 
 pytestmark = requires("aiecc", "peano")
 

@@ -44,8 +44,8 @@ from iron.operators import (
 )
 from iron.operators.magnitude import Magnitude
 from iron.operators.merge import GEMMA
-from iron.tests.common.graphs import Adds, Chain
-from iron.tests.common import sequences
+from iron.tests.support.graphs import Adds, Chain
+from iron.tests.support import sequences
 
 SIZE = 1024
 TILE = 128

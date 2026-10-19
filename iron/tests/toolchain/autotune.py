@@ -25,8 +25,8 @@ from iron.operators import Softmax
 from iron.operators.flm import DequantBFP
 from iron.operators.flm import ProjectionGEMM
 from iron.operators.gemm import GEMMPlacement
-from iron.tests.common.graphs import Rotate
-from iron.tests.common.llama_model import llama_1b
+from iron.tests.support.graphs import Rotate
+from iron.tests.support.llama_model import llama_1b
 from iron.tune import autotune as tuning
 from iron.tune.autotune import Point, Shape, Timed, autotune, line, refusal, settings
 from iron.tune.measure import Cache, Measurement, Timing, judge, time_interleaved

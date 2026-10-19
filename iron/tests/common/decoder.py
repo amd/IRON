@@ -18,7 +18,7 @@ from iron.lm import rope_angles
 from iron.applications.llama.model import Llama
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
-from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint, small
+from iron.tests.support.llama_model import PROFILE, SMALL, checkpoint, small
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 

@@ -16,7 +16,7 @@ leaves the permutation's cycle and is caught at the step it happens.
 import numpy as np
 import pytest
 
-from iron.tests.common.graphs import Walk
+from iron.tests.support.graphs import Walk
 
 N = 64
 

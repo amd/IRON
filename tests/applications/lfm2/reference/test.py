@@ -17,7 +17,7 @@ from iron.applications.lfm2.model import Lfm2, Lfm2Config
 from iron.lm import OnHost as Host
 from iron.lm.testing import assert_close
 from iron.tests.common.llama_reference import Decoder
-from iron.tests.toolchain.tools import DEVICES
+from iron.tests.support.tools import DEVICES
 
 pytestmark = pytest.mark.usefixtures("npu2")
 

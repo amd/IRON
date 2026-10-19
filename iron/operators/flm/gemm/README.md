@@ -40,7 +40,7 @@ memtile — so those are *not* what distinguishes it. What does:
 | B layout | `(K, N)`, or `(N, K)` with `b_col_maj` | `(N, K)` with `b_col_maj`, or packed by `pack_B` |
 | A tile height | tied to the accumulator | decoupled (asymmetric tile buffering) |
 
-The shipped overlay itself is a test fixture, `iron/tests/common/shipped.py`
+The shipped overlay itself is a test fixture, `iron/tests/support/shipped.py`
 ([Matching the shipped FastFlowLM overlay](#matching-the-shipped-fastflowlm-overlay)),
 that `test.py` compares the port against.
 
@@ -242,7 +242,7 @@ ProjectionGEMM(M=M, K=K, N=N)                           # conv_even, default
 ```
 
 Verified against the shipped overlay on identical inputs, driven through
-the test fixture `iron/tests/common/shipped.py`, which runs that xclbin unmodified: with
+the test fixture `iron/tests/support/shipped.py`, which runs that xclbin unmodified: with
 `floor` and no activation, output is **bit-identical across all 6291456
 elements**. With the `conv_even` default it differs everywhere, and is far more
 accurate — see [Accuracy](#accuracy).
@@ -556,13 +556,13 @@ unit. A bound needs `m_chunk = 1` and M in one slab.
 ## The shipped overlay
 
 ```python
-from iron.tests.common.shipped import Shipped
+from iron.tests.support.shipped import Shipped
 
 op = Shipped(M=1024, K=1536, N=6144, epilogue="silu")
 op(A, op.pack_B(B), C_out)
 ```
 
-`Shipped` (`iron/tests/common/shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a
+`Shipped` (`iron/tests/support/shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a
 second overlay for the same operator: the binary the port was ported from,
 driven by the same `ProjectionGEMM`, its reference and its packing, so the two can be
 measured against each other on identical inputs through one host path.

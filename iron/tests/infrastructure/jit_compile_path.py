@@ -32,7 +32,7 @@ from iron.common.design import OperatorDesign, runtime
 from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.operators import GEMM, MHA, ElementwiseAdd
-from iron.tests.common.graphs import Adds
+from iron.tests.support.graphs import Adds
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 

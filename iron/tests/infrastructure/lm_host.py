@@ -36,7 +36,7 @@ from iron.lm import testing
 from iron.lm.checkpoint import renamed
 from iron.lm.testing import require, weights_dir
 from iron.operators import sample
-from iron.tests.common.llama_model import REAL_1B
+from iron.tests.support.llama_model import REAL_1B
 
 
 def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:

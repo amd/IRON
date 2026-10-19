@@ -11,7 +11,7 @@ import pytest
 from iron.applications.embedding_gemma2 import Multimodal
 from iron.applications.llama import Llama
 from iron.lm import Encoder, Sampler, tune
-from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint, small
+from iron.tests.support.llama_model import PROFILE, SMALL, checkpoint, small
 
 pytestmark = pytest.mark.usefixtures("npu2")
 

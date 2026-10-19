@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.tests.common.graphs import FeedForward
+from iron.tests.support.graphs import FeedForward
 from iron.operators.flm.gemm.op import ProjectionGEMM
 
 pytestmark = pytest.mark.usefixtures("npu2")

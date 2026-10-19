@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 import iron
-from iron.tests.common.graphs import Trail
+from iron.tests.support.graphs import Trail
 
 N = 64
 STEPS = 3 * N

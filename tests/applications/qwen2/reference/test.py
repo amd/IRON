@@ -9,7 +9,7 @@ of q, k and v.
 """
 
 from iron.applications.qwen2.model import Qwen2, Qwen2Config
-from iron.tests.common.llama_model import shapes
+from iron.tests.support.llama_model import shapes
 from iron.tests.common.llama_reference import Decoder
 
 #: Qwen 2.5's proportions at toy size: GQA, a tied head.

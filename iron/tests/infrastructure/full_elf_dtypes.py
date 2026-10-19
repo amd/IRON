@@ -25,7 +25,7 @@ from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
-from iron.tests.common import sequences
+from iron.tests.support import sequences
 
 ROWS, ROW, SLOTS = 16, 32, 4
 TABLE_BYTES = ROWS * ROW * 4

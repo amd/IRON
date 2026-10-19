@@ -14,8 +14,8 @@ from iron.common.graph.record import Recording
 from iron.common.image.packaging import Kind, plan
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
-from iron.tests.common.llama_model import small
-from iron.tests.common.shipped import Shipped
+from iron.tests.support.llama_model import small
+from iron.tests.support.shipped import Shipped
 
 
 def _recorded(*values):

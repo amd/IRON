@@ -13,7 +13,7 @@ from aie.iron.device import from_name
 from iron.common import Elementwise
 from iron.common.elementwise import _interval
 from iron.common.testing import vectors
-from iron.tests.common.declared import declared
+from iron.tests.support.declared import declared
 
 
 def _cases():

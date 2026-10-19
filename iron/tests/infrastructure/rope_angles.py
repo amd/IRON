@@ -9,7 +9,7 @@
 import numpy as np
 
 from iron.lm import rope_angles
-from iron.tests.common.llama_model import REAL_1B
+from iron.tests.support.llama_model import REAL_1B
 
 LLAMA_3_2_ROPE_SCALING = REAL_1B.rope_scaling
 

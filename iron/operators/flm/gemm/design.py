@@ -19,7 +19,7 @@ the ``fused_mm`` kernel factory, so the C++ and the dataflow cannot drift apart.
 The array itself is ``ProjectionGEMM.build`` and the runtime sequence is
 ``ProjectionGEMM.sequence`` in ``op.py``; this module keeps the geometry, the L1 and
 memtile budget helpers and the parameter-buffer layout they and
-the shipped overlay (``iron/tests/common/shipped.py``) share.
+the shipped overlay (``iron/tests/support/shipped.py``) share.
 """
 
 from enum import StrEnum

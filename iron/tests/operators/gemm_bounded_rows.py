@@ -17,7 +17,7 @@ from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
 from iron.operators.gemm import GEMM
-from iron.tests.common.graphs import Project
+from iron.tests.support.graphs import Project
 
 M, K, N = 512, 512, 512
 BOUNDS = (M, 1, 300, 64, 65, M, 17, 128, 3)

@@ -26,7 +26,7 @@ from iron.operators.flm.gemm.design import (
     l1_tiles,
 )
 from iron.operators.flm.gemm.op import ProjectionGEMM
-from iron.tests.common.shipped import Shipped
+from iron.tests.support.shipped import Shipped
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue

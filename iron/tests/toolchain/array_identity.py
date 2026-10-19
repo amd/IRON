@@ -25,8 +25,8 @@ from iron.common.image.coresidence import Packing
 from iron.common.image.compose import Composition
 from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
-from iron.tests.common import sequences
-from iron.tests.toolchain.tools import requires
+from iron.tests.support import sequences
+from iron.tests.support.tools import requires
 
 pytestmark = requires("aiecc")
 

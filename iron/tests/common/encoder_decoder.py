@@ -32,7 +32,7 @@ from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.tests.common.layer import WHISPER, shapes
-from iron.tests.common.llama_model import checkpoint
+from iron.tests.support.llama_model import checkpoint
 from iron.lm.testing import assert_close
 from iron.tests.common.llama_reference import prompt
 from iron.tests.common.encoder import SelfAttend, Shape

@@ -26,7 +26,7 @@ from iron import Scratchpad
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.softmax import Softmax
-from iron.tests.toolchain.tools import DEVICES, requires
+from iron.tests.support.tools import DEVICES, requires
 
 pytestmark = requires("xclbinutil", "peano")
 

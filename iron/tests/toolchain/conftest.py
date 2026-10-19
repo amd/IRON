@@ -5,7 +5,7 @@
 
 import pytest
 
-from iron.tests.toolchain.tools import DEVICES
+from iron.tests.support.tools import DEVICES
 
 
 @pytest.fixture(params=sorted(DEVICES))

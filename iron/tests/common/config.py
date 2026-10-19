@@ -26,7 +26,7 @@ from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig
 from iron.applications.phi3.model import LongRope, Phi4Config
 from iron.applications.whisper.model import WhisperConfig
 from iron.lm import Config, DecoderConfig
-from iron.tests.common.llama_model import REAL_1B
+from iron.tests.support.llama_model import REAL_1B
 from iron.lm.testing import require, weights_dir
 
 LLAMA_DIR = weights_dir("llama3.2-1b")

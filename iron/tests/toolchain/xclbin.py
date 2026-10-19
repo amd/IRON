@@ -28,8 +28,8 @@ import pytest
 
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
-from iron.tests.common.llama_model import llama_1b
-from iron.tests.toolchain.tools import requires, shipped, swiglu
+from iron.tests.support.llama_model import llama_1b
+from iron.tests.support.tools import requires, shipped, swiglu
 
 pytestmark = requires("xclbinutil", "peano")
 

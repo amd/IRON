@@ -27,7 +27,7 @@ from iron.lm import Checkpoint, Model, TokenizerJson, main
 from iron.lm.cli import parse_args
 from iron.lm.golden import RECORD
 from iron.lm.testing import require, weights_dir
-from iron.tests.common.llama_model import SMALL, checkpoint
+from iron.tests.support.llama_model import SMALL, checkpoint
 
 TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.json"
 

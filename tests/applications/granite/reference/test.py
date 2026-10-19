@@ -9,7 +9,7 @@ scalars, none at its default, and an untied head.
 """
 
 from iron.applications.granite.model import Granite, GraniteConfig
-from iron.tests.common.llama_model import shapes
+from iron.tests.support.llama_model import shapes
 from iron.tests.common.llama_reference import Decoder
 
 #: Granite's proportions at toy size, its scalars Granite 3's own but the

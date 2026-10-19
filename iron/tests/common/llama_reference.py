@@ -47,7 +47,7 @@ from iron.applications.llama.model import Llama3RopeScaling
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE
-from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint, shapes
+from iron.tests.support.llama_model import PROFILE, SMALL, checkpoint, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")  # MHA decode on any host
 

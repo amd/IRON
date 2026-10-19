@@ -47,8 +47,8 @@ from iron.operators.rope import RoPE
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.softmax import Softmax
 from iron.tests.common.declare import Rows
-from iron.tests.common.graphs import ProjectAsStored
-from iron.tests.common.shipped import Shipped
+from iron.tests.support.graphs import ProjectAsStored
+from iron.tests.support.shipped import Shipped
 
 # A descriptor's fields are the current device's.
 pytestmark = pytest.mark.usefixtures("npu2")

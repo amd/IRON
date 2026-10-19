@@ -16,7 +16,7 @@ from ml_dtypes import bfloat16
 from iron.applications.resnet.model import ResNet, ResNetConfig
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close
-from iron.tests.common.llama_model import checkpoint
+from iron.tests.support.llama_model import checkpoint
 
 pytestmark = pytest.mark.usefixtures("npu2")
 

@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from iron.lm.golden import RECORD, Golden, HuggingFace, fingerprint
-from iron.tests.common.llama_model import SMALL, checkpoint
+from iron.tests.support.llama_model import SMALL, checkpoint
 
 TOKENS = np.arange(4)
 

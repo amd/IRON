@@ -33,7 +33,7 @@ from iron.common.image.step import BufferRef, SequenceStep
 from iron.common.image.artifacts import Parameter
 from iron.common.image.packaging import Kind, require_device
 import iron.functional as F
-from iron.tests.common.graphs import FeedForward
+from iron.tests.support.graphs import FeedForward
 from iron.operators.copy import Copy
 from iron.tests.operators import copy_bounded_view
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -49,8 +49,8 @@ from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
 from iron.tests.common.declare import Rows
-from iron.tests.common.graphs import Trail, Walk
-from iron.tests.common.llama_model import llama_1b, small
+from iron.tests.support.graphs import Trail, Walk
+from iron.tests.support.llama_model import llama_1b, small
 
 E, H = 2048, 8192
 

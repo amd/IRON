@@ -44,7 +44,7 @@ from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
 from iron.operators.sample import Sample
 from iron.operators.tanh import Tanh
-from iron.tests.common import sequences
+from iron.tests.support import sequences
 
 RELATIVE = Tolerance.relative(0.04, 1e-6)
 

@@ -38,8 +38,8 @@ from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.operators import ElementwiseAdd
 from iron.operators.gemm import GEMM
-from iron.tests.common import sequences
-from iron.tests.toolchain.tools import DEVICES, requires, swiglu
+from iron.tests.support import sequences
+from iron.tests.support.tools import DEVICES, requires, swiglu
 
 pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
 
@@ -94,7 +94,7 @@ def _assert_values_in_table(version):
 
 
 def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
-    from iron.tests.common.llama_model import small
+    from iron.tests.support.llama_model import small
 
     model = small(max_seq_len=256)
     version = build_elf(model, **model.shapes()[0])
@@ -166,7 +166,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     sequence grows with its DMA tasks (about 1,800 per layer against decode's
     430), past this gate's memory at the full depth.
     """
-    from iron.tests.common.llama_model import llama_1b
+    from iron.tests.support.llama_model import llama_1b
 
     model = llama_1b(num_hidden_layers=1)
     version = build_elf(model, **model.shapes()[1])
@@ -177,7 +177,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
 
 
 def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table():
-    from iron.tests.common.llama_model import small
+    from iron.tests.support.llama_model import small
 
     model = small()
     _assert_values_in_table(build_elf(model, **model.shapes()[1]))

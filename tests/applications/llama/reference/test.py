@@ -11,7 +11,7 @@ bias on each of q, k, v and o, as transformers' Llama biases them.
 import dataclasses
 
 from iron.applications.llama.model import Llama
-from iron.tests.common.llama_model import SMALL, shapes
+from iron.tests.support.llama_model import SMALL, shapes
 from iron.tests.common.llama_reference import Decoder
 
 

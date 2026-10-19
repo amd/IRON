@@ -26,7 +26,7 @@ from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators import LayerNorm
 from iron.operators.copy import Copy
-from iron.tests.common import sequences
+from iron.tests.support import sequences
 
 ROWS, ROW = 8, 8
 # Where in a row the next row's offset is, and the word after it (zero): the

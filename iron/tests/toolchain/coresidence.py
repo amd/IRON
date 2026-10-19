@@ -39,9 +39,9 @@ from iron.common.image.coresidence import CoResidenceError, conflicts, fits, pla
 from iron.common.design import OperatorDesign
 from iron.operators import GEMM, GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 from iron.operators.gemm import GEMMPlacement
-from iron.tests.common.graphs import Chain
-from iron.tests.common import sequences
-from iron.tests.toolchain.tools import requires
+from iron.tests.support.graphs import Chain
+from iron.tests.support import sequences
+from iron.tests.support.tools import requires
 
 SIZE = 8192
 TILE = 256

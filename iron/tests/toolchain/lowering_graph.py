@@ -16,9 +16,9 @@ import iron.operators.flm.gemm.op as flm
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.mha import MHA
-from iron.tests.common.llama_model import small
+from iron.tests.support.llama_model import small
 from iron.tests.toolchain.lowering import _lower_all, lower
-from iron.tests.toolchain.tools import requires, shipped, swiglu
+from iron.tests.support.tools import requires, shipped, swiglu
 
 pytestmark = [*requires("aiecc", "peano"), pytest.mark.usefixtures("npu2")]
 
