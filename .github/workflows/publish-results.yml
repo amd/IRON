@@ -36,7 +36,6 @@ jobs:
           path: artifacts
 
       - name: Merge the results and push them to the ci branch
-        continue-on-error: true # a lost race with another run's push
         env:
           SUITE: ${{ inputs.suite }}
         run: |
@@ -50,4 +49,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Add test results testing commit \`${GITHUB_SHA::7}\`" || echo "No changes to commit"
-          git push origin ci
+          # A push that loses a race with another run's is not a failure.
+          git push origin ci || echo "Lost a race with another push; skipped"
