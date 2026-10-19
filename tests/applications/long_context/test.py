@@ -29,6 +29,7 @@ from iron.applications.llama import Llama
 from iron.applications.phi3 import Phi4
 from iron.applications.qwen2 import Qwen2
 from iron.applications.qwen3 import Qwen3
+from iron.applications.qwen3_5 import Qwen35
 from iron.applications.smollm2 import SmolLM2
 from iron.applications.smollm3 import SmolLM3
 from iron.lm import CausalLM, Checkpoint, EncoderDecoder
@@ -124,6 +125,9 @@ APPLICATIONS = {
     ),
     "smollm3_3b": Application(
         SmolLM3, "smollm3-3b", INDEX, "tokenizer.json", staged=False
+    ),
+    "qwen3.5_0.8b": Application(
+        Qwen35, "qwen3.5-0.8b", "model.safetensors", "tokenizer.json", staged=False
     ),
 }
 

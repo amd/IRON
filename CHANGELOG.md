@@ -57,6 +57,12 @@ public API adds its entry under Unreleased.
 - `Conv2d`'s gathered patches pad to whole 64-pixel GEMM tiles, and
   `flm.ProjectionGEMM` narrows its default n tile where K is short of its
   k chunk, so ResNet-50's 7x7 to 28x28 maps and 64-channel 1x1 convs build.
+- Application `qwen3_5` (Qwen3.5's text decoder), judged by a device-free
+  toy golden.
+- `RMSNorm.centered(module)`: every `RMSNorm` of a loaded module scaling by
+  `1 + weight`, as Gemma's and Qwen3.5's do.
+- `Attention.output(o, x)`, the block's output from its heads: `o_proj`,
+  or a model's own, as Qwen3.5's gates it.
 - Applications `gemma3` (Gemma 3 1B) and `gemma4` (Gemma 4 E2B's text
   decoder), each judged by a device-free toy golden, their sliding layers
   within Hugging Face's window.

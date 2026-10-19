@@ -21,6 +21,7 @@ import iron
 import iron.functional as F
 from iron import Precision, Scratchpad
 from iron.common.graph import Handle
+from iron.common.graph.compiled import walk
 from iron.common.image.packaging import require_device
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
@@ -401,6 +402,16 @@ class RMSNorm(iron.Graph):
     def body(self, x: Handle) -> Handle:
         return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
 
+    @staticmethod
+    def centered(module) -> None:
+        """Every ``RMSNorm`` of ``module``, loaded, scaling by ``1 + weight``
+        (Gemma's, Qwen3.5's), the sum in float32 rounded to bf16 (Hugging
+        Face keeps it float32).
+        """
+        for _, weight, norm, _ in list(walk(module)):
+            if isinstance(norm, RMSNorm):
+                norm.weight = (weight.astype(np.float32) + 1).astype(bfloat16)
+
 
 class LayerNorm(iron.Graph):
     """``torch.nn.LayerNorm`` over the last axis, times ``weight`` plus
@@ -621,7 +632,8 @@ class Attention(iron.Graph):
     and ``v_proj`` of the layer's input, q and k turned by the call's RoPE
     rows where given, a pair of q's and k's (``Rope.rows``), only their
     first ``rotary`` columns where the config gives a ``rotary_dim``,
-    attended over the layer's ``KVCache``, then ``o_proj``; q, k and v
+    attended over the layer's ``KVCache``, then ``output``, ``o_proj`` of
+    the heads unless a model says; q, k and v
     with a bias where the config's ``attention_bias`` says, o where
     ``o_bias`` does, each at the config's ``precision``. ``projections``
     builds what ``project`` reads. ``scaling`` is the logits' scale; None
@@ -708,6 +720,12 @@ class Attention(iron.Graph):
         if k is not None:
             k, v = k.reshape(n, G, D), v.reshape(n, G, D)
         o = cache.attend(call, q.reshape(n, H, D), k, v, scale=self.scaling)
+        return self.output(o, x)
+
+    def output(self, o: Handle, x: Handle) -> Handle:
+        """The block's output from the heads ``o`` ``(rows, heads *
+        head_dim)`` of the input ``x``.
+        """
         return self.o_proj(o)
 
 
