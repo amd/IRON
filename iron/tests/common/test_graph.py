@@ -271,8 +271,8 @@ def test_binding_two_handles_to_one_instance_is_an_error():
 
     class Two(iron.Graph):
         def body(self, x, *, a: Scratchpad[np.int32], b: Scratchpad[np.int32]):
-            y = copy.apply(x, out_offset=a)
-            return copy.apply(y, out_offset=b)
+            y = copy(x, out_offset=a)
+            return copy(y, out_offset=b)
 
     two = Two()
 
@@ -324,7 +324,7 @@ def test_an_explicit_instance_is_applied_like_the_class():
             self.w = w
 
         def body(self, x):
-            return q.apply(self.w, x)
+            return q(self.w, x)
 
     w = z(256, E)
     t = Step(w).record(x=(E,))
@@ -754,7 +754,7 @@ def test_a_bound_value_survives_tuning():
 
     class F(iron.Graph):
         def body(self, x, *, a: Scratchpad[np.int32]):
-            return copy.apply(x, out_offset=a)
+            return copy(x, out_offset=a)
 
     f = F()
 
@@ -1133,7 +1133,7 @@ def test_a_given_output_of_another_rank_is_refused_unless_declared_flat():
     class Flat(iron.Graph):
         def body(self, a, b):
             y = ElementwiseAdd.step(a.reshape(256 * 256), a.reshape(256 * 256))
-            gemm.apply(a, b, y)
+            gemm(a, b, y)
             return y
 
     with pytest.raises(ValueError, match="operand C has rank 1"):

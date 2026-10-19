@@ -139,18 +139,6 @@ class Operator(jit.Operator, library=True):
             raise TypeError(f"{cls.__name__}.step() is for a graph's body")
         return recorder.call(cls, operands, kwargs)
 
-    def apply(self, *operands: Any, **values: Any) -> Handle:
-        """Record a step applying this already-constructed instance, inside
-        a graph's body.
-
-        Raises:
-            TypeError: Called outside a graph's body.
-        """
-        recorder = graph_recorder.get()
-        if recorder is None:
-            raise TypeError(f"{type(self).__name__}.apply() is for a graph's body")
-        return recorder.call(self, operands, values)
-
     def __init__(
         self,
         *,
@@ -645,13 +633,11 @@ class Operator(jit.Operator, library=True):
         """A run of this operator's own image (``compile``) on device
         tensors, one per declared buffer in declaration order, ``kwargs``
         its ``DispatchTime`` values by device symbol. Inside a graph's body,
-        call ``op.apply(*operands, **values)`` instead.
+        a step applying this instance to handles, ``kwargs`` its per-call
+        values.
         """
-        if graph_recorder.get() is not None:
-            raise TypeError(
-                f"{type(self).__name__} instance called inside a graph's "
-                f"body; use op.apply(*operands, **values)"
-            )
+        if (recorder := graph_recorder.get()) is not None:
+            return recorder.call(self, args, kwargs)
         names = [b.name for b in self.buffers]
         if len(args) != len(names) or not all(isinstance(a, NpuTensor) for a in args):
             raise TypeError(

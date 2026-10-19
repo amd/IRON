@@ -192,8 +192,8 @@ CONTRIBUTING.md walks through the common case. The rules:
 
 Construction is keyword-only (`GEMV(M=..., K=...)`) and never records.
 Inside a graph's `body()`, `GEMV.step(w, h, **kw)` records a step and
-returns a handle; an instance is applied with `op.apply(...)`. Outside a
-graph, `op(*tensors)` compiles once and runs on the device.
+returns a handle, as calling an instance, `op(h, **values)`, does. Outside
+a graph, `op(*tensors)` compiles once and runs on the device.
 
 ## Graphs
 

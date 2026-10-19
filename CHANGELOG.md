@@ -517,6 +517,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `Operator.apply`: inside a graph's body an operator instance is called,
+  `op(*handles, **values)`, as a graph is.
 - The graph-wide precision floor: `Graph.precision`, `Graph.record(precision=)`,
   `Graph.compile(precision=)`, `Operator.at_precision` and
   `Precision.at_least`. A precision is asked for per call

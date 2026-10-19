@@ -274,9 +274,9 @@ class ImagePatches(iron.Graph):
         out_width: Scratchpad[np.int32],
     ) -> tuple[Handle, Handle, Handle]:
         T = self.patches
-        taps_w = self.taps_w.apply(in_samples=width, out_samples=out_width)
-        taps_h = self.taps_h.apply(in_samples=height, out_samples=out_height)
-        self.resample.apply(
+        taps_w = self.taps_w(in_samples=width, out_samples=out_width)
+        taps_h = self.taps_h(in_samples=height, out_samples=out_height)
+        self.resample(
             rgb,
             taps_w,
             taps_h,
@@ -286,7 +286,7 @@ class ImagePatches(iron.Graph):
             out_rows=out_height,
             out_columns=out_width,
         )
-        xy, position_ids, order = self.patch_positions.apply(
+        xy, position_ids, order = self.patch_positions(
             out_rows=out_height, out_columns=out_width
         )
         return (

@@ -353,7 +353,7 @@ class TwoTables(iron.Graph):
         self.taps_w = ResampleTaps(in_size=4032, out_size=912, **taps)
 
     def body(self):
-        return self.taps_h.apply(), self.taps_w.apply()
+        return self.taps_h(), self.taps_w()
 
 
 @pytest.mark.supported_devices("npu2")
@@ -385,8 +385,8 @@ class TwoPositions(iron.Graph):
         out_width: Scratchpad[np.int32],
     ):
         return (
-            *self.few.apply(out_rows=out_height, out_columns=out_width),
-            *self.many.apply(out_rows=out_height, out_columns=out_width),
+            *self.few(out_rows=out_height, out_columns=out_width),
+            *self.many(out_rows=out_height, out_columns=out_width),
         )
 
 

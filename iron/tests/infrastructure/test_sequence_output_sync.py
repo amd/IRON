@@ -30,7 +30,7 @@ def test_every_dispatch_returns_its_own_output(calls):
 
     class F(iron.Graph):
         def body(self, x):
-            return add.apply(x, w)
+            return add(x, w)
 
     f = F()
 

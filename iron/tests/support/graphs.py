@@ -106,8 +106,8 @@ class Chain(iron.Graph):
         self.mul = ElementwiseMul(**shape)
 
     def body(self, a, b):
-        x = self.mul.apply(self.silu.apply(self.add.apply(a, b)), b)
-        return self.silu.apply(self.add.apply(x, b))
+        x = self.mul(self.silu(self.add(a, b)), b)
+        return self.silu(self.add(x, b))
 
 
 class Adds(iron.Graph):
@@ -119,5 +119,5 @@ class Adds(iron.Graph):
 
     def body(self, x, w):
         for _ in range(self.n):
-            x = self.add.apply(x, w)
+            x = self.add(x, w)
         return x

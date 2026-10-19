@@ -38,7 +38,7 @@ def _layer_norm_run(name, trace):
 
     class F(iron.Graph):
         def body(self, x):
-            return layer_norm.apply(x)
+            return layer_norm(x)
 
     f = F()
 
