@@ -528,7 +528,7 @@ done.
 
 ### A row bound per call
 
-A prompt chunk projects `x[:rows]` (`valid`, an `Extent` of M), and one
+A prompt chunk projects `x[:rows]` (`valid`, `per_call(bounds=M)`), and one
 compile serves every row count. A and C move, and the cores compute, only the
 units the bound reaches. A unit is the 256 rows (`rows * M_TILE`) the four
 core rows join into one C block, so a bound rounds up to it: that is the

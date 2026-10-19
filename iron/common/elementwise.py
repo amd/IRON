@@ -634,7 +634,7 @@ class BinaryElementwise(Elementwise):
 class Rowwise(Elementwise):
     """``rows`` rows of ``tile_size`` elements in, the same out, one kernel
     call per row. For a kernel that reduces over its line, so the line is a
-    ``field()``: another line would compute something else.
+    ``param()`` the cores read: another line would compute something else.
     """
 
     test = Testing(Sweep(rows=True))

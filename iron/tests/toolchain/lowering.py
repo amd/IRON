@@ -9,7 +9,7 @@ assigns buffer addresses, lowers the DMAs and emits the runtime sequence's
 instructions. Peano is there for the kernels and aiecc's probe of each
 core, which links the core with them to measure its stack and reserve each
 bank's kernel data before placement. What that checks is everything the
-operator model owns: the array an ``Array.build()`` builds is placeable and
+operator model owns: the array an operator's ``build()`` builds is placeable and
 routable, every descriptor a sequence issues is legal, the resident writes
 and barrier sets lower. What it cannot check is the kernels' objects and
 the numbers, which need hardware.

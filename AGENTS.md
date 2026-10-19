@@ -132,8 +132,8 @@ CONTRIBUTING.md walks through the common case. The rules:
      | a tunable `resolve(dev)` always fills | `tunable(init=False)` |
      | a core | `per_call(derive=...)` |
 
-   - `build()`, on the operator as its cores see it (`layout()`): the
-     array tier, generated from the parameters it reads. It makes
+   - `build()`, on `layout()`: a copy of the operator holding only the
+     parameters its cores read (`declaration.key`) and its members. It makes
      ObjectFIFOs and Workers, uses
      `range_()` (not `range`) for core loops, binds each streamed operand's
      lanes to fifo ends, gives each core an `Rtp` for its values and

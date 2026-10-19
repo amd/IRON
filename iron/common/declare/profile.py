@@ -115,6 +115,8 @@ class Profile:
             if name in given:
                 dims[name] = given[name]
             elif p.derive is not None or isinstance(p.default, FunctionType):
+                # Unknown until made, so an entry naming it matches only a call
+                # giving it: entries key on what a call constructs with.
                 dims[name] = None
             elif p.default is not MISSING:
                 dims[name] = p.default

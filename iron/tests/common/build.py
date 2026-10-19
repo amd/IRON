@@ -615,7 +615,7 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
     op = Shipped(M=256, K=1024, N=1152)
     assert op.external.filename == "flm_mm_f81eba71.xclbin"
-    # Its Array.build() pins each lane to the image's shim channel, places each
+    # Its build() pins each lane to the image's shim channel, places each
     # core's parameter block and the lock that releases it.
     text = str(OperatorDesign(op.resolved(), full_elf=False).module())
     pins = re.findall(r"shim_dma_allocation @(\w+)\(%\w+, (\w+), (\d)\)", text)
