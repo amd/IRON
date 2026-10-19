@@ -46,23 +46,6 @@ def _marked(cls: type, name: str, hint, tag: str):
     return None
 
 
-def _call(marker) -> tuple[tuple, dict]:
-    """The arguments an ``In``/``Out``/``InOut`` was called with: its
-    ``args``/``kwargs`` on mlir-aie 1.4.5a1, its typed fields on PR #50.
-    The 1.4.5a1 branch goes with the pin bump.
-    """
-    if hasattr(marker, "kwargs"):
-        return marker.args, marker.kwargs
-    return marker.dims, dict(
-        dtype=marker.declared_dtype,
-        obj_shape=marker.obj_dims,
-        per=marker.per,
-        depth=marker.depth,
-        replicate=marker.replicate,
-        when=marker.when,
-    )
-
-
 class Declaration:
     """What an operator class declares: its members and the kind of each field.
 
@@ -99,8 +82,16 @@ class Declaration:
         # aie.iron's In, Out and InOut, called in the body, become operands.
         for name, value in list(vars(cls).items()):
             if isinstance(value, (In, Out, InOut)):
-                args, kwargs = _call(value)
-                member = Operand(type(value), *args, **kwargs)
+                member = Operand(
+                    type(value),
+                    *value.dims,
+                    dtype=value.declared_dtype,
+                    obj_shape=value.obj_dims,
+                    per=value.per,
+                    depth=value.depth,
+                    replicate=value.replicate,
+                    when=value.when,
+                )
                 setattr(cls, name, member)
                 member.__set_name__(cls, name)
         # Members must be unannotated, or dataclass would make them constructor args.
