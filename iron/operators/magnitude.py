@@ -56,6 +56,5 @@ class Magnitude(Rowwise):
                 f"Magnitude: width ({self.width}) is not two halves, re and im"
             )
 
-    class Array(Rowwise.Array):
-        def kernel(self):
-            return eltwise.magnitude_f32(self.tile_size)
+    def kernel(self):
+        return eltwise.magnitude_f32(self.tile_size)

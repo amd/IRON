@@ -11,6 +11,5 @@ class LayerNorm(WeightedRowwise):
     times a learned weight row (gamma).
     """
 
-    class Array(WeightedRowwise.Array):
-        def kernel(self):
-            return norm.layer_norm(self.tile_size)
+    def kernel(self):
+        return norm.layer_norm(self.tile_size)

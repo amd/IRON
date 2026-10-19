@@ -56,37 +56,34 @@ class Clamp(UnaryElementwise):
         # The bounds are words a core reads, not part of the array.
         return (KernelCall(self.array_config().kernel(), self.bits(), (self.x,)),)
 
-    class Array(UnaryElementwise.Array):
-        def kernel(self):
-            return eltwise.clamp(self.tile_size)
+    def kernel(self):
+        return eltwise.clamp(self.tile_size)
 
-        def build(self) -> Built:
-            cores = self.cores
-            kernel = self.kernel()
-            depth = self.x.l1_depth
-            of_ins = [ObjectFifo(self.x.obj_type, depth=depth) for k in range(cores)]
-            of_outs = [ObjectFifo(self.y.obj_type, depth=depth) for k in range(cores)]
-            rtps = [
-                Rtp([self.count, self.low_bits, self.high_bits]) for _ in range(cores)
-            ]
+    def build(self) -> Built:
+        cores = self.cores
+        kernel = self.kernel()
+        depth = self.x.l1_depth
+        of_ins = [ObjectFifo(self.x.obj_type, depth=depth) for k in range(cores)]
+        of_outs = [ObjectFifo(self.y.obj_type, depth=depth) for k in range(cores)]
+        rtps = [Rtp([self.count, self.low_bits, self.high_bits]) for _ in range(cores)]
 
-            def core_fn(of_in, of_out, kernel_fn, rtp):
-                words = rtp.read()
-                n = words[self.count]
-                low, high = words[self.low_bits], words[self.high_bits]
-                for _ in range_(n):
-                    x, y = of_in.acquire(1), of_out.acquire(1)
-                    kernel_fn(x, y, self.tile_size, low, high)
-                    of_in.release(1)
-                    of_out.release(1)
+        def core_fn(of_in, of_out, kernel_fn, rtp):
+            words = rtp.read()
+            n = words[self.count]
+            low, high = words[self.low_bits], words[self.high_bits]
+            for _ in range_(n):
+                x, y = of_in.acquire(1), of_out.acquire(1)
+                kernel_fn(x, y, self.tile_size, low, high)
+                of_in.release(1)
+                of_out.release(1)
 
-            workers = [
-                Worker(
-                    core_fn,
-                    [of_ins[k].cons(), of_outs[k].prod(), kernel, rtps[k]],
-                )
-                for k in range(cores)
-            ]
-            self.x.bind([f.prod() for f in of_ins])
-            self.y.bind([f.cons() for f in of_outs])
-            return Built(workers, rtps)
+        workers = [
+            Worker(
+                core_fn,
+                [of_ins[k].cons(), of_outs[k].prod(), kernel, rtps[k]],
+            )
+            for k in range(cores)
+        ]
+        self.x.bind([f.prod() for f in of_ins])
+        self.y.bind([f.cons() for f in of_outs])
+        return Built(workers, rtps)

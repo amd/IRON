@@ -17,7 +17,6 @@ class SiLU(UnaryElementwise):
     # One channel per column: the LUT-based kernel is sized for it.
     num_channels: int = tunable(default=1, repr=False, init=False)
 
-    class Array(UnaryElementwise.Array):
-        def kernel(self):
-            # vtanh's error was most of Llama 3.2 3B's divergence; the table costs nothing.
-            return activation.silu_sized(self.tile_size, use_lut=True)
+    def kernel(self):
+        # vtanh's error was most of Llama 3.2 3B's divergence; the table costs nothing.
+        return activation.silu_sized(self.tile_size, use_lut=True)

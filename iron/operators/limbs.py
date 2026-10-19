@@ -46,6 +46,5 @@ class Limbs(Rowwise):
         per=CORES,
     )
 
-    class Array(Rowwise.Array):
-        def kernel(self):
-            return datamovement.limbs_f32(self.line)
+    def kernel(self):
+        return datamovement.limbs_f32(self.line)

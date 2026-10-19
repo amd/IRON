@@ -40,16 +40,15 @@ class ElementwiseMax(BinaryElementwise):
         ]
     )
 
-    class Array(BinaryElementwise.Array):
-        def kernel(self):
-            return ExternalFunction(
-                "eltwise_max_bf16",
-                source_string=MAX,
-                arg_types=[self.a.obj_type, self.b.obj_type, self.y.obj_type, np.int32],
-                contract=KernelContract(
-                    roles=(In, In, Out, Param),
-                    parameter_bindings=((3, self.tile_size),),
-                    reference=np.maximum,
-                    tolerance=Tolerance.exact(note="a selection"),
-                ),
-            )
+    def kernel(self):
+        return ExternalFunction(
+            "eltwise_max_bf16",
+            source_string=MAX,
+            arg_types=[self.a.obj_type, self.b.obj_type, self.y.obj_type, np.int32],
+            contract=KernelContract(
+                roles=(In, In, Out, Param),
+                parameter_bindings=((3, self.tile_size),),
+                reference=np.maximum,
+                tolerance=Tolerance.exact(note="a selection"),
+            ),
+        )

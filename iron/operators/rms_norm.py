@@ -15,9 +15,8 @@ class RMSNorm(WeightedRowwise):
     # The epsilon under the root: 1e-5 by default; a model states its own.
     epsilon: float = param(default=1e-5, array=True)
 
-    class Array(WeightedRowwise.Array):
-        def kernel(self):
-            return norm.rms_norm_eps(self.tile_size)
+    def kernel(self):
+        return norm.rms_norm_eps(self.tile_size)
 
-        def scalars(self) -> tuple:
-            return (self.epsilon,)
+    def scalars(self) -> tuple:
+        return (self.epsilon,)

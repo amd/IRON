@@ -11,9 +11,8 @@ from iron.common import BinaryElementwise, RowBroadcast
 class ElementwiseMul(BinaryElementwise):
     """AIE-accelerated element-wise multiplication."""
 
-    class Array(BinaryElementwise.Array):
-        def kernel(self):
-            return eltwise.mul_sized(self.tile_size)
+    def kernel(self):
+        return eltwise.mul_sized(self.tile_size)
 
 
 class RowwiseMul(RowBroadcast):
@@ -21,6 +20,5 @@ class RowwiseMul(RowBroadcast):
 
     tile_cap: ClassVar[int] = 4096
 
-    class Array(RowBroadcast.Array):
-        def kernel(self):
-            return eltwise.mul_sized(self.line)
+    def kernel(self):
+        return eltwise.mul_sized(self.line)

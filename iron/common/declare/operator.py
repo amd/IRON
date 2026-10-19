@@ -103,16 +103,6 @@ class Array:
             return bound.member(name)
         return getattr(layout, name)
 
-    def build(self) -> Built:
-        """Build the array for the bound device.
-
-        Bind every operand's lanes to fifos' shim ends, and give each core
-        reading ``Value``s its runtime parameters (``Rtp``).
-        """
-        raise NotImplementedError(
-            f"{type(self).__qualname__}.build() is not implemented"
-        )
-
 
 class Operator(jit.Operator, library=True):
     """An operator. Subclass it; each subclass's body is its declaration
@@ -156,7 +146,8 @@ class Operator(jit.Operator, library=True):
             cls._external = image
         if cls.reference_only and (
             image is not None
-            or cls.Array.build is not Array.build
+            or getattr(cls.Array, "build", Operator.build) is not Operator.build
+            or cls.build is not Operator.build
             or cls.sequence is not Operator.sequence
             or cls.exported_design is not Operator.exported_design
         ):
@@ -221,6 +212,15 @@ class Operator(jit.Operator, library=True):
             p.tunable and vars(self)[n] is None for n, p in params.items()
         ):
             self.compatible()
+
+    def build(self) -> Built:
+        """Build the array for the bound device, on the operator as its
+        cores see it (``layout()``).
+
+        Bind every operand's lanes to fifos' shim ends, and give each core
+        reading ``Value``s its runtime parameters (``Rtp``).
+        """
+        raise NotImplementedError(f"{type(self).__name__}.build() is not implemented")
 
     def array_config(self) -> Array:
         """This operator's ``Array``: what its array is built from."""

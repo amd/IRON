@@ -36,21 +36,20 @@ extern "C" void vadd(bfloat16 *a, bfloat16 *b, bfloat16 *y, int n) {
 class VectorAdd(BinaryElementwise):
     """y = a + b."""
 
-    class Array(BinaryElementwise.Array):
-        def kernel(self):
-            tiles = [self.a.obj_type, self.b.obj_type, self.y.obj_type, np.int32]
-            contract = KernelContract(
-                roles=(In, In, Out, Param),
-                parameter_bindings=((3, self.tile_size),),
-                reference=lambda a, b: a + b,
-                tolerance=Tolerance.bf16_ulps(1, atol=2**-126),
-            )
-            return ExternalFunction(
-                "vadd",
-                source_string=VADD,
-                arg_types=tiles,
-                contract=contract,
-            )
+    def kernel(self):
+        tiles = [self.a.obj_type, self.b.obj_type, self.y.obj_type, np.int32]
+        contract = KernelContract(
+            roles=(In, In, Out, Param),
+            parameter_bindings=((3, self.tile_size),),
+            reference=lambda a, b: a + b,
+            tolerance=Tolerance.bf16_ulps(1, atol=2**-126),
+        )
+        return ExternalFunction(
+            "vadd",
+            source_string=VADD,
+            arg_types=tiles,
+            contract=contract,
+        )
 
 
 def test_an_inline_kernel_lowers(device, tmp_path):

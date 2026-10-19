@@ -13,6 +13,5 @@ class ReLU(UnaryElementwise):
 
     test = Testing(Sweep(), draw=lambda op: dict(centered=(op.x,)))  # both signs
 
-    class Array(UnaryElementwise.Array):
-        def kernel(self):
-            return eltwise.relu_sized(self.tile_size)
+    def kernel(self):
+        return eltwise.relu_sized(self.tile_size)

@@ -7,19 +7,17 @@ streaming fixed-size lines of every declared operand through its kernel.
 A ``replicate=True`` input is one line each core holds for the whole call
 and every line meets (``RowwiseMul``'s row).
 
-A concrete operator is one small subclass naming the kernel on its
-``Array``:
+A concrete operator is one small subclass naming its kernel:
 
 ```python
 class ReLU(UnaryElementwise):
-    class Array(UnaryElementwise.Array):
-        def kernel(self):
-            return eltwise.relu_sized(self.tile_size)
+    def kernel(self):
+        return eltwise.relu_sized(self.tile_size)
 ```
 
 A core calls the kernel in its contract's argument order, with the scalars
-the factory binds and those ``scalars()`` supplies. A field either reads is
-declared ``array=True`` unless a stream names it.
+the factory binds and those ``scalars()`` supplies. A parameter either reads
+is declared ``array=True`` unless a stream names it.
 """
 
 from __future__ import annotations
@@ -426,150 +424,140 @@ class Elementwise(Operator):
             tuple(scalars[i] for i in contract.reference_indices() if i in scalars),
         )
 
-    class Array(Operator.Array):
-        buffers: list[Operand]
+    def kernel(self) -> ExternalFunction:
+        """The ``ExternalFunction`` each core calls over one line."""
+        raise NotImplementedError(f"{type(self).__qualname__} declares no kernel()")
 
-        @property
-        def cores(self) -> int:
-            return self.num_aie_columns * self.num_channels
+    def scalars(self) -> tuple:
+        """The kernel's scalar arguments its contract leaves unbound, in order."""
+        return ()
 
-        def kernel(self) -> ExternalFunction:
-            """The ``ExternalFunction`` each core calls over one line."""
-            raise NotImplementedError(f"{type(self).__qualname__} declares no kernel()")
+    def held_segments(self) -> int:
+        """The lines each held input is cut into, which a core holds all of
+        and meets, in turn, with that many lines of every other input.
+        """
+        return 1
 
-        def scalars(self) -> tuple:
-            """The kernel's scalar arguments its contract leaves unbound, in order."""
-            return ()
+    def arguments(
+        self, kernel: ExternalFunction, given: tuple, n_in: int, n_out: int
+    ) -> tuple[list[int], dict]:
+        """Where each tile goes in a call, and the scalar arguments.
 
-        def held_segments(self) -> int:
-            """The lines each held input is cut into, which a core holds all of
-            and meets, in turn, with that many lines of every other input.
-            """
-            return 1
+        Args:
+            kernel: The kernel called.
+            given: The scalars its contract leaves unbound, in order.
+            n_in: The input tiles a call is given.
+            n_out: The output tiles a call is given.
 
-        def arguments(
-            self, kernel: ExternalFunction, given: tuple, n_in: int, n_out: int
-        ) -> tuple[list[int], dict]:
-            """Where each tile goes in a call, and the scalar arguments.
+        Returns:
+            The argument positions of the inputs then the outputs, in the
+            order a core acquires them, and the scalar values by position.
+        """
+        contract = kernel.contract
+        if contract is None:
+            return list(range(n_in + n_out)), {}
+        if contract.accumulates:
+            raise ValueError(
+                f"{type(self).__qualname__}: an elementwise kernel writes its output; "
+                f"{kernel.name} accumulates into one"
+            )
+        roles = contract.roles
+        scalars = dict(contract.parameter_bindings)
+        free = [
+            i for i, r in enumerate(roles) if r is kernels.Param and i not in scalars
+        ]
+        if len(free) != len(given):
+            raise ValueError(
+                f"{type(self).__qualname__}: {kernel.name} leaves {len(free)} scalar(s) "
+                f"unbound; {len(given)} given"
+            )
+        scalars.update(zip(free, given))
+        outs = list(contract.out_indices)
+        ins = [i for i in range(len(roles)) if i not in scalars and i not in outs]
+        if (len(ins), len(outs)) != (n_in, n_out):
+            raise ValueError(
+                f"{type(self).__qualname__}: {kernel.name} takes {len(ins)} input and "
+                f"{len(outs)} output tile(s); it is given {n_in} and {n_out}"
+            )
+        return ins + outs, scalars
 
-            Args:
-                kernel: The kernel called.
-                given: The scalars its contract leaves unbound, in order.
-                n_in: The input tiles a call is given.
-                n_out: The output tiles a call is given.
+    def build(self) -> Built:
+        streams = [b for b in self.buffers if b.streamed]
+        ins = [b for b in streams if b.role is In]
+        outs = [b for b in streams if b.drains]
+        n_in = len(ins)
+        cores = self.cores
+        kernel = self.kernel()
+        positions, scalars = self.arguments(kernel, self.scalars(), n_in, len(outs))
+        order = {i: k for k, i in enumerate(positions)}
+        n_args = len(positions) + len(scalars)
 
-            Returns:
-                The argument positions of the inputs then the outputs, in the
-                order a core acquires them, and the scalar values by position.
-            """
-            contract = kernel.contract
-            if contract is None:
-                return list(range(n_in + n_out)), {}
-            if contract.accumulates:
-                raise ValueError(
-                    f"{type(self).__qualname__}: an elementwise kernel writes its output; "
-                    f"{kernel.name} accumulates into one"
-                )
-            roles = contract.roles
-            scalars = dict(contract.parameter_bindings)
-            free = [
-                i
-                for i, r in enumerate(roles)
-                if r is kernels.Param and i not in scalars
-            ]
-            if len(free) != len(given):
-                raise ValueError(
-                    f"{type(self).__qualname__}: {kernel.name} leaves {len(free)} scalar(s) "
-                    f"unbound; {len(given)} given"
-                )
-            scalars.update(zip(free, given))
-            outs = list(contract.out_indices)
-            ins = [i for i in range(len(roles)) if i not in scalars and i not in outs]
-            if (len(ins), len(outs)) != (n_in, n_out):
-                raise ValueError(
-                    f"{type(self).__qualname__}: {kernel.name} takes {len(ins)} input and "
-                    f"{len(outs)} output tile(s); it is given {n_in} and {n_out}"
-                )
-            return ins + outs, scalars
+        def slot(k: int) -> str:
+            col, chan = divmod(k, self.num_channels)
+            return f"{col}" if self.num_channels == 1 else f"{col}_{chan}"
 
-        def build(self) -> Built:
-            streams = [b for b in self.buffers if b.streamed]
-            ins = [b for b in streams if b.role is In]
-            outs = [b for b in streams if b.drains]
-            n_in = len(ins)
-            cores = self.cores
-            kernel = self.kernel()
-            positions, scalars = self.arguments(kernel, self.scalars(), n_in, len(outs))
-            order = {i: k for k, i in enumerate(positions)}
-            n_args = len(positions) + len(scalars)
+        segments = self.held_segments()
 
-            def slot(k: int) -> str:
-                col, chan = divmod(k, self.num_channels)
-                return f"{col}" if self.num_channels == 1 else f"{col}_{chan}"
+        def fifos(stream, name):
+            # A held line, acquired once per call, is one fifo per lane that
+            # the cores of its lane share.
+            if stream.replicate:
+                return [
+                    ObjectFifo(stream.obj_type, depth=segments)
+                    for j in range(stream.lanes)
+                ]
+            depth = stream.l1_depth
+            return [ObjectFifo(stream.obj_type, depth=depth) for k in range(cores)]
 
-            segments = self.held_segments()
+        of_ins = [fifos(s, f"in{i}") for i, s in enumerate(ins)]
+        of_outs = [
+            fifos(s, f"out{i}" if len(outs) > 1 else "out") for i, s in enumerate(outs)
+        ]
+        rtps = [Rtp([self.count]) for _ in range(cores)]
+        n_fifos = n_in + len(outs)
+        held = [s.replicate for s in ins] + [False] * len(outs)
 
-            def fifos(stream, name):
-                # A held line, acquired once per call, is one fifo per lane that
-                # the cores of its lane share.
-                if stream.replicate:
-                    return [
-                        ObjectFifo(stream.obj_type, depth=segments)
-                        for j in range(stream.lanes)
-                    ]
-                depth = stream.l1_depth
-                return [ObjectFifo(stream.obj_type, depth=depth) for k in range(cores)]
-
-            of_ins = [fifos(s, f"in{i}") for i, s in enumerate(ins)]
-            of_outs = [
-                fifos(s, f"out{i}" if len(outs) > 1 else "out")
-                for i, s in enumerate(outs)
-            ]
-            rtps = [Rtp([self.count]) for _ in range(cores)]
-            n_fifos = n_in + len(outs)
-            held = [s.replicate for s in ins] + [False] * len(outs)
-
-            def core_fn(*args):
-                fifos = args[:n_fifos]
-                kernel_fn, rtp = args[n_fifos:]
-                n = rtp.read()[self.count]
-                kept = {j: f.acquire(segments) for j, f in enumerate(fifos) if held[j]}
-                for _ in range_(n):
-                    for s in range(segments):
-                        elements = [
-                            (
-                                (kept[j] if segments == 1 else kept[j][s])
-                                if held[j]
-                                else f.acquire(1)
-                            )
-                            for j, f in enumerate(fifos)
-                        ]
-                        kernel_fn(
-                            *(
-                                elements[order[i]] if i in order else scalars[i]
-                                for i in range(n_args)
-                            )
+        def core_fn(*args):
+            fifos = args[:n_fifos]
+            kernel_fn, rtp = args[n_fifos:]
+            n = rtp.read()[self.count]
+            kept = {j: f.acquire(segments) for j, f in enumerate(fifos) if held[j]}
+            for _ in range_(n):
+                for s in range(segments):
+                    elements = [
+                        (
+                            (kept[j] if segments == 1 else kept[j][s])
+                            if held[j]
+                            else f.acquire(1)
                         )
-                        for j, f in enumerate(fifos):
-                            if not held[j]:
-                                f.release(1)
-                for j in kept:
-                    fifos[j].release(segments)
+                        for j, f in enumerate(fifos)
+                    ]
+                    kernel_fn(
+                        *(
+                            elements[order[i]] if i in order else scalars[i]
+                            for i in range(n_args)
+                        )
+                    )
+                    for j, f in enumerate(fifos):
+                        if not held[j]:
+                            f.release(1)
+            for j in kept:
+                fifos[j].release(segments)
 
-            workers = [
-                Worker(
-                    core_fn,
-                    [of[k % len(of)].cons() for of in of_ins]
-                    + [of[k].prod() for of in of_outs]
-                    + [kernel, rtps[k]],
-                )
-                for k in range(cores)
-            ]
-            for stream, of in zip(ins, of_ins):
-                stream.bind([f.prod() for f in of])
-            for stream, of in zip(outs, of_outs):
-                stream.bind([f.cons() for f in of])
-            return Built(workers, rtps)
+        workers = [
+            Worker(
+                core_fn,
+                [of[k % len(of)].cons() for of in of_ins]
+                + [of[k].prod() for of in of_outs]
+                + [kernel, rtps[k]],
+            )
+            for k in range(cores)
+        ]
+        for stream, of in zip(ins, of_ins):
+            stream.bind([f.prod() for f in of])
+        for stream, of in zip(outs, of_outs):
+            stream.bind([f.cons() for f in of])
+        return Built(workers, rtps)
 
 
 # An operand split over every core: one lane per (column, channel).
@@ -769,94 +757,87 @@ class WeightedRowwise(Rowwise):
             "first kernel's times |weight|",
         )
 
-    class Array(Rowwise.Array):
-        def build(self) -> Built:
-            if not self.weighted:
-                return super().build()
-            tile_ty = self.x.obj_type
-            weights_ty = self.weight.obj_type
-            cols, chans = self.num_aie_columns, self.num_channels
-            depth = self.x.l1_depth
-            kernel = self.kernel()
-            positions, scalars = self.arguments(kernel, self.scalars(), 1, 1)
-            n_args = len(positions) + len(scalars)
-            eltwise_mul = eltwise.mul_sized(self.tile_size)
-            of_ins = [
-                ObjectFifo(tile_ty, depth=depth)
-                for i in range(cols)
-                for j in range(chans)
-            ]
-            of_ws = [ObjectFifo(weights_ty, depth=depth) for j in range(chans)]
-            of_mid = [
-                ObjectFifo(tile_ty, depth=depth)
-                for i in range(cols)
-                for j in range(chans)
-            ]
-            of_outs = [
-                ObjectFifo(tile_ty, depth=depth)
-                for i in range(cols)
-                for j in range(chans)
-            ]
-            n_cores = cols * chans
-            rtps = [Rtp([self.count]) for _ in range(2 * n_cores)]
+    def build(self) -> Built:
+        if not self.weighted:
+            return super().build()
+        tile_ty = self.x.obj_type
+        weights_ty = self.weight.obj_type
+        cols, chans = self.num_aie_columns, self.num_channels
+        depth = self.x.l1_depth
+        kernel = self.kernel()
+        positions, scalars = self.arguments(kernel, self.scalars(), 1, 1)
+        n_args = len(positions) + len(scalars)
+        eltwise_mul = eltwise.mul_sized(self.tile_size)
+        of_ins = [
+            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
+        ]
+        of_ws = [ObjectFifo(weights_ty, depth=depth) for j in range(chans)]
+        of_mid = [
+            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
+        ]
+        of_outs = [
+            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
+        ]
+        n_cores = cols * chans
+        rtps = [Rtp([self.count]) for _ in range(2 * n_cores)]
 
-            def core_kernel(of_in, of_out, kernel_fn, rtp):
-                n = rtp.read()[self.count]
-                for _ in range_(n):
-                    elem_in = of_in.acquire(1)
-                    elem_out = of_out.acquire(1)
-                    tiles = dict(zip(positions, (elem_in, elem_out)))
-                    kernel_fn(
-                        *(tiles[i] if i in tiles else scalars[i] for i in range(n_args))
-                    )
-                    of_in.release(1)
-                    of_out.release(1)
+        def core_kernel(of_in, of_out, kernel_fn, rtp):
+            n = rtp.read()[self.count]
+            for _ in range_(n):
+                elem_in = of_in.acquire(1)
+                elem_out = of_out.acquire(1)
+                tiles = dict(zip(positions, (elem_in, elem_out)))
+                kernel_fn(
+                    *(tiles[i] if i in tiles else scalars[i] for i in range(n_args))
+                )
+                of_in.release(1)
+                of_out.release(1)
 
-            def core_mul(of_in, of_w, of_out, mul, rtp):
-                n = rtp.read()[self.count]
-                elem_w = of_w.acquire(1)
-                for _ in range_(n):
-                    elem_in = of_in.acquire(1)
-                    elem_out = of_out.acquire(1)
-                    mul(elem_in, elem_w, elem_out, self.tile_size)
-                    of_in.release(1)
-                    of_out.release(1)
-                of_w.release(1)
+        def core_mul(of_in, of_w, of_out, mul, rtp):
+            n = rtp.read()[self.count]
+            elem_w = of_w.acquire(1)
+            for _ in range_(n):
+                elem_in = of_in.acquire(1)
+                elem_out = of_out.acquire(1)
+                mul(elem_in, elem_w, elem_out, self.tile_size)
+                of_in.release(1)
+                of_out.release(1)
+            of_w.release(1)
 
-            workers = []
-            for i in range(cols):
-                for j in range(chans):
-                    k = i * chans + j
-                    workers.append(
-                        Worker(
-                            core_kernel,
-                            [
-                                of_ins[k].cons(),
-                                of_mid[k].prod(),
-                                kernel,
-                                rtps[k],
-                            ],
-                        )
+        workers = []
+        for i in range(cols):
+            for j in range(chans):
+                k = i * chans + j
+                workers.append(
+                    Worker(
+                        core_kernel,
+                        [
+                            of_ins[k].cons(),
+                            of_mid[k].prod(),
+                            kernel,
+                            rtps[k],
+                        ],
                     )
-            for i in range(cols):
-                for j in range(chans):
-                    k = i * chans + j
-                    workers.append(
-                        Worker(
-                            core_mul,
-                            [
-                                of_mid[k].cons(),
-                                of_ws[j].cons(),
-                                of_outs[k].prod(),
-                                eltwise_mul,
-                                rtps[n_cores + k],
-                            ],
-                        )
+                )
+        for i in range(cols):
+            for j in range(chans):
+                k = i * chans + j
+                workers.append(
+                    Worker(
+                        core_mul,
+                        [
+                            of_mid[k].cons(),
+                            of_ws[j].cons(),
+                            of_outs[k].prod(),
+                            eltwise_mul,
+                            rtps[n_cores + k],
+                        ],
                     )
-            self.x.bind([f.prod() for f in of_ins])
-            self.y.bind([f.cons() for f in of_outs])
-            self.weight.bind([f.prod() for f in of_ws])
-            return Built(workers, rtps)
+                )
+        self.x.bind([f.prod() for f in of_ins])
+        self.y.bind([f.cons() for f in of_outs])
+        self.weight.bind([f.prod() for f in of_ws])
+        return Built(workers, rtps)
 
 
 class RowBroadcast(Rowwise):
@@ -928,6 +909,5 @@ class RowBroadcast(Rowwise):
         (out,) = self.outputs
         return out.elements // self.line
 
-    class Array(Rowwise.Array):
-        def held_segments(self) -> int:
-            return self.segments
+    def held_segments(self) -> int:
+        return self.segments

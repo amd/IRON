@@ -35,9 +35,8 @@ class Log(UnaryElementwise):
         per=CORES,
     )
 
-    class Array(UnaryElementwise.Array):
-        def kernel(self):
-            return activation.log_f32(self.tile_size)
+    def kernel(self):
+        return activation.log_f32(self.tile_size)
 
-        def scalars(self) -> tuple:
-            return (self.offset,)
+    def scalars(self) -> tuple:
+        return (self.offset,)
