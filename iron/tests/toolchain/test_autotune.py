@@ -337,6 +337,18 @@ def test_cache_entries_round_trip_per_platform_and_mode(tmp_path):
     assert cache.get("k") is None
 
 
+def test_settings_all_cached_are_not_timed(monkeypatch, tmp_path):
+    from iron.tune import measure as measuring
+
+    monkeypatch.setattr(measuring, "pmode", lambda: "turbo")
+    ops = [ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=c) for c in (8, 4)]
+    cache = Cache("NPU Strix Halo", "turbo", root=tmp_path)
+    m = Measurement(4.0, (4.1, 3.9), "ab" * 32, "run", "turbo", 50)
+    for op in ops:
+        cache.put(Cache.key(op, full_elf=True), m)
+    assert measuring.measure(ops, full_elf=True, cache=cache) == {0: m, 1: m}
+
+
 def test_a_difference_pairs_rounds_only_within_one_run():
     a = Measurement(4.0, (4.0, 5.0, 3.0), "", "r", "turbo", 50)
     b = Measurement(3.0, (3.0, 4.0, 2.0), "", "r", "turbo", 50)

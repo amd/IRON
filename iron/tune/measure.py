@@ -538,7 +538,9 @@ def measure(
             if (m := cache.get(key)) is not None:
                 out[i] = m
     todo = [i for i in range(len(ops)) if i not in out]
-    if todo and 0 not in todo:
+    if not todo:
+        return out
+    if 0 not in todo:
         todo.insert(0, 0)  # the default, timed beside the others
     distinct = sum(b.nbytes for b in ops[0].resolved().buffers) <= DISTINCT_BYTES
     # Each setting is two runs, each holding a context; one pair is the default's.
