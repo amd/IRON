@@ -670,8 +670,27 @@ class Operator(jit.Operator, library=True):
                         self._values[word.name] = word
 
     def layout(self) -> Self:
-        view = super().layout()
+        """This operator as its cores see it, each operand bound to the view.
+
+        Its values stay this operator's, which a build hands its cores; an
+        extent reads as its number only where the key holds its bound.
+        """
+        view = object.__new__(type(self))
+        vars(view).update(
+            {n: vars(self)[n] for n in self.declaration.key}, trace=self.trace
+        )
         view._values = self._values
+        view._bound = {}
+        for m in self.declaration.members:
+            if m.name not in self._bound:
+                continue
+            if isinstance(m, PerCallMember) and m.bounds is not None:
+                if m.bounds.name in vars(view):
+                    view._bound[m.name] = vars(view)[m.bounds.name]
+            elif isinstance(m, PerCallMember):
+                view._bound[m.name] = self._bound[m.name]
+            else:
+                view._bound[m.name] = Operand(m, view)
         return view
 
     @property

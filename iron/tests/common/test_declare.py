@@ -329,6 +329,10 @@ def test_array_sees_the_array_tier_alone():
     assert op.layout().build() == Built([128, 8, 64, "none"])
     with pytest.raises(AttributeError, match="reads M, which is not in the"):
         Leaky(M=1024, K=128).resolved(NPU2).layout().build()
+    view = op.layout()
+    assert view.A.op is view and view.A.obj_shape == (64, 128)
+    with pytest.raises(AttributeError, match="reads num_batches, which is not in"):
+        view.A.shape
 
 
 def test_a_field_resolve_computes_is_kept_by_copies_and_checked_once_known():

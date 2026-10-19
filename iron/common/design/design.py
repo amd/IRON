@@ -196,7 +196,10 @@ class BuiltArray:
                 )
             else:
                 value.param = dispatch[value.symbol]
-        self.built = op.layout().build()
+        view = op.layout()
+        self.built = view.build()
+        for mine, built in zip(op.buffers, view.buffers):
+            mine.lane_handles = built.lane_handles
         self.design = design
         self.op = op
         self.workers = [w for w in self.built.objects if isinstance(w, Worker)]
