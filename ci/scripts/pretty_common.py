@@ -121,7 +121,7 @@ LLAMA = "tests/applications/llama/test.py::"
 QWEN3 = "tests/applications/qwen3/test.py::"
 # The module that runs every operator declaring its cases. Its parametrize ids
 # lead with the operator: 'GEMV-cols_4-...'.
-CATALOG_TEST_FILE = "iron/tests/operators/catalog.py"
+CATALOG_TEST_FILE = "iron/tests/operators/test_catalog.py"
 CATALOG = f"{CATALOG_TEST_FILE}::test_operator"
 # The prompt lengths and token counts a decoder application benches.
 PROMPTS = [(p, n) for p in (1024, 13) for n in (40, 1)]
@@ -149,8 +149,9 @@ RENAMED_PATHS = {
     "iron/applications/llama/": "tests/applications/llama/",
     "iron/operators/flm/gemma4_engine/": "tests/applications/gemma4_flm/",
     "iron/applications/qwen3/": "tests/applications/qwen3/",
+    "iron/tests/operators/catalog.py::": f"{CATALOG_TEST_FILE}::",
     **{
-        f"iron/operators/{block}/test.py::": f"iron/tests/lm/{block}.py::"
+        old: f"iron/tests/lm/test_{block}.py::"
         for block in (
             "concat_channels",
             "conv1d",
@@ -160,6 +161,7 @@ RENAMED_PATHS = {
             "max_pool2d",
             "swiglu",
         )
+        for old in (f"iron/operators/{block}/test.py::", f"iron/tests/lm/{block}.py::")
     },
 }
 
@@ -224,8 +226,9 @@ def operator_name(test_path: str, test_name: str = "") -> str:
     'iron/operators/flm/gemm/test.py::test_gemm' names 'flm/gemm', and
     'tests/applications/llama/test.py::test_llama' names 'llama'. A
     catalog row is named by its test's leading id:
-    'iron/tests/operators/catalog.py::test_operator' with test
-    'GEMV-cols_4' names 'GEMV'. Any other test is named by its module.
+    'iron/tests/operators/test_catalog.py::test_operator' with test
+    'GEMV-cols_4' names 'GEMV'. Any other test is named by its module,
+    'test_' dropped.
     """
     file_part = test_path.split("::", 1)[0]
     if file_part == CATALOG_TEST_FILE:
@@ -235,7 +238,7 @@ def operator_name(test_path: str, test_name: str = "") -> str:
         if directory.startswith(prefix):
             return directory[len(prefix) :] or UNKNOWN_OPERATOR
     stem = os.path.splitext(os.path.basename(file_part))[0]
-    return stem or UNKNOWN_OPERATOR
+    return stem.removeprefix("test_") or UNKNOWN_OPERATOR
 
 
 def try_parse_float(value: Any) -> Optional[float]:

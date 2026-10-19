@@ -68,7 +68,7 @@ Hugging Face decoders need a config and a model class; see
    (`iron.lm.cli`).
 
 3. **Tests.** A decoder's device-free test subclasses `Decoder`
-   (`iron/tests/common/llama_reference.py`) with the model, a toy config
+   (`iron/tests/support/llama_reference.py`) with the model, a toy config
    and transformers' model type: it draws random weights
    (`Checkpoint.tree("random", seed)`) and compares the model run on the
    host (`OnHost`) with transformers' logits on the same weights, recorded
@@ -115,10 +115,10 @@ class ReLU(UnaryElementwise):
    `Operator` with `In`/`Out` operands and `build()`; `gemm.py` and
    `mha.py` are the worked examples.
 3. **Test.** Declare `test = Testing(...)` on the class;
-   `iron/tests/operators/catalog.py` runs every operator's cases. Every
+   `iron/tests/operators/test_catalog.py` runs every operator's cases. Every
    operator needs a `bench=True` case and a `lower=True` case per layout
    (`Sweep` adds the first, and the second with `lower=True`); a shape it
-   must refuse goes in `iron/tests/operators/rejected_shapes.py`.
+   must refuse goes in `iron/tests/operators/test_rejected_shapes.py`.
 4. **Register.** Add the name to `_OPERATOR_MODULES` in
    `iron/operators/__init__.py` and to `__init__.pyi`.
 5. **Use it.** Inside a graph's `body()`, `ReLU.step(x)` records a step.

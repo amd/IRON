@@ -144,7 +144,7 @@ def test_check_mode_holds_each_step_to_its_reference(caplog):
     """compile(check=True) dispatches each step on its own and holds what it
     wrote to its reference on the NPU's inputs: a graph within its steps'
     tolerances runs, judges every step, and computes what the full ELF does.
-    A step outside its tolerance raises (iron/tests/common/checking.py).
+    A step outside its tolerance raises (iron/tests/common/test_checking.py).
     """
     rng = np.random.default_rng(0)
     a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
@@ -186,7 +186,7 @@ def test_check_mode_catches_a_step_outside_its_tolerance_at_that_step():
     A wrong weight cannot stand in here: check mode judges each step against
     its reference on the inputs the NPU gave it, so a wrong weight in a
     device buffer is what both read. What a step catches is a kernel outside
-    its operator's tolerance(), as iron/tests/common/checking.py induces on
+    its operator's tolerance(), as iron/tests/common/test_checking.py induces on
     the host.
     """
     rows, width = 8, 640

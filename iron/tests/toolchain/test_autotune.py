@@ -4,7 +4,7 @@
 """Autotuning without a device: the settings an operator is searched over,
 the placer's verdicts, the cost cache, the accuracy gate, and the profile a
 tuning writes, its times made up. Hardware times a tuned graph
-(``iron/tests/infrastructure/autotune.py``).
+(``iron/tests/infrastructure/test_autotune.py``).
 """
 
 import dataclasses

@@ -6,7 +6,7 @@
 and two depthwise ones, the second's 13 output rows not whole GEMM row
 blocks: one compile each, called at two row counts, every output row the
 call computes held to its reference (the convolution, as
-``iron/tests/common/conv2d_graph.py`` judges it against torch's) within its
+``iron/tests/common/test_conv2d_graph.py`` judges it against torch's) within its
 GEMM's bound, 2 units of 2^-8 of the convolution of |x| by |weight|.
 """
 

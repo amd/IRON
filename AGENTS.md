@@ -47,7 +47,7 @@ and finds the Peano wheel itself.
 ```bash
 pytest iron/operators/ iron/tests/ -m "not extensive"   # what CI runs on every PR
 pytest iron/operators/ iron/tests/                      # the extensive suite
-pytest iron/tests/operators/catalog.py -k AXPY          # one declared operator
+pytest iron/tests/operators/test_catalog.py -k AXPY     # one declared operator
 pytest tests/applications/                              # model tests
 pytest ... -n auto                                      # in parallel
 pytest ... --csv-output=tests_latest.csv                # write benchmark figures
@@ -92,6 +92,9 @@ Formatting and licence checks are in CONTRIBUTING.md.
 - `iron/lm/`: what every language model shares (see "Language models").
 - `iron/applications/<name>/`: one model each; `tests/applications/<name>/`
   its tests.
+- `iron/tests/`: the tests by subsystem, each module `test_<name>.py`.
+  What several share is in `iron/tests/support/`; no test module imports
+  another.
 - Kernels are not here: they are C++ in mlir-aie's
   [`aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels),
   reached through the factories in `aie.iron.kernels`, each returning an
@@ -105,7 +108,7 @@ Formatting and licence checks are in CONTRIBUTING.md.
 - Data moves host (L3) to shim DMA, to memory tiles (L2), to each core's
   local memory (L1, tens of KB), where the kernel runs.
 - An operator's size rules are its `compatible()` and its domains; a shape
-  it must refuse is in `iron/tests/operators/rejected_shapes.py`.
+  it must refuse is in `iron/tests/operators/test_rejected_shapes.py`.
 
 ## Adding an operator
 
@@ -151,7 +154,7 @@ CONTRIBUTING.md walks through the common case. The rules:
    run time is the operator's `scalars()`, in the kernel's order. A kernel no
    factory covers is an `ExternalFunction` with `symbol_prefix=` naming its
    configuration and a `contract=KernelContract(...)`;
-   `iron/tests/toolchain/inline_kernel.py` is the example. A new C++ kernel
+   `iron/tests/toolchain/test_inline_kernel.py` is the example. A new C++ kernel
    goes into mlir-aie with a factory; IRON hosts none.
 5. `reference(*inputs)` only where the kernel's contract is not already
    the reference: numpy, upcast to float32, round once. A composite builds
@@ -164,7 +167,7 @@ CONTRIBUTING.md walks through the common case. The rules:
    least one `bench=True` case in the default suite, large enough that
    dispatch overhead (about 160 us) does not dominate, and a `lower=True`
    case for each layout or dtype its first default case does not reach.
-   `iron/tests/operators/catalog.py` runs every declaration; a test with a
+   `iron/tests/operators/test_catalog.py` runs every declaration; a test with a
    body of its own goes beside the operator as `test.py`.
 7. Register it in `_OPERATOR_MODULES` in `iron/operators/__init__.py` (an
    flm port in `_FLM_OPERATOR_MODULES`) and in `__init__.pyi`.
@@ -216,7 +219,7 @@ values, weights, state and profiles are named. The rules:
   `reference()` on the host.
 
 `iron/applications/llama/model.py` is the worked example;
-`iron/tests/common/graph.py` records it device-free and
+`iron/tests/common/test_graph.py` records it device-free and
 `iron/tests/toolchain/` builds it.
 
 ## Design rationale and known limits
@@ -227,7 +230,7 @@ Check the code before relying on a line here; it is the authority.
 
 - **One array, every extent.** `build()` sees only the key's parameters, and
   trip counts are per-call values the sequence writes, so one build serves many
-  shapes. `iron/tests/toolchain/array_identity.py` compares core ELFs built
+  shapes. `iron/tests/toolchain/test_array_identity.py` compares core ELFs built
   at two extents.
 - **Length-free extents.** A per-call bound (`x[:n]`) is mlir-aie's runtime
   transfer length, in whole 16-byte units. GEMM bounds its compute, not its

@@ -4,7 +4,7 @@
 """How an operator declares the shapes it is tested at on a device, and the
 device test harness: draw vectors, run it, judge and time it.
 
-``iron/tests/operators/catalog.py`` runs every declaration against the
+``iron/tests/operators/test_catalog.py`` runs every declaration against the
 operator's ``reference()``. Nothing here imports pytest, so an operator
 module stays importable without it.
 """

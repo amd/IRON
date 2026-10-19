@@ -252,7 +252,7 @@ def test_dispatch_modes_bit_identical(dispatch):
 
 # ---------------------------------------------------------------------------
 # 4. Check mode holds each step to its one tolerance(). A step outside it
-#    raises; iron/tests/common/checking.py induces that device-free, from a
+#    raises; iron/tests/common/test_checking.py induces that device-free, from a
 #    real wrong weight.
 #
 #    Magnitude's kernel comes within 2e-7 of hypot, about a float32 ulp, on

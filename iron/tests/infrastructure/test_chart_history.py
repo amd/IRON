@@ -36,7 +36,7 @@ RENAMES = [
     (
         "iron/operators/conv2d/test.py::test_conv2d",
         "case_band-share_1.0",
-        "iron/tests/lm/conv2d.py::test_conv2d",
+        "iron/tests/lm/test_conv2d.py::test_conv2d",
         "case_band-share_1.0",
         "conv2d",
     ),
@@ -214,7 +214,7 @@ REBASED = [
     (
         "iron/tests/operators/catalog.py::test_operator",
         "Merge-rows_2048-audio_token_258881-image_token_258880-audio_at_2048-vision_at_2560",
-        "iron/tests/operators/catalog.py::test_operator",
+        "iron/tests/operators/test_catalog.py::test_operator",
         "Merge-rows_2048-placeholders_((258881, 2048), (258880, 2560))",
         "Merge",
     ),

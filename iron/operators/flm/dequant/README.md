@@ -117,8 +117,8 @@ so the tests compare bytes.
 
 | Check | Where |
 |---|---|
-| descriptors reproduce `pack_b`'s order | `iron/tests/operators/flm_dequant_layout.py` |
-| device output equals the CPU reference | `iron/tests/operators/catalog.py`, at `DequantBFP.test`'s cases |
+| descriptors reproduce `pack_b`'s order | `iron/tests/operators/test_flm_dequant_layout.py` |
+| device output equals the CPU reference | `iron/tests/operators/test_catalog.py`, at `DequantBFP.test`'s cases |
 | device output equals `ProjectionGEMM.pack_B` | `test.py::test_output_feeds_gemm_unchanged` |
 
 A wrong stride yields a buffer of the right size holding real weight values in

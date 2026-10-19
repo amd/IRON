@@ -3,7 +3,7 @@
 
 """Autotuning on the NPU: settings timed, cached and written to a profile a
 graph then runs bit-identically with. What needs no device is checked in
-``iron/tests/toolchain/autotune.py``.
+``iron/tests/toolchain/test_autotune.py``.
 """
 
 import dataclasses
