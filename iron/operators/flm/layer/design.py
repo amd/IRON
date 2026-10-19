@@ -96,33 +96,27 @@ LK = 16
 # The padding in the engine's per-layer-input stream (gemma4e_npu_sequence.hpp).
 MIN_BF16_PAD = 32
 # The memtiles of the projection engine's four groups. Group i's memtile
-# feeds its cores proj_{i}_0 to proj_{i}_3, in column PROJ_COLS[i] rows 2 to
-# 5, their weights, and proj_shim_{i} feeds the memtile.
+# feeds its cores proj_{i}_0 to proj_{i}_3 their weights, and proj_shim_{i}
+# feeds the memtile.
 PROJ_MEMS = ("proj_gather_0", "proj_x", "proj_gather_1", "proj_weight")
-PROJ_COLS = (0, 1, 6, 7)
 
 _CORE, _MEM, _SHIM = AIETileType.CoreTile, AIETileType.MemTile, AIETileType.ShimNOCTile
-# Tile type, or (col, row) where a kernel takes the lock of the neighbour in
-# a fixed direction: the gate core the RMS core's, west, and each projection
-# core without x output the one below's.
+# The tile type of each stage. The placer chooses every tile, and keeps two
+# cores that share a buffer next to each other.
 STAGES = {
     "attn_qk": _CORE,
     "attn_kv": _CORE,
     "swa_attn_qk": _CORE,
     "swa_attn_kv": _CORE,
-    "rms": (3, 2),
+    "rms": _CORE,
     "glu": _CORE,
     "rope": _CORE,
     "swa_rope": _CORE,
-    "pl_gate": (4, 2),
+    "pl_gate": _CORE,
     "pl_embedding": _CORE,
     "pl_up": _CORE,
     "pl_merge": _CORE,
-    **{
-        f"proj_{i}_{j}": (col, 2 + j)
-        for i, col in enumerate(PROJ_COLS)
-        for j in range(4)
-    },
+    **{f"proj_{i}_{j}": _CORE for i in range(len(PROJ_MEMS)) for j in range(4)},
     **dict.fromkeys(PROJ_MEMS, _MEM),
     "attn_mem": _MEM,
     **{f"proj_shim_{i}": _SHIM for i in range(len(PROJ_MEMS))},
@@ -461,14 +455,7 @@ class _Array:
     flows: dict[str, Flow] = field(init=False)
 
     def __post_init__(self) -> None:
-        self.t = {
-            stage: (
-                Tile(*at, tile_type=_CORE)
-                if isinstance(at, tuple)
-                else Tile(tile_type=at)
-            )
-            for stage, at in STAGES.items()
-        }
+        self.t = {stage: Tile(tile_type=at) for stage, at in STAGES.items()}
         # The circuit-switched flows. The compiler assigns their channels, and
         # each stage's DMA reaches them by endpoint.
         t = self.t
