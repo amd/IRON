@@ -224,9 +224,11 @@ public API adds its entry under Unreleased.
   `Rope`, `CausalLM` and `DecoderConfig.long_angles` into Phi-4's
   `LongRopeTable`; `Rope.table_start(n)` is 0.
 - A decoder's tuning calls are `iron.lm.tune.calls(model, position, token,
-  context, points, sampler)`, on the flags `iron.lm.tune.arguments` adds,
-  not `CausalLM.tune_calls` and `tune_arguments`; `contexts` moved with
-  them. A model of another kind still names its own `tune_calls`.
+  context, points, sampler)`, on the flags `iron.lm.tune.arguments` adds;
+  `contexts` moved with them. `CausalLM.tune_calls` and `tune_arguments`,
+  the hook every model is tuned through, build the decoder on unread
+  weights and call them, refusing a `--context` that is not whole prompt
+  chunks within `max_seq_len`.
 - `Tokenizer.chat` puts the BOS where the chat template writes it, and only
   there, as transformers' `apply_chat_template` does; it no longer adds one.
   The template may call `strftime_now` and writes `tokenizer_config.json`'s

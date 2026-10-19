@@ -29,7 +29,7 @@ from iron.operators.copy import Copy
 from iron.operators.sample import Sample
 
 from .blocks import DecoderLayer, Embedding, Linear, RMSNorm, Rope
-from .checkpoint import renamed
+from .checkpoint import Checkpoint, renamed
 from .config import DecoderConfig
 from .model import Model
 from .generation import Sampler
@@ -234,6 +234,28 @@ class CausalLM(Model):
             at=call.position,
         )
         return logits, iron.carry(token=drawn, position=call.position + 1)
+
+    @classmethod
+    def tune_arguments(cls, parser) -> None:
+        """The flags ``tune_calls`` follows from (``tune.arguments``)."""
+        from .tune import arguments
+
+        arguments(parser)
+
+    @classmethod
+    def tune_calls(cls, parser, args) -> list:
+        """``tune.calls`` on ``args``, built on weights it never reads."""
+        from .tune import calls
+
+        config = cls.default_config(args.checkpoint)
+        L, C = config.max_seq_len, config.prefill_chunk
+        if not 0 < args.context <= L or args.context % C:
+            parser.error(f"--context {args.context} is not a multiple of {C} to {L}")
+        model = cls(config, Checkpoint(args.checkpoint).tree("unread"))
+        sampler = Sampler(args.temperature, args.top_k)
+        return calls(
+            model, args.position, args.token, args.context, args.points, sampler
+        )
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the decode step's (none), then

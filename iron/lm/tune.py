@@ -8,8 +8,8 @@ python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors
 python -m iron.lm.tune embedding_gemma2
 ```
 
-A decoder's operators are timed in its decode step and its prompt chunk
-(``calls``); another kind of model names its own calls (``tune_calls``).
+A model names the calls its operators are timed in (``tune_calls``): a
+decoder's are its decode step and its prompt chunk (``calls``).
 The fastest settings found rewrite the application's
 ``profiles/<device>.json`` (``iron.tune.autotune``): review the change with
 ``git diff`` and commit it. Times the cost cache holds are kept unless
@@ -29,7 +29,6 @@ from iron.tune import cli as tune_cli
 from iron.tune.autotune import Call, Point
 
 from .causal import CausalLM
-from .checkpoint import Checkpoint
 from .cli import parse_args, sampling_arguments
 from .generation import Sampler
 from .model import Model
@@ -115,7 +114,7 @@ def calls(
     """
     L, C = model.config.max_seq_len, model.config.prefill_chunk
     if context > L:
-        raise ValueError(f"--context {context} is past max_seq_len {L}")
+        raise ValueError(f"context {context} is past max_seq_len {L}")
     decode_shapes, prompt_shapes = model.shapes()
     versions = [
         (
@@ -157,9 +156,9 @@ def calls(
 
 
 def application_model(name: str) -> type[Model]:
-    """``name``'s model class: of those its package exports, the one tuned,
-    a decoder or one that names its own calls (``tune_calls``), ``name``
-    dotted under ``iron.applications``.
+    """``name``'s model class: of those its package exports, the one that
+    names its calls (``tune_calls``), ``name`` dotted under
+    ``iron.applications``.
 
     Raises:
         ValueError: ``name`` names no such application, or its package
@@ -170,11 +169,7 @@ def application_model(name: str) -> type[Model]:
     except ImportError as e:
         raise ValueError(f"no application {name!r}: {e}") from e
     exported = [getattr(package, n) for n in getattr(package, "__all__", ())]
-    found = [
-        m
-        for m in exported
-        if hasattr(m, "tune_calls") or isinstance(m, type) and issubclass(m, CausalLM)
-    ]
+    found = [m for m in exported if hasattr(m, "tune_calls")]
     if len(found) != 1:
         raise ValueError(
             f"iron.applications.{name} exports {len(found)} models to tune, not one"
@@ -183,31 +178,16 @@ def application_model(name: str) -> type[Model]:
 
 
 def main(name: str, model: type[Model], argv: Sequence[str] | None = None) -> None:
-    """The command line that tunes ``name``'s profile: a decoder's ``calls``
-    on the flags ``arguments`` adds, built on weights it never reads, or the
-    calls ``model`` plans (``tune_calls``, on the flags ``tune_arguments``
-    adds), into its profiles directory.
+    """The command line that tunes ``name``'s profile: the calls ``model``
+    plans (``tune_calls``, on the flags ``tune_arguments`` adds), into its
+    profiles directory.
     """
     parser = tune_cli.parser(f"Tune {name}'s profile")
     if model.profile is None:
         parser.error(f"{name} has no profiles directory to tune into")
-    if not issubclass(model, CausalLM):
-        model.tune_arguments(parser)
-        args = parse_args(parser, argv)
-        tune_cli.tune(args, model.tune_calls(parser, args), Path(model.profile))
-        return
-    arguments(parser)
+    model.tune_arguments(parser)
     args = parse_args(parser, argv)
-    config = model.default_config(args.checkpoint)
-    graph = model(config, Checkpoint(args.checkpoint).tree("unread"))
-    sampler = Sampler(args.temperature, args.top_k)
-    try:
-        timed = calls(
-            graph, args.position, args.token, args.context, args.points, sampler
-        )
-    except ValueError as e:
-        parser.error(str(e))
-    tune_cli.tune(args, timed, Path(model.profile))
+    tune_cli.tune(args, model.tune_calls(parser, args), Path(model.profile))
 
 
 def cli() -> None:
