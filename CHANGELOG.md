@@ -246,8 +246,9 @@ public API adds its entry under Unreleased.
   bare names only, and `catalog_name` is gone.
 - `compile(coresident=)` packs on an xclbin too (NPU1): steps that run back
   to back on one pack are one dispatch, its arrays and one sequence running
-  the steps' in turn (`Runtime.merge`); `check=True` with `coresident`
-  raises.
+  the steps' in turn (`Runtime.merge`), cut where it would pass the kernel
+  more than 16 buffers. A design taking a per-call value packs with none
+  there, and `check=True` with `coresident` raises.
 - `KVCache` within a window keeps only a ring of the last `ring` positions
   (a window and a chunk, to a power of two), each held twice so the
   positions a call reads are one run, copied to `staged` for `MHA`: a

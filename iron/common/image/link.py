@@ -25,7 +25,7 @@ from ..design import BuiltArray, OperatorDesign
 from .artifacts import Design
 from .callable import FullELFCallable, PerStepCallable
 from .compose import Composition
-from .coresidence import AdjacentPacking, Packing, pack
+from .coresidence import AdjacentPacking, Packing, pack, unvalued
 from .packaging import require_device
 
 
@@ -164,6 +164,9 @@ class PerStep:
     (``Runtime.merge``), so a dispatch configures the array once for them;
     a step of a pack between steps of others runs its own design.
 
+    A run is cut where it would pass the kernel more than ``HOST_BUFFERS``
+    buffers.
+
     ``links`` is by ``id(op)`` over the sequence's operators, and ``runs``
     by a run's first step: its end and link.
 
@@ -177,18 +180,25 @@ class PerStep:
         ValueError: Both are given, as ``check`` dispatches each step alone.
     """
 
+    # aiecc binds at most this many host buffer objects to a kernel (kMaxHostBOs).
+    HOST_BUFFERS = 16
+
     def __init__(
         self,
         check: bool = False,
         coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
     ):
         if check and coresident:
-            raise ValueError("check=True dispatches each step alone; it packs none")
+            raise ValueError(
+                "check=True dispatches each step alone, so nothing packs: pass "
+                "check=False or drop coresident"
+            )
         self.check = check
         self.coresident = coresident
         self.image: Path | None = None
         self.links: dict[int, Link] = {}
         self.runs: dict[int, tuple[int, Link]] = {}
+        self.run_records: tuple[Design, ...] = ()
 
     @staticmethod
     def in_arena(scratch: list[str], residents: Mapping[str, object]) -> list[str]:
@@ -274,6 +284,21 @@ class PerStep:
                 xclbin = image.get_cache_entry().xclbin
                 links[i] = Link(own, image, config.name, kernel(xclbin, own))
         self.runs = {a: (b, by_pack[tuple(order[a:b])]) for a, b in runs}
+        operators: dict[int, dict[str, None]] = {}
+        for a, (b, run) in self.runs.items():
+            operators.setdefault(id(run), {}).update(
+                dict.fromkeys(s.op.name for s in seq.steps[a:b])
+            )
+        self.run_records = tuple(
+            Design(
+                name=run.name,
+                operators=tuple(operators[id(run)]),
+                entry=run.design.get_cache_entry(),
+                image=Path(run.kernel.xclbin_path),
+                insts=run.design.get_cache_entry().insts,
+            )
+            for run in by_pack.values()
+        )
         for op in seq.unique_operators():
             d = design_of[id(op)]
             self.links[id(op)] = links.get(d) or next(
@@ -288,6 +313,10 @@ class PerStep:
     ) -> dict[tuple[int, int], dict[str, OperatorDesign]]:
         """Each run of two or more steps back to back on one pack, by its
         ``(first, end)`` steps: the pack's designs, by name.
+
+        Raises:
+            CoResidenceError: A run's pack holds a design that takes a
+                per-call value.
         """
         if not self.coresident:
             return {}
@@ -296,19 +325,32 @@ class PerStep:
             packing, _ = self.coresident.pack(order, own)
         else:
             packing = Packing.of(self.coresident, own, full_elf=False)
-        runs = {}
+        pieces: list[tuple[list[int], tuple[str, ...]]] = []
         for device, steps in itertools.groupby(
             enumerate(order), key=lambda step: packing.device_of(step[1])
         ):
-            first, *rest = steps
-            if rest and device not in designs:
-                group = packing.group_of(first[1])
-                runs[first[0], rest[-1][0] + 1] = {n: own[n] for n in group}
+            if device in designs:
+                continue
+            count = self.HOST_BUFFERS
+            for i, name in steps:
+                # The merged sequence takes each step's buffers in turn.
+                n = len(designs[name].buffers)
+                if count + n > self.HOST_BUFFERS:
+                    pieces.append(([], packing.group_of(name)))
+                    count = 0
+                pieces[-1][0].append(i)
+                count += n
+        runs = {}
+        for steps, group in pieces:
+            if len(steps) > 1:
+                members = {n: own[n] for n in group}
+                unvalued(members)
+                runs[steps[0], steps[-1] + 1] = members
         return runs
 
     def record(self, designs: list[Operator], sharing: list[tuple[str, ...]]):
-        """The designs' records, the first's cache entry, and its stream
-        where it is the only one.
+        """The designs' records then the runs', the first design's cache
+        entry, and its stream where it is the only one.
         """
         links = [self.links[id(op)] for op in designs]
         records = tuple(
@@ -324,7 +366,11 @@ class PerStep:
             for i, link in enumerate(links)
         )
         entry = links[0].design.get_cache_entry()
-        return records, entry, entry.insts if len(links) == 1 else None
+        return (
+            (*records, *self.run_records),
+            entry,
+            entry.insts if len(links) == 1 else None,
+        )
 
     def callable(self, seq, arena) -> PerStepCallable:
         return PerStepCallable(seq, check=self.check, arena=arena)

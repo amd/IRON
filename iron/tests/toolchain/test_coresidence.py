@@ -19,6 +19,7 @@ Peano and ``aiebu-asm``. Nothing dispatches.
 
 import json
 import re
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -37,7 +38,10 @@ from iron.common.image.sequence import Image
 from iron.common.graph.record import Recording
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
 from iron.common.design import OperatorDesign
+import iron
+from iron import Scratchpad
 from iron.operators import GEMM, GEMV, ElementwiseAdd, ElementwiseMul, SiLU
+from iron.operators.copy import Gather
 from iron.operators.gemm import GEMMPlacement
 from iron.tests.support.graphs import Chain
 from iron.tests.support import sequences
@@ -421,35 +425,170 @@ def test_graph_compile_forwards_the_packing():
     ]
 
 
-def _runs(coresident) -> tuple[list[str], dict]:
-    """The NPU1 ``Chain``'s designs by step, and its runs on ``coresident``."""
-    seq = Image(
-        Chain(SIZE, TILE, columns=1).record(a=(SIZE,), b=(SIZE,)),
-        PerStep(coresident=coresident),
-    )
+def _image(recording, coresident) -> Image:
+    seq = Image(recording, PerStep(coresident=coresident))
     seq._prepare()
+    return seq
+
+
+def _runs(seq: Image) -> tuple[list[str], dict]:
+    """``seq``'s designs by step, and its runs."""
     designs, design_of = seq.unique_designs()
     names = [OperatorDesign(op, full_elf=False).name for op in designs]
     order = [names[design_of[id(s.op)]] for s in seq.steps]
+    assert isinstance(seq.packaging, PerStep)
     return order, seq.packaging._runs(order, dict(zip(names, designs)))
 
 
+def _chain(coresident) -> tuple[list[str], dict]:
+    """The NPU1 ``Chain``'s designs by step, and its runs on ``coresident``."""
+    graph = Chain(SIZE, TILE, columns=1)
+    packs = coresident(graph) if callable(coresident) else coresident
+    return _runs(_image(graph.record(a=(SIZE,), b=(SIZE,)), packs))
+
+
+def _steps(*kinds: str) -> Recording:
+    """Adds and SiLUs on one column, in ``kinds`` order, each on the last's output."""
+    add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=1)
+    silu = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=1)
+    steps, last = [], "a"
+    for i, kind in enumerate(kinds):
+        out = f"t{i}"
+        steps.append((add, last, "b", out) if kind == "add" else (silu, last, out))
+        last = out
+    return Recording.of_steps("steps", sequences.steps(*steps), ["a", "b"], [last])
+
+
 def test_an_npu1_pack_runs_its_steps_as_one_sequence(npu1):
-    order, runs = _runs(AdjacentPacking())
+    order, runs = _chain(AdjacentPacking())
     assert list(runs) == [(0, 5)]
     text = str(_run(runs[0, 5], tuple(order)).generate_mlir())
     assert len(re.findall(r"aie\.device\(npu1\)", text)) == 1
     (sequence,) = re.findall(r"aie\.runtime_sequence\((.*)\) \{", text)
-    # Each step's two inputs and output, the steps' buffers in turn.
+    # add, silu, mul, add, silu: 3 + 2 + 3 + 3 + 2 buffers, in turn.
     assert sequence.count("memref<") == 13
+    # Each step writes its core's parameter, then moves its own fifos.
+    moves = re.findall(r"rtp_write\(@(rtp\d)|task_for @(of\d)", text)
+    assert ["".join(m) for m in moves] == (
+        "rtp0 of0 of1 of2 rtp1 of3 of4 rtp2 of5 of6 of7 "
+        "rtp0 of0 of1 of2 rtp1 of3 of4"
+    ).split()
 
 
 def test_an_npu1_pack_member_between_others_runs_alone(npu1):
-    graph = Chain(SIZE, TILE, columns=1)
-    order, runs = _runs([[graph.add, graph.silu]])
+    order, runs = _chain(lambda graph: [[graph.add, graph.silu]])
     assert order[2].startswith("ElementwiseMul") and list(runs) == [(0, 2), (3, 5)]
 
 
+def test_an_npu1_pack_runs_only_where_its_members_meet(npu1):
+    _, runs = _chain(lambda graph: [[graph.add, graph.mul]])
+    assert list(runs) == [(2, 4)]
+
+
+def test_an_npu1_run_is_cut_at_the_kernel_s_buffers(npu1):
+    # 3 + 2 + 3 + 2 + 3 + 2 = 15 buffers, then 3 more: the last add runs alone.
+    seq = _image(_steps(*["add", "silu"] * 3, "add"), AdjacentPacking())
+    assert list(_runs(seq)[1]) == [(0, 6)]
+
+
+class _Bounded(iron.Graph):
+    def body(self, a, b, *, n: Scratchpad[np.int32]):
+        shape = dict(tile_size=TILE, num_aie_columns=1)
+        return SiLU.step(ElementwiseAdd.step(a[:n], b[:n], **shape), **shape)
+
+
+def test_an_npu1_design_with_per_call_values_packs_with_none(npu1, caplog):
+    recording = _Bounded().record(a=(SIZE,), b=(SIZE,))
+    members = [s.op for s in recording.steps]
+    with caplog.at_level("INFO", logger=coresidence.__name__):
+        assert _runs(_image(recording, AdjacentPacking()))[1] == {}
+    assert "takes per-call value 'valid'" in caplog.text
+    with pytest.raises(CoResidenceError, match="per-call value 'valid'"):
+        _runs(_image(recording, [members]))
+
+
+def test_an_npu1_run_declares_a_pinned_design_s_pins_once(npu1):
+    gather = Gather(rows=16, table_rows=64, row=512, feeds=1)
+    add = ElementwiseAdd(size=16 * 512, tile_size=512, num_aie_columns=1)
+    recording = Recording.of_steps(
+        "gathers",
+        sequences.steps(
+            (gather, "table", "control", "y"),
+            (add, "y", "b", "z"),
+            (gather, "table", "control", "w"),
+        ),
+        ["table", "control", "b"],
+        ["z", "w"],
+    )
+    order, runs = _runs(_image(recording, [[gather, add]]))
+    text = str(_run(runs[0, 3], tuple(order)).generate_mlir())
+    assert len(re.findall(r"aie\.shim_dma_allocation @y_0\(", text)) == 1
+
+
+class _Built:
+    """A design ``CompilableDesign.chain`` compiled, without aiecc."""
+
+    dispatch_params = ()
+
+    def get_cache_entry(self):
+        return SimpleNamespace(insts=None)
+
+    def get_dispatch_lib_path(self):
+        return None
+
+
+class _Tensor:
+    """An XRTTensor's shape alone, for a callable built without a runtime."""
+
+    def __init__(self, shape, dtype=None):
+        self.shape = shape
+
+    def subview(self, start, shape, dtype):
+        return _Tensor(shape)
+
+    def to(self, device):
+        pass
+
+
+def test_an_npu1_pack_links_and_dispatches_each_run_once(npu1, monkeypatch):
+    """Without aiecc: each run is one kernel over its steps' buffers, and a
+    member that also runs alone still builds its own.
+    """
+    from iron.common.image import callable as image_callable
+    from iron.common.image import link
+
+    built = []
+
+    def chain(designs, name):
+        built.extend(designs)
+        return [(_Built(), f"x{i}", f"k{i}") for i in range(len(designs))]
+
+    calls = []
+
+    class Kernel:
+        dispatch_params = ()
+
+        def __init__(self, xclbin, insts, kernel_name, **_):
+            self.xclbin_path, self.name = xclbin, kernel_name
+
+        def __call__(self, *args):
+            calls.append((self.name, len(args)))
+
+    monkeypatch.setattr(link.CompilableDesign, "chain", staticmethod(chain))
+    monkeypatch.setattr(link, "NPUKernel", Kernel)
+    monkeypatch.setattr(image_callable, "_require_xrt", lambda: None)
+    monkeypatch.setattr(image_callable, "XRTTensor", _Tensor)
+    graph = Chain(SIZE, TILE, columns=1)
+    recording = graph.record(a=(SIZE,), b=(SIZE,))
+    image = Image(recording, PerStep(coresident=[[graph.add, graph.mul]])).compile()
+    # add, silu, then mul and add as one run, then silu: add also runs alone,
+    # so it builds its own; mul runs only in the run.
+    assert len(built) == 3 and list(image.packaging.runs) == [2]
+    assert [s.design for s in image.artifacts.steps] == ["k0", "k1", "k2", "k2", "k1"]
+    image.get_callable()()
+    assert calls == [("k0", 3), ("k1", 2), ("k2", 3 + 3), ("k1", 2)]
+
+
 def test_check_packs_nothing():
-    with pytest.raises(ValueError, match="packs none"):
+    with pytest.raises(ValueError, match="pass check=False or drop coresident"):
         PerStep(check=True, coresident=AdjacentPacking())

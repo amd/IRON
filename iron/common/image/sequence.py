@@ -254,8 +254,11 @@ class Image:
         records, entry, insts = self.packaging.record(designs, sharing)
         labels = [d.name for d in records]
         by_design = {id(op): labels[design_of[id(op)]] for op in operators}
+        # A step of a run of a pack ran on the run's own design.
+        runs = self.packaging.runs if isinstance(self.packaging, PerStep) else {}
+        ran = {i: run.name for a, (b, run) in runs.items() for i in range(a, b)}
         steps = tuple(
-            Step(i, s.op.name, by_design[id(s.op)], s.buffers)
+            Step(i, s.op.name, ran.get(i, by_design[id(s.op)]), s.buffers)
             for i, s in enumerate(self.steps)
         )
         return Artifacts(

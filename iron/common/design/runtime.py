@@ -372,7 +372,6 @@ class MergedRuntime(Runtime):
     @classmethod
     def merge(cls, runtimes, name=None) -> MergedRuntime:
         merged = super().merge(runtimes, name)
-        assert isinstance(merged, MergedRuntime)
         merged.runtimes = list(runtimes)
         return merged
 

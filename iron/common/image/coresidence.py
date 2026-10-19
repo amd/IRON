@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import logging
 from collections.abc import Callable, Collection, Hashable, Iterable, Mapping, Sequence
 
 import aie.utils as aie_utils
@@ -32,6 +33,8 @@ from aie.passmanager import PassManager
 
 from ..declare import Operator
 from ..design import BuiltArray, OperatorDesign, configuration, identities
+
+logger = logging.getLogger(__name__)
 
 # aiecc's resource stages, in its order (tools/aiecc/IRTransforms.h). The whole
 # stateful transform, since allocate alone on unsplit fifos checks nothing.
@@ -305,6 +308,22 @@ def places(module: ir.Module) -> str | None:
     return "\n".join(diagnostics) if diagnostics else None
 
 
+def unvalued(designs: Mapping[str, OperatorDesign]) -> None:
+    """Refuse a pack of ``designs`` where one is built for an xclbin and
+    takes a per-call value: a dispatch parameter, which a pack's one
+    sequence does not carry.
+
+    Raises:
+        CoResidenceError: One does.
+    """
+    for name, design in designs.items():
+        if not design.full_elf and design.op.values:
+            raise CoResidenceError(
+                f"{name} takes per-call value {design.op.values[0].name!r}, a "
+                f"dispatch parameter on an xclbin, which a pack does not carry"
+            )
+
+
 def fits(
     designs: Mapping[str, OperatorDesign], words: Mapping[str, str] | None = None
 ) -> str | None:
@@ -318,6 +337,7 @@ def fits(
     """
     exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
     try:
+        unvalued(designs)
         if exported and len(designs) > 1:
             raise CoResidenceError(
                 f"{exported[0]} is exported by another tool, a device of its own"
@@ -359,7 +379,7 @@ class AdjacentPacking:
         words: Mapping[str, str] | None = None,
     ) -> tuple[Packing, dict[tuple[str, ...], str]]:
         """The packing for runlist ``order`` of ``designs``, and the
-        diagnostic that stopped each pack growing.
+        diagnostic that stopped each pack growing, which it also logs.
         """
         groups: list[tuple[str, ...]] = []
         stopped: dict[tuple[str, ...], str] = {}
@@ -384,6 +404,7 @@ class AdjacentPacking:
                 current = candidate
             else:
                 stopped[tuple(current)] = verdict
+                logger.info("%s does not pack with %s: %s", design, current, verdict)
                 groups.append(tuple(current))
                 current = [design]
             placed.add(design)
