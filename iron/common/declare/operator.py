@@ -436,12 +436,6 @@ class Operator(jit.Operator, library=True):
         """This operator resolved for ``dev``, the bound device unless given."""
         return super().resolved(self.dev if dev is None else dev)
 
-    def copy(self) -> Self:
-        """A fresh instance for one build, keeping resolution and bound values."""
-        new = self.replace()
-        new._resolved = self._resolved
-        return new
-
     def replace(self, **changes: Any) -> Self:
         """A copy with ``changes``, which may name any parameter, the
         ``bound_values`` or the ``pinned`` tunables; checked against the
