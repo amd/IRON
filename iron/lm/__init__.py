@@ -36,6 +36,7 @@ from .encoder_decoder import EncoderDecoder
 from .golden import Golden, HuggingFace
 from .generation import Sampler, accuracy, determinism, generate_on_host
 from .multimodal import Multimodal
+from .session import Session
 
 __all__ = [
     "Attention",
@@ -71,6 +72,7 @@ __all__ = [
     "OnHost",
     "RMSNorm",
     "Sampler",
+    "Session",
     "Tokenizer",
     "TokenizerJson",
     "Tower",

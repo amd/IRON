@@ -31,6 +31,7 @@ from iron.lm import (
     DecoderConfig,
     OnHost as Host,
     Sampler,
+    Session,
     Tokenizer,
     TokenizerJson,
     accuracy,
@@ -88,7 +89,7 @@ def prompt(model, tokens, **values):
     C = text.config.prefill_chunk
     for begin in range(0, tokens.size, C):
         chunk = tokens[begin : begin + C]
-        inputs = (text.prompt_ids(chunk),)
+        inputs = (text.session.prompt_ids(chunk),)
         if np.isin(chunk, towers).any():
             before = [np.count_nonzero(tokens[:begin] == t) for t in towers]
             unfed = (None,) * (len(model.text_inputs) + len(towers))
@@ -285,7 +286,7 @@ def test_a_token_outside_the_vocabulary_is_refused_before_any_dispatch(cpu, outs
     broken[70] = outside
     with pytest.raises(IndexError, match=rf"\[{outside}\] are outside"):
         model.logits(broken)
-    np.testing.assert_array_equal(model._seen, tokens)
+    np.testing.assert_array_equal(model.session._seen, tokens)
     # The same calls on a model that refused nothing: its last token again.
     fresh = OnHost(config, cpu.weights)
     fresh.logits(tokens)
@@ -353,7 +354,7 @@ def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
     sampler = Sampler(temperature, 40, seed=5)
     draws[n - 1 : n - 1 + count] = sampler.rows(count, k_max=64)
     model.draws.host = draws
-    ((inputs, values),) = model._chunks(np.asarray(cpu.prompt), 0)
+    ((inputs, values),) = model.session._chunks(np.asarray(cpu.prompt), 0)
     _, carry = model(*inputs, **values)
     drawn = [carry["token"]]
     for _ in range(count - 1):
@@ -443,12 +444,33 @@ def test_a_turn_runs_from_its_first_new_token(cpu):
     model.logits(tokens)
     before = np.array(model.model.layers[0].cache.keys.host)
     turn = np.concatenate([tokens[:270], rng.integers(0, config.vocab_size, 40)])
-    assert model.resume(model._held(turn)) == 270
-    assert [(v["start"], v["rows"]) for _, v in model._chunks(turn, 270)] == [(270, 40)]
+    session = model.session
+    assert session.resume(session._held(turn)) == 270
+    assert [(v["start"], v["rows"]) for _, v in session._chunks(turn, 270)] == [
+        (270, 40)
+    ]
     assert_close(model.logits(turn), reference.logits(turn))
     np.testing.assert_array_equal(
         model.model.layers[0].cache.keys.host[:270], before[:270]
     )
+
+
+def test_two_sessions_share_one_model(cpu):
+    """Two conversations over one model's versions, a ``Session`` each: the
+    caches hold one session's tokens at a time, so the first, its tokens
+    replaced by the second's, runs its history again, and each gives the
+    logits a model of its own would.
+    """
+    model = OnHost(cpu.config, cpu.weights)
+    rng = np.random.default_rng(11)
+    first, second = (rng.integers(0, cpu.config.vocab_size, 40) for _ in range(2))
+    a, b = Session(model), Session(model)
+    a.logits(first)
+    b.logits(second)
+    for session, tokens in ((a, first), (b, second)):
+        turn = np.append(tokens, 1)
+        alone = OnHost(cpu.config, cpu.weights)
+        np.testing.assert_array_equal(session.logits(turn), alone.logits(turn))
 
 
 def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):

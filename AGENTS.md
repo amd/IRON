@@ -337,6 +337,10 @@ tunables and profiles already do that job.
 - `causal.py`: `CausalLM`, a decoder as one graph of a prompt chunk and a
   decode step, its modules a `Decoder` of `layer_class` layers;
   `Checkpoints`, recurrent state per chunk boundary.
+- `session.py`: `Session`, one conversation over a decoder's loaded
+  versions (the tokens its caches hold, `logits` and the draws); a model's
+  `session` is the one `logits` and `generate` run in, and several share
+  one model.
 - `encoder.py`, `encoder_decoder.py`, `multimodal.py`: `Encoder` and
   `Tower`, `EncoderDecoder`, and `Multimodal`.
 - `cli.py`: `main`, the command line every model shares (`--help` lists

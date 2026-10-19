@@ -35,6 +35,7 @@ from .checkpoint import renamed
 from .config import DecoderConfig
 from .model import Model
 from .generation import Sampler
+from .session import Session
 
 logger = logging.getLogger(__name__)
 
@@ -155,13 +156,16 @@ class CausalLM(Model):
         # Zero until the host writes draws: a row of zeros is greedy.
         self.draws = iron.state((config.max_seq_len, ROW_WORDS), np.int32)
         self.drawn = iron.state((config.max_seq_len,), np.int32)
-        self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
         self._prompt: CompiledGraph | None = None
         self._decode: CompiledGraph | None = None
         self._placed: CompiledGraph | None = None
         self._placeholders: tuple[int, ...] = ()
-        # By the version a device loop starts from, its loop.
+        # By the version a device loop starts from, its loop (``loop``).
         self._loops: dict[int, CarriedLoop] = {}
+        # The session whose tokens the caches hold, and the one ``logits``
+        # and ``generate`` run in.
+        self._holder: Session | None = None
+        self.session = Session(self)
         if self.layer_class is not None:
             self.model = Decoder(config, self.layer_class)
             for layer in self.model.layers:
@@ -329,8 +333,7 @@ class CausalLM(Model):
         """
         self._decode, self._prompt = decode, prompt
         self._placed, self._placeholders = placed, tuple(placeholders)
-        self._loops = {}
-        self._seen = np.empty(0, dtype=np.int64)
+        self._loops, self._holder = {}, None
         if not decode.plan.full_elf:
             logger.info("%s", decode.plan.report("decode"))
 
@@ -341,9 +344,10 @@ class CausalLM(Model):
         return {}
 
     def __call__(self, ids=None, before=None, **values) -> Any:
-        """One call of the prompt version on ``ids`` (``prompt_ids``), of the
-        placed one on ``ids`` and ``before`` (``use``), else of the decode
-        step, with ``call_values`` where ``values`` give none of their own.
+        """One call of the prompt version on ``ids``
+        (``Session.prompt_ids``), of the placed one on ``ids`` and
+        ``before`` (``use``), else of the decode step, with ``call_values``
+        where ``values`` give none of their own.
 
         Raises:
             RuntimeError: Neither version is loaded: ``load_versions()``
@@ -367,177 +371,29 @@ class CausalLM(Model):
             raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         return self._decode.emit is not None
 
-    def logits(self, tokens) -> np.ndarray:
-        """The logits after the last of ``tokens``, the whole history.
-
-        One more token than the last call's is a decode step; anything else
-        runs from the first token the caches do not hold (``resume``).
-
-        Raises:
-            ValueError: ``tokens`` is empty or longer than ``max_seq_len``.
-            IndexError: A token is outside ``[0, vocab_size)``; refused
-                before any dispatch, so the caches are as they were.
+    def loop(self, version: CompiledGraph) -> CarriedLoop:
+        """The device loop of decode steps ``version`` starts, made once: its
+        runs are bound to the versions, which every session shares.
         """
-        tokens = self._tokens(tokens)
-        n, L = tokens.size, self.config.max_seq_len
-        if not 0 < n <= L:
-            raise ValueError(f"{n} tokens do not fit {L} rows")
-        held = self._held(tokens)
-        if held == n - 1 == self._seen.size:
-            out, _ = self(
-                token=int(tokens[-1]), position=n - 1, start=0, rows=1, rope_start=0
-            )
-        else:
-            start = self.resume(held)
-            self._seen = tokens[:start]
-            for inputs, values in self._chunks(tokens, start):
-                out, _ = self(*inputs, **values)
-        self._seen = tokens
-        # A copy: the next call rewrites the output buffer.
-        logits = out.numpy()
-        return np.array(logits).reshape(-1)
+        if id(version) not in self._loops:
+            self._loops[id(version)] = CarriedLoop(version, self._decode, depth=2)
+        return self._loops[id(version)]
+
+    def logits(self, tokens) -> np.ndarray:
+        """The logits after the last of ``tokens``, the whole history, in
+        ``session`` (``Session.logits``).
+        """
+        return self.session.logits(tokens)
 
     def _draw(
         self, tokens, max_tokens: int, sampler: Sampler, each: bool = True
     ) -> Iterator[int]:
-        """Draw ``max_tokens`` after ``tokens`` on the device, each yielded
-        as it is drawn (``Model.stream``).
-
-        Where the decode step is a full ELF each step starts the next
-        (``device_loop``): with ``each``, each token is read once its step
-        completes, else the first alone and the rest once the last has;
-        elsewhere the host starts each step on the token the last one drew,
-        which it reads alone. The draws match ``generate_on_host`` with the
-        same seed.
-
-        Raises:
-            ValueError: The tokens and those to draw do not fit the caches.
-            IndexError: A token is outside ``[0, vocab_size)``.
-            RuntimeError: Neither version is loaded: ``load_versions()``
-                first.
-        """
-        tokens = self._tokens(tokens)
-        n, L = tokens.size, self.config.max_seq_len
-        if not (0 < n and 0 < max_tokens and n + max_tokens - 1 <= L):
-            raise ValueError(
-                f"{n} tokens and {max_tokens} more to draw do not fit {L} rows"
-            )
-        if self._prompt is None or self._decode is None:
-            raise RuntimeError(f"{type(self).__name__}: load_versions() first")
-        loop = self.device_loop
-        # The prompt draws at its last position, n - 1; decode step k at n + k.
-        draws = np.zeros((L, ROW_WORDS), dtype=np.int32)
-        draws[n - 1 : n - 1 + max_tokens] = sampler.rows(max_tokens, self._k_max())
-        self._decode.write(self.draws, draws)
-        start = self.resume(self._held(tokens))
-        # A caller may stop early, leaving steps in the caches nothing records:
-        # until the last token, they hold nothing.
-        self._seen = np.empty(0, dtype=np.int64)
-        for inputs, values in self._chunks(tokens, start):
-            if not loop or values["position"] < n - 1:
-                _, carry = self(*inputs, **values)
-            else:
-                version = self._prompt if len(inputs) == 1 else self._placed
-                started = self._loops.setdefault(
-                    id(version), CarriedLoop(version, self._decode, depth=2)
-                )
-                started.start(*inputs, **values)
-        drawn = []
-        if loop:
-            read = partial(self._decode.read, self.drawn)
-            drawn.append(int(read()[n - 1]))
-            yield drawn[-1]
-            for k, _ in enumerate(started.steps(max_tokens - 1), start=1):
-                if each:
-                    drawn.append(int(read()[n - 1 + k]))
-                    yield drawn[-1]
-            if not each:
-                drawn += [int(t) for t in read()[n : n - 1 + max_tokens]]
-                yield from drawn[1:]
-        else:
-            drawn.append(int(carry["token"]))
-            yield drawn[-1]
-            for _ in range(max_tokens - 1):
-                _, carry = self(start=0, rows=1, rope_start=0, **carry)
-                drawn.append(int(carry["token"]))
-                yield drawn[-1]
-        # The caches hold every token but the last drawn, which no step read.
-        self._seen = np.concatenate([tokens, drawn[:-1]]).astype(np.int64)
+        """``Model.stream``'s draws, in ``session`` (``Session.draw``)."""
+        return self.session.draw(tokens, max_tokens, sampler, each)
 
     def forget(self, position: int) -> None:
-        """Hold nothing the caches have from ``position`` on: the next call
-        runs from there, as a change before it (a placeholder's soft tokens)
-        would leave them stale.
+        """Hold nothing the caches have from ``position`` on, whichever
+        session's tokens they hold (``Session.forget``).
         """
-        self._seen = self._seen[:position]
-
-    def _tokens(self, tokens) -> np.ndarray:
-        tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        V = self.config.vocab_size
-        if ((tokens < 0) | (tokens >= V)).any():
-            raise IndexError(
-                f"tokens {tokens[(tokens < 0) | (tokens >= V)]} are outside [0, {V})"
-            )
-        return tokens
-
-    def _held(self, tokens: np.ndarray) -> int:
-        """How many of ``tokens`` the caches hold; never the last."""
-        held = min(tokens.size - 1, self._seen.size)
-        same = np.append(tokens[:held] == self._seen[:held], False)
-        return int(np.argmin(same))
-
-    def resume(self, held: int) -> int:
-        """The position calls start from to run the tokens from ``held`` on:
-        ``held`` itself, or for a state that cannot restart there
-        (``Checkpoints.restart``), the earliest one of them can.
-        """
-        ran = self._seen.size
-        return min([held, *(c.restart(held, ran) for c in self.recurrent)])
-
-    def prompt_ids(self, tokens) -> np.ndarray:
-        """A prompt call's ``ids`` for a chunk of ``tokens``, padded to
-        ``prefill_chunk`` with row 0, which the bound by ``rows`` leaves
-        unread.
-        """
-        tokens = np.asarray(tokens)
-        ids = np.zeros(self.config.prefill_chunk, dtype=np.int32)
-        ids[: tokens.size] = tokens
-        return ids
-
-    def _chunks(self, tokens: np.ndarray, start: int) -> Iterator[tuple]:
-        """Each prompt call from ``start``: its inputs, ``ids`` and for a call
-        holding a placeholder ``before``, and its per-call values. With
-        recurrent state a call ends at the next chunk boundary, the slot it
-        writes.
-        """
-        n, C, rope = tokens.size, self.config.prefill_chunk, self.rotary_emb
-        table = 0 if rope is None else rope.table_start(n)
-        end = start
-        while end < n:
-            begin, end = end, min(end + C, n)
-            if self.recurrent:
-                end = min(end, (begin // C + 1) * C)
-            ids = self.prompt_ids(tokens[begin:end])
-            values = dict(
-                self.call_values(),
-                token=int(tokens[end - 1]),
-                position=end - 1,
-                start=begin,
-                rows=end - begin,
-                rope_start=table + begin,
-            )
-            placed = np.isin(tokens[begin:end], self._placeholders).any()
-            if self._placed is None or not placed:
-                yield (ids,), values
-                continue
-            before = np.array(
-                [np.count_nonzero(tokens[:begin] == t) for t in self._placeholders],
-                np.int32,
-            )
-            yield (ids, before), values
-
-    def _k_max(self) -> int:
-        assert self._decode is not None
-        return next(
-            s.op.k_max for s in self._decode.traced.steps if isinstance(s.op, Sample)
-        )
+        if self._holder is not None:
+            self._holder.forget(position)

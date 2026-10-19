@@ -12,6 +12,10 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `Session(model)`: one conversation over a `CausalLM`'s loaded versions,
+  with `logits(tokens)`, `draw(...)`, `forget`, `resume` and `prompt_ids`,
+  which move there from `CausalLM`. Several sessions share one compiled
+  model; `model.session` is the one `logits` and `generate` run in.
 - `Operator.reference_only = True`: an operator that is a declaration plus
   `reference()`, with no kernel. Graphs trace it and references run it;
   compiling it raises, and the device catalog skips it.

@@ -161,7 +161,8 @@ def test_a_turn_resumes_where_its_state_is_held(toy):
         (tokens[:280] + list(rng.integers(0, 512, 300)), 256, [(256, 256), (512, 68)]),
     ):
         turn = np.array(turn)
-        assert model.resume(model._held(turn)) == start
-        got = [(v["start"], v["rows"]) for _, v in model._chunks(turn, start)]
+        session = model.session
+        assert session.resume(session._held(turn)) == start
+        got = [(v["start"], v["rows"]) for _, v in session._chunks(turn, start)]
         assert got == calls
         _assert_close(model, reference, list(turn))
