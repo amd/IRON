@@ -174,6 +174,5 @@ class Ministral3(CausalLM):
 
     def rotary(self, config: Ministral3Config) -> Rope:
         """``Rope``'s table, its queries scaled where Llama 4 scaling is on."""
-        if config.llama_4_scaling_beta:
-            return Rope(config, q_scale=config.query_scale())
-        return Rope(config)
+        scaled = config.llama_4_scaling_beta
+        return Rope(config, q_scale=config.query_scale() if scaled else None)
