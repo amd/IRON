@@ -115,7 +115,7 @@ class Decoder(iron.Graph):
     and the final ``norm``.
     """
 
-    def __init__(self, c: DecoderConfig, layer: type[iron.Graph]):
+    def __init__(self, c: DecoderConfig, layer: type[DecoderLayer]):
         self.embed_tokens = Embedding(c.vocab_size, c.hidden_size)
         self.layers = [layer(c, i) for i in range(c.num_hidden_layers)]
         self.norm = RMSNorm(c.hidden_size, c.eps)
@@ -133,7 +133,7 @@ class CausalLM(Model):
     """
 
     decoder_class: ClassVar[type[Decoder]] = Decoder
-    layer_class: ClassVar[type[iron.Graph]] = DecoderLayer
+    layer_class: ClassVar[type[DecoderLayer]] = DecoderLayer
     layers: list
 
     def __init__(self, config: DecoderConfig, weights):
@@ -190,7 +190,7 @@ class CausalLM(Model):
 
     def body(
         self,
-        ids=None,
+        ids: Handle | None = None,
         *,
         token: Carried[np.int32],
         position: Carried[np.int32],
@@ -228,7 +228,7 @@ class CausalLM(Model):
             ),
         )
 
-    def forward(self, x, call: Call):
+    def forward(self, x: Handle, call: Call):
         """The layers, the head and the draw over ``x``, the rows ``call``
         runs, each memory module reading ``call``.
         """
@@ -365,6 +365,7 @@ class CausalLM(Model):
         runs are bound to the versions, which every session shares.
         """
         if id(version) not in self._loops:
+            assert self.decode_step is not None, "loaded with the version it starts"
             self._loops[id(version)] = CarriedLoop(version, self.decode_step, depth=2)
         return self._loops[id(version)]
 

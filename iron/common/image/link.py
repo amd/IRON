@@ -131,7 +131,7 @@ class FullELF:
         )
         return records, self.design.get_cache_entry(), None
 
-    def callable(self, seq, arena):
+    def callable(self, seq, arena) -> FullELFCallable:
         return FullELFCallable(seq, arena=arena)
 
 
@@ -267,5 +267,5 @@ class PerStep:
         entry = links[0].design.get_cache_entry()
         return records, entry, entry.insts if len(links) == 1 else None
 
-    def callable(self, seq, arena):
+    def callable(self, seq, arena) -> PerStepCallable:
         return PerStepCallable(seq, check=self.check, arena=arena)

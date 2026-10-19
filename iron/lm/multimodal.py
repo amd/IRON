@@ -147,6 +147,7 @@ class Multimodal(Model):
         """The per-call values of the longest call: the text model's and each
         tower's.
         """
+        assert isinstance(self.text, Encoder), "an encoder text model's"
         values = dict(self.text.longest())
         for token, tower in self.towers.items():
             name = self.tower_inputs[token]
@@ -231,6 +232,7 @@ class Multimodal(Model):
             self(*inputs, **values)
         self._last_raw = {t: tuple(np.array(a) for a in raw[t]) for t in raw}
         places = np.flatnonzero(np.isin(tokens, list(self.towers)))
+        assert isinstance(self.text, CausalLM), "a causal text model's"
         self.text.forget(int(places[0]) if places.size else tokens.size)
 
     def logits(self, tokens, raw: dict[int, tuple]) -> np.ndarray:
@@ -238,6 +240,7 @@ class Multimodal(Model):
         placeholders (``CausalLM.logits``).
         """
         self.place(tokens, raw)
+        assert isinstance(self.text, CausalLM), "a causal text model's"
         return self.text.logits(tokens)
 
     def _draw(
@@ -253,4 +256,5 @@ class Multimodal(Model):
         ``stream(..., raw=)``.
         """
         self.place(tokens, raw or {})
+        assert isinstance(self.text, CausalLM), "a causal text model's"
         return self.text._draw(tokens, max_tokens, sampler, each)

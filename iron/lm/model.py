@@ -17,7 +17,7 @@ import os
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 import numpy as np
 
@@ -138,7 +138,7 @@ class TokenizerJson:
     def decode(self, tokens) -> str:
         return self._tokenizer.decode(tokens)
 
-    def token(self, id: int) -> str:
+    def token(self, id: int) -> str | None:
         """The text of token ``id``."""
         return self._tokenizer.id_to_token(id)
 
@@ -181,6 +181,17 @@ class Model(iron.Graph):
     tokenizer: Tokenizer | None = None
     stats: Stats | None = None
 
+    if TYPE_CHECKING:
+        # A subclass's: on the class, ``config`` is the Config class or one
+        # shape, on an instance its shape; the weights it holds; the
+        # constructor ``load`` calls; and how it draws a generation's tokens.
+        config: Any
+        weights: Any
+
+        def __init__(self, config: Any, weights: Any) -> None: ...
+
+        def _draw(self, *args, **kwargs) -> Iterator[int]: ...
+
     @classmethod
     def load(
         cls,
@@ -194,6 +205,7 @@ class Model(iron.Graph):
         ``full_elf`` is every version's packaging (``load_versions``).
         """
         model = cls.from_checkpoint(path, seed=seed, max_seq_len=max_seq_len)
+        assert model.checkpoint is not None, "from_checkpoint gives it one"
         return model.load_versions(release=model.checkpoint.release, full_elf=full_elf)
 
     @classmethod
@@ -262,6 +274,8 @@ class Model(iron.Graph):
         ``bos_token_id``, from its ``config.json`` or else its
         ``generation_config.json``, unless a subclass names it.
         """
+        if self.checkpoint is None:
+            raise KeyError(f"{self.name} has no checkpoint: name the model's bos")
         directory = Path(self.checkpoint.path).parent
         for name in ("config.json", "generation_config.json"):
             path = directory / name
@@ -289,7 +303,7 @@ class Model(iron.Graph):
         return set()
 
     @classmethod
-    def default_config(cls, weights_path) -> Config:
+    def default_config(cls, weights_path) -> Any:
         """``cls.config`` itself, if it is already one shape; else that
         class's own, built from ``weights_path``'s checkpoint directory
         (``Config.from_checkpoint``).
@@ -365,6 +379,7 @@ class Model(iron.Graph):
                 pass
 
             return Host(self.config, self.weights)
+        assert self.checkpoint is not None, "a model without drawn weights loaded one"
         directory = Path(self.checkpoint.path).parent
         return Golden(
             directory / "golden.npz",
@@ -381,6 +396,7 @@ class Model(iron.Graph):
         characters runs at about its size on the text.
         """
         if self.tokenizer is None:
+            assert self.seed is not None, "without a tokenizer, weights drawn at a seed"
             rng = np.random.default_rng((self.seed, skip))
             draw = rng.integers(0, self.config.vocab_size, chars // 3 - 1)
             return [self.bos, *draw]
@@ -426,12 +442,14 @@ class Model(iron.Graph):
         text = _is_text(prompt)
         if text and self.tokenizer is None:
             raise RuntimeError(f"{type(self).__name__}: no tokenizer; give token ids")
+        # Read only for text, which has one.
+        tokenizer = cast(Tokenizer, self.tokenizer)
         if not text:
             tokens = prompt
         elif isinstance(prompt, str):
-            tokens = self.tokenizer(prompt)
+            tokens = tokenizer(prompt)
         else:
-            tokens = self.tokenizer.chat(prompt)
+            tokens = tokenizer.chat(prompt)
         sampler = Sampler(temperature=0) if sampler is None else sampler
         # The text of drawn[held:] is yet to be shown; drawn[seen:held] is
         # decoded with it, since a token's text can depend on the one before.
@@ -445,8 +463,8 @@ class Model(iron.Graph):
             if not text:
                 yield token
             else:
-                shown = self.tokenizer.decode(drawn[seen:held])
-                piece = self.tokenizer.decode(drawn[seen:])[len(shown) :]
+                shown = tokenizer.decode(drawn[seen:held])
+                piece = tokenizer.decode(drawn[seen:])[len(shown) :]
                 # A token can end partway through a character; the next completes it.
                 if not piece.endswith("\ufffd"):
                     if piece:
@@ -455,8 +473,8 @@ class Model(iron.Graph):
             if token in self.eos:
                 break
         if text and held < len(drawn):
-            shown = self.tokenizer.decode(drawn[seen:held])
-            if piece := self.tokenizer.decode(drawn[seen:])[len(shown) :]:
+            shown = tokenizer.decode(drawn[seen:held])
+            if piece := tokenizer.decode(drawn[seen:])[len(shown) :]:
                 yield piece
         later = len(drawn) - 1
         rate = later / (last - first) if later else math.nan
@@ -475,7 +493,7 @@ class Model(iron.Graph):
         release: Callable[[np.ndarray], None] | None = None,
         full_elf: bool | None = None,
         dev=None,
-    ) -> "Model":
+    ) -> Self:
         """Compile every version, then load each, in one arena, and hand
         them to ``loaded``: every version is placed before the arena's
         buffers are made, so none grows them, which would copy them.
@@ -507,10 +525,10 @@ class Model(iron.Graph):
         """
 
     def __repr__(self) -> str:
-        config = getattr(self, "config", None)
+        max_seq_len = getattr(getattr(self, "config", None), "max_seq_len", None)
         fields = []
-        if hasattr(config, "max_seq_len"):
-            fields.append(f"max_seq_len={config.max_seq_len}")
+        if max_seq_len is not None:
+            fields.append(f"max_seq_len={max_seq_len}")
         loaded = self._versions and all(v.is_loaded for v in self._versions.values())
         fields.append("loaded" if loaded else "not loaded")
         return f"{self.name}({', '.join(fields)})"
@@ -530,6 +548,12 @@ class OnHost:
     compiles nothing, and ``generate`` draws on the host.
     """
 
+    if TYPE_CHECKING:  # the model's, mixed in after
+
+        def logits(self, tokens) -> np.ndarray: ...
+
+        def reference(self, *tensors, **values) -> Any: ...
+
     def _draw(self, tokens, max_tokens: int, sampler: Sampler, each=True):
         history = [int(t) for t in tokens]
         for _ in range(max_tokens):
@@ -540,7 +564,7 @@ class OnHost:
         logits, carry = self.reference(*tensors, **values)
         return _HostOutput(logits), carry
 
-    def load_versions(self, *, release=None, full_elf=None, dev=None) -> "OnHost":
+    def load_versions(self, *, release=None, full_elf=None, dev=None) -> Self:
         return self
 
 

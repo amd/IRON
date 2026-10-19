@@ -208,6 +208,7 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `lm.main(model_class)`, was `lm.main(model)`.
 - `Handle` is a frozen record of `buffer` (a `Buffer`, which every handle
   on it shares), `shape`, `dtype`, `valid` (was `bounds`) and `layout`:
   `Dense(offset)`, `Strided(tap, offset, repeat, length, window)` or

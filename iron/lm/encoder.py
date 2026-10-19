@@ -16,8 +16,8 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-import iron
 from iron import Scratchpad
+from iron.common.graph import Handle
 
 from .blocks import EncoderLayer
 from .checkpoint import renamed
@@ -51,7 +51,8 @@ class Encoder(Model):
         max_tokens: The longest sequence a call takes.
     """
 
-    layer_class: ClassVar[type[iron.Graph]] = EncoderLayer
+    # A graph class taking (config, i).
+    layer_class: ClassVar[type[Any]] = EncoderLayer
 
     def __init__(self, config, max_tokens: int):
         self.config = config
@@ -103,7 +104,7 @@ class Encoder(Model):
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
 
-    def forward(self, x, rows, ropes):
+    def forward(self, x: Handle, rows, ropes):
         """The layers, the final norm, ``pool`` and ``head`` over the rows
         ``x``, bounded to their first ``rows``, rotated by ``ropes``
         (``EncodeStep.ropes``).
@@ -122,7 +123,7 @@ class Encoder(Model):
         """
         return self.forward(x, rows, self.angles(rows))
 
-    def body(self, ids, *, rows: Scratchpad[np.int32]):
+    def body(self, ids: Handle, *, rows: Scratchpad[np.int32]):
         return self.from_rows(self.lookup(ids[:rows]), rows=rows)
 
     def shapes(self) -> list[dict]:
@@ -179,7 +180,9 @@ class Tower(Encoder):
         super().__init__(config, max_tokens)
         self.soft_rows = soft_rows
 
-    def inputs(self, *raw) -> tuple[np.ndarray, dict]:
+    def inputs(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, *raw
+    ) -> tuple[np.ndarray, dict]:
         """A call's input buffer and per-call values for ``raw``."""
         raise NotImplementedError(f"{type(self).__name__} defines no inputs()")
 

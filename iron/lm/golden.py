@@ -7,10 +7,14 @@ so a test or an accuracy run needs neither torch nor transformers, which
 are not IRON's requirements, only to record.
 """
 
+# torch and transformers: only recording imports them.
+# pyright: reportMissingImports=false
+
 import dataclasses
 import hashlib
 import os
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -93,7 +97,9 @@ class Golden:
     def write(self):
         """The rows to the file, replaced whole so no reader sees half."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        held = {} if self.fingerprint is None else {"fingerprint": self.fingerprint}
+        held: dict[str, Any] = (
+            {} if self.fingerprint is None else {"fingerprint": self.fingerprint}
+        )
         partial = self.path.with_name(f".{self.path.stem}.{os.getpid()}.npz")
         np.savez_compressed(partial, **self.rows, **held)
         os.replace(partial, self.path)

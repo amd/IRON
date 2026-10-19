@@ -10,6 +10,7 @@ import dataclasses
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -61,7 +62,7 @@ def unscaled(rope_scaling: dict) -> None:
         raise ValueError(f"rope_scaling {rope_scaling}: no RoPE table here builds it")
 
 
-def not_json(default, **kwargs) -> dataclasses.Field:
+def not_json(default, **kwargs) -> Any:
     """A field ``config.json`` does not set, an IRON choice: kept at
     ``default`` by ``from_checkpoint`` and left out by ``to_json``.
     """
@@ -111,7 +112,7 @@ class Config:
         return cls.from_json(json.loads(path.read_text()), path)
 
     @classmethod
-    def from_json(cls, data: dict, source="config.json") -> "Config":
+    def from_json(cls, data: dict, source: str | Path = "config.json") -> "Config":
         """``from_checkpoint`` on ``data``, a ``config.json`` already
         parsed; ``source`` names it in an error.
 
@@ -230,6 +231,7 @@ class DecoderConfig(Config):
         """The angle table's own width: ``head_dim``, or ``rotary_dim`` under
         partial rotary.
         """
+        assert self.head_dim is not None, "__post_init__ sets it"
         return self.rotary_dim or self.head_dim
 
     def angles(self) -> np.ndarray | None:

@@ -80,7 +80,9 @@ class EncoderDecoder(CausalLM):
                 inputs.append(named.replace(default=None))
         return inspect.Signature(inputs + values)
 
-    def body(self, *inputs, **values):
+    def body(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, *inputs, **values
+    ):
         given = dict(zip(self._parameters.inputs, inputs))
         encoded = given[f"encoder_{self.encoder_input}"]
         if encoded is not None:

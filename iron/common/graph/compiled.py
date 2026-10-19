@@ -34,7 +34,12 @@ from ..declare.precision import Precision
 from ..declare.profile import Profile
 from ..image.allocator import ALIGNMENT, ArenaPlan
 from ..image.artifacts import Parameter
-from ..image.callable import FullELFRun, ScratchArena
+from ..image.callable import (
+    FullELFCallable,
+    FullELFRun,
+    PerStepCallable,
+    ScratchArena,
+)
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import Kind, Plan, plan, require_device
 from ..image.link import FullELF, PerStep
@@ -667,7 +672,7 @@ class Graph:
             return self.inline(
                 self.body, *(given.get(n) for n in self._parameters.inputs), **values
             )
-        shapes = {
+        shapes: dict[str, Any] = {
             name: (tuple(int(n) for n in t.shape), np.dtype(t.dtype).type)
             for name, t in given.items()
         }
@@ -712,7 +717,9 @@ class Graph:
         """
         given = {n: np.asarray(t) for n, t in self._given(tensors).items()}
         _check_values(self.name, self._parameters.values, values)
-        shapes = {n: (t.shape, np.dtype(t.dtype).type) for n, t in given.items()}
+        shapes: dict[str, Any] = {
+            n: (t.shape, np.dtype(t.dtype).type) for n, t in given.items()
+        }
         signature = self._signature(shapes)
         recording = self._references.get(signature)
         if recording is None:
@@ -783,7 +790,7 @@ class CompiledGraph:
         self._loaded: set = set() if arena is None else arena.loaded
 
     @property
-    def callable(self):
+    def callable(self) -> FullELFCallable | PerStepCallable:
         """The loaded image, made on first use so a host without an NPU can compile."""
         if self._callable is None:
             self._callable = self.sequence.get_callable(self.arena)
@@ -872,10 +879,12 @@ class CompiledGraph:
 
     def __call__(self, *tensors, **values) -> Any:
         self._stage(tensors, values)
+        call = self.callable
         if self.plan.commands:
-            self.callable(idle=self.plan.idle(self.recording.steps, values))
+            assert isinstance(call, FullELFCallable), "commands cut a full ELF"
+            call(idle=self.plan.idle(self.recording.steps, values))
         else:
-            self.callable()
+            call()
         outputs = [self.callable.get_buffer(h.ref()) for h in self.recording.returned]
         if not self.recording.carry:
             return _results(outputs, None)
@@ -884,7 +893,9 @@ class CompiledGraph:
     def start(self, run: FullELFRun, /, *tensors, **values) -> None:
         """Start a call of this full ELF on ``run`` without waiting for it."""
         self._stage(tensors, values, run)
-        self.callable.start(run, idle=self.plan.idle(self.recording.steps, values))
+        call = self.callable
+        assert isinstance(call, FullELFCallable), "a run is a full ELF's"
+        call.start(run, idle=self.plan.idle(self.recording.steps, values))
 
     def emit_to(self, target: CompiledGraph) -> None:
         """Program this version's Emit to start a call of ``target``."""
@@ -952,6 +963,7 @@ class CompiledGraph:
         if name not in self._addressed or self._addressed[name][0] is not view:
             storage = view.storage
             root = storage.binding_handle(0, storage.nbytes)
+            assert root is not None, "a device buffer"
             self._addressed[name] = (view, root.address() + view.storage_offset)
         return self._addressed[name][1]
 
@@ -1144,8 +1156,9 @@ def _shared(words: list[Word]) -> dict[str, str]:
         forms.setdefault(w.symbol, set()).add(found)
     groups: dict[Linear | str, list[str]] = {}
     for symbol, found in forms.items():
-        if len(found) == 1 and None not in found:
-            groups.setdefault(next(iter(found)), []).append(symbol)
+        form = next(iter(found))
+        if len(found) == 1 and form is not None:
+            groups.setdefault(form, []).append(symbol)
 
     def spell(r: Fraction) -> str:
         # An identifier's: m for minus, d for over.
@@ -1153,9 +1166,11 @@ def _shared(words: list[Word]) -> dict[str, str]:
         return f"{'m' if r < 0 else ''}{abs(r.numerator)}{den}"
 
     for form, symbols in groups.items():
-        if len(symbols) > 1 and isinstance(form, str):
+        if len(symbols) < 2:
+            continue
+        if isinstance(form, str):
             shared.update(dict.fromkeys(symbols, f"graph_{form}"))
-        elif len(symbols) > 1:
+        else:
             name = f"graph_{form.value}_x{spell(form.ratio)}"
             if form.offset:
                 name += f"{'p' if form.offset > 0 else 'm'}{spell(abs(form.offset))}"

@@ -23,6 +23,7 @@ from aie.helpers.taplib import Affine
 
 from ...operators.emit import ROW, UNCLAMPED, Emit
 from ..image.artifacts import Parameter
+from ..image.callable import FullELFCallable
 from .handle import Dense, Handle, State
 from .record import Recording, Step
 
@@ -77,7 +78,7 @@ def attach_emit(
     inputs = [_resident(recording, program), planes]
     recording.steps.append(
         Step(
-            Emit(slots=slots, carried=n),
+            Emit(slots=slots, carried=n),  # pyright: ignore[reportCallIssue]
             inputs + [image, current],
             inputs,
             [image, current],
@@ -88,6 +89,7 @@ def attach_emit(
 
 
 def _resident(recording: Recording, state: State) -> Handle:
+    assert state.name is not None, "the carry and the program are named"
     handle = Handle.whole(state.shape, state.dtype, state.name, "state")
     recording.states[id(state)] = (state, handle)
     recording.pinned[handle.name] = handle.nbytes
@@ -214,11 +216,16 @@ class CarriedLoop:
         body.emit_to(body)
         # Each run holds a copy of its ELF's control code in the device heap,
         # 64 MB on older amdxdna, so the loop reuses each version's own run.
-        self._runs: list[FullELFRun] = [body.callable.run]
-        self._runs += [body.callable.new_run() for _ in range(depth - 1)]
+        first_call, body_call = first.callable, body.callable
+        # Only a full ELF has an Emit step.
+        assert isinstance(first_call, FullELFCallable)
+        assert isinstance(body_call, FullELFCallable)
+        self._first_call, self._body_call = first_call, body_call
+        self._runs: list[FullELFRun] = [body_call.run]
+        self._runs += [body_call.new_run() for _ in range(depth - 1)]
         for k, run in enumerate(self._runs):
             run.bind_feedback(self._runs[(k + 1) % depth].scratchpad_alias())
-        self._first = first.callable.run
+        self._first = first_call.run
         self._first.bind_feedback(self._runs[0].scratchpad_alias())
 
     def run(self, steps: int, /, *tensors, **values) -> Iterator[int]:
@@ -230,7 +237,7 @@ class CarriedLoop:
         """Run ``first`` on ``tensors`` and ``values``, and wait for it."""
         self.body.upload()
         self.first.start(self._first, *tensors, **values)
-        self.first.callable.wait(self._first)
+        self._first_call.wait(self._first)
 
     def steps(self, steps: int) -> Iterator[int]:
         """Run ``steps`` steps of ``body``, yielding each index once complete;
@@ -243,11 +250,11 @@ class CarriedLoop:
         try:
             for k in range(steps):
                 run = self._runs[k % self.depth]
-                self.body.callable.wait(run)
+                self._body_call.wait(run)
                 in_flight.popleft()
                 if k + self.depth < steps:
                     run.start()
                     in_flight.append(k + self.depth)
                 yield k
         finally:
-            self.body.callable.wait(*(self._runs[k % self.depth] for k in in_flight))
+            self._body_call.wait(*(self._runs[k % self.depth] for k in in_flight))

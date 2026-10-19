@@ -7,6 +7,7 @@ import argparse
 import importlib
 import inspect
 import logging
+from typing import Any
 
 import numpy as np
 
@@ -15,7 +16,7 @@ from .model import Model, prompt_text
 
 #: The flags ``main()``'s CLI and pytest's fixtures read alike, each a
 #: tuple of ``add_argument``'s own flag strings and keywords.
-FLAGS = (
+FLAGS: tuple[tuple[tuple[str, ...], dict[str, Any]], ...] = (
     (
         ("--random-weights",),
         dict(
@@ -76,11 +77,11 @@ def parse_args(parser: argparse.ArgumentParser, args=None) -> argparse.Namespace
     return args
 
 
-def main(model: type[Model]):
-    """The command line of ``model``, loaded as ``Model.load`` loads it:
-    sample, or check it.
+def main(model_class: type[Model]):
+    """The command line of ``model_class``, loaded as ``Model.load`` loads
+    it: sample, or check it.
     """
-    parser = argparse.ArgumentParser(description=f"{model.__name__} on the NPU")
+    parser = argparse.ArgumentParser(description=f"{model_class.__name__} on the NPU")
     parser.add_argument(
         "path",
         help="a directory holding config.json, the checkpoint and the "
@@ -129,7 +130,7 @@ def main(model: type[Model]):
     )
     args = parse_args(parser)
     try:
-        model = model.from_checkpoint(
+        model = model_class.from_checkpoint(
             args.path, seed=args.random_weights, max_seq_len=args.max_seq_len
         )
     except ValueError as e:
@@ -145,6 +146,7 @@ def main(model: type[Model]):
             f"a {len(tokens)}-token prompt and {args.num_tokens} more exceed "
             f"{model.config.max_seq_len} rows"
         )
+    assert model.checkpoint is not None, "from_checkpoint gives it one"
     model.load_versions(release=model.checkpoint.release, full_elf=args.full_elf)
 
     if args.check_accuracy:
@@ -170,9 +172,11 @@ def main(model: type[Model]):
         prompt = tokens if ids else text
         for piece in model.stream(prompt, args.num_tokens, sampler()):
             print(f" {piece}" if ids else piece, end="", flush=True)
-        print(f"\n\n[Prefill] Time to first token: {model.stats.ttft:7.3f} s")
+        stats = model.stats
+        assert stats is not None, "set once the last token is drawn"
+        print(f"\n\n[Prefill] Time to first token: {stats.ttft:7.3f} s")
         if args.num_tokens > 1:
-            print(f"[Decode]  Tokens per second:   {model.stats.tokens_per_s:7.3f}")
+            print(f"[Decode]  Tokens per second:   {stats.tokens_per_s:7.3f}")
         if args.compare_host:
             drawn = model.generate(tokens, args.num_tokens, sampler())
             host = generate_on_host(model, tokens, args.num_tokens, sampler())

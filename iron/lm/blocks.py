@@ -11,6 +11,7 @@ projected by ``F.linear``.
 import math
 from collections.abc import Hashable
 from functools import partial
+from typing import Any
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -19,6 +20,7 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, Scratchpad
+from iron.common.graph import Handle
 from iron.common.image.packaging import require_device
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
@@ -103,7 +105,13 @@ class LogMel(iron.Graph):
         self.dft = stacked(dft)
         self.filterbank = stacked(np.pad(self.filters, ((0, width - bins), (0, 0))))
 
-    def body(self, wave, features=None, *, frames: Scratchpad[np.int32]):
+    def body(
+        self,
+        wave: Handle,
+        features: Handle | None = None,
+        *,
+        frames: Scratchpad[np.int32],
+    ) -> Handle:
         F = wave.shape[0] // self.hop - 1
         if F % 4:
             raise ValueError(f"LogMel: {F} frames are not whole rows of four")
@@ -157,7 +165,9 @@ class Conv1d(iron.Graph):
         self.matrix = w.transpose(2, 1, 0).reshape(k * C, C_out).astype(bfloat16)
         self.bias = iron.weight(np.asarray(bias, np.float32).astype(bfloat16))
 
-    def body(self, x, y=None, *, rows: Scratchpad[np.int32]):
+    def body(
+        self, x: Handle, y: Handle | None = None, *, rows: Scratchpad[np.int32]
+    ) -> Handle:
         k, s = self.kernel, self.stride
         R, line = x.shape
         out_rows = (R - k) // s + 1
@@ -210,7 +220,7 @@ class ImagePatches(iron.Graph):
         # Every grid of whole pooling windows the rows hold; the fewest patch
         # columns give the most bands and padded raster rows.
         grids = [(patches // s // k * k, s) for s in range(k, patches // k + 1, k)]
-        shared = dict(
+        shared: dict[str, Any] = dict(
             height=side,
             width=side,
             out_height=side,
@@ -229,7 +239,7 @@ class ImagePatches(iron.Graph):
             **shared,
         )
         self.raster = iron.state((shared["patch_rows"], 3 * SIDE**2))
-        taps = dict(
+        taps: dict[str, Any] = dict(
             in_size=side,
             out_size=side,
             words=self.resample.words,
@@ -250,13 +260,13 @@ class ImagePatches(iron.Graph):
 
     def body(
         self,
-        rgb,
+        rgb: Handle,
         *,
         height: Scratchpad[np.int32],
         width: Scratchpad[np.int32],
         out_height: Scratchpad[np.int32],
         out_width: Scratchpad[np.int32],
-    ):
+    ) -> tuple[Handle, Handle, Handle]:
         T = self.patches
         taps_w = self.taps_w.apply(in_samples=width, out_samples=out_width)
         taps_h = self.taps_h.apply(in_samples=height, out_samples=out_height)
@@ -334,7 +344,7 @@ class Linear(iron.Graph):
         self.bias = iron.param(out_features) if bias else None
         self.precision = precision
 
-    def body(self, x):
+    def body(self, x: Handle) -> Handle:
         return F.linear(x, self.weight, self.bias, precision=self.precision)
 
     def split(self, x, *rows: int, **gemv) -> list:
@@ -363,7 +373,7 @@ class Embedding(iron.Graph):
         self.num_embeddings, self.embedding_dim = num_embeddings, embedding_dim
         self.weight = iron.param(num_embeddings, embedding_dim)
 
-    def body(self, ids):
+    def body(self, ids: Handle) -> Handle:
         return Copy.step(iron.weight(self.weight)[ids])
 
 
@@ -388,7 +398,7 @@ class RMSNorm(iron.Graph):
         self.normalized_shape, self.eps = _last_axis(normalized_shape), eps
         self.weight = iron.param(*self.normalized_shape)
 
-    def body(self, x):
+    def body(self, x: Handle) -> Handle:
         return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
 
 
@@ -406,7 +416,7 @@ class LayerNorm(iron.Graph):
         self.weight = iron.param(*self.normalized_shape)
         self.bias = iron.param(*self.normalized_shape)
 
-    def body(self, x):
+    def body(self, x: Handle) -> Handle:
         return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
 
 
@@ -416,8 +426,10 @@ class BatchNorm2d(iron.Graph):
     """
 
     def __init__(self, num_features: int, eps: float = 1e-5):
-        for name in ("weight", "bias", "running_mean", "running_var"):
-            setattr(self, name, iron.param(num_features, dtype=np.float32))
+        self.weight = iron.param(num_features, dtype=np.float32)
+        self.bias = iron.param(num_features, dtype=np.float32)
+        self.running_mean = iron.param(num_features, dtype=np.float32)
+        self.running_var = iron.param(num_features, dtype=np.float32)
         self.num_batches_tracked = iron.param(dtype=np.int64)
         self.eps = eps
 
@@ -675,7 +687,7 @@ class Attention(iron.Graph):
         x[:, : self.rotary] = F.rope(Copy.step(x[:, : self.rotary]), angles)
         return x
 
-    def body(self, x, cache, call, angles=None):
+    def body(self, x: Handle, cache, call, angles: Handle | None = None) -> Handle:
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         # One row's GEMV tiles half a head. Given here, not by the profile:
         # q's shape is o's when heads * head_dim is the width.
@@ -733,7 +745,7 @@ class MLP(iron.Graph):
         self.fc2 = linear(M, E)
         self.act = activation(c.hidden_act)
 
-    def body(self, x):
+    def body(self, x: Handle) -> Handle:
         return self.fc2(self.act(self.fc1(x)))
 
 
@@ -759,7 +771,7 @@ class GatedMLP(iron.Graph):
         self.gate_proj = linear(E, M)
         self.up_proj = linear(E, M)
 
-    def body(self, x):
+    def body(self, x: Handle) -> Handle:
         gate, up = self.gate_proj(x), self.up_proj(x)
         return self.down_proj(self.act(gate) * up)
 
@@ -789,7 +801,7 @@ class DecoderLayer(iron.Graph):
         self.rope: Hashable | None = None
         self.residual_multiplier = 1.0
 
-    def body(self, x, call):
+    def body(self, x: Handle, call) -> Handle:
         angles = None if self.rope is None else call.ropes[self.rope]
         h = self.self_attn(self.input_layernorm(x), self.cache, call, angles)
         x = _add(x, h, self.residual_multiplier)
@@ -833,7 +845,7 @@ class CrossDecoderLayer(DecoderLayer):
         )
         self.cross: CrossCache | None = None
 
-    def body(self, x, call):
+    def body(self, x: Handle, call) -> Handle:
         angles = None if self.rope is None else call.ropes[self.rope]
         h = self.self_attn(self.input_layernorm(x), self.cache, call, angles)
         x = _add(x, h, self.residual_multiplier)
@@ -855,7 +867,7 @@ class SandwichLayer(DecoderLayer):
         self.pre_feedforward_layernorm = RMSNorm(c.hidden_size, c.eps)
         self.post_feedforward_layernorm = RMSNorm(c.hidden_size, c.eps)
 
-    def body(self, x, call):
+    def body(self, x: Handle, call) -> Handle:
         angles = None if self.rope is None else call.ropes[self.rope]
         h = self.self_attn(self.input_layernorm(x), self.cache, call, angles)
         x = _add(x, self.post_attention_layernorm(h), self.residual_multiplier)
@@ -884,7 +896,9 @@ class PleLayer(SandwichLayer):
         scalar, E = self.layer_scalar, self.per_layer_projection.out_features
         self.scale = np.full(E, scalar[0], scalar.dtype)
 
-    def body(self, x, call, ple):
+    def body(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, x: Handle, call, ple: Handle
+    ) -> Handle:
         x = super().body(x, call)
         g = self.mlp.act(self.per_layer_input_gate(x)) * ple
         g = self.post_per_layer_input_norm(self.per_layer_projection(g))

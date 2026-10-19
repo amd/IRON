@@ -494,7 +494,7 @@ class Handle:
             # A repeat count may be clamped; a length patches a size, linear.
             repeats = tuple(
                 r if isinstance(r, Affine) else r.affine()
-                for r in (repeat if isinstance(tap, tuple) else (repeat,))
+                for r in (repeat if isinstance(repeat, tuple) else (repeat,))
             )
         length = None if length is None else length.affine()
         recorder = graph_recorder.get()
@@ -684,8 +684,8 @@ def _broadcast(whole, rowwise, x: Handle, y) -> Handle:
         x, y = (y if isinstance(y, Handle) else graph_recorder.get().operand(y)), x
     shape = tuple(getattr(y, "shape", ()))
     if len(x.shape) > 1 and shape == x.shape[-1:]:
-        rows = x.elements // shape[0]
-        return rowwise.step(x.reshape(rows, shape[0]), y).reshape(x.shape)
+        rows = x.elements // x.shape[-1]
+        return rowwise.step(x.reshape(rows, x.shape[-1]), y).reshape(x.shape)
     if shape == x.shape:
         return whole.step(x, y)
     raise TypeError(

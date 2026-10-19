@@ -50,3 +50,32 @@ jobs:
       - name: Lint workflows
         if: success() || failure()
         run: actionlint
+
+  Types:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # mlir-aie's Python sources, pinned: reading types needs none of the
+      # wheel's native modules.
+      - name: Checkout mlir-aie
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: hunhoffe/mlir-aie
+          ref: 9ff3701d28d2c20009a8e1c84011d25d8db03df2
+          path: mlir-aie
+          sparse-checkout: python
+      - name: Install dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install pyright==1.1.414 numpy ml_dtypes \
+            pytest huggingface_hub tokenizers safetensors jinja2
+          mkdir "$RUNNER_TEMP/aie"
+          ln -s "$PWD/mlir-aie/python" "$RUNNER_TEMP/aie/aie"
+          site=$("$RUNNER_TEMP/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+          echo "$RUNNER_TEMP/aie" > "$site/aie-src.pth"
+
+      - name: Check types
+        run: |
+          "$RUNNER_TEMP/venv/bin/pyright" --pythonpath "$RUNNER_TEMP/venv/bin/python"

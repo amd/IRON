@@ -23,6 +23,7 @@ import argparse
 import importlib
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from iron.operators.sample import Sample
 from iron.tune import cli as tune_cli
@@ -183,7 +184,7 @@ def application_model(name: str) -> type[Model]:
     return found[0]
 
 
-def main(name: str, model: type[Model], argv: Sequence[str] | None = None) -> None:
+def main(name: str, model: Any, argv: Sequence[str] | None = None) -> None:
     """The command line that tunes ``name``'s profile: the calls ``model``
     plans (``tune_calls``, on the flags ``tune_arguments`` adds), into its
     profiles directory.

@@ -35,3 +35,8 @@ include = ["iron*"]
     "*.hpp",
     "Makefile",
 ]
+
+[tool.pyright]
+include = ["iron/common/graph", "iron/functional.py", "iron/lm"]
+# A loop over chunks or calls, never empty, binds what follows it.
+reportPossiblyUnboundVariable = false

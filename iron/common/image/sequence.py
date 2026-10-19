@@ -16,7 +16,7 @@ from aie.utils import bfp
 from ..declare import Operator
 from .allocator import Allocation, ArenaPlan, lay_out
 from .artifacts import Artifacts, Step
-from .callable import BF16, ScratchArena
+from .callable import BF16, FullELFCallable, PerStepCallable, ScratchArena
 from .link import FullELF, PerStep
 from .step import BufferRef, SequenceStep
 
@@ -274,7 +274,9 @@ class Image:
             buffers=dict(self.layout),
         )
 
-    def get_callable(self, arena: ScratchArena | None = None):
+    def get_callable(
+        self, arena: ScratchArena | None = None
+    ) -> FullELFCallable | PerStepCallable:
         """The runtime callable of this sequence's image, compiling first if
         needed. A sequence placed in an arena plan runs what it placed there
         in ``arena``, made here if not given.

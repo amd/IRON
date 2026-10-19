@@ -9,6 +9,7 @@ import dataclasses
 import itertools
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping
+from typing import Any
 
 import numpy as np
 from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
@@ -69,15 +70,14 @@ class Encoder:
         return self.encode(tensor, address, valid)
 
 
-@dataclasses.dataclass(frozen=True)
 class Binding:
     """A graph value bound to one operator's value member, written per call
     as ``expression``.
     """
 
-    op: Operator
-    member: Value
-    expression: Affine
+    # Not a dataclass: a field typed as a descriptor (Value) reads as its __get__.
+    def __init__(self, op: Operator, member: Value, expression: Affine):
+        self.op, self.member, self.expression = op, member, expression
 
     @property
     def symbol(self) -> str:
@@ -167,7 +167,7 @@ def _take_views(cls, operands, kwargs, values):
             values[offset_member] = view.offset
         # What the pattern walks: the whole buffer, in the pattern's shape.
         walked = view.tap[0] if isinstance(view.tap, tuple) else view.tap
-        out.append(Handle(h.buffer, walked.tensor_dims, h.dtype))
+        out.append(Handle(h.buffer, tuple(map(int, walked.tensor_dims)), h.dtype))
     return out
 
 
@@ -439,6 +439,7 @@ def _gather_reference(step: Step, ids: np.ndarray, view) -> None:
     table, out = (view(h) for h in (step.inputs[0], step.outputs[0]))
     table = table.reshape(table.shape[0], -1)
     rows = ids.astype(np.int64)
+    assert step.gather is not None, "a gather's step"
     if step.gather.role != "input":
         rows = np.clip(rows, -len(table), len(table) - 1)
     out.reshape(-1, table.shape[1])[: len(rows)] = table[rows]
@@ -520,7 +521,9 @@ class Recorder:
             if isinstance(x.layout, Strided) and x.layout.window is not None:
                 # A run from a per-call start taken whole ends inside its axis.
                 _, start, width, n = x.layout.window
-                self.limit(start + width, 0, n + 1, x)
+                end = start + width
+                assert isinstance(end, Affine), "a per-call start"
+                self.limit(end, 0, n + 1, x)
             return x
         if isinstance(x, State):
             key = id(x)
@@ -721,6 +724,8 @@ class Recorder:
             dtype=table.dtype,
         )
         gather = target.per_call_gather
+        # The class's gather operator, whose words and template only it declares.
+        op: Any
         if self.profile is None:
             op = gather(**given)
         else:
@@ -768,6 +773,7 @@ class Recorder:
             self._record(source, [ids, control])
             self.steps[-1].gather = ids
         out = self._record(op, [table, control])
+        assert isinstance(out, Handle), "one output"
         self.steps[-1].gather = ids
         return out if out.shape == view.shape else out.reshape(view.shape)
 
@@ -796,8 +802,8 @@ class Recorder:
         """``op``, its precision raised to the graph's where it rounds more."""
         if self.precision is None or "precision" not in op.declaration.tunables:
             return op
-        level = op.precision.at_least(self.precision)
-        if level == op.precision:
+        level = vars(op)["precision"].at_least(self.precision)
+        if level == vars(op)["precision"]:
             return op
         raised = op.at_precision(level)
         if type(raised) is type(op) or self.profile is None:

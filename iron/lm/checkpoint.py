@@ -278,7 +278,9 @@ def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:
 _FILE = "the checkpoint"
 
 
-def nest(named: Mapping[str, Any], path: str = "", file=_FILE) -> SimpleNamespace:
+def nest(
+    named: Mapping[str, Any], path: str = "", file: str | Path = _FILE
+) -> SimpleNamespace:
     """Values by dotted name, nested as ``Checkpoint.tree()`` nests them,
     under ``path`` (a dotted prefix) of ``file``, which a missing name
     names.

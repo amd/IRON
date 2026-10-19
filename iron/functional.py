@@ -19,6 +19,7 @@ A feature map is one image, channels last: ``(H, W, C)``, not torch's
 
 import dataclasses
 import math
+from collections.abc import Sequence
 
 import ml_dtypes
 import numpy as np
@@ -44,7 +45,7 @@ from iron.operators.silu import SiLU
 LAYER_NORM_EPS = 1e-5
 
 
-def linear(x, weight, bias=None, *, precision=None, **gemv):
+def linear(x: Handle | State, weight, bias=None, *, precision=None, **gemv) -> Handle:
     """``x @ weight.T``, plus ``bias`` on every row if given.
 
     ``x`` is one row (``(in,)`` or ``(1, in)``) or several (``(rows, in)``).
@@ -81,7 +82,7 @@ def linear(x, weight, bias=None, *, precision=None, **gemv):
     return (y.reshape(rows, bias.shape[0]) + bias).reshape(y.shape)
 
 
-def _last_axis(name: str, x, normalized_shape) -> None:
+def _last_axis(name: str, x: Handle, normalized_shape) -> None:
     """Refuse a ``normalized_shape`` other than ``x``'s last axis."""
     given = (
         (normalized_shape,)
@@ -95,7 +96,9 @@ def _last_axis(name: str, x, normalized_shape) -> None:
         )
 
 
-def rms_norm(x, normalized_shape, weight=None, eps: float | None = None):
+def rms_norm(
+    x: Handle, normalized_shape, weight=None, eps: float | None = None
+) -> Handle:
     """``x`` over the RMS of its last axis, times ``weight`` if given.
     ``eps`` None is ``x``'s dtype's machine epsilon, as torch's.
 
@@ -109,8 +112,8 @@ def rms_norm(x, normalized_shape, weight=None, eps: float | None = None):
 
 
 def layer_norm(
-    x, normalized_shape, weight=None, bias=None, eps: float = LAYER_NORM_EPS
-):
+    x: Handle, normalized_shape, weight=None, bias=None, eps: float = LAYER_NORM_EPS
+) -> Handle:
     """``x`` less its mean over the RMS of that, times ``weight`` and plus
     ``bias`` where given.
 
@@ -127,11 +130,11 @@ def layer_norm(
     return y if bias is None else y + bias
 
 
-def silu(x):
+def silu(x: Handle) -> Handle:
     return SiLU.step(x)
 
 
-def gelu(x, approximate: str = "none"):
+def gelu(x: Handle, approximate: str = "none") -> Handle:
     """GELU by its tanh approximation (``gelu_pytorch_tanh``). The default
     is torch's, the exact GELU, so a call written for it is refused rather
     than approximated.
@@ -147,7 +150,7 @@ def gelu(x, approximate: str = "none"):
     return GELU.step(x)
 
 
-def rope(x, angles):
+def rope(x: Handle, angles: Handle) -> Handle:
     """``x`` ``(rows, head_dim)`` turned by RoPE, a row of ``angles`` per row."""
     return RoPE.step(x, angles)
 
@@ -166,7 +169,7 @@ class ConvState:
     tail: State
 
 
-def causal_conv1d(x, taps, state: ConvState):
+def causal_conv1d(x: Handle, taps, state: ConvState) -> Handle:
     """``x`` ``(rows, channels)`` through a depth-wise causal FIR of ``K``
     taps: row ``t`` is ``sum_k taps[k] * x[t - K + 1 + k]``, each channel its
     own column of ``taps`` ``(K, channels)``, the rows before ``x``'s first
@@ -199,7 +202,7 @@ def causal_conv1d(x, taps, state: ConvState):
     return y
 
 
-def _feature_map(name: str, x) -> tuple[int, int, int]:
+def _feature_map(name: str, x: Handle) -> tuple[int, int, int]:
     """``x``'s ``(H, W, C)``.
 
     Raises:
@@ -210,7 +213,9 @@ def _feature_map(name: str, x) -> tuple[int, int, int]:
     return x.shape
 
 
-def conv2d(x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+def conv2d(
+    x: Handle, weight, bias=None, stride=1, padding=0, dilation=1, groups=1
+) -> Handle:
     """The feature map ``x`` convolved by ``weight`` ``(out, C / groups,
     k, k)`` at ``stride``, inside ``padding`` zero pixels a side, plus
     ``bias`` per output channel if given.
@@ -276,7 +281,7 @@ def conv2d(x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
     return y.reshape(out_rows, conv.out_width, out)
 
 
-def max_pool2d(x, kernel_size, stride=None, padding=0):
+def max_pool2d(x: Handle, kernel_size, stride=None, padding=0) -> Handle:
     """The feature map ``x``'s max over each ``kernel_size`` square window
     at ``stride`` (``kernel_size`` where None), each channel its own:
     ``MaxPool2d``, which pools at stride 1 inside ``-inf`` padding of half
@@ -302,7 +307,9 @@ def max_pool2d(x, kernel_size, stride=None, padding=0):
     return Copy.step(y, src=strided).reshape(rows, width, C)
 
 
-def interpolate(x, size=None, scale_factor=None, mode="nearest", align_corners=None):
+def interpolate(
+    x: Handle, size=None, scale_factor=None, mode="nearest", align_corners=None
+) -> Handle:
     """The feature map ``x`` upsampled 2x, each pixel a 2x2 block: each row
     read twice into a held map, which is then written twice, into the even
     and the odd pixels of another.
@@ -339,7 +346,7 @@ def interpolate(x, size=None, scale_factor=None, mode="nearest", align_corners=N
     return Copy.step(out[:]).reshape(2 * H, 2 * W, C)
 
 
-def cat(tensors, dim=0):
+def cat(tensors: Sequence[Handle], dim=0) -> Handle:
     """Two to four feature maps of one height and width joined along their
     channels, ``dim`` -1: ``ConcatChannels``.
 
