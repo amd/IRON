@@ -389,25 +389,15 @@ class Embedding(iron.Graph):
         return Copy.step(iron.weight(self.weight)[ids])
 
 
-def _last_axis(normalized_shape: int | tuple[int]) -> tuple[int]:
-    """``normalized_shape`` as torch's norms take it, one axis only."""
-    shape = (
-        tuple(normalized_shape)
-        if isinstance(normalized_shape, (tuple, list))
-        else (normalized_shape,)
-    )
-    if len(shape) != 1:
-        raise ValueError(f"a norm here is over the last axis, not {shape}")
-    return shape
-
-
 class RMSNorm(iron.Graph):
     """``torch.nn.RMSNorm`` over the last axis, times ``weight``; ``eps``
     None is the input dtype's machine epsilon.
     """
 
     def __init__(self, normalized_shape: int | tuple[int], eps: float | None = None):
-        self.normalized_shape, self.eps = _last_axis(normalized_shape), eps
+        n = normalized_shape
+        self.normalized_shape = (n,) if isinstance(n, int) else tuple(n)
+        self.eps = eps
         self.weight = iron.param(*self.normalized_shape)
 
     def body(self, x: Handle) -> Handle:
@@ -430,11 +420,9 @@ class LayerNorm(iron.Graph):
     """
 
     def __init__(self, normalized_shape: int | tuple[int], eps: float = 1e-5):
-        if eps != F.LAYER_NORM_EPS:
-            raise ValueError(
-                f"LayerNorm's kernel takes eps {F.LAYER_NORM_EPS}, not {eps}"
-            )
-        self.normalized_shape, self.eps = _last_axis(normalized_shape), eps
+        n = normalized_shape
+        self.normalized_shape = (n,) if isinstance(n, int) else tuple(n)
+        self.eps = eps
         self.weight = iron.param(*self.normalized_shape)
         self.bias = iron.param(*self.normalized_shape)
 

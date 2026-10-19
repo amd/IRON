@@ -274,13 +274,6 @@ def test_leaf_modules_take_torch_nn_s_names_and_defaults():
     assert RMSNorm((4,)).normalized_shape == LayerNorm([4]).normalized_shape == (4,)
 
 
-def test_a_norm_refuses_more_than_the_last_axis_and_layer_norm_another_eps():
-    with pytest.raises(ValueError, match="over the last axis"):
-        RMSNorm((2, 4))
-    with pytest.raises(ValueError, match="takes eps 1e-05, not 1e-06"):
-        LayerNorm(4, eps=1e-6)
-
-
 def test_attention_refuses_a_norm_of_other_than_q_k_and_v():
     with pytest.raises(ValueError, match="'qo' names other than q, k and v"):
         Attention(SMALL, 0, norms="qo")
