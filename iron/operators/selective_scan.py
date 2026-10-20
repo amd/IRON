@@ -14,11 +14,11 @@ from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, kernels
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.context import compile_context
+from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp
-from iron.common.declare.kernel_memory import core_stack, kernel_data
 from iron.common.testing import Case, Testing
 from iron.operators.state_slices import SLICE, depths, resolve_heads, resolve_rows
 
@@ -150,14 +150,16 @@ class SelectiveScan(Operator):
 
     def held(self, dev, rows: int) -> int:
         """Core memory a core of ``dev`` holds at ``rows`` a call besides a
-        slice's state and final: the row, the block and y, and the kernel's
-        data (its own copy of the state among it) and stack.
+        slice's state and final: the row, the block and y, the kernel's data
+        (its own copy of the state among it) and stack, and the device's
+        default stack, which covers the core's own frame.
         """
         # Made to be read, not built: kept out of the registry a build reads.
         with compile_context(_iron_kernel_registry=set()):
             kernel = self.kernel(rows)
             block = 2 * int(np.prod(kernel.arg_shape(0)))
-            frame = kernel_data(dev, kernel) + core_stack(dev, kernel)
+            frame = kernel.frame_bytes(resolve_target_arch(dev))
+        frame += dev.default_core_stack_bytes
         return 2 * (self.width + self.heads) + block + 4 * rows * SLICE + frame
 
     def kernel(self, rows: int):

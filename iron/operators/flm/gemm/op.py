@@ -35,12 +35,13 @@ from aie.iron.device import Tile
 from aie.iron.kernels import fused_mm
 from aie.utils import bfp
 from aie.utils.verify import Tolerance
+from aie.utils import set_current_device
+from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.compile.jit.context import compile_context
 from aie.utils.compile.jit.params import Select, divisors, param, per_call, tunable
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Precision, Rtp, Unresolvable
-from iron.common.declare.kernel_memory import core_stack
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
     B_MAX_SLOTS,
@@ -60,7 +61,6 @@ from iron.operators.flm.gemm.design import (
     _b_bytes,
     _Slab,
     compute_rows,
-    l1_budget,
     l1_tiles,
 )
 from iron.operators.flm.packing import pack_b
@@ -330,21 +330,15 @@ class ProjectionGEMM(Operator):
             k_tile = K_TILE
             while self.K % k_tile and (k_tile // 2) % ct_k == 0:
                 k_tile //= 2
-        l1 = l1_budget(dev, self.compiled_modes)
-
-        def stack(height: int) -> int:
-            # Made to be read, not built: kept out of the registry a build reads.
-            with compile_context(_iron_kernel_registry=set()):
-                k = self.kernel(tile_n, k_tile, height, bfp16_b, emulate)
-                calls = (
-                    k.mm_fused_acc_init,
-                    k.mm_fused_k_step,
-                    k.mm_fused_epilogue_chunk,
-                )
-                return core_stack(dev, *calls, objects=(k,))
-
         tile_ma, l1_b_depth = l1_tiles(
-            tile_n, ct_k, b_elem_bytes, l1, stack, m_chunk, k_tile, self.tile_ma
+            tile_n,
+            ct_k,
+            b_elem_bytes,
+            dev.core_memory_bytes,
+            lambda height: self.frame(dev, tile_n, k_tile, height, bfp16_b, emulate),
+            m_chunk,
+            k_tile,
+            self.tile_ma,
         )
         b_dtype = v8bfp16ebs8 if bfp16_b else bfloat16
         return self.replace(
@@ -452,6 +446,19 @@ class ProjectionGEMM(Operator):
         if self.epilogue is not Epilogue.NONE:
             base = f"{base}_epi{self.epilogue}"
         return base
+
+    def frame(self, dev, tile_n, k_tile, band_m, bfp16_b, emulate) -> int:
+        """What a core of ``dev`` holds beside its buffers at these tiles: its
+        kernel's data and deepest call's stack, over the default stack.
+        """
+        arch = resolve_target_arch(dev)
+        # Made to be read, not built: kept out of the registry a build reads,
+        # and for dev, whose architecture the factory reads off the bound device.
+        with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
+            k = self.kernel(tile_n, k_tile, band_m, bfp16_b, emulate)
+            calls = (k.mm_fused_acc_init, k.mm_fused_k_step, k.mm_fused_epilogue_chunk)
+            deepest = max(k.frame_bytes(arch, entry=c.name) for c in calls)
+        return dev.default_core_stack_bytes + deepest
 
     def kernel(self, tile_n, k_tile, band_m, bfp16_b, emulate):
         """The fused tile kernel each core runs at these tiles."""

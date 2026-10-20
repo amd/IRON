@@ -27,7 +27,6 @@ from enum import StrEnum
 from typing import NamedTuple
 
 import numpy as np
-from aie.dialects._aie_enum_gen import AIEArch
 from aie.dialects.aie import (
     get_target_model,
 )
@@ -61,26 +60,6 @@ C_DEPTH = 2  # C fifo depth; also the core-body unroll
 C_JOINS = 2
 B_DEPTH = 2  # the deepest L1 B ring the budget below tries
 A_DEPTH = 2
-# L1 bytes the activation LUT tables occupy, which the buffer budget must not
-# hand out either. On AIE2 the activations come from lut_based_ops, whose
-# tables are bank-pinned in local memory; AIE2P computes its activations and
-# links no tables, so it reserves nothing.
-LUT_STATIC_SIZE = 5248
-
-
-def l1_budget(dev, epilogue_modes) -> int:
-    """Local memory the buffer sizing may spend on this device.
-
-    Args:
-        dev: The device the array is built for.
-        epilogue_modes: The activations compiled in. Without one the kernel
-            links no LUT tables, so their bytes go to the buffers.
-    """
-    budget = get_target_model(dev.resolve()).get_local_memory_size()
-    activated = any(Epilogue(m) is not Epilogue.NONE for m in epilogue_modes)
-    return budget - (LUT_STATIC_SIZE if dev.arch == AIEArch.AIE2 and activated else 0)
-
-
 # B does not go through an ObjectFifo. A fifo's memtile BDs are part of the
 # device configuration, so holding a column-block there would put K (the buffer
 # size) and M (the replay count) into the one xclbin every shape shares.
@@ -186,7 +165,7 @@ def l1_tiles(
     ct_max_k: int,
     b_elem_bytes: float,
     budget: int,
-    stack: Callable[[int], int],
+    frame: Callable[[int], int],
     m_chunk: int = 1,
     k_tile: int = K_TILE,
     t_ma: int | None = None,
@@ -197,8 +176,9 @@ def l1_tiles(
     far more than B's L1 prefetch; ``t_ma`` fixes the height instead. A depth
     divides the ``k_tile // ct_max_k`` B chunks a k step consumes, since the
     core walks the ring that many at a time. ``budget`` is the whole local
-    memory; ``stack(height)``, the core's stack at an A band ``height``, comes
-    off it here.
+    memory; ``frame(height)``, what the core's kernel holds beside its buffers
+    at an A band ``height`` (its data, AIE2's LUT tables among it, and stack),
+    comes off it here.
     """
     # m_chunk accumulators, since the core holds a B chunk across that many
     # row-blocks. The only term that scales with it.
@@ -211,7 +191,7 @@ def l1_tiles(
         b = int(ct_max_k * n_tile * b_elem_bytes) * b_depth
         for height in heights:
             a = (2 * R * ct_max_k) * (height // R // 2) * 2 * A_DEPTH
-            if acc + a + b + cout + stack(height) <= budget:
+            if acc + a + b + cout + frame(height) <= budget:
                 return height, b_depth
     if t_ma is None:
         raise ValueError(

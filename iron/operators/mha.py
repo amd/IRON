@@ -23,6 +23,8 @@ from aie.iron.device import AnyComputeTile, AnyMemTile, AnyShimTile, Device, Til
 from aie.iron.kernels.linalg import mm_stream_dims
 from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.context import compile_context
+from aie.utils import set_current_device
+from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.compile.jit.params import (
     Select,
     divisors,
@@ -34,7 +36,6 @@ from aie.utils.compile.jit.params import (
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp, Unresolvable
-from iron.common.declare.kernel_memory import core_stack
 from iron.common.testing import Case, Testing
 
 
@@ -531,23 +532,27 @@ class MHA(Operator):
             pv_cores: The P*V cores the head is split over.
 
         Returns:
-            The larger core's bytes, its stack included.
+            The larger core's bytes, its kernels' data and stack included,
+            over the device's default stack.
         """
         d, pv_width = self.d, self.d // pv_cores
+        arch = resolve_target_arch(dev)
         pv = 4 * B_q * B_kv + 4 * pv_width * B_kv + 6 * pv_width * B_q + 32 * B_q
         qk = (4 if pv_cores == 1 else 2) * d * B_q + 4 * d * B_kv + 4 * B_q * B_kv
-        # Made to be read, not built: kept out of the registry a build reads.
-        with compile_context(_iron_kernel_registry=set()):
+        # Made to be read, not built: kept out of the registry a build reads,
+        # and for dev, whose architecture the factory reads off the bound device.
+        with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
             qk_mha = self.mha_kernel(B_q, d, B_kv, dev.arch is AIEArch.AIE2p)
             pv_mha = qk_mha if pv_cores == 1 else self.mha_kernel(B_q, pv_width, B_kv)
             bind = pv_mha.object_file.bind
-            pv += core_stack(
-                dev, bind("matmul_PV"), bind("rescale_O"), objects=(pv_mha,)
+            pv += max(
+                pv_mha.frame_bytes(arch, entry=bind(name).name)
+                for name in ("matmul_PV", "rescale_O")
             )
-            qk += core_stack(
-                dev, qk_mha, kernels.zero(tile_size=(B_q, B_kv), dtype=bfloat16)
-            )
-        return max(pv, qk)
+            zero = kernels.zero(tile_size=(B_q, B_kv), dtype=bfloat16)
+            # Summed, the two objects' stacks bound the deeper one from above.
+            qk += qk_mha.frame_bytes(arch) + zero.frame_bytes(arch)
+        return dev.default_core_stack_bytes + max(pv, qk)
 
     def mha_kernel(self, B_q: int, width: int, B_kv: int, accurate_exp2=False):
         """mha.cc at a ``B_q`` x ``width`` x ``B_kv`` block."""
