@@ -19,8 +19,10 @@ import iron
 import iron.functional as F
 from iron import Precision, Scratchpad, lm
 from iron.lm import Attention, ImagePatches, NoCache, SandwichLayer, Tower, rope_angles
+from iron.lm.checkpoint import renamed
 from iron.operators.axpy import AXPY
 from iron.operators.gemm import GEMM
+from iron.operators.resample.op import SIDE
 
 
 @dataclasses.dataclass(frozen=True)
@@ -145,6 +147,35 @@ class VisionLayer(SandwichLayer):
             norm.weight = iron.param(norm.weight[order])
 
 
+class PatchEmbedder(iron.Graph):
+    """A patch's projection into the tower's space, and the table its x and
+    y position embeddings are rows of: ``x_windows`` and ``y_windows``,
+    ``x_ids`` and ``y_ids`` of its rows in window order, derived once it loads.
+    """
+
+    def __init__(self, c: VisionConfig, x_ids: list[int], y_ids: list[int]):
+        self.input_proj = SimpleNamespace(weight=iron.param(c.hidden_size, 3 * SIDE**2))
+        self.position_embedding_table = iron.param(
+            2, c.position_embedding_size, c.hidden_size
+        )
+        self.x_ids, self.y_ids = x_ids, y_ids
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        table = self.position_embedding_table
+        self.x_windows = iron.param(table[0][self.x_ids])
+        self.y_windows = iron.param(table[1][self.y_ids])
+
+
+class EmbedVision(iron.Graph):
+    """The tower's output projected into the text model's space."""
+
+    def __init__(self, c: VisionConfig):
+        self.embedding_projection = SimpleNamespace(
+            weight=iron.param(c.text_dim, c.hidden_size)
+        )
+
+
 class VisionTower(Tower):
     """The vision tower and `embed_vision` over at most `patches` patches,
     one compile for every image; called in another graph's body, its steps
@@ -177,12 +208,9 @@ class VisionTower(Tower):
 
     def __init__(self, config: VisionConfig, weights: SimpleNamespace):
         c = config
-        tree = self.vision_tower = weights.vision_tower
-        self.embed_vision = weights.embed_vision
         window = c.pooling_kernel_size**2
         tokens = -(-(c.patches // window) // c.rows) * c.rows
         super().__init__(config, c.patches, tokens)
-        self.load_layers(weights, "vision_tower.encoder.layers.")
         self.processor = ImagePatches(
             c.patches,
             c.largest,
@@ -216,12 +244,18 @@ class VisionTower(Tower):
             k * tx + wx for tx in range(across) for _ in range(k) for wx in range(k)
         ]
         y_ids = [k * ty + wy for ty in blocks for wy in range(k) for _ in range(k)]
-        table = tree.patch_embedder.position_embedding_table
-        self.x_windows, self.y_windows = table[0][x_ids], table[1][y_ids]
+        patch_embedder = PatchEmbedder(c, x_ids, y_ids)
+        tree = renamed(weights, self.renames)
+        patch_embedder.load_state_dict(tree, path="vision_tower.patch_embedder.")
+        self.vision_tower = SimpleNamespace(patch_embedder=patch_embedder)
+        self.embed_vision = EmbedVision(c)
+        self.embed_vision.load_state_dict(tree, path="embed_vision.")
+        self.load_layers(weights, "vision_tower.encoder.layers.")
         rope = rope_angles(half, c.position_embedding_size, c.rope_theta).astype(
             bfloat16
         )
-        self.x_angles, self.y_angles = iron.param(rope[x_ids]), iron.param(rope[y_ids])
+        self.x_angles = iron.param(rope[x_ids])
+        self.y_angles = iron.param(rope[y_ids])
         self.capacity = max(
             self.walked(hk, wk)
             for hk in range(1, windows + 1)
@@ -248,7 +282,8 @@ class VisionTower(Tower):
         repeat = tuple(
             iron.clamp(hk - first, lo=1, hi=rows) for first, rows, *_ in self.groups
         )
-        sides = self.x_windows, self.y_windows
+        pe = self.vision_tower.patch_embedder
+        sides = pe.x_windows, pe.y_windows
         for table, x_side in zip(sides, (True, False)):
             walk = self.walk(table, x_side, repeat=repeat, wk=wk, walked=walked)
             self.window_rows[:walked] = walk

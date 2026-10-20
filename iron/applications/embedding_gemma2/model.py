@@ -42,6 +42,7 @@ from iron.lm import (
     RMSNorm,
     rope_angles,
 )
+from iron.lm.checkpoint import renamed
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
@@ -200,6 +201,62 @@ class TextLayer(PleLayer):
         self.rope = D
 
 
+class EmbedTokens(iron.Graph):
+    """The vocabulary's rows, scaled by ``sqrt(hidden_size)`` once this
+    loads (Gemma's input embedding scale), gathered on the device.
+    """
+
+    def __init__(self, c: Config):
+        self.weight = iron.param(c.vocab_size, c.hidden_size)
+        self._scale = np.sqrt(np.float32(c.hidden_size))
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        scaled = self.weight.astype(np.float32) * self._scale
+        self.scaled = iron.param(scaled.astype(bfloat16))
+
+
+class EmbeddingProjection(iron.Graph):
+    """The projection's Matryoshka truncations, each padded to a power of
+    four and stacked a power of four apart, derived once this loads.
+    """
+
+    def __init__(self, c: Config):
+        self.weight = iron.param(c.embedding_dim, c.hidden_size)
+        self._dims, self._hidden = c.mrl_dims, c.hidden_size
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        # A power of four: a row's RMS over it is its norm over a power of two.
+        self.width = width = 4 ** math.ceil(math.log(self.weight.shape[0], 4))
+        mrl = np.zeros((len(self._dims), width, self._hidden), bfloat16)
+        for j, d in enumerate(self._dims):
+            mrl[j, :d] = self.weight[:d]
+        # Each truncation's rows of the projection, a power of four apart.
+        self.mrl = iron.param(mrl.reshape(-1, self._hidden))
+
+
+class LanguageModelPle(iron.Graph):
+    """Every layer's own slice of the per-layer input projection, and the
+    norm every layer's slice shares, sliced once this loads.
+    """
+
+    def __init__(self, c: Config):
+        P, L = c.ple_dim, c.num_hidden_layers
+        self.per_layer_model_projection = SimpleNamespace(
+            weight=iron.param(L * P, c.hidden_size)
+        )
+        self.per_layer_projection_norm = SimpleNamespace(weight=iron.param(P))
+        self._ple_dim = P
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        P, weight = self._ple_dim, self.per_layer_model_projection.weight
+        self.layers = [
+            iron.param(weight[i * P : (i + 1) * P]) for i in range(weight.shape[0] // P)
+        ]
+
+
 class EmbeddingGemma(Encoder):
     """The text encoder over ``max_tokens`` rows at most, one compile for
     every length.
@@ -237,25 +294,31 @@ class EmbeddingGemma(Encoder):
     ):
         c = config
         self.tokenizer = tokenizer
-        w = self.language_model = weights.language_model
         super().__init__(config, c.max_tokens)
         self.final_norm = RMSNorm(c.hidden_size, c.eps)
+        tree = renamed(weights, self.renames)
+        embed_tokens = EmbedTokens(c)
+        embed_tokens.load_state_dict(tree, path="language_model.embed_tokens.")
+        embedding_projection = EmbeddingProjection(c)
+        embedding_projection.load_state_dict(
+            tree, path="language_model.embedding_projection."
+        )
+        ple = LanguageModelPle(c)
+        ple.load_state_dict(tree, path="language_model.ple.")
+        self.language_model = SimpleNamespace(
+            embed_tokens=embed_tokens,
+            embedding_projection=embedding_projection,
+            ple=ple,
+        )
+        self.embed_scaled = embed_tokens.scaled
+        self.mrl = embedding_projection.mrl
         self.load_layers(weights, "language_model.layers.", "language_model.norm.")
-        scale = np.sqrt(np.float32(c.hidden_size))
-        embedding = w.embed_tokens.weight.astype(np.float32) * scale
-        self.embed_scaled = iron.param(embedding.astype(bfloat16))
         self.rope = {
             D: iron.weight(rope_angles(D, c.max_tokens, base).astype(bfloat16))
             for _, D, base in {c.heads(i) for i in range(c.num_hidden_layers)}
         }
         self.query = iron.param(np.zeros((c.block, 1, c.hidden_size), bfloat16))
-        # A power of four: a row's RMS over it is its norm over a power of two.
-        width = 4 ** math.ceil(math.log(c.embedding_dim, 4))
-        mrl = np.zeros((len(c.mrl_dims), width, c.hidden_size), bfloat16)
-        for j, d in enumerate(c.mrl_dims):
-            mrl[j, :d] = w.embedding_projection.weight[:d]
-        # Each truncation's rows of the projection, a power of four apart.
-        self.mrl = iron.param(mrl.reshape(-1, c.hidden_size))
+        width = embedding_projection.width
         self.unit = iron.param(np.full(width, 1 / np.sqrt(width), bfloat16))
 
     def lookup(self, ids):
@@ -272,10 +335,9 @@ class EmbeddingGemma(Encoder):
         c = self.config
         # The projection's E ** -0.5 scale folded into the norm's epsilon:
         # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
-        P, tree = c.ple_dim, self.language_model.ple
-        projection = tree.per_layer_model_projection.weight[i * P : (i + 1) * P]
-        ple = F.linear(call.embeddings, projection, precision=c.precision)
-        norm = tree.per_layer_projection_norm.weight
+        ple_module = self.language_model.ple
+        ple = F.linear(call.embeddings, ple_module.layers[i], precision=c.precision)
+        norm = ple_module.per_layer_projection_norm.weight
         ple = F.rms_norm(ple, ple.shape[-1:], norm, c.eps * c.hidden_size)
         return layer(x, call, ple)
 

@@ -291,6 +291,54 @@ class AudioLayer(iron.Graph):
         return self.norm_out(self.feed_forward2(x))
 
 
+class SubsampleConvProjection(iron.Graph):
+    """The two subsampling convolutions, each an `iron.lm.Conv2d` built from
+    its own kernel centred over its output channels (so its layer norm is
+    an RMS norm), derived once this loads, and the projection after them.
+    """
+
+    def __init__(self, c: AudioConfig):
+        C0, C1 = c.subsampling_conv_channels
+        self.layer0 = SimpleNamespace(
+            conv=SimpleNamespace(weight=iron.param(C0, 1, 3, 3, dtype=np.float32)),
+            norm=SimpleNamespace(weight=iron.param(C0)),
+        )
+        self.layer1 = SimpleNamespace(
+            conv=SimpleNamespace(weight=iron.param(C1, C0, 3, 3, dtype=np.float32)),
+            norm=SimpleNamespace(weight=iron.param(C1)),
+        )
+        self.input_proj_linear = SimpleNamespace(
+            weight=iron.param(c.hidden_size, (c.mels // 4) * C1)
+        )
+        self.mels = c.mels
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        w0 = np.asarray(self.layer0.conv.weight, np.float32)
+        w1 = np.asarray(self.layer1.conv.weight, np.float32)
+        self.conv0 = Conv2d(
+            w0 - w0.mean(axis=0), self.mels, stride=2, padding=1, border=1
+        )
+        self.conv1 = Conv2d(w1 - w1.mean(axis=0), self.mels // 2 + 2, stride=2)
+
+
+class OutputProj(iron.Graph):
+    """The tower's own output projection, before `embed_audio`'s."""
+
+    def __init__(self, c: AudioConfig):
+        self.weight = iron.param(c.text_dim, c.hidden_size)
+        self.bias = iron.param(c.text_dim)
+
+
+class EmbedAudio(iron.Graph):
+    """The tower's output projected into the text model's space."""
+
+    def __init__(self, c: AudioConfig):
+        self.embedding_projection = SimpleNamespace(
+            weight=iron.param(c.text_dim, c.text_dim)
+        )
+
+
 class AudioTower(Tower):
     """The audio tower and `embed_audio` over at most `max_tokens` soft
     tokens, one compile for every clip; called in another graph's body, its
@@ -324,10 +372,16 @@ class AudioTower(Tower):
 
     def __init__(self, config: AudioConfig, weights: SimpleNamespace):
         c = config
-        tree = self.audio_tower = weights.audio_tower
-        self.embed_audio = weights.embed_audio
-        sub = tree.subsample_conv_projection
         super().__init__(config, c.max_tokens, c.max_tokens)
+        sub = SubsampleConvProjection(c)
+        sub.load_state_dict(weights, path="audio_tower.subsample_conv_projection.")
+        output_proj = OutputProj(c)
+        output_proj.load_state_dict(weights, path="audio_tower.output_proj.")
+        self.audio_tower = SimpleNamespace(
+            subsample_conv_projection=sub, output_proj=output_proj
+        )
+        self.embed_audio = EmbedAudio(c)
+        self.embed_audio.load_state_dict(weights, path="embed_audio.")
         self.load_layers(weights, "audio_tower.layers.")
         T = c.max_tokens
         H, D, W, B = c.num_attention_heads, c.head_dim, c.window, c.band
@@ -336,12 +390,7 @@ class AudioTower(Tower):
         # The first convolution's output row: each frequency's channels in a
         # slot of their own, with a zero slot either side, the second's padding.
         self.slots = (F0 + 2) * C0
-        w0, w1 = (
-            np.asarray(layer.conv.weight, np.float32)
-            for layer in (sub.layer0, sub.layer1)
-        )
-        self.conv0 = Conv2d(w0 - w0.mean(axis=0), c.mels, stride=2, padding=1, border=1)
-        self.conv1 = Conv2d(w1 - w1.mean(axis=0), F0 + 2, stride=2)
+        self.conv0, self.conv1 = sub.conv0, sub.conv1
         self.log_mel = blocks.LogMel(
             c.frame, c.hop, mels=c.mels, sample_rate=c.sample_rate
         )
