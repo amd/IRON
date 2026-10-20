@@ -55,3 +55,10 @@ utterances (CC BY 4.0) into IRON's cache, each pinned by its sha256.
 Hugging Face's outputs are recorded once in `golden.npz` beside the
 checkpoint by `pytest <test> --record-goldens -p no:xdist`; a test whose golden is missing
 fails.
+
+On NPU1, `TestAudio::test_audio_accuracy[name_passage]` scores 0.9901 at its
+judged 1st-percentile token, under `AUDIO_MIN_COSINE` (0.992, measured on
+NPU2): through 11 layers the tower stays within 0.9996 of its operators'
+references at every token, and the last layer turns passage's tokens 161 to
+163 into 0.876, 0.706 and 0.989. That is the last layer's own
+ill-conditioning (`AUDIO_MIN_COSINE`'s comment), not an operator's error.

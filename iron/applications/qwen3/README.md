@@ -25,6 +25,13 @@ picks a smaller block, which at `num_pipelines=1` pushes a prompt chunk's
 K/V fill past the DMA descriptor's 64-iteration cap. `profiles/npu1.json`
 pins `num_pipelines=4` for the prompt-chunk shape to stay under it.
 
+Open on NPU1: 1.7B's deepest prompt chunk at its native 40960 positions
+differs from the graph's reference by KL 0.148 (`long_context`'s
+`test_prompt_deep_in_the_cache`, bound 0.1). It passes at 34816 positions
+(4.8e-6), 32768 (2.0e-5) and 16384 (2.1e-6), its deepest decode step
+passes at 40960, and the prompt's MHA alone, given its inputs, is as
+accurate at 40959 as at 2047.
+
 ## Testing
 
 `tests/applications/qwen3/` runs 1.7B's checkpoint and 0.6B's, each also
