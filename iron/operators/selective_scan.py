@@ -68,6 +68,17 @@ class SelectiveScan(Operator):
         [
             Case(dict(rows=5, heads=2, head_dim=16, state_size=16, columns=1)),
             Case(dict(rows=8, heads=4, head_dim=32, state_size=32, groups=2)),
+            # Granite 4.0-H's decode: a one-row block over a 128-wide state,
+            # its B and C off the 64-byte line an even block keeps them on.
+            Case(
+                dict(rows=1, heads=2, head_dim=16, state_size=128, columns=1),
+                id="decode",
+            ),
+            Case(
+                dict(rows=3, heads=2, head_dim=16, state_size=64, columns=1),
+                id="odd_rows",
+                extensive=True,
+            ),
             Case(
                 dict(rows=64, heads=16, head_dim=64, state_size=64, groups=2),
                 bench=True,
