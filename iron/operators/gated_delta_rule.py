@@ -12,6 +12,7 @@ from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, kernels
 from aie.iron.controlflow import range_
+from aie.utils.compile.jit.context import compile_context
 from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
@@ -19,7 +20,7 @@ from ml_dtypes import bfloat16
 from iron.common import Built, Operator, Rtp
 from iron.common.declare.kernel_memory import core_stack, kernel_data
 from iron.common.testing import Case, Testing
-from iron.operators.state_slices import SLICE, block_rows, resolve_heads
+from iron.operators.state_slices import SLICE, depths, resolve_heads, resolve_rows
 
 
 def _slices(op) -> int:
@@ -111,7 +112,8 @@ class GatedDeltaRule(Operator):
     inner: int = param(
         derive=lambda op: op.v_heads * op.value_dim, repr=False, array=True
     )
-    block: int = param(derive=lambda op: block_rows(op) * SLICE, repr=False)
+    # The rows of y one kernel call writes, a whole number of SLICE-row runs.
+    block: int = tunable(repr=False)
     slice_state: int = param(derive=lambda op: op.key_dim * SLICE, repr=False)
 
     qkv = In(rows, width, obj_shape=(width,))
@@ -150,32 +152,39 @@ class GatedDeltaRule(Operator):
             )
 
     def resolve(self, dev):
-        return resolve_heads(self, dev, self.v_heads)
+        return resolve_rows(resolve_heads(self, dev, self.v_heads), dev)
 
-    def kernel(self):
+    def slice_bytes(self) -> tuple[int, int]:
+        """Bytes of a slice's (dt_bias, A) then state in, and its final out."""
+        return 4 * (2 + self.slice_state), 4 * self.slice_state
+
+    def held(self, dev, rows: int) -> int:
+        """Core memory a core of ``dev`` holds at ``rows`` a call besides a
+        slice's state and final: the row, the block and y, and the kernel's
+        data (its own copy of the state among it) and stack.
+        """
+        # Made to be read, not built: kept out of the registry a build reads.
+        with compile_context(_iron_kernel_registry=set()):
+            kernel = self.kernel(rows)
+            block = 2 * int(np.prod(kernel.arg_shape(0)))
+            frame = kernel_data(dev, kernel) + core_stack(dev, kernel)
+        return 2 * (self.width + 2 * self.v_heads) + block + 4 * rows * SLICE + frame
+
+    def kernel(self, rows: int):
         return kernels.ssm.gated_delta_rule(
-            rows=block_rows(self),
+            rows=rows,
             key_dim=self.key_dim,
             value_dim=SLICE,
-            blocks=self.rows // block_rows(self),
+            blocks=self.rows // rows,
         )
 
     def build(self) -> Built:
         V, Dk, Dv, W = self.v_heads, self.key_dim, self.value_dim, self.width
-        T, per_group, heads = block_rows(self), V // self.k_heads, V // self.columns
-        kernel = self.kernel()
+        T, per_group, heads = self.block // SLICE, V // self.k_heads, V // self.columns
+        kernel = self.kernel(T)
         f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
         bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
-        # A slice's state streams in and its final out during the previous
-        # slice's kernel where L1 holds a second of each beside the row, the
-        # block, and the kernel's data (its own copy of the state among it)
-        # and stack.
-        slice_in, slice_out = 4 * (2 + self.slice_state), 4 * self.slice_state
-        held = 2 * (W + 2 * V) + 2 * T * (2 * Dk + 3 * SLICE + 2)
-        held += kernel_data(self.dev, kernel) + core_stack(self.dev, kernel)
-        mem = self.dev.core_memory_bytes
-        deep_in = 2 if held + 2 * slice_in + slice_out <= mem else 1
-        deep_out = 2 if held + deep_in * slice_in + 2 * slice_out <= mem else 1
+        deep_in, deep_out = depths(self)
         # A core takes two streams, a memtile joining each: a row's qkv
         # then its a and b, one stream every core reads, and a slice's
         # (dt_bias, A) then its state.

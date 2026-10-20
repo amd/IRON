@@ -17,10 +17,10 @@ from aie.utils.compile.jit.context import compile_context
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Built, Operator, Rtp, Unresolvable
+from iron.common import Built, Operator, Rtp
 from iron.common.declare.kernel_memory import core_stack, kernel_data
 from iron.common.testing import Case, Testing
-from iron.operators.state_slices import SLICE, block_rows, resolve_heads
+from iron.operators.state_slices import SLICE, depths, resolve_heads, resolve_rows
 
 
 def _slices(op) -> int:
@@ -142,25 +142,11 @@ class SelectiveScan(Operator):
             )
 
     def resolve(self, dev):
-        op = resolve_heads(self, dev, self.heads)
-        if self.block is not None:
-            return op
-        N, mem = self.state_size, dev.core_memory_bytes
-        slices = 4 * (3 + SLICE * N) + 4 * SLICE * N  # one state and final
-        rows = next(
-            (
-                t
-                for t in range(block_rows(op), 0, -1)
-                if op.rows % t == 0 and op.held(dev, t) + slices <= mem
-            ),
-            None,
-        )
-        if rows is None:
-            raise Unresolvable(
-                f"SelectiveScan: no block of rows fits a core's {mem} bytes "
-                f"beside a state of {N}"
-            )
-        return op.replace(block=rows * SLICE)
+        return resolve_rows(resolve_heads(self, dev, self.heads), dev)
+
+    def slice_bytes(self) -> tuple[int, int]:
+        """Bytes of a slice's (dt_bias, A, D) then state in, and its final out."""
+        return 4 * (3 + self.slice_state), 4 * self.slice_state
 
     def held(self, dev, rows: int) -> int:
         """Core memory a core of ``dev`` holds at ``rows`` a call besides a
@@ -188,14 +174,7 @@ class SelectiveScan(Operator):
         kernel = self.kernel(T)
         f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
         bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
-        # A slice's state streams in and its final out during the previous
-        # slice's kernel where L1 holds a second of each beside the row, the
-        # block and the kernel's own copy of the state.
-        slice_in, slice_out = 4 * (3 + SLICE * N), 4 * SLICE * N
-        held = self.held(self.dev, T)
-        mem = self.dev.core_memory_bytes
-        deep_in = 2 if held + 2 * slice_in + slice_out <= mem else 1
-        deep_out = 2 if held + deep_in * slice_in + 2 * slice_out <= mem else 1
+        deep_in, deep_out = depths(self)
         # A core takes two streams, a memtile joining each: a row's xbc
         # then its dt, one stream every core reads, and a slice's (dt_bias,
         # A, D) then its state.
