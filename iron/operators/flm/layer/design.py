@@ -432,19 +432,6 @@ def _bf16_proj(
         store(y, y_acc, i, y_offset)
 
 
-def _connect(
-    rt, src, src_ch, dst, dst_ch, pkt_id=None, keep_pkt_header=False, shim_symbol=None
-):
-    """A circuit-switched flow, or a packet flow when pkt_id is set."""
-    ends = dict(src_channel=src_ch, dst_channel=dst_ch, shim_symbol=shim_symbol)
-    if pkt_id is None:
-        rt.add_flow(Flow(src, dst, **ends))
-    else:
-        rt.add_flow(
-            PacketFlow(pkt_id, src, dst, keep_pkt_header=keep_pkt_header, **ends)
-        )
-
-
 @dataclass
 class _Ctx:
     """The state that every stage builder adds to."""
@@ -1808,31 +1795,58 @@ def _route(rt, grid, t, proj_send_tiles):
     """
     x_shim, kv_shim = t["x_shim"], t["kv_shim"]
     proj_x = t["proj_x"]
-    _connect(rt, x_shim, 0, t["rms"], 0, pkt_id=_ShimPkt.to_rms, shim_symbol="send_x")
-    _connect(rt, x_shim, 1, t["rms"], 1, pkt_id=_ShimPkt.to_rms, shim_symbol="send_rms")
-    _connect(rt, x_shim, 0, t["rope"], 1, pkt_id=_ShimPkt.to_rope)
-    _connect(rt, x_shim, 1, t["swa_rope"], 1, pkt_id=_ShimPkt.to_rope)
-    _connect(rt, t["rms"], 0, proj_x, 3, pkt_id=_X_FROM_RMS)
+    rt.add_flow(
+        PacketFlow(
+            _ShimPkt.to_rms,
+            x_shim,
+            t["rms"],
+            src_channel=0,
+            dst_channel=0,
+            shim_symbol="send_x",
+        )
+    )
+    rt.add_flow(
+        PacketFlow(
+            _ShimPkt.to_rms,
+            x_shim,
+            t["rms"],
+            src_channel=1,
+            dst_channel=1,
+            shim_symbol="send_rms",
+        )
+    )
+    rt.add_flow(
+        PacketFlow(_ShimPkt.to_rope, x_shim, t["rope"], src_channel=0, dst_channel=1)
+    )
+    rt.add_flow(
+        PacketFlow(
+            _ShimPkt.to_rope, x_shim, t["swa_rope"], src_channel=1, dst_channel=1
+        )
+    )
+    rt.add_flow(PacketFlow(_X_FROM_RMS, t["rms"], proj_x, src_channel=0, dst_channel=3))
 
     # The weights from the shim into each memtile.
     for col in PROJ_COLS:
         for ch in (0, 1):
-            _connect(
-                rt,
-                grid[col, 0],
-                ch,
-                grid[col, 1],
-                4 + ch,
-                shim_symbol=f"proj_w{ch}_{col}",
+            rt.add_flow(
+                Flow(
+                    grid[col, 0],
+                    grid[col, 1],
+                    src_channel=ch,
+                    dst_channel=4 + ch,
+                    shim_symbol=f"proj_w{ch}_{col}",
+                )
             )
     # The weights from each memtile to its column's cores.
     for col in PROJ_COLS:
         for j in range(4):
-            _connect(rt, grid[col, 1], j, grid[col, 2 + j], 1)
+            rt.add_flow(
+                Flow(grid[col, 1], grid[col, 2 + j], src_channel=j, dst_channel=1)
+            )
     # x to every projection core.
     for col in PROJ_COLS:
         for j in range(4):
-            _connect(rt, proj_x, 4, grid[col, 2 + j], 0)
+            rt.add_flow(Flow(proj_x, grid[col, 2 + j], src_channel=4, dst_channel=0))
     # y from each group's sending cores to its memtile. The first keeps the
     # packet header, which carries the consumer's id to proj_x.
     pkts = [_ProjPkt.to_swa_rope, _ProjPkt.to_rope, _ProjPkt.to_rms, _ProjPkt.to_glu]
@@ -1840,10 +1854,28 @@ def _route(rt, grid, t, proj_send_tiles):
     for gather_mt, send_tiles in zip(gather_mts, proj_send_tiles):
         for j, send_t in enumerate(send_tiles):
             for pk in pkts:
-                _connect(rt, send_t, 0, gather_mt, j, pkt_id=pk, keep_pkt_header=j == 0)
+                rt.add_flow(
+                    PacketFlow(
+                        pk,
+                        send_t,
+                        gather_mt,
+                        src_channel=0,
+                        dst_channel=j,
+                        keep_pkt_header=j == 0,
+                    )
+                )
     for ch, gather_mt in enumerate(gather_mts):
         for pk in pkts:
-            _connect(rt, gather_mt, 4, proj_x, ch, pkt_id=pk, keep_pkt_header=ch == 0)
+            rt.add_flow(
+                PacketFlow(
+                    pk,
+                    gather_mt,
+                    proj_x,
+                    src_channel=4,
+                    dst_channel=ch,
+                    keep_pkt_header=ch == 0,
+                )
+            )
 
     for dst, pk in (
         ("glu", _ProjPkt.to_glu),
@@ -1851,29 +1883,63 @@ def _route(rt, grid, t, proj_send_tiles):
         ("rope", _ProjPkt.to_rope),
         ("swa_rope", _ProjPkt.to_swa_rope),
     ):
-        _connect(rt, proj_x, 5, t[dst], 0, pkt_id=pk)
+        rt.add_flow(PacketFlow(pk, proj_x, t[dst], src_channel=5, dst_channel=0))
 
     # This token's k and v, out to the KV cache.
-    _connect(rt, t["rope"], 1, kv_shim, 0, shim_symbol="recv_k")
-    _connect(rt, t["swa_rope"], 1, kv_shim, 1, shim_symbol="recv_v")
-    _connect(rt, t["attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
-    _connect(rt, t["swa_attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
-    _connect(rt, t["glu"], 0, proj_x, 3, pkt_id=_X_FROM_GLU)
+    rt.add_flow(
+        Flow(t["rope"], kv_shim, src_channel=1, dst_channel=0, shim_symbol="recv_k")
+    )
+    rt.add_flow(
+        Flow(t["swa_rope"], kv_shim, src_channel=1, dst_channel=1, shim_symbol="recv_v")
+    )
+    rt.add_flow(
+        PacketFlow(_X_FROM_ATTN, t["attn_kv"], proj_x, src_channel=0, dst_channel=3)
+    )
+    rt.add_flow(
+        PacketFlow(_X_FROM_ATTN, t["swa_attn_kv"], proj_x, src_channel=0, dst_channel=3)
+    )
+    rt.add_flow(PacketFlow(_X_FROM_GLU, t["glu"], proj_x, src_channel=0, dst_channel=3))
 
     # The KV cache into the attention memtile.
     amt = t["attn_mem"]
-    _connect(rt, kv_shim, 0, amt, 0, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_k")
-    _connect(rt, kv_shim, 0, amt, 2, pkt_id=_KV_PKT_SWA)
-    _connect(rt, kv_shim, 1, amt, 1, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_v")
-    _connect(rt, kv_shim, 1, amt, 3, pkt_id=_KV_PKT_SWA)
-    _connect(rt, amt, 0, t["attn_qk"], 1)
-    _connect(rt, amt, 1, t["attn_kv"], 1)
-    _connect(rt, amt, 2, t["swa_attn_qk"], 1)
-    _connect(rt, amt, 3, t["swa_attn_kv"], 1)
+    rt.add_flow(
+        PacketFlow(
+            _KV_PKT_GLOBAL,
+            kv_shim,
+            amt,
+            src_channel=0,
+            dst_channel=0,
+            shim_symbol="move_k",
+        )
+    )
+    rt.add_flow(PacketFlow(_KV_PKT_SWA, kv_shim, amt, src_channel=0, dst_channel=2))
+    rt.add_flow(
+        PacketFlow(
+            _KV_PKT_GLOBAL,
+            kv_shim,
+            amt,
+            src_channel=1,
+            dst_channel=1,
+            shim_symbol="move_v",
+        )
+    )
+    rt.add_flow(PacketFlow(_KV_PKT_SWA, kv_shim, amt, src_channel=1, dst_channel=3))
+    rt.add_flow(Flow(amt, t["attn_qk"], src_channel=0, dst_channel=1))
+    rt.add_flow(Flow(amt, t["attn_kv"], src_channel=1, dst_channel=1))
+    rt.add_flow(Flow(amt, t["swa_attn_qk"], src_channel=2, dst_channel=1))
+    rt.add_flow(Flow(amt, t["swa_attn_kv"], src_channel=3, dst_channel=1))
 
     # The per-layer-input path. Only the rope and rms stream keeps a flow of
     # its own; ObjectFifos route the rest of the cluster themselves.
-    _connect(rt, t["pl_shim_0"], 0, t["pl_embedding"], 0, shim_symbol="pli_rope_rms")
+    rt.add_flow(
+        Flow(
+            t["pl_shim_0"],
+            t["pl_embedding"],
+            src_channel=0,
+            dst_channel=0,
+            shim_symbol="pli_rope_rms",
+        )
+    )
 
 
 def decode_layer(
