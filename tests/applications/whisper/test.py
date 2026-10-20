@@ -18,7 +18,6 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.applications.whisper.hugging_face import HuggingFaceWhisper
 from iron.applications.whisper.model import Whisper, WhisperConfig, WhisperEncoder
 from iron.lm.generation import divergence
 from iron.lm.testing import LOGITS, assert_close, require, weights_dir
@@ -122,12 +121,14 @@ def toy(request):
 def reference(clip, golden, toy):
     """Hugging Face's logits over the toy's weights after the clip."""
     weights, _ = clip
-    return golden(
-        "toy" if toy is TOY else "toy_exact",
-        lambda: HuggingFaceWhisper.build("whisper", toy, weights, pad_token_id=None),
-        toy,
-        weights,
-    )
+
+    # transformers and torch, optional: only recording a golden imports them
+    def record():
+        from iron.applications.whisper.hugging_face import HuggingFaceWhisper
+
+        return HuggingFaceWhisper.build("whisper", toy, weights, pad_token_id=None)
+
+    return golden("toy" if toy is TOY else "toy_exact", record, toy, weights)
 
 
 @pytest.mark.parametrize("version", [0, 1, 2], ids=["decode", "prompt", "encode"])
@@ -146,6 +147,8 @@ class Encoder:
     """
 
     def __init__(self, weights):
+        from iron.applications.whisper.hugging_face import HuggingFaceWhisper
+
         self.whisper = HuggingFaceWhisper.build(
             "whisper", TOY, weights, pad_token_id=None
         )
@@ -222,12 +225,13 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
     weights = checkpoint(TOY, names(TOY), "F16").tree("random")
     assert weights.model.decoder.embed_tokens.weight.dtype == np.float16
     model = Whisper(TOY, weights)
-    reference = golden(
-        "toy_f16",
-        lambda: HuggingFaceWhisper.build("whisper", TOY, weights, pad_token_id=None),
-        TOY,
-        weights,
-    )
+
+    def record():
+        from iron.applications.whisper.hugging_face import HuggingFaceWhisper
+
+        return HuggingFaceWhisper.build("whisper", TOY, weights, pad_token_id=None)
+
+    reference = golden("toy_f16", record, TOY, weights)
     assert model.model.embed_tokens.weight.dtype == bfloat16
     audio = drawn_audio(3.0)
     buffer, own = model.encoder.inputs(audio)

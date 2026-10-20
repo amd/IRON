@@ -10,19 +10,24 @@ the text model as one ``iron.lm.Multimodal``, its soft tokens placed across
 a chunk boundary.
 """
 
+from __future__ import annotations
+
 import dataclasses
 import re
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
 
-from iron.applications.idefics3.hugging_face import HuggingFaceVLM
 from iron.applications.idefics3.model import SmolVLMText, SmolVLMTextConfig
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.lm import Multimodal
 from iron.lm.testing import LOGITS, assert_close
 from iron.tests.support.llama_model import checkpoint, shapes
 from iron.tests.support.llama_reference import prompt
+
+if TYPE_CHECKING:
+    from iron.applications.idefics3.hugging_face import HuggingFaceVLM
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -132,11 +137,18 @@ def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
     image = rng.integers(0, 256, (300, 200, 3), dtype=np.uint8)
     buffer, values = tower.inputs(image)
     got = np.asarray(tower.reference(buffer, **values), np.float32)
+
+    # transformers and torch, optional: only recording a golden imports them
+    def record():
+        from iron.applications.idefics3.hugging_face import HuggingFaceVLM
+
+        return SoftTokens(
+            HuggingFaceVLM.build("idefics3", VISION, weights, **TEXT.to_json())
+        )
+
     reference = golden(
         "soft_tokens",
-        lambda: SoftTokens(
-            HuggingFaceVLM.build("idefics3", VISION, weights, **TEXT.to_json())
-        ),
+        record,
         TEXT,
         VISION,
         weights,
@@ -157,9 +169,15 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
     model = Multimodal(
         SmolVLMText(TEXT, weights), {IMAGE: VisionTower(VISION, weights)}
     )
+
+    def record():
+        from iron.applications.idefics3.hugging_face import HuggingFaceVLM
+
+        return HuggingFaceVLM.build("idefics3", VISION, weights, **TEXT.to_json())
+
     reference = golden(
         "small",
-        lambda: HuggingFaceVLM.build("idefics3", VISION, weights, **TEXT.to_json()),
+        record,
         TEXT,
         VISION,
         weights,
