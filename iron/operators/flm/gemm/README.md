@@ -552,20 +552,26 @@ starts past the first's 128 rows a unit, a per-call offset.
 | A | one transfer per lane, `units_repeat` (units less one) its runtime repeat count | the same, a scratchpad repeat parameter (mlir-aie's repeat-parameter) |
 | C | `units_valid` row blocks, a runtime size | the same, a patched length |
 | second half | A and C start at `a_half` and `c_half`, the units' 128 rows of K and of N, a runtime offset | the same, scratchpad offset parameters |
-| B | as unbounded | as unbounded |
+| B, streamed | one fill per lane, `units_repeat` its runtime repeat count; the memtile ring's passes `b_passes_repeat`, a runtime repeat count | the same, scratchpad repeat parameters (on the memtile's queues too) |
+| B, resident | as unbounded | as unbounded |
 
 Every GEMM bounded by the same rows shares `units_valid` and `units_repeat`,
 and every one as wide shares a half's offset (a K's `a_half` is the same word
-as an N's `c_half`), so Llama 3.2 1B's prompt chunk takes 5 of a full ELF's 32.
+as an N's `c_half`); `b_passes_repeat` is `units_repeat` where B is resident,
+and its own word where B streams (one per ring), so Llama 3.2 1B's prompt
+chunk takes 6 of a full ELF's 32.
 
-B is not bounded. Its resident replay count is the memtile's lock values and
-task runs, which no per-call word reaches on either image, so the memtile
-replays B for every unit and the cores drain a unit past the bound's replay
-without computing it. They drain those first, since every replay is the same
-B, so each column's last C still ends the call; a call with no rows has no C
-to end it, and is refused. A unit past the bound therefore still costs its B
-broadcast from L2, and down's streamed B is still read from DDR once per
-unit. A bound needs `m_chunk = 1` and M in one slab.
+Streamed B follows the bound: DDR reads it once per unit reached, and the
+memtile ring, whose slots then divide one unit's k tiles, passes it on as
+many times, so a short call strands nothing in the memtile. Resident B does
+not: its replay count is the memtile's lock values, which no per-call word
+reaches, so the memtile replays it for every unit and the cores drain a unit
+past the bound's replay without computing it (`b_resident`). They drain those
+first, since every replay is the same B, so each column's last C still ends
+the call; a call with no rows has no C to end it, and is refused. A resident
+unit past the bound therefore still costs its B broadcast from L2, never DDR.
+A bound needs `m_chunk = 1`, M in one slab, and a streamed column-block's
+ring passes in one queue push.
 
 ## The shipped overlay
 

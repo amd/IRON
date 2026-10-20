@@ -592,22 +592,26 @@ def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
 
 
 def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
-    """Each projection of a prompt chunk derives four per-call words from its
+    """Each projection of a prompt chunk derives five per-call words from its
     rows: the 256-row units they reach and that less one, A's repeat count,
-    which every projection shares, and where the second half of the core
-    rows starts in A and in C, the units' first 128 rows of K and of N,
-    which every projection as wide shares.
+    which every projection shares; where the second half of the core rows
+    starts in A and in C, the units' first 128 rows of K and of N, which
+    every projection as wide shares; and B's memtile ring passes less one,
+    A's repeat count where B is resident, and where it streams (down's)
+    the units' k tiles over the ring's slots.
     """
     g = llama_1b(num_hidden_layers=2)
     t = g.record(**g.shapes()[1])
     words, shared = _words(t, share=True)
     assert len(words) <= 32
     gemms = [op.resolved(npu2) for op in t.operators if type(op) is ProjectionGEMM]
-    names = {"units_valid", "units_repeat", "a_half", "c_half"}
-    symbols, widths = set(), set()
+    names = {"units_valid", "units_repeat", "a_half", "c_half", "b_passes_repeat"}
+    symbols, widths, passes = set(), set(), set()
     for op in gemms:
         assert {v.name for v in op.values} == names | {"valid"}
         widths |= {op.K, op.N}
+        unit_passes = op._k_iters // op._b_ring
+        passes |= {unit_passes} - {1}
         for name in names:
             symbol = op.value(name).symbol
             symbols.add(shared.get(symbol, symbol))
@@ -616,7 +620,12 @@ def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
             assert op.derived_at("units_repeat", valid=rows) == reached - 1
             assert op.derived_at("a_half", valid=rows) == reached * 128 * op.K
             assert op.derived_at("c_half", valid=rows) == reached * 128 * op.N
-    assert len(symbols) == 2 + len(widths)
+            assert (
+                op.derived_at("b_passes_repeat", valid=rows)
+                == reached * unit_passes - 1
+            )
+    assert passes == {4}
+    assert len(symbols) == 2 + len(widths) + len(passes)
 
 
 @pytest.mark.parametrize("step", ["decode", "prompt"])

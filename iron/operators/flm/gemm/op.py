@@ -238,6 +238,14 @@ class ProjectionGEMM(Operator):
     units_valid = per_call(derive=_units_valid)
     # A's repeat count on a full ELF: the units less one.
     units_repeat = per_call(derive=lambda op: _units_valid(op) - 1)
+    # Under a bound, the passes B's memtile ring takes on a column-block, less
+    # one: a streamed ring's per call, as DDR reads B once per unit reached.
+    b_passes_repeat = per_call(
+        derive=lambda op: _units_valid(op) * op._k_iters // op._b_ring - 1
+    )
+    # Whether the memtile replays B to every unit, as it does where B is
+    # resident, so that the cores drain the replays past a bound.
+    b_resident = per_call(derive=lambda op: int(op._b_resident))
     # Under a bound, where the second half of the core rows starts in A and in
     # C: past the first half's share of the units it reaches.
     a_half = per_call(
@@ -566,23 +574,15 @@ class ProjectionGEMM(Operator):
         # xclbin. What varies per shape -- how the slots are filled and
         # replayed -- is the sequence's BD programming.
         #
-        # The pool takes what the memtile has left once A and C are placed,
-        # capped at B_MAX_SLOTS. Budgeted as if every memtile held an A
-        # forward, though only every (COLS // ROWS)-th does, so a slot count
-        # is the same on every column.
+        # The pool takes what the memtile has left once A and C are placed
+        # (_b_slots).
         b_slot_elems = K_TILE * N_TILE // B_GROUP
-        b_slot_bytes = _b_bytes(K_TILE * N_TILE, self.bfp16_b)
-        mt_free = (
-            tm.get_mem_tile_size()
-            - A_DEPTH * M_CHUNK * M_TILE * K_TILE * 2
-            - C_DEPTH * C_SLICE_LEN * ROWS * 2
-        )
-        B_SLOTS = min(B_MAX_SLOTS, mt_free // b_slot_bytes)
+        B_SLOTS = self._b_slots
         if B_SLOTS < 1:
             raise ValueError(
                 f"flm.ProjectionGEMM: tile_n ({N_TILE}) leaves no room for a "
-                f"{b_slot_bytes}-byte B slot in the memtile; {mt_free} bytes "
-                f"remain after A and C"
+                f"{_b_bytes(K_TILE * N_TILE, self.bfp16_b)}-byte B slot in the "
+                f"memtile after A and C"
             )
         b_mt_ty = np.ndarray[(B_SLOTS * b_slot_elems,), b_elem_ty]
         b_mt_bufs = [Buffer(b_mt_ty, tile=mt_tiles[c]) for c in range(COLS)]
@@ -679,7 +679,7 @@ class ProjectionGEMM(Operator):
         if M_CHUNK > 1:
             read.append(self.n_units)
         if bounded:
-            read.append(self.units_valid)
+            read += [self.units_valid, self.b_resident]
         rtps = [Rtp(read) for _ in range(ROWS * COLS)]
 
         def core_fn(
@@ -752,11 +752,13 @@ class ProjectionGEMM(Operator):
                             o_h.release(1)
 
             for _ in range_(n_work):
-                # A unit past the bound has its B replay all the same; every
-                # replay is the same B, so those go first and the call's
-                # last C still comes after the cores' last acquire.
+                # A unit past the bound has its B replay all the same where B
+                # is resident, its count in the memtile's locks; every replay
+                # is the same B, so those go first and the call's last C still
+                # comes after the cores' last acquire. A streamed ring stops at
+                # the bound.
                 if bounded:
-                    for _ in range_(n_units_rt - n_live):
+                    for _ in range_((n_units_rt - n_live) * words[self.b_resident]):
                         for _ in range_(n_k_iters):
                             for _ in range_(B_ITERS // L1_B_DEPTH):
                                 for _ in b_bufs:
@@ -824,6 +826,38 @@ class ProjectionGEMM(Operator):
         """Groups of m_chunk row-blocks; every leg is issued per unit."""
         return self._m_row_blocks // self.m_chunk
 
+    @property
+    def _b_slots(self) -> int:
+        """B's memtile pool in k-tile slots: what A and C leave, at most
+        ``B_MAX_SLOTS``. Budgeted as if every memtile held an A forward, though
+        only every (cols // rows)-th does, so a slot count is the same on every
+        column.
+        """
+        free = (
+            get_target_model(self.dev.resolve()).get_mem_tile_size()
+            - A_DEPTH * self.m_chunk * M_TILE * self.k_tile * 2
+            - C_DEPTH * M_TILE * self.tile_n * self.rows * 2
+        )
+        return min(
+            B_MAX_SLOTS, free // _b_bytes(self.k_tile * self.tile_n, self.bfp16_b)
+        )
+
+    @property
+    def _b_resident(self) -> bool:
+        """Whether a column-block of B stays in the memtile for all of M's units."""
+        lock_max = get_target_model(self.dev.resolve()).get_max_lock_value()
+        return self._k_iters <= self._b_slots and self._n_units <= lock_max
+
+    @property
+    def _b_ring(self) -> int:
+        """The slots B's memtile ring uses under a bound: every k tile where B
+        is resident, else the most that one unit's k tiles fill whole, so that
+        a call's ring passes follow the units it reaches.
+        """
+        if self._b_resident:
+            return self._k_iters
+        return max(s for s in range(1, self._b_slots + 1) if self._k_iters % s == 0)
+
     def sequence(self, rt):
         M, K, N = self.M, self.K, self.N
         COLS, ROWS, JOINS = self.cols, self.rows, self.joins
@@ -831,6 +865,7 @@ class ProjectionGEMM(Operator):
         k_iters, n_units = self._k_iters, self._n_units
         pool = rt.built.b_pool
         B_SLOTS, b_slot_elems = pool.slots, pool.slot_elems
+        bounded = "valid" in self.bound_extents
         # Sweeps where all COLS columns have work, plus a trailing group of
         # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
         n_full = N // (N_TILE * COLS)
@@ -873,6 +908,10 @@ class ProjectionGEMM(Operator):
             """The plan for ``units`` units from unit ``first``, armed at once."""
             if k_iters <= B_SLOTS and units <= pool.lock_max:
                 resident, b_slots, b_uses = True, k_iters, units
+            elif bounded:
+                # Streamed under a bound, the ring passes follow the units
+                # reached, so a pass covers part of one unit (_b_ring).
+                resident, b_slots, b_uses = False, self._b_ring, 1
             else:
                 # Streamed, a chain pass must cover whole units, so the ring
                 # must divide what one takes.
@@ -928,11 +967,19 @@ class ProjectionGEMM(Operator):
             )
         # A bound reaches units from the first, and a slab past it would arm
         # B and the cores for nothing.
-        bounded = "valid" in self.bound_extents
         if bounded and len(slabs) > 1:
             raise ValueError(
                 f"flm.ProjectionGEMM: M, K, N ({M}, {K}, {N}): a per-call row bound needs M in one slab, "
                 f"and this shape takes {len(slabs)}"
+            )
+        if (
+            bounded
+            and not slabs[0].b_resident
+            and n_units * k_iters // self._b_ring > pool.passes
+        ):
+            raise ValueError(
+                f"flm.ProjectionGEMM: M, K, N ({M}, {K}, {N}): a per-call row bound needs a "
+                f"column-block's B ring passes in one queue push of {pool.passes}"
             )
 
         if self.b_col_maj:
@@ -968,12 +1015,12 @@ class ProjectionGEMM(Operator):
         else:
             drains = slots
 
-        def start_b_mt(c, direction, passes, slab):
-            """Program and start one of column ``c``'s memtile B channels.
+        def b_mt_task(c, direction, passes, slab):
+            """Program one of column ``c``'s memtile B channels.
 
             The chain is one BD per used slot, walked ``passes`` times; past
             what one queue push carries, the compiler pushes it again. The
-            task is returned for restarting, and never awaited: C completing
+            task is returned for starting, and never awaited: C completing
             implies it.
             """
             fill = direction == DMAChannelDir.S2MM
@@ -991,7 +1038,7 @@ class ProjectionGEMM(Operator):
                         releases=[Release(post, value=value)],
                     )
                 )
-            return flow.endpoint(pool.mt_tiles[c]).task(*chain, runs=passes).start()
+            return flow.endpoint(pool.mt_tiles[c]).task(*chain, runs=passes)
 
         C = TensorAccessPattern.full(
             (JOINS, n_units * M_CHUNK, HALF * M_TILE, N // N_TILE, N_TILE)
@@ -1028,8 +1075,10 @@ class ProjectionGEMM(Operator):
                 and goes out at the first of them. Every push the compiler
                 then waits on for a queue slot is an earlier block's, whose
                 fills and C are already issued; pushing a whole slab up front
-                would wait on fills not issued yet.
+                would wait on fills not issued yet. Under a bound a streamed
+                ring's passes are a per-call count, one push a block.
                 """
+                per_call = bounded and not slab.b_resident
                 for c in range(COLS):
                     if bi >= n_work(c):
                         continue
@@ -1037,15 +1086,25 @@ class ProjectionGEMM(Operator):
                         (DMAChannelDir.S2MM, DMAChannelDir.MM2S),
                         b_mt_block_passes(slab),
                     ):
-                        per_push = max(1, pool.passes // passes)
+                        per_push = 1 if per_call else max(1, pool.passes // passes)
                         if bi % per_push:
                             continue
                         count = min(per_push, n_work(c) - bi) * passes
                         task = b_mt_tasks.get((c, direction))
-                        if task is None:
-                            b_mt_tasks[c, direction] = start_b_mt(
+                        if per_call:
+                            if task is None:
+                                task = b_mt_tasks[c, direction] = b_mt_task(
+                                    c, direction, count, slab
+                                )
+                            word = self.b_passes_repeat
+                            if word.ssa is None:
+                                task.start(repeat_parameter=word.param)
+                            else:
+                                task.start(repeat_count=word.ssa)
+                        elif task is None:
+                            b_mt_tasks[c, direction] = b_mt_task(
                                 c, direction, count, slab
-                            )
+                            ).start()
                         else:
                             task.start(repeat_count=count - 1)
 
@@ -1100,7 +1159,16 @@ class ProjectionGEMM(Operator):
                         managed=False,
                     )
                 for c in range(active_cols):
-                    self.B.fill(b_tap(mega_col, c, slab), lane=c, managed=False)
+                    self.B.fill(
+                        b_tap(mega_col, c, slab),
+                        lane=c,
+                        repeat_parameter=(
+                            self.units_repeat
+                            if bounded and not slab.b_resident
+                            else None
+                        ),
+                        managed=False,
+                    )
                 if bi == 0:
                     set_up()
                 else:
