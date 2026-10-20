@@ -184,33 +184,37 @@ class SelectiveScan(Operator):
             i32 = valid.type
             zero, size = arith.constant(0, i32), arith.constant(T, i32)
             bc, dt = T * SLICE, T * (SLICE + 2 * N)
-            for u in range_(_slices(self)):
-                # Slice u // heads of each of the core's heads in turn.
-                h = u % heads + first
-                p = (u // heads) * SLICE + h * P
-                g = (h // per_group) * N + I
-                start, final = of_slice.acquire(1), of_final.acquire(1)
-                for j in range_(self.rows // T):
-                    # Gather the block: x, then B and C, then dt.
-                    for t in range_(T):
-                        row = of_row.acquire(1)
-                        block[dt + t] = row[h]
-                        for i in range_(SLICE):
-                            block[t * SLICE + i] = row[H + p + i]
-                        for n in range_(N):
-                            block[bc + t * 2 * N + n] = row[H + g + n]
-                            block[bc + t * 2 * N + N + n] = row[
-                                H + g + self.groups * N + n
-                            ]
-                        of_row.release(1)
-                    b = arith.index_cast(j, to=i32)
-                    left = valid - b * size
-                    live = arith.minsi(arith.maxsi(left, zero), size)
-                    y = of_y.acquire(1)
-                    scan(block, start, final, y, live, b)
-                    of_y.release(1)
-                of_slice.release(1)
-                of_final.release(1)
+            for q in range_(_slices(self) // heads):
+                for r in range_(heads):
+                    # Slice q of head r of the core's heads in turn, q and r
+                    # each their own loop counter rather than a flattened
+                    # index's div/mod (AIE2's backend cannot legalize the
+                    # bitreverse Peano's mid-end folds that div/mod into).
+                    h = r + first
+                    p = q * SLICE + h * P
+                    g = (h // per_group) * N + I
+                    start, final = of_slice.acquire(1), of_final.acquire(1)
+                    for j in range_(self.rows // T):
+                        # Gather the block: x, then B and C, then dt.
+                        for t in range_(T):
+                            row = of_row.acquire(1)
+                            block[dt + t] = row[h]
+                            for i in range_(SLICE):
+                                block[t * SLICE + i] = row[H + p + i]
+                            for n in range_(N):
+                                block[bc + t * 2 * N + n] = row[H + g + n]
+                                block[bc + t * 2 * N + N + n] = row[
+                                    H + g + self.groups * N + n
+                                ]
+                            of_row.release(1)
+                        b = arith.index_cast(j, to=i32)
+                        left = valid - b * size
+                        live = arith.minsi(arith.maxsi(left, zero), size)
+                        y = of_y.acquire(1)
+                        scan(block, start, final, y, live, b)
+                        of_y.release(1)
+                    of_slice.release(1)
+                    of_final.release(1)
 
         workers = [
             Worker(
