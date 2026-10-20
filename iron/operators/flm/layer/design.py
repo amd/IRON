@@ -54,7 +54,7 @@ from aie.iron.kernels import (
     FlmGemma4DecodeGeometry,
     flm_gemma4,
 )
-from aie.iron.controlflow import range_
+from aie.iron.controlflow import range_, yield_
 from aie.iron.dataflow import Flow, PacketFlow
 from aie.iron.device import Tile
 
@@ -381,6 +381,17 @@ def _single_bd(direction, channel, buf, acq, rel, **bd_args):
         channel,
         [Bd(buf, acquires=[Acquire(acq)], releases=[Release(rel)], **bd_args)],
     )
+
+
+def _pick_ping_pong(is_ping, b0, b1):
+    """The buffer this acquire took from the pair, and the parity after it.
+
+    A ping_pong channel alternates b0 and b1 behind one lock pair, so a core
+    that acquires from it must track which buffer each acquire handed over.
+    b0 comes first, from a ``False`` start.
+    """
+    nxt = arith.xori(is_ping, constant(True, type=T.bool()))
+    return arith.select(nxt, b0.op.buffer, b1.op.buffer), nxt
 
 
 def _call_kernel(*args):
@@ -1568,14 +1579,20 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads, handshak
         def kv_body(hs, s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
             kb(yy, ll)
             hs.acquire(1)
-            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
+            false = constant(False, type=T.bool())
+            for _, (row_is_ping,), rows in range_(
+                (rtp_l[0] + (LK - 1)) // LK, iter_args=[false]
+            ):
                 s = s_in.acquire(1)
                 ksb(s, yy, ll)
-                for j in range_(2):
+                for j, (is_ping,), halves in range_(2, iter_args=[row_is_ping]):
                     v_cons.acquire(1)
-                    kvh(s, v_0, v_1, yy, j)
+                    v, nxt = _pick_ping_pong(is_ping, v_0, v_1)
+                    kvh(s, v, yy, j)
                     v_prod.release(1)
+                    yield_([nxt])
                 s_in.release(1)
+                yield_([halves[0]])
             o_prod.acquire(o_repeats)
             kf(yy, oo, ll)
             o_cons.release(o_repeats)
@@ -1587,12 +1604,17 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads, handshak
         def kv_body(hs, s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
             kb(yy, ll)
             hs.acquire(1)
-            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
+            false = constant(False, type=T.bool())
+            for _, (is_ping,), _rows in range_(
+                (rtp_l[0] + (LK - 1)) // LK, iter_args=[false]
+            ):
                 s = s_in.acquire(1)
                 v_cons.acquire(1)
-                kr(s, v_0, v_1, yy, ll)
+                v, nxt = _pick_ping_pong(is_ping, v_0, v_1)
+                kr(s, v, yy, ll)
                 v_prod.release(1)
                 s_in.release(1)
+                yield_([nxt])
             o_prod.acquire(o_repeats)
             kf(yy, oo, ll)
             o_cons.release(o_repeats)
@@ -1655,7 +1677,7 @@ def _build_attn_qk(
     else:
         k_round = ctx.entry(name, "attn_qk_round")
         k_step = k_round
-    q_ty, k_ty, _, _, m_ty, c_ty = k_step.arg_types()[:6]
+    q_ty, k_ty, _, m_ty, c_ty = k_step.arg_types()[:5]
     # The kernel pads each KV head's query group.
     (q_len,) = np_ndarray_type_get_shape(q_ty)
     NQ_PADDED = q_len // dh
@@ -1675,14 +1697,20 @@ def _build_attn_qk(
             q = q_h.acquire(1)
             kb(mm)
             hs.release(1)
-            for i in range_((rtp_l[0] + (LK - 1)) // LK):
+            false = constant(False, type=T.bool())
+            for i, (row_is_ping,), rows in range_(
+                (rtp_l[0] + (LK - 1)) // LK, iter_args=[false]
+            ):
                 s = s_out.acquire(1)
-                for j in range_(2):
+                for j, (is_ping,), halves in range_(2, iter_args=[row_is_ping]):
                     k_cons.acquire(1)
-                    kh(q, k_0, k_1, s, mm, cc, j, i, rtp_l[0])
+                    k, nxt = _pick_ping_pong(is_ping, k_0, k_1)
+                    kh(q, k, s, mm, cc, j, i, rtp_l[0])
                     k_prod.release(1)
+                    yield_([nxt])
                 ks(s, cc)
                 s_out.release(1)
+                yield_([halves[0]])
             q_h.release(1)
 
         kerns = [k_begin, k_half, k_storec]
@@ -1692,12 +1720,17 @@ def _build_attn_qk(
             q = q_h.acquire(1)
             kb(mm)
             hs.release(1)
-            for i in range_((rtp_l[0] + (LK - 1)) // LK):
+            false = constant(False, type=T.bool())
+            for i, (is_ping,), _ in range_(
+                (rtp_l[0] + (LK - 1)) // LK, iter_args=[false]
+            ):
                 s = s_out.acquire(1)
                 k_cons.acquire(1)
-                kr(q, k_0, k_1, s, mm, cc, i, rtp_l[0])
+                k, nxt = _pick_ping_pong(is_ping, k_0, k_1)
+                kr(q, k, s, mm, cc, i, rtp_l[0])
                 k_prod.release(1)
                 s_out.release(1)
+                yield_([nxt])
             q_h.release(1)
 
         kerns = [k_begin, k_round]
