@@ -192,6 +192,28 @@ def test_checkpoint_rejects_a_malformed_file(tmp_path, offsets, data):
         Checkpoint(path)
 
 
+def test_a_batchnorm_s_int64_counter_loads_beside_its_float_weights(tmp_path):
+    """A released ResNet's safetensors holds each BatchNorm's
+    num_batches_tracked as I64, among its F32 tensors.
+    """
+    header = {
+        "bn.weight": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
+        "bn.num_batches_tracked": {
+            "dtype": "I64",
+            "shape": [],
+            "data_offsets": [8, 16],
+        },
+    }
+    blob = json.dumps(header).encode()
+    path = tmp_path / "bn.safetensors"
+    data = np.array([1.5, -2.0], np.float32).tobytes() + np.int64(7).tobytes()
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob + data)
+    tensors = Checkpoint(path).tensors
+    assert tensors["bn.weight"].tolist() == [1.5, -2.0]
+    assert tensors["bn.num_batches_tracked"].dtype == np.int64
+    assert tensors["bn.num_batches_tracked"] == 7
+
+
 def test_checkpoint_rejects_an_unsupported_dtype(tmp_path):
     """One safetensors knows and a model's weights never are: complex64."""
     header = {"x": {"dtype": "C64", "shape": [4], "data_offsets": [0, 32]}}

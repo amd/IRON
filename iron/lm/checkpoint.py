@@ -35,7 +35,8 @@ class _Shard:
     numpy loader has no bfloat16, and IRON reads PyTorch's without torch.
     """
 
-    DTYPES = {"BF16": bfloat16, "F16": np.float16, "F32": np.float32}
+    # I64: a BatchNorm's num_batches_tracked.
+    DTYPES = {"BF16": bfloat16, "F16": np.float16, "F32": np.float32, "I64": np.int64}
 
     def __init__(self, path: Path):
         self.path = path
