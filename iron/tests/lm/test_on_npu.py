@@ -941,6 +941,10 @@ GEMMA4_AUDIO = AudioConfig(
     band=16,
     conv_kernel_size=5,
     text_dim=256,
+    # Deliberately not text_dim: output_proj_dims is the tower's own fixed
+    # output width, embed_audio's projection into text_dim is rectangular,
+    # not square, a real checkpoint caught square toy shapes missing.
+    output_proj_dims=320,
     max_tokens=64,
 )
 
@@ -1024,9 +1028,9 @@ def names_gemma4_audio(c: AudioConfig) -> dict[str, tuple[int, ...]]:
             E,
             (c.mels // 4) * C1,
         ),
-        "audio_tower.output_proj.weight": (c.text_dim, E),
-        "audio_tower.output_proj.bias": (c.text_dim,),
-        "embed_audio.embedding_projection.weight": (c.text_dim, c.text_dim),
+        "audio_tower.output_proj.weight": (c.output_proj_dims, E),
+        "audio_tower.output_proj.bias": (c.output_proj_dims,),
+        "embed_audio.embedding_projection.weight": (c.text_dim, c.output_proj_dims),
     }
     for i in range(c.num_hidden_layers):
         p = f"audio_tower.layers.{i}"

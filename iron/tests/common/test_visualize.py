@@ -88,18 +88,24 @@ def test_a_towers_layers_are_found_under_its_prefix():
 
 
 def test_a_per_layer_slice_is_drawn_in_its_layer():
+    """Each layer's own slice of the per-layer projection, sliced once at
+    load into its own param rather than from the shared tensor at body
+    time, is read only by its own layer's steps.
+    """
     path = weights_dir("embeddinggemma-2") / "model.safetensors"
     require(path)
     graph = Multimodal(Config(), Checkpoint(path).tree("unread"))
     text, *_ = graph.shapes()
     t = graph.record(**text)
     drawn = in_layer(t, 1)
-    shared = "text.language_model.ple.per_layer_model_projection.weight"
-    sliced = [
-        i
-        for i, s in enumerate(t.steps)
-        if any(h.buffer.name == shared for h in s.inputs)
-    ]
-    projection, norm = sliced[1], sliced[1] + 1
-    assert {projection, norm} <= drawn
-    assert sliced[0] not in drawn and sliced[2] not in drawn
+
+    def reads(name: str) -> set[int]:
+        return {
+            i
+            for i, s in enumerate(t.steps)
+            if any(h.buffer.name == name for h in s.inputs)
+        }
+
+    assert reads("text.language_model.ple.layers.1") <= drawn
+    assert not reads("text.language_model.ple.layers.0") & drawn
+    assert not reads("text.language_model.ple.layers.2") & drawn

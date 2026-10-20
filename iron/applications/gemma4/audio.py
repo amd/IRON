@@ -54,6 +54,10 @@ class AudioConfig(lm.Config):
     text_dim: int = dataclasses.field(
         default=512, metadata={"json": "/text_config.hidden_size"}
     )
+    # The tower's own output width, before embed_audio's projection into
+    # text_dim: fixed by the tower's own pretraining, not by whichever text
+    # model it is wired into.
+    output_proj_dims: int = 1536
     # The feature extractor's: samples per second, per frame and per hop.
     sample_rate: int = lm.not_json(16000)
     frame: int = lm.not_json(320)
@@ -326,8 +330,8 @@ class OutputProj(iron.Graph):
     """The tower's own output projection, before `embed_audio`'s."""
 
     def __init__(self, c: AudioConfig):
-        self.weight = iron.param(c.text_dim, c.hidden_size)
-        self.bias = iron.param(c.text_dim)
+        self.weight = iron.param(c.output_proj_dims, c.hidden_size)
+        self.bias = iron.param(c.output_proj_dims)
 
 
 class EmbedAudio(iron.Graph):
@@ -335,7 +339,7 @@ class EmbedAudio(iron.Graph):
 
     def __init__(self, c: AudioConfig):
         self.embedding_projection = SimpleNamespace(
-            weight=iron.param(c.text_dim, c.text_dim)
+            weight=iron.param(c.text_dim, c.output_proj_dims)
         )
 
 
@@ -372,14 +376,19 @@ class AudioTower(Tower):
 
     def __init__(self, config: AudioConfig, weights: SimpleNamespace):
         c = config
+        # Named here, ahead of super().__init__()'s self.layers, so a
+        # recording names a layer's weights under this prefix, not bare
+        # "layers.N": the visualizer tells this tower's steps apart from
+        # another's sharing the same layer index.
+        self.audio_tower = SimpleNamespace()
         super().__init__(config, c.max_tokens, c.max_tokens)
         sub = SubsampleConvProjection(c)
         sub.load_state_dict(weights, path="audio_tower.subsample_conv_projection.")
         output_proj = OutputProj(c)
         output_proj.load_state_dict(weights, path="audio_tower.output_proj.")
-        self.audio_tower = SimpleNamespace(
-            subsample_conv_projection=sub, output_proj=output_proj
-        )
+        self.audio_tower.subsample_conv_projection = sub
+        self.audio_tower.output_proj = output_proj
+        self.audio_tower.layers = self.layers
         self.embed_audio = EmbedAudio(c)
         self.embed_audio.load_state_dict(weights, path="embed_audio.")
         self.load_layers(weights, "audio_tower.layers.")

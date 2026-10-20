@@ -294,6 +294,11 @@ class EmbeddingGemma(Encoder):
     ):
         c = config
         self.tokenizer = tokenizer
+        # Named here, ahead of super().__init__()'s self.layers, so a
+        # recording names a layer's weights under this prefix, not bare
+        # "layers.N": the visualizer tells this model's steps apart from a
+        # tower's sharing the same layer index.
+        self.language_model = SimpleNamespace()
         super().__init__(config, c.max_tokens)
         self.final_norm = RMSNorm(c.hidden_size, c.eps)
         tree = renamed(weights, self.renames)
@@ -305,11 +310,11 @@ class EmbeddingGemma(Encoder):
         )
         ple = LanguageModelPle(c)
         ple.load_state_dict(tree, path="language_model.ple.")
-        self.language_model = SimpleNamespace(
-            embed_tokens=embed_tokens,
-            embedding_projection=embedding_projection,
-            ple=ple,
-        )
+        self.language_model.embed_tokens = embed_tokens
+        self.language_model.embedding_projection = embedding_projection
+        self.language_model.ple = ple
+        self.language_model.layers = self.layers
+        self.language_model.norm = self.final_norm
         self.embed_scaled = embed_tokens.scaled
         self.mrl = embedding_projection.mrl
         self.load_layers(weights, "language_model.layers.", "language_model.norm.")

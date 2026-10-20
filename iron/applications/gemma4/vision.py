@@ -210,6 +210,11 @@ class VisionTower(Tower):
         c = config
         window = c.pooling_kernel_size**2
         tokens = -(-(c.patches // window) // c.rows) * c.rows
+        # Named here, ahead of super().__init__()'s self.layers, so a
+        # recording names a layer's weights under this prefix, not bare
+        # "layers.N": the visualizer tells this tower's steps apart from
+        # another's sharing the same layer index.
+        self.vision_tower = SimpleNamespace()
         super().__init__(config, c.patches, tokens)
         self.processor = ImagePatches(
             c.patches,
@@ -247,7 +252,8 @@ class VisionTower(Tower):
         patch_embedder = PatchEmbedder(c, x_ids, y_ids)
         tree = renamed(weights, self.renames)
         patch_embedder.load_state_dict(tree, path="vision_tower.patch_embedder.")
-        self.vision_tower = SimpleNamespace(patch_embedder=patch_embedder)
+        self.vision_tower.patch_embedder = patch_embedder
+        self.vision_tower.encoder = SimpleNamespace(layers=self.layers)
         self.embed_vision = EmbedVision(c)
         self.embed_vision.load_state_dict(tree, path="embed_vision.")
         self.load_layers(weights, "vision_tower.encoder.layers.")
