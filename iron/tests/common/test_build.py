@@ -442,6 +442,8 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         "n_units": 2,
         "units_valid": 2,
         "units_repeat": 1,
+        "a_half": 2 * 128 * 1024,
+        "c_half": 2 * 128 * 1024,
     }
     with pytest.raises(ValueError, match="multiple of 256"):
         flm_gemm.ProjectionGEMM(M=100, K=1024, N=1024).resolved(
@@ -501,19 +503,9 @@ def _flm_gemm_moves(op, full_elf, rows):
             r"aiex\.dma_start_task\(%(\d+)\) \{repeat_parameter = @(\w+)\}", text
         )
     )
-    # A size of several steps per unit is the scalar times their count.
-    widened = dict(re.findall(r"(%\w+) = arith\.extsi (%\w+)", text))
-    steps = dict(re.findall(r"(%\w+) = arith\.muli %\w+, %c(\d+)_i32", text))
     moved = dict.fromkeys((b.name for b in op.buffers), 0)
     for t in tasks:
-        sizes = [
-            (
-                units * int(steps.get(widened.get(s, s), 1))
-                if s.startswith("%")
-                else int(s)
-            )
-            for s in t.sizes.split(", ")
-        ]
+        sizes = [units if s.startswith("%") else int(s) for s in t.sizes.split(", ")]
         elements = prod(sizes[1:])
         if t.length_parameter:
             elements = words[t.length_parameter] * int(t.length_unit)
@@ -539,49 +531,42 @@ def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
     device, image, K, width, request
 ):
     """Llama's q projection on a 15-row prompt chunk moves A and C for one
-    unit, the 256 rows its four core rows join into a C block, and at 2048
-    rows for all eight, as it does unbounded. B moves the same at any bound,
-    and A once per column block, as unbounded. Qwen2.5 1.5B's up projection
-    drains a unit's C in two runs of rows, and its down projection computes
-    on two core rows, 128-row units: a 256-row unit of either is further
-    than one shim descriptor's stride reaches.
+    unit, the 256 rows its four core rows compute, and at 2048 rows for all
+    eight, as it does unbounded. B moves the same at any bound, and A once
+    per column block, as unbounded. Qwen2.5 1.5B's up and down projections
+    are past 8192 wide, where a 256-row unit outgrows a descriptor's step
+    and only the half-unit each half of the core rows steps fits.
     """
     dev = request.getfixturevalue(device)
     M = 2048
+    unbounded = flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True).resolved(dev)
     op = flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True)
     op.use_value("valid", N)
     op = op.resolved(dev)
-    assert op.rows == (2 if K > 8192 else 4)
-    unbounded = (
-        flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True)
-        .replace(rows=op.rows)
-        .resolved(dev)
-    )
-    unit = op.rows * 64
     blocks = -(-width // (op.tile_n * op.cols))
     full_elf = image == "elf"
     whole = _flm_gemm_moves(unbounded, full_elf, M)
-    for rows in (15, 256, 257, 2048):
-        units = -(-rows // unit)
+    for rows, units in ((15, 1), (256, 1), (257, 2), (2048, 8)):
         assert _flm_gemm_moves(op, full_elf, rows) == {
-            "A": units * unit * K * 2 * blocks,
+            "A": units * 256 * K * 2 * blocks,
             "B": whole["B"],
-            "C": units * unit * width * 2,
+            "C": units * 256 * width * 2,
         }, rows
     assert _flm_gemm_moves(op, full_elf, M) == whole
 
 
 def test_on_an_xclbin_a_bounded_flm_gemm_repeats_a_by_the_dispatch_scalar(npu1):
     # No scratchpad: A's units are the repeat count of one task per row and
-    # column block, C's row blocks its D2, both the per-call scalar.
+    # column block, C's row blocks its D2 in each half, both the per-call
+    # scalar.
     op = flm_gemm.ProjectionGEMM(M=512, K=1024, N=512, b_col_maj=True)
     op.use_value("valid", N)
     _, tasks = generated_sequence(op.resolved(npu1), full_elf=False)
     a = [t.sizes for t in tasks if t.arg == 0]
     c = [t.sizes for t in tasks if t.arg == 2]
-    assert len(a) == 2 * 4 and len(c) == 2 * 4  # two column blocks
+    assert len(a) == 2 * 4 and len(c) == 2 * 4 * 2  # two column blocks
     assert all(re.fullmatch(r"%\w+, 2, 64, 512", s) for s in a), a
-    assert all(re.fullmatch(r"1, %\w+, 256, 64", s) for s in c), c
+    assert all(re.fullmatch(r"1, %\w+, 128, 64", s) for s in c), c
 
 
 def test_a_bounded_flm_gemm_refuses_a_call_with_no_rows(npu2):

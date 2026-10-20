@@ -106,6 +106,7 @@ class Shipped(
     m_chunk: int = tunable(default=1, repr=False, init=False)
     rows: int = tunable(default=ROWS, repr=False, init=False)
     cols: int = tunable(default=COLS, repr=False, init=False)
+    joins: int = tunable(default=1, repr=False, init=False)
     precision: Precision = param(
         default=Precision.MEDIUM, array=True, repr=False, init=False
     )
@@ -147,7 +148,7 @@ class Shipped(
     # The port's named values are not this image's: it reads one block of
     # eight words behind a lock, written once per shape.
     n_val = m_row_blocks = k_iters = mode = clamp_min = clamp_max = None
-    n_units = units_valid = units_repeat = valid = None
+    n_units = units_valid = units_repeat = a_half = c_half = valid = None
     parameters = Block(PARAMETER_WORDS, derive=_parameter_words)
 
     def build(self) -> Built:

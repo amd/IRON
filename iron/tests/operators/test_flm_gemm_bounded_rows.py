@@ -10,7 +10,9 @@ block's B replay without computing. One compiled graph is driven at bounds
 on both sides of a unit, long ones before short ones and back, so a count
 or a replay one call leaves must not reach the next. B is resident in the
 memtile at the first shape and streamed per unit at the second; the third
-is Llama 3.2 1B's q projection at a prompt chunk's bounds.
+is Llama 3.2 1B's q projection at a prompt chunk's bounds, and the last two
+Qwen2.5 1.5B's up and down projections, past 8192 wide, where the second
+half of the core rows starts at a per-call offset into A and C.
 """
 
 import numpy as np
@@ -32,8 +34,10 @@ CHUNK = (2048, 1, 15, 512, 2048, 15)
         (512, 512, 1024, SHORT),
         (512, 3072, 512, SHORT),
         (2048, 2048, 2048, CHUNK),
+        (2048, 1536, 8960, CHUNK),
+        (2048, 8960, 1536, CHUNK),
     ],
-    ids=["resident_b", "streamed_b", "llama_q"],
+    ids=["resident_b", "streamed_b", "llama_q", "qwen2_up", "qwen2_down"],
 )
 @pytest.mark.parametrize(
     "full_elf",

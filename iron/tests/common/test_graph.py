@@ -592,26 +592,31 @@ def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
 
 
 def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
-    """Each projection of a prompt chunk derives two per-call words from its
-    rows, the 256-row units they reach and that less one, A's repeat count,
-    and every projection shares them.
+    """Each projection of a prompt chunk derives four per-call words from its
+    rows: the 256-row units they reach and that less one, A's repeat count,
+    which every projection shares, and where the second half of the core
+    rows starts in A and in C, the units' first 128 rows of K and of N,
+    which every projection as wide shares.
     """
     g = llama_1b(num_hidden_layers=2)
     t = g.record(**g.shapes()[1])
     words, shared = _words(t, share=True)
     assert len(words) <= 32
     gemms = [op.resolved(npu2) for op in t.operators if type(op) is ProjectionGEMM]
-    names = {"units_valid", "units_repeat"}
-    symbols = set()
+    names = {"units_valid", "units_repeat", "a_half", "c_half"}
+    symbols, widths = set(), set()
     for op in gemms:
         assert {v.name for v in op.values} == names | {"valid"}
+        widths |= {op.K, op.N}
         for name in names:
             symbol = op.value(name).symbol
             symbols.add(shared.get(symbol, symbol))
         for rows, reached in ((1, 1), (15, 1), (256, 1), (257, 2), (2048, 8)):
             assert op.derived_at("units_valid", valid=rows) == reached
             assert op.derived_at("units_repeat", valid=rows) == reached - 1
-    assert len(symbols) == len(names)
+            assert op.derived_at("a_half", valid=rows) == reached * 128 * op.K
+            assert op.derived_at("c_half", valid=rows) == reached * 128 * op.N
+    assert len(symbols) == 2 + len(widths)
 
 
 @pytest.mark.parametrize("step", ["decode", "prompt"])

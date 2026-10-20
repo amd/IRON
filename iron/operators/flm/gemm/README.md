@@ -502,11 +502,22 @@ bit-identical on all: median **-23.9%**, best -37.7% (E4B gateup M2048).
 | M = 256 (one row-block, nothing to replay) | +0.9% to -13.5%, from the setup ordering and queue depth |
 | down projections (streamed), M ≥ 1024 | -2.0% to +1.8%, i.e. noise |
 
+### Each half of the core rows takes its own range of M
+
+A shim tile has two S2MM channels, so C goes out in two joins per column, one
+per half of the core rows (rows 0-1 and 2-3), each on its own channel. Each
+half takes its own range of M, its two rows' 64-row blocks interleaved in it:
+half `h`'s unit `u` is the 128 rows from `(h * n_units + u) * 128`. A leg so
+steps 128 rows a unit, not 256, and K or N up to 16384 fits a descriptor's
+20-bit step (4 MiB); with one join of all four rows, Qwen2.5 1.5B's 8960-wide
+up and down projections did not. The cores are unchanged: each computes the
+rows its A brings and drops its C in order.
+
 ### The compiler bounds what is outstanding
 
 The sequence issues one transfer per leg per column-block, whatever the shape.
-Where K or N is 10240, the row-block stride overflows the shim BD's 20-bit
-iteration step, and under `m_chunk` A's pattern has 5 dimensions. The compiler
+Where K or N is past 16384, a half's row-block stride overflows the shim BD's
+20-bit step, and under `m_chunk` A's pattern has 5 dimensions. The compiler
 cuts such a leg into pieces a BD can take, one task each, and interleaves them
 with the other legs' transfers so that a wait on one leg is for transfers the
 other has already been given.
@@ -531,18 +542,21 @@ done.
 A prompt chunk projects `x[:rows]` (`valid`, `per_call(bounds=M)`), and one
 compile serves every row count. A and C move, and the cores compute, only the
 units the bound reaches. A unit is the 256 rows (`rows * M_TILE`) the four
-core rows join into one C block, so a bound rounds up to it: that is the
-array's granularity, not a DMA rule.
+core rows compute at once, 128 in each half's range, so a bound rounds up to
+it: that is the array's granularity, not a DMA rule. The second half's range
+starts past the first's 128 rows a unit, a per-call offset.
 
 | | xclbin | full ELF (NPU2) |
 |---|---|---|
 | cores | read `units_valid` from a parameter word bounded designs add | read it from the scratchpad |
 | A | one transfer per lane, `units_repeat` (units less one) its runtime repeat count | the same, a scratchpad repeat parameter (mlir-aie's repeat-parameter) |
 | C | `units_valid` row blocks, a runtime size | the same, a patched length |
+| second half | A and C start at `a_half` and `c_half`, the units' 128 rows of K and of N, a runtime offset | the same, scratchpad offset parameters |
 | B | as unbounded | as unbounded |
 
-Every GEMM bounded by the same rows shares the two words, so Llama 3.2 1B's
-prompt chunk takes 2 of a full ELF's 32.
+Every GEMM bounded by the same rows shares `units_valid` and `units_repeat`,
+and every one as wide shares a half's offset (a K's `a_half` is the same word
+as an N's `c_half`), so Llama 3.2 1B's prompt chunk takes 5 of a full ELF's 32.
 
 B is not bounded. Its resident replay count is the memtile's lock values and
 task runs, which no per-call word reaches on either image, so the memtile

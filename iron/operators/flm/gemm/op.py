@@ -43,6 +43,7 @@ from iron.operators.flm.gemm.design import (
     A_DEPTH,
     B_MAX_SLOTS,
     C_DEPTH,
+    C_JOINS,
     CT_MAX_K_FOR_N,
     CT_OUT_LEN,
     K_TILE,
@@ -107,7 +108,7 @@ class _Built(Built):
 
 
 def _units_valid(op) -> Any:
-    """The units (rows * M_TILE rows each) a call's row bound reaches, at least one.
+    """The 256-row units a call's row bound reaches, at least one.
 
     Raises:
         ValueError: A call with no rows, which would end before the cores
@@ -182,6 +183,7 @@ class ProjectionGEMM(Operator):
     emulate_bf16_mmul_with_bfp16: bool = tunable(repr=False, init=False)
     rows: int = tunable(repr=False, init=False)
     cols: int = tunable(repr=False, init=False)
+    joins: int = tunable(repr=False, init=False)
     bfp16_b: bool = tunable(repr=False, init=False)
     # B's element type, on the array and in DDR alike; the host holds a
     # block-float B as bytes (Operand.host_dtype).
@@ -213,7 +215,7 @@ class ProjectionGEMM(Operator):
         obj_shape=(b_l2,),
         per=(cols,),
     )
-    C = Out(M, N, obj_shape=(c_l2,), per=(cols,), depth=C_DEPTH)
+    C = Out(M, N, obj_shape=(c_l2,), per=(cols, joins), depth=C_DEPTH)
     # M, or fewer rows per call (``A[:n]`` in a graph). A and C move, and the
     # cores compute, only the units (rows * M_TILE rows each) the bound
     # reaches; past them the cores drain each column-block's B replay
@@ -236,6 +238,14 @@ class ProjectionGEMM(Operator):
     units_valid = per_call(derive=_units_valid)
     # A's repeat count on a full ELF: the units less one.
     units_repeat = per_call(derive=lambda op: _units_valid(op) - 1)
+    # Under a bound, where the second half of the core rows starts in A and in
+    # C: past the first half's share of the units it reaches.
+    a_half = per_call(
+        derive=lambda op: _units_valid(op) * M_TILE * op.rows // op.joins * op.K
+    )
+    c_half = per_call(
+        derive=lambda op: _units_valid(op) * M_TILE * op.rows // op.joins * op.N
+    )
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened
@@ -287,7 +297,7 @@ class ProjectionGEMM(Operator):
             raise Unresolvable(
                 "flm.ProjectionGEMM is sized from the device's L1 and grid"
             )
-        rows, cols = self.rows or compute_rows(dev), dev.cols
+        rows, cols = compute_rows(dev), dev.cols
         # B is packed to bfp16ebs8 where the macs are bfp16 and B is not read
         # as stored; otherwise it is bf16. AIE2 has no BFP types, so its mmul
         # lowers onto four native bf16 macs.
@@ -311,21 +321,6 @@ class ProjectionGEMM(Operator):
             k_tile = K_TILE
             while self.K % k_tile and (k_tile // 2) % ct_k == 0:
                 k_tile //= 2
-        if "valid" in self.bound_extents:
-            # A bound repeats each core row's A walk once per unit, whose
-            # rows * M_TILE rows of K the shim's step field must reach.
-            while rows > 1 and not dev.dma_bd_fits(
-                0,
-                0,
-                TensorAccessPattern(
-                    (2 * rows * M_TILE, self.K),
-                    0,
-                    [2, self.K // k_tile, M_TILE, k_tile],
-                    [rows * M_TILE * self.K, k_tile, self.K, 1],
-                ),
-                bfloat16,
-            ):
-                rows //= 2
         l1 = l1_budget(dev, self.compiled_modes)
         tile_ma, l1_b_depth = l1_tiles(
             tile_n, ct_k, b_elem_bytes, l1, m_chunk, k_tile, self.tile_ma
@@ -337,13 +332,14 @@ class ProjectionGEMM(Operator):
             tile_ma=tile_ma,
             rows=rows,
             cols=cols,
+            joins=C_JOINS,
             emulate_bf16_mmul_with_bfp16=emulate,
             bfp16_b=bfp16_b,
             b_dtype=b_dtype,
             l1_b_depth=l1_b_depth,
             a_l2=m_chunk * M_TILE * k_tile,
             b_l2=k_tile * tile_n // b_group,
-            c_l2=M_TILE * tile_n * rows,
+            c_l2=M_TILE * tile_n * rows // C_JOINS,
         )
 
     def compatible(self) -> None:
@@ -415,8 +411,7 @@ class ProjectionGEMM(Operator):
         return (
             f"FLM_GEMM_tn{t.tile_n}_kt{t.k_tile}_ck{t.ct_max_k}"
             f"_ma{t.tile_ma}_mc{t.m_chunk}"
-            + ("" if t.rows == compute_rows(dev) else f"_r{t.rows}")
-            + f"_em{t.epilogue_mask:x}_{t.rounding}"
+            f"_em{t.epilogue_mask:x}_{t.rounding}"
             + ("" if t.gelu is Gelu.FP32 else f"_gelu_{t.gelu}")
             + ("_bt" if t.b_col_maj else "")
             + (
@@ -438,7 +433,7 @@ class ProjectionGEMM(Operator):
         return base
 
     def build(self) -> Built:
-        COLS, ROWS = self.cols, self.rows
+        COLS, ROWS, JOINS = self.cols, self.rows, self.joins
         N_TILE, CT_MAX_K, M_CHUNK, T_MA = (
             self.tile_n,
             CT_MAX_K_FOR_N[self.tile_n],
@@ -530,20 +525,22 @@ class ProjectionGEMM(Operator):
             for _ in range(ROWS)
         ]
 
-        # C: one join per column; each of the ROWS cores drops its slice at
-        # its own offset in a single memtile buffer.
+        # C: a join per column and half of the core rows; each core drops its
+        # slice at its own offset in its half's memtile buffer.
+        HALF = ROWS // JOINS
         c_l2l3_fifos, c_prod = [], {}
         for c in range(COLS):
-            of_c = ObjectFifo(mt_out_ty, depth=C_DEPTH)
-            c_l2l3_fifos.append(of_c)
-            sub = of_c.prod().join(
-                [C_SLICE_LEN * r for r in range(ROWS)],
-                tile=mt_tiles[c],
-                obj_types=[ct_out_ty] * ROWS,
-                from_stream=[gather_dims] * ROWS,
-            )
-            for r in range(ROWS):
-                c_prod[(r, c)] = sub[r]
+            for h in range(JOINS):
+                of_c = ObjectFifo(mt_out_ty, depth=C_DEPTH)
+                c_l2l3_fifos.append((c, of_c))
+                sub = of_c.prod().join(
+                    [C_SLICE_LEN * p for p in range(HALF)],
+                    tile=mt_tiles[c],
+                    obj_types=[ct_out_ty] * HALF,
+                    from_stream=[gather_dims] * HALF,
+                )
+                for p in range(HALF):
+                    c_prod[(h * HALF + p, c)] = sub[p]
 
         # A: shim -> memtile -> broadcast along the compute row, reblocking on
         # the forward(). One fifo per row even at M_CHUNK > 1: a second would
@@ -811,7 +808,7 @@ class ProjectionGEMM(Operator):
         self.B.bind(b_shim_flows)
         # C's drains on column c's shim, as the shared image has them: where
         # the placer chose, a shape whose transfers differ would move them.
-        self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in enumerate(c_l2l3_fifos)])
+        self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in c_l2l3_fifos])
         return _Built(workers + unrouted, rtps, b_pool=b_pool)
 
     @property
@@ -829,7 +826,7 @@ class ProjectionGEMM(Operator):
 
     def sequence(self, rt):
         M, K, N = self.M, self.K, self.N
-        COLS, ROWS = self.cols, self.rows
+        COLS, ROWS, JOINS = self.cols, self.rows, self.joins
         N_TILE, M_CHUNK, K_TILE = self.tile_n, self.m_chunk, self.k_tile
         k_iters, n_units = self._k_iters, self._n_units
         pool = rt.built.b_pool
@@ -842,14 +839,22 @@ class ProjectionGEMM(Operator):
         # One transfer per (column-block, leg), not one per object: a
         # descriptor walks many fifo objects in consume order. Dimension
         # order must match the core's nest.
-        A = TensorAccessPattern.full((n_units, M_CHUNK, ROWS, M_TILE, k_iters, K_TILE))
+        #
+        # Each half of the core rows takes its own range of M, its rows'
+        # row-blocks interleaved in it, so a leg steps HALF row-blocks a unit
+        # rather than ROWS: K and N up to twice as wide fit a descriptor.
+        HALF = ROWS // JOINS
+        A = TensorAccessPattern.full(
+            (JOINS, n_units, M_CHUNK, HALF, M_TILE, k_iters, K_TILE)
+        )
 
         def a_tap(r, slab):
             # Every (row-block, k) block this row consumes for one
             # column-block: per unit, k outermost, then the unit's
             # row-blocks. A does not depend on the column-block; it is
             # re-fetched because the cores re-consume it.
-            rows = A[slab.first : slab.first + slab.units, :, r]
+            half, p = divmod(r, HALF)
+            rows = A[half, slab.first : slab.first + slab.units, :, p]
             return rows.permute((0, 3, 1, 2, 4))
 
         # B's slot pool, per shape. Resident where the column-block fits: DDR
@@ -988,40 +993,18 @@ class ProjectionGEMM(Operator):
                 )
             return flow.endpoint(pool.mt_tiles[c]).task(*chain, runs=passes).start()
 
-        # A row-block's C goes out in as few runs of rows as one shim
-        # descriptor reaches: past N = 8192, the step from one row-block to
-        # the next outgrows its stride field.
-        c_runs = next(
-            (
-                runs
-                for runs in range(1, ROWS * M_TILE + 1)
-                if (ROWS * M_TILE) % runs == 0
-                and self.C.fits(
-                    TensorAccessPattern.full(
-                        (M // (ROWS * M_TILE) * runs, ROWS * M_TILE // runs, N)
-                    )[:, :, :N_TILE]
-                )
-            ),
-            1,
-        )
         C = TensorAccessPattern.full(
-            (
-                M // (ROWS * M_TILE) * c_runs,
-                ROWS * M_TILE // c_runs,
-                N // N_TILE,
-                N_TILE,
-            )
+            (JOINS, n_units * M_CHUNK, HALF * M_TILE, N // N_TILE, N_TILE)
         )
 
-        def c_tap(mega_col, c, slab):
-            # Every joined block this column produces: one ROWS*M_TILE x
-            # N_TILE per row-block, in plain row-block order even under
+        def c_tap(mega_col, c, half, slab):
+            # Every joined block this column's half produces: one HALF*M_TILE
+            # x N_TILE per row-block, in plain row-block order even under
             # M_CHUNK.
             row_blocks = slice(
-                slab.first * M_CHUNK * c_runs,
-                (slab.first + slab.units) * M_CHUNK * c_runs,
+                slab.first * M_CHUNK, (slab.first + slab.units) * M_CHUNK
             )
-            return C[row_blocks, :, mega_col * COLS + c]
+            return C[half, row_blocks, :, mega_col * COLS + c]
 
         # A trailing block uses only the first rem_blocks columns. A is still
         # issued for every row, since the sitting-out columns drain it.
@@ -1083,16 +1066,20 @@ class ProjectionGEMM(Operator):
 
             # Every transfer is unmanaged: the compiler meters each channel's
             # queue and takes a descriptor back once a poll proves its
-            # transfer done. A column's C drains in order on one channel, and
-            # its last one finishing means the column's slab is done -- fills,
+            # transfer done. A column half's C drains in order on one channel,
+            # and its last one finishing means its cores' slab is done -- fills,
             # memtile chains and cores -- so only that one carries a token.
             last_c = []
 
             # A's transfers, one per lane. Bounded, each repeats over the
-            # units the bound reaches, a per-call repeat count.
+            # units the bound reaches, a per-call repeat count, and the second
+            # half's start past them is a per-call offset.
             if bounded:
                 a_legs = [
-                    (A[:, 0, r].permute((0, 2, 1, 3)), self.units_repeat)
+                    (
+                        A[0, :, 0, r % HALF].permute((0, 2, 1, 3)),
+                        self.a_half if r >= HALF else None,
+                    )
                     for r in range(ROWS)
                 ]
             else:
@@ -1104,8 +1091,14 @@ class ProjectionGEMM(Operator):
             # task queue holds, the compiler cuts into pieces and interleaves
             # with the other legs'.
             for bi, (mega_col, active_cols) in enumerate(blocks):
-                for r, (tap, repeats) in enumerate(a_legs):
-                    self.A.fill(tap, lane=r, repeat_parameter=repeats, managed=False)
+                for r, (tap, offset) in enumerate(a_legs):
+                    self.A.fill(
+                        tap,
+                        lane=r,
+                        offset_parameter=offset,
+                        repeat_parameter=self.units_repeat if bounded else None,
+                        managed=False,
+                    )
                 for c in range(active_cols):
                     self.B.fill(b_tap(mega_col, c, slab), lane=c, managed=False)
                 if bi == 0:
@@ -1114,16 +1107,18 @@ class ProjectionGEMM(Operator):
                     push_b_mt(bi)
                 for c in range(active_cols):
                     last = bi == n_work(c) - 1
-                    task = self.C.drain(
-                        c_tap(mega_col, c, slab),
-                        lane=c,
-                        wait=last,
-                        length_parameter=self.units_valid if bounded else None,
-                        length_unit=ROWS * M_TILE * N_TILE,
-                        managed=False,
-                    )
-                    if last:
-                        last_c.append(task)
+                    for half in range(JOINS):
+                        task = self.C.drain(
+                            c_tap(mega_col, c, 0 if bounded else half, slab),
+                            lane=c * JOINS + half,
+                            wait=last,
+                            offset_parameter=self.c_half if bounded and half else None,
+                            length_parameter=self.units_valid if bounded else None,
+                            length_unit=HALF * M_TILE * N_TILE,
+                            managed=False,
+                        )
+                        if last:
+                            last_c.append(task)
             for task in last_c:
                 task.await_()
 
@@ -1147,7 +1142,6 @@ class ProjectionGEMM(Operator):
             M=M,
             K=K,
             N=N,
-            rows=self.rows,
             epilogue=Epilogue.NONE,
             epilogue_modes=self.compiled_modes,
             packed_blocks=None,

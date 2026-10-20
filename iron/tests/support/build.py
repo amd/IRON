@@ -21,19 +21,21 @@ class Task(NamedTuple):
     ssa: int
     lane: str
     arg: int
-    offset: int
+    offset: int | str  # a runtime offset's SSA name
     sizes: str
     strides: str
     length_parameter: str  # the patched length's symbol, or ""
     length_unit: str  # the elements per unit of it, or ""
+    offset_parameter: str  # the patched offset's symbol, or ""
     attributes: str
 
 
 _TASK = re.compile(
     r"%(\d+) = aiex\.dma_configure_task_for @(\w+) (?:repeat %\w+ : \w+ )?\{\s*"
-    r"aie\.dma_bd\(%arg(\d+) : \S+ offset = (\d+) (?:len = %?\w+ )?"
+    r"aie\.dma_bd\(%arg(\d+) : \S+ offset = (\d+|%\w+ : i64) (?:len = %?\w+ )?"
     r"sizes = \[([^\]]*)\] strides = \[([^\]]*)\]\)"
-    r"(?: \{length_parameter = @(\w+), length_unit = (\d+) : i32\})?"
+    r"(?: \{(?:length_parameter = @(\w+), length_unit = (\d+) : i32)?(?:, )?"
+    r"(?:offset_parameter = @(\w+))?\})?"
     r"\s*aie\.end\s*\}(?: \{([^}]*)\})?"
 )
 
@@ -43,7 +45,9 @@ def _tasks(module) -> tuple[str, list[Task]]:
     text = str(module)
     text = text[text.index("aie.runtime_sequence") :]
     return text, [
-        Task(int(ssa), lane, int(arg), int(offset), *rest)
+        Task(
+            int(ssa), lane, int(arg), int(offset) if offset.isdigit() else offset, *rest
+        )
         for ssa, lane, arg, offset, *rest in _TASK.findall(text)
     ]
 

@@ -16,6 +16,7 @@ from iron.common import Precision
 from iron.common.design import OperatorDesign
 from iron.common.testing import run_test, vectors
 from iron.operators.flm.gemm.design import (
+    C_JOINS,
     CT_MAX_K_FOR_N,
     M_TILE,
     Epilogue,
@@ -283,18 +284,15 @@ def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, precision, record_prope
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_gemm_split_leg_bounds_runs():
-    """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so the
-    compiler cuts that leg into pieces, bounded by its queue polls and BD
-    reclaim. Overrunning either hangs or corrupts silently, which only running
-    can show.
-
-    The square case splits both legs, which the real Gemma shapes never do
-    (E4B's down overflows on K and its gate/up on N, never both), so it is
-    the only cover for the two-sided path. Regular rather than extensive
-    despite the size: ~8s against the suite's ~13s.
+    """N = 20480 overflows the shim BD's 20-bit step from one row-block to the
+    next, and m_chunk = 2 gives A's leg a fifth dimension, so the compiler
+    cuts both legs into pieces, bounded by its queue polls and BD reclaim.
+    Overrunning either hangs or corrupts silently, which only running can
+    show. No model shape cuts a leg at m_chunk = 1, so this is their only
+    cover.
     """
-    M, K, N = 512, 10240, 10240
-    operator = ProjectionGEMM(M=M, K=K, N=N)
+    M, K, N = 512, 512, 20480
+    operator = ProjectionGEMM(M=M, K=K, N=N, m_chunk=2)
 
     errors = check_on_device(operator, flm_vectors(operator))
     assert not errors, "Test failed"
@@ -344,19 +342,19 @@ def tile_option_params():
 
 
 @pytest.mark.parametrize(
-    "M,K,N", [(512, 1024, 1024), (512, 6144, 1024), (512, 1024, 10240)]
+    "M,K,N", [(512, 1024, 1024), (512, 6144, 1024), (512, 1024, 20480)]
 )
 def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
     """Device-free: B is resident (K=1024), streamed (K=6144) or behind a leg
-    the compiler cuts (N=10240); in each, B has no fifo, nothing is pinned,
+    the compiler cuts (N=20480); in each, B has no fifo, nothing is pinned,
     the memtile locks are armed per dispatch, and one slab awaits one C per
-    column.
+    column and half of the core rows.
     """
     mlir = str(OperatorDesign(ProjectionGEMM(M=M, K=K, N=N)).module())
     assert "aie.objectfifo @B" not in mlir
     assert "bd_id" not in mlir
     assert "aiex.set_lock" in mlir
-    assert mlir.count("aiex.dma_await_task") == npu2.cols
+    assert mlir.count("aiex.dma_await_task") == npu2.cols * C_JOINS
 
 
 @pytest.mark.supported_devices("npu1", "npu2")

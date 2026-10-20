@@ -55,6 +55,9 @@ def compute_rows(dev) -> int:
 
 CT_OUT_LEN = 512  # the core's C slice, streamed out in chunks this size
 C_DEPTH = 2  # C fifo depth; also the core-body unroll
+# C's joins per column, one per shim S2MM channel: each half of the core rows
+# takes its own range of row blocks.
+C_JOINS = 2
 B_DEPTH = 2  # the deepest L1 B ring the budget below tries
 A_DEPTH = 2
 # L1 bytes reserved for the core's stack: past the device default of 1024,
