@@ -12,6 +12,11 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `iron.lm.ImageResize`, an image resized on the NPU to a uint8 image
+  another resize reads; `ImagePatches` and the resample operators take
+  torchvision's Lanczos-3 (`interpolation=`), the processor's
+  normalization (`mean=`, `std=`) and a fixed output size (`out=`); a
+  resize's size need not be whole patches.
 - Whisper's log-mel features on the NPU: `LogMel`'s `mel_scale` and `norm`
   (`filterbank`'s, transformers' `mel_filter_bank`), `power=2` and
   `decades`, Whisper's log10 held to that many decades below the clip's
