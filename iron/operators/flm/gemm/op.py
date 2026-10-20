@@ -35,10 +35,12 @@ from aie.iron.device import Tile
 from aie.iron.kernels import fused_mm
 from aie.utils import bfp
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.context import compile_context
 from aie.utils.compile.jit.params import Select, divisors, param, per_call, tunable
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Precision, Rtp, Unresolvable
+from iron.common.declare.kernel_memory import core_stack
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
     B_MAX_SLOTS,
@@ -49,7 +51,6 @@ from iron.operators.flm.gemm.design import (
     K_TILE,
     M_TILE,
     N_TILE_DEFAULT,
-    STACK_SIZE,
     Epilogue,
     Gelu,
     R,
@@ -330,8 +331,20 @@ class ProjectionGEMM(Operator):
             while self.K % k_tile and (k_tile // 2) % ct_k == 0:
                 k_tile //= 2
         l1 = l1_budget(dev, self.compiled_modes)
+
+        def stack(height: int) -> int:
+            # Made to be read, not built: kept out of the registry a build reads.
+            with compile_context(_iron_kernel_registry=set()):
+                k = self.kernel(tile_n, k_tile, height, bfp16_b, emulate)
+                calls = (
+                    k.mm_fused_acc_init,
+                    k.mm_fused_k_step,
+                    k.mm_fused_epilogue_chunk,
+                )
+                return core_stack(dev, *calls, objects=(k,))
+
         tile_ma, l1_b_depth = l1_tiles(
-            tile_n, ct_k, b_elem_bytes, l1, m_chunk, k_tile, self.tile_ma
+            tile_n, ct_k, b_elem_bytes, l1, stack, m_chunk, k_tile, self.tile_ma
         )
         b_dtype = v8bfp16ebs8 if bfp16_b else bfloat16
         return self.replace(
@@ -440,6 +453,28 @@ class ProjectionGEMM(Operator):
             base = f"{base}_epi{self.epilogue}"
         return base
 
+    def kernel(self, tile_n, k_tile, band_m, bfp16_b, emulate):
+        """The fused tile kernel each core runs at these tiles."""
+        modes = _compiled_modes(self.epilogue_modes)
+        return fused_mm(
+            dim_m=M_TILE,
+            dim_k=k_tile,
+            dim_n=tile_n,
+            band_m=band_m,
+            chunk_k=CT_MAX_K_FOR_N[tile_n],
+            out_chunk=CT_OUT_LEN,
+            c_depth=C_DEPTH,
+            # 8x8x8 on both architectures: AIE2P lowers it onto one bfp16 mac
+            # or two bf16 ones, AIE2 onto four native bf16 macs.
+            mmul_shape=(R, S, T),
+            bfp16_b=bfp16_b,
+            b_col_maj=self.b_col_maj,
+            emulate_bf16_mmul_with_bfp16=emulate,
+            epilogue_modes=tuple(str(m) for m in modes),
+            rounding=str(self.rounding),
+            gelu=str(self.gelu),
+        )
+
     def build(self) -> Built:
         COLS, ROWS, JOINS = self.cols, self.rows, self.joins
         N_TILE, CT_MAX_K, M_CHUNK, T_MA = (
@@ -479,24 +514,8 @@ class ProjectionGEMM(Operator):
         # always compiled in, since the kernel falls back to it. Under
         # asymmetric tile buffering the k step takes the A band index, as the
         # core folds RHO A bands into one accumulator.
-        modes = _compiled_modes(self.epilogue_modes)
-        kernel = fused_mm(
-            dim_m=M_TILE,
-            dim_k=K_TILE,
-            dim_n=N_TILE,
-            band_m=T_MA,
-            chunk_k=CT_MAX_K,
-            out_chunk=CT_OUT_LEN,
-            c_depth=C_DEPTH,
-            # 8x8x8 on both architectures: AIE2P lowers it onto one bfp16 mac
-            # or two bf16 ones, AIE2 onto four native bf16 macs.
-            mmul_shape=(R, S, T),
-            bfp16_b=self.bfp16_b,
-            b_col_maj=self.b_col_maj,
-            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
-            epilogue_modes=tuple(str(m) for m in modes),
-            rounding=str(self.rounding),
-            gelu=str(self.gelu),
+        kernel = self.kernel(
+            N_TILE, K_TILE, T_MA, self.bfp16_b, self.emulate_bf16_mmul_with_bfp16
         )
         acc_init = kernel.mm_fused_acc_init
         k_step = kernel.mm_fused_k_step
@@ -802,7 +821,6 @@ class ProjectionGEMM(Operator):
                             my_cols[r][c],
                         ],
                         tile=ct_tiles[r][c],
-                        stack_size=STACK_SIZE,
                     )
                 )
 

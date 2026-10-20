@@ -30,10 +30,6 @@ GEMMA4_SOFTCAP = 30.0
 # frees the round's BDs for the bd-id allocator. A shim tile holds 16 BDs.
 DEPTH = 2
 
-# Core stack bytes. The kernel's b_group_sums array grows with dim. The array
-# overflows the default stack of 1024 bytes at both Gemma 4 sizes.
-STACK_SIZE = 10 * 1024
-
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class _Built(Built):
@@ -216,7 +212,6 @@ class LMHead(Operator):
                             sums,
                             rtp,
                         ],
-                        stack_size=STACK_SIZE,
                     )
                 )
         self.w.bind(ws)

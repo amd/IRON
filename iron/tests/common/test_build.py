@@ -410,10 +410,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         from_name("npu2", n_cols=8)
     )
     assert (op.tile_n, op.m_chunk, op.rows, op.cols, op.bfp16_b) == (64, 1, 4, 8, True)
-    assert (
-        op.tile_ma
-        == flm_gemm.l1_tiles(64, 128, bfp.BLOCK_BYTES / bfp.BLOCK, 65536, 1)[0]
-    )
+    assert (op.tile_ma, op.l1_b_depth) == (32, 2)
     # tile_n is resolution, not a function of K: the same on every shape.
     assert (
         flm_gemm.ProjectionGEMM(M=256, K=512, N=1024)

@@ -287,7 +287,6 @@ class DequantBFP(Operator):
                 Worker(
                     core_body,
                     [qw_cores[r].cons(), out_cores[r].prod(), kernel],
-                    stack_size=2048,
                 )
                 for r in range(ROWS)
             ]

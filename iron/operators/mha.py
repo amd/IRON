@@ -22,6 +22,7 @@ from aie.iron.controlflow import range_
 from aie.iron.device import AnyComputeTile, AnyMemTile, AnyShimTile, Device, Tile
 from aie.iron.kernels.linalg import mm_stream_dims
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.context import compile_context
 from aie.utils.compile.jit.params import (
     Select,
     divisors,
@@ -33,9 +34,8 @@ from aie.utils.compile.jit.params import (
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp, Unresolvable
+from iron.common.declare.kernel_memory import core_stack
 from iron.common.testing import Case, Testing
-
-STACK_SIZE = 0xD00
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,7 +69,7 @@ def block_sizes(op, dev, start: int) -> tuple[int, ...]:
         (
             b
             for b in (16, 32, 64)
-            if op.core_bytes(b, op.key_block(b, dev.core_memory_bytes), op.pv_cores)
+            if op.core_bytes(dev, b, op.key_block(b, dev), op.pv_cores)
             <= dev.core_memory_bytes
         ),
         default=16,
@@ -361,6 +361,14 @@ class MHA(Operator):
             )
         if self.seq_len <= 0:
             raise ValueError(f"MHA: seq_len ({self.seq_len}) must be at least 1")
+        # Before resolve() sizes the cores, which builds each P*V share's kernel.
+        if self.pv_cores is not None and (
+            self.pv_cores not in (1, 2) or self.d % self.pv_cores
+        ):
+            raise ValueError(
+                f"MHA: P*V takes one core or two, each an equal share of d "
+                f"({self.d}); got pv_cores={self.pv_cores}"
+            )
 
     def compatible(self) -> None:
         if 64 % self.B_q:
@@ -456,7 +464,7 @@ class MHA(Operator):
                     (cores, b)
                     for cores in ((1, 2) if pv_cores is None else (pv_cores,))
                     for b in (blocks if B_q is None else (B_q,))
-                    if self.core_bytes(b, self.key_block(b, mem), cores) <= mem
+                    if self.core_bytes(dev, b, self.key_block(b, dev), cores) <= mem
                     and not (self.packed and B_q is None and group > b)
                 ),
                 None,
@@ -467,7 +475,7 @@ class MHA(Operator):
                     f"core's {mem} bytes"
                 )
             pv_cores, B_q = fit or (pv_cores or 1, B_q)
-        B_kv = self.key_block(B_q, mem)
+        B_kv = self.key_block(B_q, dev)
         q_shims = 2 if self.num_pipelines > 6 else 1
         if dev is not None:
             width = max(w for w in self.PACKED_PIPELINES if w <= dev.cols)
@@ -495,10 +503,11 @@ class MHA(Operator):
             return 1
         return ceildiv(seq_len, 64) * 64
 
-    def key_block(self, B_q: int, mem: int | None) -> int:
+    def key_block(self, B_q: int, dev: Device | None) -> int:
         """``B_kv`` for ``B_q``: ``B_q`` itself, which mha.cc's causal skip
-        compares by; packed, past every key, the widest that fits ``mem`` (any
-        where None), since mha.cc's vectorized softmax reads 64-key rows."""
+        compares by; packed, past every key, the widest whose cores fit
+        ``dev`` (any where None), since mha.cc's vectorized softmax reads
+        64-key rows."""
         if not self.packed:
             return B_q
         return next(
@@ -507,12 +516,15 @@ class MHA(Operator):
                 for b in (64, 32, 16)
                 if B_q <= b
                 and not self.kv_len % b
-                and (mem is None or self.core_bytes(B_q, b, 1) <= mem)
+                and (
+                    dev is None
+                    or self.core_bytes(dev, B_q, b, 1) <= dev.core_memory_bytes
+                )
             ),
             B_q,
         )
 
-    def core_bytes(self, B_q: int, B_kv: int, pv_cores: int) -> int:
+    def core_bytes(self, dev, B_q: int, B_kv: int, pv_cores: int) -> int:
         """The L1 bytes the fuller of a pipeline's QK^T and P*V cores holds.
 
         Args:
@@ -524,7 +536,32 @@ class MHA(Operator):
         d, pv_width = self.d, self.d // pv_cores
         pv = 4 * B_q * B_kv + 4 * pv_width * B_kv + 6 * pv_width * B_q + 32 * B_q
         qk = (4 if pv_cores == 1 else 2) * d * B_q + 4 * d * B_kv + 4 * B_q * B_kv
-        return max(pv, qk) + STACK_SIZE
+        # Made to be read, not built: kept out of the registry a build reads.
+        with compile_context(_iron_kernel_registry=set()):
+            qk_mha = self.mha_kernel(B_q, d, B_kv, dev.arch is AIEArch.AIE2p)
+            pv_mha = qk_mha if pv_cores == 1 else self.mha_kernel(B_q, pv_width, B_kv)
+            bind = pv_mha.object_file.bind
+            pv += core_stack(
+                dev, bind("matmul_PV"), bind("rescale_O"), objects=(pv_mha,)
+            )
+            qk += core_stack(
+                dev, qk_mha, kernels.zero(tile_size=(B_q, B_kv), dtype=bfloat16)
+            )
+        return max(pv, qk)
+
+    def mha_kernel(self, B_q: int, width: int, B_kv: int, accurate_exp2=False):
+        """mha.cc at a ``B_q`` x ``width`` x ``B_kv`` block."""
+        return kernels.linalg.mha(
+            B_q,
+            width,
+            B_kv,
+            b_col_maj=True,
+            accurate_exp2=accurate_exp2,
+            causal=self.causal,
+            window=self.window or 0,
+            # Unwindowed decode runs as it has, without mha.cc's packed path.
+            packed=self.packed and self.window is not None,
+        )
 
     def build(self) -> Built:
         of_depth = 2
@@ -555,17 +592,7 @@ class MHA(Operator):
         # The rest bind from mha.cc's object: declared apart, each would
         # redefine it. Never on bfp16 macs: bfp16 shares an exponent over 8
         # keys of P*V, and the softmax bounds the time.
-        matmul_QK = kernels.linalg.mha(
-            B_q,
-            d,
-            B_kv,
-            b_col_maj=True,
-            accurate_exp2=accurate_exp2,
-            causal=self.causal,
-            window=self.window or 0,
-            # Unwindowed decode runs as it has, without mha.cc's packed path.
-            packed=self.packed and self.window is not None,
-        )
+        matmul_QK = self.mha_kernel(B_q, d, B_kv, accurate_exp2)
         mha_object = matmul_QK.object_file
 
         zero_scores = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
@@ -594,15 +621,7 @@ class MHA(Operator):
         pv_object = (
             mha_object
             if pv_cores == 1
-            else kernels.linalg.mha(
-                B_q,
-                pv_width,
-                B_kv,
-                b_col_maj=True,
-                causal=self.causal,
-                window=self.window or 0,
-                packed=self.packed and self.window is not None,
-            ).object_file
+            else self.mha_kernel(B_q, pv_width, B_kv).object_file
         )
         matmul_PV = pv_object.bind(
             "matmul_PV",
@@ -914,7 +933,6 @@ class MHA(Operator):
                         qk_rtps[i],
                         idx_buffer_qk,
                     ],
-                    stack_size=STACK_SIZE,
                     tile=Tile(i, 2) if split else AnyComputeTile,
                 )
             )
@@ -963,7 +981,6 @@ class MHA(Operator):
                             idx_buffer_pv,
                             Buffer(acc_ty),
                         ],
-                        stack_size=STACK_SIZE,
                         tile=Tile(i, 3 + 2 * h) if split else AnyComputeTile,
                     )
                 )

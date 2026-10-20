@@ -586,10 +586,9 @@ class _Array:
         body,
         args: list,
         channels: list[DmaChannel],
-        stack_size: int = 4 * 1024,
     ) -> None:
         """A core running ``body`` on ``args``, and its tile's DMA channels."""
-        self.workers.append(Worker(body, args, tile=tile, stack_size=stack_size))
+        self.workers.append(Worker(body, args, tile=tile))
         self.rt.add_tile_dma(TileDma(tile, channels))
 
     def rms(self, rms_tile: Tile) -> Buffer:
@@ -995,7 +994,6 @@ class _Array:
             proj_body,
             [y0, w0, x0, y1, w1, x1, is_swa, skip_kv, kern],
             chans,
-            stack_size=10 * 1024,
         )
         return y0, y1
 
@@ -1191,7 +1189,6 @@ class _Array:
                     ).permute((1, 0, 2)),
                 ),
             ],
-            stack_size=1024 * 6,
         )
 
     def attn_qk(

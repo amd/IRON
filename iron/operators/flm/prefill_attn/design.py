@@ -82,8 +82,6 @@ class Variant:
     name: str
     factory: Callable[..., ExternalFunction]
     num_cu: int  # column groups, one query head each per pass
-    # Core stack bytes: the FastFlowLM overlay's, which ends at its lowest buffer.
-    stack_size: int
     # The memtile, of MT, that splits the q fifos of column pair p; it shares
     # no memtile with k and v, whose channels o's join already half spends.
     q_memtile: Callable[[int], int]
@@ -99,7 +97,6 @@ CAUSAL = Variant(
     name="causal",
     factory=flm_gemma4.flm_gemma4_attn_prefill,
     num_cu=2,
-    stack_size=3072,
     q_memtile=lambda p: 2 * p + p % 2,
     kv_memtile=2,
     windowed=False,
@@ -110,7 +107,6 @@ SLIDING = Variant(
     name="sliding",
     factory=flm_gemma4.flm_gemma4_swa_prefill,
     num_cu=4,
-    stack_size=3712,
     q_memtile=lambda p: 2 * p,
     kv_memtile=3,
     windowed=True,
@@ -595,7 +591,6 @@ def prefill_attn(
                 ],
                 tile=tile,
                 while_true=True,
-                stack_size=v.stack_size,
             )
         )
         rt.add_tile_dma(

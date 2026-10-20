@@ -583,7 +583,6 @@ class ResampleTaps(Operator):
                         quantize_k,
                         rtps[k],
                     ],
-                    stack_size=4096,
                 )
             )
         self.table.bind([f.cons() for f in of_tables])

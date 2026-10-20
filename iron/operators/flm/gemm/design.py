@@ -22,6 +22,7 @@ memtile budget helpers and the parameter-buffer layout they and
 the shipped overlay (``iron/tests/support/shipped.py``) share.
 """
 
+from collections.abc import Callable
 from enum import StrEnum
 from typing import NamedTuple
 
@@ -60,9 +61,6 @@ C_DEPTH = 2  # C fifo depth; also the core-body unroll
 C_JOINS = 2
 B_DEPTH = 2  # the deepest L1 B ring the budget below tries
 A_DEPTH = 2
-# L1 bytes reserved for the core's stack: past the device default of 1024,
-# the most aiecc measures a build needing is 2304 (AIE2P's bf16 B^T kernel).
-STACK_SIZE = 2560
 # L1 bytes the activation LUT tables occupy, which the buffer budget must not
 # hand out either. On AIE2 the activations come from lut_based_ops, whose
 # tables are bank-pinned in local memory; AIE2P computes its activations and
@@ -188,6 +186,7 @@ def l1_tiles(
     ct_max_k: int,
     b_elem_bytes: float,
     budget: int,
+    stack: Callable[[int], int],
     m_chunk: int = 1,
     k_tile: int = K_TILE,
     t_ma: int | None = None,
@@ -198,9 +197,9 @@ def l1_tiles(
     far more than B's L1 prefetch; ``t_ma`` fixes the height instead. A depth
     divides the ``k_tile // ct_max_k`` B chunks a k step consumes, since the
     core walks the ring that many at a time. ``budget`` is the whole local
-    memory; the stack comes off it here.
+    memory; ``stack(height)``, the core's stack at an A band ``height``, comes
+    off it here.
     """
-    budget -= STACK_SIZE
     # m_chunk accumulators, since the core holds a B chunk across that many
     # row-blocks. The only term that scales with it.
     acc = m_chunk * M_TILE * n_tile * 4
@@ -212,7 +211,7 @@ def l1_tiles(
         b = int(ct_max_k * n_tile * b_elem_bytes) * b_depth
         for height in heights:
             a = (2 * R * ct_max_k) * (height // R // 2) * 2 * A_DEPTH
-            if acc + a + b + cout <= budget:
+            if acc + a + b + cout + stack(height) <= budget:
                 return height, b_depth
     if t_ma is None:
         raise ValueError(

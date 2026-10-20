@@ -89,8 +89,12 @@ def _cases(cls, dev: Device):
     return out
 
 
-# A core's stack, and the depth of each core-side fifo of A, B and C.
+# What the tile search budgets for a core's stack, which aiecc sizes per
+# build: above the 2784 B the deepest measured tile needs (npu1), and the
+# budget mlir-aie's nightly times GEMM's tiles under. Reading each tile's own
+# frame builds a kernel per tile a search tries.
 STACK_BYTES = 0xD00
+# The depth of each core-side fifo of A, B and C.
 FIFO_DEPTH = 2
 
 
@@ -545,7 +549,6 @@ class GEMM(Operator):
                             rtps[row * n_aie_cols + col],
                             acc_buffer,
                         ],
-                        stack_size=STACK_BYTES,
                         tile=Tile(col, 2 + row) if pinned else AnyComputeTile,
                     )
                 )
