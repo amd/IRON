@@ -972,8 +972,29 @@ class ProjectionGEMM(Operator):
                 )
             return flow.endpoint(pool.mt_tiles[c]).task(*chain, runs=passes).start()
 
+        # A row-block's C goes out in as few runs of rows as one shim
+        # descriptor reaches: past N = 8192, the step from one row-block to
+        # the next outgrows its stride field.
+        c_runs = next(
+            (
+                runs
+                for runs in range(1, ROWS * M_TILE + 1)
+                if (ROWS * M_TILE) % runs == 0
+                and self.C.fits(
+                    TensorAccessPattern.full(
+                        (M // (ROWS * M_TILE) * runs, ROWS * M_TILE // runs, N)
+                    )[:, :, :N_TILE]
+                )
+            ),
+            1,
+        )
         C = TensorAccessPattern.full(
-            (M // (ROWS * M_TILE), ROWS * M_TILE, N // N_TILE, N_TILE)
+            (
+                M // (ROWS * M_TILE) * c_runs,
+                ROWS * M_TILE // c_runs,
+                N // N_TILE,
+                N_TILE,
+            )
         )
 
         def c_tap(mega_col, c, slab):
@@ -981,7 +1002,8 @@ class ProjectionGEMM(Operator):
             # N_TILE per row-block, in plain row-block order even under
             # M_CHUNK.
             row_blocks = slice(
-                slab.first * M_CHUNK, (slab.first + slab.units) * M_CHUNK
+                slab.first * M_CHUNK * c_runs,
+                (slab.first + slab.units) * M_CHUNK * c_runs,
             )
             return C[row_blocks, :, mega_col * COLS + c]
 

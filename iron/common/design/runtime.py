@@ -217,30 +217,30 @@ class OperatorRuntime(Runtime):
                 f"length is a scratchpad word patched into the descriptor"
             )
         _, sizes, strides = shim_dims(tap)
-        dim = scale = None
+        dim, scale = None, 1
         if length_parameter is not None:
             # A patched descriptor's length ends at its outermost dimension
             # below the iteration; an xclbin's stream, regenerated per call,
-            # sizes any dimension of length_unit-element units.
+            # sizes any dimension of length_unit-element units. A unit may
+            # span several steps of the dimension, as a linear run's elements.
             patched = length_parameter.ssa is None
             dim = next(
                 (
                     d
                     for d in range(1, 4)
                     if (prod(sizes[1:d]) == 1 or not patched)
-                    and prod(sizes[d + 1 :]) == length_unit
+                    and length_unit % prod(sizes[d + 1 :]) == 0
+                    and prod(sizes[d:]) % length_unit == 0
                 ),
                 None,
             )
-            if dim is None and prod(sizes[1:3]) == 1 and sizes[3] % length_unit == 0:
-                # One linear run, whose length counts its elements: units of them.
-                dim, scale = 3, length_unit
             if dim is None:
                 raise ValueError(
                     f"{type(self.op).__name__}.{buffer.name}: {tap} has no "
                     f"descriptor dimension of {length_unit}-element units"
                     + (" below the iteration, outermost" if patched else "")
                 )
+            scale = length_unit // prod(sizes[dim + 1 :])
         data = self._tensors[buffer.name]
         if pinned and managed:
             # The image's memtiles hold depth objects: past that, wait for the oldest.
@@ -293,7 +293,7 @@ class OperatorRuntime(Runtime):
                 inner = zip(sizes[dim + 1 :], strides[dim + 1 :])
                 strides[dim] = max(n * stride for n, stride in inner)
             sizes[dim] = length_parameter.ssa
-            if scale is not None:
+            if scale > 1:
                 sizes[dim] = arith.muli(
                     length_parameter.ssa,
                     arith.constant(scale, IntegerType.get_signless(32)),

@@ -501,9 +501,19 @@ def _flm_gemm_moves(op, full_elf, rows):
             r"aiex\.dma_start_task\(%(\d+)\) \{repeat_parameter = @(\w+)\}", text
         )
     )
+    # A size of several steps per unit is the scalar times their count.
+    widened = dict(re.findall(r"(%\w+) = arith\.extsi (%\w+)", text))
+    steps = dict(re.findall(r"(%\w+) = arith\.muli %\w+, %c(\d+)_i32", text))
     moved = dict.fromkeys((b.name for b in op.buffers), 0)
     for t in tasks:
-        sizes = [units if s.startswith("%") else int(s) for s in t.sizes.split(", ")]
+        sizes = [
+            (
+                units * int(steps.get(widened.get(s, s), 1))
+                if s.startswith("%")
+                else int(s)
+            )
+            for s in t.sizes.split(", ")
+        ]
         elements = prod(sizes[1:])
         if t.length_parameter:
             elements = words[t.length_parameter] * int(t.length_unit)
@@ -518,23 +528,26 @@ def _flm_gemm_moves(op, full_elf, rows):
     return moved
 
 
+@pytest.mark.parametrize("width", [2048, 8960], ids=["llama_q", "qwen2_up"])
 @pytest.mark.parametrize("image", ["elf", "xclbin"])
 @pytest.mark.parametrize("device", ["npu1", "npu2"])
 def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
-    device, image, request
+    device, image, width, request
 ):
     """Llama's q projection on a 15-row prompt chunk moves A and C for one
     unit, the 256 rows its four core rows join into a C block, and at 2048
     rows for all eight, as it does unbounded. B moves the same at any bound,
-    and A once per column block, as unbounded.
+    and A once per column block, as unbounded. Qwen2.5 1.5B's up projection
+    drains a unit's C in two runs of rows: its row blocks are further apart
+    than one shim descriptor's stride reaches.
     """
     dev = request.getfixturevalue(device)
-    M = K = width = 2048
+    M = K = 2048
     unbounded = flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True).resolved(dev)
     op = flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True)
     op.use_value("valid", N)
     op = op.resolved(dev)
-    blocks = width // (op.tile_n * op.cols)
+    blocks = -(-width // (op.tile_n * op.cols))
     full_elf = image == "elf"
     whole = _flm_gemm_moves(unbounded, full_elf, M)
     for rows, units in ((15, 1), (256, 1), (257, 2), (2048, 8)):
