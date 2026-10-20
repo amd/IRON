@@ -54,7 +54,7 @@ from aie.iron.kernels import (
     FlmGemma4DecodeGeometry,
     flm_gemma4,
 )
-from aie.iron.controlflow import range_, yield_
+from aie.iron.controlflow import range_
 from aie.iron.dataflow import Flow, PacketFlow
 from aie.iron.device import Tile
 
@@ -241,6 +241,17 @@ _X_FROM_GLU = 22
 _KV_PKT_GLOBAL = 12
 _KV_PKT_SWA = 13
 
+# The KV cache streams, shim to attention memtile to core. Both layer types'
+# streams share a shim channel, and the packet id picks the one a dispatch
+# fills. Fields: the stream, its shim channel, its packet id, the memtile
+# channel it leaves on, and the stage whose core reads it.
+KV_STREAMS = (
+    ("k", 0, _KV_PKT_GLOBAL, 0, "attn_qk"),
+    ("v", 1, _KV_PKT_GLOBAL, 1, "attn_kv"),
+    ("swa_k", 0, _KV_PKT_SWA, 2, "swa_attn_qk"),
+    ("swa_v", 1, _KV_PKT_SWA, 3, "swa_attn_kv"),
+)
+
 
 def layer_kernels(geometry):
     """The flm_gemma4_decode_* kernels that this design's cores link, by kernel name.
@@ -383,17 +394,6 @@ def _single_bd(direction, channel, buf, acq, rel, **bd_args):
     )
 
 
-def _pick_ping_pong(is_ping, b0, b1):
-    """The buffer this acquire took from the pair, and the parity after it.
-
-    A ping_pong channel alternates b0 and b1 behind one lock pair, so a core
-    that acquires from it must track which buffer each acquire handed over.
-    b0 comes first, from a ``False`` start.
-    """
-    nxt = arith.xori(is_ping, constant(True, type=T.bool()))
-    return arith.select(nxt, b0.op.buffer, b1.op.buffer), nxt
-
-
 def _call_kernel(*args):
     """A core body that calls the kernel, its last argument, on the others."""
     args[-1](*args[:-1])
@@ -520,6 +520,7 @@ def _sequence(
     max_l_arg,
     pli_prods,
     y_cons,
+    kv_prods,
 ):
     """The runtime sequence of one ``layer_type`` dispatch.
 
@@ -633,6 +634,7 @@ def _sequence(
             emit(*legs)
 
     pli_prod = dict(zip([name for name, *_ in PLI_WEIGHTS], pli_prods))
+    kv_prod = dict(zip([key for key, *_ in KV_STREAMS], kv_prods))
 
     def pli_leg(name):
         """One leg over the bf16 weight ``name``, filling that weight's fifo.
@@ -664,12 +666,26 @@ def _sequence(
     # x reuses pli_rope_rms's channel as a second BD.
     emit(leg("pli_rope_rms", x_arg.op, 2 * D, D, token=False))
     emit_started(pli_leg("pli_down"))
-    # The KV cache into the attention memtile.
-    mv_pkt = _KV_PKT_SWA if IS_SWA else _KV_PKT_GLOBAL
+    # The KV cache into the attention memtile. This layer type's pair of
+    # KV_STREAMS fifos carries it; the other pair stays idle this dispatch.
+    k_key, v_key = ("swa_k", "swa_v") if IS_SWA else ("k", "v")
+
+    def kv_leg(key, off, length, token=True):
+        """One leg of the KV cache into ``key``'s fifo."""
+        task = kv_prod[key].fill(
+            kv_arg,
+            tap=TensorAccessPattern(
+                (arg_lens["kv"],), off, [1, 1, 1, length], [0, 0, 0, 1]
+            ),
+            wait=token,
+            managed=False,
+        )
+        return task.handle, token
+
     if not IS_SWA:
         d2m = _ceil_mul(L, LK) * DK
-        emit(leg("move_k", kv_arg.op, 0, d2m, pkt=mv_pkt))
-        emit(leg("move_v", kv_arg.op, v_cache_off, d2m, pkt=mv_pkt))
+        emit_started(kv_leg(k_key, 0, d2m))
+        emit_started(kv_leg(v_key, v_cache_off, d2m))
     else:
         # The sliding-window cache is a ring of `rows` rows. Its oldest row is
         # `start`. Phase 1 sends rows start..rows-1. Phase 2 sends rows
@@ -690,19 +706,10 @@ def _sequence(
         p1_len = (rows - start) * DK - arith.andi(_z, _as_i32(DK))
         p2_off = arith.andi(_z, p1_len)
         p2_len = arith.ori(start * DK, arith.andi(_z, _as_i32(DK)))
-        emit(leg("move_k", kv_arg.op, p1_off, p1_len, pkt=mv_pkt))
-        emit(leg("move_v", kv_arg.op, p1_off + v_cache_off, p1_len, pkt=mv_pkt))
-        emit(leg("move_k", kv_arg.op, p2_off, p2_len, token=False, pkt=mv_pkt))
-        emit(
-            leg(
-                "move_v",
-                kv_arg.op,
-                p2_off + v_cache_off,
-                p2_len,
-                token=False,
-                pkt=mv_pkt,
-            )
-        )
+        emit_started(kv_leg(k_key, p1_off, p1_len))
+        emit_started(kv_leg(v_key, p1_off + v_cache_off, p1_len))
+        emit_started(kv_leg(k_key, p2_off, p2_len, token=False))
+        emit_started(kv_leg(v_key, p2_off + v_cache_off, p2_len, token=False))
     for name in ("o", "up_gate", "down"):
         move_weights(weights[name])
     emit_started(pli_leg("pli_gate"))
@@ -1540,10 +1547,12 @@ def _scores_ty(ctx, name):
     return first.arg_types()[0]
 
 
-def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads, handshake):
+def _build_attn_kv(
+    ctx, kv_tile, name, rtp_key, dh, of_s, v_fifo, two_kv_heads, handshake
+):
     """An attention kv core.
 
-    The core takes the scores from of_s and v on S2MM 1. It sends o to the
+    The core takes the scores from of_s and v from v_fifo on S2MM 1. It sends o to the
     projection engine on MM2S 0. It reads its RTPs only once it holds
     ``handshake``, a lock of the qk core on the tile below.
 
@@ -1560,61 +1569,45 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads, handshak
     if two_kv_heads:
         k_sbeg = ctx.entry(name, f"{name}_s_begin")
         k_vhalf = ctx.entry(name, f"{name}_v_half")
-        v_ty = k_vhalf.arg_types()[1]
     else:
         k_round = ctx.entry(name, f"{name}_round")
-        v_ty = k_round.arg_types()[1]
     y_ty, o_ty, l_ty = k_finish.arg_types()
     L = ctx.rtp_buffer(kv_tile, rtp_key)
-    v0 = Buffer(type=v_ty, name=f"v_0_{r}_{c}", tile=kv_tile)
-    v1 = Buffer(type=v_ty, name=f"v_1_{r}_{c}", tile=kv_tile)
     y = Buffer(type=y_ty, name=f"y_{r}_{c}", tile=kv_tile)
     o = Buffer(type=o_ty, name=f"o_{r}_{c}", tile=kv_tile)
-    v_prod, v_cons = ctx.add_locks(kv_tile, [2, 0])
     # The down projection reads o o_repeats times a dispatch.
     o_prod, o_cons = ctx.add_locks(kv_tile, [o_repeats, 0])
     lbuf = Buffer(type=l_ty, name=f"l_{r}_{c}", tile=kv_tile)
     if two_kv_heads:
 
-        def kv_body(hs, s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
+        def kv_body(hs, s_in, v_h, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
             kb(yy, ll)
             hs.acquire(1)
-            false = constant(False, type=T.bool())
-            for _, (row_is_ping,), rows in range_(
-                (rtp_l[0] + (LK - 1)) // LK, iter_args=[false]
-            ):
+            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
                 s = s_in.acquire(1)
                 ksb(s, yy, ll)
-                for j, (is_ping,), halves in range_(2, iter_args=[row_is_ping]):
-                    v_cons.acquire(1)
-                    v, nxt = _pick_ping_pong(is_ping, v_0, v_1)
+                for j in range_(2):
+                    v = v_h.acquire(1)
                     kvh(s, v, yy, j)
-                    v_prod.release(1)
-                    yield_([nxt])
+                    v_h.release(1)
                 s_in.release(1)
-                yield_([halves[0]])
             o_prod.acquire(o_repeats)
             kf(yy, oo, ll)
             o_cons.release(o_repeats)
 
-        args = [handshake, of_s.cons(), v0, v1, y, lbuf, o, L]
+        args = [handshake, of_s.cons(), v_fifo.cons(channel=1), y, lbuf, o, L]
         args += [k_begin, k_sbeg, k_vhalf, k_finish]
     else:
 
-        def kv_body(hs, s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
+        def kv_body(hs, s_in, v_h, yy, ll, oo, rtp_l, kb, kr, kf):
             kb(yy, ll)
             hs.acquire(1)
-            false = constant(False, type=T.bool())
-            for _, (is_ping,), _rows in range_(
-                (rtp_l[0] + (LK - 1)) // LK, iter_args=[false]
-            ):
+            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
                 s = s_in.acquire(1)
-                v_cons.acquire(1)
-                v, nxt = _pick_ping_pong(is_ping, v_0, v_1)
+                v = v_h.acquire(1)
                 kr(s, v, yy, ll)
-                v_prod.release(1)
+                v_h.release(1)
                 s_in.release(1)
-                yield_([nxt])
             o_prod.acquire(o_repeats)
             kf(yy, oo, ll)
             o_cons.release(o_repeats)
@@ -1622,8 +1615,7 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads, handshak
         args = [
             handshake,
             of_s.cons(),
-            v0,
-            v1,
+            v_fifo.cons(channel=1),
             y,
             lbuf,
             o,
@@ -1638,11 +1630,6 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads, handshak
         TileDma(
             kv_tile,
             [
-                DmaChannel(
-                    DMAChannelDir.S2MM,
-                    1,
-                    ping_pong(v0, v1, v_prod, v_cons),
-                ),
                 _single_bd(
                     DMAChannelDir.MM2S,
                     0,
@@ -1660,11 +1647,12 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads, handshak
 
 
 def _build_attn_qk(
-    ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads, handshake
+    ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, k_fifo, two_kv_heads, handshake
 ):
     """An attention qk core.
 
-    The core takes q from q_fifo and k on S2MM 1. It sends the scores to of_s.
+    The core takes q from q_fifo and k from k_fifo on S2MM 1. It sends the
+    scores to of_s.
     It releases ``handshake`` once it has read its RTPs.
     """
     r, c = qk_tile.row, qk_tile.col
@@ -1677,13 +1665,10 @@ def _build_attn_qk(
     else:
         k_round = ctx.entry(name, "attn_qk_round")
         k_step = k_round
-    q_ty, k_ty, _, m_ty, c_ty = k_step.arg_types()[:5]
+    q_ty, _, _, m_ty, c_ty = k_step.arg_types()[:5]
     # The kernel pads each KV head's query group.
     (q_len,) = np_ndarray_type_get_shape(q_ty)
     NQ_PADDED = q_len // dh
-    k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
-    k1 = Buffer(type=k_ty, name=f"k_1_{r}_{c}", tile=qk_tile)
-    k_prod, k_cons = ctx.add_locks(qk_tile, [2, 0])
     L = ctx.rtp_buffer(qk_tile, rtp_key)
     q_in_order = TensorAccessPattern(
         (NQ_PADDED, dh), 0, [NQ_PADDED, dh // 8, 8], [8, NQ_PADDED * 8, 1]
@@ -1693,44 +1678,33 @@ def _build_attn_qk(
     # The q acquire orders the RTP read after the sequence's RTP writes.
     if two_kv_heads:
 
-        def qk_body(hs, s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
+        def qk_body(hs, s_out, q_h, k_h, mm, cc, rtp_l, kb, kh, ks):
             q = q_h.acquire(1)
             kb(mm)
             hs.release(1)
-            false = constant(False, type=T.bool())
-            for i, (row_is_ping,), rows in range_(
-                (rtp_l[0] + (LK - 1)) // LK, iter_args=[false]
-            ):
+            for i in range_((rtp_l[0] + (LK - 1)) // LK):
                 s = s_out.acquire(1)
-                for j, (is_ping,), halves in range_(2, iter_args=[row_is_ping]):
-                    k_cons.acquire(1)
-                    k, nxt = _pick_ping_pong(is_ping, k_0, k_1)
+                for j in range_(2):
+                    k = k_h.acquire(1)
                     kh(q, k, s, mm, cc, j, i, rtp_l[0])
-                    k_prod.release(1)
-                    yield_([nxt])
+                    k_h.release(1)
                 ks(s, cc)
                 s_out.release(1)
-                yield_([halves[0]])
             q_h.release(1)
 
         kerns = [k_begin, k_half, k_storec]
     else:
 
-        def qk_body(hs, s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kr):
+        def qk_body(hs, s_out, q_h, k_h, mm, cc, rtp_l, kb, kr):
             q = q_h.acquire(1)
             kb(mm)
             hs.release(1)
-            false = constant(False, type=T.bool())
-            for i, (is_ping,), _ in range_(
-                (rtp_l[0] + (LK - 1)) // LK, iter_args=[false]
-            ):
+            for i in range_((rtp_l[0] + (LK - 1)) // LK):
                 s = s_out.acquire(1)
-                k_cons.acquire(1)
-                k, nxt = _pick_ping_pong(is_ping, k_0, k_1)
+                k = k_h.acquire(1)
                 kr(q, k, s, mm, cc, i, rtp_l[0])
-                k_prod.release(1)
+                k_h.release(1)
                 s_out.release(1)
-                yield_([nxt])
             q_h.release(1)
 
         kerns = [k_begin, k_round]
@@ -1739,38 +1713,35 @@ def _build_attn_qk(
         handshake,
         of_s.prod(),
         q_fifo.cons(from_stream=q_in_order),
-        k0,
-        k1,
+        k_fifo.cons(channel=1),
         m_buf,
         c_local,
         L,
     ] + kerns
     ctx.workers.append(Worker(qk_body, args, tile=qk_tile, stack_size=1024 * 4))
-    ctx.rt.add_tile_dma(
-        TileDma(
-            qk_tile,
-            [
-                DmaChannel(
-                    DMAChannelDir.S2MM,
-                    1,
-                    ping_pong(k0, k1, k_prod, k_cons),
-                ),
-            ],
-        )
-    )
 
 
-def _build_attn_mem(ctx, amt):
-    """The attention memtile.
+def _kv_core_type(kernels, stage, two_kv):
+    """The k or v object type that ``stage``'s kernel reads."""
+    names = {
+        "attn_qk": "attn_qk_half" if two_kv else "attn_qk_round",
+        "attn_kv": "attn_kv_v_half" if two_kv else "attn_kv_round",
+        "swa_attn_qk": "attn_qk_round",
+        "swa_attn_kv": "swa_attn_kv_round",
+    }
+    return getattr(kernels[stage], names[stage]).arg_types()[1]
 
-    It takes k, v, swa_k and swa_v in whole rows. It sends each to its core in
-    the order the core's kernel reads.
+
+def _kv_fifos(g, kernels, amt, kv_shim):
+    """One ObjectFifo per KV stream: shim, attention memtile, then core.
+
+    Returns the producer handles in KV_STREAMS order, for the runtime, and
+    each stream's core-side fifo by name. The memtile walks every object into
+    the order its core's kernel reads. A two-KV-head core reads half an object
+    at a time, so its forward re-chunks.
     """
-    g = ctx.g
     NUM_KV, two_kv = g.num_kv_heads, g.num_kv_heads == 2
-    amt_name = f"{amt.row}_{amt.col}"
-    k_row = NUM_KV * g.dh
-    sk_row = NUM_KV * g.swa_dh
+    k_row, sk_row = NUM_KV * g.dh, NUM_KV * g.swa_dh
     k_order = [(k_row // 8, 8), (16, k_row), (8, 1)]
     if not two_kv:
         v_order = [(LK // 8, LK // 2 * k_row), (k_row // 8, 8), (8, k_row), (8, 1)]
@@ -1778,44 +1749,34 @@ def _build_attn_mem(ctx, amt):
         v_order = [(k_row // 8, 8), (LK, k_row), (8, 1)]
     sk_order = [(sk_row // 8, 8), (16, sk_row), (8, 1)]
     sv_order = [(LK // 8, LK // 2 * sk_row), (sk_row // 8, 8), (8, sk_row), (8, 1)]
-    amt_chans = []
-    for ch, (key, row, order) in enumerate(
-        (
-            ("k", k_row, k_order),
-            ("v", k_row, v_order),
-            ("swa_k", sk_row, sk_order),
-            ("swa_v", sk_row, sv_order),
+    rows = dict(k=k_row, v=k_row, swa_k=sk_row, swa_v=sk_row)
+    orders = dict(k=k_order, v=v_order, swa_k=sk_order, swa_v=sv_order)
+
+    prods, cores = [], {}
+    for key, shim_ch, pkt, mem_ch, stage in KV_STREAMS:
+        row, order = rows[key], orders[key]
+        of = ObjectFifo(
+            np.ndarray[(LK, row), _BF16],
+            name=f"{key}_in",
+            depth=2,
+            packet=True,
+            packet_id=pkt,
         )
-    ):
-        b0, b1 = (
-            Buffer(
-                type=np.ndarray[(LK, row), _BF16],
-                name=f"{key}_mem_buffer_{i}_{amt_name}",
-                tile=amt,
-            )
-            for i in (0, 1)
-        )
-        prod, cons = ctx.add_locks(amt, [2, 0])
-        amt_chans += [
-            DmaChannel(DMAChannelDir.S2MM, ch, ping_pong(b0, b1, prod, cons)),
-            DmaChannel(
-                DMAChannelDir.MM2S,
-                ch,
-                ping_pong(
-                    b0,
-                    b1,
-                    cons,
-                    prod,
-                    tap=TensorAccessPattern(
-                        b0.shape,
-                        0,
-                        [size for size, _ in order],
-                        [stride for _, stride in order],
-                    ),
-                ),
+        cores[key] = of.cons().forward(
+            tile=amt,
+            obj_type=_kv_core_type(kernels, stage, two_kv),
+            depth=2,
+            name=f"{key}_to_core",
+            to_stream=TensorAccessPattern(
+                (LK, row),
+                0,
+                [size for size, _ in order],
+                [stride for _, stride in order],
             ),
-        ]
-    ctx.rt.add_tile_dma(TileDma(amt, amt_chans))
+            channel=mem_ch,
+        )
+        prods.append(of.prod(tile=kv_shim, channel=shim_ch))
+    return prods, cores
 
 
 def _route(rt, grid, t, proj_send_tiles):
@@ -1933,34 +1894,8 @@ def _route(rt, grid, t, proj_send_tiles):
     )
     rt.add_flow(PacketFlow(_X_FROM_GLU, t["glu"], proj_x, src_channel=0, dst_channel=3))
 
-    # The KV cache into the attention memtile.
-    amt = t["attn_mem"]
-    rt.add_flow(
-        PacketFlow(
-            _KV_PKT_GLOBAL,
-            kv_shim,
-            amt,
-            src_channel=0,
-            dst_channel=0,
-            shim_symbol="move_k",
-        )
-    )
-    rt.add_flow(PacketFlow(_KV_PKT_SWA, kv_shim, amt, src_channel=0, dst_channel=2))
-    rt.add_flow(
-        PacketFlow(
-            _KV_PKT_GLOBAL,
-            kv_shim,
-            amt,
-            src_channel=1,
-            dst_channel=1,
-            shim_symbol="move_v",
-        )
-    )
-    rt.add_flow(PacketFlow(_KV_PKT_SWA, kv_shim, amt, src_channel=1, dst_channel=3))
-    rt.add_flow(Flow(amt, t["attn_qk"], src_channel=0, dst_channel=1))
-    rt.add_flow(Flow(amt, t["attn_kv"], src_channel=1, dst_channel=1))
-    rt.add_flow(Flow(amt, t["swa_attn_qk"], src_channel=2, dst_channel=1))
-    rt.add_flow(Flow(amt, t["swa_attn_kv"], src_channel=3, dst_channel=1))
+    # The KV cache reaches the attention memtile and its cores through the
+    # KV_STREAMS fifos, which route themselves.
 
     # The per-layer-input path. Only the rope and rms stream keeps a flow of
     # its own; ObjectFifos route the rest of the cluster themselves.
@@ -2022,6 +1957,7 @@ def decode_layer(
     }
     # The layer output. One buffer, as the engine's single y BD has.
     y_of = ObjectFifo(np.ndarray[(g.model_dim,), _BF16], name="layer_y", depth=1)
+    kv_prods, kv_cores = _kv_fifos(g, kernels, t["attn_mem"], t["kv_shim"])
     # The up projection's input, gathered on the merge tile: the embedding
     # output in front, the gate output behind it.
     D, PLI = g.model_dim, g.pli_d
@@ -2052,6 +1988,7 @@ def decode_layer(
                 for name, _, shim, ch in PLI_WEIGHTS
             ],
             y_of.cons(tile=t["x_shim"], channel=0),
+            kv_prods,
         ],
     )
     workers = []
@@ -2086,10 +2023,27 @@ def decode_layer(
     # its own only afterwards. It lives on the qk tile, south of the kv tile.
     (g_handshake,) = ctx.add_locks(t["attn_qk"], [0])
     _build_attn_kv(
-        ctx, t["attn_kv"], "attn_kv", "l_kv", g.dh, of_g_s, two_kv, g_handshake
+        ctx,
+        t["attn_kv"],
+        "attn_kv",
+        "l_kv",
+        g.dh,
+        of_g_s,
+        kv_cores["v"],
+        two_kv,
+        g_handshake,
     )
     _build_attn_qk(
-        ctx, t["attn_qk"], "attn_qk", "l_qk", g.dh, of_g_s, q_of_g, two_kv, g_handshake
+        ctx,
+        t["attn_qk"],
+        "attn_qk",
+        "l_qk",
+        g.dh,
+        of_g_s,
+        q_of_g,
+        kv_cores["k"],
+        two_kv,
+        g_handshake,
     )
     of_swa_s = ObjectFifo(
         _scores_ty(ctx, "swa_attn_kv"),
@@ -2104,6 +2058,7 @@ def decode_layer(
         "swa_l_kv",
         g.swa_dh,
         of_swa_s,
+        kv_cores["swa_v"],
         False,
         swa_handshake,
     )
@@ -2115,10 +2070,10 @@ def decode_layer(
         g.swa_dh,
         of_swa_s,
         q_of_swa,
+        kv_cores["swa_k"],
         False,
         swa_handshake,
     )
-    _build_attn_mem(ctx, t["attn_mem"])
 
     _route(rt, grid, t, proj_send_tiles)
     return Program(dev, rt, workers=workers).resolve_program()
