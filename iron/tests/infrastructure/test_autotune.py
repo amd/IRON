@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 import aie.utils as aie_utils
 import numpy as np
@@ -198,21 +199,32 @@ run = Standalone("held", [ElementwiseAdd(size=8192, tile_size=256)])
 run.callable()
 print("held", flush=True)
 time.sleep(float(sys.argv[1]))
+# Its context goes with its kernel handles; the runtime then lets the NPU go.
+del run
+aie_utils.cleanup_npu_runtime()
+print("released", time.monotonic(), flush=True)
 """
 
 
 def test_timing_waits_for_another_process_to_leave_the_npu():
+    """No timed call overlaps another process's hold on the NPU: under
+    NPU_LOCK the hold blocks this process's first call, without it timing
+    waits until the holder is gone (``wait_idle``). Either way the timing
+    ends after the holder lets go, though it began while it held.
+    """
     child = subprocess.Popen(
         [sys.executable, "-c", HOLD, "3"], stdout=subprocess.PIPE, text=True
     )
     assert child.stdout.readline().strip() == "held"
     # In a container xrt-smi reports the child by its host pid, not child.pid.
     assert len(other_npu_users()) == 1
+    began = time.monotonic()
     run = Standalone("waits", [SiLU(size=SIZE, tile_size=TILE)])
-    logged = []
-    time_interleaved([run.callable], Timing(rounds=2, calls=5), log=logged.append)
-    assert child.poll() == 0
-    assert any("the NPU is in use by pid" in line for line in logged), logged
+    time_interleaved([run.callable], Timing(rounds=2, calls=5), log=lambda _: None)
+    ended = time.monotonic()
+    word, released = child.stdout.readline().split()
+    assert child.wait() == 0 and word == "released"
+    assert began < float(released) < ended
 
 
 STARVE = """
