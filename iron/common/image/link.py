@@ -202,8 +202,9 @@ class PerStep:
 
     @staticmethod
     def in_arena(scratch: list[str], residents: Mapping[str, object]) -> list[str]:
-        """The scratch buffers an arena holds: the residents, as each other
-        buffer is a buffer object of its own.
+        """The scratch buffers the cross-version arena holds: the residents,
+        as every other one lives in this image's own pool instead
+        (``PerStepCallable``).
         """
         return [r for r in scratch if r in residents]
 

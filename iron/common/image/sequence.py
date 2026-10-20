@@ -43,8 +43,9 @@ class Image:
         packaging: One full ELF, or an xclbin per step, as
             ``packaging.plan`` picks.
         arena: A shared ``ArenaPlan`` to place the scratch buffers in. The
-            full ELF places them all; a step at a time, each buffer is its
-            own buffer object, so only the residents are placed there.
+            full ELF places them all there; a step at a time, only the
+            residents are, since the others live in this image's own pool
+            instead (``PerStepCallable``), not another image's.
         residents: With ``arena``, the scratch buffers resident there, by
             storage key.
     """

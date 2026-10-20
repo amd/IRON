@@ -552,7 +552,8 @@ class PerStepCallable(ImageCallable):
     ``check`` holds each dispatched step to its reference on the NPU's
     inputs, by the step's ``tolerance()`` (``check_step``), so each
     comparison isolates one operator. Every version of a graph reads one
-    copy of the residents, in the arena.
+    copy of the residents, in the arena; its own transients share one
+    bank-split pool, each a view at the offset ``Image._layout`` gave it.
     """
 
     def __init__(self, seq, check: bool = False, arena: ScratchArena | None = None):
@@ -561,13 +562,32 @@ class PerStepCallable(ImageCallable):
         self.dispatch_values: dict[str, np.generic] = {}
         self._buffers: dict[BufferRef, XRTTensor] = {}
         self._storage: dict[str, XRTTensor] = {}
-        for root, (_, _, length) in seq.layout.items():
+        own_scratch: dict[str, tuple[int, int]] = {}
+        for root, (kind, offset, length) in seq.layout.items():
             if self.arena is not None and root in seq.residents:
+                continue
+            if kind == "scratch":
+                own_scratch[root] = (offset, length)
                 continue
             ref = BufferRef(root)
             dtype = seq.buffer_dtype(ref)
             self._storage[root] = XRTTensor((_n_elements(length, dtype),), dtype=dtype)
             self._buffers[ref] = self._storage[root]
+        # Every transient this image keeps, not a resident, is disjoint in
+        # time with some others (Image._layout's Pool.place already proved
+        # it, same as the full ELF's arena); one bank-split pool, not one
+        # buffer object each, holds them all.
+        size = max((o + n for o, n in own_scratch.values()), default=0)
+        self._scratch_banks = [
+            XRTTensor((_n_elements(min(BANK, size - start)),), dtype=BF16)
+            for start in range(0, size, BANK)
+        ]
+        for root, (offset, length) in own_scratch.items():
+            bank, offset = divmod(offset, BANK)
+            dtype = seq.buffer_dtype(BufferRef(root))
+            view = _line_view(self._scratch_banks[bank], offset, length, dtype)
+            self._storage[root] = view
+            self._buffers[BufferRef(root)] = view
         # A run of a pack is one dispatch, over its steps' buffers in turn.
         self._steps = []
         i = 0
