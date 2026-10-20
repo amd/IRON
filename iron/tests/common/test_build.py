@@ -528,33 +528,45 @@ def _flm_gemm_moves(op, full_elf, rows):
     return moved
 
 
-@pytest.mark.parametrize("width", [2048, 8960], ids=["llama_q", "qwen2_up"])
+@pytest.mark.parametrize(
+    "K, width",
+    [(2048, 2048), (2048, 8960), (8960, 1536)],
+    ids=["llama_q", "qwen2_up", "qwen2_down"],
+)
 @pytest.mark.parametrize("image", ["elf", "xclbin"])
 @pytest.mark.parametrize("device", ["npu1", "npu2"])
 def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
-    device, image, width, request
+    device, image, K, width, request
 ):
     """Llama's q projection on a 15-row prompt chunk moves A and C for one
     unit, the 256 rows its four core rows join into a C block, and at 2048
     rows for all eight, as it does unbounded. B moves the same at any bound,
     and A once per column block, as unbounded. Qwen2.5 1.5B's up projection
-    drains a unit's C in two runs of rows: its row blocks are further apart
+    drains a unit's C in two runs of rows, and its down projection computes
+    on two core rows, 128-row units: a 256-row unit of either is further
     than one shim descriptor's stride reaches.
     """
     dev = request.getfixturevalue(device)
-    M = K = 2048
-    unbounded = flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True).resolved(dev)
+    M = 2048
     op = flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True)
     op.use_value("valid", N)
     op = op.resolved(dev)
+    assert op.rows == (2 if K > 8192 else 4)
+    unbounded = (
+        flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True)
+        .replace(rows=op.rows)
+        .resolved(dev)
+    )
+    unit = op.rows * 64
     blocks = -(-width // (op.tile_n * op.cols))
     full_elf = image == "elf"
     whole = _flm_gemm_moves(unbounded, full_elf, M)
-    for rows, units in ((15, 1), (256, 1), (257, 2), (2048, 8)):
+    for rows in (15, 256, 257, 2048):
+        units = -(-rows // unit)
         assert _flm_gemm_moves(op, full_elf, rows) == {
-            "A": units * 256 * K * 2 * blocks,
+            "A": units * unit * K * 2 * blocks,
             "B": whole["B"],
-            "C": units * 256 * width * 2,
+            "C": units * unit * width * 2,
         }, rows
     assert _flm_gemm_moves(op, full_elf, M) == whole
 

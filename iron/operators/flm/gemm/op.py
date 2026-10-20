@@ -107,7 +107,7 @@ class _Built(Built):
 
 
 def _units_valid(op) -> Any:
-    """The 256-row units a call's row bound reaches, at least one.
+    """The units (rows * M_TILE rows each) a call's row bound reaches, at least one.
 
     Raises:
         ValueError: A call with no rows, which would end before the cores
@@ -287,7 +287,7 @@ class ProjectionGEMM(Operator):
             raise Unresolvable(
                 "flm.ProjectionGEMM is sized from the device's L1 and grid"
             )
-        rows, cols = compute_rows(dev), dev.cols
+        rows, cols = self.rows or compute_rows(dev), dev.cols
         # B is packed to bfp16ebs8 where the macs are bfp16 and B is not read
         # as stored; otherwise it is bf16. AIE2 has no BFP types, so its mmul
         # lowers onto four native bf16 macs.
@@ -311,6 +311,21 @@ class ProjectionGEMM(Operator):
             k_tile = K_TILE
             while self.K % k_tile and (k_tile // 2) % ct_k == 0:
                 k_tile //= 2
+        if "valid" in self.bound_extents:
+            # A bound repeats each core row's A walk once per unit, whose
+            # rows * M_TILE rows of K the shim's step field must reach.
+            while rows > 1 and not dev.dma_bd_fits(
+                0,
+                0,
+                TensorAccessPattern(
+                    (2 * rows * M_TILE, self.K),
+                    0,
+                    [2, self.K // k_tile, M_TILE, k_tile],
+                    [rows * M_TILE * self.K, k_tile, self.K, 1],
+                ),
+                bfloat16,
+            ):
+                rows //= 2
         l1 = l1_budget(dev, self.compiled_modes)
         tile_ma, l1_b_depth = l1_tiles(
             tile_n, ct_k, b_elem_bytes, l1, m_chunk, k_tile, self.tile_ma
@@ -400,7 +415,8 @@ class ProjectionGEMM(Operator):
         return (
             f"FLM_GEMM_tn{t.tile_n}_kt{t.k_tile}_ck{t.ct_max_k}"
             f"_ma{t.tile_ma}_mc{t.m_chunk}"
-            f"_em{t.epilogue_mask:x}_{t.rounding}"
+            + ("" if t.rows == compute_rows(dev) else f"_r{t.rows}")
+            + f"_em{t.epilogue_mask:x}_{t.rounding}"
             + ("" if t.gelu is Gelu.FP32 else f"_gelu_{t.gelu}")
             + ("_bt" if t.b_col_maj else "")
             + (
@@ -1131,6 +1147,7 @@ class ProjectionGEMM(Operator):
             M=M,
             K=K,
             N=N,
+            rows=self.rows,
             epilogue=Epilogue.NONE,
             epilogue_modes=self.compiled_modes,
             packed_blocks=None,
