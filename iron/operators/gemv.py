@@ -30,6 +30,9 @@ def _cases(cls, dev: Device):
         (8192, 2048, 4, 4, 1024),
         (2048, 8192, 8, 1, 256),
         (8192, 2048, 8, 4, 1024),
+        # A single-buffered: Gemma 4's and SmolLM3's down projections.
+        (1536, 12288, 8, 1, 64),
+        (2048, 11008, 8, 1, 256),
     ]
     # ... and num_batches.
     batched = [
@@ -116,6 +119,8 @@ class GEMV(Operator):
         domain=lambda op, dev, t: divisors(t, of=op.M, step=op.tile_size_input, span=3)
     )
     kernel_vector_size: int = tunable(repr=False)
+    # Filled by resolve: A double-buffered where two of its tiles fit a core, else one.
+    a_depth: int = tunable(repr=False, init=False)
 
     A = In(
         num_matrices,
@@ -225,22 +230,22 @@ class GEMV(Operator):
             kernel_vector_size=self._legal_kernel_vector_size(),
         )
         if dev is None:
-            return new
+            return new.replace(a_depth=self.a_depth or new.A.depth)
         item = np.dtype(bfloat16).itemsize
         line, out = self.K * item, new.tile_size_output * item
-        held = (
-            new.A.depth * new.tile_size_input * line
-            + line
-            + new.C.depth * out
-            + dev.default_core_stack_bytes
-        )
+        tile_bytes = new.tile_size_input * line
+        rest = line + new.C.depth * out + dev.default_core_stack_bytes
+        depth = self.a_depth or new.A.depth
+        if self.a_depth is None and depth * tile_bytes + rest > dev.core_memory_bytes:
+            depth = 1
+        held = depth * tile_bytes + rest
         if held > dev.core_memory_bytes:
             raise ValueError(
                 f"GEMV: K ({self.K}), tile_size_input ({new.tile_size_input}), "
                 f"tile_size_output ({new.tile_size_output}): a core holds {held} "
                 f"bytes, past its {dev.core_memory_bytes}"
             )
-        return new
+        return new.replace(a_depth=depth)
 
     def compatible(self):
         lanes = self.num_aie_columns * self.num_channels
@@ -280,7 +285,7 @@ class GEMV(Operator):
         )
 
         A_fifos = [
-            ObjectFifo(self.A.obj_type, depth=self.A.depth) for i in range(lanes)
+            ObjectFifo(self.A.obj_type, depth=self.a_depth) for i in range(lanes)
         ]
         C_fifos = [
             ObjectFifo(self.C.obj_type, depth=self.C.depth) for i in range(lanes)
