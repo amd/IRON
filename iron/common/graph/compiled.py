@@ -488,7 +488,7 @@ class Graph:
         """Each next value: an expression of the values, or one element the graph computed."""
         if carry is None:
             return {}
-        dtypes = {v.name: v.dtype for v in values}
+        dtypes = {v.name: v.scalar_type for v in values}
         found: dict[str, Handle | Affine] = {}
         for name, nxt in carry.items():
             if isinstance(nxt, Affine):
@@ -1059,7 +1059,9 @@ def _words(
                 Fraction(e.bias),
                 np.dtype(b.member.dtype).name,
             )
-        words.append(Word(b.symbol, e.dtype, lambda v, e=e: e.evaluate(v), linear, e))
+        words.append(
+            Word(b.symbol, e.scalar_type, lambda v, e=e: e.evaluate(v), linear, e)
+        )
     seen: set[int] = set()
     derived: set[str] = set()
     for b in recording.bindings:
