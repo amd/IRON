@@ -35,7 +35,7 @@ DECODERS = [
     pytest.param((Gemma3, "gemma-3-1b-it/model.safetensors", (256, 13)), id="gemma3"),
     pytest.param((Gemma4, "gemma-4-e2b-it/model.safetensors", (256, 13)), id="gemma4"),
     pytest.param((SmolLM3, f"smollm3-3b/{INDEX}", (1024, 13)), id="smollm3"),
-    pytest.param((Qwen35, "qwen3.5-0.8b/model.safetensors", (1024, 13)), id="qwen3_5"),
+    pytest.param((Qwen35, f"qwen3.5-0.8b/{INDEX}", (1024, 13)), id="qwen3_5"),
     pytest.param(
         (Qwen3Moe, f"qwen3-30b-a3b/{INDEX}", (1024, 13)),
         id="qwen3_moe",

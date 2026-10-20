@@ -15,7 +15,9 @@ import numpy as np
 import pytest
 
 from iron.applications.qwen3_5.model import Qwen35, Qwen35Config
+from iron.lm import TokenizerJson
 from iron.lm.checkpoint import leaves
+from iron.lm.testing import require, weights_dir
 from iron.tests.support.llama_reference import Decoder
 
 #: Qwen3.5's proportions at toy size: Gated DeltaNet layers of twice as
@@ -143,3 +145,13 @@ def test_layer_types_other_than_its_two_are_refused():
 
 def test_a_config_reads_back_from_its_json():
     assert Qwen35Config.from_json(TOY.to_json()).to_json() == TOY.to_json()
+
+
+def test_the_bos_and_eos_named_are_the_checkpoint_s_end_tokens():
+    """The checkpoint names neither; the ids are its tokenizer's."""
+    path = weights_dir("qwen3.5-0.8b") / "tokenizer.json"
+    require(path, staged=False)
+    tokenizer = TokenizerJson(path)
+    assert tokenizer.encode("<|endoftext|>") == [Qwen35.bos]
+    ends = tokenizer.encode("<|endoftext|><|im_end|>")
+    assert Qwen35.eos == set(ends)
