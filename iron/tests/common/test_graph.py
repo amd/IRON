@@ -2237,6 +2237,23 @@ def test_a_number_on_either_side_is_a_row_of_it():
         np.testing.assert_array_equal(y, want)
 
 
+def test_one_row_times_a_number_is_elementwise():
+    """A single row's row is the whole operand: streamed, not held in one
+    core, as Gemma 4's 262144-wide soft-capped logits need.
+    """
+
+    class Capped(iron.Graph):
+        def body(self, x):
+            return x * (1 / 30) + 1
+
+    t = Capped().record(x=(1, 262144))
+    assert _steps(t) == ["ElementwiseMul", "ElementwiseAdd"]
+    x = (np.arange(262144) % 8).reshape(1, 262144).astype(bfloat16)
+    (got,) = [np.asarray(Capped().reference(x), np.float32)]
+    want = x.astype(np.float32) * np.float32(bfloat16(1 / 30)) + 1
+    np.testing.assert_array_equal(got, want.astype(bfloat16).astype(np.float32))
+
+
 def test_a_difference_is_one_axpy_and_a_number_less_a_handle_two_steps():
     class Differences(iron.Graph):
         def body(self, x, y):
