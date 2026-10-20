@@ -34,4 +34,5 @@ class GELU(UnaryElementwise):
     def kernel(self):
         if self.approximate == "none":
             return activation.gelu_erf(self.tile_size)
-        return activation.gelu(self.tile_size)
+        # vtanh's error was most of SmolVLM's vision tower's divergence; the table costs nothing.
+        return activation.gelu(self.tile_size, use_lut=True)
