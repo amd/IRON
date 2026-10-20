@@ -16,7 +16,9 @@ public API adds its entry under Unreleased.
   another resize reads; `ImagePatches` and the resample operators take
   torchvision's Lanczos-3 (`interpolation=`), the processor's
   normalization (`mean=`, `std=`) and a fixed output size (`out=`); a
-  resize's size need not be whole patches.
+  resize's size need not be whole patches. SmolVLM processes any image up
+  to 3072x4096 on the NPU, through 2048 on its longest side, as its
+  processor does.
 - Whisper's log-mel features on the NPU: `LogMel`'s `mel_scale` and `norm`
   (`filterbank`'s, transformers' `mel_filter_bank`), `power=2` and
   `decades`, Whisper's log10 held to that many decades below the clip's

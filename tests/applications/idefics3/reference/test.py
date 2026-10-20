@@ -2,18 +2,19 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""SmolVLM's graphs against transformers' own SmolVLM in float32 over the
-same random weights, its outputs recorded in ``goldens/``, device-free (no
-checkpoint, no NPU), at a toy shape: the vision tower's ``EncoderLayer``s on
-SigLIP's names, and the tower and the text model as one
-``iron.lm.Multimodal``, its soft tokens placed across a chunk boundary.
+"""SmolVLM's graphs against transformers' own SmolVLM and image processor in
+float32 over the same random weights, its outputs recorded in ``goldens/``,
+device-free (no checkpoint, no NPU), at a toy shape: the vision tower's
+``EncoderLayer``s on SigLIP's names over a decoded image, and the tower and
+the text model as one ``iron.lm.Multimodal``, its soft tokens placed across
+a chunk boundary.
 """
 
+import dataclasses
 import re
 
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
 
 from iron.applications.idefics3.hugging_face import HuggingFaceVLM
 from iron.applications.idefics3.model import SmolVLMText, SmolVLMTextConfig
@@ -25,17 +26,20 @@ from iron.tests.support.llama_reference import prompt
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
-#: SmolVLM's vision tower at toy size: an 8x8 patch grid, shuffled 2x2.
+#: SmolVLM's vision tower at toy size: a 16x16 patch grid, shuffled 2x2,
+#: an image first resized to 512 on its longest side.
 VISION = VisionConfig(
     hidden_size=256,
     num_hidden_layers=2,
     num_attention_heads=4,
     intermediate_size=512,
     patch_size=16,
-    image_size=128,
+    image_size=256,
     scale_factor=2,
     text_dim=256,
     image_token=511,
+    longest_edge=512,
+    largest=(480, 640),
 )
 #: Its text model, Llama's layer under ``model.text_model``.
 TEXT = SmolVLMTextConfig(
@@ -125,7 +129,7 @@ def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
     """
     tower = VisionTower(VISION, weights)
     rng = np.random.default_rng(1)
-    image = rng.uniform(-1, 1, (VISION.image_size, VISION.image_size, 3))
+    image = rng.integers(0, 256, (300, 200, 3), dtype=np.uint8)
     buffer, values = tower.inputs(image)
     got = np.asarray(tower.reference(buffer, **values), np.float32)
     reference = golden(
@@ -140,7 +144,7 @@ def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
     want = reference.logits([], image)
     assert got.shape == (tower.soft_rows, VISION.text_dim)
     err, scale = np.abs(got - want).max(), np.abs(want).max()
-    # Measured 0.84%.
+    # Measured 0.92%.
     assert err <= LOGITS * scale, f"|diff| {err:.4f} against |soft tokens| {scale:.3f}"
 
 
@@ -162,9 +166,8 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
     )
     rng = np.random.default_rng(2)
     tokens = rng.integers(0, IMAGE, 300)
-    tokens[250 : 250 + VISION.tokens] = IMAGE
-    image = rng.uniform(-1, 1, (VISION.image_size, VISION.image_size, 3))
-    image = image.astype(bfloat16).astype(np.float32)
+    tokens[220 : 220 + VISION.tokens] = IMAGE
+    image = rng.integers(0, 256, (160, 240, 3), dtype=np.uint8)
     raw = {IMAGE: (image,)}
     calls, towers = model.tower_calls(tokens, raw)
     for inputs in calls:
@@ -176,6 +179,26 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)
     assert_close(logits, reference.logits(tokens, image))
+
+
+@pytest.mark.parametrize(
+    "image,size",
+    [
+        # As Idefics3ImageProcessor resizes them at a longest edge of 2048.
+        ((512, 512), (2048, 2048)),
+        ((480, 640), (1536, 2048)),
+        ((500, 333), (2048, 1364)),
+        ((37, 53), (1430, 2048)),
+        ((3, 4096), (2, 2048)),
+        ((296, 970), (624, 2048)),
+    ],
+)
+def test_the_first_resize_is_the_processor_s(image, size):
+    """The processor's first size: its longest edge's, the other side at
+    the image's aspect, truncated, then made even.
+    """
+    vision = dataclasses.replace(VISION, longest_edge=2048)
+    assert vision.size(*image) == size
 
 
 def test_a_rope_scaling_nested_in_the_text_config_is_refused():
