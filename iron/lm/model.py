@@ -38,11 +38,52 @@ logger = logging.getLogger(__name__)
 HOST_RESERVE = 8 << 30
 
 
-def host_budget() -> int:
-    """The bytes a model's arena may take here: physical memory, in which
-    the NPU's buffers live, less ``HOST_RESERVE``.
+def _cgroup_limit() -> int | None:
+    """This process's cgroup memory ceiling: cgroup v2's ``memory.max``,
+    the lowest one set from its own cgroup up to the root, or else v1's
+    ``memory.limit_in_bytes``; ``None`` where neither bounds it (no cgroup
+    mounted, or every level reads ``max``).
     """
-    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") - HOST_RESERVE
+    root = Path("/sys/fs/cgroup")
+    unified = (root / "cgroup.controllers").exists()
+    try:
+        lines = Path("/proc/self/cgroup").read_text().splitlines()
+    except FileNotFoundError:
+        return None
+    own = None
+    for line in lines:
+        _, controllers, path = line.split(":", 2)
+        if controllers == "" if unified else "memory" in controllers.split(","):
+            own = path
+            break
+    if own is None:
+        return None
+    name, base = (
+        ("memory.max", root) if unified else ("memory.limit_in_bytes", root / "memory")
+    )
+    limits, path = [], own
+    while True:
+        try:
+            text = (base / path.lstrip("/") / name).read_text().strip()
+        except OSError:
+            text = "max"
+        if text != "max":
+            limits.append(int(text))
+        if path in ("", "/"):
+            break
+        path = str(Path(path).parent)
+    return min(limits) if limits else None
+
+
+def host_budget() -> int:
+    """The bytes a model's arena may take here: physical memory, or a
+    cgroup's lower ceiling (a container's, or a job's own, as CI's
+    self-hosted runners and a capped test both impose with systemd), in
+    which the NPU's buffers live, less ``HOST_RESERVE``.
+    """
+    phys = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    limit = _cgroup_limit()
+    return (phys if limit is None else min(phys, limit)) - HOST_RESERVE
 
 
 def prompt_text(chars: int, skip: int = 0) -> str:
