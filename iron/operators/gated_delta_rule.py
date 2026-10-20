@@ -266,7 +266,7 @@ class GatedDeltaRule(Operator):
                     of_ys[k].prod(),
                     of_finals[k].prod(),
                     kernel,
-                    Buffer(bf16(T * (2 * Dk + SLICE + 2))),
+                    Buffer(kernel.arg_types()[0]),
                     rtps[k],
                     k * heads,
                 ],

@@ -253,7 +253,7 @@ class SelectiveScan(Operator):
                     of_ys[k].prod(),
                     of_finals[k].prod(),
                     kernel,
-                    Buffer(bf16(T * (SLICE + 2 * N + 1))),
+                    Buffer(kernel.arg_types()[0]),
                     rtps[k],
                     k * heads,
                 ],
