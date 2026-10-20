@@ -21,8 +21,15 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+from iron.applications.embedding_gemma2.model import AudioTower as EGAudioTower
+from iron.applications.embedding_gemma2.model import Config as EmbeddingGemmaConfig
+from iron.applications.embedding_gemma2.model import EmbeddingGemma
+from iron.applications.embedding_gemma2.model import Multimodal as EmbeddingGemma2
+from iron.applications.embedding_gemma2.model import VisionTower as EGVisionTower
 from iron.applications.gemma3.model import Gemma3, Gemma3Config
+from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.model import Gemma4, Gemma4Config
+from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.applications.granite.model import Granite, GraniteConfig
 from iron.applications.granite_hybrid.model import GraniteHybrid, GraniteHybridConfig
 from iron.applications.idefics3.model import (
@@ -891,3 +898,261 @@ def test_smolvlm_is_on_npu():
     }
     config = SmolVLMConfig(**fields, vision=SMOLVLM_VISION)
     assert_on_npu(SmolVLM(config, weights))
+
+
+# ---------------------------------------------------------------------------
+# Gemma 4's towers: their real names and shapes, read from the released
+# checkpoints' safetensors headers (names and shapes only, no tensor data),
+# at a toy config's own scale. Both read a few tensors as plain arrays
+# rather than through load_state_dict (see the report alongside this test).
+
+
+GEMMA4_VISION = VisionConfig(
+    # hidden_size is pinned at 768: the patch pixels AXPY.step centres
+    # before input_proj's own projection are SIDE * SIDE * 3 wide
+    # (operators/resample/op.py's SIDE, 16, fixed, not patch_size),
+    # matching the real checkpoint's own hidden_size.
+    hidden_size=768,
+    num_hidden_layers=2,
+    num_attention_heads=12,
+    head_dim=64,
+    intermediate_size=512,
+    patch_size=16,
+    pooling_kernel_size=3,
+    position_embedding_size=1024,
+    text_dim=256,
+    patches=512,
+    largest=(256, 256),
+    rows=256,
+    chunk=512,
+    patch_columns=8,
+)
+
+GEMMA4_AUDIO = AudioConfig(
+    hidden_size=256,
+    num_attention_heads=4,
+    intermediate_size=512,
+    # GEMM's K: the first subsampling conv's banded kernel * mels, the
+    # second's 3 * 3 * its in channels (the first's out channels, C0),
+    # each a multiple of 64.
+    mels=64,
+    subsampling_conv_channels=(64, 16),
+    window=8,
+    band=16,
+    conv_kernel_size=5,
+    text_dim=256,
+    max_tokens=64,
+)
+
+
+def names_gemma4_vision(c: VisionConfig) -> dict[str, tuple[int, ...]]:
+    """``VisionTower``'s own tensors, as the real checkpoint names them
+    (``gemma-4-e2b/model.safetensors``'s header): the attention and MLP
+    projections, unclipped (``VisionLayer`` uses plain ``Linear``, not
+    ``Clipped``, so the real checkpoint's per-projection clamp bounds go
+    unread; they are left out of this toy for the same reason).
+    """
+    E, F, D = c.hidden_size, c.intermediate_size, c.head_dim
+    Q = c.num_attention_heads * D
+    out = {
+        "vision_tower.patch_embedder.input_proj.weight": (E, E),
+        "vision_tower.patch_embedder.position_embedding_table": (
+            2,
+            c.position_embedding_size,
+            E,
+        ),
+        "embed_vision.embedding_projection.weight": (c.text_dim, E),
+    }
+    for i in range(c.num_hidden_layers):
+        p = f"vision_tower.encoder.layers.{i}"
+        out |= {
+            f"{p}.input_layernorm.weight": (E,),
+            f"{p}.self_attn.q_proj.weight": (Q, E),
+            f"{p}.self_attn.k_proj.weight": (Q, E),
+            f"{p}.self_attn.v_proj.weight": (Q, E),
+            f"{p}.self_attn.o_proj.weight": (E, Q),
+            f"{p}.self_attn.q_norm.weight": (D,),
+            f"{p}.self_attn.k_norm.weight": (D,),
+            f"{p}.post_attention_layernorm.weight": (E,),
+            f"{p}.pre_feedforward_layernorm.weight": (E,),
+            f"{p}.post_feedforward_layernorm.weight": (E,),
+            f"{p}.mlp.gate_proj.weight": (F, E),
+            f"{p}.mlp.up_proj.weight": (F, E),
+            f"{p}.mlp.down_proj.weight": (E, F),
+        }
+    return out
+
+
+def test_gemma4_vision_tower_is_on_npu():
+    weights = checkpoint(QWEN3, names_gemma4_vision(GEMMA4_VISION)).tree("random")
+    assert_on_npu(VisionTower(GEMMA4_VISION, weights))
+
+
+def _clipped(path: str, cin: int, cout: int) -> dict[str, tuple[int, ...]]:
+    """A ``Clipped`` linear's own tensors: its weight and its four scalar
+    clamp bounds, each ``iron.param()``-bound through load_state_dict like
+    any other weight.
+    """
+    return {
+        f"{path}.linear.weight": (cout, cin),
+        f"{path}.input_min": (),
+        f"{path}.input_max": (),
+        f"{path}.output_min": (),
+        f"{path}.output_max": (),
+    }
+
+
+def names_gemma4_audio(c: AudioConfig) -> dict[str, tuple[int, ...]]:
+    """``AudioTower``'s own tensors, as the real checkpoint names them
+    (``gemma-4-e2b/model.safetensors``'s header): each conformer layer's two
+    feed-forwards, attention and light convolution, their ``Clipped``
+    linears' weights and clamp bounds among them. ``subsample_conv_projection``'s
+    two ``Conv2d`` kernels, ``output_proj`` and ``embed_audio`` are read as
+    plain arrays at construction or call time, not through load_state_dict
+    (see the report alongside this test); they still need real shapes here,
+    since reading them happens regardless of how they were bound.
+    """
+    E, M, D = c.hidden_size, c.intermediate_size, c.head_dim
+    C0, C1 = c.subsampling_conv_channels
+    F0 = c.mels // 2
+    out = {
+        "audio_tower.subsample_conv_projection.layer0.conv.weight": (C0, 1, 3, 3),
+        "audio_tower.subsample_conv_projection.layer0.norm.weight": (C0,),
+        "audio_tower.subsample_conv_projection.layer1.conv.weight": (C1, C0, 3, 3),
+        "audio_tower.subsample_conv_projection.layer1.norm.weight": (C1,),
+        "audio_tower.subsample_conv_projection.input_proj_linear.weight": (
+            E,
+            (c.mels // 4) * C1,
+        ),
+        "audio_tower.output_proj.weight": (c.text_dim, E),
+        "audio_tower.output_proj.bias": (c.text_dim,),
+        "embed_audio.embedding_projection.weight": (c.text_dim, c.text_dim),
+    }
+    for i in range(c.num_hidden_layers):
+        p = f"audio_tower.layers.{i}"
+        for ff in ("feed_forward1", "feed_forward2"):
+            out |= {
+                f"{p}.{ff}.pre_layer_norm.weight": (E,),
+                f"{p}.{ff}.post_layer_norm.weight": (E,),
+            }
+            out |= _clipped(f"{p}.{ff}.ffw_layer_1", E, M)
+            out |= _clipped(f"{p}.{ff}.ffw_layer_2", M, E)
+        out |= {
+            f"{p}.norm_pre_attn.weight": (E,),
+            f"{p}.norm_post_attn.weight": (E,),
+            f"{p}.norm_out.weight": (E,),
+            f"{p}.self_attn.relative_k_proj.weight": (E, E),
+            f"{p}.self_attn.per_dim_scale": (D,),
+        }
+        for proj in ("q_proj", "k_proj", "v_proj", "post"):
+            out |= _clipped(f"{p}.self_attn.{proj}", E, E)
+        out |= {
+            f"{p}.lconv1d.pre_layer_norm.weight": (E,),
+            f"{p}.lconv1d.depthwise_conv1d.weight": (E, 1, c.conv_kernel_size),
+            f"{p}.lconv1d.conv_norm.weight": (E,),
+        }
+        out |= _clipped(f"{p}.lconv1d.linear_start", E, 2 * E)
+        out |= _clipped(f"{p}.lconv1d.linear_end", E, E)
+    return out
+
+
+def test_gemma4_audio_tower_is_on_npu():
+    # "unread": filled("random")'s 0-d draw (the Clipped linears' scalar
+    # clamp bounds) is a bare numpy scalar, not an array, which param()
+    # refuses; "unread"'s np.zeros(()) is a proper 0-d array.
+    weights = checkpoint(QWEN3, names_gemma4_audio(GEMMA4_AUDIO)).tree("unread")
+    assert_on_npu(AudioTower(GEMMA4_AUDIO, weights))
+
+
+# ---------------------------------------------------------------------------
+# embedding_gemma2: a text encoder (its own PLE wiring, read as a plain
+# array from a shared per-layer projection, not through load_state_dict
+# either) with Gemma 4's two towers, as one iron.lm.Multimodal.
+
+
+EMBEDDING_GEMMA = EmbeddingGemmaConfig(
+    vocab_size=1024,
+    hidden_size=256,
+    num_hidden_layers=2,
+    num_attention_heads=4,
+    intermediate_size=512,
+    num_key_value_heads=2,
+    head_dim=64,
+    rope_theta=10000.0,
+    layer_types=("sliding_attention", "full_attention"),
+    global_kv_groups=1,
+    global_head_dim=64,
+    global_rope_theta=1000000.0,
+    sliding_window=8,
+    ple_dim=256,
+    embedding_dim=256,
+    max_tokens=256,
+    block=64,
+)
+
+
+def names_embedding_gemma_text(c: EmbeddingGemmaConfig) -> dict[str, tuple[int, ...]]:
+    E, F, P, L = c.hidden_size, c.intermediate_size, c.ple_dim, c.num_hidden_layers
+    out = {
+        "language_model.embed_tokens.weight": (c.vocab_size, E),
+        "language_model.norm.weight": (E,),
+        "language_model.embedding_projection.weight": (c.embedding_dim, E),
+        "language_model.ple.per_layer_model_projection.weight": (L * P, E),
+        "language_model.ple.per_layer_projection_norm.weight": (P,),
+    }
+    for i in range(L):
+        G, D, _ = c.heads(i)
+        Q, KV = c.num_attention_heads * D, G * D
+        p = f"language_model.layers.{i}"
+        out |= {
+            f"{p}.input_layernorm.weight": (E,),
+            f"{p}.self_attn.q_proj.weight": (Q, E),
+            f"{p}.self_attn.k_proj.weight": (KV, E),
+            f"{p}.self_attn.v_proj.weight": (KV, E),
+            f"{p}.self_attn.o_proj.weight": (E, Q),
+            f"{p}.self_attn.q_norm.weight": (D,),
+            f"{p}.self_attn.k_norm.weight": (D,),
+            f"{p}.post_attention_layernorm.weight": (E,),
+            f"{p}.pre_feedforward_layernorm.weight": (E,),
+            f"{p}.post_feedforward_layernorm.weight": (E,),
+            f"{p}.mlp.gate_proj.weight": (F, E),
+            f"{p}.mlp.up_proj.weight": (F, E),
+            f"{p}.mlp.down_proj.weight": (E, F),
+            f"{p}.per_layer_input_gate.weight": (P, E),
+            f"{p}.per_layer_projection.weight": (E, P),
+            f"{p}.post_per_layer_input_norm.weight": (E,),
+            f"{p}.layer_scalar": (1,),
+        }
+    return out
+
+
+def test_embedding_gemma2_is_on_npu():
+    named = names_embedding_gemma_text(EMBEDDING_GEMMA)
+    weights = checkpoint(QWEN3, named).tree("random")
+    assert_on_npu(EmbeddingGemma(EMBEDDING_GEMMA, weights))
+
+
+def test_embedding_gemma2_multimodal_is_on_npu():
+    named = (
+        names_embedding_gemma_text(EMBEDDING_GEMMA)
+        | names_gemma4_vision(GEMMA4_VISION)
+        | names_gemma4_audio(GEMMA4_AUDIO)
+    )
+    weights = checkpoint(QWEN3, named).tree("unread")
+    text = EmbeddingGemma(EMBEDDING_GEMMA, weights)
+    audio = EGAudioTower(GEMMA4_AUDIO, weights)
+    vision = EGVisionTower(GEMMA4_VISION, weights)
+
+    class _Multimodal(EmbeddingGemma2):
+        def __init__(self, text, audio, vision):
+            self.config, self.tokenizer = EMBEDDING_GEMMA, None
+            Multimodal.__init__(
+                self,
+                text,
+                {
+                    EMBEDDING_GEMMA.audio_token: audio,
+                    EMBEDDING_GEMMA.image_token: vision,
+                },
+            )
+
+    assert_on_npu(_Multimodal(text, audio, vision))
