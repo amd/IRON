@@ -41,6 +41,10 @@ RESAMPLE = """
 
 // torch's weights are float64 without contraction: an FMA changes the bits.
 #pragma clang fp contract(off)
+// AIE2's 16 KB of program memory holds Lanczos' float64 code only at minsize.
+#if __AIE_ARCH__ == 20 && LANCZOS
+#pragma clang attribute push(__attribute__((minsize)), apply_to = function)
+#endif
 
 namespace {
 constexpr int HEADER = 4;
@@ -273,6 +277,9 @@ extern "C" void resample_quantize(int32_t *peak, int32_t *chunk, int32_t in,
         for (int i = 0; i < a.slot; i++)
             chunk[HEADER + s * a.slot + i] = chunk[HEADER + (n - 1) * a.slot + i];
 }
+#if __AIE_ARCH__ == 20 && LANCZOS
+#pragma clang attribute pop
+#endif
 """
 
 
