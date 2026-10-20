@@ -197,7 +197,7 @@ def assert_close(
     scale = np.abs(want).max()
     bound, err = share * scale, np.abs(got - want).max()
     assert err <= bound, f"{what}: max |diff| {err:.4f} against |logits| {scale:.3f}"
-    second, first = np.sort(want)[-2:]
+    second, first = np.sort(want, axis=None)[-2:]
     if first - second > bound:
         assert (
             got.argmax() == want.argmax()
