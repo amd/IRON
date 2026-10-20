@@ -1116,14 +1116,19 @@ def _words(
 
 def _shared(words: list[Word]) -> dict[str, str]:
     """The symbol each word shares with the words of its one form: a
-    ``Linear``, or a clamped or wrapped expression's name.
+    ``Linear``, or the name of a clamped or wrapped expression or of a
+    floor scaled past one.
     """
     shared: dict[str, str] = {}
     forms: dict[str, set[Linear | str | None]] = {}
     for w in words:
         found, e = w.linear, w.form
-        if found is None and e is not None and (e.clamped or e.mod is not None):
-            # A clamped or wrapped expression has no Linear form; its name spells it whole.
+        if (
+            found is None
+            and e is not None
+            and (e.clamped or e.mod is not None or e.mul not in (1, -1))
+        ):
+            # None of these has a Linear form; its name spells it whole.
             found = f"{e.name}_{np.dtype(w.dtype).name}"
         elif found is None and e is not None and e.mul in (1, -1):
             # ((s v + b) >> k) * m + a as a Linear, which rounds up: a
