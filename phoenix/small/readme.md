@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_10_20_19_40_42` at commit `189524b`.
+Tested on `2026_10_20_22_37_00` at commit `b3ba3cf`.
 
 <details>
 <summary>iron/operators/axpy</summary>
@@ -11,13 +11,13 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_axpy[input_length_2048-num_aie_columns_1-tile_size_2048-scalar_factor_1.003]</td><td>✅ 5/5</td><td>428.40</td><td>0.04</td><td>n/a</td></tr>
-        <tr><td>test_axpy[input_length_2048-num_aie_columns_1-tile_size_2048-scalar_factor_3.0]</td><td>✅ 5/5</td><td>400.78</td><td>0.04</td><td>n/a</td></tr>
-        <tr><td>test_axpy[input_length_2048-num_aie_columns_2-tile_size_1024-scalar_factor_1.003]</td><td>✅ 5/5</td><td>357.02</td><td>0.04</td><td>n/a</td></tr>
-        <tr><td>test_axpy[input_length_2048-num_aie_columns_2-tile_size_1024-scalar_factor_3.0]</td><td>✅ 5/5</td><td>363.88</td><td>0.04</td><td>n/a</td></tr>
-        <tr><td>test_axpy[input_length_2048-num_aie_columns_4-tile_size_512-scalar_factor_1.003]</td><td>✅ 5/5</td><td>519.76</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_axpy[input_length_2048-num_aie_columns_4-tile_size_512-scalar_factor_3.0]</td><td>✅ 5/5</td><td>532.46</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_axpy[input_length_8388608-num_aie_columns_4-tile_size_4096-scalar_factor_3.0]</td><td>✅ 5/5</td><td>3593.70</td><td>15.32</td><td>n/a</td></tr>
+        <tr><td>test_axpy[input_length_2048-num_aie_columns_1-tile_size_2048-scalar_factor_1.003]</td><td>✅ 5/5</td><td>445.84</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_axpy[input_length_2048-num_aie_columns_1-tile_size_2048-scalar_factor_3.0]</td><td>✅ 5/5</td><td>267.84</td><td>0.05</td><td>n/a</td></tr>
+        <tr><td>test_axpy[input_length_2048-num_aie_columns_2-tile_size_1024-scalar_factor_1.003]</td><td>✅ 5/5</td><td>379.46</td><td>0.04</td><td>n/a</td></tr>
+        <tr><td>test_axpy[input_length_2048-num_aie_columns_2-tile_size_1024-scalar_factor_3.0]</td><td>✅ 5/5</td><td>392.36</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_axpy[input_length_2048-num_aie_columns_4-tile_size_512-scalar_factor_1.003]</td><td>✅ 5/5</td><td>839.32</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_axpy[input_length_2048-num_aie_columns_4-tile_size_512-scalar_factor_3.0]</td><td>✅ 5/5</td><td>365.84</td><td>0.04</td><td>n/a</td></tr>
+        <tr><td>test_axpy[input_length_8388608-num_aie_columns_4-tile_size_4096-scalar_factor_3.0]</td><td>✅ 5/5</td><td>4323.78</td><td>14.16</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -31,13 +31,13 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_dequant[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-group_size_32]</td><td>✅ 5/5</td><td>339.36</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_dequant[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024-group_size_32]</td><td>✅ 5/5</td><td>287.78</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_dequant[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024-group_size_32]</td><td>✅ 5/5</td><td>335.54</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_dequant[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512-group_size_32]</td><td>✅ 5/5</td><td>587.56</td><td>0.01</td><td>n/a</td></tr>
-        <tr><td>test_dequant[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512-group_size_32]</td><td>✅ 5/5</td><td>394.22</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_dequant[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256-group_size_32]</td><td>✅ 5/5</td><td>1059.16</td><td>0.01</td><td>n/a</td></tr>
-        <tr><td>test_dequant[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096-group_size_32]</td><td>✅ 5/5</td><td>2022.18</td><td>13.45</td><td>n/a</td></tr>
+        <tr><td>test_dequant[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-group_size_32]</td><td>✅ 5/5</td><td>587.76</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_dequant[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024-group_size_32]</td><td>✅ 5/5</td><td>397.68</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_dequant[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024-group_size_32]</td><td>✅ 5/5</td><td>495.88</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_dequant[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512-group_size_32]</td><td>✅ 5/5</td><td>491.60</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_dequant[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512-group_size_32]</td><td>✅ 5/5</td><td>470.98</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_dequant[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256-group_size_32]</td><td>✅ 5/5</td><td>493.68</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_dequant[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096-group_size_32]</td><td>✅ 5/5</td><td>2336.56</td><td>10.36</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -51,10 +51,10 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_elementwise_add[input_length_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 5/5</td><td>555.64</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_elementwise_add[input_length_2048-num_aie_columns_2-tile_size_1024]</td><td>✅ 5/5</td><td>393.14</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_elementwise_add[input_length_2048-num_aie_columns_4-tile_size_512]</td><td>✅ 5/5</td><td>461.88</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_elementwise_add[input_length_8388608-num_aie_columns_4-tile_size_4096]</td><td>✅ 5/5</td><td>4074.80</td><td>13.89</td><td>n/a</td></tr>
+        <tr><td>test_elementwise_add[input_length_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 5/5</td><td>483.06</td><td>0.04</td><td>n/a</td></tr>
+        <tr><td>test_elementwise_add[input_length_2048-num_aie_columns_2-tile_size_1024]</td><td>✅ 5/5</td><td>347.78</td><td>0.04</td><td>n/a</td></tr>
+        <tr><td>test_elementwise_add[input_length_2048-num_aie_columns_4-tile_size_512]</td><td>✅ 5/5</td><td>440.74</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_elementwise_add[input_length_8388608-num_aie_columns_4-tile_size_4096]</td><td>✅ 5/5</td><td>4993.56</td><td>10.12</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -68,10 +68,10 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_elementwise_mul[input_length_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 5/5</td><td>285.22</td><td>0.04</td><td>n/a</td></tr>
-        <tr><td>test_elementwise_mul[input_length_2048-num_aie_columns_2-tile_size_1024]</td><td>✅ 5/5</td><td>350.60</td><td>0.04</td><td>n/a</td></tr>
-        <tr><td>test_elementwise_mul[input_length_2048-num_aie_columns_4-tile_size_512]</td><td>✅ 5/5</td><td>454.84</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_elementwise_mul[input_length_8388608-num_aie_columns_4-tile_size_4096]</td><td>✅ 5/5</td><td>3830.98</td><td>16.16</td><td>n/a</td></tr>
+        <tr><td>test_elementwise_mul[input_length_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 5/5</td><td>318.94</td><td>0.05</td><td>n/a</td></tr>
+        <tr><td>test_elementwise_mul[input_length_2048-num_aie_columns_2-tile_size_1024]</td><td>✅ 5/5</td><td>431.02</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_elementwise_mul[input_length_2048-num_aie_columns_4-tile_size_512]</td><td>✅ 5/5</td><td>397.42</td><td>0.04</td><td>n/a</td></tr>
+        <tr><td>test_elementwise_mul[input_length_8388608-num_aie_columns_4-tile_size_4096]</td><td>✅ 5/5</td><td>6096.24</td><td>8.74</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -123,13 +123,13 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_gelu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>416.66</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_gelu[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>416.82</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_gelu[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>403.20</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_gelu[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>710.72</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_gelu[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>531.78</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_gelu[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 5/5</td><td>440.10</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_gelu[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 5/5</td><td>3928.62</td><td>8.62</td><td>n/a</td></tr>
+        <tr><td>test_gelu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>300.36</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_gelu[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>510.16</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_gelu[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>334.92</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_gelu[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>826.42</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_gelu[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>406.90</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_gelu[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 5/5</td><td>389.92</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_gelu[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 5/5</td><td>3379.98</td><td>10.47</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -143,12 +143,12 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_gemm[M_192-K_384-N_64-num_aie_columns_4-b_col_maj_False-c_col_maj_False-m_48-k_96-n_16-partition_N_1]</td><td>✅ 5/5</td><td>708.52</td><td>0.34</td><td>14.65</td></tr>
-        <tr><td>test_gemm[M_192-K_384-N_64-num_aie_columns_4-b_col_maj_True-c_col_maj_True-m_48-k_96-n_16-partition_N_1]</td><td>✅ 5/5</td><td>677.46</td><td>0.38</td><td>16.06</td></tr>
-        <tr><td>test_gemm[M_2048-K_2048-N_2048-num_aie_columns_1-b_col_maj_False-c_col_maj_False-m_64-k_64-n_64-partition_N_1]</td><td>✅ 5/5</td><td>81876.46</td><td>0.31</td><td>209.86</td></tr>
-        <tr><td>test_gemm[M_2048-K_2048-N_2048-num_aie_columns_2-b_col_maj_True-c_col_maj_False-m_64-k_64-n_64-partition_N_1]</td><td>✅ 5/5</td><td>19275.68</td><td>1.31</td><td>892.43</td></tr>
-        <tr><td>test_gemm[M_384-K_1536-N_1792-num_aie_columns_4-b_col_maj_True-c_col_maj_False-m_32-k_48-n_64-partition_N_1]</td><td>✅ 5/5</td><td>2982.06</td><td>3.26</td><td>856.08</td></tr>
-        <tr><td>test_gemm[M_64-K_512-N_256-num_aie_columns_4-b_col_maj_True-c_col_maj_False-m_16-k_64-n_64-partition_N_4]</td><td>✅ 5/5</td><td>6043.06</td><td>0.21</td><td>11.13</td></tr>
+        <tr><td>test_gemm[M_192-K_384-N_64-num_aie_columns_4-b_col_maj_False-c_col_maj_False-m_48-k_96-n_16-partition_N_1]</td><td>✅ 5/5</td><td>605.12</td><td>0.41</td><td>17.48</td></tr>
+        <tr><td>test_gemm[M_192-K_384-N_64-num_aie_columns_4-b_col_maj_True-c_col_maj_True-m_48-k_96-n_16-partition_N_1]</td><td>✅ 5/5</td><td>857.94</td><td>0.31</td><td>13.39</td></tr>
+        <tr><td>test_gemm[M_2048-K_2048-N_2048-num_aie_columns_1-b_col_maj_False-c_col_maj_False-m_64-k_64-n_64-partition_N_1]</td><td>✅ 5/5</td><td>81695.28</td><td>0.31</td><td>210.38</td></tr>
+        <tr><td>test_gemm[M_2048-K_2048-N_2048-num_aie_columns_2-b_col_maj_True-c_col_maj_False-m_64-k_64-n_64-partition_N_1]</td><td>✅ 5/5</td><td>20093.84</td><td>1.26</td><td>861.90</td></tr>
+        <tr><td>test_gemm[M_384-K_1536-N_1792-num_aie_columns_4-b_col_maj_True-c_col_maj_False-m_32-k_48-n_64-partition_N_1]</td><td>✅ 5/5</td><td>3487.78</td><td>2.60</td><td>681.36</td></tr>
+        <tr><td>test_gemm[M_64-K_512-N_256-num_aie_columns_4-b_col_maj_True-c_col_maj_False-m_16-k_64-n_64-partition_N_4]</td><td>✅ 5/5</td><td>7979.04</td><td>0.16</td><td>8.55</td></tr>
     </tbody>
 </table>
 
@@ -162,17 +162,17 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_gemv[M_128-K_128-num_aie_columns_1-tile_size_input_32-tile_size_output_128]</td><td>✅ 5/5</td><td>378.74</td><td>0.10</td><td>0.10</td></tr>
-        <tr><td>test_gemv[M_2048-K_8192-num_aie_columns_1-tile_size_input_1-tile_size_output_2048]</td><td>✅ 5/5</td><td>9418.40</td><td>3.57</td><td>3.56</td></tr>
-        <tr><td>test_gemv[M_2048-K_8192-num_aie_columns_2-tile_size_input_1-tile_size_output_1024]</td><td>✅ 5/5</td><td>6647.30</td><td>5.18</td><td>5.18</td></tr>
-        <tr><td>test_gemv[M_2048-K_8192-num_aie_columns_4-tile_size_input_1-tile_size_output_512]</td><td>✅ 5/5</td><td>4084.26</td><td>8.32</td><td>8.32</td></tr>
-        <tr><td>test_gemv[M_8192-K_2048-num_aie_columns_1-tile_size_input_4-tile_size_output_1024]</td><td>✅ 5/5</td><td>9381.12</td><td>3.58</td><td>3.58</td></tr>
-        <tr><td>test_gemv[M_8192-K_2048-num_aie_columns_2-tile_size_input_4-tile_size_output_1024]</td><td>✅ 5/5</td><td>5241.44</td><td>6.59</td><td>6.58</td></tr>
-        <tr><td>test_gemv[M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_1024]</td><td>✅ 5/5</td><td>3958.50</td><td>8.54</td><td>8.54</td></tr>
-        <tr><td>test_gemv_batched[M_1024-K_1024-num_aie_columns_1-tile_size_input_1-tile_size_output_64-num_batches_2]</td><td>✅ 5/5</td><td>3592.58</td><td>1.33</td><td>1.33</td></tr>
-        <tr><td>test_gemv_batched[M_1026-K_64-num_aie_columns_1-tile_size_input_1-tile_size_output_2-num_batches_2]</td><td>✅ 5/5</td><td>1916.98</td><td>0.22</td><td>0.21</td></tr>
-        <tr><td>test_gemv_batched[M_256-K_128-num_aie_columns_1-tile_size_input_1-tile_size_output_256-num_batches_4]</td><td>✅ 5/5</td><td>1675.10</td><td>0.35</td><td>0.35</td></tr>
-        <tr><td>test_gemv_batched[M_64-K_1536-num_aie_columns_1-tile_size_input_1-tile_size_output_64-num_batches_8]</td><td>✅ 5/5</td><td>1587.82</td><td>1.42</td><td>1.40</td></tr>
+        <tr><td>test_gemv[M_128-K_128-num_aie_columns_1-tile_size_input_32-tile_size_output_128]</td><td>✅ 5/5</td><td>368.90</td><td>0.10</td><td>0.09</td></tr>
+        <tr><td>test_gemv[M_2048-K_8192-num_aie_columns_1-tile_size_input_1-tile_size_output_2048]</td><td>✅ 5/5</td><td>9842.22</td><td>3.43</td><td>3.43</td></tr>
+        <tr><td>test_gemv[M_2048-K_8192-num_aie_columns_2-tile_size_input_1-tile_size_output_1024]</td><td>✅ 5/5</td><td>5762.04</td><td>5.93</td><td>5.93</td></tr>
+        <tr><td>test_gemv[M_2048-K_8192-num_aie_columns_4-tile_size_input_1-tile_size_output_512]</td><td>✅ 5/5</td><td>3639.22</td><td>10.30</td><td>10.30</td></tr>
+        <tr><td>test_gemv[M_8192-K_2048-num_aie_columns_1-tile_size_input_4-tile_size_output_1024]</td><td>✅ 5/5</td><td>9500.16</td><td>3.55</td><td>3.54</td></tr>
+        <tr><td>test_gemv[M_8192-K_2048-num_aie_columns_2-tile_size_input_4-tile_size_output_1024]</td><td>✅ 5/5</td><td>5651.58</td><td>6.11</td><td>6.10</td></tr>
+        <tr><td>test_gemv[M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_1024]</td><td>✅ 5/5</td><td>4156.28</td><td>8.09</td><td>8.09</td></tr>
+        <tr><td>test_gemv_batched[M_1024-K_1024-num_aie_columns_1-tile_size_input_1-tile_size_output_64-num_batches_2]</td><td>✅ 5/5</td><td>2672.50</td><td>1.94</td><td>1.93</td></tr>
+        <tr><td>test_gemv_batched[M_1026-K_64-num_aie_columns_1-tile_size_input_1-tile_size_output_2-num_batches_2]</td><td>✅ 5/5</td><td>1332.94</td><td>0.30</td><td>0.30</td></tr>
+        <tr><td>test_gemv_batched[M_256-K_128-num_aie_columns_1-tile_size_input_1-tile_size_output_256-num_batches_4]</td><td>✅ 5/5</td><td>1710.82</td><td>0.36</td><td>0.36</td></tr>
+        <tr><td>test_gemv_batched[M_64-K_1536-num_aie_columns_1-tile_size_input_1-tile_size_output_64-num_batches_8]</td><td>✅ 5/5</td><td>1880.06</td><td>1.46</td><td>1.44</td></tr>
         <tr><td>test_gemv_gelu[M_128-K_128-num_aie_columns_1-tile_size_input_32-tile_size_output_128]</td><td>❌ 0/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_gemv_gelu[M_2048-K_8192-num_aie_columns_1-tile_size_input_1-tile_size_output_2048]</td><td>❌ 0/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_gemv_gelu[M_8192-K_2048-num_aie_columns_1-tile_size_input_4-tile_size_output_1024]</td><td>❌ 0/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -189,13 +189,13 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>351.72</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>417.44</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>436.84</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>474.00</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>338.40</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 5/5</td><td>572.92</td><td>0.01</td><td>n/a</td></tr>
-        <tr><td>test_layer_norm[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 5/5</td><td>4163.86</td><td>8.30</td><td>n/a</td></tr>
+        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>372.70</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>604.36</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>414.00</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>730.06</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>494.16</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_layer_norm[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 5/5</td><td>584.60</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_layer_norm[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 5/5</td><td>3501.76</td><td>9.81</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -209,15 +209,15 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-alpha_0.01]</td><td>✅ 5/5</td><td>376.80</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-alpha_0.1]</td><td>✅ 5/5</td><td>415.52</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-alpha_0.25]</td><td>✅ 5/5</td><td>332.70</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024-alpha_0.01]</td><td>✅ 5/5</td><td>375.20</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024-alpha_0.01]</td><td>✅ 5/5</td><td>367.70</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512-alpha_0.01]</td><td>✅ 5/5</td><td>688.58</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512-alpha_0.01]</td><td>✅ 5/5</td><td>509.14</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256-alpha_0.01]</td><td>✅ 5/5</td><td>466.58</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_leaky_relu[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096-alpha_0.01]</td><td>✅ 5/5</td><td>3588.58</td><td>10.99</td><td>n/a</td></tr>
+        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-alpha_0.01]</td><td>✅ 5/5</td><td>307.62</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-alpha_0.1]</td><td>✅ 5/5</td><td>274.90</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-alpha_0.25]</td><td>✅ 5/5</td><td>401.18</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024-alpha_0.01]</td><td>✅ 5/5</td><td>422.04</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024-alpha_0.01]</td><td>✅ 5/5</td><td>712.92</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512-alpha_0.01]</td><td>✅ 5/5</td><td>478.02</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512-alpha_0.01]</td><td>✅ 5/5</td><td>454.36</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_leaky_relu[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256-alpha_0.01]</td><td>✅ 5/5</td><td>762.52</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_leaky_relu[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096-alpha_0.01]</td><td>✅ 5/5</td><td>3841.22</td><td>8.80</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -231,13 +231,13 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_mem_copy[input_length_2048-num_cores_1-num_channels_1-bypass_False-tile_size_2048]</td><td>✅ 5/5</td><td>373.98</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_mem_copy[input_length_2048-num_cores_2-num_channels_1-bypass_False-tile_size_1024]</td><td>✅ 5/5</td><td>771.04</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_mem_copy[input_length_2048-num_cores_2-num_channels_2-bypass_False-tile_size_1024]</td><td>✅ 5/5</td><td>488.28</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_mem_copy[input_length_2048-num_cores_4-num_channels_1-bypass_False-tile_size_512]</td><td>✅ 5/5</td><td>524.24</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_mem_copy[input_length_2048-num_cores_4-num_channels_2-bypass_False-tile_size_512]</td><td>✅ 5/5</td><td>349.70</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_mem_copy[input_length_2048-num_cores_8-num_channels_2-bypass_False-tile_size_256]</td><td>✅ 5/5</td><td>463.54</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_mem_copy[input_length_8388608-num_cores_8-num_channels_2-bypass_False-tile_size_4096]</td><td>✅ 5/5</td><td>3338.18</td><td>10.43</td><td>n/a</td></tr>
+        <tr><td>test_mem_copy[input_length_2048-num_cores_1-num_channels_1-bypass_False-tile_size_2048]</td><td>✅ 5/5</td><td>307.98</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_mem_copy[input_length_2048-num_cores_2-num_channels_1-bypass_False-tile_size_1024]</td><td>✅ 5/5</td><td>997.58</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_mem_copy[input_length_2048-num_cores_2-num_channels_2-bypass_False-tile_size_1024]</td><td>✅ 5/5</td><td>374.22</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_mem_copy[input_length_2048-num_cores_4-num_channels_1-bypass_False-tile_size_512]</td><td>✅ 5/5</td><td>408.72</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_mem_copy[input_length_2048-num_cores_4-num_channels_2-bypass_False-tile_size_512]</td><td>✅ 5/5</td><td>378.48</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_mem_copy[input_length_2048-num_cores_8-num_channels_2-bypass_False-tile_size_256]</td><td>✅ 5/5</td><td>496.74</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_mem_copy[input_length_8388608-num_cores_8-num_channels_2-bypass_False-tile_size_4096]</td><td>✅ 5/5</td><td>3618.26</td><td>11.06</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -266,13 +266,13 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_relu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>411.64</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_relu[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>561.00</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_relu[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>454.88</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_relu[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>339.44</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_relu[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>569.94</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_relu[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 5/5</td><td>622.18</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_relu[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 5/5</td><td>3012.94</td><td>13.12</td><td>n/a</td></tr>
+        <tr><td>test_relu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>358.74</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_relu[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>378.50</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_relu[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>381.24</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_relu[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>404.96</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_relu[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>310.98</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_relu[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 5/5</td><td>485.80</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_relu[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 5/5</td><td>3152.68</td><td>12.18</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -289,9 +289,9 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>test_cols_without_a_legal_split_is_rejected[cols_1031-why_prime > 1023: the only divisors are 1 and cols, neither legal]</td><td>✅ 5/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_cols_without_a_legal_split_is_rejected[cols_2062-why_2 x 1031: the only word-aligned chunk leaves a 1031-wide chunk count]</td><td>✅ 5/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_cols_without_a_legal_split_is_rejected[cols_513-why_odd: every divisor is odd, so no chunk is a whole 32-bit word]</td><td>✅ 5/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_repeat[rows_4-cols_1024-repeat_2-transfer_size_None]</td><td>✅ 5/5</td><td>366.80</td><td>0.07</td><td>n/a</td></tr>
-        <tr><td>test_repeat[rows_8-cols_512-repeat_4-transfer_size_64]</td><td>✅ 5/5</td><td>454.66</td><td>0.10</td><td>n/a</td></tr>
-        <tr><td>test_repeat[rows_8-cols_64-repeat_4-transfer_size_None]</td><td>✅ 5/5</td><td>654.40</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_repeat[rows_4-cols_1024-repeat_2-transfer_size_None]</td><td>✅ 5/5</td><td>230.82</td><td>0.11</td><td>n/a</td></tr>
+        <tr><td>test_repeat[rows_8-cols_512-repeat_4-transfer_size_64]</td><td>✅ 5/5</td><td>305.76</td><td>0.15</td><td>n/a</td></tr>
+        <tr><td>test_repeat[rows_8-cols_64-repeat_4-transfer_size_None]</td><td>✅ 5/5</td><td>228.78</td><td>0.02</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -305,19 +305,19 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-weighted_False]</td><td>✅ 5/5</td><td>372.50</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-weighted_True]</td><td>✅ 5/5</td><td>327.88</td><td>0.04</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024-weighted_False]</td><td>✅ 5/5</td><td>331.94</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024-weighted_True]</td><td>✅ 5/5</td><td>379.74</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024-weighted_False]</td><td>✅ 5/5</td><td>263.04</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024-weighted_True]</td><td>✅ 5/5</td><td>657.48</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512-weighted_False]</td><td>✅ 5/5</td><td>404.84</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512-weighted_True]</td><td>✅ 5/5</td><td>539.12</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512-weighted_False]</td><td>✅ 5/5</td><td>636.46</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512-weighted_True]</td><td>✅ 5/5</td><td>493.40</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256-weighted_False]</td><td>✅ 5/5</td><td>517.70</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_8388608-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True]</td><td>✅ 5/5</td><td>3290.50</td><td>12.24</td><td>n/a</td></tr>
-        <tr><td>test_rms_norm[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096-weighted_False]</td><td>✅ 5/5</td><td>3879.16</td><td>8.79</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-weighted_False]</td><td>✅ 5/5</td><td>341.02</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048-weighted_True]</td><td>✅ 5/5</td><td>260.76</td><td>0.05</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024-weighted_False]</td><td>✅ 5/5</td><td>437.76</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024-weighted_True]</td><td>✅ 5/5</td><td>369.22</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024-weighted_False]</td><td>✅ 5/5</td><td>410.40</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024-weighted_True]</td><td>✅ 5/5</td><td>449.34</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512-weighted_False]</td><td>✅ 5/5</td><td>426.26</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512-weighted_True]</td><td>✅ 5/5</td><td>740.82</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512-weighted_False]</td><td>✅ 5/5</td><td>385.64</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512-weighted_True]</td><td>✅ 5/5</td><td>485.30</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256-weighted_False]</td><td>✅ 5/5</td><td>393.20</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_8388608-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True]</td><td>✅ 5/5</td><td>3599.90</td><td>10.80</td><td>n/a</td></tr>
+        <tr><td>test_rms_norm[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096-weighted_False]</td><td>✅ 5/5</td><td>3794.78</td><td>8.88</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -331,13 +331,13 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_rope[rows_32-cols_512-angle_rows_32-aie_columns_1-method_type_0]</td><td>✅ 5/5</td><td>436.16</td><td>0.24</td><td>n/a</td></tr>
-        <tr><td>test_rope[rows_32-cols_512-angle_rows_32-aie_columns_2-method_type_0]</td><td>✅ 5/5</td><td>465.54</td><td>0.22</td><td>n/a</td></tr>
-        <tr><td>test_rope[rows_32-cols_512-angle_rows_32-aie_columns_4-method_type_0]</td><td>✅ 5/5</td><td>421.96</td><td>0.30</td><td>n/a</td></tr>
-        <tr><td>test_rope[rows_32-cols_512-angle_rows_8-aie_columns_1-method_type_0]</td><td>✅ 5/5</td><td>421.74</td><td>0.20</td><td>n/a</td></tr>
-        <tr><td>test_rope[rows_32-cols_512-angle_rows_8-aie_columns_2-method_type_0]</td><td>✅ 5/5</td><td>621.10</td><td>0.18</td><td>n/a</td></tr>
-        <tr><td>test_rope[rows_32-cols_512-angle_rows_8-aie_columns_4-method_type_0]</td><td>✅ 5/5</td><td>489.94</td><td>0.17</td><td>n/a</td></tr>
-        <tr><td>test_rope[rows_4096-cols_512-angle_rows_8-aie_columns_4-method_type_0]</td><td>✅ 5/5</td><td>1092.64</td><td>9.90</td><td>n/a</td></tr>
+        <tr><td>test_rope[rows_32-cols_512-angle_rows_32-aie_columns_1-method_type_0]</td><td>✅ 5/5</td><td>428.66</td><td>0.25</td><td>n/a</td></tr>
+        <tr><td>test_rope[rows_32-cols_512-angle_rows_32-aie_columns_2-method_type_0]</td><td>✅ 5/5</td><td>469.26</td><td>0.22</td><td>n/a</td></tr>
+        <tr><td>test_rope[rows_32-cols_512-angle_rows_32-aie_columns_4-method_type_0]</td><td>✅ 5/5</td><td>703.74</td><td>0.15</td><td>n/a</td></tr>
+        <tr><td>test_rope[rows_32-cols_512-angle_rows_8-aie_columns_1-method_type_0]</td><td>✅ 5/5</td><td>354.84</td><td>0.23</td><td>n/a</td></tr>
+        <tr><td>test_rope[rows_32-cols_512-angle_rows_8-aie_columns_2-method_type_0]</td><td>✅ 5/5</td><td>560.12</td><td>0.15</td><td>n/a</td></tr>
+        <tr><td>test_rope[rows_32-cols_512-angle_rows_8-aie_columns_4-method_type_0]</td><td>✅ 5/5</td><td>506.34</td><td>0.15</td><td>n/a</td></tr>
+        <tr><td>test_rope[rows_4096-cols_512-angle_rows_8-aie_columns_4-method_type_0]</td><td>✅ 5/5</td><td>905.22</td><td>10.81</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -351,13 +351,13 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>367.56</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>421.28</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>329.50</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>598.42</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>510.42</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 5/5</td><td>518.66</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_sigmoid[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 5/5</td><td>3525.36</td><td>10.63</td><td>n/a</td></tr>
+        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>421.02</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>383.66</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>399.06</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>511.42</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>409.56</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_sigmoid[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 5/5</td><td>565.84</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_sigmoid[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 5/5</td><td>3257.16</td><td>11.32</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -371,10 +371,10 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_silu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>319.96</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_silu[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>469.18</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_silu[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>375.78</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_silu[input_length_8388608-num_aie_columns_4-num_channels_1-tile_size_4096]</td><td>✅ 5/5</td><td>4659.24</td><td>7.44</td><td>n/a</td></tr>
+        <tr><td>test_silu[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>346.58</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_silu[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>361.66</td><td>0.03</td><td>n/a</td></tr>
+        <tr><td>test_silu[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>478.22</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_silu[input_length_8388608-num_aie_columns_4-num_channels_1-tile_size_4096]</td><td>✅ 5/5</td><td>4703.38</td><td>7.30</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -388,10 +388,10 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_softmax[input_length_2097152-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>2784.76</td><td>3.50</td><td>n/a</td></tr>
-        <tr><td>test_softmax[input_length_32768-num_aie_columns_2-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>480.70</td><td>0.29</td><td>n/a</td></tr>
-        <tr><td>test_softmax[input_length_32768-num_aie_columns_2-num_channels_2-tile_size_2048]</td><td>✅ 5/5</td><td>435.78</td><td>0.34</td><td>n/a</td></tr>
-        <tr><td>test_softmax[input_length_32768-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>472.94</td><td>0.30</td><td>n/a</td></tr>
+        <tr><td>test_softmax[input_length_2097152-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>3390.44</td><td>2.77</td><td>n/a</td></tr>
+        <tr><td>test_softmax[input_length_32768-num_aie_columns_2-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>549.94</td><td>0.25</td><td>n/a</td></tr>
+        <tr><td>test_softmax[input_length_32768-num_aie_columns_2-num_channels_2-tile_size_2048]</td><td>✅ 5/5</td><td>642.40</td><td>0.25</td><td>n/a</td></tr>
+        <tr><td>test_softmax[input_length_32768-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>518.70</td><td>0.26</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -405,17 +405,17 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_strided_copy[bench_flat_4mi]</td><td>✅ 5/5</td><td>2206.90</td><td>7.89</td><td>n/a</td></tr>
-        <tr><td>test_strided_copy[chunked_transfer]</td><td>✅ 5/5</td><td>310.60</td><td>0.01</td><td>n/a</td></tr>
-        <tr><td>test_strided_copy[contiguous]</td><td>✅ 5/5</td><td>323.64</td><td>0.01</td><td>n/a</td></tr>
-        <tr><td>test_strided_copy[four_channels]</td><td>✅ 5/5</td><td>353.78</td><td>0.01</td><td>n/a</td></tr>
-        <tr><td>test_strided_copy[kv_slot0]</td><td>✅ 5/5</td><td>378.92</td><td>0.39</td><td>n/a</td></tr>
-        <tr><td>test_strided_copy[kv_slot5]</td><td>✅ 5/5</td><td>374.04</td><td>0.42</td><td>n/a</td></tr>
-        <tr><td>test_strided_copy[kv_slot5_four_channels]</td><td>✅ 5/5</td><td>456.80</td><td>0.31</td><td>n/a</td></tr>
-        <tr><td>test_strided_copy[kv_slot5_two_channels]</td><td>✅ 5/5</td><td>349.32</td><td>0.41</td><td>n/a</td></tr>
-        <tr><td>test_strided_copy[kv_slot_last]</td><td>✅ 5/5</td><td>470.32</td><td>0.29</td><td>n/a</td></tr>
-        <tr><td>test_strided_copy[two_channels]</td><td>✅ 5/5</td><td>298.04</td><td>0.01</td><td>n/a</td></tr>
-        <tr><td>test_strided_copy[two_channels_chunked]</td><td>✅ 5/5</td><td>633.08</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[bench_flat_4mi]</td><td>✅ 5/5</td><td>2078.46</td><td>8.97</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[chunked_transfer]</td><td>✅ 5/5</td><td>367.28</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[contiguous]</td><td>✅ 5/5</td><td>281.28</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[four_channels]</td><td>✅ 5/5</td><td>363.06</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[kv_slot0]</td><td>✅ 5/5</td><td>414.38</td><td>0.36</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[kv_slot5]</td><td>✅ 5/5</td><td>341.94</td><td>0.43</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[kv_slot5_four_channels]</td><td>✅ 5/5</td><td>501.56</td><td>0.30</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[kv_slot5_two_channels]</td><td>✅ 5/5</td><td>429.06</td><td>0.33</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[kv_slot_last]</td><td>✅ 5/5</td><td>357.38</td><td>0.42</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[two_channels]</td><td>✅ 5/5</td><td>400.78</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_strided_copy[two_channels_chunked]</td><td>✅ 5/5</td><td>406.12</td><td>0.01</td><td>n/a</td></tr>
         <tr><td>test_transfer_size_not_dividing_per_channel_share_is_rejected[iter0]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_transfer_size_not_dividing_per_channel_share_is_rejected[iter1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_transfer_size_not_dividing_per_channel_share_is_rejected[iter2]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -434,8 +434,8 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_swiglu_decode[embedding_dim_1024-hidden_dim_3584]</td><td>✅ 5/5</td><td>11642.41</td><td>0.00</td><td>n/a</td></tr>
-        <tr><td>test_swiglu_decode[embedding_dim_2048-hidden_dim_2048]</td><td>✅ 5/5</td><td>17245.48</td><td>0.00</td><td>n/a</td></tr>
+        <tr><td>test_swiglu_decode[embedding_dim_1024-hidden_dim_3584]</td><td>✅ 5/5</td><td>12675.35</td><td>0.00</td><td>n/a</td></tr>
+        <tr><td>test_swiglu_decode[embedding_dim_2048-hidden_dim_2048]</td><td>✅ 5/5</td><td>15667.98</td><td>0.00</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -449,8 +449,8 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_swiglu_prefill[seq_len_256-embedding_dim_2048-hidden_dim_2048-prio_accuracy_False-b_col_maj_False]</td><td>✅ 5/5</td><td>23977.44</td><td>0.09</td><td>n/a</td></tr>
-        <tr><td>test_swiglu_prefill[seq_len_256-embedding_dim_2048-hidden_dim_2048-prio_accuracy_False-b_col_maj_True]</td><td>✅ 5/5</td><td>18669.64</td><td>0.11</td><td>n/a</td></tr>
+        <tr><td>test_swiglu_prefill[seq_len_256-embedding_dim_2048-hidden_dim_2048-prio_accuracy_False-b_col_maj_False]</td><td>✅ 5/5</td><td>25281.07</td><td>0.09</td><td>n/a</td></tr>
+        <tr><td>test_swiglu_prefill[seq_len_256-embedding_dim_2048-hidden_dim_2048-prio_accuracy_False-b_col_maj_True]</td><td>✅ 5/5</td><td>25871.22</td><td>0.08</td><td>n/a</td></tr>
         <tr><td>test_weight_layout_reaches_both_gemms[b_col_maj_False]</td><td>✅ 5/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_weight_layout_reaches_both_gemms[b_col_maj_True]</td><td>✅ 5/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
@@ -466,13 +466,13 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_tanh[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>504.12</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_tanh[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>316.88</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_tanh[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>427.34</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_tanh[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>689.52</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_tanh[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>355.20</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_tanh[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 5/5</td><td>456.42</td><td>0.02</td><td>n/a</td></tr>
-        <tr><td>test_tanh[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 5/5</td><td>2449.82</td><td>17.41</td><td>n/a</td></tr>
+        <tr><td>test_tanh[input_length_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 5/5</td><td>397.48</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_tanh[input_length_2048-num_aie_columns_1-num_channels_2-tile_size_1024]</td><td>✅ 5/5</td><td>456.58</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_tanh[input_length_2048-num_aie_columns_2-num_channels_1-tile_size_1024]</td><td>✅ 5/5</td><td>389.76</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_tanh[input_length_2048-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 5/5</td><td>469.94</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_tanh[input_length_2048-num_aie_columns_4-num_channels_1-tile_size_512]</td><td>✅ 5/5</td><td>496.64</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_tanh[input_length_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 5/5</td><td>717.96</td><td>0.02</td><td>n/a</td></tr>
+        <tr><td>test_tanh[input_length_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 5/5</td><td>3218.30</td><td>11.28</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -491,10 +491,10 @@ Tested on `2026_10_20_19_40_42` at commit `189524b`.
         <tr><td>test_a_tiling_that_fits_is_still_accepted[aie_columns_1]</td><td>✅ 5/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_tiling_that_fits_is_still_accepted[aie_columns_2]</td><td>✅ 5/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_tiling_that_fits_is_still_accepted[aie_columns_4]</td><td>✅ 5/5</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_transpose[M_2048-N_64-aie_columns_1-channels_1-m_64-n_64-s_8-num_batches_1]</td><td>✅ 5/5</td><td>538.06</td><td>1.26</td><td>n/a</td></tr>
-        <tr><td>test_transpose[M_2048-N_64-aie_columns_1-channels_1-m_64-n_64-s_8-num_batches_2]</td><td>✅ 5/5</td><td>644.62</td><td>1.68</td><td>n/a</td></tr>
-        <tr><td>test_transpose[M_2048-N_64-aie_columns_1-channels_2-m_64-n_64-s_8-num_batches_1]</td><td>✅ 5/5</td><td>679.32</td><td>0.88</td><td>n/a</td></tr>
-        <tr><td>test_transpose[M_8192-N_512-aie_columns_4-channels_2-m_64-n_64-s_8-num_batches_1]</td><td>✅ 5/5</td><td>2689.58</td><td>7.40</td><td>n/a</td></tr>
+        <tr><td>test_transpose[M_2048-N_64-aie_columns_1-channels_1-m_64-n_64-s_8-num_batches_1]</td><td>✅ 5/5</td><td>541.38</td><td>1.10</td><td>n/a</td></tr>
+        <tr><td>test_transpose[M_2048-N_64-aie_columns_1-channels_1-m_64-n_64-s_8-num_batches_2]</td><td>✅ 5/5</td><td>680.20</td><td>2.30</td><td>n/a</td></tr>
+        <tr><td>test_transpose[M_2048-N_64-aie_columns_1-channels_2-m_64-n_64-s_8-num_batches_1]</td><td>✅ 5/5</td><td>602.76</td><td>0.97</td><td>n/a</td></tr>
+        <tr><td>test_transpose[M_8192-N_512-aie_columns_4-channels_2-m_64-n_64-s_8-num_batches_1]</td><td>✅ 5/5</td><td>3633.62</td><td>4.89</td><td>n/a</td></tr>
     </tbody>
 </table>
 
