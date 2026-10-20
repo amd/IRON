@@ -249,6 +249,7 @@ def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
         "tile_ma": (64, 32, 16),
         "m_chunk": (8, 4, 2, 1),
         "k_tile": (512, 256, 128),
+        "ct_k": (256, 128, 64),
     }
 
 

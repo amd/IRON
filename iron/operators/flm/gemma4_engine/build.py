@@ -31,6 +31,7 @@ from iron.operators.flm import (
     PrefillAttention,
     PrefillSlidingAttention,
 )
+from iron.operators.flm.dequant.op import CT_K as DEQUANT_CT_K
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.layer.design import LayerType
 
@@ -84,7 +85,8 @@ def gemm(M, K, N, gelu):
 
     floor rounding and bf16_steps gelu reproduce the engine's arithmetic bit for
     bit. k_tile=256 divides every K, so all shapes share one configuration, and
-    so one xclbin.
+    so one xclbin. B comes from DequantBFP, so the k slice is the one it
+    writes.
     """
     return ProjectionGEMM(
         M=M,
@@ -93,6 +95,7 @@ def gemm(M, K, N, gelu):
         epilogue=Epilogue.GELU if gelu else Epilogue.NONE,
         tile_n=64,
         k_tile=256,
+        ct_k=DEQUANT_CT_K,
         rounding="floor",
         gelu="bf16_steps",
     )

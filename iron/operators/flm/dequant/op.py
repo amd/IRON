@@ -18,7 +18,7 @@ from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
 
 # flm.ProjectionGEMM's B tiling, imported rather than restated: this design has to write
 # the buffer in the order that one reads it, and two copies would drift.
-from iron.operators.flm.gemm.design import CT_MAX_K_FOR_N, S, T
+from iron.operators.flm.gemm.design import S, T
 from iron.operators.flm.gemm.design import K_TILE as K_TILE_B
 from iron.operators.flm.gemm.design import N_TILE_DEFAULT as N_TILE
 from iron.operators.flm.q4nx import (
@@ -29,7 +29,9 @@ from iron.operators.flm.q4nx import (
     packed_bytes,
 )
 
-CT_K = CT_MAX_K_FOR_N[N_TILE]
+# The k slice of the order this writes: a ProjectionGEMM that reads it must
+# hold B in slices this deep (ct_k=CT_K).
+CT_K = 128
 
 # Four cores per column: each takes one n-half and one k-half of the column
 # block. The column count is the device's, so it lives on the overlay.

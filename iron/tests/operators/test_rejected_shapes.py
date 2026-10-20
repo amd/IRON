@@ -372,9 +372,9 @@ def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision, request):
         op.pack_B(None)
 
 
-def test_flm_gemm_narrows_its_n_tile_to_a_k_its_chunk_divides(npu2):
-    assert ProjectionGEMM(M=256, K=64, N=256).resolved(npu2).tile_n == 32
-    assert ProjectionGEMM(M=256, K=512, N=256).resolved(npu2).tile_n == 64
+def test_flm_gemm_halves_a_short_k_tile_to_double_buffer_b(npu2):
+    op = ProjectionGEMM(M=256, K=64, N=256).resolved(npu2)
+    assert (op.tile_n, op.k_tile, op.ct_k, op.l1_b_depth) == (64, 64, 32, 2)
 
 
 def test_flm_gemm_at_medium_takes_bf16_macs_on_aie2(npu1):

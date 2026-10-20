@@ -131,7 +131,7 @@ and still drains its share of the A broadcast, because the memtile will not
 release an A object until every consumer has taken it.
 
 The two artifacts therefore carry different stems: the xclbin's `config_name`
-covers tile_n, ct_max_k, tile_ma, the compiled activation set, rounding and the
+covers tile_n, ct_k, tile_ma, the compiled activation set, rounding and the
 device, while `name` adds every runtime parameter -- M, K, N and the
 activation -- so two instruction streams never share a name. The
 xclbin is built from a module emitted at a reference shape, whose runtime
@@ -329,8 +329,8 @@ to reduce over -- with a single k iteration there is not enough compute to
 hide the extra A traffic.
 
 On NPU2, `tile_n=128` wins only at `k_iters=1`, and by ~3%; at `k_iters>=2` it
-is 1.2-1.7x slower, because its `CT_MAX_K` falls to 32 and the compute cost of
-the shorter k slice swamps the A traffic it saves.
+was 1.2-1.7x slower, measured while its k slice (`ct_k`) was fixed at 32: the
+compute cost of the shorter k slice swamps the A traffic it saves.
 
 NPU1 never reaches that crossover. It has half the columns *and* a quarter of
 the per-tile bf16 mac throughput, so it stays compute-bound at every K, and
@@ -377,12 +377,21 @@ call. It does have to reproduce the core's rounding *mode* to be free — see
 ### NPU1
 
 L1 tile selection reserves the linked `lut_based_ops.cpp` tables (5,248 bytes
-per core) and the stack before it sizes the data buffers. The default
-`tile_n=64` configuration takes `tile_ma=32` and single-buffered L1 B;
-`tile_n=128` takes `tile_ma=32` and double-buffered L1 B. NPU2 links no
-activation LUT and keeps its defaults.
+per core) and the stack before it sizes the data buffers. It then takes
+double-buffered L1 B, the deepest k slice (`ct_k`) that still fits, and the
+tallest A tile: the default `tile_n=64` configuration takes `ct_k=64` and
+`tile_ma=64`, `tile_n=32` takes `ct_k=128`, and `tile_n=128` takes `ct_k=32`.
+Each k slice reloads and stores the f32 accumulator, and a B chunk the core
+waits on stalls it, so both matter; the A height measured no effect. On
+xcoradaie205 (Phoenix), median of 20 dispatches, every output checked:
 
-The measurements below predate the LUT reservation.
+| M / K / N | tiles | before (ct_k fixed) | L1-derived ct_k |
+|---|---|---|---|
+| 512 / 2048 / 2048 | `tile_n=64` | 2878 us (ct_k 128, single B) | **2355 us** (ct_k 64) |
+| 1024 / 2048 / 1024 | `tile_n=64` | 2870 us (ct_k 128, single B) | **2337 us** (ct_k 64) |
+| 512 / 2048 / 2048 | `tile_n=32` | 3232 us (ct_k 32) | **2344 us** (ct_k 128) |
+
+The table below predates the LUT reservation and the L1-derived k slice.
 
 Against `iron.operators.GEMM` at its own defaults (64/64/64 over all 4
 columns), min of 5 interleaved rounds of 20 dispatches each:

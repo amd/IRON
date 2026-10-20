@@ -31,16 +31,16 @@ from aie.dialects.aie import (
     get_target_model,
 )
 from aie.utils import bfp
+from aie.utils.compile.jit.params import divisors
 
 # GEMM tiling per compute tile, and the register tiling inside it. K_TILE is
 # the default for ProjectionGEMM's k_tile field.
 M_TILE, K_TILE = 64, 512
 # 64 doubles A fetches but gives the mmul colA=8 instead of 4.
 N_TILE_DEFAULT = 64
-# How much of K one compute tile holds at a time, per n width. It is a fixed
-# L1 budget split two ways, passed to the kernel as its ``chunk_k``. n=256 is
-# absent because its f32 accumulator alone (M_TILE*256*4) fills all of L1.
-CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32}
+# The n widths a compute tile takes. n=256 is absent because its f32
+# accumulator alone (M_TILE*256*4) fills all of L1.
+TILE_NS = (16, 32, 64, 128)
 # Register tiling, shared by both architectures. pack_B, the stream-dimension
 # lists and gather_dims all key off these; changing one alone is silently
 # wrong.
@@ -160,45 +160,58 @@ def _b_bytes(elems: int, bfp16_b: bool) -> int:
     return elems // bfp.BLOCK * bfp.BLOCK_BYTES
 
 
+def k_slices(k_tile: int) -> tuple[int, ...]:
+    """The k slices a compute tile can hold of a ``k_tile``, deepest first:
+    ``k_tile`` and its halvings down to the mmul's ``S``.
+    """
+    return divisors(k_tile, of=k_tile, step=S)
+
+
 def l1_tiles(
     n_tile: int,
-    ct_max_k: int,
     b_elem_bytes: float,
     budget: int,
-    frame: Callable[[int], int],
+    frame: Callable[[int, int], int],
     m_chunk: int = 1,
     k_tile: int = K_TILE,
     t_ma: int | None = None,
-) -> tuple[int, int]:
-    """The working set that fits L1: (A-tile height, L1 B depth).
+    ct_k: int | None = None,
+) -> tuple[int, int, int]:
+    """The working set that fits L1: (k slice, A-tile height, L1 B depth).
 
-    Deeper B first, then the tallest A that still fits, since colA is worth
-    far more than B's L1 prefetch; ``t_ma`` fixes the height instead. A depth
-    divides the ``k_tile // ct_max_k`` B chunks a k step consumes, since the
-    core walks the ring that many at a time. ``budget`` is the whole local
-    memory; ``frame(height)``, what the core's kernel holds beside its buffers
-    at an A band ``height`` (its data, AIE2's LUT tables among it, and stack),
-    comes off it here.
+    Double-buffered B first, then the deepest k slice, then the tallest A
+    that still fits. Each k slice reloads and stores the f32 accumulator, so
+    a deeper one runs the kernel's macs longer between them: on npu1, at
+    n=16, ct_k 128 takes 1932 cycles a call where 16 takes 4254, while the
+    A height moves nothing. ``t_ma`` and ``ct_k`` fix their values instead. A
+    depth divides the ``k_tile // ct_k`` B chunks a k step consumes, since
+    the core walks the ring that many at a time. ``budget`` is the whole
+    local memory; ``frame(height, ct_k)``, what the core's kernel holds
+    beside its buffers at an A band ``height`` and that k slice (its data,
+    AIE2's LUT tables among it, and stack), comes off it here.
     """
     # m_chunk accumulators, since the core holds a B chunk across that many
     # row-blocks. The only term that scales with it.
     acc = m_chunk * M_TILE * n_tile * 4
     cout = CT_OUT_LEN * 2 * C_DEPTH
     heights = (M_TILE, M_TILE // 2, M_TILE // 4) if t_ma is None else (t_ma,)
+    slices = k_slices(k_tile) if ct_k is None else (ct_k,)
     for b_depth in (B_DEPTH, 1):
-        if (k_tile // ct_max_k) % b_depth:
-            continue
-        b = int(ct_max_k * n_tile * b_elem_bytes) * b_depth
-        for height in heights:
-            a = (2 * R * ct_max_k) * (height // R // 2) * 2 * A_DEPTH
-            if acc + a + b + cout + frame(height) <= budget:
-                return height, b_depth
-    if t_ma is None:
-        raise ValueError(
-            f"flm.ProjectionGEMM: tile_n ({n_tile}) leaves no A tile fitting L1 at "
-            f"ct_max_k ({ct_max_k})"
-        )
+        for slice_k in slices:
+            if (k_tile // slice_k) % b_depth:
+                continue
+            b = int(slice_k * n_tile * b_elem_bytes) * b_depth
+            for height in heights:
+                a = (2 * R * slice_k) * (height // R // 2) * 2 * A_DEPTH
+                if acc + a + b + cout + frame(height, slice_k) <= budget:
+                    return slice_k, height, b_depth
+    fixed = ", ".join(
+        f"{name} ({value})"
+        for name, value in (("tile_ma", t_ma), ("ct_k", ct_k))
+        if value is not None
+    )
     raise ValueError(
-        f"flm.ProjectionGEMM: tile_ma ({t_ma}) does not fit L1 at tile_n ({n_tile}) and "
-        f"ct_max_k ({ct_max_k}); even single-buffered B overflows the budget"
+        f"flm.ProjectionGEMM: tile_n ({n_tile}) does not fit L1"
+        + (f" at {fixed}" if fixed else "")
+        + "; even single-buffered B overflows the budget"
     )

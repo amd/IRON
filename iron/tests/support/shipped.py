@@ -102,6 +102,7 @@ class Shipped(
     # image), one row-block per B fetch, and the whole of K in one slice.
     tile_n: int = tunable(default=N_TILE, repr=False, init=False)
     k_tile: int = tunable(default=K_TILE, repr=False, init=False)
+    ct_k: int = tunable(default=K_TILE, repr=False, init=False)
     tile_ma: int = tunable(default=M_TILE, repr=False, init=False)
     m_chunk: int = tunable(default=1, repr=False, init=False)
     rows: int = tunable(default=ROWS, repr=False, init=False)
@@ -202,12 +203,6 @@ class Shipped(
         # (kb, i, s_in, cb, tb, t_in) -> (cb, kb, tb, s_in, i, t_in)
         out = blocked.transpose(3, 0, 4, 2, 1, 5)
         return np.ascontiguousarray(out).reshape(-1).astype(bfloat16)
-
-    @property
-    def ct_max_k(self) -> int:
-        # The binary holds the whole k tile at once; the port's table for
-        # tile_n=128 does not apply.
-        return K_TILE
 
     @property
     def config_name(self) -> str:

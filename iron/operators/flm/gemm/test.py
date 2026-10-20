@@ -16,12 +16,13 @@ from iron.common.design import OperatorDesign
 from iron.common.testing import run_test, vectors
 from iron.operators.flm.gemm.design import (
     C_JOINS,
-    CT_MAX_K_FOR_N,
     M_TILE,
     Epilogue,
     Gelu,
     R,
     Rounding,
+    TILE_NS,
+    k_slices,
 )
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.tests.support.shipped import Shipped
@@ -236,7 +237,7 @@ def b_col_maj_params():
         pytest.param(512, 6144, 64 * cols, None, (NONE,), id="streamed"),
         pytest.param(256, 512, 64 * cols, None, tuple(Epilogue), id="tables-linked"),
     ]
-    for tile_n in sorted(set(CT_MAX_K_FOR_N) - {64}):
+    for tile_n in sorted(set(TILE_NS) - {64}):
         params.append(
             pytest.param(256, 512, tile_n * cols, tile_n, (NONE,), id=f"tn{tile_n}")
         )
@@ -309,7 +310,7 @@ def tile_option_params():
     if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
         return []
     params = []
-    for tile_n in sorted(CT_MAX_K_FOR_N):
+    for tile_n in sorted(TILE_NS):
         # One full sweep of the grid at this tile_n, so every column has work.
         M, K, N = 256, 512, tile_n * dev.cols
         shape = dict(M=M, K=K, N=N, tile_n=tile_n)
@@ -363,6 +364,47 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
     assert not errors, "Test failed"
 
 
+def k_slice_params():
+    """Every k slice the design accepts at the default tile_n on this device.
+
+    Like the tiles above, a slice changes the blocked L1 layout and the B and
+    A transfers, and a mismatch is silently wrong rather than a build error.
+    The default stays in the regular suite; the others are extensive.
+    """
+    dev = aie_utils.get_current_device()
+    if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
+        return []
+    shape = dict(M=256, K=512, N=64 * dev.cols)
+    default = ProjectionGEMM(**shape).resolved(dev).ct_k
+    params = []
+    for ct_k in k_slices(512):
+        try:
+            ProjectionGEMM(**shape, ct_k=ct_k).resolved(dev)
+        except ValueError:
+            continue  # this slice leaves no room for the tiles in L1
+        marks = [] if ct_k == default else [pytest.mark.extensive]
+        params.append(
+            pytest.param(
+                ct_k,
+                marks=marks,
+                id=f"ck{ct_k}" + ("-default" if not marks else ""),
+            )
+        )
+    return params
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("ct_k", k_slice_params())
+def test_gemm_k_slices(ct_k):
+    """Each accepted k slice computes the right answer on hardware."""
+    dev = aie_utils.get_current_device()
+    assert dev is not None
+    operator = ProjectionGEMM(M=256, K=512, N=64 * dev.cols, ct_k=ct_k)
+    assert operator.resolved().ct_k == ct_k
+    errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
+    assert not errors, "Test failed"
+
+
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("K", [256, 768])
 def test_gemm_k_tile(K):
@@ -384,9 +426,10 @@ def test_gemm_k_tile(K):
     "precision", [None, Precision.HIGH], ids=["default_macs", "bf16_macs"]
 )
 @pytest.mark.parametrize(
-    "K,tile_n,k_tile", [(512, 64, 128), (16, 16, 16), (64, 32, 64), (96, 32, 96)]
+    "K,tile_n,k_tile,ct_k",
+    [(512, 64, 128, 128), (16, 16, 16, 16), (64, 32, 64, 32), (96, 32, 96, 32)],
 )
-def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, precision):
+def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, ct_k, precision):
     """A k step of one B chunk (k_tile the compute tile's k slice), or of an
     odd number of them, walks every chunk: small integers, exact in bfp16
     and bf16 and in every sum, give the product exactly. check_on_device's
@@ -403,6 +446,7 @@ def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, precision):
         N=N,
         tile_n=tile_n,
         k_tile=k_tile,
+        ct_k=ct_k,
         precision=precision,
     )
     rng = np.random.default_rng(0)

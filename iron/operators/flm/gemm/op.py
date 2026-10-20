@@ -47,7 +47,6 @@ from iron.operators.flm.gemm.design import (
     B_MAX_SLOTS,
     C_DEPTH,
     C_JOINS,
-    CT_MAX_K_FOR_N,
     CT_OUT_LEN,
     K_TILE,
     M_TILE,
@@ -58,6 +57,7 @@ from iron.operators.flm.gemm.design import (
     Rounding,
     S,
     T,
+    TILE_NS,
     _b_bytes,
     _Slab,
     compute_rows,
@@ -154,7 +154,13 @@ class ProjectionGEMM(Operator):
     tile_n: int = tunable()
     # k tile. K must be a multiple of it, and it of the compute tile's k slice.
     k_tile: int = tunable(
-        domain=lambda op, dev, t: divisors(t, of=op.K, step=op.ct_max_k, cap=K_TILE),
+        domain=lambda op, dev, t: divisors(t, of=op.K, step=op.ct_k, cap=K_TILE),
+    )
+    # How much of the k tile a compute tile holds at a time, the kernel's
+    # chunk_k. None resolves to the deepest that fits L1 (see l1_tiles); the
+    # search tries the slice either side of it.
+    ct_k: int = tunable(
+        domain=lambda op, dev, t: divisors(t, of=op.k_tile, step=S, span=1)
     )
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
@@ -265,10 +271,14 @@ class ProjectionGEMM(Operator):
                 "flm.ProjectionGEMM: rounds per K tile at best (precision='high'); "
                 "iron.operators.GEMM rounds once"
             )
-        if self.tile_n is not None and self.tile_n not in CT_MAX_K_FOR_N:
+        if self.tile_n is not None and self.tile_n not in TILE_NS:
             raise ValueError(
                 f"flm.ProjectionGEMM: tile_n ({self.tile_n}) must be one of "
-                f"{sorted(CT_MAX_K_FOR_N)}"
+                f"{TILE_NS}"
+            )
+        if self.ct_k is not None and self.ct_k % S:
+            raise ValueError(
+                f"flm.ProjectionGEMM: ct_k ({self.ct_k}) must be a multiple of {S}"
             )
         if self.tile_ma is not None and (
             M_TILE % self.tile_ma or self.tile_ma % (2 * R)
@@ -316,34 +326,32 @@ class ProjectionGEMM(Operator):
         b_elem_bytes = bfp.BLOCK_BYTES / bfp.BLOCK if bfp16_b else 2
         b_group = bfp.BLOCK if bfp16_b else 1
         tile_n = self.tile_n or next(
-            (
-                n
-                for n in (N_TILE_DEFAULT, 32, 16)
-                if self.K % CT_MAX_K_FOR_N[n] == 0 and self.N % n == 0
-            ),
+            (n for n in (N_TILE_DEFAULT, 32, 16) if self.N % n == 0),
             N_TILE_DEFAULT,
         )
-        ct_k = CT_MAX_K_FOR_N[tile_n]
         m_chunk = self.m_chunk
         k_tile = self.k_tile
         if k_tile is None:
             k_tile = K_TILE
-            while self.K % k_tile and (k_tile // 2) % ct_k == 0:
+            while self.K % k_tile and (k_tile // 2) % S == 0:
                 k_tile //= 2
-        tile_ma, l1_b_depth = l1_tiles(
+        ct_k, tile_ma, l1_b_depth = l1_tiles(
             tile_n,
-            ct_k,
             b_elem_bytes,
             dev.core_memory_bytes,
-            lambda height: self.frame(dev, tile_n, k_tile, height, bfp16_b, emulate),
+            lambda height, ct_k: self.frame(
+                dev, tile_n, k_tile, ct_k, height, bfp16_b, emulate
+            ),
             m_chunk,
             k_tile,
             self.tile_ma,
+            self.ct_k,
         )
         b_dtype = v8bfp16ebs8 if bfp16_b else bfloat16
         return self.replace(
             tile_n=tile_n,
             k_tile=k_tile,
+            ct_k=ct_k,
             tile_ma=tile_ma,
             rows=rows,
             cols=cols,
@@ -358,13 +366,13 @@ class ProjectionGEMM(Operator):
         )
 
     def compatible(self) -> None:
-        # B_ITERS = k_tile // ct_max_k counts the B chunks one k step
-        # consumes, so a k tile the compute tile's slice does not divide is
+        # B_ITERS = k_tile // ct_k counts the B chunks one k step consumes,
+        # so a k tile the compute tile's slice does not divide is
         # inexpressible.
-        if self.k_tile % self.ct_max_k:
+        if self.k_tile % self.ct_k:
             raise ValueError(
-                f"flm.ProjectionGEMM: k_tile ({self.k_tile}) must be a multiple of ct_max_k "
-                f"({self.ct_max_k}) for tile_n={self.tile_n}"
+                f"flm.ProjectionGEMM: k_tile ({self.k_tile}) must be a multiple of ct_k "
+                f"({self.ct_k})"
             )
         # N only needs to tile to tile_n: a trailing group of fewer than
         # cols column-blocks is handled by per-column trip counts.
@@ -401,10 +409,6 @@ class ProjectionGEMM(Operator):
         return _compiled_modes(self.epilogue_modes)
 
     @property
-    def ct_max_k(self) -> int:
-        return CT_MAX_K_FOR_N[self.tile_n]
-
-    @property
     def epilogue_mask(self) -> int:
         """Bitmask of the modes compiled into the epilogue. Mode 0 is always
         present; the kernel falls back to it.
@@ -424,7 +428,7 @@ class ProjectionGEMM(Operator):
                 "flm.ProjectionGEMM: the xclbin is named for a device; none is bound"
             )
         return (
-            f"FLM_GEMM_tn{t.tile_n}_kt{t.k_tile}_ck{t.ct_max_k}"
+            f"FLM_GEMM_tn{t.tile_n}_kt{t.k_tile}_ck{t.ct_k}"
             f"_ma{t.tile_ma}_mc{t.m_chunk}"
             f"_em{t.epilogue_mask:x}_{t.rounding}"
             + ("" if t.gelu is Gelu.FP32 else f"_gelu_{t.gelu}")
@@ -447,7 +451,7 @@ class ProjectionGEMM(Operator):
             base = f"{base}_epi{self.epilogue}"
         return base
 
-    def frame(self, dev, tile_n, k_tile, band_m, bfp16_b, emulate) -> int:
+    def frame(self, dev, tile_n, k_tile, ct_k, band_m, bfp16_b, emulate) -> int:
         """What a core of ``dev`` holds beside its buffers at these tiles: its
         kernel's data and deepest call's stack, over the default stack.
         """
@@ -455,12 +459,12 @@ class ProjectionGEMM(Operator):
         # Made to be read, not built: kept out of the registry a build reads,
         # and for dev, whose architecture the factory reads off the bound device.
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
-            k = self.kernel(tile_n, k_tile, band_m, bfp16_b, emulate)
+            k = self.kernel(tile_n, k_tile, ct_k, band_m, bfp16_b, emulate)
             calls = (k.mm_fused_acc_init, k.mm_fused_k_step, k.mm_fused_epilogue_chunk)
             deepest = max(k.frame_bytes(arch, entry=c.name) for c in calls)
         return dev.default_core_stack_bytes + deepest
 
-    def kernel(self, tile_n, k_tile, band_m, bfp16_b, emulate):
+    def kernel(self, tile_n, k_tile, ct_k, band_m, bfp16_b, emulate):
         """The fused tile kernel each core runs at these tiles."""
         modes = _compiled_modes(self.epilogue_modes)
         return fused_mm(
@@ -468,7 +472,7 @@ class ProjectionGEMM(Operator):
             dim_k=k_tile,
             dim_n=tile_n,
             band_m=band_m,
-            chunk_k=CT_MAX_K_FOR_N[tile_n],
+            chunk_k=ct_k,
             out_chunk=CT_OUT_LEN,
             c_depth=C_DEPTH,
             # 8x8x8 on both architectures: AIE2P lowers it onto one bfp16 mac
@@ -484,20 +488,20 @@ class ProjectionGEMM(Operator):
 
     def build(self) -> Built:
         COLS, ROWS, JOINS = self.cols, self.rows, self.joins
-        N_TILE, CT_MAX_K, M_CHUNK, T_MA = (
+        N_TILE, CT_K, M_CHUNK, T_MA = (
             self.tile_n,
-            CT_MAX_K_FOR_N[self.tile_n],
+            self.ct_k,
             self.m_chunk,
             self.tile_ma,
         )
         B_GROUP = bfp.BLOCK if self.bfp16_b else 1  # B values per element
         L1_B_DEPTH, K_TILE = self.l1_b_depth, self.k_tile
         RHO = M_TILE // T_MA
-        CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
+        CT_A_LEN = 2 * R * CT_K  # one z slice
         CT_A_OBJ = CT_A_LEN * (T_MA // R // 2)  # every z slice of one mmul
         C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
         O_CHUNKS = C_SLICE_LEN // CT_OUT_LEN  # C objects an accumulator drains as
-        B_ITERS = K_TILE // CT_MAX_K  # B chunks consumed per k step
+        B_ITERS = K_TILE // CT_K  # B chunks consumed per k step
         # Under a row bound the cores read the units it reaches: from the
         # scratchpad on a full ELF, else from their parameter buffer.
         bounded = self.value("valid").per_call
@@ -508,7 +512,7 @@ class ProjectionGEMM(Operator):
         b_elem_ty = np.dtype[self.b_dtype]
         # L1 (per compute tile)
         ct_a_obj_ty = np.ndarray[(CT_A_OBJ,), bf16_ty]
-        ct_b_ty = np.ndarray[(CT_MAX_K * N_TILE // B_GROUP,), b_elem_ty]
+        ct_b_ty = np.ndarray[(CT_K * N_TILE // B_GROUP,), b_elem_ty]
         ct_out_ty = np.ndarray[(CT_OUT_LEN,), bf16_ty]
         ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
         # L2 (per memtile): the declared stream tiles.
@@ -522,7 +526,12 @@ class ProjectionGEMM(Operator):
         # asymmetric tile buffering the k step takes the A band index, as the
         # core folds RHO A bands into one accumulator.
         kernel = self.kernel(
-            N_TILE, K_TILE, T_MA, self.bfp16_b, self.emulate_bf16_mmul_with_bfp16
+            N_TILE,
+            K_TILE,
+            CT_K,
+            T_MA,
+            self.bfp16_b,
+            self.emulate_bf16_mmul_with_bfp16,
         )
         acc_init = kernel.mm_fused_acc_init
         k_step = kernel.mm_fused_k_step
@@ -538,12 +547,12 @@ class ProjectionGEMM(Operator):
         # Emits (b_iter, mc, band): the order the core acquires A in while
         # holding a B chunk across the group.
         # A mem tile's run is bounded in elements; one past the wrap splits.
-        run, wrap = R * CT_MAX_K, (1 << self.dev.get_dma_bd_wrap_bits(0, 1)) - 1
+        run, wrap = R * CT_K, (1 << self.dev.get_dma_bd_wrap_bits(0, 1)) - 1
         a_lo = max(d for d in range(1, min(run, wrap) + 1) if run % d == 0)
         a_hi = run // a_lo
-        a_send_dims = TensorAccessPattern.full(
-            (a_bands, B_ITERS, R * CT_MAX_K)
-        ).permute((1, 0, 2))
+        a_send_dims = TensorAccessPattern.full((a_bands, B_ITERS, R * CT_K)).permute(
+            (1, 0, 2)
+        )
         if a_hi > 1:
             a_send_dims = a_send_dims.split(2, a_lo)
 
@@ -1261,7 +1270,7 @@ class ProjectionGEMM(Operator):
             n_tile=t.tile_n,
             s=S,
             t=T,
-            ct_k=t.ct_max_k,
+            ct_k=t.ct_k,
             bfp16=bool(t.bfp16_b),
             round_conv_even=t.rounding is Rounding.CONV_EVEN,
         )
