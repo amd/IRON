@@ -540,24 +540,10 @@ class _Built:
         return None
 
 
-class _Tensor:
-    """An XRTTensor's shape alone, for a callable built without a runtime."""
-
-    def __init__(self, shape, dtype=None):
-        self.shape = shape
-
-    def subview(self, start, shape, dtype):
-        return _Tensor(shape)
-
-    def to(self, device):
-        pass
-
-
 def test_an_npu1_pack_links_and_dispatches_each_run_once(npu1, monkeypatch):
     """Without aiecc: each run is one kernel over its steps' buffers, and a
     member that also runs alone still builds its own.
     """
-    from iron.common.image import callable as image_callable
     from iron.common.image import link
 
     built = []
@@ -579,8 +565,6 @@ def test_an_npu1_pack_links_and_dispatches_each_run_once(npu1, monkeypatch):
 
     monkeypatch.setattr(link.CompilableDesign, "chain", staticmethod(chain))
     monkeypatch.setattr(link, "NPUKernel", Kernel)
-    monkeypatch.setattr(image_callable, "_require_xrt", lambda: None)
-    monkeypatch.setattr(image_callable, "XRTTensor", _Tensor)
     graph = Chain(SIZE, TILE, columns=1)
     recording = graph.record(a=(SIZE,), b=(SIZE,))
     image = Image(recording, PerStep(coresident=[[graph.add, graph.mul]])).compile()
