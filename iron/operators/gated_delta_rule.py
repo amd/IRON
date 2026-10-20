@@ -222,50 +222,56 @@ class GatedDeltaRule(Operator):
             zero, size = arith.constant(0, i32), arith.constant(T, i32)
             k, v = T * Dk, 2 * T * Dk
             ab = v + T * SLICE
-            for u in range_(_slices(self)):
-                # Slice u // heads of each of the core's heads in turn.
-                h = u % heads + first
-                p = 2 * self.k_heads * Dk + h * Dv + (u // heads) * SLICE
-                g = (h // per_group) * Dk
-                start, final = of_slice.acquire(1), of_final.acquire(1)
-                for j in range_(self.rows // T):
-                    # Gather the block: q, k, v, then a and b; q, k and v a
-                    # vector of SLICE at a time where q's and k's rows are
-                    # whole vectors, which qkv first keeps 32-byte aligned.
-                    for t in range_(T):
-                        row = of_row.acquire(1)
-                        runs = []
-                        if Dk % SLICE:
-                            for i in range_(Dk):
-                                block[t * Dk + i] = row[g + i]
-                                block[k + t * Dk + i] = row[g + self.k_heads * Dk + i]
-                            for i in range_(SLICE):
-                                block[v + t * SLICE + i] = row[p + i]
-                        else:
-                            runs = [
-                                (c * k + t * Dk + i, g + c * self.k_heads * Dk + i)
-                                for c in range(2)
-                                for i in range(0, Dk, SLICE)
-                            ] + [(v + t * SLICE, p)]
-                        lane = types.vector(SLICE, types.bf16())
-                        for to, at in runs:
-                            vector.store(
-                                vector.load(lane, row, [at], alignment=32),
-                                block.op,
-                                [to],
-                                alignment=32,
-                            )
-                        block[ab + t] = row[W + h]
-                        block[ab + T + t] = row[W + V + h]
-                        of_row.release(1)
-                    b = arith.index_cast(j, to=i32)
-                    left = valid - b * size
-                    live = arith.minsi(arith.maxsi(left, zero), size)
-                    y = of_y.acquire(1)
-                    rule(block, start, final, y, live, b)
-                    of_y.release(1)
-                of_slice.release(1)
-                of_final.release(1)
+            for q in range_(_slices(self) // heads):
+                for r in range_(heads):
+                    # Slice q of head r of the core's heads in turn, q and r
+                    # each their own loop counter rather than a flattened
+                    # index's div/mod (AIE2's backend cannot legalize the
+                    # bitreverse Peano's mid-end folds that div/mod into).
+                    h = r + first
+                    p = 2 * self.k_heads * Dk + h * Dv + q * SLICE
+                    g = (h // per_group) * Dk
+                    start, final = of_slice.acquire(1), of_final.acquire(1)
+                    for j in range_(self.rows // T):
+                        # Gather the block: q, k, v, then a and b; q, k and v a
+                        # vector of SLICE at a time where q's and k's rows are
+                        # whole vectors, which qkv first keeps 32-byte aligned.
+                        for t in range_(T):
+                            row = of_row.acquire(1)
+                            runs = []
+                            if Dk % SLICE:
+                                for i in range_(Dk):
+                                    block[t * Dk + i] = row[g + i]
+                                    block[k + t * Dk + i] = row[
+                                        g + self.k_heads * Dk + i
+                                    ]
+                                for i in range_(SLICE):
+                                    block[v + t * SLICE + i] = row[p + i]
+                            else:
+                                runs = [
+                                    (c * k + t * Dk + i, g + c * self.k_heads * Dk + i)
+                                    for c in range(2)
+                                    for i in range(0, Dk, SLICE)
+                                ] + [(v + t * SLICE, p)]
+                            lane = types.vector(SLICE, types.bf16())
+                            for to, at in runs:
+                                vector.store(
+                                    vector.load(lane, row, [at], alignment=32),
+                                    block.op,
+                                    [to],
+                                    alignment=32,
+                                )
+                            block[ab + t] = row[W + h]
+                            block[ab + T + t] = row[W + V + h]
+                            of_row.release(1)
+                        b = arith.index_cast(j, to=i32)
+                        left = valid - b * size
+                        live = arith.minsi(arith.maxsi(left, zero), size)
+                        y = of_y.acquire(1)
+                        rule(block, start, final, y, live, b)
+                        of_y.release(1)
+                    of_slice.release(1)
+                    of_final.release(1)
 
         workers = [
             Worker(
