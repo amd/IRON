@@ -74,13 +74,18 @@ class GatedDeltaRule(Operator):
                 dict(rows=64, k_heads=8, v_heads=16, key_dim=64, value_dim=64),
                 bench=True,
             ),
-            # Qwen3.5's prefill: too many shim BDs at once without
-            # reclaiming them.
+            # Too many shim BDs at once without reclaiming them.
+            Case(
+                dict(rows=1536, k_heads=2, v_heads=4, key_dim=16, value_dim=128),
+                id="reclaim",
+                extensive=True,
+            ),
+            # Qwen3.5's prefill: one command outlasts the driver's watchdog.
             Case(
                 dict(rows=2048, k_heads=16, v_heads=32, key_dim=128, value_dim=128),
                 id="qwen35_prefill",
-                extensive=True,
                 lower=True,
+                run=False,
             ),
         ],
         draw=_trained,

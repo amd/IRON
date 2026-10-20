@@ -46,6 +46,7 @@ def _declared():
         for name, cls, case, unresolvable in (
             declared(DEVICE) if DEVICE is not None else []
         )
+        if case.run
     ]
 
 

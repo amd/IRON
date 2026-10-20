@@ -68,13 +68,19 @@ class SelectiveScan(Operator):
                 dict(rows=64, heads=16, head_dim=64, state_size=64, groups=2),
                 bench=True,
             ),
-            # Granite 4.0-H Small's prefill: too many shim BDs at once
-            # without reclaiming them.
+            # Too many shim BDs at once without reclaiming them.
+            Case(
+                dict(rows=2048, heads=8, head_dim=64, state_size=16),
+                id="reclaim",
+                extensive=True,
+            ),
+            # Granite 4.0-H Small's prefill: one command outlasts the
+            # driver's watchdog.
             Case(
                 dict(rows=2048, heads=128, head_dim=64, state_size=128),
                 id="granite_small_prefill",
-                extensive=True,
                 lower=True,
+                run=False,
             ),
         ],
         draw=_trained,
