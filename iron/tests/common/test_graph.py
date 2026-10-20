@@ -1415,8 +1415,12 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
     assert mha.derived_at("kv_blocks", **at) == 2  # ceil(100 / 64)
     assert mha.derived_at("q_start", **at) == 0
     assert mha.derived_at("q_start", valid=64, kv_valid=192) == 2  # a later chunk
+    # A call from mid-block: the block holding its first query, and the rows into it.
+    at = dict(valid=40, kv_valid=310)
+    assert [mha.derived_at(v, **at) for v in ("q_start", "q_offset")] == [4, 14]
     # Bound alike, the queries start at 0 on every call: written once.
-    assert mha.residents["q_start"] == 0 and mha.value("s_q").per_call
+    assert mha.residents["q_start"] == mha.residents["q_offset"] == 0
+    assert mha.value("s_q").per_call
     (out,) = t.outputs
     assert out.valid == {0: t.values[0].affine()}  # O is bounded like Q
 

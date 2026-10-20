@@ -287,6 +287,7 @@ class MHA(Operator):
     )
     s_kv = per_call(derive=lambda op: op.kv_tokens)
     q_start = per_call(derive=lambda op: op.first_query_block)
+    q_offset = per_call(derive=lambda op: 0 if op.packed else op.first_query % op.B_q)
 
     @property
     def q_tokens(self) -> int:
@@ -303,19 +304,24 @@ class MHA(Operator):
         return self.kv_len - self.seq_pad + q_tokens
 
     @property
-    def first_query_block(self) -> int:
-        """The position of Q's first row, in Q blocks, which mha.cc masks by."""
-        if self.packed:
-            return ceildiv(self.kv_tokens, self.B_q)
+    def first_query(self) -> int:
+        """The position of Q's first row, which mha.cc masks by; 0 unmasked."""
         if not (self.causal or self.window):
             return 0
         start = self.kv_tokens - self.q_tokens
-        if start < 0 or start % self.B_q:
+        if start < 0:
             raise ValueError(
-                f"MHA: the queries' first key ({start}) must be a whole number "
-                f"of {self.B_q}-row blocks into the keys"
+                f"MHA: the {self.q_tokens} queries are more than the "
+                f"{self.kv_tokens} keys whose last rows they are"
             )
-        return start // self.B_q
+        return start
+
+    @property
+    def first_query_block(self) -> int:
+        """The Q block ``first_query`` is in, ``q_offset`` rows into it."""
+        if self.packed:
+            return ceildiv(self.kv_tokens, self.B_q)
+        return self.first_query // self.B_q
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # no tiles-per-lane word: the sequence patches K and V itself
@@ -578,7 +584,7 @@ class MHA(Operator):
                 qk_ty,
                 qk_ty,
                 s_ty,
-                np.ndarray[(2,), np.dtype[np.int32]],
+                np.ndarray[(3,), np.dtype[np.int32]],
                 dtype,
                 np.int32,
                 np.int32,
@@ -609,13 +615,13 @@ class MHA(Operator):
                 s_ty,
                 np.int32,
                 np.int32,
-                np.ndarray[(2,), np.dtype[np.int32]],
+                np.ndarray[(3,), np.dtype[np.int32]],
                 np.int32,
             ],
         )
         rescale_O = pv_object.bind(
             "rescale_O",
-            [acc_ty, o_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
+            [acc_ty, o_ty, s_ty, np.int32, np.ndarray[(3,), np.dtype[np.int32]]],
         )
 
         # Each stream is blocked as the product that reads or writes it takes it.
@@ -706,9 +712,12 @@ class MHA(Operator):
             self.kv_blocks,
         ]
 
-        def each_q_block(heads, q_blocks, q_valid, q_start, bias, idx, q_block):
+        def each_q_block(heads, q_blocks, q_valid, first, bias, idx, q_block):
             """``q_block(compute)`` over every head's Q blocks, those past
-            the bound not computed; ``idx`` restarts at the head's first."""
+            the bound not computed; ``idx`` restarts at the head's first,
+            ``first``'s block and row offset."""
+            q_start, q_offset = first
+            idx[2] = q_offset
             for _ in range_(heads):
                 idx[0] = 0
                 idx[1] = q_start + bias
@@ -746,9 +755,9 @@ class MHA(Operator):
 
             words = rtp.read()
             heads, q_blocks, q_valid, kv_blocks = (words[v] for v in blocks)
-            q_start = words[self.q_start]
+            first = words[self.q_start], words[self.q_offset]
             each_q_block(
-                heads, q_blocks, q_valid, q_start, q_block_bias, idx_buffer, q_block
+                heads, q_blocks, q_valid, first, q_block_bias, idx_buffer, q_block
             )
 
         def softmax(
@@ -797,13 +806,10 @@ class MHA(Operator):
 
             words = rtp.read()
             heads, q_blocks, q_valid, kv_blocks = (words[v] for v in blocks)
-            s_q, s_kv, q_start = (
-                words[self.s_q],
-                words[self.s_kv],
-                words[self.q_start],
-            )
+            s_q, s_kv = words[self.s_q], words[self.s_kv]
+            first = words[self.q_start], words[self.q_offset]
             each_q_block(
-                heads, q_blocks, q_valid, q_start, q_block_bias, idx_buffer, q_block
+                heads, q_blocks, q_valid, first, q_block_bias, idx_buffer, q_block
             )
 
         def batched_matmul_pv(
@@ -876,25 +882,26 @@ class MHA(Operator):
 
             words = rtp.read()
             heads, q_blocks, q_valid, loop_idx_kv = (words[v] for v in blocks)
-            s_kv, q_start = words[self.s_kv], words[self.q_start]
+            s_kv = words[self.s_kv]
+            first = words[self.q_start], words[self.q_offset]
             each_q_block(
-                heads, q_blocks, q_valid, q_start, q_block_bias, idx_buffer, q_block
+                heads, q_blocks, q_valid, first, q_block_bias, idx_buffer, q_block
             )
 
-        qk_rtps = [Rtp([*blocks, self.q_start]) for _ in range(num_pipelines)]
+        first = [self.q_start, self.q_offset]
+        qk_rtps = [Rtp([*blocks, *first]) for _ in range(num_pipelines)]
         softmax_rtps = [
-            Rtp([*blocks, self.s_q, self.s_kv, self.q_start])
-            for _ in range(num_pipelines)
+            Rtp([*blocks, self.s_q, self.s_kv, *first]) for _ in range(num_pipelines)
         ]
         pv_rtps = [
-            [Rtp([*blocks, self.s_kv, self.q_start]) for _ in range(num_pipelines)]
+            [Rtp([*blocks, self.s_kv, *first]) for _ in range(num_pipelines)]
             for _ in range(pv_cores)
         ]
 
         matmul_workers, softmax_workers, matmul_pv_workers = [], [], []
         for i in range(num_pipelines):
             idx_buffer_qk = Buffer(
-                initial_value=np.zeros(shape=(2,), dtype=np.int32),
+                initial_value=np.zeros(shape=(3,), dtype=np.int32),
             )
             matmul_workers.append(
                 Worker(
@@ -914,7 +921,7 @@ class MHA(Operator):
                 )
             )
             idx_buffer_softmax = Buffer(
-                initial_value=np.zeros(shape=(2,), dtype=np.int32),
+                initial_value=np.zeros(shape=(3,), dtype=np.int32),
             )
             scale_buffer_softmax = Buffer(
                 initial_value=np.zeros(shape=(4 * B_q,), dtype=np.float32),
@@ -942,7 +949,7 @@ class MHA(Operator):
             # state each reads from shared memory.
             for h in range(pv_cores):
                 idx_buffer_pv = Buffer(
-                    initial_value=np.zeros(shape=(2,), dtype=np.int32),
+                    initial_value=np.zeros(shape=(3,), dtype=np.int32),
                 )
                 matmul_pv_workers.append(
                     Worker(

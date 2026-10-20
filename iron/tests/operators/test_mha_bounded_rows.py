@@ -14,7 +14,7 @@ whatever the step before left, so here it is random rather than zeros.
 A chunk of a longer prompt runs MHA over the cache it extends: its queries
 are the last rows of ``k[:, :position + 1]``, so a chunk at any offset
 attends causally over every key before it, and the keys past the bound are
-never read.
+never read. A call may start at any position, its first query mid-block.
 
 Bidirectional attention bounds the same way: a key past ``n`` is masked
 whether it lies before or after a query.
@@ -115,6 +115,9 @@ CHUNK, CACHE = 512, 2048
 
 
 class Chunk(iron.Graph):
+    def __init__(self, window: int | None = None):
+        self.window = window
+
     def body(
         self,
         q,
@@ -129,6 +132,7 @@ class Chunk(iron.Graph):
             k[:, : position + 1],
             v[:, : position + 1],
             heads_interleaved=True,
+            window=self.window,
             num_pipelines=PIPELINES,
         )
 
@@ -160,6 +164,38 @@ def test_a_chunk_attends_over_the_cache_before_it(full_elf):
             mha.resolved().tolerance(),
         )
         assert verdict, f"{c=} {rows=}: the valid elements differ: {verdict.detail}"
+
+
+@pytest.mark.parametrize("window", [None, 511], ids=["causal", "sliding"])
+def test_a_call_starts_its_queries_anywhere(window):
+    """Calls from positions no block divides, as a chat turn's: each query
+    attends over the keys before it, within Gemma 3's window if sliding.
+    """
+    chunk = Chunk(window)
+    rng = np.random.default_rng(1)
+    q = rng.standard_normal((CACHE, HEADS, D)).astype(bfloat16)
+    k = rng.standard_normal((KV_HEADS, CACHE, D)).astype(bfloat16)
+    v = rng.standard_normal((KV_HEADS, CACHE, D)).astype(bfloat16)
+    net = chunk.compile(q=(CHUNK, HEADS, D), k=k.shape, v=v.shape)
+    mha = MHA(
+        num_heads=HEADS,
+        num_KV_heads=KV_HEADS,
+        seq_len=CACHE,
+        heads_interleaved=True,
+        window=window,
+    )
+    whole = mha.reference(q, k, v)
+    whole = np.asarray(whole, dtype=np.float32).reshape(CACHE, HEADS, D)
+    for start, rows in ((270, 40), (13, 100), (601, CHUNK), (1500, 77)):
+        position = start + rows - 1
+        o = net(q[start : start + CHUNK], k, v, rows=rows, position=position)
+        o = np.asarray(o, dtype=np.float32).reshape(CHUNK, HEADS, D)
+        verdict = compare(
+            o[:rows],
+            whole[start : start + rows],
+            mha.resolved().tolerance(),
+        )
+        assert verdict, f"{start=} {rows=}: the valid elements differ: {verdict.detail}"
 
 
 def test_what_lies_past_the_bound_does_not_reach_the_output():
