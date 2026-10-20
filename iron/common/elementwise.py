@@ -184,13 +184,23 @@ class Elementwise(Operator):
     tile_cap: ClassVar[int] = 4096
 
     def resolve(self, dev) -> Self:
+        (out,) = self.outputs
         tile_size = self.default_tile if self.tile_size is None else self.tile_size
+        if self.tile_size is None and out.elements % tile_size:
+            # The widest line, in 64-element steps, that splits it whole.
+            tile_size = next(
+                (
+                    t
+                    for t in range(tile_size, 0, -64)
+                    if t % 64 == 0 and out.elements % t == 0
+                ),
+                tile_size,
+            )
         if tile_size > self.tile_cap:
             raise Unresolvable(
                 f"tile_size={tile_size} exceeds the {self.tile_cap}-element line "
                 f"one core holds ({type(self).__name__}.tile_cap)"
             )
-        (out,) = self.outputs
         cols = self.resolve_columns(
             dev,
             self.num_aie_columns,

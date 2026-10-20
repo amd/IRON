@@ -33,6 +33,13 @@ def test_a_tunable_free_operator_takes_the_widest_split_that_leaves_whole_lines(
     assert ElementwiseAdd(size=2048).resolved(NPU2).num_aie_columns == 8
 
 
+def test_a_size_the_default_line_does_not_split_takes_a_narrower_one():
+    """Gemma 3's 1152-wide rows: 192-element lines on six columns."""
+    op = ReLU(size=1152).resolved(NPU2)
+    assert (op.num_aie_columns, op.tile_size) == (6, 192)
+    assert op.lines % op.cores == 0
+
+
 def test_the_refusals_name_what_to_change():
     with pytest.raises(ValueError, match="give a tile_size= or num_aie_columns="):
         ReLU(size=1000).resolved(NPU2)
