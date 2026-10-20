@@ -90,10 +90,20 @@ struct state {
     uint32_t mlp_d = 0, mlp_i = 0; ///< the MLP shape of the layer being prefilled
 };
 
+inline std::unique_ptr<state> &state_storage()
+{
+    static std::unique_ptr<state> instance = std::make_unique<state>();
+    return instance;
+}
+
 inline state &S()
 {
-    static state s;
-    return s;
+    return *state_storage();
+}
+
+inline void reset_state()
+{
+    state_storage() = std::make_unique<state>();
 }
 
 inline bytes &at_offset(bytes &parent, size_t offset)
@@ -204,6 +214,11 @@ ert_cmd_state o_proj(const Layer &w, const Shape &s, Bufs &bufs, bytes &o)
 /// xclbin. The device holds 16.
 template <class Npu, class Config> void engine_init(Npu *npu, const Config &config)
 {
+    // The override DLL remains loaded when FastFlowLM unloads a model. Replace
+    // every process-global cache before binding the new engine so apps, buffer
+    // views, generated-sequence parameters, and resident weights cannot refer
+    // to the previous model's managers or allocations.
+    reset_state();
     state &s = S();
     const auto xclbin = [&](const char *name) {
         return npu->register_xclbin(utils::path_join(config.exec_path, "xclbins", config.model_name, name));
