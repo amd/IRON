@@ -134,14 +134,11 @@ def to_bfp16ebs8(weights):
     """Pack an (N, K) matrix for the B operand of IRON GEMM."""
     if IRON and IRON not in sys.path:
         sys.path.insert(0, IRON)
-    import torch
-
-    torch.set_num_threads(2)
     from iron.operators.flm.packing import pack_b
 
     k_dim = weights.shape[1]
     tile_n = 128 if k_dim == K_TILE else 64
-    operand = torch.from_numpy(np.ascontiguousarray(through_bf16(weights).T))
+    operand = np.ascontiguousarray(through_bf16(weights).T)
     packed = pack_b(
         operand,
         k_tile=K_TILE,
@@ -152,7 +149,7 @@ def to_bfp16ebs8(weights):
         bfp16=True,
         round_conv_even=False,
     )
-    return packed.numpy().view(np.uint8)
+    return np.ascontiguousarray(packed).view(np.uint8)
 
 
 def build(raw, cols, mode):

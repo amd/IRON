@@ -13,7 +13,8 @@ belongs here.
 """
 
 import numpy as np
-import torch
+
+from iron.common.host_array import as_numpy
 
 
 def f32_to_bfp16ebs8(a, round_conv_even=True):
@@ -61,7 +62,7 @@ def f32_to_bfp16ebs8(a, round_conv_even=True):
     out = np.empty((flat.shape[0], 9), dtype=np.uint8)
     out[:, 0] = max_exp[:, 0].astype(np.uint8)
     out[:, 1:] = v8.astype(np.int8).view(np.uint8)
-    return torch.from_numpy(out.reshape(-1))
+    return out.reshape(-1)
 
 
 def pack_b(
@@ -82,8 +83,8 @@ def pack_b(
     with the wrong value produces a wrongly ordered buffer of the RIGHT SIZE, so
     it mis-computes silently rather than raising.
 
-    With ``bfp16`` the result is a flat uint8 tensor of bfp16ebs8 blocks (9
-    bytes per 8 values); otherwise a flat bf16 tensor. The quantization is not a
+    With ``bfp16`` the result is a flat uint8 array of bfp16ebs8 blocks (9
+    bytes per 8 values); otherwise a flat bf16 array. The quantization is not a
     loss this adds: the AIE2P mmul only multiplies bfp16, so the bf16 path would
     convert B inside every mac anyway. Doing it here hoists a rounding that
     already happened, and makes B 9 bytes per 8 values instead of 16.
@@ -99,28 +100,29 @@ def pack_b(
     """
     if overlay_order and bfp16:
         raise ValueError("overlay_order is bf16-only; the overlay never takes bfp16 B")
-    K, N = B.shape
+    array = as_numpy(B)
+    K, N = array.shape
     if K % k_tile or N % n_tile:
         raise ValueError(f"B ({K}, {N}) must tile to ({k_tile}, {n_tile}) to be packed")
     col_a = ct_k // s
-    blocked = B.reshape(
+    blocked = array.reshape(
         K // k_tile, k_tile // ct_k, col_a, s, N // n_tile, n_tile // t, t
     )
     # (kb, kslice, i, s_in, cb, tb, t_in)
     if not bfp16:
         if overlay_order:
             #   -> (cb, kb, kslice, tb, s_in, i, t_in)
-            out = blocked.permute(4, 0, 1, 5, 3, 2, 6).reshape(-1).contiguous()
+            axes = (4, 0, 1, 5, 3, 2, 6)
         else:
             #   -> (cb, kb, kslice, tb, i, s_in, t_in)
             # Row-major s x t within the block, which is what the plain mmul
             # loads.
-            out = blocked.permute(4, 0, 1, 5, 2, 3, 6).reshape(-1).contiguous()
+            axes = (4, 0, 1, 5, 2, 3, 6)
         # Callers may pass B in whatever dtype they have it in (e.g. a model's
         # native f32 weight); the kernels and get_arg_spec() assume the result
         # is bf16, so guarantee that here rather than silently returning
-        # whatever B.dtype was.
-        return out.to(torch.bfloat16)
+        # whatever dtype came in.
+        return _as_bf16(np.ascontiguousarray(blocked.transpose(axes).reshape(-1)))
     #   -> (cb, kb, kslice, tb, i, t_in, s_in)
     # t-major within the block: the mixed mmul hands B straight to
     # mac_8x8_8x8T without the transpose the bf16 form applies, so the transpose
@@ -128,8 +130,19 @@ def pack_b(
     # exponent (8 consecutive k for one n) adjacent, which is what makes the
     # block grouping match the kernel's. Grouping over n instead measures
     # 1.95e-02 against this layout's 2.69e-04.
-    blocked = blocked.permute(4, 0, 1, 5, 2, 6, 3).reshape(-1, 8).contiguous()
-    return f32_to_bfp16ebs8(blocked.float().numpy(), round_conv_even=round_conv_even)
+    blocked = np.ascontiguousarray(
+        blocked.transpose(4, 0, 1, 5, 2, 6, 3).reshape(-1, 8)
+    )
+    return f32_to_bfp16ebs8(blocked.astype(np.float32), round_conv_even=round_conv_even)
+
+
+def _as_bf16(values):
+    from ml_dtypes import bfloat16
+
+    array = np.ascontiguousarray(values)
+    if array.dtype != np.dtype(bfloat16):
+        array = array.astype(np.float32).astype(bfloat16)
+    return array
 
 
 def packed_b_size(K, N, bfp16):

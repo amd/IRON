@@ -45,6 +45,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
@@ -137,12 +138,17 @@ class Candidate:
         self.xclbin = Path(op.xclbin_artifact.filename)
         self.c_bo = XRTTensor((M, N), dtype=np.dtype("bfloat16"))
         run = op.get_callable()
+        # Host weights are arrays. A stays a tensor for XRTTensor.from_torch.
         # Only the flm operators take B pre-packed. iron.operators.GEMM
         # reorders in the descriptor, so it wants plain row-major (K, N).
-        packed_b = op.pack_B(B) if hasattr(op, "pack_B") else B
+        weight = np.ascontiguousarray(
+            B.detach().cpu().contiguous().view(torch.uint16).numpy().view(bfloat16)
+        )
+        packed_b = op.pack_B(weight) if hasattr(op, "pack_B") else weight
+        packed_b = np.ascontiguousarray(packed_b)
         args = [
             XRTTensor.from_torch(A.flatten()),
-            XRTTensor.from_torch(packed_b.flatten()),
+            XRTTensor(packed_b.reshape(-1), dtype=packed_b.dtype),
             self.c_bo,
         ]
         self.run = lambda: run(*args)
