@@ -202,7 +202,7 @@ class LogMel(iron.Graph):
             )
         peaks = RowMax.step(energy.reshape(size // line, line))
         peak = RowMax.step(peaks.reshape(1, size // line))
-        clamp = dict(floor=self.mel_floor, decades=self.decades)
+        clamp = dict(mel_floor=self.mel_floor, decades=self.decades)
         if features is None:
             return Log10Clamp.step(energy, peak, **clamp)
         return Log10Clamp.step(energy, peak, features, **clamp)

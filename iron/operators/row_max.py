@@ -2,29 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import ExternalFunction, In, Out
-from aie.iron.kernels import KernelContract, Param
+from aie.iron import In, Out
+from aie.iron.kernels import reduce
 from aie.utils.compile.jit.params import param
-from aie.utils.verify import Tolerance
 
 from iron.common import Rowwise
 from iron.common.elementwise import CORES
 from iron.common.testing import Case, Testing
-
-ROW_MAX = """
-#include <aie_api/aie.hpp>
-#include <stdint.h>
-
-extern "C" void row_max_f32(float *restrict x, float *restrict y, int32_t n) {
-  event0();
-  aie::vector<float, 16> m = aie::load_v<16>(x);
-  for (int32_t i = 16; i < ROW_MAX_ELEMS; i += 16) chess_prepare_for_pipelining {
-    m = aie::max(m, aie::load_v<16>(x + i));
-  }
-  *y = aie::reduce_max(m);
-  event1();
-}
-"""
 
 
 class RowMax(Rowwise):
@@ -69,16 +53,4 @@ class RowMax(Rowwise):
         return self.rows * self.width
 
     def kernel(self):
-        return ExternalFunction(
-            "row_max_f32",
-            source_string=ROW_MAX,
-            arg_types=[self.x.obj_type, self.y.obj_type, np.int32],
-            compile_flags=[f"-DROW_MAX_ELEMS={self.width}"],
-            symbol_prefix=f"row_max_{self.width}",
-            contract=KernelContract(
-                roles=(In, Out, Param),
-                parameter_bindings=((2, self.width),),
-                reference=lambda x: np.max(x, axis=-1, keepdims=True),
-                tolerance=Tolerance.exact(note="a selection"),
-            ),
-        )
+        return reduce.reduce_max(self.width, dtype=np.float32)
