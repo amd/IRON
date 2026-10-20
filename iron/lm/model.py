@@ -37,6 +37,14 @@ logger = logging.getLogger(__name__)
 # checkpoint's pages as they upload, a test's host copies.
 HOST_RESERVE = 8 << 30
 
+# What this process itself keeps beside the arena, inside a cgroup that
+# already excludes the rest of the host: the interpreter, aie.utils and a
+# bound device cost 130 MB RSS; a small operator's compile, 183 MB; with
+# torch and transformers imported too, as a golden-recording test does,
+# 337 MB. Rounded up with margin for a bigger compile or several xdist
+# workers.
+CGROUP_RESERVE = 512 << 20
+
 
 def _cgroup_limit() -> int | None:
     """This process's cgroup memory ceiling: cgroup v2's ``memory.max``,
@@ -76,14 +84,16 @@ def _cgroup_limit() -> int | None:
 
 
 def host_budget() -> int:
-    """The bytes a model's arena may take here: physical memory, or a
-    cgroup's lower ceiling (a container's, or a job's own, as CI's
-    self-hosted runners and a capped test both impose with systemd), in
-    which the NPU's buffers live, less ``HOST_RESERVE``.
+    """The bytes a model's arena may take here: physical memory less
+    ``HOST_RESERVE`` (the rest of the host), or a cgroup's lower ceiling
+    less ``CGROUP_RESERVE`` (this process's own, a cgroup already
+    excluding the rest of the host) where one bounds this process (a
+    container, or a job's own, as CI's self-hosted runners and a capped
+    test both impose with systemd).
     """
-    phys = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    phys = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") - HOST_RESERVE
     limit = _cgroup_limit()
-    return (phys if limit is None else min(phys, limit)) - HOST_RESERVE
+    return phys if limit is None else min(phys, limit - CGROUP_RESERVE)
 
 
 def prompt_text(chars: int, skip: int = 0) -> str:
