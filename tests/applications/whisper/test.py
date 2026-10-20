@@ -6,8 +6,8 @@
 against Hugging Face's own model in float32 over the same weights, its
 logits recorded in ``goldens/``: device-free, the encoder over a clip's
 features, then the decoder's prompt chunks and a decode step over its
-output, each version's reference in turn; and the same on the NPU.
-The real checkpoint waits on exact GELU (the pin group) and the gaps
+output, each version's reference in turn; and the same on the NPU, with
+tanh and exact GELU. The real checkpoint waits on the gaps
 ``iron/applications/whisper/README.md`` lists.
 """
 
@@ -40,6 +40,8 @@ TOY = WhisperConfig(
     num_mel_bins=64,
     max_source_positions=200,
 )
+#: The toy with Whisper's own GELU, the exact one.
+EXACT = dataclasses.replace(TOY, hidden_act="gelu")
 
 
 def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
@@ -98,14 +100,20 @@ def clip():
     return weights, features.astype(bfloat16).astype(np.float32)
 
 
+@pytest.fixture(scope="module", params=[TOY, EXACT], ids=["tanh_gelu", "exact_gelu"])
+def toy(request):
+    """The toy, with tanh GELU and with exact."""
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def reference(clip, golden):
+def reference(clip, golden, toy):
     """Hugging Face's logits over the toy's weights after the clip."""
     weights, _ = clip
     return golden(
-        "toy",
-        lambda: HuggingFaceWhisper.build("whisper", TOY, weights, pad_token_id=None),
-        TOY,
+        "toy" if toy is TOY else "toy_exact",
+        lambda: HuggingFaceWhisper.build("whisper", toy, weights, pad_token_id=None),
+        toy,
         weights,
     )
 
@@ -158,13 +166,13 @@ def test_the_encoder_s_output_is_hugging_face_s(clip, golden):
 
 
 @pytest.mark.usefixtures("npu2")
-def test_the_decoder_attends_over_the_encoded_clip(clip, reference):
+def test_the_decoder_attends_over_the_encoded_clip(clip, toy, reference):
     """The encode version, then two prompt chunks and a decode step, each
     reference carrying its states to the next, against Hugging Face's
     logits after the same clip.
     """
     weights, features = clip
-    model = Whisper(TOY, weights)
+    model = Whisper(toy, weights)
     buffer, own = model.encoder.inputs(features)
     source = model.encoder.soft(own)
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
@@ -178,20 +186,13 @@ def test_the_decoder_attends_over_the_encoded_clip(clip, reference):
     assert_close(logits, want, "a decode step's logits")
 
 
-def test_whisper_s_exact_gelu_is_refused_until_its_kernel():
-    """The checkpoint's own ``gelu`` (exact): no operator yet."""
-    exact = dataclasses.replace(TOY, hidden_act="gelu")
-    with pytest.raises(ValueError, match="'gelu'"):
-        Whisper(exact, checkpoint(TOY, names(TOY)).tree("random"))
-
-
 @pytest.mark.supported_devices("npu2")
-def test_whisper_toy_on_the_device(clip, reference):
+def test_whisper_toy_on_the_device(clip, toy, reference):
     """The encode version, the prompt's two chunks and two decode steps,
     each within 5% of Hugging Face's largest logit, as the references are.
     """
     weights, features = clip
-    model = Whisper(TOY, weights).load_versions()
+    model = Whisper(toy, weights).load_versions()
     model.encode(features)
     tokens = list(np.random.default_rng(2).integers(0, TOY.vocab_size, 300))
     for _ in range(3):

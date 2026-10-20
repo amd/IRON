@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The norms and GELU ``F`` refuses, device-free, and EmbeddingGemma 2's
-text layer (``SandwichLayer`` and ``PleLayer``, the shared blocks at their
-fullest) through its operators' references against Hugging Face's own
-Gemma 4 layer.
+"""The norms and GELU forms ``F`` refuses and each GELU's operator,
+device-free, and EmbeddingGemma 2's text layer (``SandwichLayer`` and
+``PleLayer``, the shared blocks at their fullest) through its operators'
+references against Hugging Face's own Gemma 4 layer.
 """
 
 from types import SimpleNamespace
@@ -62,8 +62,8 @@ GEMMA = (
 
 
 def test_an_activation_with_no_operator_is_refused():
-    with pytest.raises(ValueError, match="no operator for hidden_act 'gelu'"):
-        blocks.activation("gelu")
+    with pytest.raises(ValueError, match="no operator for hidden_act 'quick_gelu'"):
+        blocks.activation("quick_gelu")
 
 
 @pytest.mark.parametrize(
@@ -106,9 +106,26 @@ def test_layer_norm_refuses_an_eps_other_than_its_kernel_s():
         F.layer_norm(x, WIDTH, eps=1e-6)
 
 
-def test_gelu_refuses_the_exact_form_it_has_no_operator_for():
-    with pytest.raises(ValueError, match="only approximate='tanh'"):
-        F.gelu(None)
+@pytest.mark.parametrize(
+    "act, approximate",
+    [("gelu", "none"), ("gelu_pytorch_tanh", "tanh")],
+)
+def test_each_gelu_is_its_operator_s_form(act, approximate):
+    class Activated(iron.Graph):
+        def body(self, x):
+            return blocks.activation(act)(x)
+
+    (step,) = Activated().record(x=(T, WIDTH)).steps
+    assert (type(step.op).__name__, step.op.approximate) == ("GELU", approximate)
+
+
+def test_gelu_refuses_a_form_it_has_no_kernel_for():
+    class Activated(iron.Graph):
+        def body(self, x):
+            return F.gelu(x, approximate="sigmoid")
+
+    with pytest.raises(ValueError, match="approximate='sigmoid'"):
+        Activated().record(x=(T, WIDTH))
 
 
 # The per-layer input's width, and the rows of the Gemma layer's test.

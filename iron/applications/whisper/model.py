@@ -144,8 +144,6 @@ class WhisperConfig(DecoderConfig):
     rope_theta: float | None = not_json(None, kw_only=True)
     max_seq_len: int = dataclasses.field(metadata={"json": "max_target_positions"})
     prefill_chunk: int = not_json(256)
-    # Whisper's own "gelu" is exact, which MLP refuses: no operator computes
-    # it. A checkpoint at "gelu_pytorch_tanh" runs.
     hidden_act: str = dataclasses.field(
         default="gelu", metadata={"json": "activation_function"}
     )

@@ -140,19 +140,10 @@ def silu(x: Handle) -> Handle:
 
 
 def gelu(x: Handle, approximate: str = "none") -> Handle:
-    """GELU by its tanh approximation (``gelu_pytorch_tanh``). The default
-    is torch's, the exact GELU, so a call written for it is refused rather
-    than approximated.
-
-    Raises:
-        ValueError: ``approximate`` is not ``"tanh"``: no operator computes
-            the exact GELU.
+    """GELU, exact by default as torch's, or by its tanh approximation
+    (``approximate="tanh"``, ``gelu_pytorch_tanh``).
     """
-    if approximate != "tanh":
-        raise ValueError(
-            f"gelu(): only approximate='tanh' has an operator, not {approximate!r}"
-        )
-    return GELU.step(x)
+    return GELU.step(x, approximate=approximate)
 
 
 def rope(x: Handle, angles: Handle) -> Handle:

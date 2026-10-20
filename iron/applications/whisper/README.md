@@ -13,16 +13,15 @@ is judged by. The shared library is [AGENTS.md](../../../AGENTS.md#language-mode
 
 ## Status
 
-The model runs at a toy shape with tanh GELU on drawn weights
-(`tests/applications/whisper/test.py`): device-free, each version's
+The model runs at a toy shape on drawn weights, with tanh GELU and with
+exact (`tests/applications/whisper/test.py`): device-free, each version's
 reference against Hugging Face's logits recorded in
 `tests/applications/whisper/goldens/`, and the same checks on the NPU.
+`hidden_act` `"gelu"`, Whisper's own, is the exact GELU, `GELU`'s
+`approximate="none"` on mlir-aie's `gelu_erf`.
 
-The real checkpoint waits on:
-
-- **Exact GELU.** Whisper's `activation_function` is `"gelu"`, which
-  `MLP` refuses: no operator computes it.
-- **The log-mel features.** Whisper's extractor clamps each clip's log-mel
-  to its own maximum less 8 before the affine `(x + 4) / 4`. That needs a
-  reduction over the whole clip, which no operator does (`RMSNorm` and
-  `Softmax` reduce a row). The rest is `iron.lm.LogMel`'s.
+The real checkpoint waits on the log-mel features. Whisper's extractor
+clamps each clip's log-mel to its own maximum less 8 before the affine
+`(x + 4) / 4`. That needs a reduction over the whole clip, which no
+operator does (`RMSNorm` and `Softmax` reduce a row). The rest is
+`iron.lm.LogMel`'s.

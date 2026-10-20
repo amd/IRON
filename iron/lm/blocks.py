@@ -462,15 +462,18 @@ def activation(name: str):
     """The function ``hidden_act`` ``name`` is.
 
     Raises:
-        ValueError: No operator computes it: only ``"silu"`` and
-            ``"gelu_pytorch_tanh"`` have one.
+        ValueError: No operator computes it: only ``"silu"``, ``"gelu"``
+            and ``"gelu_pytorch_tanh"`` have one.
     """
     if name == "silu":
         return F.silu
+    if name == "gelu":
+        return F.gelu
     if name == "gelu_pytorch_tanh":
         return partial(F.gelu, approximate="tanh")
     raise ValueError(
-        f"no operator for hidden_act {name!r}; silu and gelu_pytorch_tanh have one"
+        f"no operator for hidden_act {name!r}; silu, gelu and gelu_pytorch_tanh "
+        "have one"
     )
 
 

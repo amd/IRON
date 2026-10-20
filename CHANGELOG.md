@@ -12,6 +12,8 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `GELU(approximate="none")`, the exact GELU on mlir-aie's `gelu_erf`:
+  `F.gelu`'s default and `hidden_act` `"gelu"`.
 - Qwen3-Reranker (`Qwen3Reranker.score`: "yes" over "no" after its model
   card's prompt) and Qwen3-Embedding (`Qwen3Embedding.embed`: the last
   token's unit-length final hidden state, one compile up to a prompt
