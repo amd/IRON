@@ -17,6 +17,7 @@ a zero row before them, as its convolutions' padding.
 """
 
 import dataclasses
+import functools
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -155,6 +156,8 @@ class WhisperConfig(DecoderConfig):
     encoder_ffn_dim: int = dataclasses.field(kw_only=True)
     num_mel_bins: int = dataclasses.field(kw_only=True)
     max_source_positions: int = dataclasses.field(kw_only=True)
+    # <|startoftranscript|>, every Whisper checkpoint's.
+    decoder_start_token_id: int = dataclasses.field(default=50258, kw_only=True)
 
     def encoder(self) -> WhisperEncoderConfig:
         """The encoder's shape."""
@@ -306,9 +309,11 @@ class WhisperEncoder(Tower):
 class Whisper(EncoderDecoder):
     """Whisper on ``config``'s shape and a checkpoint's ``weights``: its
     encoder a ``WhisperEncoder``, its decoder under ``model.decoder``, the
-    head tied to the embedding.
+    head tied to the embedding. From its checkpoint and ``tokenizer.json``,
+    a prompt starts at ``<|startoftranscript|>``.
     """
 
+    config = WhisperConfig
     decoder_class = WhisperDecoder
     layer_class = WhisperDecoderLayer
     renames = RENAMES
@@ -317,6 +322,18 @@ class Whisper(EncoderDecoder):
         weights = bf16(weights)
         encoder = WhisperEncoder(config.encoder(), weights)
         super().__init__(config, decoder_weights(weights), encoder)
+
+    @functools.cached_property
+    def bos(self) -> int:
+        """``<|startoftranscript|>``, the decoder's first token."""
+        return self.config.decoder_start_token_id
+
+    @property
+    def hugging_face(self):
+        """transformers' Whisper, imported only where a golden is recorded."""
+        from .hugging_face import HuggingFaceWhisper
+
+        return HuggingFaceWhisper
 
     def positions(self, x, call):
         c = self.config

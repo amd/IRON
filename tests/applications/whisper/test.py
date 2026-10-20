@@ -7,19 +7,21 @@ against Hugging Face's own model in float32 over the same weights, its
 logits recorded in ``goldens/``: device-free, the encoder over a clip's
 features, then the decoder's prompt chunks and a decode step over its
 output, each version's reference in turn; and the same on the NPU, with
-tanh and exact GELU. The real checkpoint waits on the gaps
-``iron/applications/whisper/README.md`` lists.
+tanh and exact GELU. Then large-v3-turbo from its checkpoint on the NPU,
+against transformers' logits recorded beside it.
 """
 
 import dataclasses
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
 from iron.applications.whisper.hugging_face import HuggingFaceWhisper
 from iron.applications.whisper.model import Whisper, WhisperConfig, WhisperEncoder
-from iron.lm.testing import LOGITS, assert_close
+from iron.lm.generation import divergence
+from iron.lm.testing import LOGITS, assert_close, require, weights_dir
 from iron.tests.support.llama_model import checkpoint
 from iron.tests.support.llama_reference import prompt
 
@@ -42,6 +44,8 @@ TOY = WhisperConfig(
 )
 #: The toy with Whisper's own GELU, the exact one.
 EXACT = dataclasses.replace(TOY, hidden_act="gelu")
+
+DIRECTORY = weights_dir("whisper-large-v3-turbo")
 
 
 def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
@@ -229,3 +233,46 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
     tokens = np.random.default_rng(2).integers(0, TOY.vocab_size, 100)
     logits, _ = prompt(model, tokens, source=source, encoder_rows=0)
     assert_close(logits, reference.logits(tokens, features), "the prompt's logits")
+
+
+# The bound on each step's KL(float32 forward || device).
+MAX_KL = 0.05
+
+
+@pytest.fixture(scope="module")
+def large():
+    """large-v3-turbo from its checkpoint, compiled and loaded once."""
+    require(
+        DIRECTORY / "model.safetensors",
+        DIRECTORY / "config.json",
+        DIRECTORY / "tokenizer.json",
+        staged=False,
+    )
+    yield Whisper.load(DIRECTORY)
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
+
+
+@pytest.mark.bench
+@pytest.mark.supported_devices("npu2")
+def test_whisper_large_v3_turbo_accuracy(large, record_property):
+    """A drawn clip's features, then the transcript's preamble and three
+    decode steps: each next-token distribution against transformers',
+    teacher-forced. KL is held to its bound and a top-1 mismatch recorded.
+    """
+    encoder = large.encoder.config
+    rng = np.random.default_rng(1)
+    features = rng.uniform(-1, 1, (encoder.num_mel_bins, encoder.frames))
+    features = features.astype(bfloat16).astype(np.float32)
+    large.encode(features)
+    reference = large.cpu_reference()
+    tokens = large.tokenizer("<|en|><|transcribe|><|notimestamps|>")
+    results = []
+    for _ in range(4):
+        want = reference.logits(tokens, features)
+        results.append(divergence(want, large.logits(tokens)))
+        tokens.append(int(want.argmax()))
+    worst = max(kl for kl, _ in results)
+    record_property("MaxKL", worst)
+    record_property("Top1Mismatches", sum(not top1 for _, top1 in results))
+    assert worst <= MAX_KL, f"KL {worst} > {MAX_KL}"

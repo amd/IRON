@@ -13,7 +13,9 @@ public API adds its entry under Unreleased.
 ### Added
 
 - `GELU(approximate="none")`, the exact GELU on mlir-aie's `gelu_erf`:
-  `F.gelu`'s default and `hidden_act` `"gelu"`.
+  `F.gelu`'s default and `hidden_act` `"gelu"`. `Whisper.load` builds
+  large-v3-turbo from its checkpoint (`Whisper.config`, `WhisperConfig`'s
+  `decoder_start_token_id` its `bos`).
 - Qwen3-Reranker (`Qwen3Reranker.score`: "yes" over "no" after its model
   card's prompt) and Qwen3-Embedding (`Qwen3Embedding.embed`: the last
   token's unit-length final hidden state, one compile up to a prompt
