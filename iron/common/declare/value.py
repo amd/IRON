@@ -91,14 +91,20 @@ class Value(PerCallMember):
     def symbol(self) -> str:
         """The device symbol the host writes this value through: an exported
         design's own parameter of its name, else the instance's name, the
-        value's and the graph value bound to it.
+        value's and the graph value bound to it; for a value the operator
+        derives, the instance's name, every graph value bound to it (two
+        instances bound to others derive it from them) and the value's.
         """
         if self.op.exported_design() is not None:
             return self.name
-        bound = self.op.bound_values.get(self.name)
-        return f"{self.op.name}_{self.name}" + (
-            "" if bound is None else f"_{bound.name}"
-        )
+        bound = self.op.bound_values
+        if self.name in bound:
+            own = bound[self.name]
+            return "_".join(
+                [self.op.name, self.name, *([] if own is None else [own.name])]
+            )
+        names = [bound[k].name for k in sorted(bound) if bound[k] is not None]
+        return "_".join([self.op.name, *names, self.name])
 
     @property
     def in_scratchpad(self) -> bool:

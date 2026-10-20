@@ -1025,9 +1025,9 @@ def test_a_bound_rounds_up_to_the_tiles_it_ends_in(npu2):
     for p in range(64):
         elements = (p + 1) * 512
         tiles = -(-elements // per_word)
-        assert words[f"{op.name}_valid_p_x512_p512"]({"p": p}) == elements
-        assert words[f"{op.name}_count"]({"p": p}) == tiles
-        assert words[f"{op.name}_valid_a"]({"p": p}) == tiles
+        assert words[op.value("valid").symbol]({"p": p}) == elements
+        assert words[op.value("count").symbol]({"p": p}) == tiles
+        assert words[op.value("valid_a").symbol]({"p": p}) == tiles
         assert tiles * per_word >= elements and tiles * per_word <= 64 * 512
 
 
@@ -1200,18 +1200,39 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
     t = g.record(x=(64, 8))
     (op,) = t.operators
     words = {w.symbol: w for w in _words(t)[0]}
-    assert set(words) == {
-        f"{op.name}_{w}" for w in ("valid_n_x8", "count", "valid_x", "valid_y")
-    }
+    symbol = {v: op.value(v).symbol for v in ("valid", "count", "valid_x", "valid_y")}
+    assert set(words) == set(symbol.values())
+    assert symbol["valid"] == f"{op.name}_valid_n_x8"
+    assert symbol["count"] == f"{op.name}_n_x8_count"
     call = {"n": 16}
-    assert words[f"{op.name}_valid_n_x8"](call) == 16 * 8  # the reshape's scale
-    assert words[f"{op.name}_count"](call) == 16 * 8 // 2  # derived: valid // lanes
-    assert words[f"{op.name}_valid_x"](call) == 16 * 8 // 2  # tiles per lane
+    assert words[symbol["valid"]](call) == 16 * 8  # the reshape's scale
+    assert words[symbol["count"]](call) == 16 * 8 // 2  # derived: valid // lanes
+    assert words[symbol["valid_x"]](call) == 16 * 8 // 2  # tiles per lane
     # A full ELF's designs read the bound only through what they derive.
     elf = {w.symbol for w in _words(t, extents=False)[0]}
-    assert elf == set(words) - {f"{op.name}_valid_n_x8"}
+    assert elf == set(words) - {symbol["valid"]}
     for w in words.values():  # and each is what its Emit row computes
         assert w.form is not None and w.form.evaluate(call) == w(call)
+
+
+def test_one_operator_bound_to_two_values_derives_a_word_from_each(npu2):
+    """Two steps of one operator, each bounded by its own value, derive
+    their words each from its own: a derived word is named by the values
+    bound to its step, not shared as two steps bound alike share it.
+    """
+
+    class G(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32], m: Scratchpad[np.int32]):
+            a = Rows.step(x[:n].reshape(64 * 8, 1))
+            return a, Rows.step(x[:m].reshape(64 * 8, 1))
+
+    t = G().record(x=(64, 8))
+    first, second = t.operators
+    assert first.value("count").symbol != second.value("count").symbol
+    words = {w.symbol: w for w in _words(t)[0]}
+    call = {"n": 16, "m": 32}
+    for op, rows in ((first, 16), (second, 32)):
+        assert words[op.value("count").symbol](call) == rows * 8 // 2
 
 
 def test_integer_arithmetic_on_an_expression_is_an_expression():
