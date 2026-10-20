@@ -137,7 +137,7 @@ APPLICATIONS = {
         Gemma4, "gemma-4-e2b-it", "model.safetensors", "tokenizer.json", staged=False
     ),
     "qwen3.5_0.8b": Application(
-        Qwen35, "qwen3.5-0.8b", "model.safetensors", "tokenizer.json", staged=False
+        Qwen35, "qwen3.5-0.8b", INDEX, "tokenizer.json", staged=False
     ),
     "qwen3_reranker_0.6b": Application(
         Qwen3Reranker,
