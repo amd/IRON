@@ -75,7 +75,7 @@ def block_sizes(op, dev, start: int) -> tuple[int, ...]:
         ),
         default=16,
     )
-    return divisors(start, of=op.kv_len, step=16, cap=cap)
+    return divisors(start, of=op.kv_len, step=8 if op.packed else 16, cap=cap)
 
 
 # At NPU2's eight pipelines; _cases halves them on a narrower array.
@@ -459,7 +459,7 @@ class MHA(Operator):
                 )
             group = self.num_heads // self.num_KV_heads
             # Every row of a packed block is computed: the narrowest holding the group.
-            blocks = (16, 32, 64) if self.packed else (64, 32, 16)
+            blocks = (8, 16, 32, 64) if self.packed else (64, 32, 16)
             fit = next(
                 (
                     (cores, b)
@@ -472,7 +472,7 @@ class MHA(Operator):
             )
             if fit is None and B_q is None:
                 raise Unresolvable(
-                    f"MHA at d={self.d}: no block of 16 rows or more fits a "
+                    f"MHA at d={self.d}: no block of {min(blocks)} rows or more fits a "
                     f"core's {mem} bytes"
                 )
             pv_cores, B_q = fit or (pv_cores or 1, B_q)

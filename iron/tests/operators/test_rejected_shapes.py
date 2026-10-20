@@ -256,7 +256,7 @@ def test_mha_blocks_follow_the_head_size(npu2):
 
 @pytest.mark.parametrize(
     "heads,kv_heads,d,block",
-    [(32, 8, 64, 16), (32, 1, 64, 32)],
+    [(32, 8, 64, 8), (32, 1, 64, 32)],
     ids=["llama_1b", "group_of_32"],
 )
 def test_mha_one_query_packed_takes_the_narrowest_block_and_64_keys(
