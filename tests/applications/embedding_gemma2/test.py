@@ -16,14 +16,12 @@ it, before the text encoder's graphs are built for the module's last tests.
 """
 
 import functools
-import tarfile
 import time
 from types import SimpleNamespace
 
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-import soundfile
 from aie.utils.benchmark import run_iters
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
@@ -42,11 +40,11 @@ from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.lm import Checkpoint, prompt_text, rope_angles
 from iron.lm.golden import Golden
-from iron.lm.testing import Download, cache_dir, check_embedding, require, weights_dir
+from iron.lm.testing import Download, check_embedding, require, weights_dir
 from iron.operators.copy import Copy
+from iron.tests.support.librispeech import utterance
 
 DIRECTORY = weights_dir("embeddinggemma-2")
-CACHE = cache_dir()
 
 QUERY = "What causes the northern lights?"
 DOCUMENTS = [
@@ -100,14 +98,7 @@ AUDIO_MAX_ERROR = 0.06
 VISION_MIN_COSINE = 0.95
 VISION_MAX_ERROR = 0.06
 
-# LibriSpeech's test-clean (CC BY 4.0, V. Panayotov et al., 2015), as openslr
-# publishes it, fetched once into IRON's cache.
-LIBRISPEECH = Download(
-    "https://www.openslr.org/resources/12/test-clean.tar.gz",
-    "39fde525e59672dc6d1551919b1478f724438a95aa55f874b576be21967e6c23",
-)
-
-# Utterances of it, 16 kHz mono, by the soft tokens they give.
+# Utterances of LibriSpeech's test-clean (``librispeech``), 16 kHz mono, by the soft tokens they give.
 CLIPS = {
     # 2.0 s, 50 tokens: "Won't you tell Douglas".
     "short": "121-127105-0021",
@@ -185,25 +176,8 @@ def cosine(a, b):
 
 
 def clip(name: str) -> np.ndarray:
-    """The utterance `CLIPS[name]`, its FLAC member taken from the archive
-    in IRON's cache the first time, decoded: float32 samples in
-    [-1, 1) at the extractor's sample rate.
-    """
-    speaker, chapter, _ = CLIPS[name].split("-")
-    member = f"LibriSpeech/test-clean/{speaker}/{chapter}/{CLIPS[name]}.flac"
-    path = CACHE / member
-    if not path.exists():
-        with tarfile.open(LIBRISPEECH.fetch()) as archive:
-            data = archive.extractfile(member).read()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Renamed into place, so an interrupted extraction leaves no clip.
-        partial = path.with_suffix(".part")
-        partial.write_bytes(data)
-        partial.replace(path)
-    samples, rate = soundfile.read(path, dtype="float32")
-    if samples.ndim != 1 or rate != AudioConfig().sample_rate:
-        raise ValueError(f"{name}: not mono at the extractor's rate")
-    return samples
+    """The utterance `CLIPS[name]`, at the extractor's sample rate."""
+    return utterance(CLIPS[name])
 
 
 def photo(name: str) -> np.ndarray:

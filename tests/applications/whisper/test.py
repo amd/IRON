@@ -16,7 +16,6 @@ import dataclasses
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-import soundfile
 from ml_dtypes import bfloat16
 
 from iron.applications.whisper.hugging_face import HuggingFaceWhisper
@@ -24,6 +23,7 @@ from iron.applications.whisper.model import Whisper, WhisperConfig, WhisperEncod
 from iron.lm.generation import divergence
 from iron.lm.testing import LOGITS, assert_close, require, weights_dir
 from iron.tests.support.llama_model import checkpoint
+from iron.tests.support.librispeech import utterance
 from iron.tests.support.llama_reference import prompt
 
 #: Whisper's proportions at toy size: 200 source positions, padded to 256,
@@ -47,8 +47,8 @@ TOY = WhisperConfig(
 EXACT = dataclasses.replace(TOY, hidden_act="gelu")
 
 DIRECTORY = weights_dir("whisper-large-v3-turbo")
-#: A LibriSpeech test-clean clip, 7.3 s of speech, EmbeddingGemma 2's.
-SPEECH = weights_dir("embeddinggemma-2") / "librispeech-4446-2275-0016.wav"
+#: A LibriSpeech test-clean utterance, 7.3 s of speech.
+SPEECH = "4446-2275-0016"
 
 
 def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
@@ -250,7 +250,6 @@ def large():
         DIRECTORY / "model.safetensors",
         DIRECTORY / "config.json",
         DIRECTORY / "tokenizer.json",
-        SPEECH,
         staged=False,
     )
     yield Whisper.load(DIRECTORY)
@@ -265,7 +264,7 @@ def test_whisper_large_v3_turbo_accuracy(large, record_property):
     steps: each next-token distribution against transformers', teacher-forced.
     KL is held to its bound and a top-1 mismatch recorded.
     """
-    audio, _ = soundfile.read(SPEECH, dtype="float32")
+    audio = utterance(SPEECH)
     large.encode(audio)
     reference = large.cpu_reference()
     tokens = large.tokenizer("<|en|><|transcribe|><|notimestamps|>")
