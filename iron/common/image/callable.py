@@ -124,6 +124,7 @@ class FullELFRun:
         image: NPUKernel,
         kernels: list[pyxrt.kernel],
         runs: list[pyxrt.run],
+        commands: list[str],
         arguments: Mapping[int, XRTTensor],
         feedback_arg: int | None,
         params_path: Path | None,
@@ -132,6 +133,7 @@ class FullELFRun:
         self._image = image
         self._kernel = kernels[0]
         self.handles = runs
+        self._commands = commands
         self._started = runs
         for index, tensor in arguments.items():
             self.bind(index, tensor.buffer_object())
@@ -160,16 +162,19 @@ class FullELFRun:
 
     @property
     def params(self) -> list[ParameterScratchpad] | None:
-        """Each command's parameter scratchpad; ``None`` when ``params.txt``
-        counts none.
+        """Each command's parameter scratchpad, holding the words it reads;
+        ``None`` when ``params.txt`` counts none.
         """
         if self._params is not None:
             return self._params
         if self._params_path is None:
             return None
-        if self._params_path.read_text().split("\n", 1)[0].strip() == "0":
+        if self._params_path.read_text().split()[0] == "0":
             return None
-        self._params = [ParameterScratchpad(h, self._params_path) for h in self.handles]
+        self._params = [
+            ParameterScratchpad(h, self._params_path, command)
+            for h, command in zip(self.handles, self._commands)
+        ]
         return self._params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
@@ -179,17 +184,19 @@ class FullELFRun:
                 f"{self.name} was built without per-call values; got "
                 f"{sorted(values)}"
             )
+        # Words of different commands may share a slot: each gets its own.
         for block in params:
-            for symbol, value in values.items():
-                block.write(symbol, value)
+            for symbol in block.names & values.keys():
+                block.write(symbol, values[symbol])
             block.sync()
 
     def read_value(self, symbol: str) -> int:
         params = self.params
         if params is None:
             raise ValueError(f"{self.name} was built without per-call values")
-        params[0].sync_from_device()
-        return params[0].read(symbol)
+        block = next(b for b in params if symbol in b.names)
+        block.sync_from_device()
+        return block.read(symbol)
 
     def scratchpad_alias(self) -> pyxrt.bo:
         """This run's ctrl scratchpad, for another run to drain its feedback into.
@@ -432,6 +439,7 @@ class FullELFCallable(ImageCallable):
             self.kernel,
             kernels,
             runs,
+            [k.kernel_name for k in (self.kernel, *self.later)],
             arguments,
             self._argument_index.get("feedback"),
             self.op.artifacts.params,

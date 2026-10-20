@@ -10,8 +10,9 @@ from aie.helpers.taplib import PerCall
 
 import iron
 from iron import Carried, Scratchpad
+from iron.common.graph.compiled import _step_words
 from iron.common.graph.record import Recording
-from iron.common.image.packaging import Kind, plan
+from iron.common.image.packaging import SCRATCHPAD_WORDS, Kind, plan
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.tests.support.llama_model import small
@@ -122,6 +123,25 @@ def test_a_prompt_chunk_is_a_command_per_attention_and_decode_one(npu2):
     cuts = plan(npu2, prompt).commands
     attention = [i + 1 for i, s in enumerate(prompt.steps) if isinstance(s.op, MHA)]
     assert list(cuts) == attention and len(cuts) == model.config.num_hidden_layers
+
+
+class ManyWords(iron.Graph):
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return tuple(ReLU.step(x[: n + k]) for k in range(40))
+
+
+def test_a_command_reads_at_most_a_scratchpads_words(npu2):
+    """Forty steps, each bounded by its own word, are commands of at most
+    32 words each, the state table a command's scratchpad has.
+    """
+    recording = ManyWords().record(x=(4096,))
+    words = _step_words(recording)
+    assert len(frozenset().union(*words)) > SCRATCHPAD_WORDS
+    p = plan(npu2, recording, step_words=words)
+    edges = (0, *p.commands, len(recording.steps))
+    held = [frozenset().union(*words[a:b]) for a, b in zip(edges, edges[1:])]
+    assert len(held) > 1 and all(len(h) <= SCRATCHPAD_WORDS for h in held)
+    assert any("scratchpad holds 32 words" in r for r in p.reasons)
 
 
 class Shrinks(iron.Graph):

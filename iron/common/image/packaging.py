@@ -6,7 +6,8 @@
 ``full_elf`` is mlir-aie's choice of the same name. ``None`` derives it:
 NPU1 or ``check`` forces an xclbin, one dispatch per step; otherwise the
 image is one full ELF. A full ELF is one command unless a step's work grows
-with a carried value, which ends a command (``Plan.commands``).
+with a carried value, which ends a command, or the words a command reads
+would pass its scratchpad's ``SCRATCHPAD_WORDS`` (``Plan.commands``).
 """
 
 from __future__ import annotations
@@ -16,6 +17,9 @@ import enum
 import os
 
 import aie.utils as aie_utils
+
+# The command processor's state table: each word a command reads takes an entry.
+SCRATCHPAD_WORDS = 32
 
 
 class Kind(enum.Enum):
@@ -81,16 +85,25 @@ def require_device():
     return dev
 
 
-def plan(dev, recording, full_elf: bool | None = None, check: bool = False) -> Plan:
+def plan(
+    dev,
+    recording,
+    full_elf: bool | None = None,
+    check: bool = False,
+    step_words: list[frozenset[str]] | None = None,
+) -> Plan:
     """Derive the packaging for ``recording`` on the device.
 
     Args:
         check: Each step is checked against its reference on its own
             dispatch, which an xclbin per step gives.
+        step_words: The scratchpad words each step reads, by the symbol it
+            shares; none bounds a command.
 
     Raises:
         ValueError: ``full_elf`` is asked for where a value, the device or
-            ``check`` forbids it, or the graph runs a shipped image.
+            ``check`` forbids it, the graph runs a shipped image, or one step
+            reads more words than a command's scratchpad holds.
     """
     shipped = [op for op in recording.operators if op.external is not None]
     if shipped:
@@ -132,14 +145,35 @@ def plan(dev, recording, full_elf: bool | None = None, check: bool = False) -> P
         values.append((v.name, v.marker.value, lowering))
     # A carried-bound step grows with every call; amdxdna stops a command past ~4 s.
     # A version taking no tensor stays one: a loop drains its values into one.
-    commands = ()
+    commands: list[int] = []
     if full_elf and recording.inputs:
-        commands = tuple(
+        after_carried = {
             i + 1
             for i, step in enumerate(recording.steps[:-1])
             if any(
                 b is not None and b.value.marker is Kind.CARRIED
                 for b in step.op.bound_extents.values()
             )
-        )
-    return Plan(full_elf, reasons, values, commands)
+        }
+        held: frozenset[str] = frozenset()
+        split = []
+        for i, words in enumerate(step_words or [frozenset()] * len(recording.steps)):
+            if len(words) > SCRATCHPAD_WORDS:
+                raise ValueError(
+                    f"{recording.name}: step {i} ({recording.steps[i].op.name}) "
+                    f"reads {len(words)} scratchpad words; a command's "
+                    f"scratchpad holds {SCRATCHPAD_WORDS}"
+                )
+            full = len(held | words) > SCRATCHPAD_WORDS
+            if i in after_carried or full:
+                commands.append(i)
+                held = frozenset()
+                if full and i not in after_carried:
+                    split.append(i)
+            held |= words
+        if split:
+            reasons.append(
+                f"a command's scratchpad holds {SCRATCHPAD_WORDS} words: a "
+                f"command also starts at steps {split}"
+            )
+    return Plan(full_elf, reasons, values, tuple(commands))

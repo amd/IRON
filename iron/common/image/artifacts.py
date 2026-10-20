@@ -80,9 +80,9 @@ class Artifacts:
         """The scratchpad words the image declares, in the table's order."""
         if self.params is None:
             return []
-        count, *rows = self.params.read_text().splitlines()
+        header, *rows = self.params.read_text().splitlines()
         table = []
-        for row in rows[: int(count)]:
+        for row in rows[: int(header.split()[0])]:
             name, index, dtype, kind, _, _ = row.split()
             table.append(Parameter(name, int(index), dtype, kind))
         return table

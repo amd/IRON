@@ -568,7 +568,13 @@ class Graph:
             else contextlib.nullcontext()
         ):
             recording = self.record(**shapes)
-            chosen = plan(require_device(), recording, full_elf, check)
+            chosen = plan(
+                require_device(),
+                recording,
+                full_elf,
+                check,
+                step_words=_step_words(recording),
+            )
             logger.info("%s", chosen.report(self.name))
             signature = self._signature(
                 {h.name: (h.shape, h.dtype) for h in recording.inputs}
@@ -1114,6 +1120,22 @@ def _words(
             written.add(symbol)
             out.append(dataclasses.replace(w, symbol=symbol))
     return out, shared
+
+
+def _step_words(recording: Recording) -> list[frozenset[str]]:
+    """The scratchpad words each step's design reads on a full ELF, by the
+    symbol each shares.
+    """
+    dev = aie_utils.get_current_device()
+    shared = _words(recording, share=True)[1]
+    return [
+        frozenset(
+            shared.get(v.symbol, v.symbol)
+            for v in step.op.resolved(dev).values
+            if v.per_call and not v.dispatch
+        )
+        for step in recording.steps
+    ]
 
 
 def _shared(words: list[Word]) -> dict[str, str]:
