@@ -5,10 +5,10 @@
 """Whisper at a toy shape with tanh GELU, on drawn weights (no checkpoint),
 against Hugging Face's own model in float32 over the same weights, its
 logits recorded in ``goldens/``: device-free, the encoder over a clip's
-features, then the decoder's prompt chunks and a decode step over its
+samples, then the decoder's prompt chunks and a decode step over its
 output, each version's reference in turn; and the same on the NPU, with
-tanh and exact GELU. Then large-v3-turbo from its checkpoint on the NPU,
-against transformers' logits recorded beside it.
+tanh and exact GELU. Then large-v3-turbo from its checkpoint on the NPU
+over a LibriSpeech clip, against transformers' logits recorded beside it.
 """
 
 import dataclasses
@@ -16,6 +16,7 @@ import dataclasses
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+import soundfile
 from ml_dtypes import bfloat16
 
 from iron.applications.whisper.hugging_face import HuggingFaceWhisper
@@ -46,6 +47,8 @@ TOY = WhisperConfig(
 EXACT = dataclasses.replace(TOY, hidden_act="gelu")
 
 DIRECTORY = weights_dir("whisper-large-v3-turbo")
+#: A LibriSpeech test-clean clip, 7.3 s of speech, EmbeddingGemma 2's.
+SPEECH = weights_dir("embeddinggemma-2") / "librispeech-4446-2275-0016.wav"
 
 
 def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
@@ -94,14 +97,19 @@ def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
     return out
 
 
+def drawn_audio(seconds: float) -> np.ndarray:
+    """``seconds`` of a rising tone in noise at 16 kHz, float32."""
+    t = np.arange(int(16000 * seconds)) / 16000
+    rng = np.random.default_rng(1)
+    tone = 0.3 * np.sin(2 * np.pi * (200 * t + 300 * t**2))
+    return (tone + 0.05 * rng.standard_normal(t.size)).astype(np.float32)
+
+
 @pytest.fixture(scope="module")
 def clip():
-    """The toy's weights and a clip's features, ``(num_mel_bins, frames)``."""
+    """The toy's weights and 3 s of audio, short of its 4 s clip."""
     weights = checkpoint(TOY, names(TOY)).tree("random")
-    encoder = TOY.encoder()
-    rng = np.random.default_rng(1)
-    features = rng.uniform(-1, 1, (encoder.num_mel_bins, encoder.frames))
-    return weights, features.astype(bfloat16).astype(np.float32)
+    return weights, drawn_audio(3.0)
 
 
 @pytest.fixture(scope="module", params=[TOY, EXACT], ids=["tanh_gelu", "exact_gelu"])
@@ -132,21 +140,22 @@ def test_each_version_resolves(clip, npu2, version):
 
 class Encoder:
     """Hugging Face's encoder over the toy's weights, what records
-    ``goldens/encoder.npz``: its output over a clip's features, rounded to bf16 to keep the file small, a hundredth of
-    the bound it is held to.
+    ``goldens/encoder.npz``: its output over a clip's samples' features,
+    rounded to bf16 to keep the file small, a hundredth of the bound it is
+    held to.
     """
 
     def __init__(self, weights):
-        self.encoder = HuggingFaceWhisper.build(
+        self.whisper = HuggingFaceWhisper.build(
             "whisper", TOY, weights, pad_token_id=None
-        ).model.model.encoder
+        )
 
-    def logits(self, tokens, features):
+    def logits(self, tokens, audio):
         import torch
 
-        features = torch.from_numpy(np.asarray(features, np.float32))[None]
+        features = torch.from_numpy(self.whisper.features(audio))[None]
         with torch.no_grad():
-            out = self.encoder(features).last_hidden_state[0]
+            out = self.whisper.model.model.encoder(features).last_hidden_state[0]
         return out.numpy().astype(bfloat16).astype(np.float32)
 
 
@@ -155,13 +164,11 @@ def test_the_encoder_s_output_is_hugging_face_s(clip, golden):
     """The encoder judged alone: through the decoder, another clip moves
     the logits by less than the bound they are held to.
     """
-    weights, features = clip
+    weights, audio = clip
     encoder = WhisperEncoder(TOY.encoder(), weights)
-    buffer, values = encoder.inputs(features)
+    buffer, values = encoder.inputs(audio)
     got = np.asarray(encoder.reference(buffer, **values), np.float32)
-    want = golden("encoder", lambda: Encoder(weights), TOY, weights).logits(
-        [], features
-    )
+    want = golden("encoder", lambda: Encoder(weights), TOY, weights).logits([], audio)
     # 200 positions of the 256 rows the layers take.
     assert got.shape == want.shape == (TOY.max_source_positions, TOY.hidden_size)
     # bf16 against float32, held as a decoder's logits are: measured 0.87%.
@@ -175,18 +182,18 @@ def test_the_decoder_attends_over_the_encoded_clip(clip, toy, reference):
     reference carrying its states to the next, against Hugging Face's
     logits after the same clip.
     """
-    weights, features = clip
+    weights, audio = clip
     model = Whisper(toy, weights)
-    buffer, own = model.encoder.inputs(features)
+    buffer, own = model.encoder.inputs(audio)
     source = model.encoder.soft(own)
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_rows=own["rows"])
     tokens = np.random.default_rng(2).integers(0, TOY.vocab_size, 300)
     logits, carry = prompt(model, tokens, source=source, encoder_rows=0)
-    assert_close(logits, reference.logits(tokens, features), "the prompt's logits")
+    assert_close(logits, reference.logits(tokens, audio), "the prompt's logits")
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_rows=0, **carry)
-    want = reference.logits(tokens, features)
+    want = reference.logits(tokens, audio)
     assert_close(logits, want, "a decode step's logits")
 
 
@@ -195,12 +202,12 @@ def test_whisper_toy_on_the_device(clip, toy, reference):
     """The encode version, the prompt's two chunks and two decode steps,
     each within 5% of Hugging Face's largest logit, as the references are.
     """
-    weights, features = clip
+    weights, audio = clip
     model = Whisper(toy, weights).load_versions()
-    model.encode(features)
+    model.encode(audio)
     tokens = list(np.random.default_rng(2).integers(0, TOY.vocab_size, 300))
     for _ in range(3):
-        want = reference.logits(tokens, features)
+        want = reference.logits(tokens, audio)
         assert_close(model.logits(tokens), want, f"{len(tokens)} tokens")
         tokens.append(int(want.argmax()))
 
@@ -222,17 +229,14 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
         weights,
     )
     assert model.model.embed_tokens.weight.dtype == bfloat16
-    features = np.random.default_rng(1).uniform(
-        -1, 1, (TOY.num_mel_bins, 2 * TOY.max_source_positions)
-    )
-    features = features.astype(bfloat16).astype(np.float32)
-    buffer, own = model.encoder.inputs(features)
+    audio = drawn_audio(3.0)
+    buffer, own = model.encoder.inputs(audio)
     source = model.encoder.soft(own)
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_rows=own["rows"])
     tokens = np.random.default_rng(2).integers(0, TOY.vocab_size, 100)
     logits, _ = prompt(model, tokens, source=source, encoder_rows=0)
-    assert_close(logits, reference.logits(tokens, features), "the prompt's logits")
+    assert_close(logits, reference.logits(tokens, audio), "the prompt's logits")
 
 
 # The bound on each step's KL(float32 forward || device).
@@ -246,6 +250,7 @@ def large():
         DIRECTORY / "model.safetensors",
         DIRECTORY / "config.json",
         DIRECTORY / "tokenizer.json",
+        SPEECH,
         staged=False,
     )
     yield Whisper.load(DIRECTORY)
@@ -256,20 +261,17 @@ def large():
 @pytest.mark.bench
 @pytest.mark.supported_devices("npu2")
 def test_whisper_large_v3_turbo_accuracy(large, record_property):
-    """A drawn clip's features, then the transcript's preamble and three
-    decode steps: each next-token distribution against transformers',
-    teacher-forced. KL is held to its bound and a top-1 mismatch recorded.
+    """A LibriSpeech clip, then the transcript's preamble and three decode
+    steps: each next-token distribution against transformers', teacher-forced.
+    KL is held to its bound and a top-1 mismatch recorded.
     """
-    encoder = large.encoder.config
-    rng = np.random.default_rng(1)
-    features = rng.uniform(-1, 1, (encoder.num_mel_bins, encoder.frames))
-    features = features.astype(bfloat16).astype(np.float32)
-    large.encode(features)
+    audio, _ = soundfile.read(SPEECH, dtype="float32")
+    large.encode(audio)
     reference = large.cpu_reference()
     tokens = large.tokenizer("<|en|><|transcribe|><|notimestamps|>")
     results = []
     for _ in range(4):
-        want = reference.logits(tokens, features)
+        want = reference.logits(tokens, audio)
         results.append(divergence(want, large.logits(tokens)))
         tokens.append(int(want.argmax()))
     worst = max(kl for kl, _ in results)

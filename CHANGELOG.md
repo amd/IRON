@@ -12,6 +12,13 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- Whisper's log-mel features on the NPU: `LogMel`'s `mel_scale` and `norm`
+  (`filterbank`'s, transformers' `mel_filter_bank`), `power=2` and
+  `decades`, Whisper's log10 held to that many decades below the clip's
+  largest, as `(x + 4) / 4`; `Magnitude(power=2)`, the power spectrum;
+  `RowMax`, the largest of each float32 row; `Log10Clamp`, that log10,
+  clamp and affine rounded once to bf16. `WhisperEncoder` takes a clip's
+  samples (`inputs(audio)`), not the extractor's features.
 - `GELU(approximate="none")`, the exact GELU on mlir-aie's `gelu_erf`:
   `F.gelu`'s default and `hidden_act` `"gelu"`. `Whisper.load` builds
   large-v3-turbo from its checkpoint (`Whisper.config`, `WhisperConfig`'s

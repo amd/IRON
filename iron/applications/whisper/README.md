@@ -26,8 +26,13 @@ logits recorded in `golden.npz` beside it; the tests find it at
 `hidden_act` `"gelu"`, Whisper's own, is the exact GELU, `GELU`'s
 `approximate="none"` on mlir-aie's `gelu_erf`.
 
-The encoder still takes the feature extractor's log-mel features, not
-the waveform: Whisper's extractor clamps each clip's log-mel to its own
-maximum less 8 before the affine `(x + 4) / 4`. That needs a reduction
-over the whole clip, which no operator does (`RMSNorm` and `Softmax`
-reduce a row). The rest is `iron.lm.LogMel`'s.
+The encoder takes a clip's samples at 16 kHz (`WhisperEncoder.inputs`):
+the host pads or cuts them to the clip (30 s at large-v3-turbo's) and
+mirrors 200 samples at each end, as `torch.stft` centres its frames, and
+the NPU computes the extractor's log-mel features from them,
+`iron.lm.LogMel` with Whisper's parameters: the power spectrum through
+Slaney's mel filters, then each log10 held to 8 below the clip's largest
+(`RowMax` twice), as `(x + 4) / 4` (`Log10Clamp`). On LibriSpeech clips
+they are transformers' `WhisperFeatureExtractor`'s rounded to bf16 at all
+but 0.05% of features, those one bf16 ulp away
+(`iron/tests/lm/test_log_mel.py`).

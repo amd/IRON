@@ -12,8 +12,9 @@ the encoder adds a fixed position table after its two convolutions, the
 decoder a learned one after its embedding. The shape is read from the
 checkpoint's ``config.json``.
 
-The encoder takes the feature extractor's log-mel features (``input_features``),
-a zero row before them, as its convolutions' padding.
+The encoder takes a clip's samples and computes the feature extractor's
+log-mel features from them (``iron.lm.LogMel``, Whisper's), a zero row
+before them as its convolutions' padding.
 """
 
 import dataclasses
@@ -38,6 +39,7 @@ from iron.lm import (
     EncoderLayer,
     LayerNorm,
     Linear,
+    LogMel,
     Tower,
     activation,
     not_json,
@@ -93,6 +95,10 @@ class WhisperEncoderConfig(Config):
     positions: int
     hidden_act: str
     eps: float = dataclasses.field(default=1e-5, kw_only=True)
+    # Every Whisper's feature extractor: samples per second, per hop and per frame.
+    sample_rate: int = dataclasses.field(default=16000, kw_only=True)
+    hop: int = dataclasses.field(default=160, kw_only=True)
+    n_fft: int = dataclasses.field(default=400, kw_only=True)
 
     @property
     def num_key_value_heads(self) -> int:
@@ -111,6 +117,11 @@ class WhisperEncoderConfig(Config):
     def frames(self) -> int:
         """The log-mel frames of a clip, two a position."""
         return 2 * self.positions
+
+    @property
+    def samples(self) -> int:
+        """The samples of a clip, a hop a frame: 30 s at large-v3-turbo's."""
+        return self.frames * self.hop
 
     @property
     def rows(self) -> int:
@@ -228,10 +239,11 @@ def decoder_weights(weights):
 
 
 class WhisperEncoder(Tower):
-    """Whisper's audio encoder over one clip's log-mel features: two
-    convolutions, each then a GELU, the second at stride 2, the position
-    table added, then each layer and the final LayerNorm. Its rows are
-    ``config.rows``, bounded per call to ``rows``, the clip's positions.
+    """Whisper's audio encoder over one clip: its log-mel features, as the
+    feature extractor computes them (``LogMel``), then two convolutions,
+    each then a GELU, the second at stride 2, the position table added, then
+    each layer and the final LayerNorm. Its rows are ``config.rows``,
+    bounded per call to ``rows``, the clip's positions.
 
     Args:
         config: The encoder's shape.
@@ -247,6 +259,20 @@ class WhisperEncoder(Tower):
         super().__init__(c, c.rows, c.rows)
         self.final_norm = LayerNorm(c.hidden_size)
         self.load_layers(weights, "model.encoder.layers.", "model.encoder.layer_norm.")
+        self.log_mel = LogMel(
+            c.n_fft,
+            c.hop,
+            c.n_fft,
+            c.num_mel_bins,
+            c.sample_rate,
+            mel_floor=1e-10,
+            mel_scale="slaney",
+            norm="slaney",
+            power=2,
+            decades=8.0,
+        )
+        # The first convolution's input: a zero row, the features, zero rows.
+        self.features = iron.state((c.conv_rows + 2, c.num_mel_bins))
         self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.num_mel_bins)
         self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
         # The convolutions' GELU is the layers' hidden_act.
@@ -259,12 +285,21 @@ class WhisperEncoder(Tower):
         )
         self.embed_positions[: c.positions] = e.embed_positions.weight
 
-    def front(self, features, *, rows):
+    @property
+    def wave_samples(self) -> int:
+        """The samples a call takes: those of the clip's frames in whole
+        128-row blocks, ``LogMel``'s GEMMs'.
+        """
+        c = self.config
+        return (-(-c.frames // 128) * 128 - 1) * c.hop + self.log_mel.span
+
+    def front(self, wave, *, rows):
         """The clip's ``rows`` positions after the convolutions, with their
         position embeddings.
         """
         c = self.config
-        h = self.act(self.conv1(features, rows=c.conv_rows))
+        self.log_mel(wave, self.features[1 : c.frames + 1], frames=c.frames)
+        h = self.act(self.conv1(self.features, rows=c.conv_rows))
         self.convolved[1 : c.frames + 1] = h[: c.frames]
         h = self.act(self.conv2(self.convolved, rows=rows))
         table = iron.weight(self.embed_positions)
@@ -273,36 +308,37 @@ class WhisperEncoder(Tower):
     def head(self, x):
         return x
 
-    def body(self, features, *, rows: Scratchpad[np.int32]):
-        """The encoder's output over a clip's ``features``, ``(conv_rows +
-        2, num_mel_bins)``: a zero row, the frames, zero rows after.
-        """
-        x, angles = self.front(features, rows=rows)
+    def body(self, wave, *, rows: Scratchpad[np.int32]):
+        """The encoder's output over a clip's ``wave``, ``inputs``'."""
+        x, angles = self.front(wave, rows=rows)
         return self.forward(x, rows, angles)
 
     def shapes(self) -> list[dict]:
-        c = self.config
-        return [dict(features=((c.conv_rows + 2, c.num_mel_bins), bfloat16))]
+        return [dict(wave=((self.wave_samples,), np.float32))]
 
     def longest(self) -> dict:
         return dict(rows=self.config.positions)
 
-    def inputs(self, features) -> tuple[np.ndarray, dict]:
-        """A call's buffer for ``features``, ``(num_mel_bins, frames)`` as the
-        feature extractor gives them, and its ``rows``.
+    def inputs(self, audio) -> tuple[np.ndarray, dict]:
+        """A call's buffer for ``audio``, float32 samples at ``sample_rate``,
+        and its ``rows``: as the feature extractor takes them, padded with
+        zeros or cut to the clip's samples, then mirrored ``n_fft // 2``
+        samples at each end (``torch.stft``'s centring), zero past.
 
         Raises:
-            ValueError: ``features`` is not ``(num_mel_bins, frames)``.
+            ValueError: ``audio`` is not one channel of samples.
         """
         c = self.config
-        features = np.asarray(features)
-        if features.shape != (c.num_mel_bins, c.frames):
+        audio = np.asarray(audio, np.float32)
+        if audio.ndim != 1:
             raise ValueError(
-                f"WhisperEncoder: features {features.shape} are not "
-                f"{(c.num_mel_bins, c.frames)}"
+                f"WhisperEncoder: audio {audio.shape} is not one channel of samples"
             )
-        buffer = np.zeros((c.conv_rows + 2, c.num_mel_bins), bfloat16)
-        buffer[1 : c.frames + 1] = features.T
+        clip = np.zeros(c.samples, np.float32)
+        clip[: min(audio.size, c.samples)] = audio[: c.samples]
+        padded = np.pad(clip, c.n_fft // 2, mode="reflect")[: self.wave_samples]
+        buffer = np.zeros(self.wave_samples, np.float32)
+        buffer[: padded.size] = padded
         return buffer, dict(rows=c.positions)
 
 
