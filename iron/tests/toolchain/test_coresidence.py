@@ -19,7 +19,6 @@ Peano and ``aiebu-asm``. Nothing dispatches.
 
 import json
 import re
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -29,6 +28,8 @@ from aie.dialects.aie import DMAChannelDir, shim_dma_allocation
 from aie.iron import DeviceConfiguration, Flow, ObjectFifo, Program, Runtime, Worker
 from aie.iron.device import NPU2, AnyShimTile, Tile
 from aie.utils.compile.jit._hash import _python_identity
+from aie.utils.verify import compare
+from ml_dtypes import bfloat16
 
 from iron.common.image import AdjacentPacking, compose, coresidence
 from iron.common.image.coresidence import Packing
@@ -528,52 +529,42 @@ def test_an_npu1_run_declares_a_pinned_design_s_pins_once(npu1):
     assert len(re.findall(r"aie\.shim_dma_allocation @y_0\(", text)) == 1
 
 
-class _Built:
-    """A design ``CompilableDesign.chain`` compiled, without aiecc."""
-
-    dispatch_params = ()
-
-    def get_cache_entry(self):
-        return SimpleNamespace(insts=None)
-
-    def get_dispatch_lib_path(self):
-        return None
-
-
-def test_an_npu1_pack_links_and_dispatches_each_run_once(npu1, monkeypatch):
-    """Without aiecc: each run is one kernel over its steps' buffers, and a
-    member that also runs alone still builds its own.
+@requires("aiebu", "peano")
+def test_an_npu1_pack_links_once_per_run(npu1):
+    """Each run is one build over its steps' buffers, and a member that
+    also runs alone still builds its own.
     """
-    from iron.common.image import link
-
-    built = []
-
-    def chain(designs, name):
-        built.extend(designs)
-        return [(_Built(), f"x{i}", f"k{i}") for i in range(len(designs))]
-
-    calls = []
-
-    class Kernel:
-        dispatch_params = ()
-
-        def __init__(self, xclbin, insts, kernel_name, **_):
-            self.xclbin_path, self.name = xclbin, kernel_name
-
-        def __call__(self, *args):
-            calls.append((self.name, len(args)))
-
-    monkeypatch.setattr(link.CompilableDesign, "chain", staticmethod(chain))
-    monkeypatch.setattr(link, "NPUKernel", Kernel)
     graph = Chain(SIZE, TILE, columns=1)
     recording = graph.record(a=(SIZE,), b=(SIZE,))
     image = Image(recording, PerStep(coresident=[[graph.add, graph.mul]])).compile()
     # add, silu, then mul and add as one run, then silu: add also runs alone,
     # so it builds its own; mul runs only in the run.
-    assert len(built) == 3 and list(image.packaging.runs) == [2]
-    assert [s.design for s in image.artifacts.steps] == ["k0", "k1", "k2", "k2", "k1"]
-    image.get_callable()()
-    assert calls == [("k0", 3), ("k1", 2), ("k2", 3 + 3), ("k1", 2)]
+    assert len({id(link) for link in image.packaging.links.values()}) == 3
+    assert list(image.packaging.runs) == [2]
+    designs = [s.design for s in image.artifacts.steps]
+    add, silu, pack = designs[0], designs[1], designs[2]
+    assert len({add, silu, pack}) == 3
+    assert designs == [add, silu, pack, pack, silu]
+
+
+@pytest.mark.supported_devices("npu1")
+def test_an_npu1_pack_dispatches_each_run_once(npu1):
+    """A pack's run dispatches both its members once each call, over the
+    buffers the graph recorded for them: a run skipped, repeated, or wired
+    to the wrong buffer computes the wrong numbers, not an error.
+    """
+    graph = Chain(SIZE, TILE, columns=1)
+    rng = np.random.default_rng(0)
+    a, b = ((rng.integers(-4, 4, SIZE)).astype(bfloat16) for _ in range(2))
+    expected = graph.reference(a, b)
+    version = graph.compile(
+        full_elf=False, coresident=[[graph.add, graph.mul]], a=(SIZE,), b=(SIZE,)
+    )
+    assert list(version.sequence.packaging.runs) == [2]
+    expected = np.asarray(expected)
+    got = np.array(version(a, b).numpy()[: len(expected)])
+    verdict = compare(got, expected, graph.silu.resolved().tolerance())
+    assert verdict, verdict.detail
 
 
 def test_check_packs_nothing():
