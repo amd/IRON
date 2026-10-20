@@ -36,8 +36,6 @@ from iron.common import Built, Operator, Rtp, Unresolvable
 from iron.common.testing import Case, Testing
 
 STACK_SIZE = 0xD00
-# The softmax core's accurate exp2 polynomial needs 4 KiB, as aiecc measures it.
-SOFTMAX_STACK_SIZE = 0x1000
 
 
 @dataclasses.dataclass(frozen=True)
@@ -941,7 +939,6 @@ class MHA(Operator):
                         idx_buffer_softmax,
                         scale_buffer_softmax,
                     ],
-                    stack_size=SOFTMAX_STACK_SIZE,
                     tile=Tile(i, 4) if split else AnyComputeTile,
                 )
             )
