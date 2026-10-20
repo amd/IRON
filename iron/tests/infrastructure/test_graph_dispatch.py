@@ -223,7 +223,7 @@ def test_a_packed_graph_computes_what_the_temporal_one_does():
 
 
 @pytest.mark.supported_devices("npu1")
-def test_an_npu1_pack_computes_what_its_steps_do_alone():
+def test_an_npu1_pack_computes_what_its_steps_do_alone(npu1):
     """On an xclbin, a pack's steps are one dispatch, and compute the same."""
     rng = np.random.default_rng(0)
     a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
