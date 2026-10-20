@@ -34,3 +34,8 @@ has room for both (`Model.fit`).
 
 `tests/applications/granite/` also runs the each-step form
 (`TestEachStep`, `--no-full-elf`), a two-chunk prompt and a chat turn.
+
+NPU1 runs `TestEachStep` from an empty `profiles/npu1.json` (every
+operator's device defaults, as smollm2's, phi3's and qwen2's are), and
+all of it passes there: generation, accuracy and determinism. Not yet
+run on NPU1: `tests/applications/long_context`'s deep checks.
