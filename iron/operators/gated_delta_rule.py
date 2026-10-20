@@ -17,11 +17,9 @@ from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp
+from iron.common.declare.kernel_memory import core_stack, kernel_data
 from iron.common.testing import Case, Testing
 from iron.operators.state_slices import SLICE, block_rows, resolve_heads
-
-# Kernel statics past its state copy, and the stack, with room to spare.
-STACK = 8192
 
 
 def _slices(op) -> int:
@@ -170,10 +168,11 @@ class GatedDeltaRule(Operator):
         bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
         # A slice's state streams in and its final out during the previous
         # slice's kernel where L1 holds a second of each beside the row, the
-        # block and the kernel's own copy of the state (three bf16 limbs).
+        # block, and the kernel's data (its own copy of the state among it)
+        # and stack.
         slice_in, slice_out = 4 * (2 + self.slice_state), 4 * self.slice_state
-        held = 2 * (W + 2 * V) + 2 * T * (2 * Dk + 3 * SLICE + 2) + 6 * self.slice_state
-        held += STACK
+        held = 2 * (W + 2 * V) + 2 * T * (2 * Dk + 3 * SLICE + 2)
+        held += kernel_data(self.dev, kernel) + core_stack(self.dev, kernel)
         mem = self.dev.core_memory_bytes
         deep_in = 2 if held + 2 * slice_in + slice_out <= mem else 1
         deep_out = 2 if held + deep_in * slice_in + 2 * slice_out <= mem else 1

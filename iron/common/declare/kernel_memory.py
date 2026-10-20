@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import tempfile
 from pathlib import Path
 
 from aie.iron import ExternalFunction, Kernel
+from aie.utils import config
 from aie.utils.compile import NPU_CACHE_HOME
 from aie.utils.compile.jit._object_cache import KernelObjectCache
 from aie.utils.compile.jit.compilabledesign import COMPILE_LOCK_TIMEOUT_SECONDS
@@ -17,6 +20,8 @@ from aie.utils.compile.utils import compile_external_kernel, resolve_target_arch
 
 # The deepest frames below each kernel, by (object, symbol, arch).
 _frames: dict[tuple[str, str, str], int] = {}
+# The bytes of data each object keeps, by (object, arch).
+_data: dict[tuple[str, str], int] = {}
 
 
 def _built(func: ExternalFunction, arch: str, directory: str) -> Path:
@@ -66,3 +71,33 @@ def core_stack(dev, *calls: Kernel | None, objects: tuple = ()) -> int:
                 _frames[key] = linked(obj, k.name).stack or 0
             deepest = max(deepest, _frames[key])
     return dev.default_core_stack_bytes + deepest
+
+
+def kernel_data(dev, *objects: ExternalFunction) -> int:
+    """The bytes of data ``objects`` keep in a core's memory on ``dev``: every
+    allocated section of theirs but code (``.data``, ``.bss``, ``.rodata``).
+    """
+    arch = resolve_target_arch(dev)
+    total = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for f in objects:
+            key = (f.object_file_name, arch)
+            if key not in _data:
+                out = subprocess.run(
+                    [
+                        config.readobj_path(),
+                        "--elf-output-style=JSON",
+                        "--sections",
+                        str(_built(f, arch, tmp)),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+                _data[key] = 0
+                for s in json.loads(out)[0]["Sections"]:
+                    flags = {f["Name"] for f in s["Section"]["Flags"]["Flags"]}
+                    if "SHF_ALLOC" in flags and "SHF_EXECINSTR" not in flags:
+                        _data[key] += s["Section"]["Size"]
+            total += _data[key]
+    return total

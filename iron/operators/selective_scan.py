@@ -13,15 +13,14 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, kernels
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
+from aie.utils.compile.jit.context import compile_context
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
-from iron.common import Built, Operator, Rtp
+from iron.common import Built, Operator, Rtp, Unresolvable
+from iron.common.declare.kernel_memory import core_stack, kernel_data
 from iron.common.testing import Case, Testing
 from iron.operators.state_slices import SLICE, block_rows, resolve_heads
-
-# Kernel statics past its state copy, and the stack, with room to spare.
-STACK = 8192
 
 
 def _slices(op) -> int:
@@ -104,7 +103,8 @@ class SelectiveScan(Operator):
     width: int = param(
         derive=lambda op: op.inner + 2 * op.groups * op.state_size, repr=False
     )
-    block: int = param(derive=lambda op: block_rows(op) * SLICE, repr=False)
+    # The rows of y one kernel call writes: whole SLICE-row runs that fit L1.
+    block: int = tunable(repr=False)
     slice_state: int = param(derive=lambda op: SLICE * op.state_size, repr=False)
 
     xbc = In(rows, width, obj_shape=(width,))
@@ -142,29 +142,57 @@ class SelectiveScan(Operator):
             )
 
     def resolve(self, dev):
-        return resolve_heads(self, dev, self.heads)
+        op = resolve_heads(self, dev, self.heads)
+        if self.block is not None:
+            return op
+        N, mem = self.state_size, dev.core_memory_bytes
+        slices = 4 * (3 + SLICE * N) + 4 * SLICE * N  # one state and final
+        rows = next(
+            (
+                t
+                for t in range(block_rows(op), 0, -1)
+                if op.rows % t == 0 and op.held(dev, t) + slices <= mem
+            ),
+            None,
+        )
+        if rows is None:
+            raise Unresolvable(
+                f"SelectiveScan: no block of rows fits a core's {mem} bytes "
+                f"beside a state of {N}"
+            )
+        return op.replace(block=rows * SLICE)
 
-    def kernel(self):
+    def held(self, dev, rows: int) -> int:
+        """Core memory a core of ``dev`` holds at ``rows`` a call besides a
+        slice's state and final: the row, the block and y, and the kernel's
+        data (its own copy of the state among it) and stack.
+        """
+        # Made to be read, not built: kept out of the registry a build reads.
+        with compile_context(_iron_kernel_registry=set()):
+            kernel = self.kernel(rows)
+            block = 2 * int(np.prod(kernel.arg_shape(0)))
+            frame = kernel_data(dev, kernel) + core_stack(dev, kernel)
+        return 2 * (self.width + self.heads) + block + 4 * rows * SLICE + frame
+
+    def kernel(self, rows: int):
         return kernels.ssm.selective_scan(
-            rows=block_rows(self),
+            rows=rows,
             head_dim=SLICE,
             state=self.state_size,
-            blocks=self.rows // block_rows(self),
+            blocks=self.rows // rows,
         )
 
     def build(self) -> Built:
         H, P, N, I = self.heads, self.head_dim, self.state_size, self.inner
-        T, per_group, heads = block_rows(self), H // self.groups, H // self.columns
-        kernel = self.kernel()
+        T, per_group, heads = self.block // SLICE, H // self.groups, H // self.columns
+        kernel = self.kernel(T)
         f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
         bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
         # A slice's state streams in and its final out during the previous
         # slice's kernel where L1 holds a second of each beside the row, the
         # block and the kernel's own copy of the state.
         slice_in, slice_out = 4 * (3 + SLICE * N), 4 * SLICE * N
-        held = (
-            2 * (self.width + H) + 2 * T * (3 * SLICE + 2 * N + 1) + slice_out + STACK
-        )
+        held = self.held(self.dev, T)
         mem = self.dev.core_memory_bytes
         deep_in = 2 if held + 2 * slice_in + slice_out <= mem else 1
         deep_out = 2 if held + deep_in * slice_in + 2 * slice_out <= mem else 1
