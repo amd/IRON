@@ -6,6 +6,8 @@
 from typing import ClassVar
 
 import numpy as np
+from aie.dialects import vector
+from aie.extras import types
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, kernels
@@ -17,6 +19,9 @@ from ml_dtypes import bfloat16
 from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 from iron.operators.state_slices import SLICE, block_rows, resolve_heads
+
+# Kernel statics past its state copy, and the stack, with room to spare.
+STACK = 8192
 
 
 def _slices(op) -> int:
@@ -59,9 +64,10 @@ class GatedDeltaRule(Operator):
     Each of ``columns`` cores takes whole value heads, ``SLICE`` columns of
     a head's state at a time, and gathers a block of rows' ``q``, ``k``,
     ``v``, ``a`` and ``b`` for the slice from whole rows of ``qkv``, which
-    a memtile joins to each row's ``a`` and ``b``; another joins each
-    slice's state to its head's ``head``, so a core reads two streams. The
-    kernel keeps the state from block to block. Scalar.
+    one memtile joins to each row's ``a`` and ``b`` and every core reads;
+    another joins each slice's state to its head's ``head``, so a core
+    reads two streams. The kernel keeps the state from block to block.
+    Scalar.
     """
 
     test = Testing(
@@ -110,9 +116,9 @@ class GatedDeltaRule(Operator):
     block: int = param(derive=lambda op: block_rows(op) * SLICE, repr=False)
     slice_state: int = param(derive=lambda op: op.key_dim * SLICE, repr=False)
 
-    qkv = In(rows, width, obj_shape=(width,), per=(columns,))
-    a = In(rows, v_heads, obj_shape=(v_heads,), per=(columns,))
-    b = In(rows, v_heads, obj_shape=(v_heads,), per=(columns,))
+    qkv = In(rows, width, obj_shape=(width,))
+    a = In(rows, v_heads, obj_shape=(v_heads,))
+    b = In(rows, v_heads, obj_shape=(v_heads,))
     head = In(v_heads, 2, dtype=np.float32, obj_shape=(2,), per=(columns,))
     state = In(
         v_heads,
@@ -162,28 +168,39 @@ class GatedDeltaRule(Operator):
         kernel = self.kernel()
         f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
         bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
-        # A core takes two streams, a memtile joining each: a row's a
-        # and b then its qkv, and a slice's (dt_bias, A) then its state.
-        rows, starts, ends = [], [], ([], [], [], [], [])
+        # A slice's state streams in and its final out during the previous
+        # slice's kernel where L1 holds a second of each beside the row, the
+        # block and the kernel's own copy of the state (three bf16 limbs).
+        slice_in, slice_out = 4 * (2 + self.slice_state), 4 * self.slice_state
+        held = 2 * (W + 2 * V) + 2 * T * (2 * Dk + 3 * SLICE + 2) + 6 * self.slice_state
+        held += STACK
+        mem = self.dev.core_memory_bytes
+        deep_in = 2 if held + 2 * slice_in + slice_out <= mem else 1
+        deep_out = 2 if held + deep_in * slice_in + 2 * slice_out <= mem else 1
+        # A core takes two streams, a memtile joining each: a row's qkv
+        # then its a and b, one stream every core reads, and a slice's
+        # (dt_bias, A) then its state.
+        row = ObjectFifo(bf16(W + 2 * V), depth=1)
+        parts = row.prod().join(
+            [0, W, W + V],
+            obj_types=[self.qkv.obj_type, self.a.obj_type, self.b.obj_type],
+        )
+        for o, f in zip((self.qkv, self.a, self.b), parts):
+            o.bind([f.prod()])
+        starts, ends = [], ([], [])
         for _ in range(self.columns):
-            row = ObjectFifo(bf16(2 * V + W), depth=1)
-            part = row.prod().join(
-                [0, V, 2 * V],
-                obj_types=[self.a.obj_type, self.b.obj_type, self.qkv.obj_type],
-            )
-            start = ObjectFifo(f32(2 + self.slice_state), depth=1)
-            part += start.prod().join(
+            start = ObjectFifo(f32(2 + self.slice_state), depth=deep_in)
+            part = start.prod().join(
                 [0, 2], obj_types=[self.head.obj_type, self.state.obj_type]
             )
-            rows.append(row)
             starts.append(start)
             for lane, f in zip(ends, part):
                 lane.append(f.prod())
-        for o, lane in zip((self.a, self.b, self.qkv, self.head, self.state), ends):
+        for o, lane in zip((self.head, self.state), ends):
             o.bind(lane)
         of_ys = [ObjectFifo(self.y.obj_type) for _ in range(self.columns)]
         of_finals = [
-            ObjectFifo(self.final.obj_type, depth=1) for _ in range(self.columns)
+            ObjectFifo(self.final.obj_type, depth=deep_out) for _ in range(self.columns)
         ]
         self.y.bind([f.cons() for f in of_ys])
         self.final.bind([f.cons() for f in of_finals])
@@ -198,20 +215,38 @@ class GatedDeltaRule(Operator):
             for u in range_(_slices(self)):
                 # Slice u // heads of each of the core's heads in turn.
                 h = u % heads + first
-                p = 2 * V + 2 * self.k_heads * Dk + h * Dv + (u // heads) * SLICE
-                g = 2 * V + (h // per_group) * Dk
+                p = 2 * self.k_heads * Dk + h * Dv + (u // heads) * SLICE
+                g = (h // per_group) * Dk
                 start, final = of_slice.acquire(1), of_final.acquire(1)
                 for j in range_(self.rows // T):
-                    # Gather the block: q, k, v, then a and b.
+                    # Gather the block: q, k, v, then a and b; q, k and v a
+                    # vector of SLICE at a time where q's and k's rows are
+                    # whole vectors, which qkv first keeps 32-byte aligned.
                     for t in range_(T):
                         row = of_row.acquire(1)
-                        for i in range_(Dk):
-                            block[t * Dk + i] = row[g + i]
-                            block[k + t * Dk + i] = row[g + self.k_heads * Dk + i]
-                        for i in range_(SLICE):
-                            block[v + t * SLICE + i] = row[p + i]
-                        block[ab + t] = row[h]
-                        block[ab + T + t] = row[V + h]
+                        runs = []
+                        if Dk % SLICE:
+                            for i in range_(Dk):
+                                block[t * Dk + i] = row[g + i]
+                                block[k + t * Dk + i] = row[g + self.k_heads * Dk + i]
+                            for i in range_(SLICE):
+                                block[v + t * SLICE + i] = row[p + i]
+                        else:
+                            runs = [
+                                (c * k + t * Dk + i, g + c * self.k_heads * Dk + i)
+                                for c in range(2)
+                                for i in range(0, Dk, SLICE)
+                            ] + [(v + t * SLICE, p)]
+                        lane = types.vector(SLICE, types.bf16())
+                        for to, at in runs:
+                            vector.store(
+                                vector.load(lane, row, [at], alignment=32),
+                                block.op,
+                                [to],
+                                alignment=32,
+                            )
+                        block[ab + t] = row[W + h]
+                        block[ab + T + t] = row[W + V + h]
                         of_row.release(1)
                     b = arith.index_cast(j, to=i32)
                     left = valid - b * size
@@ -226,7 +261,7 @@ class GatedDeltaRule(Operator):
             Worker(
                 core_fn,
                 [
-                    rows[k].cons(),
+                    row.cons(),
                     starts[k].cons(),
                     of_ys[k].prod(),
                     of_finals[k].prod(),
@@ -241,8 +276,9 @@ class GatedDeltaRule(Operator):
         return Built(workers, rtps)
 
     def sequence(self, rt):
-        """Per core, every row of ``a``, ``b`` and ``qkv`` once a slice, its
-        heads' parameters and states, and its slices of ``y`` and ``final``.
+        """Every row of ``qkv``, ``a`` and ``b`` once a slice, for every core;
+        per core, its heads' parameters and states, and its slices of ``y``
+        and ``final``.
         """
         R, V, W, I = self.rows, self.v_heads, self.width, self.inner
         Dk, Dv = self.key_dim, self.value_dim
@@ -257,16 +293,10 @@ class GatedDeltaRule(Operator):
             [SLICE, Dk * Dv, Dv, 1],
         )
         tg = TaskGroup()
+        self.qkv.fill(TensorAccessPattern((R, W), 0, [S, R, W], [0, W, 1]), group=tg)
+        for o in (self.a, self.b):
+            o.fill(TensorAccessPattern((R, V), 0, [S, R, V], [0, V, 1]), group=tg)
         for k in range(self.columns):
-            for o in (self.a, self.b):
-                o.fill(
-                    TensorAccessPattern((R, V), 0, [S, R, V], [0, V, 1]),
-                    lane=k,
-                    group=tg,
-                )
-            self.qkv.fill(
-                TensorAccessPattern((R, W), 0, [S, R, W], [0, W, 1]), lane=k, group=tg
-            )
             self.head.fill(
                 TensorAccessPattern((V, 2), 2 * k * heads, [per, heads, 2], [0, 2, 1]),
                 lane=k,

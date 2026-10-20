@@ -6,6 +6,8 @@
 from typing import ClassVar
 
 import numpy as np
+from aie.dialects import vector
+from aie.extras import types
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, kernels
@@ -17,6 +19,9 @@ from ml_dtypes import bfloat16
 from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 from iron.operators.state_slices import SLICE, block_rows, resolve_heads
+
+# Kernel statics past its state copy, and the stack, with room to spare.
+STACK = 8192
 
 
 def _slices(op) -> int:
@@ -54,10 +59,10 @@ class SelectiveScan(Operator):
 
     Each of ``columns`` cores takes whole heads, ``SLICE`` rows of a head's
     state at a time, and gathers a block of rows' ``x``, ``B``, ``C`` and
-    ``dt`` for the slice from whole rows of ``xbc``, which a memtile joins
-    to each row's ``dt``; another joins each slice's state to its head's
-    ``head``, so a core reads two streams. The kernel keeps the state from
-    block to block. Scalar.
+    ``dt`` for the slice from whole rows of ``xbc``, which one memtile
+    joins to each row's ``dt`` and every core reads; another joins each
+    slice's state to its head's ``head``, so a core reads two streams.
+    The kernel keeps the state from block to block. Scalar.
     """
 
     test = Testing(
@@ -102,8 +107,8 @@ class SelectiveScan(Operator):
     block: int = param(derive=lambda op: block_rows(op) * SLICE, repr=False)
     slice_state: int = param(derive=lambda op: SLICE * op.state_size, repr=False)
 
-    xbc = In(rows, width, obj_shape=(width,), per=(columns,))
-    dt = In(rows, heads, obj_shape=(heads,), per=(columns,))
+    xbc = In(rows, width, obj_shape=(width,))
+    dt = In(rows, heads, obj_shape=(heads,))
     head = In(heads, 3, dtype=np.float32, obj_shape=(3,), per=(columns,))
     state = In(
         heads,
@@ -132,8 +137,8 @@ class SelectiveScan(Operator):
             raise ValueError(
                 f"SelectiveScan: head_dim ({self.head_dim}) must be whole "
                 f"{SLICE}-row slices, and heads ({self.heads}) whole groups "
-                f"({self.groups}) and even, so a row's xbc after its dt is "
-                "4-byte aligned"
+                f"({self.groups}) and even, so a row's dt after its xbc is "
+                "whole 4-byte words"
             )
 
     def resolve(self, dev):
@@ -153,27 +158,39 @@ class SelectiveScan(Operator):
         kernel = self.kernel()
         f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
         bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
-        # A core takes two streams, a memtile joining each: a row's dt
-        # then its xbc, and a slice's (dt_bias, A, D) then its state.
-        rows, starts, ends = [], [], ([], [], [], [])
+        # A slice's state streams in and its final out during the previous
+        # slice's kernel where L1 holds a second of each beside the row, the
+        # block and the kernel's own copy of the state.
+        slice_in, slice_out = 4 * (3 + SLICE * N), 4 * SLICE * N
+        held = (
+            2 * (self.width + H) + 2 * T * (3 * SLICE + 2 * N + 1) + slice_out + STACK
+        )
+        mem = self.dev.core_memory_bytes
+        deep_in = 2 if held + 2 * slice_in + slice_out <= mem else 1
+        deep_out = 2 if held + deep_in * slice_in + 2 * slice_out <= mem else 1
+        # A core takes two streams, a memtile joining each: a row's xbc
+        # then its dt, one stream every core reads, and a slice's (dt_bias,
+        # A, D) then its state.
+        row = ObjectFifo(bf16(self.width + H), depth=1)
+        parts = row.prod().join(
+            [0, self.width], obj_types=[self.xbc.obj_type, self.dt.obj_type]
+        )
+        for o, f in zip((self.xbc, self.dt), parts):
+            o.bind([f.prod()])
+        starts, ends = [], ([], [])
         for _ in range(self.columns):
-            row = ObjectFifo(bf16(H + self.width), depth=1)
-            part = row.prod().join(
-                [0, H], obj_types=[self.dt.obj_type, self.xbc.obj_type]
-            )
-            start = ObjectFifo(f32(3 + SLICE * N), depth=1)
-            part += start.prod().join(
+            start = ObjectFifo(f32(3 + SLICE * N), depth=deep_in)
+            part = start.prod().join(
                 [0, 3], obj_types=[self.head.obj_type, self.state.obj_type]
             )
-            rows.append(row)
             starts.append(start)
             for lane, f in zip(ends, part):
                 lane.append(f.prod())
-        for o, lane in zip((self.dt, self.xbc, self.head, self.state), ends):
+        for o, lane in zip((self.head, self.state), ends):
             o.bind(lane)
         of_ys = [ObjectFifo(self.y.obj_type) for _ in range(self.columns)]
         of_finals = [
-            ObjectFifo(self.final.obj_type, depth=1) for _ in range(self.columns)
+            ObjectFifo(self.final.obj_type, depth=deep_out) for _ in range(self.columns)
         ]
         self.y.bind([f.cons() for f in of_ys])
         self.final.bind([f.cons() for f in of_finals])
@@ -195,17 +212,28 @@ class SelectiveScan(Operator):
                     g = (h // per_group) * N + I
                     start, final = of_slice.acquire(1), of_final.acquire(1)
                     for j in range_(self.rows // T):
-                        # Gather the block: x, then B and C, then dt.
+                        # Gather the block: x, then B and C, then dt, a
+                        # vector of SLICE at a time; xbc first keeps each
+                        # 32-byte aligned.
                         for t in range_(T):
                             row = of_row.acquire(1)
-                            block[dt + t] = row[h]
-                            for i in range_(SLICE):
-                                block[t * SLICE + i] = row[H + p + i]
-                            for n in range_(N):
-                                block[bc + t * 2 * N + n] = row[H + g + n]
-                                block[bc + t * 2 * N + N + n] = row[
-                                    H + g + self.groups * N + n
-                                ]
+                            block[dt + t] = row[self.width + h]
+                            lane = types.vector(SLICE, types.bf16())
+                            runs = [(t * SLICE, p)] + [
+                                (
+                                    bc + t * 2 * N + c * N + n,
+                                    g + c * self.groups * N + n,
+                                )
+                                for c in range(2)
+                                for n in range(0, N, SLICE)
+                            ]
+                            for to, at in runs:
+                                vector.store(
+                                    vector.load(lane, row, [at], alignment=32),
+                                    block.op,
+                                    [to],
+                                    alignment=32,
+                                )
                             of_row.release(1)
                         b = arith.index_cast(j, to=i32)
                         left = valid - b * size
@@ -220,7 +248,7 @@ class SelectiveScan(Operator):
             Worker(
                 core_fn,
                 [
-                    rows[k].cons(),
+                    row.cons(),
                     starts[k].cons(),
                     of_ys[k].prod(),
                     of_finals[k].prod(),
@@ -235,8 +263,9 @@ class SelectiveScan(Operator):
         return Built(workers, rtps)
 
     def sequence(self, rt):
-        """Per core, every row of ``xbc`` and ``dt`` once a slice, its heads'
-        parameters and states, and its slices of ``y`` and ``final``.
+        """Every row of ``xbc`` and ``dt`` once a slice, for every core; per
+        core, its heads' parameters and states, and its slices of ``y`` and
+        ``final``.
         """
         R, H, W, I = self.rows, self.heads, self.width, self.inner
         P, SN = self.head_dim, SLICE * self.state_size
@@ -247,13 +276,9 @@ class SelectiveScan(Operator):
             (states,), k * run, [per, heads, SN], [SN, P * self.state_size, 1]
         )
         tg = TaskGroup()
+        self.xbc.fill(TensorAccessPattern((R, W), 0, [S, R, W], [0, W, 1]), group=tg)
+        self.dt.fill(TensorAccessPattern((R, H), 0, [S, R, H], [0, H, 1]), group=tg)
         for k in range(self.columns):
-            self.xbc.fill(
-                TensorAccessPattern((R, W), 0, [S, R, W], [0, W, 1]), lane=k, group=tg
-            )
-            self.dt.fill(
-                TensorAccessPattern((R, H), 0, [S, R, H], [0, H, 1]), lane=k, group=tg
-            )
             self.head.fill(
                 TensorAccessPattern((H, 3), 3 * k * heads, [per, heads, 3], [0, 3, 1]),
                 lane=k,
