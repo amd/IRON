@@ -160,16 +160,11 @@ class Tokenizer:
             raise ValueError("the checkpoint has no chat template")
         _models_extra("jinja2")
         from jinja2 import TemplateError
-        from jinja2.sandbox import ImmutableSandboxedEnvironment
 
         def raise_exception(message):
             raise TemplateError(message)
 
-        env = ImmutableSandboxedEnvironment(
-            trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"]
-        )
-        template = env.from_string(self.chat_template)
-        text = template.render(
+        text = _chat_template(self.chat_template).render(
             messages=messages,
             add_generation_prompt=True,
             bos_token=(
@@ -181,6 +176,17 @@ class Tokenizer:
             strftime_now=lambda f: datetime.datetime.now().strftime(f),
         )
         return self.encoding.encode(text)
+
+
+@functools.lru_cache(maxsize=8)
+def _chat_template(source: str):
+    """``source`` compiled once, in jinja2's sandbox, as transformers sets it up."""
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    env = ImmutableSandboxedEnvironment(
+        trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"]
+    )
+    return env.from_string(source)
 
 
 class TokenizerJson:

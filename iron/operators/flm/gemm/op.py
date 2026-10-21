@@ -96,6 +96,10 @@ CLAMP_BITS = (
 )
 
 
+# ProjectionGEMM.frame's, by device, tiles and the fields its kernel reads.
+_FRAMES: dict[tuple, int] = {}
+
+
 def _compiled_modes(epilogue_modes) -> tuple[Epilogue, ...]:
     """Mode 0, then ``epilogue_modes``."""
     return tuple(dict.fromkeys([Epilogue.NONE, *map(Epilogue, epilogue_modes)]))
@@ -453,16 +457,29 @@ class ProjectionGEMM(Operator):
 
     def frame(self, dev, tile_n, k_tile, ct_k, band_m, bfp16_b, emulate) -> int:
         """What a core of ``dev`` holds beside its buffers at these tiles: its
-        kernel's data and deepest call's stack, over the default stack.
+        kernel's data and deepest call's stack, over the default stack. Kept
+        per kernel, as every resolve asks it of up to six.
         """
+        tiles = (tile_n, k_tile, ct_k, band_m, bfp16_b, emulate)
+        key = (
+            dev,
+            tiles,
+            self.b_col_maj,
+            self.epilogue_modes,
+            self.rounding,
+            self.gelu,
+        )
+        if key in _FRAMES:
+            return _FRAMES[key]
         arch = resolve_target_arch(dev)
         # Made to be read, not built: kept out of the registry a build reads,
         # and for dev, whose architecture the factory reads off the bound device.
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
-            k = self.kernel(tile_n, k_tile, ct_k, band_m, bfp16_b, emulate)
+            k = self.kernel(*tiles)
             calls = (k.mm_fused_acc_init, k.mm_fused_k_step, k.mm_fused_epilogue_chunk)
             deepest = max(k.frame_bytes(arch, entry=c.name) for c in calls)
-        return dev.default_core_stack_bytes + deepest
+        _FRAMES[key] = dev.default_core_stack_bytes + deepest
+        return _FRAMES[key]
 
     def kernel(self, tile_n, k_tile, ct_k, band_m, bfp16_b, emulate):
         """The fused tile kernel each core runs at these tiles."""

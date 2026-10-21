@@ -548,8 +548,9 @@ class FullELFCallable(ImageCallable):
         """Dispatch ``run``, each but its ``idle`` commands."""
         self._sync_inputs()
         t0 = time.perf_counter()
-        self.run.start(idle)
-        self.run.wait()
+        run = self.run
+        run.start(idle)
+        run.wait()
         self.last_elapsed = time.perf_counter() - t0
 
 
