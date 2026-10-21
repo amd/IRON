@@ -19,7 +19,7 @@ from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
 from iron.lm.blocks import KVCache, Rope
 from iron.lm.checkpoint import nest, leaves
 from iron.lm.golden import HuggingFace
-from iron.lm.testing import assert_close
+from iron.lm.testing import assert_close, check_generation
 from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm as RMSNormOp
 from iron.operators.rope import RoPE
@@ -353,6 +353,26 @@ def test_an_odd_vocabulary_pads_the_head_with_a_row_no_draw_takes():
     assert (sample.vocab, sample.drawable) == (V + 1, V)
     tokens = np.random.default_rng(1).integers(0, V, 20)
     assert model.logits(tokens).shape == (V,)
+
+
+def test_each_generation_check_prefills_its_whole_prompt():
+    """A module's model holds the last check's tokens; a check that
+    resumed from them would time part of its prompt as the whole.
+    """
+
+    class Starts(OnHost):
+        bos = 1
+
+        def __call__(self, *tensors, **values):
+            if tensors:
+                self.starts.append(values["start"])
+            return super().__call__(*tensors, **values)
+
+    model = Starts(SMALL, checkpoint(SMALL).tree("random", 3))
+    model.seed, model.starts = 3, []
+    for _ in range(2):
+        check_generation(model, 64, 1, record=lambda *_: None)
+    assert model.starts == [0, 0]
 
 
 def test_attention_turns_only_the_rotary_columns():

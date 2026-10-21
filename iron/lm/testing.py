@@ -134,11 +134,13 @@ def prompt(model, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
 
 def check_generation(model, prompt_len: int, num_tokens: int, *, record):
     """Sample ``num_tokens`` on the device after a prompt of ``prompt_len``
-    characters (``CausalLM.generate``); record the time to the first token
-    and the tokens per second after it. Returns the prompt and the tokens
-    drawn.
+    characters (``CausalLM.generate``), the whole prompt prefilled; record
+    the time to the first token and the tokens per second after it. Returns
+    the prompt and the tokens drawn.
     """
     tokens = prompt(model, prompt_len, num_tokens)
+    # A module's model holds the last test's tokens: its time is the prompt's.
+    model.forget(0)
     drawn = model.generate(tokens, num_tokens, Sampler())
     print(drawn if model.tokenizer is None else model.tokenizer.decode(drawn))
     record("TTFT", model.stats.ttft)
