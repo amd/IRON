@@ -30,18 +30,23 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron import lm, param
+from iron import Precision, lm, param
 from iron.lm import CausalLM, DecoderConfig, DecoderLayer
 
 
 @dataclasses.dataclass(frozen=True)
 class GraniteConfig(DecoderConfig):
-    """``DecoderConfig`` and Granite's own four scalars."""
+    """``DecoderConfig``, Granite's own four scalars, and every
+    projection's ``precision``: a caller's, else ``Precision.HIGH``.
+    """
 
     attention_multiplier: float = dataclasses.field(kw_only=True)
     residual_multiplier: float = dataclasses.field(default=1.0, kw_only=True)
     embedding_multiplier: float = dataclasses.field(default=1.0, kw_only=True)
     logits_scaling: float = dataclasses.field(default=1.0, kw_only=True)
+    # 4.2-3B's prompt over two chunks needs bf16 macs on its projections, as
+    # Llama 3B's does (decision 40).
+    precision: Precision | None = lm.not_json(Precision.HIGH, kw_only=True)
 
 
 class GraniteLayer(DecoderLayer):
