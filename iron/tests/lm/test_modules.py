@@ -368,7 +368,7 @@ def test_each_generation_check_prefills_its_whole_prompt():
             return super().__call__(*tensors, **values)
 
     model = Starts(SMALL, checkpoint(SMALL).tree("random", 3))
-    model.seed, model.starts = 3, []
+    model.random_weights, model.starts = 3, []
     for _ in range(2):
         check_generation(model, 64, 1, record=lambda *_: None)
     assert model.starts == [0, 0]
