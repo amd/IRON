@@ -197,6 +197,14 @@ class _TorchUnpickler(pickle.Unpickler):
         )
 
 
+def weights_file(directory) -> Path:
+    """A checkpoint directory's weights: a sharded checkpoint's
+    ``model.safetensors.index.json``, else ``model.safetensors``.
+    """
+    index = Path(directory) / "model.safetensors.index.json"
+    return index if index.exists() else index.with_name("model.safetensors")
+
+
 class Checkpoint:
     """A ``.safetensors`` file or a PyTorch checkpoint, or, given its
     ``.safetensors.index.json``, every shard a sharded checkpoint splits

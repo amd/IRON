@@ -122,7 +122,7 @@ def load_from_flags(
     require(*files, staged=staged)
     max_seq_len = request.config.getoption("--max-seq-len")
     return functools.partial(
-        model.load, weights.parent, seed=seed, max_seq_len=max_seq_len
+        model.load, weights.parent, random_weights=seed, max_seq_len=max_seq_len
     )
 
 

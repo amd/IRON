@@ -220,7 +220,7 @@ public API adds its entry under Unreleased.
   versions to.
 - `BuiltArray.program()`, a built array alone with its operator's own
   sequence, as a `Program`.
-- `Model.load(path, seed=, max_seq_len=, full_elf=)`: the model of a
+- `Model.load(path, random_weights=, max_seq_len=, full_elf=)`: the model of a
   Hugging Face repository's files, a local directory or a repository id
   downloaded once, fitted, compiled and loaded, its tokenizer as
   `model.tokenizer`; `Model.from_checkpoint` is the same, not yet loaded.

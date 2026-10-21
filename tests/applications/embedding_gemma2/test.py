@@ -33,7 +33,7 @@ from iron.applications.embedding_gemma2.model import (
     Config,
     EmbeddingGemma,
     Multimodal,
-    Tokenizer,
+    TextProcessor,
 )
 from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
@@ -219,7 +219,7 @@ def weights():
 @pytest.fixture(scope="module")
 def tokenizer():
     require(DIRECTORY / "tokenizer.json")
-    return Tokenizer(DIRECTORY / "tokenizer.json")
+    return TextProcessor(DIRECTORY / "tokenizer.json")
 
 
 @pytest.fixture(scope="module")
@@ -260,7 +260,7 @@ def embedding(reference, text, task, speech=None, name=None, dims=None):
     e = reference(
         f"embedding {task} {speech} {name} {text}",
         lambda model: model.encode(
-            Tokenizer.TASKS[task] + text,
+            TextProcessor.TASKS[task] + text,
             None if speech is None else clip(speech),
             None if name is None else photo(name),
         ),

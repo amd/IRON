@@ -54,8 +54,8 @@ def toy(tmp_path, monkeypatch):
     PROFILE.save(tmp_path / "npu2.json")
     monkeypatch.setattr(Toy, "profile", tmp_path)
     monkeypatch.setattr(tune.tune_cli, "tune", lambda *a: tuned.append(a))
-    path = checkpoint(Toy.config).path
-    return ["--checkpoint", str(path)], tuned
+    (tmp_path / "model.safetensors").symlink_to(checkpoint(Toy.config).path)
+    return ["--checkpoint", str(tmp_path)], tuned
 
 
 def test_main_tunes_a_decoder_s_calls_on_its_flags(toy):

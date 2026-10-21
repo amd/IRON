@@ -58,8 +58,8 @@ def arguments(parser: argparse.ArgumentParser) -> None:
         "--checkpoint",
         type=Path,
         required=True,
-        help="the .safetensors checkpoint, or a sharded one's "
-        "model.safetensors.index.json, of which only the header is read",
+        help="the checkpoint directory, as Model.load takes it, of whose "
+        "weights only the header is read",
     )
     parser.add_argument(
         "--position",

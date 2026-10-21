@@ -30,7 +30,7 @@ from iron.operators.copy import Copy
 from iron.operators.sample import Sample
 
 from .blocks import DecoderLayer, Embedding, KVCache, Linear, RMSNorm, Rope
-from .checkpoint import Checkpoint, renamed
+from .checkpoint import Checkpoint, renamed, weights_file
 from .config import DecoderConfig
 from .model import Model
 from .generation import Sampler
@@ -342,9 +342,10 @@ class CausalLM(Model):
         """``tune.calls`` on ``args``, built on weights it never reads."""
         from .tune import calls
 
-        config = cls.default_config(args.checkpoint)
+        weights = weights_file(args.checkpoint)
+        config = cls.default_config(weights)
         assert isinstance(config, DecoderConfig), "a decoder's"
-        model = cls(config, Checkpoint(args.checkpoint).tree("unread"))
+        model = cls(config, Checkpoint(weights).tree("unread"))
         L, C = config.max_seq_len, config.prefill_chunk
         if not C <= args.context <= L or args.context % C:
             parser.error(

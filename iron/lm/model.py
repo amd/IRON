@@ -25,7 +25,7 @@ import numpy as np
 import iron
 from iron.common.image.packaging import require_device
 
-from .checkpoint import Checkpoint
+from .checkpoint import Checkpoint, weights_file
 from .config import Config, DecoderConfig
 from .golden import Golden, HuggingFace
 from .generation import Sampler
@@ -227,8 +227,8 @@ class Model(iron.Graph):
 
     A subclass sets ``config`` to the ``Config`` class that reads
     ``config.json``, or to one fixed shape. ``load`` sets ``checkpoint`` and
-    ``tokenizer`` on the instance, and ``seed`` when the weights are drawn
-    at random. With a seed, a prompt without a tokenizer is random tokens,
+    ``tokenizer`` on the instance, and ``random_weights``, the seed, when the
+    weights are drawn at random. Then a prompt without a tokenizer is random tokens,
     so speed, accuracy and determinism can be checked without real weights.
     ``stats`` holds the last generation's timings.
     """
@@ -240,7 +240,7 @@ class Model(iron.Graph):
     # What loads the checkpoint into transformers to record its goldens.
     hugging_face: type = HuggingFace
     checkpoint: Checkpoint | None = None
-    seed: int | None = None
+    random_weights: int | None = None
     tokenizer: Tokenizer | None = None
     stats: Stats | None = None
     # Set by a subclass. On the class, config is the Config class or one
@@ -260,20 +260,22 @@ class Model(iron.Graph):
         cls,
         path,
         *,
-        seed: int | None = None,
+        random_weights: int | None = None,
         max_seq_len: int | None = None,
         full_elf: bool | None = None,
     ) -> "Model":
         """``from_checkpoint``'s model compiled and loaded, weights uploaded;
         ``full_elf`` is every version's packaging (``load_versions``).
         """
-        model = cls.from_checkpoint(path, seed=seed, max_seq_len=max_seq_len)
+        model = cls.from_checkpoint(
+            path, random_weights=random_weights, max_seq_len=max_seq_len
+        )
         assert model.checkpoint is not None, "from_checkpoint gives it one"
         return model.load_versions(release=model.checkpoint.release, full_elf=full_elf)
 
     @classmethod
     def from_checkpoint(
-        cls, path, *, seed: int | None = None, max_seq_len: int | None = None
+        cls, path, *, random_weights: int | None = None, max_seq_len: int | None = None
     ) -> "Model":
         """The model of a Hugging Face repository's files, not yet loaded,
         its context ``max_seq_len`` or else fitted to this host (``fit``).
@@ -283,8 +285,8 @@ class Model(iron.Graph):
                 or a sharded one's ``model.safetensors.index.json``, and
                 ``tokenizer.json``; or a repository's id, those files
                 downloaded to Hugging Face's cache.
-            seed: In place of the checkpoint's weights and the tokenizer,
-                weights drawn at ``seed`` in its shapes (only its header is
+            random_weights: A seed: in place of the checkpoint's weights and
+                its tokenizer, weights drawn at it in its shapes (only its header is
                 read).
             max_seq_len: The longest context served, prompt and generated
                 tokens together, at most the checkpoint's own.
@@ -302,9 +304,7 @@ class Model(iron.Graph):
                 "chat_template.jinja",
             ]
             directory = Path(snapshot_download(str(path), allow_patterns=files))
-        weights = directory / "model.safetensors.index.json"
-        if not weights.exists():
-            weights = directory / "model.safetensors"
+        weights = weights_file(directory)
         config = cls.default_config(weights)
         if max_seq_len is None:
             config = cls.fit(config, weights)
@@ -317,10 +317,14 @@ class Model(iron.Graph):
                 )
             config = dataclasses.replace(config, max_seq_len=max_seq_len)
         checkpoint = Checkpoint(weights)
-        tree = checkpoint.tree() if seed is None else checkpoint.tree("random", seed)
+        tree = (
+            checkpoint.tree()
+            if random_weights is None
+            else checkpoint.tree("random", random_weights)
+        )
         model = cls(config, tree)
-        model.checkpoint, model.seed = checkpoint, seed
-        if seed is None:
+        model.checkpoint, model.random_weights = checkpoint, random_weights
+        if random_weights is None:
             settings = directory / "tokenizer_config.json"
             jinja = directory / "chat_template.jinja"
             found = json.loads(settings.read_text()) if settings.exists() else {}
@@ -442,7 +446,7 @@ class Model(iron.Graph):
         beside the checkpoint (``golden.npz``) from its ``config.json`` and
         its tensors (``Checkpoint.fingerprint``).
         """
-        if self.seed is not None:
+        if self.random_weights is not None:
 
             class Host(OnHost, type(self)):
                 pass
@@ -459,14 +463,16 @@ class Model(iron.Graph):
     def prompt(self, chars: int, skip: int = 0) -> list[int]:
         """``chars`` characters of ``prompt.txt`` from ``skip`` on, tokenized.
 
-        With no tokenizer, ``chars // 3`` tokens drawn at ``seed`` and
+        With no tokenizer, ``chars // 3`` tokens drawn at the weights' seed and
         ``skip``: a little more than the text encodes to (Llama 3's
         tokenizer takes 3.7 characters a token), so a check sized in
         characters runs at about its size on the text.
         """
         if self.tokenizer is None:
-            assert self.seed is not None, "without a tokenizer, weights drawn at a seed"
-            rng = np.random.default_rng((self.seed, skip))
+            assert (
+                self.random_weights is not None
+            ), "without a tokenizer, weights drawn at random"
+            rng = np.random.default_rng((self.random_weights, skip))
             draw = rng.integers(0, self.config.vocab_size, chars // 3 - 1)
             return [self.bos, *draw]
         return self.tokenizer(prompt_text(chars, skip))

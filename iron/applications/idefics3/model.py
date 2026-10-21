@@ -118,7 +118,7 @@ class SmolVLM(Multimodal):
         the image: transformers' own SmolVLM, over the drawn weights, else
         its logits recorded beside the checkpoint.
         """
-        if self.seed is None:
+        if self.random_weights is None:
             return super().cpu_reference()
         return self.hugging_face.build(
             "idefics3", self.config.vision, self.weights, **self.config.to_json()

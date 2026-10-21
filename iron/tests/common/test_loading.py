@@ -49,7 +49,7 @@ def _directory(path, config=SMALL):
 
 def test_main_takes_the_path_and_flags_load_takes(monkeypatch):
     """The command line's positional argument is ``load``'s path, and its
-    ``--random-weights``/``--max-seq-len`` its ``seed``/``max_seq_len``.
+    ``--random-weights``/``--max-seq-len`` its ``random_weights``/``max_seq_len``.
     """
     given = {}
 
@@ -62,7 +62,7 @@ def test_main_takes_the_path_and_flags_load_takes(monkeypatch):
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit):
         main(Small)
-    assert given == dict(path="org/repo", seed=7, max_seq_len=64)
+    assert given == dict(path="org/repo", random_weights=7, max_seq_len=64)
 
 
 def test_v_shows_iron_s_info_lines(caplog):
@@ -79,9 +79,9 @@ def test_v_shows_iron_s_info_lines(caplog):
 
 def test_from_checkpoint_draws_its_weights_at_a_seed(tmp_path):
     directory = _directory(tmp_path)
-    model = Small.from_checkpoint(directory, seed=7)
+    model = Small.from_checkpoint(directory, random_weights=7)
     assert model.config == SMALL
-    assert model.seed == 7
+    assert model.random_weights == 7
     assert model.tokenizer is None
     np.testing.assert_array_equal(
         model.weights.model.embed_tokens.weight,
@@ -121,17 +121,17 @@ def test_from_checkpoint_opens_the_tokenizer_beside_it(tmp_path):
     directory = _directory(tmp_path)
     (directory / "tokenizer.json").symlink_to(TOKENIZER)
     model = Small.from_checkpoint(directory)
-    assert model.seed is None
+    assert model.random_weights is None
     want = [model.bos, *TokenizerJson(TOKENIZER).encode("hello")]
     assert model.tokenizer("hello") == want
 
 
 def test_from_checkpoint_lowers_the_context_and_refuses_to_raise_it(tmp_path):
     directory = _directory(tmp_path)
-    lowered = Small.from_checkpoint(directory, seed=1, max_seq_len=128)
+    lowered = Small.from_checkpoint(directory, random_weights=1, max_seq_len=128)
     assert (lowered.config.max_seq_len, lowered.config.prefill_chunk) == (128, 128)
     with pytest.raises(ValueError, match="past the model's 256"):
-        Small.from_checkpoint(directory, seed=1, max_seq_len=512)
+        Small.from_checkpoint(directory, random_weights=1, max_seq_len=512)
 
 
 def _held(config, length: int) -> int:
@@ -166,7 +166,9 @@ def test_a_model_fits_its_context_with_no_device_bound(tmp_path):
 
     directory = _directory(tmp_path, Native.config)
     with aie_utils.set_current_device(None):
-        assert Native.from_checkpoint(directory, seed=1).config == Native.config
+        assert (
+            Native.from_checkpoint(directory, random_weights=1).config == Native.config
+        )
 
 
 def test_fit_says_what_it_chose_and_how_to_ask_for_more(caplog):
@@ -192,14 +194,14 @@ def test_a_model_s_bos_is_its_checkpoint_s_unless_it_names_one(tmp_path):
 
     directory = _directory(tmp_path)
     (directory / "config.json").write_text('{"bos_token_id": 7}')
-    assert FromCheckpoint.from_checkpoint(directory, seed=1).bos == 7
+    assert FromCheckpoint.from_checkpoint(directory, random_weights=1).bos == 7
     (directory / "config.json").write_text("{}")
     (directory / "generation_config.json").write_text('{"bos_token_id": 8}')
-    assert FromCheckpoint.from_checkpoint(directory, seed=1).bos == 8
+    assert FromCheckpoint.from_checkpoint(directory, random_weights=1).bos == 8
     (directory / "generation_config.json").unlink()
     with pytest.raises(KeyError, match="names no bos_token_id"):
-        FromCheckpoint.from_checkpoint(directory, seed=1).bos
-    bos = Small.from_checkpoint(directory, seed=1).bos
+        FromCheckpoint.from_checkpoint(directory, random_weights=1).bos
+    bos = Small.from_checkpoint(directory, random_weights=1).bos
     assert bos == 1
 
 
@@ -234,3 +236,25 @@ def test_a_checkpoint_s_golden_is_refused_once_it_changes(
             f.write(b"\x01")
     with pytest.raises(ValueError, match="other inputs"):
         _golden(path)
+
+
+def test_embedding_gemma_loads_with_its_text_processor(tmp_path, monkeypatch):
+    """``EmbeddingGemma.from_checkpoint`` is ``Model``'s, its tokenizer the
+    text processor that ``embed`` encodes with.
+    """
+    from iron.applications.embedding_gemma2.model import (
+        Config,
+        EmbeddingGemma,
+        TextProcessor,
+    )
+
+    loaded = argparse.Namespace(
+        checkpoint=argparse.Namespace(path=tmp_path / "model.safetensors"),
+        tokenizer=object(),
+        config=Config(),
+    )
+    monkeypatch.setattr(Model, "from_checkpoint", classmethod(lambda *a, **k: loaded))
+    monkeypatch.setattr(TextProcessor, "__init__", lambda self, path, c: None)
+    assert EmbeddingGemma.default_config(tmp_path) == Config()
+    model = EmbeddingGemma.from_checkpoint(tmp_path)
+    assert isinstance(model.tokenizer, TextProcessor)

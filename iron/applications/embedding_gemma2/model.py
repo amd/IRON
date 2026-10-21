@@ -42,7 +42,7 @@ from iron.lm import (
     RMSNorm,
     rope_angles,
 )
-from iron.lm.checkpoint import renamed
+from iron.lm.checkpoint import renamed, weights_file
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
@@ -127,7 +127,7 @@ class Config(lm.Config):
         return self.num_key_value_heads, self.head_dim, self.rope_theta
 
 
-class Tokenizer:
+class TextProcessor:
     """EmbeddingGemma 2's text processor: the checkpoint's `tokenizer.json`,
     a text behind its task's prefix, and the placeholders of a clip's and an
     image's soft tokens expanded as Hugging Face's processor expands them.
@@ -274,6 +274,7 @@ class EmbeddingGemma(Encoder):
         tokenizer: What ``embed`` encodes text with.
     """
 
+    config = Config()
     profile = PROFILES
     layer_class = TextLayer
     # Transformers 5 saves a layer's per-layer input under ``ple_block``.
@@ -290,7 +291,7 @@ class EmbeddingGemma(Encoder):
         self,
         config: Config,
         weights: SimpleNamespace,
-        tokenizer: Tokenizer | None = None,
+        tokenizer: TextProcessor | None = None,
     ):
         c = config
         self.tokenizer = tokenizer
@@ -378,6 +379,16 @@ class EmbeddingGemma(Encoder):
         ids, values = self.inputs(tokens)
         return self.config.truncated(self(ids, **values).numpy(), dims)
 
+    @classmethod
+    def from_checkpoint(cls, path, **kwargs):
+        """``Model.from_checkpoint``, its tokenizer the text processor."""
+        model = super().from_checkpoint(path, **kwargs)
+        if model.tokenizer is not None:
+            assert model.checkpoint is not None, "from_checkpoint gives it one"
+            directory = Path(model.checkpoint.path).parent
+            model.tokenizer = TextProcessor(directory / "tokenizer.json", model.config)
+        return model
+
     def embed(self, text: str, task: str, dims: int = 768) -> np.ndarray:
         """The embedding of `text` for `task`, its first `dims` renormalized."""
         return self.encode(self.tokenizer.encode(text, task), dims)
@@ -401,7 +412,7 @@ class Multimodal(lm.Multimodal):
         self,
         config: Config,
         weights: SimpleNamespace,
-        tokenizer: Tokenizer | None = None,
+        tokenizer: TextProcessor | None = None,
         audio_config: AudioConfig = AudioConfig(),
         vision_config: VisionConfig = VisionConfig(),
     ):
@@ -455,8 +466,8 @@ class Multimodal(lm.Multimodal):
             "--checkpoint",
             type=Path,
             default=weights_dir("embeddinggemma-2"),
-            help="the checkpoint directory, of whose model.safetensors only "
-            "the header is read (default: %(default)s)",
+            help="the checkpoint directory, of whose weights only the header "
+            "is read (default: %(default)s)",
         )
 
     @classmethod
@@ -468,7 +479,7 @@ class Multimodal(lm.Multimodal):
         checkpoint's header gives. The towers' graphs alone run designs
         these hold, so the one profile in ``profiles/`` serves them.
         """
-        weights = Checkpoint(args.checkpoint / "model.safetensors").tree("unread")
+        weights = Checkpoint(weights_file(args.checkpoint)).tree("unread")
         graph = cls(Config(), weights)
         return [
             Timed(graph.record(**shapes), graph.longest()) for shapes in graph.shapes()
@@ -490,9 +501,7 @@ def main():
     parser.add_argument("--document", nargs="+", required=True)
     parser.add_argument("--dims", type=int, choices=config.mrl_dims, default=768)
     args = parser.parse_args()
-    tokenizer = Tokenizer(args.directory / "tokenizer.json", config)
-    weights = Checkpoint(args.directory / "model.safetensors").tree()
-    encoder = EmbeddingGemma(config, weights, tokenizer).load_versions()
+    encoder = EmbeddingGemma.load(args.directory)
     try:
         t = time.perf_counter()
         query = encoder.embed(args.query, "query", args.dims)

@@ -131,7 +131,7 @@ def main(model_class: type[Model]):
     args = parse_args(parser)
     try:
         model = model_class.from_checkpoint(
-            args.path, seed=args.random_weights, max_seq_len=args.max_seq_len
+            args.path, random_weights=args.random_weights, max_seq_len=args.max_seq_len
         )
     except ValueError as e:
         parser.error(str(e))
