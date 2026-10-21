@@ -2416,3 +2416,26 @@ def test_a_refused_step_shows_an_unheld_param_as_an_array_of_its_shape():
 
     with pytest.raises(ValueError, match=r"^Project: GEMV\(ndarray \[256, 512\], x\)"):
         Project().record(x=(256,))
+
+
+def test_reference_without_a_device_names_how_to_bind_one(monkeypatch):
+    class Doubled(iron.Graph):
+        def body(self, x):
+            return x + x
+
+    x = np.ones((4, 64), dtype=bfloat16)
+    np.testing.assert_array_equal(Doubled().reference(x, dev=from_name("npu1")), x + x)
+    monkeypatch.setattr(aie_utils, "ensure_current_device", lambda: None)
+    with pytest.raises(RuntimeError, match="set_current_device"):
+        Doubled().reference(x)
+
+
+def test_a_per_call_value_s_default_is_given_when_left_out():
+    class Defaulted(iron.Graph):
+        def body(self, x, *, n: iron.Scratchpad[np.int32] = 1):
+            return x + x
+
+    x = np.ones((4, 64), dtype=bfloat16)
+    np.testing.assert_array_equal(Defaulted().reference(x), x + x)
+    with pytest.raises(TypeError, match=r"\['m'\] unknown"):
+        Defaulted().reference(x, m=2)

@@ -48,9 +48,7 @@ class Session:
         self._take()
         held = self._held(tokens)
         if held == n - 1 == self._seen.size:
-            out, _ = self.lm(
-                token=int(tokens[-1]), position=n - 1, start=0, rows=1, rope_start=0
-            )
+            out, _ = self.lm(token=int(tokens[-1]), position=n - 1)
         else:
             start = self.resume(held)
             self._seen = tokens[:start]
@@ -199,7 +197,7 @@ def host_draws(model, chunks, max_tokens: int) -> Iterator[int]:
         _, carry = model(*inputs, **values)
     yield int(carry["token"])
     for _ in range(max_tokens - 1):
-        _, carry = model(start=0, rows=1, rope_start=0, **carry)
+        _, carry = model(**carry)
         yield int(carry["token"])
 
 

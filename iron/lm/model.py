@@ -613,15 +613,16 @@ def _is_text(prompt) -> bool:
 class OnHost:
     """A model with its versions stood in by its graph's reference
     (``Graph.reference``), run at whatever shape it is called with: the
-    model with no device, mixed in before the model's own class. It
-    compiles nothing, and ``generate`` draws on the host.
+    model with no NPU, tiled for the bound device, mixed in before the
+    model's own class. It compiles nothing, and ``generate`` draws on the
+    host.
     """
 
     if TYPE_CHECKING:  # the model's, mixed in after
 
         def logits(self, tokens) -> np.ndarray: ...
 
-        def reference(self, *tensors, **values) -> Any: ...
+        def reference(self, *tensors, dev=None, **values) -> Any: ...
 
     def _draw(self, tokens, max_tokens: int, sampler: Sampler, each=True):
         history = [int(t) for t in tokens]

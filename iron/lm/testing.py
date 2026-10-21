@@ -326,7 +326,7 @@ def check_deep_decode(model, position: int, bound: float, chars: int = 1024, *, 
     tokens = prompt(model, chars, 1)
     token = greedy(model.logits(tokens))
     # A decode step takes the token; the device gathers its embedding row.
-    values = dict(token=token, position=position, start=0, rows=1, rope_start=0)
+    values = dict(token=token, position=position)
     with _fill_caches(model, len(tokens), position):
         got, _ = model(**values)
         got = got.numpy()

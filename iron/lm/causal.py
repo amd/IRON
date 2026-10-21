@@ -257,9 +257,9 @@ class CausalLM(Model):
         *,
         token: Carried[np.int32],
         position: Carried[np.int32],
-        start: Scratchpad[np.int32],
-        rows: Scratchpad[np.int32],
-        rope_start: Scratchpad[np.int32],
+        start: Scratchpad[np.int32] = np.int32(0),
+        rows: Scratchpad[np.int32] = np.int32(1),
+        rope_start: Scratchpad[np.int32] = np.int32(0),
     ):
         prompt = ids is not None
         call = Call(

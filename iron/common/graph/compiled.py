@@ -95,11 +95,12 @@ def _store(
 @dataclasses.dataclass(frozen=True)
 class _Parameters:
     """A body's inputs, which of them may be left out, and its per-call
-    values, read from its signature."""
+    values and their defaults, read from its signature."""
 
     inputs: list[str]
     values: dict[str, tuple[Kind, Any]]
     optional: frozenset[str]
+    defaults: dict[str, int]
 
     @property
     def carried(self) -> list[str]:
@@ -133,6 +134,7 @@ class _Parameters:
             )
         values = {}
         optional = set()
+        defaults = {}
         for p in params:
             if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
                 if p.default is None:
@@ -160,9 +162,11 @@ class _Parameters:
                         f"two bits of the value"
                     )
                 values[p.name] = (kinds[0], dtype)
+                if p.default is not p.empty:
+                    defaults[p.name] = p.default
             elif p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
                 raise TypeError(f"{owner}.body: *args/**kwargs are not traceable")
-        return cls(inputs, values, frozenset(optional))
+        return cls(inputs, values, frozenset(optional), defaults)
 
 
 class _Param(np.ndarray):
@@ -649,6 +653,7 @@ class Graph:
 
     def __call__(self, *tensors, **values) -> Any:
         given = self._given(tensors)
+        values = {**self._parameters.defaults, **values}
         _check_values(self.name, self._parameters.values, values)
         if graph_recorder.get() is not None:
             if self._parameters.carried:
@@ -689,15 +694,17 @@ class Graph:
         finally:
             recorder.profile = previous
 
-    def reference(self, *tensors, **values) -> Any:
+    def reference(self, *tensors, dev=None, **values) -> Any:
         """The graph recorded for these tensors' shapes, each step run on the
-        host through its operator's ``reference()`` (``Recording.reference``),
-        at any shape the operators take, one no device fits too. Each output
-        is a numpy array of its recorded shape, cut to its bounds, where a
-        call on the device returns each as a flat device tensor of its
-        elements, uncut.
+        host through its operator's ``reference()`` (``Recording.reference``).
+        No NPU is needed, but operators tile for a device: ``dev``, bound for
+        this call alone, else the current one. The shapes need not fit it.
+        Each output is a numpy array of its recorded shape, cut to its
+        bounds, where a call on the device returns each as a flat device
+        tensor of its elements, uncut.
 
         Raises:
+            RuntimeError: No device is given or bound.
             TypeError: An input is missing, or a per-call value is missing or
                 unknown, as a call on the device refuses them; or the body
                 does not record.
@@ -705,19 +712,26 @@ class Graph:
                 call on the device refuses them.
         """
         given = {n: np.asarray(t) for n, t in self._given(tensors).items()}
+        values = {**self._parameters.defaults, **values}
         _check_values(self.name, self._parameters.values, values)
         shapes: dict[str, Any] = {
             n: (t.shape, np.dtype(t.dtype).type) for n, t in given.items()
         }
-        signature = self._signature(shapes)
-        recording = self._references.get(signature)
-        if recording is None:
-            token = device_fit.set(False)
-            try:
-                recording = self._references[signature] = self.record(**shapes)
-            finally:
-                device_fit.reset(token)
-        outputs, carry = recording.reference(given, values)
+        with (
+            aie_utils.set_current_device(dev)
+            if dev is not None
+            else contextlib.nullcontext()
+        ):
+            require_device()
+            signature = self._signature(shapes)
+            recording = self._references.get(signature)
+            if recording is None:
+                token = device_fit.set(False)
+                try:
+                    recording = self._references[signature] = self.record(**shapes)
+                finally:
+                    device_fit.reset(token)
+            outputs, carry = recording.reference(given, values)
         return _results(outputs, Carry(**carry) if recording.carry else None)
 
     def _profile(self) -> Profile | None:
