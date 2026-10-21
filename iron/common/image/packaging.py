@@ -116,7 +116,7 @@ def plan(
         )
 
     forced: list[str] = []
-    if not dev.dispatches_full_elf:
+    if not dev.can_dispatch_full_elf:
         forced.append(f"{dev.name} ({dev.arch}) has no full-ELF dispatch")
     if check:
         forced.append("check=True: each step its own dispatch, checked")

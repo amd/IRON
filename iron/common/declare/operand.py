@@ -17,7 +17,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import DmaEndpoint
 from aie.utils import bfp
 
-from aie.utils.compile.jit.params import Param, PerCallMember, Select, resolve
+from aie.utils.compile.jit.params import OperatorParam, PerCallMember, Select, resolve
 
 from .value import Value
 
@@ -271,7 +271,7 @@ class Operand:
         dims = self.dims
         if (
             dims
-            and isinstance(dims[0], Param)
+            and isinstance(dims[0], OperatorParam)
             and dims[0].name in self.op.declaration.nullable
         ):
             return 1 if vars(self.op)[dims[0].name] is not None else 0
@@ -441,7 +441,7 @@ def axis_of(dims: tuple, name: str, op) -> int | None:
                 return axis + inner
             axis += len(resolve(branch, op))
             continue
-        if isinstance(d, Param):
+        if isinstance(d, OperatorParam):
             if d.name in op.declaration.nullable and vars(op)[d.name] is None:
                 continue
             if d.name == name:
@@ -454,7 +454,7 @@ def param_names(dims: tuple) -> set[str]:
     """The parameters ``dims`` name, through ``Select``."""
     out: set[str] = set()
     for d in dims:
-        if isinstance(d, Param):
+        if isinstance(d, OperatorParam):
             out.add(d.name)
         elif isinstance(d, Select):
             out |= param_names((d.flag, *d.when_true, *d.when_false))

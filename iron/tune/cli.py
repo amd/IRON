@@ -87,7 +87,7 @@ def tune(args: argparse.Namespace, calls: Sequence[Timed], profiles: Path) -> Pa
         calls,
         dev,
         profile,
-        full_elf=dev.dispatches_full_elf,
+        full_elf=dev.can_dispatch_full_elf,
         cycles=kernel_cycles(dev),
         core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
         **_timing(args),
@@ -137,7 +137,7 @@ def main() -> None:
     tried = time_shape(
         shape,
         dev,
-        full_elf=dev.dispatches_full_elf,
+        full_elf=dev.can_dispatch_full_elf,
         cycles=kernel_cycles(dev),
         core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
         **_timing(args),

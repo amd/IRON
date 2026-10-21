@@ -17,7 +17,7 @@ from aie.iron import ScratchpadParameter, ceildiv
 from aie.utils.compile.jit.params import PerCallMember
 
 if TYPE_CHECKING:
-    from aie.utils.compile.jit.params import Param
+    from aie.utils.compile.jit.params import OperatorParam
 
     from .operator import Operator
 
@@ -54,7 +54,7 @@ class Value(PerCallMember):
         *,
         dtype: Any = np.int32,
         derive: Callable[[Any], Any] | None = None,
-        bounds: Param | None = None,
+        bounds: OperatorParam | None = None,
         words: int = 1,
     ) -> None:
         super().__init__(dtype, derive, bounds)

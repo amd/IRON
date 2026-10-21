@@ -80,7 +80,7 @@ class FullELF:
         design = self.design
         if design is None:
             dev = require_device()
-            if not dev.dispatches_full_elf:
+            if not dev.can_dispatch_full_elf:
                 raise RuntimeError(
                     f"{dev.name} ({dev.arch}) does not dispatch a full ELF"
                 )
