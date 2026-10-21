@@ -88,7 +88,8 @@ class Golden:
                 )
             if self.reference is None:
                 self.reference = self.build()
-            row = np.asarray(self.reference.logits(tokens, *arrays), np.float32)
+            # A copy: a reference's row may view its whole forward's logits.
+            row = np.array(self.reference.logits(tokens, *arrays), np.float32)
             # Another process may have recorded others since this one read.
             self.rows = self.read() | self.rows | {key: row}
             self.write()
