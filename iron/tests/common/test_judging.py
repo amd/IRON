@@ -19,10 +19,19 @@ from iron.tests.support.declared import declared
 from iron.tests.support.judging import interval
 
 
+def test_every_declared_case_resolves_on_npu2():
+    """A sizing change that leaves a case unresolvable would otherwise only
+    skip its device test.
+    """
+    dev = from_name("npu2", n_cols=8)
+    assert not [(n, c.label, u) for n, _, c, u in declared(dev) if u]
+
+
 def _cases():
     first = {}
     for name, cls, case, unresolvable in declared(from_name("npu2", n_cols=8)):
-        if unresolvable is None and not case.extensive:
+        # A bench case's inputs are large on purpose; judging one took 335 s.
+        if unresolvable is None and not case.extensive and not case.bench:
             first.setdefault(name, (cls, case))
     return [
         pytest.param(cls, case, id=f"{name}-{case.label}")

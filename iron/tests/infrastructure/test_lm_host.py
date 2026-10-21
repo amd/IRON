@@ -798,3 +798,43 @@ def test_the_lm_testing_helpers_import_without_pytest():
     """A model's CLI reads ``weights_dir`` from ``iron.lm.testing``."""
     code = "import sys, iron.lm.testing; assert 'pytest' not in sys.modules"
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize(
+    "files, own, expect",
+    [
+        (
+            {
+                "cgroup.controllers": "",
+                "memory.max": "max",
+                "a/memory.max": str(2 << 30),
+                "a/b/memory.max": str(3 << 30),
+            },
+            "0::/a/b",
+            2 << 30,
+        ),
+        (
+            {"memory/job/memory.limit_in_bytes": str(5 << 30)},
+            "4:memory:/job",
+            5 << 30,
+        ),
+        ({"cgroup.controllers": "", "memory.max": "max"}, "0::/", None),
+    ],
+    ids=["v2-nested", "v1", "unbounded"],
+)
+def test_cgroup_limit_reads_the_lowest_ceiling(
+    tmp_path, monkeypatch, files, own, expect
+):
+    """``host_budget``'s ceiling: the lowest cgroup v2 ``memory.max`` on the
+    way to the root, v1's ``memory.limit_in_bytes``, or none.
+    """
+    from iron.lm import model
+
+    root = tmp_path / "cgroup"
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text)
+    (tmp_path / "self").write_text(own + "\n")
+    monkeypatch.setattr(model, "CGROUP", root)
+    monkeypatch.setattr(model, "PROC_CGROUP", tmp_path / "self")
+    assert model._cgroup_limit() == expect

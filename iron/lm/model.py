@@ -44,6 +44,8 @@ HOST_RESERVE = 8 << 30
 # 337 MB. Rounded up with margin for a bigger compile or several xdist
 # workers.
 CGROUP_RESERVE = 512 << 20
+CGROUP = Path("/sys/fs/cgroup")
+PROC_CGROUP = Path("/proc/self/cgroup")
 
 
 def _cgroup_limit() -> int | None:
@@ -52,10 +54,10 @@ def _cgroup_limit() -> int | None:
     ``memory.limit_in_bytes``; ``None`` where neither bounds it (no cgroup
     mounted, or every level reads ``max``).
     """
-    root = Path("/sys/fs/cgroup")
+    root = CGROUP
     unified = (root / "cgroup.controllers").exists()
     try:
-        lines = Path("/proc/self/cgroup").read_text().splitlines()
+        lines = PROC_CGROUP.read_text().splitlines()
     except FileNotFoundError:
         return None
     own = None
