@@ -20,6 +20,7 @@ from iron.operators.flm.gemm.design import (
     l1_tiles,
 )
 from iron.operators.flm.gemm.op import ProjectionGEMM
+from iron.tests.support.tools import requires
 
 NPU1 = from_name("npu1", n_cols=4)
 L1 = 65536
@@ -71,6 +72,7 @@ def test_default_k_slice_is_the_deepest_that_fits_double_buffered(device, tile_n
         )
 
 
+@requires("peano")  # frame_bytes reads 0 without it
 def test_aie2_activations_bring_their_lut_tables_into_the_frame():
     """Measured, an activated core's frame holds lut_based_ops' tables; an
     unactivated one's bytes go to a deeper k slice.

@@ -25,7 +25,6 @@ import pytest
 from aie.utils.benchmark import run_iters
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
-from PIL import Image
 
 import iron
 from iron import Scratchpad
@@ -184,6 +183,8 @@ def photo(name: str) -> np.ndarray:
     """`COCO[name]`, fetched into IRON's cache and decoded:
     `(height, width, 3)` uint8.
     """
+    from PIL import Image
+
     with Image.open(COCO[name].fetch()) as image:
         return np.array(image.convert("RGB"))
 

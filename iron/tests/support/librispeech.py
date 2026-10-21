@@ -6,7 +6,6 @@
 import tarfile
 
 import numpy as np
-import soundfile
 
 from iron.lm.testing import Download, cache_dir
 
@@ -37,6 +36,8 @@ def utterance(name: str) -> np.ndarray:
         partial = path.with_suffix(".part")
         partial.write_bytes(data)
         partial.replace(path)
+    import soundfile
+
     samples, rate = soundfile.read(path, dtype="float32")
     if samples.ndim != 1 or rate != 16000:
         raise ValueError(f"{name}: not 16 kHz mono")
