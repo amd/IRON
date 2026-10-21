@@ -262,12 +262,12 @@ class Checkpoint:
     def tree(
         self, fill: Literal["read", "random", "unread"] = "read", seed: int = 0
     ) -> SimpleNamespace:
-        """The checkpoint as a tree of its tensors, each a ``param``, by
-        their names, each split at its dots:
-        ``model.layers.3.self_attn.q_proj.weight`` is
-        ``tree.model.layers[3].self_attn.q_proj.weight``, a run of indices a
-        list, an empty module at an index the checkpoint skips (a module
-        holding no tensor, as ``nn.Sequential``'s ``Flatten``).
+        """Return the checkpoint's tensors as a tree of ``param``, split at the dots.
+
+        ``model.layers.3.self_attn.q_proj.weight`` becomes
+        ``tree.model.layers[3].self_attn.q_proj.weight``. A run of indices
+        becomes a list. An index the checkpoint skips, such as a tensorless
+        ``Flatten`` in an ``nn.Sequential``, becomes an empty module.
 
         Args:
             fill: What the arrays hold. ``"read"``: the tensors, views of the

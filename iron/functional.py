@@ -119,8 +119,10 @@ def rms_norm(
 def layer_norm(
     x: Handle, normalized_shape, weight=None, bias=None, eps: float = LAYER_NORM_EPS
 ) -> Handle:
-    """``x`` less its mean over the RMS of that, times ``weight`` and plus
-    ``bias`` where given.
+    """Layer-normalize ``x`` over its last axis, as torch's ``layer_norm``.
+
+    Subtracts the mean, divides by the standard deviation, then multiplies
+    by ``weight`` and adds ``bias`` when they are given.
 
     Raises:
         ValueError: ``normalized_shape`` is not ``x``'s last axis, or

@@ -539,8 +539,8 @@ class MHA(Operator):
         arch = resolve_target_arch(dev)
         pv = 4 * B_q * B_kv + 4 * pv_width * B_kv + 6 * pv_width * B_q + 32 * B_q
         qk = (4 if pv_cores == 1 else 2) * d * B_q + 4 * d * B_kv + 4 * B_q * B_kv
-        # Made to be read, not built: kept out of the registry a build reads,
-        # and for dev, whose architecture the factory reads off the bound device.
+        # Only measured, never built, so it stays out of the build's registry.
+        # dev is bound because the factory reads its architecture from it.
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
             qk_mha = self.mha_kernel(B_q, d, B_kv, dev.arch is AIEArch.AIE2p)
             pv_mha = qk_mha if pv_cores == 1 else self.mha_kernel(B_q, pv_width, B_kv)

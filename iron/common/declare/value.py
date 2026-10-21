@@ -89,11 +89,14 @@ class Value(PerCallMember):
 
     @property
     def symbol(self) -> str:
-        """The device symbol the host writes this value through: an exported
-        design's own parameter of its name, else the instance's name, the
-        value's and the graph value bound to it; for a value the operator
-        derives, the instance's name, every graph value bound to it (two
-        instances bound to others derive it from them) and the value's.
+        """The device symbol the host writes this value through.
+
+        An exported design's parameter keeps its own name. Otherwise the
+        symbol is ``<instance>_<value>``, followed by the name of the graph
+        value bound to it if there is one. A value the operator derives is
+        ``<instance>_<bound graph values>_<value>``, naming every graph value
+        bound to the instance, so two instances bound to different graph
+        values derive different symbols.
         """
         if self.op.exported_design() is not None:
             return self.name

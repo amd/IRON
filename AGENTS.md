@@ -72,11 +72,11 @@ Formatting and licence checks are in CONTRIBUTING.md.
   which is how a `Profile` names them. `flm.ProjectionGEMM` is not
   `iron.operators.GEMM`.
 - `iron/common/declare/`: IRON's `Operator` over mlir-aie's declaration
-  (`aie.utils.compile.jit`'s `param()`, `tunable()`, `per_call()`), the
-  bound operands and `Value`s a build reads (a `Value` is a `per_call()`
-  member bound to one operator, `op.value(name)`; `op.<name>` is it too,
-  except an extent's, which reads as its number), `Xclbin`, `Profile`,
-  `Precision`.
+  (`aie.utils.compile.jit`'s `param()`, `tunable()`, `per_call()`), and the
+  bound operands and `Value`s a build reads. A `Value` is one operator's
+  `per_call()` member, `op.value(name)`, which `op.<name>` also returns
+  except for an extent, which reads as its number. Also `Xclbin`,
+  `Profile` and `Precision`.
 - `iron/common/design/`: an operator's MLIR module (`OperatorDesign`) and
   its runtime sequence (`OperatorRuntime`).
 - `iron/common/graph/`: `iron.Graph`, recording and `compile`.
@@ -124,8 +124,9 @@ CONTRIBUTING.md walks through the common case. The rules:
    it needs more than one module.
 2. Declare `class X(Operator)`:
    - Parameters are mlir-aie's `param()`. A host shape's dimension is one
-     (`M: int = param()`); a tunable is `tunable()`, which a call, a profile
-     or `resolve(dev)` fills, in that order, then its default.
+     (`M: int = param()`). A tunable is `tunable()`. Its value comes from
+     the call if given, else the profile, else `resolve(dev)`, else its
+     default.
      Identity (`array_key`, `design_key`) is taken after resolution.
    - Operands are aie.iron's `In`/`Out`/`InOut`, declared by shape. An
      operand with `obj_shape=` (in the units a core reads; `per=` a column

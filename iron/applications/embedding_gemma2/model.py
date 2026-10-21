@@ -126,9 +126,11 @@ class Config(lm.Config):
 
 
 class TextProcessor:
-    """EmbeddingGemma 2's text processor: the checkpoint's `tokenizer.json`,
-    a text behind its task's prefix, and the placeholders of a clip's and an
-    image's soft tokens expanded as Hugging Face's processor expands them.
+    """EmbeddingGemma 2's text processor.
+
+    It tokenizes a text after its task's prefix, and expands the
+    placeholders for a clip's and an image's soft tokens as Hugging Face's
+    processor does.
 
     Args:
         path: The checkpoint's `tokenizer.json`; its `encode` adds BOS and EOS.

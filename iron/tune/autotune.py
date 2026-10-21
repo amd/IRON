@@ -133,10 +133,12 @@ class Timed:
         }
 
     def op_points(self, op: Operator) -> list[tuple[float, dict[str, int]]]:
-        """Where ``op`` is timed: each set of bound extents this call's
-        ``points`` write it, with their summed weight and the per-call
-        values of the first; the call's own values alone where every point
-        writes it alike, as where it has no bound extent.
+        """Return where ``op`` is timed, as ``(weight, values)`` pairs.
+
+        Points that give ``op``'s bound extents the same values are merged:
+        their weights are summed, and the first one's per-call values are
+        kept. When every point gives them the same values, as when ``op``
+        has no bound extent, that is a single pair.
         """
         out: dict[tuple, tuple[float, dict[str, int]]] = {}
         for point in self.points:

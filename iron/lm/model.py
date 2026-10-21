@@ -86,12 +86,11 @@ def _cgroup_limit() -> int | None:
 
 
 def host_budget() -> int:
-    """The bytes a model's arena may take here: physical memory less
-    ``HOST_RESERVE`` (the rest of the host), or a cgroup's lower ceiling
-    less ``CGROUP_RESERVE`` (this process's own, a cgroup already
-    excluding the rest of the host) where one bounds this process (a
-    container, or a job's own, as CI's self-hosted runners and a capped
-    test both impose with systemd).
+    """Return the bytes a model's arena may use on this host.
+
+    That is physical memory minus ``HOST_RESERVE``. When a cgroup caps this
+    process (a container, or a systemd-limited CI job), it is the smaller of
+    that and the cgroup's limit minus ``CGROUP_RESERVE``.
     """
     phys = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") - HOST_RESERVE
     limit = _cgroup_limit()

@@ -81,27 +81,35 @@ def filterbank(
 
 
 class LogMel(iron.Graph):
-    """The log-mel spectrogram of float32 samples, as Hugging Face's Gemma 4
-    feature extractor computes it, or with ``decades`` its Whisper one:
-    frame ``f`` is the ``frame`` samples from ``f * hop`` under a periodic
-    Hann window, its rfft over ``fft`` points, the magnitude (``power=1``)
-    or its square (``power=2``) through ``mels`` triangles to ``max_hz``
-    (``filterbank``'s ``mel_scale`` and ``norm``), and the log of that plus
-    ``mel_floor``, rounded once to bf16. With ``decades``, Whisper's: the
-    log10 of that floored at ``mel_floor``, held to ``decades`` below the
-    clip's largest, as ``(x + 4) / 4``, rounded once (``Log10Clamp``).
+    """The log-mel spectrogram of float32 samples, as Gemma 4 or Whisper computes it.
 
-    A call takes ``(F - 1) * hop + span`` samples for ``F`` frames, a whole
-    number of rows of four (``span`` the frame in whole 32s), and the
-    per-call ``frames`` it computes; it writes ``features``, ``(F, mels)``,
-    where a caller gives them (a state's rows), else returns them, past
-    ``frames`` unwritten. With ``decades``, ``frames`` is a number, the
-    clip's (Whisper's is 30 s): every call computes all ``F``, which the
-    GEMMs take in whole 128-row blocks, and writes the first ``frames``,
-    held below their largest. The rfft and the filterbank are GEMMs of exact
-    float32 products, each operand six planes of its bf16 limbs (``Limbs``),
-    the bins padded with zeros to whole 64-column tiles; ``Magnitude``,
-    ``Log`` and the clip's largest (``RowMax``) are float32.
+    Hugging Face's Gemma 4 feature extractor is the default, and
+    ``decades`` selects Whisper's.
+
+    Frame ``f`` is the ``frame`` samples from ``f * hop``, under a periodic
+    Hann window. Its rfft over ``fft`` points gives the magnitude
+    (``power=1``) or its square (``power=2``), which ``mels`` triangular
+    filters up to ``max_hz`` reduce to bands (``filterbank``'s ``mel_scale``
+    and ``norm``). The result is the log of each band plus ``mel_floor``,
+    rounded once to bf16. With ``decades`` it is Whisper's instead: the
+    log10 of each band floored at ``mel_floor``, held to ``decades`` below
+    the clip's largest, scaled as ``(x + 4) / 4`` and rounded once
+    (``Log10Clamp``).
+
+    A call for ``F`` frames takes ``(F - 1) * hop + span`` samples, a whole
+    number of rows of four, where ``span`` is the frame in whole 32s. It
+    also takes the per-call ``frames`` to compute. It writes ``features``,
+    ``(F, mels)``, into the caller's buffer (a state's rows) when one is
+    given and returns them otherwise, leaving rows past ``frames``
+    unwritten. With ``decades``, ``frames`` is a fixed number, the clip's
+    (30 s for Whisper): every call computes all ``F``, since the GEMMs take
+    them in whole 128-row blocks, and writes the first ``frames``, held
+    below their largest.
+
+    The rfft and the filterbank are GEMMs with exact float32 products. Each
+    operand is six planes of its bf16 limbs (``Limbs``), and the bins are
+    padded with zeros to whole 64-column tiles. ``Magnitude``, ``Log`` and
+    the clip's largest (``RowMax``) are float32.
 
     Args:
         frame: The samples of a frame.
@@ -584,10 +592,11 @@ class Linear(iron.Graph):
         return F.linear(x, self.weight, self.bias, precision=self.precision)
 
     def split(self, x, *rows: int, **gemv) -> list:
-        """``x`` through each run of ``rows`` of the weight in turn, one
-        ``F.linear`` each: a fused projection's outputs. Each reads its rows
-        in place, where one projection's columns would be a strided view no
-        descriptor of a bounded row count fits.
+        """Project ``x`` through each run of ``rows`` of the weight in turn.
+
+        This gives a fused projection's outputs, one ``F.linear`` each. Each
+        reads its rows of the weight in place. Splitting the output columns
+        instead would need a strided view that no bounded-row descriptor fits.
         """
         ends = np.cumsum(rows)
         return [
@@ -707,10 +716,12 @@ def residual_add(x, y, residual: float):
 
 
 class Rope(iron.Graph):
-    """A decoder's RoPE table, a row a position (``DecoderConfig.angles``):
-    k's, and q's too unless ``q_scale``, a factor for each row of the table,
-    scales a table of q's own. A model copies a call's rows of each ``Rope``
-    its layers hold once (``rows``), and every layer holding it reads them.
+    """A decoder's RoPE table, one row per position (``DecoderConfig.angles``).
+
+    q and k share the table unless ``q_scale`` is given. It is one factor per
+    row, and q then gets a scaled table of its own. A model copies each
+    call's rows of a ``Rope`` once (``rows``), and every layer holding that
+    ``Rope`` reads the copy.
     """
 
     def __init__(self, c, q_scale: np.ndarray | None = None):
@@ -798,11 +809,14 @@ class KVCache(iron.Graph):
         return start if ran - (start - self.window) <= self.ring else 0
 
     def attend(self, call, q, k, v, scale: float | None = None):
-        """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` at ``call``'s
-        positions, unless None (a layer reading another's cache), and attend
-        ``q`` ``(rows, heads, head_dim)`` over every position up to its
-        last, causally and within ``window``, the logits scaled by ``scale``
-        (MHA's ``1 / sqrt(head_dim)`` if None); ``(rows, heads * head_dim)``.
+        """Write ``k`` and ``v`` at the call's positions, and attend ``q`` over them.
+
+        ``k`` and ``v`` are ``(rows, groups, head_dim)``, or None for a layer
+        that reads another layer's cache. ``q`` is ``(rows, heads, head_dim)``.
+        Each query sees every position up to its own, within ``window`` if
+        one is set. Logits are scaled by ``scale``, or by
+        ``1 / sqrt(head_dim)`` when it is None. Returns
+        ``(rows, heads * head_dim)``.
         """
         C, (_, G, D), (n, H, _) = self.chunk, self.keys.shape, q.shape
         if self.ring is None:
@@ -1065,11 +1079,12 @@ class MLP(iron.Graph):
 
 
 class GatedMLP(iron.Graph):
-    """A gated feed-forward on ``c``'s shape:
-    ``down_proj(act(gate_proj(x)) * up_proj(x))``, ``act`` its
-    ``hidden_act``, each projection with a bias where the config's
-    ``mlp_bias`` says, at its ``precision``. ``projections`` builds what
-    ``body`` reads besides ``down_proj``.
+    """A gated feed-forward, ``down_proj(act(gate_proj(x)) * up_proj(x))``.
+
+    ``act`` is the config's ``hidden_act``. Each projection runs at the
+    config's ``precision`` and has a bias when ``mlp_bias`` is set.
+    ``projections`` builds the projections ``body`` reads other than
+    ``down_proj``.
     """
 
     def __init__(self, c):
@@ -1139,11 +1154,12 @@ class DecoderLayer(iron.Graph):
 
 
 class EncoderLayer(DecoderLayer):
-    """Layer ``i`` of a pre-norm encoder on ``c``'s shape (SigLIP's,
-    Whisper's): ``DecoderLayer``'s two blocks, each after a ``LayerNorm``,
-    a plain ``MLP``, attending both ways over the call's rows (``NoCache``),
-    ``o_proj`` biased with q, k and v; ``self_attn`` a model's own where
-    given.
+    """Layer ``i`` of a pre-norm encoder, as in SigLIP and Whisper.
+
+    It has ``DecoderLayer``'s two blocks, attention then MLP, each after a
+    ``LayerNorm``, with a plain (ungated) ``MLP``. Attention is bidirectional
+    over the call's rows and keeps no cache (``NoCache``). ``o_proj`` has a
+    bias whenever q, k and v do. A model may pass its own ``self_attn``.
     """
 
     def __init__(self, c, i: int, self_attn=None):

@@ -21,9 +21,11 @@ def block_rows(op) -> int:
 
 
 def resolve_rows(op, dev):
-    """``op`` with its ``block``: the most rows up to ``block_rows`` that
-    divide ``op.rows`` and whose core holds ``op.held`` beside one slice's
-    state and final.
+    """Return ``op`` with its ``block`` set.
+
+    ``block`` is the most rows, up to ``block_rows``, that divide
+    ``op.rows`` and leave room in a core for ``op.held`` plus one slice's
+    state and final state.
 
     Raises:
         Unresolvable: Not even one row fits.

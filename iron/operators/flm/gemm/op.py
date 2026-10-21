@@ -472,8 +472,8 @@ class ProjectionGEMM(Operator):
         if key in _FRAMES:
             return _FRAMES[key]
         arch = resolve_target_arch(dev)
-        # Made to be read, not built: kept out of the registry a build reads,
-        # and for dev, whose architecture the factory reads off the bound device.
+        # Only measured, never built, so it stays out of the build's registry.
+        # dev is bound because the factory reads its architecture from it.
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
             k = self.kernel(*tiles)
             calls = (k.mm_fused_acc_init, k.mm_fused_k_step, k.mm_fused_epilogue_chunk)

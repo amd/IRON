@@ -159,12 +159,14 @@ class GatedDeltaRule(Operator):
         return 4 * (2 + self.slice_state), 4 * self.slice_state
 
     def held(self, dev, rows: int) -> int:
-        """Core memory a core of ``dev`` holds at ``rows`` a call besides a
-        slice's state and final: the row, the block and y, the kernel's data
-        (its own copy of the state among it) and stack, and the device's
-        default stack, which covers the core's own frame.
+        """Return the bytes a core of ``dev`` uses at ``rows`` rows per call.
+
+        That is the input row, the block buffer, y, the kernel's data and
+        stack (its own copy of the state included), and the device's default
+        stack, which covers the core's own frame. One slice's state and final
+        state are not counted.
         """
-        # Made to be read, not built: kept out of the registry a build reads.
+        # Only measured, never built, so it stays out of the build's registry.
         with compile_context(_iron_kernel_registry=set()):
             kernel = self.kernel(rows)
             block = 2 * int(np.prod(kernel.arg_shape(0)))
