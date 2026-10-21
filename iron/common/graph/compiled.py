@@ -1051,7 +1051,6 @@ def _words(
     """The scratchpad words a call writes, and with ``share`` the symbols
     sharing one: a full ELF has 32 words for its whole image.
     """
-    dev = aie_utils.get_current_device()
     words: list[Word] = []
     for b in recording.bindings:
         if not extents and b.member.bounds is not None:
@@ -1074,7 +1073,7 @@ def _words(
         if id(b.op) in seen or b.member.bounds is None:
             continue
         seen.add(id(b.op))
-        op = b.op.resolved(dev)
+        op = b.op.resolved()
         counts = {
             e.member.name: e.expression
             for e in recording.bindings
@@ -1126,12 +1125,11 @@ def _step_words(recording: Recording) -> list[frozenset[str]]:
     """The scratchpad words each step's design reads on a full ELF, by the
     symbol each shares.
     """
-    dev = aie_utils.get_current_device()
     shared = _words(recording, share=True)[1]
     return [
         frozenset(
             shared.get(v.symbol, v.symbol)
-            for v in step.op.resolved(dev).values
+            for v in step.op.resolved().values
             if v.per_call and not v.dispatch
         )
         for step in recording.steps
