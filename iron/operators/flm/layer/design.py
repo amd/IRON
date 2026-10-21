@@ -39,6 +39,7 @@ from aie.iron import (
     Acquire,
     Bd,
     Buffer,
+    BufferPool,
     DmaChannel,
     Lock,
     ObjectFifo,
@@ -385,6 +386,22 @@ def arg_sizes(geometry):
     }
 
 
+def _fill_bd(pool, **bd_args):
+    """One BD of a hand-written chain, filling ``pool``'s one segment.
+
+    It takes the lock protocol that pool's core endpoint expects: acquire the
+    object, write it, hand it over.
+    """
+    (segment,) = pool.segments
+    (buffer,) = pool.buffers
+    return Bd(
+        buffer,
+        acquires=[Acquire(segment.produce_lock)],
+        releases=[Release(segment.consume_lock)],
+        **bd_args,
+    )
+
+
 def _single_bd(direction, channel, buf, acq, rel, **bd_args):
     """A DMA channel of one BD that repeats behind one lock pair."""
     return DmaChannel(
@@ -466,6 +483,26 @@ class _Ctx:
             tile=tile,
             use_write_rtp=True,
             address=self.rtp[key],
+        )
+
+    def manual_pool(self, tile, buffer, obj_type):
+        """A one-object BufferPool over ``buffer`` that a hand-written BD fills.
+
+        The core reaches the buffer through the pool's handle; ``_fill_bd``
+        drives the other end.
+        """
+        prod = Lock(tile=tile, init=1, name=f"{buffer.name}_prod")
+        cons = Lock(tile=tile, init=0, name=f"{buffer.name}_cons")
+        for lock in (prod, cons):
+            self.rt.add_lock(lock)
+        return BufferPool(
+            obj_type,
+            tile=tile,
+            name=f"{buffer.name}_pool",
+            buffers=[buffer],
+            produce_lock=prod,
+            consume_lock=cons,
+            manual_fill=True,
         )
 
     def add_locks(self, tile, inits):
@@ -900,9 +937,14 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
 def _build_pl_embedding(ctx, ple_tile, w_fifo, y_fifo):
     """Per-layer-input embedding.
 
-    x0_per_layer, the norm weights and x0 arrive on S2MM 0 as a 4-BD cycle,
+    x0_per_layer, the norm weights and x0 arrive on S2MM 0 as one 3-BD cycle,
     the projection weights through w_fifo on S2MM 1. y leaves through y_fifo
     on MM2S 1, into the front of the up projection's input object.
+
+    The three arrivals share the one channel, which cuts the stream by
+    position: a BD per buffer, in the order the sequence sends them. Each
+    buffer is a BufferPool the chain fills by hand, so the core takes them
+    with the acquire and release of any other fifo.
     """
     D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     ple_name = f"{ple_tile.row}_{ple_tile.col}"
@@ -919,13 +961,17 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo, y_fifo):
     ple_x0 = Buffer(type=ple_x0_ty, name=f"x0_{ple_name}", tile=ple_tile)
     ple_x_proj = Buffer(type=ple_x_proj_ty, name=f"x_proj_{ple_name}", tile=ple_tile)
     ple_y_acc = Buffer(type=ple_y_acc_ty, name=f"y_acc_{ple_name}", tile=ple_tile)
-    x0_per_layer_prod, xw_cons = ctx.add_locks(ple_tile, [1, 0])
-    ple_norm_w_prod, ple_norm_w_p2, ple_x0_prod = ctx.add_locks(ple_tile, [0, 0, 0])
+    # The order the sequence sends them in, which is the order of the BDs.
+    pools = [
+        ctx.manual_pool(ple_tile, ple_x0_pl, ple_x0_pl_ty),
+        ctx.manual_pool(ple_tile, ple_norm_w, ple_norm_w_ty),
+        ctx.manual_pool(ple_tile, ple_x0, ple_x0_ty),
+    ]
 
     def ple_body(
-        norm_w,
-        x0_per_layer,
-        x0,
+        pl_h,
+        nw_h,
+        x0_h,
         x_proj,
         y_h,
         w_h,
@@ -935,7 +981,9 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo, y_fifo):
         mvm,
         store,
     ):
-        xw_cons.acquire(1)
+        x0_per_layer = pl_h.acquire(1)
+        norm_w = nw_h.acquire(1)
+        x0 = x0_h.acquire(1)
         y = y_h.acquire(1)
         _bf16_proj(
             x_proj,
@@ -952,15 +1000,15 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo, y_fifo):
         )
         finish(norm_w, x0_per_layer, x_proj, y)
         y_h.release(1)
-        x0_per_layer_prod.release(1)
+        pl_h.release(1)
+        nw_h.release(1)
+        x0_h.release(1)
 
     ctx.workers.append(
         Worker(
             ple_body,
             [
-                ple_norm_w,
-                ple_x0_pl,
-                ple_x0,
+                *[pool.cons() for pool in pools],
                 ple_x_proj,
                 y_fifo.prod(channel=1),
                 w_fifo.cons(channel=1),
@@ -982,34 +1030,8 @@ def _build_pl_embedding(ctx, ple_tile, w_fifo, y_fifo):
                     DMAChannelDir.S2MM,
                     0,
                     [
-                        Bd(
-                            ple_x0_pl,
-                            acquires=[Acquire(x0_per_layer_prod)],
-                            releases=[Release(ple_norm_w_prod)],
-                            next=1,
-                        ),
-                        Bd(
-                            ple_norm_w,
-                            tap=TensorAccessPattern(ple_norm_w.shape, 0, [PLI_D], [1]),
-                            acquires=[Acquire(ple_norm_w_prod)],
-                            releases=[Release(ple_norm_w_p2)],
-                            next=2,
-                        ),
-                        Bd(
-                            ple_norm_w,
-                            tap=TensorAccessPattern(
-                                ple_norm_w.shape, PLI_D, [D + 32], [1]
-                            ),
-                            acquires=[Acquire(ple_norm_w_p2)],
-                            releases=[Release(ple_x0_prod)],
-                            next=3,
-                        ),
-                        Bd(
-                            ple_x0,
-                            acquires=[Acquire(ple_x0_prod)],
-                            releases=[Release(xw_cons)],
-                            next=0,
-                        ),
+                        _fill_bd(pool, next=(i + 1) % len(pools))
+                        for i, pool in enumerate(pools)
                     ],
                 ),
             ],
