@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -37,7 +36,8 @@ from iron.applications.embedding_gemma2.model import (
 )
 from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
-from iron.lm import Checkpoint, prompt_text, rope_angles
+from iron.lm import Checkpoint, rope_angles
+from iron.lm.model import prompt_text
 from iron.lm.golden import Golden
 from iron.lm.testing import Download, check_embedding, require, weights_dir
 from iron.operators.copy import Copy

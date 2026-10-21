@@ -3,10 +3,7 @@
 
 """IRON: operators for the NPU, and graphs over them.
 
-``iron.Graph``, ``iron.param``, ``iron.state``, ``iron.weight``, ``iron.carry``,
-``iron.clamp``, ``iron.CarriedLoop``, the per-call value annotations,
-``Precision`` and ``Profile`` are imported on first use, so ``import iron``
-stays light.
+Its names are imported on first use, so ``import iron`` stays light.
 """
 
 import importlib
@@ -27,21 +24,6 @@ if TYPE_CHECKING:  # the same names, for a checker; the runtime loads them lazil
         weight,
     )
 
-_LAZY = {
-    "Graph": "iron.common.graph",
-    "param": "iron.common.graph",
-    "state": "iron.common.graph",
-    "weight": "iron.common.graph",
-    "carry": "iron.common.graph",
-    "clamp": "iron.common.graph",
-    "CarriedLoop": "iron.common.graph",
-    "CompiledGraph": "iron.common.graph",
-    "Scratchpad": "iron.common.graph",
-    "Carried": "iron.common.graph",
-    "Precision": "iron.common.declare",
-    "Profile": "iron.common.declare",
-}
-
 __all__ = [
     "Carried",
     "CarriedLoop",
@@ -56,7 +38,10 @@ __all__ = [
     "state",
     "weight",
 ]
-assert sorted(__all__) == sorted(_LAZY)
+# Each name's module, loaded on first use.
+_LAZY = dict.fromkeys(__all__, "iron.common.graph") | dict.fromkeys(
+    ["Precision", "Profile"], "iron.common.declare"
+)
 
 
 def __getattr__(name):

@@ -123,17 +123,16 @@ def main():
     )  # Ignore empty/non-existant all.csv on first run
     latest_rows = get_rows(args.latest)
 
-    with open(args.all, "w", newline="") as f:
-        output_rows = all_rows + latest_rows
-        add_empty_columns(output_rows)
+    output_rows = all_rows + latest_rows
+    add_empty_columns(output_rows)
 
-        output_rows = drop_rows_older_than(output_rows, args.max_age_days)
+    output_rows = drop_rows_older_than(output_rows, args.max_age_days)
 
-        # Apply limit if specified
-        if args.limit:
-            output_rows = limit_rows_by_date(output_rows, args.limit)
+    # Apply limit if specified
+    if args.limit:
+        output_rows = limit_rows_by_date(output_rows, args.limit)
 
-        write_results(output_rows, args.all)
+    write_results(output_rows, args.all)
 
 
 if __name__ == "__main__":

@@ -546,47 +546,6 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
-- `AdjacentPacking(max_members=)`: a pack grows while the placer takes it.
-  `time_shape(fit_cache=)`: it reads the default `FIT_CACHE`.
-- `iron.lm.EncodeStep`: an encoder's layers are called with a `Call`, one
-  prompt of `rows` from position 0, its `ropes` and `embeddings` as before.
-- A graph body's `aie.iron.DispatchTime[T]` per-call value, which no view
-  could take: a body's per-call value is `Scratchpad[T]` or `Carried[T]`.
-- `Operator.apply`: inside a graph's body an operator instance is called,
-  `op(*handles, **values)`, as a graph is.
-- The graph-wide precision floor: `Graph.precision`, `Graph.record(precision=)`,
-  `Graph.compile(precision=)`, `Operator.at_precision` and
-  `Precision.at_least`. A precision is asked for per call
-  (`F.linear(precision=)`) or per layer (`Linear(precision=)`,
-  `Config.precision`).
-- `Graph.draw(seed)` and `Graph.unread()`: `Checkpoint.tree("random", seed)`
-  and `Checkpoint.tree("unread")` fill a model's weights.
-- `Tower.front`: a tower's `body` builds its own rows.
-- An operator's nested `Array` class and `array_config()`: its `build()`,
-  `kernel()` and `scalars()` are on the operator itself, and `layout()`
-  (mlir-aie's) is the operator as its cores see it.
-- YOLOX's `folded` and `padded`: its modules fold and pad their own weights.
-- `iron.common.field`, `Auto`, `Extent` and `Select`, and `Value(words=)`:
-  mlir-aie's `param`, `tunable`, `per_call` and `Select`, and IRON's
-  `Block(words)` for a shipped image's block of words, replace them.
-- `iron.common.image.packaging.dispatches_full_elf(dev)`: mlir-aie's
-  `dev.dispatches_full_elf` replaces it.
-- `iron.tune.autotune.CORE_MHZ`: the bound reads mlir-aie's `dev.core_mhz`,
-  times `CLOCK_HEADROOM`.
-- `iron.tune.measure.others` and `wait_idle`: mlir-aie's
-  `aie.utils.benchmark.other_npu_users` and `wait_idle` replace them.
-- `iron.tune.measure.CPU_WAIT_US` and `Awake`: mlir-aie's
-  `aie.utils.benchmark.CPU_WAIT_US` and `CompletionCores` replace them.
-- `PerStep.KERNELS` (`XclbinChain`'s, before its rename): mlir-aie's
-  `CompilableDesign.chain` splits a chain at the hardware context's kernel
-  limit.
-- `field(probe=)`: the tuner times each distinct value of such a field, as
-  it does every other (Clamp's `low` and `high`).
-- `CausalLM`'s `layer_class = None` path: its `decoder=` argument,
-  `caches`, `attend`, `final_norm`, and `Call.angles` (a layer reads
-  its own `Rope`'s rows in `Call.ropes`). Also `Encoder.attend`'s
-  MHA (it is `NoCache.attend`), `EncoderDecoder.cross` and `layer`,
-  `Config.layer`, `DecoderConfig.attention` and `layer`.
 - Llama's tiktoken tokenizer, `SPECIAL_TOKENS` and `tokenizer()`: Llama
   reads its checkpoint's `tokenizer.json` like every model, and tiktoken is
   no longer a dependency.
@@ -594,50 +553,14 @@ public API adds its entry under Unreleased.
   `dequant.op.dequantize` and `qw_bytes_for`, replaced by
   `q4nx.dequantize(DequantBFP.grid(qw))` and `DequantBFP.quantized_size()`;
   and `q4nx.parts`, folded into `q4nx.unpack`.
-- `iron.common`'s `In`, `Out`, `InOut` and `DispatchTime`; import the
-  markers from `aie.iron`.
-- `F.linear(accurate=)`, `Attention(accurate=)`, `MLP(accurate=)` and
-  `iron.functional.ACCURATE`; pass `precision=Precision.HIGHEST`.
-- `Phi4Config.max_position_embeddings`: LongRoPE's amplitude scale is set
-  from `max_seq_len` as the checkpoint gives it, and kept when a caller
-  lowers it.
-- gemma4_flm's GEMM and dequant exploration and `build.py --only`; the
-  application is one example.
-- `Layer`, the numpy `Oracle`, `EncoderDecoderOracle` and `widen`. Models are
-  judged by transformers' goldens or the graph's reference.
-- Mamba-2 and mixture-of-experts layers, which only the Oracle ran.
-  `TopKRouter` stays.
 - GEMM's `emulate_bf16_mmul_with_bfp16` and `prio_accuracy`, and
   flm.ProjectionGEMM's and MHA's `emulate_bf16_mmul_with_bfp16`, replaced by
   `precision`.
-- `compile(tuner=)`, `CompiledGraph.tuning`, `Model.load(tuner=)`,
-  `Runner.tables`, `--cost-table`, and the `Tuner`, `Tuning` and `Prices`
-  interfaces.
-- `Auto(derived=True)`, replaced by `Auto(init=False)`; a caller can no
-  longer give MHA's `B_kv`.
-- `Profile.lookup`, `Operator.from_operands`, `Operator.value_buffer`, and
-  the `AutoSpec` and `ParamSpec` exports from `iron.common`.
+- gemma4_flm's GEMM and dequant exploration and `build.py --only`; the
+  application is one example.
 - The `ReduceMax`, `LeakyReLU`, `Repeat` and `Dequant` operators and
   `swiglu_prefill_stream`; flm's `Shipped` overlay is a test helper, not a
   catalog operator.
 - GEMM's `round_conv_even` and `use_scalar`, `DequantBFP`'s `tile_n`,
   `decode_layer`'s `sliding_window`, and `lm_head`'s and `prefill_attn`'s
   `trace_size`.
-- `Derived`; a module derives a tensor in its own `load_state_dict`.
-- `CausalLM.head` and `Encoder.norm()` overrides, replaced by `final_norm`;
-  `CausalLM.embed`.
-- `generate_on_host(show=)`, and its timings: it returns the tokens drawn.
-- `Runner`, its `runner` back-pointer and `VLMRunner`: the model class is
-  what loads (`Model.load`); idefics3's whole model is `SmolVLM`. A model's
-  command line takes the checkpoint's directory or repository id, not
-  the weights' and tokenizer's paths.
-- `Runner.sizes` and `--size`, `F.linear`'s `k_tile` and `tile_n`, and
-  Whisper's `Runner`.
-- `Operand.runtime`; an operand finds the running sequence itself.
-- Operator fusion, one operator's step run in another's cores, until it is
-  done as dataflow: `compile(fold=)` and `iron.common.graph.fold`; `Chain`,
-  `Link`, `Finish` and `Prepare`; `Operator`'s `finish`, `prepare` and
-  `placements` fields, `fold`, `prefold`, `on_array`, `placed`, `copies_to`,
-  `at_line`, `finish_inputs` and `prepare_inputs`; an operand's `finish=`,
-  `prepare=` and `feed=`; and flm.ProjectionGEMM's clamp. Image fusion, several
-  operators' arrays in one full ELF, stays.

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -15,7 +14,7 @@ import numpy as np
 import pytest
 
 from iron.applications.qwen3_5.model import Qwen35, Qwen35Config
-from iron.lm import TokenizerJson
+from iron.lm.model import TokenizerJson
 from iron.lm.checkpoint import leaves
 from iron.lm.testing import require, weights_dir
 from iron.tests.support.llama_reference import Decoder

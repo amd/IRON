@@ -100,7 +100,7 @@ class Clipped(iron.Graph):
     """
 
     def __init__(self, c: AudioConfig, in_features: int, out_features: int):
-        self.linear = Linear(in_features, out_features, False, c.precision)
+        self.linear = Linear(in_features, out_features, False, precision=c.precision)
         bound = partial(iron.param, dtype=np.float32)
         self.input_min, self.input_max = bound(), bound()
         self.output_min, self.output_max = bound(), bound()

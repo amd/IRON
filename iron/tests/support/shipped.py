@@ -61,7 +61,6 @@ PARAMETER_WORDS = 8
 # stream, so a third transfer would overwrite one still in use.
 QUEUE_DEPTH = 2
 MIN_M = M_TILE * ROWS
-MIN_K = K_TILE
 
 
 def _parameter_words(op) -> list[int]:

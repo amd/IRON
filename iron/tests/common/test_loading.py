@@ -23,7 +23,8 @@ import numpy as np
 import pytest
 
 from iron.applications.llama.model import Llama
-from iron.lm import Checkpoint, Model, TokenizerJson, main
+from iron.lm import Checkpoint, Model, main
+from iron.lm.model import TokenizerJson
 from iron.lm.cli import parse_args
 from iron.lm.golden import RECORD
 from iron.lm.testing import require, weights_dir

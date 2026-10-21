@@ -32,18 +32,18 @@ from .elementwise import (
 )
 
 __all__ = [
-    "Block",
     "BinaryElementwise",
+    "Block",
     "Built",
     "Elementwise",
     "KernelCall",
     "Operand",
     "Operator",
-    "Rtp",
+    "Precision",
     "RowBroadcast",
     "Rowwise",
+    "Rtp",
     "UnaryElementwise",
-    "Precision",
     "Unresolvable",
     "Value",
     "WeightedRowwise",

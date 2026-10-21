@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -148,7 +146,7 @@ class Gemma4Decoder(Decoder):
         super().__init__(c, layer)
         L, P, E = c.num_hidden_layers, c.ple_dim, c.hidden_size
         self.embed_tokens_per_layer = Embedding(c.vocab_size, L * P)
-        self.per_layer_model_projection = Linear(E, L * P, False, c.precision)
+        self.per_layer_model_projection = Linear(E, L * P, False, precision=c.precision)
         self.per_layer_projection_norm = RMSNorm(P, c.eps)
 
 

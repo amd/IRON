@@ -30,9 +30,9 @@ from iron.lm import (
     Sampler,
     Session,
     Tokenizer,
-    TokenizerJson,
     generate_on_host,
 )
+from iron.lm.model import TokenizerJson
 from iron.lm.checkpoint import leaves
 from iron.lm.testing import assert_close
 from iron.applications.llama import Llama

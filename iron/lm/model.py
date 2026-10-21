@@ -61,7 +61,7 @@ def _cgroup_limit() -> int | None:
     own = None
     for line in lines:
         _, controllers, path = line.split(":", 2)
-        if controllers == "" if unified else "memory" in controllers.split(","):
+        if (controllers == "") if unified else ("memory" in controllers.split(",")):
             own = path
             break
     if own is None:

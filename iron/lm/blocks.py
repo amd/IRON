@@ -572,6 +572,7 @@ class Linear(iron.Graph):
         in_features: int,
         out_features: int,
         bias: bool = True,
+        *,
         precision: Precision | None = None,
     ):
         self.in_features, self.out_features = in_features, out_features
@@ -1074,7 +1075,7 @@ class GatedMLP(iron.Graph):
     def __init__(self, c):
         self.projections(c)
         self.down_proj = Linear(
-            c.intermediate_size, c.hidden_size, c.mlp_bias, c.precision
+            c.intermediate_size, c.hidden_size, c.mlp_bias, precision=c.precision
         )
         self.act = activation(c.hidden_act)
 
@@ -1214,8 +1215,8 @@ class PleLayer(SandwichLayer):
     def __init__(self, c, i: int, self_attn=None, mlp=None, cache=None):
         super().__init__(c, i, self_attn, mlp, cache)
         E, P = c.hidden_size, c.ple_dim
-        self.per_layer_input_gate = Linear(E, P, False, c.precision)
-        self.per_layer_projection = Linear(P, E, False, c.precision)
+        self.per_layer_input_gate = Linear(E, P, False, precision=c.precision)
+        self.per_layer_projection = Linear(P, E, False, precision=c.precision)
         self.post_per_layer_input_norm = RMSNorm(E, c.eps)
         self.layer_scalar = iron.param(1)
 
