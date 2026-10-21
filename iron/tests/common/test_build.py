@@ -476,6 +476,16 @@ def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
     assert static(op) == static(op.xclbin_operator())
 
 
+def test_a_design_is_keyed_by_what_it_builds():
+    """A replaced copy of a resolved operator resolves afresh, here to another
+    tile_n than it holds; its design's key is the build's.
+    """
+    dev = from_name("npu2", n_cols=8)
+    wide = flm_gemm.ProjectionGEMM(M=2048, K=1024, N=16).resolved(dev).replace(N=128)
+    assert wide.resolved(dev).tile_n != wide.tile_n
+    assert OperatorDesign(wide).identity == OperatorDesign(wide.resolved(dev)).identity
+
+
 def test_flm_gemm_selects_its_activation_by_a_word():
     op = flm_gemm.ProjectionGEMM(M=256, K=512, N=512)
     silu = flm_gemm.ProjectionGEMM(M=256, K=512, N=512, epilogue="silu")

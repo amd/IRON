@@ -46,7 +46,9 @@ class OperatorDesign:
     def __init__(self, op: Operator, full_elf: bool = True):
         if op.reference_only:
             raise TypeError(f"{type(op).__name__} is reference-only: it has no kernel")
-        self.op = op
+        # Keyed by what it builds: a replaced copy of a resolved operator
+        # resolves afresh, and may resolve to other tunables than it holds.
+        op = self.op = op.resolved(op.dev)
         self.full_elf = full_elf
         P = inspect.Parameter
         build = op.exported_design()
@@ -176,7 +178,7 @@ class BuiltArray:
         words = words or {}
         dispatch = dispatch or {}
         self._words, self._dispatch = words, dispatch
-        op = design.op.resolved(design.op.dev).copy()  # a build binds streams
+        op = design.op.copy()  # a build binds streams
         # Before build(), which may hand a core-read value to a worker.
         for value in op.values:
             if design.full_elf and not value.dispatch:
