@@ -301,6 +301,8 @@ def check_chat_turn(model, chars: int, turn: int, num_tokens: int = 2, *, record
     runs = []
     for name, before in (("Turn", whole[:-turn]), ("Scratch", other)):
         model.logits(before)
+        if name == "Scratch":
+            model.session.forget(0)  # other shares the turn's first token
         start = time.perf_counter()
         runs.append(greedy_logits(model, whole, num_tokens))
         record(f"{name}Seconds", time.perf_counter() - start)
