@@ -848,18 +848,24 @@ class RowBroadcast(Rowwise):
         per=CORES,
     )
 
-    def resolve(self, dev) -> Self:
-        W = self.tile_size
-        # A core holds the row and two lines each of x and y: as much as a
-        # row at the cap takes.
-        segments = next(
+    @classmethod
+    def segments_for(cls, width: int) -> int | None:
+        """The fewest lines a ``width``-element row is cut into for a core to
+        hold it beside two lines each of x and y, as much as a row at the cap
+        takes; None where no cut does.
+        """
+        return next(
             (
                 s
-                for s in range(1, W + 1)
-                if W % s == 0 and W + 4 * (W // s) <= 5 * self.tile_cap
+                for s in range(1, width + 1)
+                if width % s == 0 and width + 4 * (width // s) <= 5 * cls.tile_cap
             ),
             None,
         )
+
+    def resolve(self, dev) -> Self:
+        W = self.tile_size
+        segments = self.segments_for(W)
         if segments is None:
             raise Unresolvable(
                 f"{type(self).__name__}: a {W}-element row and its lines do not "

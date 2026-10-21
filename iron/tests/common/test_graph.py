@@ -2254,6 +2254,24 @@ def test_one_row_times_a_number_is_elementwise():
     np.testing.assert_array_equal(got, want.astype(bfloat16).astype(np.float32))
 
 
+def test_one_row_a_core_holds_is_still_rowwise():
+    """ResNet's classifier bias: one row of ten, which no elementwise line
+    divides, is a row a core holds.
+    """
+
+    class Biased(iron.Graph):
+        def __init__(self):
+            self.bias = iron.param(np.arange(10).astype(bfloat16))
+
+        def body(self, x):
+            return x + self.bias
+
+    t = Biased().record(x=(1, 10))
+    assert _steps(t) == ["RowwiseAdd"]
+    for step in t.steps:
+        step.op.resolved()
+
+
 def test_a_difference_is_one_axpy_and_a_number_less_a_handle_two_steps():
     class Differences(iron.Graph):
         def body(self, x, y):
