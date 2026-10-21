@@ -28,7 +28,7 @@ from iron.common.image.sequence import Image
 from iron.tests.support import sequences
 from iron.tests.support.tools import requires
 
-pytestmark = requires("aiecc")
+pytestmark = requires("aiecc", "peano")
 
 # (module, class, tunables, the extent doubled). Every tunable the array could
 # resolve from the extent is given, so only the extent differs. Copy is a
