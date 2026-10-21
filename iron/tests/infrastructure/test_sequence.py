@@ -125,7 +125,7 @@ def test_auto_dispatch_selects_platform_default(size):
     seq = _build_add_relu_sequence("infra_auto_add_relu")
     seq.compile()
 
-    expected = aie_utils.get_current_device().dispatches_full_elf
+    expected = aie_utils.get_current_device().can_dispatch_full_elf
     assert isinstance(seq.packaging, FullELF) == expected
 
     run = seq.get_callable()
@@ -231,7 +231,7 @@ def test_dispatch_modes_bit_identical(dispatch):
     """
     if (
         dispatch == "composed"
-        and not aie_utils.get_current_device().dispatches_full_elf
+        and not aie_utils.get_current_device().can_dispatch_full_elf
     ):
         pytest.skip("composed dispatch needs a full ELF, which this device lacks")
 
@@ -342,7 +342,7 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
     """
     if (
         dispatch == "composed"
-        and not aie_utils.get_current_device().dispatches_full_elf
+        and not aie_utils.get_current_device().can_dispatch_full_elf
     ):
         pytest.skip("composed dispatch needs a full ELF, which this device lacks")
 
@@ -419,7 +419,7 @@ def test_one_design_is_configured_once():
     """A full-ELF sequence of one design builds no expanded load, and every
     dispatch after the first still computes on its new inputs.
     """
-    if not aie_utils.get_current_device().dispatches_full_elf:
+    if not aie_utils.get_current_device().can_dispatch_full_elf:
         pytest.skip("composed dispatch needs a full ELF, which this device lacks")
     seq = _build_one_design_sequence(_relu(), "infra_full_elf_relu_once").compile()
     assert not _expanded_pdis(seq)
@@ -440,7 +440,7 @@ def test_one_design_reconfigures_after_another_image():
     """Two one-design images dispatched in turn each configure the array
     again after the other ran, so each still computes its own operator.
     """
-    if not aie_utils.get_current_device().dispatches_full_elf:
+    if not aie_utils.get_current_device().can_dispatch_full_elf:
         pytest.skip("composed dispatch needs a full ELF, which this device lacks")
     tanh = Tanh(
         size=_ADD_RELU_SIZE,
