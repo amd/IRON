@@ -15,7 +15,7 @@ Its output head is the input embedding, tied.
 import dataclasses
 
 from iron import lm
-from iron.lm import CausalLM, DecoderConfig
+from iron.lm import CausalLM, DecoderConfig, not_json
 
 
 @dataclasses.dataclass(frozen=True)
@@ -25,6 +25,9 @@ class SmolLM3Config(DecoderConfig):
     no_rope_layers: tuple[int, ...] = dataclasses.field(
         kw_only=True, metadata={"convert": tuple}
     )
+    # The down projection's K = 11008 = 43 x 256 leaves B one memtile slot,
+    # and a bounded call's ring passes must fit one queue push of 256.
+    prefill_chunk: int = not_json(1024)
 
     def __post_init__(self):
         super().__post_init__()
