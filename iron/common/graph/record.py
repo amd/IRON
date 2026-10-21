@@ -382,7 +382,25 @@ class Recording:
         bound: dict[int, list[Binding]] = {}
         for b in self.bindings:
             bound.setdefault(id(b.op), []).append(b)
-        for step in self.steps:
+        kept = {h.ref().root for h in (*self.inputs, *self.returned)}
+        kept |= {
+            h.ref().root for _, h in (*self.weights.values(), *self.states.values())
+        }
+        kept |= {n.ref().root for n in self.carry.values() if not isinstance(n, Affine)}
+        last: dict[str, int] = {}
+        for i, step in enumerate(self.steps):
+            gather = [] if step.gather is None else [step.gather]
+            for h in (*step.slots, *step.inputs, *step.outputs, *gather):
+                last[h.ref().root] = i
+        # Each intermediate is dropped before the first step past its last reader,
+        # so the host holds about one layer's at a time, as the device does.
+        dead: dict[int, list[str]] = {}
+        for root, i in last.items():
+            if root not in kept:
+                dead.setdefault(i + 1, []).append(root)
+        for i, step in enumerate(self.steps):
+            for root in dead.get(i, ()):
+                buffers.pop(root, None)
             if step.gather is not None:
                 if step.inputs[0] is not step.gather:
                     _gather_reference(step, view(step.gather)[valid(step.gather)], view)

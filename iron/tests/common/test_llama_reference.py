@@ -20,6 +20,7 @@ import itertools
 import json
 import math
 import struct
+import tracemalloc
 
 import numpy as np
 import pytest
@@ -40,7 +41,7 @@ from iron.applications.llama.model import Llama3RopeScaling
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE
-from iron.tests.support.llama_model import PROFILE, SMALL
+from iron.tests.support.llama_model import PROFILE, SMALL, checkpoint, shapes
 from iron.tests.support.llama_reference import Decoder, OnHost
 
 pytestmark = pytest.mark.usefixtures("npu2")  # MHA decode on any host
@@ -489,3 +490,19 @@ def test_a_chat_s_added_tokens_are_their_ids_and_its_bos_is_the_template_s(
         end,
         *text("\n\n"),
     ]
+
+
+def test_the_reference_holds_one_layer_s_intermediates_at_a_time():
+    """A prompt chunk's reference peak grows with the layers by their caches
+    alone: each intermediate is dropped after the last step that reads it.
+    """
+    peaks = {}
+    for layers in (2, 6):
+        config = dataclasses.replace(SMALL, num_hidden_layers=layers, max_seq_len=4096)
+        model = OnHost(config, checkpoint(config, shapes(config)).tree("random"))
+        tracemalloc.start()
+        model.logits(np.zeros(config.prefill_chunk, np.int64))
+        peaks[layers] = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+    caches = 2 * config.max_seq_len * config.num_key_value_heads * config.head_dim * 2
+    assert (peaks[6] - peaks[2]) / 4 <= 1.25 * caches
