@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Checks that the IRON engine generates the same tokens as FastFlowLM's own engine.
+"""Checks the IRON engine against FastFlowLM's own engine, greedy over the same prompts: the
+same tokens up to their first difference, and there IRON's token at least as likely as the stock
+engine's under Gemma 4 in float32 (Hugging Face's, its logits recorded in the checkpoint's
+golden.npz), the reference every model is judged by. After it the two continue from different
+tokens and are not compared.
 
     FLM_MODEL_PATH=<dir> pytest tests/applications/gemma4_flm
 
@@ -18,10 +22,12 @@ import time
 import urllib.request
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from iron.applications.gemma4 import Gemma4
 from iron.operators import flm
-from iron.lm.testing import require
+from iron.lm.testing import require, weights_dir
 
 APP = Path(flm.__file__).with_name("gemma4_engine")
 FLM = APP / "build" / "FastFlowLM" / "src"
@@ -157,4 +163,18 @@ def test_iron_matches_engine(prompt, build_engines, stock_tokens, record_propert
     print(f"[Decode] Tokens per second: {tps:.2f}")
     record_property("TTFT", ttft)
     record_property("TPS", tps)
-    assert reply["context"] == stock_tokens[prompt]
+    got, stock = reply["context"], stock_tokens[prompt]
+    assert len(got) == len(
+        stock
+    ), f"IRON gave {len(got)} tokens, the stock engine {len(stock)}"
+    at = next((i for i, (a, b) in enumerate(zip(got, stock)) if a != b), None)
+    if at is not None:
+        oracle = Gemma4.from_checkpoint(weights_dir("gemma-4-e2b-it")).cpu_reference()
+        logits = np.asarray(oracle.logits(stock[:at]), np.float64)
+        p = np.exp(logits - logits.max())
+        p /= p.sum()
+        record_property("DivergesAt", at)
+        assert p[got[at]] >= p[stock[at]], (
+            f"at {at} IRON chose {got[at]} (p {p[got[at]]:.4f} in float32), "
+            f"the stock engine {stock[at]} (p {p[stock[at]]:.4f})"
+        )
