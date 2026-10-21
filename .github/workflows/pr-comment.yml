@@ -40,10 +40,13 @@ jobs:
         # ci/scripts/pretty_aggregate.py under the write token would be the
         # vulnerability itself. The job only needs the trusted aggregation
         # script; artifacts and PR metadata come from the API, not the tree.
+        with:
+          persist-credentials: false
 
       - name: Check out the results branch
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           ref: ci
           path: history
 

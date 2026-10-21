@@ -37,8 +37,12 @@ configure_runner() {
 
 install_runner
 
-configure_runner "${GITHUB_RUNNER_TOKEN}"
+# The registration token comes on stdin, not in the environment, which the
+# runner hands to every job it runs.
+read -r token
+configure_runner "${token}"
+unset token
 
 echo "Configured. Running actions runner..."
 cd "${RUNNER_DIR}"
-./run.sh
+exec ./run.sh </dev/null
