@@ -74,7 +74,7 @@ def test_swiglu_graph_compiles_to_a_full_elf():
     assert [s.index for s in artifacts.steps] == list(range(5))
     # No per-call values: an empty table, not a missing one.
     assert artifacts.params is not None
-    assert artifacts.params.read_text().split("\n", 1)[0].strip() == "0"
+    assert artifacts.params.read_text().split()[0] == "0"
 
 
 def _assert_values_in_table(version):
