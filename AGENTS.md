@@ -25,8 +25,13 @@ Elsewhere:
 
 Install as the README says. XRT must be sourced
 (`source /opt/xilinx/xrt/setup.sh`) before anything runs on a device.
-`requirements.txt` pins an mlir-aie wheel, which brings the kernel library
-and finds the Peano wheel itself.
+`requirements.txt` pins the last mlir-aie release, which brings the
+kernel library and finds the Peano wheel itself. This branch needs a newer
+mlir-aie: the commit in `.github/workflows/ci-lint.yml`'s `ref:`. Until a
+release carries it, install the pinned wheel and copy that commit's
+`python/` over the wheel's `aie/` package, keeping the wheel's
+`_mlir_libs`; set `MLIR_AIE_KERNEL_SOURCES` to the checkout. A pull request
+that needs a newer mlir-aie bumps that `ref:` in the same pull request.
 
 - Compiled artifacts live in mlir-aie's content-keyed cache,
   `~/.npu/cache/<hash>/` or `$NPU_CACHE_HOME`; nothing is written to the
@@ -164,8 +169,10 @@ CONTRIBUTING.md walks through the common case. The rules:
    operation per output element is not the count. `tolerance()` where the
    kernel's contract is not what the output is held to (a data mover
    returns `Tolerance.exact()`).
-6. `test = Testing(cases, draw=...)` on the class. Every operator has at
-   least one `bench=True` case in the default suite, large enough that
+6. `test = Testing(cases, draw=...)` on the class. A tolerance that is not
+   exact says where its number comes from in `note=`. Every operator
+   without a `test.py` of its own has at least one `bench=True` case in
+   the default suite, large enough that
    dispatch overhead (about 160 us) does not dominate, and a `lower=True`
    case for each layout or dtype its first default case does not reach.
    `iron/tests/operators/test_catalog.py` runs every declaration; a test with a

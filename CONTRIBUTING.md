@@ -108,14 +108,14 @@ class ReLU(UnaryElementwise):
         return eltwise.relu(self.tile_size)
 ```
 
-1. **Kernel.** If no factory in mlir-aie's `aie.iron.kernels` computes
-   it, add the C++ under `aie_kernels/<family>/` in mlir-aie (architecture
-   specifics in `*_aie2.h` / `*_aie2p.h`) and a factory beside the others
-   in `python/iron/kernels/<family>.py`. The factory's `KernelContract`
-   carries the numpy reference and the tolerance, so the operator needs
-   neither (see `relu` in `eltwise.py`), and it checks the vector
-   alignment its tile needs. IRON sees the factory once `requirements.txt`
-   pins an mlir-aie wheel that has it.
+1. **Kernel.** If no `aie.iron.kernels` factory computes it, add one in
+   mlir-aie as its guide says ("Adding a kernel" in
+   `programming_guide/kernels_library.md`): the C++, the factory with its
+   `KernelContract`, the export, and a case in
+   `test/python/npu/kernel_cases.py`. The contract carries the reference
+   and tolerance, so the IRON operator needs neither (see `relu` in
+   `eltwise.py`). In IRON, bump `ci-lint.yml`'s mlir-aie `ref:` to the
+   commit that has it (AGENTS.md, "Environment").
 2. **Operator.** Subclass the closest family (`UnaryElementwise`,
    `BinaryElementwise`, ... in `iron/common/elementwise.py`) and return the
    factory from `kernel()`. A new data layout needs its own

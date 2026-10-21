@@ -90,8 +90,9 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    source /opt/xilinx/xrt/setup.sh
    ```
 
-1. Install required Python packages (from requirements.txt), the mlir-aie
-   release wheel it pins among them:
+1. Install required Python packages (from requirements.txt). The mlir-aie
+   it pins is the last release; [AGENTS.md](AGENTS.md#environment) says
+   how to run against the newer one this branch needs:
    ```bash
    pip install -r requirements.txt
    ```
