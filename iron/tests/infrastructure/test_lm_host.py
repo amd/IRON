@@ -214,6 +214,33 @@ def test_a_batchnorm_s_int64_counter_loads_beside_its_float_weights(tmp_path):
     assert tensors["bn.num_batches_tracked"] == 7
 
 
+def test_checkpoint_rejects_a_tensor_with_no_byte_range(tmp_path):
+    blob = json.dumps({"x": {"dtype": "F32", "shape": [4]}}).encode()
+    path = tmp_path / "bad.safetensors"
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(16))
+    with pytest.raises(ValueError, match="x has no data_offsets"):
+        Checkpoint(path)
+
+
+def test_checkpoint_rejects_an_empty_archive(tmp_path):
+    path = tmp_path / "empty.pth"
+    zipfile.ZipFile(path, "w").close()
+    with pytest.raises(ValueError, match="an empty archive"):
+        Checkpoint(path)
+
+
+def test_a_layer_index_far_past_its_layers_is_refused(tmp_path):
+    """One tensor named layers.4000000000 would build four billion modules."""
+    header = {
+        "layers.4000000000.w": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}
+    }
+    blob = json.dumps(header).encode()
+    path = tmp_path / "far.safetensors"
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(4))
+    with pytest.raises(ValueError, match="layers.4000000000 is past its 1 layers"):
+        Checkpoint(path).tree()
+
+
 def test_checkpoint_rejects_an_unsupported_dtype(tmp_path):
     """One safetensors knows and a model's weights never are: complex64."""
     header = {"x": {"dtype": "C64", "shape": [4], "data_offsets": [0, 32]}}
