@@ -59,6 +59,7 @@ def get_params():
             (  512, 1024,  2048, NONE,     CONV_EVEN),
             (  256,  512,  1536, NONE,     CONV_EVEN),  # remainder: 4 of 8 cols
             (  256,  512,   128, NONE,     CONV_EVEN),  # remainder only: 1 col
+            ( 2048, 1024,    16, NONE,     CONV_EVEN),  # Qwen3.5 gate: tile_n 16
             (  256,  512,  1024, SILU,     CONV_EVEN),
             (  256,  512,  1024, GELU,     CONV_EVEN),
             # floor reproduces the shipped FastFlowLM overlay's rounding mode

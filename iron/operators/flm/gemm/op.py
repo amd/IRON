@@ -1240,10 +1240,16 @@ class ProjectionGEMM(Operator):
         xclbin every shape sharing it runs, each with its own instruction stream.
         """
         M, K, N = self._reference_shape
+        # The tiles are named: the copy resolves again, at the reference shape.
         return self.replace(
             M=M,
             K=K,
             N=N,
+            tile_n=self.tile_n,
+            k_tile=self.k_tile,
+            ct_k=self.ct_k,
+            tile_ma=self.tile_ma,
+            m_chunk=self.m_chunk,
             epilogue=Epilogue.NONE,
             epilogue_modes=self.compiled_modes,
             packed_blocks=None,

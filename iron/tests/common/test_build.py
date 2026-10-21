@@ -476,6 +476,15 @@ def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
     assert static(op) == static(op.xclbin_operator())
 
 
+def test_flm_gemm_image_keeps_the_tiles_a_narrow_shape_resolves_to():
+    """N=16 resolves to tile_n=16; the image, at its 128-wide reference shape,
+    keeps those tiles rather than resolving the default tile_n=64 there.
+    """
+    dev = from_name("npu2", n_cols=8)
+    op = flm_gemm.ProjectionGEMM(M=2048, K=1024, N=16).resolved(dev)
+    assert op.xclbin_operator().resolved(dev).config_name == op.config_name
+
+
 def test_a_design_is_keyed_by_what_it_builds():
     """A replaced copy of a resolved operator resolves afresh, here to another
     tile_n than it holds; its design's key is the build's.
