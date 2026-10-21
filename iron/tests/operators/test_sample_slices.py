@@ -32,7 +32,7 @@ def _built(op: Sample) -> str:
 def test_each_core_reads_its_slice_once_a_pass(device, vocab, cores, request):
     op = Sample(vocab=vocab, cores=cores).resolved(request.getfixturevalue(device))
     runs = op.layout().runs
-    starts = np.cumsum([0] + [run for run, _ in runs])
+    starts = np.cumsum([0] + [run for run, _, _ in runs])
     assert starts[-1] == vocab and all(
         s == c * op.slice_size for c, s in enumerate(starts[:-1])
     )
@@ -49,7 +49,7 @@ def test_each_core_reads_its_slice_once_a_pass(device, vocab, cores, request):
             index = np.add.outer(index, int(stride) * np.arange(int(size)))
         reads.setdefault(fifo, []).append(index.reshape(-1))
     assert len(reads) == cores
-    for (fifo, read), start, (run, chunk) in zip(reads.items(), starts, runs):
+    for (fifo, read), start, (run, chunk, _) in zip(reads.items(), starts, runs):
         streams = kernels.select_streams(run, chunk)
         expected = np.tile(np.arange(start, start + run), streams)
         assert np.array_equal(np.concatenate(read), expected), fifo

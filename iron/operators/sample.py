@@ -79,6 +79,8 @@ def _logits(op: "Sample") -> dict:
     rng = np.random.default_rng(11)
     logits = rng.normal(0, 3, op.vocab).astype(bfloat16)
     logits[rng.choice(op.vocab, 8, replace=False)] = logits.max()
+    # Padding above every token's logit, which no draw may take.
+    logits[op.drawable :] = logits.max() + 1
     draws = np.stack(
         [
             sample.draw_row(t, k, int(rng.integers(0, 1 << 53)))
@@ -107,12 +109,17 @@ class Sample(Operator):
             Case(dict(vocab=128256, cores=4), id="llama", bench=True),
             # No even split: three slices of 14560, and 8186 left for the last.
             Case(dict(vocab=51866, cores=4), id="uneven", lower=True),
+            # Qwen3-Reranker's 151669 tokens padded to whole words.
+            Case(dict(vocab=151670, drawable=151669, cores=4), id="padded", lower=True),
         ],
         draw=_logits,
     )
 
     vocab: int = param(array=True)
     k_max: int = param(default=64, array=True)
+    # The logits that are tokens'; the rest pad an odd vocabulary to whole
+    # words, and the last select core writes them -inf.
+    drawable: int = param(default=lambda op: op.vocab, array=True)
     # Positions the draws and the record hold; the sequence picks one.
     steps: int = param(default=1)
     cores: int = tunable(default=4, domain=widths)
@@ -142,6 +149,11 @@ class Sample(Operator):
             raise ValueError(
                 f"Sample: vocab ({self.vocab}) must be even: the logits move in 4-byte words"
             )
+        if not self.k_max <= self.drawable <= self.vocab:
+            raise ValueError(
+                f"Sample: drawable ({self.drawable}) must be from k_max ({self.k_max}) "
+                f"to vocab ({self.vocab})"
+            )
 
     def resolve(self, dev):
         self.check_shim_columns(dev, self.cores)
@@ -164,14 +176,21 @@ class Sample(Operator):
         config.combine()
 
     @property
-    def runs(self) -> list[tuple[int, int]]:
-        """Each select core's `(logits, chunk)`: the last reads what is left."""
+    def runs(self) -> list[tuple[int, int, int]]:
+        """Each select core's `(logits, chunk, drawable)`: the last reads what
+        is left, the padding with it.
+        """
         size, last = slices(self.vocab, self.cores, self.k_max)
         tail = self.chunk if last == size else _largest_chunk(last, last // 2)
-        return [(size, self.chunk)] * (self.cores - 1) + [(last, tail)]
+        padding = self.vocab - self.drawable
+        return [(size, self.chunk, size)] * (self.cores - 1) + [
+            (last, tail, last - padding)
+        ]
 
-    def select(self, run: int, chunk: int):
-        return sample.sample_select(slice_size=run, chunk=chunk, k_max=self.k_max)
+    def select(self, run: int, chunk: int, drawable: int):
+        return sample.sample_select(
+            slice_size=run, chunk=chunk, k_max=self.k_max, valid=drawable
+        )
 
     def combine(self):
         size, last = slices(self.vocab, self.cores, self.k_max)
@@ -194,7 +213,7 @@ class Sample(Operator):
         # its object up to the next offset, so a shorter last summary ends it.
         of_summaries = ObjectFifo(
             np.ndarray[
-                (sum(sample.summary_words(run, self.k_max) for run, _ in runs),),
+                (sum(sample.summary_words(run, self.k_max) for run, _, _ in runs),),
                 np.dtype[np.int32],
             ],
             depth=1,
@@ -203,7 +222,7 @@ class Sample(Operator):
             [words * c for c in range(self.cores)],
             obj_types=[
                 np.ndarray[(sample.summary_words(run, self.k_max),), np.dtype[np.int32]]
-                for run, _ in runs
+                for run, _, _ in runs
             ],
             depths=[1] * self.cores,
         )
@@ -230,7 +249,7 @@ class Sample(Operator):
             of_rec.release(1)
 
         workers, logits = [], []
-        for c, (run, chunk) in enumerate(runs):
+        for c, (run, chunk, drawable) in enumerate(runs):
             of_x = ObjectFifo(
                 np.ndarray[(chunk,), np.dtype[self.logits.dtype]],
                 depth=self.logits.depth,
@@ -247,7 +266,7 @@ class Sample(Operator):
                         of_x.cons(),
                         of_draw.cons(),
                         of_summary[c].prod(),
-                        selects[run, chunk],
+                        selects[run, chunk, drawable],
                         state,
                         sample.select_streams(run, chunk) * run // chunk,
                     ],
@@ -274,7 +293,7 @@ class Sample(Operator):
         at = self.at if self.at.per_call else None
         tg = TaskGroup()
         self.draws.fill(self.draws[0], group=tg, offset_parameter=row)
-        for c, (run, chunk) in enumerate(self.layout().runs):
+        for c, (run, chunk, _) in enumerate(self.layout().runs):
             # Core c's slice, once per select stream.
             streams = sample.select_streams(run, chunk)
             start = c * self.slice_size
@@ -294,7 +313,7 @@ class Sample(Operator):
     def reference(self, logits, draws, tokens, *, row=0, at=0):
         """``(tokens, token)``: the draw at ``draws`` row ``row // 4``, recorded at ``at``."""
         token = reference(
-            logits,
+            np.asarray(logits).reshape(-1)[: self.drawable],
             np.asarray(draws).reshape(-1)[row : row + sample.ROW_WORDS],
             self.k_max,
         )

@@ -23,6 +23,7 @@ from iron.lm.testing import assert_close
 from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm as RMSNormOp
 from iron.operators.rope import RoPE
+from iron.operators.sample import Sample
 from iron.tests.support.llama_reference import OnHost
 from iron.tests.support.llama_model import SMALL, checkpoint, small
 
@@ -335,6 +336,23 @@ def test_a_q_table_scaled_by_two_doubles_the_logits_scale():
         layer.self_attn.scaling = 2 / np.sqrt(config.head_dim)
     tokens = np.random.default_rng(1).integers(0, config.vocab_size, 20)
     np.testing.assert_array_equal(scaled.logits(tokens), doubled.logits(tokens))
+
+
+def test_an_odd_vocabulary_pads_the_head_with_a_row_no_draw_takes():
+    """An odd vocabulary's logits end mid-word: the head gains a zero row,
+    Sample draws from the vocabulary's logits alone, and a session's logits
+    are the vocabulary's.
+    """
+    config = dataclasses.replace(SMALL, vocab_size=SMALL.vocab_size - 1)
+    V = config.vocab_size
+    model = OnHost(config, checkpoint(config).tree("random", 3))
+    head = np.asarray(model.lm_head.weight)
+    assert head.shape == (V + 1, config.hidden_size) and not head[V].any()
+    t = model.record(**model.shapes()[1])
+    (sample,) = [s.op for s in t.steps if type(s.op) is Sample]
+    assert (sample.vocab, sample.drawable) == (V + 1, V)
+    tokens = np.random.default_rng(1).integers(0, V, 20)
+    assert model.logits(tokens).shape == (V,)
 
 
 def test_attention_turns_only_the_rotary_columns():

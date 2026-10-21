@@ -172,7 +172,7 @@ def test_adversarial_logits_draw_the_reference_token(kwargs):
         aie_utils.ensure_current_device()
     )
     vocab, slice_size, chunk = sample.vocab, sample.slice_size, sample.chunk
-    [*_, (last, _)] = sample.layout().runs
+    [*_, (last, _, _)] = sample.layout().runs
 
     class Step(iron.Graph):
         def body(self, logits, *, position: Scratchpad[np.int32]):

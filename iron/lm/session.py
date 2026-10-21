@@ -57,8 +57,9 @@ class Session:
             for inputs, values in self._chunks(tokens, start):
                 out, _ = self.lm(*inputs, **values)
         self._seen = tokens
-        # A copy: the next call rewrites the output buffer.
-        return np.array(out.numpy()).reshape(-1)
+        # A copy: the next call rewrites the output buffer. An odd vocabulary
+        # is padded by a logit no token has.
+        return np.array(out.numpy()).reshape(-1)[: self.lm.config.vocab_size]
 
     def draw(
         self, tokens, max_tokens: int, sampler: Sampler, each: bool = True

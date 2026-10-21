@@ -200,6 +200,11 @@ class CausalLM(Model):
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.load_state_dict(renamed(weights, self.renames))
+        if config.vocab_size % 2:
+            # An odd vocabulary's logits end mid-word; a zero row makes them
+            # whole words, and Sample draws none from it.
+            head = np.asarray(self.lm_head.weight)
+            self.lm_head.weight = iron.param(np.pad(head, ((0, 1), (0, 0))))
         self.layers = self.model.layers
         # The scratch every causal conv of a shape stages its calls in.
         scratch = {}
@@ -305,11 +310,12 @@ class CausalLM(Model):
             )  # the last row's logits alone
         logits = self.head(x)
         _, drawn = Sample.step(
-            logits.reshape(c.vocab_size),
+            logits.reshape(c.vocab_size + c.vocab_size % 2),
             self.draws,
             self.drawn,
             row=call.position * ROW_WORDS,
             at=call.position,
+            drawable=c.vocab_size,
         )
         return logits, iron.carry(token=drawn, position=call.position + 1)
 
