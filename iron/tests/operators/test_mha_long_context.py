@@ -13,6 +13,8 @@ as a prompt the decoder has repeated does; random keys average the outputs
 to near 0, where the loss hides under any absolute floor.
 """
 
+import tracemalloc
+
 import numpy as np
 import pytest
 from aie.utils.verify import Tolerance, compare
@@ -57,3 +59,19 @@ def test_one_query_is_as_accurate_deep_in_the_cache_as_near_its_start():
         peak = float(np.abs(expected).max())
         verdict = compare(o, expected, Tolerance(rtol=0, atol=0.04 * peak))
         assert verdict, f"{position=}: {verdict.detail}"
+
+
+def test_the_reference_scores_a_long_cache_a_few_rows_at_a_time():
+    """A chunk's reference over 128K keys holds 64 MiB of scores at a time,
+    not the chunk's every row's, which are GiBs a head at a model's chunk.
+    """
+    rows, keys = 512, 131072
+    mha = MHA(num_heads=1, seq_len=rows, kv_len=keys, d=D)
+    rng = np.random.default_rng(0)
+    q = rng.standard_normal((1, rows, D)).astype(bfloat16)
+    k, v = (rng.standard_normal((1, keys, D)).astype(bfloat16) for _ in range(2))
+    tracemalloc.start()
+    mha.reference(q, k, v)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak <= 512 << 20, f"{peak / 2**20:.0f} MiB"

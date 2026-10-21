@@ -1050,10 +1050,11 @@ class MHA(Operator):
         key = np.arange(k.shape[1])
         scale = np.float32(self.scale)
         out = np.zeros(Q.shape, dtype=Q.dtype)
-        # A block of query rows at a time: at 16K keys a block's scores, mask
-        # and exponentials are 64 MiB each, where all rows' are 1 GiB.
-        for first in range(0, rows, 1024):
-            block = slice(first, min(first + 1024, rows))
+        # A block of query rows at a time, its scores, mask and exponentials
+        # 64 MiB each at any context, where all rows' are GiBs at 128K keys.
+        step = max(1, 2**24 // max(k.shape[1], 1))
+        for first in range(0, rows, step):
+            block = slice(first, min(first + step, rows))
             position = offset + np.arange(block.start, block.stop)[:, None]
             masked = np.zeros((len(position), k.shape[1]), dtype=bool)
             if self.causal or self.window:
