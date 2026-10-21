@@ -94,6 +94,9 @@ class Decoder:
     # The prompt's seed: one whose greedy steps have no near-tie.
     seed = 7
     profile = None
+    # The config's fields replaced where the toy, sized for the host, is
+    # one the device's operators refuse: the shape every version records at.
+    recorded: dict = {}
 
     @classmethod
     def names(cls) -> dict[str, tuple[int, ...]]:
@@ -149,6 +152,19 @@ class Decoder:
     @classmethod
     def cpu(cls, golden):
         return cls.case(golden)
+
+    def test_every_step_of_every_version_resolves(self, npu2):
+        """Built on its checkpoint's names through its own loading, every
+        version records and each step resolves on the device: no step hides
+        host compute or a shape the device refuses.
+        """
+        toy = type(self)
+        recorded = type(toy.__name__, (toy,), {})
+        recorded.config = dataclasses.replace(toy.config, **toy.recorded)
+        model = self.model(recorded.config, recorded.weights())
+        for call in model.shapes():
+            for step in model.record(**call).steps:
+                step.op.resolved(npu2)
 
     def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(self, cpu):
         """One token at a time only: the prompt fed a token at a time from an

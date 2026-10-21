@@ -76,6 +76,7 @@ def golden(golden):
 
 class TestGraniteHybrid(Decoder):
     model, config, model_type, name = GraniteHybrid, TOY, "granitemoehybrid", "toy"
+    recorded = dict(prefill_chunk=256, num_local_experts=64, mamba_n_heads=64)
     json = {"mamba_expand": 2}
     # A prompt with no near-tie in its logits or its routing: at seed 32
     # every token's chosen experts lead the next by at least 2.4e-2 of
@@ -133,6 +134,7 @@ class TestGraniteHybridDense(TestGraniteHybrid):
     """Granite 4.0-H 1B's kind: no experts, the shared MLP alone."""
 
     config, name = dataclasses.replace(TOY, num_local_experts=0), "dense"
+    recorded = dict(prefill_chunk=256, mamba_n_heads=64)
     # No router to tie; at seed 32 bf16 leaves float32 at step 5.
     seed = 2
 

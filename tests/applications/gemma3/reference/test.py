@@ -42,6 +42,7 @@ TOY = Gemma3Config(
 
 class TestGemma3(Decoder):
     model, config, model_type, name = Gemma3, TOY, "gemma3_text", "toy"
+    recorded = dict(prefill_chunk=256)
 
     @classmethod
     def names(cls):

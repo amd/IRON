@@ -46,6 +46,7 @@ TOY = Qwen35Config(
 
 class TestQwen35(Decoder):
     model, config, model_type, name = Qwen35, TOY, "qwen3_5", "toy"
+    recorded = dict(prefill_chunk=256, linear_num_value_heads=64)
     # Seed 7's last greedy step's top two swap in bf16.
     seed = 1
     json = {"text_config": {"rope_parameters": {"rope_type": "default"}}}
