@@ -115,8 +115,8 @@ CHUNK, CACHE = 512, 2048
 
 
 class Chunk(iron.Graph):
-    def __init__(self, window: int | None = None):
-        self.window = window
+    def __init__(self, window: int | None = None, pipelines: int = PIPELINES):
+        self.window, self.pipelines = window, pipelines
 
     def body(
         self,
@@ -133,7 +133,7 @@ class Chunk(iron.Graph):
             v[:, : position + 1],
             heads_interleaved=True,
             window=self.window,
-            num_pipelines=PIPELINES,
+            num_pipelines=self.pipelines,
         )
 
 
@@ -223,3 +223,31 @@ def test_what_lies_past_the_bound_does_not_reach_the_output():
     for fill in (1000, np.nan):
         differ = np.flatnonzero((runs[fill] != runs[0]).any(axis=1))
         assert not differ.size, f"{fill=}: valid rows {differ} differ"
+
+
+def test_one_pipeline_fills_k_and_v_past_the_task_queue():
+    """Gemma 3's prompt chunk on one pipeline: K and V are re-read in eight
+    fills per KV group, past the shim's queue of four. A fill past it waits
+    for a free slot, which the cores free only while O drains.
+    """
+    heads, kv_heads, d, chunk, cache = 4, 1, 256, 2048, 4096
+    rng = np.random.default_rng(2)
+    q = rng.standard_normal((chunk, heads, d)).astype(bfloat16)
+    k = rng.standard_normal((kv_heads, cache, d)).astype(bfloat16)
+    v = rng.standard_normal((kv_heads, cache, d)).astype(bfloat16)
+    net = Chunk(511, pipelines=1).compile(q=q.shape, k=k.shape, v=v.shape)
+    mha = MHA(
+        num_heads=heads,
+        num_KV_heads=kv_heads,
+        d=d,
+        seq_len=chunk,
+        heads_interleaved=True,
+        window=511,
+    )
+    rows = 78
+    whole = mha.reference(q, k[:, :chunk], v[:, :chunk])
+    whole = np.asarray(whole, dtype=np.float32).reshape(chunk, heads, d)
+    o = net(q, k, v, rows=rows, position=rows - 1)
+    o = np.asarray(o, dtype=np.float32).reshape(chunk, heads, d)
+    verdict = compare(o[:rows], whole[:rows], mha.resolved().tolerance())
+    assert verdict, f"the valid elements differ: {verdict.detail}"

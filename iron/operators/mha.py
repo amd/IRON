@@ -1152,6 +1152,18 @@ class MHA(Operator):
             tg = TaskGroup()
             for shim in range(self.q_shims):
                 self.Q.fill(q_rows(self.Q, head0, shim), lane=shim, group=tg)
+            # O drains before K and V fill: past the queue's depth a fill
+            # waits for a free slot, which the cores free only while O drains.
+            for shim in range(self.q_shims):
+                for h in range(cores):
+                    self.O.drain(
+                        q_rows(self.O, head0, shim)[
+                            ..., h * pv_width : (h + 1) * pv_width
+                        ],
+                        lane=shim * cores + h,
+                        group=tg,
+                        wait=True,
+                    )
             # A bounded pattern is one descriptor: re-reads at most the slot's count.
             reads = group * blocks
             for first in range(0, reads, iterations):
@@ -1171,15 +1183,5 @@ class MHA(Operator):
                         group=tg,
                         length_parameter=kv_valid,
                         length_unit=B_kv * pv_width,
-                    )
-            for shim in range(self.q_shims):
-                for h in range(cores):
-                    self.O.drain(
-                        q_rows(self.O, head0, shim)[
-                            ..., h * pv_width : (h + 1) * pv_width
-                        ],
-                        lane=shim * cores + h,
-                        group=tg,
-                        wait=True,
                     )
             tg.finish()
