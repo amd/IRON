@@ -52,6 +52,19 @@ class Step:
 
 
 @dataclasses.dataclass(frozen=True)
+class HostStep:
+    """``fn(*reads, *writes)`` on the host before step ``at``: each read as
+    the device left it, cut to its bounds; each write a part of a state no
+    step writes, holding what ``fn`` last wrote there.
+    """
+
+    at: int
+    fn: Callable[..., None]
+    reads: tuple[Handle, ...]
+    writes: tuple[Handle, ...]
+
+
+@dataclasses.dataclass(frozen=True)
 class Encoder:
     """How the host turns an input into the ``words`` the device reads, from
     ``buffer``'s device address: ``encode(input, address, valid)``, with
@@ -208,6 +221,8 @@ class Recording:
         default_factory=dict
     )
     limits: list[Limit] = dataclasses.field(default_factory=list)
+    # Run between the steps, each ending a full ELF's command (``on_host``).
+    host: list[HostStep] = dataclasses.field(default_factory=list)
 
     @property
     def reads(self) -> set[str]:
@@ -227,6 +242,7 @@ class Recording:
                 for e in held
                 if e.bound is not None
             ),
+            *(n for s in self.host for h in s.reads for n in h.valid.values()),
         ]
         declared = {v.name for v in self.values}
         carried = {v.name for v in self.values if v.marker is Kind.CARRIED}
@@ -392,15 +408,27 @@ class Recording:
             gather = [] if step.gather is None else [step.gather]
             for h in (*step.slots, *step.inputs, *step.outputs, *gather):
                 last[h.ref().root] = i
+        host: dict[int, list[HostStep]] = {}
+        for s in self.host:
+            host.setdefault(s.at, []).append(s)
+            for h in (*s.reads, *s.writes):
+                last[h.ref().root] = max(last.get(h.ref().root, s.at), s.at)
         # Each intermediate is dropped before the first step past its last reader,
         # so the host holds about one layer's at a time, as the device does.
         dead: dict[int, list[str]] = {}
         for root, i in last.items():
             if root not in kept:
                 dead.setdefault(i + 1, []).append(root)
-        for i, step in enumerate(self.steps):
+        for i, step in enumerate([*self.steps, None]):
             for root in dead.get(i, ()):
                 buffers.pop(root, None)
+            for s in host.get(i, ()):
+                s.fn(
+                    *(view(h)[valid(h)] for h in s.reads),
+                    *(view(h) for h in s.writes),
+                )
+            if step is None:
+                break
             if step.gather is not None:
                 if step.inputs[0] is not step.gather:
                     _gather_reference(step, view(step.gather)[valid(step.gather)], view)
@@ -494,6 +522,7 @@ class Recorder:
         # table's follow them.
         self._controls: dict[str, Handle] = {}
         self.addresses: dict[str, tuple[str, Callable, str]] = {}
+        self.host: list[HostStep] = []
         self._counter = itertools.count()
         self._constants: dict[tuple, np.ndarray] = {}
         self._names: dict[int, str] = {}
@@ -786,6 +815,23 @@ class Recorder:
         self.steps[-1].gather = ids
         return out if out.shape == view.shape else out.reshape(view.shape)
 
+    def on_host(self, fn: Callable[..., None], reads, writes) -> None:
+        """Record ``fn`` to run on the host before the next step (``HostStep``).
+
+        Raises:
+            TypeError: A read is not contiguous, or a write is not a
+                contiguous part of a state.
+        """
+        reads = tuple(self.operand(x) for x in reads)
+        writes = tuple(self.operand(x) for x in writes)
+        for h in reads:
+            if not isinstance(h.layout, Dense):
+                raise TypeError(f"on_host reads contiguous handles, not {h!r}")
+        for h in writes:
+            if h.role != "state" or not isinstance(h.layout, Dense) or h.valid:
+                raise TypeError(f"on_host writes contiguous parts of states, not {h!r}")
+        self.host.append(HostStep(len(self.steps), fn, reads, writes))
+
     @staticmethod
     def _split_values(op_cls, kwargs) -> dict:
         values = {m.name for m in op_cls.declaration.per_calls}
@@ -947,6 +993,14 @@ class Recorder:
             for h in step.inputs + step.outputs:
                 if h.layout != Dense():
                     pinned.setdefault(h.name, h.buffer.nbytes)
+        # A host write's bytes are the last the host wrote there.
+        written = {h.name for step in self.steps for h in step.outputs}
+        for s in self.host:
+            for h in s.writes:
+                if h.name in written:
+                    raise ValueError(
+                        f"{self.name}: on_host writes {h!r}, which a step writes too"
+                    )
         return Recording(
             self.name,
             self.steps,
@@ -962,6 +1016,7 @@ class Recorder:
             encoders=self.encoders,
             addresses=self.addresses,
             limits=self.limits,
+            host=self.host,
         )
 
     def limit(

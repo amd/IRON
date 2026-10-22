@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import time
 import weakref
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -216,13 +216,16 @@ class FullELFRun:
         self.wired = True
         return params[0].alias()
 
-    def start(self, idle: Collection[int] = ()) -> None:
-        """Start each command's run back to back, but the ``idle`` ones'."""
+    def start(self, idle: Collection[int] = (), commands: range | None = None) -> None:
+        """Start each command's run back to back, but the ``idle`` ones'; of
+        ``commands`` alone where given.
+        """
         if aie_utils.DefaultNPURuntime.load(self._image).kernel is not self._kernel:
             raise RuntimeError(
                 f"{self.name}: the runtime evicted the image this run was made on"
             )
-        self._started = [h for k, h in enumerate(self.handles) if k not in idle]
+        span = range(len(self.handles)) if commands is None else commands
+        self._started = [self.handles[k] for k in span if k not in idle]
         for handle in self._started:
             handle.start()
 
@@ -474,14 +477,17 @@ class FullELFCallable(ImageCallable):
         return path
 
     def get_buffer(self, ref: BufferRef):
+        """The bytes ``ref`` names, and the rest of their last coherence line
+        (``_line_view``).
+        """
         self._follow_arena()
         if ref not in self._buffer_cache:
             kind, offset, length = ref.place(self.op.layout)
             if kind == "scratch":
                 kind, offset = self.op.buffer_sizes.scratch_argument(offset, length)
             dtype = self.op.buffer_dtype(ref)
-            self._buffer_cache[ref] = self._arguments()[kind].subview(
-                offset, (length // dtype.itemsize,), dtype
+            self._buffer_cache[ref] = _line_view(
+                self._arguments()[kind], offset, length, dtype
             )
         return self._buffer_cache[ref]
 
@@ -544,12 +550,26 @@ class FullELFCallable(ImageCallable):
                 f"write between calls, or start the next run through start()"
             )
 
-    def __call__(self, idle: Collection[int] = ()):
-        """Dispatch ``run``, each but its ``idle`` commands."""
+    def __call__(
+        self,
+        idle: Collection[int] = (),
+        between: Mapping[int, Callable[[], None]] | None = None,
+    ):
+        """Dispatch ``run``, each but its ``idle`` commands; ``between[k]()``
+        runs on the host once the commands before ``k`` complete, and what it
+        wrote is pushed before ``k`` starts.
+        """
         self._sync_inputs()
         t0 = time.perf_counter()
         run = self.run
-        run.start(idle)
+        first = 0
+        for k, fn in sorted((between or {}).items()):
+            run.start(idle, range(first, k))
+            run.wait()
+            fn()
+            self._sync_inputs()
+            first = k
+        run.start(idle, range(first, len(run.handles)))
         run.wait()
         self.last_elapsed = time.perf_counter() - t0
 
@@ -599,12 +619,15 @@ class PerStepCallable(ImageCallable):
             self._buffers[BufferRef(root)] = view
         # A run of a pack is one dispatch, over its steps' buffers in turn.
         self._steps = []
+        # The step each dispatch starts at.
+        self._starts: list[int] = []
         i = 0
         while i < len(seq.steps):
             op = seq.steps[i].op
             end, link = seq.packaging.runs.get(i, (i + 1, seq.packaging.links[id(op)]))
             refs = tuple(r for s in seq.steps[i:end] for r in s.buffers)
             self._steps.append((op, link.kernel, refs, []))
+            self._starts.append(i)
             i = end
         self._follow_arena()
         self._bind_steps()
@@ -643,14 +666,17 @@ class PerStepCallable(ImageCallable):
         self._bind_steps()
 
     def get_buffer(self, ref: BufferRef):
+        """The bytes ``ref`` names, and the rest of their last coherence line
+        (``_line_view``).
+        """
         self._follow_arena()
         if ref not in self._buffers:
             if ref.root not in self._storage:
                 raise ValueError(f"{ref} is no buffer of {self.op.name}")
             _, _, length = ref.place(self.op.layout)
             dtype = self.op.buffer_dtype(ref)
-            self._buffers[ref] = self._storage[ref.root].subview(
-                ref.start, (length // dtype.itemsize,), dtype
+            self._buffers[ref] = _line_view(
+                self._storage[ref.root], ref.start, length, dtype
             )
         return self._buffers[ref]
 
@@ -664,12 +690,28 @@ class PerStepCallable(ImageCallable):
     def write_values(self, values: Mapping[str, np.generic]) -> None:
         self.dispatch_values = dict(values)
 
-    def __call__(self):
+    def __call__(self, between: Mapping[int, Callable[[], None]] | None = None):
+        """Dispatch each step; ``between[i]()`` runs on the host before step
+        ``i``, or after the last for ``i`` past it.
+
+        Raises:
+            ValueError: ``between`` names a step inside a run of a pack.
+        """
+        between = dict(between or {})
+        inside = set(between) - {*self._starts, len(self.op.steps)}
+        if inside:
+            raise ValueError(
+                f"{self.op.name}: host steps at {sorted(inside)} fall inside a "
+                f"run of a pack, one dispatch"
+            )
         self._follow_arena()
         for root in self.op.inputs:
             self._storage[root].to("npu")
         t0 = time.perf_counter()
         for index, (step_op, kernel, refs, args) in enumerate(self._steps):
+            if self._starts[index] in between:
+                self._device_resident()
+                between[self._starts[index]]()
             checked = self.check and not step_op.bound_extents
             if self.check and not checked:
                 logger.warning(
@@ -692,8 +734,13 @@ class PerStepCallable(ImageCallable):
                 }
                 held = dict(zip((spec.name for spec in step_op.buffers), refs))
                 check_step(index, step_op, held, inputs, written, expected)
+        self._device_resident()
+        if len(self.op.steps) in between:
+            between[len(self.op.steps)]()
         self.last_elapsed = time.perf_counter() - t0
-        # Device-resident, so a read pulls what the steps wrote, and only then.
+
+    def _device_resident(self) -> None:
+        """Mark what the steps write device-resident, so a read pulls it, and only then."""
         for root in self.op.layout:
             if root not in self.op.inputs:
                 self._storage[root].device = "npu"

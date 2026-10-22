@@ -17,6 +17,7 @@ from .handle import (
     Scratchpad,
     carry,
     clamp,
+    on_host,
     state,
     weight,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "Scratchpad",
     "carry",
     "clamp",
+    "on_host",
     "param",
     "state",
     "weight",

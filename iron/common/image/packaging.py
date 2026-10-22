@@ -145,8 +145,10 @@ def plan(
         values.append((v.name, v.marker.value, lowering))
     # A carried-bound step grows with every call; amdxdna stops a command past ~4 s.
     # A version taking no tensor stays one: a loop drains its values into one.
+    # A host step ends one, and a version with one does not loop.
     commands: list[int] = []
-    if full_elf and recording.inputs:
+    hosted = {s.at for s in recording.host if 0 < s.at < len(recording.steps)}
+    if full_elf and (recording.inputs or recording.host):
         after_carried = {
             i + 1
             for i, step in enumerate(recording.steps[:-1])
@@ -165,7 +167,7 @@ def plan(
                     f"scratchpad holds {SCRATCHPAD_WORDS}"
                 )
             full = len(held | words) > SCRATCHPAD_WORDS
-            if i in after_carried or full:
+            if i in after_carried or i in hosted or full:
                 commands.append(i)
                 held = frozenset()
                 if full and i not in after_carried:
@@ -175,5 +177,10 @@ def plan(
             reasons.append(
                 f"a command's scratchpad holds {SCRATCHPAD_WORDS} words: a "
                 f"command also starts at steps {split}"
+            )
+        if hosted:
+            reasons.append(
+                f"a host step runs between commands: one starts at steps "
+                f"{sorted(hosted)}"
             )
     return Plan(full_elf, reasons, values, tuple(commands))

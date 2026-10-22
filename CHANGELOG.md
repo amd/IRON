@@ -12,6 +12,10 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `iron.on_host(fn, *reads, writes=())`: `fn` runs on the host between a
+  graph's steps, on what the device left in `reads` (cut to their bounds),
+  writing parts of states the next steps read. A full ELF ends a command
+  there; a graph with one has no device loop.
 - `iron.lm.ImageResize`, an image resized on the NPU to a uint8 image
   another resize reads; `ImagePatches` and the resample operators take
   torchvision's Lanczos-3 (`interpolation=`), the processor's

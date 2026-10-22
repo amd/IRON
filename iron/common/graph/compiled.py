@@ -46,7 +46,7 @@ from ..image.sequence import Image
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .handle import Carry, Dense, Handle, State, Weight, is_operand
-from .record import Recording, Recorder
+from .record import HostStep, Recording, Recorder
 
 logger = logging.getLogger(__name__)
 
@@ -612,14 +612,14 @@ class Graph:
 
         Raises:
             ValueError: ``feeds`` is not a full-ELF version of this graph,
-                or this version does not loop.
+                or this version does not loop, as one with a host step does not.
         """
         loops = feeds is not None or not recording.inputs
-        if not (chosen.full_elf and recording.carry and loops):
+        if not (chosen.full_elf and recording.carry and loops) or recording.host:
             if feeds is not None:
                 raise ValueError(
                     f"{self.name}: only a full-ELF version with carried values "
-                    f"feeds another"
+                    f"and no host step feeds another"
                 )
             return None, None
         sized = None
@@ -883,18 +883,66 @@ class CompiledGraph:
     def __call__(self, *tensors, **values) -> Any:
         self._stage(tensors, values)
         call = self.callable
-        if self.plan.commands:
-            assert isinstance(call, FullELFCallable), "commands cut a full ELF"
-            call(idle=self.plan.idle(self.recording.steps, values))
+        hosted: dict[int, list[HostStep]] = {}
+        for s in self.recording.host:
+            hosted.setdefault(s.at, []).append(s)
+        if isinstance(call, FullELFCallable):
+            edges = (0, *self.plan.commands, len(self.recording.steps))
+            between = {
+                edges.index(at): functools.partial(self._host, held, values)
+                for at, held in hosted.items()
+            }
+            idle = (
+                self.plan.idle(self.recording.steps, values)
+                if self.plan.commands
+                else frozenset()
+            )
+            call(idle=idle, between=between)
         else:
-            call()
+            call(
+                between={
+                    at: functools.partial(self._host, held, values)
+                    for at, held in hosted.items()
+                }
+            )
         outputs = [self.callable.get_buffer(h.ref()) for h in self.recording.returned]
         if not self.recording.carry:
             return _results(outputs, None)
         return _results(outputs, self._next_values(values))
 
+    def _host(self, steps: list[HostStep], values: Mapping[str, int]) -> None:
+        """Run ``steps`` on the device's buffers, then push what they wrote."""
+        for s in steps:
+            reads = []
+            for h in s.reads:
+                key = [slice(None)] * len(h.shape)
+                for axis, count in h.valid.items():
+                    key[axis] = slice(count.evaluate(values))
+                whole = self._storage(h).numpy()[: h.elements].reshape(h.shape)
+                reads.append(whole[tuple(key)])
+            with contextlib.ExitStack() as borrowed:
+                writes = [
+                    borrowed.enter_context(self._storage(h).overwrite())[
+                        : h.elements
+                    ].reshape(h.shape)
+                    for h in s.writes
+                ]
+                s.fn(*reads, *writes)
+            for h in s.writes:
+                self._storage(h).to("npu")
+
     def start(self, run: FullELFRun, /, *tensors, **values) -> None:
-        """Start a call of this full ELF on ``run`` without waiting for it."""
+        """Start a call of this full ELF on ``run`` without waiting for it.
+
+        Raises:
+            ValueError: A host step runs between its commands, which a call
+                waits on.
+        """
+        if self.recording.host:
+            raise ValueError(
+                f"{self.recording.name}: a host step runs between its commands; "
+                f"call it, which waits on each"
+            )
         self._stage(tensors, values, run)
         call = self.callable
         assert isinstance(call, FullELFCallable), "a run is a full ELF's"

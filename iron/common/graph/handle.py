@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from math import prod
 from typing import Annotated, Any, TypeVar
 
@@ -849,6 +849,28 @@ def carry(**next_values: Handle | Affine | PerCall | int) -> Carry:
     ``return logits, iron.carry(token=sampled, position=position + 1)``.
     """
     return Carry(**next_values)
+
+
+def on_host(fn: Callable[..., None], *reads, writes=()) -> None:
+    """Run ``fn(*reads, *writes)`` on the host between the steps recorded
+    before and after it; a full ELF ends a command there and waits on it, so
+    a graph with one has no device loop.
+
+    Args:
+        fn: Called on numpy arrays, each read as the device left it and cut
+            to its bounds, then each write; what it leaves of a write keeps
+            what it last wrote there.
+        *reads: Contiguous handles, states or weights.
+        writes: Contiguous parts of states no step writes; steps after
+            this read what ``fn`` wrote.
+
+    Raises:
+        TypeError: No graph's body is being recorded.
+    """
+    recorder = graph_recorder.get()
+    if recorder is None:
+        raise TypeError("on_host records into a graph's body")
+    recorder.on_host(fn, reads, writes)
 
 
 def is_operand(x) -> bool:
