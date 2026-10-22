@@ -838,9 +838,11 @@ def _count(n: PerCall | Affine) -> Affine:
     return n
 
 
-def clamp(x: PerCall | Affine, lo: int | None = None, hi: int | None = None) -> Affine:
+def clamp(
+    x: PerCall | Affine, lo: int | None = None, hi: int | None = None
+) -> Affine | int:
     """A per-call value's expression ``x`` held to ``[lo, hi]``, a bound of
-    None none."""
+    None none; the nearer bound itself where ``x`` never reaches the range."""
     return (x if isinstance(x, Affine) else x.affine()).clamp(lo, hi)
 
 
