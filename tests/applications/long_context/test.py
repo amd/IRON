@@ -240,6 +240,7 @@ def loaded(request):
         aie_utils.DefaultNPURuntime.cleanup()
 
 
+@pytest.mark.extensive
 def test_decode_deep_in_the_cache(loaded, record_property):
     """The deepest step the caches hold, at ``max_seq_len - 1``."""
     app, model = loaded
@@ -247,6 +248,7 @@ def test_decode_deep_in_the_cache(loaded, record_property):
     check_deep_decode(model, position, app.deep_kl, record=record_property)
 
 
+@pytest.mark.extensive
 def test_prompt_deep_in_the_cache(loaded, record_property):
     """The chunk holding ``max_seq_len - 1``, its rows: the longest
     dispatch a prompt makes, over the whole context.
@@ -256,6 +258,7 @@ def test_prompt_deep_in_the_cache(loaded, record_property):
     check_deep_prompt(model, rows, app.deep_kl, record=record_property)
 
 
+@pytest.mark.extensive
 @pytest.mark.bench
 def test_prompt_time_at_8k(loaded, record_property):
     """Time to the first token after an 8192-token prompt, four whole

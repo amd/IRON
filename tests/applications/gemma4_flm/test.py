@@ -146,6 +146,7 @@ def stock_tokens(build_engines):
     return {name: r["context"] for name, r in zip(PROMPTS, stock)}
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "prompt", [pytest.param(name, marks=pytest.mark.bench) for name in PROMPTS]

@@ -44,18 +44,32 @@ MAX_KL = {"Mean": 0.02, "P90": 0.03, "Max": 0.05}
 
 @pytest.mark.parametrize(
     "prompt_len,num_tokens",
-    [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
+    [
+        pytest.param(
+            p,
+            n,
+            # The shortest per PR; the rest nightly.
+            marks=[
+                pytest.mark.bench,
+                *([] if (p, n) == (13, 1) else [pytest.mark.extensive]),
+            ],
+        )
+        for p in (1024, 13)
+        for n in (40, 1)
+    ],
     ids=[f"lfm2_1_2b_prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
 )
 def test_lfm2_1_2b(model, prompt_len, num_tokens, record_property):
     check_generation(model, prompt_len, num_tokens, record=record_property)
 
 
+@pytest.mark.extensive
 @pytest.mark.bench
 def test_lfm2_1_2b_accuracy(model, record_property):
     check_accuracy(model, MAX_KL, record=record_property)
 
 
+@pytest.mark.extensive
 def test_lfm2_1_2b_determinism(model, record_property):
     check_determinism(model, record=record_property)
 
@@ -65,6 +79,7 @@ def test_lfm2_1_2b_determinism(model, record_property):
 LONG = 12000
 
 
+@pytest.mark.extensive
 def test_lfm2_1_2b_accuracy_across_chunks(model, record_property):
     """The prompt's two chunks and two decode steps after them, against the
     float32 reference over the whole prompt (each step a forward over 3k
@@ -74,6 +89,7 @@ def test_lfm2_1_2b_accuracy_across_chunks(model, record_property):
     check_accuracy(model, MAX_KL, 3, LONG, record=record_property)
 
 
+@pytest.mark.extensive
 def test_lfm2_1_2b_chat_turn(model, record_property):
     """A turn of 1000 tokens reruns the second chunk alone."""
     check_chat_turn(model, LONG, 1000, record=record_property)

@@ -320,6 +320,7 @@ def check_mixed(graph, reference, case, record_property):
     np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 class TestEachStep:
     """The form NPU1 runs: each step its own dispatch of an xclbin, the
@@ -364,6 +365,7 @@ class Features(iron.Graph):
         return Copy.step(self.audio.features[1 : wave.shape[0] // hop + 1])
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestAudio:
     """The audio tower alone."""
@@ -413,6 +415,7 @@ class TestAudio:
         record_property("Latency", latency.median_us)
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestVision:
     """The vision tower alone, and its image processor alone: a graph the
@@ -551,6 +554,7 @@ def test_embeddinggemma_2_accuracy(encoder, reference, text, task, record_proper
     np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dims", [512, 256, 128])
 def test_embeddinggemma_2_truncation(encoder, reference, dims, record_property):
@@ -563,6 +567,7 @@ def test_embeddinggemma_2_truncation(encoder, reference, dims, record_property):
     assert similarity >= MIN_COSINE, similarity
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_embeddinggemma_2_ranking(encoder, reference):
     query = encoder.embed(QUERY, "query")
@@ -574,12 +579,14 @@ def test_embeddinggemma_2_ranking(encoder, reference):
     np.testing.assert_allclose(scores, want, atol=3e-3)
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("case", MIXED)
 def test_embeddinggemma_2_multimodal(multimodal, reference, case, record_property):
     check_mixed(multimodal, reference, case, record_property)
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_embeddinggemma_2_determinism(multimodal):
     # Interleaved, so that a version reading what another left in the shared
@@ -600,6 +607,7 @@ def test_embeddinggemma_2_determinism(multimodal):
             )
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.bench
 @pytest.mark.parametrize(

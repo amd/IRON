@@ -46,7 +46,19 @@ MAX_KL = {"Mean": 0.015, "P90": 0.025, "Max": 0.1}
 
 GENERATION = pytest.mark.parametrize(
     "prompt_len,num_tokens",
-    [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
+    [
+        pytest.param(
+            p,
+            n,
+            # The shortest per PR; the rest nightly.
+            marks=[
+                pytest.mark.bench,
+                *([] if (p, n) == (13, 1) else [pytest.mark.extensive]),
+            ],
+        )
+        for p in (1024, 13)
+        for n in (40, 1)
+    ],
     ids=[
         f"phi_4_mini_instruct_prompt_{p}_tokens_{n}"
         for p in (1024, 13)
@@ -60,14 +72,17 @@ def test_phi_4_mini_instruct(model, prompt_len, num_tokens, record_property):
     check_generation(model, prompt_len, num_tokens, record=record_property)
 
 
+@pytest.mark.extensive
 def test_phi_4_mini_instruct_sampling(model, record_property):
     check_device_sampling(model, 256, 20, record=record_property)
 
 
+@pytest.mark.extensive
 @pytest.mark.bench
 def test_phi_4_mini_instruct_accuracy(model, record_property):
     check_accuracy(model, MAX_KL, 10, 1024, record=record_property)
 
 
+@pytest.mark.extensive
 def test_phi_4_mini_instruct_determinism(model, record_property):
     check_determinism(model, record=record_property)

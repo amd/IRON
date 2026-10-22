@@ -61,7 +61,19 @@ MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
 
 GENERATION = pytest.mark.parametrize(
     "prompt_len,num_tokens",
-    [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
+    [
+        pytest.param(
+            p,
+            n,
+            # The shortest per PR; the rest nightly.
+            marks=[
+                pytest.mark.bench,
+                *([] if (p, n) == (13, 1) else [pytest.mark.extensive]),
+            ],
+        )
+        for p in (1024, 13)
+        for n in (40, 1)
+    ],
     ids=[f"prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
 )
 
@@ -90,6 +102,7 @@ def test_the_readme_quick_start(record_property):
     assert out
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestEachStep:
     """The form NPU1 runs: each step its own dispatch of one xclbin, the host
@@ -127,16 +140,19 @@ def test_llama_3_2(model, prompt_len, num_tokens, record_property):
 
 # The device draws every token and starts every decode step itself; from the
 # same seed its text is the host loop's. The figures are the device loop's.
+@pytest.mark.extensive
 @pytest.mark.bench
 def test_llama_3_2_device_loop(model, record_property):
     check_device_sampling(model, 1024, 100, record=record_property)
 
 
+@pytest.mark.extensive
 @pytest.mark.bench
 def test_llama_3_2_accuracy(model, record_property):
     check_accuracy(model, MAX_KL, record=record_property)
 
 
+@pytest.mark.extensive
 def test_llama_3_2_determinism(model, record_property):
     check_determinism(model, record=record_property)
 
@@ -146,6 +162,7 @@ def test_llama_3_2_determinism(model, record_property):
 LONG = 12000
 
 
+@pytest.mark.extensive
 def test_llama_3_2_accuracy_across_chunks(model, record_property):
     """The prompt's two chunks and two decode steps after them, against the
     float32 reference over the whole prompt (each step a forward over 3k
@@ -155,6 +172,7 @@ def test_llama_3_2_accuracy_across_chunks(model, record_property):
     check_accuracy(model, MAX_KL, 3, LONG, record=record_property)
 
 
+@pytest.mark.extensive
 def test_llama_3_2_chat_turn(model, record_property):
     """A turn of 1000 tokens reruns the second chunk alone."""
     check_chat_turn(model, LONG, 1000, record=record_property)

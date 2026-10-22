@@ -260,6 +260,7 @@ def large():
         aie_utils.DefaultNPURuntime.cleanup()
 
 
+@pytest.mark.extensive
 @pytest.mark.bench
 @pytest.mark.supported_devices("npu2")
 def test_whisper_large_v3_turbo_accuracy(large, record_property):

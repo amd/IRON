@@ -81,6 +81,7 @@ def test_smolvlm_accuracy(model, reference, seed, question, record_property):
     check(model, reference, image, question, rng, record_property)
 
 
+@pytest.mark.extensive
 @pytest.mark.parametrize("size", SIZES, ids=[f"{h}x{w}" for h, w in SIZES])
 def test_smolvlm_accuracy_at_another_size(model, reference, size, record_property):
     """One decoded image of ``size``, not the tower's, with the first

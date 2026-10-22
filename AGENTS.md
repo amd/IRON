@@ -305,10 +305,16 @@ Each hardware workflow runs one job per runner, Phoenix (NPU1) and Krackan
   every PR.
 - `extensive.yml`: the same with extensive tests, nightly and on pushes to
   `main` and `devel`.
-- `examples.yml`: `tests/applications/`.
+- `examples.yml`: `tests/applications/`, non-extensive, on every PR: each
+  model loaded once for its shortest call (a 13-token prompt, one token
+  drawn; an embedding model's or a toy's own checks) and the device-free
+  reference tests.
 - `nightly.yml`: every `tests/applications/`
-  test, extensive ones too, each night; a benched TTFT, TPS or Latency 10%
-  worse than the night before's fails it (`pretty_trends.py --fail-on`).
+  test, extensive ones too, each night: the depth a model's checks have
+  (accuracy, determinism, sampling, chat turns, long generations, the
+  each-step form, long_context's deep checks, the 30B Qwen3-MoE); a benched
+  TTFT, TPS or Latency 10% worse than the night before's fails it
+  (`pretty_trends.py --fail-on`).
 - `ci-lint.yml`: black, clang-format, reuse and actionlint, and pyright
   over `[tool.pyright]`'s paths in `pyproject.toml`.
 - `pr-comment.yml` and `publish-pages.yml`: the performance trends of a PR

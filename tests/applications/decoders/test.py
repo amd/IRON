@@ -65,19 +65,25 @@ MOE_KL = {**MAX_KL, "P90": 0.1}
 
 @pytest.mark.bench
 @pytest.mark.parametrize(
-    "prompt,num_tokens", [(0, 40), (1, 1)], ids=["long-40", "short-1"]
+    "prompt,num_tokens",
+    [
+        pytest.param(0, 40, id="long-40", marks=pytest.mark.extensive),
+        pytest.param(1, 1, id="short-1"),
+    ],
 )
 def test_generation(decoder, prompt, num_tokens, record_property):
     model, prompts = decoder
     check_generation(model, prompts[prompt], num_tokens, record=record_property)
 
 
+@pytest.mark.extensive
 @pytest.mark.bench
 def test_accuracy(decoder, record_property):
     bounds = MOE_KL if isinstance(decoder[0], Qwen3Moe) else MAX_KL
     check_accuracy(decoder[0], bounds, record=record_property)
 
 
+@pytest.mark.extensive
 def test_determinism(decoder, record_property):
     if isinstance(decoder[0], Qwen3Moe):
         pytest.skip("15 min at 30B; test_host_steps holds a host step's calls exact")

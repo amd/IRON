@@ -79,7 +79,9 @@ Hugging Face decoders need a config and a model class; see
    `tests/applications/decoders/test.py`; any other device test goes in
    `tests/applications/<name>/test.py` and uses `iron.lm.testing`'s
    checks; `check_accuracy` judges the real checkpoint against the
-   `golden.npz` recorded beside it. The host run uses each operator's
+   `golden.npz` recorded beside it. Per PR a model makes its shortest call
+   (`prompt_13_tokens_1`); mark every other device check
+   `@pytest.mark.extensive`, which runs nightly (AGENTS.md, "CI"). The host run uses each operator's
    reference, which does not model aie2p's bfp16 rounding in flm.ProjectionGEMM, so
    only the device test measures that error.
 
