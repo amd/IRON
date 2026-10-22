@@ -381,7 +381,8 @@ def _fill_caches(model, n: int, position: int):
     positions before ``position`` so filled; past ``ring``, a prompt's
     positions in it are as it left them. A state checkpointed at each
     chunk boundary (``Checkpoints``) holds, in the slot a call at
-    ``position`` reads, the state the prompt left.
+    ``position`` reads, the state the prompt left; the reference reads a
+    copy of its slots.
     """
     version = next(iter(model.versions.values()))
     caches = [(x, p) for _, x, p, _ in walk(model) if isinstance(p, KVCache)]
@@ -403,7 +404,9 @@ def _fill_caches(model, n: int, position: int):
         slots = version.read(c.slots)
         slots[c.slot(position)] = slots[c.slot(n)]
         version.push(c.slots)
-        c.slots.host = slots
+        # A step may read and write one slot: the reference, run after the
+        # device's step, reads it as it was, not as the device left it.
+        c.slots.host = slots.copy()
     try:
         yield
     finally:
