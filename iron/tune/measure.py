@@ -25,7 +25,6 @@ import subprocess
 import uuid
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 from aie.iron import Out
@@ -315,15 +314,12 @@ def time_interleaved(
     log: Callable[[str], None] = print,
 ) -> list[Stats]:
     """Each loaded image's per-round medians, microseconds (``samples_us``),
-    each call's figure the time the image itself took (``last_elapsed``):
-    mlir-aie's ``run_interleaved``, whose arguments and errors these are.
+    each call's figure the time the image itself took, which its
+    ``KernelResult`` carries: mlir-aie's ``run_interleaved``, whose arguments
+    and errors these are.
     """
     return run_interleaved(
-        # It reads a call's figure off the second of what the call returns.
-        [
-            lambda run=run: (run(), SimpleNamespace(npu_time=run.last_elapsed * 1e9))
-            for run in runs
-        ],
+        list(runs),
         rounds=timing.rounds,
         calls=timing.calls,
         settle=timing.settle,

@@ -25,7 +25,10 @@ from .step import BufferRef
 
 if TYPE_CHECKING:
     import pyxrt
-    from aie.utils.hostruntime.xrtruntime.hostruntime import XRTKernelHandle
+    from aie.utils.hostruntime.xrtruntime.hostruntime import (
+        XRTKernelHandle,
+        XRTKernelResult,
+    )
     from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
         ParameterScratchpad,
     )
@@ -33,6 +36,7 @@ if TYPE_CHECKING:
 else:
     try:
         import pyxrt
+        from aie.utils.hostruntime.xrtruntime.hostruntime import XRTKernelResult
         from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
             ParameterScratchpad,
         )
@@ -272,8 +276,10 @@ class ImageCallable:
         """The buffer ``root`` whole."""
         raise NotImplementedError
 
-    def __call__(self) -> None:
-        """Run the sequence once."""
+    def __call__(self) -> tuple[XRTKernelHandle | None, XRTKernelResult]:
+        """Run the sequence once: the handle an empty dispatch is timed on
+        (``aie.utils.benchmark``), or None, and the call's result.
+        """
         raise NotImplementedError
 
     def _arena_grew(self) -> bool:
@@ -554,10 +560,11 @@ class FullELFCallable(ImageCallable):
         self,
         idle: Collection[int] = (),
         between: Mapping[int, Callable[[], None]] | None = None,
-    ):
+    ) -> tuple[XRTKernelHandle, XRTKernelResult]:
         """Dispatch ``run``, each but its ``idle`` commands; ``between[k]()``
         runs on the host once the commands before ``k`` complete, and what it
-        wrote is pushed before ``k`` starts.
+        wrote is pushed before ``k`` starts. Returns the image's handle, whose
+        empty dispatch is aiecc's empty sequence, and the call's result.
         """
         self._sync_inputs()
         t0 = time.perf_counter()
@@ -572,6 +579,8 @@ class FullELFCallable(ImageCallable):
         run.start(idle, range(first, len(run.handles)))
         run.wait()
         self.last_elapsed = time.perf_counter() - t0
+        completed = pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED
+        return self.handle, XRTKernelResult(completed, round(self.last_elapsed * 1e9))
 
 
 class PerStepCallable(ImageCallable):
@@ -690,9 +699,12 @@ class PerStepCallable(ImageCallable):
     def write_values(self, values: Mapping[str, np.generic]) -> None:
         self.dispatch_values = dict(values)
 
-    def __call__(self, between: Mapping[int, Callable[[], None]] | None = None):
+    def __call__(
+        self, between: Mapping[int, Callable[[], None]] | None = None
+    ) -> tuple[None, XRTKernelResult]:
         """Dispatch each step; ``between[i]()`` runs on the host before step
-        ``i``, or after the last for ``i`` past it.
+        ``i``, or after the last for ``i`` past it. Several dispatches have no
+        one empty dispatch to time: the handle returned is None.
 
         Raises:
             ValueError: ``between`` names a step inside a run of a pack.
@@ -738,6 +750,8 @@ class PerStepCallable(ImageCallable):
         if len(self.op.steps) in between:
             between[len(self.op.steps)]()
         self.last_elapsed = time.perf_counter() - t0
+        completed = pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED
+        return None, XRTKernelResult(completed, round(self.last_elapsed * 1e9))
 
     def _device_resident(self) -> None:
         """Mark what the steps write device-resident, so a read pulls it, and only then."""

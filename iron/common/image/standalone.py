@@ -50,8 +50,12 @@ class OperatorImage:
         """Run the image on ``args``, loading it into the shared runtime
         unless it is there already. ``scalars`` are the call's
         ``DispatchTime`` values, by device symbol.
+
+        Returns:
+            The kernel's handle and its ``KernelResult``, as the runtime's
+            call gives them: ``aie.utils.benchmark`` times the dispatch less
+            an empty one on the handle.
         """
         self.compile()
         (step,) = self._sequence.steps
-        _, result = self._chain.links[id(step.op)].kernel(*args, **scalars)
-        return result
+        return self._chain.links[id(step.op)].kernel(*args, **scalars)

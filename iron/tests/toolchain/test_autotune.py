@@ -654,17 +654,22 @@ def test_retuning_keeps_what_the_profile_set_that_the_search_does_not_move(
     assert op.tile_k == 32 and op.resolved(npu2).tile_n == 16
 
 
-def test_a_run_is_timed_by_the_time_its_image_took(monkeypatch):
-    class Run:
-        """Its image takes a microsecond longer each call: 1, 2, ..."""
+@pytest.mark.supported_devices("npu2")
+def test_a_run_is_timed_by_the_time_its_image_took():
+    """An image's call returns the handle an empty dispatch is timed on
+    (aiecc's empty sequence) and a result whose npu_time is the time the
+    image took, which run_interleaved reads as the call's figure.
+    """
 
-        last_elapsed = 0.0
+    class Double(iron.Graph):
+        def body(self, x):
+            return ElementwiseAdd.step(x, x)
 
-        def __call__(self):
-            self.last_elapsed += 1e-6
-
-    monkeypatch.setattr(benchmark, "other_npu_users", lambda holding=False: set())
-    monkeypatch.setattr(benchmark, "cpu_wait_us", lambda: None)
-    (timed,) = time_interleaved([Run()], Timing(rounds=2, calls=3))
-    # Two untimed calls, then each round's median of its three: 4, then 7.
-    assert timed.samples_us == pytest.approx([4.0, 7.0])
+    version = Double().compile(x=(16, 256))
+    version(np.ones((16, 256), bfloat16))
+    call = version.callable
+    handle, result = call()
+    assert result.npu_time == round(call.last_elapsed * 1e9)
+    assert handle is not None and handle.empty_dispatch_ns() is not None
+    (timed,) = time_interleaved([call], Timing(rounds=2, calls=3))
+    assert len(timed.samples_us) == 2 and min(timed.samples_us) > 0
