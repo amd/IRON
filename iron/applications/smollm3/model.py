@@ -11,6 +11,7 @@ Its output head is the input embedding, tied.
 """
 
 import dataclasses
+from pathlib import Path
 
 from iron import lm
 from iron.lm import CausalLM, DecoderConfig, not_json
@@ -42,6 +43,7 @@ class SmolLM3(CausalLM):
     """
 
     config = SmolLM3Config
+    profile = Path(__file__).with_name("profiles")
 
     def __init__(self, config: SmolLM3Config, weights):
         super().__init__(config, weights)
