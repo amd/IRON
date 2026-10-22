@@ -18,6 +18,7 @@ scaling its experts' activations and zero at the others'.
 """
 
 import dataclasses
+from pathlib import Path
 
 import numpy as np
 
@@ -151,6 +152,7 @@ class Qwen3Moe(CausalLM):
 
     config = Qwen3MoeConfig
     layer_class = Qwen3MoeLayer
+    profile = Path(__file__).with_name("profiles")
 
     def __init__(self, config: Qwen3MoeConfig, weights):
         super().__init__(config, weights)
