@@ -3,11 +3,11 @@
 
 # The mlir-aie and LLVM-AIE (Peano) wheels are not on the official PyPI, so we
 # find them on their release pages.
---find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/v1.4.5-alpha.1
+--find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
 --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 
-mlir_aie==1.4.5a1
-llvm-aie==22.0.0.2026101201+83ba9ea9
+mlir_aie==1.4.5.dev64+g843e9c3
+llvm-aie==22.0.0.2026101901+4f5df13d
 
 black
 reuse

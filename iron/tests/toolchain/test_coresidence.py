@@ -411,7 +411,8 @@ def test_pack_compiles_to_a_full_elf():
         if kernel["name"] == Packing.device_name(designs)
         for instance in kernel["instance"]
     ]
-    assert instances == designs
+    # aiecc adds a device's empty sequence (aie.utils' EMPTY_SEQUENCE).
+    assert instances == [*designs, "aiecc_empty"]
 
 
 @requires("aiebu", "peano")

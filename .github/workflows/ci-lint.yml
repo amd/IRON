@@ -63,7 +63,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: Xilinx/mlir-aie
-          ref: 976d60319356a4f1e328cc88de953f8264eecba7
+          ref: 843e9c3ec99981032066027bf7c6f4d3769ec5f5
           path: mlir-aie
           sparse-checkout: python
       - name: Install dependencies

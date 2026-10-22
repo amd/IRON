@@ -25,13 +25,13 @@ Elsewhere:
 
 Install as the README says. XRT must be sourced
 (`source /opt/xilinx/xrt/setup.sh`) before anything runs on a device.
-`requirements.txt` pins the last mlir-aie release, which brings the
-kernel library and finds the Peano wheel itself. This branch needs a newer
-mlir-aie: the commit in `.github/workflows/ci-lint.yml`'s `ref:`. Until a
-release carries it, install the pinned wheel and copy that commit's
-`python/` over the wheel's `aie/` package, keeping the wheel's
-`_mlir_libs`; set `MLIR_AIE_KERNEL_SOURCES` to the checkout. A pull request
-that needs a newer mlir-aie bumps that `ref:` in the same pull request.
+`requirements.txt` pins the mlir-aie wheel IRON is tested with, a release
+or a nightly (`latest-wheels-4`), which brings the kernel library, and the
+llvm-aie (Peano) nightly that mlir-aie commit validated
+(`utils/peano-requirements.txt`). `.github/workflows/ci-lint.yml`'s `ref:`
+is the same commit, the Python pyright types against. A pull request that
+needs a newer mlir-aie bumps all three in the same pull request
+(`update-mlir-aie.yml` does it for a release or a nightly).
 
 - Compiled artifacts live in mlir-aie's content-keyed cache,
   `~/.npu/cache/<hash>/` or `$NPU_CACHE_HOME`; nothing is written to the
