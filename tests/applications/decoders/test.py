@@ -35,7 +35,13 @@ DECODERS = [
     pytest.param((Gemma4, "gemma-4-e2b-it/model.safetensors", (256, 13)), id="gemma4"),
     pytest.param((SmolLM3, f"smollm3-3b/{INDEX}", (1024, 13)), id="smollm3"),
     pytest.param((Qwen35, f"qwen3.5-0.8b/{INDEX}", (1024, 13)), id="qwen3_5"),
-    pytest.param((Qwen3Moe, f"qwen3-30b-a3b/{INDEX}", (1024, 13)), id="qwen3_moe"),
+    # 30B, its experts paged from the checkpoint: nightly only, a toy one per PR
+    # (tests/applications/qwen3_moe).
+    pytest.param(
+        (Qwen3Moe, f"qwen3-30b-a3b/{INDEX}", (1024, 13)),
+        id="qwen3_moe",
+        marks=pytest.mark.extensive,
+    ),
 ]
 
 pytestmark = pytest.mark.supported_devices("npu2")
@@ -73,4 +79,6 @@ def test_accuracy(decoder, record_property):
 
 
 def test_determinism(decoder, record_property):
+    if isinstance(decoder[0], Qwen3Moe):
+        pytest.skip("15 min at 30B; test_host_steps holds a host step's calls exact")
     check_determinism(decoder[0], record=record_property)
