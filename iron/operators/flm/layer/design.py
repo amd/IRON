@@ -55,7 +55,7 @@ from aie.iron.kernels import (
     FlmGemma4DecodeGeometry,
     flm_gemma4,
 )
-from aie.iron.controlflow import range_
+from aie.iron.controlflow import else_, if_, range_
 from aie.iron.dataflow import Flow, PacketFlow
 from aie.iron.device import Tile
 
@@ -192,18 +192,11 @@ RMS_LOCKS = _lock_ids(
     "x_prod_lock",
     "x_cons_lock",
 )
-ROPE_LOCKS = _lock_ids(
-    "qkv_prod_lock",
-    "qkv_cons_lock",
-    "k_prod_lock",
-    "k_cons_lock",
-    "v_prod_lock",
-    "v_cons_lock",
-)
+ROPE_LOCKS = {}
 PLE_LOCKS = {}
 GLE_LOCKS = {}
 PLU_LOCKS = {}
-GLU_LOCKS = _lock_ids("x_prod_lock", "x_cons_lock", "y_prod_lock", "y_cons_lock")
+GLU_LOCKS = {}
 PROJ_LOCKS = _lock_ids(
     "x_prod_lock",
     "x_cons_lock",
@@ -485,24 +478,29 @@ class _Ctx:
             address=self.rtp[key],
         )
 
-    def manual_pool(self, tile, buffer, obj_type):
-        """A one-object BufferPool over ``buffer`` that a hand-written BD fills.
+    def manual_pool(self, tile, buffers, obj_type, drain=False):
+        """A BufferPool over ``buffers`` that a hand-written BD chain drives.
 
-        The core reaches the buffer through the pool's handle; ``_fill_bd``
-        drives the other end.
+        The core reaches the objects through the pool's handle. ``drain``
+        gives the core the filling end and the BD chain the draining one.
         """
-        prod = Lock(tile=tile, init=1, name=f"{buffer.name}_prod")
-        cons = Lock(tile=tile, init=0, name=f"{buffer.name}_cons")
+        if isinstance(buffers, Buffer):
+            buffers = [buffers]
+        stem = buffers[0].name
+        prod = Lock(tile=tile, init=len(buffers), name=f"{stem}_prod")
+        cons = Lock(tile=tile, init=0, name=f"{stem}_cons")
         for lock in (prod, cons):
             self.rt.add_lock(lock)
         return BufferPool(
             obj_type,
             tile=tile,
-            name=f"{buffer.name}_pool",
-            buffers=[buffer],
+            depth=len(buffers),
+            name=f"{stem}_pool",
+            buffers=list(buffers),
             produce_lock=prod,
             consume_lock=cons,
-            manual_fill=True,
+            manual_fill=not drain,
+            manual_drain=drain,
         )
 
     def add_locks(self, tile, inits):
@@ -855,8 +853,12 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
     qkv arrives on S2MM 0, the RoPE weights on S2MM 1. q leaves through
     q_fifo to the qk core, k and v on MM2S 1.
     """
-    kern = ctx.entry(name, "rope")
-    q_ty, kv_ty, _, qkv_ty, _, rope_ty, _ = kern.arg_types()
+    rope_q = ctx.entry(name, "rope_q")
+    rope_k = ctx.entry(name, "rope_k")
+    rope_v = ctx.entry(name, "rope_v")
+    _, qkv_ty, rope_ty, _ = rope_q.arg_types()
+    kv_ty = rope_k.arg_types()[0]
+    n_q, n_kv = ctx.g.num_attn_heads, ctx.g.num_kv_heads
 
     r, c = rope_tile.row, rope_tile.col
     qkv_0 = Buffer(type=qkv_ty, name=f"qkv_buffer_0_{r}_{c}", tile=rope_tile)
@@ -865,32 +867,49 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
     v_buf = Buffer(type=kv_ty, name=f"v_buffer_{r}_{c}", tile=rope_tile)
     rope_buf = Buffer(type=rope_ty, name=f"rope_buffer_{r}_{c}", tile=rope_tile)
     skip_kv = ctx.rtp_buffer(rope_tile, rtp_key)
-    lk = ctx.locks(
-        rope_tile,
-        ROPE_LOCKS,
-        dict(
-            qkv_prod_lock=2,
-            qkv_cons_lock=0,
-            k_prod_lock=1,
-            k_cons_lock=0,
-            v_prod_lock=1,
-            v_cons_lock=0,
-        ),
-    )
+    qkv_pool = ctx.manual_pool(rope_tile, [qkv_0, qkv_1], qkv_ty)
+    (qkv_seg,) = qkv_pool.segments
+    k_prod, k_cons = ctx.add_locks(rope_tile, [1, 0])
+    v_prod, v_cons = ctx.add_locks(rope_tile, [1, 0])
     rope_prod, rope_cons = ctx.add_locks(rope_tile, [1, 0])
-    ctx.add_locks(rope_tile, [0])
 
-    def rope_body(q_h, kk, v, q0, q1, rope, skip, kern):
+    def rope_body(q_h, kk, v, qkv_h, rope, skip, rq, rk, rv):
         q = q_h.acquire(1)
         rope_cons.acquire(1)
-        kern(q, kk, v, q0, q1, rope, skip)
+        for i in range_(n_q):
+            rq(q, qkv_h.acquire(1), rope, i)
+            qkv_h.release(1)
+        # The layer reuses another layer's KV cache when skip_kv is set, so k
+        # and v stay behind.
+        zero = constant(0, type=T.i32())
+        with if_(arith.cmpi(arith.CmpIPredicate.eq, skip[0], zero)):
+            k_prod.acquire(1)
+            for i in range_(n_kv):
+                rk(kk, qkv_h.acquire(1), rope, i)
+                qkv_h.release(1)
+            k_cons.release(1)
+            v_prod.acquire(1)
+            for i in range_(n_kv):
+                rv(v, qkv_h.acquire(1), i)
+                qkv_h.release(1)
+            v_cons.release(1)
         rope_prod.release(1)
         q_h.release(1)
 
     ctx.workers.append(
         Worker(
             rope_body,
-            [q_fifo.prod(), k_buf, v_buf, qkv_0, qkv_1, rope_buf, skip_kv, kern],
+            [
+                q_fifo.prod(),
+                k_buf,
+                v_buf,
+                qkv_pool.cons(),
+                rope_buf,
+                skip_kv,
+                rope_q,
+                rope_k,
+                rope_v,
+            ],
             tile=rope_tile,
             stack_size=1024 * 4,
         )
@@ -902,7 +921,7 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     0,
-                    ping_pong(qkv_0, qkv_1, lk["qkv_prod_lock"], lk["qkv_cons_lock"]),
+                    ping_pong(qkv_0, qkv_1, qkv_seg.produce_lock, qkv_seg.consume_lock),
                 ),
                 DmaChannel(
                     DMAChannelDir.MM2S,
@@ -910,14 +929,14 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
                     [
                         Bd(
                             k_buf,
-                            acquires=[Acquire(lk["k_cons_lock"])],
-                            releases=[Release(lk["k_prod_lock"])],
+                            acquires=[Acquire(k_cons)],
+                            releases=[Release(k_prod)],
                             next=1,
                         ),
                         Bd(
                             v_buf,
-                            acquires=[Acquire(lk["v_cons_lock"])],
-                            releases=[Release(lk["v_prod_lock"])],
+                            acquires=[Acquire(v_cons)],
+                            releases=[Release(v_prod)],
                             next=0,
                         ),
                     ],
@@ -1182,24 +1201,47 @@ def _build_glu(ctx, glu_tile, sync):
     packet header to the projection engine.
     """
     glu_name = f"{glu_tile.row}_{glu_tile.col}"
-    glu_k = ctx.entry("glu", "glu")
-    glu_hid_ty, glu_up_gate_ty, _, glu_y_ty, _, _ = glu_k.arg_types()
+    chunk_k = ctx.entry("glu", "glu_chunk")
+    emit_k = ctx.entry("glu", "glu_emit")
+    glu_hid_ty, glu_up_gate_ty, _ = chunk_k.arg_types()
+    glu_y_ty = emit_k.arg_types()[0]
     glu_x_0 = Buffer(type=glu_up_gate_ty, name=f"x_0_{glu_name}", tile=glu_tile)
     glu_x_1 = Buffer(type=glu_up_gate_ty, name=f"x_1_{glu_name}", tile=glu_tile)
     glu_y_0 = Buffer(type=glu_y_ty, name=f"y_0_{glu_name}", tile=glu_tile)
     glu_y_1 = Buffer(type=glu_y_ty, name=f"y_1_{glu_name}", tile=glu_tile)
     glu_hid = Buffer(type=glu_hid_ty, name=f"hid_0_{glu_name}", tile=glu_tile)
     glu_is_skip = ctx.rtp_buffer(glu_tile, "glu_skip")
-    ll = ctx.locks(
-        glu_tile,
-        GLU_LOCKS,
-        dict(x_prod_lock=2, x_cons_lock=0, y_prod_lock=2, y_cons_lock=0),
-    )
+    x_pool = ctx.manual_pool(glu_tile, [glu_x_0, glu_x_1], glu_up_gate_ty)
+    y_pool = ctx.manual_pool(glu_tile, [glu_y_0, glu_y_1], glu_y_ty, drain=True)
+    (x_seg,) = x_pool.segments
+    (y_seg,) = y_pool.segments
+    # The gate and up halves arrive one glu_slice at a time; the down
+    # projection then reads the activations back once per repeat.
+    chunks = 2 * ctx.g.intermediate_size // ctx.g.glu_slice
+    repeats = ctx.g.model_dim // (4 * len(PROJ_COLS) * q4nx.M_TILE)
+
+    def sweep(hid, x_h, y_h, chunk, emit, n):
+        for i in range_(n):
+            chunk(hid, x_h.acquire(1), i)
+            x_h.release(1)
+        for _ in range_(repeats):
+            for j in range_(n):
+                emit(y_h.acquire(1), hid, j)
+                y_h.release(1)
+
+    def glu_body(hid, x_h, y_h, skip, chunk, emit):
+        sync.acquire(1)
+        # A layer that reuses another's KV cache runs a double-wide MLP.
+        zero = constant(0, type=T.i32())
+        with if_(arith.cmpi(arith.CmpIPredicate.eq, skip[0], zero)) as skip_if:
+            sweep(hid, x_h, y_h, chunk, emit, chunks)
+        with else_(skip_if):
+            sweep(hid, x_h, y_h, chunk, emit, 2 * chunks)
 
     ctx.workers.append(
         Worker(
-            _wrapped_call(acquire=[(sync, 1)]),
-            [glu_hid, glu_x_0, glu_x_1, glu_y_0, glu_y_1, glu_is_skip, glu_k],
+            glu_body,
+            [glu_hid, x_pool.cons(), y_pool.prod(), glu_is_skip, chunk_k, emit_k],
             tile=glu_tile,
             stack_size=4 * 1024,
         )
@@ -1211,7 +1253,7 @@ def _build_glu(ctx, glu_tile, sync):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     0,
-                    ping_pong(glu_x_0, glu_x_1, ll["x_prod_lock"], ll["x_cons_lock"]),
+                    ping_pong(glu_x_0, glu_x_1, x_seg.produce_lock, x_seg.consume_lock),
                 ),
                 DmaChannel(
                     DMAChannelDir.MM2S,
@@ -1219,8 +1261,8 @@ def _build_glu(ctx, glu_tile, sync):
                     ping_pong(
                         glu_y_0,
                         glu_y_1,
-                        ll["y_cons_lock"],
-                        ll["y_prod_lock"],
+                        y_seg.consume_lock,
+                        y_seg.produce_lock,
                         packet=(0, _X_FROM_GLU),
                     ),
                 ),
