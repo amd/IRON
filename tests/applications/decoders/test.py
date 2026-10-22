@@ -39,7 +39,8 @@ DECODERS = [
         (Qwen3Moe, f"qwen3-30b-a3b/{INDEX}", (1024, 13)),
         id="qwen3_moe",
         marks=pytest.mark.skip(
-            reason="Experts streams every expert a row: too slow to generate"
+            reason="a prompt chunk's Experts streams every staged expert a row: "
+            "too slow to generate"
         ),
     ),
 ]

@@ -9,6 +9,11 @@ Qwen3-MoE is Qwen3's layer with its feed-forward a mixture of experts
 experts and weighs them by a softmax over their logits alone, which is
 ``TopKRouter``'s; the chosen experts' feed-forwards are ``Experts``. Its
 output head is untied.
+
+The experts stay in the mapped checkpoint, 58 GB of them at 30B: between
+the router and ``Experts`` the host copies the ones a call chose into a
+state every layer shares (``SparseMoE.stage``), so the device holds only
+those and the page cache whichever the host read lately.
 """
 
 import dataclasses
@@ -18,6 +23,7 @@ import numpy as np
 import iron
 import iron.functional as F
 from iron.applications.qwen3.model import Qwen3Layer
+from iron.common.graph.handle import State
 from iron.lm import CausalLM, DecoderConfig, GatedMLP, Linear
 from iron.operators.experts import Experts
 from iron.operators.router import TopKRouter
@@ -58,8 +64,15 @@ class Qwen3MoeConfig(DecoderConfig):
 class SparseMoE(iron.Graph):
     """A mixture of experts on ``c``'s shape: ``gate``, the router, and
     ``experts``, each a gated feed-forward ``moe_intermediate_size`` wide,
-    stacked once they load.
+    left in the checkpoint. ``Qwen3Moe`` gives every layer's the states a
+    call's chosen experts are staged in: ``gate_up`` and ``down``, a slot
+    per expert as transformers stacks them, and ``ids``, each row's choices
+    by slot.
     """
+
+    gate_up: State
+    down: State
+    ids: State
 
     def __init__(self, c: Qwen3MoeConfig):
         self.gate = Linear(c.hidden_size, c.num_experts, bias=False)
@@ -67,24 +80,29 @@ class SparseMoE(iron.Graph):
         self.experts = [GatedMLP(expert) for _ in range(c.num_experts)]
         self.top_k = c.num_experts_per_tok
 
-    def load_state_dict(self, tree, *, path: str = "") -> None:
-        super().load_state_dict(tree, path=path)
-        # As transformers stacks them: each expert's gate over its up.
-        self.gate_up = iron.param(
-            np.stack(
-                [
-                    np.concatenate([e.gate_proj.weight, e.up_proj.weight])
-                    for e in self.experts
-                ]
-            )
-        )
-        self.down = iron.param(np.stack([e.down_proj.weight for e in self.experts]))
-
     def body(self, x):
         n, experts = x.shape[0], self.gate.weight.shape[0]
         logits = F.linear(x, self.gate.weight).reshape(n, experts)
         ids, weights = TopKRouter.step(logits, top_k=self.top_k)
-        return Experts.step(x, ids, weights, self.gate_up, self.down)
+        slots = min(experts, n * self.top_k)
+        staged = (self.gate_up[:slots], self.down[:slots], self.ids[:n])
+        iron.on_host(self.stage, ids, writes=staged)
+        return Experts.step(x, staged[2], weights, *staged[:2])
+
+    def stage(self, ids, gate_up, down, staged) -> None:
+        """Copy the experts ``ids`` chose into ``gate_up`` and ``down``, a slot
+        each, and each row's choices by slot into ``staged``; a row past
+        ``ids``' takes slot 0.
+        """
+        chosen, slots = np.unique(ids, return_inverse=True)
+        width = down.shape[2]
+        for slot, e in enumerate(chosen):
+            expert = self.experts[e]
+            gate_up[slot, :width] = expert.gate_proj.weight
+            gate_up[slot, width:] = expert.up_proj.weight
+            down[slot] = expert.down_proj.weight
+        staged[: len(ids)] = slots.reshape(ids.shape)
+        staged[len(ids) :] = 0
 
 
 class Qwen3MoeLayer(Qwen3Layer):
@@ -102,3 +120,13 @@ class Qwen3Moe(CausalLM):
 
     config = Qwen3MoeConfig
     layer_class = Qwen3MoeLayer
+
+    def __init__(self, config: Qwen3MoeConfig, weights):
+        super().__init__(config, weights)
+        c = config
+        H, I, K = c.hidden_size, c.moe_intermediate_size, c.num_experts_per_tok
+        slots = min(c.num_experts, c.prefill_chunk * K)
+        gate_up, down = iron.state((slots, 2 * I, H)), iron.state((slots, H, I))
+        ids = iron.state((c.prefill_chunk, K), np.int32)
+        for layer in self.layers:
+            layer.mlp.gate_up, layer.mlp.down, layer.mlp.ids = gate_up, down, ids
