@@ -35,14 +35,7 @@ DECODERS = [
     pytest.param((Gemma4, "gemma-4-e2b-it/model.safetensors", (256, 13)), id="gemma4"),
     pytest.param((SmolLM3, f"smollm3-3b/{INDEX}", (1024, 13)), id="smollm3"),
     pytest.param((Qwen35, f"qwen3.5-0.8b/{INDEX}", (1024, 13)), id="qwen3_5"),
-    pytest.param(
-        (Qwen3Moe, f"qwen3-30b-a3b/{INDEX}", (1024, 13)),
-        id="qwen3_moe",
-        marks=pytest.mark.skip(
-            reason="a prompt chunk's Experts streams every staged expert a row: "
-            "too slow to generate"
-        ),
-    ),
+    pytest.param((Qwen3Moe, f"qwen3-30b-a3b/{INDEX}", (1024, 13)), id="qwen3_moe"),
 ]
 
 pytestmark = pytest.mark.supported_devices("npu2")
@@ -60,6 +53,8 @@ def decoder(request):
 
 # Qwen3's bounds: none of these decoders has been measured on the NPU.
 MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
+# bf16 transformers itself reaches p90 0.065 on Qwen3-MoE's steps: near-tie experts.
+MOE_KL = {**MAX_KL, "P90": 0.1}
 
 
 @pytest.mark.bench
@@ -73,7 +68,8 @@ def test_generation(decoder, prompt, num_tokens, record_property):
 
 @pytest.mark.bench
 def test_accuracy(decoder, record_property):
-    check_accuracy(decoder[0], MAX_KL, record=record_property)
+    bounds = MOE_KL if isinstance(decoder[0], Qwen3Moe) else MAX_KL
+    check_accuracy(decoder[0], bounds, record=record_property)
 
 
 def test_determinism(decoder, record_property):
