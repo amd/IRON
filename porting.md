@@ -23,7 +23,9 @@ One complication per tier. A kernel or path appears in every tier that affects i
 **Affects** 
 - decode_proj_main.cc
 
-Done for decode_glu.cc and decode_rope.cc.
+**Done** 
+- decode_glu.cc 
+- decode_rope.cc
 
 **Complication** The loop and a static ping/pong toggle sit in C++, so the design cannot see the per-iteration acquire.
 
@@ -93,7 +95,11 @@ Done for decode_glu.cc and decode_rope.cc.
 
 **Complication** The `y` lock identity follows ping/pong parity across four locks, and `send_x_output` switches between the local lock space and the tile below. A fifo models one producer/consumer pair.
 
-**Change** Open.
+A pair of cores fills one output object: the lower core writes the packet header and its row block at offset 16, its partner in the row above writes a second row block at 16+m, straight into the lower tile's memory. Nothing streams between them, so this is not a `join`: a join moves data through DMAs, and here no data moves.
+
+**Change** Open. A two-segment pool, one slice per core, does not work. A BD takes at most one acquire (`'aie.mem' op BD block must have at most one acquire UseLockOp`), so the one BD that drains the object cannot wait on a lock pair per slice. That is what the four locks buy: both cores release one lock, the BD acquires it with value 2, and a pair per buffer still lets the cores drift across ping and pong. Per-slice locks need either a BD per slice, which costs a channel, or segments that share a lock pair and count.
+
+Two things that attempt settled. Placing an endpoint on the acting core's tile rather than the pool's satisfies `verifyAccessPlacement`, which demands they match. A segment-scoped acquire wants the subview type `ObjectFifoCoreEndpointOp::getAccessType` builds, `memref<48xbf16, strided<[1]>>`, not a plain memref; `BufferPoolHandle._memref_type` builds the plain one today.
 
 **Compiler** Likely.
 
