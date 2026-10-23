@@ -281,12 +281,28 @@ def test_a_cache_attends_within_its_window():
 
 def test_a_ring_restarts_at_the_chunk_while_it_holds_the_window_before():
     """A ring of 128 positions, a window of 7 and a chunk of 64: positions
-    from 70 change after 185 ran restart at 64, whose window from 57 the
-    ring still holds, and after 186 at the first.
+    from 70 change after 70 or 185 ran restart at 64, whose window from 57
+    the ring still holds, and after 186 at the first.
     """
     cache = KVCache(dataclasses.replace(SMALL, prefill_chunk=64, max_seq_len=512), 7)
     assert cache.ring == 128
-    assert [cache.restart(70, ran) for ran in (70, 185, 186)] == [70, 64, 0]
+    assert [cache.restart(70, ran) for ran in (70, 185, 186)] == [64, 64, 0]
+
+
+def test_a_turn_over_a_ring_is_the_run_from_scratch_bit_for_bit():
+    """A turn of 150 tokens after 550 ran, over a ring of 512 positions and
+    chunks of 256, reruns its chunk from 512: its logits are those of the
+    whole run from scratch, which from 550 they were not.
+    """
+    model = small(sliding_window=65, max_seq_len=4096)
+    host = OnHost(model.config, model.weights)
+    rng = np.random.default_rng(1)
+    whole, other = rng.integers(0, model.config.vocab_size, (2, 700))
+    host.logits(whole[:550])
+    turn = host.logits(whole)
+    host.logits(other)
+    scratch = host.logits(whole)
+    np.testing.assert_array_equal(turn, scratch)
 
 
 def test_a_window_keeps_every_position_where_a_ring_takes_as_many_rows():

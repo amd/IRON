@@ -811,12 +811,11 @@ class KVCache(iron.Graph):
 
     def restart(self, held: int, ran: int) -> int:
         """Where a call may start to change the positions from ``held`` on,
-        after ``ran`` positions ran: there where the last call ended, else at
-        the boundary before it while the ring holds the window before that,
-        else at the first.
+        after ``ran`` positions ran: at the chunk boundary before it while
+        the ring holds the window before that, else at the first. A call
+        from mid-chunk would stage its keys from another offset than one
+        from the boundary, and round otherwise.
         """
-        if held == ran:
-            return held
         assert self.ring is not None and self.window is not None, "restart needs a ring"
         start = held // self.chunk * self.chunk
         return start if ran - (start - self.window) <= self.ring else 0
