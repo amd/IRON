@@ -33,7 +33,9 @@ def utterance(name: str) -> np.ndarray:
             data = archive.extractfile(member).read()
         path.parent.mkdir(parents=True, exist_ok=True)
         # Renamed into place, so an interrupted extraction leaves no clip.
-        partial = path.with_suffix(".part")
+        from uuid import uuid4
+
+        partial = path.with_suffix(f".{uuid4().hex}.part")
         partial.write_bytes(data)
         partial.replace(path)
     import soundfile
