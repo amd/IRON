@@ -278,10 +278,10 @@ def _repository(directory, weights):
     """A Hugging Face Llama repository's files at ``SCALED``'s shape: its
     ``config.json``, of a context of two prompt chunks so that loading fits
     it, ``weights``, and a tokenizer of every byte and enough two-byte
-    pieces to fill the vocabulary, its last id the BOS.
+    pieces to fill the vocabulary, its last id the BOS it puts first.
     """
     V = SMALL.vocab_size
-    config = SCALED.to_json() | {"max_position_embeddings": 4096, "bos_token_id": V - 1}
+    config = SCALED.to_json() | {"max_position_embeddings": 4096}
     (directory / "config.json").write_text(json.dumps(config))
     header, end = {}, 0
     for name, t in leaves(weights):
@@ -294,12 +294,13 @@ def _repository(directory, weights):
         f.write(struct.pack("<Q", len(blob)) + blob)
         for _, t in leaves(weights):
             f.write(t.tobytes())
-    _tokenizer_json(directory / "tokenizer.json", V)
+    _tokenizer_json(directory / "tokenizer.json", V, bos=V - 1)
 
 
-def _tokenizer_json(path, size=256, specials=()):
+def _tokenizer_json(path, size=256, specials=(), bos=None):
     """A byte-level ``tokenizer.json`` at ``path``: every byte, two-letter
-    pieces up to ``size`` ids, then ``specials``; its encoding.
+    pieces up to ``size`` ids, then ``specials``, its post-processor putting
+    id ``bos`` before a text if given; its encoding.
     """
     tokenizers = pytest.importorskip("tokenizers")
     alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
@@ -310,6 +311,11 @@ def _tokenizer_json(path, size=256, specials=()):
     hf.pre_tokenizer = tokenizers.pre_tokenizers.ByteLevel(add_prefix_space=False)
     hf.decoder = tokenizers.decoders.ByteLevel()
     hf.add_special_tokens(list(specials))
+    if bos is not None:
+        token = hf.id_to_token(bos)
+        hf.post_processor = tokenizers.processors.TemplateProcessing(
+            single=f"{token} $A", special_tokens=[(token, bos)]
+        )
     hf.save(str(path))
     return TokenizerJson(path)
 
@@ -451,7 +457,7 @@ def test_a_chat_template_s_raise_exception_raises_its_message(tmp_path):
     template = "{{ raise_exception('roles must alternate') }}"
     encoding = _tokenizer_json(tmp_path / "tokenizer.json")
     with pytest.raises(jinja2.TemplateError, match="roles must alternate"):
-        Tokenizer(encoding, 0, template).chat(HI)
+        Tokenizer(encoding, template).chat(HI)
 
 
 # Chat turns opened and closed by added tokens, after a BOS the template
@@ -477,7 +483,7 @@ def test_a_chat_s_added_tokens_are_their_ids_and_its_bos_is_the_template_s(
     encoding = _tokenizer_json(path, specials=specials)
     hf = pytest.importorskip("tokenizers").Tokenizer.from_file(str(path))
     begin, start, end, eot = (hf.token_to_id(t) for t in specials)
-    got = Tokenizer(encoding, begin, bos + TURNS).chat(HI)
+    got = Tokenizer(encoding, bos + TURNS, "<|bos|>").chat(HI)
     text = encoding.encode
     assert got == [begin] * bool(bos) + [
         start,

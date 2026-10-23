@@ -69,7 +69,6 @@ class Granite(CausalLM):
     config = GraniteConfig
     profile = Path(__file__).with_name("profiles")
     layer_class = GraniteLayer
-    bos = 100283  # "<s>"; eos/pad is "<|im_end|>" = 100257
 
     def __init__(self, config: GraniteConfig, weights):
         super().__init__(config, weights)

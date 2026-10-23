@@ -151,13 +151,13 @@ def check_generation(model, prompt_len: int, num_tokens: int, *, record):
 def check_prompt_time(model, length: int, runs: int = 3, *, record):
     """Record the median seconds to the first token after a prompt of
     ``length`` tokens over ``runs`` timed runs, each a fresh prompt (random
-    ids after BOS: a prompt's time does not follow its ids), so no run
-    reuses a chunk another wrote.
+    ids: a prompt's time does not follow its ids), so no run reuses a chunk
+    another wrote.
     """
     rng = np.random.default_rng(SEED)
     seconds = []
     for _ in range(runs):
-        tokens = [model.bos, *rng.integers(0, model.config.vocab_size, length - 1)]
+        tokens = list(rng.integers(0, model.config.vocab_size, length))
         model.generate(tokens, 1, Sampler())
         seconds.append(model.stats.ttft)
     record("TTFT", float(np.median(seconds)))

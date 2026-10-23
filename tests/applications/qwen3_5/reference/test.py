@@ -147,11 +147,10 @@ def test_a_config_reads_back_from_its_json():
     assert Qwen35Config.from_json(TOY.to_json()).to_json() == TOY.to_json()
 
 
-def test_the_bos_and_eos_named_are_the_checkpoint_s_end_tokens():
-    """The checkpoint names neither; the ids are its tokenizer's."""
+def test_the_eos_named_are_the_checkpoint_s_end_tokens():
+    """The checkpoint names none; the ids are its tokenizer's."""
     path = weights_dir("qwen3.5-0.8b") / "tokenizer.json"
     require(path, staged=False)
     tokenizer = TokenizerJson(path)
-    assert tokenizer.encode("<|endoftext|>") == [Qwen35.bos]
     ends = tokenizer.encode("<|endoftext|><|im_end|>")
     assert Qwen35.eos == set(ends)

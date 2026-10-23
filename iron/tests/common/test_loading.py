@@ -4,7 +4,7 @@
 """``Model.load`` up to the device: ``main()``'s command line handing its
 path and flags to ``from_checkpoint``, its ``-v``, the model
 ``from_checkpoint`` builds with drawn weights or a real tokenizer (skipped
-without the real checkpoint's), the context ``fit`` chooses, the BOS, and the golden
+without the real checkpoint's), the context ``fit`` chooses, and the golden
 beside a checkpoint. No NPU (the fit tests record under a bound npu2, as
 Llama's profile is per device); the checkpoint is synthetic, of
 ``SMALL``'s shape, a concrete ``Config`` instance so no config.json is
@@ -39,7 +39,6 @@ class Small(Llama):
     """
 
     config = SMALL
-    bos = 1
 
 
 def _directory(path, config=SMALL):
@@ -123,8 +122,37 @@ def test_from_checkpoint_opens_the_tokenizer_beside_it(tmp_path):
     (directory / "tokenizer.json").symlink_to(TOKENIZER)
     model = Small.from_checkpoint(directory)
     assert model.random_weights is None
-    want = [model.bos, *TokenizerJson(TOKENIZER).encode("hello")]
-    assert model.tokenizer("hello") == want
+    begin = TokenizerJson(TOKENIZER).encode("<|begin_of_text|>")
+    assert model.tokenizer("hello") == [
+        *begin,
+        *TokenizerJson(TOKENIZER).encode("hello"),
+    ]
+
+
+# The ids transformers' tokenizer("Hello world") puts before the text's
+# (and any after it), read off each checkpoint's AutoTokenizer.
+LEADS = [
+    ("llama3.2-1b", [128000], []),
+    ("gemma-3-1b-it", [2], []),
+    ("qwen2.5-1.5b-instruct", [], []),
+    ("gemma-4-e2b-it", [], []),
+    ("smollm2-1.7b-instruct", [], []),
+    ("whisper-large-v3-turbo", [50258, 50364], [50257]),
+]
+
+
+@pytest.mark.parametrize("name, lead, tail", LEADS, ids=[n for n, *_ in LEADS])
+def test_a_prompt_begins_as_the_tokenizer_begins_a_text(name, lead, tail):
+    """Only the special tokens before the text: a BOS where the tokenizer
+    puts one, none where it puts none, nothing it puts after.
+    """
+    path = weights_dir(name) / "tokenizer.json"
+    require(path, staged=False)
+    encoding = TokenizerJson(path)
+    text = encoding.encode("Hello world")
+    assert encoding.prompt("Hello world") == [*lead, *text]
+    hf = pytest.importorskip("tokenizers").Tokenizer.from_file(str(path))
+    assert hf.encode("Hello world").ids == [*lead, *text, *tail]
 
 
 def test_from_checkpoint_lowers_the_context_and_refuses_to_raise_it(tmp_path):
@@ -183,27 +211,6 @@ def test_fit_says_what_it_chose_and_how_to_ask_for_more(caplog):
     assert short.levelno == logging.WARNING
     assert "max_seq_len 512, not the native 1024" in short.message
     assert "--max-seq-len asks for up to 1024" in short.message
-
-
-def test_a_model_s_bos_is_its_checkpoint_s_unless_it_names_one(tmp_path):
-    """The checkpoint's ``config.json``'s, else its
-    ``generation_config.json``'s.
-    """
-
-    class FromCheckpoint(Small):
-        bos = Model.bos
-
-    directory = _directory(tmp_path)
-    (directory / "config.json").write_text('{"bos_token_id": 7}')
-    assert FromCheckpoint.from_checkpoint(directory, random_weights=1).bos == 7
-    (directory / "config.json").write_text("{}")
-    (directory / "generation_config.json").write_text('{"bos_token_id": 8}')
-    assert FromCheckpoint.from_checkpoint(directory, random_weights=1).bos == 8
-    (directory / "generation_config.json").unlink()
-    with pytest.raises(KeyError, match="names no bos_token_id"):
-        FromCheckpoint.from_checkpoint(directory, random_weights=1).bos
-    bos = Small.from_checkpoint(directory, random_weights=1).bos
-    assert bos == 1
 
 
 def _golden(path):

@@ -39,8 +39,8 @@ Hugging Face decoders need a config and a model class; see
    `not_json(default)` marks an IRON choice.
 
 2. **Model.** Subclass `CausalLM` (or `Encoder`, `Tower`, `EncoderDecoder`),
-   naming `config` and pointing `profile` at a `profiles/` directory (and
-   naming `bos` where `config.json` has no `bos_token_id`). A decoder's
+   naming `config` and pointing `profile` at a `profiles/` directory. A
+   prompt begins as the checkpoint's `tokenizer.json` begins a text. A decoder's
    layer is `layer_class(config, i)`, Llama's `DecoderLayer` by default
    (`iron/lm/blocks.py`); a layer that differs subclasses it and swaps the
    module that differs:

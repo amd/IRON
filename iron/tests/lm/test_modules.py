@@ -360,8 +360,6 @@ def test_each_generation_check_prefills_its_whole_prompt():
     """
 
     class Starts(OnHost):
-        bos = 1
-
         def __call__(self, *tensors, **values):
             if tensors:
                 self.starts.append(values["start"])

@@ -120,26 +120,24 @@ def _models_extra(name: str):
 
 
 class Tokenizer:
-    """Text to a prompt's token ids, ``bos`` first, and token ids back to
-    text, over ``encoding``: anything with ``encode`` and ``decode``, as
-    ``TokenizerJson`` gives. ``chat_template`` is the checkpoint's
-    own, from its ``tokenizer_config.json`` or ``chat_template.jinja``, if
-    it has one, and ``bos_token`` the text it writes for ``bos_token``
-    (``bos``'s own text when None).
+    """Text to a prompt's token ids, as transformers' tokenizer begins them
+    (``TokenizerJson.prompt``), and token ids back to text, over
+    ``encoding``, a ``TokenizerJson``. ``chat_template`` is the checkpoint's own, from its
+    ``tokenizer_config.json`` or ``chat_template.jinja``, if it has one, and
+    ``bos_token`` the text it writes for ``bos_token``.
     """
 
     def __init__(
         self,
-        encoding,
-        bos: int,
+        encoding: "TokenizerJson",
         chat_template: str | None = None,
-        bos_token: str | None = None,
+        bos_token: str = "",
     ):
-        self.encoding, self.bos = encoding, bos
+        self.encoding = encoding
         self.chat_template, self.bos_token = chat_template, bos_token
 
     def __call__(self, text: str) -> list[int]:
-        return [self.bos, *self.encoding.encode(text)]
+        return self.encoding.prompt(text)
 
     def decode(self, tokens) -> str:
         return self.encoding.decode(list(tokens))
@@ -148,7 +146,7 @@ class Tokenizer:
         """The ids of ``messages``, each ``{"role": ..., "content": ...}``,
         as ``chat_template`` renders them (with jinja2, the ``models``
         extra), the assistant's turn opened after them. The special tokens
-        the text names are their ids; ``bos`` is there only where the
+        the text names are their ids; a BOS is there only where the
         template writes it, as transformers' ``apply_chat_template`` has it.
 
         Raises:
@@ -168,11 +166,7 @@ class Tokenizer:
         text = _chat_template(self.chat_template).render(
             messages=messages,
             add_generation_prompt=True,
-            bos_token=(
-                self.encoding.token(self.bos)
-                if self.bos_token is None
-                else self.bos_token
-            ),
+            bos_token=self.bos_token,
             raise_exception=raise_exception,
             strftime_now=lambda f: datetime.datetime.now().strftime(f),
         )
@@ -192,8 +186,7 @@ def _chat_template(source: str):
 
 class TokenizerJson:
     """A Hugging Face ``tokenizer.json``, over ``tokenizers`` (not
-    ``transformers``): text to token ids without the special tokens its
-    post-processor adds, since ``Tokenizer`` puts the BOS first, and back.
+    ``transformers``): text to token ids, and back.
     """
 
     def __init__(self, path):
@@ -203,6 +196,16 @@ class TokenizerJson:
     def encode(self, text: str) -> list[int]:
         """``text``'s ids, each added token it names its own id."""
         return self._tokenizer.encode(text, add_special_tokens=False).ids
+
+    def prompt(self, text: str) -> list[int]:
+        """``encode(text)`` after the special tokens the post-processor puts
+        before a text: a BOS, or none (Qwen's), as transformers'
+        ``tokenizer(text)`` begins. Any it puts after a text are left off.
+        """
+        encoded = self._tokenizer.encode(text)
+        words = encoded.sequence_ids
+        lead = words.index(0) if 0 in words else len(words)
+        return encoded.ids[:lead] + self.encode(text)
 
     def decode(self, tokens) -> str:
         return self._tokenizer.decode(tokens)
@@ -339,31 +342,12 @@ class Model(iron.Graph):
             if template is None and jinja.exists():
                 template = jinja.read_text()
             # transformers renders tokenizer_config.json's bos_token, which
-            # may be null (nothing) or an added token's record.
-            bos_token = None
-            if "bos_token" in found:
-                b = found["bos_token"]
-                bos_token = (b["content"] if isinstance(b, dict) else b) or ""
+            # may be null or absent (nothing) or an added token's record.
+            b = found.get("bos_token")
+            bos_token = (b["content"] if isinstance(b, dict) else b) or ""
             encoding = TokenizerJson(directory / "tokenizer.json")
-            model.tokenizer = Tokenizer(encoding, model.bos, template, bos_token)
+            model.tokenizer = Tokenizer(encoding, template, bos_token)
         return model
-
-    @functools.cached_property
-    def bos(self) -> int:
-        """The token every prompt starts with: the checkpoint's
-        ``bos_token_id``, from its ``config.json`` or else its
-        ``generation_config.json``, unless a subclass names it.
-        """
-        if self.checkpoint is None:
-            raise KeyError(f"{self.name} has no checkpoint: name the model's bos")
-        directory = Path(self.checkpoint.path).parent
-        for name in ("config.json", "generation_config.json"):
-            path = directory / name
-            if path.exists():
-                bos = json.loads(path.read_text()).get("bos_token_id")
-                if bos is not None:
-                    return bos
-        raise KeyError(f"{directory} names no bos_token_id: name the model's bos")
 
     @functools.cached_property
     def eos(self) -> set[int]:
@@ -480,8 +464,7 @@ class Model(iron.Graph):
                 self.random_weights is not None
             ), "without a tokenizer, weights drawn at random"
             rng = np.random.default_rng((self.random_weights, skip))
-            draw = rng.integers(0, self.config.vocab_size, chars // 3 - 1)
-            return [self.bos, *draw]
+            return list(rng.integers(0, self.config.vocab_size, chars // 3))
         return self.tokenizer(prompt_text(chars, skip))
 
     def generate(

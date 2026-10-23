@@ -20,8 +20,8 @@ reference against Hugging Face's logits recorded in
 `Whisper.load` builds large-v3-turbo from its checkpoint (`config.json`,
 `model.safetensors`, `tokenizer.json`), held on the NPU to transformers'
 logits recorded in `golden.npz` beside it; the tests find it at
-`$IRON_EXAMPLE_WEIGHTS_DIR/whisper-large-v3-turbo`. A prompt starts at
-`<|startoftranscript|>`, the checkpoint's `decoder_start_token_id`.
+`$IRON_EXAMPLE_WEIGHTS_DIR/whisper-large-v3-turbo`. A text prompt starts
+as its tokenizer starts one, `<|startoftranscript|><|notimestamps|>`.
 
 `hidden_act` `"gelu"`, Whisper's own, is the exact GELU, `GELU`'s
 `approximate="none"` on mlir-aie's `gelu_erf`.

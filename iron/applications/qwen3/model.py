@@ -34,17 +34,11 @@ class Qwen3(CausalLM):
     """The Qwen3 decoder, with the shape ``config`` and the checkpoint's
     ``weights``. ``Qwen3.load`` builds one from a checkpoint and its
     ``tokenizer.json``.
-
-    Qwen3's ``tokenizer_config.json`` names no ``bos_token``; its
-    ``generation_config.json`` names ``<|endoftext|>`` (151643) as both
-    ``bos_token_id`` and ``pad_token_id``, which is used here as every
-    prompt's leading token, as ``lm.Model`` requires one.
     """
 
     config = DecoderConfig
     profile = Path(__file__).with_name("profiles")
     layer_class = Qwen3Layer
-    bos = 151643
 
 
 if __name__ == "__main__":

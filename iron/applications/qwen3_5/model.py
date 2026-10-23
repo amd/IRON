@@ -191,15 +191,13 @@ class Qwen35(CausalLM):
     tower and the multi-token prediction head unread), from its checkpoint
     and ``tokenizer.json``.
 
-    The checkpoint names no ``bos_token_id`` and has no
-    ``generation_config.json``: as Qwen3, every prompt leads with
-    ``<|endoftext|>``, and generation stops at it or at ``<|im_end|>``.
+    The checkpoint has no ``generation_config.json``: generation stops at
+    ``<|endoftext|>`` or ``<|im_end|>``.
     """
 
     config = Qwen35Config
     profile = None
     layer_class = Qwen35Layer
-    bos = 248044
     eos = {248044, 248046}
 
     def __init__(self, config: Qwen35Config, weights):

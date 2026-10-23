@@ -259,6 +259,11 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- A prompt begins as the checkpoint's tokenizer begins a text
+  (`TokenizerJson.prompt`): the special tokens its post-processor puts
+  before it, a BOS or none (Qwen's, Gemma 4's, SmolLM2's), as
+  transformers' `tokenizer(text)`. A chat template's `bos_token` is
+  `tokenizer_config.json`'s.
 - `LayerNorm` takes `epsilon` (mlir-aie's `layer_norm_eps`), and
   `F.layer_norm` passes its `eps`: a model's LayerNorms run at its
   checkpoint's epsilon (SmolVLM's vision tower at 1e-6).
@@ -554,6 +559,9 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `Model.bos`, `Tokenizer`'s `bos` and each model's `bos`, with
+  `WhisperConfig.decoder_start_token_id`: a prompt's first tokens are its
+  tokenizer's. `iron.functional.LAYER_NORM_EPS`.
 - Llama's tiktoken tokenizer, `SPECIAL_TOKENS` and `tokenizer()`: Llama
   reads its checkpoint's `tokenizer.json` like every model, and tiktoken is
   no longer a dependency.

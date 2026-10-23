@@ -27,7 +27,6 @@ import iron.functional as F
 from iron.applications.granite.model import Granite, GraniteConfig, GraniteLayer
 from iron.lm import (
     CausalConv1d,
-    CausalLM,
     Checkpoints,
     Linear,
     RMSNorm,
@@ -218,5 +217,3 @@ class GraniteHybrid(Granite):
     config = GraniteHybridConfig
     profile = None
     layer_class = GraniteHybridLayer
-    # The checkpoint's, not Granite 4.2's.
-    bos = CausalLM.bos

@@ -38,10 +38,6 @@ class SmolVLMTextConfig(DecoderConfig):
     tie_word_embeddings: bool = False
 
 
-#: ``<|im_start|>``, the turn marker every prompt starts with.
-BOS = 1
-
-
 class SmolVLMText(CausalLM):
     """SmolVLM's text backbone on ``config``'s shape and a checkpoint's
     ``weights``, by its names: the decoder under ``model.text_model``, the
@@ -52,7 +48,6 @@ class SmolVLMText(CausalLM):
 
     config = SmolVLMTextConfig
     profile = Path(__file__).with_name("profiles")
-    bos = BOS
 
     def __init__(self, config, weights):
         text = subtree(weights, model=weights.model.text_model, lm_head=weights.lm_head)
@@ -101,7 +96,6 @@ class SmolVLM(Multimodal):
     """
 
     config = SmolVLMConfig
-    bos = BOS
     hugging_face = SmolVLMText.hugging_face
 
     def __init__(self, config: SmolVLMConfig, weights):
