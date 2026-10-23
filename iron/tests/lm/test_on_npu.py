@@ -33,7 +33,8 @@ from iron.applications.idefics3.model import (
 )
 from iron.applications.idefics3.vision.model import VisionConfig as SmolVLMVisionConfig
 from iron.applications.idefics3.vision.model import VisionTower as SmolVLMVisionTower
-from iron.applications.qwen3_embedding.model import Qwen3Embedding, Qwen3EmbeddingConfig
+from iron.applications.qwen3.model import Qwen3Config
+from iron.applications.qwen3_embedding.model import Qwen3Embedding
 from iron.applications.resnet.model import ResNet, ResNetConfig
 from iron.applications.whisper.model import Whisper, WhisperConfig
 from iron.applications.yolox.model import YOLOXNano
@@ -63,7 +64,7 @@ def assert_on_npu(model, calls: list[dict] | None = None) -> None:
         op.resolved(dev)
 
 
-QWEN3 = Qwen3EmbeddingConfig(
+QWEN3 = Qwen3Config(
     vocab_size=1024,
     hidden_size=512,
     num_hidden_layers=2,

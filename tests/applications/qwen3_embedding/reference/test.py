@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 from iron.applications.qwen3_embedding.model import Qwen3Embedding
+from iron.lm import OnHost
 from iron.lm.golden import HuggingFace
-from iron.lm.model import _HostOutput
 from iron.tests.support.llama_model import checkpoint
 from tests.applications.qwen3.reference import test as qwen3
 from tests.applications.qwen3_reranker.reference.test import Words
@@ -35,14 +35,11 @@ class LastHidden(HuggingFace):
         return out.last_hidden_state[0, -1].numpy()
 
 
-class Host(Qwen3Embedding):
-    """The embedder, its call the graph's reference."""
+class Host(OnHost, Qwen3Embedding):
+    """The embedder, its calls the graph's reference."""
 
     profile = None
     end_of_text = EOS
-
-    def __call__(self, *tensors, **values):
-        return _HostOutput(self.reference(*tensors, **values))
 
 
 @pytest.mark.parametrize("task", [None, "Given a web search query"])
