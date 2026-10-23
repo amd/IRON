@@ -213,13 +213,13 @@ def _identity(op: Operator, dev) -> str:
 
 def refusal(op: Operator) -> str | None:
     """Why the placer refuses ``op`` alone on a device, or None if it fits;
-    kept under ``FIT_CACHE``, keyed on its recipe.
+    kept under ``FIT_CACHE``, keyed on its recipe and its build environment
+    (the device and the tools), so a placer fix is seen.
     """
     design = OperatorDesign(op.resolved())
-    record = (
-        FIT_CACHE
-        / hashlib.sha256(design.compilable().recipe_hash.encode()).hexdigest()[:24]
-    )
+    compilable = design.compilable()
+    key = compilable.recipe_hash + compilable.artifact_hash
+    record = FIT_CACHE / hashlib.sha256(key.encode()).hexdigest()[:24]
     if record.exists():
         verdict = record.read_text()
     else:
