@@ -192,13 +192,13 @@ class TextLayer(PleLayer):
     """
 
     def __init__(self, c: Config, i: int):
-        G, D, _ = c.heads(i)
+        G, D, base = c.heads(i)
         heads = dataclasses.replace(c, num_key_value_heads=G, head_dim=D)
         sliding = c.layer_types[i] != "full_attention"
         window = NoCache(c.sliding_window if sliding else None)
         super().__init__(c, i, Attention(heads, i, norms="qkv"), cache=window)
         self.self_attn.scaling = 1.0
-        self.rope = D
+        self.rope = D, base
 
 
 class EmbedTokens(iron.Graph):
@@ -319,8 +319,9 @@ class EmbeddingGemma(Encoder):
         self.embed_scaled = embed_tokens.scaled
         self.mrl = embedding_projection.mrl
         self.load_layers(weights, "language_model.layers.", "language_model.norm.")
+        # A table per head size and base, which a layer names (``rope``).
         self.rope = {
-            D: iron.weight(rope_angles(D, c.max_tokens, base).astype(bfloat16))
+            (D, base): iron.weight(rope_angles(D, c.max_tokens, base).astype(bfloat16))
             for _, D, base in {c.heads(i) for i in range(c.num_hidden_layers)}
         }
         self.query = iron.param(np.zeros((c.block, 1, c.hidden_size), bfloat16))
@@ -332,7 +333,7 @@ class EmbeddingGemma(Encoder):
         return Copy.step(table[ids])
 
     def angles(self, n):
-        return {D: (table[:n],) * 2 for D, table in self.rope.items()}
+        return {key: (table[:n],) * 2 for key, table in self.rope.items()}
 
     def layer(self, call, i, layer, x):
         """Layer ``i`` on ``x``, its per-layer input projected from the
