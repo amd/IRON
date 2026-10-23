@@ -12,6 +12,12 @@ public API adds its entry under Unreleased.
 
 ### Added
 
+- `Gemma4Multimodal`, Gemma 4 E2B whole: the text decoder with its vision
+  and audio towers' soft tokens at their placeholders, one compile for every
+  prompt, image size and clip length; `Gemma4MultimodalConfig.expand` lays a
+  prompt's image and clip out as `Gemma4Processor` does. Gemma 4's vision
+  tower clips its projections where the checkpoint says
+  (`VisionConfig.use_clipped_linears`), and reads its checkpoint's own names.
 - `iron.on_host(fn, *reads, writes=())`: `fn` runs on the host between a
   graph's steps, on what the device left in `reads` (cut to their bounds),
   writing parts of states the next steps read. A full ELF ends a command

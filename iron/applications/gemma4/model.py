@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Gemma 4 E2B's text decoder on the shared decoder (``iron.lm``), its
-shape read from its checkpoint's ``config.json``. Run it with ``python -m
-iron.applications.gemma4.model``.
+shape read from its checkpoint's ``config.json``, and the whole model, the
+decoder with its vision and audio towers (``vision.py``, ``audio.py``) as
+one ``iron.lm.Multimodal`` (``Gemma4Multimodal``). Run the text decoder
+with ``python -m iron.applications.gemma4.model``.
 
 Gemma 4 is a sandwich-normed layer with a per-layer input gated in after
 its MLP (``PleLayer``), q, k and v normed per head (v unweighted),
@@ -39,11 +41,14 @@ from iron.lm import (
     GatedMLP,
     KVCache,
     Linear,
+    Multimodal,
     PleLayer,
     RMSNorm,
     Rope,
     subtree,
 )
+from iron.applications.gemma4.audio import AudioConfig, AudioTower
+from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.operators.copy import Copy
 from iron.operators.tanh import Tanh
 
@@ -81,6 +86,18 @@ class Gemma4Config(DecoderConfig):
         default=256, metadata={"json": "hidden_size_per_layer_input"}
     )
     final_logit_softcapping: float | None = None
+    # The placeholders a tower's soft tokens replace, which the per-layer
+    # inputs read as the padding token.
+    pad_token_id: int = 0
+    image_token_id: int | None = dataclasses.field(
+        default=None, metadata={"json": "/image_token_id"}
+    )
+    audio_token_id: int | None = dataclasses.field(
+        default=None, metadata={"json": "/audio_token_id"}
+    )
+    video_token_id: int | None = dataclasses.field(
+        default=None, metadata={"json": "/video_token_id"}
+    )
 
     @classmethod
     def from_json(cls, data: dict, source="config.json") -> "Gemma4Config":
@@ -174,7 +191,7 @@ class Gemma4Layer(PleLayer):
 class Gemma4(CausalLM):
     """Gemma 4's text decoder on ``config``'s shape and a checkpoint's
     ``weights``, the decoder's under ``model.language_model`` (the towers'
-    unread), from its checkpoint and ``tokenizer.json``.
+    are ``Gemma4Multimodal``'s), from its checkpoint and ``tokenizer.json``.
     """
 
     config = Gemma4Config
@@ -203,12 +220,18 @@ class Gemma4(CausalLM):
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
-        P, m = self.config.ple_dim, self.model
-        scale = np.float32(bfloat16(np.sqrt(P)))
+        c, m = self.config, self.model
+        P, scale = c.ple_dim, np.float32(bfloat16(np.sqrt(c.ple_dim)))
         table = m.embed_tokens_per_layer.weight
+        placeholders = [
+            t
+            for t in (c.image_token_id, c.audio_token_id, c.video_token_id)
+            if t is not None
+        ]
         for i, layer in enumerate(m.layers):
             # A layer's own columns, scaled, contiguous: one gather a layer.
             rows = table[:, i * P : (i + 1) * P].astype(np.float32) * scale
+            rows[placeholders] = rows[c.pad_token_id]
             layer.per_layer_embedding = iron.param(rows.astype(bfloat16))
         m.embed_tokens_per_layer = None
 
@@ -234,6 +257,87 @@ class Gemma4(CausalLM):
         """The tied head's logits, soft-capped where the config says."""
         logits, cap = super().head(x), self.config.final_logit_softcapping
         return logits if cap is None else Tanh.step(logits * (1 / cap)) * cap
+
+
+@dataclasses.dataclass(frozen=True)
+class Gemma4MultimodalConfig(Gemma4Config):
+    """``Gemma4Config``, its towers' shapes, ``vision`` and ``audio``, and
+    the markers either side of a run of an image's or a clip's placeholders.
+    """
+
+    boi_token_id: int = dataclasses.field(
+        default=255999, metadata={"json": "/boi_token_id"}
+    )
+    eoi_token_id: int = dataclasses.field(
+        default=258882, metadata={"json": "/eoi_token_id"}
+    )
+    boa_token_id: int = dataclasses.field(
+        default=256000, metadata={"json": "/boa_token_id"}
+    )
+    eoa_token_id: int = dataclasses.field(
+        default=258883, metadata={"json": "/eoa_token_id"}
+    )
+    vision: VisionConfig | None = lm.not_json(None, kw_only=True)
+    audio: AudioConfig | None = lm.not_json(None, kw_only=True)
+
+    @classmethod
+    def from_checkpoint(cls, path) -> "Gemma4MultimodalConfig":
+        text = super().from_checkpoint(path)
+        return dataclasses.replace(
+            text,
+            vision=VisionConfig.from_checkpoint(path),
+            audio=AudioConfig.from_checkpoint(path),
+        )
+
+    def expand(self, tokens, raw: dict[int, tuple]) -> list[int]:
+        """``tokens`` with each placeholder of ``raw`` a run of its tower's
+        soft tokens between its markers, as ``Gemma4Processor`` lays it out.
+        """
+        vision, audio = self.vision, self.audio
+        assert vision is not None and audio is not None
+        runs = {}
+        if self.image_token_id in raw:
+            image, max_tokens = raw[self.image_token_id]
+            run = [self.image_token_id] * vision.tokens(
+                *np.shape(image)[:2], max_tokens
+            )
+            runs[self.image_token_id] = [self.boi_token_id, *run, self.eoi_token_id]
+        if self.audio_token_id in raw:
+            (wave,) = raw[self.audio_token_id]
+            run = [self.audio_token_id] * audio.tokens(audio.frames(np.size(wave)))
+            runs[self.audio_token_id] = [self.boa_token_id, *run, self.eoa_token_id]
+        out = []
+        for t in tokens:
+            out += runs.get(int(t), [int(t)])
+        return out
+
+
+class Gemma4Multimodal(Multimodal):
+    """Gemma 4 whole: its text decoder (``Gemma4``) with its vision and
+    audio towers' soft tokens at their placeholders, from its checkpoint and
+    ``tokenizer.json``. A call takes an image and a clip as
+    ``Multimodal.logits`` and ``generate`` take them, by placeholder: an
+    image as ``(image, max_soft_tokens)``, a clip as ``(waveform,)``.
+    """
+
+    config = Gemma4MultimodalConfig
+
+    def __init__(self, config: Gemma4MultimodalConfig, weights):
+        assert config.vision is not None and config.audio is not None
+        assert config.image_token_id is not None and config.audio_token_id is not None
+        self.config, self.weights = config, weights
+        towers = {
+            config.image_token_id: VisionTower(config.vision, weights.model),
+            config.audio_token_id: AudioTower(config.audio, weights.model),
+        }
+        super().__init__(Gemma4(config, weights), towers)
+
+    @property
+    def hugging_face(self):
+        """transformers' Gemma 4, imported only where a golden is recorded."""
+        from .hugging_face import HuggingFaceGemma4
+
+        return HuggingFaceGemma4
 
 
 if __name__ == "__main__":

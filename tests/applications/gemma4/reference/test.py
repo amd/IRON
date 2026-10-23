@@ -143,3 +143,18 @@ def test_bidirectional_attention_for_images_alone_is_text_s_causal():
 def test_a_shared_layer_with_no_earlier_layer_of_its_kind_is_refused():
     with pytest.raises(ValueError, match="shared layer 0 has no earlier layer"):
         dataclasses.replace(TOY, num_kv_shared_layers=6).owner(0)
+
+
+def test_a_placeholder_s_per_layer_inputs_are_the_padding_token_s(npu2):
+    """Each layer's per-layer table holds the padding token's row at the
+    image, audio and video placeholders, as transformers' ``Gemma4Model``
+    reads a placeholder as the padding token for the per-layer inputs.
+    """
+    placeholders = dict(image_token_id=1021, audio_token_id=1022, video_token_id=1023)
+    config = dataclasses.replace(TOY, **placeholders)
+    model = Gemma4(config, TestGemma4.weights())
+    for layer in model.layers:
+        table = np.asarray(layer.per_layer_embedding)
+        for token in placeholders.values():
+            np.testing.assert_array_equal(table[token], table[config.pad_token_id])
+        assert not np.array_equal(table[1020], table[config.pad_token_id])

@@ -40,8 +40,9 @@ from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.lm import Checkpoint, rope_angles
 from iron.lm.model import prompt_text
 from iron.lm.golden import RECORD, Golden
-from iron.lm.testing import Download, check_embedding, require, weights_dir
+from iron.lm.testing import check_embedding, require, weights_dir
 from iron.operators.copy import Copy
+from iron.tests.support.coco import photo
 from iron.tests.support.librispeech import utterance
 
 DIRECTORY = weights_dir("embeddinggemma-2")
@@ -115,32 +116,6 @@ CLIPS = {
 # The processor's soft-token budgets for an image and for video.
 I, V = VisionConfig().image_tokens, 140
 
-VAL2017 = "https://s3.amazonaws.com/images.cocodataset.org/val2017"
-
-# COCO val2017 photos, fetched into IRON's cache.
-COCO = {
-    # 640x480.
-    "cats": Download(
-        f"{VAL2017}/000000039769.jpg",
-        "dea9e7ef97386345f7cff32f9055da4982da5471c48d575146c796ab4563b04e",
-    ),
-    # 375x500, portrait.
-    "stop_sign": Download(
-        f"{VAL2017}/000000000724.jpg",
-        "5c0e559c75d3969c8e3e297b61f61063f78045c9d4802b526ba616361f3823fd",
-    ),
-    # 640x426.
-    "living_room": Download(
-        f"{VAL2017}/000000000139.jpg",
-        "ffe0f0cec3b2e27aab1967229cdf0a0d7751dcdd5800322f0b8ac0dffb3b8a8d",
-    ),
-    # 621x640: the image of the text encoder's cases.
-    "baseball": Download(
-        f"{VAL2017}/000000000872.jpg",
-        "c2aa138ee3a59b057a7ba6fc5a6a18e62af531aa7dab78a7bfd33c1cd7e55eb6",
-    ),
-}
-
 # The vision tower's photos and the soft-token budget each is resized to.
 IMAGES = {
     # 14 x 19 tokens, 2394 patches: an upscale to nearly the whole budget.
@@ -178,16 +153,6 @@ def cosine(a, b):
 def clip(name: str) -> np.ndarray:
     """The utterance `CLIPS[name]`, at the extractor's sample rate."""
     return utterance(CLIPS[name])
-
-
-def photo(name: str) -> np.ndarray:
-    """`COCO[name]`, fetched into IRON's cache and decoded:
-    `(height, width, 3)` uint8.
-    """
-    from PIL import Image
-
-    with Image.open(COCO[name].fetch()) as image:
-        return np.array(image.convert("RGB"))
 
 
 def tiled(image: np.ndarray, height: int, width: int) -> np.ndarray:

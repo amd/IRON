@@ -5,5 +5,5 @@
 
 from iron.lm.cli import exports
 
-__all__ = ["Gemma4"]
+__all__ = ["Gemma4", "Gemma4Multimodal"]
 __getattr__ = exports(__name__, __all__)
