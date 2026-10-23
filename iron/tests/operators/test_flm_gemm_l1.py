@@ -9,6 +9,7 @@ import pytest
 from aie.iron.device import from_name
 from aie.utils import bfp
 
+from iron import Precision
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
     C_DEPTH,
@@ -78,6 +79,7 @@ def test_aie2_activations_bring_their_lut_tables_into_the_frame():
     unactivated one's bytes go to a deeper k slice.
     """
     shape = dict(M=512, K=1024, N=1024, tile_n=64, k_tile=512)
+    shape.update(precision=Precision.MEDIUM)
     frames = {}
     for modes in ((Epilogue.NONE,), ACTIVATED):
         op = ProjectionGEMM(**shape, epilogue_modes=modes).resolved(NPU1)

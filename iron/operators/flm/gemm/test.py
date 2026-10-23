@@ -200,6 +200,7 @@ def test_gemm(M, K, N, epilogue, rounding, record_property):
         N=N,
         rounding=rounding,
         epilogue=epilogue,
+        precision=Precision.MEDIUM,
     )
 
     errors = check_on_device(
@@ -214,7 +215,9 @@ def test_gemm(M, K, N, epilogue, rounding, record_property):
 def test_gemm_without_activations(M, K, N, record_property):
     """Compiling no activation links no LUT tables, so on AIE2 the bytes they
     held go to B and the tiles differ from every case above."""
-    operator = ProjectionGEMM(M=M, K=K, N=N, epilogue_modes=(NONE,))
+    operator = ProjectionGEMM(
+        M=M, K=K, N=N, epilogue_modes=(NONE,), precision=Precision.MEDIUM
+    )
 
     errors = check_on_device(operator, flm_vectors(operator), record=record_property)
 
@@ -290,7 +293,7 @@ def test_gemm_split_leg_bounds_runs():
     cover.
     """
     M, K, N = 512, 512, 20480
-    operator = ProjectionGEMM(M=M, K=K, N=N, m_chunk=2)
+    operator = ProjectionGEMM(M=M, K=K, N=N, m_chunk=2, precision=Precision.MEDIUM)
 
     errors = check_on_device(operator, flm_vectors(operator))
     assert not errors, "Test failed"
@@ -313,7 +316,7 @@ def tile_option_params():
     for tile_n in sorted(TILE_NS):
         # One full sweep of the grid at this tile_n, so every column has work.
         M, K, N = 256, 512, tile_n * dev.cols
-        shape = dict(M=M, K=K, N=N, tile_n=tile_n)
+        shape = dict(M=M, K=K, N=N, tile_n=tile_n, precision=Precision.MEDIUM)
         default_ma = ProjectionGEMM(**shape).resolved(dev).tile_ma
         for tile_ma in (16, 32, 64):
             if M_TILE % tile_ma or tile_ma % (2 * R):
@@ -346,7 +349,11 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
     the memtile locks are armed per dispatch, and one slab awaits one C per
     column and half of the core rows.
     """
-    mlir = str(OperatorDesign(ProjectionGEMM(M=M, K=K, N=N)).module())
+    mlir = str(
+        OperatorDesign(
+            ProjectionGEMM(M=M, K=K, N=N, precision=Precision.MEDIUM)
+        ).module()
+    )
     assert "aie.objectfifo @B" not in mlir
     assert "bd_id" not in mlir
     assert "aiex.set_lock" in mlir
@@ -357,7 +364,9 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
 @pytest.mark.parametrize("M,K,N,tile_n,tile_ma", tile_option_params())
 def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
     """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
-    operator = ProjectionGEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma)
+    operator = ProjectionGEMM(
+        M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma, precision=Precision.MEDIUM
+    )
     resolved = operator.resolved()
     assert (resolved.tile_n, resolved.tile_ma) == (tile_n, tile_ma)
     errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
@@ -374,7 +383,7 @@ def k_slice_params():
     dev = aie_utils.get_current_device()
     if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
         return []
-    shape = dict(M=256, K=512, N=64 * dev.cols)
+    shape = dict(M=256, K=512, N=64 * dev.cols, precision=Precision.MEDIUM)
     default = ProjectionGEMM(**shape).resolved(dev).ct_k
     params = []
     for ct_k in k_slices(512):
@@ -399,7 +408,9 @@ def test_gemm_k_slices(ct_k):
     """Each accepted k slice computes the right answer on hardware."""
     dev = aie_utils.get_current_device()
     assert dev is not None
-    operator = ProjectionGEMM(M=256, K=512, N=64 * dev.cols, ct_k=ct_k)
+    operator = ProjectionGEMM(
+        M=256, K=512, N=64 * dev.cols, ct_k=ct_k, precision=Precision.MEDIUM
+    )
     assert operator.resolved().ct_k == ct_k
     errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
     assert not errors, "Test failed"
@@ -416,14 +427,16 @@ def test_gemm_k_tile(K):
     """
     dev = aie_utils.get_current_device()
     assert dev is not None
-    operator = ProjectionGEMM(M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256)
+    operator = ProjectionGEMM(
+        M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256, precision=Precision.MEDIUM
+    )
     errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
     assert not errors, "Test failed"
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
-    "precision", [None, Precision.HIGH], ids=["default_macs", "bf16_macs"]
+    "precision", [Precision.MEDIUM, Precision.HIGH], ids=["medium", "high"]
 )
 @pytest.mark.parametrize(
     "K,tile_n,k_tile,ct_k",
@@ -434,8 +447,9 @@ def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, ct_k, precision):
     odd number of them, walks every chunk: small integers, exact in bfp16
     and bf16 and in every sum, give the product exactly. check_on_device's
     bound, a fraction of the accumulated mass, is fitted at K of 256 and
-    more; bfp16's error shrinks against the mass only as sqrt(K). Both the
-    device's default macs and bf16 macs (a small CNN's 1x1 convolutions).
+    more; bfp16's error shrinks against the mass only as sqrt(K). Both
+    MEDIUM's macs (bfp16 on AIE2P) and HIGH's bf16 macs (a small CNN's 1x1
+    convolutions).
     """
     dev = aie_utils.get_current_device()
     assert dev is not None
@@ -482,7 +496,9 @@ def test_one_xclbin_serves_every_shape():
     ]
     xclbin = None
     for M, K, N, epilogue in shapes:
-        operator = ProjectionGEMM(M=M, K=K, N=N, epilogue=epilogue)
+        operator = ProjectionGEMM(
+            M=M, K=K, N=N, epilogue=epilogue, precision=Precision.MEDIUM
+        )
         data = flm_vectors(operator, 4.0 if epilogue == "none" else 0.5)
         mass = accumulated_mass(K, data["A"], data["B"])
         errors = run_test(
@@ -673,7 +689,13 @@ def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N):
     shipped = run(Shipped(M=M, K=K, N=N, epilogue=GELU))
     ported = run(
         ProjectionGEMM(
-            M=M, K=K, N=N, epilogue=GELU, rounding=FLOOR, gelu=Gelu.BF16_STEPS
+            M=M,
+            K=K,
+            N=N,
+            epilogue=GELU,
+            rounding=FLOOR,
+            gelu=Gelu.BF16_STEPS,
+            precision=Precision.MEDIUM,
         )
     )
     # The accumulator reaches about -15 at this scale. gelu's minimum is

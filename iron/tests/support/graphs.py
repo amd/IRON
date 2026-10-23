@@ -6,7 +6,7 @@
 import numpy as np
 
 import iron
-from iron import Carried, Scratchpad
+from iron import Carried, Precision, Scratchpad
 import iron.functional as F
 from iron.operators import GEMM, ElementwiseAdd, ElementwiseMul, RoPE, SiLU
 from iron.operators.copy import Copy
@@ -23,8 +23,10 @@ class FeedForward(iron.Graph):
         self.w_gate, self.w_up, self.w_down = map(iron.param, (w_gate, w_up, w_down))
 
     def body(self, x):
-        gate, up = F.linear(x, self.w_gate), F.linear(x, self.w_up)
-        return F.linear(F.silu(gate) * up, self.w_down)
+        gate, up = F.linear(x, self.w_gate, precision=Precision.MEDIUM), F.linear(
+            x, self.w_up, precision=Precision.MEDIUM
+        )
+        return F.linear(F.silu(gate) * up, self.w_down, precision=Precision.MEDIUM)
 
 
 class Rotate(iron.Graph):
@@ -38,7 +40,7 @@ class Project(iron.Graph):
     """The first `n` rows of `x` projected by `w`."""
 
     def body(self, x, w, *, n: Scratchpad[np.int32]):
-        return GEMM.step(x[:n], w, b_col_maj=True)
+        return GEMM.step(x[:n], w, b_col_maj=True, precision=Precision.MEDIUM)
 
 
 class ProjectAsStored(iron.Graph):
@@ -47,7 +49,7 @@ class ProjectAsStored(iron.Graph):
     """
 
     def body(self, x, w, *, n: Scratchpad[np.int32]):
-        return ProjectionGEMM.step(x[:n], w, b_col_maj=True)
+        return ProjectionGEMM.step(x[:n], w, b_col_maj=True, precision=Precision.MEDIUM)
 
 
 class Walk(iron.Graph):

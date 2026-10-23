@@ -19,6 +19,7 @@ import math
 
 import numpy as np
 
+from iron import Precision, lm
 from iron.lm import CausalLM, DecoderConfig, Rope, subtree
 from iron.lm.checkpoint import leaves
 
@@ -90,6 +91,7 @@ class Ministral3Config(DecoderConfig):
     in ``rope_parameters``.
     """
 
+    precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
     rope_theta: float = dataclasses.field(
         metadata={"json": "rope_parameters.rope_theta"}
     )

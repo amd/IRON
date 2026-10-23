@@ -577,14 +577,16 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
 class Pointwise(iron.Graph):
     """A 1x1 convolution's pixels projected."""
 
-    def __init__(self, precision: Precision | None):
+    def __init__(self, precision: Precision):
         self.precision = precision
 
     def body(self, x, w):
         return F.linear(x, w, precision=self.precision)
 
 
-@pytest.mark.parametrize("precision,macs", [(None, True), (Precision.HIGH, False)])
+@pytest.mark.parametrize(
+    "precision,macs", [(Precision.MEDIUM, True), (Precision.HIGH, False)]
+)
 def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
     t = Pointwise(precision).record(x=((256, 128), bfloat16), w=((128, 128), bfloat16))
     (op,) = [op for op in t.operators if type(op) is ProjectionGEMM]
@@ -1067,7 +1069,7 @@ def test_the_reference_writes_a_given_output_of_an_operator_that_returns_one(npu
     class Into(iron.Graph):
         def body(self, x, a, b):
             y = ElementwiseAdd.step(x, x)
-            GEMM.step(a, b, y[:256])
+            GEMM.step(a, b, y[:256], precision=Precision.MEDIUM)
             return y
 
     rng = np.random.default_rng(0)
@@ -1122,7 +1124,7 @@ def test_a_given_output_of_another_rank_is_refused_unless_declared_flat():
     """A class call infers from the ranks and refuses; a built operator's
     call is checked as it records.
     """
-    gemm = GEMM(M=256, K=256, N=256)
+    gemm = GEMM(M=256, K=256, N=256, precision=Precision.MEDIUM)
 
     class Flat(iron.Graph):
         def body(self, a, b):
@@ -1141,7 +1143,11 @@ def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
 
     class Transposed(iron.Graph):
         def body(self, a, b):
-            return ReLU.step(GEMM.step(a, b, b_col_maj=True, c_col_maj=True))
+            return ReLU.step(
+                GEMM.step(
+                    a, b, b_col_maj=True, c_col_maj=True, precision=Precision.MEDIUM
+                )
+            )
 
     rng = np.random.default_rng(0)
     a = rng.integers(-2, 2, (32, 256)).astype(bfloat16)
@@ -1154,7 +1160,9 @@ def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
 def test_a_float32_product_is_not_rounded_to_its_inputs_dtype(npu2):
     class Wide(iron.Graph):
         def body(self, a, b):
-            return GEMM.step(a, b, output_dtype=np.float32, tile_m=32)
+            return GEMM.step(
+                a, b, output_dtype=np.float32, tile_m=32, precision=Precision.MEDIUM
+            )
 
     rng = np.random.default_rng(0)
     a = rng.standard_normal((256, 256)).astype(bfloat16)
@@ -1421,7 +1429,9 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
 
     class G(iron.Graph):
         def body(self, x, w, *, n: Scratchpad[np.int32]):
-            h = GEMM.step(x[:n], w, b_col_maj=True)  # (512, 64) x (256, 64)^T
+            h = GEMM.step(
+                x[:n], w, b_col_maj=True, precision=Precision.MEDIUM
+            )  # (512, 64) x (256, 64)^T
             return MHA.step(
                 h.reshape(512, 4, 64),
                 h.reshape(512, 4, 64),
@@ -2087,7 +2097,7 @@ def test_a_handle_adds_and_multiplies_by_elementwise_and_rowwise_steps():
     "rows, keywords, steps",
     [
         (1, dict(precision=Precision.MEDIUM), ["GEMV"]),
-        (4, dict(tile_size_output=32), None),
+        (4, dict(precision=Precision.MEDIUM, tile_size_output=32), None),
     ],
     ids=["gemv", "gemm"],
 )
@@ -2126,7 +2136,7 @@ def test_highest_runs_the_gemm_that_rounds_once():
 def test_linear_takes_one_row_or_several():
     class Batched(iron.Graph):
         def body(self, x, w):
-            return F.linear(x, w)
+            return F.linear(x, w, precision=Precision.MEDIUM)
 
     with pytest.raises(
         ValueError, match=r"x \(2, 4, 256\) is not \(in,\) or \(rows, in\)"
@@ -2312,18 +2322,14 @@ def test_a_handle_is_divided_by_a_number_alone():
 
 
 @pytest.mark.parametrize(
-    "rows, op, held",
-    [
-        (1, "GEMV", iron.param),
-        (256, "ProjectionGEMM", iron.param),
-        (256, "ProjectionGEMM", iron.weight),
-        (256, "ProjectionGEMM", lambda w: iron.state(w.shape)),
-    ],
-    ids=["gemv", "gemm", "weight", "state"],
+    "held",
+    [iron.param, iron.weight, lambda w: iron.state(w.shape)],
+    ids=["param", "weight", "state"],
 )
-def test_matmul_by_a_weight_s_transpose_is_linear(rows, op, held):
-    """``x @ W.T`` of a bare array, a weight or a state; a handle's ``.T``
-    is its transpose.
+def test_matmul_of_a_row_by_a_weight_s_transpose_is_linear(held):
+    """``x @ W.T`` of a bare array, a weight or a state, ``x`` one row; a
+    handle's ``.T`` is its transpose. Rows take a precision, so ``@`` of
+    rows is refused.
     """
 
     class Project(iron.Graph):
@@ -2334,7 +2340,9 @@ def test_matmul_by_a_weight_s_transpose_is_linear(rows, op, held):
             assert v.T.shape == (E, 128) and v.T.layout == v.transpose(1, 0).layout
             return x @ self.w.T
 
-    assert _steps(Project().record(x=(rows, E), v=(128, E))) == [op]
+    assert _steps(Project().record(x=(1, E), v=(128, E))) == ["GEMV"]
+    with pytest.raises(TypeError, match="rows take a precision"):
+        Project().record(x=(256, E), v=(128, E))
 
 
 def test_a_weight_times_a_row_is_linear_and_a_plain_matrix_is_refused():

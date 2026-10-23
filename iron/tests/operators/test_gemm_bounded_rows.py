@@ -15,6 +15,7 @@ import pytest
 from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
+from iron import Precision
 from iron.operators.gemm import GEMM
 from iron.tests.support.graphs import Project
 
@@ -35,7 +36,7 @@ BOUNDS = (M, 1, 300, 64, 65, M, 17, 128, 3)
 )
 def test_the_rows_of_a_bound_are_computed(full_elf):
     project = Project().compile(x=(M, K), w=(N, K), full_elf=full_elf)
-    op = GEMM(M=M, K=K, N=N, b_col_maj=True)
+    op = GEMM(M=M, K=K, N=N, b_col_maj=True, precision=Precision.MEDIUM)
     tolerance = op.resolved().tolerance()
 
     rng = np.random.default_rng(0)

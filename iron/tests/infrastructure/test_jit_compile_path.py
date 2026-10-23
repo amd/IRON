@@ -27,6 +27,7 @@ from aie.utils.compile.jit._hash import _python_identity
 from aie.utils.trace import TraceConfig
 from aie.utils.compile.jit.params import param
 
+from iron import Precision
 from iron.common import Operator
 from iron.common.design import OperatorDesign, runtime
 from iron.common.image.link import FullELF
@@ -212,8 +213,10 @@ def test_a_field_the_repr_leaves_out_still_keys_the_build():
     a composed GEMV+GELU the plain GEMV's cached binary, and the output came
     back un-GELU'd with nothing reporting it.
     """
-    plain = GEMM(M=256, K=256, N=256)
-    other = GEMM(M=256, K=256, N=256, output_dtype=np.float32)
+    plain = GEMM(M=256, K=256, N=256, precision=Precision.MEDIUM)
+    other = GEMM(
+        M=256, K=256, N=256, output_dtype=np.float32, precision=Precision.MEDIUM
+    )
     assert repr(plain) == repr(other), "the case no longer exercises a hidden field"
     assert (
         OperatorDesign(plain).compilable().recipe_hash

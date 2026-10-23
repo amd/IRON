@@ -19,7 +19,7 @@ import dataclasses
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron import lm
+from iron import Precision, lm
 from iron.lm import (
     Attention,
     CausalLM,
@@ -38,6 +38,7 @@ class Gemma3Config(DecoderConfig):
     base and which layers slide.
     """
 
+    precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
     hidden_act: str = dataclasses.field(
         default="gelu_pytorch_tanh", metadata={"json": "hidden_activation"}
     )

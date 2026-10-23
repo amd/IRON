@@ -19,6 +19,7 @@ import pytest
 from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
+from iron import Precision
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.tests.support.graphs import ProjectAsStored
 
@@ -51,7 +52,7 @@ CHUNK = (2048, 1, 15, 512, 2048, 15)
 )
 def test_the_units_a_bound_reaches_are_computed(full_elf, M, K, N, bounds):
     project = ProjectAsStored().compile(x=(M, K), w=(N, K), full_elf=full_elf)
-    op = ProjectionGEMM(M=M, K=K, N=N, b_col_maj=True)
+    op = ProjectionGEMM(M=M, K=K, N=N, b_col_maj=True, precision=Precision.MEDIUM)
     tolerance = op.resolved().tolerance()
 
     rng = np.random.default_rng(0)

@@ -14,6 +14,8 @@ from typing import Any
 
 import numpy as np
 
+from iron.common.declare.precision import Precision
+
 RopeScaling = Callable[[np.ndarray], np.ndarray]
 
 
@@ -73,11 +75,11 @@ def not_json(default, **kwargs) -> Any:
 class Config:
     """A model's shape, built from a checkpoint's ``config.json``
     (``from_checkpoint``). ``DecoderConfig`` and EmbeddingGemma 2's config
-    subclass it; ``eps`` is every model's RMS norm epsilon.
+    subclass it; ``eps`` is every model's RMS norm epsilon, and
+    ``precision`` every projection's in iron.lm's blocks, which each
+    application chooses on its measured accuracy: it has no default here.
     """
 
-    # Every projection's in iron.lm's blocks; None is ``F.linear``'s.
-    precision = None
     # Unbiased projections, RoPE over whole heads, unless a model says.
     attention_bias = mlp_bias = False
     rotary_dim = None
@@ -89,6 +91,7 @@ class Config:
     eps: float = dataclasses.field(
         default=1e-6, kw_only=True, metadata={"json": "rms_norm_eps"}
     )
+    precision: Precision = dataclasses.field(kw_only=True, metadata={"json": None})
 
     @classmethod
     def from_checkpoint(cls, path) -> "Config":
@@ -117,12 +120,17 @@ class Config:
         parsed; ``source`` names it in an error.
 
         Raises:
-            ValueError: ``data`` lacks a field that has no default.
+            ValueError: ``data`` lacks a field that has no default, or
+                ``cls`` states no default for a field ``config.json`` does
+                not set (an application's choice, as ``precision``).
         """
         kwargs, missing = {}, []
         for f in dataclasses.fields(cls):
             key = cls.json_key(f)
             if key is None:
+                required = dataclasses.MISSING
+                if f.default is required and f.default_factory is required:
+                    raise ValueError(f"{cls.__name__} states no {f.name}")
                 continue
             value = _dotted(data, key)
             # Hugging Face writes an unset option as null.

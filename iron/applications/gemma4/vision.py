@@ -28,7 +28,7 @@ from iron.operators.resample.op import SIDE
 @dataclasses.dataclass(frozen=True)
 class VisionConfig(lm.Config):
     # Every projection at HIGHEST (``Attention``, ``GatedMLP``).
-    precision = Precision.HIGHEST
+    precision: Precision = lm.not_json(Precision.HIGHEST, kw_only=True)
     json_prefix = "vision_config."
 
     hidden_size: int = 768

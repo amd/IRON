@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from aie.utils.verify import Tolerance
 
+from iron import Precision
 from iron.common.testing import run_test, vectors
 from iron.operators.flm import q4nx
 from iron.operators.flm.aie2p_math_emulation import rb
@@ -27,7 +28,9 @@ def test_output_feeds_gemm_unchanged():
     """
     op = DequantBFP(K=1024, N=128)
     v = vectors(op, **op.test.draw(op))
-    gemm = ProjectionGEMM(M=256, K=op.K, N=op.N, tile_n=64, rounding="floor")
+    gemm = ProjectionGEMM(
+        M=256, K=op.K, N=op.N, tile_n=64, rounding="floor", precision=Precision.MEDIUM
+    )
     packed = gemm.pack_B(rb(q4nx.dequantize(op.grid(v["qw"]))).T.copy())
     _check(op, v.inputs, {"out": packed})
 

@@ -26,7 +26,7 @@ import dataclasses
 from pathlib import Path
 
 import iron
-from iron import lm
+from iron import Precision, lm
 from iron.lm import (
     Attention,
     CausalConv1d,
@@ -46,6 +46,7 @@ class Lfm2Config(DecoderConfig):
     keys, and which layers are full attention.
     """
 
+    precision: Precision = not_json(Precision.MEDIUM, kw_only=True)
     intermediate_size: int = not_json(0, init=False)
     eps: float = dataclasses.field(
         default=1e-5, kw_only=True, metadata={"json": "norm_eps"}
@@ -89,9 +90,9 @@ class ShortConv(iron.Graph):
 
     def __init__(self, c: Lfm2Config):
         E, K = c.hidden_size, c.conv_kernel
-        self.in_proj = Linear(E, 3 * E, bias=False)
+        self.in_proj = Linear(E, 3 * E, False, precision=c.precision)
         self.conv = CausalConv1d(c, E, K)
-        self.out_proj = Linear(E, E, bias=False)
+        self.out_proj = Linear(E, E, False, precision=c.precision)
 
     def body(self, h, call):
         n, E = h.shape[0], self.out_proj.weight.shape[0]

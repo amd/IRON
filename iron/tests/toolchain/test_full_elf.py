@@ -32,6 +32,7 @@ from aie.iron import ExternalFunction
 from ml_dtypes import bfloat16
 
 import iron
+from iron import Precision
 from iron.common.graph.record import Recording
 from iron.common.image.allocator import BANK
 from iron.common.image.link import FullELF
@@ -202,7 +203,9 @@ def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
             )
 
         def body(self, x):
-            return GEMM.step(x, self.w, b_col_maj=self.b_col_maj)
+            return GEMM.step(
+                x, self.w, b_col_maj=self.b_col_maj, precision=Precision.MEDIUM
+            )
 
     def build(b_col_maj):
         return Project(b_col_maj).compile(

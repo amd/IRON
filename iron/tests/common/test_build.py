@@ -30,7 +30,7 @@ from aie.utils.compile.jit.params import param, per_call, tunable, widths
 
 import iron
 import iron.operators.flm.gemm.op as flm_gemm
-from iron import Scratchpad
+from iron import Precision, Scratchpad
 from iron.common import Block, Built, Operator, Rtp, Xclbin
 from iron.common.design import BuiltArray, OperatorDesign
 from iron.common.design.design import configuration
@@ -402,18 +402,18 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     # Keyword construction leaves every tunable to resolution, which reads the
     # device alone; the operator's extent is checked against the resolved
     # tunables by compatible(), not folded into its defaults.
-    untuned = flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024)
+    untuned = flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024, precision=Precision.MEDIUM)
     assert untuned.tile_n is None
     with pytest.raises(ValueError):
         [b.shape for b in untuned.buffers]  # B's layout follows the device
-    op = flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024).resolved(
-        from_name("npu2", n_cols=8)
-    )
+    op = flm_gemm.ProjectionGEMM(
+        M=512, K=1024, N=1024, precision=Precision.MEDIUM
+    ).resolved(from_name("npu2", n_cols=8))
     assert (op.tile_n, op.m_chunk, op.rows, op.cols, op.bfp16_b) == (64, 1, 4, 8, True)
     assert (op.tile_ma, op.l1_b_depth) == (32, 2)
     # tile_n is resolution, not a function of K: the same on every shape.
     assert (
-        flm_gemm.ProjectionGEMM(M=256, K=512, N=1024)
+        flm_gemm.ProjectionGEMM(M=256, K=512, N=1024, precision=Precision.MEDIUM)
         .resolved(from_name("npu2", n_cols=8))
         .tile_n
         == 64
@@ -445,12 +445,19 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         "b_resident": 1,
     }
     with pytest.raises(ValueError, match="multiple of 256"):
-        flm_gemm.ProjectionGEMM(M=100, K=1024, N=1024).resolved(
+        flm_gemm.ProjectionGEMM(
+            M=100, K=1024, N=1024, precision=Precision.MEDIUM
+        ).resolved(
             from_name("npu2", n_cols=8)
         )  # M tiles to the array's rows
     with pytest.raises(ValueError, match="not in epilogue_modes"):
         flm_gemm.ProjectionGEMM(
-            M=256, K=1024, N=1024, epilogue="gelu", epilogue_modes=("none",)
+            M=256,
+            K=1024,
+            N=1024,
+            epilogue="gelu",
+            epilogue_modes=("none",),
+            precision=Precision.MEDIUM,
         )
 
 
@@ -470,9 +477,9 @@ def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
         return sorted(name.sub("_", line).strip() for line in text.splitlines())
 
     dev = from_name("npu2", n_cols=8)
-    op = flm_gemm.ProjectionGEMM(M=512, K=1536, N=256, tile_n=64, k_tile=256).resolved(
-        dev
-    )
+    op = flm_gemm.ProjectionGEMM(
+        M=512, K=1536, N=256, tile_n=64, k_tile=256, precision=Precision.MEDIUM
+    ).resolved(dev)
     assert static(op) == static(op.xclbin_operator())
 
 
@@ -481,7 +488,9 @@ def test_flm_gemm_image_keeps_the_tiles_a_narrow_shape_resolves_to():
     keeps those tiles rather than resolving the default tile_n=64 there.
     """
     dev = from_name("npu2", n_cols=8)
-    op = flm_gemm.ProjectionGEMM(M=2048, K=1024, N=16).resolved(dev)
+    op = flm_gemm.ProjectionGEMM(
+        M=2048, K=1024, N=16, precision=Precision.MEDIUM
+    ).resolved(dev)
     assert op.xclbin_operator().resolved(dev).config_name == op.config_name
 
 
@@ -490,14 +499,20 @@ def test_a_design_is_keyed_by_what_it_builds():
     tile_n than it holds; its design's key is the build's.
     """
     dev = from_name("npu2", n_cols=8)
-    wide = flm_gemm.ProjectionGEMM(M=2048, K=1024, N=16).resolved(dev).replace(N=128)
+    wide = (
+        flm_gemm.ProjectionGEMM(M=2048, K=1024, N=16, precision=Precision.MEDIUM)
+        .resolved(dev)
+        .replace(N=128)
+    )
     assert wide.resolved(dev).tile_n != wide.tile_n
     assert OperatorDesign(wide).identity == OperatorDesign(wide.resolved(dev)).identity
 
 
 def test_flm_gemm_selects_its_activation_by_a_word():
-    op = flm_gemm.ProjectionGEMM(M=256, K=512, N=512)
-    silu = flm_gemm.ProjectionGEMM(M=256, K=512, N=512, epilogue="silu")
+    op = flm_gemm.ProjectionGEMM(M=256, K=512, N=512, precision=Precision.MEDIUM)
+    silu = flm_gemm.ProjectionGEMM(
+        M=256, K=512, N=512, epilogue="silu", precision=Precision.MEDIUM
+    )
     assert silu.config_name == op.config_name
     assert silu.resolved().residents["mode"] == Epilogue.SILU.mode
 
@@ -559,8 +574,12 @@ def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
     """
     dev = request.getfixturevalue(device)
     M = 2048
-    unbounded = flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True).resolved(dev)
-    op = flm_gemm.ProjectionGEMM(M=M, K=K, N=width, b_col_maj=True)
+    unbounded = flm_gemm.ProjectionGEMM(
+        M=M, K=K, N=width, b_col_maj=True, precision=Precision.MEDIUM
+    ).resolved(dev)
+    op = flm_gemm.ProjectionGEMM(
+        M=M, K=K, N=width, b_col_maj=True, precision=Precision.MEDIUM
+    )
     op.use_value("valid", N)
     op = op.resolved(dev)
     assert op._b_resident == (K != 8960)
@@ -580,7 +599,9 @@ def test_on_an_xclbin_a_bounded_flm_gemm_repeats_a_by_the_dispatch_scalar(npu1):
     # No scratchpad: A's units are the repeat count of one task per row and
     # column block, C's row blocks its D2 in each half, both the per-call
     # scalar.
-    op = flm_gemm.ProjectionGEMM(M=512, K=1024, N=512, b_col_maj=True)
+    op = flm_gemm.ProjectionGEMM(
+        M=512, K=1024, N=512, b_col_maj=True, precision=Precision.MEDIUM
+    )
     op.use_value("valid", N)
     _, tasks = generated_sequence(op.resolved(npu1), full_elf=False)
     a = [t.sizes for t in tasks if t.arg == 0]
@@ -604,7 +625,9 @@ def test_a_bounded_flm_gemm_refuses_a_call_with_no_rows(npu2):
 
 
 def test_a_row_bound_needs_one_row_block_per_unit():
-    op = flm_gemm.ProjectionGEMM(M=512, K=512, N=512, b_col_maj=True, m_chunk=2)
+    op = flm_gemm.ProjectionGEMM(
+        M=512, K=512, N=512, b_col_maj=True, m_chunk=2, precision=Precision.MEDIUM
+    )
     op.use_value("valid", N)
     with pytest.raises(
         ValueError, match=r"m_chunk \(2\) must be 1 under a per-call row bound"

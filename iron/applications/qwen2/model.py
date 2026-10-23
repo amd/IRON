@@ -19,7 +19,7 @@ caches and the RoPE table alone.
 import dataclasses
 from pathlib import Path
 
-from iron import lm
+from iron import Precision, lm
 from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer, not_json
 
 
@@ -29,6 +29,7 @@ class Qwen2Config(DecoderConfig):
     ``config.json`` does not say.
     """
 
+    precision: Precision = not_json(Precision.MEDIUM, kw_only=True)
     attention_bias: bool = not_json(True, kw_only=True)
 
 

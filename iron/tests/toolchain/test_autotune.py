@@ -128,10 +128,12 @@ def test_derived_fields_are_not_widths(npu2):
     # resolve() sets GEMM's A shims and MHA's lanes from the other fields
     # whatever it is given, so a width there would be timed once per value
     # and built alike.
-    gemm = GEMM(M=512, K=512, N=512)
+    gemm = GEMM(M=512, K=512, N=512, precision=Precision.MEDIUM)
     assert "n_shim_mem_a" not in gemm.resolved(npu2)._domains(npu2)
     # n_shim_mem_a resolves to at most the columns: many settings, one design.
-    found = designs(GEMM(M=2560, K=768, N=3072, b_col_maj=True), npu2)
+    found = designs(
+        GEMM(M=2560, K=768, N=3072, b_col_maj=True, precision=Precision.MEDIUM), npu2
+    )
     assert len(identities(found, npu2)) == len(found)
     widths = [s["num_aie_columns"] for s, _ in found]
     assert list(dict.fromkeys(widths)) == [8, 4, 2, 1]
@@ -144,7 +146,7 @@ def test_derived_fields_are_not_widths(npu2):
 
 
 def test_gemm_searches_tile_k_only_where_c_accumulates_in_f32(npu2):
-    plain = GEMM(M=2048, K=2048, N=2048).resolved(npu2)
+    plain = GEMM(M=2048, K=2048, N=2048, precision=Precision.MEDIUM).resolved(npu2)
     assert set(plain._domains(npu2)) == {
         "num_aie_columns",
         "tile_m",
@@ -244,7 +246,9 @@ def test_a_row_a_core_holds_whole_is_one_block(npu2):
 
 
 def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
-    gemm = ProjectionGEMM(M=2048, K=2048, N=2048).resolved(npu2)
+    gemm = ProjectionGEMM(M=2048, K=2048, N=2048, precision=Precision.MEDIUM).resolved(
+        npu2
+    )
     assert gemm._domains(npu2) == {
         "tile_ma": (64, 32, 16),
         "m_chunk": (8, 4, 2, 1),
@@ -254,7 +258,14 @@ def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
 
 
 def test_a_placement_is_searched_by_name(tmp_path, npu2):
-    gemm = GEMM(M=2048, K=2048, N=2048, num_aie_columns=2, b_col_maj=True)
+    gemm = GEMM(
+        M=2048,
+        K=2048,
+        N=2048,
+        num_aie_columns=2,
+        b_col_maj=True,
+        precision=Precision.MEDIUM,
+    )
     found = settings(gemm, npu2, frozenset({"tile_m", "tile_n"}))
     assert {s["placement"] for s in found} == {
         GEMMPlacement.SHIMS,
@@ -263,7 +274,7 @@ def test_a_placement_is_searched_by_name(tmp_path, npu2):
     # A profile's placement starts the search, the declared ones after it.
     profile = Profile()
     profile.add(GEMM, placement=GEMMPlacement.TILES)
-    held = profile.make(GEMM, M=512, K=512, N=512)
+    held = profile.make(GEMM, M=512, K=512, N=512, precision=Precision.MEDIUM)
     assert held.resolved(npu2)._domains(npu2)["placement"] == (
         GEMMPlacement.TILES,
         GEMMPlacement.SHIMS,
@@ -274,7 +285,7 @@ def test_a_placement_takes_its_own_enum_alone():
     with pytest.raises(
         TypeError, match=r"GEMM: placement \('diagonal'\) must be a GEMMPlacement"
     ):
-        GEMM(M=512, K=512, N=512, placement="diagonal")
+        GEMM(M=512, K=512, N=512, placement="diagonal", precision=Precision.MEDIUM)
 
 
 def test_a_profile_refuses_a_derived_field():
@@ -392,7 +403,7 @@ def _gemm_judged():
     """GEMM at its default tile_k and at 16, random inputs, its reference's
     output, and each setting's bound on C.
     """
-    default = GEMM(M=256, K=256, N=256)
+    default = GEMM(M=256, K=256, N=256, precision=Precision.MEDIUM)
     narrow = default._with_tunables(tile_k=16)
     v = vectors(default)
     bounds = [
@@ -536,7 +547,9 @@ def test_an_operator_is_timed_at_each_point_its_extents_move(monkeypatch, npu2):
 
 
 def test_a_gemm_s_busiest_core_makes_a_call_per_k_tile_of_each_of_its_tiles(npu2):
-    op = GEMM(M=512, K=256, N=256, tile_m=32, tile_k=64, tile_n=64).resolved(npu2)
+    op = GEMM(
+        M=512, K=256, N=256, tile_m=32, tile_k=64, tile_n=64, precision=Precision.MEDIUM
+    ).resolved(npu2)
     tiles = 512 // 32 * 256 // 64
     cores = op.n_aie_rows * op.num_aie_columns
     assert op.matmul_calls({}) == -(-tiles * 256 // 64 // cores)
@@ -637,7 +650,7 @@ def test_every_gemm_tile_searched_is_one_the_nightly_times(name, request):
 
 class Projection(iron.Graph):
     def body(self, x, w):
-        return GEMM.step(x, w)
+        return GEMM.step(x, w, precision=Precision.MEDIUM)
 
 
 def test_retuning_keeps_what_the_profile_set_that_the_search_does_not_move(
@@ -650,7 +663,7 @@ def test_retuning_keeps_what_the_profile_set_that_the_search_does_not_move(
     graph.profile = old
     recording = graph.record(x=(256, 256), w=(256, 256))
     profile = _tune(recording, npu2, old)
-    op = profile.make(GEMM, M=256, K=256, N=256)
+    op = profile.make(GEMM, M=256, K=256, N=256, precision=Precision.MEDIUM)
     assert op.tile_k == 32 and op.resolved(npu2).tile_n == 16
 
 

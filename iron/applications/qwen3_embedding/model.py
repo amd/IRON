@@ -7,14 +7,24 @@ its last token's final hidden state, unit length; the tokenizer's end of
 text closes it, and a query goes behind its task's instruction.
 """
 
+import dataclasses
+
 import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
+from iron import Precision, lm
 from iron.applications.qwen3.model import Qwen3
 from iron.lm import Attention, DecoderConfig, DecoderLayer, Encoder, NoCache
 from iron.lm import RMSNorm, rope_angles
 from iron.operators.copy import Copy
+
+
+@dataclasses.dataclass(frozen=True)
+class Qwen3EmbeddingConfig(DecoderConfig):
+    """``DecoderConfig`` and its projections' ``precision``."""
+
+    precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
 
 
 class Qwen3EmbeddingLayer(DecoderLayer):
@@ -32,7 +42,7 @@ class Qwen3Embedding(Encoder):
     modules at its root). A call returns the last row's final hidden state.
     """
 
-    config = DecoderConfig
+    config = Qwen3EmbeddingConfig
     profile = Qwen3.profile
     layer_class = Qwen3EmbeddingLayer
     # The end-of-text token each input ends in.

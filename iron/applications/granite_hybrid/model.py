@@ -97,11 +97,11 @@ class Mamba(iron.Graph):
         self.inner = I = H * c.mamba_d_head
         self.channels = c.conv_channels
         self.groups = c.mamba_n_groups
-        self.in_proj = Linear(E, I + self.channels + H, bias=False)
+        self.in_proj = Linear(E, I + self.channels + H, False, precision=c.precision)
         self.conv1d = CausalConv1d(c, self.channels, K, bias=True)
         self.dt_bias, self.A_log, self.D = (iron.param(H) for _ in range(3))
         self.norm = RMSNorm(I, c.eps)
-        self.out_proj = Linear(I, E, bias=False)
+        self.out_proj = Linear(I, E, False, precision=c.precision)
         state = (H, c.mamba_d_head, c.mamba_d_state)
         self.ssm_state = Checkpoints.of(
             state, c.max_seq_len, c.prefill_chunk, np.float32
@@ -117,10 +117,10 @@ class Mamba(iron.Graph):
 
     def body(self, x, call):
         I, C = self.inner, self.channels
-        w = self.in_proj.weight
+        w, p = self.in_proj.weight, self.in_proj.precision
         # Three projections, not one split three ways, as LFM2's conv.
         gate, xbc, dt = (
-            F.linear(x, part) for part in (w[:I], w[I : I + C], w[I + C :])
+            F.linear(x, part, precision=p) for part in (w[:I], w[I : I + C], w[I + C :])
         )
         xbc = F.silu(self.conv1d(xbc, call))
         read, write = self.ssm_state.at(call)
@@ -143,12 +143,13 @@ class SharedMLP(iron.Graph):
     def __init__(self, c: GraniteHybridConfig):
         E, S = c.hidden_size, c.shared_intermediate_size
         self.width = S
-        self.input_linear = Linear(E, 2 * S, bias=False)
-        self.output_linear = Linear(S, E, bias=False)
+        self.input_linear = Linear(E, 2 * S, False, precision=c.precision)
+        self.output_linear = Linear(S, E, False, precision=c.precision)
 
     def body(self, x):
-        w, S = self.input_linear.weight, self.width
-        gate, up = F.linear(x, w[:S]), F.linear(x, w[S:])
+        w, S, p = self.input_linear.weight, self.width, self.input_linear.precision
+        gate = F.linear(x, w[:S], precision=p)
+        up = F.linear(x, w[S:], precision=p)
         return self.output_linear(F.silu(gate) * up)
 
 
@@ -156,7 +157,9 @@ class Router(iron.Graph):
     """The experts' router: ``layer``, a linear to a logit per expert."""
 
     def __init__(self, c: GraniteHybridConfig):
-        self.layer = Linear(c.hidden_size, c.num_local_experts, bias=False)
+        self.layer = Linear(
+            c.hidden_size, c.num_local_experts, False, precision=c.precision
+        )
 
 
 class GraniteMoE(iron.Graph):
@@ -174,7 +177,8 @@ class GraniteMoE(iron.Graph):
 
     def body(self, x):
         gate_up, down = self.input_linear.weight, self.output_linear.weight
-        logits = F.linear(x, self.router.layer.weight)
+        layer = self.router.layer
+        logits = F.linear(x, layer.weight, precision=layer.precision)
         ids, weights = TopKRouter.step(logits, top_k=self.top_k)
         return Experts.step(x, ids, weights, gate_up, down)
 

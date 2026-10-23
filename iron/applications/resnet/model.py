@@ -24,6 +24,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
+from iron import Precision
 from iron.lm import BatchNorm2d, Linear
 from iron.lm.config import Config, not_json
 from iron.operators.relu import ReLU
@@ -40,6 +41,7 @@ class ResNetConfig(Config):
     graph takes, the classifier's ``num_labels`` ImageNet's.
     """
 
+    precision: Precision = not_json(Precision.HIGHEST, kw_only=True)
     embedding_size: int
     hidden_sizes: tuple[int, ...] = dataclasses.field(metadata={"convert": tuple})
     depths: tuple[int, ...] = dataclasses.field(metadata={"convert": tuple})
@@ -197,7 +199,9 @@ class ResNet(iron.Graph):
         # transformers' classifier is a flatten, then the linear.
         self.classifier = [
             None,
-            Linear(config.hidden_sizes[-1], config.num_labels),
+            Linear(
+                config.hidden_sizes[-1], config.num_labels, precision=config.precision
+            ),
         ]
         self.load_state_dict(weights)
 

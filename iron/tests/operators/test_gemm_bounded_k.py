@@ -25,7 +25,7 @@ ROWS, SEQ, D = 128, 2048, 128
 POSITIONS = (SEQ, 300, 1, 63, 64, 65, 1024, 1025, 2047, 1000)
 MODES = {
     "accurate": dict(precision=Precision.HIGHEST),
-    "default": dict(),
+    "medium": dict(precision=Precision.MEDIUM),
     "b_col_maj": dict(precision=Precision.HIGHEST, b_col_maj=True),
 }
 
@@ -57,7 +57,7 @@ def test_the_reduction_stops_at_the_per_call_length(mode, full_elf):
 
     # bfp16's shared exponents hold a one-term product to past its tolerance,
     # which is measured on dense sums.
-    positions = [n for n in POSITIONS if n > 1 or mode != "default"]
+    positions = [n for n in POSITIONS if n > 1 or mode != "medium"]
     rng = np.random.default_rng(0)
     for n in positions:
         k = -(-n // tile_k) * tile_k

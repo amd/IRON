@@ -13,6 +13,7 @@ import pytest
 from aie.helpers.taplib import TensorAccessPattern
 
 import iron.operators.flm.gemm.op as flm
+from iron import Precision
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.mha import MHA
@@ -64,7 +65,7 @@ def test_attention_over_a_128k_cache_lowers(rows, tmp_path):
     ids=["base", "n10240", "tn128"],
 )
 def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path):
-    op = flm.ProjectionGEMM(M=M, K=K, N=N)
+    op = flm.ProjectionGEMM(M=M, K=K, N=N, precision=Precision.MEDIUM)
     (tmp_path / "shape").mkdir()
     lower(op, tmp_path / "shape")
     tuned = op.resolved(aie_utils.get_current_device())
@@ -132,6 +133,7 @@ def _reorder(sizes, in_strides, out_strides, **kw):
                 tile_k=64,
                 tile_n=64,
                 b_col_maj=True,
+                precision=Precision.MEDIUM,
             ),
             id="down_projection_checkpoint_layout",
         ),

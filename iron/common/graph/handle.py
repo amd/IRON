@@ -17,6 +17,7 @@ from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 from ..declare.operator import graph_recorder
+from ..declare.precision import Precision
 from ..image.packaging import Kind
 from ..image.step import BufferRef
 
@@ -581,22 +582,34 @@ class Handle:
         return self * (1 / other)
 
     def __matmul__(self, other) -> "Handle":
-        """``self @ W.T``, ``W`` a weight as ``torch.nn.Linear`` stores it
-        ``(out, in)``: ``iron.functional.linear(self, W)``.
+        """``self @ W.T``, ``self`` one row and ``W`` a weight as
+        ``torch.nn.Linear`` stores it ``(out, in)``: GEMV, summed in float32
+        and rounded once (``iron.functional.linear`` at
+        ``Precision.HIGHEST``).
+
+        Raises:
+            TypeError: ``self`` is several rows, whose precision the caller
+                chooses (``iron.functional.linear``).
         """
         import iron.functional as F
 
-        return F.linear(self, _untransposed(self, other))
+        if prod(self.shape[:-1]) != 1:
+            raise TypeError(
+                f"{self!r} @ W.T: rows take a precision, "
+                "iron.functional.linear(x, W, precision=...)"
+            )
+        return F.linear(self, _untransposed(self, other), precision=Precision.HIGHEST)
 
     def __rmatmul__(self, other) -> "Handle":
-        """``W @ self``, ``self`` one row: ``iron.functional.linear(self, W)``."""
+        """``W @ self``, ``self`` one row: as ``self @ W.T``."""
         import iron.functional as F
 
         if len(self.shape) != 1:
             raise TypeError(
-                f"W @ {self!r} takes one row; for rows write x @ W.T, W (out, in)"
+                f"W @ {self!r} takes one row; for rows, "
+                "iron.functional.linear(x, W, precision=...)"
             )
-        return F.linear(self, other)
+        return F.linear(self, other, precision=Precision.HIGHEST)
 
     def __repr__(self) -> str:
         return f"Handle({str(self.ref())!r}, {list(self.shape)}, {bfp.dtype_name(self.dtype)})"

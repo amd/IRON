@@ -14,6 +14,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+from iron import Precision
 from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
 from iron.lm.blocks import KVCache, Rope
 from iron.lm.checkpoint import nest, leaves
@@ -33,7 +34,10 @@ class Block(iron.Graph):
     def __init__(self):
         self.embed = Embedding(512, 256)
         self.norm = RMSNorm(256, 1e-5)
-        self.layers = [Linear(256, 128), Linear(128, 256, bias=False)]
+        self.layers = [
+            Linear(256, 128, precision=Precision.MEDIUM),
+            Linear(128, 256, bias=False, precision=Precision.MEDIUM),
+        ]
         self.out = LayerNorm(256)
 
     def body(self, ids):
@@ -65,7 +69,10 @@ def test_load_state_dict_binds_each_param_to_its_tensor():
 
 class Head(iron.Graph):
     def __init__(self):
-        self.classifier = [None, Linear(256, 128, bias=False)]
+        self.classifier = [
+            None,
+            Linear(256, 128, bias=False, precision=Precision.MEDIUM),
+        ]
 
 
 def test_an_index_a_checkpoint_skips_is_empty_and_no_leaf():
@@ -117,7 +124,7 @@ class Tied(iron.Graph):
 
     def __init__(self):
         self.embed = Embedding(512, 256)
-        self.head = Linear(256, 512, bias=False)
+        self.head = Linear(256, 512, bias=False, precision=Precision.MEDIUM)
         self.head.weight = self.embed.weight
 
 
@@ -140,7 +147,7 @@ def test_a_tied_param_ignores_a_tensor_at_its_other_path():
 def test_a_graph_held_at_two_paths_skips_the_second_paths_tensors():
     class Shared(iron.Graph):
         def __init__(self):
-            self.a = self.b = Linear(4, 4, bias=False)
+            self.a = self.b = Linear(4, 4, bias=False, precision=Precision.MEDIUM)
             self.c = self.d = [iron.param(2)]
 
     tensors = {
@@ -243,10 +250,13 @@ def test_leaf_modules_match_numpy():
 
 
 def test_leaf_modules_take_torch_nn_s_names_and_defaults():
-    linear, embedding = Linear(4, 8), Embedding(16, 4)
+    linear, embedding = Linear(4, 8, precision=Precision.MEDIUM), Embedding(16, 4)
     rms, layer = RMSNorm(4), LayerNorm(4)
     assert (linear.in_features, linear.out_features) == (4, 8)
-    assert linear.bias.shape == (8,) and Linear(4, 8, bias=False).bias is None
+    assert (
+        linear.bias.shape == (8,)
+        and Linear(4, 8, bias=False, precision=Precision.MEDIUM).bias is None
+    )
     assert (embedding.num_embeddings, embedding.embedding_dim) == (16, 4)
     assert (rms.normalized_shape, rms.eps) == ((4,), None)
     assert (layer.normalized_shape, layer.eps) == ((4,), 1e-5)

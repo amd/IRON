@@ -24,7 +24,7 @@ import numpy as np
 
 import iron
 import iron.functional as F
-from iron import Precision
+from iron import Precision, lm
 from iron.applications.qwen3.model import Qwen3Layer
 from iron.common.graph.handle import State
 from iron.lm import CausalLM, DecoderConfig, GatedMLP, Linear, activation
@@ -38,6 +38,7 @@ class Qwen3MoeConfig(DecoderConfig):
     checkpoints have them. ``Qwen3MoeConfig`` refuses any other.
     """
 
+    precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
     num_experts: int = dataclasses.field(kw_only=True)
     num_experts_per_tok: int = dataclasses.field(kw_only=True)
     moe_intermediate_size: int = dataclasses.field(kw_only=True)
@@ -97,7 +98,7 @@ class SparseMoE(iron.Graph):
     staged: dict[int, Staged]
 
     def __init__(self, c: Qwen3MoeConfig):
-        self.gate = Linear(c.hidden_size, c.num_experts, bias=False)
+        self.gate = Linear(c.hidden_size, c.num_experts, False, precision=c.precision)
         expert = dataclasses.replace(c, intermediate_size=c.moe_intermediate_size)
         self.experts = [GatedMLP(expert) for _ in range(c.num_experts)]
         self.top_k = c.num_experts_per_tok
@@ -106,7 +107,8 @@ class SparseMoE(iron.Graph):
 
     def body(self, x):
         n, experts = x.shape[0], self.gate.weight.shape[0]
-        logits = F.linear(x, self.gate.weight).reshape(n, experts)
+        logits = F.linear(x, self.gate.weight, precision=self.gate.precision)
+        logits = logits.reshape(n, experts)
         ids, weights = TopKRouter.step(logits, top_k=self.top_k)
         s = self.staged[n]
         iron.on_host(self.stage, ids, weights, writes=(s.gate, s.up, s.down, s.routed))

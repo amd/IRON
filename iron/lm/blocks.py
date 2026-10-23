@@ -572,7 +572,7 @@ class Weights(iron.Graph):
 
 class Linear(iron.Graph):
     """``torch.nn.Linear``: ``x @ weight.T``, plus ``bias`` where it holds one,
-    at ``precision`` (None: ``F.linear``'s).
+    at ``precision`` (``F.linear``'s, the caller's choice).
     """
 
     def __init__(
@@ -581,7 +581,7 @@ class Linear(iron.Graph):
         out_features: int,
         bias: bool = True,
         *,
-        precision: Precision | None = None,
+        precision: Precision,
     ):
         self.in_features, self.out_features = in_features, out_features
         self.weight = iron.param(out_features, in_features)

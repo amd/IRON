@@ -40,7 +40,7 @@ from iron.common.graph.record import Recording
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
 from iron.common.design import OperatorDesign
 import iron
-from iron import Scratchpad
+from iron import Precision, Scratchpad
 from iron.operators import GEMM, GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 from iron.operators.copy import Gather
 from iron.operators.gemm import GEMMPlacement
@@ -321,6 +321,7 @@ def test_a_pack_refuses_two_cores_on_one_tile():
             num_aie_columns=1,
             b_col_maj=b_col_maj,
             placement=GEMMPlacement.TILES,
+            precision=Precision.MEDIUM,
         )
         return OperatorDesign(op.resolved())
 

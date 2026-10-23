@@ -7,13 +7,12 @@ device-free: the shared decoder's tests (``Decoder``) with q and k normed
 per head.
 """
 
-from iron.applications.qwen3.model import Qwen3
-from iron.lm import DecoderConfig
+from iron.applications.qwen3.model import Qwen3, Qwen3Config
 from iron.tests.support.llama_model import shapes
 from iron.tests.support.llama_reference import Decoder
 
 #: Qwen3's proportions at toy size: GQA, a head_dim of its own, a tied head.
-TOY = DecoderConfig(
+TOY = Qwen3Config(
     vocab_size=1024,
     hidden_size=512,
     num_hidden_layers=2,

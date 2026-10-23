@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-from iron import lm
+from iron import Precision, lm
 from iron.lm import (
     Attention,
     CausalLM,
@@ -86,6 +86,7 @@ class Phi4Config(DecoderConfig):
     LongRoPE.
     """
 
+    precision: Precision = not_json(Precision.MEDIUM, kw_only=True)
     # LongRoPE's, read as longrope.
     rope_scaling: None = not_json(None)
     longrope: LongRope | None = dataclasses.field(
@@ -159,7 +160,9 @@ class Phi4Attention(Attention):
 
     def projections(self, c: Phi4Config) -> None:
         H, G, D = self.heads, self.groups, self.head_dim
-        self.qkv_proj = Linear(c.hidden_size, (H + 2 * G) * D, bias=False)
+        self.qkv_proj = Linear(
+            c.hidden_size, (H + 2 * G) * D, False, precision=c.precision
+        )
 
     def project(self, x, **gemv) -> list:
         H, G, D = self.heads, self.groups, self.head_dim
@@ -171,7 +174,7 @@ class Phi4MLP(GatedMLP):
 
     def projections(self, c: Phi4Config) -> None:
         M = self.intermediate_size = c.intermediate_size
-        self.gate_up_proj = Linear(c.hidden_size, 2 * M, bias=False)
+        self.gate_up_proj = Linear(c.hidden_size, 2 * M, False, precision=c.precision)
 
     def body(self, x):
         M = self.intermediate_size

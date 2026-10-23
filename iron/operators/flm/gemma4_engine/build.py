@@ -21,6 +21,7 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
+from iron import Precision
 from iron.operators.flm.gemma4_engine import pli_weights
 from iron.operators.flm import (
     ProjectionGEMM,
@@ -82,8 +83,8 @@ UPGATE_RUN = 512
 def gemm(M, K, N, gelu):
     """Every GEMM of the model.
 
-    floor rounding and bf16_steps gelu reproduce the engine's arithmetic bit for
-    bit. k_tile=256 divides every K, so all shapes share one configuration, and
+    floor rounding, bf16_steps gelu and MEDIUM's bfp16 macs reproduce the
+    engine's arithmetic bit for bit. k_tile=256 divides every K, so all shapes share one configuration, and
     so one xclbin. B comes from DequantBFP, so the k slice is the one it
     writes.
     """
@@ -97,6 +98,7 @@ def gemm(M, K, N, gelu):
         ct_k=DEQUANT_CT_K,
         rounding="floor",
         gelu="bf16_steps",
+        precision=Precision.MEDIUM,
     )
 
 

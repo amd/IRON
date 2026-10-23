@@ -17,10 +17,18 @@ keyed by operator shape at Qwen3 1.7B's shape: a decode step's and a
 the RoPE table alone.
 """
 
+import dataclasses
 from pathlib import Path
 
-from iron import lm
+from iron import Precision, lm
 from iron.lm import Attention, CausalLM, DecoderConfig, DecoderLayer
+
+
+@dataclasses.dataclass(frozen=True)
+class Qwen3Config(DecoderConfig):
+    """``DecoderConfig`` and its projections' ``precision``."""
+
+    precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
 
 
 class Qwen3Layer(DecoderLayer):
@@ -36,7 +44,7 @@ class Qwen3(CausalLM):
     ``tokenizer.json``.
     """
 
-    config = DecoderConfig
+    config = Qwen3Config
     profile = Path(__file__).with_name("profiles")
     layer_class = Qwen3Layer
 

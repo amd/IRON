@@ -19,6 +19,7 @@ import re
 import pytest
 
 from aie.iron import Out
+from iron import Precision
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.coresidence import Packing
@@ -60,7 +61,12 @@ PAIRS = [
         dict(K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=2),
         ("M", 256),
     ),
-    ("gemm", "GEMM", dict(K=64, N=512, num_aie_columns=4), ("M", 256)),
+    (
+        "gemm",
+        "GEMM",
+        dict(K=64, N=512, num_aie_columns=4, precision=Precision.MEDIUM),
+        ("M", 256),
+    ),
 ]
 
 

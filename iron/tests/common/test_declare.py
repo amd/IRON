@@ -22,7 +22,7 @@ from aie.utils.compile.jit.params import Select, param, per_call, tunable, width
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Profile, Scratchpad
+from iron import Precision, Profile, Scratchpad
 from iron.common import Built, Operator, Rtp, Unresolvable, Value, Xclbin
 from iron.common.declare.operand import active_runtime, axis_of
 from iron.common.design import OperatorDesign
@@ -449,9 +449,13 @@ def test_compatible_runs_at_construction_once_every_tunable_is_known():
 def test_gemm_layout_flags_transpose_rather_than_resize():
     from iron.operators.gemm import GEMM
 
-    plain = GEMM(M=256, K=64, N=512).buffers
-    b_major = GEMM(M=256, K=64, N=512, b_col_maj=True).buffers
-    c_major = GEMM(M=256, K=64, N=512, c_col_maj=True).buffers
+    plain = GEMM(M=256, K=64, N=512, precision=Precision.MEDIUM).buffers
+    b_major = GEMM(
+        M=256, K=64, N=512, b_col_maj=True, precision=Precision.MEDIUM
+    ).buffers
+    c_major = GEMM(
+        M=256, K=64, N=512, c_col_maj=True, precision=Precision.MEDIUM
+    ).buffers
     assert plain[1].shape == (64, 512) and b_major[1].shape == (512, 64)
     assert plain[2].shape == (256, 512) and c_major[2].shape == (512, 256)
     # Transposing a layout must not change how many bytes move.

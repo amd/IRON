@@ -259,6 +259,13 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `precision` has no default: GEMM, flm.ProjectionGEMM, `F.linear`,
+  `iron.lm.Linear` and `Config.precision` take the caller's, and every
+  application's config states its own (reading a config whose application
+  states none raises). `x @ W.T` of one row is GEMV; of several rows it
+  raises, as rows take a precision (`F.linear(x, W, precision=...)`).
+  Llama states `Precision.HIGH` from 3B's width up when read from a
+  checkpoint (`LlamaConfig.from_json`), MEDIUM below.
 - A prompt begins as the checkpoint's tokenizer begins a text
   (`TokenizerJson.prompt`): the special tokens its post-processor puts
   before it, a BOS or none (Qwen's, Gemma 4's, SmolLM2's), as

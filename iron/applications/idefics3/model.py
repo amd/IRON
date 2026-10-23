@@ -19,7 +19,7 @@ import dataclasses
 from pathlib import Path
 
 
-from iron import lm
+from iron import Precision, lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal, not_json, subtree
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 
@@ -30,6 +30,7 @@ class SmolVLMTextConfig(DecoderConfig):
     ``text_config``.
     """
 
+    precision: Precision = not_json(Precision.MEDIUM, kw_only=True)
     json_prefix = "text_config."
 
     eps: float = dataclasses.field(

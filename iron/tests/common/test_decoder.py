@@ -14,6 +14,7 @@ from ml_dtypes import bfloat16
 from aie.helpers.taplib import Affine
 
 import iron.functional as F
+from iron import Precision
 from iron.lm import rope_angles
 from iron.applications.llama.model import Llama
 from iron.operators.rms_norm import RMSNorm
@@ -34,7 +35,7 @@ class _PartialRotaryLlama(Llama):
         q_rot_weight = q.reshape(H, D, c.hidden_size)[:, :A, :].reshape(
             H * A, c.hidden_size
         )
-        q_rot = F.linear(h, q_rot_weight)
+        q_rot = F.linear(h, q_rot_weight, precision=Precision.MEDIUM)
         RoPE.step(q_rot.reshape(n * H, A), call.ropes[w.rope][1])
         return x
 

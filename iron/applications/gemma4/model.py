@@ -29,7 +29,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron import lm
+from iron import Precision, lm
 from iron.lm import (
     Attention,
     CausalLM,
@@ -54,6 +54,7 @@ class Gemma4Config(DecoderConfig):
     RoPE, the shared caches, the per-layer inputs and the logits' cap.
     """
 
+    precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
     json_prefix = "text_config."
 
     rope_theta: float = dataclasses.field(

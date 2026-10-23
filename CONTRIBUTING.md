@@ -36,7 +36,9 @@ Hugging Face decoders need a config and a model class; see
 
 1. **Config.** Subclass `DecoderConfig`. Its fields are read from the
    checkpoint's `config.json` by name, or at `metadata={"json": ...}`;
-   `not_json(default)` marks an IRON choice.
+   `not_json(default)` marks an IRON choice. One the config must make is
+   `precision`, its projections' (`Config.precision`): it has no default,
+   and the README says which the model's accuracy test chose and why.
 
 2. **Model.** Subclass `CausalLM` (or `Encoder`, `Tower`, `EncoderDecoder`),
    naming `config` and pointing `profile` at a `profiles/` directory. A

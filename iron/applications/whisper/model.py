@@ -21,7 +21,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Scratchpad
+from iron import Precision, Scratchpad
 from iron.lm import (
     MLP,
     Attention,
@@ -81,6 +81,7 @@ class WhisperEncoderConfig(Config):
     ``config.json`` by itself.
     """
 
+    precision: Precision = not_json(Precision.MEDIUM, kw_only=True)
     # Every projection biased (``Attention``, ``MLP``).
     attention_bias = mlp_bias = True
 
@@ -141,6 +142,7 @@ class WhisperConfig(DecoderConfig):
     (``encoder()``).
     """
 
+    precision: Precision = not_json(Precision.MEDIUM, kw_only=True)
     hidden_size: int = dataclasses.field(metadata={"json": "d_model"})
     num_hidden_layers: int = dataclasses.field(metadata={"json": "decoder_layers"})
     num_attention_heads: int = dataclasses.field(
@@ -184,9 +186,10 @@ class WhisperAttention(Attention):
 
     def projections(self, c) -> None:
         E, D = c.hidden_size, self.head_dim
-        self.q_proj = Linear(E, self.heads * D)
-        self.k_proj = Linear(E, self.groups * D, bias=False)
-        self.v_proj = Linear(E, self.groups * D)
+        p = c.precision
+        self.q_proj = Linear(E, self.heads * D, precision=p)
+        self.k_proj = Linear(E, self.groups * D, bias=False, precision=p)
+        self.v_proj = Linear(E, self.groups * D, precision=p)
 
 
 class WhisperCrossAttention(CrossAttention, WhisperAttention):

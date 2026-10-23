@@ -202,8 +202,9 @@ reads each `(tile_n, k_tile)` block as `tile_n` runs of `k_tile` elements
 (1 KB each), the memtile hands the core one 8-deep k panel at a time, and the
 kernel transposes it (`fused_mm(..., b_col_maj=True)`). The short runs are
 between the memtile and the core, not in DDR. On NPU2 the core converts the
-bf16 B to bfp16 for the bfp16 macs (`precision="medium"`, the default), so
-its arithmetic is the packed path's; `"high"` multiplies in bf16.
+bf16 B to bfp16 for the bfp16 macs (`precision="medium"`), so its
+arithmetic is the packed path's; `"high"` multiplies in bf16. `precision`
+has no default: every caller names it.
 
 At Llama 3.2 1B's prompt projections (M = 2048, `epilogue_modes=("none",)`)
 on Strix, the times below are the fastest of 8 interleaved rounds, each the

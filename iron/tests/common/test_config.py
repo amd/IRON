@@ -4,7 +4,8 @@
 """``Config.from_checkpoint``: the dotted-path lookup and ``convert`` hooks
 against a real checkpoint's own ``config.json`` (device-free; skipped
 outside CI where the checkpoint is not there, failed in CI), and that
-``DecoderConfig`` adds the decoder-only fields to ``Config``'s ``eps``.
+``DecoderConfig`` adds the decoder-only fields to ``Config``'s ``eps`` and
+``precision``.
 """
 
 import dataclasses
@@ -23,6 +24,7 @@ from iron.applications.idefics3.vision import model as smolvlm_vision
 from iron.applications.lfm2.model import Lfm2Config
 from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig
 from iron.applications.phi3.model import LongRope, Phi4Config
+from iron.applications.qwen3.model import Qwen3Config
 from iron.applications.whisper.model import WhisperConfig
 from iron.lm import Config, DecoderConfig
 from iron.tests.support.llama_model import REAL_1B
@@ -58,7 +60,7 @@ def test_from_checkpoint_takes_either_the_file_or_its_directory():
 @pytest.mark.parametrize(
     "cls",
     [
-        DecoderConfig,
+        Qwen3Config,
         LlamaConfig,
         GraniteConfig,
         Lfm2Config,
@@ -111,7 +113,7 @@ def test_a_path_is_under_the_prefix_unless_it_starts_at_the_root():
 @pytest.mark.parametrize(
     "cls,scaling",
     [
-        (DecoderConfig, {"rope_type": "yarn", "factor": 4.0}),
+        (Qwen3Config, {"rope_type": "yarn", "factor": 4.0}),
         (LlamaConfig, {"rope_type": "linear", "factor": 2.0}),
     ],
 )
@@ -152,17 +154,27 @@ def test_head_dim_falls_back_and_max_seq_len_is_the_native_context(tmp_path):
     )
     path = tmp_path / "config.json"
     path.write_text(json.dumps(fields))
-    cfg = DecoderConfig.from_checkpoint(path)
+    cfg = Qwen3Config.from_checkpoint(path)
     assert (cfg.head_dim, cfg.max_seq_len) == (1536 // 12, 40960)
     path.write_text(json.dumps(fields | {"head_dim": 64}))
-    assert DecoderConfig.from_checkpoint(path).head_dim == 64
+    assert Qwen3Config.from_checkpoint(path).head_dim == 64
 
 
 def test_llama_projects_at_high_from_3b_s_width_unless_given():
-    wide = dataclasses.replace(REAL_1B, hidden_size=3072)
-    assert REAL_1B.precision is None and wide.precision is Precision.HIGH
+    wide = LlamaConfig.from_json(REAL_1B.to_json() | {"hidden_size": 3072})
+    assert REAL_1B.precision is Precision.MEDIUM and wide.precision is Precision.HIGH
     given = dataclasses.replace(wide, precision=Precision.MEDIUM)
     assert given.precision is Precision.MEDIUM
+
+
+def test_a_config_whose_application_states_no_precision_is_refused():
+    """``precision`` is no file's and has no default: each application
+    states its own.
+    """
+    data = REAL_1B.to_json() | {"rope_scaling": None}
+    with pytest.raises(ValueError, match="DecoderConfig states no precision"):
+        DecoderConfig.from_json(data)
+    assert Qwen3Config.from_json(data).precision is Precision.MEDIUM
 
 
 def test_from_checkpoint_raises_with_no_config_json_beside_the_path(tmp_path):
@@ -193,10 +205,10 @@ def test_embedding_gemma2_from_checkpoint_is_the_default_instance(cls, instance)
     assert cls.from_checkpoint(EMBEDDING_GEMMA2_DIR) == instance
 
 
-def test_decoder_config_adds_the_decoder_fields_to_configs_eps():
+def test_decoder_config_adds_the_decoder_fields_to_configs_eps_and_precision():
     base_fields = {f.name for f in dataclasses.fields(Config)}
     decoder_fields = {f.name for f in dataclasses.fields(DecoderConfig)}
-    assert base_fields == {"eps"}
+    assert base_fields == {"eps", "precision"}
     assert {"vocab_size", "max_seq_len", "rope_scaling"} <= decoder_fields - base_fields
 
 

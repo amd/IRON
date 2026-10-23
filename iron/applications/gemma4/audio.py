@@ -31,7 +31,7 @@ from iron.operators.softmax import Softmax
 @dataclasses.dataclass(frozen=True)
 class AudioConfig(lm.Config):
     # Every projection and attention matmul at HIGHEST.
-    precision = Precision.HIGHEST
+    precision: Precision = lm.not_json(Precision.HIGHEST, kw_only=True)
     json_prefix = "audio_config."
 
     hidden_size: int = 1024

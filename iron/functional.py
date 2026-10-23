@@ -8,10 +8,11 @@ Each records the operator steps that compute it and returns their handle::
     import iron.functional as F
 
     h = F.rms_norm(x, x.shape[-1:], w.input_layernorm.weight, eps)
-    y = F.silu(F.linear(h, w.mlp.gate_proj.weight)) * F.linear(h, w.mlp.up_proj.weight)
+    gate = F.linear(h, w.mlp.gate_proj.weight, precision=Precision.HIGH)
+    y = F.silu(gate) * F.linear(h, w.mlp.up_proj.weight, precision=Precision.HIGH)
 
 Weights are a checkpoint's ``(out, in)``, as ``torch.nn.Linear`` stores them.
-A handle's own ``+ - * /`` and ``@`` are steps too (``Handle``).
+A handle's own ``+ - * /`` are steps too, and ``@`` of one row (``Handle``).
 
 A feature map is one image, channels last: ``(H, W, C)``, not torch's
 ``(N, C, H, W)``. Its rows, ``(H, W * C)``, are what its steps read.
@@ -42,16 +43,19 @@ from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
 
-def linear(x: Handle | State, weight, bias=None, *, precision=None, **gemv) -> Handle:
+def linear(
+    x: Handle | State, weight, bias=None, *, precision: Precision, **gemv
+) -> Handle:
     """Return ``x @ weight.T``, plus ``bias`` on every row if ``bias`` is given.
 
     ``x`` is one row, ``(in,)`` or ``(1, in)``, or several rows,
     ``(rows, in)``. ``weight`` is ``(out, in)``, as ``torch.nn.Linear``
     stores it.
 
-    One row runs on GEMV, which sums in float32 and rounds once, so
-    ``precision`` has no effect on it. Several rows run on
-    flm.ProjectionGEMM at the given ``precision``. At
+    ``precision`` is the caller's choice; there is no default. One row runs
+    on GEMV, which sums in float32 and rounds once, as ``Precision.HIGHEST``
+    does, whatever ``precision`` says. Several rows run on
+    flm.ProjectionGEMM at ``precision``. At
     ``Precision.HIGHEST`` they run on GEMM instead, which also sums in
     float32 and handles row counts flm.ProjectionGEMM cannot tile. Nothing
     is padded: a row count neither operator tiles raises when the graph is
@@ -73,9 +77,12 @@ def linear(x: Handle | State, weight, bias=None, *, precision=None, **gemv) -> H
     elif precision == Precision.HIGHEST:
         y = GEMM.step(x, weight, b_col_maj=True, precision=Precision.HIGHEST)
     else:
-        tiled = {} if precision is None else dict(precision=precision)
         y = ProjectionGEMM.step(
-            x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
+            x,
+            weight,
+            b_col_maj=True,
+            epilogue_modes=(Epilogue.NONE,),
+            precision=precision,
         )
     if bias is None:
         return y

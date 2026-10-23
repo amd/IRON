@@ -51,7 +51,7 @@ PROFILES = Path(__file__).with_name("profiles")
 @dataclasses.dataclass(frozen=True)
 class Config(lm.Config):
     # Every projection at HIGHEST (``Attention``, ``GatedMLP``).
-    precision = Precision.HIGHEST
+    precision: Precision = lm.not_json(Precision.HIGHEST, kw_only=True)
     json_prefix = "text_config."
 
     vocab_size: int = 262144
@@ -368,7 +368,7 @@ class EmbeddingGemma(Encoder):
 
     def head(self, x):
         c = self.config
-        y = F.linear(x, self.mrl)
+        y = F.linear(x, self.mrl, precision=c.precision)
         y = y.reshape(len(c.mrl_dims), self.unit.size)
         return F.rms_norm(y, y.shape[-1:], self.unit, 0.0)
 

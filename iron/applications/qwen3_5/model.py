@@ -21,12 +21,13 @@ layer's ``Checkpoints`` states, as Granite 4.0-H's Mamba2 mixer's are.
 """
 
 import dataclasses
+from functools import partial
 
 import numpy as np
 
 import iron
 import iron.functional as F
-from iron import lm
+from iron import Precision, lm
 from iron.lm import Attention, CausalConv1d, CausalLM, Checkpoints, DecoderConfig
 from iron.lm import DecoderLayer, Linear, RMSNorm, Weights, subtree
 from iron.operators.copy import Copy
@@ -40,6 +41,7 @@ class Qwen35Config(DecoderConfig):
     the Gated DeltaNet's shape and the rotated fraction of a head.
     """
 
+    precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
     json_prefix = "text_config."
 
     rope_theta: float = dataclasses.field(
@@ -103,7 +105,9 @@ class GatedAttention(Attention):
 
     def projections(self, c) -> None:
         super().projections(c)
-        self.q_proj = Linear(c.hidden_size, 2 * self.heads * self.head_dim, False)
+        self.q_proj = Linear(
+            c.hidden_size, 2 * self.heads * self.head_dim, False, precision=c.precision
+        )
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
@@ -114,7 +118,8 @@ class GatedAttention(Attention):
         self.q_proj.out_features = H * D
 
     def output(self, o, x):
-        return self.o_proj(o * Sigmoid.step(F.linear(x, self.gate)))
+        gate = F.linear(x, self.gate, precision=self.q_proj.precision)
+        return self.o_proj(o * Sigmoid.step(gate))
 
 
 class GatedDeltaNet(iron.Graph):
@@ -129,14 +134,15 @@ class GatedDeltaNet(iron.Graph):
         Hv, Dv = c.linear_num_value_heads, c.linear_value_head_dim
         self.channels, self.k_heads = c.conv_channels, c.linear_num_key_heads
         self.eps = c.eps
-        self.in_proj_qkv = Linear(E, self.channels, False)
-        self.in_proj_z = Linear(E, Hv * Dv, False)
-        self.in_proj_b, self.in_proj_a = Linear(E, Hv, False), Linear(E, Hv, False)
+        linear = partial(Linear, bias=False, precision=c.precision)
+        self.in_proj_qkv = linear(E, self.channels)
+        self.in_proj_z = linear(E, Hv * Dv)
+        self.in_proj_b, self.in_proj_a = linear(E, Hv), linear(E, Hv)
         self.conv1d = CausalConv1d(c, self.channels, K)
         self.dt_bias, self.A_log = iron.param(Hv), iron.param(Hv)
         # Plain: not one of the norms that scale by 1 + weight.
         self.norm = Weights(weight=(Dv,))
-        self.out_proj = Linear(Hv * Dv, E, False)
+        self.out_proj = linear(Hv * Dv, E)
         state = (Hv, c.linear_key_head_dim, Dv)
         self.ssm_state = Checkpoints.of(
             state, c.max_seq_len, c.prefill_chunk, np.float32

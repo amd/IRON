@@ -38,6 +38,7 @@ class VisionConfig(Config):
     ``eps`` is its LayerNorms', the checkpoint's ``layer_norm_eps``.
     """
 
+    precision: Precision = not_json(Precision.MEDIUM, kw_only=True)
     # Every projection biased (``Attention``, ``MLP``).
     attention_bias = mlp_bias = True
 

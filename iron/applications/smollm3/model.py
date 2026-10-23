@@ -13,7 +13,7 @@ Its output head is the input embedding, tied.
 import dataclasses
 from pathlib import Path
 
-from iron import lm
+from iron import Precision, lm
 from iron.lm import CausalLM, DecoderConfig, not_json
 
 
@@ -21,6 +21,7 @@ from iron.lm import CausalLM, DecoderConfig, not_json
 class SmolLM3Config(DecoderConfig):
     """``DecoderConfig`` and which layers turn q and k by RoPE."""
 
+    precision: Precision = not_json(Precision.MEDIUM, kw_only=True)
     no_rope_layers: tuple[int, ...] = dataclasses.field(
         kw_only=True, metadata={"convert": tuple}
     )

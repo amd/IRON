@@ -76,15 +76,19 @@ def _cases(cls, dev: Device):
             kwargs.update(precision=Precision.HIGHEST)
             lower = c_col_maj and not extensive
             out.append(Case(kwargs, extensive=extensive, lower=lower))
-    # MEDIUM's bfp16 inputs, C rounded to bf16 between K tiles.
-    out.append(
-        Case(dict(M=2048, K=2048, N=2048, b_col_maj=True), bench=True, lower=True)
-    )
+    # MEDIUM's bfp16 inputs, C rounded to bf16 between K tiles; its label is
+    # the benchmark history's.
+    medium = dict(M=2048, K=2048, N=2048, b_col_maj=True, precision=Precision.MEDIUM)
+    label = "M_2048-K_2048-N_2048-b_col_maj_True"
+    out.append(Case(medium, id=label, bench=True, lower=True))
     # An f32 C at the default 64-wide tiles overflows a core's memory.
     f32 = dict(M=512, K=256, N=512, output_dtype=np.float32, tile_m=32, tile_k=32)
-    out.append(Case(dict(f32, tile_n=32), id="f32_out", lower=True))
+    out.append(
+        Case(dict(f32, tile_n=32, precision=Precision.MEDIUM), id="f32_out", lower=True)
+    )
     # The placement the tuner tries beside the default.
     kwargs = dict(M=2048, K=2048, N=2048, num_aie_columns=2, b_col_maj=True)
+    kwargs.update(precision=Precision.MEDIUM)
     out.append(Case(dict(kwargs, placement=GEMMPlacement.TILES), extensive=True))
     return out
 
@@ -153,7 +157,7 @@ class GEMM(Operator):
     )
     b_col_maj: bool = param(default=False, array=True)
     c_col_maj: bool = param(default=False, array=True)
-    precision: Precision = param(default=Precision.MEDIUM, array=True)
+    precision: Precision = param(array=True)
     input_dtype: Any = param(default=bfloat16, repr=False)
     output_dtype: Any = param(default=bfloat16, repr=False)
     # Filled by resolve.

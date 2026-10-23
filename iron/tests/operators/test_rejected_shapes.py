@@ -181,8 +181,18 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles(npu1, npu2)
     """A tunable-free operator resolves on either device to the widest count
     its shape divides over, rather than the whole shim budget and a refusal.
     """
-    assert GEMM(M=256, K=64, N=256).resolved(npu2).num_aie_columns == 4
-    assert GEMM(M=256, K=64, N=512).resolved(npu1).num_aie_columns == 4
+    assert (
+        GEMM(M=256, K=64, N=256, precision=Precision.MEDIUM)
+        .resolved(npu2)
+        .num_aie_columns
+        == 4
+    )
+    assert (
+        GEMM(M=256, K=64, N=512, precision=Precision.MEDIUM)
+        .resolved(npu1)
+        .num_aie_columns
+        == 4
+    )
     assert Transpose(M=64, N=64).resolved(npu2).num_aie_columns == 1
     assert Transpose(M=64, N=256).resolved(npu2).num_aie_columns == 4
     # Nothing fits: one column, and compatible() names the rule.
@@ -372,7 +382,7 @@ def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision, request):
 
 
 def test_flm_gemm_halves_a_short_k_tile_to_double_buffer_b(npu2):
-    op = ProjectionGEMM(M=256, K=64, N=256).resolved(npu2)
+    op = ProjectionGEMM(M=256, K=64, N=256, precision=Precision.MEDIUM).resolved(npu2)
     assert (op.tile_n, op.k_tile, op.ct_k, op.l1_b_depth) == (64, 64, 32, 2)
 
 
@@ -438,7 +448,7 @@ def test_gemm_on_columns_that_do_not_divide_its_rows_is_refused(device, request)
     two on npu1, six on npu2.
     """
     dev = request.getfixturevalue(device)
-    shape = dict(M=256, K=128, N=384, b_col_maj=True)
+    shape = dict(M=256, K=128, N=384, b_col_maj=True, precision=Precision.MEDIUM)
     with pytest.raises(ValueError, match="do not divide the 4 rows"):
         GEMM(**shape, num_aie_columns=3).resolved(dev)
     assert GEMM(**shape).resolved(dev).num_aie_columns == {"npu1": 2, "npu2": 6}[device]
