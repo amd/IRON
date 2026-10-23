@@ -6,8 +6,10 @@ against Hugging Face's own model in float32 over the same weights, its
 logits recorded in ``goldens/``: device-free, the encoder over a clip's
 samples, then the decoder's prompt chunks and a decode step over its
 output, each version's reference in turn; and the same on the NPU, with
-tanh and exact GELU. Then large-v3-turbo from its checkpoint on the NPU
-over a LibriSpeech clip, against transformers' logits recorded beside it.
+tanh and exact GELU. Then large-v3-turbo from its checkpoint on the NPU,
+compiled once, over two LibriSpeech clips: each one's next-token
+distributions and its whole greedy transcript against transformers' logits
+recorded beside the checkpoint.
 """
 
 import dataclasses
@@ -45,8 +47,8 @@ TOY = WhisperConfig(
 EXACT = dataclasses.replace(TOY, hidden_act="gelu")
 
 DIRECTORY = weights_dir("whisper-large-v3-turbo")
-#: A LibriSpeech test-clean utterance, 7.3 s of speech.
-SPEECH = "4446-2275-0016"
+#: LibriSpeech test-clean utterances: 7.3 s and 13.0 s of speech.
+SPEECH = ["4446-2275-0016", "2094-142345-0014"]
 
 
 def names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
@@ -259,18 +261,26 @@ def large():
         aie_utils.DefaultNPURuntime.cleanup()
 
 
+#: The decoder's prompt for an English transcript without timestamps, as
+#: transformers' generate() begins it: special tokens, each its own id.
+TASK = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
+#: The most tokens a transcript is followed for, past any of these clips'.
+TRANSCRIPT = 96
+
+
 @pytest.mark.extensive
 @pytest.mark.bench
 @pytest.mark.supported_devices("npu2")
-def test_whisper_large_v3_turbo_accuracy(large, record_property):
+@pytest.mark.parametrize("speech", SPEECH)
+def test_whisper_large_v3_turbo_accuracy(large, speech, record_property):
     """A LibriSpeech clip, then the transcript's preamble and three decode
     steps: each next-token distribution against transformers', teacher-forced.
     KL is held to its bound and a top-1 mismatch recorded.
     """
-    audio = utterance(SPEECH)
+    audio = utterance(speech)
     large.encode(audio)
     reference = large.cpu_reference()
-    tokens = large.tokenizer("<|en|><|transcribe|><|notimestamps|>")
+    tokens = large.tokenizer.encoding.encode(TASK)
     results = []
     for _ in range(4):
         want = reference.logits(tokens, audio)
@@ -280,3 +290,28 @@ def test_whisper_large_v3_turbo_accuracy(large, record_property):
     record_property("MaxKL", worst)
     record_property("Top1Mismatches", sum(not top1 for _, top1 in results))
     assert worst <= MAX_KL, f"KL {worst} > {MAX_KL}"
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("speech", SPEECH)
+def test_whisper_large_v3_turbo_transcribes_as_transformers(
+    large, speech, record_property
+):
+    """The clip's greedy transcript drawn on the device, token for token
+    the one transformers' logits give, each step's argmax after the last,
+    through the end of text.
+    """
+    audio = utterance(speech)
+    large.encode(audio)
+    reference = large.cpu_reference()
+    tokens = large.tokenizer.encoding.encode(TASK)
+    want: list[int] = []
+    while len(want) < TRANSCRIPT and not large.eos & set(want):
+        want.append(int(reference.logits(tokens + want, audio).argmax()))
+    assert large.eos & set(want), f"no end of text in {TRANSCRIPT} tokens"
+    got = large.generate(tokens, TRANSCRIPT)
+    record_property("Transcript", large.tokenizer.decode(got))
+    assert got == want, (
+        f"{large.tokenizer.decode(got)!r} against " f"{large.tokenizer.decode(want)!r}"
+    )
