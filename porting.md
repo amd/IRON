@@ -5,20 +5,20 @@ SPDX-License-Identifier: Apache-2.0
 
 # Porting the decode layer to ObjectFifos
 
-## Already on ObjectFifo
+## Paths already on an ObjectFifo
 
-- PLI weight streams: down, gate, up
-- Layer output drain
-- Up projection input, joined on the merge tile
-- KV cache: four packet fifos, forwarded through the attention memtile
-- q from RoPE to the qk cores
-- Scores between qk and kv
+- The PLI weight streams: down, gate and up
+- The layer output
+- The up projection input, joined on the merge tile
+- The KV cache: four packet ObjectFifos through the attention memtile
+- q, from the RoPE core to the qk cores
+- The scores, from the qk core to the kv core
 
 ## Open complications
 
-One complication per tier. A kernel or path appears in every tier that affects it.
+Each tier states one complication. A kernel or a path appears in every tier that affects it.
 
-### T1 — The kernel owns a counted loop and its ping-pong
+### T1 — A kernel owns a counted loop and its ping-pong pair
 
 **Affects** 
 - decode_proj_main.cc
@@ -27,38 +27,43 @@ One complication per tier. A kernel or path appears in every tier that affects i
 - decode_glu.cc 
 - decode_rope.cc
 
-**Complication** The loop and a static ping/pong toggle sit in C++, so the design cannot see the per-iteration acquire.
+**Complication** The C++ kernel holds the loop and a static ping-pong flag. The kernel acquires and releases the buffers. The design therefore states no lock traffic for them.
 
-**Change** Hoist the loop into the Worker. One fifo handle replaces the ping and pong buffers. `_bf16_proj` already works this way.
+**Change** Move the loop into the Worker. One ObjectFifo handle replaces the ping buffer and the pong buffer. `_bf16_proj` already takes this form.
 
-rope and GLU now expose one entry point per iteration: `rope_q`, `rope_k`, `rope_v`, and `glu_chunk`, `glu_emit`. The design runs the loops and works the locks, and each ping-pong pair is a depth-2 `BufferPool` the core reaches through a handle, so `ROPE_LOCKS` and `GLU_LOCKS` are empty. Latency did not move: median 947.9 us before, 944.8 us after, over 25 dispatches each with a standard deviation near 17 us.
+rope and GLU expose one entry point per iteration: `rope_q`, `rope_k`, `rope_v`, `glu_chunk` and `glu_emit`. The Worker runs the loops. The Worker acquires and releases every lock. A depth-2 `BufferPool` replaces each ping-pong pair. The core reaches that pool through a handle. `ROPE_LOCKS` and `GLU_LOCKS` are therefore empty.
 
-proj_main holds three toggles. x and w are this tier. y is T6, since parity picks the lock, so hoisting it needs that tier's answer. Splitting proj_main also means `y_acc` and `b_col_reduce_add` become design buffers, since the kernel declares them on its stack today.
+The median latency measures 947.9 us before this tier and 944.8 us after it, over 25 dispatches each, with a standard deviation near 17 us.
 
-**Compiler** None.
-
-### T2 — An RTP picks between compile-time counts
-
-**Affects** 
-- decode_rms_residual.cc (release count)
-- decode_proj_main.cc (which projections run)
-
-Done for decode_glu.cc and decode_rope.cc.
-
-**Complication** `SKIP_KV` and `IS_SWA` select between constants. Every count is `constexpr` in decode_layout.h; none is computed at run time.
-
-**Change** `scf.if` in the Worker. Hoisting a loop forces its tier-2 branch with it, so glu and rope took theirs: the Worker reads the RTP word through `buffer[0]` and branches with `if_`/`else_`.
+proj_main holds three flags. The x flag and the w flag belong to this tier. The y flag belongs to T6, because the ping-pong parity selects the lock. This tier also moves `y_acc` and `b_col_reduce_add` into design buffers. The kernel declares both on its stack.
 
 **Compiler** None.
 
-### T3 — One object goes out N times
+### T2 — An RTP selects between compile-time counts
 
 **Affects** 
-- decode_rms_residual.cc (`y`), attention kv `o` output BD
+- decode_rms_residual.cc (the lock count)
+- decode_proj_main.cc (the set of projections)
 
-**Complication** The core releases the consumer lock N times so one BD sends the same buffer N times. A fifo calls this `repeat_count` and fixes it at compile time.
+**Done** 
+- decode_glu.cc 
+- decode_rope.cc
 
-**Change** `o` has a fixed N, so set `repeat_count`. rms picks N per dispatch: drive that edge from a raw `Lock`, or give `ObjectFifoCreateOp` a runtime `repeat_count`. AIEX takes a runtime repeat count already.
+**Complication** `SKIP_KV` and `IS_SWA` select between constants. decode_layout.h declares every count `constexpr`. The design computes none of them at run time.
+
+**Change** Emit an `scf.if` in the Worker. The Worker takes this branch together with the loop of T1. The glu Worker and the rope Worker therefore already hold theirs. Each Worker reads the RTP word through `buffer[0]`. Each Worker branches with `if_` and `else_`.
+
+**Compiler** None.
+
+### T3 — One object leaves N times
+
+**Affects** 
+- decode_rms_residual.cc (`y`)
+- the attention kv `o` output BD
+
+**Complication** The core releases the consumer lock N times. One BD therefore sends the same buffer N times. An ObjectFifo states this count as `repeat_count` and fixes it at compile time.
+
+**Change** `o` uses a fixed N. Set `repeat_count` for it. rms selects N per dispatch. Drive that edge from a raw `Lock`, or add a runtime `repeat_count` to `ObjectFifoCreateOp`. AIEX already takes a runtime repeat count.
 
 **Compiler** Optional.
 
@@ -67,66 +72,70 @@ Done for decode_glu.cc and decode_rope.cc.
 **Affects** 
 - the embedding's three inputs: `x0_per_layer`, `norm_w`, `x0`
 
-**Complication** One channel, a three-BD cyclic chain, and arrival order is the only thing that routes each stream to its buffer. A fifo owns one object type and one rotation, so three fifos cannot share the channel.
+**Complication** One channel carries three streams through a three-BD cyclic chain. Arrival order alone routes each stream to its buffer. An ObjectFifo holds one object type and one rotation. Three ObjectFifos therefore cannot share the channel.
 
-**Change** Out-of-order fifos: each packet names its descriptor through `out_of_order_id`, and `bd_id_base` keeps the BD ranges disjoint. The shim sequence tags each transfer. This retires the `manual_fill` BufferPool.
+**Change** Use out-of-order ObjectFifos. Each packet names its descriptor through `out_of_order_id`. `bd_id_base` keeps the BD ranges disjoint. The shim sequence tags each transfer. Out-of-order ObjectFifos remove the `manual_fill` BufferPool.
 
-**Compiler** Implemented on the sibling branch.
+**Compiler** The `objectfifo-out-of-order` branch implements this.
 
-### T5 — Many channels into one object, with chained locks
+### T5 — Several channels fill one object behind chained locks
 
 **Affects** 
 - proj weight memtile
 - proj gather memtile (two tiles)
 - proj x memtile
 
-**Complication** Two to four S2MM channels write disjoint slices of one buffer pair, and up to four MM2S channels read disjoint slices out. The locks daisy-chain (`yp0 → yp1 → yp2 → yp3 → yc`), so each consumer starts the next and only the last returns the object.
+**Complication** Two to four S2MM channels write disjoint slices of one buffer pair. Up to four MM2S channels read disjoint slices. The locks form a chain: `yp0 → yp1 → yp2 → yp3 → yc`. Each consumer releases the lock of the next consumer. The last consumer returns the object.
 
-**Change** `join` and `split` state the dataflow. The chained hand-off needs a lowering that reproduces it, or one lock pair per slice.
+**Change** `join` and `split` state this dataflow. The chain of locks needs a lowering that reproduces it. One lock pair per slice is the alternative.
 
-**Compiler** Needed for the chained form.
+**Compiler** Needed for the chain.
 
-**Channel budget** The gather memtile holds 6/6 S2MM, the x memtile 6/6 MM2S. Sharing a channel through T4 frees channels here, but does not unblock the port.
+**Channel budget** The gather memtile uses 6 of 6 S2MM channels. The x memtile uses 6 of 6 MM2S channels. T4 frees channels here. T4 does not unblock this tier.
 
-### T6 — Parity picks which lock to use
+### T6 — Ping-pong parity selects the lock
 
 **Affects** 
 - decode_proj_main.cc
 
-**Complication** The `y` lock identity follows ping/pong parity across four locks, and `send_x_output` switches between the local lock space and the tile below. A fifo models one producer/consumer pair.
+**Complication** Two cores fill one output object. The lower core writes the packet header and its row block at offset 16. The upper core writes its row block at offset 16+m, into the memory of the lower tile. No data crosses a stream between the two cores. A `join` moves data through DMAs. This path is therefore not a `join`.
 
-A pair of cores fills one output object: the lower core writes the packet header and its row block at offset 16, its partner in the row above writes a second row block at 16+m, straight into the lower tile's memory. Nothing streams between them, so this is not a `join`: a join moves data through DMAs, and here no data moves.
+The `y` lock identity follows the ping-pong parity across four locks. `send_x_output` selects between the lock space of the core's own tile and the lock space of the tile below. An ObjectFifo states one producer and one consumer.
 
-**Change** Open. A two-segment pool, one slice per core, does not work. A BD takes at most one acquire (`'aie.mem' op BD block must have at most one acquire UseLockOp`), so the one BD that drains the object cannot wait on a lock pair per slice. That is what the four locks buy: both cores release one lock, the BD acquires it with value 2, and a pair per buffer still lets the cores drift across ping and pong. Per-slice locks need either a BD per slice, which costs a channel, or segments that share a lock pair and count.
+**Change** Open.
 
-Two things that attempt settled. Placing an endpoint on the acting core's tile rather than the pool's satisfies `verifyAccessPlacement`, which demands they match. A segment-scoped acquire wants the subview type `ObjectFifoCoreEndpointOp::getAccessType` builds, `memref<48xbf16, strided<[1]>>`, not a plain memref; `BufferPoolHandle._memref_type` builds the plain one today.
+A pool of two segments, one slice per core, fails. A BD block acquires at most one lock: `'aie.mem' op BD block must have at most one acquire UseLockOp`. One BD drains the object. That BD therefore cannot wait on one lock pair per slice. The design uses four locks for this reason. Both cores release one lock. The BD acquires that lock with value 2. One pair per buffer lets the two cores use different buffers. Per-slice locks need one BD per slice, which costs a channel. Two segments may instead share one lock pair and a count.
+
+That attempt settled two points. Place the endpoint on the tile of the acting core: `verifyAccessPlacement` requires the two tiles to match. `ObjectFifoCoreEndpointOp::getAccessType` builds the subview type `memref<48xbf16, strided<[1]>>` for one segment. `BufferPoolHandle._memref_type` builds a plain memref.
 
 **Compiler** Likely.
 
-### T7 — Several tiles take turns filling one buffer
+### T7 — Several tiles fill one buffer in turn
 
 **Affects** 
-- proj x memtile (`x` in, from rms, attn_kv, swa_attn_kv and glu)
-- rms (`x` in, from the shim and from the proj x memtile)
+- proj x memtile (`x`, from rms, attn_kv, swa_attn_kv and glu)
+- rms (`x`, from the shim and from the proj x memtile)
 
-**Complication** Four tiles send `x` into one buffer pair on the proj x memtile, which forwards it to all 16 projection cores. Each sender writes the whole object, not a slice, and only one sends at a time. This is neither T4, where one tile sends several kinds of data down one channel, nor T5, where several channels each write a piece of one object.
+**Complication** Four tiles send `x` into one buffer pair on the proj x memtile. The memtile forwards `x` to the 16 projection cores. Each producer writes the whole object. One producer sends at a time.
 
-An ObjectFifo names one sending tile and a list of receiving tiles. The receiving side already fans out; the sending side cannot fan in.
+T4 covers one producer and several object types on one channel. T5 covers several channels and one slice each. This tier covers neither.
 
-The switchbox does the merge today. Four packet flows meet on one channel, three of them under packet id 0, and the receiving BD writes whatever arrives into the rotation.
+An ObjectFifo states one producer tile and a list of consumer tiles. The consumer side therefore takes several tiles. The producer side takes one.
 
-**Change** Let a fifo name several sending tiles. Nothing checks that the senders take turns. They do so only because each one waits on the result of the phase before it, which is a fact about the schedule that the compiler cannot see. A fifo with several senders would have to take that on trust, or arbitrate.
+The switchbox merges the four streams. Four packet flows meet on one channel. Three of them carry packet id 0. The receiving BD writes each arrival into the rotation.
+
+**Change** Let an ObjectFifo state several producer tiles. No check enforces the order of the producers. Each producer waits for the result of the previous phase. That order is a property of the schedule. The IR states no such property. Such an ObjectFifo is correct only while the producers do not overlap. An arbiter is the alternative.
 
 **Compiler** Needed.
 
-## Design sites waiting on the kernels
+## Design sites that wait on the kernels
 
-`_build_rms` and `_build_proj_core` call `ctx.locks(...)` with a pinned table, because each kernel names its lock ids as compile-time constants. Each site unblocks when T1, T2, T3 and T6 take the locks out of the matching kernel. `_build_rope` and `_build_glu` no longer pin anything.
+`_build_rms` and `_build_proj_core` call `ctx.locks(...)` with a pinned table, because each kernel states its lock ids as compile-time constants. T1, T2, T3 and T6 remove the locks from the matching kernel. Each site becomes free at that point. `_build_rope` and `_build_glu` pin no lock.
 
 ## Runtime lock values
 
-Core-side lock values are already dynamic end to end. `aie.use_lock` takes an i32 SSA operand, the core lowering passes it through, and Peano holds the count in a register (`acq #48, r0`) even for a constant. `Lock.acquire` and `Lock.release` take `int | ir.Value`. Only the BD descriptor path demands constants: two sites in AIETargetXAIEV2.cpp, two in AIERT.cpp.
+A core-side lock value is dynamic along the whole path. `aie.use_lock` takes an i32 SSA operand. The core lowering passes that operand through. Peano holds the count in a register, `acq #48, r0`, even for a constant. `Lock.acquire` and `Lock.release` take `int | ir.Value`. Only the BD descriptor path requires a constant: two sites in AIETargetXAIEV2.cpp, two sites in AIERT.cpp.
 
-`objectfifo.acquire` is the exception. Its count is the result arity, so it cannot take a runtime value, and nothing in this design asks for one.
+`objectfifo.acquire` is the exception. Its count is the result arity. It therefore takes no runtime value. This design requires none.
 
 
