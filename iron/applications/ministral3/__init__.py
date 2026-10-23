@@ -5,5 +5,5 @@
 
 from iron.lm.cli import exports
 
-__all__ = ["Ministral3"]
+__all__ = ["Ministral3", "Ministral3VLM"]
 __getattr__ = exports(__name__, __all__)

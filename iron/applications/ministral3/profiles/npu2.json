@@ -1,4 +1,5 @@
 {"entries": [
   {"operator": "MHA", "num_heads": 32, "num_KV_heads": 8, "d": 128, "seq_pad": 1, "num_pipelines": 4},
-  {"operator": "MHA", "num_heads": 32, "num_KV_heads": 8, "d": 128, "seq_pad": 2048, "num_pipelines": 8}
+  {"operator": "MHA", "num_heads": 32, "num_KV_heads": 8, "d": 128, "seq_pad": 2048, "num_pipelines": 8},
+  {"operator": "MHA", "num_heads": 16, "num_KV_heads": 16, "d": 64, "seq_pad": 12288, "num_pipelines": 8}
 ]}

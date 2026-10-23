@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Ministral 3's text decoder on the shared decoder (``iron.lm``), its shape
-that of Hugging Face's ``ministral3`` text model. The released checkpoints
-are Mistral 3's vision-language model, the text config and weights nested
-under it: both are read here, the vision tower left unread. It is judged
-by transformers' own Mistral 3 (``hugging_face.py``).
+"""Ministral 3 on the shared decoder (``iron.lm``): its text decoder
+(``Ministral3``), its shape that of Hugging Face's ``ministral3`` text
+model, and the vision-language model the released checkpoints are
+(``Ministral3VLM``), the text decoder and Pixtral's tower (``vision.py``)
+as one ``iron.lm.Multimodal``. Both are judged by transformers' own
+Mistral 3 (``hugging_face.py``).
 
 Ministral 3 is Llama's layer under YaRN's RoPE (``YarnRopeScaling``), its
 queries scaled by position past the context it was trained at: by ``1 +
@@ -22,7 +23,8 @@ from pathlib import Path
 import numpy as np
 
 from iron import Precision, lm
-from iron.lm import CausalLM, DecoderConfig, Rope, subtree
+from iron.applications.ministral3.vision import VisionConfig, VisionTower
+from iron.lm import CausalLM, DecoderConfig, Multimodal, Rope, subtree
 from iron.lm.checkpoint import leaves
 
 
@@ -190,3 +192,43 @@ class Ministral3(CausalLM):
         """``Rope``'s table, its queries scaled where Llama 4 scaling is on."""
         scaled = config.llama_4_scaling_beta
         return Rope(config, q_scale=config.query_scale() if scaled else None)
+
+
+@dataclasses.dataclass(frozen=True)
+class Ministral3VLMConfig(Ministral3Config):
+    """``Ministral3Config`` and the vision tower's shape, ``vision``."""
+
+    vision: VisionConfig | None = lm.not_json(None, kw_only=True)
+
+    @classmethod
+    def from_checkpoint(cls, path) -> "Ministral3VLMConfig":
+        text = super().from_checkpoint(path)
+        return dataclasses.replace(text, vision=VisionConfig.from_checkpoint(path))
+
+
+class Ministral3VLM(Multimodal):
+    """Ministral 3, its text decoder and vision tower as one
+    ``iron.lm.Multimodal``, an image's placeholders taking its soft tokens.
+    """
+
+    config = Ministral3VLMConfig
+    hugging_face = Ministral3.hugging_face
+
+    def __init__(self, config: Ministral3VLMConfig, weights):
+        self.config, self.weights = config, weights
+        tower = VisionTower(config.vision, weights)
+        super().__init__(
+            Ministral3(config, weights), {config.vision.image_token: tower}
+        )
+
+    def cpu_reference(self):
+        """What the model is judged by, its ``logits`` taking the tokens and
+        the image: transformers' own Mistral 3 over the drawn weights, else
+        its logits recorded beside the checkpoint.
+        """
+        if self.random_weights is None:
+            return super().cpu_reference()
+        text = self.config.to_json() | {"model_type": "ministral3"}
+        return self.hugging_face.build(
+            "mistral3", self.config.vision, self.weights, text_config=text
+        )
