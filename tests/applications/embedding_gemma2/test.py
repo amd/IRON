@@ -15,6 +15,7 @@ it, before the text encoder's graphs are built for the module's last tests.
 """
 
 import functools
+import os
 import time
 from types import SimpleNamespace
 
@@ -38,7 +39,7 @@ from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.lm import Checkpoint, rope_angles
 from iron.lm.model import prompt_text
-from iron.lm.golden import Golden
+from iron.lm.golden import RECORD, Golden
 from iron.lm.testing import Download, check_embedding, require, weights_dir
 from iron.operators.copy import Copy
 from iron.tests.support.librispeech import utterance
@@ -230,6 +231,8 @@ def reference():
     --record-goldens`` (torch, torchvision and transformers installed) and
     refused once the checkpoint's ``config.json`` or tensors change.
     """
+    if not os.environ.get(RECORD):
+        require(DIRECTORY / "golden.npz")
 
     @functools.cache
     def model():

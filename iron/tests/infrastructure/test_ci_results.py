@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """The root conftest.py's results CSV, run as a real pytest session: a test
-whose fixture fails in setup is a failed check, not missing from the CSV, and
-a session not given ``--csv-output`` writes none.
+whose fixture fails in setup, or xfails for a CI runner's missing files, is a
+failed check, not missing from the CSV, and a session not given
+``--csv-output`` writes none.
 """
 
 import csv
+import os
 import shutil
 import subprocess
 import sys
@@ -15,11 +17,22 @@ from pathlib import Path
 _ROOT_CONFTEST = Path(__file__).resolve().parents[3] / "conftest.py"
 
 _TESTS = """\
+from pathlib import Path
+
 import pytest
+
+from iron.lm.testing import require
 
 @pytest.fixture(scope="module")
 def runner():
     pytest.fail("this CI runner lacks config.json", pytrace=False)
+
+@pytest.fixture(scope="module")
+def unstaged():
+    require(Path("absent/model.safetensors"))
+
+def test_unstaged(unstaged):
+    pass
 
 def test_accuracy(runner):
     pass
@@ -44,6 +57,7 @@ def _pytest(tmp_path, *args):
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "test_model.py"]
         + list(args),
         cwd=tmp_path,
+        env=os.environ | {"CI": "1"},
         capture_output=True,
         text=True,
     )
@@ -57,6 +71,7 @@ def test_a_test_failing_in_setup_is_a_failed_check(tmp_path):
     assert checks == {
         "test_accuracy": "0/1",
         "test_latency": "0/1",
+        "test_unstaged": "0/1",
         "test_plain": "1/1",
     }
 
