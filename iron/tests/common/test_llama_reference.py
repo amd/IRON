@@ -437,6 +437,35 @@ def test_a_chat_template_jinja_file_is_read_and_may_call_strftime_now(cpu, tmp_p
     assert tokenizer.decode(tokenizer.chat(HI)).startswith(year + "<|im_start|>")
 
 
+def test_a_chat_template_jinja_file_is_read_over_tokenizer_config_s(cpu, tmp_path):
+    """As transformers: the reranker's checkpoint ships both."""
+    pytest.importorskip("jinja2")
+    _repository(tmp_path, cpu.weights)
+    (tmp_path / "chat_template.jinja").write_text("file" + CHATML)
+    settings = {"chat_template": "config" + CHATML}
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps(settings))
+    tokenizer = OnHost.load(tmp_path).tokenizer
+    assert tokenizer.decode(tokenizer.chat(HI)).startswith("file<|im_start|>")
+
+
+def test_a_generation_block_renders_its_body(cpu, tmp_path):
+    """SmolLM3's template marks the assistant's turns ``{% generation %}``,
+    which transformers renders as its body.
+    """
+    pytest.importorskip("jinja2")
+    _repository(tmp_path, cpu.weights)
+    template = (
+        "{% for message in messages %}{% generation %}{{'<|im_start|>' + "
+        "message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n'}}"
+        "{% endgeneration %}{% endfor %}"
+        "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+    )
+    (tmp_path / "chat_template.jinja").write_text(template)
+    tokenizer = OnHost.load(tmp_path).tokenizer
+    text = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+    assert tokenizer.chat(HI) == tokenizer.encoding.encode(text)
+
+
 @pytest.mark.parametrize(
     "given, written", [(None, ""), ("<s>", "<s>"), ({"content": "<s>"}, "<s>")]
 )

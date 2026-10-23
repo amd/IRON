@@ -122,9 +122,9 @@ def _models_extra(name: str):
 class Tokenizer:
     """Text to a prompt's token ids, as transformers' tokenizer begins them
     (``TokenizerJson.prompt``), and token ids back to text, over
-    ``encoding``, a ``TokenizerJson``. ``chat_template`` is the checkpoint's own, from its
-    ``tokenizer_config.json`` or ``chat_template.jinja``, if it has one, and
-    ``bos_token`` the text it writes for ``bos_token``.
+    ``encoding``, a ``TokenizerJson``. ``chat_template`` is the checkpoint's
+    own, from its ``chat_template.jinja`` or else ``tokenizer_config.json``,
+    if it has one, and ``bos_token`` the text it writes for ``bos_token``.
     """
 
     def __init__(
@@ -175,11 +175,25 @@ class Tokenizer:
 
 @functools.lru_cache(maxsize=8)
 def _chat_template(source: str):
-    """``source`` compiled once, in jinja2's sandbox, as transformers sets it up."""
+    """``source`` compiled once, in jinja2's sandbox, as transformers sets it
+    up: a ``{% generation %}`` block (SmolLM3's) renders its body.
+    """
+    from jinja2 import nodes
+    from jinja2.ext import Extension
     from jinja2.sandbox import ImmutableSandboxedEnvironment
 
+    class Generation(Extension):
+        tags = {"generation"}
+
+        def parse(self, parser):
+            lineno = next(parser.stream).lineno
+            body = parser.parse_statements(("name:endgeneration",), drop_needle=True)
+            return nodes.Scope(body).set_lineno(lineno)
+
     env = ImmutableSandboxedEnvironment(
-        trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"]
+        trim_blocks=True,
+        lstrip_blocks=True,
+        extensions=["jinja2.ext.loopcontrols", Generation],
     )
     return env.from_string(source)
 
@@ -338,9 +352,10 @@ class Model(iron.Graph):
             settings = directory / "tokenizer_config.json"
             jinja = directory / "chat_template.jinja"
             found = json.loads(settings.read_text()) if settings.exists() else {}
-            template = found.get("chat_template")
-            if template is None and jinja.exists():
-                template = jinja.read_text()
+            # As transformers: chat_template.jinja over tokenizer_config.json's.
+            template = (
+                jinja.read_text() if jinja.exists() else found.get("chat_template")
+            )
             # transformers renders tokenizer_config.json's bos_token, which
             # may be null or absent (nothing) or an added token's record.
             b = found.get("bos_token")
