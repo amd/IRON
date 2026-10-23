@@ -126,15 +126,18 @@ class SoftTokens:
 
 
 def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
-    """The tower's reference against transformers' soft tokens: bf16
-    against float32, so within 5% of the largest soft token's magnitude,
-    as a decoder's logits are held.
+    """The tower's reference against transformers' soft tokens, a call a
+    frame, the image split into 2 by 2 squares and its whole: bf16 against
+    float32, so within 5% of the largest soft token's magnitude, as a
+    decoder's logits are held.
     """
     tower = VisionTower(VISION, weights)
     rng = np.random.default_rng(1)
     image = rng.integers(0, 256, (300, 200, 3), dtype=np.uint8)
-    buffer, values = tower.inputs(image)
-    got = np.asarray(tower.reference(buffer, **values), np.float32)
+    calls = tower.calls(image)
+    assert len(calls) == 5
+    for buffer, values in calls:
+        got = np.asarray(tower.reference(buffer, **values), np.float32)
 
     # transformers and torch, optional: only recording a golden imports them
     def record():
@@ -152,7 +155,7 @@ def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
         weights,
     )
     want = reference.logits([], image)
-    assert got.shape == (tower.soft_rows, VISION.text_dim)
+    assert got.shape == want.shape == (tower.soft_rows, VISION.text_dim)
     err, scale = np.abs(got - want).max(), np.abs(want).max()
     # Measured 0.79%.
     assert err <= LOGITS * scale, f"|diff| {err:.4f} against |soft tokens| {scale:.3f}"
@@ -181,8 +184,9 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
         weights,
     )
     rng = np.random.default_rng(2)
-    tokens = rng.integers(0, IMAGE, 300)
-    tokens[220 : 220 + VISION.tokens] = IMAGE
+    tokens = rng.integers(0, IMAGE, 600)
+    # Five frames' placeholders: 2 by 2 squares and the whole.
+    tokens[200 : 200 + 5 * VISION.tokens] = IMAGE
     image = rng.integers(0, 256, (160, 240, 3), dtype=np.uint8)
     raw = {IMAGE: (image,)}
     for inputs, values in model.tower_calls(tokens, raw):

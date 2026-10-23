@@ -18,9 +18,9 @@ from iron.lm.golden import HuggingFace
 class HuggingFaceVLM(HuggingFace):
     """transformers' own SmolVLM (``Idefics3ForConditionalGeneration``) in
     float32, built over both configs as ``HuggingFace.build("idefics3",
-    vision, weights, **text.to_json())``, and its image processor, unsplit
-    (``do_image_splitting=False``): the checkpoint's, or for a built model
-    one of the vision config's sizes.
+    vision, weights, **text.to_json())``, and its image processor: the
+    checkpoint's, or for a built model one of the vision config's sizes and
+    splitting.
     """
 
     model_class = "AutoModelForImageTextToText"
@@ -33,15 +33,13 @@ class HuggingFaceVLM(HuggingFace):
 
     @classmethod
     def load(cls, directory) -> "HuggingFaceVLM":
-        processor = AutoImageProcessor.from_pretrained(
-            directory, do_image_splitting=False
-        )
+        processor = AutoImageProcessor.from_pretrained(directory)
         return cls(super().load(directory).model, processor)
 
     @classmethod
     def build(cls, model_type: str, config, weights, **json) -> "HuggingFaceVLM":
         processor = Idefics3ImageProcessor(
-            do_image_splitting=False,
+            do_image_splitting=config.do_image_splitting,
             size={"longest_edge": config.longest_edge},
             max_image_size={"longest_edge": config.image_size},
             resample=PILImageResampling.LANCZOS,
@@ -53,8 +51,8 @@ class HuggingFaceVLM(HuggingFace):
 
     def pixels(self, image):
         """The processor's ``pixel_values`` of a decoded ``image``,
-        ``(height, width, 3)`` uint8, rounded to bfloat16 as the device holds
-        them.
+        ``(height, width, 3)`` uint8, a frame each, rounded to bfloat16 as
+        the device holds them.
         """
         out = self.processor(
             images=[np.asarray(image)],

@@ -62,21 +62,36 @@ class SmolVLMText(CausalLM):
         return HuggingFaceVLM
 
 
-# The real processor's own ids either side of an image and its question
-# ("<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:", one
-# image, no splitting), read off Idefics3Processor's output.
-_PREAMBLE_IDS = [1, 11126, 42, 49189, 49152]
-_SUFFIX_IDS = [49189]
+# The real processor's own ids ("<|im_start|>User:<image>{question}
+# <end_of_utterance>\nAssistant:", one image), read off Idefics3Processor's
+# output: the turn's opening, its close, the markers around each frame's
+# placeholders, the first of the squares' row and column markers
+# (<row_1_col_1>, of six by six), and the line after each row of squares,
+# the last row's and the whole image's one token.
+_USER_IDS = [1, 11126, 42]
 _TAIL_IDS = [49279, 198, 9519, 9531, 42]
+_FAKE, _GLOBAL, _ROW_COL, _LINE, _LINES = 49189, 49152, 49153, 198, 1116
 
 
-def build_prompt(question: list[int], vision: VisionConfig) -> list[int]:
-    """The token ids of one unsplit image, first in the turn, then the
-    ``question``'s ids, as the real processor lays them out: the image a run
-    of ``vision.image_token`` placeholders, one per soft token.
+def build_prompt(
+    question: list[int], vision: VisionConfig, rows: int = 0, columns: int = 0
+) -> list[int]:
+    """The token ids of one image first in the turn, then the
+    ``question``'s ids, as the real processor lays them out: each of
+    ``rows`` by ``columns`` squares (``VisionConfig.grid``) a run of
+    ``vision.image_token`` placeholders, one per soft token, after its row
+    and column's marker, a line after each row, then the whole image's run.
     """
-    image = [vision.image_token] * vision.tokens
-    return _PREAMBLE_IDS + image + _SUFFIX_IDS + question + _TAIL_IDS
+    run = [vision.image_token] * vision.tokens
+    image = []
+    for r in range(rows):
+        for k in range(columns):
+            image += [_FAKE, _ROW_COL + 6 * r + k, *run]
+        image.append(_LINE)
+    if rows:
+        image[-1] = _LINES
+    image += [_FAKE, _GLOBAL, *run, _FAKE]
+    return _USER_IDS + image + question + _TAIL_IDS
 
 
 @dataclasses.dataclass(frozen=True)
