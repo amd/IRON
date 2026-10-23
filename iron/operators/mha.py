@@ -201,6 +201,7 @@ class MHA(Operator):
     """
 
     test = Testing(_cases)
+    ends_command: ClassVar[bool] = True
 
     num_heads: int = param()
     num_KV_heads: int = param(default=lambda op: op.num_heads)

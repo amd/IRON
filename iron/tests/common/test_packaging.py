@@ -125,6 +125,32 @@ def test_a_prompt_chunk_is_a_command_per_attention_and_decode_one(npu2):
     assert list(cuts) == attention and len(cuts) == model.config.num_hidden_layers
 
 
+class Encoding(iron.Graph):
+    """Two layers' attention over a call's own rows, as a tower's are,
+    bounded by a scratchpad value.
+    """
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        rows, heads, d = x.shape
+        x = x[:n]
+        for _ in range(2):
+            o = MHA.step(
+                x, x, x, heads_interleaved=True, kv_interleaved=True, causal=False
+            )
+            x = ReLU.step(o.reshape(rows * heads * d)).reshape(rows, heads, d)
+        return x
+
+
+def test_attention_a_scratchpad_value_bounds_ends_a_command(npu2):
+    """An encoder's attention grows with its rows, which a call bounds: a
+    command per attention step, so no command of a long call outlasts the
+    watchdog.
+    """
+    recording = Encoding().record(x=(256, 2, 64))
+    attention = [i + 1 for i, s in enumerate(recording.steps) if isinstance(s.op, MHA)]
+    assert list(plan(npu2, recording).commands) == attention and len(attention) == 2
+
+
 class ManyWords(iron.Graph):
     def body(self, x, *, n: Scratchpad[np.int32]):
         return tuple(ReLU.step(x[: n + k]) for k in range(40))

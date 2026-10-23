@@ -102,6 +102,9 @@ class Operator(jit.Operator, library=True):
     own_preamble: ClassVar[bool] = False
     # A full ELF lowers every operator's sequence under the union.
     aiecc_flags: ClassVar[tuple[str, ...]] = ()
+    # A step bounded per call ends a full ELF's command: its work grows past
+    # the driver's watchdog with the bound (attention's, as its square).
+    ends_command: ClassVar[bool] = False
     # Per leading operand that may be a view: the param holding its pattern
     # and the per-call value a dynamic index binds.
     accept_views: ClassVar[tuple[tuple[str, str], ...]] = ()
