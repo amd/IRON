@@ -19,6 +19,7 @@ The convolution's last rows and the scan's state are the layer's
 """
 
 import dataclasses
+from pathlib import Path
 
 import numpy as np
 
@@ -219,5 +220,5 @@ class GraniteHybrid(Granite):
     """
 
     config = GraniteHybridConfig
-    profile = None
+    profile = Path(__file__).with_name("profiles")
     layer_class = GraniteHybridLayer

@@ -17,6 +17,7 @@ queries turn by a table of their own, k's times that scale (``Rope``'s
 
 import dataclasses
 import math
+from pathlib import Path
 
 import numpy as np
 
@@ -173,6 +174,7 @@ class Ministral3(CausalLM):
     """
 
     config = Ministral3Config
+    profile = Path(__file__).with_name("profiles")
 
     def __init__(self, config: Ministral3Config, weights):
         super().__init__(config, text_weights(weights))
