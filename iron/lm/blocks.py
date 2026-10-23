@@ -651,7 +651,7 @@ class RMSNorm(iron.Graph):
 
 class LayerNorm(iron.Graph):
     """``torch.nn.LayerNorm`` over the last axis, times ``weight`` plus
-    ``bias``; the kernel takes only its own ``eps`` (``F.layer_norm``).
+    ``bias`` (``F.layer_norm``).
     """
 
     def __init__(self, normalized_shape: int | tuple[int], eps: float = 1e-5):
@@ -1163,11 +1163,11 @@ class EncoderLayer(DecoderLayer):
     """
 
     def __init__(self, c, i: int, self_attn=None):
-        self.input_layernorm = LayerNorm(c.hidden_size)
+        self.input_layernorm = LayerNorm(c.hidden_size, c.eps)
         self.self_attn = (
             Attention(c, i, o_bias=c.attention_bias) if self_attn is None else self_attn
         )
-        self.post_attention_layernorm = LayerNorm(c.hidden_size)
+        self.post_attention_layernorm = LayerNorm(c.hidden_size, c.eps)
         self.mlp = MLP(c)
         self.cache = NoCache()
         self.rope = None

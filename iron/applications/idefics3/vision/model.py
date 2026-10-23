@@ -34,9 +34,8 @@ from iron.operators.resample.reference import Interpolation
 @dataclasses.dataclass(frozen=True)
 class VisionConfig(Config):
     """SmolVLM's vision tower and connector's shape, from the checkpoint's
-    ``vision_config``, ``text_config`` and top-level ``scale_factor``.
-    Its norms take the kernel's LayerNorm eps, not the checkpoint's
-    ``layer_norm_eps``, which transformers' uses.
+    ``vision_config``, ``text_config`` and top-level ``scale_factor``;
+    ``eps`` is its LayerNorms', the checkpoint's ``layer_norm_eps``.
     """
 
     # Every projection biased (``Attention``, ``MLP``).
@@ -134,7 +133,7 @@ class VisionTower(Tower):
         self.vision_model = weights.model.vision_model
         self.connector = weights.model.connector
         super().__init__(c, c.side**2, c.tokens)
-        self.final_norm = LayerNorm(c.hidden_size)
+        self.final_norm = LayerNorm(c.hidden_size, c.eps)
         v = "model.vision_model."
         self.load_layers(weights, f"{v}encoder.layers.", f"{v}post_layernorm.")
         through = (c.longest_edge, c.longest_edge)

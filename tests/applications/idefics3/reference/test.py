@@ -127,8 +127,7 @@ class SoftTokens:
 
 def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
     """The tower's reference against transformers' soft tokens: bf16
-    against float32, LayerNorm at the kernel's 1e-5 against the
-    checkpoint's 1e-6, so within 5% of the largest soft token's magnitude,
+    against float32, so within 5% of the largest soft token's magnitude,
     as a decoder's logits are held.
     """
     tower = VisionTower(VISION, weights)
@@ -155,7 +154,7 @@ def test_the_vision_tower_s_soft_tokens_match_transformers(golden, weights):
     want = reference.logits([], image)
     assert got.shape == (tower.soft_rows, VISION.text_dim)
     err, scale = np.abs(got - want).max(), np.abs(want).max()
-    # Measured 0.92%.
+    # Measured 0.79%.
     assert err <= LOGITS * scale, f"|diff| {err:.4f} against |soft tokens| {scale:.3f}"
 
 

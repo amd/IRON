@@ -41,9 +41,6 @@ from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
-# mlir-aie's layer_norm kernel always uses this epsilon.
-LAYER_NORM_EPS = 1e-5
-
 
 def linear(x: Handle | State, weight, bias=None, *, precision=None, **gemv) -> Handle:
     """Return ``x @ weight.T``, plus ``bias`` on every row if ``bias`` is given.
@@ -117,23 +114,19 @@ def rms_norm(
 
 
 def layer_norm(
-    x: Handle, normalized_shape, weight=None, bias=None, eps: float = LAYER_NORM_EPS
+    x: Handle, normalized_shape, weight=None, bias=None, eps: float = 1e-5
 ) -> Handle:
     """Layer-normalize ``x`` over its last axis, as torch's ``layer_norm``.
 
-    Subtracts the mean, divides by the standard deviation, then multiplies
-    by ``weight`` and adds ``bias`` when they are given.
+    Subtracts the mean, divides by the standard deviation (``eps`` under
+    the root), then multiplies by ``weight`` and adds ``bias`` when they are
+    given.
 
     Raises:
-        ValueError: ``normalized_shape`` is not ``x``'s last axis, or
-            ``eps`` is not the kernel's own, ``LAYER_NORM_EPS``.
+        ValueError: ``normalized_shape`` is not ``x``'s last axis.
     """
     _last_axis("layer_norm", x, normalized_shape)
-    if eps != LAYER_NORM_EPS:
-        raise ValueError(
-            f"layer_norm(): the kernel takes no epsilon but {LAYER_NORM_EPS}, not {eps}"
-        )
-    y = LayerNorm.step(x, weight=weight)
+    y = LayerNorm.step(x, weight=weight, epsilon=eps)
     return y if bias is None else y + bias
 
 

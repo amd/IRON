@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The norms and GELU forms ``F`` refuses and each GELU's operator,
+"""The norms and GELU forms ``F`` refuses, a LayerNorm's eps and each GELU's operator,
 device-free, and EmbeddingGemma 2's text layer (``SandwichLayer`` and
 ``PleLayer``, the shared blocks at their fullest) through its operators'
 references against Hugging Face's own Gemma 4 layer.
@@ -100,10 +100,21 @@ def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
         norm(x, 4)
 
 
-def test_layer_norm_refuses_an_eps_other_than_its_kernel_s():
-    x = SimpleNamespace(shape=(4, WIDTH))
-    with pytest.raises(ValueError, match="takes no epsilon"):
-        F.layer_norm(x, WIDTH, eps=1e-6)
+def test_a_layer_norm_s_eps_is_its_kernel_s():
+    class Normed(iron.Graph):
+        def body(self, x):
+            return F.layer_norm(x, x.shape[-1:], eps=1e-6)
+
+    (step,) = Normed().record(x=(T, WIDTH)).steps
+    assert (type(step.op).__name__, step.op.epsilon) == ("LayerNorm", 1e-6)
+    x = np.random.default_rng(0).standard_normal((T, WIDTH)).astype(bfloat16)
+    x[0] = 0.01 * x[0]
+    torch_like = (x - x.mean(-1, keepdims=True, dtype=np.float32)) / np.sqrt(
+        x.astype(np.float32).var(-1, keepdims=True) + np.float32(1e-6)
+    )
+    np.testing.assert_allclose(
+        np.asarray(step.op.reference(x), np.float32), torch_like, rtol=2**-7
+    )
 
 
 @pytest.mark.parametrize(

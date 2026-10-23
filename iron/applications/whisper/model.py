@@ -228,7 +228,7 @@ class WhisperDecoder(Decoder):
     def __init__(self, c: WhisperConfig, layer):
         super().__init__(c, layer)
         self.embed_positions = Embedding(c.max_seq_len, c.hidden_size)
-        self.norm = LayerNorm(c.hidden_size)
+        self.norm = LayerNorm(c.hidden_size, c.eps)
 
 
 def decoder_weights(weights):
@@ -255,7 +255,7 @@ class WhisperEncoder(Tower):
     def __init__(self, config: WhisperEncoderConfig, weights):
         c, e = config, weights.model.encoder
         super().__init__(c, c.rows, c.rows)
-        self.final_norm = LayerNorm(c.hidden_size)
+        self.final_norm = LayerNorm(c.hidden_size, c.eps)
         self.load_layers(weights, "model.encoder.layers.", "model.encoder.layer_norm.")
         self.log_mel = LogMel(
             c.n_fft,

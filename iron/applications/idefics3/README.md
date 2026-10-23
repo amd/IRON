@@ -11,9 +11,6 @@ soft tokens, as transformers' `masked_scatter` places them; the model does
 not cross-attend. `model.py` and `vision/model.py` say what is its own.
 The shared library is [AGENTS.md](../../../AGENTS.md#language-models).
 
-Its vision LayerNorms run at the LayerNorm kernel's epsilon, 1e-5
-(`iron.functional.LAYER_NORM_EPS`), not the checkpoint's 1e-6.
-
 ## Scope: one image of any size, no splitting
 
 By default (`do_image_splitting=True`), the real processor splits a large

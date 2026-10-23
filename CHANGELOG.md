@@ -259,6 +259,9 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `LayerNorm` takes `epsilon` (mlir-aie's `layer_norm_eps`), and
+  `F.layer_norm` passes its `eps`: a model's LayerNorms run at its
+  checkpoint's epsilon (SmolVLM's vision tower at 1e-6).
 - A projection's precision is its model config's (`Config.precision`; Llama's
   is `HIGH` from 3B's width), not a tunable a profile sets or the tuner tries.
 - EmbeddingGemma 2's audio and vision towers, `AudioTower` and
