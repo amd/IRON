@@ -164,8 +164,9 @@ def test_load_loads_a_version_whose_weights_are_already_uploaded():
 
 
 def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state():
-    """Compiling on first call at a new shape: the arena grows under the
-    version that already ran, which keeps working.
+    """Once a version is loaded, a call at a new shape compiles nothing and
+    raises; compiling it then grows the arena under the version that
+    already ran, which keeps working.
     """
     f, w, w2, s = _function()
     x1, x2 = _numbers(E, 5), _numbers(2 * E, 6)
@@ -174,7 +175,13 @@ def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state
     np.testing.assert_array_equal(_f32(first), _f32(x1) + 2 * _f32(w))
     assert f.arena.generation == 1
 
-    out = f(x2).numpy()  # compiles the second version, grows the arena
+    with pytest.raises(
+        ValueError, match=rf"no loaded version takes x=\({2 * E},\) bfloat16"
+    ):
+        f(x2)
+    assert len(f.versions) == 1
+    f.compile(x=(2 * E,))
+    out = f(x2).numpy()
     assert f.arena.generation == 2
     expect = (_f32(x2) + _f32(w2))[E:] + _f32(x1) + _f32(w)
     np.testing.assert_array_equal(_f32(out), expect)

@@ -668,8 +668,19 @@ class Graph:
             name: (tuple(int(n) for n in t.shape), np.dtype(t.dtype).type)
             for name, t in given.items()
         }
-        version = self._versions.get(self._signature(shapes))
+        signature = self._signature(shapes)
+        version = self._versions.get(signature)
         if version is None:
+            if any(v.is_loaded for v in self._versions.values()):
+                loaded = "; ".join(
+                    ", ".join(f"{n}={s} {d}" for n, s, d in v) or "no input"
+                    for v in self._versions
+                )
+                given = ", ".join(f"{n}={s} {d}" for n, s, d in signature)
+                raise ValueError(
+                    f"{self.name}: no loaded version takes {given} (loaded: "
+                    f"{loaded}); compile every shape before the first call"
+                )
             logger.info("%s: compiling for %s", self.name, shapes)
             version = self.compile(**shapes)
         return version(*given.values(), **values)
