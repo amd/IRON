@@ -39,6 +39,7 @@ from aie.iron import (
     Acquire,
     Bd,
     Buffer,
+    BufferPool,
     DmaChannel,
     Lock,
     ObjectFifo,
@@ -54,7 +55,7 @@ from aie.iron.kernels import (
     FlmGemma4DecodeGeometry,
     flm_gemma4,
 )
-from aie.iron.controlflow import range_
+from aie.iron.controlflow import else_, if_, range_
 from aie.iron.dataflow import Flow, PacketFlow
 from aie.iron.device import Tile
 
@@ -160,92 +161,54 @@ PLACEMENT = {
     "pl_shim_1": (5, 0),
 }
 
+# The three bf16 projection weight streams, each an ObjectFifo of one 32 by
+# 256 weight block: the weight's name in the blob, the kernel whose first
+# argument gives the block type, and the shim tile and channel the runtime
+# fills it from. Each lands on S2MM 1 of its stage's core.
+PLI_WEIGHTS = (
+    ("pli_down", "proj_layer_embedding_mvm", "pl_shim_0", 1),
+    ("pli_gate", "gate_layer_embedding_mvm", "pl_shim_1", 0),
+    ("pli_up", "per_layer_up_mvm", "pl_shim_1", 1),
+)
+
 _BF16 = np.dtype[bfloat16]
 _RTP_TY = np.ndarray[(16,), np.dtype[np.int32]]
 
-# Core locks, by the name of the factory argument that gives the kernel the id.
-RMS_LOCKS = dict(
-    w_prod_lock=0,
-    w_cons_lock=1,
-    y_prod_lock=2,
-    y_cons_lock=3,
-    x_prod_lock=4,
-    x_cons_lock=5,
-    rtp_available_lock=6,
-    lm_head_out_prod_lock=7,
-    lm_head_out_cons_lock=8,
-)
-ROPE_LOCKS = dict(
-    qkv_prod_lock=0,
-    qkv_cons_lock=1,
-    k_prod_lock=4,
-    k_cons_lock=5,
-    v_prod_lock=6,
-    v_cons_lock=7,
-    rope_prod_lock=8,
-    rope_cons_lock=9,
-)
-ROPE_Q_PASS_LOCK = 10
-PLE_LOCKS = dict(
-    norm_w_prod_lock=0,
-    x0_per_layer_prod_lock=1,
-    x0_prod_lock=2,
-    xw_cons_lock=3,
-    proj_w_prod_lock=4,
-    proj_w_cons_lock=5,
-    y_prod_lock=6,
-    y_cons_lock=7,
-)
-# The lock of the DMA's second norm_w BD. No kernel takes it.
-PLE_NORM_W_P2_LOCK = 8
-# final_x_* are locks of the RMS tile, to the left of the gate tile.
-GLE_LOCKS = dict(
-    x_prod_lock=0,
-    x_cons_lock=1,
-    proj_w_prod_lock=2,
-    proj_w_cons_lock=3,
-    y_prod_lock=4,
-    y_cons_lock=5,
-    final_x_prod_lock=RMS_LOCKS["lm_head_out_prod_lock"],
-    final_x_cons_lock=RMS_LOCKS["lm_head_out_cons_lock"],
-)
-PLU_LOCKS = dict(
-    x_prod_lock=0,
-    x_cons_lock=1,
-    proj_w_prod_lock=2,
-    proj_w_cons_lock=3,
-    y_prod_lock=4,
-    y_cons_lock=5,
-)
-GLU_LOCKS = dict(x_prod_lock=0, x_cons_lock=1, y_prod_lock=2, y_cons_lock=3, rtp_lock=6)
-PROJ_LOCKS = dict(
-    x_prod_lock=0,
-    x_cons_lock=1,
-    w_prod_lock=2,
-    w_cons_lock=3,
-    y_prod_ping_lock=4,
-    y_prod_pong_lock=5,
-    rtp_available_lock=6,
-    y_cons_ping_lock=7,
-    y_cons_pong_lock=8,
-)
-# The qk core's lock 8 orders the kv core's RTP read after the qk core's.
-ATTN_HANDSHAKE_LOCK = 8
-ATTN_KV_LOCKS = dict(
-    o_prod_lock=0,
-    o_cons_lock=1,
-    v_prod_lock=2,
-    v_cons_lock=3,
-    l_cons_lock=ATTN_HANDSHAKE_LOCK,
-)
-ATTN_QK_LOCKS = dict(k_prod_lock=2, k_cons_lock=3)
 
-# The RMS, GLU and projection cores acquire this lock before they read their
-# RTPs. The sequence sets it after it writes them. The RoPE and attention
-# cores read their RTPs after data from the projection cores arrives.
-RTP_SYNC_LOCK = PROJ_LOCKS["rtp_available_lock"]
-assert RTP_SYNC_LOCK == RMS_LOCKS["rtp_available_lock"] == GLU_LOCKS["rtp_lock"]
-RTP_SYNC_LOCK_ADDR = 0x1F000 + 16 * RTP_SYNC_LOCK
+def _lock_ids(*names):
+    """Lock ids for ``names``, numbered from 0 in the order the design declares them.
+
+    A kernel takes a lock id as a compile-time constant, so the design has to
+    pin every lock a kernel names. It pins them from 0 up, which is what the
+    compiler would pick, and leaves the ids above them to the compiler.
+    """
+    return {name: i for i, name in enumerate(names)}
+
+
+# Core locks, by the name of the factory argument that gives the kernel the id.
+RMS_LOCKS = _lock_ids(
+    "y_prod_lock",
+    "y_cons_lock",
+    "x_prod_lock",
+    "x_cons_lock",
+)
+ROPE_LOCKS = {}
+PLE_LOCKS = {}
+GLE_LOCKS = {}
+PLU_LOCKS = {}
+GLU_LOCKS = {}
+PROJ_LOCKS = _lock_ids(
+    "x_prod_lock",
+    "x_cons_lock",
+    "w_prod_lock",
+    "w_cons_lock",
+    "y_prod_ping_lock",
+    "y_prod_pong_lock",
+    "y_cons_ping_lock",
+    "y_cons_pong_lock",
+)
+ATTN_KV_LOCKS = {}
+ATTN_QK_LOCKS = {}
 
 
 class _ShimPkt(IntEnum):
@@ -272,6 +235,17 @@ _X_FROM_GLU = 22
 _KV_PKT_GLOBAL = 12
 _KV_PKT_SWA = 13
 
+# The KV cache streams, shim to attention memtile to core. Both layer types'
+# streams share a shim channel, and the packet id picks the one a dispatch
+# fills. Fields: the stream, its shim channel, its packet id, the memtile
+# channel it leaves on, and the stage whose core reads it.
+KV_STREAMS = (
+    ("k", 0, _KV_PKT_GLOBAL, 0, "attn_qk"),
+    ("v", 1, _KV_PKT_GLOBAL, 1, "attn_kv"),
+    ("swa_k", 0, _KV_PKT_SWA, 2, "swa_attn_qk"),
+    ("swa_v", 1, _KV_PKT_SWA, 3, "swa_attn_kv"),
+)
+
 
 def layer_kernels(geometry):
     """The flm_gemma4_decode_* kernels that this design's cores link, by kernel name.
@@ -280,13 +254,10 @@ def layer_kernels(geometry):
     depend on the geometry's KV head count.
     """
     two_kv = geometry.num_kv_heads == 2
-    qk_handshake = "l_prod_lock" if two_kv else "l_cons_lock"
 
     def build(factory, locks, **kwargs):
         return factory(geometry=geometry, **locks, **kwargs)
 
-    attn_qk_locks = {**ATTN_QK_LOCKS, qk_handshake: ATTN_HANDSHAKE_LOCK}
-    swa_qk_locks = {**ATTN_QK_LOCKS, "l_cons_lock": ATTN_HANDSHAKE_LOCK}
     return {
         "rms_residual": build(flm_gemma4.flm_gemma4_decode_rms_residual, RMS_LOCKS),
         "rope": build(flm_gemma4.flm_gemma4_decode_rope, ROPE_LOCKS),
@@ -296,10 +267,27 @@ def layer_kernels(geometry):
         "proj_layer_embedding": build(
             flm_gemma4.flm_gemma4_decode_proj_layer_embedding, PLE_LOCKS
         ),
+        "proj_layer_embedding_mvm": build(
+            flm_gemma4.flm_gemma4_decode_proj_layer_embedding_mvm, {}
+        ),
+        "proj_layer_embedding_store": build(
+            flm_gemma4.flm_gemma4_decode_proj_layer_embedding_store, {}
+        ),
         "gate_layer_embedding": build(
             flm_gemma4.flm_gemma4_decode_gate_layer_embedding, GLE_LOCKS
         ),
+        "gate_layer_embedding_mvm": build(
+            flm_gemma4.flm_gemma4_decode_gate_layer_embedding_mvm, {}
+        ),
+        "gate_layer_embedding_store": build(
+            flm_gemma4.flm_gemma4_decode_gate_layer_embedding_store, {}
+        ),
         "per_layer_up": build(flm_gemma4.flm_gemma4_decode_per_layer_up, PLU_LOCKS),
+        "per_layer_up_mvm": build(flm_gemma4.flm_gemma4_decode_per_layer_up_mvm, {}),
+        "per_layer_up_store": build(
+            flm_gemma4.flm_gemma4_decode_per_layer_up_store, {}
+        ),
+        "bf16_proj_zero": build(flm_gemma4.flm_gemma4_decode_bf16_proj_zero, {}),
         "glu": build(flm_gemma4.flm_gemma4_decode_glu, GLU_LOCKS),
         "proj_main": build(flm_gemma4.flm_gemma4_decode_proj_main, PROJ_LOCKS),
         "attn_kv": build(
@@ -316,11 +304,11 @@ def layer_kernels(geometry):
                 if two_kv
                 else flm_gemma4.flm_gemma4_decode_attn_qk
             ),
-            attn_qk_locks,
+            ATTN_QK_LOCKS,
         ),
         "swa_attn_kv": build(flm_gemma4.flm_gemma4_decode_swa_attn_kv, ATTN_KV_LOCKS),
         "swa_attn_qk": build(
-            flm_gemma4.flm_gemma4_decode_attn_qk, swa_qk_locks, sliding_window=True
+            flm_gemma4.flm_gemma4_decode_attn_qk, ATTN_QK_LOCKS, sliding_window=True
         ),
     }
 
@@ -391,6 +379,22 @@ def arg_sizes(geometry):
     }
 
 
+def _fill_bd(pool, **bd_args):
+    """One BD of a hand-written chain, filling ``pool``'s one segment.
+
+    It takes the lock protocol that pool's core endpoint expects: acquire the
+    object, write it, hand it over.
+    """
+    (segment,) = pool.segments
+    (buffer,) = pool.buffers
+    return Bd(
+        buffer,
+        acquires=[Acquire(segment.produce_lock)],
+        releases=[Release(segment.consume_lock)],
+        **bd_args,
+    )
+
+
 def _single_bd(direction, channel, buf, acq, rel, **bd_args):
     """A DMA channel of one BD that repeats behind one lock pair."""
     return DmaChannel(
@@ -405,17 +409,48 @@ def _call_kernel(*args):
     args[-1](*args[:-1])
 
 
-def _connect(
-    rt, src, src_ch, dst, dst_ch, pkt_id=None, keep_pkt_header=False, shim_symbol=None
+def _wrapped_call(acquire=(), release=()):
+    """A core body that acquires, calls the kernel, then releases.
+
+    ``acquire`` and ``release`` hold (lock, value) pairs. The kernel is the
+    body's last argument and takes the others.
+    """
+
+    def body(*args):
+        for lock, value in acquire:
+            lock.acquire(value)
+        args[-1](*args[:-1])
+        for lock, value in release:
+            lock.release(value)
+
+    return body
+
+
+def _bf16_proj(
+    y,
+    w_h,
+    x,
+    y_acc,
+    m_blocks,
+    k_blocks,
+    x_offset,
+    y_offset,
+    zero,
+    mvm,
+    store,
 ):
-    """A circuit-switched flow, or a packet flow when pkt_id is set."""
-    ends = dict(src_channel=src_ch, dst_channel=dst_ch, shim_symbol=shim_symbol)
-    if pkt_id is None:
-        rt.add_flow(Flow(src, dst, **ends))
-    else:
-        rt.add_flow(
-            PacketFlow(pkt_id, src, dst, keep_pkt_header=keep_pkt_header, **ends)
-        )
+    """One bf16 projection: ``m_blocks`` output blocks over ``k_blocks`` weight blocks.
+
+    ``w_h`` consumes the stage's weight ObjectFifo, one block per MVM, in the
+    order the sequence fills it.
+    """
+    for i in range_(m_blocks):
+        zero(y_acc)
+        for j in range_(k_blocks):
+            w = w_h.acquire(1)
+            mvm(w, x, y_acc, j, x_offset)
+            w_h.release(1)
+        store(y, y_acc, i, y_offset)
 
 
 @dataclass
@@ -430,7 +465,8 @@ class _Ctx:
 
     def entry(self, name, symbol):
         """The entry point ``symbol`` of the kernel ``name``, typed by its factory."""
-        return getattr(self.kernels[name], symbol)
+        kernel = self.kernels[name]
+        return kernel if kernel.name == symbol else getattr(kernel, symbol)
 
     def rtp_buffer(self, tile, key, name=None):
         """The RTP buffer of RTP_ADDRESSES key ``key``, pinned at its address."""
@@ -442,7 +478,39 @@ class _Ctx:
             address=self.rtp[key],
         )
 
-    def add_locks(self, tile, ids_inits):
+    def manual_pool(self, tile, buffers, obj_type, drain=False):
+        """A BufferPool over ``buffers`` that a hand-written BD chain drives.
+
+        The core reaches the objects through the pool's handle. ``drain``
+        gives the core the filling end and the BD chain the draining one.
+        """
+        if isinstance(buffers, Buffer):
+            buffers = [buffers]
+        stem = buffers[0].name
+        prod = Lock(tile=tile, init=len(buffers), name=f"{stem}_prod")
+        cons = Lock(tile=tile, init=0, name=f"{stem}_cons")
+        for lock in (prod, cons):
+            self.rt.add_lock(lock)
+        return BufferPool(
+            obj_type,
+            tile=tile,
+            depth=len(buffers),
+            name=f"{stem}_pool",
+            buffers=list(buffers),
+            produce_lock=prod,
+            consume_lock=cons,
+            manual_fill=not drain,
+            manual_drain=drain,
+        )
+
+    def add_locks(self, tile, inits):
+        """The tile's locks, one per init value, at ids the compiler picks.
+
+        Only a lock that no kernel names can take an id this way.
+        """
+        return self.pinned_locks(tile, [(None, init) for init in inits])
+
+    def pinned_locks(self, tile, ids_inits):
         """The tile's locks, one per (lock id, init) pair."""
         out = [Lock(tile=tile, lock_id=i, init=init) for i, init in ids_inits]
         for lock in out:
@@ -452,7 +520,7 @@ class _Ctx:
     def locks(self, tile, table, inits):
         """The tile's locks named in ``table``, with ``inits`` by name."""
         ids_inits = [(table[name], init) for name, init in inits.items()]
-        return dict(zip(inits, self.add_locks(tile, ids_inits)))
+        return dict(zip(inits, self.pinned_locks(tile, ids_inits)))
 
 
 def _ceil_mul(v, chunk):
@@ -477,6 +545,7 @@ def _sequence(
     rtp,
     layer_type,
     sliding_window,
+    sync,
     x_arg,
     proj_arg,
     rms_arg,
@@ -484,12 +553,17 @@ def _sequence(
     kv_arg,
     len_arg,
     max_l_arg,
+    pli_prods,
+    y_cons,
+    kv_prods,
 ):
     """The runtime sequence of one ``layer_type`` dispatch.
 
     The sequence writes the RTPs, then starts the shim DMA legs in the order of
     the engine's gen_layer_seq. Offsets and lengths count bf16 elements. L
-    counts the tokens up to and including this one.
+    counts the tokens up to and including this one. ``pli_prods`` holds the
+    producer end of each PLI_WEIGHTS fifo, in that order. ``y_cons`` holds the
+    consumer end of the layer output.
     """
     IS_SWA = layer_type in ("swa", "swa_skip")
     IS_SKIP = layer_type in ("global_skip", "swa_skip")
@@ -500,12 +574,13 @@ def _sequence(
     DH = g.swa_dh if IS_SWA else g.dh
     DK = g.num_kv_heads * DH
     weights = weight_layout(g, layer_type)
+    arg_lens = arg_sizes(g)
 
     for c in PROJ_COLS:
         for r in (2, 3, 4, 5):
             npu_write32(rtp["proj_swa"], int(IS_SWA), column=c, row=r)
             npu_write32(rtp["proj_skip"], int(IS_SKIP), column=c, row=r)
-            npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=c, row=r)
+            sync["proj"][(c, r)].set(1)
 
     def write(stage, addr, value):
         col, row = PLACEMENT[stage]
@@ -521,8 +596,8 @@ def _sequence(
     write("rope", rtp["rope_skip_kv"], int(IS_SKIP))
     write("swa_rope", rtp["swa_rope_skip_kv"], int(IS_SKIP))
     write("glu", rtp["glu_skip"], int(IS_SKIP and g.double_wide_mlp))
-    write("rms", RTP_SYNC_LOCK_ADDR, 1)
-    write("glu", RTP_SYNC_LOCK_ADDR, 1)
+    sync["rms"].set(1)
+    sync["glu"].set(1)
 
     # The sequence keeps two rounds of legs in flight, as the engine's
     # bd_offset double buffer does. A shim tile has 16 BDs.
@@ -540,6 +615,11 @@ def _sequence(
     def emit(*legs):
         """Start one round of legs."""
         dma_start_task(*[task for task, _ in legs])
+        window.append(legs)
+        flush()
+
+    def emit_started(*legs):
+        """Record one round of legs that their own fill already started."""
         window.append(legs)
         flush()
 
@@ -565,8 +645,12 @@ def _sequence(
     # type's RoPE tile.
     rope_sym = "send_rms" if IS_SWA else "send_x"
     emit(leg(rope_sym, rope_rms_arg.op, 0, 3 * DH, pkt=_ShimPkt.to_rope))
-    recv_y, _ = leg("recv_y", x_arg.op, 0, D)
-    dma_start_task(recv_y)
+    recv_y = y_cons.drain(
+        x_arg,
+        tap=TensorAccessPattern((arg_lens["x"],), 0, [1, 1, 1, D], [0, 0, 0, 1]),
+        wait=True,
+        managed=False,
+    )
 
     def move_weights(w):
         """The engine's _move_weights: a round is 2 legs to each proj column."""
@@ -584,9 +668,25 @@ def _sequence(
                     )
             emit(*legs)
 
+    pli_prod = dict(zip([name for name, *_ in PLI_WEIGHTS], pli_prods))
+    kv_prod = dict(zip([key for key, *_ in KV_STREAMS], kv_prods))
+
     def pli_leg(name):
-        """One leg over the bf16 weight ``name``, on the shim symbol ``name``."""
-        return leg(name, proj_arg.op, weights[name].offset, weights[name].size)
+        """One leg over the bf16 weight ``name``, filling that weight's fifo.
+
+        One leg carries the whole matrix. Its stage's core takes it one 32 by
+        256 block at a time, so the fill starts here and the window awaits it.
+        """
+        w = weights[name]
+        task = pli_prod[name].fill(
+            proj_arg,
+            tap=TensorAccessPattern(
+                (arg_lens["proj"],), w.offset, [1, 1, 1, w.size], [0, 0, 0, 1]
+            ),
+            wait=True,
+            managed=False,
+        )
+        return task.handle, True
 
     v_cache_off = DK * SW if IS_SWA else MAX_L_v * DK
     move_weights(weights["qkv"])
@@ -600,13 +700,27 @@ def _sequence(
     emit(leg("pli_rope_rms", rope_rms_arg.op, 3 * DH, g.pli_d * 2 + D + MIN_BF16_PAD))
     # x reuses pli_rope_rms's channel as a second BD.
     emit(leg("pli_rope_rms", x_arg.op, 2 * D, D, token=False))
-    emit(pli_leg("pli_down"))
-    # The KV cache into the attention memtile.
-    mv_pkt = _KV_PKT_SWA if IS_SWA else _KV_PKT_GLOBAL
+    emit_started(pli_leg("pli_down"))
+    # The KV cache into the attention memtile. This layer type's pair of
+    # KV_STREAMS fifos carries it; the other pair stays idle this dispatch.
+    k_key, v_key = ("swa_k", "swa_v") if IS_SWA else ("k", "v")
+
+    def kv_leg(key, off, length, token=True):
+        """One leg of the KV cache into ``key``'s fifo."""
+        task = kv_prod[key].fill(
+            kv_arg,
+            tap=TensorAccessPattern(
+                (arg_lens["kv"],), off, [1, 1, 1, length], [0, 0, 0, 1]
+            ),
+            wait=token,
+            managed=False,
+        )
+        return task.handle, token
+
     if not IS_SWA:
         d2m = _ceil_mul(L, LK) * DK
-        emit(leg("move_k", kv_arg.op, 0, d2m, pkt=mv_pkt))
-        emit(leg("move_v", kv_arg.op, v_cache_off, d2m, pkt=mv_pkt))
+        emit_started(kv_leg(k_key, 0, d2m))
+        emit_started(kv_leg(v_key, v_cache_off, d2m))
     else:
         # The sliding-window cache is a ring of `rows` rows. Its oldest row is
         # `start`. Phase 1 sends rows start..rows-1. Phase 2 sends rows
@@ -627,30 +741,24 @@ def _sequence(
         p1_len = (rows - start) * DK - arith.andi(_z, _as_i32(DK))
         p2_off = arith.andi(_z, p1_len)
         p2_len = arith.ori(start * DK, arith.andi(_z, _as_i32(DK)))
-        emit(leg("move_k", kv_arg.op, p1_off, p1_len, pkt=mv_pkt))
-        emit(leg("move_v", kv_arg.op, p1_off + v_cache_off, p1_len, pkt=mv_pkt))
-        emit(leg("move_k", kv_arg.op, p2_off, p2_len, token=False, pkt=mv_pkt))
-        emit(
-            leg(
-                "move_v",
-                kv_arg.op,
-                p2_off + v_cache_off,
-                p2_len,
-                token=False,
-                pkt=mv_pkt,
-            )
-        )
+        emit_started(kv_leg(k_key, p1_off, p1_len))
+        emit_started(kv_leg(v_key, p1_off + v_cache_off, p1_len))
+        emit_started(kv_leg(k_key, p2_off, p2_len, token=False))
+        emit_started(kv_leg(v_key, p2_off + v_cache_off, p2_len, token=False))
     for name in ("o", "up_gate", "down"):
         move_weights(weights[name])
-    emit(pli_leg("pli_gate"))
-    emit(pli_leg("pli_up"))
+    emit_started(pli_leg("pli_gate"))
+    emit_started(pli_leg("pli_up"))
     flush(force=True)
-    dma_await_task(recv_y)
-    dma_free_task(recv_y)
+    recv_y.await_()
+    recv_y.free()
 
 
-def _build_rms(ctx, rms_tile):
-    """RMS norm and residual. Returns y_out, the layer output the gate tile reads.
+def _build_rms(ctx, rms_tile, sync):
+    """RMS norm and residual.
+
+    Returns y_out, the layer output the gate tile reads, and the lock pair that
+    hands it over.
 
     x arrives on S2MM 0, the norm weights on S2MM 1. y leaves on MM2S 0
     behind its packet header.
@@ -671,23 +779,22 @@ def _build_rms(ctx, rms_tile):
         rms_tile,
         RMS_LOCKS,
         dict(
-            w_prod_lock=1,
-            w_cons_lock=0,
             y_prod_lock=0,
             y_cons_lock=0,
             x_prod_lock=2,
             x_cons_lock=0,
-            # No DMA takes these three. lm_head_out_* hand y_out to the gate
-            # tile's kernel.
-            rtp_available_lock=0,
-            lm_head_out_prod_lock=1,
-            lm_head_out_cons_lock=0,
         ),
     )
+    w_prod, w_cons = ctx.add_locks(rms_tile, [1, 0])
+    # No DMA takes these two. They hand y_out to the gate tile's kernel.
+    out_prod, out_cons = ctx.add_locks(rms_tile, [1, 0])
 
     ctx.workers.append(
         Worker(
-            _call_kernel,
+            _wrapped_call(
+                acquire=[(sync, 1), (w_cons, 1), (out_prod, 1)],
+                release=[(w_prod, 1), (out_cons, 1)],
+            ),
             [
                 rms_y,
                 rms_x_ping,
@@ -722,8 +829,8 @@ def _build_rms(ctx, rms_tile):
                     DMAChannelDir.S2MM,
                     1,
                     rms_w,
-                    rl["w_prod_lock"],
-                    rl["w_cons_lock"],
+                    w_prod,
+                    w_cons,
                     tap=TensorAccessPattern(rms_w.shape, 0, [4 * D], [1]),
                 ),
                 _single_bd(
@@ -737,7 +844,7 @@ def _build_rms(ctx, rms_tile):
             ],
         )
     )
-    return rms_y_out
+    return rms_y_out, out_prod, out_cons
 
 
 def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
@@ -746,8 +853,12 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
     qkv arrives on S2MM 0, the RoPE weights on S2MM 1. q leaves through
     q_fifo to the qk core, k and v on MM2S 1.
     """
-    kern = ctx.entry(name, "rope")
-    q_ty, kv_ty, _, qkv_ty, _, rope_ty, _ = kern.arg_types()
+    rope_q = ctx.entry(name, "rope_q")
+    rope_k = ctx.entry(name, "rope_k")
+    rope_v = ctx.entry(name, "rope_v")
+    _, qkv_ty, rope_ty, _ = rope_q.arg_types()
+    kv_ty = rope_k.arg_types()[0]
+    n_q, n_kv = ctx.g.num_attn_heads, ctx.g.num_kv_heads
 
     r, c = rope_tile.row, rope_tile.col
     qkv_0 = Buffer(type=qkv_ty, name=f"qkv_buffer_0_{r}_{c}", tile=rope_tile)
@@ -756,31 +867,49 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
     v_buf = Buffer(type=kv_ty, name=f"v_buffer_{r}_{c}", tile=rope_tile)
     rope_buf = Buffer(type=rope_ty, name=f"rope_buffer_{r}_{c}", tile=rope_tile)
     skip_kv = ctx.rtp_buffer(rope_tile, rtp_key)
-    lk = ctx.locks(
-        rope_tile,
-        ROPE_LOCKS,
-        dict(
-            qkv_prod_lock=2,
-            qkv_cons_lock=0,
-            k_prod_lock=1,
-            k_cons_lock=0,
-            v_prod_lock=1,
-            v_cons_lock=0,
-            rope_prod_lock=1,
-            rope_cons_lock=0,
-        ),
-    )
-    ctx.add_locks(rope_tile, [(ROPE_Q_PASS_LOCK, 0)])
+    qkv_pool = ctx.manual_pool(rope_tile, [qkv_0, qkv_1], qkv_ty)
+    (qkv_seg,) = qkv_pool.segments
+    k_prod, k_cons = ctx.add_locks(rope_tile, [1, 0])
+    v_prod, v_cons = ctx.add_locks(rope_tile, [1, 0])
+    rope_prod, rope_cons = ctx.add_locks(rope_tile, [1, 0])
 
-    def rope_body(q_h, kk, v, q0, q1, rope, skip, kern):
+    def rope_body(q_h, kk, v, qkv_h, rope, skip, rq, rk, rv):
         q = q_h.acquire(1)
-        kern(q, kk, v, q0, q1, rope, skip)
+        rope_cons.acquire(1)
+        for i in range_(n_q):
+            rq(q, qkv_h.acquire(1), rope, i)
+            qkv_h.release(1)
+        # The layer reuses another layer's KV cache when skip_kv is set, so k
+        # and v stay behind.
+        zero = constant(0, type=T.i32())
+        with if_(arith.cmpi(arith.CmpIPredicate.eq, skip[0], zero)):
+            k_prod.acquire(1)
+            for i in range_(n_kv):
+                rk(kk, qkv_h.acquire(1), rope, i)
+                qkv_h.release(1)
+            k_cons.release(1)
+            v_prod.acquire(1)
+            for i in range_(n_kv):
+                rv(v, qkv_h.acquire(1), i)
+                qkv_h.release(1)
+            v_cons.release(1)
+        rope_prod.release(1)
         q_h.release(1)
 
     ctx.workers.append(
         Worker(
             rope_body,
-            [q_fifo.prod(), k_buf, v_buf, qkv_0, qkv_1, rope_buf, skip_kv, kern],
+            [
+                q_fifo.prod(),
+                k_buf,
+                v_buf,
+                qkv_pool.cons(),
+                rope_buf,
+                skip_kv,
+                rope_q,
+                rope_k,
+                rope_v,
+            ],
             tile=rope_tile,
             stack_size=1024 * 4,
         )
@@ -792,7 +921,7 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     0,
-                    ping_pong(qkv_0, qkv_1, lk["qkv_prod_lock"], lk["qkv_cons_lock"]),
+                    ping_pong(qkv_0, qkv_1, qkv_seg.produce_lock, qkv_seg.consume_lock),
                 ),
                 DmaChannel(
                     DMAChannelDir.MM2S,
@@ -800,14 +929,14 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
                     [
                         Bd(
                             k_buf,
-                            acquires=[Acquire(lk["k_cons_lock"])],
-                            releases=[Release(lk["k_prod_lock"])],
+                            acquires=[Acquire(k_cons)],
+                            releases=[Release(k_prod)],
                             next=1,
                         ),
                         Bd(
                             v_buf,
-                            acquires=[Acquire(lk["v_cons_lock"])],
-                            releases=[Release(lk["v_prod_lock"])],
+                            acquires=[Acquire(v_cons)],
+                            releases=[Release(v_prod)],
                             next=0,
                         ),
                     ],
@@ -816,53 +945,98 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
                     DMAChannelDir.S2MM,
                     1,
                     rope_buf,
-                    lk["rope_prod_lock"],
-                    lk["rope_cons_lock"],
+                    rope_prod,
+                    rope_cons,
                 ),
             ],
         )
     )
 
 
-def _build_pl_embedding(ctx, ple_tile):
+def _build_pl_embedding(ctx, ple_tile, w_fifo, y_fifo):
     """Per-layer-input embedding.
 
-    x0_per_layer, the norm weights and x0 arrive on S2MM 0 as a 4-BD cycle,
-    the weights on S2MM 1. y leaves on MM2S 1.
+    x0_per_layer, the norm weights and x0 arrive on S2MM 0 as one 3-BD cycle,
+    the projection weights through w_fifo on S2MM 1. y leaves through y_fifo
+    on MM2S 1, into the front of the up projection's input object.
+
+    The three arrivals share the one channel, which cuts the stream by
+    position: a BD per buffer, in the order the sequence sends them. Each
+    buffer is a BufferPool the chain fills by hand, so the core takes them
+    with the acquire and release of any other fifo.
     """
     D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     ple_name = f"{ple_tile.row}_{ple_tile.col}"
-    ple_k = ctx.entry("proj_layer_embedding", "proj_layer_embedding")
-    ple_norm_w_ty, ple_x0_pl_ty, ple_x0_ty, _, ple_y_ty, w_ty, _ = ple_k.arg_types()
+    ple_finish = ctx.entry("proj_layer_embedding", "proj_layer_embedding_finish")
+    ple_zero = ctx.entry("bf16_proj_zero", "bf16_proj_zero")
+    ple_mvm = ctx.entry("proj_layer_embedding_mvm", "proj_layer_embedding_mvm")
+    ple_store = ctx.entry("proj_layer_embedding_store", "proj_layer_embedding_store")
+    ple_norm_w_ty, ple_x0_pl_ty, ple_x_proj_ty, _ = ple_finish.arg_types()
+    _, ple_x0_ty, ple_y_acc_ty, _, _ = ple_mvm.arg_types()
     ple_norm_w = Buffer(type=ple_norm_w_ty, name=f"norm_w_{ple_name}", tile=ple_tile)
     ple_x0_pl = Buffer(
         type=ple_x0_pl_ty, name=f"x0_per_layer_{ple_name}", tile=ple_tile
     )
     ple_x0 = Buffer(type=ple_x0_ty, name=f"x0_{ple_name}", tile=ple_tile)
-    ple_x_proj = Buffer(type=ple_x0_pl_ty, name=f"x_proj_{ple_name}", tile=ple_tile)
-    ple_y = Buffer(type=ple_y_ty, name=f"y_{ple_name}", tile=ple_tile)
-    ple_w0 = Buffer(type=w_ty, name=f"proj_w_0_{ple_name}", tile=ple_tile)
-    ple_w1 = Buffer(type=w_ty, name=f"proj_w_1_{ple_name}", tile=ple_tile)
-    pl = ctx.locks(
-        ple_tile,
-        PLE_LOCKS,
-        dict(
-            norm_w_prod_lock=0,
-            x0_per_layer_prod_lock=1,
-            x0_prod_lock=0,
-            xw_cons_lock=0,
-            proj_w_prod_lock=2,
-            proj_w_cons_lock=0,
-            y_prod_lock=1,
-            y_cons_lock=0,
-        ),
-    )
-    (ple_norm_w_p2,) = ctx.add_locks(ple_tile, [(PLE_NORM_W_P2_LOCK, 0)])
+    ple_x_proj = Buffer(type=ple_x_proj_ty, name=f"x_proj_{ple_name}", tile=ple_tile)
+    ple_y_acc = Buffer(type=ple_y_acc_ty, name=f"y_acc_{ple_name}", tile=ple_tile)
+    # The order the sequence sends them in, which is the order of the BDs.
+    pools = [
+        ctx.manual_pool(ple_tile, ple_x0_pl, ple_x0_pl_ty),
+        ctx.manual_pool(ple_tile, ple_norm_w, ple_norm_w_ty),
+        ctx.manual_pool(ple_tile, ple_x0, ple_x0_ty),
+    ]
+
+    def ple_body(
+        pl_h,
+        nw_h,
+        x0_h,
+        x_proj,
+        y_h,
+        w_h,
+        y_acc,
+        finish,
+        zero,
+        mvm,
+        store,
+    ):
+        x0_per_layer = pl_h.acquire(1)
+        norm_w = nw_h.acquire(1)
+        x0 = x0_h.acquire(1)
+        y = y_h.acquire(1)
+        _bf16_proj(
+            x_proj,
+            w_h,
+            x0,
+            y_acc,
+            PLI_D // 32,
+            D // 256,
+            0,
+            0,
+            zero,
+            mvm,
+            store,
+        )
+        finish(norm_w, x0_per_layer, x_proj, y)
+        y_h.release(1)
+        pl_h.release(1)
+        nw_h.release(1)
+        x0_h.release(1)
 
     ctx.workers.append(
         Worker(
-            _call_kernel,
-            [ple_norm_w, ple_x0_pl, ple_x0, ple_x_proj, ple_y, ple_w0, ple_w1, ple_k],
+            ple_body,
+            [
+                *[pool.cons() for pool in pools],
+                ple_x_proj,
+                y_fifo.prod(channel=1),
+                w_fifo.cons(channel=1),
+                ple_y_acc,
+                ple_finish,
+                ple_zero,
+                ple_mvm,
+                ple_store,
+            ],
             tile=ple_tile,
             stack_size=1024 * 4,
         )
@@ -875,235 +1049,199 @@ def _build_pl_embedding(ctx, ple_tile):
                     DMAChannelDir.S2MM,
                     0,
                     [
-                        Bd(
-                            ple_x0_pl,
-                            acquires=[Acquire(pl["x0_per_layer_prod_lock"])],
-                            releases=[Release(pl["norm_w_prod_lock"])],
-                            next=1,
-                        ),
-                        Bd(
-                            ple_norm_w,
-                            tap=TensorAccessPattern(ple_norm_w.shape, 0, [PLI_D], [1]),
-                            acquires=[Acquire(pl["norm_w_prod_lock"])],
-                            releases=[Release(ple_norm_w_p2)],
-                            next=2,
-                        ),
-                        Bd(
-                            ple_norm_w,
-                            tap=TensorAccessPattern(
-                                ple_norm_w.shape, PLI_D, [D + 32], [1]
-                            ),
-                            acquires=[Acquire(ple_norm_w_p2)],
-                            releases=[Release(pl["x0_prod_lock"])],
-                            next=3,
-                        ),
-                        Bd(
-                            ple_x0,
-                            acquires=[Acquire(pl["x0_prod_lock"])],
-                            releases=[Release(pl["xw_cons_lock"])],
-                            next=0,
-                        ),
+                        _fill_bd(pool, next=(i + 1) % len(pools))
+                        for i, pool in enumerate(pools)
                     ],
-                ),
-                DmaChannel(
-                    DMAChannelDir.S2MM,
-                    1,
-                    ping_pong(
-                        ple_w0,
-                        ple_w1,
-                        pl["proj_w_prod_lock"],
-                        pl["proj_w_cons_lock"],
-                    ),
-                ),
-                _single_bd(
-                    DMAChannelDir.MM2S, 1, ple_y, pl["y_cons_lock"], pl["y_prod_lock"]
                 ),
             ],
         )
     )
 
 
-def _build_pl_gate(ctx, gle_tile, x):
+def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons, w_fifo, y_fifo):
     """Per-layer-input gate.
 
-    x is the RMS tile's y_out. The weights arrive on S2MM 1. y leaves on
-    MM2S 1.
+    x is the RMS tile's y_out, behind the x_prod/x_cons pair of that tile. The
+    weights arrive through w_fifo on S2MM 1. y leaves through y_fifo on MM2S
+    1, into the back of the up projection's input object.
     """
+    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     gle_name = f"{gle_tile.row}_{gle_tile.col}"
-    gle_k = ctx.entry("gate_layer_embedding", "gate_layer_embedding")
-    _, w_ty, _, gle_y_ty = gle_k.arg_types()
-    gle_w0 = Buffer(type=w_ty, name=f"proj_w_0_{gle_name}", tile=gle_tile)
-    gle_w1 = Buffer(type=w_ty, name=f"proj_w_1_{gle_name}", tile=gle_tile)
-    gle_y = Buffer(type=gle_y_ty, name=f"y_{gle_name}", tile=gle_tile)
-    gl = ctx.locks(
-        gle_tile,
-        GLE_LOCKS,
-        dict(
-            x_prod_lock=1,
-            x_cons_lock=0,
-            proj_w_prod_lock=2,
-            proj_w_cons_lock=0,
-            y_prod_lock=1,
-            y_cons_lock=0,
-        ),
-    )
+    gle_begin = ctx.entry("gate_layer_embedding", "gate_layer_embedding_begin")
+    gle_finish = ctx.entry("gate_layer_embedding", "gate_layer_embedding_finish")
+    gle_zero = ctx.entry("bf16_proj_zero", "bf16_proj_zero")
+    gle_mvm = ctx.entry("gate_layer_embedding_mvm", "gate_layer_embedding_mvm")
+    gle_store = ctx.entry("gate_layer_embedding_store", "gate_layer_embedding_store")
+    _, _, gle_y_acc_ty, _, _ = gle_mvm.arg_types()
+    gle_y_acc = Buffer(type=gle_y_acc_ty, name=f"y_acc_{gle_name}", tile=gle_tile)
+
+    def gle_body(
+        xx,
+        w_h,
+        y_h,
+        y_acc,
+        begin,
+        finish,
+        zero,
+        mvm,
+        store,
+    ):
+        x_cons.acquire(1)
+        y = y_h.acquire(1)
+        begin(xx, y)
+        _bf16_proj(
+            y,
+            w_h,
+            y,
+            y_acc,
+            PLI_D // 32,
+            D // 256,
+            0,
+            D,
+            zero,
+            mvm,
+            store,
+        )
+        finish(y)
+        y_h.release(1)
+        x_prod.release(1)
 
     ctx.workers.append(
         Worker(
-            _call_kernel,
-            [x, gle_w0, gle_w1, gle_y, gle_k],
+            gle_body,
+            [
+                x,
+                w_fifo.cons(channel=1),
+                y_fifo.prod(channel=1),
+                gle_y_acc,
+                gle_begin,
+                gle_finish,
+                gle_zero,
+                gle_mvm,
+                gle_store,
+            ],
             tile=gle_tile,
             stack_size=1024 * 4,
         )
     )
-    ctx.rt.add_tile_dma(
-        TileDma(
-            gle_tile,
-            [
-                DmaChannel(
-                    DMAChannelDir.S2MM,
-                    1,
-                    ping_pong(
-                        gle_w0,
-                        gle_w1,
-                        gl["proj_w_prod_lock"],
-                        gl["proj_w_cons_lock"],
-                    ),
-                ),
-                _single_bd(
-                    DMAChannelDir.MM2S, 1, gle_y, gl["y_cons_lock"], gl["y_prod_lock"]
-                ),
-            ],
-        )
-    )
 
 
-def _build_pl_merge(ctx, plm_tile):
-    """Per-layer-input merge.
-
-    The tile runs no kernel. Its DMA gathers the embedding and the gate
-    outputs into one buffer and sends the buffer to the up projection.
-    """
-    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
-    plm_dual_y_ty = np.ndarray[(2 * (PLI_D + D) + 32,), _BF16]
-    plm_y = Buffer(
-        type=plm_dual_y_ty, name=f"y_{plm_tile.row}_{plm_tile.col}", tile=plm_tile
-    )
-    plm_norm_i_prod, plm_res_gate_prod, plm_cons = ctx.add_locks(
-        plm_tile, [(0, 1), (1, 0), (2, 0)]
-    )
-    ctx.rt.add_tile_dma(
-        TileDma(
-            plm_tile,
-            [
-                _single_bd(
-                    DMAChannelDir.S2MM,
-                    0,
-                    plm_y,
-                    plm_norm_i_prod,
-                    plm_res_gate_prod,
-                    tap=TensorAccessPattern(plm_y.shape, 0, [D + PLI_D + 32], [1]),
-                ),
-                _single_bd(
-                    DMAChannelDir.S2MM,
-                    1,
-                    plm_y,
-                    plm_res_gate_prod,
-                    plm_cons,
-                    tap=TensorAccessPattern(
-                        plm_y.shape, D + PLI_D + 32, [D + PLI_D], [1]
-                    ),
-                ),
-                _single_bd(DMAChannelDir.MM2S, 0, plm_y, plm_cons, plm_norm_i_prod),
-            ],
-        )
-    )
-
-
-def _build_pl_up(ctx, plu_tile):
+def _build_pl_up(ctx, plu_tile, x_fifo, w_fifo, y_fifo):
     """Per-layer-input up projection.
 
-    x arrives on S2MM 0, the weights on S2MM 1. The layer output leaves on
-    MM2S 0.
+    x arrives through x_fifo on S2MM 0, the weights through w_fifo on S2MM 1.
+    The layer output leaves through y_fifo on MM2S 0, which the sequence
+    drains.
     """
+    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     plu_name = f"{plu_tile.row}_{plu_tile.col}"
-    plu_k = ctx.entry("per_layer_up", "per_layer_up")
-    plu_dual_x_ty, w_ty, _, plu_y_ty = plu_k.arg_types()
-    plu_x = Buffer(type=plu_dual_x_ty, name=f"x_{plu_name}", tile=plu_tile)
-    plu_y = Buffer(type=plu_y_ty, name=f"y_{plu_name}", tile=plu_tile)
-    plu_w0 = Buffer(type=w_ty, name=f"proj_w_0_{plu_name}", tile=plu_tile)
-    plu_w1 = Buffer(type=w_ty, name=f"proj_w_1_{plu_name}", tile=plu_tile)
-    ul = ctx.locks(
-        plu_tile,
-        PLU_LOCKS,
-        dict(
-            x_prod_lock=1,
-            x_cons_lock=0,
-            proj_w_prod_lock=2,
-            proj_w_cons_lock=0,
-            y_prod_lock=1,
-            y_cons_lock=0,
-        ),
-    )
+    plu_begin = ctx.entry("per_layer_up", "per_layer_up_begin")
+    plu_finish = ctx.entry("per_layer_up", "per_layer_up_finish")
+    plu_zero = ctx.entry("bf16_proj_zero", "bf16_proj_zero")
+    plu_mvm = ctx.entry("per_layer_up_mvm", "per_layer_up_mvm")
+    plu_store = ctx.entry("per_layer_up_store", "per_layer_up_store")
+    _, _, plu_y_acc_ty, _, _ = plu_mvm.arg_types()
+    plu_y_acc = Buffer(type=plu_y_acc_ty, name=f"y_acc_{plu_name}", tile=plu_tile)
+
+    def plu_body(
+        x_h,
+        w_h,
+        y_h,
+        y_acc,
+        begin,
+        finish,
+        zero,
+        mvm,
+        store,
+    ):
+        x = x_h.acquire(1)
+        y = y_h.acquire(1)
+        begin(x)
+        _bf16_proj(
+            y,
+            w_h,
+            x,
+            y_acc,
+            D // 32,
+            PLI_D // 256,
+            D + 32,
+            0,
+            zero,
+            mvm,
+            store,
+        )
+        finish(x, y)
+        y_h.release(1)
+        x_h.release(1)
 
     ctx.workers.append(
         Worker(
-            _call_kernel,
-            [plu_x, plu_w0, plu_w1, plu_y, plu_k],
+            plu_body,
+            [
+                x_fifo.cons(channel=0),
+                w_fifo.cons(channel=1),
+                y_fifo.prod(channel=0),
+                plu_y_acc,
+                plu_begin,
+                plu_finish,
+                plu_zero,
+                plu_mvm,
+                plu_store,
+            ],
             tile=plu_tile,
             stack_size=1024 * 4,
         )
     )
-    ctx.rt.add_tile_dma(
-        TileDma(
-            plu_tile,
-            [
-                _single_bd(
-                    DMAChannelDir.S2MM, 0, plu_x, ul["x_prod_lock"], ul["x_cons_lock"]
-                ),
-                DmaChannel(
-                    DMAChannelDir.S2MM,
-                    1,
-                    ping_pong(
-                        plu_w0,
-                        plu_w1,
-                        ul["proj_w_prod_lock"],
-                        ul["proj_w_cons_lock"],
-                    ),
-                ),
-                _single_bd(
-                    DMAChannelDir.MM2S, 0, plu_y, ul["y_cons_lock"], ul["y_prod_lock"]
-                ),
-            ],
-        )
-    )
 
 
-def _build_glu(ctx, glu_tile):
+def _build_glu(ctx, glu_tile, sync):
     """GLU.
 
     gate and up arrive on S2MM 0. The activations leave on MM2S 0 with a
     packet header to the projection engine.
     """
     glu_name = f"{glu_tile.row}_{glu_tile.col}"
-    glu_k = ctx.entry("glu", "glu")
-    glu_hid_ty, glu_up_gate_ty, _, glu_y_ty, _, _ = glu_k.arg_types()
+    chunk_k = ctx.entry("glu", "glu_chunk")
+    emit_k = ctx.entry("glu", "glu_emit")
+    glu_hid_ty, glu_up_gate_ty, _ = chunk_k.arg_types()
+    glu_y_ty = emit_k.arg_types()[0]
     glu_x_0 = Buffer(type=glu_up_gate_ty, name=f"x_0_{glu_name}", tile=glu_tile)
     glu_x_1 = Buffer(type=glu_up_gate_ty, name=f"x_1_{glu_name}", tile=glu_tile)
     glu_y_0 = Buffer(type=glu_y_ty, name=f"y_0_{glu_name}", tile=glu_tile)
     glu_y_1 = Buffer(type=glu_y_ty, name=f"y_1_{glu_name}", tile=glu_tile)
     glu_hid = Buffer(type=glu_hid_ty, name=f"hid_0_{glu_name}", tile=glu_tile)
     glu_is_skip = ctx.rtp_buffer(glu_tile, "glu_skip")
-    ll = ctx.locks(
-        glu_tile,
-        GLU_LOCKS,
-        dict(x_prod_lock=2, x_cons_lock=0, y_prod_lock=2, y_cons_lock=0, rtp_lock=0),
-    )
+    x_pool = ctx.manual_pool(glu_tile, [glu_x_0, glu_x_1], glu_up_gate_ty)
+    y_pool = ctx.manual_pool(glu_tile, [glu_y_0, glu_y_1], glu_y_ty, drain=True)
+    (x_seg,) = x_pool.segments
+    (y_seg,) = y_pool.segments
+    # The gate and up halves arrive one glu_slice at a time; the down
+    # projection then reads the activations back once per repeat.
+    chunks = 2 * ctx.g.intermediate_size // ctx.g.glu_slice
+    repeats = ctx.g.model_dim // (4 * len(PROJ_COLS) * q4nx.M_TILE)
+
+    def sweep(hid, x_h, y_h, chunk, emit, n):
+        for i in range_(n):
+            chunk(hid, x_h.acquire(1), i)
+            x_h.release(1)
+        for _ in range_(repeats):
+            for j in range_(n):
+                emit(y_h.acquire(1), hid, j)
+                y_h.release(1)
+
+    def glu_body(hid, x_h, y_h, skip, chunk, emit):
+        sync.acquire(1)
+        # A layer that reuses another's KV cache runs a double-wide MLP.
+        zero = constant(0, type=T.i32())
+        with if_(arith.cmpi(arith.CmpIPredicate.eq, skip[0], zero)) as skip_if:
+            sweep(hid, x_h, y_h, chunk, emit, chunks)
+        with else_(skip_if):
+            sweep(hid, x_h, y_h, chunk, emit, 2 * chunks)
 
     ctx.workers.append(
         Worker(
-            _call_kernel,
-            [glu_hid, glu_x_0, glu_x_1, glu_y_0, glu_y_1, glu_is_skip, glu_k],
+            glu_body,
+            [glu_hid, x_pool.cons(), y_pool.prod(), glu_is_skip, chunk_k, emit_k],
             tile=glu_tile,
             stack_size=4 * 1024,
         )
@@ -1115,7 +1253,7 @@ def _build_glu(ctx, glu_tile):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     0,
-                    ping_pong(glu_x_0, glu_x_1, ll["x_prod_lock"], ll["x_cons_lock"]),
+                    ping_pong(glu_x_0, glu_x_1, x_seg.produce_lock, x_seg.consume_lock),
                 ),
                 DmaChannel(
                     DMAChannelDir.MM2S,
@@ -1123,8 +1261,8 @@ def _build_glu(ctx, glu_tile):
                     ping_pong(
                         glu_y_0,
                         glu_y_1,
-                        ll["y_cons_lock"],
-                        ll["y_prod_lock"],
+                        y_seg.consume_lock,
+                        y_seg.produce_lock,
                         packet=(0, _X_FROM_GLU),
                     ),
                 ),
@@ -1133,7 +1271,7 @@ def _build_glu(ctx, glu_tile):
     )
 
 
-def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
+def _build_proj_core(ctx, pt, kern, sync, send_x_out, main_y0=None, main_y1=None):
     """One q4nx projection core. Returns its y buffers (y0, y1).
 
     A core that does not send y fills the second slot of main_y0 and main_y1,
@@ -1162,19 +1300,19 @@ def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
             w_cons_lock=0,
             y_prod_ping_lock=2,
             y_prod_pong_lock=2,
-            rtp_available_lock=0,
             y_cons_ping_lock=0,
             y_cons_pong_lock=0,
         ),
     )
 
-    def proj_body(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, kern):
+    def proj_body(sync, yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, kern):
+        sync.acquire(1)
         kern(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, constant(int(send_x_out)))
 
     ctx.workers.append(
         Worker(
             proj_body,
-            [y0, w0, x0, y1, w1, x1, is_swa, skip_kv, kern],
+            [sync, y0, w0, x0, y1, w1, x1, is_swa, skip_kv, kern],
             tile=pt,
             stack_size=10 * 1024,
         )
@@ -1214,11 +1352,11 @@ def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
     return y0, y1
 
 
-def _build_proj_cores(ctx, grid):
+def _build_proj_cores(ctx, grid, sync):
     """The q4nx projection engine: 16 cores in PROJ_COLS.
 
-    The cores in rows 2 and 4 send y. Returns the sending cores of each group
-    of two columns.
+    The cores in rows 2 and 4 send y. ``sync`` holds each core's RTP lock by
+    (column, row). Returns the sending cores of each group of two columns.
     """
     proj_k = ctx.entry("proj_main", "proj_main")
 
@@ -1230,9 +1368,17 @@ def _build_proj_cores(ctx, grid):
             for row_pair in range(2):
                 send_t = grid[col, 2 + row_pair * 2]
                 nosend_t = grid[col, 3 + row_pair * 2]
-                y0, y1 = _build_proj_core(ctx, send_t, proj_k, send_x_out=True)
+                y0, y1 = _build_proj_core(
+                    ctx, send_t, proj_k, sync[col, send_t.row], send_x_out=True
+                )
                 _build_proj_core(
-                    ctx, nosend_t, proj_k, send_x_out=False, main_y0=y0, main_y1=y1
+                    ctx,
+                    nosend_t,
+                    proj_k,
+                    sync[col, nosend_t.row],
+                    send_x_out=False,
+                    main_y0=y0,
+                    main_y1=y1,
                 )
                 group_send.append(send_t)
         proj_send_tiles.append(group_send)
@@ -1240,8 +1386,8 @@ def _build_proj_cores(ctx, grid):
 
 
 _LINEAR_4W_TY = np.ndarray[(4 * W_BLOCK,), _BF16]
-# (lock id, init) of a projection memtile's weight locks.
-_PROJ_MEM_W_LOCKS = [(5, 2), (6, 0), (7, 0), (8, 2), (9, 0), (10, 0)]
+# Initial values of a projection memtile's weight locks.
+_PROJ_MEM_W_INITS = [2, 0, 0, 2, 0, 0]
 
 
 def _proj_weight_channels(w0, w1, wp0, wp0c0, wp0c1, wp1, wp1c0, wp1c1):
@@ -1338,8 +1484,8 @@ def _build_proj_gather_mem(ctx, mt):
     y0 = Buffer(type=m_col_ty, name=f"y_buffer_0_{r}_{c}", tile=mt)
     y1 = Buffer(type=m_col_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
     w0, w1 = _proj_weight_buffers(mt)
-    yp0, yp1, yp2, yp3, yc = ctx.add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 0), (4, 0)])
-    wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_LOCKS))
+    yp0, yp1, yp2, yp3, yc = ctx.add_locks(mt, [2, 0, 0, 0, 0])
+    wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_INITS))
     ctx.rt.add_tile_dma(
         TileDma(
             mt,
@@ -1400,7 +1546,7 @@ def _build_proj_gather_mem(ctx, mt):
 def _build_proj_weight_mem(ctx, mt):
     """A projection memtile that carries weights only."""
     w0, w1 = _proj_weight_buffers(mt)
-    wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_LOCKS))
+    wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_INITS))
     ctx.rt.add_tile_dma(TileDma(mt, [wc["in0"], *wc["out"], wc["in1"]]))
 
 
@@ -1414,9 +1560,9 @@ def _build_proj_x_mem(ctx, mt):
     y1 = Buffer(type=m_full_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
     x0 = Buffer(type=x_chunk_ty, name=f"x_buffer_0_{r}_{c}", tile=mt)
     x1 = Buffer(type=x_chunk_ty, name=f"x_buffer_1_{r}_{c}", tile=mt)
-    mp0, mp1, mc, xp, xc = ctx.add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 2), (4, 0)])
+    mp0, mp1, mc, xp, xc = ctx.add_locks(mt, [2, 0, 0, 2, 0])
     w0, w1 = _proj_weight_buffers(mt)
-    wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_LOCKS))
+    wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_INITS))
     ctx.rt.add_tile_dma(
         TileDma(
             mt,
@@ -1465,11 +1611,14 @@ def _scores_ty(ctx, name):
     return first.arg_types()[0]
 
 
-def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
+def _build_attn_kv(
+    ctx, kv_tile, name, rtp_key, dh, of_s, v_fifo, two_kv_heads, handshake
+):
     """An attention kv core.
 
-    The core takes the scores from of_s and v on S2MM 1. It sends o to the
-    projection engine on MM2S 0.
+    The core takes the scores from of_s and v from v_fifo on S2MM 1. It sends o to the
+    projection engine on MM2S 0. It reads its RTPs only once it holds
+    ``handshake``, a lock of the qk core on the tile below.
 
     A round of the two-KV-head kernels covers one KV head. A round of the
     other kernels covers every KV head.
@@ -1484,64 +1633,73 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
     if two_kv_heads:
         k_sbeg = ctx.entry(name, f"{name}_s_begin")
         k_vhalf = ctx.entry(name, f"{name}_v_half")
-        v_ty = k_vhalf.arg_types()[1]
     else:
         k_round = ctx.entry(name, f"{name}_round")
-        v_ty = k_round.arg_types()[1]
     y_ty, o_ty, l_ty = k_finish.arg_types()
     L = ctx.rtp_buffer(kv_tile, rtp_key)
-    v0 = Buffer(type=v_ty, name=f"v_0_{r}_{c}", tile=kv_tile)
-    v1 = Buffer(type=v_ty, name=f"v_1_{r}_{c}", tile=kv_tile)
     y = Buffer(type=y_ty, name=f"y_{r}_{c}", tile=kv_tile)
     o = Buffer(type=o_ty, name=f"o_{r}_{c}", tile=kv_tile)
-    kl = ctx.locks(
-        kv_tile,
-        ATTN_KV_LOCKS,
-        dict(o_prod_lock=o_repeats, o_cons_lock=0, v_prod_lock=2, v_cons_lock=0),
-    )
+    # The down projection reads o o_repeats times a dispatch.
+    o_prod, o_cons = ctx.add_locks(kv_tile, [o_repeats, 0])
     lbuf = Buffer(type=l_ty, name=f"l_{r}_{c}", tile=kv_tile)
     if two_kv_heads:
 
-        def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
+        def kv_body(hs, s_in, v_h, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
             kb(yy, ll)
+            hs.acquire(1)
             for _ in range_((rtp_l[0] + (LK - 1)) // LK):
                 s = s_in.acquire(1)
                 ksb(s, yy, ll)
                 for j in range_(2):
-                    kvh(s, v_0, v_1, yy, j)
+                    v = v_h.acquire(1)
+                    kvh(s, v, yy, j)
+                    v_h.release(1)
                 s_in.release(1)
+            o_prod.acquire(o_repeats)
             kf(yy, oo, ll)
+            o_cons.release(o_repeats)
 
-        args = [of_s.cons(), v0, v1, y, lbuf, o, L]
+        args = [handshake, of_s.cons(), v_fifo.cons(channel=1), y, lbuf, o, L]
         args += [k_begin, k_sbeg, k_vhalf, k_finish]
     else:
 
-        def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
+        def kv_body(hs, s_in, v_h, yy, ll, oo, rtp_l, kb, kr, kf):
             kb(yy, ll)
+            hs.acquire(1)
             for _ in range_((rtp_l[0] + (LK - 1)) // LK):
                 s = s_in.acquire(1)
-                kr(s, v_0, v_1, yy, ll)
+                v = v_h.acquire(1)
+                kr(s, v, yy, ll)
+                v_h.release(1)
                 s_in.release(1)
+            o_prod.acquire(o_repeats)
             kf(yy, oo, ll)
+            o_cons.release(o_repeats)
 
-        args = [of_s.cons(), v0, v1, y, lbuf, o, L, k_begin, k_round, k_finish]
+        args = [
+            handshake,
+            of_s.cons(),
+            v_fifo.cons(channel=1),
+            y,
+            lbuf,
+            o,
+            L,
+            k_begin,
+            k_round,
+            k_finish,
+        ]
 
     ctx.workers.append(Worker(kv_body, args, tile=kv_tile, stack_size=1024 * 6))
     ctx.rt.add_tile_dma(
         TileDma(
             kv_tile,
             [
-                DmaChannel(
-                    DMAChannelDir.S2MM,
-                    1,
-                    ping_pong(v0, v1, kl["v_prod_lock"], kl["v_cons_lock"]),
-                ),
                 _single_bd(
                     DMAChannelDir.MM2S,
                     0,
                     o,
-                    kl["o_cons_lock"],
-                    kl["o_prod_lock"],
+                    o_cons,
+                    o_prod,
                     packet=(0, _X_FROM_ATTN),
                     tap=TensorAccessPattern(
                         o.shape, 0, [NQ, dh // 8, 8], [8, NQ * 8, 1]
@@ -1552,10 +1710,14 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
     )
 
 
-def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
+def _build_attn_qk(
+    ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, k_fifo, two_kv_heads, handshake
+):
     """An attention qk core.
 
-    The core takes q from q_fifo and k on S2MM 1. It sends the scores to of_s.
+    The core takes q from q_fifo and k from k_fifo on S2MM 1. It sends the
+    scores to of_s.
+    It releases ``handshake`` once it has read its RTPs.
     """
     r, c = qk_tile.row, qk_tile.col
     # Every qk kernel names its entry points attn_qk_*.
@@ -1567,14 +1729,10 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
     else:
         k_round = ctx.entry(name, "attn_qk_round")
         k_step = k_round
-    q_ty, k_ty, _, _, m_ty, c_ty = k_step.arg_types()[:6]
+    q_ty, _, _, m_ty, c_ty = k_step.arg_types()[:5]
     # The kernel pads each KV head's query group.
     (q_len,) = np_ndarray_type_get_shape(q_ty)
     NQ_PADDED = q_len // dh
-    k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
-    k1 = Buffer(type=k_ty, name=f"k_1_{r}_{c}", tile=qk_tile)
-    ql = ctx.locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
-    ctx.add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
     L = ctx.rtp_buffer(qk_tile, rtp_key)
     q_in_order = TensorAccessPattern(
         (NQ_PADDED, dh), 0, [NQ_PADDED, dh // 8, 8], [8, NQ_PADDED * 8, 1]
@@ -1584,13 +1742,16 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
     # The q acquire orders the RTP read after the sequence's RTP writes.
     if two_kv_heads:
 
-        def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
+        def qk_body(hs, s_out, q_h, k_h, mm, cc, rtp_l, kb, kh, ks):
             q = q_h.acquire(1)
             kb(mm)
+            hs.release(1)
             for i in range_((rtp_l[0] + (LK - 1)) // LK):
                 s = s_out.acquire(1)
                 for j in range_(2):
-                    kh(q, k_0, k_1, s, mm, cc, j, i, rtp_l[0])
+                    k = k_h.acquire(1)
+                    kh(q, k, s, mm, cc, j, i, rtp_l[0])
+                    k_h.release(1)
                 ks(s, cc)
                 s_out.release(1)
             q_h.release(1)
@@ -1598,52 +1759,53 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
         kerns = [k_begin, k_half, k_storec]
     else:
 
-        def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kr):
+        def qk_body(hs, s_out, q_h, k_h, mm, cc, rtp_l, kb, kr):
             q = q_h.acquire(1)
             kb(mm)
+            hs.release(1)
             for i in range_((rtp_l[0] + (LK - 1)) // LK):
                 s = s_out.acquire(1)
-                kr(q, k_0, k_1, s, mm, cc, i, rtp_l[0])
+                k = k_h.acquire(1)
+                kr(q, k, s, mm, cc, i, rtp_l[0])
+                k_h.release(1)
                 s_out.release(1)
             q_h.release(1)
 
         kerns = [k_begin, k_round]
 
     args = [
+        handshake,
         of_s.prod(),
         q_fifo.cons(from_stream=q_in_order),
-        k0,
-        k1,
+        k_fifo.cons(channel=1),
         m_buf,
         c_local,
         L,
     ] + kerns
     ctx.workers.append(Worker(qk_body, args, tile=qk_tile, stack_size=1024 * 4))
-    ctx.rt.add_tile_dma(
-        TileDma(
-            qk_tile,
-            [
-                DmaChannel(
-                    DMAChannelDir.S2MM,
-                    1,
-                    ping_pong(k0, k1, ql["k_prod_lock"], ql["k_cons_lock"]),
-                ),
-            ],
-        )
-    )
 
 
-def _build_attn_mem(ctx, amt):
-    """The attention memtile.
+def _kv_core_type(kernels, stage, two_kv):
+    """The k or v object type that ``stage``'s kernel reads."""
+    names = {
+        "attn_qk": "attn_qk_half" if two_kv else "attn_qk_round",
+        "attn_kv": "attn_kv_v_half" if two_kv else "attn_kv_round",
+        "swa_attn_qk": "attn_qk_round",
+        "swa_attn_kv": "swa_attn_kv_round",
+    }
+    return getattr(kernels[stage], names[stage]).arg_types()[1]
 
-    It takes k, v, swa_k and swa_v in whole rows. It sends each to its core in
-    the order the core's kernel reads.
+
+def _kv_fifos(g, kernels, amt, kv_shim):
+    """One ObjectFifo per KV stream: shim, attention memtile, then core.
+
+    Returns the producer handles in KV_STREAMS order, for the runtime, and
+    each stream's core-side fifo by name. The memtile walks every object into
+    the order its core's kernel reads. A two-KV-head core reads half an object
+    at a time, so its forward re-chunks.
     """
-    g = ctx.g
     NUM_KV, two_kv = g.num_kv_heads, g.num_kv_heads == 2
-    amt_name = f"{amt.row}_{amt.col}"
-    k_row = NUM_KV * g.dh
-    sk_row = NUM_KV * g.swa_dh
+    k_row, sk_row = NUM_KV * g.dh, NUM_KV * g.swa_dh
     k_order = [(k_row // 8, 8), (16, k_row), (8, 1)]
     if not two_kv:
         v_order = [(LK // 8, LK // 2 * k_row), (k_row // 8, 8), (8, k_row), (8, 1)]
@@ -1651,44 +1813,34 @@ def _build_attn_mem(ctx, amt):
         v_order = [(k_row // 8, 8), (LK, k_row), (8, 1)]
     sk_order = [(sk_row // 8, 8), (16, sk_row), (8, 1)]
     sv_order = [(LK // 8, LK // 2 * sk_row), (sk_row // 8, 8), (8, sk_row), (8, 1)]
-    amt_chans = []
-    for ch, (key, row, order, lock_ids) in enumerate(
-        (
-            ("k", k_row, k_order, (0, 1)),
-            ("v", k_row, v_order, (3, 4)),
-            ("swa_k", sk_row, sk_order, (5, 6)),
-            ("swa_v", sk_row, sv_order, (7, 8)),
+    rows = dict(k=k_row, v=k_row, swa_k=sk_row, swa_v=sk_row)
+    orders = dict(k=k_order, v=v_order, swa_k=sk_order, swa_v=sv_order)
+
+    prods, cores = [], {}
+    for key, shim_ch, pkt, mem_ch, stage in KV_STREAMS:
+        row, order = rows[key], orders[key]
+        of = ObjectFifo(
+            np.ndarray[(LK, row), _BF16],
+            name=f"{key}_in",
+            depth=2,
+            packet=True,
+            packet_id=pkt,
         )
-    ):
-        b0, b1 = (
-            Buffer(
-                type=np.ndarray[(LK, row), _BF16],
-                name=f"{key}_mem_buffer_{i}_{amt_name}",
-                tile=amt,
-            )
-            for i in (0, 1)
-        )
-        prod, cons = ctx.add_locks(amt, [(lock_ids[0], 2), (lock_ids[1], 0)])
-        amt_chans += [
-            DmaChannel(DMAChannelDir.S2MM, ch, ping_pong(b0, b1, prod, cons)),
-            DmaChannel(
-                DMAChannelDir.MM2S,
-                ch,
-                ping_pong(
-                    b0,
-                    b1,
-                    cons,
-                    prod,
-                    tap=TensorAccessPattern(
-                        b0.shape,
-                        0,
-                        [size for size, _ in order],
-                        [stride for _, stride in order],
-                    ),
-                ),
+        cores[key] = of.cons().forward(
+            tile=amt,
+            obj_type=_kv_core_type(kernels, stage, two_kv),
+            depth=2,
+            name=f"{key}_to_core",
+            to_stream=TensorAccessPattern(
+                (LK, row),
+                0,
+                [size for size, _ in order],
+                [stride for _, stride in order],
             ),
-        ]
-    ctx.rt.add_tile_dma(TileDma(amt, amt_chans))
+            channel=mem_ch,
+        )
+        prods.append(of.prod(tile=kv_shim, channel=shim_ch))
+    return prods, cores
 
 
 def _route(rt, grid, t, proj_send_tiles):
@@ -1701,31 +1853,58 @@ def _route(rt, grid, t, proj_send_tiles):
     """
     x_shim, kv_shim = t["x_shim"], t["kv_shim"]
     proj_x = t["proj_x"]
-    _connect(rt, x_shim, 0, t["rms"], 0, pkt_id=_ShimPkt.to_rms, shim_symbol="send_x")
-    _connect(rt, x_shim, 1, t["rms"], 1, pkt_id=_ShimPkt.to_rms, shim_symbol="send_rms")
-    _connect(rt, x_shim, 0, t["rope"], 1, pkt_id=_ShimPkt.to_rope)
-    _connect(rt, x_shim, 1, t["swa_rope"], 1, pkt_id=_ShimPkt.to_rope)
-    _connect(rt, t["rms"], 0, proj_x, 3, pkt_id=_X_FROM_RMS)
+    rt.add_flow(
+        PacketFlow(
+            _ShimPkt.to_rms,
+            x_shim,
+            t["rms"],
+            src_channel=0,
+            dst_channel=0,
+            shim_symbol="send_x",
+        )
+    )
+    rt.add_flow(
+        PacketFlow(
+            _ShimPkt.to_rms,
+            x_shim,
+            t["rms"],
+            src_channel=1,
+            dst_channel=1,
+            shim_symbol="send_rms",
+        )
+    )
+    rt.add_flow(
+        PacketFlow(_ShimPkt.to_rope, x_shim, t["rope"], src_channel=0, dst_channel=1)
+    )
+    rt.add_flow(
+        PacketFlow(
+            _ShimPkt.to_rope, x_shim, t["swa_rope"], src_channel=1, dst_channel=1
+        )
+    )
+    rt.add_flow(PacketFlow(_X_FROM_RMS, t["rms"], proj_x, src_channel=0, dst_channel=3))
 
     # The weights from the shim into each memtile.
     for col in PROJ_COLS:
         for ch in (0, 1):
-            _connect(
-                rt,
-                grid[col, 0],
-                ch,
-                grid[col, 1],
-                4 + ch,
-                shim_symbol=f"proj_w{ch}_{col}",
+            rt.add_flow(
+                Flow(
+                    grid[col, 0],
+                    grid[col, 1],
+                    src_channel=ch,
+                    dst_channel=4 + ch,
+                    shim_symbol=f"proj_w{ch}_{col}",
+                )
             )
     # The weights from each memtile to its column's cores.
     for col in PROJ_COLS:
         for j in range(4):
-            _connect(rt, grid[col, 1], j, grid[col, 2 + j], 1)
+            rt.add_flow(
+                Flow(grid[col, 1], grid[col, 2 + j], src_channel=j, dst_channel=1)
+            )
     # x to every projection core.
     for col in PROJ_COLS:
         for j in range(4):
-            _connect(rt, proj_x, 4, grid[col, 2 + j], 0)
+            rt.add_flow(Flow(proj_x, grid[col, 2 + j], src_channel=4, dst_channel=0))
     # y from each group's sending cores to its memtile. The first keeps the
     # packet header, which carries the consumer's id to proj_x.
     pkts = [_ProjPkt.to_swa_rope, _ProjPkt.to_rope, _ProjPkt.to_rms, _ProjPkt.to_glu]
@@ -1733,10 +1912,28 @@ def _route(rt, grid, t, proj_send_tiles):
     for gather_mt, send_tiles in zip(gather_mts, proj_send_tiles):
         for j, send_t in enumerate(send_tiles):
             for pk in pkts:
-                _connect(rt, send_t, 0, gather_mt, j, pkt_id=pk, keep_pkt_header=j == 0)
+                rt.add_flow(
+                    PacketFlow(
+                        pk,
+                        send_t,
+                        gather_mt,
+                        src_channel=0,
+                        dst_channel=j,
+                        keep_pkt_header=j == 0,
+                    )
+                )
     for ch, gather_mt in enumerate(gather_mts):
         for pk in pkts:
-            _connect(rt, gather_mt, 4, proj_x, ch, pkt_id=pk, keep_pkt_header=ch == 0)
+            rt.add_flow(
+                PacketFlow(
+                    pk,
+                    gather_mt,
+                    proj_x,
+                    src_channel=4,
+                    dst_channel=ch,
+                    keep_pkt_header=ch == 0,
+                )
+            )
 
     for dst, pk in (
         ("glu", _ProjPkt.to_glu),
@@ -1744,37 +1941,37 @@ def _route(rt, grid, t, proj_send_tiles):
         ("rope", _ProjPkt.to_rope),
         ("swa_rope", _ProjPkt.to_swa_rope),
     ):
-        _connect(rt, proj_x, 5, t[dst], 0, pkt_id=pk)
+        rt.add_flow(PacketFlow(pk, proj_x, t[dst], src_channel=5, dst_channel=0))
 
     # This token's k and v, out to the KV cache.
-    _connect(rt, t["rope"], 1, kv_shim, 0, shim_symbol="recv_k")
-    _connect(rt, t["swa_rope"], 1, kv_shim, 1, shim_symbol="recv_v")
-    _connect(rt, t["attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
-    _connect(rt, t["swa_attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
-    _connect(rt, t["glu"], 0, proj_x, 3, pkt_id=_X_FROM_GLU)
+    rt.add_flow(
+        Flow(t["rope"], kv_shim, src_channel=1, dst_channel=0, shim_symbol="recv_k")
+    )
+    rt.add_flow(
+        Flow(t["swa_rope"], kv_shim, src_channel=1, dst_channel=1, shim_symbol="recv_v")
+    )
+    rt.add_flow(
+        PacketFlow(_X_FROM_ATTN, t["attn_kv"], proj_x, src_channel=0, dst_channel=3)
+    )
+    rt.add_flow(
+        PacketFlow(_X_FROM_ATTN, t["swa_attn_kv"], proj_x, src_channel=0, dst_channel=3)
+    )
+    rt.add_flow(PacketFlow(_X_FROM_GLU, t["glu"], proj_x, src_channel=0, dst_channel=3))
 
-    # The KV cache into the attention memtile.
-    amt = t["attn_mem"]
-    _connect(rt, kv_shim, 0, amt, 0, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_k")
-    _connect(rt, kv_shim, 0, amt, 2, pkt_id=_KV_PKT_SWA)
-    _connect(rt, kv_shim, 1, amt, 1, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_v")
-    _connect(rt, kv_shim, 1, amt, 3, pkt_id=_KV_PKT_SWA)
-    _connect(rt, amt, 0, t["attn_qk"], 1)
-    _connect(rt, amt, 1, t["attn_kv"], 1)
-    _connect(rt, amt, 2, t["swa_attn_qk"], 1)
-    _connect(rt, amt, 3, t["swa_attn_kv"], 1)
+    # The KV cache reaches the attention memtile and its cores through the
+    # KV_STREAMS fifos, which route themselves.
 
-    # The per-layer-input path.
-    pl_shim_0, pl_shim_1 = t["pl_shim_0"], t["pl_shim_1"]
-    _connect(rt, pl_shim_0, 0, t["pl_embedding"], 0, shim_symbol="pli_rope_rms")
-    _connect(rt, pl_shim_0, 1, t["pl_embedding"], 1, shim_symbol="pli_down")
-    _connect(rt, t["pl_embedding"], 1, t["pl_merge"], 0)
-    _connect(rt, pl_shim_1, 0, t["pl_gate"], 1, shim_symbol="pli_gate")
-    _connect(rt, t["pl_gate"], 1, t["pl_merge"], 1)
-    _connect(rt, t["pl_merge"], 0, t["pl_up"], 0)
-    _connect(rt, pl_shim_1, 1, t["pl_up"], 1, shim_symbol="pli_up")
-    # The layer output, out to x.
-    _connect(rt, t["pl_up"], 0, x_shim, 0, shim_symbol="recv_y")
+    # The per-layer-input path. Only the rope and rms stream keeps a flow of
+    # its own; ObjectFifos route the rest of the cluster themselves.
+    rt.add_flow(
+        Flow(
+            t["pl_shim_0"],
+            t["pl_embedding"],
+            src_channel=0,
+            dst_channel=0,
+            shim_symbol="pli_rope_rms",
+        )
+    )
 
 
 def decode_layer(
@@ -1800,8 +1997,48 @@ def decode_layer(
     two_kv = g.num_kv_heads == 2
 
     sizes = arg_sizes(g)
+    grid = {
+        (c, r): Tile(c, r, tile_type=dev.get_tile_type(c, r))
+        for r in range(dev.rows)
+        for c in range(dev.cols)
+    }
+    t = {stage: grid[at] for stage, at in PLACEMENT.items()}
+
+    # The sequence sets these after it writes the RTPs; the core acquires one
+    # before it reads them.
+    sync = {
+        "rms": Lock(tile=t["rms"], init=0),
+        "glu": Lock(tile=t["glu"], init=0),
+        "proj": {
+            (c, r): Lock(tile=grid[c, r], init=0)
+            for c in PROJ_COLS
+            for r in (2, 3, 4, 5)
+        },
+    }
+    pli_w = {
+        name: ObjectFifo(kernels[kern].arg_types()[0], name=f"{name}_w", depth=2)
+        for name, kern, _, _ in PLI_WEIGHTS
+    }
+    # The layer output. One buffer, as the engine's single y BD has.
+    y_of = ObjectFifo(np.ndarray[(g.model_dim,), _BF16], name="layer_y", depth=1)
+    kv_prods, kv_cores = _kv_fifos(g, kernels, t["attn_mem"], t["kv_shim"])
+    # The up projection's input, gathered on the merge tile: the embedding
+    # output in front, the gate output behind it.
+    D, PLI = g.model_dim, g.pli_d
+    plu_x_of = ObjectFifo(
+        np.ndarray[(2 * (PLI + D) + 32,), _BF16], name="pl_x", depth=1
+    )
+    ple_y_of, gle_y_of = plu_x_of.prod().join(
+        [0, D + PLI + 32],
+        tile=t["pl_merge"],
+        obj_types=[
+            np.ndarray[(PLI + D + 32,), _BF16],
+            np.ndarray[(D + PLI,), _BF16],
+        ],
+        names=["pl_embedding_y", "pl_gate_y"],
+    )
     rt = Runtime(
-        partial(_sequence, g, rtp, layer_type, sliding_window),
+        partial(_sequence, g, rtp, layer_type, sliding_window, sync),
         [
             np.ndarray[(sizes["x"],), _BF16],
             np.ndarray[(sizes["proj"],), _BF16],
@@ -1810,32 +2047,34 @@ def decode_layer(
             np.ndarray[(sizes["kv"],), _BF16],
             np.int32,
             np.int32,
+            [
+                pli_w[name].prod(tile=t[shim], channel=ch)
+                for name, _, shim, ch in PLI_WEIGHTS
+            ],
+            y_of.cons(tile=t["x_shim"], channel=0),
+            kv_prods,
         ],
     )
     workers = []
 
-    grid = {
-        (c, r): Tile(c, r, tile_type=dev.get_tile_type(c, r))
-        for r in range(dev.rows)
-        for c in range(dev.cols)
-    }
-    t = {stage: grid[at] for stage, at in PLACEMENT.items()}
-
     ctx = _Ctx(rt, workers, g, rtp, kernels)
+    for lock in [sync["rms"], sync["glu"], *sync["proj"].values()]:
+        rt.add_lock(lock)
 
-    rms_y_out = _build_rms(ctx, t["rms"])
+    rms_y_out, out_prod, out_cons = _build_rms(ctx, t["rms"], sync["rms"])
     # q from RoPE to the qk core. The qk core's DMA reorders it.
     q_of_g = ObjectFifo(np.ndarray[(G_DQ,), _BF16], name="q_in", depth=2)
     q_of_swa = ObjectFifo(np.ndarray[(S_DQ,), _BF16], name="swa_q_in", depth=2)
     _build_rope(ctx, t["rope"], "rope", "rope_skip_kv", g.dh, q_of_g)
     _build_rope(ctx, t["swa_rope"], "swa_rope", "swa_rope_skip_kv", g.swa_dh, q_of_swa)
-    _build_pl_embedding(ctx, t["pl_embedding"])
-    _build_pl_gate(ctx, t["pl_gate"], rms_y_out)
-    _build_pl_merge(ctx, t["pl_merge"])
-    _build_pl_up(ctx, t["pl_up"])
-    _build_glu(ctx, t["glu"])
+    _build_pl_embedding(ctx, t["pl_embedding"], pli_w["pli_down"], ple_y_of)
+    _build_pl_gate(
+        ctx, t["pl_gate"], rms_y_out, out_prod, out_cons, pli_w["pli_gate"], gle_y_of
+    )
+    _build_pl_up(ctx, t["pl_up"], plu_x_of, pli_w["pli_up"], y_of)
+    _build_glu(ctx, t["glu"], sync["glu"])
 
-    proj_send_tiles = _build_proj_cores(ctx, grid)
+    proj_send_tiles = _build_proj_cores(ctx, grid, sync["proj"])
     _build_proj_gather_mem(ctx, t["proj_gather_0"])
     _build_proj_gather_mem(ctx, t["proj_gather_1"])
     _build_proj_weight_mem(ctx, t["proj_weight"])
@@ -1844,15 +2083,48 @@ def decode_layer(
     of_g_s = ObjectFifo(
         _scores_ty(ctx, "attn_kv"), name="attn_s", delegate_tile=t["attn_kv"]
     )
-    _build_attn_kv(ctx, t["attn_kv"], "attn_kv", "l_kv", g.dh, of_g_s, two_kv)
-    _build_attn_qk(ctx, t["attn_qk"], "attn_qk", "l_qk", g.dh, of_g_s, q_of_g, two_kv)
+    # The qk core releases this after it reads its RTPs, so the kv core reads
+    # its own only afterwards. It lives on the qk tile, south of the kv tile.
+    (g_handshake,) = ctx.add_locks(t["attn_qk"], [0])
+    _build_attn_kv(
+        ctx,
+        t["attn_kv"],
+        "attn_kv",
+        "l_kv",
+        g.dh,
+        of_g_s,
+        kv_cores["v"],
+        two_kv,
+        g_handshake,
+    )
+    _build_attn_qk(
+        ctx,
+        t["attn_qk"],
+        "attn_qk",
+        "l_qk",
+        g.dh,
+        of_g_s,
+        q_of_g,
+        kv_cores["k"],
+        two_kv,
+        g_handshake,
+    )
     of_swa_s = ObjectFifo(
         _scores_ty(ctx, "swa_attn_kv"),
         name="swa_attn_s",
         delegate_tile=t["swa_attn_kv"],
     )
+    (swa_handshake,) = ctx.add_locks(t["swa_attn_qk"], [0])
     _build_attn_kv(
-        ctx, t["swa_attn_kv"], "swa_attn_kv", "swa_l_kv", g.swa_dh, of_swa_s, False
+        ctx,
+        t["swa_attn_kv"],
+        "swa_attn_kv",
+        "swa_l_kv",
+        g.swa_dh,
+        of_swa_s,
+        kv_cores["swa_v"],
+        False,
+        swa_handshake,
     )
     _build_attn_qk(
         ctx,
@@ -1862,9 +2134,10 @@ def decode_layer(
         g.swa_dh,
         of_swa_s,
         q_of_swa,
+        kv_cores["swa_k"],
         False,
+        swa_handshake,
     )
-    _build_attn_mem(ctx, t["attn_mem"])
 
     _route(rt, grid, t, proj_send_tiles)
     return Program(dev, rt, workers=workers).resolve_program()
