@@ -103,6 +103,22 @@ Two things that attempt settled. Placing an endpoint on the acting core's tile r
 
 **Compiler** Likely.
 
+### T7 — Several tiles take turns filling one buffer
+
+**Affects** 
+- proj x memtile (`x` in, from rms, attn_kv, swa_attn_kv and glu)
+- rms (`x` in, from the shim and from the proj x memtile)
+
+**Complication** Four tiles send `x` into one buffer pair on the proj x memtile, which forwards it to all 16 projection cores. Each sender writes the whole object, not a slice, and only one sends at a time. This is neither T4, where one tile sends several kinds of data down one channel, nor T5, where several channels each write a piece of one object.
+
+An ObjectFifo names one sending tile and a list of receiving tiles. The receiving side already fans out; the sending side cannot fan in.
+
+The switchbox does the merge today. Four packet flows meet on one channel, three of them under packet id 0, and the receiving BD writes whatever arrives into the rotation.
+
+**Change** Let a fifo name several sending tiles. Nothing checks that the senders take turns. They do so only because each one waits on the result of the phase before it, which is a fact about the schedule that the compiler cannot see. A fifo with several senders would have to take that on trust, or arbitrate.
+
+**Compiler** Needed.
+
 ## Design sites waiting on the kernels
 
 `_build_rms` and `_build_proj_core` call `ctx.locks(...)` with a pinned table, because each kernel names its lock ids as compile-time constants. Each site unblocks when T1, T2, T3 and T6 take the locks out of the matching kernel. `_build_rope` and `_build_glu` no longer pin anything.
