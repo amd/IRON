@@ -27,6 +27,7 @@ from iron.applications.granite import Granite
 from iron.applications.idefics3 import SmolVLMText
 from iron.applications.lfm2 import Lfm2
 from iron.applications.llama import Llama
+from iron.applications.ministral3 import Ministral3
 from iron.applications.phi3 import Phi4
 from iron.applications.qwen2 import Qwen2
 from iron.applications.qwen3 import Qwen3
@@ -121,6 +122,9 @@ APPLICATIONS = {
         each_step=("npu2",),
     ),
     "lfm2_1.2b": Application(Lfm2, "lfm2-1.2b", "model.safetensors", "tokenizer.json"),
+    "ministral_3_3b": Application(
+        Ministral3, "ministral-3-3b-base-2512", INDEX, "tokenizer.json"
+    ),
     "smolvlm_256m": Application(
         SmolVLMText, "smolvlm-256m-instruct", "model.safetensors", "tokenizer.json"
     ),
@@ -145,7 +149,6 @@ APPLICATIONS = {
 UNHELD = {
     "granite_hybrid": "Experts streams every expert a row: too slow to generate",
     "qwen3_moe": "Experts streams every expert a row: too slow to generate",
-    "ministral3": "its released checkpoints nest the text decoder, unread",
 }
 
 

@@ -4,7 +4,8 @@
 """Ministral 3's text decoder on the shared decoder (``iron.lm``), its shape
 that of Hugging Face's ``ministral3`` text model. The released checkpoints
 are Mistral 3's vision-language model, the text config and weights nested
-under it: both are read here, the vision tower left unread.
+under it: both are read here, the vision tower left unread. It is judged
+by transformers' own Mistral 3 (``hugging_face.py``).
 
 Ministral 3 is Llama's layer under YaRN's RoPE (``YarnRopeScaling``), its
 queries scaled by position past the context it was trained at: by ``1 +
@@ -139,8 +140,8 @@ class Ministral3Config(DecoderConfig):
 
 def text_weights(weights):
     """The text decoder's modules of a checkpoint's tree, as ``model`` and
-    ``lm_head``: a Mistral 3 checkpoint holds them at
-    ``language_model.model`` and ``language_model.lm_head`` as
+    ``lm_head`` (none where the head is tied): a Mistral 3 checkpoint holds
+    them at ``language_model.model`` and ``language_model.lm_head`` as
     transformers 4 saved it, or ``model.language_model`` and ``lm_head`` as
     transformers 5 does. A text checkpoint is returned as it is.
 
@@ -152,24 +153,36 @@ def text_weights(weights):
             "Ministral3: an FP8 checkpoint (weight_scale_inv) is not read; "
             "take a Base (bf16) one"
         )
-    if hasattr(getattr(weights, "model", None), "language_model"):
-        model, head = weights.model.language_model, weights.lm_head
-    elif hasattr(weights, "language_model"):
-        model, head = weights.language_model.model, weights.language_model.lm_head
+    found = vars(weights)
+    if "language_model" in found:
+        nested = vars(weights.language_model)
+        model, head = nested["model"], nested.get("lm_head")
+    elif "model" in found and "language_model" in vars(weights.model):
+        model, head = weights.model.language_model, found.get("lm_head")
     else:
         return weights
+    if head is None:
+        return subtree(weights, model=model)
     return subtree(weights, model=model, lm_head=head)
 
 
 class Ministral3(CausalLM):
     """Ministral 3's text decoder on ``config``'s shape and a checkpoint's
-    ``weights`` (``text_weights``), its (untied) output head ``lm_head``.
+    ``weights`` (``text_weights``), its output head ``lm_head`` or, tied,
+    the embedding.
     """
 
     config = Ministral3Config
 
     def __init__(self, config: Ministral3Config, weights):
         super().__init__(config, text_weights(weights))
+
+    @property
+    def hugging_face(self):
+        """transformers' Mistral 3, imported only where a golden is recorded."""
+        from .hugging_face import HuggingFaceMistral3
+
+        return HuggingFaceMistral3
 
     def rotary(self, config: Ministral3Config) -> Rope:
         """``Rope``'s table, its queries scaled where Llama 4 scaling is on."""

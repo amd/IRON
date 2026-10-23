@@ -109,3 +109,17 @@ def test_the_config_reads_from_a_mistral_3_text_config(tmp_path):
     nested = {"model_type": "mistral3", "text_config": text, "vision_config": {}}
     (tmp_path / "config.json").write_text(json.dumps(nested))
     assert Ministral3Config.from_checkpoint(tmp_path) == flat
+
+
+def test_a_tied_checkpoint_reads_its_head_from_the_embedding(npu2):
+    """The released checkpoints tie the head and hold no ``lm_head``."""
+    tied = dataclasses.replace(TOY, tie_word_embeddings=True)
+    named = {
+        "language_model." + n: s
+        for n, s in TestMinistral3.names().items()
+        if not n.startswith("lm_head.")
+    }
+    tree = checkpoint(tied, named).tree("random", 0)
+    got = Ministral3(tied, tree)
+    embedding = dict(leaves(tree))["language_model.model.embed_tokens.weight"]
+    assert got.lm_head.weight is embedding
