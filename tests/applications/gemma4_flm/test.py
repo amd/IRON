@@ -93,34 +93,43 @@ def serve(engine, xclbins):
         server.wait()
 
 
+def chat(prompt, *, backend=None, max_tokens=128):
+    request = {
+        "model": "gemma4-it:e2b",
+        "stream": False,
+        "temperature": 0,
+        "top_k": 1,
+        "messages": [{"role": "user", "content": prompt}],
+        "options": {"num_predict": max_tokens},
+    }
+    if backend is not None:
+        request["backend"] = backend
+    return post("/api/chat", request)
+
+
+def configure_greedy():
+    # /api/generate ignores sampling options. /api/chat sets them for the
+    # requests that follow.
+    chat("Hi", max_tokens=1)
+
+
+def generate(prompt, *, backend=None, max_tokens=128):
+    request = {
+        "model": "gemma4-it:e2b",
+        "stream": False,
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+    }
+    if backend is not None:
+        request["backend"] = backend
+    return post("/api/generate", request)
+
+
 def replies(engine, xclbins, prompts):
     """The /api/generate responses to prompts, greedy."""
     with serve(engine, xclbins):
-        # /api/generate ignores sampling options. /api/chat sets them for the
-        # requests that follow.
-        post(
-            "/api/chat",
-            {
-                "model": "gemma4-it:e2b",
-                "stream": False,
-                "temperature": 0,
-                "top_k": 1,
-                "messages": [{"role": "user", "content": "Hi"}],
-                "options": {"num_predict": 1},
-            },
-        )
-        return [
-            post(
-                "/api/generate",
-                {
-                    "model": "gemma4-it:e2b",
-                    "stream": False,
-                    "prompt": prompt,
-                    "max_tokens": 128,
-                },
-            )
-            for prompt in prompts
-        ]
+        configure_greedy()
+        return [generate(prompt) for prompt in prompts]
 
 
 @pytest.fixture(scope="module")
@@ -179,3 +188,19 @@ def test_iron_matches_engine(prompt, build_engines, stock_tokens, record_propert
             f"at {at} IRON chose {got[at]} (p {p[got[at]]:.4f} in float32), "
             f"the stock engine {stock[at]} (p {p[stock[at]]:.4f})"
         )
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.skipif(
+    not MODEL.exists(), reason="needs $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2"
+)
+def test_iron_engine_reload_rebuilds_override_state(build_engines):
+    prompt = "Reply with only the word hello."
+    with serve(APP / "build" / "engine" / "engines", APP / "build"):
+        before = chat(prompt, max_tokens=8)
+        # The server initially lets the model catalog select the "flm" backend.
+        # Naming that backend explicitly changes the request selector, forcing
+        # the same model and override DLL to unload and reload in this process.
+        after = chat(prompt, backend="flm", max_tokens=8)
+    assert after["message"]["content"] == before["message"]["content"]
