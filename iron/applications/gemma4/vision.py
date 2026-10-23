@@ -18,8 +18,16 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, Scratchpad, lm
-from iron.lm import Attention, ImagePatches, NoCache, SandwichLayer, Tower, rope_angles
-from iron.lm.checkpoint import renamed
+from iron.applications.gemma4.audio import Clipped
+from iron.lm import (
+    Attention,
+    GatedMLP,
+    ImagePatches,
+    NoCache,
+    SandwichLayer,
+    Tower,
+    rope_angles,
+)
 from iron.operators.axpy import AXPY
 from iron.operators.gemm import GEMM
 from iron.operators.resample.op import SIDE
@@ -47,6 +55,7 @@ class VisionConfig(lm.Config):
     hidden_act: str = dataclasses.field(
         default="gelu_pytorch_tanh", metadata={"json": "hidden_activation"}
     )
+    use_clipped_linears: bool = False
     text_dim: int = dataclasses.field(
         default=512, metadata={"json": "/text_config.hidden_size"}
     )
@@ -120,27 +129,74 @@ class VisionConfig(lm.Config):
         )
 
 
-class VisionLayer(SandwichLayer):
-    """Layer ``i``: unscaled attention over RMS-normed q, k and v, each
-    head's channels of q and k reordered as they load, so that the axial
-    RoPE turns halves rather than each half of a head.
+class VisionAttention(Attention):
+    """Unscaled attention over RMS-normed q, k and v, every projection
+    ``Clipped``, q, k and v clamping their input alike.
     """
 
     def __init__(self, c: VisionConfig, i: int):
-        super().__init__(c, i, Attention(c, i, norms="qkv"), cache=NoCache())
-        self.self_attn.scaling = 1.0
+        super().__init__(c, i, norms="qkv")
+        self.o_proj = Clipped(c, self.heads * self.head_dim, c.hidden_size)
+        self.scaling = 1.0
+
+    def projections(self, c) -> None:
+        E, D = c.hidden_size, self.head_dim
+        self.q_proj = Clipped(c, E, self.heads * D)
+        self.k_proj = Clipped(c, E, self.groups * D)
+        self.v_proj = Clipped(c, E, self.groups * D)
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        Clipped.same_input(self.q_proj, self.k_proj, self.v_proj)
+
+    def project(self, x, **gemv) -> list:
+        h = self.q_proj.clamp(x)
+        return [p.project(h) for p in (self.q_proj, self.k_proj, self.v_proj)]
+
+
+class VisionMLP(GatedMLP):
+    """``GatedMLP``, every projection ``Clipped``, gate and up clamping
+    their input alike.
+    """
+
+    def __init__(self, c: VisionConfig):
+        super().__init__(c)
+        self.down_proj = Clipped(c, c.intermediate_size, c.hidden_size)
+
+    def projections(self, c) -> None:
+        self.gate_proj = Clipped(c, c.hidden_size, c.intermediate_size)
+        self.up_proj = Clipped(c, c.hidden_size, c.intermediate_size)
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        Clipped.same_input(self.gate_proj, self.up_proj)
+
+    def body(self, x):
+        h = self.gate_proj.clamp(x)
+        gate, up = self.gate_proj.project(h), self.up_proj.project(h)
+        return self.down_proj(self.act(gate) * up)
+
+
+class VisionLayer(SandwichLayer):
+    """Layer ``i``: ``VisionAttention`` and ``VisionMLP``, each head's
+    channels of q and k reordered as they load, so that the axial RoPE
+    turns halves rather than each half of a head.
+    """
+
+    def __init__(self, c: VisionConfig, i: int):
+        super().__init__(c, i, VisionAttention(c, i), VisionMLP(c), NoCache())
         self.rope = c.head_dim
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
         a = self.self_attn
-        half, E = a.head_dim // 2, a.q_proj.in_features
+        half, E = a.head_dim // 2, a.q_proj.linear.in_features
         quarter = np.arange(half // 2)
         # The x half's first and second quarters, then the y half's.
         order = np.concatenate(
             [quarter, quarter + half, quarter + half // 2, quarter + 3 * half // 2]
         )
-        for p in (a.q_proj, a.k_proj):
+        for p in (a.q_proj.linear, a.k_proj.linear):
             w = p.weight.reshape(a.heads, a.head_dim, E)[:, order]
             p.weight = iron.param(w.reshape(E, E))
         for norm in (a.q_norm, a.k_norm):
@@ -250,12 +306,11 @@ class VisionTower(Tower):
         ]
         y_ids = [k * ty + wy for ty in blocks for wy in range(k) for _ in range(k)]
         patch_embedder = PatchEmbedder(c, x_ids, y_ids)
-        tree = renamed(weights, self.renames)
-        patch_embedder.load_state_dict(tree, path="vision_tower.patch_embedder.")
+        patch_embedder.load_state_dict(weights, path="vision_tower.patch_embedder.")
         self.vision_tower.patch_embedder = patch_embedder
         self.vision_tower.encoder = SimpleNamespace(layers=self.layers)
         self.embed_vision = EmbedVision(c)
-        self.embed_vision.load_state_dict(tree, path="embed_vision.")
+        self.embed_vision.load_state_dict(weights, path="embed_vision.")
         self.load_layers(weights, "vision_tower.encoder.layers.")
         rope = rope_angles(half, c.position_embedding_size, c.rope_theta).astype(
             bfloat16
@@ -329,12 +384,6 @@ class VisionTower(Tower):
             repeat=repeat,
             length=wk,
         )
-
-    renames = {
-        f"{module}.{p}_proj.linear": f"{module}.{p}_proj"
-        for module, ps in (("self_attn", "qkvo"), ("mlp", ("gate", "up", "down")))
-        for p in ps
-    }
 
     def pool(self, x, n):
         return GEMM.step(self.pooling[:, :n], x, precision=self.config.precision)

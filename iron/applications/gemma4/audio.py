@@ -49,6 +49,7 @@ class AudioConfig(lm.Config):
     # make the row a whole Softmax line.
     band: int = lm.not_json(32)
     attention_logit_cap: float = 50.0
+    use_clipped_linears: bool = True
     conv_kernel_size: int = 5
     residual_weight: float = 0.5
     text_dim: int = dataclasses.field(
@@ -95,21 +96,41 @@ class AudioConfig(lm.Config):
 
 
 class Clipped(iron.Graph):
-    """A checkpoint's clipped linear: clamp, project by ``linear`` at
-    ``c.precision``, clamp.
+    """A checkpoint's clippable linear: clamp, project by ``linear`` at
+    ``c.precision``, clamp, each clamp only where ``c.use_clipped_linears``.
     """
 
-    def __init__(self, c: AudioConfig, in_features: int, out_features: int):
+    def __init__(self, c, in_features: int, out_features: int):
         self.linear = Linear(in_features, out_features, False, precision=c.precision)
         bound = partial(iron.param, dtype=np.float32)
-        self.input_min, self.input_max = bound(), bound()
-        self.output_min, self.output_max = bound(), bound()
+        self.input_min = self.input_max = self.output_min = self.output_max = None
+        if c.use_clipped_linears:
+            self.input_min, self.input_max = bound(), bound()
+            self.output_min, self.output_max = bound(), bound()
 
     def clamp(self, x):
+        if self.input_min is None:
+            return x
         return Clamp.step(x, low=float(self.input_min), high=float(self.input_max))
 
     def output(self, y):
+        if self.output_min is None:
+            return y
         return Clamp.step(y, low=float(self.output_min), high=float(self.output_max))
+
+    @staticmethod
+    def same_input(*linears: "Clipped") -> None:
+        """Check that ``linears``, which share an input, clamp it alike, so
+        the first's ``clamp`` serves them all.
+
+        Raises:
+            ValueError: They clamp it to different bounds.
+        """
+        if linears[0].input_min is None:
+            return
+        bounds = {(float(p.input_min), float(p.input_max)) for p in linears}
+        if len(bounds) > 1:
+            raise ValueError(f"linears sharing an input clamp it to {sorted(bounds)}")
 
     def project(self, x):
         """``x``, already clamped, projected and clamped."""
@@ -171,12 +192,7 @@ class ConformerAttention(iron.Graph):
         """
         super().load_state_dict(tree, path=path)
         H, D, W, B = self.dims
-        if not (
-            (self.q_proj.input_min, self.q_proj.input_max)
-            == (self.k_proj.input_min, self.k_proj.input_max)
-            == (self.v_proj.input_min, self.v_proj.input_max)
-        ):
-            raise ValueError("q, k and v are clamped to different input bounds")
+        Clipped.same_input(self.q_proj, self.k_proj, self.v_proj)
         # The key scale moved to the queries; the soft cap and the band
         # (window, period) are Softmax's own.
         q_scale = D**-0.5 / math.log(2)

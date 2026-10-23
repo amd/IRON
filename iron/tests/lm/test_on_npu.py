@@ -439,6 +439,7 @@ GEMMA4_VISION = VisionConfig(
     rows=256,
     chunk=512,
     patch_columns=8,
+    use_clipped_linears=True,
 )
 
 GEMMA4_AUDIO = AudioConfig(
@@ -465,9 +466,7 @@ GEMMA4_AUDIO = AudioConfig(
 def names_gemma4_vision(c: VisionConfig) -> dict[str, tuple[int, ...]]:
     """``VisionTower``'s own tensors, as the real checkpoint names them
     (``gemma-4-e2b/model.safetensors``'s header): the attention and MLP
-    projections, unclipped (``VisionLayer`` uses plain ``Linear``, not
-    ``Clipped``, so the real checkpoint's per-projection clamp bounds go
-    unread; they are left out of this toy for the same reason).
+    projections ``Clipped``, their clamp bounds read.
     """
     E, F, D = c.hidden_size, c.intermediate_size, c.head_dim
     Q = c.num_attention_heads * D
@@ -484,24 +483,29 @@ def names_gemma4_vision(c: VisionConfig) -> dict[str, tuple[int, ...]]:
         p = f"vision_tower.encoder.layers.{i}"
         out |= {
             f"{p}.input_layernorm.weight": (E,),
-            f"{p}.self_attn.q_proj.weight": (Q, E),
-            f"{p}.self_attn.k_proj.weight": (Q, E),
-            f"{p}.self_attn.v_proj.weight": (Q, E),
-            f"{p}.self_attn.o_proj.weight": (E, Q),
             f"{p}.self_attn.q_norm.weight": (D,),
             f"{p}.self_attn.k_norm.weight": (D,),
             f"{p}.post_attention_layernorm.weight": (E,),
             f"{p}.pre_feedforward_layernorm.weight": (E,),
             f"{p}.post_feedforward_layernorm.weight": (E,),
-            f"{p}.mlp.gate_proj.weight": (F, E),
-            f"{p}.mlp.up_proj.weight": (F, E),
-            f"{p}.mlp.down_proj.weight": (E, F),
         }
+        for name, (cin, cout) in {
+            "self_attn.q_proj": (E, Q),
+            "self_attn.k_proj": (E, Q),
+            "self_attn.v_proj": (E, Q),
+            "self_attn.o_proj": (Q, E),
+            "mlp.gate_proj": (E, F),
+            "mlp.up_proj": (E, F),
+            "mlp.down_proj": (F, E),
+        }.items():
+            out |= _clipped(f"{p}.{name}", cin, cout)
     return out
 
 
 def test_gemma4_vision_tower_is_on_npu():
-    weights = checkpoint(QWEN3, names_gemma4_vision(GEMMA4_VISION)).tree("random")
+    # "unread": q, k and v, and gate and up, clamp their input alike, which
+    # bounds drawn at random do not.
+    weights = checkpoint(QWEN3, names_gemma4_vision(GEMMA4_VISION)).tree("unread")
     assert_on_npu(VisionTower(GEMMA4_VISION, weights))
 
 
@@ -573,9 +577,8 @@ def names_gemma4_audio(c: AudioConfig) -> dict[str, tuple[int, ...]]:
 
 
 def test_gemma4_audio_tower_is_on_npu():
-    # "unread": filled("random")'s 0-d draw (the Clipped linears' scalar
-    # clamp bounds) is a bare numpy scalar, not an array, which param()
-    # refuses; "unread"'s np.zeros(()) is a proper 0-d array.
+    # "unread": q, k and v clamp their input alike, which bounds drawn at
+    # random do not.
     weights = checkpoint(QWEN3, names_gemma4_audio(GEMMA4_AUDIO)).tree("unread")
     assert_on_npu(AudioTower(GEMMA4_AUDIO, weights))
 
