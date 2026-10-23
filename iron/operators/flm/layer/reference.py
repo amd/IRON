@@ -7,9 +7,8 @@ kernels compute it.
 The reference takes the five buffers of DecodeLayer and returns x and the kv
 cache as the device leaves them:
 
-    x_out, kv_out = reference(
-        FLM_GEMMA4_E2B_DECODE, "swa", x, proj, rms, rope_rms, kv,
-        context_len=37, max_l=1024)
+    g = LayerDims(FLM_GEMMA4_E2B_DECODE, LayerType.SWA)
+    x_out, kv_out = reference(g, x, proj, rms, rope_rms, kv, context_len=37, max_l=1024)
 
 It reproduces the kernels' rounding, accumulation order and lookup tables with
 aie2p_math_emulation. A product or an inverse square root can still differ
@@ -19,10 +18,9 @@ changes the bf16 result by one ulp.
 generate_inputs() draws synthetic buffers with a fixed seed.
 """
 
-import dataclasses
-
 import numpy as np
 from aie.iron.kernels import bf16_exp_lut_ref
+from ml_dtypes import bfloat16
 
 from iron.operators.flm.aie2p_math_emulation import (
     bfp16,
@@ -36,18 +34,18 @@ from iron.operators.flm.aie2p_math_emulation import (
     tree_sum,
 )
 from iron.operators.flm.layer.design import (
-    LAYER_TYPES,
     LK,
     MIN_BF16_PAD,
     SLIDING_WINDOW,
+    LayerDims,
 )
 from iron.operators.flm.q4nx import (
     BLOCK_BYTES,
     GROUP,
     K_TILE,
     M_TILE,
-    bf16_to_f32,
     packed_bytes,
+    unpack,
 )
 
 # The epsilon of aie_kernels/flm_gemma4/rms_norm.h.
@@ -56,70 +54,36 @@ RMS_EPS = 1e-6
 BF16_M, BF16_K = 32, 256
 
 
-def layer_dims(geometry, layer_type):
-    """The dimensions of one layer type, in elements, by geometry field name.
-
-    geometry is aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or FLM_GEMMA4_E4B_DECODE.
-    dh is the head dim of this layer type. A skip layer with double_wide_mlp has
-    twice the intermediate size.
+def proj_layout(g: LayerDims) -> dict[str, tuple[int, str, int, int]]:
+    """Weight name -> (byte offset, format, rows, cols) in proj: the design's
+    weights, with its qkv split into q, k and v (absent on a skip layer).
+    rows are output features.
     """
-    if layer_type not in LAYER_TYPES:
-        raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
-    g = dataclasses.asdict(geometry)
-    g["swa"] = layer_type.startswith("swa")
-    g["skip"] = layer_type.endswith("_skip")
-    if g["swa"]:
-        g["dh"] = g["swa_dh"]
-    g["dq"] = g["num_attn_heads"] * g["dh"]
-    g["dk"] = g["num_kv_heads"] * g["dh"]
-    if g["skip"] and g["double_wide_mlp"]:
-        g["intermediate_size"] *= 2
-    return g
-
-
-# ---------------------------------------------------------------------------
-# Buffer layout
-# ---------------------------------------------------------------------------
-
-
-def proj_layout(geometry, layer_type):
-    """Weight name -> (byte offset, format, rows, cols) in proj.
-
-    The weights lie back to back: q, k and v (absent on a skip layer), o, the
-    interleaved up/gate and down in q4nx, then the per-layer-input down, gate
-    and up projections in blocked bf16. rows are output features.
-    """
-    g = layer_dims(geometry, layer_type)
-    D, I, P = g["model_dim"], g["intermediate_size"], g["pli_d"]
-    items = [("q", "q4nx", g["dq"], D)]
-    if not g["skip"]:
-        items += [("k", "q4nx", g["dk"], D), ("v", "q4nx", g["dk"], D)]
-    items += [
-        ("o", "q4nx", D, g["dq"]),
-        ("up_gate", "q4nx", 2 * I, D),
-        ("down", "q4nx", D, I),
-        ("pli_down", "bf16", P, D),
-        ("pli_gate", "bf16", P, D),
-        ("pli_up", "bf16", D, P),
-    ]
-    out, off = {}, 0
-    for name, fmt, rows, cols in items:
-        out[name] = (off, fmt, rows, cols)
-        off += _size(fmt, rows, cols)
+    out = {}
+    for name, w in g.weights.items():
+        fmt = "q4nx" if w.packed else "bf16"
+        if name != "qkv":
+            out[name] = (2 * w.offset, fmt, w.dout, w.din)
+            continue
+        off = 2 * w.offset
+        for part, rows in (("q", g.dq), ("k", g.dk), ("v", g.dk)):
+            if part == "q" or not g.skip:
+                out[part] = (off, fmt, rows, w.din)
+                off += _size(fmt, rows, w.din)
     return out
 
 
-def _size(fmt, rows, cols):
+def _size(fmt: str, rows: int, cols: int) -> int:
     """Bytes of a weight in q4nx or in bf16."""
     return packed_bytes(rows * cols) if fmt == "q4nx" else 2 * rows * cols
 
 
-def rope_rms_layout(geometry, layer_type):
+def rope_rms_layout(g: LayerDims) -> dict[str, int]:
     """Element offsets in rope_rms: cos and sin of this token's position, the q
     and k norm weights, the per-layer embedding of this token, the per-layer
-    norm weight, the post-per-layer-input norm weight and the layer scale."""
-    g = layer_dims(geometry, layer_type)
-    dh, P, D = g["dh"], g["pli_d"], g["model_dim"]
+    norm weight, the post-per-layer-input norm weight and the layer scale.
+    """
+    dh, P, D = g.dh, g.geometry.pli_d, g.geometry.model_dim
     lay = dict(cos=0, sin=dh // 2, q_norm=dh, k_norm=2 * dh, pli_embed=3 * dh)
     lay["pli_norm"] = lay["pli_embed"] + P
     lay["post_pli_norm"] = lay["pli_norm"] + P
@@ -128,25 +92,14 @@ def rope_rms_layout(geometry, layer_type):
     return lay
 
 
-def kv_rows(geometry, layer_type, max_l):
-    """Rows of each half (K, then V) of the kv cache."""
-    return SLIDING_WINDOW if layer_dims(geometry, layer_type)["swa"] else max_l
-
-
-def kv_row(geometry, layer_type, context_len):
-    """The cache row of the token at position context_len."""
-    if layer_dims(geometry, layer_type)["swa"]:
-        return context_len % SLIDING_WINDOW
-    return context_len
-
-
-def _attention_rows(g, context_len):
+def _attention_rows(g: LayerDims, context_len: int) -> tuple[np.ndarray, int]:
     """Cache rows in the order the attention core reads them, and how many hold
     keys. The core reads whole rounds and masks the rows past the keys. A
     sliding-window ring of L >= 512 tokens holds them in time order from row
-    L % 512."""
+    L % 512.
+    """
     L = context_len + 1
-    if g["swa"] and L >= SLIDING_WINDOW:
+    if g.swa and L >= SLIDING_WINDOW:
         lb = L % SLIDING_WINDOW
         return (
             np.concatenate([np.arange(lb, SLIDING_WINDOW), np.arange(lb)]),
@@ -155,14 +108,10 @@ def _attention_rows(g, context_len):
     return np.arange(-(-L // LK) * LK), L
 
 
-# ---------------------------------------------------------------------------
-# RMS norm
-# ---------------------------------------------------------------------------
-
-
 def rms_norm(x, w):
     """rms_norm.h: bf16(x * w * rsqrt(mean(x^2) + eps)). w is None for the v
-    norm."""
+    norm.
+    """
     x = np.asarray(x, np.float64)
     s = f32(
         fmul(tree_sum(x * x, 16)[..., None], np.float32(1.0 / x.shape[-1]))
@@ -171,43 +120,29 @@ def rms_norm(x, w):
     return rb(fmul(x if w is None else f32(x * w), fast_rsqrt(s)))
 
 
-# ---------------------------------------------------------------------------
-# Weights and projections
-# ---------------------------------------------------------------------------
-
-
 # The bytes of a q4nx block's bf16 scales and minima.
 _SM_BYTES = 2 * 2 * M_TILE * K_TILE // GROUP
 
 
 def parse_q4nx(proj_u8, offset, rows, cols):
     """A q4nx weight in natural order: (codes [rows, cols], scales and mins
-    [rows, cols / 32]). The weight is min + scale * code.
-
-    A block holds 32 rows by 256 columns in 5120 bytes: 256 bf16 scales, 256 bf16
-    minima at index g * 32 + r, then 8192 4-bit codes at nibble
-    (r // 16) * 4096 + c * 16 + r % 16, low nibble first. Blocks go by pairs of
-    32-row bands: column block c of band 2p, then of band 2p + 1.
+    [rows, cols / 32]) (``q4nx.unpack``). Blocks go by pairs of 32-row bands:
+    column block c of band 2p, then of band 2p + 1.
     """
     nb_r, nb_c = rows // M_TILE, cols // K_TILE
     blk = proj_u8[offset : offset + nb_r * nb_c * BLOCK_BYTES]
-    blk = blk.reshape(nb_r // 2, nb_c, 2, BLOCK_BYTES).transpose(0, 2, 1, 3)
-    blk = blk.reshape(nb_r, nb_c, BLOCK_BYTES)
-    sm = blk[..., :_SM_BYTES].copy().view("<u2")
-    sm = bf16_to_f32(sm.reshape(nb_r, nb_c, 2, K_TILE // GROUP, M_TILE))
-    sm = sm.transpose(2, 0, 4, 1, 3).reshape(2, rows, cols // GROUP)
-    qs = blk[..., _SM_BYTES:]
-    codes = np.empty(qs.shape[:-1] + (M_TILE * K_TILE,), np.uint8)
-    codes[..., 0::2] = qs & 0x0F
-    codes[..., 1::2] = qs >> 4
-    codes = codes.reshape(nb_r, nb_c, 2, K_TILE, 16).transpose(0, 2, 4, 1, 3)
-    return codes.reshape(rows, cols), sm[0], sm[1]
+    return unpack(
+        blk.reshape(nb_r // 2, nb_c, 2, BLOCK_BYTES)
+        .transpose(0, 2, 1, 3)
+        .reshape(nb_r, nb_c, BLOCK_BYTES)
+    )
 
 
 def parse_bf16_blocked(proj_u8, offset, rows, cols):
     """A bf16 weight in 32 x 256 blocks, row-block major. Element k * 32 + m of
-    block (i, j) is W[32 i + m, 256 j + k]."""
-    w = bf16_to_f32(proj_u8[offset : offset + 2 * rows * cols].view("<u2"))
+    block (i, j) is W[32 i + m, 256 j + k].
+    """
+    w = proj_u8[offset : offset + 2 * rows * cols].view(bfloat16).astype(np.float32)
     w = w.reshape(rows // BF16_M, cols // BF16_K, BF16_K, BF16_M).transpose(0, 3, 1, 2)
     return w.reshape(rows, cols)
 
@@ -248,14 +183,10 @@ def bf16_matvec(x, w):
     return rb(acc)
 
 
-# ---------------------------------------------------------------------------
-# Layer stages
-# ---------------------------------------------------------------------------
-
-
 def rope_head(x, w_norm, cos, sin):
     """Per-head RMS norm, then rotate-half RoPE. A global layer rotates the first
-    64 pairs only: the engine passes cos 1 and sin 0 for the others."""
+    64 pairs only: the engine passes cos 1 and sin 0 for the others.
+    """
     xn = rms_norm(x, w_norm)
     h = xn.shape[-1] // 2
     x1, x2 = xn[..., :h], xn[..., h:]
@@ -269,13 +200,13 @@ def attention(q, K, V, valid, n_kv):
 
     Scale 1.0: q and k are RMS normalized. Per head the kernel runs an online
     softmax over rounds of 16 keys:
-        s  = bf16(q . k)
-        mx = max(m, max(s))
-        p  = bf16(exp(bf16(s - mx))), 0 for rows past `valid`
-        c  = exp(bf16(m - mx))
-        l  = l * c + bf16(sum(p))
-        y  = y * c + p . V
-    and returns bf16(bf16(y) * inv(l)). q . k and p . V run on bfp16 operands.
+        s     = bf16(q . k)
+        mx    = max(m, max(s))
+        p     = bf16(exp(bf16(s - mx))), 0 for rows past `valid`
+        c     = exp(bf16(m - mx))
+        denom = denom * c + bf16(sum(p))
+        y     = y * c + p . V
+    and returns bf16(bf16(y) * inv(denom)). q . k and p . V run on bfp16 operands.
     """
     H, dh = q.shape
     n_rows = K.shape[0]
@@ -292,7 +223,7 @@ def attention(q, K, V, valid, n_kv):
 
     neg_max = -3.3895313892515355e38  # the bf16 lowest value
     m = np.full(H, neg_max)
-    l = np.zeros(H, np.float32)
+    denom = np.zeros(H, np.float32)
     y = np.zeros((H, dh), np.float32)
     for r0 in range(0, n_rows, LK):
         sr = s_all[:, r0 : r0 + LK]
@@ -304,18 +235,19 @@ def attention(q, K, V, valid, n_kv):
         p = np.where(mask, rb(bf16_exp_lut_ref(d)), 0.0)
         c = bf16_exp_lut_ref(np.clip(rb(f32(m - vmax)), -87.0, 88.0))
         m = vmax
-        l = f32(fmul(l, c) + rb(tree_sum(p, 16)))
+        denom = f32(fmul(denom, c) + rb(tree_sum(p, 16)))
         y = fmul(y, c[:, None])
         pb = bfp16(p, 1)
         vr = Vh[r0 : r0 + LK]
         for k0 in (0, 8):
             y = f32(y + np.einsum("hk,khd->hd", pb[:, k0 : k0 + 8], vr[k0 : k0 + 8]))
-    return rb(rb(y) * inv_kernel(l)[:, None])
+    return rb(rb(y) * inv_kernel(denom)[:, None])
 
 
 def glu(up_gate, glu_slice):
     """bf16(gelu(gate) * up). Each glu_slice-row slice of the up/gate output
-    holds glu_slice / 2 up values, then glu_slice / 2 gate values."""
+    holds glu_slice / 2 up values, then glu_slice / 2 gate values.
+    """
     u = up_gate.reshape(-1, 2, glu_slice // 2)
     return rb(gelu_kernel(u[:, 1]) * u[:, 0]).reshape(-1)
 
@@ -324,7 +256,9 @@ def _u8(buf):
     return np.ascontiguousarray(buf).reshape(-1).view(np.uint8)
 
 
-def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max_l):
+def reference(
+    g: LayerDims, x, proj, rms, rope_rms, kv, context_len: int, max_l: int
+) -> tuple[np.ndarray, np.ndarray]:
     """One decode-layer dispatch on DecodeLayer's five buffers.
 
     The buffers are numpy arrays of any dtype (bf16, uint16 or uint8) and may be
@@ -332,22 +266,21 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
     patterns: the layer output in x[:D], and on a non-skip layer this token's K
     and V rows in kv.
     """
-    g = layer_dims(geometry, layer_type)
     D, dh, H, n_kv, P, dk = (
-        g["model_dim"],
-        g["dh"],
-        g["num_attn_heads"],
-        g["num_kv_heads"],
-        g["pli_d"],
-        g["dk"],
+        g.geometry.model_dim,
+        g.dh,
+        g.geometry.num_attn_heads,
+        g.geometry.num_kv_heads,
+        g.geometry.pli_d,
+        g.dk,
     )
     x16, rms16, rr16 = (_u8(b).view("<u2") for b in (x, rms, rope_rms))
     proj_u8 = _u8(proj)
-    W = proj_layout(geometry, layer_type)
-    lay = rope_rms_layout(geometry, layer_type)
+    W = proj_layout(g)
+    lay = rope_rms_layout(g)
 
     def vec(buf, off, n):
-        return bf16_to_f32(buf[off : off + n]).astype(np.float64)
+        return buf[off : off + n].view(bfloat16).astype(np.float64)
 
     def q4(name, v):
         off, _, rows, cols = W[name]
@@ -366,35 +299,35 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
     q = rope_head(q4("q", xn).reshape(H, dh), vec(rr16, lay["q_norm"], dh), cos, sin)
 
     kv_out = _u8(kv).view("<u2").copy()
-    rows = kv_rows(geometry, layer_type, max_l)
+    rows = g.kv_rows(max_l)
     v_off = rows * dk
-    if not g["skip"]:
+    if not g.skip:
         k_new = rope_head(
             q4("k", xn).reshape(n_kv, dh), vec(rr16, lay["k_norm"], dh), cos, sin
         )
         v_new = rms_norm(q4("v", xn).reshape(n_kv, dh), None)
-        r = kv_row(geometry, layer_type, context_len)
+        r = g.kv_row(context_len)
         kv_out[r * dk : (r + 1) * dk] = to_bf16(k_new.reshape(-1))
         kv_out[v_off + r * dk : v_off + (r + 1) * dk] = to_bf16(v_new.reshape(-1))
 
     # The attention reads the cache after this token's row lands in it.
     order, valid = _attention_rows(g, context_len)
-    cache = bf16_to_f32(kv_out[: 2 * v_off]).astype(np.float64)
+    cache = kv_out[: 2 * v_off].view(bfloat16).astype(np.float64)
     K = cache[:v_off].reshape(rows, n_kv, dh)[order]
     V = cache[v_off:].reshape(rows, n_kv, dh)[order]
     o = attention(q, K, V, valid, n_kv)
 
     h1 = rb(h0 + rms_norm(q4("o", o.reshape(-1)), w_post_attn))
-    act = glu(q4("up_gate", rms_norm(h1, w_pre_ff)), g["glu_slice"])
+    act = glu(q4("up_gate", rms_norm(h1, w_pre_ff)), g.geometry.glu_slice)
     h2 = rb(h1 + rms_norm(q4("down", act), w_post_ff))
 
     # The per-layer input of this layer, from the token embedding:
     # bf16(norm(bf16(W_down emb) / sqrt(D)) + per-layer embedding) / sqrt(2).
-    pli = rb(bf("pli_down", emb) * rb(g["pli_input_scale"], "rne"))
+    pli = rb(bf("pli_down", emb) * rb(g.geometry.pli_input_scale, "rne"))
     pli = rb(
         rms_norm(pli, vec(rr16, lay["pli_norm"], P)) + vec(rr16, lay["pli_embed"], P)
     )
-    pli = rb(pli * rb(g["pli_projection_scale"], "rne"))
+    pli = rb(pli * rb(g.geometry.pli_projection_scale, "rne"))
     gate = gelu_kernel(bf("pli_gate", h2))
     up = bf("pli_up", rb(pli * gate))
     out = rb(rb(h2 + rms_norm(up, vec(rr16, lay["post_pli_norm"], D))) * layer_scale)
@@ -402,11 +335,6 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
     x_out = x16.copy()
     x_out[:D] = to_bf16(out)
     return x_out, kv_out
-
-
-# ---------------------------------------------------------------------------
-# Synthetic inputs
-# ---------------------------------------------------------------------------
 
 
 def pack_q4nx(codes, scales, mins):
@@ -433,7 +361,7 @@ def pack_bf16_blocked(w):
     return to_bf16(b.reshape(-1), "rne").view(np.uint8)
 
 
-def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
+def generate_inputs(g: LayerDims, context_len: int, max_l: int, seed: int = 0):
     """Random buffers (x, proj, rms, rope_rms, kv) for one dispatch, as uint16
     bf16 bit patterns (proj as uint8).
 
@@ -447,9 +375,8 @@ def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
     rows the layer reads.
     """
     rng = np.random.default_rng(seed)
-    g = layer_dims(geometry, layer_type)
-    D, P, dh, dk = g["model_dim"], g["pli_d"], g["dh"], g["dk"]
-    W = proj_layout(geometry, layer_type)
+    D, P, dh, dk = g.geometry.model_dim, g.geometry.pli_d, g.dh, g.dk
+    W = proj_layout(g)
     end = max(off + _size(fmt, rows, cols) for off, fmt, rows, cols in W.values())
     proj = np.zeros(end, np.uint8)
     for off, fmt, rows, cols in W.values():
@@ -469,9 +396,9 @@ def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
     # The input, post-attention, pre-feedforward and post-feedforward norms.
     rms = (rng.normal(1, 0.2, (4, D)) * np.array([[20], [0.5], [4], [1]])).reshape(-1)
 
-    lay = rope_rms_layout(geometry, layer_type)
+    lay = rope_rms_layout(g)
     rr = np.zeros(lay["size"])
-    if g["swa"]:
+    if g.swa:
         inv_freq = 10000.0 ** (-np.arange(dh // 2) * 2 / dh)
     else:
         inv_freq = np.zeros(dh // 2)
@@ -488,9 +415,9 @@ def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
         rr[lay[name] : lay[name] + n] = rng.normal(mean, std, n)
     rr[lay["layer_scale"]] = 0.6
 
-    rows = kv_rows(geometry, layer_type, max_l)
+    rows = g.kv_rows(max_l)
     kv = np.zeros((2, rows, dk))
-    n = min(context_len + g["skip"], rows)
+    n = min(context_len + g.skip, rows)
     kv[0, :n] = rng.normal(0, 0.1, (n, dk))
     kv[1, :n] = rng.normal(0, 1, (n, dk))
     x, rms, rr = to_bf16(x, "rne"), to_bf16(rms, "rne"), to_bf16(rr, "rne")
@@ -500,17 +427,20 @@ def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
 
 def _query(g, W, x, proj, rms, rope_rms, lay):
     """The rotated query heads [heads, dh] of the layer."""
-    D, dh = g["model_dim"], g["dh"]
+    D, dh = g.geometry.model_dim, g.dh
     off, _, rows, cols = W["q"]
-    xn = rms_norm(bf16_to_f32(x[:D]), bf16_to_f32(rms[:D]))
+    xn = rms_norm(
+        x[:D].view(bfloat16).astype(np.float32),
+        rms[:D].view(bfloat16).astype(np.float32),
+    )
     qp = q4_matvec(xn, *parse_q4nx(proj, off, rows, cols)).reshape(
-        g["num_attn_heads"], dh
+        g.geometry.num_attn_heads, dh
     )
-    cos = bf16_to_f32(rope_rms[lay["cos"] : lay["cos"] + dh // 2])
-    sin = bf16_to_f32(rope_rms[lay["sin"] : lay["sin"] + dh // 2])
-    return rope_head(
-        qp, bf16_to_f32(rope_rms[lay["q_norm"] : lay["q_norm"] + dh]), cos, sin
+    cos, sin, q_norm = (
+        rope_rms[lay[name] : lay[name] + n].view(bfloat16).astype(np.float32)
+        for name, n in (("cos", dh // 2), ("sin", dh // 2), ("q_norm", dh))
     )
+    return rope_head(qp, q_norm, cos, sin)
 
 
 NEEDLE_SCORE = 8.0
@@ -529,15 +459,15 @@ def _plant_needles(g, context_len, kv, q, rng):
     """
     order, valid = _attention_rows(g, context_len)
     # A non-skip layer writes its own key at the newest position.
-    newest = order[valid - 1 - (not g["skip"])]
+    newest = order[valid - 1 - (not g.skip)]
     rows = {order[0], newest, 0}
-    if not g["skip"]:
+    if not g.skip:
         # The layer overwrites this row with its own key.
         rows.add(order[valid - 1])
     if valid < kv.shape[1] and context_len + 1 < kv.shape[1]:
         rows.add(context_len + 1)
-    n_kv, dh = g["num_kv_heads"], g["dh"]
-    group = g["num_attn_heads"] // n_kv
+    n_kv, dh = g.geometry.num_kv_heads, g.dh
+    group = g.geometry.num_attn_heads // n_kv
     for h in range(n_kv):
         qh = q[h * group : (h + 1) * group]
         u = (qh / np.linalg.norm(qh, axis=1, keepdims=True)).sum(0)

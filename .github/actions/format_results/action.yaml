@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Format Test Results"
+description: "Put a run's tests_latest.csv, as latest.csv, and its summary, as readme.md, in results/ to upload."
+
+inputs:
+  pretty_flags:
+    required: false
+    default: "--metric='Latency (mean)' --metric='Bandwidth (mean)' --metric='Throughput (mean)'"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Format results
+      shell: bash
+      run: |
+        mkdir -p results
+        cp tests_latest.csv results/latest.csv
+        ./ci/scripts/pretty.py --date="$(printf '%(%Y_%m_%d_%H_%M_%S)T')" \
+          --commit="$(git rev-parse --short HEAD)" ${{ inputs.pretty_flags }} \
+          -o results/readme.md tests_latest.csv

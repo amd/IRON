@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -21,17 +19,18 @@ UNKNOWN_OPERATOR = "(unknown)"
 # The results branch stores one directory per architecture and suite. The
 # workflow that benchmarks each one names its artifact after the pair.
 ARCHS = ["krackan", "phoenix"]
-SUITES = ["small", "extensive", "examples"]
+SUITES = ["small", "extensive", "examples", "nightly"]
 
 # What each suite holds, for a reader of the report.
 SUITE_LABELS = {
     "small": "Operators",
     "extensive": "Operators, extensive",
     "examples": "Applications",
+    "nightly": "Applications, nightly",
 }
 
-# A pull request runs the default and the example suites. The extensive suite
-# runs on a push to a trunk branch, so no pull request reports it.
+# A pull request runs the default and the example suites. The extensive and
+# nightly suites run on a trunk branch alone, so no pull request reports them.
 PR_SUITES = ["small", "examples"]
 
 
@@ -97,17 +96,34 @@ def status_emoji(passed: int, total: int, partial: bool = True) -> str:
     return "🟠" if partial else "❌"
 
 
-def operator_name(test_path: str) -> str:
-    """Name the operator a 'Test Path' belongs to.
+# The modules whose parametrize ids lead with what they test: every declared
+# operator ('GEMV-cols_4-...') and the decoders sharing one test
+# ('gemma3-long-40').
+LEADING_ID_TEST_FILES = (
+    "iron/tests/operators/test_catalog.py",
+    "tests/applications/decoders/test.py",
+)
+
+
+def operator_name(test_path: str, test_name: str = "") -> str:
+    """Name the operator a row of 'Test Path' and 'Test' belongs to.
 
     'iron/operators/flm/gemm/test.py::test_gemm' names 'flm/gemm', and
-    'iron/applications/llama_3.2_1b/test.py::test_llama' names 'llama_3.2_1b'.
+    'tests/applications/llama/test.py::test_llama' names 'llama'. A row of
+    a LEADING_ID_TEST_FILES module is named by its test's leading id:
+    'iron/tests/operators/test_catalog.py::test_operator' with test
+    'GEMV-cols_4' names 'GEMV'. Any other test is named by its module,
+    'test_' dropped.
     """
+    file_part = test_path.split("::", 1)[0]
+    if file_part in LEADING_ID_TEST_FILES:
+        return test_name.split("-", 1)[0] or UNKNOWN_OPERATOR
     directory, _ = split_test_path(test_path)
-    for prefix in ("iron/operators/", "iron/applications/"):
+    for prefix in ("iron/operators/", "tests/applications/"):
         if directory.startswith(prefix):
             return directory[len(prefix) :] or UNKNOWN_OPERATOR
-    return UNKNOWN_OPERATOR
+    stem = os.path.splitext(os.path.basename(file_part))[0]
+    return stem.removeprefix("test_") or UNKNOWN_OPERATOR
 
 
 def try_parse_float(value: Any) -> Optional[float]:
@@ -123,7 +139,7 @@ def try_parse_float(value: Any) -> Optional[float]:
 
 
 def row_key(row: Dict[str, str]) -> Tuple[str, str]:
-    """Identify the parametrization a row measures."""
+    """Identify the parametrization a row measures, by its test's path and id."""
     return ((row.get("Test Path") or "").strip(), (row.get("Test") or "").strip())
 
 

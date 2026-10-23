@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Keeps the SHA-pinned actions current. Python dependencies are not listed:
+# mlir_aie and llvm-aie are bumped by update-mlir-aie.yml, and the rest of
+# requirements.txt is unpinned.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    # `/` covers .github/workflows only; each composite action is listed.
+    directories:
+      - "/"
+      - "/.github/actions/format_results"
+      - "/.github/actions/prereqs"
+      - "/.github/actions/test"
+    schedule:
+      interval: "cron"
+      cronjob: "0 6 8,22 * *"
+    # Let a release age a week before adopting it.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]

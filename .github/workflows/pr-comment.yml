@@ -16,12 +16,15 @@ name: Comment on PR with Test Results
 on:
   workflow_run:
     workflows:
-      - Krackan - Small Benchmark/Test Suite
-      - Krackan - Test Example Applications
-      - Phoenix - Small Benchmark/Test Suite
-      - Phoenix - Test Example Applications
+      - Small Benchmark/Test Suite
+      - Test Example Applications
     types:
       - completed
+
+permissions:
+  actions: read # list and download the test-result artifacts
+  contents: read
+  pull-requests: write # post the aggregated comment
 
 jobs:
   comment:
@@ -29,7 +32,7 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         # No ref: check out the default branch (trusted base code). This job
         # runs from workflow_run with a write-scoped GITHUB_TOKEN and secrets,
         # so it must not check out the fork's head_sha: actions/checkout now
@@ -37,21 +40,24 @@ jobs:
         # ci/scripts/pretty_aggregate.py under the write token would be the
         # vulnerability itself. The job only needs the trusted aggregation
         # script; artifacts and PR metadata come from the API, not the tree.
+        with:
+          persist-credentials: false
 
       - name: Check out the results branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           ref: ci
           path: history
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Collect artifacts from all CI runs for this SHA
         id: collect
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           github-token: ${{ github.token }}
           script: |
@@ -65,19 +71,18 @@ jobs:
 
             // Artifact name -> suite directory. A name outside this map is
             // ignored, which keeps the fork from choosing a path.
-            const ARTIFACT_MAP = {
-              'results-phoenix-small':    'phoenix/small',
-              'results-phoenix-examples': 'phoenix/examples',
-              'results-small':            'krackan/small',
-              'results-examples':         'krackan/examples',
-            };
+            const RUNNERS = ['phoenix', 'krackan'];
+            const ARTIFACT_MAP = {};
+            for (const runner of RUNNERS) {
+              for (const suite of ['small', 'examples']) {
+                ARTIFACT_MAP[`results-${runner}-${suite}`] = `${runner}/${suite}`;
+              }
+            }
 
-            // Workflow name -> the suite it reports.
+            // Workflow name -> the suite each runner's job reports.
             const WORKFLOWS = {
-              'Krackan - Small Benchmark/Test Suite': 'krackan/small',
-              'Krackan - Test Example Applications': 'krackan/examples',
-              'Phoenix - Small Benchmark/Test Suite': 'phoenix/small',
-              'Phoenix - Test Example Applications': 'phoenix/examples',
+              'Small Benchmark/Test Suite': 'small',
+              'Test Example Applications': 'examples',
             };
 
             const root = path.join(process.env.RUNNER_TEMP, 'results');
@@ -94,7 +99,7 @@ jobs:
               per_page: 100,
             });
 
-            for (const [wf, suite] of Object.entries(WORKFLOWS)) {
+            for (const [wf, name] of Object.entries(WORKFLOWS)) {
               const matching = runs.data.workflow_runs.filter(r => r.name === wf);
               if (matching.length === 0) {
                 core.info(`No completed run found for "${wf}" at ${headSha}`);
@@ -102,8 +107,18 @@ jobs:
               }
 
               const run = matching[0]; // most recent
-              status[suite] = run.conclusion || 'unknown';
               core.info(`Found run ${run.id} for "${wf}" (${run.conclusion})`);
+
+              // Each runner's job ends its name with the runner's.
+              const jobs = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: run.id,
+              });
+              for (const runner of RUNNERS) {
+                const job = jobs.data.jobs.find(j => j.name.toLowerCase().endsWith(` on ${runner}`));
+                status[`${runner}/${name}`] = job?.conclusion || 'unknown';
+              }
 
               const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
                 owner: context.repo.owner,
@@ -113,7 +128,7 @@ jobs:
 
               for (const artifact of artifacts.data.artifacts) {
                 const dir = ARTIFACT_MAP[artifact.name];
-                if (dir !== suite) continue;
+                if (!dir || !dir.endsWith(`/${name}`)) continue;
 
                 core.info(`Downloading artifact "${artifact.name}" -> ${dir}`);
 
@@ -189,7 +204,7 @@ jobs:
 
       - name: Comment on PR
         if: steps.collect.outputs.skip != 'true' && steps.collect.outputs.pr_number != ''
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           RESULTS_ROOT: ${{ steps.collect.outputs.root }}
           PR_NUMBER: ${{ steps.collect.outputs.pr_number }}

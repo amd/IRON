@@ -1,92 +1,96 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass, field
+import functools
 
 import numpy as np
+from aie.dialects._aie_enum_gen import AIEArch
+from aie.iron import In, InOut
+from aie.iron.kernels import FlmGemma4DecodeGeometry
+from aie.utils.compile.jit.params import param, per_call
 from ml_dtypes import bfloat16
 
-import aie.utils as aie_utils
-from aie.dialects._aie_enum_gen import AIEArch
-from aie.iron.kernels import FlmGemma4DecodeGeometry
-
-from iron.common import (
-    AIERuntimeArgSpec,
-    DesignGenerator,
-    KernelObjectArtifact,
-    MLIROperator,
-    PythonGeneratedMLIRArtifact,
-)
+from iron.common import Operator, Unresolvable
+from iron.operators.flm.layer import reference
 from iron.operators.flm.layer.design import (
-    LAYER_TYPES,
-    RTP_ADDRESSES,
+    GEOMETRIES,
+    LayerDims,
+    LayerType,
     arg_sizes,
+    decode_layer,
     layer_kernels,
 )
 
 
-@dataclass
-class DecodeLayer(MLIROperator):
+class DecodeLayer(Operator):
     """One Gemma 4 decode layer for one token, as FastFlowLM's engine drives it.
 
     See README.md for the parameters, the buffers and the dispatch parameters.
     """
 
-    geometry: FlmGemma4DecodeGeometry
-    layer_type: str
-    context: object = field(default=None, repr=False)
+    geometry: FlmGemma4DecodeGeometry = param()
+    layer_type: LayerType | str = param()
+    x_len: int = param(derive=lambda op: arg_sizes(op.geometry)["x"], repr=False)
+    proj_len: int = param(derive=lambda op: arg_sizes(op.geometry)["proj"], repr=False)
+    rms_len: int = param(derive=lambda op: arg_sizes(op.geometry)["rms"], repr=False)
+    rope_rms_len: int = param(
+        derive=lambda op: arg_sizes(op.geometry)["rope_rms"], repr=False
+    )
+    kv_len: int = param(derive=lambda op: arg_sizes(op.geometry)["kv"], repr=False)
 
-    def __post_init__(self):
-        if self.geometry not in RTP_ADDRESSES:
+    # The runtime sequence's argument order.
+    x = InOut(x_len, dtype=bfloat16)
+    proj = In(proj_len, dtype=bfloat16)
+    rms = In(rms_len, dtype=bfloat16)
+    rope_rms = In(rope_rms_len, dtype=bfloat16)
+    kv = InOut(kv_len, dtype=bfloat16)
+    context_len = per_call(np.int32)
+    max_l = per_call(np.int32)
+
+    def validate(self) -> None:
+        if self.geometry not in GEOMETRIES:
             raise ValueError(
-                "geometry must be aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or "
-                f"FLM_GEMMA4_E4B_DECODE, not {self.geometry!r}"
+                f"DecodeLayer: geometry ({self.geometry!r}) must be "
+                "aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or FLM_GEMMA4_E4B_DECODE"
             )
-        if self.layer_type not in LAYER_TYPES:
+        try:
+            self.layer_type = LayerType(self.layer_type)
+        except ValueError:
             raise ValueError(
-                f"layer_type must be one of {LAYER_TYPES}, not {self.layer_type!r}"
+                f"DecodeLayer: layer_type ({self.layer_type!r}) must be one of "
+                f"{', '.join(LayerType)}"
+            ) from None
+
+    def resolve(self, dev):
+        if dev is None or dev.arch != AIEArch.AIE2p:
+            raise Unresolvable(
+                "DecodeLayer: the flm_gemma4_decode kernels are AIE2P only"
             )
-        dev = aie_utils.get_current_device()
-        if dev.arch != AIEArch.AIE2p:
-            raise NotImplementedError("the flm_gemma4_decode kernels are AIE2P only")
-        MLIROperator.__init__(self, context=self.context)
+        return self.replace()
 
     @property
-    def name(self) -> str:
-        dev = aie_utils.get_current_device().resolve().name
-        return f"FLM_DecodeLayer_{self.geometry.name}_{self.layer_type}_{dev}"
+    def dims(self) -> LayerDims:
+        """This layer type's dimensions and weight blob."""
+        return LayerDims(self.geometry, self.layer_type)
 
-    def get_dispatch_params(self):
-        return {"context_len": np.int32, "max_l": np.int32}
+    def xclbin_operator(self):
+        # The four layer types share one array; they differ in their sequences.
+        return self.replace(layer_type=LayerType.GLOBAL)
 
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                self.operator_dir / "design.py",
-                "decode_layer",
-                (
-                    aie_utils.get_current_device(),
-                    self.geometry,
-                    RTP_ADDRESSES[self.geometry],
-                    self.layer_type,
-                ),
-                {"kernels": layer_kernels(self.geometry)},
-            ),
+    def exported_design(self):
+        return functools.partial(
+            decode_layer,
+            self.dev,
+            self.geometry,
+            self.layer_type,
+            kernels=layer_kernels(self.geometry),
         )
 
-    def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact.from_extern(fn)
-            for fn in layer_kernels(self.geometry).values()
-        ]
-
-    def get_arg_spec(self):
-        sizes = arg_sizes(self.geometry)
-        return [
-            AIERuntimeArgSpec("inout", (sizes["x"],), dtype=bfloat16),
-            AIERuntimeArgSpec("in", (sizes["proj"],), dtype=bfloat16),
-            AIERuntimeArgSpec("in", (sizes["rms"],), dtype=bfloat16),
-            AIERuntimeArgSpec("in", (sizes["rope_rms"],), dtype=bfloat16),
-            AIERuntimeArgSpec("inout", (sizes["kv"],), dtype=bfloat16),
-        ]
+    def reference(self, x, proj, rms, rope_rms, kv, context_len, max_l):
+        """x and kv as the dispatch leaves them; see reference.py."""
+        return tuple(
+            r.view(bfloat16)
+            for r in reference.reference(
+                self.dims, x, proj, rms, rope_rms, kv, context_len, max_l
+            )
+        )

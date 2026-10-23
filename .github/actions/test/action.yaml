@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: "Run test suite"
+description: "Run the IRON test suite."
 
 inputs:
   test_flags:
@@ -31,10 +32,10 @@ runs:
         
         case "${{ inputs.test_suite }}" in
           operators)
-            TEST_PATH="iron/operators/"
+            TEST_PATH="iron/operators/ iron/tests/"
             ;;
           applications)
-            TEST_PATH="iron/applications/"
+            TEST_PATH="tests/applications/"
             ;;
           *)
             echo "Invalid test_suite: ${{ inputs.test_suite }}"

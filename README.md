@@ -28,58 +28,27 @@ IRON is an open-source & close-to-metal Python API enabling fast and efficient e
 
 **Key Features:**
 
-- Close-to-metal NPU programming via MLIR-AIE Python bindings
-- Pre-built operator library (GEMM, MHA, RMSNorm, RoPE, activations, etc.)
-- Operator fusion for optimal performance
-- Extensible architecture for custom operators
-- End-to-end LLM inference (Llama 3.2 1B example included)
+- An operator library (GEMM, MHA, RMSNorm, RoPE, activations, ...) over mlir-aie's `aie.iron`, each operator one declared class
+- Graphs: a model's operators recorded once per input shape and compiled into one image, so intermediate values stay on the device
+- Autotuning of each operator's tunables into a per-device profile
+- End-to-end models on the NPU, from Llama 3.2 1B to a vision-language model (see [Models](#models))
+
+## Quick start
+
+After [installing](#installation-linux) IRON with its `models` extra, and given a Hugging Face token for meta-llama's gated repository:
+
+```python
+from iron.applications.llama import Llama
+
+model = Llama.load("meta-llama/Llama-3.2-1B")   # downloads, fits, compiles once
+print(model.generate("The capital of France is", 8))   # greedy; pass an iron.lm.Sampler to sample
+```
+
+`Llama.load` also takes a local directory holding `config.json`, the checkpoint and `tokenizer.json`.
 
 The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 
 > E. Hunhoff, J. Melber, K. Denolf, A. Bisca, S. Bayliss, S. Neuendorffer, J. Fifield, J. Lo, P. Vasireddy, P. James-Roxby, E. Keller. "[Efficiency, Expressivity, and Extensibility in a Close-to-Metal NPU Programming Interface](https://arxiv.org/abs/2504.18430)". In 33rd IEEE International Symposium On Field-Programmable Custom Computing Machines, May 2025.
-
-#### 🎯 Operator Dashboard
-
-| Section | Description | Datatype | AIE2 | AIE2P | Status | Design Example |
-|:--------|:------------|:---------|:-----|:------|:-------|:-------------|
-| [Element-wise Add](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/eltwise/add.cc) | Element-wise addition kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_add/](./iron/operators/elementwise_add/) |
-| [Element-wise Mul](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/eltwise/mul.cc) | Element-wise multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_mul/](./iron/operators/elementwise_mul/) |
-| [GEMM](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/linalg/mm.cc) | General Matrix Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemm/](./iron/operators/gemm/) |
-| [Alternative GEMM](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/fused/mm_fused.h) | General Matrix Multiplication with a fused activation epilogue, specialised for transformer projection shapes. M, K and N are runtime parameters, so one xclbin serves every shape. B is stored as bfp16 on AIE2P | bfloat16, bfp16 | ✓ | ✓ | 🟢 | [iron/operators/flm/gemm/](./iron/operators/flm/gemm/) |
-| [GEMV](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/linalg/mv_bf16.cc) | General Matrix-Vector Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemv/](./iron/operators/gemv/) |
-| [GQA](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/linalg/mha.cc) | Grouped Query Attention kernel (Single pipeline) | bfloat16 | | ✓ | 🟢 | [iron/operators/mha/](./iron/operators/mha/) |
-| [MHA](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/linalg/mha.cc) | Multi-Head Attention kernel & Grouped Query Attention | bfloat16 | | ✓ | 🟢 | [iron/operators/mha/](./iron/operators/mha/) |
-| [RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/norm/rms_norm.cc) | RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm/](./iron/operators/rms_norm/) |
-| [RoPE](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/rope.cc) | Rotary Positional Embedding kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rope/](./iron/operators/rope/) |
-| [SiLU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/silu/](./iron/operators/silu/) |
-| [Softmax](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/softmax.cc) | Softmax kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/softmax/](./iron/operators/softmax/) |
-| [Weighted RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/norm/rms_norm.cc) | Weighted RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm/](./iron/operators/rms_norm/) |
-| [Copy](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/eltwise/passThrough.cc) | Copy | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/mem_copy/](./iron/operators/mem_copy/) |
-| [Transpose](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/transpose/](./iron/operators/transpose/) |
-| [AXPY](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/axpy.cc) | AXPY | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/axpy/](./iron/operators/axpy/) |
-| [Reduction]() | Reduction | bfloat16 | | | 🟡 |  |
-| [Dequant](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/expand.cc) | Dequant Q4NX from [AWQ](https://github.com/mit-han-lab/llm-awq) to bfloat16 | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/dequant/](./iron/operators/dequant/) |
-| [Dequant to bfp16](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/quant/q4nx_dequant.cc) | Dequant Q4NX to bfp16, laid out for the B operand of the [alternative GEMM](./iron/operators/flm/gemm/) | q4nx → bfp16 | | ✓ | 🟢 | [iron/operators/flm/dequant/](./iron/operators/flm/dequant/) |
-| [RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/eltwise/relu.cc) | RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/relu/](./iron/operators/relu/) |
-| [Leaky RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/leaky_relu.cc) | Leaky RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/leaky_relu/](./iron/operators/leaky_relu/) |
-| [GELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/gelu.cc) | GELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gelu/](./iron/operators/gelu/) |
-| [LayerNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/norm/layer_norm.cc) | LayerNorm | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/layer_norm/](./iron/operators/layer_norm/) |
-| [Convolution]() | Convolution | bfloat16 | | | 🟡 |  |
-| [MaxPool]() | MaxPool | bfloat16 | | | ⚪ |  |
-| [AveragePool]() | AveragePool | bfloat16 | | | ⚪ |  |
-| [Tanh](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/tanh.cc) | Tanh kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/tanh/](./iron/operators/tanh/) |
-| [Sigmoid](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/sigmoid.cc) | Sigmoid kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/sigmoid/](./iron/operators/sigmoid/) |
-
-> Use this dashboard to quickly check the status of each kernel and locate relevant setup, build, and usage information.
-
-#### 📌 Legend
-
-| Status | Meaning            |
-|--------|--------------------|
-| 🟢     | **Done**           |
-| 🟡     | **In Development** |
-| ⚪     | **Not Assigned**   |
-
 
 ## Installation (Linux)
 
@@ -104,7 +73,7 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 1. Install the packages needed for IRON and MLIR-AIE:
 
     ```bash
-    # Python versions 3.10, 3.12 and 3.13 are currently supported by our wheels
+    # IRON needs Python 3.11 or later; our wheels support 3.12 and 3.13
     sudo apt install \
     build-essential clang clang-14 lld lld-14 python3-venv python3-pip
     ```
@@ -121,115 +90,77 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    source /opt/xilinx/xrt/setup.sh
    ```
 
-1. Install required Python packages (from requirements.txt):
+1. Install required Python packages (from requirements.txt). The mlir-aie
+   it pins is the last release; [AGENTS.md](AGENTS.md#environment) says
+   how to run against the newer one this branch needs:
    ```bash
    pip install -r requirements.txt
    ```
 
-1. To test your installation, you can try to build and run the example below:
+   Loading a model needs the `models` extra (huggingface_hub, tokenizers and
+   jinja2); the model tests also read images and audio. From this checkout:
    ```bash
-   pytest ./iron/operators/axpy/
+   pip install -e '.[models]'               # to load and run models
+   pip install -r requirements_examples.txt # the extra and the model tests' packages
    ```
 
-### Building/Using & Testing Operators
+1. To test your installation, you can try to build and run the example below:
+   ```bash
+   pytest iron/tests/operators/test_catalog.py -k AXPY
+   ```
 
-All available operators can be found in `iron/operators`. These each contain:
+The commands that run the operator and model tests are in [AGENTS.md](./AGENTS.md#commands).
 
-- `op.py`: The Python operator interface -- an easy access point to integrate operators into your project that prescribes how to compile the operator (build artifacts) and how to call it at runtime (buffer sizes, etc.)
-- `design.py`: The implementation of the operator's NPU code. Often references a C++ compute kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels) for the compute core code and describes the data movement using ObjectFIFOs.
-- `reference.py`: A reference CPU implementation to validate the correctness of the NPU implementation.
-- `test.py`: An end-to-end test that instantiates and builds the operator, runs it and verifies its outputs against the reference.
+## Models
 
-> NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated:
->       `source /opt/xilinx/xrt/setup.sh`
->       `source /path/to/ironenv/bin/activate`
+Each model is a package under [iron/applications/](./iron/applications/) over [iron/lm/](./iron/lm/), the library every model shares ([AGENTS.md](./AGENTS.md#language-models) describes it). Each model's README says which code is specific to it and where its files come from. The tests find a checkpoint at `$IRON_EXAMPLE_WEIGHTS_DIR/<checkpoint>`, default `/srv` (`iron.lm.testing.weights_dir`).
 
-To build and test all the operators:
+| Model | Application | Checkpoint |
+|---|---|---|
+| Llama 3.2 1B, 3B | [llama](./iron/applications/llama/) | `llama3.2-1b`, `llama3.2-3b` |
+| Qwen3 1.7B, 0.6B | [qwen3](./iron/applications/qwen3/) | `qwen3-1.7b`, `qwen3-0.6b` |
+| Qwen3-Reranker 0.6B (`score`) | [qwen3_reranker](./iron/applications/qwen3_reranker/) | `qwen3-reranker-0.6b` |
+| Qwen3-Embedding 0.6B (`embed`) | [qwen3_embedding](./iron/applications/qwen3_embedding/) | `qwen3-embedding-0.6b` |
+| Qwen 2.5 1.5B Instruct | [qwen2](./iron/applications/qwen2/) | `qwen2.5-1.5b-instruct` |
+| SmolLM2 1.7B Instruct | [smollm2](./iron/applications/smollm2/) | `smollm2-1.7b-instruct` |
+| Phi-4-mini-instruct | [phi3](./iron/applications/phi3/) | `phi-4-mini-instruct` |
+| Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` |
+| SmolLM3 3B | [smollm3](./iron/applications/smollm3/) | `smollm3-3b` |
+| Gemma 3 1B | [gemma3](./iron/applications/gemma3/) | `gemma-3-1b-it` |
+| Gemma 4 E2B text decoder | [gemma4](./iron/applications/gemma4/) | `gemma-4-e2b-it` |
+| Qwen3.5 0.8B text decoder | [qwen3_5](./iron/applications/qwen3_5/) | `qwen3.5-0.8b` |
+| Qwen3-30B-A3B (reference only) | [qwen3_moe](./iron/applications/qwen3_moe/) | `qwen3-30b-a3b` |
+| Granite 4.0-H (reference only) | [granite_hybrid](./iron/applications/granite_hybrid/) | none yet |
+| Ministral 3 text decoder (drawn weights) | [ministral3](./iron/applications/ministral3/) | none yet |
+| LFM2-1.2B | [lfm2](./iron/applications/lfm2/) | `lfm2-1.2b` |
+| SmolVLM-256M-Instruct | [idefics3](./iron/applications/idefics3/) | `smolvlm-256m-instruct` |
+| EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |
+| ResNet-50 | [resnet](./iron/applications/resnet/) | `resnet-50` |
+| YOLOX-Nano | [yolox](./iron/applications/yolox/) | `yolox-nano` |
+| Whisper large-v3-turbo | [whisper](./iron/applications/whisper/) | `whisper-large-v3-turbo` |
+| Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) |
 
-``` bash
-pytest iron/operators/ -m "not extensive"
-```
+What the text decoders (Llama to LFM2 above) share:
 
-To run the extensive test suite:
+- **Setup**: `requirements_examples.txt`, as [installing](#installation-linux) says. XRT maps every device buffer locked, and a model's weights and caches are banks of at most 3.5 GiB (`iron.common.image.allocator.BANK`), so `ulimit -l` must cover one bank.
 
-``` bash
-pytest iron/operators/
-```
-
-To run a specific operator's tests:
-
-``` bash
-pytest iron/operators/axpy/
-```
-
-### Git Hooks (Optional but Recommended)
-
-To ensure your code passes CI linting checks before pushing, install the pre-push hook:
-
-```bash
-cp scripts/hooks/pre-push .git/hooks/pre-push
-chmod +x .git/hooks/pre-push
-```
-
-The hook will run the same linting checks as CI:
-
-- License checks (reuse)
-- Python formatting (black)
-- C++ formatting (clang-format)
-
-To bypass the hook if needed: `git push --no-verify`
-
-## Applications
-
-### Llama 3.2 1B Inference
-
-IRON includes a complete LLM inference example demonstrating NPU acceleration:
-
-- **Location**: `iron/applications/llama_3.2_1b/`
-- **Model**: Meta Llama 3.2 1B
-- **Features**: Multi-head attention, fused operators, bfloat16 quantization
-
-See [iron/applications/llama_3.2_1b/README.md](./iron/applications/llama_3.2_1b/README.md) for setup and usage instructions.
+- **Run**: `python -m iron.applications.<application>.model <directory or repository id> [--prompt TEXT]`, the directory holding `config.json`, the checkpoint and the tokenizer; `-v` logs each compile; `--help` lists the options, and [Llama's README](./iron/applications/llama/README.md#running) explains them.
+- **Test**: `pytest tests/applications/<application>/` (or `tests/applications/decoders/ -k <application>` for the decoders that share one test) loads the model once and checks throughput, accuracy against transformers' logits recorded in `golden.npz` beside the checkpoint, and determinism. `pytest <test> --record-goldens -p no:xdist` records missing logits where torch and transformers are installed; they are not IRON's requirements.
+- **Tune**: `python -m iron.lm.tune <application> --checkpoint <directory>` times each operator at every setting of its tunables and rewrites the application's `profiles/<device>.json`; review it with `git diff` and commit it.
 
 ## Architecture
 
-IRON uses a three-layer architecture:
-
-1. **Operators** (`iron/operators/`): High-level Python API for NPU operations
-   - Each operator has: `op.py` (interface), `design.py` (MLIR-AIE implementation), `reference.py` (CPU reference), `test.py` (validation)
-
-2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): Low-level C++ compute kernels
-   - Organized by family (`activation/`, `eltwise/`, `linalg/`, `norm/`, ...); architecture-specific
-     code lives in `*_aie2.h` / `*_aie2p.h` headers the family's `.cc` selects between
-   - Vectorized using AIE API for optimal performance
-
-3. **Common Infrastructure** (`iron/common/`): Compilation, device management, and utilities
-   - MLIR-AIE compilation pipeline
-   - XRT runtime integration
-   - Operator fusion framework
-
-## Performance
-
-IRON operators are designed for maximum NPU utilization:
-
-- Parallel execution across multiple AIE columns
-- Optimized data movement via ObjectFIFOs
-- Fused operations to minimize host-NPU transfers
-- Vectorized kernels using AIE intrinsics
-
-Run benchmarks:
-
-```bash
-# Run all operators with performance metrics stored in tests_latest.csv
-pytest iron/operators/ -m "not extensive" -v
-```
+1. **Operators** (`iron/operators/`): each operator is one class, imported in [iron/operators/\_\_init\_\_.py](./iron/operators/__init__.py); its docstring says what it computes. Its parameters are declared with mlir-aie's `param()` (a tunable with `tunable()`, a per-call value with `per_call()`); its operands are aie.iron's `In`/`Out`/`InOut`, declared by shape. Its `build()` builds the array with ObjectFIFOs and Workers around a kernel; the library derives the runtime sequence unless the operator writes it. Its `reference()` and `test = Testing(...)` are what `iron/tests/operators/test_catalog.py` checks it by.
+2. **Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): C++ compute kernels, vectorized with the AIE API, reached through mlir-aie's kernel factories (`aie.iron.kernels`), which also carry each kernel's reference and tolerance. IRON hosts no kernels of its own, apart from the FastFlowLM Gemma 4 engine's overrides (`iron/operators/flm/gemma4_engine/`).
+3. **Graphs and images** (`iron/common/`): a graph is recorded on handles and lowered onto an image: its buffers placed in one arena, and on NPU2 its operators' designs composed into one full ELF that runs them in turn (on NPU1, an xclbin per step), run through XRT.
+4. **Models** (`iron/lm/`, `iron/applications/`): see [Models](#models).
 
 ## Community and Support
 
 - 💬 **Discord**: Join our [Discord server](https://discord.gg/cW99Ds85e8) for discussions and support
 - 🐛 **Issues**: Report bugs and request features via [GitHub Issues](https://github.com/amd/iron/issues)
 - 📖 **Contributing**: See [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines
-- 📚 **Documentation**: Operator examples in `iron/operators/`, kernel docs in the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
+- 📚 **Documentation**: [AGENTS.md](./AGENTS.md) for the rules and the map of the code, operator docstrings in `iron/operators/`, kernel docs in the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
 
 ## License
 

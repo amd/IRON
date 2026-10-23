@@ -1,47 +1,46 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The IRON operator library.
+"""The IRON operator library."""
 
-Operators are re-exported lazily (PEP 562):
+from . import flm
+from .axpy import AXPY
+from .clamp import Clamp
+from .copy import Copy, Gather, GatherWords
+from .depthwise_conv1d import DepthwiseConv1d
+from .elementwise_add import ElementwiseAdd, RowwiseAdd
+from .elementwise_max import ElementwiseMax
+from .elementwise_mul import ElementwiseMul, RowwiseMul
+from .emit import Emit
+from .experts import Experts
+from .gated_delta_rule import GatedDeltaRule
+from .gelu import GELU
+from .gemm import GEMM
+from .gemv import GEMV
+from .layer_norm import LayerNorm
+from .limbs import Limbs
+from .log import Log
+from .log10_clamp import Log10Clamp
+from .magnitude import Magnitude
+from .merge import Merge
+from .mha import MHA
+from .relu import ReLU
+from .resample.op import PatchPositions, Resample, ResampleTaps
+from .rms_norm import RMSNorm
+from .rope import RoPE
+from .row_max import RowMax
+from .router import TopKRouter
+from .sample import Sample
+from .selective_scan import SelectiveScan
+from .sigmoid import Sigmoid
+from .silu import SiLU
+from .softmax import Softmax
+from .tanh import Tanh
+from .transpose import Transpose
 
-    from iron.operators import GEMM  # imports iron.operators.gemm.op, nothing else
-"""
+__all__ = sorted(name for name in dir() if name[0].isupper())
 
-import importlib
-
-_OPERATOR_MODULES = {
-    "ElementwiseAdd": "elementwise_add",
-    "ElementwiseMul": "elementwise_mul",
-    "GEMM": "gemm",
-    "GEMV": "gemv",
-    "MHA": "mha",
-    "RMSNorm": "rms_norm",
-    "RoPE": "rope",
-    "SiLU": "silu",
-    "Softmax": "softmax",
-    "SwiGLUDecode": "swiglu_decode",
-    "SwiGLUPrefill": "swiglu_prefill",
-    "Transpose": "transpose",
-    "StridedCopy": "strided_copy",
-    "Repeat": "repeat",
+#: Every operator by the name a profile gives it, flm's as ``"flm.<name>"``.
+CATALOG = {name: globals()[name] for name in __all__} | {
+    f"flm.{name}": getattr(flm, name) for name in flm.__all__
 }
-
-# Sub-packages whose operator names would collide with the table above.
-_SUBPACKAGES = ("flm",)
-
-__all__ = sorted(set(_OPERATOR_MODULES) | set(_SUBPACKAGES))
-
-
-def __getattr__(name):
-    """Import the operator that defines `name`, on first access."""
-    if name in _SUBPACKAGES:
-        return importlib.import_module(f".{name}", __name__)
-    module = _OPERATOR_MODULES.get(name)
-    if module is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(importlib.import_module(f".{module}.op", __name__), name)
-
-
-def __dir__():
-    return sorted(set(globals()) | set(_OPERATOR_MODULES) | set(_SUBPACKAGES))

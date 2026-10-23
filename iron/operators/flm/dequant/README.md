@@ -5,19 +5,18 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.DequantBFP`
 
-Dequantizes q4nx weights into the bfp16ebs8 layout [`flm.GEMM`](../gemm) reads
+Dequantizes q4nx weights into the bfp16ebs8 layout [`flm.ProjectionGEMM`](../gemm) reads
 as B, on the device.
 
 ```python
 from iron.operators.flm import DequantBFP
 
-op = DequantBFP(K=2048, N=2048, context=ctx)
-op.compile()
-op.get_callable()(q4nx_blob, packed_b)
+op = DequantBFP(K=2048, N=2048)
+op(q4nx_blob, packed_b)  # compiles once, then runs
 ```
 
 `K` is the in-feature count and `N` the out-feature count, so the result is B
-for a `(M, K) x (K, N)` GEMM. The output equals `GEMM.pack_B` byte for byte
+for a `(M, K) x (K, N)` GEMM. The output equals `ProjectionGEMM.pack_B` byte for byte
 under `Rounding.FLOOR`, the mode the cores run in.
 
 ## Input layout
@@ -81,7 +80,7 @@ memtile objects per slab, one per k-half, and the half rides in the offset.
 
 No K or N reaches the device configuration: every descriptor comes from the
 layout above, and the cores loop over identical per-block work. `config_name`
-keys the xclbin on `tile_n` and the device; `name` keys the instruction stream
+keys the xclbin on the device and its column count; `name` keys the instruction stream
 on the shape. A clean build of the test suite emits one xclbin and ten
 instruction streams.
 
@@ -104,24 +103,23 @@ the matrix's own start, with `Tensor.subview` on the containing buffer.
 
 `K % 512 == 0`, `N % 64 == 0`, AIE2P only.
 
-`K == 512` raises. `flm.GEMM` picks `tile_n = 128` at a single k iteration,
-which packs B in a different order, and a mismatch there yields a buffer of the
-right size that the GEMM reads wrongly.
+The output is in the order `flm.ProjectionGEMM` reads B at `tile_n = 64`, its default.
+A GEMM at another `tile_n` reads a buffer of the right size in the wrong order.
 
 ## Rounding
 
 The cores never call `set_rounding`, so both conversions run in the power-up
 `floor` mode: f32 to bf16 rounds toward negative infinity, and bf16 to
-bfp16ebs8 truncates onto the shared exponent. `reference.py` reproduces both,
+bfp16ebs8 truncates onto the shared exponent. `DequantBFP.reference` reproduces both,
 so the tests compare bytes.
 
 ## Validation
 
 | Check | Where |
 |---|---|
-| descriptors reproduce `pack_b`'s order | `iron/tests/operators/flm_dequant_layout.py` |
-| device output equals the CPU reference | `test.py::test_matches_reference` |
-| device output equals `GEMM.pack_B` | `test.py::test_output_feeds_gemm_unchanged` |
+| descriptors reproduce `pack_b`'s order | `iron/tests/operators/test_flm_dequant_layout.py` |
+| device output equals the CPU reference | `iron/tests/operators/test_catalog.py`, at `DequantBFP.test`'s cases |
+| device output equals `ProjectionGEMM.pack_B` | `test.py::test_output_feeds_gemm_unchanged` |
 
 A wrong stride yields a buffer of the right size holding real weight values in
 the wrong order. The layout tests therefore compare index arithmetic.

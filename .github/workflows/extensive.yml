@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Extensive Benchmark/Test Suite
+
+on:
+  workflow_dispatch:
+  schedule:
+   - cron:  '0 9 * * *'  # 2 AM MT
+  push:
+     branches:
+       - main
+       - devel
+
+# VJUNG: Introduce concurrency groups named with branch refs.
+# VJUNG: If one pushes 5 times on its branch only the most recent commit will trigger CI.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test_extensive:
+    name: Test Extensive Suite on ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: phoenix, name: Phoenix}
+          - {runner: krackan, name: Krackan}
+    runs-on: [self-hosted, "${{ matrix.runner }}"]
+    steps:
+      - name: Pull
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+        env:
+          HOME: /workspace
+
+      - name: Prerequisites
+        uses: ./.github/actions/prereqs
+        with:
+          env_name: ci_env
+
+      - name: Test
+        id: test
+        continue-on-error: true
+        uses: ./.github/actions/test
+        with:
+          env_name: ci_env
+          extensive: "true"
+          test_suite: "operators"
+
+      - name: Format test results
+        uses: ./.github/actions/format_results
+
+      - name: Upload test results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-${{ matrix.runner }}-extensive
+          path: results/
+          retention-days: 7
+
+      - name: Mark workflow as failed if tests failed
+        if: steps.test.outcome == 'failure'
+        run: exit 1
+
+  publish:
+    needs: test_extensive
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-results.yml
+    with:
+      suite: extensive
