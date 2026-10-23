@@ -436,6 +436,9 @@ class ImageResize(iron.Graph):
     """A decoded image resized as torchvision's antialiased resize does it,
     to a uint8 image another resize reads, as ``ImagePatches`` with ``chunk``
     its ``pitch``: rows of ``pitch`` bytes, every row of a call one chunk.
+    Given ``mean``, each pixel is instead its bf16 level, rescaled and
+    normalized as ``ImagePatches`` does it, rows of ``pitch`` values a
+    tower cuts its patches from.
 
     A call takes the image, ``(height, width, 3)`` uint8 laid out by
     ``pack``, and per call its size and the size it is resized to. Past that
@@ -451,6 +454,9 @@ class ImageResize(iron.Graph):
             fewest ``out`` takes.
         chunk: The bytes of an image row ``Resample`` receives at a time.
         words: The words of a filter table's chunk, which bound its window.
+        mean: The processor's normalization after its rescale, per channel,
+            or None for uint8 pixels.
+        std: Its standard deviations, given ``mean``.
     """
 
     def __init__(
@@ -461,6 +467,8 @@ class ImageResize(iron.Graph):
         patch_columns: int | None = None,
         chunk: int = 4096,
         words: int = 244,
+        mean: tuple[float, ...] | None = None,
+        std: tuple[float, ...] | None = None,
     ):
         self.chunk = chunk
         cores = 2 * require_device().cols
@@ -482,7 +490,10 @@ class ImageResize(iron.Graph):
             height_chunks=16 * -(-bands // 16),
             patch_rows=bands * patch_columns * cores,
             interpolation=interpolation,
-            dtype=np.uint8,
+            dtype=np.uint8 if mean is None else bfloat16,
+            raster=True,
+            mean=mean,
+            std=std,
             num_aie_columns=cores // 2,
             num_channels=2,
         )
@@ -497,11 +508,13 @@ class ImageResize(iron.Graph):
         )
         self.taps_w = ResampleTaps(chunks=strips, **taps)
         self.taps_h = ResampleTaps(chunks=16 * -(-bands // 16), **taps)
-        self.resized = iron.state((self.resample.patch_rows, 3 * SIDE**2), np.uint8)
+        self.resized = iron.state(
+            (self.resample.patch_rows, 3 * SIDE**2), self.resample.dtype
+        )
 
     @property
     def pitch(self) -> int:
-        """The bytes of a row of the image a call writes."""
+        """The values of a row of the image a call writes, three a pixel."""
         return self.resample.pitch
 
     def body(

@@ -14,7 +14,8 @@ word; the slots past them repeat the last. A size the table cannot hold
 `[-1, window, 0, 0]` to every header instead.
 
 `Resample` resizes an image with two such tables and writes it as the
-vision tower's bf16 patches, or as a uint8 image another resize reads, and
+vision tower's bf16 patches, or as an image (`raster`): uint8, which another
+resize reads, or bf16 levels, which a tower cuts into patches of any size; and
 `PatchPositions` says where each of the tower's rows comes from in them.
 """
 
@@ -772,7 +773,7 @@ extern "C" void resize_setup(int32_t *counts, int32_t h, int32_t w, int32_t ho,
     cpr = w > 0 ? (3 * w + CHUNK - 1) / CHUNK : 0;
     int strips = wo > 0 ? (wo + SIDE - 1) / SIDE : 0;
     owned = c < strips ? (strips - c + CORES - 1) / CORES : 0;
-#if OUT8
+#if RASTER
     // A band's 16 rows, each across the core's COLS patch columns.
     int nmax = SIDE;
     bool fits = (strips + CORES - 1) / CORES <= COLS;
@@ -929,6 +930,32 @@ extern "C" void resize_emit8(uint8_t *out, int32_t y) {
     }
 }
 
+// Row y of the band as resize_emit8 writes it, each pixel its bf16 level as
+// resize_emit's, zeros past the image.
+extern "C" void resize_emit16(uint16_t *out, int32_t y) {
+    if (next < SIDE)
+        ok = false;
+    uint16_t *o = (uint16_t *)__builtin_assume_aligned(out, 4);
+    for (int i = 0; i < COLS; i++) {
+        const uint8_t *row = hold[y] + 3 * i * SIDE;
+        bool live = ok && i < owned;
+        for (int x = 0; x < SIDE; x += 4, o += 12) {
+            uint32_t c[3], w[6] = {0, 0, 0, 0, 0, 0};
+            if (live) {
+                for (int ch = 0; ch < 3; ch++)
+                    __builtin_memcpy(&c[ch], __builtin_assume_aligned(row + ch * SIDE + x, 4),
+                                     4);
+                for (int v = 0; v < 12; v += 2)
+                    w[v / 2] = PIXEL[v % 3 % CHANNELS][c[v % 3] >> 8 * (v / 3) & 255] |
+                               (uint32_t)PIXEL[(v + 1) % 3 % CHANNELS]
+                                              [c[(v + 1) % 3] >> 8 * ((v + 1) / 3) & 255]
+                                   << 16;
+            }
+            __builtin_memcpy(o, w, 24);
+        }
+    }
+}
+
 extern "C" void resize_finish(int32_t *counts) {
     counts[4] = rows * cpr - consumed;
 }
@@ -947,8 +974,9 @@ class Resample(Operator):
     image's last row and column again. Patch `(py, px)` is row
     `py * pad + px` of `patches`, `pad` the patch columns padded past the
     cores with zeros: row `pad - 1` is the zero patch padding gathers. A
-    uint8 image's rows are `pitch` bytes, `patch_columns` patches of every
-    core's, zeros past the image; a core writes it a row at a time.
+    `raster` image's rows are `pitch` values, `patch_columns` patches of
+    every core's, zeros past the image; a core writes it a row at a time,
+    as uint8 pixels or, as `dtype` bf16, each pixel's level.
     """
 
     test = Testing(
@@ -1032,6 +1060,21 @@ class Resample(Operator):
                 id="lanczos_normalized",
                 lower=True,
             ),
+            # Pixtral's resize of a COCO photo, up to whole 28-pixel blocks,
+            # as an image of normalized levels it cuts 14-pixel patches from.
+            Case(
+                dict(
+                    height=480,
+                    width=640,
+                    out_height=504,
+                    out_width=644,
+                    raster=True,
+                    mean=(0.48145466, 0.4578275, 0.40821073),
+                    std=(0.26862954, 0.26130258, 0.27577711),
+                    num_aie_columns=8,
+                ),
+                id="raster_normalized",
+            ),
         ],
         draw=lambda op: dict(
             given={
@@ -1066,6 +1109,10 @@ class Resample(Operator):
     chunk: int = param(default=4096)
     # A 39-tap window: a scale of up to 9.5.
     words: int = param(default=356)
+    # bfloat16 levels or uint8 pixels; uint8 only as an image.
+    dtype: Any = param(default=bfloat16, repr=False)
+    # An image's rows rather than patches.
+    raster: bool = param(default=lambda op: np.dtype(op.dtype) == np.uint8, array=True)
     # A floor of 8, so two resizes of one image that need no more share an array.
     patch_columns: int = param(
         default=lambda op: max(8, op.default_patch_columns()), array=True
@@ -1078,12 +1125,10 @@ class Resample(Operator):
     height_chunks: int = param(default=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
     patch_rows: int = param(default=lambda op: op.padded_rows())
     interpolation: Interpolation = param(default=Interpolation.BICUBIC)
-    # bfloat16 patches, or a uint8 image.
-    dtype: Any = param(default=bfloat16, repr=False)
     # What a core writes at a time: a patch, or its patch columns of an image row.
     piece: int = param(
         derive=lambda op: (
-            op.patch_columns * SIDE * 3 if op.writes_image else SIDE * SIDE * 3
+            op.patch_columns * SIDE * 3 if op.raster else SIDE * SIDE * 3
         ),
         init=False,
     )
@@ -1122,7 +1167,7 @@ class Resample(Operator):
         derive=lambda op: -(-op.out_rows // SIDE)
         * (-(-op.out_columns // SIDE) // op.cores + 1)
     )
-    # The rows of a uint8 image a call writes, its bands'.
+    # The rows of an image a call writes, its bands'.
     image_rows = per_call(derive=lambda op: -(-op.out_rows // SIDE) * SIDE)
 
     @property
@@ -1130,13 +1175,8 @@ class Resample(Operator):
         return self.num_aie_columns * self.num_channels
 
     @property
-    def writes_image(self) -> bool:
-        """It writes a uint8 image, not bf16 patches."""
-        return np.dtype(self.dtype) == np.uint8
-
-    @property
     def pitch(self) -> int:
-        """The bytes of a row of the uint8 image it writes."""
+        """The values of a row of the image it writes, three a pixel."""
         return self.patch_columns * self.cores * SIDE * 3
 
     def default_patch_columns(self) -> int:
@@ -1147,16 +1187,16 @@ class Resample(Operator):
         cols = self.num_aie_columns or (dev.cols if dev is not None else 8)
         cores = cols * self.num_channels
         strips = -(-self.out_width // SIDE)
-        return -(-strips // cores) if self.writes_image else strips // cores + 1
+        return -(-strips // cores) if self.raster else strips // cores + 1
 
     def padded_rows(self) -> int:
-        """Every band's patch columns, padded past the cores: a uint8
-        image's every core's `patch_columns`.
+        """Every band's patch columns, padded past the cores: an image's
+        every core's `patch_columns`.
         """
         dev = self.dev
         cols = self.num_aie_columns or (dev.cols if dev is not None else 8)
         cores = cols * self.num_channels
-        per = self.patch_columns if self.writes_image else self.default_patch_columns()
+        per = self.patch_columns if self.raster else self.default_patch_columns()
         return -(-self.out_height // SIDE) * per * cores
 
     def levels(self) -> np.ndarray:
@@ -1219,6 +1259,8 @@ class Resample(Operator):
                 f"Resample: a mean {self.mean} and std {self.std} are both None or "
                 f"one per channel"
             )
+        if np.dtype(self.dtype) == np.uint8 and not self.raster:
+            raise ValueError("Resample: uint8 pixels are written as an image (raster)")
 
     def resolve(self, dev):
         cols = self.resolve_columns(
@@ -1242,15 +1284,13 @@ class Resample(Operator):
                     f"{taps_window}-tap window; {self.words}-word chunks hold {cap}"
                 )
         strips, bands = -(-self.out_width // SIDE), -(-self.out_height // SIDE)
-        nmax = (
-            -(-strips // self.cores) if self.writes_image else strips // self.cores + 1
-        )
+        nmax = -(-strips // self.cores) if self.raster else strips // self.cores + 1
         if nmax > self.patch_columns:
             raise ValueError(
                 f"Resample: {strips} patch columns over {self.cores} cores is "
                 f"{nmax} a core; a core holds {self.patch_columns}"
             )
-        written = self.patch_columns if self.writes_image else nmax
+        written = self.patch_columns if self.raster else nmax
         if (dev := self.dev) is not None:
             held = self.held(dev)
             if held > dev.core_memory_bytes:
@@ -1287,7 +1327,7 @@ class Resample(Operator):
         out_columns=None,
         patches=None,
     ):
-        """The image's patches, or its uint8 image's rows of `pitch` bytes;
+        """The image's patches, or its image's rows of `pitch` values;
         given `patches`, written over its leading rows, the ones a call
         writes, the rest kept.
         """
@@ -1301,15 +1341,19 @@ class Resample(Operator):
         bands, strips = -(-ho // SIDE), -(-wo // SIDE)
         edge = ((0, bands * SIDE - ho), (0, strips * SIDE - wo), (0, 0))
         out = np.pad(out, edge, mode="edge")
-        if self.writes_image:
+        levels = self.levels()
+        if np.dtype(self.dtype) == np.uint8:
             canvas = np.zeros((bands * SIDE, self.pitch // 3, 3), np.uint8)
             canvas[:, : strips * SIDE] = out
             written = canvas.reshape(-1, SIDE * SIDE * 3)
+        elif self.raster:
+            # Each channel's pixels through its row of levels; zero past them.
+            canvas = np.zeros((bands * SIDE, self.pitch // 3, 3), np.uint16)
+            canvas[:, : strips * SIDE] = levels[np.arange(3) % len(levels), out]
+            written = canvas.view(bfloat16).reshape(-1, SIDE * SIDE * 3)
         else:
             pad = (strips // self.cores + 1) * self.cores
             grid = out.reshape(bands, SIDE, strips, SIDE, 3).transpose(0, 2, 1, 3, 4)
-            levels = self.levels()
-            # Each channel's pixels through its row of levels; zero past them.
             written = np.zeros((bands, pad, SIDE, SIDE, 3), np.uint16)
             written[:, :strips] = levels[np.arange(3) % len(levels), grid]
             written = written.view(bfloat16).reshape(bands * pad, SIDE * SIDE * 3)
@@ -1332,7 +1376,7 @@ class Resample(Operator):
             (self.taps_w, None, self.taps_h, "height_count", 0, 1),
         ] + [
             (self.patches, k, self.patches, "patch_count", k, self.cores)
-            for k in range(0 if self.writes_image else self.cores)
+            for k in range(0 if self.raster else self.cores)
         ]
         for operand, lane, buffer, name, first, step in moves:
             per_call = self.value(name).per_call
@@ -1360,7 +1404,7 @@ class Resample(Operator):
                     length_parameter=length,
                     length_unit=width,
                 )
-        if self.writes_image:
+        if self.raster:
             rows = self.value("image_rows")
             n, width = self.patches.shape
             count = (
@@ -1396,6 +1440,7 @@ class Resample(Operator):
             self.patches.obj_type,
         )
         levels = self.levels()
+        u8 = np.dtype(self.dtype) == np.uint8
         setup_k = ExternalFunction(
             "resize_setup",
             source_string=RESIZE.replace(
@@ -1409,11 +1454,11 @@ class Resample(Operator):
                 f"-DCOLS={self.patch_columns}",
                 f"-DCORES={cores}",
                 f"-DCHANNELS={len(levels)}",
-                f"-DOUT8={int(self.writes_image)}",
+                f"-DRASTER={int(self.raster)}",
             ],
             symbol_prefix=(
                 f"resize_{self.words}_{self.chunk}_{self.patch_columns}_{cores}_"
-                f"{'u8' if self.writes_image else 'bf16'}_"
+                f"{'u8' if u8 else 'raster_bf16' if self.raster else 'bf16'}_"
                 f"{hashlib.sha256(levels.tobytes()).hexdigest()[:8]}"
             ),
         )
@@ -1421,7 +1466,9 @@ class Resample(Operator):
         take_k = lib.bind("resize_take", [taps_ty, np.int32])
         band_k = lib.bind("resize_band", [taps_ty, counts_ty])
         consume_k = lib.bind("resize_consume", [image_ty, taps_ty])
-        emit = "resize_emit8" if self.writes_image else "resize_emit"
+        emit = (
+            "resize_emit8" if u8 else "resize_emit16" if self.raster else "resize_emit"
+        )
         emit_k = lib.bind(emit, [patch_ty, np.int32])
         finish_k = lib.bind("resize_finish", [counts_ty])
         of_image = ObjectFifo(image_ty, depth=2)
