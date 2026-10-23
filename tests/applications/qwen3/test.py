@@ -34,8 +34,6 @@ CHECKPOINTS = {
     "qwen3_1.7b": weights_dir("qwen3-1.7b") / "model.safetensors.index.json",
     "qwen3_0.6b": weights_dir("qwen3-0.6b") / "model.safetensors",
 }
-# The checkpoints CI holds, so one missing there fails, not skips.
-STAGED = {"qwen3_1.7b"}
 
 pytestmark = pytest.mark.supported_devices("npu2")
 
@@ -43,7 +41,7 @@ pytestmark = pytest.mark.supported_devices("npu2")
 @pytest.fixture(scope="module", params=list(CHECKPOINTS), ids=str)
 def load(request):
     weights = CHECKPOINTS[request.param]
-    return load_from_flags(request, Qwen3, weights, staged=request.param in STAGED)
+    return load_from_flags(request, Qwen3, weights)
 
 
 @pytest.fixture(scope="module")
@@ -155,7 +153,7 @@ def test_qwen3_lm_head_is_the_tied_embedding(name):
     ``model.embed_tokens.weight``.
     """
     weights = CHECKPOINTS[name]
-    require(weights, weights.with_name("config.json"), staged=name in STAGED)
+    require(weights, weights.with_name("config.json"))
     tree = Checkpoint(weights).tree()
     assert tree.lm_head.weight.dtype == bfloat16
     assert np.array_equal(

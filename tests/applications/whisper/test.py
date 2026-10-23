@@ -253,7 +253,6 @@ def large():
         DIRECTORY / "model.safetensors",
         DIRECTORY / "config.json",
         DIRECTORY / "tokenizer.json",
-        staged=False,
     )
     yield Whisper.load(DIRECTORY)
     if aie_utils.DefaultNPURuntime is not None:

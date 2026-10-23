@@ -19,7 +19,7 @@ WEIGHTS = weights_dir("resnet-50") / "model.safetensors"
 
 @pytest.mark.supported_devices("npu2")
 def test_resnet_50_classifies_as_its_graph_reference():
-    require(WEIGHTS, staged=False)
+    require(WEIGHTS)
     model = ResNet(ResNetConfig.from_checkpoint(WEIGHTS), Checkpoint(WEIGHTS).tree())
     S = model.config.image_size
     image = np.random.default_rng(0).standard_normal((S, S, 3)).astype(bfloat16)

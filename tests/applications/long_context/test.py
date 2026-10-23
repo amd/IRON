@@ -57,8 +57,8 @@ DEEP_KL = 0.1
 class Application:
     """A decoder application, a checkpoint its test runs and the forms it
     is held to here: the full ELF on NPU2 where ``full_elf``, and an xclbin a
-    step on the ``each_step`` devices; ``staged`` where CI holds the
-    checkpoint, so its absence fails there rather than skips.
+    step on the ``each_step`` devices. CI holds every checkpoint, so one
+    missing there fails rather than skips.
     """
 
     model: type[CausalLM]
@@ -68,7 +68,6 @@ class Application:
     full_elf: bool = True
     each_step: tuple[str, ...] = ()
     deep_kl: float = DEEP_KL
-    staged: bool = True
 
     @property
     def path(self) -> Path:
@@ -110,7 +109,7 @@ APPLICATIONS = {
         Qwen3, "qwen3-1.7b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
     ),
     "qwen3_0.6b": Application(
-        Qwen3, "qwen3-0.6b", "model.safetensors", "tokenizer.json", staged=False
+        Qwen3, "qwen3-0.6b", "model.safetensors", "tokenizer.json"
     ),
     "granite_4.2_3b": Application(Granite, "granite-4.2-3b", INDEX, "tokenizer.json"),
     "phi4_mini": Application(
@@ -125,25 +124,20 @@ APPLICATIONS = {
     "smolvlm_256m": Application(
         SmolVLMText, "smolvlm-256m-instruct", "model.safetensors", "tokenizer.json"
     ),
-    "smollm3_3b": Application(
-        SmolLM3, "smollm3-3b", INDEX, "tokenizer.json", staged=False
-    ),
+    "smollm3_3b": Application(SmolLM3, "smollm3-3b", INDEX, "tokenizer.json"),
     # Unmeasured: DEEP_KL until each one's first run.
     "gemma3_1b": Application(
-        Gemma3, "gemma-3-1b-it", "model.safetensors", "tokenizer.json", staged=False
+        Gemma3, "gemma-3-1b-it", "model.safetensors", "tokenizer.json"
     ),
     "gemma4_e2b": Application(
-        Gemma4, "gemma-4-e2b-it", "model.safetensors", "tokenizer.json", staged=False
+        Gemma4, "gemma-4-e2b-it", "model.safetensors", "tokenizer.json"
     ),
-    "qwen3.5_0.8b": Application(
-        Qwen35, "qwen3.5-0.8b", INDEX, "tokenizer.json", staged=False
-    ),
+    "qwen3.5_0.8b": Application(Qwen35, "qwen3.5-0.8b", INDEX, "tokenizer.json"),
     "qwen3_reranker_0.6b": Application(
         Qwen3Reranker,
         "qwen3-reranker-0.6b",
         "model.safetensors",
         "tokenizer.json",
-        staged=False,
     ),
 }
 
@@ -179,7 +173,7 @@ def test_nothing_grows_with_the_context(application, version):
     row per position: its size is affine in the context.
     """
     app = APPLICATIONS[application]
-    require(app.path, app.path.with_name("config.json"), staged=app.staged)
+    require(app.path, app.path.with_name("config.json"))
     config = app.model.default_config(app.path)
     weights = Checkpoint(app.path).tree("unread")
     C = config.prefill_chunk
@@ -231,7 +225,7 @@ def loaded(request):
     each on the token the last one drew.
     """
     app = APPLICATIONS[request.param.removesuffix("_each_step")]
-    load = load_from_flags(request, app.model, app.path, app.tokenizer, app.staged)
+    load = load_from_flags(request, app.model, app.path, app.tokenizer)
     each_step = request.param.endswith("_each_step")
     model = load(full_elf=False if each_step else None)
     assert model.device_loop is not each_step

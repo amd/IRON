@@ -53,7 +53,11 @@ def decoder(request):
     runtime is released before the next decoder loads.
     """
     cls, weights, prompts = request.param
-    yield load_from_flags(request, cls, weights_dir(weights), staged=False)(), prompts
+    # CI holds every checkpoint here but the 30B's.
+    load = load_from_flags(
+        request, cls, weights_dir(weights), staged=cls is not Qwen3Moe
+    )
+    yield load(), prompts
     aie_utils.cleanup_npu_runtime()
 
 
