@@ -64,6 +64,9 @@ class Call:
     # The token ids the call embeds, a prompt chunk's rows or the decode
     # step's token; None for embedding rows given (``from_rows``).
     ids: Any = None
+    # The token value the call was given: the decode step's, or a prompt
+    # chunk's last; None where no token is given (an encoder's call).
+    token: Any = None
     # The embedding rows the layers start from (``forward``).
     embeddings: Any = None
 
@@ -271,6 +274,7 @@ class CausalLM(Model):
             position=position,
             rope_start=rope_start,
             ids=ids[:rows] if prompt else token,
+            token=token,
         )
         if prompt:
             return self.forward(self.lookup(call.ids), call)
@@ -310,7 +314,13 @@ class CausalLM(Model):
             x = Copy.step(x[call.rows - 1]).reshape(
                 1, c.hidden_size
             )  # the last row's logits alone
-        logits = self.head(x)
+        return self.draw(self.head(x), call)
+
+    def draw(self, logits, call: Call):
+        """What a call returns: ``logits``, ``head``'s output, and the
+        token drawn from them on the device, carried with the next position.
+        """
+        c = self.config
         _, drawn = Sample.step(
             logits.reshape(c.vocab_size + c.vocab_size % 2),
             self.draws,
