@@ -30,7 +30,7 @@ from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
 from iron.lm import Checkpoint, Sampler
-from iron.lm.model import TokenizerJson
+from iron.lm.model import TokenizerJson, prompt_text
 from iron.applications.llama.model import LlamaConfig
 from iron.lm import testing
 from iron.lm.checkpoint import renamed
@@ -635,6 +635,14 @@ def test_draws_follow_the_distribution():
     sampler = Sampler(1.0, None, seed=5)
     counts = np.bincount([sampler(logits) for _ in range(20000)], minlength=3)
     np.testing.assert_allclose(counts / counts.sum(), [0.5, 0.3, 0.2], atol=0.015)
+
+
+def test_the_prompt_text_repeats_past_its_end():
+    """A long input, a 32k-token context's, is the text again from its start."""
+    path = Path(sys.modules[prompt_text.__module__].__file__).with_name("prompt.txt")
+    text = path.read_text()
+    assert prompt_text(len(text)) == text
+    assert prompt_text(2 * len(text) + 5, skip=3) == text[3:] + text + text[:8]
 
 
 # Tier 2 -- the real checkpoint (no NPU), gated on its presence

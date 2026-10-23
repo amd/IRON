@@ -98,10 +98,11 @@ def host_budget() -> int:
 
 
 def prompt_text(chars: int, skip: int = 0) -> str:
-    """``chars`` characters of ``prompt.txt``, from ``skip`` on: the text every
-    model's long inputs are drawn from.
+    """``chars`` characters of ``prompt.txt``, from ``skip`` on, the text
+    repeated past its end: the text every model's long inputs are drawn from.
     """
-    return Path(__file__).with_name("prompt.txt").read_text()[skip : skip + chars]
+    text = Path(__file__).with_name("prompt.txt").read_text()
+    return (text * -(-(skip + chars) // len(text)))[skip : skip + chars]
 
 
 def _models_extra(name: str):
