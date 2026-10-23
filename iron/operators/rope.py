@@ -117,8 +117,12 @@ class RoPE(Operator):
             )
 
     def extent_unit(self, buffer: str) -> int | None:
-        """A position's rows at a time, so each core gets its angle row."""
-        return self.rows // self.angle_rows if buffer in ("x", "y") else None
+        """A position's rows at a time, so each core gets its angle row; one
+        core takes the rows a call bounds one at a time.
+        """
+        if buffer not in ("x", "y"):
+            return None
+        return 1 if self.num_aie_columns == 1 else self.rows // self.angle_rows
 
     def build(self) -> Built:
 
