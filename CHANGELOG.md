@@ -274,6 +274,12 @@ public API adds its entry under Unreleased.
 - `LayerNorm` takes `epsilon` (mlir-aie's `layer_norm_eps`), and
   `F.layer_norm` passes its `eps`: a model's LayerNorms run at its
   checkpoint's epsilon (SmolVLM's vision tower at 1e-6).
+- A tower may take several calls for one raw input (`Tower.calls`, by
+  default its `inputs`' one), each with its own per-call values:
+  `Multimodal.tower_calls` and `calls` return each call's `(inputs,
+  values)`, and `Multimodal.idle` holds every tower's values at zero.
+  `CausalLM.from_rows` and `Encoder.from_rows` take the chunk's ids, which
+  `Call.ids` holds on a placed chunk too.
 - A projection's precision is its model config's (`Config.precision`; Llama's
   is `HIGH` from 3B's width), not a tunable a profile sets or the tuner tries.
 - EmbeddingGemma 2's audio and vision towers, `AudioTower` and

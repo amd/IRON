@@ -62,7 +62,8 @@ class Call:
     # By each Rope a layer holds, its rows of the call (Rope.rows).
     ropes: dict = dataclasses.field(default_factory=dict)
     # The token ids the call embeds, a prompt chunk's rows or the decode
-    # step's token; None for embedding rows given (``from_rows``).
+    # step's token, placeholders included where a tower's rows replace
+    # their embeddings (``from_rows``); None for a tower's call.
     ids: Any = None
     # The token value the call was given: the decode step's, or a prompt
     # chunk's last; None where no token is given (an encoder's call).
@@ -282,10 +283,10 @@ class CausalLM(Model):
             self.lookup(token).reshape(1, self.config.hidden_size), call
         )
 
-    def from_rows(self, x, *, token, position, start, rows, rope_start):
+    def from_rows(self, x, ids, *, token, position, start, rows, rope_start):
         """A prompt chunk's call on its embedding rows ``x``, bounded to
-        ``rows``, in place of its ids' lookup; ``token`` is the decode
-        step's, unread here.
+        ``rows``, in place of the lookup of its ``ids``; ``token`` is the
+        decode step's, unread here.
         """
         return self.forward(
             x,
@@ -295,6 +296,7 @@ class CausalLM(Model):
                 rows=rows,
                 position=position,
                 rope_start=rope_start,
+                ids=ids,
             ),
         )
 

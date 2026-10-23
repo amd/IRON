@@ -59,6 +59,12 @@ class Multimodal(Model):
             self.tower_values[token] = [
                 p.name for p in parameters if p.kind is P.KEYWORD_ONLY
             ]
+        # Every tower's per-call values, zero: those of a call none runs.
+        self.idle = {
+            f"{self.tower_inputs[token]}_{v}": 0
+            for token in towers
+            for v in self.tower_values[token]
+        }
         (ids,) = [s["ids"] for s in text.shapes() if "ids" in s]
         (rows,), _ = ids
         self.at = {}
@@ -122,7 +128,7 @@ class Multimodal(Model):
         merge = Merge.step(placed, placeholders=tuple(self.at.items()), **counted)
         self.merged[: x.shape[0]] = x
         rows = Copy.step(self.merged[merge])[:n]
-        return self.text.inline(self.text.from_rows, rows, **text)
+        return self.text.inline(self.text.from_rows, rows, ids, **text)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the text model's, first so its
@@ -154,14 +160,14 @@ class Multimodal(Model):
             values |= {f"{name}_{v}": x for v, x in tower.longest().items()}
         return values
 
-    def tower_calls(self, tokens, raw: dict[int, tuple]) -> tuple[list[tuple], dict]:
-        """The inputs of each tower version ``raw`` runs, and every tower's
-        per-call values, zero for a tower left out.
+    def tower_calls(self, tokens, raw: dict[int, tuple]) -> list[tuple[tuple, dict]]:
+        """Each tower version ``raw`` runs, in turn: its inputs and every
+        tower's per-call values, zero for a tower not running.
 
         Args:
             tokens: The token ids, each placeholder run as long as its
                 tower's soft tokens.
-            raw: Each tower's raw input, as its ``inputs`` takes it, by
+            raw: Each tower's raw input, as its ``calls`` takes it, by
                 placeholder token.
 
         Raises:
@@ -169,46 +175,47 @@ class Multimodal(Model):
         """
         tokens = np.asarray(tokens)
         names = list(self._parameters.inputs)
-        calls, values = [], {}
+        calls = []
         for token, tower in self.towers.items():
-            name = self.tower_inputs[token]
-            own = {v: 0 for v in self.tower_values[token]}
-            soft = 0
-            if token in raw:
-                buffer, own = tower.inputs(*raw[token])
-                soft = tower.soft(own)
-                calls.append(tuple(buffer if n == name else None for n in names))
-            values |= {f"{name}_{v}": x for v, x in own.items()}
+            name, soft = self.tower_inputs[token], 0
+            for buffer, own in tower.calls(*raw[token]) if token in raw else []:
+                soft += tower.soft(own)
+                inputs = tuple(buffer if n == name else None for n in names)
+                calls.append(
+                    (inputs, self.idle | {f"{name}_{v}": x for v, x in own.items()})
+                )
             places = np.count_nonzero(tokens == token)
             if places != soft:
                 raise ValueError(
                     f"{places} placeholders {token} for {soft} soft tokens"
                 )
-        return calls, values
+        return calls
 
-    def calls(self, tokens, raw: dict[int, tuple]) -> tuple[list[tuple], dict]:
-        """An encoder text model's call: the inputs of each version it runs,
-        in the order they run, and its per-call values (``tower_calls``).
+    def calls(self, tokens, raw: dict[int, tuple]) -> list[tuple[tuple, dict]]:
+        """An encoder text model's call: each version it runs, in turn, its
+        inputs and per-call values (``tower_calls``).
 
         Raises:
             TypeError: The text model is causal: ``logits``, ``generate``.
         """
         if not isinstance(self.text, Encoder):
             raise TypeError(f"{type(self.text).__name__} runs logits() or generate()")
-        ids, values = self.text.inputs(tokens)
-        calls, towers = self.tower_calls(tokens, raw)
-        values |= towers
+        ids, text = self.text.inputs(tokens)
+        towers = [
+            (inputs, values | text) for inputs, values in self.tower_calls(tokens, raw)
+        ]
         names = list(self._parameters.inputs)
-        if not calls:
-            return [tuple(ids if n == "ids" else None for n in names)], values
-        return [*calls, tuple(ids if n == "placed" else None for n in names)], values
+        last = "placed" if towers else "ids"
+        return [
+            *towers,
+            (tuple(ids if n == last else None for n in names), text | self.idle),
+        ]
 
     def run(self, tokens, raw: dict[int, tuple]):
         """An encoder text model's output for ``tokens`` with ``raw`` at their
         placeholders (as ``calls`` takes them), each version run in turn.
         """
-        calls, values = self.calls(tokens, raw)
-        for inputs in calls:
+        for inputs, values in self.calls(tokens, raw):
             out = self(*inputs, **values)
         return out
 
@@ -219,7 +226,7 @@ class Multimodal(Model):
         placeholder on, and it forgets them from there.
         """
         tokens = np.asarray(tokens)
-        calls, values = self.tower_calls(tokens, raw)
+        calls = self.tower_calls(tokens, raw)
         same = raw.keys() == self._last_raw.keys() and all(
             len(raw[t]) == len(self._last_raw[t])
             and all(np.array_equal(a, b) for a, b in zip(raw[t], self._last_raw[t]))
@@ -227,9 +234,9 @@ class Multimodal(Model):
         )
         if same:
             return
-        values |= {v: 0 for v in self.text_values}
-        for inputs in calls:
-            self(*inputs, **values)
+        text = {v: 0 for v in self.text_values}
+        for inputs, values in calls:
+            self(*inputs, **values, **text)
         self._last_raw = {t: tuple(np.array(a) for a in raw[t]) for t in raw}
         places = np.flatnonzero(np.isin(tokens, list(self.towers)))
         assert isinstance(self.text, CausalLM), "a causal text model's"

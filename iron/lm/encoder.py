@@ -92,13 +92,20 @@ class Encoder(Model):
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
 
-    def forward(self, x: Handle, rows, ropes):
+    def forward(self, x: Handle, rows, ropes, ids=None):
         """The layers, the final norm, ``pool`` and ``head`` over the rows
-        ``x``, bounded to their first ``rows``, rotated by ``ropes``
-        (``Call.ropes``): one prompt of ``rows`` from position 0.
+        ``x`` of ``ids`` (None for a tower's), bounded to their first
+        ``rows``, rotated by ``ropes`` (``Call.ropes``): one prompt of
+        ``rows`` from position 0.
         """
         call = Call(
-            prompt=True, start=0, rows=rows, position=None, ropes=ropes, embeddings=x
+            prompt=True,
+            start=0,
+            rows=rows,
+            position=None,
+            ropes=ropes,
+            ids=ids,
+            embeddings=x,
         )
         x = self.positions(x, call)
         for i, weights in enumerate(self.layers):
@@ -107,14 +114,15 @@ class Encoder(Model):
             x = self.final_norm(x)
         return self.head(self.pool(x, rows))
 
-    def from_rows(self, x, *, rows):
+    def from_rows(self, x, ids, *, rows):
         """A call on its embedding rows ``x``, bounded to ``rows``, in place
-        of its ids' lookup.
+        of the lookup of its ``ids``.
         """
-        return self.forward(x, rows, self.angles(rows))
+        return self.forward(x, rows, self.angles(rows), ids)
 
     def body(self, ids: Handle, *, rows: Scratchpad[np.int32]):
-        return self.from_rows(self.lookup(ids[:rows]), rows=rows)
+        ids = ids[:rows]
+        return self.from_rows(self.lookup(ids), ids, rows=rows)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, ``max_tokens`` rows."""
@@ -176,10 +184,19 @@ class Tower(Encoder):
         """A call's input buffer and per-call values for ``raw``."""
         raise NotImplementedError(f"{type(self).__name__} defines no inputs()")
 
+    def calls(self, *raw) -> list[tuple[np.ndarray, dict]]:
+        """Each call ``raw`` takes, in turn, its input buffer and per-call
+        values, each call's soft tokens after the last's: one, ``inputs``'s,
+        by default.
+        """
+        return [self.inputs(*raw)]
+
     def soft_tokens(self, *raw) -> np.ndarray:
-        """The soft tokens of ``raw``, as ``inputs`` takes it,
+        """The soft tokens of ``raw``, as ``calls`` takes it,
         ``(soft, text_dim)`` float32.
         """
-        buffer, values = self.inputs(*raw)
-        out = self(buffer, **values).numpy().reshape(-1, self.config.text_dim)
-        return np.asarray(out[: self.soft(values)], np.float32)
+        calls = self.calls(*raw)
+        for buffer, values in calls:
+            out = self(buffer, **values)
+        out = out.numpy().reshape(-1, self.config.text_dim)
+        return np.asarray(out[: sum(self.soft(v) for _, v in calls)], np.float32)
