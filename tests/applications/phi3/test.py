@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Phi-4-mini-instruct on the NPU, from the real checkpoint: speed,
-accuracy against the float32 reference, and determinism. The model is
-compiled and loaded once for the module and every test calls it in-process.
+accuracy against the float32 reference, determinism, and past its original
+4096-position context, where LongRoPE turns to its long table: a prompt of
+three chunks and a chat turn. The model is compiled and loaded once for the
+module and every test calls it in-process.
 
 ``--random-weights SEED`` runs it on drawn weights and random prompts, on
 a host without the checkpoint, and ``--max-seq-len`` at another context.
@@ -17,6 +19,7 @@ import pytest
 from iron.applications.phi3 import Phi4
 from iron.lm.testing import (
     check_accuracy,
+    check_chat_turn,
     check_determinism,
     check_generation,
     check_device_sampling,
@@ -86,3 +89,27 @@ def test_phi_4_mini_instruct_accuracy(model, record_property):
 @pytest.mark.extensive
 def test_phi_4_mini_instruct_determinism(model, record_property):
     check_determinism(model, record=record_property)
+
+
+# 22000 characters of prompt.txt, the text repeated past its end, are 5877
+# tokens: past 4096 with the last 1000 left off too, so a chat turn's
+# history and the run from scratch both rotate by the long table.
+PAST = 22000
+
+
+@pytest.mark.extensive
+def test_phi_4_mini_instruct_accuracy_past_4096(model, record_property):
+    """The prompt's three chunks, past the original context, and two decode
+    steps after them, against the float32 reference over the whole prompt,
+    which rotates every position by the long table as the device does.
+    """
+    assert (
+        len(model.prompt(PAST)) - 1000 > model.config.original_max_position_embeddings
+    )
+    check_accuracy(model, MAX_KL, 3, PAST, record=record_property)
+
+
+@pytest.mark.extensive
+def test_phi_4_mini_instruct_chat_turn(model, record_property):
+    """A turn of 1000 tokens past 4096 reruns the third chunk alone."""
+    check_chat_turn(model, PAST, 1000, record=record_property)

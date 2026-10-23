@@ -2,15 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Qwen 2.5 1.5B Instruct on the NPU, from the real checkpoint: speed,
-accuracy against the float32 reference, and determinism. The model is
-compiled and loaded once for the module and every test calls it in-process.
+accuracy against the float32 reference, determinism, and past one chunk: a
+prompt of two and a chat turn (the end of the caches is ``long_context``'s).
+The model is compiled and loaded once for the module and every test calls
+it in-process.
 
 ``--random-weights SEED`` runs it on weights drawn in the checkpoint's
 shapes (only its header is read) and random prompts, on a host without the
 tokenizer, and ``--max-seq-len`` at another context.
-
-Not yet included: a chat-turn check, as Llama 3.2 1B's test has; the end
-of the caches is ``long_context``'s.
 
 The ``model`` fixture packages it ``--each-step``: the full-ELF link does
 not finish within an hour.
@@ -21,6 +20,7 @@ import pytest
 from iron.applications.qwen2 import Qwen2
 from iron.lm.testing import (
     check_accuracy,
+    check_chat_turn,
     check_determinism,
     check_generation,
     check_device_sampling,
@@ -90,3 +90,23 @@ def test_qwen2_5_1_5b_instruct_accuracy(model, record_property):
 @pytest.mark.extensive
 def test_qwen2_5_1_5b_instruct_determinism(model, record_property):
     check_determinism(model, record=record_property)
+
+
+# 12000 characters of prompt.txt are 3261 tokens: a full chunk and most of
+# a second, which attends over the first's caches.
+LONG = 12000
+
+
+@pytest.mark.extensive
+def test_qwen2_5_1_5b_instruct_accuracy_across_chunks(model, record_property):
+    """The prompt's two chunks and two decode steps after them, against the
+    float32 reference over the whole prompt.
+    """
+    assert len(model.prompt(LONG)) > model.config.prefill_chunk
+    check_accuracy(model, MAX_KL, 3, LONG, record=record_property)
+
+
+@pytest.mark.extensive
+def test_qwen2_5_1_5b_instruct_chat_turn(model, record_property):
+    """A turn of 1000 tokens reruns the second chunk alone."""
+    check_chat_turn(model, LONG, 1000, record=record_property)
