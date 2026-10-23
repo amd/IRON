@@ -461,3 +461,12 @@ def test_a_layer_reading_another_s_cache_projects_and_writes_no_keys(golden):
     )
     tokens = np.arange(9)
     assert_close(host.logits(tokens), reference.logits(tokens))
+
+
+def test_a_random_tree_draws_a_scalar_as_an_array():
+    """A 0-d tensor drawn at random is a 0-d array, as ``iron.param`` takes
+    it (a clipped linear's clamp bound), not a bare numpy scalar.
+    """
+    tree = checkpoint(SMALL, {"linear.input_min": (), "norm.weight": (8,)})
+    bound = tree.tree("random").linear.input_min
+    assert isinstance(bound, np.ndarray) and bound.shape == ()

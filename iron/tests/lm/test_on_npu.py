@@ -151,8 +151,7 @@ def test_resnet_is_on_npu():
 
 def _base_conv(path, cin, cout, k=1, groups=1) -> dict[str, tuple[int, ...]]:
     # bn.num_batches_tracked (int64, scalar) is set directly on the loaded
-    # tree below: filled("random")'s 0-d draw is a bare numpy scalar, not
-    # an array, which param() refuses, and one checkpoint holds one dtype.
+    # tree below: one checkpoint holds one dtype.
     return {
         f"{path}.conv.weight": (cout, cin // groups, k, k),
         f"{path}.bn.weight": (cout,),

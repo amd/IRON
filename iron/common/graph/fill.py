@@ -36,5 +36,6 @@ def filled(
         if len(shape) >= 2:
             out[n] = (x / np.sqrt(math.prod(shape[1:]))).astype(dtype)
         else:
-            out[n] = (x / 10 + (not n.endswith("bias"))).astype(dtype)
+            # An array even of no axes, where numpy's arithmetic gives a scalar.
+            out[n] = np.asarray(x / 10 + (not n.endswith("bias")), dtype)
     return out
