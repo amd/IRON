@@ -24,7 +24,11 @@ TASK = "Given a web search query, retrieve relevant passages that answer the que
 # cosine its embedding reaches against transformers'.
 TEXTS = {
     "query": ("What is the capital of China?", TASK, 0.99),
-    "document": ("The capital of China is Beijing, its seat of government.", None, 0.99),
+    "document": (
+        "The capital of China is Beijing, its seat of government.",
+        None,
+        0.99,
+    ),
     # 7625 tokens and the end of text: four prompt chunks.
     "four_chunks": (prompt_text(28000), None, 0.99),
     # 32682 tokens and the end of text: the native context's last chunk.
