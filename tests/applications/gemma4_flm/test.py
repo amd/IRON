@@ -192,9 +192,6 @@ def test_iron_matches_engine(prompt, build_engines, stock_tokens, record_propert
 
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.skipif(
-    not MODEL.exists(), reason="needs $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2"
-)
 def test_iron_engine_reload_rebuilds_override_state(build_engines):
     prompt = "Reply with only the word hello."
     with serve(APP / "build" / "engine" / "engines", APP / "build"):
