@@ -53,15 +53,16 @@ HIGHEST (float32 partial sums) is not measured yet.
 
 ## Accuracy and speed
 
-On Strix (npu2, xcoradaie211), one compile at the native context, against
-the float32 golden recorded beside the checkpoint (`golden.npz`): KL over
-40 teacher-forced steps after 293 tokens, mean 0.0029, p90 0.0051, max
-0.0105; over a prompt of 3262 tokens, two chunks, and two decode steps
-after it, max 0.025. A chat turn rerun from the states checkpointed at the
+On Strix Halo (npu2, xcoradaie220), one compile at the native context,
+against the float32 golden recorded beside the checkpoint (`golden.npz`):
+KL over 40 teacher-forced steps after 292 tokens, mean 0.0024, p90 0.0048,
+max 0.0063; over a prompt of 3261 tokens, two chunks, and two decode steps
+after it, max 0.0049. A chat turn rerun from the states checkpointed at the
 chunk boundary is bit for bit the run from scratch, and repeated runs are
-bitwise identical. The first token takes 2.7 s after 13 tokens (a prompt
-chunk's scan streams all 2048 rows whatever the prompt's length) and
-decode runs at 6.7 tokens a second; neither is tuned.
+bitwise identical. The first token takes 2.9 s after a 13-character
+prompt (a prompt chunk's scan streams all 2048 rows whatever the prompt's
+length), 3.6 s after 292 tokens and 8.0 s after 2048, and decode runs at
+6.7 tokens a second; none of it is tuned.
 
 ## The mixture-of-experts sizes
 

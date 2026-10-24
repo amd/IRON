@@ -38,9 +38,10 @@ def model(load):
     yield load()
 
 
-# KL(fp32 CPU || NPU) measured mean 0.0029, p90 0.0051, max 0.0105 over 40
-# steps; over two chunks and two decode steps mean 0.0098, max 0.025.
-MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.05}
+# KL(fp32 CPU || NPU) measured mean 0.0024, p90 0.0048, max 0.0063 over 40
+# steps after 292 tokens; over two chunks and two decode steps mean 0.0027,
+# max 0.0049.
+MAX_KL = {"Mean": 0.006, "P90": 0.012, "Max": 0.015}
 
 
 @pytest.mark.parametrize(
