@@ -68,8 +68,10 @@ MIN_COSINE_MIXED = 0.9995
 # reaches it.
 NORM_RTOL = 2**-8
 
-# Measured on chirps: 0.99925, 0.99953, 0.99931 and 0.99941 of the features
-# are the host extractor's rounded to bf16.
+# Measured on npu2 over CLIPS (LibriSpeech, 10-24): 0.99984, 0.99980,
+# 0.99984, 0.99987 and 0.99988 of the features are the host extractor's
+# rounded to bf16. Twice the worst clip's misses would be 0.9996; npu1's
+# are not measured on these clips, so the bound stays 0.999.
 AUDIO_MIN_EXACT = 0.999
 # The rest are within one bf16 ulp, bar a log near 0, where the energy's
 # relative error is the feature's absolute one: measured 1.9e-6 at most.
@@ -77,18 +79,11 @@ AUDIO_ATOL = 4e-6
 # The 1st percentile of the token cosines, not the worst token: the last layer
 # is ill-conditioned at a few tokens, where HF's own float32 model turns the
 # NPU's 11-layer state, within 0.9995 of its own there, into 0.74. Measured
-# on npu2 over CLIPS before S21a's float32 scores and band (pr222/s21a-mask.md):
-# 0.9991, 0.9929, 0.9994, 0.9984 and 0.9982, relative error 0.021, 0.038,
-# 0.018, 0.047 and 0.037; HF's own bf16 tower against its float32 one: 0.9992,
-# 0.9933, 0.9958, 0.9996 and 0.9990, and 0.015, 0.027, 0.043, 0.013 and 0.016.
-# vtanh's Tanh, in the soft cap, reached 0.082.
-# After S21a (simplify/p2-s21a, ae20edc09): 0.9994, 0.9950, 0.9985, 0.9990 and
-# 0.9994 -- medium improves the most (0.9929 -> 0.9950) and is still the
-# worst of the five; passage alone moves the wrong way (0.9994 -> 0.9985), by
-# less than the others gain, within the same ill-conditioning this comment
-# already describes (a specific token's content, not the path). The bound
-# tightens to the new worst (medium), the same margin the old one carried.
-# Relative error not remeasured this round, so AUDIO_MAX_ERROR stays as is.
+# on npu2 over CLIPS (10-24): 0.99936, 0.99482, 0.99457, 0.99926 and 0.99901
+# (short to long), relative error 0.017, 0.033, 0.023, 0.016 and 0.032; the
+# tower's host reference has passage at 0.99870, so the NPU's own rounding
+# moves it most. HF's own bf16 tower against its float32 one reaches 0.9933
+# on these clips.
 AUDIO_MIN_COSINE = 0.992
 AUDIO_MAX_ERROR = 0.06
 
