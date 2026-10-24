@@ -22,6 +22,7 @@ import pytest
 import iron.applications
 from iron.applications.gemma4 import Gemma4
 from iron.applications.granite import Granite
+from iron.applications.granite_hybrid import GraniteHybrid
 from iron.applications.llama import Llama
 from iron.lm import CausalLM, Checkpoint
 from iron.lm.testing import (
@@ -90,6 +91,13 @@ APPLICATIONS = {
         "model.safetensors",
         "tokenizer.json",
         each_step=("npu1", "npu2"),
+    ),
+    # Granite 4.0-H 1B's decode measured 0.0035 at 131071 and its deepest
+    # prompt chunk 4.1e-5, one compile at its native 131072. The MoE sizes
+    # the package also builds stream every expert a row and have no
+    # checkpoint or test here.
+    "granite_4.0_h_1b": Application(
+        GraniteHybrid, "granite-4.0-h-1b", "model.safetensors", "tokenizer.json"
     ),
 }
 
