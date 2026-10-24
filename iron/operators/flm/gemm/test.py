@@ -25,6 +25,7 @@ from iron.operators.flm.gemm.design import (
 )
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.tests.support.shipped import Shipped
+from iron.tests.support.tools import DEVICES
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue
@@ -38,12 +39,11 @@ INPUT_SCALE = 4.0
 ACTIVATION_INPUT_SCALE = 0.5
 
 
-def get_params():
-    dev = aie_utils.get_current_device()
-    if dev is None:
-        return []
-    if dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
-        return []
+def get_params(device: str):
+    """``test_gemm``'s shapes on ``device``, run only there: declared for its
+    model in ``DEVICES``, so collecting opens no device.
+    """
+    dev = DEVICES[device]()
 
     # One full sweep is N_TILE * COLS wide, so both it and the N values that
     # leave a trailing partial column-block differ per device. The trailing
@@ -120,7 +120,8 @@ def get_params():
     )
 
     def marks_for(p, extensive):
-        marks = [pytest.mark.extensive] if extensive else []
+        marks = [pytest.mark.supported_devices(device)]
+        marks += [pytest.mark.extensive] if extensive else []
         M, K, N, epilogue, rounding = p
         if (M, K, N) in bench_shapes and epilogue is NONE:
             marks.append(pytest.mark.bench)
@@ -131,7 +132,15 @@ def get_params():
         params.append(pytest.param(*p, marks=marks_for(p, extensive=False)))
     for p in extensive_params:
         params.append(pytest.param(*p, marks=marks_for(p, extensive=True)))
-    return params
+    names = ("M", "K", "N", "epilogue", "rounding")
+    return [
+        pytest.param(
+            *q.values,
+            marks=q.marks,
+            id="-".join([device, *(f"{n}_{v}" for n, v in zip(names, q.values))]),
+        )
+        for q in params
+    ]
 
 
 def flm_vectors(operator, scale=4.0):
@@ -190,8 +199,9 @@ def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
     )
 
 
-@pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("M,K,N,epilogue,rounding", get_params())
+@pytest.mark.parametrize(
+    "M,K,N,epilogue,rounding", [*get_params("npu1"), *get_params("npu2")]
+)
 def test_gemm(M, K, N, epilogue, rounding, record_property):
     scale = INPUT_SCALE if epilogue is NONE else ACTIVATION_INPUT_SCALE
     operator = ProjectionGEMM(
@@ -224,15 +234,13 @@ def test_gemm_without_activations(M, K, N, record_property):
     assert not errors, "Test failed"
 
 
-def b_col_maj_params():
+def b_col_maj_params(device: str):
     """Where B as stored reaches the kernel by another path than packed B: a
     resident and a streamed memtile pool, a trailing column, every tile width
-    and two slabs, on each kind of mac the device has: AIE2P's bfp16 and bf16
+    and two slabs, on each kind of mac ``device`` has: AIE2P's bfp16 and bf16
     macs, AIE2's bf16 ones.
     """
-    dev = aie_utils.get_current_device()
-    if dev is None:
-        return []
+    dev = DEVICES[device]()
     cols = dev.cols
     params = [
         pytest.param(256, 512, 64 * cols, None, (NONE,), id="resident"),
@@ -261,14 +269,21 @@ def b_col_maj_params():
         else (Precision.HIGH,)
     )
     return [
-        pytest.param(*p.values, precision, marks=p.marks, id=f"{p.id}-{precision}")
+        pytest.param(
+            *p.values,
+            precision,
+            marks=[*p.marks, pytest.mark.supported_devices(device)],
+            id=f"{device}-{p.id}-{precision}",
+        )
         for precision in levels
         for p in params
     ]
 
 
-@pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("M,K,N,tile_n,epilogue_modes,precision", b_col_maj_params())
+@pytest.mark.parametrize(
+    "M,K,N,tile_n,epilogue_modes,precision",
+    [*b_col_maj_params("npu1"), *b_col_maj_params("npu2")],
+)
 def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, precision, record_property):
     operator = ProjectionGEMM(
         M=M,
@@ -299,42 +314,39 @@ def test_gemm_split_leg_bounds_runs():
     assert not errors, "Test failed"
 
 
-def tile_option_params():
-    """Every (tile_n, tile_ma) the design accepts on this device.
+def tile_option_params(device: str):
+    """Every (tile_n, tile_ma) to try on ``device``.
 
     The shape parameters above only exercise the default geometry, since
     __post_init__ resolves both tunables. These cover the tunables themselves, which
     change the blocked L1 layout, and a mismatch is silently wrong output
-    rather than a build error, so each has to run on hardware. The defaults
-    stay in the regular suite; the overrides are extensive, since each is its
-    own kernel object and xclbin.
+    rather than a build error, so each has to run on hardware. The default
+    (``tile_ma`` None) stays in the regular suite; the overrides are
+    extensive, since each is its own kernel object and xclbin. Which the
+    design accepts, and which is the default, resolving says, so the test
+    does it, not collection.
     """
-    dev = aie_utils.get_current_device()
-    if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
-        return []
+    dev = DEVICES[device]()
     params = []
     for tile_n in sorted(TILE_NS):
         # One full sweep of the grid at this tile_n, so every column has work.
-        M, K, N = 256, 512, tile_n * dev.cols
-        shape = dict(M=M, K=K, N=N, tile_n=tile_n, precision=Precision.MEDIUM)
-        default_ma = ProjectionGEMM(**shape).resolved(dev).tile_ma
-        for tile_ma in (16, 32, 64):
-            if M_TILE % tile_ma or tile_ma % (2 * R):
+        N = tile_n * dev.cols
+        for tile_ma in (None, 16, 32, 64):
+            if tile_ma is not None and (M_TILE % tile_ma or tile_ma % (2 * R)):
                 continue
-            try:
-                ProjectionGEMM(**shape, tile_ma=tile_ma).resolved(dev)
-            except ValueError:
-                continue  # this A height leaves no room for B at this width
-            marks = [] if tile_ma == default_ma else [pytest.mark.extensive]
             params.append(
                 pytest.param(
-                    M,
-                    K,
+                    256,
+                    512,
                     N,
                     tile_n,
                     tile_ma,
-                    marks=marks,
-                    id=f"tn{tile_n}-ma{tile_ma}" + ("-default" if not marks else ""),
+                    marks=[
+                        pytest.mark.supported_devices(device),
+                        *([] if tile_ma is None else [pytest.mark.extensive]),
+                    ],
+                    id=f"{device}-tn{tile_n}-"
+                    + ("default" if tile_ma is None else f"ma{tile_ma}"),
                 )
             )
     return params
@@ -360,58 +372,66 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
     assert mlir.count("aiex.dma_await_task") == npu2.cols * C_JOINS
 
 
-@pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("M,K,N,tile_n,tile_ma", tile_option_params())
+@pytest.mark.parametrize(
+    "M,K,N,tile_n,tile_ma",
+    [*tile_option_params("npu1"), *tile_option_params("npu2")],
+)
 def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
-    """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
-    operator = ProjectionGEMM(
-        M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma, precision=Precision.MEDIUM
-    )
-    resolved = operator.resolved()
-    assert (resolved.tile_n, resolved.tile_ma) == (tile_n, tile_ma)
+    """The default (tile_n, tile_ma), and each other A height the design
+    accepts, computes the right answer on hardware.
+    """
+    shape = dict(M=M, K=K, N=N, tile_n=tile_n, precision=Precision.MEDIUM)
+    default = ProjectionGEMM(**shape).resolved().tile_ma
+    if tile_ma == default:
+        pytest.skip(f"tile_ma {default} is the default, run as -default")
+    try:
+        operator = ProjectionGEMM(**shape, tile_ma=tile_ma or default)
+        resolved = operator.resolved()
+    except ValueError as e:
+        pytest.skip(f"this A height leaves no room for B at this width: {e}")
+    assert (resolved.tile_n, resolved.tile_ma) == (tile_n, tile_ma or default)
     errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
     assert not errors, "Test failed"
 
 
-def k_slice_params():
-    """Every k slice the design accepts at the default tile_n on this device.
+def k_slice_params(device: str):
+    """Every k slice to try at the default tile_n on ``device``.
 
     Like the tiles above, a slice changes the blocked L1 layout and the B and
     A transfers, and a mismatch is silently wrong rather than a build error.
-    The default stays in the regular suite; the others are extensive.
+    The default (``ct_k`` None) stays in the regular suite; the others are
+    extensive, each run where the design accepts it.
+    """
+    return [
+        pytest.param(
+            ct_k,
+            marks=[
+                pytest.mark.supported_devices(device),
+                *([] if ct_k is None else [pytest.mark.extensive]),
+            ],
+            id=f"{device}-" + ("default" if ct_k is None else f"ck{ct_k}"),
+        )
+        for ct_k in (None, *k_slices(512))
+    ]
+
+
+@pytest.mark.parametrize("ct_k", [*k_slice_params("npu1"), *k_slice_params("npu2")])
+def test_gemm_k_slices(ct_k):
+    """The default k slice, and each other the design accepts, computes the
+    right answer on hardware.
     """
     dev = aie_utils.get_current_device()
-    if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
-        return []
-    shape = dict(M=256, K=512, N=64 * dev.cols, precision=Precision.MEDIUM)
-    default = ProjectionGEMM(**shape).resolved(dev).ct_k
-    params = []
-    for ct_k in k_slices(512):
-        try:
-            ProjectionGEMM(**shape, ct_k=ct_k).resolved(dev)
-        except ValueError:
-            continue  # this slice leaves no room for the tiles in L1
-        marks = [] if ct_k == default else [pytest.mark.extensive]
-        params.append(
-            pytest.param(
-                ct_k,
-                marks=marks,
-                id=f"ck{ct_k}" + ("-default" if not marks else ""),
-            )
-        )
-    return params
-
-
-@pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("ct_k", k_slice_params())
-def test_gemm_k_slices(ct_k):
-    """Each accepted k slice computes the right answer on hardware."""
-    dev = aie_utils.get_current_device()
     assert dev is not None
-    operator = ProjectionGEMM(
-        M=256, K=512, N=64 * dev.cols, ct_k=ct_k, precision=Precision.MEDIUM
-    )
-    assert operator.resolved().ct_k == ct_k
+    shape = dict(M=256, K=512, N=64 * dev.cols, precision=Precision.MEDIUM)
+    default = ProjectionGEMM(**shape).resolved().ct_k
+    if ct_k == default:
+        pytest.skip(f"ct_k {default} is the default, run as -default")
+    try:
+        operator = ProjectionGEMM(**shape, ct_k=ct_k or default)
+        resolved = operator.resolved()
+    except ValueError as e:
+        pytest.skip(f"this slice leaves no room for the tiles in L1: {e}")
+    assert resolved.ct_k == (ct_k or default)
     errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
     assert not errors, "Test failed"
 
@@ -527,21 +547,19 @@ def test_one_xclbin_serves_every_shape():
 MAX_SLOPE = {NONE: 1.0, SIGMOID: 0.25, SILU: 1.1, GELU: 1.1}
 
 
-def _shipped_marks():
-    """Extensive, since constructing the operator downloads the image; and
-    NPU2 with eight columns, which the binary was built for.
+# Extensive, since constructing the operator downloads the image.
+SHIPPED = pytest.mark.extensive
+
+
+@pytest.fixture
+def eight_column_npu2():
+    """Skips unless the attached NPU is the eight-column NPU2 the shipped
+    binary was built for.
     """
     dev = aie_utils.get_current_device()
-    unfit = dev is None or dev.arch is not AIEArch.AIE2p or dev.cols < 8
-    return [
-        pytest.mark.extensive,
-        pytest.mark.skipif(
-            unfit, reason="the shipped overlay is an 8-column NPU2 binary"
-        ),
-    ]
+    if dev.arch is not AIEArch.AIE2p or dev.cols < 8:
+        pytest.skip("the shipped overlay is an 8-column NPU2 binary")
 
-
-SHIPPED = _shipped_marks()
 
 # The overlay never calls set_rounding, so it runs in the core's power-up floor
 # mode and carries a ~1% truncation bias -- not a bug. See README.md.
@@ -564,7 +582,7 @@ BUDGET_FLOOR = 2e-2
         pytest.param(256, 512, 1024, GELU, marks=SHIPPED),
     ],
 )
-def test_shipped_overlay(M, K, N, epilogue, record_property):
+def test_shipped_overlay(M, K, N, epilogue, record_property, eight_column_npu2):
     """The shipped binary through the same operator: the second reference."""
     operator = Shipped(M=M, K=K, N=N, epilogue=epilogue)
     # B drawn row-major (K, N); the operator consumes it packed (pack_B).
@@ -604,7 +622,7 @@ def test_shipped_overlay(M, K, N, epilogue, record_property):
         pytest.param(GELU, marks=SHIPPED),
     ],
 )
-def test_shipped_epilogue_matches_accumulator(epilogue):
+def test_shipped_epilogue_matches_accumulator(epilogue, eight_column_npu2):
     """The epilogue is the right function of the accumulator the device produced.
 
     Checking a bounded epilogue against the idealized CPU reference cannot work.
@@ -670,7 +688,7 @@ def test_shipped_epilogue_matches_accumulator(epilogue):
         pytest.param(512, 1536, 256, marks=SHIPPED),  # Gemma 4 E2B per-layer gate
     ],
 )
-def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N):
+def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N, eight_column_npu2):
     """``gelu=bf16_steps`` with ``rounding=floor`` matches the shipped overlay's
     gelu bit for bit, on identical inputs.
     """

@@ -13,9 +13,9 @@ from aie.iron.device import from_name
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
-from iron.common import Elementwise
+from iron.common import Elementwise, Unresolvable
 from iron.common.testing import vectors
-from iron.tests.support.declared import declared
+from iron.tests.support.declared import declared, unresolvable
 from iron.tests.support.judging import interval
 
 
@@ -24,14 +24,16 @@ def test_every_declared_case_resolves_on_npu2():
     skip its device test.
     """
     dev = from_name("npu2", n_cols=8)
-    assert not [(n, c.label, u) for n, _, c, u in declared(dev) if u]
+    reasons = [(n, c.label, unresolvable(cls, c, dev)) for n, cls, c in declared(dev)]
+    assert not [r for r in reasons if r[2]]
 
 
 def _cases():
     first = {}
-    for name, cls, case, unresolvable in declared(from_name("npu2", n_cols=8)):
+    # Every case resolves on npu2 (test_every_declared_case_resolves_on_npu2).
+    for name, cls, case in declared(from_name("npu2", n_cols=8)):
         # A bench case's inputs are large on purpose; judging one took 335 s.
-        if unresolvable is None and not case.extensive and not case.bench:
+        if not case.extensive and not case.bench:
             first.setdefault(name, (cls, case))
     return [
         pytest.param(cls, case, id=f"{name}-{case.label}")
@@ -95,10 +97,12 @@ def test_every_tolerance_says_where_its_numbers_come_from(device):
     dev = from_name(device[0], n_cols=device[1])
     unnoted = set()
     with aie_utils.set_current_device(dev):
-        for name, cls, case, unresolvable in declared(dev):
-            if unresolvable is not None:
+        for name, cls, case in declared(dev):
+            try:
+                op = cls(**case.kwargs).resolved(dev)
+            except Unresolvable:
                 continue
-            tolerance = cls(**case.kwargs).resolved(dev).tolerance()
+            tolerance = op.tolerance()
             if (
                 tolerance is not None
                 and tolerance.kind != "exact"

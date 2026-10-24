@@ -29,6 +29,7 @@ from aie.helpers.taplib import PerCall
 import iron
 from iron import Precision
 from iron import Scratchpad
+from iron.common import Unresolvable
 from iron.common.image.packaging import Kind
 from iron.lm import Conv2d, ImagePatches, LogMel
 from iron.operators.copy import Copy
@@ -41,35 +42,30 @@ pytestmark = requires("aiecc", "peano")
 
 def _cases():
     """Each device's first default case of every operator and the cases
-    declared to lower, one it cannot resolve skipped with the reason.
+    declared to lower.
     """
     params = []
     for device in sorted(DEVICES):
         firsts = set()
-        for name, cls, case, unresolvable in declared(DEVICES[device]()):
+        for name, cls, case in declared(DEVICES[device]()):
             if not case.extensive and name not in firsts:
                 firsts.add(name)
             elif not case.lower:
                 continue
             params.append(
-                pytest.param(
-                    device,
-                    cls,
-                    case,
-                    id=f"{device}-{name}-{case.label}",
-                    marks=(
-                        pytest.mark.skip(reason=f"not for {device}: {unresolvable}")
-                        if unresolvable
-                        else ()
-                    ),
-                )
+                pytest.param(device, cls, case, id=f"{device}-{name}-{case.label}")
             )
     return params
 
 
 @pytest.mark.parametrize("device,cls,case", _cases(), indirect=["device"])
 def test_operator_lowers_to_instructions(device, cls, case, tmp_path):
-    lower(cls(**case.kwargs).resolved(device), tmp_path)
+    """Each case lowers, or is skipped with why ``device`` cannot resolve it."""
+    try:
+        op = cls(**case.kwargs).resolved(device)
+    except Unresolvable as e:
+        pytest.skip(f"not for {device}: {e}")
+    lower(op, tmp_path)
 
 
 @pytest.mark.parametrize(

@@ -13,28 +13,33 @@ def declared(dev):
     """Every catalog operator that declares its cases, with each case at `dev`.
 
     Read from the catalog's own table, so an operator added there is covered
-    without touching a test. Constructing may read the bound device (a
-    `validate()`), so `dev` is bound while the cases are made and the
-    previous one restored after.
+    without touching a test. A sweep may read the bound device, so `dev`
+    is bound while the cases are made and the previous one restored after.
+    Nothing is resolved: resolving can build kernels, which a test does when
+    it runs, not when it is collected.
 
     Args:
-        dev: The device the cases are declared and resolved for.
+        dev: The device the cases are declared for.
 
     Returns:
-        `(name, cls, case, unresolvable)` for each case: `unresolvable` is
-        why `dev` cannot resolve it (more columns than it has, say), else
-        None.
+        `(name, cls, case)` for each case.
     """
     with aie_utils.set_current_device(dev):
-        cases = []
-        for name, cls in sorted(catalog.CATALOG.items()):
-            if cls.test is None or cls.reference_only:
-                continue
-            for case in cls.test.resolve(cls, dev):
-                try:
-                    cls(**case.kwargs).resolved(dev)
-                    unresolvable = None
-                except Unresolvable as e:
-                    unresolvable = str(e)
-                cases.append((name, cls, case, unresolvable))
-        return cases
+        return [
+            (name, cls, case)
+            for name, cls in sorted(catalog.CATALOG.items())
+            if cls.test is not None and not cls.reference_only
+            for case in cls.test.resolve(cls, dev)
+        ]
+
+
+def unresolvable(cls, case, dev) -> str | None:
+    """Why `dev` cannot resolve `case` of `cls` (more columns than it has,
+    say), else None.
+    """
+    with aie_utils.set_current_device(dev):
+        try:
+            cls(**case.kwargs).resolved(dev)
+        except Unresolvable as e:
+            return str(e)
+    return None

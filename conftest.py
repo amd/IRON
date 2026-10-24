@@ -216,33 +216,34 @@ def pytest_configure(config):
     config._csv_reporter = CSVReporter(csv_path) if csv_path else None
 
 
-def pytest_collection_modifyitems(config, items):
-    marked_items = [
-        (item, item.get_closest_marker("supported_devices")) for item in items
-    ]
-    marked_items = [(item, marker) for item, marker in marked_items if marker]
-    if not marked_items:
-        # Nothing collected needs the NPU. Resolving one here would open the
-        # single-tenant device at collection time, contending with whatever
-        # else holds it and erroring out when none is attached.
-        return
+ATTACHED = pytest.StashKey[str]()
 
-    if aie_utils.DefaultNPURuntime is None:
-        # A host without an NPU runs everything else: the device tests are
-        # skipped, each saying why (most often no NPU, or an unsourced XRT,
-        # which would otherwise look like a pile of toolchain regressions).
-        reason = f"No NPU runtime: {npu_unavailable_reason()}"
-        for item, _ in marked_items:
-            item.add_marker(pytest.mark.skip(reason=reason))
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Skip a device test the attached NPU is not among its
+    ``supported_devices``, before its fixtures build anything. The device is
+    opened here, at the first device test run, never at collection: it is
+    single-tenant, and a collect-only gate must not hold it.
+    """
+    marker = item.get_closest_marker("supported_devices")
+    if marker is None:
         return
-    device = aie_utils.DefaultNPURuntime.device().resolve().name
-    for item, marker in marked_items:
-        if device not in marker.args:
-            item.add_marker(
-                pytest.mark.skip(
-                    reason=f"Not supported on {device} (supported: {', '.join(marker.args)})"
-                )
-            )
+    if ATTACHED not in item.config.stash:
+        if aie_utils.DefaultNPURuntime is None:
+            # A host without an NPU runs everything else: the device tests
+            # are skipped, each saying why (most often no NPU, or an
+            # unsourced XRT, which would otherwise look like a pile of
+            # toolchain regressions).
+            item.config.stash[ATTACHED] = ""
+        else:
+            device = aie_utils.DefaultNPURuntime.device().resolve().name
+            item.config.stash[ATTACHED] = device
+    device = item.config.stash[ATTACHED]
+    if not device:
+        pytest.skip(f"No NPU runtime: {npu_unavailable_reason()}")
+    if device not in marker.args:
+        pytest.skip(f"Not supported on {device} (supported: {', '.join(marker.args)})")
 
 
 def pytest_sessionfinish(session, exitstatus):

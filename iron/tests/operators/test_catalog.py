@@ -21,40 +21,44 @@ import aie.utils as aie_utils
 import pytest
 
 import iron.operators as catalog
-from iron.common import Operator
+from iron.common import Operator, Unresolvable
 from iron.common.testing import Case, Testing, run_test, vectors
 from iron.tests.support.declared import declared
-
-DEVICE = aie_utils.get_current_device()
+from iron.tests.support.tools import DEVICES
 
 
 def _declared():
-    """Every operator in the catalog that declares its cases, with those cases."""
+    """Every operator in the catalog that declares its cases, with those
+    cases, on each device: declared for its model of the device, run only
+    on that device and resolved against the one attached.
+    """
     return [
         pytest.param(
             cls,
             cls.test,
             case,
-            id=f"{name}-{case.label}",
+            id=f"{device}-{name}-{case.label}",
             marks=[
+                pytest.mark.supported_devices(device),
                 *([pytest.mark.extensive] if case.extensive else []),
                 *([pytest.mark.bench] if case.bench else []),
-                *([pytest.mark.skip(reason=unresolvable)] if unresolvable else []),
             ],
         )
-        for name, cls, case, unresolvable in (
-            declared(DEVICE) if DEVICE is not None else []
-        )
+        for device in sorted(DEVICES)
+        for name, cls, case in declared(DEVICES[device]())
         if case.run
     ]
 
 
-@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("cls,declaration,case", _declared())
 def test_operator(
     cls: type[Operator], declaration: Testing, case: Case, record_property
 ):
-    op = cls(**case.kwargs).resolved(DEVICE)
+    dev = aie_utils.get_current_device()
+    try:
+        op = cls(**case.kwargs).resolved(dev)
+    except Unresolvable as e:
+        pytest.skip(str(e))
     extra = declaration.draw(op) if declaration.draw is not None else {}
     tolerance = op.tolerance()
     if tolerance is None:
