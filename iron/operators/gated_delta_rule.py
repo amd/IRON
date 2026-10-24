@@ -85,12 +85,11 @@ class GatedDeltaRule(Operator):
                 id="reclaim",
                 extensive=True,
             ),
-            # Qwen3.5's prefill: one command outlasts the driver's watchdog.
             Case(
                 dict(rows=2048, k_heads=16, v_heads=32, key_dim=128, value_dim=128),
                 id="qwen35_prefill",
+                extensive=True,
                 lower=True,
-                run=False,
             ),
         ],
         draw=_trained,

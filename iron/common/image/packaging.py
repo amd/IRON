@@ -5,11 +5,9 @@
 
 ``full_elf`` is mlir-aie's choice of the same name. ``None`` derives it:
 NPU1 or ``check`` forces an xclbin, one dispatch per step; otherwise the
-image is one full ELF. A full ELF is one command unless a step's work grows
-with a carried value, or an operator's that ``ends_command`` (attention)
-with any per-call bound, either of which ends a command, or the words a
-command reads would pass its scratchpad's ``SCRATCHPAD_WORDS``
-(``Plan.commands``).
+image is one full ELF. A full ELF is one command unless a host step runs
+between its steps or the words a command reads would pass its scratchpad's
+``SCRATCHPAD_WORDS`` (``Plan.commands``).
 """
 
 from __future__ import annotations
@@ -145,22 +143,11 @@ def plan(
                 "written into the array by the sequence"
             )
         values.append((v.name, v.marker.value, lowering))
-    # A carried-bound step grows with every call, and a bounded step of an
-    # operator that ends_command with its bound; amdxdna stops a command past
-    # ~4 s. A version taking no tensor stays one: a loop drains its values
+    # A version taking no tensor stays one command: a loop drains its values
     # into one. A host step ends one, and a version with one does not loop.
     commands: list[int] = []
     hosted = {s.at for s in recording.host if 0 < s.at < len(recording.steps)}
     if full_elf and (recording.inputs or recording.host):
-        after_growing = {
-            i + 1
-            for i, step in enumerate(recording.steps[:-1])
-            if any(
-                b is not None
-                and (b.value.marker is Kind.CARRIED or step.op.ends_command)
-                for b in step.op.bound_extents.values()
-            )
-        }
         held: frozenset[str] = frozenset()
         split = []
         for i, words in enumerate(step_words or [frozenset()] * len(recording.steps)):
@@ -171,10 +158,10 @@ def plan(
                     f"scratchpad holds {SCRATCHPAD_WORDS}"
                 )
             full = len(held | words) > SCRATCHPAD_WORDS
-            if i in after_growing or i in hosted or full:
+            if i in hosted or full:
                 commands.append(i)
                 held = frozenset()
-                if full and i not in after_growing:
+                if full:
                     split.append(i)
             held |= words
         if split:

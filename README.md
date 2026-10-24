@@ -70,6 +70,19 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 
     > [Instructions from mlir-aie repository](https://github.com/Xilinx/mlir-aie?tab=readme-ov-file#build-and-install-the-xdna-driver-and-xrt)
 
+1. Give the driver a command timeout IRON's longest commands fit in. The
+   amdxdna driver ends a command after two periods of its `tdr_timeout_ms`
+   in which no command starts or finishes (2000 ms by default, so about
+   4 s), and the run reports `ERT_CMD_STATE_TIMEOUT`. On NPU2 a model's prompt chunk is one
+   command, and the deepest chunk at a model's native context takes up to
+   about 4 minutes (Ministral 3 at 262144 positions on Strix Halo; Llama 3.2
+   3B at 131072, about 100 s); on NPU1 a command is one operator. Set it,
+   then reload the driver or reboot:
+    ```bash
+    echo "options amdxdna tdr_timeout_ms=180000" | sudo tee /etc/modprobe.d/amdxdna-tdr.conf
+    sudo modprobe -r amdxdna && sudo modprobe amdxdna
+    ```
+
 1. Install the packages needed for IRON and MLIR-AIE:
 
     ```bash

@@ -342,8 +342,8 @@ def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, reco
     1``, at most ``rows`` rows of it, against the graph's own reference
     within ``bound`` of its KL, every position before it filled as
     ``check_deep_decode`` fills them: the chunk attends over the whole
-    context. Records its seconds, the longest a prompt chunk takes, which
-    the driver's watchdog bounds where a chunk is one dispatch.
+    context. Records its seconds, the longest a prompt chunk takes: on a
+    full ELF, the longest command a model's prompt makes.
     """
     tokens = prompt(model, chars, 1)
     model.logits(tokens)

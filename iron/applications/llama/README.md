@@ -67,9 +67,9 @@ top-k must be at most 64.
 - `--max-seq-len`: the longest context served, prompt and generated tokens
   together, up to the checkpoint's own `max_position_embeddings` (131072,
   4 GiB of caches, the default where it fits the host; a log line says
-  what was chosen); the compile is the same at any of them. How a long
-  prompt stays under the amdxdna driver's watchdog is in AGENTS.md's
-  [Not built, or limited](../../../AGENTS.md#not-built-or-limited)
+  what was chosen); the compile is the same at any of them. A prompt chunk
+  is one command, the deepest the longest, which the driver's timeout must
+  cover ([installation](../../../README.md#installation-linux))
 - `--temperature`, `--top-k`: the sampler's, at `Sampler`'s defaults
 - `--check-accuracy`: instead of sampling, compare each step's logits with
   the reference's and print the KL divergence and top-1 agreement

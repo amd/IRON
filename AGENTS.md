@@ -266,12 +266,10 @@ Check the code before relying on a line here; it is the authority.
 
 - An xclbin image is one dispatch per step; several steps in one xclbin
   dispatch are refused.
-- A prompt chunk's attention grows with the context. amdxdna's watchdog
-  stops a command about 4 s past the device's last progress, so a full ELF
-  ends a command after each step a carried value bounds (`Plan.commands`):
-  a prompt chunk is a command per attention layer, the longest 0.62 s at
-  32768 positions and 2.4 s at 131072 on npu2. A window of keys per command
-  would bound it.
+- A full ELF call is one command however long it runs: a prompt chunk's
+  attention grows with the context, and a tower's with its image. The
+  driver's command timeout must cover the longest, as the README's
+  [installation](README.md#installation-linux) sets it.
 - Tuning times each operator alone, not inside the image it runs in.
   Kernel cycle counts skip only GEMM settings, only on npu2, and never with
   a column-major B.

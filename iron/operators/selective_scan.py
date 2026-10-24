@@ -89,13 +89,11 @@ class SelectiveScan(Operator):
                 id="reclaim",
                 extensive=True,
             ),
-            # Granite 4.0-H Small's prefill: one command outlasts the
-            # driver's watchdog.
             Case(
                 dict(rows=2048, heads=128, head_dim=64, state_size=128),
                 id="granite_small_prefill",
+                extensive=True,
                 lower=True,
-                run=False,
             ),
         ],
         draw=_trained,

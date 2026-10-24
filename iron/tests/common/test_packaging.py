@@ -104,27 +104,6 @@ class Bounded(iron.Graph):
         return ReLU.step(ReLU.step(x[: n + 1]))
 
 
-def test_a_step_a_carried_value_bounds_ends_a_command(npu2):
-    recording = Grows().record(x=(4096,))
-    assert plan(npu2, recording).commands == (1,)
-    assert plan(npu2, recording).report("g").splitlines()[0] == (
-        "g: one full ELF in 2 commands"
-    )
-    # An xclbin is a dispatch per step already, and a scratchpad bound does
-    # not grow from call to call.
-    assert plan(npu2, recording, full_elf=False).commands == ()
-    assert plan(npu2, Bounded().record(x=(4096,))).commands == ()
-
-
-def test_a_prompt_chunk_is_a_command_per_attention_and_decode_one(npu2):
-    model = small()
-    decode, prompt = (model.record(**shapes) for shapes in model.shapes())
-    assert plan(npu2, decode).commands == ()
-    cuts = plan(npu2, prompt).commands
-    attention = [i + 1 for i, s in enumerate(prompt.steps) if isinstance(s.op, MHA)]
-    assert list(cuts) == attention and len(cuts) == model.config.num_hidden_layers
-
-
 class Encoding(iron.Graph):
     """Two layers' attention over a call's own rows, as a tower's are,
     bounded by a scratchpad value.
@@ -141,14 +120,21 @@ class Encoding(iron.Graph):
         return x
 
 
-def test_attention_a_scratchpad_value_bounds_ends_a_command(npu2):
-    """An encoder's attention grows with its rows, which a call bounds: a
-    command per attention step, so no command of a long call outlasts the
-    watchdog.
+def test_a_bounded_step_ends_no_command(npu2):
+    """However a call bounds a step, carried or scratchpad, attention or
+    not, a full ELF stays one command: a prompt chunk, a decode step and an
+    encoder call alike.
     """
-    recording = Encoding().record(x=(256, 2, 64))
-    attention = [i + 1 for i, s in enumerate(recording.steps) if isinstance(s.op, MHA)]
-    assert list(plan(npu2, recording).commands) == attention and len(attention) == 2
+    model = small()
+    for recording in (
+        Grows().record(x=(4096,)),
+        Bounded().record(x=(4096,)),
+        Encoding().record(x=(256, 2, 64)),
+        *(model.record(**shapes) for shapes in model.shapes()),
+    ):
+        p = plan(npu2, recording)
+        assert p.full_elf and p.commands == (), recording.name
+        assert p.report("g").splitlines()[0] == "g: one full ELF"
 
 
 class ManyWords(iron.Graph):
@@ -171,14 +157,21 @@ def test_a_command_reads_at_most_a_scratchpads_words(npu2):
 
 
 class Shrinks(iron.Graph):
-    def body(self, x, *, n: Carried[np.int32]):
-        return ReLU.step(ReLU.step(ReLU.step(x)[:n])), iron.carry(n=n + 1)
+    def __init__(self):
+        self.staged = iron.state((4096,))
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        iron.on_host(self.stage, ReLU.step(x), writes=(self.staged,))
+        return ReLU.step(self.staged[:n])
+
+    def stage(self, y, staged):
+        staged[:] = y
 
 
 def test_a_call_skips_the_commands_its_values_leave_without_work(npu2):
     recording = Shrinks().record(x=(4096,))
     p = plan(npu2, recording)
-    # The bounded step ends a command; the step after reads only its rows.
-    assert p.commands == (2,)
+    # The host step ends a command; the step after reads only n rows.
+    assert p.commands == (1,)
     assert p.idle(recording.steps, dict(n=0)) == {1}
     assert p.idle(recording.steps, dict(n=1)) == set()

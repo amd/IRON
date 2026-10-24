@@ -46,7 +46,6 @@ def _declared():
         )
         for device in sorted(DEVICES)
         for name, cls, case in declared(DEVICES[device]())
-        if case.run
     ]
 
 
