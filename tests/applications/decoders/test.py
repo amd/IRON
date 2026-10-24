@@ -15,11 +15,7 @@ shapes and random prompts, on a host without the tokenizer, and
 import aie.utils as aie_utils
 import pytest
 
-from iron.applications.gemma3 import Gemma3
 from iron.applications.gemma4 import Gemma4
-from iron.applications.qwen3_5 import Qwen35
-from iron.applications.qwen3_moe import Qwen3Moe
-from iron.applications.smollm3 import SmolLM3
 from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
@@ -29,22 +25,10 @@ from iron.lm.testing import (
     weights_dir,
 )
 
-INDEX = "model.safetensors.index.json"
-
 # Each decoder's class, checkpoint file, and the lengths of the long and the
 # short prompt it generates from.
 DECODERS = [
-    pytest.param((Gemma3, "gemma-3-1b-it/model.safetensors", (256, 13)), id="gemma3"),
     pytest.param((Gemma4, "gemma-4-e2b-it/model.safetensors", (256, 13)), id="gemma4"),
-    pytest.param((SmolLM3, f"smollm3-3b/{INDEX}", (1024, 13)), id="smollm3"),
-    pytest.param((Qwen35, f"qwen3.5-0.8b/{INDEX}", (1024, 13)), id="qwen3_5"),
-    # 30B, its experts paged from the checkpoint: nightly only, a toy one per PR
-    # (tests/applications/qwen3_moe).
-    pytest.param(
-        (Qwen3Moe, f"qwen3-30b-a3b/{INDEX}", (1024, 13)),
-        id="qwen3_moe",
-        marks=pytest.mark.extensive,
-    ),
 ]
 
 pytestmark = pytest.mark.supported_devices("npu2")
@@ -56,18 +40,13 @@ def decoder(request):
     runtime is released before the next decoder loads.
     """
     cls, weights, prompts = request.param
-    # CI holds every checkpoint here but the 30B's.
-    load = load_from_flags(
-        request, cls, weights_dir(weights), staged=cls is not Qwen3Moe
-    )
+    load = load_from_flags(request, cls, weights_dir(weights))
     yield load(), prompts
     aie_utils.cleanup_npu_runtime()
 
 
 # Qwen3's bounds: none of these decoders has been measured on the NPU.
 MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
-# bf16 transformers itself reaches p90 0.065 on Qwen3-MoE's steps: near-tie experts.
-MOE_KL = {**MAX_KL, "P90": 0.1}
 
 
 @pytest.mark.bench
@@ -86,14 +65,11 @@ def test_generation(decoder, prompt, num_tokens, record_property):
 @pytest.mark.extensive
 @pytest.mark.bench
 def test_accuracy(decoder, record_property):
-    bounds = MOE_KL if isinstance(decoder[0], Qwen3Moe) else MAX_KL
-    check_accuracy(decoder[0], bounds, record=record_property)
+    check_accuracy(decoder[0], MAX_KL, record=record_property)
 
 
 @pytest.mark.extensive
 def test_determinism(decoder, record_property):
-    if isinstance(decoder[0], Qwen3Moe):
-        pytest.skip("15 min at 30B; test_host_steps holds a host step's calls exact")
     check_determinism(decoder[0], record=record_property)
 
 
@@ -110,8 +86,7 @@ def test_accuracy_across_chunks(decoder, record_property):
     """
     model = decoder[0]
     assert len(model.prompt(LONG)) > model.config.prefill_chunk
-    bounds = MOE_KL if isinstance(model, Qwen3Moe) else MAX_KL
-    check_accuracy(model, bounds, 3, LONG, record=record_property)
+    check_accuracy(model, MAX_KL, 3, LONG, record=record_property)
 
 
 @pytest.mark.extensive

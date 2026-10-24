@@ -21,48 +21,35 @@ public API adds its entry under Unreleased.
 - `iron.on_host(fn, *reads, writes=())`: `fn` runs on the host between a
   graph's steps, on what the device left in `reads` (cut to their bounds),
   writing parts of states the next steps read. A full ELF ends a command
-  there; a graph with one has no device loop. Qwen3-MoE stages each call's
-  chosen experts this way, from the mapped checkpoint.
+  there; a graph with one has no device loop.
 - `iron.lm.ImageResize`, an image resized on the NPU to a uint8 image
   another resize reads; `ImagePatches` and the resample operators take
   torchvision's Lanczos-3 (`interpolation=`), the processor's
   normalization (`mean=`, `std=`) and a fixed output size (`out=`); a
-  resize's size need not be whole patches. SmolVLM processes any image up
-  to 3072x4096 on the NPU, through 2048 on its longest side, as its
-  processor does.
+  resize's size need not be whole patches.
 - Whisper's log-mel features on the NPU: `LogMel`'s `mel_scale` and `norm`
   (`filterbank`'s, transformers' `mel_filter_bank`), `power=2` and
   `decades`, Whisper's log10 held to that many decades below the clip's
   largest, as `(x + 4) / 4`; `Magnitude(power=2)`, the power spectrum;
   `RowMax`, the largest of each float32 row; `Log10Clamp`, that log10,
-  clamp and affine rounded once to bf16. `WhisperEncoder` takes a clip's
-  samples (`inputs(audio)`), not the extractor's features.
+  clamp and affine rounded once to bf16.
 - `GELU(approximate="none")`, the exact GELU on mlir-aie's `gelu_erf`:
-  `F.gelu`'s default and `hidden_act` `"gelu"`. `Whisper.load` builds
-  large-v3-turbo from its checkpoint (`Whisper.config`, `WhisperConfig`'s
-  `decoder_start_token_id` its `bos`).
-- Qwen3-Reranker (`Qwen3Reranker.score`: "yes" over "no" after its model
-  card's prompt) and Qwen3-Embedding (`Qwen3Embedding.embed`: the last
-  token's unit-length final hidden state, one compile up to a prompt
-  chunk), each with a toy golden; `NoCache(causal=True)` attends back
-  only, the embedder's.
-- `CausalConv1d`, a depth-wise causal convolution whose rows before a call
-  are a `Checkpoints` state, shared by Granite 4.0-H's Mamba, Qwen3.5's
-  Gated DeltaNet and LFM2's short conv; and `Weights`, named weights read
-  from a checkpoint and computed with elsewhere, from Granite 4.0-H.
+  `F.gelu`'s default and `hidden_act` `"gelu"`.
+- `NoCache(causal=True)` attends back only.
+- `Weights`, named weights read from a checkpoint and computed with
+  elsewhere.
 - `iron.lm` exports what the models import: `Rope`, `KVCache`, `Decoder`,
   `activation`, `subtree` and `residual_add` (blocks' `_add` before).
 - `DecoderLayer.mix(h, call)`, the block between `input_layernorm` and the
   first residual: attention over the layer's cache unless a layer mixes its
-  rows otherwise (LFM2's convolution, Granite 4.0-H's Mamba, Qwen3.5's
-  Gated DeltaNet).
+  rows otherwise.
 - `Config.json_prefix`, the object of `config.json` a config's fields are
-  read from: `"text_config."` for EmbeddingGemma 2's text encoder, SmolVLM's
-  text model and Gemma 4, `"audio_config."` and `"vision_config."` for
+  read from: `"text_config."` for EmbeddingGemma 2's text encoder and
+  Gemma 4, `"audio_config."` and `"vision_config."` for
   EmbeddingGemma 2's towers. A field's `metadata["json"]` path is under it,
   or from the file's root after a `/` (`Config.json_key`).
 - `DecoderLayer.norm`, the class its norms are built from: `RMSNorm`, or
-  Whisper's decoder's `LayerNorm`.
+  `LayerNorm`.
 - `CausalLM.rope_row(n, begin)`: the RoPE table row a prompt chunk reads
   first, which a caller writing the `rope_start` value itself passes.
 - `SandwichLayer` (Gemma's: each block's output normed again before its
@@ -89,34 +76,22 @@ public API adds its entry under Unreleased.
 - `SelectiveScan`: Mamba2's state space recurrence over a run of rows,
   from a state to the state after its last valid row, over mlir-aie's
   scalar `selective_scan`, a core per run of heads.
-- `GatedDeltaRule`: Gated DeltaNet's recurrence over a run of rows, as
-  Qwen3.5 calls it, over mlir-aie's scalar `gated_delta_rule`, a core per
-  run of value heads.
-- Application `granite_hybrid` (Granite 4.0-H, dense and MoE, on the host),
-  judged by device-free toy goldens.
-- Application `resnet` (ResNet-50), judged by a device-free toy golden.
+- `GatedDeltaRule`: Gated DeltaNet's recurrence over a run of rows, over
+  mlir-aie's scalar `gated_delta_rule`, a core per run of value heads.
 - `F.max_pool2d` takes a `stride` (torch's default, the window).
-- `BatchNorm2d`, torch's weights and running statistics, which `fold`
-  folds into the conv before it at load, for YOLOX and ResNet alike.
 - `Conv2d`'s gathered patches pad to whole 64-pixel GEMM tiles, and
   `flm.ProjectionGEMM` narrows its default n tile where K is short of its
-  k chunk, so ResNet-50's 7x7 to 28x28 maps and 64-channel 1x1 convs build.
-- Application `qwen3_5` (Qwen3.5's text decoder), judged by a device-free
-  toy golden.
+  k chunk, so 7x7 to 28x28 maps and 64-channel 1x1 convs build.
 - `RMSNorm.plus_one(module)`: every `RMSNorm` of a loaded module scaling by
-  `1 + weight`, as Gemma's and Qwen3.5's do.
+  `1 + weight`, as Gemma's do.
 - `Attention.output(o, x)`, the block's output from its heads: `o_proj`,
-  or a model's own, as Qwen3.5's gates it.
-- Applications `gemma3` (Gemma 3 1B) and `gemma4` (Gemma 4 E2B's text
-  decoder), each judged by a device-free toy golden, their sliding layers
-  within Hugging Face's window.
+  or a model's own.
+- Application `gemma4` (Gemma 4 E2B's text decoder), judged by a
+  device-free toy golden, its sliding layers within Hugging Face's window.
 - `MHA` takes a window of any width, and windows one query packed (a
   decode step), with Xilinx/mlir-aie#3940.
 - `Call.ids` and `Call.embeddings`, a call's token ids and the embedding
   rows its layers start from, which `CausalLM.layer` may read.
-- Applications `smollm3` (SmolLM3 3B), `ministral3` (Ministral 3's text
-  decoder, on drawn weights) and `qwen3_moe` (Qwen3-30B-A3B, on the host),
-  each judged by a device-free toy golden.
 - `iron.param(*shape, dtype=bfloat16)`, a weight a graph declares by shape,
   and `Graph.load_state_dict(tree, *, path="")`, which binds each one to the tensor at its
   dotted path, cast to its dtype, and raises once, naming every missing,
@@ -138,8 +113,7 @@ public API adds its entry under Unreleased.
   and a model's own attention, feed-forward and memory where given. Their
   projections are biased where the config's `attention_bias` and
   `mlp_bias` say, o where `o_bias` does (`DecoderLayer`'s by
-  `attention_bias`, as transformers' Llama; Qwen 2's `Qwen2Layer` keeps o
-  unbiased); a subclass with fused projections builds them in
+  `attention_bias`, as transformers' Llama); a subclass with fused projections builds them in
   `projections(c)`.
   `iron.lm` exports `Attention`, `GatedMLP` and `DecoderLayer`.
 - `KVCache(c, window=None)`: the cache attends within `window` positions
@@ -153,16 +127,10 @@ public API adds its entry under Unreleased.
 - `Attention(norms="v")` RMS-norms each head of v, unweighted; a layer
   that holds another layer's `KVCache` and sets `k_proj` and `v_proj` to
   None attends over that cache, projecting and writing no keys or values.
-- Encoder and cross-attention blocks as modules: `NoCache(window=None)`,
-  attention both ways over a call's own rows; `CrossCache(c, rows)`, an
-  encoder's keys and values, written once an encoding and attended over
-  their first `source` rows; `CrossAttention(c, i)`, which projects only q
-  a call and the keys and values once (`keys_values`); `MLP(c)`, the plain
-  `fc2(act(fc1(x)))`; `EncoderLayer(c, i)`, SigLIP's and Whisper's
-  pre-LayerNorm layer over a `NoCache`; and `CrossDecoderLayer(c, i)`,
-  `DecoderLayer` with `encoder_attn` over the `CrossCache` an
-  `EncoderDecoder` gives it. `CausalLM.decoder_class` is the `Decoder` it
-  builds (Whisper's adds its position table and a LayerNorm).
+- Encoder blocks as modules: `NoCache(window=None)`, attention both ways
+  over a call's own rows; `MLP(c)`, the plain `fc2(act(fc1(x)))`; and
+  `EncoderLayer(c, i)`, SigLIP's pre-LayerNorm layer over a `NoCache`.
+  `CausalLM.decoder_class` is the `Decoder` it builds.
 - `Linear.split(x, *rows)`, a fused projection's outputs: one `F.linear`
   per run of the weight's rows.
 - `iron.lm.testing.load_from_flags`, a model test's `Model.load` at the
@@ -181,7 +149,7 @@ public API adds its entry under Unreleased.
 - `iron.functional.causal_conv1d(x, taps, state)`, a depth-wise causal FIR
   over a prompt chunk or a decode step that stages and carries the rows
   before the call itself, its `state` an `F.ConvState(read, write, window,
-  tail)`; LFM2's short conv calls it.
+  tail)`.
 - Handle arithmetic in graph bodies: `x + y` and `x * y` record an
   elementwise step, or a rowwise one when a row meets a matrix, in either
   order.
@@ -274,12 +242,12 @@ public API adds its entry under Unreleased.
   checkpoint (`LlamaConfig.from_json`), MEDIUM below.
 - A prompt begins as the checkpoint's tokenizer begins a text
   (`TokenizerJson.prompt`): the special tokens its post-processor puts
-  before it, a BOS or none (Qwen's, Gemma 4's, SmolLM2's), as
+  before it, a BOS or none (Llama's, Gemma 4's), as
   transformers' `tokenizer(text)`. A chat template's `bos_token` is
   `tokenizer_config.json`'s.
 - `LayerNorm` takes `epsilon` (mlir-aie's `layer_norm_eps`), and
   `F.layer_norm` passes its `eps`: a model's LayerNorms run at its
-  checkpoint's epsilon (SmolVLM's vision tower at 1e-6).
+  checkpoint's epsilon.
 - A tower may take several calls for one raw input (`Tower.calls`, by
   default its `inputs`' one), each with its own per-call values:
   `Multimodal.tower_calls` and `calls` return each call's `(inputs,
@@ -367,11 +335,9 @@ public API adds its entry under Unreleased.
   and `Affine` (`aie.helpers.taplib`): `marker` replaces `kind`, and an
   expression prints as itself (`pos + 1`).
 - `iron.lm.testing.assert_close(..., share=LOGITS)`: a test's own bound,
-  a share of the largest logit (ResNet's toy holds 2%).
+  a share of the largest logit.
 - `Experts` leaves its hidden and width tile check to mlir-aie's
   `moe.experts`, which makes the same one.
-- `GraniteHybridConfig.rope_theta` defaults to transformers' 10000.0 under
-  `position_embedding_type="rope"`.
 - A checkpoint's tensors at indices (`nn.ParameterList`'s) read as a list
   of those tensors: a single zero is no longer taken for an empty module,
   and a longer tensor no longer raises.
@@ -389,10 +355,8 @@ public API adds its entry under Unreleased.
 - `Call` replaces `DecodeStep`: one call's values, keyword-only, built once in
   `CausalLM.body` and handed whole to `forward(x, call)`, `Rope.rows(call)`,
   `KVCache.attend(call, ...)` and `Checkpoints.at(call)`, in place of their
-  keyword lists. LongRoPE's stacked table and `table_start` moved out of
-  `Rope`, `CausalLM` and `DecoderConfig.long_angles` into Phi-4's
-  `Phi4Config.angles` and `LongRopeTable`, which Phi-4's
-  `CausalLM.rotary(config)` returns; `Rope.table_start(n)` is 0.
+  keyword lists. LongRoPE's stacked table and `table_start` left `Rope`,
+  `CausalLM` and `DecoderConfig.long_angles`; `Rope.table_start(n)` is 0.
 - A decoder's tuning calls are `iron.lm.tune.calls(model, position, token,
   context, points, sampler)`, on the flags `iron.lm.tune.arguments` adds;
   `contexts` moved with them. `CausalLM.tune_calls` and `tune_arguments`,
@@ -410,21 +374,10 @@ public API adds its entry under Unreleased.
   The RoPE table is `CausalLM.rotary_emb`, a `Rope`, whose `rows`
   replaces `CausalLM.angles` and whose `long_past` replaces
   `CausalLM.long_past`.
-- Phi-4 and LFM2 are built from modules: `Phi4Layer`, whose fused
-  `qkv_proj` and `gate_up_proj` are one `Linear` each, and `Lfm2Layer`,
-  whose conv layers hold a `ShortConv` that owns its `Checkpoints` state
-  and derives its taps when it loads, in place of `Phi4.sanitize`,
-  `Lfm2.sanitize` and `Lfm2Config.attention`. `CausalLM.recurrent` is
-  the list of `Checkpoints` the model's modules hold. `Model.renames`
+- `CausalLM.recurrent` is the list of `Checkpoints` the model's modules hold. `Model.renames`
   keys match a run of names anywhere in a path, and a model with a
   `layer_class` renames its whole tree before loading. `Attention` turns
   only the config's `rotary_dim` columns.
-- Qwen3 and Granite name their layers, `Qwen3Layer` and `GraniteLayer`,
-  in place of `Qwen3Config.attention` and `GraniteConfig.attention` and
-  `layer`; Granite's sets
-  `Attention.scaling` and `DecoderLayer.residual_multiplier`. Qwen3
-  reads `DecoderConfig`, and `Qwen3Config` is gone; Qwen 2 reads
-  `Qwen2Config`, whose `attention_bias` is set.
 - `DecoderConfig` reads `attention_bias`, `mlp_bias`, `sliding_window`
   and `use_sliding_window` from `config.json`. Each `DecoderLayer`'s cache
   attends within `sliding_window` (`DecoderConfig.window`). A config
@@ -434,16 +387,6 @@ public API adds its entry under Unreleased.
 - `Encoder` and `Tower` build their layers from `layer_class`
   (`EncoderLayer` by default), `Encoder(config, max_tokens)` and
   `Tower(config, max_tokens, soft_rows)`, a subclass loading them.
-  `EncoderDecoder(config, weights, encoder)` builds `CrossDecoderLayer`s,
-  each holding a `CrossCache`, in place of `cross_keys` and `cross_values`.
-  Whisper and SmolVLM (its text model and vision tower) are built from
-  modules.
-- `SmolVLMTextConfig` reads every field under `text_config`
-  (`Config.json_prefix`): a nested `rope_scaling` is refused at load, and
-  a nested window is honoured.
-- `YOLOXNano` is written in `iron.functional`'s CNN functions on modules
-  that load the checkpoint's tree, and returns each scale's predictions as
-  `(H, W, 144)`, not `(H, W * 144)`. SmolVLM's patch embed is `F.conv2d`.
 - `Model.generate` and `stream` stop after the first of `Model.eos` they
   draw, the eos token included, as Hugging Face's `generate` does:
   `max_tokens` is a cap. `Model.eos` is the checkpoint's `eos_token_id`, one
@@ -515,9 +458,6 @@ public API adds its entry under Unreleased.
   per-round medians in `samples_us`, in place of `measure.Timed`.
 - `RMSNorm` and `LayerNorm` no longer check `normalized_shape` or `eps` as
   they are built: `F.rms_norm` and `F.layer_norm` refuse them when recorded.
-- `HuggingFaceWhisper` and `HuggingFaceVLM` move to their applications'
-  `hugging_face.py`, as EmbeddingGemma 2's builders are, which only tests
-  and golden recording import.
 - Config fields use `config.json`'s names: `hidden_size`,
   `num_hidden_layers`, `num_attention_heads`, `num_key_value_heads`,
   `intermediate_size`, `rope_theta`, `num_experts_per_tok` and
@@ -571,16 +511,11 @@ public API adds its entry under Unreleased.
 - A config field is read from and written to `config.json` at its own name
   unless its `metadata["json"]` names another key; `iron.lm.not_json(default)`
   declares one `config.json` does not set.
-- idefics3 vision, Whisper and Phi-4 config fields take `config.json`'s
-  names: `hidden_size`, `patch_size`, `encoder_attention_heads`,
-  `encoder_ffn_dim`, `num_mel_bins`, `max_source_positions` and
-  `max_position_embeddings`.
 
 ### Removed
 
-- `Model.bos`, `Tokenizer`'s `bos` and each model's `bos`, with
-  `WhisperConfig.decoder_start_token_id`: a prompt's first tokens are its
-  tokenizer's. `iron.functional.LAYER_NORM_EPS`.
+- `Model.bos`, `Tokenizer`'s `bos` and each model's `bos`: a prompt's
+  first tokens are its tokenizer's. `iron.functional.LAYER_NORM_EPS`.
 - Llama's tiktoken tokenizer, `SPECIAL_TOKENS` and `tokenizer()`: Llama
   reads its checkpoint's `tokenizer.json` like every model, and tiktoken is
   no longer a dependency.

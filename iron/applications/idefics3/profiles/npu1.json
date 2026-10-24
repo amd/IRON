@@ -1,5 +1,0 @@
-{"entries": [
-  {"operator": "flm.ProjectionGEMM", "K": 576, "tile_n": 32, "k_tile": 192},
-  {"operator": "flm.ProjectionGEMM", "N": 576, "tile_n": 32, "k_tile": 192},
-  {"operator": "ElementwiseAdd", "size": 576, "tile_size": 192}
-]}

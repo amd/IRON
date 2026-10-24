@@ -21,7 +21,6 @@ from aie.iron.kernels.sample import ROW_WORDS
 from ml_dtypes import bfloat16
 
 import iron
-import iron.functional as F
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.compiled import walk
@@ -57,8 +56,6 @@ class Call:
     position: Any
     # The row a prompt chunk's first position reads of a stacked RoPE table.
     rope_start: Any = None
-    # The encoder's rows a cross attention reads (``EncoderDecoder``).
-    source: Any = None
     # By each Rope a layer holds, its rows of the call (Rope.rows).
     ropes: dict = dataclasses.field(default_factory=dict)
     # The token ids the call embeds, a prompt chunk's rows or the decode
@@ -118,38 +115,6 @@ class Checkpoints:
     def slot(self, position: int) -> int:
         """The slot holding the state after the first ``position`` positions."""
         return 0 if position == 0 else (position - 1) // self.chunk + 1
-
-
-class CausalConv1d(iron.Graph):
-    """A depth-wise causal convolution of ``kernel`` taps over a call's
-    rows, each of ``channels`` its own taps (``weight``, torch's
-    ``(channels, 1, kernel)``), plus ``bias`` where it holds one. The
-    ``kernel - 1`` rows before a call are its ``state``, a slot per
-    prompt-chunk boundary; ``CausalLM`` gives every one of a model the
-    scratch ``F.causal_conv1d`` stages a call in (``window``, ``tail``).
-    """
-
-    window: State
-    tail: State
-
-    def __init__(self, c, channels: int, kernel: int, bias: bool = False):
-        self.weight = iron.param(channels, 1, kernel)
-        self.bias = iron.param(channels) if bias else None
-        self.state = Checkpoints.of(
-            (kernel - 1, channels), c.max_seq_len, c.prefill_chunk
-        )
-
-    def load_state_dict(self, tree, *, path: str = "") -> None:
-        super().load_state_dict(tree, path=path)
-        # A row per tap, each the row RowwiseMul takes.
-        C, _, K = self.weight.shape
-        self.taps = iron.param(np.ascontiguousarray(self.weight.reshape(C, K).T))
-
-    def body(self, x, call):
-        read, write = self.state.at(call)
-        state = F.ConvState(read, write, self.window, self.tail)
-        y = F.causal_conv1d(x, self.taps, state)
-        return y if self.bias is None else y + self.bias
 
 
 class Decoder(iron.Graph):
@@ -212,14 +177,6 @@ class CausalLM(Model):
             head = np.asarray(self.lm_head.weight)
             self.lm_head.weight = iron.param(np.pad(head, ((0, 1), (0, 0))))
         self.layers = self.model.layers
-        # The scratch every causal conv of a shape stages its calls in.
-        scratch = {}
-        for conv in {id(p): p for _, _, p, _ in walk(self)}.values():
-            if isinstance(conv, CausalConv1d):
-                (K, C), chunk = conv.taps.shape, config.prefill_chunk
-                if (K, C) not in scratch:
-                    scratch[K, C] = iron.state((2, chunk, C)), iron.state((K - 1, C))
-                conv.window, conv.tail = scratch[K, C]
 
     @property
     def recurrent(self) -> list[Checkpoints | KVCache]:

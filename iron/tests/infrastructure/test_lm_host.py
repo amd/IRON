@@ -251,7 +251,7 @@ def test_checkpoint_rejects_an_unsupported_dtype(tmp_path):
         Checkpoint(path)
 
 
-# Tier 1 -- a sharded checkpoint (Qwen3's own: two files and an index)
+# Tier 1 -- a sharded checkpoint (two files and an index)
 # ##########################################################################
 
 
@@ -383,26 +383,6 @@ def test_tree_names_a_layer_past_the_last(toy_path):
     message = f"model.layers.2 is not in {toy_path} (it has 2)"
     with pytest.raises(IndexError, match=re.escape(message)):
         layers[2]
-
-
-YOLOX = weights_dir("yolox-nano") / "yolox_nano.pth"
-
-
-def test_a_pytorch_checkpoint_reads_as_views_by_its_dotted_names():
-    """The real YOLOX-Nano release, a PyTorch zip, without torch: each
-    tensor a read-only view of its storage in the mapped file.
-    """
-    require(YOLOX)
-    checkpoint = Checkpoint(YOLOX)
-    stem = checkpoint.tensors["model.backbone.backbone.stem.conv.conv.weight"]
-    assert (stem.shape, stem.dtype) == ((16, 12, 3, 3), np.float32)
-    assert stem.flags.c_contiguous and not stem.flags.writeable
-    var = checkpoint.tree().model.backbone.backbone.stem.conv.bn.running_var
-    assert var.shape == (16,) and (var > 0).all()
-    count = checkpoint.tensors[
-        "model.backbone.backbone.stem.conv.bn.num_batches_tracked"
-    ]
-    assert (count.shape, count.dtype) == ((), np.int64)
 
 
 def _unicode(text: str) -> bytes:
@@ -703,29 +683,29 @@ def test_real_checkpoint_is_llama_3_2_1b():
     assert sorted(vars(Checkpoint(real_checkpoint).tree())) == ["model"]
 
 
-# Tier 2 -- Qwen3's real, sharded checkpoint (no NPU), gated on its presence
+# Tier 2 -- Llama 3.2 3B's real, sharded checkpoint (no NPU), gated on its presence
 # ##########################################################################
 
-real_qwen3_index = weights_dir("qwen3-1.7b") / "model.safetensors.index.json"
-requires_qwen3_checkpoint = pytest.mark.skipif(
-    not real_qwen3_index.exists(),
-    reason=f"qwen3-1.7b checkpoint not found at {real_qwen3_index}",
+real_index = weights_dir("llama3.2-3b") / "model.safetensors.index.json"
+requires_sharded_checkpoint = pytest.mark.skipif(
+    not real_index.exists(),
+    reason=f"llama3.2-3b checkpoint not found at {real_index}",
 )
 
 
-@requires_qwen3_checkpoint
-def test_real_qwen3_checkpoint_every_tensor_bitwise():
+@requires_sharded_checkpoint
+def test_real_sharded_checkpoint_every_tensor_bitwise():
     """Every tensor the index names, read from whichever of its two shard
     files holds it, bitwise the shard's own.
     """
-    tensors = Checkpoint(real_qwen3_index).tensors
-    index = json.loads(real_qwen3_index.read_text())
+    tensors = Checkpoint(real_index).tensors
+    index = json.loads(real_index.read_text())
     by_shard: dict[str, list[str]] = {}
     for name, filename in index["weight_map"].items():
         by_shard.setdefault(filename, []).append(name)
     assert set(tensors) == set(index["weight_map"])
     for filename, names in by_shard.items():
-        expected = load_file(real_qwen3_index.parent / filename)
+        expected = load_file(real_index.parent / filename)
         for name in names:
             assert bitwise_equal(tensors[name], expected[name]), name
 

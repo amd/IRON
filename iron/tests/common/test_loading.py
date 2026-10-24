@@ -133,11 +133,7 @@ def test_from_checkpoint_opens_the_tokenizer_beside_it(tmp_path):
 # (and any after it), read off each checkpoint's AutoTokenizer.
 LEADS = [
     ("llama3.2-1b", [128000], []),
-    ("gemma-3-1b-it", [2], []),
-    ("qwen2.5-1.5b-instruct", [], []),
     ("gemma-4-e2b-it", [], []),
-    ("smollm2-1.7b-instruct", [], []),
-    ("whisper-large-v3-turbo", [50258, 50364], [50257]),
 ]
 
 

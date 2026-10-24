@@ -118,29 +118,11 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | Model | Application | Checkpoint |
 |---|---|---|
 | Llama 3.2 1B, 3B | [llama](./iron/applications/llama/) | `llama3.2-1b`, `llama3.2-3b` |
-| Qwen3 1.7B, 0.6B | [qwen3](./iron/applications/qwen3/) | `qwen3-1.7b`, `qwen3-0.6b` |
-| Qwen3-Reranker 0.6B (`score`) | [qwen3_reranker](./iron/applications/qwen3_reranker/) | `qwen3-reranker-0.6b` |
-| Qwen3-Embedding 0.6B (`embed`) | [qwen3_embedding](./iron/applications/qwen3_embedding/) | `qwen3-embedding-0.6b` |
-| Qwen 2.5 1.5B Instruct | [qwen2](./iron/applications/qwen2/) | `qwen2.5-1.5b-instruct` |
-| SmolLM2 1.7B Instruct | [smollm2](./iron/applications/smollm2/) | `smollm2-1.7b-instruct` |
-| Phi-4-mini-instruct | [phi3](./iron/applications/phi3/) | `phi-4-mini-instruct` |
-| Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` |
-| SmolLM3 3B | [smollm3](./iron/applications/smollm3/) | `smollm3-3b` |
-| Gemma 3 1B | [gemma3](./iron/applications/gemma3/) | `gemma-3-1b-it` |
 | Gemma 4 E2B text decoder | [gemma4](./iron/applications/gemma4/) | `gemma-4-e2b-it` |
-| Qwen3.5 0.8B text decoder | [qwen3_5](./iron/applications/qwen3_5/) | `qwen3.5-0.8b` |
-| Qwen3-30B-A3B (reference only) | [qwen3_moe](./iron/applications/qwen3_moe/) | `qwen3-30b-a3b` |
-| Granite 4.0-H (reference only) | [granite_hybrid](./iron/applications/granite_hybrid/) | none yet |
-| Ministral 3 text decoder (drawn weights) | [ministral3](./iron/applications/ministral3/) | none yet |
-| LFM2-1.2B | [lfm2](./iron/applications/lfm2/) | `lfm2-1.2b` |
-| SmolVLM-256M-Instruct | [idefics3](./iron/applications/idefics3/) | `smolvlm-256m-instruct` |
 | EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |
-| ResNet-50 | [resnet](./iron/applications/resnet/) | `resnet-50` |
-| YOLOX-Nano | [yolox](./iron/applications/yolox/) | `yolox-nano` |
-| Whisper large-v3-turbo | [whisper](./iron/applications/whisper/) | `whisper-large-v3-turbo` |
 | Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) |
 
-What the text decoders (Llama to LFM2 above) share:
+What the text decoders (Llama and Gemma 4 above) share:
 
 - **Setup**: `requirements_examples.txt`, as [installing](#installation-linux) says. XRT maps every device buffer locked, and a model's weights and caches are banks of at most 3.5 GiB (`iron.common.image.allocator.BANK`), so `ulimit -l` must cover one bank.
 

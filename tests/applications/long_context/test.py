@@ -21,21 +21,9 @@ import aie.utils as aie_utils
 import pytest
 
 import iron.applications
-from iron.applications.gemma3 import Gemma3
 from iron.applications.gemma4 import Gemma4
-from iron.applications.granite import Granite
-from iron.applications.idefics3 import SmolVLMText
-from iron.applications.lfm2 import Lfm2
 from iron.applications.llama import Llama
-from iron.applications.ministral3 import Ministral3
-from iron.applications.phi3 import Phi4
-from iron.applications.qwen2 import Qwen2
-from iron.applications.qwen3 import Qwen3
-from iron.applications.qwen3_5 import Qwen35
-from iron.applications.qwen3_reranker import Qwen3Reranker
-from iron.applications.smollm2 import SmolLM2
-from iron.applications.smollm3 import SmolLM3
-from iron.lm import CausalLM, Checkpoint, EncoderDecoder
+from iron.lm import CausalLM, Checkpoint
 from iron.lm.testing import (
     check_deep_decode,
     check_deep_prompt,
@@ -48,9 +36,6 @@ from iron.lm.testing import (
 # KL(graph reference || NPU) of one step deep in the caches. Llama 3.2 1B's
 # decode measured 0.002 to 0.015 just past the prompt, 0.009 to 0.033 at
 # 16k and 0.030 to 0.038 at 32k: it grows with the keys the step sums over.
-# Qwen3 1.7B's decode measured 0.0039 at 32767; Granite's 0.0033 at 4095
-# and its prompt chunk 2.3e-6; LFM2's decode 0.0214 at 32767 and its prompt
-# chunk 1.4e-6. None is yet measured at a native context past 32768.
 DEEP_KL = 0.1
 
 
@@ -77,8 +62,6 @@ class Application:
 
 INDEX = "model.safetensors.index.json"
 
-# Qwen 2.5's and Phi-4's full ELFs did not link within an hour (their own
-# tests run each step its own xclbin).
 APPLICATIONS = {
     "llama_3.2_1b": Application(
         Llama,
@@ -88,84 +71,26 @@ APPLICATIONS = {
         each_step=("npu1", "npu2"),
     ),
     "llama_3.2_3b": Application(Llama, "llama3.2-3b", INDEX, "tokenizer.json"),
-    "smollm2_1.7b": Application(
-        SmolLM2,
-        "smollm2-1.7b-instruct",
-        "model.safetensors",
-        "tokenizer.json",
-        each_step=("npu1", "npu2"),
-        # Unmeasured deep in the caches: 24 layers, its shallow bounds above
-        # Llama's.
-        deep_kl=0.2,
-    ),
-    "qwen2.5_1.5b": Application(
-        Qwen2,
-        "qwen2.5-1.5b-instruct",
-        "model.safetensors",
-        "tokenizer.json",
-        full_elf=False,
-        each_step=("npu2",),
-    ),
-    "qwen3_1.7b": Application(
-        Qwen3, "qwen3-1.7b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
-    ),
-    "qwen3_0.6b": Application(
-        Qwen3, "qwen3-0.6b", "model.safetensors", "tokenizer.json"
-    ),
-    "granite_4.2_3b": Application(Granite, "granite-4.2-3b", INDEX, "tokenizer.json"),
-    "phi4_mini": Application(
-        Phi4,
-        "phi-4-mini-instruct",
-        INDEX,
-        "tokenizer.json",
-        full_elf=False,
-        each_step=("npu2",),
-    ),
-    "lfm2_1.2b": Application(Lfm2, "lfm2-1.2b", "model.safetensors", "tokenizer.json"),
-    "ministral_3_3b": Application(
-        Ministral3, "ministral-3-3b-base-2512", INDEX, "tokenizer.json"
-    ),
-    "smolvlm_256m": Application(
-        SmolVLMText, "smolvlm-256m-instruct", "model.safetensors", "tokenizer.json"
-    ),
-    "smollm3_3b": Application(SmolLM3, "smollm3-3b", INDEX, "tokenizer.json"),
-    # Unmeasured: DEEP_KL until each one's first run.
-    "gemma3_1b": Application(
-        Gemma3, "gemma-3-1b-it", "model.safetensors", "tokenizer.json"
-    ),
+    # Unmeasured: DEEP_KL until its first run.
     "gemma4_e2b": Application(
         Gemma4, "gemma-4-e2b-it", "model.safetensors", "tokenizer.json"
     ),
-    "qwen3.5_0.8b": Application(Qwen35, "qwen3.5-0.8b", INDEX, "tokenizer.json"),
-    "qwen3_reranker_0.6b": Application(
-        Qwen3Reranker,
-        "qwen3-reranker-0.6b",
-        "model.safetensors",
-        "tokenizer.json",
-    ),
-}
-
-#: Decoder applications held to no context yet, and why.
-UNHELD = {
-    "granite_hybrid": "Experts streams every expert a row: too slow to generate",
-    "qwen3_moe": "Experts streams every expert a row: too slow to generate",
 }
 
 
 def test_every_decoder_application_is_held_to_its_context():
     """Each application whose package exports a ``CausalLM`` has a
-    checkpoint here; an encoder-decoder's context follows the clip it
-    encodes, not a text prompt's.
+    checkpoint here.
     """
     found = set()
     for package in pkgutil.iter_modules(iron.applications.__path__):
         module = importlib.import_module(f"iron.applications.{package.name}")
         for name in getattr(module, "__all__", ()):
             model = getattr(module, name)
-            if issubclass(model, CausalLM) and not issubclass(model, EncoderDecoder):
+            if issubclass(model, CausalLM):
                 found.add(package.name)
     held = {a.model.__module__.split(".")[2] for a in APPLICATIONS.values()}
-    assert found == held | UNHELD.keys()
+    assert found == held
 
 
 @pytest.mark.parametrize("version", ["decode", "prompt"])

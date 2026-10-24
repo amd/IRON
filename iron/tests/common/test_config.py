@@ -18,14 +18,7 @@ from iron import Precision
 from iron.applications.embedding_gemma2.model import Config as EmbeddingGemmaConfig
 from iron.applications.gemma4.audio import AudioConfig
 from iron.applications.gemma4.vision import VisionConfig
-from iron.applications.granite.model import GraniteConfig
-from iron.applications.idefics3.model import SmolVLMTextConfig
-from iron.applications.idefics3.vision import model as smolvlm_vision
-from iron.applications.lfm2.model import Lfm2Config
 from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig
-from iron.applications.phi3.model import LongRope, Phi4Config
-from iron.applications.qwen3.model import Qwen3Config
-from iron.applications.whisper.model import WhisperConfig
 from iron.lm import Config, DecoderConfig
 from iron.tests.support.llama_model import REAL_1B
 from iron.lm.testing import require, weights_dir
@@ -60,14 +53,7 @@ def test_from_checkpoint_takes_either_the_file_or_its_directory():
 @pytest.mark.parametrize(
     "cls",
     [
-        Qwen3Config,
         LlamaConfig,
-        GraniteConfig,
-        Lfm2Config,
-        Phi4Config,
-        WhisperConfig,
-        SmolVLMTextConfig,
-        smolvlm_vision.VisionConfig,
         EmbeddingGemmaConfig,
         AudioConfig,
         VisionConfig,
@@ -113,7 +99,7 @@ def test_a_path_is_under_the_prefix_unless_it_starts_at_the_root():
 @pytest.mark.parametrize(
     "cls,scaling",
     [
-        (Qwen3Config, {"rope_type": "yarn", "factor": 4.0}),
+        (LlamaConfig, {"rope_type": "yarn", "factor": 4.0}),
         (LlamaConfig, {"rope_type": "linear", "factor": 2.0}),
     ],
 )
@@ -154,10 +140,10 @@ def test_head_dim_falls_back_and_max_seq_len_is_the_native_context(tmp_path):
     )
     path = tmp_path / "config.json"
     path.write_text(json.dumps(fields))
-    cfg = Qwen3Config.from_checkpoint(path)
+    cfg = LlamaConfig.from_checkpoint(path)
     assert (cfg.head_dim, cfg.max_seq_len) == (1536 // 12, 40960)
     path.write_text(json.dumps(fields | {"head_dim": 64}))
-    assert Qwen3Config.from_checkpoint(path).head_dim == 64
+    assert LlamaConfig.from_checkpoint(path).head_dim == 64
 
 
 def test_llama_projects_at_high_from_3b_s_width_unless_given():
@@ -174,7 +160,7 @@ def test_a_config_whose_application_states_no_precision_is_refused():
     data = REAL_1B.to_json() | {"rope_scaling": None}
     with pytest.raises(ValueError, match="DecoderConfig states no precision"):
         DecoderConfig.from_json(data)
-    assert Qwen3Config.from_json(data).precision is Precision.MEDIUM
+    assert LlamaConfig.from_json(data).precision is Precision.MEDIUM
 
 
 def test_from_checkpoint_raises_with_no_config_json_beside_the_path(tmp_path):
@@ -212,24 +198,10 @@ def test_decoder_config_adds_the_decoder_fields_to_configs_eps_and_precision():
     assert {"vocab_size", "max_seq_len", "rope_scaling"} <= decoder_fields - base_fields
 
 
-PHI4 = Phi4Config(
-    vocab_size=32,
-    hidden_size=64,
-    num_hidden_layers=1,
-    num_attention_heads=2,
-    num_key_value_heads=2,
-    intermediate_size=128,
-    rope_theta=10000.0,
-    max_seq_len=512,
-    original_max_position_embeddings=128,
-    longrope=LongRope(short_factor=(1.0,) * 16, long_factor=(2.0,) * 16),
-)
-
-
 @pytest.mark.parametrize(
     "config",
-    [REAL_1B, PHI4, EmbeddingGemmaConfig()],
-    ids=["llama", "phi4", "embedding_gemma2"],
+    [REAL_1B, EmbeddingGemmaConfig()],
+    ids=["llama", "embedding_gemma2"],
 )
 def test_to_json_is_from_checkpoint_s_inverse(tmp_path, config):
     """A converted field (a ``rope_scaling``) is written as the checkpoint

@@ -32,7 +32,7 @@ We actively welcome community involvement in this project! If you have a questio
 
 A model is a package under `iron/applications/<name>/` over `iron.lm`. Most
 Hugging Face decoders need a config and a model class; see
-`iron/applications/qwen3/model.py`, which is the whole of Qwen3.
+`iron/applications/llama/model.py`, which is the whole of Llama.
 
 1. **Config.** Subclass `DecoderConfig`. Its fields are read from the
    checkpoint's `config.json` by name, or at `metadata={"json": ...}`;
@@ -40,7 +40,7 @@ Hugging Face decoders need a config and a model class; see
    `precision`, its projections' (`Config.precision`): it has no default,
    and the README says which the model's accuracy test chose and why.
 
-2. **Model.** Subclass `CausalLM` (or `Encoder`, `Tower`, `EncoderDecoder`),
+2. **Model.** Subclass `CausalLM` (or `Encoder`, `Tower`),
    naming `config` and pointing `profile` at a `profiles/` directory. A
    prompt begins as the checkpoint's `tokenizer.json` begins a text. A decoder's
    layer is `layer_class(config, i)`, Llama's `DecoderLayer` by default
@@ -59,12 +59,12 @@ Hugging Face decoders need a config and a model class; see
    tensor that is missing, extra or the wrong shape. If the checkpoint
    names a module differently, map its names in `renames`. Compute a
    tensor derived from loaded ones in the module's `load_state_dict`,
-   after `super().load_state_dict()` (`iron/applications/lfm2/model.py`).
+   after `super().load_state_dict()` (`iron/applications/gemma4/model.py`).
    A fused projection is one `Linear`, and `Linear.split` projects through
-   each part's rows in turn (`iron/applications/phi3/model.py`). Write the model
+   each part's rows in turn (`iron/applications/gemma4/audio.py`). Write the model
    body with `iron.functional as F` and handle arithmetic (`x + y`), the
    way you would with `torch.nn.functional`. End the file with
-   `lm.main(Qwen3)` on your class, its command line, and export it from the
+   `lm.main(Llama)` on your class, its command line, and export it from the
    package's `__init__.py` with `__getattr__ = exports(__name__, __all__)`
    (`iron.lm.cli`).
 
@@ -74,7 +74,7 @@ Hugging Face decoders need a config and a model class; see
    (`Checkpoint.tree("random", seed)`) and compares the model run on the
    host (`OnHost`) with transformers' logits on the same weights, recorded
    once into `goldens/` beside the test by the `golden` fixture. See
-   `tests/applications/qwen3/reference/test.py`. Record with
+   `tests/applications/llama/reference/test.py`. Record with
    `pytest <test> --record-goldens -p no:xdist` (transformers and torch
    are needed only then) and commit the `.npz`. A decoder that needs only
    the speed, accuracy and determinism checks is a row of `DECODERS` in
@@ -88,13 +88,13 @@ Hugging Face decoders need a config and a model class; see
    only the device test measures that error.
 
 4. **Register.** Add the decoder to `APPLICATIONS` in
-   `tests/applications/long_context/test.py`, or to `UNHELD` with the
-   reason; a test fails unless it is in one. Write its `profiles/` with
+   `tests/applications/long_context/test.py`; a test fails unless it is
+   there. Write its `profiles/` with
    `iron.lm.tune` ("Tune" in the [README](README.md#models)), give the
    package a README, and add a row to the README's model table.
 
 A Llama-shaped decoder (Mistral v0.3, Qwen, SmolLM) needs only these
-steps. Gemma 3 (`iron/applications/gemma3/model.py`) shows a
+steps. Gemma 4 (`iron/applications/gemma4/model.py`) shows a
 sandwich-normed, windowed layer with per-layer RoPE. Post-norm layers
 (OLMo 2) need new code in `iron/lm/`.
 

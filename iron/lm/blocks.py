@@ -678,29 +678,6 @@ class LayerNorm(iron.Graph):
         return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
 
 
-class BatchNorm2d(iron.Graph):
-    """``torch.nn.BatchNorm2d``'s affine weights and running statistics,
-    float32, which ``fold`` folds into the conv before it.
-    """
-
-    def __init__(self, num_features: int, eps: float = 1e-5):
-        self.weight = iron.param(num_features, dtype=np.float32)
-        self.bias = iron.param(num_features, dtype=np.float32)
-        self.running_mean = iron.param(num_features, dtype=np.float32)
-        self.running_var = iron.param(num_features, dtype=np.float32)
-        self.num_batches_tracked = iron.param(dtype=np.int64)
-        self.eps = eps
-
-    def fold(self, weight) -> tuple[np.ndarray, np.ndarray]:
-        """The bias-free conv ``weight`` with this norm folded in, and the
-        bias it gives, float32 whatever the conv's dtype, so a bf16 weight
-        rounds once, after the fold.
-        """
-        scale = self.weight / np.sqrt(self.running_var + np.float32(self.eps))
-        weight = np.asarray(weight, np.float32) * scale[:, None, None, None]
-        return weight, (self.bias - self.running_mean * scale).astype(np.float32)
-
-
 def activation(name: str):
     """The function ``hidden_act`` ``name`` is.
 
@@ -914,40 +891,6 @@ class NoCache(iron.Graph):
         return o.reshape(n, H * D)
 
 
-class CrossCache(iron.Graph):
-    """A layer's keys and values of an encoder's output, each ``(rows,
-    num_key_value_heads, head_dim)``, written once an encoding (``write``)
-    and attended over by every call after, their first ``call.source``
-    rows.
-    """
-
-    def __init__(self, c, rows: int):
-        shape = (rows, c.num_key_value_heads, c.head_dim)
-        self.keys, self.values = iron.state(shape), iron.state(shape)
-
-    def write(self, k, v):
-        """``k`` and ``v`` ``(rows, groups, head_dim)`` from the first row."""
-        self.keys[: k.shape[0]] = k
-        self.values[: v.shape[0]] = v
-
-    def attend(self, call, q, k, v, scale: float | None = None):
-        """``q`` ``(rows, heads, head_dim)`` over the first ``call.source``
-        rows, both ways; ``k`` and ``v`` are None (``CrossAttention``).
-        """
-        n, H, D = q.shape
-        span = np.s_[: call.source]
-        o = MHA.step(
-            q,
-            self.keys[span],
-            self.values[span],
-            heads_interleaved=True,
-            kv_interleaved=True,
-            causal=False,
-            scale=scale,
-        )
-        return o.reshape(n, H * D)
-
-
 class Attention(iron.Graph):
     """Self-attention for layer ``i`` of a decoder with config ``c``.
 
@@ -1050,27 +993,6 @@ class Attention(iron.Graph):
         head_dim)`` of the input ``x``.
         """
         return self.o_proj(o)
-
-
-class CrossAttention(Attention):
-    """``Attention`` over a ``CrossCache``: a call projects q alone, the
-    keys and values an encoder's output's, projected once (``keys_values``).
-    """
-
-    def project(self, x, **gemv) -> list:
-        q = self.q_proj
-        return [
-            F.linear(x, q.weight, q.bias, precision=q.precision, **gemv),
-            None,
-            None,
-        ]
-
-    def keys_values(self, memory) -> list:
-        """The keys and values of ``memory`` ``(rows, width)``, each
-        ``(rows, groups, head_dim)``.
-        """
-        n, G, D = memory.shape[0], self.groups, self.head_dim
-        return [p(memory).reshape(n, G, D) for p in (self.k_proj, self.v_proj)]
 
 
 class MLP(iron.Graph):
@@ -1184,32 +1106,6 @@ class EncoderLayer(DecoderLayer):
         self.cache = NoCache()
         self.rope = None
         self.residual_multiplier = 1.0
-
-
-class CrossDecoderLayer(DecoderLayer):
-    """``DecoderLayer`` with a third block between its two:
-    ``encoder_attn`` after ``encoder_attn_layer_norm``, attending over
-    ``cross``, the ``CrossCache`` an ``EncoderDecoder`` gives it;
-    ``encoder_attn`` a model's own where given, as ``DecoderLayer``'s
-    modules.
-    """
-
-    def __init__(self, c, i: int, self_attn=None, mlp=None, encoder_attn=None):
-        super().__init__(c, i, self_attn, mlp)
-        self.encoder_attn_layer_norm = self.norm(c.hidden_size, c.eps)
-        self.encoder_attn = (
-            CrossAttention(c, i) if encoder_attn is None else encoder_attn
-        )
-        self.cross: CrossCache | None = None
-
-    def body(self, x: Handle, call) -> Handle:
-        x = residual_add(
-            x, self.mix(self.input_layernorm(x), call), self.residual_multiplier
-        )
-        h = self.encoder_attn(self.encoder_attn_layer_norm(x), self.cross, call)
-        x = residual_add(x, h, self.residual_multiplier)
-        h = self.mlp(self.post_attention_layernorm(x))
-        return residual_add(x, h, self.residual_multiplier)
 
 
 class SandwichLayer(DecoderLayer):
