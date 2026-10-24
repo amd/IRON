@@ -14,6 +14,7 @@ a host without the checkpoint, and ``--max-seq-len`` at another context.
 import pytest
 
 from iron.applications.granite_hybrid import GraniteHybrid
+from iron.lm.generation import Sampler
 from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
@@ -67,6 +68,26 @@ MAX_KL = {"Mean": 0.006, "P90": 0.012, "Max": 0.015}
 )
 def test_granite_4_0_h_1b(model, prompt_len, num_tokens, record_property):
     check_generation(model, prompt_len, num_tokens, record=record_property)
+
+
+@pytest.mark.extensive
+def test_granite_4_0_h_1b_rate_counts_the_draws_past_eos(model, record_property):
+    """After 13 characters the model draws eos 8th. generate's device loop
+    draws all 40 tokens before reading them, so its rate counts all 40;
+    stream reads each as it is drawn and counts those through eos. The two
+    rates agree.
+    """
+    tokens = model.prompt(13)
+    model.forget(0)
+    drawn = model.generate(tokens, 40, Sampler())
+    assert len(drawn) < 40 and drawn[-1] in model.eos
+    generated = model.stats.tokens_per_s
+    model.forget(0)
+    assert list(model.stream(tokens, 40, Sampler())) == drawn
+    streamed = model.stats.tokens_per_s
+    record_property("GenerateTPS", generated)
+    record_property("StreamTPS", streamed)
+    assert abs(generated / streamed - 1) < 0.25, f"{generated} vs {streamed} tokens/s"
 
 
 @pytest.mark.extensive

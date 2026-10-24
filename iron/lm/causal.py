@@ -432,6 +432,11 @@ class CausalLM(Model):
             raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         return self.decode_step.emit is not None
 
+    @property
+    def draws_at_once(self) -> bool:
+        """A device loop's: ``generate`` reads its draws once the last is drawn."""
+        return self.device_loop
+
     def release(self) -> None:
         """Free the device loops' runs, then the graph's memory."""
         self._loops.clear()

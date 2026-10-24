@@ -247,6 +247,10 @@ class Multimodal(Model):
         assert isinstance(self.text, CausalLM), "a causal text model's"
         return self.text.logits(tokens)
 
+    @property
+    def draws_at_once(self) -> bool:
+        return self.text.draws_at_once
+
     def _draw(
         self,
         tokens,
