@@ -168,13 +168,9 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
 
-    # A test that fails or xfails in setup (a runner missing a model's files)
-    # is recorded too, or the model would drop out of the results.
-    if (
-        (report.when == "call" and not report.skipped)
-        or report.failed
-        or "wasxfail" in vars(report)
-    ):
+    # A test that fails in setup (a runner missing a model's files) is
+    # recorded too, or the model would drop out of the results.
+    if (report.when == "call" and not report.skipped) or report.failed:
         csv_reporter = item.session.config._csv_reporter
         if csv_reporter:
             # The pytest nodeid looks like this:

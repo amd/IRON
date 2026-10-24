@@ -89,7 +89,7 @@ class Download:
 
 def require(*files: Path, staged: bool = True) -> None:
     """Skip the test unless every one of ``files`` exists, except in CI where
-    they are ``staged``: there a missing file xfails it, naming what the
+    they are ``staged``: there a missing file fails it, naming what the
     runner must hold.
     """
     missing = [str(f) for f in files if not f.exists()]
@@ -98,9 +98,10 @@ def require(*files: Path, staged: bool = True) -> None:
     import pytest
 
     if staged and os.environ.get("CI"):
-        pytest.xfail(
+        pytest.fail(
             f"this CI runner lacks {', '.join(missing)}: install the model's "
-            "files at that path; its README says which and how"
+            "files at that path; its README says which and how",
+            pytrace=False,
         )
     pytest.skip(f"not found outside CI: {missing}")
 

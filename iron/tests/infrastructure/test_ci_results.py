@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """The root conftest.py's results CSV, run as a real pytest session: a test
-whose fixture fails in setup, or xfails for a CI runner's missing files, is a
-failed check, not missing from the CSV, and a session not given
+whose fixture fails in setup, as one does for a CI runner's missing files, is
+a failed check, not missing from the CSV, and a session not given
 ``--csv-output`` writes none.
 """
 
