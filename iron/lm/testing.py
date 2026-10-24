@@ -217,9 +217,12 @@ def check_accuracy(
     """KL(reference || model) of the next-token distribution, teacher-forced
     over ``num_tokens`` steps from a ``chars``-character prompt, within
     ``bounds`` (``{"Mean": .., "P90": .., "Max": ..}``). The mean and p90
-    bound a drift across many steps, the max a single broken step.
+    bound a drift across many steps, the max a single broken step. The
+    prompt runs from its first token whatever the caches hold, so its chunks
+    start where a fresh session's would, whichever test ran before.
     """
     tokens = prompt(model, chars, num_tokens)
+    model.forget(0)
     results = accuracy(model, model.cpu_reference(), tokens, num_tokens)
     stats = kl_stats(results)
     for stat, value in stats.items():
