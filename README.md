@@ -71,17 +71,31 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
     > [Instructions from mlir-aie repository](https://github.com/Xilinx/mlir-aie?tab=readme-ov-file#build-and-install-the-xdna-driver-and-xrt)
 
 1. Give the driver a command timeout IRON's longest commands fit in. The
-   amdxdna driver ends a command after two periods of its `tdr_timeout_ms`
-   in which no command starts or finishes (2000 ms by default, so about
-   4 s), and the run reports `ERT_CMD_STATE_TIMEOUT`. On NPU2 a model's prompt chunk is one
-   command, and the deepest chunk at a model's native context takes up to
-   about 4 minutes (Ministral 3 at 262144 positions on Strix Halo; Llama 3.2
-   3B at 131072, about 100 s); on NPU1 a command is one operator. Set it,
-   then reload the driver or reboot:
+   amdxdna driver ends a command after about two periods of its
+   `tdr_timeout_ms` in which no command on the device starts or finishes
+   (2000 ms by default, so about 4 s), and the run reports
+   `ERT_CMD_STATE_TIMEOUT`. IRON needs `tdr_timeout_ms=150000`, so a command
+   may run about 300 s. Set it, then reload the driver or reboot:
     ```bash
-    echo "options amdxdna tdr_timeout_ms=180000" | sudo tee /etc/modprobe.d/amdxdna-tdr.conf
+    echo "options amdxdna tdr_timeout_ms=150000" | sudo tee /etc/modprobe.d/amdxdna-tdr.conf
     sudo modprobe -r amdxdna && sudo modprobe amdxdna
     ```
+   On NPU2 a model's prompt chunk is one command, and the deepest chunk, at
+   the model's native context, is the longest. On Strix Halo, measured at
+   two contexts, extrapolated linearly to the native one:
+
+   | Model | Measured (context: s) | Native context: s (extrapolated) |
+   |---|---|---|
+   | Llama 3.2 1B | 8192: 2.0, 32768: 6.9 | 131072: 26 |
+   | Llama 3.2 3B | 4096: 7.0, 8192: 10.0 | 131072: 101 |
+   | Qwen3 1.7B | 4096: 3.9, 8192: 8.0 | 40960: 40 |
+   | Ministral 3 3B | 4096: 4.6, 8192: 8.4 | 262144: 243 |
+   | Granite 4.2 3B | 4096: 7.2, 8192: 9.8 | 131072: 86 |
+   | SmolLM3 3B | 8192: 5.6 | 65536: under 45 |
+   | Ministral 3's vision tower, 6 of 24 layers | 12100 patches: 3.9 | 24 layers: 16 |
+
+   On NPU1 a command is one operator, the longest an attention layer of the
+   deepest chunk.
 
 1. Install the packages needed for IRON and MLIR-AIE:
 
