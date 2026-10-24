@@ -16,7 +16,8 @@ from iron.common.design import OperatorDesign
 
 def lower(op, tmp_path, name=None):
     """Generate the operator's MLIR and lower it to instructions; return both paths."""
-    name = name or op.name
+    # op.name spells out every parameter, past a file name's 255 bytes for some.
+    name = name or type(op).__name__
     src = tmp_path / f"{name}.mlir"
     # CompilableDesign clears the kernel registry before generating; a bare
     # generator() call in one process must do the same, or two designs
