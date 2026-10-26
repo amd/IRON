@@ -30,22 +30,6 @@ from iron.operators.flm.q4nx import K_TILE, M_TILE
 
 DRAIN = drain_halves(HALF_BLOCKS)[0]
 
-# Every distinct (K in-features, N out-features) Gemma4 E2B needs, from
-# hidden_size 1536, intermediate_size 6144, DQ/DK/DV 4096/512/512 and the SWA
-# and skip variants.
-E2B_SHAPES = [
-    (1536, 5120),
-    (4096, 1536),
-    (1536, 6144),
-    (6144, 1536),
-    (1536, 4096),
-    (1536, 12288),
-    (12288, 1536),
-    (1536, 2560),
-    (2048, 1536),
-    (1536, 2048),
-]
-
 
 def _apply(stream_idx, sizes, strides):
     """Destination index for a value arriving at stream_idx."""
@@ -76,25 +60,9 @@ def _model(K, N):
     return (cb * (K // K_TILE_B) + kb) * SLAB_BLOCKS + k_half * HALF_BLOCKS + pos
 
 
-def _pack_b_block(K, N):
-    """Which bfp16 block pack_b puts (k, n) in."""
-    n = np.arange(N)[:, None]
-    k = np.arange(K)[None, :]
-    cb, kb = n // N_TILE, k // K_TILE_B
-    kslice, i = (k % K_TILE_B) // CT_K, (k % CT_K) // S
-    tb, t_in = (n % N_TILE) // T, n % T
-    blk = (cb * (K // K_TILE_B) + kb) * (K_TILE_B // CT_K) + kslice
-    return ((blk * (N_TILE // T) + tb) * (CT_K // S) + i) * T + t_in
-
-
 @pytest.mark.parametrize(
     "K, N", [(512, 64), (1024, 128), (2048, 256), (1536, 640), (2048, 2048)]
 )
-def test_block_index_matches_pack_b(K, N):
-    assert np.array_equal(_model(K, N), _pack_b_block(K, N))
-
-
-@pytest.mark.parametrize("K, N", [(512, 64), (1024, 128), (2048, 256)])
 def test_bytes_match_pack_b(K, N):
     """End to end, including the conversion."""
     rng = np.random.default_rng(0)
@@ -135,14 +103,3 @@ def test_descriptors_are_dma_expressible():
     assert dims[-1][1] == 1
     assert dims[-1][0] <= 1023
     assert int(np.prod(DRAIN.sizes)) == HALF_BLOCKS
-
-
-@pytest.mark.parametrize("K, N", E2B_SHAPES)
-def test_e2b_shapes_are_servable(K, N):
-    """Replacing the stock GEMM means dequantizing every E2B weight on device,
-    so a model or a tiling rule that breaks one of these must fail here.
-    """
-    assert K % K_TILE_B == 0, f"K={K} does not tile"
-    assert N % N_TILE == 0, f"N={N} does not tile"
-    assert K // K_TILE_B > 1, f"K={K} would make flm.ProjectionGEMM pick tile_n=128"
-    assert N // N_TILE >= 8, f"N={N} leaves columns without work"

@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The descriptors Copy issues for the copies llama makes, pinned.
+"""Copy's device-free edges: a reference write into a strided view of an
+intermediate, and a pattern a shim descriptor does not fit.
 
-Each copy is built, and every shim task of its runtime sequence recorded as
-(lane, offset, sizes, strides), exactly: the copies written as views must
-issue them.
+The descriptors Copy issues run on a device, against numpy: slot writes as
+the catalog's Copy cases, channel splits in
+``iron/tests/operators/test_copy_channels.py``, and per-call offsets,
+gathers and bounded views in ``iron/tests/operators``' test_copy_offset.py,
+test_copy_gather.py and test_copy_bounded_view.py.
 """
-
-from typing import Any
 
 import numpy as np
 import pytest
@@ -17,244 +18,12 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.operators.copy import Copy
-from iron.tests.support.build import built, generated_sequence
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
-G, D, L, E, N = 8, 64, 128, 2048, 16  # kv groups, head dim, context, embed, rows
 
-
-def _permuted(n, g, d) -> TensorAccessPattern:
-    """An (n, g, d) buffer read as (g, n, d): ``x.transpose(1, 0, 2)``."""
-    return TensorAccessPattern((n, g, d), 0, [g, n, d], [d, g * d, 1])
-
-
-# One token's (G, D) keys into row `pos` of the (G, L, D) cache:
-# Copy(k, keys[:, pos]), the row a per-call value.
-ROW_INTO_CACHE = dict(
-    src=TensorAccessPattern.full((G, D)),
-    dst=TensorAccessPattern.full((G, L, D))[:, 0],
-    input_buffer_size=G * D,
-    output_buffer_size=G * L * D,
-)
-# N tokens' (N, G, D) keys, heads interleaved per token, into the first N
-# rows: Copy(k.reshape(N, G, D).transpose(1, 0, 2), keys[:, :N]).
-ROWS_INTO_CACHE = dict(
-    src=_permuted(N, G, D),
-    dst=TensorAccessPattern.full((G, L, D))[:, 0:N],
-    input_buffer_size=N * G * D,
-    output_buffer_size=G * L * D,
-    tile_size=1024,
-)
-# The last prompt row of (4, E), selected by the per-call index `last`:
-# Copy(x[last]).
-LAST_ROW = dict(
-    src=TensorAccessPattern.full((4, E))[0],
-    input_buffer_size=4 * E,
-    output_buffer_size=E,
-)
-# The same row at slot 5, on one channel and on two.
-SLOT5 = dict(ROW_INTO_CACHE, dst=TensorAccessPattern.full((G, L, D))[:, 5])
-SLOT5_TWO_CHANNELS = dict(SLOT5, num_channels=2)
-
-# A task's lane, as (operand attribute, channel): the fifos are unnamed
-# (mlir-aie's DeviceConfiguration names them), so a case names a lane by
-# what it is, and a test resolves it to the real name through the built op.
-PINNED: dict[str, tuple[dict[str, Any], list]] = {
-    "row_into_cache": (
-        ROW_INTO_CACHE,
-        [
-            (("x", 0), 0, "1, 1, 8, 64", "0, 0, 64, 1"),
-            (("y", 0), 0, "1, 1, 8, 64", "0, 0, 8192, 1"),
-        ],
-    ),
-    "rows_into_cache": (
-        ROWS_INTO_CACHE,
-        [
-            (("x", 0), 0, "1, 8, 16, 64", "0, 64, 512, 1"),
-            (("y", 0), 0, "1, 8, 16, 64", "0, 8192, 64, 1"),
-        ],
-    ),
-    "last_row": (
-        LAST_ROW,
-        [
-            (("x", 0), 0, "1, 1, 1, 2048", "0, 0, 0, 1"),
-            (("y", 0), 0, "1, 1, 1, 2048", "0, 0, 0, 1"),
-        ],
-    ),
-    "slot5": (
-        SLOT5,
-        [
-            (("x", 0), 0, "1, 1, 8, 64", "0, 0, 64, 1"),
-            (("y", 0), 320, "1, 1, 8, 64", "0, 0, 8192, 1"),
-        ],
-    ),
-    "slot5_two_channels": (
-        SLOT5_TWO_CHANNELS,
-        [
-            (("x", 0), 0, "1, 1, 8, 32", "0, 0, 64, 1"),
-            (("y", 0), 320, "1, 1, 8, 32", "0, 0, 8192, 1"),
-            (("x", 1), 32, "1, 1, 8, 32", "0, 0, 64, 1"),
-            (("y", 1), 352, "1, 1, 8, 32", "0, 0, 8192, 1"),
-        ],
-    ),
-}
-
-
-def _lane_names(op: Copy) -> dict[tuple[str, int], str]:
-    """``op``'s lanes, named as mlir-aie assigned them, keyed as the
-    ``PINNED``/``GATHERS`` cases name a lane: ``(operand attribute, channel)``.
-    """
-    names = {("x", c): h.name for c, h in enumerate(op.x.handles)}
-    names.update({("y", c): h.name for c, h in enumerate(op.y.handles)})
-    return names
-
-
-def _bounded(op: Copy) -> Copy:
-    """``op`` as a graph builds it, its per-call sizes bound."""
-    op.use_value("src_valid")
-    op.use_value("dst_valid")
-    return op
-
-
-@pytest.mark.parametrize("name", sorted(PINNED))
-def test_copy_issues_these_descriptors(name):
-    kwargs, tasks = PINNED[name]
-    _, issued, op = built(Copy(**kwargs))
-    names = _lane_names(op)
-    assert [(t.lane, t.offset, t.sizes, t.strides) for t in issued] == [
-        (names[lane], offset, sizes, strides) for lane, offset, sizes, strides in tasks
-    ]
-
-
-def test_a_bounded_axis_lands_on_d2_and_names_it():
-    """A cache write of n rows, ``Copy(k.transpose(1, 0, 2), keys[:, :n])``:
-    the bounded axis is one exact descriptor dimension per channel, D2 (the
-    one a length patch bounds, with no wrap), the group axis iterating
-    outside it; and the reference moves the bounded rows alone.
-    """
-    N, G, D, L = 16, 4, 8, 32
-    op = Copy(
-        src=_permuted(N, G, D),
-        dst=TensorAccessPattern.full((G, L, D))[:, 0:N],
-        src_bound=1,
-        dst_bound=1,
-        input_buffer_size=N * G * D,
-        output_buffer_size=G * L * D,
-    )
-    _, (fill, drain) = generated_sequence(_bounded(op))
-    assert (fill.sizes, fill.strides) == (f"{G}, {N}, 1, {D}", f"{D}, {G * D}, 0, 1")
-    assert (drain.sizes, drain.strides) == (f"{G}, {N}, 1, {D}", f"{L * D}, {D}, 0, 1")
-    assert fill.length_parameter.endswith("src_valid")
-    assert drain.length_parameter.endswith("dst_valid")
-    x = np.arange(N * G * D, dtype=np.float32).reshape(N, G, D)
-    y = np.zeros((G, L, D), dtype=np.float32)
-    op.reference(x, y, src_valid=5, dst_valid=5)
-    assert (y[:, :5] == x[:5].transpose(1, 0, 2)).all() and not y[:, 5:].any()
-    flat = Copy(
-        src=TensorAccessPattern.full((N,)),
-        src_bound=0,
-        input_buffer_size=N,
-        num_channels=2,
-    )
-    with pytest.raises(ValueError, match="channels split"):
-        generated_sequence(_bounded(flat))
-
-
-def test_a_bounded_axis_past_the_d1_wrap_still_packs():
-    """Llama's prompt cache write, 2048 rows into a 2048-row cache: past
-    D1's 1023 wrap, so the bounded axis packs only on D2.
-    """
-    N, G, D = 2048, 8, 64
-    op = Copy(
-        src=_permuted(N, G, D),
-        dst=TensorAccessPattern.full((G, N, D))[:, 0:N],
-        src_bound=1,
-        dst_bound=1,
-        input_buffer_size=N * G * D,
-        output_buffer_size=G * N * D,
-    )
-    _, tasks = generated_sequence(_bounded(op))
-    assert [t.sizes for t in tasks] == [f"{G}, {N}, 1, {D}"] * 2
-
-
-# A gather of rows of a (V, W) table, ids known at record time: Copy(table[ids]).
+# A (V, W) table a gather reads rows of.
 V, W = 64, 32
-
-
-def _gather(ids, **kwargs) -> Copy:
-    whole = TensorAccessPattern.full((V, W))
-    return Copy(
-        src=tuple(whole[int(i)] for i in ids), input_buffer_size=V * W, **kwargs
-    )
-
-
-GATHERS = {
-    # Two runs of consecutive ids, of equal length: one pattern.
-    "runs": (
-        np.r_[5:9, 40:44],
-        [
-            (("y", 0), 0, "1, 1, 8, 32", "0, 0, 32, 1"),
-            (("x", 0), 160, "1, 2, 4, 32", "0, 1120, 32, 1"),
-        ],
-    ),
-    # A row repeated: a stride-0 iteration.
-    "repeat": (
-        np.full(6, 7),
-        [
-            (("y", 0), 0, "1, 1, 6, 32", "0, 0, 32, 1"),
-            (("x", 0), 224, "6, 1, 1, 32", "0, 0, 0, 1"),
-        ],
-    ),
-    # Out of order: a run down cannot merge, so every row is its own fill.
-    "descending": (
-        np.array([9, 8, 2]),
-        [
-            (("y", 0), 0, "1, 1, 3, 32", "0, 0, 32, 1"),
-            (("x", 0), 288, "1, 1, 1, 32", "0, 0, 0, 1"),
-            (("x", 0), 256, "1, 1, 1, 32", "0, 0, 0, 1"),
-            (("x", 0), 64, "1, 1, 1, 32", "0, 0, 0, 1"),
-        ],
-    ),
-}
-
-
-@pytest.mark.parametrize("name", sorted(GATHERS))
-def test_a_gather_merges_the_rows_it_can(name):
-    ids, tasks = GATHERS[name]
-    text, issued, op = built(_gather(ids))
-    names = _lane_names(op)
-    assert [(t.lane, t.offset, t.sizes, t.strides) for t in issued] == [
-        (names[lane], offset, sizes, strides) for lane, offset, sizes, strides in tasks
-    ]
-    assert text.count("dma_await_task") == 1
-    assert op.aiecc_flags == ("--reclaim-runtime-bds",)
-    x = np.arange(V * W, dtype=np.float32).reshape(V, W)
-    assert (op.reference(x).reshape(len(ids), W) == x[ids]).all()
-
-
-class _Gathers(iron.Graph):
-    def __init__(self, ids):
-        self.table = iron.weight(np.zeros((V, W), dtype=bfloat16))
-        self.ids = iron.param(ids)
-
-    def body(self, x):
-        rows = Copy.step(self.table[self.ids])
-        return Copy.step(Copy.step(x)[self.ids]), rows
-
-
-def test_a_graph_gathers_from_a_weight_and_an_intermediate():
-    ids = np.array([4, 0, 4, 63, -1])
-    graph = _Gathers(ids)
-    t = graph.record(x=(V, W))
-    gathers = [s.op for s in t.steps if isinstance(s.op.src, tuple)]
-    assert len(gathers) == 2
-    whole = TensorAccessPattern.full((V, W))
-    assert all(op.src == tuple(whole[i % V] for i in ids) for op in gathers)
-    x = np.arange(V * W, dtype=np.float32).reshape(V, W).astype(bfloat16)
-    from_x, from_table = graph.reference(x)
-    assert (np.asarray(from_x).reshape(len(ids), W) == x[ids]).all()
-    assert not np.asarray(from_table).any()
 
 
 @pytest.mark.parametrize(
@@ -277,83 +46,6 @@ def test_a_gather_refuses_what_it_cannot_lower(index, match):
         Bad().record(x=(V, W))
 
 
-CHANNEL_SPLITS = {
-    "permuted_on_4": dict(
-        src=_permuted(N, G, D), input_buffer_size=N * G * D, num_channels=4
-    ),
-    "rows_into_cache_on_2": dict(ROWS_INTO_CACHE, num_channels=2),
-    "slot5_on_2": SLOT5_TWO_CHANNELS,
-    # Innermost runs of 64 and 4096: the channels split the 64.
-    "by_head_on_4": dict(
-        src=TensorAccessPattern.full((16, 4, 64)).permute((1, 0, 2)),
-        dst=TensorAccessPattern.full((16 * 4 * 64,)),
-        input_buffer_size=16 * 4 * 64,
-        num_channels=4,
-    ),
-    # Rows of 48 into rows of 64 share runs of 16, neither side's row.
-    "rows_of_48_into_rows_of_64_on_2": dict(
-        src=TensorAccessPattern.full((8, 48)),
-        dst=TensorAccessPattern.full((6, 64)),
-        input_buffer_size=8 * 48,
-        num_channels=2,
-    ),
-    "gather_on_2": dict(
-        src=tuple(TensorAccessPattern.full((V, W))[i] for i in (3, 3, 60, 1)),
-        input_buffer_size=V * W,
-        num_channels=2,
-    ),
-}
-
-
-@pytest.mark.parametrize("name", sorted(CHANNEL_SPLITS))
-def test_each_channel_drains_the_elements_it_fills(name):
-    """A channel's memtile hands its fill stream to its drain in order, so
-    replaying each channel's issued descriptors, element for element, must
-    give the reference: a split whose two sides' shares do not line up
-    lands elements in the wrong places only on a device otherwise.
-    """
-    text, tasks, op = built(Copy(**CHANNEL_SPLITS[name]).resolved())
-    assert text.count("dma_await_task") == op.num_channels
-    names = _lane_names(op)
-    x = np.arange(1, op.input_buffer_size + 1, dtype=np.float32)
-    want = op.reference(x)
-    got = np.zeros_like(want)
-    for c in range(op.num_channels):
-        moved = {}
-        for side, attr in (("in", "x"), ("out", "y")):
-            walks = []
-            for t in tasks:
-                if t.lane != names[(attr, c)]:
-                    continue
-                sizes = [int(s) for s in t.sizes.split(",")]
-                strides = [int(s) for s in t.strides.split(",")]
-                walks.append(t.offset + np.tensordot(strides, np.indices(sizes), 1))
-            moved[side] = np.concatenate(walks).reshape(-1)
-        assert len(moved["in"]) == len(moved["out"]), f"channel {c}"
-        got[moved["out"]] = x[moved["in"]]
-    assert (got == want).all()
-
-
-class _Views(iron.Graph):
-    def __init__(self):
-        self.cache = iron.state((G, L, D), dtype=bfloat16)
-
-    def body(self, x):
-        return Copy.step(x.reshape(N, G, D).transpose(1, 0, 2)), Copy.step(
-            self.cache[:, 0:N]
-        )
-
-
-def test_a_copy_of_a_view_has_the_view_s_shape():
-    graph = _Views()
-    t = graph.record(x=(N, G * D))
-    assert [h.shape for h in t.returned] == [(G, N, D), (G, N, D)]
-    x = np.arange(N * G * D, dtype=np.float32).reshape(N, G * D).astype(bfloat16)
-    transposed, cached = graph.reference(x)
-    assert transposed.shape == cached.shape == (G, N, D)
-    assert (transposed == x.reshape(N, G, D).transpose(1, 0, 2)).all()
-
-
 class _IntoColumns(iron.Graph):
     """A weight copied into the leading columns of an intermediate, a
     strided view of it, the rest of its rows kept.
@@ -369,6 +61,7 @@ class _IntoColumns(iron.Graph):
 
 
 def test_the_reference_writes_a_copy_into_a_strided_view_through_it():
+    N, D = 16, 64
     columns = np.arange(N * D, dtype=np.float32).reshape(N, D).astype(bfloat16)
     x = -np.arange(N * 2 * D, dtype=np.float32).reshape(N, 2 * D).astype(bfloat16)
     got = np.asarray(_IntoColumns(columns).reference(x)).reshape(N, 2 * D)
@@ -377,7 +70,12 @@ def test_the_reference_writes_a_copy_into_a_strided_view_through_it():
 
 
 def test_a_padded_pattern_does_not_fit_a_shim_descriptor():
-    op = Copy(**LAST_ROW)
+    E = 2048
+    op = Copy(
+        src=TensorAccessPattern.full((4, E))[0],
+        input_buffer_size=4 * E,
+        output_buffer_size=E,
+    )
     tap = TensorAccessPattern.full((E,))
     assert op.x.fits(tap)
     assert not op.x.fits(tap.pad([(0, 8)]))

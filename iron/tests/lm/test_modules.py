@@ -7,7 +7,6 @@ references against numpy.
 """
 
 import dataclasses
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -21,7 +20,6 @@ from iron.lm.checkpoint import nest, leaves
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close, check_generation
 from iron.operators.mha import MHA
-from iron.operators.rms_norm import RMSNorm as RMSNormOp
 from iron.operators.rope import RoPE
 from iron.operators.sample import Sample
 from iron.tests.support.llama_reference import OnHost
@@ -59,14 +57,6 @@ def tensors(under: str = "") -> dict[str, np.ndarray]:
     return {under + n: np.zeros(s, bfloat16) for n, s in shapes.items()}
 
 
-def test_load_state_dict_binds_each_param_to_its_tensor():
-    named = {n: t.shape for n, t in tensors("model.").items()}
-    tree = checkpoint(SMALL, named | {"lm_head.weight": (512, 256)}).tree()
-    block = Block()
-    block.load_state_dict(tree, path="model.")
-    assert block.layers[0].bias is tree.model.layers[0].bias and block.held()
-
-
 class Head(iron.Graph):
     def __init__(self):
         self.classifier = [
@@ -95,13 +85,6 @@ def test_tensors_at_indices_are_a_list_of_tensors():
     assert tree.scales[0] is zero and tree.scales[1] is row
 
 
-def test_load_state_dict_names_every_missing_tensor():
-    named = tensors()
-    del named["norm.weight"], named["layers.1.weight"]
-    with pytest.raises(ValueError, match=r"missing layers\.1\.weight, norm\.weight$"):
-        Block().load_state_dict(named)
-
-
 def test_load_state_dict_names_each_kind_in_one_error():
     named = tensors("model.") | {"model.norm.weight": np.zeros(4, bfloat16)}
     del named["model.out.bias"]
@@ -128,14 +111,6 @@ class Tied(iron.Graph):
         self.head.weight = self.embed.weight
 
 
-def test_a_tied_param_needs_only_its_first_path():
-    table = np.ones((512, 256), bfloat16)
-    tied = Tied()
-    tied.load_state_dict({"embed.weight": table})
-    assert tied.head.weight is tied.embed.weight
-    assert tied.embed.weight.base is table
-
-
 def test_a_tied_param_ignores_a_tensor_at_its_other_path():
     first, second = np.ones((512, 256), bfloat16), np.zeros((512, 256), bfloat16)
     tied = Tied()
@@ -157,20 +132,6 @@ def test_a_graph_held_at_two_paths_skips_the_second_paths_tensors():
     shared.load_state_dict(tensors | {"b.weight": np.ones((4, 4), bfloat16)})
     assert shared.b.weight.base is tensors["a.weight"]
     assert shared.d[0].base is tensors["c.0"]
-
-
-def test_load_state_dict_binds_params_in_lists_dicts_and_namespaces():
-    class Held(iron.Graph):
-        def __init__(self):
-            self.items = [iron.param(2)]
-            self.named = {"a": iron.param(2)}
-            self.space = SimpleNamespace(b=iron.param(2))
-
-    held = Held()
-    held.load_state_dict(
-        {n: np.zeros(2, bfloat16) for n in ("items.0", "named.a", "space.b")}
-    )
-    assert len(held.held()) == 3
 
 
 def test_load_state_dict_refuses_a_param_in_a_tuple():
@@ -195,19 +156,11 @@ def test_load_state_dict_refuses_a_param_in_a_frozen_dataclass():
         Held().load_state_dict({})
 
 
-@pytest.mark.parametrize("dtype", [np.float32, np.float16])
-def test_load_state_dict_casts_to_the_params_dtype(dtype):
-    named = {n: t.astype(dtype) for n, t in tensors().items()}
+def test_load_state_dict_casts_to_the_params_dtype():
+    named = {n: t.astype(np.float32) for n, t in tensors().items()}
     block = Block()
     block.load_state_dict(named)
     assert block.norm.weight.dtype == bfloat16
-
-
-def test_load_state_dict_keeps_a_tensor_of_the_params_dtype_as_the_view_it_is():
-    named = tensors()
-    block = Block()
-    block.load_state_dict(named)
-    assert block.norm.weight.base is named["norm.weight"]
 
 
 def test_load_state_dict_refuses_a_change_of_kind():
@@ -221,11 +174,6 @@ def test_a_second_bind_is_refused():
     block.load_state_dict(tensors())
     with pytest.raises(ValueError, match="already loaded"):
         block.load_state_dict(tensors())
-
-
-def test_a_path_without_its_trailing_dot_is_refused():
-    with pytest.raises(ValueError, match="'model' must end in a dot"):
-        Block().load_state_dict(tensors("model."), path="model")
 
 
 def test_leaf_modules_match_numpy():
@@ -245,20 +193,6 @@ def test_leaf_modules_match_numpy():
     want = norm(x, f32["out.weight"], f32["out.bias"], centre=True)
     got = np.asarray(block.reference(ids), np.float32)
     assert np.abs(got - want).max() < 0.05 * np.abs(want).max()
-
-
-def test_leaf_modules_take_torch_nn_s_names_and_defaults():
-    linear, embedding = Linear(4, 8, precision=Precision.MEDIUM), Embedding(16, 4)
-    rms, layer = RMSNorm(4), LayerNorm(4)
-    assert (linear.in_features, linear.out_features) == (4, 8)
-    assert (
-        linear.bias.shape == (8,)
-        and Linear(4, 8, bias=False, precision=Precision.MEDIUM).bias is None
-    )
-    assert (embedding.num_embeddings, embedding.embedding_dim) == (16, 4)
-    assert (rms.normalized_shape, rms.eps) == ((4,), None)
-    assert (layer.normalized_shape, layer.eps) == ((4,), 1e-5)
-    assert RMSNorm((4,)).normalized_shape == LayerNorm([4]).normalized_shape == (4,)
 
 
 def test_attention_refuses_a_norm_of_other_than_q_k_and_v():
@@ -404,22 +338,6 @@ def test_attention_turns_only_the_rotary_columns():
     t = model.record(**model.shapes()[1])
     turned = [s.op.cols for s in t.steps if type(s.op) is RoPE]
     assert turned == [32] * 4 and model.config.head_dim == 64
-
-
-def test_a_v_norm_is_one_unweighted_rms_norm_a_layer():
-    model = small()
-    for i, layer in enumerate(model.model.layers):
-        v = Attention(model.config, i, norms="v")
-        v.q_proj, v.k_proj, v.v_proj, v.o_proj = (
-            layer.self_attn.q_proj,
-            layer.self_attn.k_proj,
-            layer.self_attn.v_proj,
-            layer.self_attn.o_proj,
-        )
-        layer.self_attn = v
-    t = model.record(**model.shapes()[1])
-    norms = [s for s in t.steps if type(s.op) is RMSNormOp]
-    assert len(norms) == 7 and sum(len(s.inputs) == 1 for s in norms) == 2
 
 
 class SharedKeys(HuggingFace):

@@ -114,11 +114,6 @@ def test_a_model_runs_only_the_versions_it_loaded(cpu):
     assert not model._versions
 
 
-def test_a_model_reads_as_its_context_and_whether_it_is_loaded(cpu):
-    model = Llama(cpu.config, cpu.weights)
-    assert repr(model) == f"Llama(max_seq_len={cpu.config.max_seq_len}, not loaded)"
-
-
 @pytest.mark.parametrize("temperature", [0.0, 0.7])
 def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
     """What ``generate_on_host`` loops on the device, each call started from

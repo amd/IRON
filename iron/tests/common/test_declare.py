@@ -22,11 +22,12 @@ from aie.utils.compile.jit.params import Select, param, per_call, tunable, width
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Precision, Profile, Scratchpad
+from iron import Profile, Scratchpad
 from iron.common import Built, Operator, Rtp, Unresolvable, Value, Xclbin
 from iron.common.declare.operand import active_runtime, axis_of
 from iron.common.design import OperatorDesign
 from iron.tests.support.declare import Rows
+from iron.operators.mha import MHA
 
 NPU2 = from_name("npu2", n_cols=8)
 
@@ -77,19 +78,9 @@ class MV(Operator):
         return A @ B
 
 
-# --------------------------------------------------------------------------
-# The catalog's declarations
-# --------------------------------------------------------------------------
-
-
-def test_every_catalog_operator_s_declaration_prints():
-    from iron.operators import CATALOG
-
-    for cls in CATALOG.values():
-        assert repr(cls.declaration).startswith(cls.__name__)
-
-
 def test_float_scratchpad_annotation_is_rejected():
+    # Unvalidated, a float's bits reinterpreted as the scratchpad's integer
+    # encoding would silently zero its top bits rather than fail loudly.
     with pytest.raises(TypeError, match="floating point"):
 
         class Bad(iron.Graph):
@@ -156,13 +147,6 @@ def test_a_stream_binds_a_handle_per_lane():
         op.C.handles
     with pytest.raises(ValueError, match="has 2 lanes"):
         MV(M=1024, K=256, columns=2).A.bind("h")
-
-    class NoObjType(Operator):
-        n: int = param()
-        x = In(n)
-
-    with pytest.raises(TypeError, match="without an obj_shape"):
-        NoObjType(n=4).x.obj_type
 
 
 def test_an_operand_fills_only_inside_its_operators_sequence():
@@ -377,13 +361,6 @@ def test_a_profile_fills_the_tunables_a_call_leaves_open():
     assert len(p) == 2
 
 
-def test_a_profile_reads_as_its_operators():
-    p = Profile()
-    p.add(MV, columns=4)
-    p.add(MV, K=256, tile_out=16)
-    assert repr(p) == "Profile(MV)"
-
-
 def test_saving_an_operator_outside_the_catalog_names_it(tmp_path):
     p = Profile()
     p.add(MV, columns=4)
@@ -441,42 +418,7 @@ def test_compatible_runs_at_construction_once_every_tunable_is_known():
     MV(M=1000, K=128)  # a tunable is open: compatible() waits for resolution
 
 
-# --------------------------------------------------------------------------
-# Two behaviours of declared shapes
-# --------------------------------------------------------------------------
-
-
-def test_gemm_layout_flags_transpose_rather_than_resize():
-    from iron.operators.gemm import GEMM
-
-    plain = GEMM(M=256, K=64, N=512, precision=Precision.MEDIUM).buffers
-    b_major = GEMM(
-        M=256, K=64, N=512, b_col_maj=True, precision=Precision.MEDIUM
-    ).buffers
-    c_major = GEMM(
-        M=256, K=64, N=512, c_col_maj=True, precision=Precision.MEDIUM
-    ).buffers
-    assert plain[1].shape == (64, 512) and b_major[1].shape == (512, 64)
-    assert plain[2].shape == (256, 512) and c_major[2].shape == (512, 256)
-    # Transposing a layout must not change how many bytes move.
-    assert plain[1].nbytes == b_major[1].nbytes
-    assert plain[2].nbytes == c_major[2].nbytes
-
-
-def test_mha_pads_the_sequence_and_groups_kv():
-    from iron.operators.mha import MHA
-
-    grouped = MHA(num_heads=8, seq_len=100, num_KV_heads=2).buffers
-    plain = MHA(num_heads=8, seq_len=100).buffers
-    # 100 rounds up to 128, so Q is 8 heads x 128 x 64.
-    assert grouped[0].shape == (8, 128, 64)
-    # Grouped K/V are narrower than Q; plain K/V are exactly as wide.
-    assert grouped[1].shape == (2, 128, 64)
-    assert plain[1].shape == plain[0].shape
-    assert [spec.role for spec in grouped] == [In] * 3 + [Out]
-    inputs, _, _ = MHA.call_operands(((8, 128, 64), (2, 128, 64), (2, 128, 64)), {})
-    op = MHA(**MHA.declaration.infer(inputs))
-    assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
+def test_mha_refuses_a_sequence_pad_of_no_whole_blocks():
     with pytest.raises(ValueError, match=r"seq_pad \(100\)"):
         MHA(num_heads=1, seq_len=100, seq_pad=100, d=64)
 

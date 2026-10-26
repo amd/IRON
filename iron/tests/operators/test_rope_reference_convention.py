@@ -46,16 +46,10 @@ def _make_inputs(rows, angle_rows, cols=32, seed=0):
     return x, angles
 
 
-def test_reference_matches_device_convention_for_batched_angle_rows():
-    """1 < angle_rows < rows, the only regime that separates the two conventions."""
-    rows, angle_rows = 6, 3
-    x, angles = _make_inputs(rows, angle_rows)
-    expected = _block_major_expected(x, angles, rows, angle_rows)
-    got = RoPE(rows=rows, cols=32, angle_rows=angle_rows).reference(x, angles)
-    assert np.array_equal(expected, got)
-
-
 def test_reference_matches_device_convention_across_shapes():
+    """(8, 2) and (12, 4) are 1 < angle_rows < rows, the only regime that
+    separates the two conventions; the rest confirm they agree elsewhere.
+    """
     for rows, angle_rows in [(8, 2), (1024, 1), (4, 4), (13, 13), (12, 4)]:
         x, angles = _make_inputs(rows, angle_rows)
         expected = _block_major_expected(x, angles, rows, angle_rows)

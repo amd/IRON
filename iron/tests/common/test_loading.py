@@ -122,18 +122,26 @@ def _held(config, length: int) -> int:
     return sum(model.record(**model.shapes()[0]).pinned.values())
 
 
-def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2):
+def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2, caplog):
     """1024 native positions in 256-row chunks: a budget one byte short of
-    a context takes the next shorter whole chunks.
+    a context takes the next shorter whole chunks, logging what it chose and,
+    short, how to ask for more.
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
     path = checkpoint(config).path
-    assert Small.fit(config, path, budget=_held(config, 1024)) == config
-    short = Small.fit(config, path, budget=_held(config, 1024) - 1)
-    assert short.max_seq_len == 768
     assert Small.fit(config, path, budget=_held(config, 512)).max_seq_len == 512
     with pytest.raises(ValueError, match="do not fit"):
         Small.fit(config, path, budget=_held(config, 256) - 1)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="iron.lm.model"):
+        assert Small.fit(config, path, budget=_held(config, 1024)) == config
+        short = Small.fit(config, path, budget=_held(config, 1024) - 1)
+    assert short.max_seq_len == 768
+    native, short_log = caplog.records
+    assert native.levelno == logging.INFO and "native context" in native.message
+    assert short_log.levelno == logging.WARNING
+    assert "max_seq_len 768, not the native 1024" in short_log.message
+    assert "--max-seq-len asks for up to 1024" in short_log.message
 
 
 def test_a_model_fits_its_context_with_no_device_bound(tmp_path):
@@ -149,19 +157,6 @@ def test_a_model_fits_its_context_with_no_device_bound(tmp_path):
         assert (
             Native.from_checkpoint(directory, random_weights=1).config == Native.config
         )
-
-
-def test_fit_says_what_it_chose_and_how_to_ask_for_more(caplog):
-    config = dataclasses.replace(SMALL, max_seq_len=1024)
-    path = checkpoint(config).path
-    with caplog.at_level(logging.INFO, logger="iron.lm.model"):
-        Small.fit(config, path, budget=_held(config, 1024))
-        Small.fit(config, path, budget=_held(config, 512))
-    native, short = caplog.records
-    assert native.levelno == logging.INFO and "native context" in native.message
-    assert short.levelno == logging.WARNING
-    assert "max_seq_len 512, not the native 1024" in short.message
-    assert "--max-seq-len asks for up to 1024" in short.message
 
 
 def _golden(path):

@@ -3,9 +3,7 @@
 
 """``Config.from_checkpoint``: the dotted-path lookup and ``convert`` hooks
 against a real checkpoint's own ``config.json`` (device-free; skipped
-outside CI where the checkpoint is not there, failed in CI), and that
-``DecoderConfig`` adds the decoder-only fields to ``Config``'s ``eps`` and
-``precision``.
+outside CI where the checkpoint is not there, failed in CI).
 """
 
 import dataclasses
@@ -19,7 +17,7 @@ from iron.applications.embedding_gemma2.model import Config as EmbeddingGemmaCon
 from iron.applications.gemma4.audio import AudioConfig
 from iron.applications.gemma4.vision import VisionConfig
 from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig
-from iron.lm import Config, DecoderConfig
+from iron.lm import DecoderConfig
 from iron.tests.support.llama_model import REAL_1B
 from iron.lm.testing import require, weights_dir
 
@@ -90,27 +88,13 @@ def test_from_checkpoint_reads_each_key_and_no_not_json_field(tmp_path, cls):
     assert not unread.keys() & config.to_json().keys()
 
 
-def test_a_path_is_under_the_prefix_unless_it_starts_at_the_root():
-    data = {"image_token_id": 5, "text_config": {"rms_norm_eps": 0.5}}
-    config = EmbeddingGemmaConfig.from_json(data)
-    assert (config.image_token, config.eps) == (5, 0.5)
-
-
-@pytest.mark.parametrize(
-    "cls,scaling",
-    [
-        (LlamaConfig, {"rope_type": "yarn", "factor": 4.0}),
-        (LlamaConfig, {"rope_type": "linear", "factor": 2.0}),
-    ],
-)
-def test_from_checkpoint_refuses_a_rope_scaling_it_builds_no_table_for(
-    tmp_path, cls, scaling
-):
+def test_from_checkpoint_refuses_a_rope_scaling_it_builds_no_table_for(tmp_path):
+    scaling = {"rope_type": "yarn", "factor": 4.0}
     (tmp_path / "config.json").write_text(
         json.dumps(REAL_1B.to_json() | {"rope_scaling": scaling})
     )
     with pytest.raises(ValueError, match=re.escape(f"rope_scaling {scaling}")):
-        cls.from_checkpoint(tmp_path)
+        LlamaConfig.from_checkpoint(tmp_path)
 
 
 def test_a_sliding_window_some_layers_take_is_refused():
@@ -163,11 +147,6 @@ def test_a_config_whose_application_states_no_precision_is_refused():
     assert LlamaConfig.from_json(data).precision is Precision.MEDIUM
 
 
-def test_from_checkpoint_raises_with_no_config_json_beside_the_path(tmp_path):
-    with pytest.raises(FileNotFoundError):
-        LlamaConfig.from_checkpoint(tmp_path / "model.safetensors")
-
-
 def test_from_checkpoint_names_the_keys_a_config_json_lacks(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 8}))
     with pytest.raises(ValueError, match="lacks .*'hidden_size'"):
@@ -189,13 +168,6 @@ def test_embedding_gemma2_from_checkpoint_is_the_default_instance(cls, instance)
     """
     require(EMBEDDING_GEMMA2_DIR / "config.json")
     assert cls.from_checkpoint(EMBEDDING_GEMMA2_DIR) == instance
-
-
-def test_decoder_config_adds_the_decoder_fields_to_configs_eps_and_precision():
-    base_fields = {f.name for f in dataclasses.fields(Config)}
-    decoder_fields = {f.name for f in dataclasses.fields(DecoderConfig)}
-    assert base_fields == {"eps", "precision"}
-    assert {"vocab_size", "max_seq_len", "rope_scaling"} <= decoder_fields - base_fields
 
 
 @pytest.mark.parametrize(

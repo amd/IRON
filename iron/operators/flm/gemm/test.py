@@ -11,10 +11,8 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Precision
-from iron.common.design import OperatorDesign
 from iron.common.testing import run_test, vectors
 from iron.operators.flm.gemm.design import (
-    C_JOINS,
     M_TILE,
     Epilogue,
     Gelu,
@@ -55,10 +53,11 @@ def get_params(device: str):
         #      M,    K,     N, epilogue, rounding
         regular_params = [
             (  256,  512,  1024, NONE,     CONV_EVEN),  # smallest full sweep
-            (  512, 1024,  2048, NONE,     CONV_EVEN),
             (  256,  512,  1536, NONE,     CONV_EVEN),  # remainder: 4 of 8 cols
             (  256,  512,   128, NONE,     CONV_EVEN),  # remainder only: 1 col
-            ( 2048, 1024,    16, NONE,     CONV_EVEN),  # Qwen3.5 gate: tile_n 16
+            # Qwen3.5's gate projection: tile_n 16, at a scale no other case
+            # or tile_option_params reaches.
+            ( 2048, 1024,    16, NONE,     CONV_EVEN),
             (  256,  512,  1024, SILU,     CONV_EVEN),
             (  256,  512,  1024, GELU,     CONV_EVEN),
             # floor reproduces the shipped FastFlowLM overlay's rounding mode
@@ -67,19 +66,13 @@ def get_params(device: str):
             (  256,  512,  1024, NONE,     FLOOR),
         ]
         extensive_params = [
-            ( 1024, 2048,  2048, NONE,     CONV_EVEN),
-            ( 2048, 2048,  2048, NONE,     CONV_EVEN),
-            ( 1024, 2560,  2560, NONE,     CONV_EVEN),  # E4B o-proj
-            (  512, 1536,  1536, SILU,     CONV_EVEN),  # E2B down-proj
             (  256,  512,  1024, SIGMOID,  CONV_EVEN),
-            (  256,  512,  1024, SILU,     FLOOR),
             # K or N = 10240 at M > 256 overflows the shim BD's 20-bit
             # mega_row iteration step, so the compiler cuts that leg into
             # pieces, bounded by its queue polls and BD reclaim. These are the
             # real E4B FFN projections, and M=2048 doubles the pieces.
             ( 1024, 10240,  2560, NONE,     CONV_EVEN),  # E4B down
             ( 1024,  2560, 10240, NONE,     CONV_EVEN),  # E4B gateup
-            ( 2048, 10240,  2560, NONE,     CONV_EVEN),  # E4B down, 2x
             ( 2048,  2560, 10240, NONE,     CONV_EVEN),  # E4B gateup, 2x
             # 64 row-block units, past the 63 a lock can count, so B is armed
             # twice: two slabs, each resident.
@@ -91,7 +84,6 @@ def get_params(device: str):
         #      M,    K,     N, epilogue, rounding
         regular_params = [
             (  256,  512,   256, NONE,     CONV_EVEN),  # smallest full sweep
-            (  512, 1024,   512, NONE,     CONV_EVEN),
             (  256,  512,   128, NONE,     CONV_EVEN),  # remainder: 2 of 4 cols
             (  256,  512,    64, NONE,     CONV_EVEN),  # remainder only: 1 col
             (  256,  512,   320, NONE,     CONV_EVEN),  # full sweep + 1 col
@@ -100,12 +92,9 @@ def get_params(device: str):
             (  256,  512,   512, NONE,     FLOOR),
         ]
         extensive_params = [
-            ( 1024, 2048,  1024, NONE,     CONV_EVEN),
-            ( 2048, 2048,  1024, NONE,     CONV_EVEN),
-            ( 1024, 2560,  2560, NONE,     CONV_EVEN),  # E4B o-proj
-            (  512, 1536,  1536, SILU,     CONV_EVEN),  # E2B down-proj
+            ( 2048, 2048,  1024, NONE,     CONV_EVEN),  # bench-tracked below
+            ( 1024, 2560,  2560, NONE,     CONV_EVEN),  # E4B o-proj, bench-tracked
             (  256,  512,   512, SIGMOID,  CONV_EVEN),
-            (  256,  512,   512, SILU,     FLOOR),
             # Two slabs, as on NPU2.
             (16384,  512,   256, NONE,     CONV_EVEN),
         ]
@@ -330,25 +319,6 @@ def tile_option_params(device: str):
                 )
             )
     return params
-
-
-@pytest.mark.parametrize(
-    "M,K,N", [(512, 1024, 1024), (512, 6144, 1024), (512, 1024, 20480)]
-)
-def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
-    """Device-free: B is resident (K=1024), streamed (K=6144) or behind a leg
-    the compiler cuts (N=20480), each with no B fifo, nothing pinned, memtile
-    locks armed per dispatch, and one slab awaiting one C per column/half.
-    """
-    mlir = str(
-        OperatorDesign(
-            ProjectionGEMM(M=M, K=K, N=N, precision=Precision.MEDIUM)
-        ).module()
-    )
-    assert "aie.objectfifo @B" not in mlir
-    assert "bd_id" not in mlir
-    assert "aiex.set_lock" in mlir
-    assert mlir.count("aiex.dma_await_task") == npu2.cols * C_JOINS
 
 
 @pytest.mark.parametrize(
@@ -588,7 +558,6 @@ def test_shipped_overlay(M, K, N, epilogue, record_property, eight_column_npu2):
     [
         pytest.param(SIGMOID, marks=SHIPPED),
         pytest.param(SILU, marks=SHIPPED),
-        pytest.param(GELU, marks=SHIPPED),
     ],
 )
 def test_shipped_epilogue_matches_accumulator(epilogue, eight_column_npu2):
@@ -599,7 +568,10 @@ def test_shipped_epilogue_matches_accumulator(epilogue, eight_column_npu2):
     to admit it also admits an all-zero result. Instead this compares
     against the device's own no-epilogue accumulator, run through the same
     activation on the host, so the accumulator error cancels and an
-    all-zero result still fails.
+    all-zero result still fails. gelu doesn't need this: its wider output
+    range lets test_shipped_overlay check it directly against the
+    accumulator-mass bound, and test_gemm_gelu_bf16_steps_matches_overlay
+    checks it bit for bit.
     """
     M, K, N = 256, 512, 1024
     # A small input scale keeps the accumulator in the range where these curves

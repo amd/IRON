@@ -16,13 +16,10 @@ NPU2 = from_name("npu2", n_cols=8)
 
 
 def test_the_unary_sweep_reads_the_class_it_is_resolved_for():
+    # A case's divisibility is checked by building it for real, in every
+    # catalog operator declared with a Sweep (test_catalog.py).
     cases = Sweep()(GELU, NPU2)
     assert max(c.kwargs["tile_size"] for c in cases) == GELU.tile_cap == 8192
-    for c in cases:
-        k = c.kwargs
-        assert (
-            k["size"] % (k["num_aie_columns"] * k["num_channels"] * k["tile_size"]) == 0
-        )
     default = {c.kwargs["size"] for c in cases if not c.extensive and not c.bench}
     assert default == {2048}
     # One benched case, in the default suite: the widest grid, most channels.

@@ -18,8 +18,8 @@ from iron.tests.support.multimodal import IMAGE, small_causal
 
 
 def gapped(logits: np.ndarray) -> np.ndarray:
-    """``logits``, checked to hold a top-2 gap past ``LOGITS``, where
-    ``assert_close`` checks the argmax.
+    """``logits``, checked to hold a top-2 gap past ``LOGITS``, so that the
+    argmax a greedy draw takes is unambiguous.
     """
     top = np.sort(logits)[-2:]
     assert (top[1] - top[0]) / np.abs(logits).max() > LOGITS, "a top-2 tie"

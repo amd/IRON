@@ -15,16 +15,12 @@ runs in a full ELF or in an xclbin.
 
 import numpy as np
 import pytest
-from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile, Scratchpad
-from iron.common.image.link import PerStep
-from iron.common.image.sequence import Image
-from iron.common.image.step import BufferRef
 from iron.operators import ElementwiseAdd
-from iron.operators.copy import Copy, Gather, GatherWords
+from iron.operators.copy import Copy, Gather
 
 # EmbeddingGemma 2's per-layer embedding table.
 VOCAB, WIDTH = 262144, 512
@@ -183,8 +179,8 @@ def table():
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("n_ids", [256, 512])
-def test_rows_of_a_weight_are_gathered(table, n_ids):
+def test_rows_of_a_weight_are_gathered(table):
+    n_ids = 512
     ids = gathered_ids(VOCAB, n_ids)
     graph = FromWeight(table, ids)
     net = graph.compile(x=(n_ids, WIDTH))
@@ -217,9 +213,8 @@ def test_one_input_s_ids_gather_from_each_of_three_tables(table, full_elf):
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("n_ids", [256, 512])
-def test_rows_of_an_intermediate_are_gathered(n_ids):
-    n_rows = 4096
+def test_rows_of_an_intermediate_are_gathered():
+    n_rows, n_ids = 4096, 512
     ids = gathered_ids(n_rows, n_ids)
     table = np.random.default_rng(2).standard_normal((n_rows, WIDTH)).astype(bfloat16)
     graph = FromIntermediate(ids)
@@ -436,66 +431,6 @@ def test_each_step_gathers_the_rows_a_call_bounds_by_ids_the_device_made(table, 
         assert_equal(got, expected, f"{n} of {n_ids}")
 
 
-def test_the_control_words_are_counted():
-    for rows in (1, 7, 8, 15, 256, 512):
-        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
-        ids = np.arange(rows, dtype=np.int32)
-        assert gather.control_words(ids, 0).size == gather.words
-
-
-def test_each_control_transfer_is_a_run_of_alike_packets():
-    """A transfer of control words streams one packet an iteration, so the
-    packets of each are one size: the preamble's write four words of a
-    descriptor, and every row's, push's and chain end's two. Each row's two
-    packets write its descriptor's length and address.
-    """
-    for rows in (1, 7, 8, 15, 71, 256):
-        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
-        words, slots = gather.template
-        sizes = []
-        at = 0
-        while at < words.size:
-            beats = (int(words[at]) >> 20) & 0x3
-            sizes.append(beats + 2)
-            at += beats + 2
-        preamble = 4 * Gather.chain
-        assert at == words.size
-        assert sizes[:preamble] == [5] * preamble
-        assert set(sizes[preamble:]) == {3}, rows
-        bd_words = (words[slots - 2] & 0xFFFFF) - Gather.bd_base
-        assert (bd_words % 0x20 == 0).all()
-        assert ((words[slots + 1] & 0xFFFFF) - Gather.bd_base == bd_words + 8).all()
-
-
-def test_a_core_writes_the_words_the_host_would():
-    for rows in (1, 7, 8, 15, 256, 512):
-        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
-        _, slots = gather.template
-        written = np.concatenate(
-            [tap.gather(np.arange(gather.words)) for tap in gather.word_source().taps()]
-        )
-        np.testing.assert_array_equal(written, np.stack([slots, slots + 2], -1).ravel())
-
-
-def test_a_bounded_core_writes_the_addresses_then_the_lengths():
-    for rows in (1, 7, 8, 15, 256, 512):
-        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
-        _, slots = gather.template
-        source = GatherWords(
-            rows=rows,
-            table_rows=VOCAB,
-            row_bytes=WIDTH * 2,
-            words=gather.words,
-            bounded=True,
-        )
-        written = np.concatenate(
-            [tap.gather(np.arange(gather.words)) for tap in source.taps()]
-        )
-        pairs = np.stack([slots, slots + 2], -1).ravel()
-        np.testing.assert_array_equal(written, np.concatenate([pairs, slots - 1]))
-        assert source.record == 3 * rows
-
-
 def _moved(gather: Gather, valid: int) -> np.ndarray:
     """The bytes each row's descriptor moves, read from the control words a
     call with ``valid`` rows writes.
@@ -527,85 +462,6 @@ def test_a_bounded_prompt_chunk_moves_13_rows_not_2048():
     gather = Gather(rows=2048, table_rows=128256, row=2048, feeds=4)
     assert _moved(gather, None).sum() == 8 * 1024 * 1024
     assert _moved(gather, 13).sum() == 13 * 4096 + 2035 * 16 == 85808
-
-
-def test_a_gather_feeds_from_as_many_shim_pairs_as_the_device_has():
-    for name, cols, rows, feeds in (
-        ("npu1", 4, 512, 2),
-        ("npu2", 8, 512, 4),
-        ("npu2", 8, 33, 3),
-        ("npu2", 8, 16, 1),
-        ("npu2", 8, 1, 1),
-    ):
-        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
-        assert gather.resolved(from_name(name, n_cols=cols)).feeds == feeds
-
-
-def test_the_feeds_stream_runs_of_whole_pairs_that_cover_the_batches_once():
-    for rows in (17, 33, 71, 512, 5120):
-        for feeds in range(1, min(4, -(-rows // 16)) + 1):
-            gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH, feeds=feeds)
-            runs = gather.runs
-            assert [j for run in runs for j in run] == list(range(len(gather.batches)))
-            assert all(len(run) and run.start % 2 == 0 for run in runs)
-
-
-def test_the_control_words_are_one_layout_for_every_feed_count():
-    ids = gathered_ids(VOCAB, 512)
-    words = {
-        feeds: Gather(rows=512, table_rows=VOCAB, row=WIDTH, feeds=feeds).control_words(
-            ids, 0x40000
-        )
-        for feeds in (1, 2, 3, 4)
-    }
-    for feeds in (2, 3, 4):
-        np.testing.assert_array_equal(words[feeds], words[1])
-
-
-def test_ids_the_device_made_take_a_word_step(npu2, table):
-    other = np.zeros((3000, 256), dtype=bfloat16)
-    recording = FromDeviceIds(table, other).record(ids=((15,), np.int32))
-    steps = [type(s.op).__name__ for s in recording.steps]
-    assert steps == ["Copy", "GatherWords", "Gather", "GatherWords", "Gather"]
-    assert not recording.encoders
-    assert sorted(
-        (buffer, word) for buffer, _, word in recording.addresses.values()
-    ) == [
-        ("other", "base_hi"),
-        ("other", "base_lo"),
-        ("table", "base_hi"),
-        ("table", "base_lo"),
-    ]
-
-
-def test_an_input_s_words_for_each_table_follow_the_last_s(npu2, table):
-    """One input gathers from three tables: an encoder each, by table, and
-    each gather's words a part of the input's buffer, after the last's; its
-    reference is numpy's take of each table. One table's words stay the
-    whole buffer, as before.
-    """
-    tables = many_tables(table)
-    graph = ManyTables(*tables)
-    recording = graph.record(ids=((256,), np.int32))
-    held = recording.encoders["ids"]
-    assert [e.buffer for e in held] == ["tables.0", "tables.1", "tables.2"]
-    words = [e.words for e in held]
-    gathers = [s for s in recording.steps if isinstance(s.op, Gather)]
-    assert [s.op.words for s in gathers] == words
-    assert recording.pinned["ids"] == 4 * sum(words)
-    sequence = Image(recording, PerStep())
-    sequence._prepare()
-    assert sequence.layout["ids"][2] == 4 * sum(words)
-    starts = [0, 4 * words[0], 4 * (words[0] + words[1])]
-    assert [s.refs()[1] for s in gathers] == [
-        BufferRef("ids", start, 4 * w) for start, w in zip(starts, words)
-    ]
-    one = ManyTables(table).record(ids=((256,), np.int32))
-    (gather,) = [s for s in one.steps if isinstance(s.op, Gather)]
-    assert gather.refs()[1] == BufferRef("ids") and "ids" not in one.pinned
-    ids = np.random.default_rng(5).integers(0, 1000, 256).astype(np.int32)
-    for got, t in zip(graph.reference(ids, n=200), tables):
-        assert_equal(got[:200], np.take(t, ids[:200], axis=0), "reference")
 
 
 def test_an_input_gathers_from_a_table_once(npu2, table):

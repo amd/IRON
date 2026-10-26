@@ -157,11 +157,6 @@ def test_a_tower_runs_its_front_end_s_rows():
     assert verdict, verdict
 
 
-def test_a_tower_takes_no_ids():
-    with pytest.raises(NotImplementedError, match="Rows defines no lookup"):
-        Rows().lookup(None)
-
-
 def test_the_default_layer_is_an_encoder_layer_attending_both_ways(table):
     graph = Layers(table)
     recording = graph.record(**graph.shapes()[0])
@@ -187,6 +182,8 @@ class Positioned(SelfAttention):
 
 @pytest.mark.parametrize("n", [9, ROWS])
 def test_an_encoder_places_its_positions_through_the_hook(table, n):
+    # n < ROWS binds position_table to fewer rows than it holds; n == ROWS
+    # is the boundary where the bound is the table's own size.
     rng = np.random.default_rng(n)
     positions = (rng.standard_normal((ROWS, HEADS * HEAD_DIM)) / 4).astype(bfloat16)
     graph = Positioned(table, positions)

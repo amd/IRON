@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""iron.lm.Conv2d on a device, at EmbeddingGemma 2's subsampling shapes
-and two depthwise ones, the second's 13 output rows not whole GEMM row
-blocks: one compile each, called at two row counts, every output row the
+"""iron.lm.Conv2d on a device, depthwise, its 13 output rows not whole GEMM
+row blocks: one compile, called at two row counts, every output row the
 call computes held to its reference (the convolution, as
 ``iron/tests/common/test_conv2d_graph.py`` judges it against torch's) within its
-GEMM's bound, 2 units of 2^-8 of the convolution of |x| by |weight|.
+GEMM's bound, 2 units of 2^-8 of the convolution of |x| by |weight|. The
+audio subsampling shapes run in the audio tower's model tests.
 """
 
 import numpy as np
@@ -21,9 +21,6 @@ pytestmark = pytest.mark.supported_devices("npu1", "npu2")
 # convolution's own; ``groups`` (depthwise only) gives the true input
 # channel count, else it is ``channels_per_group``.
 SHAPES = {
-    "band": ((128, 1), 3074, 128, dict(stride=2, padding=1, border=1)),
-    "patches": ((32, 128), 1538, 66, dict(stride=2)),
-    "depthwise": ((64, 1), 514, 64, dict(stride=2, groups=64)),
     "depthwise_13_rows": ((64, 1), 27, 26, dict(stride=2, padding=1, groups=64)),
 }
 

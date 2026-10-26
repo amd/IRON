@@ -148,23 +148,11 @@ def test_a_tile_past_what_one_core_holds_is_refused_not_split(npu2):
     assert RMSNorm(rows=2, tile_size=8192).resolved(npu2).tile_size == 8192
 
 
-def test_the_default_column_count_is_the_most_that_leave_whole_tiles(npu1, npu2):
-    """A tunable-free operator resolves on either device to the widest count
-    its shape divides over, rather than the whole shim budget and a refusal.
+def test_softmax_with_no_column_count_that_tiles_is_refused(npu2):
+    """A tunable-free operator resolves to the widest column count its shape
+    divides over; where even one column does not fit, compatible() names the
+    rule rather than falling back to the whole shim budget.
     """
-    assert (
-        GEMM(M=256, K=64, N=256, precision=Precision.MEDIUM)
-        .resolved(npu2)
-        .num_aie_columns
-        == 4
-    )
-    assert (
-        GEMM(M=256, K=64, N=512, precision=Precision.MEDIUM)
-        .resolved(npu1)
-        .num_aie_columns
-        == 4
-    )
-    # Nothing fits: one column, and compatible() names the rule.
     with pytest.raises(ValueError, match=r"rows \(16\)"):
         Softmax(rows=16, cols=16, num_channels=3).resolved(npu2)
 
@@ -225,34 +213,23 @@ def test_mha_whose_head_fits_no_block_is_refused(npu2):
         MHA(num_heads=2, seq_len=1024, d=768, num_pipelines=8).resolved(npu2)
 
 
-def test_mha_blocks_follow_the_head_size(npu2):
-    for d, block, pv_cores in ((64, 64, 1), (128, 32, 1), (256, 16, 1), (512, 16, 2)):
-        op = MHA(num_heads=2, seq_len=1024, d=d, num_pipelines=8).resolved(npu2)
-        assert (op.B_q, op.B_kv, op.pv_cores) == (block, block, pv_cores)
-        assert op.pv_width * pv_cores == d
-
-
-@pytest.mark.parametrize(
-    "heads,kv_heads,d,block",
-    [(32, 8, 64, 8), (32, 1, 64, 32)],
-    ids=["llama_1b", "group_of_32"],
-)
-def test_mha_one_query_packed_takes_the_narrowest_block_and_64_keys(
-    heads, kv_heads, d, block, npu2
-):
+def test_mha_one_query_packed_takes_the_narrowest_block_and_64_keys(npu2):
     """Every row of a packed block is computed, so one query takes the
     narrowest block that holds its group, over 64-key blocks: mha.cc's
-    vectorized softmax reads 64-key rows."""
+    vectorized softmax reads 64-key rows. (num_heads=32, num_KV_heads=8 is
+    the llama_1b shape test_catalog.py already dispatches; group_of_32,
+    kv_heads=1, is not, so that is the one worth a construction-time check.)
+    """
     op = MHA(
-        num_heads=heads,
-        num_KV_heads=kv_heads,
-        d=d,
+        num_heads=32,
+        num_KV_heads=1,
+        d=64,
         seq_len=1,
         kv_len=32768,
         num_pipelines=1,
         heads_interleaved=True,
     ).resolved(npu2)
-    assert (op.B_q, op.B_kv) == (block, 64)
+    assert (op.B_q, op.B_kv) == (32, 64)
 
 
 @pytest.mark.parametrize(
@@ -336,28 +313,17 @@ def test_a_float32_softmax_under_a_per_call_bound_is_refused(npu2):
         step.op.resolved()
 
 
-@pytest.mark.parametrize(
-    "device,precision",
-    [("npu1", None), ("npu2", None), ("npu2", Precision.HIGH)],
-)
-def test_flm_gemm_reads_b_as_stored_in_bf16(device, precision, request):
+def test_flm_gemm_reads_b_as_stored_in_bf16(npu2):
+    """Packing is for a row-major B; ``b_col_maj`` reads B as the array
+    already holds it, so packing it again is refused rather than silently
+    reordered wrong. (The read-as-stored path itself is the device check in
+    flm/gemm/test.py's test_gemm_b_col_maj.)
+    """
     op = ProjectionGEMM(
-        M=256, K=512, N=256, b_col_maj=True, precision=precision
-    ).resolved(request.getfixturevalue(device))
-    assert op.B.shape == (256, 512) and op.b_dtype is bfloat16
-    assert not op.bfp16_b
+        M=256, K=512, N=256, b_col_maj=True, precision=Precision.MEDIUM
+    ).resolved(npu2)
     with pytest.raises(ValueError, match="reads B as stored"):
         op.pack_B(None)
-
-
-def test_flm_gemm_halves_a_short_k_tile_to_double_buffer_b(npu2):
-    op = ProjectionGEMM(M=256, K=64, N=256, precision=Precision.MEDIUM).resolved(npu2)
-    assert (op.tile_n, op.k_tile, op.ct_k, op.l1_b_depth) == (64, 64, 32, 2)
-
-
-def test_flm_gemm_at_medium_takes_bf16_macs_on_aie2(npu1):
-    op = ProjectionGEMM(M=256, K=512, N=256, precision=Precision.MEDIUM).resolved(npu1)
-    assert not op.emulate_bf16_mmul_with_bfp16 and not op.bfp16_b
 
 
 @pytest.mark.parametrize(

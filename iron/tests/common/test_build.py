@@ -91,18 +91,6 @@ def test_split_takes_every_batch_and_broadcasts():
     assert b_tap == TensorAccessPattern((100 * 128,), 0, [100 * 128], [1])
 
 
-def test_a_buffer_without_a_stream_has_no_derived_transfers():
-    class NoStream(Operator):
-        M: int = param()
-        K: int = param()
-        A = In(M, K)
-        C = Out(M, obj_shape=(64,))
-
-    op = NoStream(M=256, K=128)
-    with pytest.raises(ValueError, match="NoStream.A has no obj_shape="):
-        op.A.transfers()
-
-
 def test_a_bounded_operand_goes_round_robin_over_the_lanes():
     """Under a bound each lane reads every ``lanes``-th tile from a fixed
     offset, so one patched count serves every lane; the pattern is built
@@ -623,6 +611,8 @@ def test_a_bounded_flm_gemm_refuses_a_call_with_no_rows(npu2):
 
 
 def test_a_row_bound_needs_one_row_block_per_unit():
+    # The only cover of this refusal: no model shape bounds a call with
+    # m_chunk > 1.
     op = flm_gemm.ProjectionGEMM(
         M=512, K=512, N=512, b_col_maj=True, m_chunk=2, precision=Precision.MEDIUM
     )

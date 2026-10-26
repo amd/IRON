@@ -61,9 +61,14 @@ GEMMA = (
 )
 
 
-def test_an_activation_with_no_operator_is_refused():
-    with pytest.raises(ValueError, match="no operator for hidden_act 'quick_gelu'"):
-        blocks.activation("quick_gelu")
+@pytest.mark.parametrize("norm", [F.rms_norm, F.layer_norm], ids=["rms", "layer"])
+def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
+    # Unrefused, normalized_shape is checked against the last axis but
+    # otherwise unused: the kernel would silently normalize the last axis
+    # regardless of what the caller asked for.
+    x = SimpleNamespace(shape=(4, WIDTH))
+    with pytest.raises(ValueError, match="not the last axis"):
+        norm(x, 4)
 
 
 @pytest.mark.parametrize(
@@ -89,13 +94,6 @@ def test_a_norm_is_its_kernel_weighted_if_given_then_any_bias(norm, steps):
     assert [
         (type(s.op).__name__, getattr(s.op, "weighted", None)) for s in recorded
     ] == steps
-
-
-@pytest.mark.parametrize("norm", [F.rms_norm, F.layer_norm], ids=["rms", "layer"])
-def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
-    x = SimpleNamespace(shape=(4, WIDTH))
-    with pytest.raises(ValueError, match="not the last axis"):
-        norm(x, 4)
 
 
 def test_a_layer_norm_s_eps_is_its_kernel_s():
@@ -129,6 +127,8 @@ def test_each_gelu_is_its_operator_s_form(act, approximate):
 
 
 def test_gelu_refuses_a_form_it_has_no_kernel_for():
+    # The only check of GELU's approximate= refusal, and that it surfaces
+    # through F.gelu's graph-recording path.
     class Activated(iron.Graph):
         def body(self, x):
             return F.gelu(x, approximate="sigmoid")

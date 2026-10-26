@@ -6,7 +6,6 @@ test's halves, host-side."""
 
 import numpy as np
 import pytest
-from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -14,7 +13,6 @@ from iron.common.testing import vectors
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
-from iron.operators.rope import RoPE
 from iron.operators.sample import Sample
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -30,26 +28,17 @@ def test_vectors_draws_each_input_and_runs_the_reference_on_the_draw():
     assert not np.array_equal(vectors(op, seed=2)["a"], v["a"])
 
 
-def test_vectors_takes_a_given_array_a_shape_or_a_centred_draw():
+def test_vectors_takes_a_given_shape_or_refuses_an_unknown_input():
+    # No catalog operator's draw gives a shape rather than an array; given= array
+    # and centered=/normal= are exercised on device by the operators that use them
+    # (clamp.py, gelu.py, depthwise_conv1d.py, log.py, magnitude.py, merge.py,
+    # resample/op.py, sample.py).
     op = ReLU(size=64, num_aie_columns=1, tile_size=64)
-    given = np.arange(64, dtype=bfloat16)
-    assert vectors(op, given={op.x: given})["x"] is given
     # The declared 64, as given; the class's declared operand keys it too.
     assert vectors(op, given={ReLU.x: (2, 32)})["x"].shape == (2, 32)
-    plain, centred = vectors(op)["x"], vectors(op, centered=(op.x,))["x"]
-    assert plain.dtype == centred.dtype == bfloat16
-    assert 0 <= plain.min() and plain.max() < 4.0 and not (plain == plain.round()).all()
-    assert (centred < 0).any() and (centred > 0).any()  # both signs, as ReLU asks
     other = ElementwiseAdd(size=64, num_aie_columns=1, tile_size=64)
     with pytest.raises(ValueError, match=r"has no input \['a'\]"):
-        vectors(op, given={other.a: given})
-
-
-def test_tolerance_is_the_operators_own_else_its_kernels_contract():
-    assert RoPE(rows=8, cols=64).resolved().tolerance().rtol == 0.05
-    relu = ReLU(size=64, num_aie_columns=1, tile_size=64).resolved()
-    contract = relu.layout().kernel().contract_for(resolve_target_arch(relu.dev))
-    assert relu.tolerance() == contract.tolerance is not None
+        vectors(op, given={other.a: np.arange(64, dtype=bfloat16)})
 
 
 def _sample():
@@ -70,11 +59,10 @@ def test_call_reference_pairs_buffers_by_name_not_by_order():
 
 
 def test_judge_names_each_output_and_refuses_a_missing_one():
+    # A wrong output failing judge() is test_judging's, across every tolerance kind.
     op, v = _sample()
     verdicts = op.judge(v.inputs, v.outputs, Tolerance.exact())
     assert list(verdicts) == ["tokens", "token"] and all(verdicts.values())
-    wrong = {**v.outputs, "token": v.outputs["token"] + 1}
-    assert not op.judge(v.inputs, wrong, Tolerance.exact())["token"]
     with pytest.raises(ValueError):
         op.judge(v.inputs, {"tokens": v.outputs["tokens"]}, Tolerance.exact())
 

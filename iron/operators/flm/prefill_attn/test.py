@@ -124,21 +124,19 @@ def _build(kind, **overrides):
 # The sliding-window chunk starts past the window, so the window cuts its keys.
 BENCH = {("attn", 0, 512, 1024, 1), ("swa", 512, 1024, 2048, 1)}
 
+# Every range at the GQA ratio the other tests in this file use (num_kv_heads=1),
+# plus one case per kind at ratio 4 (num_kv_heads=2) to confirm the grouping
+# itself works; the window/cache edge cases above don't depend on the ratio.
+CASES = [
+    pytest.param(
+        kind, *r, 1, marks=[pytest.mark.bench] if (kind, *r, 1) in BENCH else []
+    )
+    for kind, (_, _, ranges) in OPERATORS.items()
+    for r in ranges
+] + [pytest.param(kind, *ranges[0], 2) for kind, (_, _, ranges) in OPERATORS.items()]
 
-@pytest.mark.parametrize(
-    "kind, L_begin, L_end, max_l, num_kv_heads",
-    [
-        pytest.param(
-            kind,
-            *r,
-            kv,
-            marks=[pytest.mark.bench] if (kind, *r, kv) in BENCH else [],
-        )
-        for kv in (1, 2)
-        for kind, (_, _, ranges) in OPERATORS.items()
-        for r in ranges
-    ],
-)
+
+@pytest.mark.parametrize("kind, L_begin, L_end, max_l, num_kv_heads", CASES)
 def test_matches_reference(kind, L_begin, L_end, max_l, num_kv_heads, record_property):
     op = _build(kind, num_kv_heads=num_kv_heads)
     _check(op, L_begin, L_end, max_l, seed=L_end, record=record_property)

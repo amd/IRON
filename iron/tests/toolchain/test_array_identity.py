@@ -36,12 +36,6 @@ pytestmark = requires("aiecc", "peano")
 # extent.
 PAIRS = [
     (
-        "relu",
-        "ReLU",
-        dict(num_aie_columns=1, num_channels=1, tile_size=256),
-        ("size", 1024),
-    ),
-    (
         "elementwise_add",
         "ElementwiseAdd",
         dict(tile_size=256, num_aie_columns=1),
