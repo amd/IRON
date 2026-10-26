@@ -26,6 +26,7 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ExternalFunction, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
+from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from ml_dtypes import bfloat16
@@ -1542,59 +1543,6 @@ class Resample(Operator):
         return Built(workers, rtps)
 
 
-POSITIONS = """
-#include <stdint.h>
-
-namespace {
-int n, pad, across, wx, wy, tx, ty;
-}
-
-// Block `b` of the patches in pooling-window order: (x, y) side by side in
-// xy, x then POSITIONS + y in position, and the patch's row of Resample's
-// raster in order. Past the image, or for a size that is not whole windows,
-// ids past each table, which a bounded gather never reads, and the raster's
-// zero patch.
-extern "C" void patch_positions(int32_t *out, int32_t b, int32_t count, int32_t ho,
-                                int32_t wo) {
-    int32_t *xy = out, *position = out + 2 * BLOCK, *order = out + 4 * BLOCK;
-    if (b == 0) {
-        unsigned bands = ho > 0 ? (unsigned)ho / SIDE : 0;
-        unsigned strips = wo > 0 ? (unsigned)wo / SIDE : 0;
-        uint64_t all = (uint64_t)bands * strips;
-        bool ok = ho % SIDE == 0 && wo % SIDE == 0 && all > 0 && bands % POOL == 0 &&
-                  strips % POOL == 0 && all <= (uint64_t)count * BLOCK;
-        n = ok ? (int)all : 0;
-        pad = (strips / CORES + 1) * CORES;
-        across = strips / POOL;
-        wx = wy = tx = ty = 0;
-    }
-    for (int r = 0, i = b * BLOCK; r < BLOCK; r++, i++) {
-        if (i < n) {
-            int x = POOL * tx + wx, y = POOL * ty + wy;
-            xy[2 * r] = position[r] = x;
-            xy[2 * r + 1] = y;
-            position[BLOCK + r] = POSITIONS + y;
-            order[r] = y * pad + x;
-            if (++wx < POOL)
-                continue;
-            wx = 0;
-            if (++wy < POOL)
-                continue;
-            wy = 0;
-            if (++tx < across)
-                continue;
-            tx = 0;
-            ty++;
-        } else {
-            xy[2 * r] = xy[2 * r + 1] = POSITIONS;
-            position[r] = position[BLOCK + r] = 2 * POSITIONS;
-            order[r] = pad - 1;
-        }
-    }
-}
-"""
-
-
 class PatchPositions(Operator):
     """Where each of `rows` patch rows of the vision tower comes from, for
     an image resized to `out_rows` by `out_columns` pixels.
@@ -1661,22 +1609,21 @@ class PatchPositions(Operator):
     def reference(self, *, out_rows=None, out_columns=None):
         ho = self.out_height if out_rows is None else int(out_rows)
         wo = self.out_width if out_columns is None else int(out_columns)
-        T, P, k = self.rows, self.positions, self.pool
-        bands, strips = max(ho, 0) // SIDE, max(wo, 0) // SIDE
-        pad = (strips // self.cores + 1) * self.cores
-        xy = np.full((T, 2), P, np.int32)
-        position_ids = np.full((2, T), 2 * P, np.int32)
-        order = np.full(T, pad - 1, np.int32)
-        whole = not (ho % SIDE or wo % SIDE or bands % k or strips % k)
-        if whole and 0 < bands * strips <= T:
-            y, x = np.divmod(np.arange(bands * strips), strips)
-            token = x // k + strips // k * (y // k)
-            o = np.lexsort((x % k, y % k, token))
-            x, y = x[o], y[o]
-            xy[: o.size] = np.stack([x, y], axis=-1)
-            position_ids[0, : o.size], position_ids[1, : o.size] = x, P + y
-            order[: o.size] = y * pad + x
-        return xy, position_ids, order
+        B = self.block
+        record = datamovement.patch_positions_ref(
+            self.rows // B,
+            ho,
+            wo,
+            block=B,
+            side=SIDE,
+            pool=self.pool,
+            positions=self.positions,
+            cores=self.cores,
+        )
+        xy = record[:, : 2 * B].reshape(-1, 2)
+        position_ids = record[:, 2 * B : 4 * B].reshape(-1, 2, B).transpose(1, 0, 2)
+        order = record[:, 4 * B :].reshape(-1)
+        return xy, position_ids.reshape(2, -1), order
 
     def tolerance(self) -> Tolerance:
         return Tolerance.exact()
@@ -1699,20 +1646,8 @@ class PatchPositions(Operator):
     def build(self) -> Built:
         B = self.block
         record_ty = np.ndarray[(5 * B,), np.dtype[np.int32]]
-        kernel = ExternalFunction(
-            "patch_positions",
-            source_string=POSITIONS,
-            arg_types=[record_ty] + [np.int32] * 4,
-            compile_flags=[
-                f"-DSIDE={SIDE}",
-                f"-DPOOL={self.pool}",
-                f"-DPOSITIONS={self.positions}",
-                f"-DCORES={self.cores}",
-                f"-DBLOCK={B}",
-            ],
-            symbol_prefix=(
-                f"patch_positions_{self.pool}_{self.positions}_{self.cores}_{B}"
-            ),
+        kernel = datamovement.patch_positions(
+            B, side=SIDE, pool=self.pool, positions=self.positions, cores=self.cores
         )
         outs = (self.xy, self.position_ids, self.order)
         # A core has two output channels: a memtile splits its record into three.
