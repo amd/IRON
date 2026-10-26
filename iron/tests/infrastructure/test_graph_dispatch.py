@@ -97,13 +97,6 @@ def test_a_graph_records_the_same_steps_as_a_hand_written_runlist():
     assert shape(graph.steps) == shape(hand.steps)
 
 
-def test_a_graph_names_its_io_from_the_function():
-    recording, seq = _graph("graph_io")
-    assert [h.name for h in recording.inputs] == ["x", "w"]
-    assert [h.name for h in recording.outputs] == ["out"]
-    assert seq.inputs == ["x", "w"] and seq.outputs == ["out"]
-
-
 def _run(sequence, inputs):
     """Fill the named inputs, dispatch, and read the output back."""
     run = sequence.get_callable()

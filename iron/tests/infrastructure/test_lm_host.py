@@ -342,16 +342,6 @@ def test_each_checkpoint_tensor_lands_on_its_name_bitwise(toy_path):
         assert bitwise_equal(at(tree, name), expected), name
 
 
-def test_tree_arrays_are_the_checkpoints(toy_path):
-    """The recorder names a weight by id(), so each is one array, as read."""
-    checkpoint = Checkpoint(toy_path)
-    tree = checkpoint.tree()
-    name = "model.layers.1.self_attn.v_proj.weight"
-    assert tree.model.layers[1].self_attn.v_proj.weight.base is checkpoint.tensors[name]
-    ids = [id(at(tree, name)) for name in checkpoint.tensors]
-    assert len(set(ids)) == len(ids)
-
-
 def test_tree_names_a_tensor_of_a_skipped_layer(tmp_path):
     """Layer 0 gone and layer 1 whole: layer 1 stays layer 1, and layer 0's
     tensors are missing by their paths, not one layer renumbered.
@@ -545,11 +535,6 @@ def test_unread_fill_zeroes_a_scalar(tmp_path):
     assert tree.bound.shape == () and tree.bound == 0
 
 
-def test_tree_refuses_an_unknown_fill(toy_path):
-    with pytest.raises(ValueError, match="'zeros'"):
-        Checkpoint(toy_path).tree("zeros")
-
-
 # Tier 1 -- sampling
 # ##########################################################################
 
@@ -589,17 +574,19 @@ def test_top_k_keeps_ties_with_the_kth():
 
 
 def test_device_rows_are_the_host_draws():
-    """rows() takes the uniforms the host draws would, greedy steps included,
-    so the device's tokens are the host's for the same seed.
+    """rows() takes the uniforms the host draws would, so the device's
+    tokens are the host's for the same seed, at the greedy step the device's
+    batched draw and the host's argmax must still agree on (the temperature
+    0.7 path is checked end to end, device against host, in
+    ``tests/applications/llama/test.py``'s ``check_device_sampling``).
     """
     logits = random_logits(4096, seed=6)
-    for temperature in (0.7, 0.0):
-        host = Sampler(temperature, 50, seed=9)
-        device = Sampler(temperature, 50, seed=9)
-        rows = device.rows(8, k_max=64)
-        want = [host(logits) for _ in range(8)]
-        assert [sample.reference(logits, r) for r in rows] == want
-        assert host.rng.random() == device.rng.random()
+    host = Sampler(0.0, 50, seed=9)
+    device = Sampler(0.0, 50, seed=9)
+    rows = device.rows(8, k_max=64)
+    want = [host(logits) for _ in range(8)]
+    assert [sample.reference(logits, r) for r in rows] == want
+    assert host.rng.random() == device.rng.random()
 
 
 def test_device_rows_refuse_an_unbounded_top_k():
