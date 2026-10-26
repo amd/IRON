@@ -14,13 +14,11 @@ from .cli import main
 from .blocks import (
     MLP,
     Attention,
-    Conv1d,
     DecoderLayer,
     Embedding,
     EncoderLayer,
     GatedMLP,
     ImagePatches,
-    ImageResize,
     KVCache,
     LayerNorm,
     Linear,
@@ -34,8 +32,8 @@ from .blocks import (
     activation,
     residual_add,
 )
-from iron.common.feature_map import ConcatChannels, Conv2d, MaxPool2d
-from .causal import Call, CausalLM, Checkpoints, Decoder
+from iron.common.feature_map import Conv2d
+from .causal import Call, CausalLM, Decoder
 from .encoder import Encoder, Tower
 from .golden import Golden, HuggingFace
 from .generation import Sampler, accuracy, determinism, generate_on_host
@@ -47,10 +45,7 @@ __all__ = [
     "Call",
     "CausalLM",
     "Checkpoint",
-    "Checkpoints",
-    "ConcatChannels",
     "Config",
-    "Conv1d",
     "Conv2d",
     "Decoder",
     "DecoderConfig",
@@ -62,13 +57,11 @@ __all__ = [
     "Golden",
     "HuggingFace",
     "ImagePatches",
-    "ImageResize",
     "KVCache",
     "LayerNorm",
     "Linear",
     "LogMel",
     "MLP",
-    "MaxPool2d",
     "Model",
     "Multimodal",
     "NoCache",

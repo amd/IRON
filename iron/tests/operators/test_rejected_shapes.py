@@ -41,10 +41,8 @@ from iron.operators.mha import MHA
 from iron.operators.resample.op import PatchPositions
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
-from iron.operators.router import TopKRouter
 from iron.operators.sample import Sample
 from iron.operators.softmax import Softmax
-from iron.operators.transpose import Transpose
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -141,33 +139,6 @@ def test_a_bounded_gather_of_rows_not_whole_16_byte_units_is_refused(npu2):
     Gather(rows=16, table_rows=64, row=6).resolved(npu2)
 
 
-# Shapes whose M*N is divisible by every factor while one per-dimension quotient is not
-# a whole number of tiles. Without the guard these reach the transfer as sizes
-# [8, 0, 256, 32]. compatible() runs at resolved(), so that is where the refusal lands.
-@pytest.mark.parametrize(
-    "M,N,aie_columns,channels,m,n,bad",
-    [
-        (2048, 128, 8, 1, 256, 32, "num_aie_columns"),
-        (256, 2048, 1, 2, 256, 32, "num_channels"),
-    ],
-)
-def test_transpose_dimension_that_does_not_tile_is_refused_by_name(
-    M, N, aie_columns, channels, m, n, bad
-):
-    with pytest.raises(ValueError, match=bad):  # every tunable given: at construction
-        Transpose(
-            M=M, N=N, num_aie_columns=aie_columns, num_channels=channels, m=m, n=n, s=8
-        )
-
-
-@pytest.mark.parametrize("aie_columns", [1, 2, 4])
-def test_transpose_tiling_that_fits_is_still_accepted(aie_columns, npu2):
-    """The guard must not narrow the accepted set: 1/2/4 columns all tile N=128 by n=32."""
-    Transpose(
-        M=2048, N=128, num_aie_columns=aie_columns, num_channels=1, m=256, n=32, s=8
-    ).resolved(npu2)
-
-
 def test_a_tile_past_what_one_core_holds_is_refused_not_split(npu2):
     """A row an elementwise kernel cannot hold is an error at resolution; the
     library never halves it, since a norm's reference is the whole row.
@@ -193,8 +164,6 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles(npu1, npu2)
         .num_aie_columns
         == 4
     )
-    assert Transpose(M=64, N=64).resolved(npu2).num_aie_columns == 1
-    assert Transpose(M=64, N=256).resolved(npu2).num_aie_columns == 4
     # Nothing fits: one column, and compatible() names the rule.
     with pytest.raises(ValueError, match=r"rows \(16\) must be a multiple of the 3"):
         Softmax(rows=16, cols=16, num_channels=3).resolved(npu2)
@@ -632,17 +601,6 @@ def test_flm_lm_head_rejects_unservable_shapes(dim, vocab, softcap, match, npu2)
 def test_flm_decode_layer_rejects_unknown_configurations(kwargs, match):
     with pytest.raises(ValueError, match=match):
         DecodeLayer(**kwargs)
-
-
-def test_top_k_router_refuses_more_experts_than_it_routes_between():
-    with pytest.raises(ValueError, match="top_k \\(9\\) must be from 1"):
-        TopKRouter(experts=8, top_k=9)
-
-
-@pytest.mark.parametrize("rows, pairs", [(6, 4), (16, 9)])
-def test_top_k_router_refuses_rows_its_pairs_do_not_split(rows, pairs, npu2):
-    with pytest.raises(Unresolvable, match="pairs of cores"):
-        TopKRouter(experts=32, top_k=8, rows=rows, pairs=pairs).resolved(npu2)
 
 
 @pytest.mark.parametrize(

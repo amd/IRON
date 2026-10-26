@@ -12,18 +12,13 @@ from iron.common.testing import Case, Testing
 
 
 class Magnitude(Rowwise):
-    """The magnitude of each row of complex float32 held as `[re | im]`, or
-    with `power=2` its square, the power spectrum.
-    """
+    """The magnitude of each row of complex float32 held as `[re | im]`."""
 
     test = Testing(
         [
             Case(dict(rows=64, width=640, num_aie_columns=1)),
             Case(dict(rows=512, width=640, num_aie_columns=4)),
             Case(dict(rows=4096, width=640, num_aie_columns=8), bench=True),
-            # Whisper's 201 bins, padded to 256.
-            Case(dict(rows=64, width=512, num_aie_columns=1, power=2), lower=True),
-            Case(dict(rows=3000, width=512, num_aie_columns=8, power=2), bench=True),
         ],
         # Spectra span many decades and pad with zero bins.
         draw=lambda op: dict(
@@ -38,7 +33,6 @@ class Magnitude(Rowwise):
     )
 
     width: int = param()
-    power: int = param(default=1, array=True)
     tile_size: int = param(derive=lambda op: op.width // 2)
 
     x = In(
@@ -61,8 +55,6 @@ class Magnitude(Rowwise):
             raise ValueError(
                 f"Magnitude: width ({self.width}) is not two halves, re and im"
             )
-        if self.power not in (1, 2):
-            raise ValueError(f"Magnitude: power ({self.power}) is not 1 or 2")
 
     def kernel(self):
-        return eltwise.magnitude_f32(self.tile_size, power=self.power)
+        return eltwise.magnitude_f32(self.tile_size)

@@ -81,8 +81,8 @@ Formatting and licence checks are in CONTRIBUTING.md.
 - `iron/common/image/`: what a graph lowers onto: the step sequence, the
   buffer allocator, image composition (several designs in one image),
   packaging, and an operator called on its own. All internal.
-- `iron/common/feature_map.py`: `Conv2d`, `MaxPool2d` and `ConcatChannels`,
-  the graphs `iron.functional`'s CNN functions are built on.
+- `iron/common/feature_map.py`: `Conv2d`, a convolution over a
+  channels-last feature map's rows.
 - `iron/common/elementwise.py`: the shared elementwise array, its families
   and `Sweep`.
 - `iron/common/testing.py`: `Testing`, `Case`, `vectors`, `run_test`,
@@ -357,8 +357,7 @@ tunables and profiles already do that job.
   own reference on the host (`OnHost`, which runs it in place of the
   device).
 - `causal.py`: `CausalLM`, a decoder as one graph of a prompt chunk and a
-  decode step, its modules a `Decoder` of `layer_class` layers;
-  `Checkpoints`, recurrent state per chunk boundary.
+  decode step, its modules a `Decoder` of `layer_class` layers.
 - `session.py`: `Session`, one conversation over a decoder's loaded
   versions (the tokens its caches hold, `logits` and the draws); a model's
   `session` is the one `logits` and `generate` run in, and several share

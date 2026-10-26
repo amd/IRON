@@ -22,7 +22,6 @@ from aie.utils.compile import NPU_CACHE_HOME
 from iron.common.graph.compiled import walk
 
 from .blocks import KVCache
-from .causal import Checkpoints
 from .generation import (
     SEED,
     Sampler,
@@ -382,10 +381,7 @@ def _fill_caches(model, n: int, position: int):
     own host memory, filled in place), for the body of the ``with``; the
     prompt's own rows stay as it wrote them. A ring holds the ``ring``
     positions before ``position`` so filled; past ``ring``, a prompt's
-    positions in it are as it left them. A state checkpointed at each
-    chunk boundary (``Checkpoints``) holds, in the slot a call at
-    ``position`` reads, the state the prompt left; the reference reads a
-    copy of its slots.
+    positions in it are as it left them.
     """
     version = next(iter(model.versions.values()))
     caches = [(x, p) for _, x, p, _ in walk(model) if isinstance(p, KVCache)]
@@ -402,17 +398,9 @@ def _fill_caches(model, n: int, position: int):
                 rows[q % p.ring] = rows[p.ring + q % p.ring] = held[q % n]
         version.push(cache)
         cache.host = rows
-    checkpoints = [c for c in model.recurrent if isinstance(c, Checkpoints)]
-    for c in checkpoints:
-        slots = version.read(c.slots)
-        slots[c.slot(position)] = slots[c.slot(n)]
-        version.push(c.slots)
-        # A step may read and write one slot: the reference, run after the
-        # device's step, reads it as it was, not as the device left it.
-        c.slots.host = slots.copy()
     try:
         yield
     finally:
-        for state in [*(x for x, _ in caches), *(c.slots for c in checkpoints)]:
+        for state in (x for x, _ in caches):
             version.push(state)
             state.host = None

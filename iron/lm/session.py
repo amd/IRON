@@ -117,7 +117,7 @@ class Session:
     def resume(self, held: int) -> int:
         """The position calls start from to run the tokens from ``held`` on:
         ``held`` itself, or for a state that cannot restart there
-        (``Checkpoints.restart``), the earliest one of them can.
+        (``KVCache.restart``), the earliest one of them can.
         """
         ran = self._seen.size
         return min([held, *(c.restart(held, ran) for c in self.lm.recurrent)])
@@ -157,8 +157,7 @@ class Session:
     def _chunks(self, tokens: np.ndarray, start: int) -> Iterator[tuple]:
         """Each prompt call from ``start``: its inputs, ``ids`` and for a call
         holding a placeholder ``before``, and its per-call values. With
-        recurrent state a call ends at the next chunk boundary, the slot it
-        writes.
+        recurrent state a call ends at the next chunk boundary.
         """
         model = self.lm
         n, C = tokens.size, model.config.prefill_chunk
