@@ -223,6 +223,8 @@ class MHA(Operator):
     pv_cores: int = tunable(repr=False, domain=(1, 2))
     pv_width: int = tunable(repr=False, init=False)
 
+    aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
+
     # The array widths MHA is placed on, each with the most pipelines one
     # query packed takes, a K and a V lane each.
     PACKED_PIPELINES: ClassVar[dict[int, int]] = {8: 4, 4: 2}
