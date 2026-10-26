@@ -179,7 +179,9 @@ def test_iron_matches_engine(prompt, build_engines, stock_tokens, record_propert
     ), f"IRON gave {len(got)} tokens, the stock engine {len(stock)}"
     at = next((i for i, (a, b) in enumerate(zip(got, stock)) if a != b), None)
     if at is not None:
-        oracle = Gemma4.from_checkpoint(weights_dir("gemma-4-e2b-it")).cpu_reference()
+        directory = weights_dir("gemma-4-e2b-it")
+        require(directory / "model.safetensors", directory / "config.json")
+        oracle = Gemma4.from_checkpoint(directory).cpu_reference()
         logits = np.asarray(oracle.logits(stock[:at]), np.float64)
         p = np.exp(logits - logits.max())
         p /= p.sum()
