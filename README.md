@@ -81,18 +81,15 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
     sudo modprobe -r amdxdna && sudo modprobe amdxdna
     ```
    On NPU2 a model's prompt chunk is one command, and the deepest chunk, at
-   the model's native context, is the longest. On Strix Halo, measured at
-   two contexts, extrapolated linearly to the native one:
+   the model's native context, is the longest. Measured on Strix Halo, one
+   command each:
 
-   | Model | Measured (context: s) | Native context: s (extrapolated) |
+   | Model | Native context | Deepest chunk, s |
    |---|---|---|
-   | Llama 3.2 1B | 8192: 2.0, 32768: 6.9 | 131072: 26 |
-   | Llama 3.2 3B | 4096: 7.0, 8192: 10.0 | 131072: 101 |
-   | Qwen3 1.7B | 4096: 3.9, 8192: 8.0 | 40960: 40 |
-   | Ministral 3 3B | 4096: 4.6, 8192: 8.4 | 262144: 243 |
-   | Granite 4.2 3B | 4096: 7.2, 8192: 9.8 | 131072: 86 |
-   | SmolLM3 3B | 8192: 5.6 | 65536: under 45 |
-   | Ministral 3's vision tower, 6 of 24 layers | 12100 patches: 3.9 | 24 layers: 16 |
+   | Gemma 4 E2B | 131072 | 182 |
+   | Llama 3.2 3B | 131072 | 101 |
+   | Llama 3.2 1B | 131072 | 26 |
+   | EmbeddingGemma 2, each tower and the encoder | its largest input | under 0.7 |
 
    On NPU1 a command is one operator, the longest an attention layer of the
    deepest chunk.
