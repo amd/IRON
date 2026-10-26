@@ -32,7 +32,6 @@ from iron.operators.log import Log
 from iron.operators.magnitude import Magnitude
 from iron.operators.mha import MHA
 from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleTaps
-from iron.operators.resample.reference import Interpolation
 
 
 def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarray:
@@ -120,13 +119,9 @@ class LogMel(iron.Graph):
 
 
 class ImagePatches(iron.Graph):
-    """A decoded image resized as torchvision's antialiased resize does it,
-    rescaled to ``[0, 1]`` (and normalized, given ``mean``) and cut row-major
-    into a vision tower's ``patches`` rows of 16x16-pixel patches.
-
-    Args:
-        out: The ``(height, width)`` every call is resized to, which sizes
-            the buffers, or None for any whole windows of ``patches``.
+    """A decoded image resized as torchvision's antialiased bicubic resize
+    does it, rescaled to ``[0, 1]`` and cut row-major into a vision tower's
+    ``patches`` rows of 16x16-pixel patches.
     """
 
     def __init__(
@@ -135,26 +130,18 @@ class ImagePatches(iron.Graph):
         image: tuple[int, int],
         pool: int = 3,
         positions: int = 10240,
-        patch_columns: int | None = None,
+        patch_columns: int = 8,
         chunk: int = 4096,
-        interpolation: Interpolation = Interpolation.BICUBIC,
-        mean: tuple[float, ...] | None = None,
-        std: tuple[float, ...] | None = None,
-        out: tuple[int, int] | None = None,
     ):
         self.patches, self.image, self.pool, self.chunk = patches, image, pool, chunk
         k, side = pool, pool * SIDE
         cores = 2 * require_device().cols
-        if patch_columns is None:
-            patch_columns = 8 if out is None else out[1] // SIDE // cores + 1
         # The most pooling windows across: Resample's cores hold
         # `patch_columns` patch columns each, one a zero column past the image.
         self.across = (patch_columns * cores - 1) // k
         # Every grid of whole pooling windows the rows hold; the fewest patch
         # columns give the most bands and padded raster rows.
         grids = [(patches // s // k * k, s) for s in range(k, patches // k + 1, k)]
-        if out is not None:
-            grids = [(out[0] // SIDE, out[1] // SIDE)]
         shared: dict[str, Any] = dict(
             height=side,
             width=side,
@@ -171,9 +158,6 @@ class ImagePatches(iron.Graph):
         a, b = image
         self.resample = Resample(
             image_chunks=max(a * -(-3 * b // chunk), b * -(-3 * a // chunk)),
-            interpolation=interpolation,
-            mean=mean,
-            std=std,
             **shared,
         )
         self.raster = iron.state((shared["patch_rows"], 3 * SIDE**2))
@@ -182,7 +166,6 @@ class ImagePatches(iron.Graph):
             out_size=side,
             words=self.resample.words,
             slots=SIDE,
-            interpolation=interpolation,
             num_aie_columns=cores // 2,
             num_channels=2,
         )
