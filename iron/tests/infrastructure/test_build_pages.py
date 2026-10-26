@@ -28,6 +28,11 @@ TESTS = [
     ),
     ("iron/tests/lm/test_conv2d.py::test_conv2d", "case_band-share_1.0", "conv2d"),
     (
+        "iron/tests/operators/test_catalog.py::test_operator",
+        "npu2-GEMV-M_2048-K_8192-num_aie_columns_8",
+        "GEMV",
+    ),
+    (
         "tests/applications/decoders/test.py::test_generation",
         "gemma3-long-40",
         "gemma3",

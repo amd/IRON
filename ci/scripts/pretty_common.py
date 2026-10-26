@@ -4,6 +4,7 @@
 """Shared helpers for the pretty_* CI report scripts."""
 
 import os
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # Columns that identify a row rather than measure it.
@@ -110,14 +111,17 @@ def operator_name(test_path: str, test_name: str = "") -> str:
 
     'iron/operators/flm/gemm/test.py::test_gemm' names 'flm/gemm', and
     'tests/applications/llama/test.py::test_llama' names 'llama'. A row of
-    a LEADING_ID_TEST_FILES module is named by its test's leading id:
-    'iron/tests/operators/test_catalog.py::test_operator' with test
-    'GEMV-cols_4' names 'GEMV'. Any other test is named by its module,
-    'test_' dropped.
+    a LEADING_ID_TEST_FILES module is named by its test's leading id, after
+    the device the catalog prefixes: 'iron/tests/operators/test_catalog.py::
+    test_operator' with test 'npu2-GEMV-cols_4' names 'GEMV'. Any other test
+    is named by its module, 'test_' dropped.
     """
     file_part = test_path.split("::", 1)[0]
     if file_part in LEADING_ID_TEST_FILES:
-        return test_name.split("-", 1)[0] or UNKNOWN_OPERATOR
+        parts = test_name.split("-")
+        if len(parts) > 1 and re.fullmatch(r"npu\d+", parts[0]):
+            parts = parts[1:]
+        return parts[0] or UNKNOWN_OPERATOR
     directory, _ = split_test_path(test_path)
     for prefix in ("iron/operators/", "tests/applications/"):
         if directory.startswith(prefix):
