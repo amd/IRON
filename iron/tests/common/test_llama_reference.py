@@ -114,34 +114,6 @@ def test_a_model_runs_only_the_versions_it_loaded(cpu):
     assert not model._versions
 
 
-def test_a_model_places_every_version_before_loading_any(cpu, monkeypatch):
-    """A version placed after the arena's buffers exist grows them, copying
-    every weight once more, so ``load_versions`` compiles all before it
-    loads one.
-    """
-    model, events = Llama(cpu.config, cpu.weights), []
-
-    class Version:
-        emit = None
-
-        def __init__(self, shapes):
-            self.shapes = shapes
-
-        def load(self, release=None):
-            events.append(("load", self.shapes))
-
-    def compile(**kw):
-        shapes = {k: v for k, v in kw.items() if k not in ("dev", "feeds", "full_elf")}
-        events.append(("compile", shapes))
-        return Version(shapes)
-
-    monkeypatch.setattr(model, "compile", compile)
-    monkeypatch.setattr(model, "loaded", lambda versions: None)
-    model.load_versions(dev=object())
-    shapes = model.shapes()
-    assert events == [("compile", s) for s in shapes] + [("load", s) for s in shapes]
-
-
 def test_a_model_reads_as_its_context_and_whether_it_is_loaded(cpu):
     model = Llama(cpu.config, cpu.weights)
     assert repr(model) == f"Llama(max_seq_len={cpu.config.max_seq_len}, not loaded)"

@@ -8,6 +8,9 @@ sizes, and value bindings; nothing here needs a toolchain.
 """
 
 import inspect
+import re
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,7 +26,7 @@ import iron
 from iron import Carried, Precision, Profile, Scratchpad
 from iron.common.graph import Handle
 from iron.common.graph.handle import Dense
-from iron.common.graph.record import Recording, Recorder
+from iron.common.graph.record import Recording
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import CompiledGraph, _words
 from iron.common.image.link import PerStep
@@ -49,6 +52,7 @@ from iron.operators.softmax import Softmax
 from iron.tests.support.declare import Rows
 from iron.tests.support.graphs import Trail, Walk
 from iron.tests.support.llama_model import llama_1b, small
+from iron.tests.support.xrt import without_xrt
 
 E, H = 2048, 8192
 
@@ -359,18 +363,21 @@ def test_shape_mismatch_and_rank_rules():
     assert t.steps[0].op.size == 2048 and t.outputs[0].shape == (4, 512)
 
 
-def test_no_npu_says_how_to_compile_without_one(monkeypatch):
-    monkeypatch.setattr(aie_utils, "ensure_current_device", lambda: None)
-    monkeypatch.delenv("NPU_RUNTIME", raising=False)
-    with pytest.raises(
-        RuntimeError,
-        match=r"no NPU found \(NPU_RUNTIME unset; is the driver loaded\? .*"
-        r"pass dev=NPU2\(\) \(aie\.iron\.device\) or bind one",
+def test_no_npu_says_how_to_compile_without_one():
+    code = "from iron.common.image.packaging import require_device; require_device()"
+    for runtime, said in (
+        (None, r"no NPU found \(NPU_RUNTIME unset; is the driver loaded\? .*"),
+        ("xrt", r"\(NPU_RUNTIME=xrt; "),
     ):
-        require_device()
-    monkeypatch.setenv("NPU_RUNTIME", "xrt")
-    with pytest.raises(RuntimeError, match=r"\(NPU_RUNTIME=xrt; "):
-        require_device()
+        env = without_xrt()
+        env.pop("NPU_RUNTIME", None)
+        if runtime is not None:
+            env["NPU_RUNTIME"] = runtime
+        run = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True
+        )
+        assert run.returncode and re.search(said, run.stderr), run.stderr
+        assert "pass dev=NPU2() (aie.iron.device) or bind one" in run.stderr
 
 
 def test_keyword_only_parameters_must_be_annotated_as_values():
@@ -674,75 +681,6 @@ def test_llama_does_not_grow_with_the_context(step):
     assert len(rotations) == len(mhas) == 2
     for rope, mha in zip(rotations, mhas):
         assert kinds[rope + 1 : mha + 1] == ["Copy", "Copy", "MHA"]
-
-
-def _resolved_fields(settings):
-    """Every field of every step of every setting, resolved for its device.
-
-    A setting is ``(device, record)``: ``record`` builds the graph with that
-    device current and records it. The device is restored afterwards.
-    """
-    out = []
-    for dev, record in settings:
-        with aie_utils.set_current_device(dev):
-            out.append(
-                [
-                    tuple((n, vars(op)[n]) for n in op.declaration.params)
-                    + (op.design_key(),)
-                    for s in record().steps
-                    for op in [s.op.resolved(dev)]
-                ]
-            )
-    return out
-
-
-def _every_tunable_is_load_bearing(monkeypatch, settings):
-    """Drop each tunable the graphs pass, one (class, name) at a time; each
-    must change some resolved step, or fail, in some setting. A tunable that
-    resolution would have picked anyway is noise a reader has to disprove.
-    """
-    construct = Recorder._construct
-    passed = set()
-
-    def recording(self, cls, inputs, outputs, kwargs):
-        passed.update((cls, n) for n in kwargs if n in cls.declaration.tunables)
-        return construct(self, cls, inputs, outputs, kwargs)
-
-    monkeypatch.setattr(Recorder, "_construct", recording)
-    baseline = _resolved_fields(settings)
-    redundant = []
-    for cls, name in sorted(passed, key=lambda k: (k[0].__name__, k[1])):
-
-        def dropping(self, kls, inputs, outputs, kwargs, cls=cls, name=name):
-            if kls is cls:
-                kwargs = {k: v for k, v in kwargs.items() if k != name}
-            return construct(self, kls, inputs, outputs, kwargs)
-
-        monkeypatch.setattr(Recorder, "_construct", dropping)
-        try:
-            same = _resolved_fields(settings) == baseline
-        except Exception:
-            continue
-        if same:
-            redundant.append(f"{cls.__name__}({name}=)")
-    assert not redundant, f"resolution picks these anyway: {redundant}"
-
-
-def test_llama_names_only_the_tunables_that_matter(monkeypatch):
-    """Every keyword the llama graph passes is a choice resolution would not
-    have made in some setting the graph is written for: the model's real
-    shape at the graph's own defaults, on NPU2 (MHA's) for a decode step and
-    a prompt; and the scaled-down shape the host tests record, with the
-    parameters that shape needs.
-    """
-    npu2 = from_name("npu2", n_cols=8)
-    real, scaled = llama_1b(num_hidden_layers=1), small()
-    settings = [
-        (npu2, lambda: real.record(**real.shapes()[0])),
-        (npu2, lambda: real.record(**real.shapes()[1])),
-        (npu2, lambda: scaled.record(**scaled.shapes()[1])),
-    ]
-    _every_tunable_is_load_bearing(monkeypatch, settings)
 
 
 def test_a_bound_value_survives_tuning():
@@ -2363,16 +2301,37 @@ def test_a_refused_step_shows_an_unheld_param_as_an_array_of_its_shape():
         Project().record(x=(256,))
 
 
-def test_reference_without_a_device_names_how_to_bind_one(monkeypatch):
+# A graph's reference in a process with no NPU runtime and no device bound.
+UNBOUND = """
+import numpy as np
+from ml_dtypes import bfloat16
+import iron
+
+
+class Doubled(iron.Graph):
+    def body(self, x):
+        return x + x
+
+
+Doubled().reference(np.ones((4, 64), dtype=bfloat16))
+"""
+
+
+def test_reference_without_a_device_names_how_to_bind_one():
     class Doubled(iron.Graph):
         def body(self, x):
             return x + x
 
     x = np.ones((4, 64), dtype=bfloat16)
     np.testing.assert_array_equal(Doubled().reference(x, dev=from_name("npu1")), x + x)
-    monkeypatch.setattr(aie_utils, "ensure_current_device", lambda: None)
-    with pytest.raises(RuntimeError, match="set_current_device"):
-        Doubled().reference(x)
+
+    run = subprocess.run(
+        [sys.executable, "-c", UNBOUND],
+        env=without_xrt(),
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode and "set_current_device" in run.stderr, run.stderr
 
 
 def test_a_per_call_value_s_default_is_given_when_left_out():

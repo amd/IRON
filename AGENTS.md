@@ -215,9 +215,8 @@ values, weights, state and profiles are named. The rules:
 - Tunables come from the graph's `profile`, not keywords at every call: a
   JSON file per device, one entry per operator class and shape, matched on
   the fields the operator is constructed with (key MHA by `seq_pad`, not
-  `seq_len`). `iron/applications/llama/profiles/` is the worked example,
-  and `test_llama_names_only_the_tunables_that_matter` checks that every
-  keyword the model still passes is one a profile could not give.
+  `seq_len`). `iron/applications/llama/profiles/` is the worked example;
+  the nightly trends, not a test, say whether a profile pays off.
 - `compile(full_elf=None)` picks one full ELF on NPU2 and an xclbin per
   step on NPU1 (`iron/common/image/packaging.py`; `Graph.compile` logs
   why at INFO). `check=True` runs each step on its own dispatch against its
