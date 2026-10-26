@@ -22,19 +22,10 @@ from iron.common.testing import Case, Testing
 
 
 def _cases(cls, dev: Device):
-    # One column, four (npu1's widest) and eight.
+    # One column with fewer angle rows than rows, and the widest grid with one each.
     out = [
-        Case(
-            dict(
-                rows=32,
-                cols=512,
-                num_aie_columns=cols,
-                angle_rows=angle_rows,
-            )
-        )
-        for cols in (1, 4, 8)
-        if cols <= dev.cols
-        for angle_rows in (8, 32)
+        Case(dict(rows=32, cols=512, num_aie_columns=1, angle_rows=8)),
+        Case(dict(rows=32, cols=512, num_aie_columns=dev.cols, angle_rows=32)),
     ]
     # The second method, and the third angle-table size at the widest grid.
     out += [

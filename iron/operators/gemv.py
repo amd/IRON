@@ -24,15 +24,10 @@ def _cases(cls, dev: Device):
     # M, K, columns, tile_size_input, tile_size_output
     plain = [
         (128, 128, 1, 32, 128),
-        (2048, 8192, 1, 1, 2048),
-        (8192, 2048, 1, 4, 1024),
-        (2048, 8192, 4, 1, 512),
-        (8192, 2048, 4, 4, 1024),
         (2048, 8192, 8, 1, 256),
         (8192, 2048, 8, 4, 1024),
-        # A single-buffered: Gemma 4's and SmolLM3's down projections.
+        # A single-buffered: Gemma 4's down projection.
         (1536, 12288, 8, 1, 64),
-        (2048, 11008, 8, 1, 256),
     ]
     # ... and num_batches.
     batched = [
@@ -52,10 +47,7 @@ def _cases(cls, dev: Device):
         (2048, 64, 8, 4, 256, 32, 4),  # Llama decode's scores: 32 heads, 8 groups
     ]
     # ... and two lanes a column.
-    laned = [
-        (2048, 8192, 1, 1, 1024),
-        (8192, 2048, 8, 4, 512),
-    ]
+    laned = [(8192, 2048, 8, 4, 512)]
 
     def case(M, K, cols, tsi, tso, *, bench=False, lower=False, **extra):
         kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)

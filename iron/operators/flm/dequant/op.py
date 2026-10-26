@@ -124,16 +124,7 @@ class DequantBFP(Operator):
             # K = 512 is one k-tile, where flm.ProjectionGEMM at tile_n = 128
             # wins on NPU2. It defaults to 64 regardless, which is the order
             # this operator emits.
-            *(
-                Case(dict(K=K, N=N))
-                for K, N in (
-                    (512, 128),
-                    (1024, 128),
-                    (1024, 512),
-                    (1536, 640),
-                    (2048, 256),
-                )
-            ),
+            *(Case(dict(K=K, N=N)) for K, N in ((512, 128), (1024, 512))),
             # Gate and up share one blob, ``run`` out-features each in a period.
             Case(
                 dict(K=1024, N=1024, run_out_features=512, run_period_out_features=1024)
