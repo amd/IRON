@@ -21,34 +21,20 @@ GEMM_COLUMNS = GEMM.declaration.params["tile_n"].default
 
 
 class Conv2d(iron.Graph):
-    """A 2-D convolution without bias of rows of ``width`` channels-last
-    pixels, at ``stride``, the width padded with ``padding`` zero columns
-    and each output row with ``border`` zero pixels either side; padding in
-    rows is rows the input holds, so a producer writes past them in place.
-
-    A call takes ``(rows, width * channels)`` and the per-call ``rows`` it
-    computes, and writes ``(out_rows, (out_width + 2 * border) *
-    out_channels)`` where a caller gives it, else returns it. One channel
-    (or depthwise) is a GEMM of ``kernel`` gathered rows by the weight laid
-    out as a band over the width; a ragged last block of ``GEMM_ROWS`` rows
-    repeats the first row, so its output cannot be given. More channels
-    are a GEMM of the output channels, as its rows, by the gathered
-    ``kernel * kernel * channels`` patches; pixels short of a whole
-    ``GEMM_COLUMNS`` repeat the first patch, so their output cannot be
-    given either. Each GEMM sums in float32 and rounds once.
+    """A bias-free 2-D convolution of channels-last rows ``(rows, width * channels)``,
+    any row padding held in the input, computing the per-call ``rows`` of
+    ``(out_rows, (out_width + 2 * border) * out_channels)`` summed in float32. Its
+    output is written to a given ``y`` only when it fills whole GEMM blocks.
 
     Args:
-        weight: ``(out_channels, channels_per_group, kernel, kernel)``,
-            ``channels_per_group`` the checkpoint's own (``in_channels //
-            groups``, as a depthwise checkpoint already stores it).
+        weight: ``(out_channels, in_channels // groups, kernel, kernel)``.
         width: The input's pixels a row, its held padding among them.
         stride: The step between output pixels, and rows.
-        padding: The zero columns either side of the width, one channel only.
-        border: The zero pixels either side of each output row, one channel
-            only.
-        groups: ``1`` (every output channel reads every input channel) or
-            ``out_channels`` (depthwise: each its own). No other grouping is
-            built.
+        padding: The zero columns either side of the width; one channel or
+            depthwise only.
+        border: The zero pixels either side of each output row; one channel or
+            depthwise only.
+        groups: ``1``, or ``out_channels`` (depthwise); no other grouping is built.
     """
 
     def __init__(

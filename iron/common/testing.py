@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""How an operator declares the shapes it is tested at on a device, and the
-device test harness: draw vectors, run it, judge and time it.
-
+"""How an operator declares the shapes it is tested at on a device, and the device
+test harness: draw vectors, run it, judge and time it.
 ``iron/tests/operators/test_catalog.py`` runs every declaration against the
-operator's ``reference()``. Nothing here imports pytest, so an operator
-module stays importable without it.
+operator's ``reference()``. Nothing here imports pytest, so an operator module
+stays importable without it.
 """
 
 from __future__ import annotations
@@ -62,11 +61,10 @@ class Testing:
     """How an operator is checked against its reference on a device.
 
     Attributes:
-        cases: ``Case``s, or callables of the class and the device
-            returning them (a ``Sweep``).
-        draw: A callable of the operator returning extra ``vectors``
-            arguments, keyed by its operands (``dict(normal=(op.A,))``,
-            ``dict(given={op.x: table})``), for inputs with preconditions.
+        cases: ``Case``s, or callables of the class and the device returning
+            them (a ``Sweep``).
+        draw: A callable of the operator returning extra ``vectors`` arguments
+            (``dict(normal=(op.A,))``), for inputs with preconditions.
     """
 
     __test__ = False  # pytest: a declaration, not a test class
@@ -160,12 +158,8 @@ def _report(buf_name: str, verdict: Verdict, tolerance: Tolerance) -> None:
 
 
 def _nbytes(buf) -> int:
-    """Bytes of tensor data moved, for the effective-bandwidth figure.
-
-    Reads the numpy view rather than the backend buffer handle: ``buffer_object()``
-    returns a ``pyxrt.bo`` under XRT but an opaque handle under HRX, so ``.size()`` is
-    not part of the Tensor interface. The view is also the payload size, not the
-    page-rounded allocation.
+    """Bytes of tensor data moved, off the numpy view: the payload, not the
+    page-rounded allocation, and ``buffer_object()`` has no ``.size()`` under HRX.
     """
     return buf.data.nbytes
 
@@ -180,23 +174,16 @@ def time_call(
     record: Callable[[str, float], object] | None = None,
     **kwargs,
 ) -> None:
-    """Time a compiled callable: ``iters`` runs of ``fn(*args, **kwargs)``,
-    timed on the NPU, their median the latency a test reports.
-
-    Any compiled callable: a declared ``Operator``, a graph version, a
-    shipped binary. ``run_test`` is this plus the checked run and the judgement;
-    a graph test that only needs timing calls this directly, in place of
-    its own ``run_iters`` and ``record_property`` calls.
+    """Time any compiled callable (an ``Operator``, a graph version, a shipped
+    binary): the median NPU latency of ``iters`` runs of ``fn(*args, **kwargs)``.
+    ``run_test`` is this plus the checked run and its judgement.
 
     Args:
         bytes_moved: Bytes moved a call, for the bandwidth figure; 0 records none.
         ops: Per call, for the throughput figure; 0 records none.
-        warmup: Runs before the ``iters`` timed ones.
-        iters: The runs timed; latency is their median (their one value, at
-            ``iters=1``).
+        warmup: Untimed runs before the ``iters`` timed ones.
         record: A test's ``record_property``: latency, its median absolute
             deviation over the timed runs, bandwidth and throughput.
-        **kwargs: ``fn``'s own keyword arguments, given to every call.
 
     Raises:
         RuntimeError: ``fn`` did not report NPU execution time.
@@ -233,22 +220,18 @@ def run_test(
     timed_iters: int = 20,
     record: Callable[[str, float], object] | None = None,
 ) -> dict[str, Verdict]:
-    """Compile ``operator``, run it on the device, check its outputs, time it.
-
-    The first run is the one checked, before a timed run rewrites an
-    ``inout`` buffer; it also warms the device for the timed runs.
+    """Compile ``operator``, run it on the device, check its outputs, time it. The
+    first run is the one checked, before a timed run rewrites an ``inout`` buffer.
 
     Args:
         inputs: A ``Vectors``, or every input by buffer name (an ``inout``
             buffer among them).
         outputs: Each buffer the operator writes, its expected result by
             name; ``operator.call_reference`` on ``inputs`` where None.
-        timed_iters: ``time_call``'s.
         record: ``time_call``'s.
 
     Returns:
-        Each output's failing ``Verdict``, by name; empty where every
-        output passed.
+        Each failing output's ``Verdict``, by name; empty where all passed.
 
     Raises:
         ValueError: ``inputs`` or ``outputs`` do not name the operator's

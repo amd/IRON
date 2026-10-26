@@ -111,9 +111,7 @@ class _Parameters:
         """``signature``'s parameters, ``self`` left out, as a graph reads them.
 
         Raises:
-            TypeError: An input defaults to other than None or is named as a
-                ``compile()`` keyword, a per-call value is unannotated or
-                floating point, or a parameter is ``*args``/``**kwargs``.
+            TypeError: The signature has a parameter a graph cannot trace.
         """
         params = list(signature.parameters.values())
         inputs = [
@@ -178,10 +176,9 @@ class _Unbound(_Param):
 
 
 def param(*shape, dtype=bfloat16) -> np.ndarray:
-    """A weight a graph holds, declared by shape, typed as the array
-    ``Graph.load_state_dict`` binds in its place; or ``param(array)``,
-    ``array`` itself held as one, as torch's ``nn.Parameter(tensor)``. A
-    graph refuses to hold an array that is not one.
+    """A weight a graph holds, declared by shape for ``Graph.load_state_dict``
+    to bind, or ``param(array)`` holding ``array``, as torch's
+    ``nn.Parameter``. A graph refuses to hold a bare array.
     """
     if len(shape) == 1 and isinstance(shape[0], np.ndarray):
         a = shape[0]
@@ -192,12 +189,9 @@ def param(*shape, dtype=bfloat16) -> np.ndarray:
 def walk(
     root, graphs: bool = True, shared: list[str] | None = None
 ) -> Iterator[tuple[str, Any, Any, Any]]:
-    """Each state and tensor under ``root``, by its dotted path from it, with
-    the container holding it and its key there, through lists, tuples,
-    dicts, dataclasses, namespaces and graphs (their attributes not starting
-    with ``_``), each container once, the path it is met at again appended
-    to ``shared``; without ``graphs``, a graph under ``root`` is yielded in
-    place of what it holds.
+    """Yield ``(path, x, container, key)`` per state and tensor under ``root``,
+    through containers and graphs' public attributes, each container once (repeats'
+    paths to ``shared``); without ``graphs``, a nested graph is yielded whole.
     """
     seen: set[int] = set()
 
@@ -236,17 +230,11 @@ class Graph:
     """A graph: a subclass whose ``body`` is recorded on handles.
 
     ``body``'s positional parameters are the inputs (one defaulting to None
-    may be left out), its keyword-only ones the per-call values, and what it
-    returns the outputs; a graph whose inputs and values follow what it
-    holds names them in ``signature()`` instead. Weights and states are what
-    the instance holds, named by attribute path (``self.layers[3].q`` is
-    ``layers.3.q``). ``profile`` is a ``Profile`` or a directory of
-    ``<device>.json`` ones, the one way a step's tunables come from one.
-
-    Called in another graph's body, on its handles and per-call values, a
-    graph's body records into that graph: its steps are the caller's, its
-    weights and states are named by the path the caller holds it at, and
-    the caller's one compile covers it.
+    may be left out), its keyword-only ones the per-call values, its return
+    the outputs; ``signature()`` may name them instead. Weights and states
+    are what it holds, by attribute path (``self.layers[3].q`` is
+    ``layers.3.q``); ``profile`` is a ``Profile`` or a directory of
+    ``<device>.json`` ones. Called in another graph's body, it records there.
     """
 
     profile: Profile | Path | None = None
@@ -320,12 +308,10 @@ class Graph:
         )
 
     def held(self) -> dict[int, tuple[str, Any]]:
-        """Each ``param``, ``weight`` and state the instance holds, by
-        identity, with its path name.
+        """Each ``param``, ``weight`` and state held, by ``id``, with its path.
 
         Raises:
-            TypeError: A ``param`` was never loaded, or an array held is no
-                ``param``.
+            TypeError: A ``param`` was never loaded, or a held array is no ``param``.
         """
         held: dict[int, tuple[str, Any]] = {}
         for path, x, _, _ in walk(self):
@@ -341,25 +327,15 @@ class Graph:
         return held
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
-        """Bind each ``param`` of this graph and of what it holds to the
-        tensor at its dotted path in ``tree`` (a ``Checkpoint.tree()``, or
-        tensors by dotted path) under ``path``, this graph's own prefix
-        (``"model."``), cast to the param's dtype as torch's ``copy_``
-        casts it, a value past the dtype's range becoming inf. A param held
-        at several paths is tied: its first path, in attribute order, binds
-        every holder, and a tensor at another is ignored; so is any tensor
-        under a graph or container held again at a second path. Each graph
-        it holds binds through its own ``load_state_dict``, so a subclass derives a
-        tensor after ``super().load_state_dict()``.
+        """Bind each ``param`` held, at any depth, to the tensor at ``path``
+        (this graph's prefix, ``"model."``) plus its dotted path in ``tree``,
+        cast as torch's ``copy_``; a param held at several paths binds once.
 
         Raises:
-            ValueError: ``path`` does not end in a dot; the graph is
-                already loaded; or a param's tensor is missing, of another
-                shape or of another kind (float for int), or ``tree`` holds
-                a tensor under ``path`` that no param declares, one error
-                naming every such path.
-            TypeError: A param is in a tuple or a frozen dataclass, which
-                cannot be rebound.
+            ValueError: ``path`` lacks its trailing dot, the graph is already
+                loaded, or a tensor is missing, extra, or of another shape or
+                kind, one error naming every such path.
+            TypeError: A param is in a tuple or a frozen dataclass.
         """
         if path and not path.endswith("."):
             raise ValueError(
@@ -548,19 +524,14 @@ class Graph:
         coresident: AdjacentPacking | None = None,
         **shapes,
     ) -> CompiledGraph:
-        """Compile the version for the given input shapes and return it.
-
-        Compile every version before the first call where you can: one placed
-        after the arena's buffer exists grows it, which copies it once.
+        """Compile and return the version for these input shapes; compile all
+        before the first call, as a later one grows (copies) the arena.
 
         Args:
-            dev: The device to compile for, bound for this compile alone;
-                else the current one.
-            full_elf: One full ELF, else an xclbin per step; ``None``
-                derives it (``iron.common.image.packaging``).
-            check: Run each step on its own dispatch and hold its outputs to
-                its reference on the same inputs, by its ``tolerance()``;
-                a step outside it raises, naming the step.
+            dev: The device, for this compile alone; else the current one.
+            full_elf: One full ELF, else an xclbin per step; ``None`` derives it.
+            check: Run each step on its own dispatch, raising at the first
+                outside its ``tolerance()``.
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
             coresident: Packs designs into shared configurations.
@@ -606,13 +577,12 @@ class Graph:
     def _emit(
         self, recording: Recording, chosen: Plan, feeds: CompiledGraph | None
     ) -> tuple[EmitSite | None, list[Word] | None]:
-        """The Emit step a full ELF with carried values ends in, appended to
-        ``recording``, sized for ``feeds``' words or, feeding itself, for its
-        own; and those own words, or None.
+        """Append the Emit step a looping full ELF with carried values ends in,
+        sized for ``feeds``' words or its own; return it and those own words.
 
         Raises:
-            ValueError: ``feeds`` is not a full-ELF version of this graph,
-                or this version does not loop, as one with a host step does not.
+            ValueError: ``feeds`` is not a full-ELF version of this graph, or
+                this version does not loop.
         """
         loops = feeds is not None or not recording.inputs
         if not (chosen.full_elf and recording.carry and loops) or recording.host:
@@ -686,9 +656,8 @@ class Graph:
         return version(*given.values(), **values)
 
     def inline(self, method: Callable, /, *args, **kwargs) -> Any:
-        """``method``, one of this graph's, recorded into the body of the graph
-        being recorded, under this graph's profile: its steps are that graph's.
-        That graph names the values ``method`` takes, carried ones included.
+        """Record ``method``, one of this graph's, into the graph being
+        recorded, under this graph's profile; that graph names its values.
 
         Raises:
             TypeError: No graph's body is being recorded.
@@ -706,21 +675,14 @@ class Graph:
             recorder.profile = previous
 
     def reference(self, *tensors, dev=None, **values) -> Any:
-        """The graph recorded for these tensors' shapes, each step run on the
-        host through its operator's ``reference()`` (``Recording.reference``).
-        No NPU is needed, but operators tile for a device: ``dev``, bound for
-        this call alone, else the current one. The shapes need not fit it.
-        Each output is a numpy array of its recorded shape, cut to its
-        bounds, where a call on the device returns each as a flat device
-        tensor of its elements, uncut.
+        """Run the body on the host, each step through its operator's
+        ``reference()``, tiled for ``dev`` (else the current device) without
+        needing an NPU; outputs are numpy arrays of their shape, cut to bounds.
 
         Raises:
             RuntimeError: No device is given or bound.
-            TypeError: An input is missing, or a per-call value is missing or
-                unknown, as a call on the device refuses them; or the body
-                does not record.
-            IndexError: The values index or bound a view outside it, as a
-                call on the device refuses them.
+            TypeError: An input or per-call value is missing or unknown.
+            IndexError: The values index or bound a view outside it.
         """
         given = {n: np.asarray(t) for n, t in self._given(tensors).items()}
         values = {**self._parameters.defaults, **values}
@@ -757,11 +719,8 @@ class Graph:
 
 
 class CompiledGraph:
-    """A recorded graph built into an image, ready to call.
-
-    A call gives the per-call values this version reads (``Recording.reads``)
-    and may give the graph's others, which another version reads; they go
-    unused.
+    """A recorded graph built into an image, ready to call with the per-call
+    values this version reads (``Recording.reads``); the graph's others go unused.
     """
 
     def __init__(
@@ -946,8 +905,7 @@ class CompiledGraph:
         """Start a call of this full ELF on ``run`` without waiting for it.
 
         Raises:
-            ValueError: A host step runs between its commands, which a call
-                waits on.
+            ValueError: A host step runs between its commands.
         """
         if self.recording.host:
             raise ValueError(

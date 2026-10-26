@@ -24,30 +24,22 @@ from ..image.step import BufferRef
 T = TypeVar("T")
 
 Scratchpad = Annotated[T, Kind.SCRATCHPAD.value]
-"""A per-call value patched into a DMA descriptor or read by a core.
-
-Free per call (a few words and a sync), works under full ELF, cannot change a
-DMA size or stride. Values are limited to 30 bits.
+"""A per-call value patched into a DMA descriptor or read by a core: free per
+call, works under full ELF, cannot change a DMA size or stride; 30 bits at most.
 """
 
 Carried = Annotated[T, Kind.CARRIED.value]
-"""A scratchpad value a graph computes for its own next call, returned last
-with ``iron.carry(name=...)``: an integer expression of its values
-(``position + 1``) or a one-element handle (a sampled token). The host writes
-it only to seed the first call.
+"""A scratchpad value a graph computes for its next call and returns last with
+``iron.carry(name=...)``: an expression of its values (``position + 1``) or a
+one-element handle (a sampled token); the host seeds only the first call.
 """
 
 
 @dataclasses.dataclass(eq=False)
 class Buffer:
-    """A buffer of the graph, which every handle on it shares: renaming it
-    (a returned intermediate becoming ``out``) renames them all.
-
-    Attributes:
-        name: What a step calls it (``BufferRef``).
-        role: input, output, weight, state or intermediate.
-        shape: Its shape as made, before any reshape.
-        dtype: Its element type as made.
+    """A graph buffer every handle on it shares, so renaming it (a returned
+    intermediate becoming ``out``) renames them all. ``role`` is input, output,
+    weight, state or intermediate; ``shape`` and ``dtype`` are as made.
     """
 
     name: str
@@ -71,19 +63,9 @@ class Dense:
 
 @dataclasses.dataclass(frozen=True)
 class Strided:
-    """What ``tap`` walks of the buffer, which only a copy takes.
-
-    Attributes:
-        tap: The pattern over the buffer seen as its ``tensor_dims``, or
-            several walked in turn (a gather's rows, fixed when recorded).
-        offset: A per-call element offset (``keys[:, pos]``), or None.
-        repeat: Per walk, the runs of its first dimension each call
-            (``Handle.at``), or None.
-        length: The entries of each walk's second dimension each call, or
-            None.
-        window: For a run from a per-call start, ``x[s : s + W]``: its axis,
-            ``s``, ``W`` and the axis's length, which a bound (``[:n]``)
-            keeps the run inside; else None.
+    """What ``tap`` walks of the buffer, which only a copy takes; per call, ``offset``
+    moves it, ``repeat`` and ``length`` size its first two dimensions, and ``window``
+    holds ``x[s : s + W]``'s axis, ``s``, ``W`` and axis length.
     """
 
     tap: TensorAccessPattern | tuple[TensorAccessPattern, ...]
@@ -104,22 +86,12 @@ class Gather:
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class Handle:
-    """A recorded tensor: where it is in a buffer of the graph, its shape,
-    its dtype, and the leading entries of each axis valid this call.
+    """A recorded tensor: where it is in a graph buffer (``layout``), its shape,
+    dtype, and per axis the leading entries valid this call (``valid``, ``x[:n]``).
 
-    ``h[key]`` takes numpy's basic indexing, on one axis a per-call
-    value (``keys[:, pos]``), and on the leading axis an integer array
-    of rows fixed when the graph is recorded (``table[ids]``) or a 1-D integer
-    handle naming the rows each call takes. A contiguous static region is a
-    slice any operator takes (``Dense``); any other view, a gather included,
-    is an access pattern only a copy takes (``Strided``, ``Gather``).
-
-    Attributes:
-        buffer: The buffer it is, or is a part or view of.
-        shape: Its shape.
-        dtype: Its element type.
-        valid: Axis -> its leading entries valid this call (``x[:n]``).
-        layout: Where in ``buffer`` it is.
+    ``h[key]`` takes numpy's basic indexing, a per-call value on one axis
+    (``keys[:, pos]``), and leading-axis rows, fixed (``table[ids]``) or a 1-D
+    integer handle's per call; any view but a contiguous static slice is a copy's.
     """
 
     buffer: Buffer
@@ -408,11 +380,8 @@ class Handle:
         _write(self[key], value)
 
     def _within(self, part: Handle) -> Handle:
-        """This handle of ``part`` seen as a buffer of its own, as where it is
-        in ``part``'s buffer.
-
-        Raises:
-            TypeError: It gathers per call, which reads a whole table.
+        """This handle of ``part`` seen as a buffer of its own, placed in
+        ``part``'s buffer; a per-call gather, which reads a whole table, raises.
         """
         match self.layout:
             case Gather():
@@ -436,17 +405,13 @@ class Handle:
     ):
         """What ``tap`` walks, as ``shape``: a slice if contiguous, else a view.
 
-        ``repeat`` runs ``tap``'s first dimension that many times a call, and
-        ``length`` takes that many entries of its second, each a per-call
-        value; ``bounds`` then gives the rows the view moves a call. A tuple
-        of patterns is walked in turn, each repeated by its entry of a tuple
-        ``repeat``, all cut to one ``length``.
+        Per call, ``repeat`` runs each pattern's first dimension (a tuple, one
+        per pattern of a tuple ``tap``) and ``length`` takes entries of its
+        second; ``bounds`` then gives the rows the view moves a call.
 
         Raises:
-            ValueError: With ``repeat`` or ``length``, a pattern is not four
-                dimensions one shim descriptor holds, the patterns and
-                repeats differ in number (a tuple of either takes a tuple of the
-                other), or no ``bounds``.
+            ValueError: With ``repeat`` or ``length``: a pattern is not one shim
+                descriptor, repeats don't match patterns, or no ``bounds``.
         """
         if not isinstance(self.layout, Dense):
             raise ValueError(f"cannot walk a view {self!r}; walk what it views")
@@ -582,10 +547,8 @@ class Handle:
         return self * (1 / other)
 
     def __matmul__(self, other) -> "Handle":
-        """``self @ W.T``, ``self`` one row and ``W`` a weight as
-        ``torch.nn.Linear`` stores it ``(out, in)``: GEMV, summed in float32
-        and rounded once (``iron.functional.linear`` at
-        ``Precision.HIGHEST``).
+        """``self @ W.T`` for one row ``self`` and ``W`` stored ``(out, in)`` as
+        ``torch.nn.Linear`` does: GEMV at ``Precision.HIGHEST``.
 
         Raises:
             TypeError: ``self`` is several rows, whose precision the caller
@@ -631,8 +594,7 @@ def _is_number(x) -> bool:
 
 
 def _untransposed(x: Handle, w) -> Handle | np.ndarray:
-    """``W``, given ``w`` its transpose ``W.T``: a held array's numpy
-    transpose, or a weight handle's ``transpose()``.
+    """``W`` from ``w``, its transpose ``W.T`` (a held array or a weight handle).
 
     Raises:
         TypeError: ``w`` is not a 2-D weight's transpose.
@@ -664,15 +626,9 @@ def _untransposed(x: Handle, w) -> Handle | np.ndarray:
 
 
 def _broadcast(whole, rowwise, x: Handle, y) -> Handle:
-    """``whole`` of ``x`` and ``y`` of its shape, or, ``x`` of two axes or
-    more, ``rowwise`` of ``x`` and ``y`` a row as wide as its last axis.
-
-    Both are commutative, so a row handle times a matrix is the matrix's
-    ``rowwise``. A number ``y`` is a row of it, one constant buffer per
-    number, width and dtype (rounded to ``x``'s dtype).
-
-    Raises:
-        TypeError: ``y`` is neither.
+    """``whole`` of ``x`` and ``y`` of its shape, else ``rowwise`` of ``x`` (two
+    axes or more) and a row ``y``; a number ``y`` is a constant row, and both
+    being commutative, a row times a matrix is the matrix's ``rowwise``.
     """
     if _is_number(y):
         recorder = graph_recorder.get()
@@ -867,17 +823,9 @@ def carry(**next_values: Handle | Affine | PerCall | int) -> Carry:
 
 
 def on_host(fn: Callable[..., None], *reads, writes=()) -> None:
-    """Run ``fn(*reads, *writes)`` on the host between the steps recorded
-    before and after it; a full ELF ends a command there and waits on it, so
-    a graph with one has no device loop.
-
-    Args:
-        fn: Called on numpy arrays, each read as the device left it and cut
-            to its bounds, then each write; what it leaves of a write keeps
-            what it last wrote there.
-        *reads: Contiguous handles, states or weights.
-        writes: Contiguous parts of states no step writes; steps after
-            this read what ``fn`` wrote.
+    """Run ``fn(*reads, *writes)`` on the host between the steps around it; a
+    full ELF ends a command there, so the graph has no device loop. Each is
+    contiguous: reads cut to their bounds, writes parts of states no step writes.
 
     Raises:
         TypeError: No graph's body is being recorded.

@@ -120,13 +120,8 @@ class Limit:
 
 def _take_views(cls, operands, kwargs, values):
     """Hand each view operand's pattern to the operator (``cls.accept_views``)
-    and stand its parent in.
-
-    A bound on one view holds the others: each side moves the same rows. A
-    side not given (a fresh output) is the bounded view's shape, bounded
-    alike; a given one must be that shape, and is bounded on the same axis.
-    A source walked with a per-call repeat or length (``Handle.at``) takes
-    them itself, and its ``bounds`` hold the others.
+    and stand its parent in; a bound on one view bounds the others alike, and a
+    source with a per-call repeat or length (``Handle.at``) takes them itself.
     """
     given = operands[: len(cls.accept_views)]
     held = next((h for h in given if h.valid), None)
@@ -187,11 +182,9 @@ def _take_views(cls, operands, kwargs, values):
 
 @dataclasses.dataclass
 class Recording:
-    """What recording a graph for given shapes produced.
-
-    ``weights`` and ``states`` hold the object they are keyed by the
-    identity of, so the key stays its own. ``carry`` is the next value of
-    each carried value; a handle there is an output too.
+    """What recording a graph for given shapes produced. ``weights`` and
+    ``states`` hold the objects whose ``id`` keys them, so no key is reused;
+    ``carry`` is each carried value's next, a handle there an output too.
     """
 
     name: str
@@ -226,10 +219,9 @@ class Recording:
 
     @property
     def reads(self) -> set[str]:
-        """The per-call values a call of this version must give: those of the
-        graph's its steps, bounds, host encodings and carry read, and its
-        carried ones; not the words the image writes itself (a gather's
-        table address).
+        """The per-call values a call of this version must give: its carried
+        ones and those its steps, bounds, host encodings and carry read, not a
+        gather's table address, which the image writes itself.
         """
         expressions = [
             *(b.expression for b in self.bindings),
@@ -258,16 +250,9 @@ class Recording:
         pinned: Mapping[str, int] | None = None,
         feedback: Iterable[str] = (),
     ) -> Recording:
-        """A graph of ``steps`` over buffers known by name alone, as bytes.
-
-        Args:
-            name: The graph's name.
-            steps: Each step's operator and where its buffers are.
-            inputs: The buffers the host writes.
-            outputs: The buffers the host reads.
-            pinned: The bytes of each buffer a step names only in part, and
-                of any it should hold at a size of its own.
-            feedback: The buffers of the feedback argument.
+        """A graph of ``steps`` over buffers known by name alone, as bytes: the
+        host writes ``inputs`` and reads ``outputs``, and ``pinned`` sizes a
+        buffer a step names only in part or holds at a size of its own.
         """
         pinned = dict(pinned or {})
         roots: dict[str, Handle] = {}
@@ -335,11 +320,7 @@ class Recording:
         return dot(self)
 
     def check_limits(self, values: Mapping[str, int]) -> None:
-        """Refuse a call whose values index or bound a view outside it.
-
-        Raises:
-            IndexError: A recorded limit does not hold for ``values``.
-        """
+        """Raise ``IndexError`` if ``values`` index or bound a view outside it."""
         for limit in self.limits:
             at = limit.evaluate(values)
             if not limit.lo <= at < limit.hi:
@@ -351,18 +332,9 @@ class Recording:
     def reference(
         self, tensors: Mapping[str, np.ndarray], values: Mapping[str, int]
     ) -> tuple[list[np.ndarray], dict[str, int]]:
-        """Run each step's ``reference()`` on host buffers: the returned
-        outputs, each cut to the rows its bounds keep, and each carried
-        value's next.
-
-        A step reads its buffers as the device holds them, and its per-call
-        values, an extent's (``op.valid``) too, evaluated for this call; it
-        writes only the rows its outputs' bounds keep. A state's
+        """Run each step's ``reference()`` on host buffers; return the returned
+        outputs, cut to their bounds, and each carried value's next. A state's
         buffer is its ``host`` array, kept from call to call.
-
-        Args:
-            tensors: Each input, by name.
-            values: Each per-call value, by name.
 
         Raises:
             IndexError: ``values`` index or bound a view outside it.
@@ -638,13 +610,8 @@ class Recorder:
         return given.role if given.role in ("weight", "input") else None
 
     def check_outputs(self, cls, outputs) -> None:
-        """Refuse an output a call gives that is a weight or an input.
-
-        A positional operand past the inputs is an output, so a weight given
-        where an optional input was meant would be written over.
-
-        Raises:
-            TypeError: An output is a weight or an input, or a view of one.
+        """Raise ``TypeError`` for a given output that is a weight or an input,
+        or a view of one, as a weight passed where an optional input was meant.
         """
         for given in outputs:
             kind = self.overwrites(given)
@@ -663,14 +630,9 @@ class Recorder:
             )
 
     def call(self, target, args, kwargs):
-        """Record ``target(*args, **kwargs)``: inputs, optionally followed by
-        outputs; keywords are optional inputs, per-call value handles, or
-        construction arguments when ``target`` is a class.
-
-        Raises:
-            TypeError, ValueError, IndexError: The call is refused; the
-                message starts with the graph, the operator and the
-                operands as the body named them.
+        """Record ``target(*args, **kwargs)``: inputs then optional outputs, and
+        keywords for optional inputs, per-call value handles or, for a class,
+        construction; a refusal re-raises naming the graph, operator and operands.
         """
         try:
             return self._call(target, args, kwargs)
@@ -740,10 +702,9 @@ class Recorder:
         return self._record(op, operands, called)
 
     def _gather(self, target, operands: list[Handle], extra) -> Handle:
-        """``Copy(table[ids])`` with ``ids`` per call: a ``Gather``. For ids an
-        input the host encodes its control words from the ids each call; for
-        ids the device made, its word source writes them into its template
-        first.
+        """Record ``Copy(table[ids])`` with per-call ``ids`` as a ``Gather``: the
+        host encodes an input's ids into control words each call, and a word
+        source writes device-made ids into the template.
         """
         from iron.operators.copy import Copy
         from iron.operators.copy import Gather as GatherRows
@@ -816,11 +777,8 @@ class Recorder:
         return out if out.shape == view.shape else out.reshape(view.shape)
 
     def on_host(self, fn: Callable[..., None], reads, writes) -> None:
-        """Record ``fn`` to run on the host before the next step (``HostStep``).
-
-        Raises:
-            TypeError: A read is not contiguous, or a write is not a
-                contiguous part of a state.
+        """Record ``fn`` to run on the host before the next step (``HostStep``);
+        each read is contiguous and each write a contiguous part of a state.
         """
         reads = tuple(self.operand(x) for x in reads)
         writes = tuple(self.operand(x) for x in writes)

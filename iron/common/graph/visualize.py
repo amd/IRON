@@ -21,11 +21,9 @@ LAYERED = re.compile(r"(?:^|\.)(?:layers|keys|values)\.(\d+)(?:\.|$)")
 
 
 def layers(recording: Recording) -> dict[int, int | None]:
-    """Each step's layer, by step index (``layers.3.q`` and
-    ``vision.layers.3.q`` are layer 3). A step reading no layer's buffer is
-    in the layer of what it reads, else of what reads it; before the first
-    layer, and after the last where it holds a weight or state of no layer
-    (a head), it is in none.
+    """Each step's layer by index (``layers.3.q``, ``vision.layers.3.q``: 3); a step
+    reading no layer's buffer takes its source's layer, else its reader's, and none
+    before the first layer or, holding a weight or state (a head), after the last.
     """
     steps = recording.steps
     own = {}
@@ -75,10 +73,9 @@ def _box(recording: Recording, i: int, values: dict[int, list[str]]) -> str:
 
 
 def dot(recording: Recording) -> str:
-    """``recording`` as Graphviz text: a box per step, clustered by layer, an
-    edge per operand labelled with its shape (and ``bounded`` where a
-    per-call value bounds or indexes it), and a node per input, weight,
-    state and output.
+    """``recording`` as Graphviz text: a box per step clustered by layer, an edge
+    per operand labelled with its shape (``bounded`` where a per-call value
+    bounds or indexes it), and a node per input, weight, state and output.
     """
     steps = recording.steps
     layer = layers(recording)

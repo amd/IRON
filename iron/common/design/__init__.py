@@ -3,11 +3,9 @@
 
 """The library-owned build of a declared operator.
 
-``OperatorDesign.module`` resolves the operator, runs its ``build()`` and
-builds aie.iron's ``Program`` around an ``OperatorRuntime``: the preamble,
-then the sequence derived from the operands or the operator's own
-``sequence(rt)``. For a full ELF, ``configuration`` puts ``BuiltArray`` s
-and their sequences into one ``DeviceConfiguration`` for ``Program.compose``.
+``OperatorDesign.module`` builds aie.iron's ``Program`` from the operator's
+``build()`` and an ``OperatorRuntime``. For a full ELF, ``configuration`` puts
+each ``BuiltArray`` and its sequences into one ``DeviceConfiguration``.
 """
 
 from .design import BuiltArray, OperatorDesign, configuration, identities

@@ -1,11 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Graphs: a ``Graph`` subclass's ``body`` recorded on handles.
-
-A ``Carried[T]`` value is one the graph computes for its own next call:
-``return logits, iron.carry(pos=pos + 1)``; on a full ELF the device can
-compute it and loop (``CarriedLoop``).
+"""Graphs: a ``Graph`` subclass's ``body`` recorded on handles, compiled to one
+image per input shape; on a full ELF, ``CarriedLoop`` loops its ``Carried``
+values on the device.
 """
 
 from .carried import CarriedLoop

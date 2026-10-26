@@ -33,11 +33,9 @@ from .runtime import MergedRuntime, OperatorRuntime
 
 
 class OperatorDesign:
-    """One operator's design as ``CompilableDesign`` compiles and caches it:
-    ``module``, or ``Operator.exported_design``.
-
-    The cache key is ``CompilableDesign``'s recipe; ``identity`` adds the
-    fields the operator's repr leaves out.
+    """One operator's design (``module``, or ``Operator.exported_design``) as
+    ``CompilableDesign`` compiles and caches it; ``identity`` adds to the cache
+    key the fields the operator's repr leaves out.
     """
 
     # An object address in the key would re-key the cache every process.
@@ -82,11 +80,8 @@ class OperatorDesign:
         self.generator = generator
 
     def module(self, **dispatch):
-        """The MLIR module for the operator, on the bound device.
-
-        Args:
-            **dispatch: On an xclbin, which has no parameter scratchpad, each
-                per-call value's dispatch-time scalar, by device symbol.
+        """The operator's MLIR module on the bound device; on an xclbin, which has no
+        parameter scratchpad, ``dispatch`` is each per-call value's scalar by symbol.
         """
         array = BuiltArray(self, dispatch=dispatch)
         prog = array.program()
@@ -128,13 +123,9 @@ class OperatorDesign:
     def compile(
         self, image: CompilableDesign | None = None, **options
     ) -> CompilableDesign:
-        """Compile the design, or find it in the cache.
-
-        Args:
-            image: For an insts_only stream, the design whose image it runs
-                on: the compile fails, naming each resource the stream lays
-                out otherwise than the image, rather than run against it.
-            **options: ``compilable``'s.
+        """Compile the design, or find it in the cache. ``image``, for an insts_only
+        stream, is the design it runs on: the compile fails, naming each resource
+        laid out otherwise than there, rather than run against it.
         """
         # The key reads the current device: bound first, keys before and after agree.
         aie_utils.ensure_current_device()
@@ -144,27 +135,18 @@ class OperatorDesign:
 
 
 class BuiltArray:
-    """One design's array, built on a resolved copy of its operator.
-
-    Designs of one array (``identities``) build it once: each runs its own
-    sequence over it (``runtime``).
+    """One design's array, built on a resolved copy of its operator (``op``), its
+    operands' lanes bound. Designs of one array (``identities``) build it once,
+    each running its own sequence over it (``runtime``).
 
     Args:
-        design: The design to build.
         words: On a full ELF, design symbol -> the scratchpad word it shares
             with others that always hold the same number.
         dispatch: On an xclbin, each per-call value's dispatch-time scalar,
             by device symbol.
 
-    Attributes:
-        design: The design built.
-        op: The copy, its array built and its operands' lanes bound.
-        built: What its ``build()`` made.
-        workers: The workers among them.
-        traced: The workers a traced operator traces, else none.
-
     Raises:
-        ValueError: A full ELF is asked to carry a `DispatchTime` value, an
+        ValueError: A full ELF is asked to carry a ``DispatchTime`` value, an
             xclbin is given no scalar for a value, or a trace would reuse
             an output a full ELF consolidates.
     """
@@ -226,11 +208,9 @@ class BuiltArray:
 
     @functools.cached_property
     def reads(self) -> frozenset[str]:
-        """The scratchpad words this design's cores read: beside its
-        ``array_key``, all its array depends on.
-
-        Read off the design built anew and resolved alone, since a core
-        reads a word through the parameter its function closes over.
+        """The scratchpad words this design's cores read: beside its ``array_key``,
+        all its array depends on. Read off the design built anew and resolved alone,
+        since a core reads a word through the parameter its function closes over.
         """
         alone = BuiltArray(self.design, self._words, self._dispatch)
         module = alone.program().resolve_program()
@@ -280,9 +260,8 @@ class BuiltArray:
 
 
 def identities(arrays: Mapping[str, BuiltArray]) -> dict[str, Hashable]:
-    """What each of ``arrays`` is, equal where two are one array: its
-    ``array_key``, and where another shares that, the words its cores read
-    (``BuiltArray.reads``).
+    """What each of ``arrays`` is, equal where two are one array: its ``array_key``,
+    and where another shares that, the words its cores read (``BuiltArray.reads``).
     """
     keys = [a.op.array_key() for a in arrays.values()]
     return {
@@ -294,11 +273,9 @@ def identities(arrays: Mapping[str, BuiltArray]) -> dict[str, Hashable]:
 def configuration(
     name: str, arrays: Mapping[str, BuiltArray], steps: Sequence[str] = ()
 ) -> DeviceConfiguration:
-    """``arrays`` as one device configuration named ``name``: one array per
-    identity, and each entry's runtime sequence over it, named
-    ``sequence`` where there is one, else for its key. Given ``steps``,
-    keys of ``arrays``, its one sequence, ``sequence``, runs theirs in
-    that order instead.
+    """``arrays`` as one device configuration ``name``: one array per identity, and
+    each entry's sequence over it, ``sequence`` if it is alone, else named for its
+    key. Given ``steps`` (keys of ``arrays``), one ``sequence`` runs theirs in order.
 
     Raises:
         ValueError: The arrays are built for different devices, or traced

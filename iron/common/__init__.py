@@ -1,13 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What an operator is written with.
-
-IRON's operator (``declare``), on mlir-aie's declaration: a class body
-declares with ``aie.utils.compile.jit``'s ``param``, ``tunable`` and
-``per_call`` and aie.iron's ``In``/``Out``/``InOut``. The elementwise templates
-(``elementwise``), which own the array and the sequence of an operator
-that names only its kernel.
+"""What an operator is written with: IRON's ``Operator`` (``declare``), whose class
+body declares with ``aie.utils.compile.jit``'s ``param``, ``tunable`` and
+``per_call`` and aie.iron's ``In``/``Out``/``InOut``; and the elementwise templates
+(``elementwise``), owning the array and sequence of an operator naming its kernel.
 """
 
 from .declare import (

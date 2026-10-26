@@ -5,8 +5,7 @@
 
 ``sequence`` drives one run: ``packaging`` picks the image, ``allocator``
 places its buffers, ``compose`` and ``coresidence`` compose the designs,
-``link`` compiles them and ``callable`` runs the result; ``standalone`` is
-one operator on its own (``Operator.compile``).
+``link`` compiles them, ``callable`` runs them; ``standalone`` runs one operator.
 """
 
 from .coresidence import AdjacentPacking

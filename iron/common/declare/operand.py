@@ -32,22 +32,9 @@ active_runtime: ContextVar[OperatorRuntime | None] = ContextVar(
 
 
 class Operand:
-    """An operand as one operator holds it: the host buffer its body declares
-    (aie.iron's ``In``, ``Out`` or ``InOut``) resolved on the operator, and
-    the stream lanes a build binds.
-
-    ``In`` the host fills and the array reads; ``Out`` the array writes and
-    the host reads; ``InOut`` the host fills and the array writes in place
-    (what the stream does not drain stays as the host gave it). On an
-    instance, ``op.x`` is it.
-
-    Every attribute it does not define is the resolved ``In``, ``Out`` or
-    ``InOut``'s (``shape``, ``dtype``, ``lanes``, ...), read on use: a shape
-    may depend on a tunable the device fills.
-
-    Attributes:
-        op: The operator.
-        lane_handles: The fifo end ``build()`` bound to each lane.
+    """An operand as one operator holds it (``op.x``): the resolved ``In``, ``Out``
+    or ``InOut``, read through on use (a shape may follow a tunable), and its
+    bound ``lane_handles``. An ``InOut`` keeps what its stream does not drain.
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
@@ -109,15 +96,11 @@ class Operand:
         return 1 if obj_bytes > bank else 2
 
     def bind(self, handles) -> None:
-        """Bind each lane to the fifo end ``build()`` built for it.
-
-        Args:
-            handles: One handle per lane, in lane order, or the handle of a
-                one-lane operand.
+        """Bind each lane, in lane order, to the fifo end ``build()`` built for
+        it; a one-lane operand may take its handle bare.
 
         Raises:
-            ValueError: Another number of handles than lanes, or the operand
-                is bound already.
+            ValueError: Not one handle per lane, or the operand is bound already.
         """
         handles = list(handles) if isinstance(handles, (list, tuple)) else [handles]
         if len(handles) != self.lanes:
@@ -130,20 +113,13 @@ class Operand:
         self.lane_handles = handles
 
     def pin(self, endpoints: list[DmaEndpoint]) -> None:
-        """Pin each lane to a shim DMA channel of routes built elsewhere (a
-        shipped image's, or two shims an ``build()`` joins): a transfer of
-        the lane is a shim DMA task on it. ``build()`` returns the endpoints
-        among what it built.
-
-        Args:
-            endpoints: One mlir-aie ``DmaEndpoint`` per lane, in lane order:
-                a shim tile, MM2S for an input or S2MM for an output, and a
-                channel.
+        """Pin each lane, in lane order, to a shim ``DmaEndpoint`` (MM2S for an
+        input, S2MM for an output) of routes built elsewhere, so its transfers
+        are shim DMA tasks; ``build()`` returns the endpoints among its objects.
 
         Raises:
             ValueError: An endpoint moves the other way or names no channel,
-                another number of endpoints than lanes, or the operand is
-                bound already.
+                or ``bind`` refuses the endpoints.
         """
         moves = DMAChannelDir.S2MM if self.drains else DMAChannelDir.MM2S
         for e in endpoints:
@@ -176,40 +152,24 @@ class Operand:
         repeat_parameter: Value | None = None,
         managed: bool = True,
     ):
-        """Fill lane ``lane`` of this operand's stream from the host, in a
-        ``sequence(rt)``: mlir-aie's ``ObjectFifoHandle.fill`` on the lane's
-        fifo, or a shim DMA task on a pinned lane.
-
-        A per-call parameter is a ``Value`` of the operator: on a full ELF its
-        scratchpad word, patched into the descriptor; on an xclbin a
-        dispatch-time scalar, which regenerates the instruction stream per
-        call.
+        """Fill ``lane`` of this operand's stream from the host in
+        ``sequence(rt)``; returns the ``Task``. A per-call ``Value`` is patched
+        into the descriptor on a full ELF; on an xclbin it regenerates the
+        instruction stream every call.
 
         Args:
             tap: The walk over ``source``; all of it where None.
-            lane: The lane; may be left out of a one-lane operand only.
-            group: The ``TaskGroup`` the transfer joins.
-            wait: The transfer concludes with an await rather than a free.
-            source: The operand whose data moves through this one's lane,
-                where it is not this one (another input riding it).
+            lane: Required unless the operand has one lane.
+            wait: End with an await rather than a free.
+            source: Another input whose data rides this operand's lane.
             offset_parameter: A per-call element offset of ``tap``.
-            length_parameter: A per-call count of ``length_unit`` elements:
-                one descriptor's length, its outermost dimension below the
-                iteration, in whole 16-byte units; the pattern must fit one
-                descriptor.
-            length_unit: The elements one unit of ``length_parameter`` is.
+            length_parameter: A per-call count of ``length_unit`` elements
+                sizing ``tap``'s outermost dimension below the iteration, in
+                whole 16-byte units; ``tap`` must fit one descriptor.
             repeat_parameter: A per-call count of extra runs of ``tap``, at
                 most its outermost size less one.
             managed: False hands the queue slot and descriptors to the
-                compiler, which frees them after a later wait; joins no
-                group.
-
-        Returns:
-            The transfer's ``Task``.
-
-        Raises:
-            ValueError: ``lane`` is left out of a multi-lane operand, or a
-                per-call length's pattern does not fit one descriptor.
+                compiler, which frees them after a later wait; joins no group.
         """
         return self._runtime().transfer(
             "fill",
@@ -337,19 +297,13 @@ class Operand:
     def transfers(
         self,
     ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]]:
-        """The derived ``(lane, tap, length_parameter, length_unit)``
-        transfers of this operand.
-
-        Unbounded, the whole buffer for a one-lane or replicated stream,
-        else the first non-batch axis in one block per lane. Under a bound,
-        round-robin by tile: lane ``k`` takes tiles ``k, k + lanes, ...``,
-        so each lane has a fixed offset and stride and one length a call
-        patches, counting tiles of ``length_unit`` elements.
+        """The derived ``(lane, tap, length_parameter, length_unit)`` transfers:
+        the whole buffer (one lane or replicated) or one block of the first
+        non-batch axis per lane; under a bound, round-robin by tile instead.
 
         Raises:
-            ValueError: The operand has no obj_shape=, does not divide across
-                its lanes, or is bounded on an axis the split cannot bound or
-                in tiles no descriptor holds.
+            ValueError: No ``obj_shape=``, or the split does not divide, cannot
+                bound that axis, or does not fit a descriptor.
         """
         name = f"{type(self.op).__name__}.{self.name}"
         if not self.streamed:

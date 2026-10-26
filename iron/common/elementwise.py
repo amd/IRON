@@ -1,23 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The shared elementwise array: one core per (column, channel), each
-streaming fixed-size lines of every declared operand through its kernel.
-
-A ``replicate=True`` input is one line each core holds for the whole call
-and every line meets (``RowwiseMul``'s row).
-
-A concrete operator is one small subclass naming its kernel:
-
-```python
-class ReLU(UnaryElementwise):
-    def kernel(self):
-        return eltwise.relu(self.tile_size)
-```
-
-A core calls the kernel in its contract's argument order, with the scalars
-the factory binds and those ``scalars()`` supplies. A parameter either reads
-is declared ``array=True`` unless a stream names it.
+"""The shared elementwise array: one core per (column, channel), each streaming
+fixed-size lines of every operand through the kernel a subclass's ``kernel()``
+names, with the scalars ``scalars()`` supplies; a parameter either reads is declared
+``array=True`` unless a stream names it. A ``replicate=True`` input is one line
+each core holds for the whole call and every line meets (``RowwiseMul``'s row).
 """
 
 from __future__ import annotations
@@ -52,19 +40,16 @@ BENCH_TILE = 4096
 
 
 class Sweep:
-    """The cases of an elementwise operator. At the regular length: one core,
-    and the grid of the most cores its shim budget allows (every grid between
-    runs the same loop over its cores). At the other lengths, the extensive
-    suite: the smallest and the largest tile.
+    """The cases of an elementwise operator: at the regular length, one core and the
+    most its shim budget allows (the grids between run the same loop); at the
+    other lengths, in the extensive suite, the smallest and the largest tile.
 
     Args:
         channels: None leaves the count to the operator (a binary one).
         tile_cap: Else the class's ``tile_cap``.
         regular: The one length in the default suite; None for all.
-        rows: A length is that many elements in rows of ``tile_size``
-            (a ``Rowwise`` operator).
-        bench: The length of one CI-tracked case at the widest grid; None
-            adds none.
+        rows: A length is that many elements in rows of ``tile_size`` (``Rowwise``).
+        bench: The length of one CI-tracked case at the widest grid; None adds none.
         lower: Flags its first default case ``Case.lower``.
         **extra: Given to every case.
     """
@@ -149,7 +134,6 @@ class KernelCall:
     """One kernel call an elementwise operator's core makes over a line.
 
     Args:
-        kernel: The kernel called.
         scalars: The scalar arguments its contract leaves unbound, in order.
         operands: Each input tile, in the kernel's order: an input of the
             operator (``self.x``), or None, the line the call before it wrote.
@@ -162,10 +146,8 @@ class KernelCall:
 
 class Elementwise(Operator):
     """The array for an elementwise kernel over lines of ``tile_size`` elements.
-
-    Subclasses declare the operands with the line as their tile, most split
-    over every core (``per=CORES``), and implement ``kernel``. ``tile_cap``
-    is the largest line the kernel holds.
+    Subclasses declare operands with the line as their tile, most split over every
+    core (``per=CORES``), and implement ``kernel``; ``tile_cap`` is the longest line.
     """
 
     num_aie_columns: int = tunable(domain=widths)
@@ -237,16 +219,14 @@ class Elementwise(Operator):
         return out.elements
 
     def chain(self) -> tuple[KernelCall, ...]:
-        """The kernel calls a core makes over one line, in order, which
-        ``reference`` and ``judge`` follow: ``kernel()`` over the inputs,
-        unless an operator with an array of its own makes more.
+        """The kernel calls a core makes over one line, in order, which ``reference``
+        and ``judge`` follow; more than ``kernel()`` only with an array of its own.
         """
         config = self.layout()
         return (KernelCall(config.kernel(), config.scalars(), tuple(self.inputs)),)
 
     def over(self, elements: int, line: int) -> Self:
-        """This operator over ``elements`` elements in lines of ``line``, on
-        one core.
+        """This operator over ``elements`` elements in lines of ``line``, on one core.
 
         Raises:
             ValueError: Its shape is not a run of lines.
@@ -265,10 +245,9 @@ class Elementwise(Operator):
         return super().ops() if per_call is None else per_call * self.lines
 
     def reference(self, *inputs):
-        """The kernel contract's reference, line by line: what the cores compute.
-
-        Elements short of a whole line, a bounded call's valid ones, are run
-        padded with zeros to whole lines, as the device runs whole tiles.
+        """The kernel contract's reference, line by line: what the cores compute. A
+        bounded call's elements short of a whole line are zero-padded to whole lines,
+        as the device runs whole tiles.
         """
         (out,) = self.outputs
         line = self.default_tile if self.tile_size is None else self.tile_size
@@ -303,9 +282,8 @@ class Elementwise(Operator):
         tolerance: Tolerance,
         expected: Mapping[str, np.ndarray] | None = None,
     ) -> dict[str, Verdict]:
-        """Its output held to its reference by its kernel's ``judge``, line
-        by line, where a core makes the one kernel call; as any operator's
-        where it makes more.
+        """Its output held to its reference by its kernel's ``judge``, line by line,
+        where a core makes one kernel call; as any operator's where it makes more.
         """
         op = self.resolved()
         if len(op.chain()) > 1:
@@ -330,8 +308,7 @@ class Elementwise(Operator):
         return {out.name: verdict}
 
     def _kernel_arguments(self, inputs) -> tuple[Self, list[np.ndarray], tuple]:
-        """The resolved operator, ``inputs`` as the lines its cores take and
-        the scalars, as its kernel's contract takes them.
+        """The resolved operator, ``inputs`` as its cores' lines, and the scalars.
 
         Raises:
             NotImplementedError: The kernel declares no reference.
@@ -381,13 +358,8 @@ class Elementwise(Operator):
     def arguments(
         self, kernel: ExternalFunction, given: tuple, n_in: int, n_out: int
     ) -> tuple[list[int], dict]:
-        """Where each tile goes in a call, and the scalar arguments.
-
-        Args:
-            kernel: The kernel called.
-            given: The scalars its contract leaves unbound, in order.
-            n_in: The input tiles a call is given.
-            n_out: The output tiles a call is given.
+        """Where each of ``n_in`` input and ``n_out`` output tiles goes in a call of
+        ``kernel``, and the scalar arguments, ``given`` filling those it leaves unbound.
 
         Returns:
             The argument positions of the inputs then the outputs, in the
@@ -611,12 +583,7 @@ class Rowwise(Elementwise):
 
 
 def _admitted(tolerance: Tolerance, ref: np.ndarray) -> np.ndarray:
-    """The largest ``|actual - ref|`` that ``tolerance`` admits at each bf16 ``ref``.
-
-    Raises:
-        ValueError: ``tolerance`` is neither an ulps nor a relative one, or
-            scales with the reference's range.
-    """
+    """The largest ``|actual - ref|`` that ``tolerance`` admits at each bf16 ``ref``."""
     if tolerance.range_frac is not None:
         raise ValueError("no element-wise bound for a range_frac tolerance")
     ref = np.abs(np.asarray(ref, np.float32))
@@ -632,11 +599,9 @@ def _admitted(tolerance: Tolerance, ref: np.ndarray) -> np.ndarray:
 
 
 class WeightedRowwise(Rowwise):
-    """A ``Rowwise`` kernel's rows, optionally times a learned ``weight`` row.
-
-    Weighted, two cores per (column, channel) are pipelined: one calls the
-    kernel, the next multiplies by the weight row, which halves the line a
-    core holds.
+    """A ``Rowwise`` kernel's rows, optionally times a learned ``weight`` row; weighted,
+    two cores per (column, channel) are pipelined, the second multiplying by the
+    row, which halves the line a core holds.
     """
 
     # The longest weighted row: the weight row beside each line halves it.
@@ -811,10 +776,9 @@ class WeightedRowwise(Rowwise):
 
 
 class RowBroadcast(Rowwise):
-    """``rows`` rows of ``tile_size`` elements, each met elementwise by one
-    ``row``. A row wider than ``tile_cap`` is cut into ``segments`` lines of
-    ``line`` elements, each met by its own segment of ``row``, which a core
-    holds whole: the same sums, in more calls.
+    """``rows`` rows of ``tile_size`` elements, each met elementwise by one ``row``,
+    which a core holds whole; past ``tile_cap`` a row is cut into ``segments`` lines
+    of ``line`` elements, each met by its own segment: the same sums, in more calls.
     """
 
     # Rows past the cap: cut in two (Whisper's 5120-wide bias) and in six.

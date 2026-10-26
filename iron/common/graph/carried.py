@@ -3,12 +3,9 @@
 
 """Carried values computed on the device, and a loop that never asks the host.
 
-A full-ELF version with ``Carried`` values ends in an ``Emit`` step. The
-versions share one ``carry`` state, ``(2, carried)`` int32: plane 0 the values
-a call started from, plane 1 the elements it computed. Emit evaluates a
-program over the planes into the next call's scratchpad image and plane 0.
-The program depends on the target image's slots, so it is data composed once
-both images are built (``CompiledGraph.emit_to()``).
+A full-ELF version with ``Carried`` values ends in an ``Emit`` step, whose
+program (``CompiledGraph.emit_to()``) turns the shared ``carry``, ``(2, carried)``
+int32 (start values, computed ones), into the next call's scratchpad and start.
 """
 
 from __future__ import annotations
@@ -187,11 +184,9 @@ def compose(
 
 
 class CarriedLoop:
-    """A graph's carried values, looped on the device.
-
-    ``first`` runs once from the host; then ``body`` (taking no tensor) runs
-    with ``depth`` runs in flight, each run's Emit writing the next's
-    scratchpad, so the host only waits and restarts.
+    """A graph's carried values looped on the device: ``first`` runs once from the
+    host, then ``body`` (no tensor) with ``depth`` runs in flight, each run's Emit
+    writing the next's scratchpad, so the host only waits and restarts.
     """
 
     def __init__(self, first: CompiledGraph, body: CompiledGraph, depth: int = 2):

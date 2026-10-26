@@ -17,21 +17,12 @@ from aie.utils.npukernel import NPUKernel
 
 
 class Xclbin(NPUKernel):
-    """A downloaded xclbin, pinned by its SHA-256 and fetched on first read
-    of ``xclbin_path``.
-
-    Declared as a class's image (``class Shipped(GEMM, image=Xclbin(...))``)
-    it has no instructions; a build runs ``with_instructions`` of it, the
-    same image with the stream IRON generates for one shape.
+    """A downloaded xclbin pinned by ``sha256``, fetched over https into the JIT
+    cache's ``prebuilt/<filename>`` on first read of ``xclbin_path``. As an
+    ``image=`` it has no instructions; a build runs it ``with_instructions``.
 
     Args:
-        url: Where the image is downloaded from, over https.
-        sha256: The digest the download must have.
-        filename: Its name in the JIT cache's ``prebuilt/`` directory.
-        **kernel: `NPUKernel`'s other arguments (``kernel_name``, ...).
-
-    Attributes:
-        settings: Those other arguments, which ``with_instructions`` keeps.
+        **kernel: ``NPUKernel``'s other arguments, kept as ``settings``.
     """
 
     def __init__(self, url: str, sha256: str, filename: str, **kernel) -> None:
@@ -63,12 +54,8 @@ class Xclbin(NPUKernel):
         return super().__call__(*args, **kwargs)
 
     def fetch(self, directory=None) -> Path:
-        """The downloaded file, by digest: fetched unless a file of the pinned
-        content is already there.
-
-        Into the JIT cache's own root by default (``NPU_CACHE_HOME``'s
-        ``prebuilt/``), so an external image is found where every other built
-        artifact is and no caller has to name a directory for it.
+        """The downloaded file in ``directory`` (``NPU_CACHE_HOME``'s
+        ``prebuilt/`` by default), fetched unless the pinned content is there.
 
         Raises:
             ValueError: The URL is not https.

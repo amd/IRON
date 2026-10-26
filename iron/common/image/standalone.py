@@ -15,15 +15,8 @@ from .sequence import Image
 
 
 class OperatorImage:
-    """An operator's own xclbin and instruction stream, and a call of them:
-    what ``Operator.compile`` builds once and a call outside a graph runs,
-    with the operator's buffers as device tensors, in declaration order.
-
-    It is the one-step sequence of the operator as an xclbin chain
-    (``PerStep``), so the xclbin is the operator's
-    ``Operator.configuration``'s: an operator whose array serves every
-    shape (flm.ProjectionGEMM) compiles only an instruction stream per shape, and
-    on a shipped image (``image=``) it is the download.
+    """What ``Operator.compile`` builds: the operator's one-step ``PerStep`` chain,
+    run outside a graph on its buffers as device tensors, in declaration order.
     """
 
     def __init__(self, op: Operator) -> None:
@@ -47,14 +40,8 @@ class OperatorImage:
         return self._sequence.artifacts
 
     def __call__(self, *args, **scalars):
-        """Run the image on ``args``, loading it into the shared runtime
-        unless it is there already. ``scalars`` are the call's
-        ``DispatchTime`` values, by device symbol.
-
-        Returns:
-            The kernel's handle and its ``KernelResult``, as the runtime's
-            call gives them: ``aie.utils.benchmark`` times the dispatch less
-            an empty one on the handle.
+        """Run the image on ``args``, ``scalars`` its ``DispatchTime`` values by
+        device symbol; returns the handle ``aie.utils.benchmark`` times, and the result.
         """
         self.compile()
         (step,) = self._sequence.steps

@@ -66,12 +66,8 @@ def _require_xrt() -> None:
 
 
 class ScratchArena:
-    """The device buffers behind an ``ArenaPlan``, a buffer object per bank,
-    shared by every image placed in it.
-
-    A plan that grew since first use grows its last bank, keeping its
-    contents, and adds banks; each callable rebinds on its next call
-    (``generation``).
+    """An ``ArenaPlan``'s device buffers, a buffer object per bank; as the plan
+    grows they grow, keeping their contents, and ``generation`` says to rebind.
     """
 
     def __init__(self, plan: ArenaPlan):
@@ -112,14 +108,8 @@ class ScratchArena:
 
 
 class FullELFRun:
-    """One run of a full ELF, with its own ctrl scratchpad of per-call values:
-    a run of each of its commands, started back to back.
-
-    Binding one run's feedback argument to another's ``scratchpad_alias``
-    makes what the first drains there the second's per-call values. The run
-    is made on ``image``'s kernels as the shared runtime loaded them; once the
-    runtime evicts the image, loading it again gives others, and the run has
-    ended.
+    """One run of a full ELF's commands, back to back, with its own ctrl
+    scratchpad of per-call values; it ends once the shared runtime evicts its image.
     """
 
     def __init__(
@@ -148,11 +138,7 @@ class FullELFRun:
         self.wired = False
 
     def bind(self, index: int, bo: pyxrt.bo | None) -> None:
-        """Run with ``bo`` as argument ``index``.
-
-        Raises:
-            ValueError: ``bo`` is None, as a released tensor's is.
-        """
+        """Run with ``bo`` as argument ``index``, refusing a released tensor's None."""
         if bo is None:
             raise ValueError(f"{self.name}: argument {index} has no buffer object")
         for handle in self.handles:
@@ -203,11 +189,8 @@ class FullELFRun:
         return block.read(symbol)
 
     def scratchpad_alias(self) -> pyxrt.bo:
-        """This run's ctrl scratchpad, for another run to drain its feedback into.
-
-        Raises:
-            ValueError: The run has no per-call values, or is several
-                commands, whose scratchpads one drain cannot all set.
+        """This run's ctrl scratchpad, for another run to drain its feedback into;
+        refused where it has no per-call values, or is several commands.
         """
         params = self.params
         if params is None:
@@ -242,18 +225,16 @@ class FullELFRun:
 
 
 def _line_view(parent: XRTTensor, offset: int, length: int, dtype) -> XRTTensor:
-    """``length`` bytes of ``parent`` from ``offset``, and the rest of their
-    last coherence line, which no other buffer holds, as ``dtype``: an exact
-    view of bytes that do not end on a line cannot be synchronized.
+    """``length`` bytes of ``parent`` at ``offset`` as ``dtype``, out to the end of
+    their coherence line (no other buffer's), as a view ending mid-line cannot sync.
     """
     stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
     return parent.subview(offset, ((stop - offset) // dtype.itemsize,), dtype)
 
 
 class ImageCallable:
-    """What a caller invokes once a sequence ``op`` has an image. The
-    residents a sequence placed in an arena plan are views of ``arena``'s
-    banks, made again once it has grown.
+    """What a caller invokes once a sequence ``op`` has an image; residents placed
+    in an arena plan are views of ``arena``'s banks, remade as it grows.
     """
 
     def __init__(self, seq, arena: ScratchArena | None):
@@ -291,17 +272,8 @@ class ImageCallable:
 
 
 class FullELFCallable(ImageCallable):
-    """The full ELF (NPU2): every operator shares consolidated buffers addressed by offset.
-
-    A call dispatches ``run``; ``new_run`` makes more over the same buffers.
-
-    Each run holds a copy of the ELF's control code in the driver's device
-    heap, which a process fills at about 512 MiB. A run that does not fit
-    releases the run of the callable least recently called, as long as no
-    loop holds that run, and unloads its image: the image's hw_context holds
-    some of the heap too, between runs, and while it lives the freed run is
-    a hole a larger one may not fit in. The next call of that callable loads
-    the image and makes a new run.
+    """The full ELF (NPU2); a call dispatches ``run``. Where the device heap (about
+    512 MiB of ctrlcode) is full, a new run frees the least recently called one's.
     """
 
     # The callables holding a run, least recently called first.
@@ -397,11 +369,8 @@ class FullELFCallable(ImageCallable):
         return self._make_run()
 
     def release(self) -> bool:
-        """Free the run a call dispatches and unload the image, unless a loop
-        holds the run, another run is out, or another callable runs the image.
-
-        Returns:
-            Whether it was freed.
+        """Free ``run`` and unload the image, returning True, unless a loop holds
+        the run, another run is out, or another callable runs the image.
         """
         if self._run is None or self._run.wired or self._runs != [self._run]:
             return False
@@ -538,12 +507,8 @@ class FullELFCallable(ImageCallable):
             run.start(idle)
 
     def wait(self, *runs: FullELFRun) -> None:
-        """Wait on ``runs``.
-
-        Raises:
-            RuntimeError: The host wrote an argument since it was pushed,
-                which no run read and the next push would lay over what
-                the runs wrote.
+        """Wait on ``runs``, refusing a host write made while they were out, which
+        no run read and the next push would lay over what they wrote.
         """
         for run in runs:
             run.wait()
@@ -561,10 +526,8 @@ class FullELFCallable(ImageCallable):
         idle: Collection[int] = (),
         between: Mapping[int, Callable[[], None]] | None = None,
     ) -> tuple[XRTKernelHandle, XRTKernelResult]:
-        """Dispatch ``run``, each but its ``idle`` commands; ``between[k]()``
-        runs on the host once the commands before ``k`` complete, and what it
-        wrote is pushed before ``k`` starts. Returns the image's handle, whose
-        empty dispatch is aiecc's empty sequence, and the call's result.
+        """Dispatch ``run`` but its ``idle`` commands; ``between[k]()`` runs on the
+        host once the commands before ``k`` complete, and its writes are pushed.
         """
         self._sync_inputs()
         t0 = time.perf_counter()
@@ -584,14 +547,8 @@ class FullELFCallable(ImageCallable):
 
 
 class PerStepCallable(ImageCallable):
-    """Runs a ``PerStep`` one step, or one run of a pack, at a time, its
-    buffers shared by name.
-
-    ``check`` holds each dispatched step to its reference on the NPU's
-    inputs, by the step's ``tolerance()`` (``check_step``), so each
-    comparison isolates one operator. Every version of a graph reads one
-    copy of the residents, in the arena; its own transients share one
-    bank-split pool, each a view at the offset ``Image._layout`` gave it.
+    """Runs a ``PerStep`` a dispatch at a time, ``check`` holding each step to its
+    reference; residents are arena views, transients share one bank-split pool.
     """
 
     def __init__(self, seq, check: bool = False, arena: ScratchArena | None = None):
@@ -702,12 +659,8 @@ class PerStepCallable(ImageCallable):
     def __call__(
         self, between: Mapping[int, Callable[[], None]] | None = None
     ) -> tuple[None, XRTKernelResult]:
-        """Dispatch each step; ``between[i]()`` runs on the host before step
-        ``i``, or after the last for ``i`` past it. Several dispatches have no
-        one empty dispatch to time: the handle returned is None.
-
-        Raises:
-            ValueError: ``between`` names a step inside a run of a pack.
+        """Dispatch each step, ``between[i]()`` running on the host before step
+        ``i``, never inside a pack's run; the handle is None, no one dispatch timed.
         """
         between = dict(between or {})
         inside = set(between) - {*self._starts, len(self.op.steps)}
@@ -794,19 +747,8 @@ def check_step(
     written: Mapping[str, np.ndarray],
     expected: Mapping[str, np.ndarray],
 ) -> None:
-    """Hold what step ``index`` wrote to its reference on the same inputs,
-    by the step's ``tolerance()``.
-
-    Args:
-        held: Each of the step's buffers, by its declared name, as the
-            sequence names it.
-        inputs: The step's inputs as its buffers held them, by declared name.
-        written: Each output the step wrote, by declared name.
-        expected: Its reference on ``inputs``, by declared name.
-
-    Raises:
-        ValueError: Nothing bounds the step's output.
-        RuntimeError: An output is outside the step's tolerance.
+    """Hold what step ``index`` wrote, by declared name, to its reference within
+    its ``tolerance()``; raises where it declares none or an output falls outside.
     """
     tol = step_op.resolved().tolerance()
     if tol is None:

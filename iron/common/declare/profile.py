@@ -4,9 +4,8 @@
 """Profiles: tunable values for operator shapes, applied as an operator is made.
 
 A call's own value wins, then the profile's, then ``Operator.resolve``. An
-entry matches on what the call constructs the operator with, so a dimension
-whose default follows from another (MHA's ``seq_len``) is keyed by the one
-given (``seq_pad``).
+entry matches what a call constructs with, so a dimension that defaults from
+another (MHA's ``seq_len``) is keyed by the one given (``seq_pad``).
 """
 
 from __future__ import annotations
@@ -25,18 +24,9 @@ _Op = TypeVar("_Op", bound="Operator")
 
 
 class Profile:
-    """Tunable values for operators, keyed by their shape.
-
-    A graph's recorder makes every step it constructs with ``make``
-    (``Recorder(name, profile)``); standalone construction calls it
-    explicitly, ``profile.make(Cls, **kw)``. A
-    tunable a call leaves open comes from the most specific entry naming it;
-    entries of equal specificity that disagree raise. A subclass matches its
-    base's entries.
-
-    Each entry is ``(cls, dims, tunables)``: the ``param()`` values it
-    matches (a dimension left out matches any) and the ``tunable()`` values it
-    gives, one line of the JSON file ``load`` reads and ``save`` writes.
+    """Tunable values by operator shape, as ``(cls, dims, tunables)`` entries. An
+    open tunable comes from the most specific match (a dimension left out matches
+    any, a subclass its base's); equally specific ones that disagree raise.
     """
 
     def __init__(self) -> None:

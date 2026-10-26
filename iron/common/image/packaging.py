@@ -3,11 +3,9 @@
 
 """How a recorded graph is packaged: one full ELF, or an xclbin per step.
 
-``full_elf`` is mlir-aie's choice of the same name. ``None`` derives it:
-NPU1 or ``check`` forces an xclbin, one dispatch per step; otherwise the
-image is one full ELF. A full ELF is one command unless a host step runs
-between its steps or the words a command reads would pass its scratchpad's
-``SCRATCHPAD_WORDS`` (``Plan.commands``).
+``full_elf=None`` picks a full ELF unless NPU1 or ``check`` forces an xclbin per
+step. A full ELF is one command unless a host step runs between steps or the
+words a command reads would pass ``SCRATCHPAD_WORDS`` (``Plan.commands``).
 """
 
 from __future__ import annotations
@@ -68,11 +66,7 @@ class Plan:
 
 
 def require_device():
-    """The current device, bound if the runtime found one.
-
-    Raises:
-        RuntimeError: There is none.
-    """
+    """The current device, bound if the runtime found one; ``RuntimeError`` if none."""
     dev = aie_utils.ensure_current_device()
     if dev is None:
         runtime = os.environ.get("NPU_RUNTIME")
@@ -92,18 +86,9 @@ def plan(
     check: bool = False,
     step_words: list[frozenset[str]] | None = None,
 ) -> Plan:
-    """Derive the packaging for ``recording`` on the device.
-
-    Args:
-        check: Each step is checked against its reference on its own
-            dispatch, which an xclbin per step gives.
-        step_words: The scratchpad words each step reads, by the symbol it
-            shares; none bounds a command.
-
-    Raises:
-        ValueError: ``full_elf`` is asked for where a value, the device or
-            ``check`` forbids it, the graph runs a shipped image, or one step
-            reads more words than a command's scratchpad holds.
+    """Derive the packaging for ``recording`` on ``dev``, refusing a shipped image,
+    ``full_elf=True`` where the device or ``check`` forbids it, or a step reading
+    over ``SCRATCHPAD_WORDS`` (``step_words``, each step's by its shared symbol).
     """
     shipped = [op for op in recording.operators if op.external is not None]
     if shipped:

@@ -4,30 +4,9 @@
 
 """NPU hardware tracing, read back after a run.
 
-An operator is traced when it is built with a ``trace``
-(``aie.utils.trace.TraceConfig``): ``OperatorDesign.module`` switches the trace
-on for the workers its ``build()`` marks with ``Worker(trace=)``, or its
-first. A sequence holding a traced operator carries one trace buffer, and
-``dump_traces`` is called after ``run()`` to write what it holds:
-
-```python
-from aie.utils.trace import TraceConfig
-from iron.common.tracing import dump_traces
-
-norm = LayerNorm(..., trace=TraceConfig(8192))
-...
-run = sequence.get_callable()
-run()
-dump_traces(run, "layer_norm.txt")
-```
-
-On an untraced build the call returns an empty list, so a test can call it
-unconditionally.
-
-The writing and decoding are mlir-aie's ``TraceConfig``: a dump is its raw trace
-text, which ``TraceConfig.read_trace`` reads back to reparse without a further
-dispatch, plus one JSON file per traced design for https://ui.perfetto.dev.
-``dump_traces`` also prints mlir-aie's per-tile cycles summary for each.
+An operator built with ``trace=TraceConfig(...)`` (``aie.utils.trace``) traces the
+workers its ``build()`` marks ``Worker(trace=)``, else its first. After ``run()``,
+``dump_traces(run, path)`` writes mlir-aie's raw trace text and Perfetto JSON.
 """
 
 from __future__ import annotations
@@ -53,20 +32,15 @@ def dump_traces(
     mlir: str | Path | None = None,
     summary: bool = True,
 ) -> list[Path]:
-    """Write a completed run's trace buffer as trace text and Perfetto JSON.
+    """Write a completed run's trace buffer as text to ``trace_file`` and Perfetto
+    JSON beside it, one per traced design; returns the JSON paths, empty on an
+    untraced build, so a test can call it unconditionally.
 
-    Call it after ``run()``; it reads the trace buffer back from the device.
-    Returns the JSON paths written, empty on an untraced build.
-
-    The text goes to ``trace_file`` and the JSON beside it, under its stem: a
-    full-ELF sequence shares the buffer between the designs it configures, and each
-    gets its own ``<stem>_<index>_<device>_<sequence>.json``; otherwise the JSON
-    is ``<stem>.json``.
-
-    ``colshift`` of None lets the parser align the columns itself, which is what you
-    want by default: a design configured for one column may be loaded into another.
-    Override it when that alignment picks the wrong columns. ``mlir`` is the
-    lowered module the parser reads, the build's own unless given.
+    Args:
+        colshift: None lets the parser align the columns, as a design may load
+            into another column; override it when that picks the wrong ones.
+        mlir: The lowered module the parser reads, else the build's own.
+        summary: Also print mlir-aie's per-tile cycles summary for each.
     """
     if not isinstance(run, FullELFCallable):
         if run.op.traced:

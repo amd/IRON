@@ -3,19 +3,9 @@
 
 """Co-residence: several designs' arrays in one aie.iron ``DeviceConfiguration``.
 
-Each member keeps its runtime sequence under its own name, so the main
-sequence configures the pack once and runs any member's sequence against it.
-Members of one array (``identities``) build it once. A member's
-cores idle on the lock its own sequence sets while another runs; dataflow
-between members still goes through DDR. Members share the device's symbol
-table, which aie.iron names their unnamed fifos and buffers into. Two
-members may share a pinned tile unless both program its core or its DMA, which a route
-into its TileControl does too: the core verifier and mlir-aie's
-``DeviceConfiguration`` refuse those; a logical tile given its column and
-row is pinned. The fifo lowering allocates shim channels around
-``aie.shim_dma_allocation`` ops alone, so a member routing a pinned shim
-channel by hand must allocate it (``conflicts``). Whether the union fits is for aiecc's
-placer, fifo lowering and router to say (``fits``).
+Each member keeps its own runtime sequence, so the main one configures the pack
+once and runs any member's against it; data between members still goes through
+DDR. Whether a union fits is for aiecc's placer, fifo lowering and router (``fits``).
 """
 
 from __future__ import annotations
@@ -87,10 +77,8 @@ class Packing:
         designs: Collection[str],
         full_elf: bool = True,
     ) -> Packing:
-        """Groups of operators as the names of the designs they run as.
-
-        Raises:
-            ValueError: A group names a design none of ``designs`` is.
+        """Groups of operators as the names of the designs they run as, each
+        required to be one of ``designs``.
         """
         dev = aie_utils.get_current_device()
         groups = tuple(
@@ -122,17 +110,8 @@ class Packing:
         arrays: Mapping[str, Hashable],
         fits: Callable[[tuple[str, ...]], str | None] | None = None,
     ) -> Packing:
-        """This packing with the designs of one array in one device.
-
-        An array's designs in two or more packs join them only where
-        ``fits`` takes the union; otherwise each pack builds the array, and
-        its designs in no pack join the first.
-
-        Args:
-            arrays: Every design, in first-use order, and its array: its
-                `design.identities`, or what stands for it.
-            fits: Why the placer refuses a union of packs, or None where it
-                takes it; every union is taken where not given.
+        """This packing with one array's designs in one device, ``arrays`` mapping
+        each design in first-use order to it; packs merge only where ``fits`` allows.
         """
         order = list(arrays)
         by_array: dict[Hashable, set[str]] = {}
@@ -220,13 +199,8 @@ def _route_ends(op: ir.OpView):
 
 
 def conflicts(devices: Mapping[str, aie.DeviceOp]) -> None:
-    """Refuse ``devices`` (design name -> its own device, each another
-    array) co-resident where one leaves a hand-routed shim channel to the
-    fifo lowering.
-
-    Raises:
-        CoResidenceError: One routes a shim DMA channel by hand with no
-            ``aie.shim_dma_allocation`` for it.
+    """Raise ``CoResidenceError`` where one of ``devices`` (design name -> device)
+    routes a shim DMA channel by hand with no ``aie.shim_dma_allocation`` for it.
     """
     for member, device in devices.items():
         routed: set[tuple[tuple[int, int], aie.DMAChannelDir, int]] = set()
@@ -262,12 +236,8 @@ def conflicts(devices: Mapping[str, aie.DeviceOp]) -> None:
 def pack(
     name: str, arrays: Mapping[str, BuiltArray], steps: Sequence[str] = ()
 ) -> DeviceConfiguration:
-    """``arrays`` co-resident in one device configuration named ``name``,
-    running ``steps`` (``design.configuration``).
-
-    Raises:
-        CoResidenceError: One of its arrays routes a shim channel by hand
-            without allocating it (``conflicts``).
+    """``arrays`` co-resident in one device configuration ``name`` running
+    ``steps`` (``design.configuration``), refused as ``conflicts`` says.
     """
     distinct: dict[Hashable, BuiltArray] = {}
     of = identities(arrays)
@@ -309,12 +279,8 @@ def places(module: ir.Module) -> str | None:
 
 
 def unvalued(designs: Mapping[str, OperatorDesign]) -> None:
-    """Refuse a pack of ``designs`` where one is built for an xclbin and
-    takes a per-call value: a dispatch parameter, which a pack's one
-    sequence does not carry.
-
-    Raises:
-        CoResidenceError: One does.
+    """Raise ``CoResidenceError`` where one of ``designs`` is built for an xclbin
+    and takes a per-call value, a dispatch parameter a pack's sequence cannot carry.
     """
     for name, design in designs.items():
         if not design.full_elf and design.op.values:
@@ -327,13 +293,8 @@ def unvalued(designs: Mapping[str, OperatorDesign]) -> None:
 def fits(
     designs: Mapping[str, OperatorDesign], words: Mapping[str, str] | None = None
 ) -> str | None:
-    """``None`` if ``designs`` place and allocate as one pack, else the
-    diagnostic.
-
-    Args:
-        designs: The designs, by the name each takes in the device; one
-            another tool exports is a device of its own.
-        words: Design symbol -> the scratchpad word it shares with others.
+    """``None`` if ``designs``, by device name, place and allocate as one pack, else
+    the diagnostic; ``words`` maps a design symbol to the scratchpad word it shares.
     """
     exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
     try:
@@ -365,9 +326,8 @@ def fits(
 
 @dataclasses.dataclass(frozen=True)
 class AdjacentPacking:
-    """Grow a pack along the runlist while ``fits`` accepts the union.
-
-    Greedy: a design recurring far apart is packed where it first appears.
+    """Grow a pack along the runlist while ``fits`` accepts the union; greedy, so
+    a design recurring far apart is packed where it first appears.
     """
 
     def pack(

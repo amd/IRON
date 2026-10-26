@@ -38,11 +38,8 @@ SHIM_ADDRESS_ALIGNMENT = 4
 
 
 class Composition:
-    """An operator sequence's designs, composed into one module.
-
-    Each device is named for its design, not its step, so its text is the
-    same in every graph and aiecc's device cache hits. ``seq.packaging``
-    is its ``FullELF``, and ``seq``'s buffer layout must already be set.
+    """An operator sequence's designs in one module, each device named for its design
+    so aiecc's device cache hits in any graph; ``seq`` is laid out, on a ``FullELF``.
     """
 
     def __init__(self, seq):
@@ -96,16 +93,8 @@ class Composition:
         return h.hexdigest()[:24]
 
     def text(self) -> str:
-        """The composed module: a device configuration per array or pack, and a
-        main one whose runtime sequence configures each in runlist order and
-        runs its steps there.
-
-        Raises:
-            CoResidenceError: A pack holds a design another tool exports, or
-                an array that routes a shim channel by hand unallocated.
-            ValueError: A buffer's layout disagrees with the sequence it is
-                handed to, a shared word names an exported design's own, or
-                two arrays of a pack program one pinned tile's DMA.
+        """The composed module: a device configuration per array or pack, and
+        ``main``, whose runtime sequence configures each in turn and runs its steps.
         """
         words = self.shared_words
         arrays: dict[str, BuiltArray] = {}
@@ -226,11 +215,8 @@ class Composition:
     def _exported(
         self, symbol: str, name: str, text: str
     ) -> tuple[DeviceConfiguration, list]:
-        """Exported design ``name``'s device as configuration ``symbol``, and
-        its runtime sequence's argument types.
-
-        Raises:
-            ValueError: A shared word names one of its parameters.
+        """Exported design ``name``'s device as configuration ``symbol``, and its
+        sequence's argument types; none of its parameters may be a shared word.
         """
         with ir.Context(), ir.Location.unknown():
             configured = DeviceConfiguration.from_module(symbol, ir.Module.parse(text))
@@ -248,13 +234,8 @@ class Composition:
     def _views(
         self, name: str, buffers: tuple[BufferRef, ...], types
     ) -> list[tuple[str, int, type]]:
-        """Where step ``name``'s buffers are in the full ELF's arguments:
-        ``(argument, byte offset, type)`` each, ``type`` that of its
-        sequence's argument.
-
-        Raises:
-            ValueError: A buffer's bytes differ from its argument's, or it
-                starts off a shim address.
+        """Each of step ``name``'s buffers as ``(argument, byte offset, type)`` in
+        the full ELF's arguments; each must match its type's bytes, on a shim word.
         """
         views = []
         for buffer, view_type in zip(buffers, types):

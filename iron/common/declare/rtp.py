@@ -27,25 +27,13 @@ class Block(PerCallMember):
 
 
 class Rtp(tuple):
-    """The words one core reads once a call: a buffer the sequence writes,
-    the barrier it then opens, and the values read from the parameter
-    scratchpad instead.
-
-    A Worker takes it as one argument: mlir-aie registers a tuple
-    argument's leaves (the barrier, the buffer and each
-    ``ScratchpadParameter``) and hands the core the tuple itself, whose
-    function calls ``read``. ``build()`` makes one per core.
-
-    Args:
-        values: The values the core reads, each a ``Value`` of the operator.
+    """The words one core reads per call: a buffer the sequence writes, then
+    opens ``barrier`` on, and scratchpad words. A tuple, so a Worker takes it as
+    one argument whose leaves mlir-aie registers; the core calls ``read``.
 
     Attributes:
-        values: The values the core reads, in order.
-        slots: Each value the buffer holds and its first slot, from the
-            words of the values before it.
-        buffer: The buffer the sequence writes; None when every value is a
-            scratchpad word.
-        barrier: The barrier the sequence opens once every word is written.
+        slots: Each value the buffer holds and its first word there.
+        buffer: None when every value is a scratchpad word.
 
     Raises:
         ValueError: A value of several words is read from the scratchpad,
@@ -99,12 +87,11 @@ class Rtp(tuple):
         return words
 
     def write(self, words: Mapping[str, Any]) -> None:
-        """In the preamble, the words of each value the buffer holds, by
+        """In the preamble, write the words of each value the buffer holds, by
         value name: a resident's number, or an xclbin's per-call scalar.
 
         Raises:
-            ValueError: A value is given another number of words than it
-                declares.
+            ValueError: A value is given another number of words than it declares.
         """
         for value, at in self.slots.items():
             word = words[value.name]

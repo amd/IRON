@@ -23,23 +23,16 @@ if TYPE_CHECKING:
 
 
 class Value(PerCallMember):
-    """A ``per_call()`` member bound to one operator: per call when a graph binds it,
-    else written once per build before the first DMA.
-
-    ``op.value("count")`` is it, as is ``op.count`` but for an extent, which
-    reads as its number. A build gives it its device parameter and a core
-    reads it through its ``Rtp``.
+    """A ``per_call()`` member bound to one operator (``op.value("count")``, or
+    ``op.count`` unless an extent): per call when a graph binds it, else written
+    once per build before the first DMA. A core reads it through its ``Rtp``.
 
     Attributes:
-        name: Its member's name.
-        dtype: Its integer type.
-        derive: The once-per-build value, from the operator: a word, or
-            ``words`` of them; None for one every call gives.
-        bounds: The ``param()`` it bounds per call (``per_call(bounds=)``),
-            an extent, or None.
-        words: The words it holds in a core's runtime parameters.
-        param: The build's parameter: on a full ELF the ``ScratchpadParameter``,
-            on an xclbin (no scratchpad) a dispatch-time scalar.
+        derive: The once-per-build word, or ``words`` of them, from the
+            operator; None for one every call gives.
+        bounds: For an extent, the ``param()`` it bounds per call; else None.
+        param: The build's parameter: a ``ScratchpadParameter`` on a full ELF,
+            a dispatch-time scalar on an xclbin.
         ssa: Its value in the sequence body, on an xclbin.
     """
 
@@ -89,14 +82,9 @@ class Value(PerCallMember):
 
     @property
     def symbol(self) -> str:
-        """The device symbol the host writes this value through.
-
-        An exported design's parameter keeps its own name. Otherwise the
-        symbol is ``<instance>_<value>``, followed by the name of the graph
-        value bound to it if there is one. A value the operator derives is
-        ``<instance>_<bound graph values>_<value>``, naming every graph value
-        bound to the instance, so two instances bound to different graph
-        values derive different symbols.
+        """The device symbol the host writes it through: an exported design's own
+        name, else ``<instance>_<value>[_<its graph value>]``; a derived value's
+        names all the instance's graph values, so differently bound ones differ.
         """
         if self.op.exported_design() is not None:
             return self.name

@@ -54,13 +54,8 @@ class Parameter:
 
 @dataclass(frozen=True)
 class Artifacts:
-    """The record of one image.
-
-    Attributes:
-        full_elf: One full ELF, else an xclbin per design, chained
-            (``image`` is the last link).
-        entry: The cache entry holding the parameter table and lowered module.
-        buffers: Each buffer to ``(argument kind, byte offset, bytes)``.
+    """The record of one image: for an xclbin chain ``image`` is the last link, and
+    ``buffers`` maps each buffer to ``(argument kind, byte offset, bytes)``.
     """
 
     full_elf: bool

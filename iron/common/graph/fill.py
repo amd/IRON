@@ -13,19 +13,9 @@ import numpy as np
 def filled(
     fill: str, named: Mapping[str, tuple[tuple[int, ...], Any]], seed: int = 0
 ) -> dict[str, np.ndarray]:
-    """An array for each of ``named``'s ``(shape, dtype)``, by name.
-
-    Args:
-        fill: ``"random"``: drawn at ``seed`` in ``named``'s order, each
-            matrix normal with deviation ``1/sqrt(in)`` (an embedding's
-            ``in`` its width), anything of fewer than two axes normal with
-            deviation 0.1, about zero if it is a bias and about one
-            otherwise (a norm), so that swapping two changes the output.
-            ``"unread"``: zeros, for recording, building and measuring a
-            model; the pages are reserved, not touched. A graph may read
-            one as it is built (a clamp's bounds, a weight a
-            ``load_state_dict`` derives another from).
-        seed: The seed ``"random"`` draws at.
+    """An array for each of ``named``'s ``(shape, dtype)``, by name: ``"random"``
+    draws matrices normal at deviation ``1/sqrt(in)`` and the rest about one (a bias
+    zero) at 0.1, so swapping two changes the output; ``"unread"`` is lazy zeros.
     """
     if fill == "unread":
         return {n: np.zeros(shape, dtype) for n, (shape, dtype) in named.items()}

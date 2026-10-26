@@ -34,20 +34,8 @@ def _signature(op):
 
 
 class Image:
-    """A recorded graph's steps, built and dispatched as one image.
-
-    Args:
-        recording: The graph: its steps, inputs, outputs, the sizes of the
-            buffers a step names only in part (``pinned``) and the buffers
-            of its feedback argument.
-        packaging: One full ELF, or an xclbin per step, as
-            ``packaging.plan`` picks.
-        arena: A shared ``ArenaPlan`` to place the scratch buffers in. The
-            full ELF places them all there; a step at a time, only the
-            residents are, since the others live in this image's own pool
-            instead (``PerStepCallable``), not another image's.
-        residents: With ``arena``, the scratch buffers resident there, by
-            storage key.
+    """A recorded graph's steps, built and dispatched as one image; ``residents``,
+    by storage key, keep one place in the shared ``arena`` across images.
     """
 
     def __init__(
@@ -86,10 +74,8 @@ class Image:
         return list(seen.values())
 
     def unique_designs(self):
-        """The designs to build, and which design each operator uses.
-
-        Operators reporting the same ``design_key`` collapse onto one design,
-        so it is built, prefixed and configured once.
+        """The designs to build, and which each operator uses: operators reporting
+        one ``design_key`` share a design, built and configured once.
         """
         designs = []
         design_of = {}
@@ -143,12 +129,8 @@ class Image:
         return self._arena_layout
 
     def _layout(self):
-        """Each buffer's ``(argument kind, byte offset, bytes)``, and the
-        bytes of each argument.
-
-        A buffer's bytes are what the steps that name it whole declare,
-        unless ``pinned`` sizes it; ``pinned`` also sizes the buffers no
-        step names whole.
+        """Each buffer's ``(argument kind, byte offset, bytes)`` and each argument's
+        bytes; ``pinned`` sizes a buffer over what the steps naming it whole declare.
         """
         sizes: dict[str, int] = {}
         declared: dict[str, object] = {}
@@ -199,8 +181,7 @@ class Image:
 
     def buffer_dtype(self, ref: BufferRef) -> np.dtype:
         """The host dtype ``ref`` is viewed as: what the first step naming it
-        declares, else, for a whole buffer, its parts' dtype if they agree
-        (bytes if not), else bf16.
+        declares, else a whole buffer's parts' if they agree (bytes if not), or bf16.
         """
         parts = set()
         for s in self.steps:
@@ -275,9 +256,8 @@ class Image:
     def get_callable(
         self, arena: ScratchArena | None = None
     ) -> FullELFCallable | PerStepCallable:
-        """The runtime callable of this sequence's image, compiling first if
-        needed. A sequence placed in an arena plan runs what it placed there
-        in ``arena``, made here if not given.
+        """The callable of this sequence's image, compiling first if needed, running
+        in ``arena`` what it placed in an arena plan (a new arena if not given).
         """
         if self.layout is None:
             self._prepare()

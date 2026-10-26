@@ -33,16 +33,9 @@ class FullELF:
     """The full ELF: every design composed into one module (NPU2 only).
 
     Args:
-        coresident: Groups of operators whose designs share one device
-            configuration, or an ``AdjacentPacking`` that chooses them.
-        reconfigure: Configure the array at every call even where it runs
-            one design, which the first call otherwise configures for all
-            (``Composition.expands``).
-        commands: The steps that start a command of their own after the
-            first's, each command a runtime sequence a call queues after
-            the one before it.
-        shared_words: Design symbol -> the scratchpad word it shares with
-            others that always hold the same number.
+        reconfigure: Configure the array at every call, even for one design.
+        commands: The steps that each start a command after the first.
+        shared_words: Design symbol -> the scratchpad word it shares.
     """
 
     # --get-scratchpad-parameters emits the parameter table the host writes
@@ -72,10 +65,8 @@ class FullELF:
         return scratch
 
     def link(self, seq) -> Path:
-        """Build the ELF once (idempotent); returns its path.
-
-        Keyed on ``Composition.identity``, so a hit generates nothing: the
-        designs are composed, inside ``compile()``, only on a miss.
+        """Build the ELF once and return its path; keyed on
+        ``Composition.identity``, a cache hit composes nothing.
         """
         design = self.design
         if design is None:
@@ -133,14 +124,8 @@ class FullELF:
 
 @dataclass(frozen=True)
 class Link:
-    """Where one design of an xclbin chain runs.
-
-    Attributes:
-        design: Its own build, whose stream (or dispatch library) it runs.
-        configuration: The build whose xclbin it runs on; None on a shipped
-            image.
-        name: The design's name in the record.
-        kernel: Its stream on the xclbin carrying its kernel instance.
+    """Where one design of an xclbin chain runs: its own ``design``'s stream on
+    ``configuration``'s xclbin (None on a shipped image), as ``kernel``.
     """
 
     design: CompilableDesign
@@ -150,34 +135,14 @@ class Link:
 
 
 class PerStep:
-    """One xclbin and instruction stream per design, each linked onto the
-    previous (mlir-aie's ``CompilableDesign.chain``): the last link of each
-    chain carries its kernels, ``image`` the last chain's.
+    """An xclbin and stream per design, each linked onto the previous
+    (``CompilableDesign.chain``), ``image`` the last link; a design on another
+    operator's ``configuration``, or a shipped image, runs that xclbin unlinked.
 
-    A design whose ``Operator.configuration`` is another operator runs that
-    configuration's own xclbin, built once for every shape it serves, and a
-    shipped image (``image=``) is the download: neither is linked into the
-    chain, and only the design's stream is built.
-
-    Steps that run back to back on one pack of ``coresident`` are one link
-    instead, the pack's arrays and one sequence running theirs in turn
-    (``Runtime.merge``), so a dispatch configures the array once for them;
-    a step of a pack between steps of others runs its own design.
-
-    A run is cut where it would pass the kernel more than ``HOST_BUFFERS``
-    buffers.
-
-    ``links`` is by ``id(op)`` over the sequence's operators, and ``runs``
-    by a run's first step: its end and link.
-
-    Args:
-        check: Check each step against its reference on the NPU's inputs
-            (``callable.check_step``).
-        coresident: Groups of operators whose steps run as one, or an
-            ``AdjacentPacking`` that chooses them.
-
-    Raises:
-        ValueError: Both are given, as ``check`` dispatches each step alone.
+    Steps back to back on one ``coresident`` pack are one link
+    (``Runtime.merge``), cut at ``HOST_BUFFERS`` buffers; ``runs`` maps its
+    first step to its end and link. ``check`` dispatches each step alone, so it
+    excludes ``coresident``.
     """
 
     # aiecc binds at most this many host buffer objects to a kernel (kMaxHostBOs).
@@ -202,15 +167,14 @@ class PerStep:
 
     @staticmethod
     def in_arena(scratch: list[str], residents: Mapping[str, object]) -> list[str]:
-        """The scratch buffers the cross-version arena holds: the residents,
-        as every other one lives in this image's own pool instead
-        (``PerStepCallable``).
+        """The scratch buffers the arena holds: only the residents, as the rest
+        live in this image's own pool (``PerStepCallable``).
         """
         return [r for r in scratch if r in residents]
 
     def link(self, seq) -> Path:
-        """Build the chain once (idempotent); returns the last link, or the
-        last design's own image where none is linked.
+        """Build the chain once and return the last link, or the last design's
+        own image where none is linked.
         """
         if self.image is not None:
             return self.image
@@ -312,12 +276,8 @@ class PerStep:
     def _runs(
         self, order: list[str], designs: Mapping[str, Operator]
     ) -> dict[tuple[int, int], dict[str, OperatorDesign]]:
-        """Each run of two or more steps back to back on one pack, by its
-        ``(first, end)`` steps: the pack's designs, by name.
-
-        Raises:
-            CoResidenceError: A run's pack holds a design that takes a
-                per-call value.
+        """Each run of two or more steps back to back on one pack, by ``(first,
+        end)``: the pack's designs by name (``unvalued`` refuses the pack).
         """
         if not self.coresident:
             return {}

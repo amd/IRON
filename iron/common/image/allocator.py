@@ -3,18 +3,9 @@
 
 """Static memory planning for a recorded runlist.
 
-``LiveRange.scan`` gives each buffer the steps it must stay resident for;
-``Pool.place`` gives each a byte offset, sharing bytes between buffers whose
-lifetimes do not overlap (greedy by size, best fit: Algorithm 3 of Pisarchyk
-& Lee, MLSys 2020). ``ArenaPlan`` shares one arena between the images of a
-graph: residents (weights, states) keep one offset in every image, and each
-image's transients are planned around them.
-
-A pool is banks of ``BANK`` bytes, and no buffer crosses from one into the
-next: each bank is its own buffer object and its own argument of a full
-ELF. XRT maps a buffer object locked and the locked-memory limit binds
-each mapping, so a bank must map under it; and aiebu relocates an address
-by a 32-bit addend to its argument.
+``Pool.place`` shares bytes between buffers whose ``LiveRange``s do not overlap
+(greedy by size, best fit: Algorithm 3 of Pisarchyk & Lee, MLSys 2020), in
+``BANK``-byte banks no buffer crosses; ``ArenaPlan`` shares an arena across images.
 """
 
 from collections.abc import Hashable, Iterable, Mapping, Sequence
@@ -47,10 +38,8 @@ class LiveRange:
 
     @classmethod
     def scan(cls, steps: Steps, pinned=()) -> dict[str, "LiveRange"]:
-        """Every poolable buffer's range, from its first write to its last read.
-
-        A buffer read before it is written is an input and one never read is an
-        output; like ``pinned``, neither is pooled.
+        """Every poolable buffer's range, from its first write to its last read: not
+        ``pinned``, nor read before written (an input), nor never read (an output).
         """
         first_write, last_read, first_read = {}, {}, {}
         for step, (reads, writes) in enumerate(steps):
@@ -73,10 +62,8 @@ class LiveRange:
 
     @classmethod
     def touching(cls, steps: Steps, names: Iterable[str]) -> dict[str, "LiveRange"]:
-        """Each of ``names`` live from the first step that touches it to the last.
-
-        For an arena whose host-visible buffers live elsewhere, so nothing in
-        ``names`` is pinned. A name no step touches is live for the whole run.
+        """Each of ``names`` live from the first step that touches it to the last,
+        or the whole run if none does; for an arena, so none is pinned.
         """
         wanted = set(names)
         first, last = {}, {}
@@ -135,11 +122,8 @@ class Pool:
         return -(-x // self.alignment) * self.alignment
 
     def fit(self, offset: int, size: int) -> int:
-        """The first aligned offset from ``offset`` at which ``size`` bytes
-        stay in one bank.
-
-        Raises:
-            ValueError: ``size`` is more than a bank.
+        """The first aligned offset from ``offset`` at which ``size`` bytes stay in
+        one bank; a ``size`` over a bank raises ``ValueError``.
         """
         offset = self.align(offset)
         if self.bank is None:
@@ -151,17 +135,8 @@ class Pool:
         return offset
 
     def place(self, ranges, sizes, fixed: Iterable[Allocation] = ()):
-        """Assign pool offsets, largest buffer first, each in the tightest gap
-        that clears every placed buffer whose lifetime overlaps its own.
-
-        Args:
-            ranges: Each buffer's `LiveRange`.
-            sizes: Each buffer's bytes.
-            fixed: Allocations made earlier, occupied at every step.
-
-        Returns:
-            `(allocations, pool_bytes)`: each buffer's `Allocation`, and the
-            highest byte any of them reaches (0 if there are none).
+        """Place each of ``ranges`` largest first, in the tightest gap clear of
+        ``fixed`` and the buffers it is live with; returns them and the top byte.
         """
         fixed = list(fixed)
         placed: list[tuple[Allocation, LiveRange]] = []
@@ -190,13 +165,8 @@ class Pool:
 
 
 class ArenaPlan(Pool):
-    """One scratch arena, shared by every image placed in it.
-
-    A resident (keyed by its storage) has one offset in every image; a
-    transient lives within one run of one image and may reuse another image's
-    transients' bytes. An image bakes its offsets into its instruction
-    stream, so nothing placed moves: a later image's new residents go above
-    everything placed so far, and the arena only grows.
+    """One scratch arena shared by images: a resident keeps one offset in all of
+    them, a transient may reuse other images' transients, and nothing placed moves.
     """
 
     def __init__(self, alignment: int = 64):
@@ -218,15 +188,8 @@ class ArenaPlan(Pool):
         sizes: Mapping[str, int],
         residents: Mapping[str, Hashable],
     ) -> dict[str, Allocation]:
-        """Place one image's scratch buffers.
-
-        Args:
-            steps: The image's `(reads, writes)` per step.
-            sizes: Every buffer the image keeps in the arena.
-            residents: Which of them are residents, by storage key.
-
-        Returns:
-            Each buffer's `Allocation`.
+        """Place one image's arena buffers, ``sizes``; ``residents`` maps those that
+        are residents to their storage key.
         """
         unknown = set(residents) - set(sizes)
         if unknown:
@@ -254,12 +217,8 @@ class ArenaPlan(Pool):
 
 
 class ArgumentSizes(NamedTuple):
-    """Bytes of each runtime-sequence argument of a full ELF, in argument
-    order; ``feedback`` is ``None`` where the image takes no such argument.
-
-    The scratch arena is passed as its banks (``allocator.BANK``), each an
-    argument: ``scratch`` the first, ``scratch_k`` the k-th after it, the
-    last arguments.
+    """Bytes of each runtime-sequence argument of a full ELF, ``feedback`` None
+    where there is none; the scratch arena is passed as one argument per bank.
     """
 
     input: int
@@ -286,11 +245,8 @@ class ArgumentSizes(NamedTuple):
         return sizes
 
     def scratch_argument(self, offset: int, length: int) -> tuple[str, int]:
-        """The argument a scratch buffer of ``length`` bytes at ``offset``
-        is in, and its offset there.
-
-        Raises:
-            ValueError: It crosses from one bank into the next.
+        """The bank argument a scratch buffer of ``length`` bytes at ``offset`` is
+        in, and its offset there; one crossing banks raises ``ValueError``.
         """
         k = offset // BANK
         if length and (offset + length - 1) // BANK != k:
@@ -308,13 +264,8 @@ def lay_out(
     pinned: Iterable[str],
     arena: Mapping[str, Allocation],
 ) -> tuple[dict[str, tuple[str, int, int]], ArgumentSizes]:
-    """Each buffer's ``(argument kind, byte offset, bytes)``, and the bytes
-    of each argument.
-
-    Intermediates whose lifetimes in ``steps`` are disjoint share bytes; a
-    buffer the host addresses (``host``: the inputs, outputs and feedback
-    buffers), or one ``pinned`` because a step names it only in part, is
-    never pooled. A scratch buffer in ``arena`` keeps its place there.
+    """Each buffer's ``(argument kind, byte offset, bytes)`` and each argument's
+    bytes; intermediates share bytes, ``host`` and ``pinned`` buffers never do.
     """
     inputs, outputs, feedback = host
     held = {*inputs, *outputs, *feedback, *pinned}

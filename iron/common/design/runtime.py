@@ -34,29 +34,21 @@ from ..declare.operand import Operand, active_runtime
 
 
 class OperatorRuntime(Runtime):
-    """The runtime sequence of one operator: aie.iron's ``Runtime``, whose
-    body runs the preamble and then the operator's ``sequence(rt)``, or the
-    sequence derived from its declaration.
-
-    It is what ``sequence(rt)`` receives, whose transfers are the
-    operands' own ``fill``/``drain``, emitted here (``transfer``). A managed
-    transfer on a pinned lane (``Operand.pin``) keeps at most the operand's
-    ``depth`` in flight, and the sequence's end awaits them.
+    """The ``rt`` an operator's ``sequence(rt)`` receives: aie.iron's ``Runtime``
+    running the preamble, then that sequence or the one its declaration derives.
+    A managed transfer on a pinned lane keeps at most the operand's ``depth`` in
+    flight, all awaited at the sequence's end.
 
     Args:
         op: The resolved operator, its array built and its operands' lanes
             bound or pinned.
-        built: What its ``build()`` made: its workers, and the flows,
-            locks, tile DMAs, pinned endpoints and buffers only the sequence
-            reaches, and its cores' runtime parameters.
         name: The sequence's symbol; the Program names it when None.
 
     Attributes:
-        built: What the build made, which ``sequence`` may read.
+        built: What the operator's ``build()`` made, which ``sequence`` may read.
         pins: Each pinned lane this runtime declares, by its symbol.
-        buffers: Buffers no worker places, declared whatever a shape's
-            sequence reaches: a shipped image's parameter blocks, or a
-            pool only descriptors address.
+        buffers: Buffers no worker places: a shipped image's parameter blocks,
+            or a pool only descriptors address.
     """
 
     def __init__(self, op: Operator, built: Built, name: str | None = None) -> None:
@@ -103,9 +95,8 @@ class OperatorRuntime(Runtime):
                 )
 
     def body(self, *args) -> None:
-        """The sequence body aie.iron runs: the operator's runtime tensors,
-        its lanes' handles, then each per-call value, a dispatch-time scalar
-        where it is not a scratchpad word.
+        """The sequence body, given the operator's runtime tensors, its lanes'
+        handles, then each per-call value not in the scratchpad as its scalar.
         """
         buffers = self.op.buffers
         self._tensors = {b.name: a for b, a in zip(buffers, args)}
@@ -128,10 +119,9 @@ class OperatorRuntime(Runtime):
         super().resolve(loc, ip, device=device, **options)
 
     def declare(self, device) -> None:
-        """Its pins and buffers, at ``device`` scope ahead of the sequence:
-        aie.iron names a shim channel through the route it starts or ends,
-        and places a buffer through the worker that reads it, and these
-        have neither.
+        """Its pins and buffers, at ``device`` scope ahead of the sequence: aie.iron
+        names a shim channel by its route and places a buffer by the worker that
+        reads it, and these have neither.
         """
         for symbol, end in self.pins.items():
             device.resolve_tile(end.tile)
@@ -178,11 +168,9 @@ class OperatorRuntime(Runtime):
         repeat_parameter: Value | None = None,
         managed: bool = True,
     ):
-        """``operand.fill``/``operand.drain`` (``verb``): one transfer of
-        ``source``'s (else ``operand``'s) ``tap`` through lane ``lane`` of
-        ``operand``'s stream, its per-call words lowered for the image: a
-        scratchpad parameter on a full ELF, the pattern's sizes and offset
-        on an xclbin. See ``Operand.fill``.
+        """``Operand.fill``/``drain`` (``verb``): ``source``'s (else ``operand``'s)
+        ``tap`` through ``lane`` of ``operand``'s stream, its per-call words a
+        scratchpad parameter on a full ELF, the pattern's sizes and offset on an xclbin.
         """
         if lane is None:
             if operand.lanes != 1:
@@ -322,13 +310,10 @@ class OperatorRuntime(Runtime):
         return self._tensors[buffer.name]
 
     def preamble(self, **values) -> None:
-        """Each core's runtime parameters, then the parameter sync, then each
-        core's barrier, before any DMA. A shipped image's parameter blocks
-        (its ``buffers``) each hold the residents' words in declaration
-        order; its sequence releases them.
-
-        An ``own_preamble`` operator's sequence calls it itself, ``values``
-        overriding residents by name.
+        """Each core's runtime parameters, the parameter sync, then each core's
+        barrier, before any DMA; a shipped image's parameter blocks (``buffers``)
+        get the residents' words in declaration order, for its sequence to release.
+        An ``own_preamble`` operator's sequence calls it, ``values`` overriding residents.
 
         Raises:
             ValueError: ``values`` names no resident of the operator, or a
