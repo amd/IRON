@@ -969,6 +969,57 @@ def test_the_reference_copies_a_bounded_call_into_the_rows_it_covers(npu2):
 # --------------------------------------------------------------------------
 
 
+def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
+    """A bound reaches GEMM through A's rows and MHA through Q's padded
+    length and K's and V's (select shapes): GEMM derives the counts its
+    cores compute per call and keeps every descriptor; MHA derives its
+    counts and the first query block, and patches its K and V descriptors'
+    block count.
+    """
+
+    class G(iron.Graph):
+        def body(self, x, w, *, n: Scratchpad[np.int32]):
+            h = GEMM.step(
+                x[:n], w, b_col_maj=True, precision=Precision.MEDIUM
+            )  # (512, 64) x (256, 64)^T
+            return MHA.step(
+                h.reshape(512, 4, 64),
+                h.reshape(512, 4, 64),
+                h.reshape(512, 4, 64),
+                heads_interleaved=True,
+                kv_interleaved=True,
+                num_pipelines=2,
+            )
+
+    g = G()
+
+    t = g.record(x=(512, 64), w=(256, 64))
+    gemm, mha = t.operators
+    assert {k: e.name for k, e in gemm.bound_extents.items()} == {"valid": "n"}
+    assert {k: e.name for k, e in mha.bound_extents.items()} == {
+        "valid": "n",
+        "kv_valid": "n",
+    }
+    gemm, mha = (op.resolved(aie_utils.get_current_device()) for op in (gemm, mha))
+    assert [v.name for v in gemm.values] == ["valid", "row_blocks_valid"]
+    assert gemm.derived_at("row_blocks_valid", valid=100) == 1
+    assert gemm.residents["col_tiles"] == 256 // gemm.mem_tile_n
+    at = dict(valid=100, kv_valid=100)
+    assert mha.derived_at("s_q", **at) == mha.derived_at("s_kv", **at) == 100
+    assert mha.derived_at("q_blocks_valid", **at) == 1  # 128 padded / (64 x 2)
+    assert mha.derived_at("kv_blocks", **at) == 2  # ceil(100 / 64)
+    assert mha.derived_at("q_start", **at) == 0
+    assert mha.derived_at("q_start", valid=64, kv_valid=192) == 2  # a later chunk
+    # A call from mid-block: the block holding its first query, and the rows into it.
+    at = dict(valid=40, kv_valid=310)
+    assert [mha.derived_at(v, **at) for v in ("q_start", "q_offset")] == [4, 14]
+    # Bound alike, the queries start at 0 on every call: written once.
+    assert mha.residents["q_start"] == mha.residents["q_offset"] == 0
+    assert mha.value("s_q").per_call
+    (out,) = t.outputs
+    assert out.valid == {0: t.values[0].affine()}  # O is bounded like Q
+
+
 class _Gather(iron.Graph):
     """A row of a held table, gathered by a per-call index, plus ``x`` if given."""
 
