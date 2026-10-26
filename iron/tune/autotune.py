@@ -29,7 +29,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
-from iron.common.image.coresidence import fits
+from iron.common.image.compose import fits
 from iron.operators.gemm import GEMM
 from .measure import Cache, Standalone, Timing, judge, measure, write
 

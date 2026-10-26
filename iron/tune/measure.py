@@ -121,7 +121,6 @@ class Standalone:
         self,
         name: str,
         runlist: Sequence[Operator],
-        coresident: Sequence[Sequence[Operator]] = (),
         values: Mapping[Operator, Mapping[str, int]] | None = None,
         seed: int = 0,
         distinct: bool = True,
@@ -150,7 +149,7 @@ class Standalone:
         ]
         # Configure the array every call, as a design beside others in a
         # model's image is, so one timed alone pays that too.
-        packaging = FullELF(coresident, reconfigure=True) if full_elf else PerStep()
+        packaging = FullELF(reconfigure=True) if full_elf else PerStep()
         self.sequence = Image(
             Recording.of_steps(name, steps, in_names, out_names), packaging
         ).compile()

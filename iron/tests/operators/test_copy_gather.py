@@ -13,8 +13,6 @@ output, a core writes those addresses in a step before the gather. Either
 runs in a full ELF or in an xclbin.
 """
 
-import re
-
 import numpy as np
 import pytest
 from aie.iron.device import from_name
@@ -22,8 +20,6 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile, Scratchpad
-from iron.common.image import AdjacentPacking
-from iron.common.image.compose import Composition
 from iron.common.image.link import PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
@@ -312,27 +308,6 @@ def test_the_rows_a_call_bounds_by_ids_the_device_made_are_gathered(
         got = np.asarray(graph(ids, n=n), dtype=np.float32).reshape(-1, WIDTH)[:n]
         assert_equal(got, expected, f"{n} of {n_ids}")
         assert_equal(graph.reference(ids, n=n), expected, f"reference {n}")
-
-
-@pytest.mark.supported_devices("npu2")
-def test_packed_word_steps_of_one_array_each_read_their_own_table():
-    """Both tables' word steps run on one configure, the second reading its
-    own table's address, not the first's.
-    """
-    rng = np.random.default_rng(5)
-    table, other = (
-        rng.standard_normal((4096, WIDTH), dtype=np.float32).astype(bfloat16)
-        for _ in range(2)
-    )
-    graph = FromDeviceIds(table, other)
-    net = graph.compile(coresident=AdjacentPacking(), ids=((256,), np.int32))
-    text = Composition(net.sequence).text()
-    assert len(re.findall(r"aiex\.configure @(\w+)", text)) == 1
-    for call in range(3):
-        ids = rng.integers(0, len(table), 256).astype(np.int32)
-        rows, others = graph(ids)
-        assert_equal(rows, table[ids], f"call {call}")
-        assert_equal(others, other[ids], f"call {call}")
 
 
 @pytest.mark.supported_devices("npu2")

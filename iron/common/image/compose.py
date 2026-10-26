@@ -2,19 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Composition: a sequence's designs as one module, mlir-aie's
-``Program.compose``: a ``DeviceConfiguration`` per array (designs of one
-array each run their own sequence over it) or per pack of arrays
-(``coresidence``), and a main one whose runtime sequence configures and
-runs them in turn.
+``Program.compose``: a ``DeviceConfiguration`` per array, designs of one
+array sharing their device, and a main one whose runtime sequence
+configures and runs them in turn.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import itertools
 import logging
 import math
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 
 import numpy as np
 from aie import ir
@@ -23,11 +23,11 @@ from aie.extras.dialects.arith import constant
 from aie.helpers.npdtypes import np_ndarray_type_get_dtype, np_ndarray_type_get_shape
 from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import DeviceConfiguration, Program, Runtime
+from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
-from ..design import BuiltArray, OperatorDesign, identities
-from .coresidence import AdjacentPacking, CoResidenceError, Packing, fits, pack
+from ..design import BuiltArray, OperatorDesign, configuration, identities
 from .step import BufferRef
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,140 @@ logger = logging.getLogger(__name__)
 # The shim DMA addresses host memory in 32-bit words, so every buffer handed
 # to a sub-design must start on one.
 SHIM_ADDRESS_ALIGNMENT = 4
+
+# aiecc's resource stages, in its order (tools/aiecc/IRTransforms.h). The whole
+# stateful transform, since allocate alone on unsplit fifos checks nothing.
+_FIT_PIPELINE = (
+    "builtin.module("
+    "aie.device(aie-place-tiles),"
+    "aie-lower-scratchpad-parameters,"
+    "aie.device("
+    "aie-objectFifo-stateful-transform,"
+    "aie-assign-lock-ids,"
+    "aie-reserve-runtime-bd-ids,"
+    "aie-assign-bd-ids,"
+    "aie-prepare-buffers,"
+    "aie-assign-buffer-addresses,"
+    "aie-create-pathfinder-flows"
+    "))"
+)
+
+
+class CoResidenceError(ValueError):
+    """The designs cannot share one device configuration."""
+
+
+@dataclasses.dataclass(frozen=True)
+class Packing:
+    """A partition of a sequence's designs into device configurations; a
+    design in no group (or a group of one) has its own.
+    """
+
+    groups: tuple[tuple[str, ...], ...] = ()
+
+    def __post_init__(self) -> None:
+        seen: set[str] = set()
+        for group in self.groups:
+            for design in group:
+                if design in seen:
+                    raise ValueError(f"{design} is packed into two groups")
+                seen.add(design)
+
+    def group_of(self, design: str) -> tuple[str, ...]:
+        for group in self.groups:
+            if design in group and len(group) > 1:
+                return group
+        return (design,)
+
+    def device_of(self, design: str) -> str:
+        group = self.group_of(design)
+        return design if len(group) == 1 else self.device_name(group)
+
+    def devices(self, designs: Iterable[str]) -> dict[str, tuple[str, ...]]:
+        """Each device symbol and the designs it carries, in first-use order."""
+        out: dict[str, tuple[str, ...]] = {}
+        for design in designs:
+            out.setdefault(self.device_of(design), self.group_of(design))
+        return out
+
+    def sharing(self, arrays: Mapping[str, Hashable]) -> Packing:
+        """This packing with one array's designs in one device, ``arrays`` mapping
+        each design in first-use order to it.
+        """
+        order = list(arrays)
+        by_array: dict[Hashable, set[str]] = {}
+        for design, array in arrays.items():
+            by_array.setdefault(array, set()).add(design)
+        devices = [set(group) for group in self.groups]
+        for mates in by_array.values():
+            if len(mates) < 2:
+                continue
+            touched = [d for d in devices if d & mates]
+            union = mates.union(*touched)
+            devices = [d for d in devices if not d & mates] + [union]
+        return Packing(tuple(tuple(sorted(g, key=order.index)) for g in devices))
+
+    @staticmethod
+    def device_name(group: Sequence[str]) -> str:
+        """A pack's symbol, independent of its members' order."""
+        digest = hashlib.sha256("|".join(sorted(group)).encode()).hexdigest()[:8]
+        return f"pack{len(group)}_{digest}"
+
+
+def unvalued(designs: Mapping[str, OperatorDesign]) -> None:
+    """Raise ``CoResidenceError`` where one of ``designs`` is built for an xclbin
+    and takes a per-call value, a dispatch parameter a pack's sequence cannot carry.
+    """
+    for name, design in designs.items():
+        if not design.full_elf and design.op.values:
+            raise CoResidenceError(
+                f"{name} takes per-call value {design.op.values[0].name!r}, a "
+                f"dispatch parameter on an xclbin, which a pack does not carry"
+            )
+
+
+def places(module: ir.Module) -> str | None:
+    """``None`` if ``module``'s devices place and allocate, else the
+    diagnostic.
+    """
+    diagnostics: list[str] = []
+
+    def collect(d: ir.Diagnostic) -> bool:
+        if d.severity == ir.DiagnosticSeverity.ERROR:
+            diagnostics.append(f"{d.location}: {d.message}")
+        return True
+
+    handler = module.context.attach_diagnostic_handler(collect)
+    try:
+        PassManager.parse(_FIT_PIPELINE, module.context).run(module.operation)
+    except ir.MLIRError as e:
+        return "\n".join(diagnostics) or str(e)
+    finally:
+        handler.detach()
+    return "\n".join(diagnostics) if diagnostics else None
+
+
+def fits(
+    designs: Mapping[str, OperatorDesign], words: Mapping[str, str] | None = None
+) -> str | None:
+    """``None`` if ``designs``, by device name, place and allocate, else the
+    diagnostic; ``words`` maps a design symbol to the scratchpad word it shares.
+    """
+    exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
+    try:
+        unvalued(designs)
+        if exported:
+            (design,) = designs.values()
+            module = ir.Module.parse(str(design.build()), ir.Context())
+        else:
+            arrays = {n: BuiltArray(d, words) for n, d in designs.items()}
+            configured = configuration(next(iter(arrays)), arrays)
+            module = Program.compose(
+                [configured], entry=configured.runtimes[0]
+            ).resolve_program()
+    except (ValueError, RuntimeError, ir.MLIRError) as e:
+        return str(e)
+    return places(module)
 
 
 class Composition:
@@ -67,9 +201,7 @@ class Composition:
         self.buffer_sizes = seq.buffer_sizes
         self.commands = full_elf.commands
         self.shared_words = full_elf.shared_words
-        self.packing: Packing | AdjacentPacking = full_elf.coresident
-        if not isinstance(self.packing, AdjacentPacking):
-            self.packing = Packing.of(self.packing, self.designs)
+        self.packing = Packing()
 
     @property
     def identity(self) -> str:
@@ -119,14 +251,8 @@ class Composition:
                     list(shared.values()),
                 )
 
-        packing = self.packing
-        if isinstance(packing, AdjacentPacking):
-            packing, _ = packing.pack(
-                [name for name, _ in self.steps], self.designs, words
-            )
-        packing = packing.sharing(
-            {n: of[n] if n in arrays else n for n in self.designs},
-            lambda members: fits({m: self.designs[m] for m in members}, words),
+        packing = self.packing.sharing(
+            {n: of[n] if n in arrays else n for n in self.designs}
         )
         device = next(iter(self.designs.values())).op.array_device()
         configurations: dict[str, DeviceConfiguration] = {}
@@ -143,7 +269,7 @@ class Composition:
                 (name,) = outside
                 configured, types[name] = self._exported(symbol, name, exported[name])
             else:
-                configured = pack(symbol, {m: arrays[m] for m in members})
+                configured = configuration(symbol, {m: arrays[m] for m in members})
                 for m in members:
                     types[m] = [b.flat_type for b in arrays[m].op.buffers]
             configurations[symbol] = configured

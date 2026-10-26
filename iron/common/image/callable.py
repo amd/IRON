@@ -583,18 +583,14 @@ class PerStepCallable(ImageCallable):
             view = _line_view(self._scratch_banks[bank], offset, length, dtype)
             self._storage[root] = view
             self._buffers[BufferRef(root)] = view
-        # A run of a pack is one dispatch, over its steps' buffers in turn.
+        # Each step is its own dispatch, over its own buffers.
         self._steps = []
         # The step each dispatch starts at.
         self._starts: list[int] = []
-        i = 0
-        while i < len(seq.steps):
-            op = seq.steps[i].op
-            end, link = seq.packaging.runs.get(i, (i + 1, seq.packaging.links[id(op)]))
-            refs = tuple(r for s in seq.steps[i:end] for r in s.buffers)
-            self._steps.append((op, link.kernel, refs, []))
+        for i, step in enumerate(seq.steps):
+            link = seq.packaging.links[id(step.op)]
+            self._steps.append((step.op, link.kernel, step.buffers, []))
             self._starts.append(i)
-            i = end
         self._follow_arena()
         self._bind_steps()
 

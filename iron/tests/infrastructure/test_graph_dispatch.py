@@ -26,7 +26,6 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.image import AdjacentPacking
 from iron.common.image.compose import Composition
 from iron.common.graph.record import Recording
 from iron.common.image.link import FullELF, PerStep
@@ -196,46 +195,6 @@ def test_check_mode_catches_a_step_outside_its_tolerance_at_that_step():
         RuntimeError, match=r"\[check step 1\] RoundedMagnitude .*deviates"
     ):
         net(x)
-
-
-@pytest.mark.supported_devices("npu2")
-def test_a_packed_graph_computes_what_the_temporal_one_does():
-    """compile(coresident=...) changes which device each step runs in, and
-    nothing it computes.
-    """
-    rng = np.random.default_rng(0)
-    a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
-    b = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
-    outputs, configures = [], []
-    for coresident in (None, AdjacentPacking()):
-        version = Chain(SIZE, TILE, columns=2).compile(
-            full_elf=True, coresident=coresident, a=(SIZE,), b=(SIZE,)
-        )
-        text = Composition(version.sequence).text()
-        configures.append(len(re.findall(r"aiex\.configure", text)))
-        outputs.append(np.array(version(a, b).numpy()[:SIZE]))
-    # A configure per change of design, against one pack: the policy must
-    # have packed, or this compares two temporals.
-    assert configures == [5, 1]
-    temporal, packed = outputs
-    assert temporal.view(np.uint16).tolist() == packed.view(np.uint16).tolist()
-
-
-@pytest.mark.supported_devices("npu1")
-def test_an_npu1_pack_computes_what_its_steps_do_alone(npu1):
-    """On an xclbin, a pack's steps are one dispatch, and compute the same."""
-    rng = np.random.default_rng(0)
-    a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
-    b = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
-    outputs = []
-    for coresident in (None, AdjacentPacking()):
-        version = Chain(SIZE, TILE, columns=1).compile(
-            coresident=coresident, a=(SIZE,), b=(SIZE,)
-        )
-        outputs.append(np.array(version(a, b).numpy()[:SIZE]))
-    assert list(version.sequence.packaging.runs) == [0]
-    alone, packed = outputs
-    assert alone.view(np.uint16).tolist() == packed.view(np.uint16).tolist()
 
 
 class TwoExtents(iron.Graph):

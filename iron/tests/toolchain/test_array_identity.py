@@ -22,8 +22,7 @@ from aie.iron import Out
 from iron import Precision
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
-from iron.common.image.coresidence import Packing
-from iron.common.image.compose import Composition
+from iron.common.image.compose import Composition, Packing
 from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.tests.support import sequences

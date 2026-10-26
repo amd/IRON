@@ -27,7 +27,6 @@ from aie.utils import bfp
 from ml_dtypes import bfloat16
 from aie.helpers.taplib import Affine, PerCall
 
-from ..declare import Operator
 from ..declare.operator import device_fit, graph_recorder
 from ..declare.value import ExtentWord
 from ..declare.profile import Profile
@@ -39,7 +38,6 @@ from ..image.callable import (
     PerStepCallable,
     ScratchArena,
 )
-from ..image.coresidence import AdjacentPacking
 from ..image.packaging import Kind, Plan, plan, require_device
 from ..image.link import FullELF, PerStep
 from ..image.sequence import Image
@@ -521,7 +519,6 @@ class Graph:
         full_elf: bool | None = None,
         check: bool = False,
         feeds: CompiledGraph | None = None,
-        coresident: AdjacentPacking | None = None,
         **shapes,
     ) -> CompiledGraph:
         """Compile and return the version for these input shapes; compile all
@@ -534,7 +531,6 @@ class Graph:
                 outside its ``tolerance()``.
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
-            coresident: Packs designs into shared configurations.
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
         with (
@@ -561,7 +557,6 @@ class Graph:
                 check=check,
                 arena=self._arena,
                 emit=emit,
-                coresident=coresident,
             )
             if sized is not None and len(version.parameters) != len(sized):
                 read = {p.name for p in version.parameters}
@@ -730,7 +725,6 @@ class CompiledGraph:
         check: bool = False,
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
-        coresident: AdjacentPacking | list[list[Operator]] | None = None,
     ):
         self.recording = recording
         self.plan = plan
@@ -740,9 +734,9 @@ class CompiledGraph:
             recording, share=plan.full_elf, extents=not plan.full_elf
         )
         packaging = (
-            FullELF(coresident or (), commands=plan.commands, shared_words=self.shared)
+            FullELF(commands=plan.commands, shared_words=self.shared)
             if plan.full_elf
-            else PerStep(check, coresident or ())
+            else PerStep(check)
         )
         placement: dict[str, Any] = (
             {}
