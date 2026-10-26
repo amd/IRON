@@ -775,7 +775,7 @@ class CompiledGraph:
     def release(self) -> None:
         """Free this version's runs, image and the buffers it holds outside the arena."""
         if isinstance(self._callable, FullELFCallable):
-            self._callable.release()
+            self._callable.release(force=True)
         self._callable = None
         self._addressed.clear()
         if self.arena is None:

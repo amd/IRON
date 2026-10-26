@@ -267,6 +267,8 @@ def test_a_released_run_is_made_again_on_the_next_call():
     # A callable with another run out, as a loop makes, keeps its image.
     two.callable.new_run()
     assert not two.callable.release()
+    # Tearing down the whole graph frees it anyway: nothing calls it again.
+    assert two.callable.release(force=True)
 
 
 def test_release_frees_the_buffers_and_the_next_call_loads_them_again():

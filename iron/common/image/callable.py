@@ -374,16 +374,23 @@ class FullELFCallable(ImageCallable):
         """Another run over this callable's buffers; each holds a copy of the ctrlcode."""
         return self._make_run()
 
-    def release(self) -> bool:
+    def release(self, *, force: bool = False) -> bool:
         """Free ``run`` and unload the image, returning True, unless a loop holds
         the run, another run is out, or another callable runs the image.
+
+        ``force`` frees it anyway: the graph is being torn down, so a run
+        still wired into its own loop (the loop is torn down with it) or
+        shared with a sibling version (torn down beside it) is safe to evict.
         """
-        if self._run is None or self._run.wired or self._runs != [self._run]:
+        if self._run is None:
+            return False
+        if not force and (self._run.wired or self._runs != [self._run]):
             return False
         image = self.kernel.elf_path
-        holding = FullELFCallable._holding.values()
-        if any(c.kernel.elf_path == image for c in holding if c is not self):
-            return False
+        if not force:
+            holding = FullELFCallable._holding.values()
+            if any(c.kernel.elf_path == image for c in holding if c is not self):
+                return False
         self._run = None
         self._runs = []
         self._xrt_kernel = None
