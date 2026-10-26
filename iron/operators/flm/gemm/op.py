@@ -67,11 +67,9 @@ from iron.operators.flm.packing import pack_b
 
 
 class _BPool(NamedTuple):
-    """B's memtile path as ``build()`` builds it, for ``sequence()`` to program.
-
-    Per column: the pool buffer, one prod/cons lock pair per slot, the flow
-    from the shim into it and the broadcast out of it. The limits are the
-    target model's, read where the device is known.
+    """B's memtile path as ``build()`` builds it, for ``sequence()`` to
+    program: per column, the pool buffer, one prod/cons lock pair per slot,
+    and the shim-in/broadcast-out flows. Limits are the target model's.
     """
 
     mt_tiles: list
@@ -126,22 +124,11 @@ def _units_valid(op) -> Any:
 
 
 class ProjectionGEMM(Operator):
-    """AIE-accelerated bf16 GEMM on a 4-row grid, with a fused epilogue.
-
-    64-row tiles over a k tile of ``k_tile`` (the largest legal one up to 512
-    dividing K, unless the caller or the profile asks), and
-    an activation (``epilogue``) applied in the output stage. M, K, N and
-    the activation are values written to the cores: they change the
-    instruction stream only, so every shape on one configuration (the array
-    fields, ``config_name``) shares an xclbin.
-
-    The grid is as wide as the device. ``tile_n`` defaults to 64;
-    ``tile_ma`` and ``m_chunk`` are filled from the device's L1.
-
-    It is ``F.linear``'s GEMM for a weight operand over two or more rows at
-    MEDIUM or HIGH; every other GEMM is ``iron.operators.GEMM`` (HIGHEST,
-    an activation times an activation, convolutions, integer types and f32
-    output).
+    """AIE-accelerated bf16 GEMM on a 4-row grid, as wide as the device, with
+    a fused epilogue. M, K, N and the activation are values written to the
+    cores, so every shape on one ``config_name`` shares an xclbin. Used
+    wherever ``iron.operators.GEMM`` doesn't apply (a weight operand,
+    MEDIUM/HIGH, two or more rows).
     """
 
     M: int = param()
@@ -875,9 +862,8 @@ class ProjectionGEMM(Operator):
     @property
     def _b_slots(self) -> int:
         """B's memtile pool in k-tile slots: what A and C leave, at most
-        ``B_MAX_SLOTS``. Budgeted as if every memtile held an A forward, though
-        only every (cols // rows)-th does, so a slot count is the same on every
-        column.
+        ``B_MAX_SLOTS``, budgeted as if every memtile held an A forward
+        (uniform across columns, though only every (cols // rows)-th does).
         """
         free = (
             get_target_model(self.dev.resolve()).get_mem_tile_size()
@@ -1062,12 +1048,9 @@ class ProjectionGEMM(Operator):
             drains = slots
 
         def b_mt_task(c, direction, passes, slab):
-            """Program one of column ``c``'s memtile B channels.
-
-            The chain is one BD per used slot, walked ``passes`` times; past
-            what one queue push carries, the compiler pushes it again. The
-            task is returned for starting, and never awaited: C completing
-            implies it.
+            """Program one of column ``c``'s memtile B channels: one BD per used slot,
+            walked ``passes`` times (re-pushed past one queue's carry); returned for
+            starting but never awaited -- C completing implies it.
             """
             fill = direction == DMAChannelDir.S2MM
             flow = (pool.shim_flows if fill else pool.bcast_flows)[c]
@@ -1115,14 +1098,10 @@ class ProjectionGEMM(Operator):
             b_mt_tasks = {}
 
             def push_b_mt(bi):
-                """Push B's memtile chains for the chunks starting at block ``bi``.
-
-                A push covers as many whole blocks as one push's passes carry
-                and goes out at the first of them. Every push the compiler
-                then waits on for a queue slot is an earlier block's, whose
-                fills and C are already issued; pushing a whole slab up front
-                would wait on fills not issued yet. Under a bound a streamed
-                ring's passes are a per-call count, one push a block.
+                """Push B's memtile chains for the chunks starting at block ``bi``: a
+                push covers as many whole blocks as its passes carry, issued at the
+                first of them, so the compiler only waits on an earlier, already-issued
+                block's queue slot. Under a bound a streamed ring pushes one block a call.
                 """
                 per_call = bounded and not slab.b_resident
                 for c in range(COLS):
@@ -1268,11 +1247,9 @@ class ProjectionGEMM(Operator):
         )
 
     def pack_B(self, B):
-        """Reorder a row-major ``(K, N)`` weight matrix into consumption order.
-
-        Flat uint8 bfp16ebs8 blocks on NPU2, flat bf16 on NPU1. Packing to
-        consumption order is what makes both B hops linear descriptors. See
-        ``iron.operators.flm.packing``.
+        """Reorder a row-major ``(K, N)`` weight matrix into consumption order
+        (``iron.operators.flm.packing``): flat uint8 bfp16ebs8 blocks on
+        NPU2, flat bf16 on NPU1, making both B hops linear descriptors.
 
         Raises:
             ValueError: Under ``b_col_maj``, which reads B as stored.
@@ -1297,29 +1274,22 @@ class ProjectionGEMM(Operator):
         return 2 * self.M * self.K * self.N
 
     def reference(self, A, B):
-        """``C = epilogue(A @ B)``, in the kernel's order of operations.
-
-        The product accumulates in float32, as the kernel's f32 accumulator
-        does, and is rounded to the output dtype before the epilogue, because ``mm_fused_epilogue_chunk`` converts the accumulator
-        to bf16 and applies the activation to that.
-
-        Not bit-exact, and cannot be: the hardware's activation is a LUT on
-        aie2 and a native instruction on aie2p, worth up to ~0.02 absolute,
-        which the tolerance absorbs. ``B`` is ``(N, K)`` under ``b_col_maj``.
+        """``C = epilogue(A @ B)``, in the kernel's order: the product
+        accumulates in float32 and rounds to the output dtype before the
+        epilogue, since ``mm_fused_epilogue_chunk`` converts the accumulator
+        to bf16 first. Not bit-exact -- the activation is a LUT on aie2,
+        native on aie2p, worth up to ~0.02 absolute, absorbed by the
+        tolerance. ``B`` is ``(N, K)`` under ``b_col_maj``.
         """
         b = B.T if self.b_col_maj else B
         C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
         return self.epilogue.apply(C)
 
     def tolerance(self) -> Tolerance | None:
-        """Each element of C within the roundings the kernel makes, in units
-        of 2^-8 of ``|A| @ |B|``: under 2 for C's conversion to bf16, even
-        truncating, and K * 2^-16 for the f32 accumulator. bfp16 macs round
-        A and B to bfp16ebs8 as well, 2 units more to nearest and 8
-        truncating.
-
-        An activation's approximation is not bounded here, so an activated
-        GEMM has none.
+        """C's roundings, in units of 2^-8 of ``|A| @ |B|``: under 2 for C's
+        conversion to bf16, plus K * 2^-16 for the f32 accumulator; bfp16
+        macs add 2 more units (nearest) or 8 (truncating). An activated
+        GEMM has no tolerance, since the approximation isn't bounded here.
         """
         if self.epilogue is not Epilogue.NONE:
             return None

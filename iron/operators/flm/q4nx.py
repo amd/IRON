@@ -23,13 +23,11 @@ def packed_bytes(n_weights: int) -> int:
 
 
 def unpack(grid):
-    """A weight's codes ``(rows, cols)`` uint8 and its scales and minima
-    ``(rows, cols // GROUP)`` float32, from its blocks laid out as a
-    ``(rows // M_TILE, cols // K_TILE)`` grid.
-
-    A block stores the scales, then the minima, at ``[k // GROUP, m]`` and
-    the codes at ``[m // 16, k, m % 16]``, the lower index in a byte's low
-    nibble.
+    """A weight's codes ``(rows, cols)`` uint8 and its scales/minima
+    ``(rows, cols // GROUP)`` float32, from blocks laid out as a
+    ``(rows // M_TILE, cols // K_TILE)`` grid: each block stores scales then
+    minima at ``[k // GROUP, m]`` and codes at ``[m // 16, k, m % 16]``, the
+    lower index in a byte's low nibble.
     """
     grid = np.asarray(grid, np.uint8)
     nb_r, nb_c = grid.shape[:2]

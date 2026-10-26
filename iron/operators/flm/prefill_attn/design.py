@@ -1,18 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Causal prefill attention, optionally over a sliding window, on the whole array.
-
-Groups of columns each take one query head per pass. A round covers ROUND
-query rows. The cores of a group split these rows. Each core receives every key
-up to the round's last row, or every key inside the window. k and v come from
-one shim tile and reach every core through one memtile. The runtime sequence
-takes the token range and the KV cache's row count as dispatch parameters. One
-build therefore serves every prompt.
-
-The two kernels differ in geometry and in their L1 layout. ``Geometry`` reads
-the geometry from the kernel build. A ``Variant`` holds the rest of what
-differs.
+"""Causal prefill attention, optionally over a sliding window, on the whole
+array: groups of columns each take one query head per pass, a round covers
+``ROUND`` query rows split across the group's cores, and each core receives
+every key up to the round's last row, or inside the window. The runtime
+sequence takes the token range and the cache's row count as dispatch parameters.
 """
 
 from dataclasses import dataclass
@@ -185,10 +178,10 @@ def _stage_kv_causal(rt, MT, v, g, k_in, v_in, kv_out):
 
 
 def _stage_kv_sliding(rt, MT, v, g, k_in, v_in, kv_out):
-    """The k/v memtile stages k and v in one buffer pair: k in the first half, v in the second.
-
-    Each S2MM channel releases one count per buffer. The MM2S channel acquires
-    two counts. It therefore reads a buffer after both halves hold data.
+    """The k/v memtile stages k and v in one buffer pair, k in the first
+    half, v in the second; each S2MM channel releases one count per buffer,
+    and the MM2S channel's two-count acquire reads a buffer only once both
+    halves hold data.
     """
     in_mem_ty = np.ndarray[(LK_MT * 2, g.dh), bf16]
     halves = TensorAccessPattern.full((2, LK_MT // g.lk, g.dh // 8, g.lk, 8))
@@ -234,11 +227,10 @@ def _stage_kv_sliding(rt, MT, v, g, k_in, v_in, kv_out):
 
 
 def _no_unroll(iv):
-    """Disable unrolling of the scf.for that yields iv in Peano's opt.
-
-    Each unrolled copy recomputes the same buffer addresses as call arguments.
-    The copies add instructions to every step. MLIR drops a malformed
-    annotation without an error: check the call count in the core's opted_*.ll.
+    """Disable unrolling of the scf.for that yields ``iv`` in Peano's opt:
+    each unrolled copy recomputes the same buffer addresses as call
+    arguments, adding instructions per step. MLIR drops a malformed
+    annotation silently; check the call count in the core's opted_*.ll.
     """
     iv.owner.owner.attributes["loop_annotation"] = Attribute.parse(
         "#llvm.loop_annotation<unroll = <disable = true>>"
@@ -258,11 +250,9 @@ def prefill_attn(
     L_end: DispatchTime[np.int32],
     max_l: DispatchTime[np.int32],
 ):
-    """Prefill attention over a KV cache of up to max_context rows.
-
-    The README gives the layout of O, Q and KV and the meaning of the
-    dispatch parameters ``L_begin``, ``L_end`` and ``max_l``. ``kernel`` is
-    the variant's factory's build.
+    """Prefill attention over a KV cache of up to ``max_context`` rows;
+    README.md has the layout of O, Q and KV and the dispatch parameters'
+    meaning. ``kernel`` is the variant's factory's build.
     """
     v = VARIANTS[variant]
     if v.windowed != (window is not None):

@@ -145,14 +145,9 @@ def get_params(device: str):
 
 def flm_vectors(operator, scale=4.0):
     """Random A (signed) and B (non-negative) at ``scale``, and epilogue(A @ B).
-
-    ``scale`` matters for the epilogue tests: the result grows like
-    ``sqrt(K) * scale**2``, and at the default scale a K=512 product lands
-    around +-200, where gelu/silu are indistinguishable from the identity (or
-    from zero). Activation tests pass a smaller scale so the result sits in the
-    range where the curve is actually interesting. B is drawn row-major
-    ``(K, N)``, which the operator consumes packed (see ``ProjectionGEMM.pack_B``), or
-    ``(N, K)`` as stored under ``b_col_maj``.
+    A small ``scale`` keeps K=512 products away from +-200, where gelu/silu are
+    indistinguishable from the identity; B is row-major ``(K, N)``, packed by
+    ``ProjectionGEMM.pack_B``, or ``(N, K)`` as stored under ``b_col_maj``.
     """
     K, N = operator.K, operator.N
     B = (N, K) if operator.b_col_maj else (K, N)
@@ -167,17 +162,11 @@ def accumulated_mass(K, A, B):
 
 
 def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
-    """Run ``operator`` against its drawn vectors and return run_test's result.
-
-    Bounds the error absolutely, as a fraction of the accumulated mass
-    K * mean|a| * mean|b|. A relative tolerance cannot work: with signed A the
-    K-sum cancels by ~sqrt(K), so |C| ends up far smaller than the mass the
-    error tracks, leaving near-zero outputs uncheckable.
-
-    The fraction is per-architecture, since NPU2 emulates the mmul with bfp16
-    while NPU1 accumulates four native bf16 macs in f32 (~20x tighter). floor
-    truncates, so its bias accumulates and gets a looser bound on both.
-    ``record`` is run_test's.
+    """Run ``operator`` against its drawn vectors and return run_test's result,
+    bounding error absolutely as a fraction of the accumulated mass
+    K * mean|a| * mean|b|: a relative tolerance can't work, since signed A's
+    K-sum cancels by ~sqrt(K), leaving near-zero outputs uncheckable. The
+    fraction is per-architecture and loosens under ``floor``'s truncation bias.
     """
     A, B = data["A"], data["B"]
     mass = accumulated_mass(operator.K, A, B)
@@ -236,9 +225,8 @@ def test_gemm_without_activations(M, K, N, record_property):
 
 def b_col_maj_params(device: str):
     """Where B as stored reaches the kernel by another path than packed B: a
-    resident and a streamed memtile pool, a trailing column, every tile width
-    and two slabs, on each kind of mac ``device`` has: AIE2P's bfp16 and bf16
-    macs, AIE2's bf16 ones.
+    resident and streamed memtile pool, a trailing column, every tile width and
+    two slabs, on each mac kind ``device`` has (AIE2P's bfp16/bf16, AIE2's bf16).
     """
     dev = DEVICES[device]()
     cols = dev.cols
@@ -301,11 +289,9 @@ def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, precision, record_prope
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_gemm_split_leg_bounds_runs():
     """N = 20480 overflows the shim BD's 20-bit step from one row-block to the
-    next, and m_chunk = 2 gives A's leg a fifth dimension, so the compiler
-    cuts both legs into pieces, bounded by its queue polls and BD reclaim.
-    Overrunning either hangs or corrupts silently, which only running can
-    show. No model shape cuts a leg at m_chunk = 1, so this is their only
-    cover.
+    next, and m_chunk = 2 gives A's leg a fifth dimension, so the compiler cuts
+    both legs into pieces; overrunning either hangs or corrupts silently, and
+    no model shape cuts a leg at m_chunk = 1, so this is their only cover.
     """
     M, K, N = 512, 512, 20480
     operator = ProjectionGEMM(M=M, K=K, N=N, m_chunk=2, precision=Precision.MEDIUM)
@@ -315,16 +301,10 @@ def test_gemm_split_leg_bounds_runs():
 
 
 def tile_option_params(device: str):
-    """Every (tile_n, tile_ma) to try on ``device``.
-
-    The shape parameters above only exercise the default geometry, since
-    __post_init__ resolves both tunables. These cover the tunables themselves, which
-    change the blocked L1 layout, and a mismatch is silently wrong output
-    rather than a build error, so each has to run on hardware. The default
-    (``tile_ma`` None) stays in the regular suite; the overrides are
-    extensive, since each is its own kernel object and xclbin. Which the
-    design accepts, and which is the default, resolving says, so the test
-    does it, not collection.
+    """Every (tile_n, tile_ma) to try on ``device``: the shapes above only
+    exercise the default geometry, and a mismatched override is silently
+    wrong output rather than a build error, so it must run on hardware. The
+    default stays in the regular suite; overrides are extensive.
     """
     dev = DEVICES[device]()
     params = []
@@ -357,9 +337,8 @@ def tile_option_params(device: str):
 )
 def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
     """Device-free: B is resident (K=1024), streamed (K=6144) or behind a leg
-    the compiler cuts (N=20480); in each, B has no fifo, nothing is pinned,
-    the memtile locks are armed per dispatch, and one slab awaits one C per
-    column and half of the core rows.
+    the compiler cuts (N=20480), each with no B fifo, nothing pinned, memtile
+    locks armed per dispatch, and one slab awaiting one C per column/half.
     """
     mlir = str(
         OperatorDesign(
@@ -395,12 +374,9 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
 
 
 def k_slice_params(device: str):
-    """Every k slice to try at the default tile_n on ``device``.
-
-    Like the tiles above, a slice changes the blocked L1 layout and the B and
-    A transfers, and a mismatch is silently wrong rather than a build error.
-    The default (``ct_k`` None) stays in the regular suite; the others are
-    extensive, each run where the design accepts it.
+    """Every k slice to try at the default tile_n on ``device``: like the
+    tiles above, a mismatch is silently wrong rather than a build error; the
+    default stays in the regular suite, the others are extensive.
     """
     return [
         pytest.param(
@@ -439,11 +415,9 @@ def test_gemm_k_slices(ct_k):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("K", [256, 768])
 def test_gemm_k_tile(K):
-    """A k tile other than the default 512 computes the right answer.
-
-    Gemma 4's per-layer-input projection has K = 256, which the default does
-    not divide. K = 768 takes three k steps, so the accumulator carries
-    across tiles of the smaller size too.
+    """A k tile other than the default 512 computes the right answer: Gemma
+    4's per-layer-input projection has K=256 (512 doesn't divide it); K=768
+    takes three k steps, carrying the accumulator across smaller tiles too.
     """
     dev = aie_utils.get_current_device()
     assert dev is not None
@@ -464,12 +438,9 @@ def test_gemm_k_tile(K):
 )
 def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, ct_k, precision):
     """A k step of one B chunk (k_tile the compute tile's k slice), or of an
-    odd number of them, walks every chunk: small integers, exact in bfp16
-    and bf16 and in every sum, give the product exactly. check_on_device's
-    bound, a fraction of the accumulated mass, is fitted at K of 256 and
-    more; bfp16's error shrinks against the mass only as sqrt(K). Both
-    MEDIUM's macs (bfp16 on AIE2P) and HIGH's bf16 macs (a small CNN's 1x1
-    convolutions).
+    odd count of them, walks every chunk: small integers are exact in bfp16
+    and bf16, since check_on_device's bound is only fitted at K >= 256.
+    Covers both MEDIUM's bfp16 macs and HIGH's bf16 macs.
     """
     dev = aie_utils.get_current_device()
     assert dev is not None
@@ -498,11 +469,9 @@ def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, ct_k, precision):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_one_xclbin_serves_every_shape():
-    """Several shapes back to back on one loaded xclbin.
-
-    The parametrised tests cannot cover this: each gets a fresh context, so
-    the array is reconfigured between cases. Here the shapes share one, they
-    disagree on every parameter, and none may rebuild the xclbin.
+    """Several shapes back to back on one loaded xclbin: the parametrised
+    tests can't cover this, since each gets a fresh context. Here the shapes
+    share one, disagree on every parameter, and none may rebuild the xclbin.
     """
     # Every shape must resolve to the same m_chunk, which shapes the core
     # program and so the xclbin. These are all even in m_row_blocks and exclude
@@ -623,21 +592,14 @@ def test_shipped_overlay(M, K, N, epilogue, record_property, eight_column_npu2):
     ],
 )
 def test_shipped_epilogue_matches_accumulator(epilogue, eight_column_npu2):
-    """The epilogue is the right function of the accumulator the device produced.
-
-    Checking a bounded epilogue against the idealized CPU reference cannot work.
-    The overlay accumulates in the core's power-up floor rounding, worth ~2% of
-    the accumulated mass, which here is ~65 -- larger than sigmoid's entire (0,1)
-    range. Any bound wide enough to admit that
-    accumulator error also admits an all-zero result, and any bound tight enough
-    to reject all-zeros also rejects correct hardware. That is why the earlier
-    flat tolerance failed on working arithmetic.
-
-    So compare the epilogue against the device's OWN accumulator instead: run
-    the same inputs with no epilogue, apply the activation to that on
-    the host, and require the epilogue build to agree. The accumulator error is
-    then common to both sides and cancels, leaving only the epilogue under test.
-    An all-zero result still fails, because the reference side is not zero.
+    """The epilogue is the right function of the accumulator the device
+    produced. A bounded check against the idealized CPU reference can't
+    work: the overlay's floor-rounded accumulator error (~2% of the
+    accumulated mass) dwarfs sigmoid's (0,1) range, so a bound wide enough
+    to admit it also admits an all-zero result. Instead this compares
+    against the device's own no-epilogue accumulator, run through the same
+    activation on the host, so the accumulator error cancels and an
+    all-zero result still fails.
     """
     M, K, N = 256, 512, 1024
     # A small input scale keeps the accumulator in the range where these curves

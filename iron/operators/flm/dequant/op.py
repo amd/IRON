@@ -53,15 +53,9 @@ HALVES = 2
 
 
 def drain_halves(out_blocks):
-    """The output's drain, per half slab.
-
-    Args:
-        out_blocks: The output's size, in bfp16 blocks.
-
-    Returns:
-        The walk over the output's half slabs, indexed by half: each one's
-        n-half, k slice, then the core's run, split so the innermost size
-        stays inside the BD's field.
+    """The output's drain, per half slab: the walk over the output's half
+    slabs, indexed by half, each one's n-half, k slice, then the core's run,
+    split so the innermost size stays inside the BD's field.
     """
     halves = TensorAccessPattern.full(
         (out_blocks // HALF_BLOCKS, K_TILE // CT_K, N_TILE // M_TILE, RUN)
@@ -110,13 +104,11 @@ def _draw(op):
 
 
 class DequantBFP(Operator):
-    """q4nx weights to bfp16, packed the way ``flm.ProjectionGEMM`` reads B.
-
-    The array is the 4-row grid, as wide as the device, for one q4nx
-    tiling: nothing in it depends on K or N, since every core loops forever
-    over identical per-block work, so one xclbin serves every weight shape.
-    K, N and the interleave move offsets inside the instruction stream only.
-    See README.md for the layout, the parameters and the constraints.
+    """q4nx weights to bfp16, packed the way ``flm.ProjectionGEMM`` reads B: a
+    4-row grid, as wide as the device, for one q4nx tiling. Nothing depends
+    on K or N, since every core loops forever over identical per-block work,
+    so one xclbin serves every shape; K, N and the interleave move only the
+    instruction stream's offsets. See README.md for the layout and constraints.
     """
 
     test = Testing(
@@ -366,10 +358,9 @@ class DequantBFP(Operator):
         return Tolerance.exact()
 
     def grid(self, qw):
-        """The weight's q4nx blocks in the blob ``qw``, as ``q4nx.unpack``'s grid.
-
-        A column block is its k-tiles in order, each k-tile its two k-halves,
-        each of those its two n-halves: README.md layers 6-9.
+        """The weight's q4nx blocks in the blob ``qw``, as ``q4nx.unpack``'s
+        grid: a column block is its k-tiles in order, each k-tile its two
+        k-halves, each of those its two n-halves (README.md layers 6-9).
         """
         cb_bytes = packed_bytes(N_TILE * self.K)
         qw = np.asarray(qw, np.uint8).reshape(-1, cb_bytes)[self.column_blocks]
@@ -380,9 +371,8 @@ class DequantBFP(Operator):
 
     def reference(self, qw):
         """The bytes the operator must produce from the blob ``qw``, as a flat
-        uint8 array: bit-exact against the device, as the cores round to bf16
-        toward negative infinity. See README.md for the layout and the
-        rounding.
+        uint8 array: bit-exact against the device, since the cores round to
+        bf16 toward negative infinity (README.md has the layout and rounding).
         """
         K, N = self.K, self.N
         grid = self.grid(qw)

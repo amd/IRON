@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Gemma 4's fused decode layer on the whole array: one token through one layer.
-
-The design reproduces the xclbin and the runtime sequence of FastFlowLM's
-fused decode layer.
-
-One core runs each stage: RMS norm and residual, RoPE for the global and the
-sliding-window layers, 16 q4nx projection cores, GLU, the per-layer-input
-path, and one attention pair (qk and kv) for each attention kind. The runtime
-sequence writes the layer type into RTPs. It then streams the weights, the KV
-cache and the hidden state.
+"""Gemma 4's fused decode layer on the whole array, one token through one
+layer: reproduces FastFlowLM's xclbin and runtime sequence. One core runs
+each stage (RMS norm and residual, RoPE, 16 q4nx projection cores, GLU, the
+per-layer-input path, one attention pair per kind); the sequence writes the
+layer type into RTPs, then streams the weights, KV cache and hidden state.
 """
 
 from dataclasses import dataclass, field
@@ -241,10 +236,9 @@ _KV_PKT_SWA = 13
 
 
 def layer_kernels(geometry):
-    """The flm_gemma4_decode_* kernels that this design's cores link, by kernel name.
-
-    The factories build for the selected device. The global attention kernels
-    depend on the geometry's KV head count.
+    """The flm_gemma4_decode_* kernels this design's cores link, by kernel
+    name; the global attention kernels also depend on the geometry's KV head
+    count.
     """
     two_kv = geometry.num_kv_heads == 2
 
@@ -291,10 +285,9 @@ def layer_kernels(geometry):
 
 
 class BlobWeight(NamedTuple):
-    """One weight matrix in the engine's weight blob.
-
-    offset and size count bf16 elements. dout and din give the matrix shape.
-    packed is true for q4nx, false for bf16.
+    """One weight matrix in the engine's weight blob: ``offset``/``size``
+    count bf16 elements, ``dout``/``din`` the matrix shape, ``packed`` q4nx
+    versus bf16.
     """
 
     offset: int
@@ -306,11 +299,8 @@ class BlobWeight(NamedTuple):
 
 @dataclass(frozen=True)
 class LayerDims:
-    """One layer type's dimensions, in elements, and its weight blob.
-
-    ``geometry`` is aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or
-    FLM_GEMMA4_E4B_DECODE. dh is the head dim of this layer type. A skip
-    layer with double_wide_mlp has twice the intermediate size.
+    """One layer type's dimensions, in elements, and its weight blob; a skip
+    layer with ``double_wide_mlp`` has twice the intermediate size.
     """
 
     geometry: FlmGemma4DecodeGeometry
@@ -343,11 +333,9 @@ class LayerDims:
 
     @property
     def weights(self) -> dict[str, BlobWeight]:
-        """The weights in the blob that the sequence reads from proj, in blob order.
-
-        The engine packs one blob per layer: qkv, o, up_gate and down in q4nx,
-        then the per-layer-input down, gate and up projections in bf16. qkv is
-        q alone on a skip layer.
+        """The weights in the blob the sequence reads from proj, in blob
+        order: qkv (q alone on a skip layer), o, up_gate and down in q4nx,
+        then the per-layer-input down, gate and up projections in bf16.
         """
         D, P, dq, dk = self.geometry.model_dim, self.geometry.pli_d, self.dq, self.dk
         inter = self.intermediate_size
@@ -377,10 +365,9 @@ class LayerDims:
 
 
 def arg_sizes(geometry):
-    """Upper bounds on the element counts of the sequence's buffers, by name.
-
-    The four layer types share one xclbin. proj therefore holds the largest
-    blob of the four.
+    """Upper bounds on the sequence's buffer element counts, by name; proj
+    holds the largest of the four layer types' blobs, since they share one
+    xclbin.
     """
     D, pli = geometry.model_dim, geometry.pli_d
     dk = geometry.num_kv_heads * geometry.dh
@@ -434,16 +421,12 @@ def _connect(rt, src, src_ch, dst, dst_ch, pkt_id, keep_pkt_header=False, name=N
 
 @dataclass
 class _Array:
-    """The decode layer's array as its stages build it: each stage adds its
-    cores, locks and DMA channels to ``rt`` and ``workers``.
-
-    ``t`` holds the tile of each stage, ``flows`` each circuit-switched flow
-    by name, ``rtps`` each RTP buffer by (key, stage) and ``sync_locks``
-    each sync lock by stage. The RMS, GLU, attention kv and projection cores
-    acquire their sync lock before they read their RTPs; the sequence sets
-    it after it writes them, an attention kv core's only in a dispatch of its
-    layer type. The RoPE and attention qk cores read their RTPs after data
-    from the projection cores arrives.
+    """The decode layer's array as its stages build it, each stage adding its
+    cores, locks and DMA channels to ``rt``/``workers``, keyed by stage in
+    ``t``, ``flows``, ``rtps`` and ``sync_locks``. RMS, GLU, attention-kv and
+    projection cores acquire their sync lock before reading RTPs (the
+    sequence sets it after writing); RoPE and attention-qk cores instead
+    wait for the projection cores.
     """
 
     rt: Runtime
@@ -496,10 +479,8 @@ class _Array:
         return self.flows[flow].endpoint(tile)
 
     def build(self) -> dict[str, Flow | PacketFlow]:
-        """Every stage, then every flow between them.
-
-        Returns:
-            The flows the runtime sequence fills and drains, by name.
+        """Every stage, then every flow between them: the flows the runtime
+        sequence fills and drains, by name.
         """
         g, t = self.g, self.t
         G_DQ = g.num_attn_heads * g.dh
@@ -799,10 +780,8 @@ class _Array:
         )
 
     def pl_merge(self, plm_tile: Tile) -> None:
-        """Per-layer-input merge.
-
-        The tile runs no kernel. Its DMA gathers the embedding and the gate
-        outputs into one buffer and sends the buffer to the up projection.
+        """Per-layer-input merge: no kernel runs here, its DMA gathers the
+        embedding and gate outputs into one buffer for the up projection.
         """
         D, PLI_D = self.g.model_dim, self.g.pli_d
         plm_dual_y_ty = np.ndarray[(2 * (PLI_D + D) + 32,), _BF16]
@@ -928,11 +907,9 @@ class _Array:
         main_y0: Buffer | None = None,
         main_y1: Buffer | None = None,
     ) -> tuple[Buffer, Buffer]:
-        """One q4nx projection core. Returns its y buffers (y0, y1).
-
-        Core ``j`` of projection group ``group``. A core that does not send y
-        fills the second slot of main_y0 and main_y1, the y buffers of the
-        sending core before it.
+        """Core ``j`` of projection group ``group``, returning its y buffers
+        (y0, y1); a core that doesn't send y fills the second slot of
+        ``main_y0``/``main_y1`` instead, the sending core's own buffers.
         """
         n = f"proj_{group}_{j}"
         pt = self.t[n]
@@ -998,10 +975,9 @@ class _Array:
         return y0, y1
 
     def proj_cores(self) -> list[list[Tile]]:
-        """The q4nx projection engine: 16 cores, four per group.
-
-        Cores 0 and 2 of each group send y. Returns the sending cores of each
-        gather memtile's two groups.
+        """The q4nx projection engine: 16 cores, four per group; cores 0 and
+        2 of each group send y. Returns each gather memtile's two groups'
+        sending cores.
         """
         proj_k = self.entry("proj_main", "proj_main")
 
@@ -1112,10 +1088,8 @@ class _Array:
         )
 
     def scores_ty(self, name: str) -> type[np.ndarray]:
-        """The type of the scores that the qk core sends kv kernel ``name``.
-
-        It is the first argument of the kernel's round, or of its s_begin for
-        two KV heads.
+        """The type of the scores the qk core sends kv kernel ``name``: the
+        first argument of its ``round``, or ``s_begin`` for two KV heads.
         """
         kv = self.kernels[name]
         first = getattr(kv, f"{name}_round", None) or getattr(kv, f"{name}_s_begin")
@@ -1307,13 +1281,9 @@ class _Array:
         self.rt.add_tile_dma(TileDma(amt, amt_chans))
 
     def route(self, proj_send_tiles: list[list[Tile]]) -> dict[str, Flow | PacketFlow]:
-        """Add every flow between the stages.
-
-        The router places flows in the order the design adds them. Long flows
-        go first.
-
-        Returns:
-            The flows the runtime sequence fills and drains, by name.
+        """Add every flow between the stages, long ones first since the
+        router places them in the order the design adds them; returns the
+        flows the runtime sequence fills and drains, by name.
         """
         rt, t = self.rt, self.t
         x_shim, kv_shim = t["x_shim"], t["kv_shim"]
@@ -1420,12 +1390,9 @@ def _sequence(
     len_arg,
     max_l_arg,
 ):
-    """The runtime sequence of one ``layer_type`` dispatch.
-
-    The sequence writes the RTPs, then starts the shim DMA legs in the order of
-    the engine's gen_layer_seq. ``shim`` holds the shim flows by name. Offsets
-    and lengths count bf16 elements. L counts the tokens up to and including
-    this one.
+    """The runtime sequence of one ``layer_type`` dispatch: writes the RTPs,
+    then starts the shim DMA legs in ``gen_layer_seq``'s order. Offsets and
+    lengths count bf16 elements; L counts tokens up to and including this one.
     """
     dims = LayerDims(g, LayerType(layer_type))
     D = g.model_dim
@@ -1579,11 +1546,9 @@ _PROJ_MEM_W_INITS = (2, 0, 0, 2, 0, 0)
 
 
 def _proj_weight_channels(w0, w1, in_ends, out_ends, *locks):
-    """A projection memtile's weight channels, on the flow ends ``in_ends`` and
-    ``out_ends``.
-
-    Each of the two halves of a weight object comes in on its own channel
-    and goes out a W_BLOCK at a time on two, behind a chain of three locks.
+    """A projection memtile's weight channels on flow ends ``in_ends``/
+    ``out_ends``: each half of a weight object comes in on its own channel,
+    then goes out a W_BLOCK at a time on two, behind a chain of three locks.
     """
     w = TensorAccessPattern.full(w0.shape)
     ins, outs = [], []
@@ -1632,11 +1597,9 @@ def decode_layer(
     context_len: DispatchTime[np.int32],
     max_l: DispatchTime[np.int32],
 ):
-    """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
-
-    ``layer_type`` sets the runtime sequence only. ``kernels`` holds
-    layer_kernels(geometry). README.md gives the meaning of the dispatch
-    parameters ``context_len`` and ``max_l``.
+    """The MLIR module of one decode layer of ``layer_type`` for ``geometry``;
+    ``layer_type`` sets only the runtime sequence, ``kernels`` holds
+    ``layer_kernels(geometry)``. README.md explains ``context_len`` and ``max_l``.
     """
     g = geometry
     sizes = arg_sizes(g)

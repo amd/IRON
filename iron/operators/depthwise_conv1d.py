@@ -17,10 +17,9 @@ TAPS = 5
 
 
 class DepthwiseConv1d(Operator):
-    """A causal depthwise convolution over time, five taps, channels last.
-
-    One core per column takes a run of rows, its input fifo the sliding
-    window; every run but the first is filled from four rows before it.
+    """A causal depthwise convolution over time, five taps, channels last: one
+    core per column takes a run of rows, its input fifo the sliding window;
+    every run but the first is filled from four rows before it.
     """
 
     test = Testing(

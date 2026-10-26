@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sample: the next token, drawn on the device from a row of bf16 logits.
-
-Temperature and top-k sampling bit for bit as
-``aie.iron.kernels.sample.sample_ref``, from a four-word draw row the host
-writes ahead of time per position. Each column's core reduces its slice of
-the logits to a top-k summary; one combine core draws the token from them.
+"""Sample: the next token, drawn on the device from a row of bf16 logits,
+bit for bit as ``aie.iron.kernels.sample.sample_ref``, from a four-word draw
+row the host writes ahead of time per position. Each column's core reduces
+its slice to a top-k summary; one combine core draws the token from them.
 """
 
 from functools import cache

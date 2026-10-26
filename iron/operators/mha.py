@@ -1,14 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fused multi-head attention.
-
-``num_pipelines`` three-stage pipelines (QK^T, partial softmax, P*V), one
-per column: Q split across them on a memtile, K and V forwarded to every
-one. Where a core holds no P*V block (d=512), P*V splits over two cores by
-halves of the head. The queries are the keys' last rows, padded to 64; one
-query (a decode step) is not padded but packs a KV group's heads into a
-block, and each pipeline takes its own K and V lanes.
+"""Fused multi-head attention: ``num_pipelines`` three-stage pipelines (QK^T,
+partial softmax, P*V), one per column, Q split across them on a memtile, K
+and V forwarded to every one; P*V may split over two cores when d=512. The
+queries are the keys' last rows, padded to 64, except one (a decode step),
+which packs a KV group's heads into a block instead.
 """
 
 import dataclasses
@@ -41,16 +38,13 @@ from iron.common.testing import Case, Testing
 
 @dataclasses.dataclass(frozen=True)
 class SplitColumns:
-    """Where MHA's streams meet the array with P*V split over two cores.
-
-    Each column then carries every stream its links hold, so these columns
-    are the only ones the router finds.
+    """Where MHA's streams meet the array with P*V split over two cores; each
+    column carries every stream its links hold, so these are what the router finds.
 
     Attributes:
         q: Each Q shim's split.
         o: Each Q shim's O joins, one per half of the head.
-        k: K's memtile.
-        k_shim: K's shim.
+        k, k_shim: K's memtile and shim.
         v: V's, one per half of the head.
     """
 
@@ -193,11 +187,8 @@ def _cases(cls, dev: Device):
 
 
 class MHA(Operator):
-    """AIE-accelerated Multi-Head Attention: fused attention over ``(B_q, d)``
-    Q blocks, ``(d, B_kv)`` K blocks and ``(B_kv, d)`` V blocks.
-
-    More than six pipelines split Q and O over two shims (a memtile split
-    serves at most six).
+    """Fused attention over ``(B_q, d)`` Q, ``(d, B_kv)`` K and ``(B_kv, d)``
+    V blocks; more than six pipelines split Q and O over two shims.
     """
 
     test = Testing(_cases)
@@ -505,10 +496,9 @@ class MHA(Operator):
         return ceildiv(seq_len, 64) * 64
 
     def key_block(self, B_q: int, dev: Device | None) -> int:
-        """``B_kv`` for ``B_q``: ``B_q`` itself, which mha.cc's causal skip
-        compares by; packed, past every key, the widest whose cores fit
-        ``dev`` (any where None), since mha.cc's vectorized softmax reads
-        64-key rows."""
+        """``B_kv`` for ``B_q``: itself, which mha.cc's causal skip compares
+        by; packed, the widest divisor of ``kv_len`` whose cores fit ``dev``
+        (any, where None), since mha.cc's vectorized softmax reads 64-key rows."""
         if not self.packed:
             return B_q
         return next(
@@ -526,14 +516,11 @@ class MHA(Operator):
         )
 
     def core_bytes(self, dev, B_q: int, B_kv: int, pv_cores: int) -> int:
-        """The L1 bytes the fuller of a pipeline's QK^T and P*V cores holds.
+        """The larger of a pipeline's QK^T and P*V cores' L1 bytes, kernels'
+        data and stack included, over the device's default stack.
 
         Args:
             pv_cores: The P*V cores the head is split over.
-
-        Returns:
-            The larger core's bytes, its kernels' data and stack included,
-            over the device's default stack.
         """
         d, pv_width = self.d, self.d // pv_cores
         arch = resolve_target_arch(dev)

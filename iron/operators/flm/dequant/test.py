@@ -37,12 +37,10 @@ def test_output_feeds_gemm_unchanged():
 
 @pytest.mark.supported_devices("npu2")
 def test_one_xclbin_serves_every_shape():
-    """Several shapes and parameter sets back to back on one loaded xclbin.
-
-    A model dispatches ten weight shapes against a budget of 16 hardware
-    contexts. The catalog's cases cannot catch a regression here: each gets
-    a fresh context, so the array is reconfigured between cases anyway. One
-    case leaves three of the eight columns without work.
+    """Several shapes and parameter sets back to back on one loaded xclbin:
+    what a model does across ten weight shapes within a 16-context budget,
+    which the catalog's fresh-context-per-case tests cannot catch. One case
+    leaves three of the eight columns without work.
     """
     cases: list[dict[str, Any]] = [
         dict(K=1536, N=2048),

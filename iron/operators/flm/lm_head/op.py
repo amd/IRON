@@ -39,10 +39,8 @@ class _Built(Built):
 
 
 def _draw(op):
-    """A q4nx vocabulary and a token with its RMS weight.
-
-    Negative minima and small scales keep the logits in the range a softcap
-    of 30 bends.
+    """A q4nx vocabulary and a token with its RMS weight: negative minima and
+    small scales keep the logits in the range a softcap of 30 bends.
     """
     rng = np.random.default_rng(1)
     groups = K_TILE // GROUP
@@ -62,11 +60,9 @@ def _draw(op):
 
 
 class LMHead(Operator):
-    """Softcapped logits from a q4nx vocabulary, with the RMS norm folded in.
-
-    ``dim`` in-features, ``vocab`` out-features, ``softcap`` the tanh bound.
-    X holds the token followed by its RMS weight. W holds the q4nx vocabulary.
-    Y receives the logits. See README.md.
+    """Softcapped logits from a q4nx vocabulary, with the RMS norm folded in:
+    ``x`` holds the token then its RMS weight, ``w`` the q4nx vocabulary,
+    ``y`` the logits. See README.md.
     """
 
     test = Testing(

@@ -2,18 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Bitwise device goldens of the flm operators, for changes that move their MLIR.
-
-``record`` dispatches every case on the NPU and saves each buffer's bytes
-before and after; ``check`` replays the saved inputs on the current build and
-fails on any byte that differs:
-
-    python -m iron.operators.flm.goldens record <dir>
-    python -m iron.operators.flm.goldens check <dir>
-
-Record on the commit before a change that moves the MLIR, then check on the
-change. The inputs are saved, not redrawn, so a later change to a test's
-draw does not move a golden. The .npz files stay on the machine that
-recorded them; they are not committed.
+``python -m iron.operators.flm.goldens record|check <dir>``. Record before a
+change that moves the MLIR, then check after; inputs are saved, not redrawn,
+so a later change to a test's draw doesn't move a golden. The .npz files
+stay local; they are not committed.
 """
 
 import argparse

@@ -1,11 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Repacks the per-layer-input (PLI) projection weights for flm's
-ProjectionGEMM.
-
-model.q4nx stores these bf16 weights in the block order of the engine's
-vision_mm.xclbin. flm's ProjectionGEMM reads B in another order, as bfp16.
-The weights are static, so the build repacks them once.
+ProjectionGEMM: ``model.q4nx`` stores them in vision_mm.xclbin's block
+order, bf16, while ProjectionGEMM reads B in another order, as bfp16. The
+weights are static, so the build repacks them once.
 """
 
 import json

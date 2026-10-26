@@ -2,16 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """AIE2P arithmetic in numpy, for references that match the device bit for bit.
-
-The functions take and return float arrays unless they say otherwise. A
-"bf16" result is a float array whose values bf16 represents.
-
-- Every float to bf16, bfp16 or integer conversion on the device rounds toward
-  minus infinity unless a kernel sets the rounding mode register. Host-side
-  constants round to nearest even.
-- AIE2P has no fp32 multiplier. fmul emulates its bf16-limb product.
-- inv_kernel and gelu_kernel are aie_runtime_lib's table lookups for AIE2P.
-  aie.iron.kernels.bf16_exp_lut_ref models the exponential table.
+A "bf16" result is a float array whose values bf16 represents; every
+float-to-bf16/bfp16/integer conversion rounds toward minus infinity unless a
+kernel sets the rounding register (host-side constants round to nearest even).
+AIE2P has no fp32 multiplier, so `fmul` emulates its bf16-limb product.
 """
 
 import re
@@ -50,11 +44,9 @@ def rb(x, rounding="floor"):
 
 
 def fmul(a, b):
-    """An fp32 product as AIE2P computes it.
-
-    AIE2P splits each operand into three bf16 limbs and adds the nine limb
-    products in fp32. The result differs from the IEEE product in the last bit
-    for a few inputs.
+    """An fp32 product as AIE2P computes it: each operand split into three
+    bf16 limbs, the nine limb products added in fp32; it differs from the
+    IEEE product in the last bit for a few inputs.
     """
     a, b = np.broadcast_arrays(np.asarray(a, np.float64), np.asarray(b, np.float64))
     A, B = ([l.astype(np.float32) for l in limbs_f32_split(v)] for v in (a, b))
@@ -91,10 +83,9 @@ def tree_sum(x, lanes):
 
 
 def bfp16(x, axis):
-    """Convert `x` to bfp16ebs8 in blocks of 8 along `axis`, with floor rounding.
-
-    AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16 converts the operands of a bf16
-    matmul to this format.
+    """Convert `x` to bfp16ebs8 in blocks of 8 along `axis`, with floor
+    rounding, as AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16 converts a bf16
+    matmul's operands.
     """
     x = np.moveaxis(np.asarray(x, np.float32), axis, -1)
     return np.moveaxis(bfp.quantize(x, rounding="floor").astype(np.float64), -1, axis)
@@ -132,11 +123,9 @@ def inv_kernel(denom):
 
 @cache
 def gelu_segments():
-    """getGeluBf16's table: 64 (slope, offset) segments of width 1/8 on [-4, 4).
-
-    The function reads gelu_lut_ab from the aie_runtime_lib sources that the
-    kernels compile against. No simple fit of GELU reproduces the table. The
-    source holds each run of four segments twice, for the gather read.
+    """getGeluBf16's table: 64 (slope, offset) segments of width 1/8 on [-4, 4),
+    read from aie_runtime_lib's `gelu_lut_ab` (no simple fit reproduces it).
+    The source holds each run of four segments twice, for the gather read.
     """
     path = Path(config.aie_runtime_lib_dir()) / "AIE2P" / "lut_based_ops.cpp"
     table = re.search(r"gelu_lut_ab\[\d+\]\s*=\s*\{([^}]*)\}", path.read_text())

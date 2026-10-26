@@ -2,19 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Emit: the words the next call's scratchpad and carried state start from.
-
-Every output word is one row of a program the host writes once:
-
-```text
-v = clamp(((planes[plane, index] * scale + bias) >> down) * mul + add, lo, hi)
-out[r] = (v & mask) << shift
-```
-
-``planes`` is ``(2, carried)``: the values this call started from, then
-those it computed. ``shift`` is 2 for a core-read parameter (the scratchpad
-holds those shifted) and 0 otherwise; ``>> down`` floors. A row that holds
-nothing to a range has ``lo``/``hi`` int32's own (``UNCLAMPED``), and one
-that does not wrap a ``mask`` of -1.
+Each row computes ``v = clamp(((planes[plane, index] * scale + bias) >> down)
+* mul + add, lo, hi)`` then ``out[r] = (v & mask) << shift``, from a program
+the host writes once. ``planes`` is ``(2, carried)``: this call's starting
+values, then those it computed; unclamped/unmasked rows use ``UNCLAMPED``/-1.
 """
 
 import numpy as np

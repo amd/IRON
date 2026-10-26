@@ -22,11 +22,9 @@ from iron.operators.flm.prefill_attn.design import (
 
 
 class _PrefillAttentionBase(Operator):
-    """Causal prefill attention from a KV cache.
-
-    ``max_context`` bounds the rows of the KV cache. ``num_heads`` and
-    ``num_kv_heads`` count the query heads and the KV heads. The token range
-    and the cache's row count are set per call; see README.md.
+    """Causal prefill attention from a KV cache: ``max_context`` bounds its
+    rows, ``num_heads``/``num_kv_heads`` the query and KV heads. The token
+    range and the cache's row count are set per call; see README.md.
     """
 
     variant: ClassVar[Variant]

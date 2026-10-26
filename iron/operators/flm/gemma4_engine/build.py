@@ -81,12 +81,10 @@ UPGATE_RUN = 512
 
 
 def gemm(M, K, N, gelu):
-    """Every GEMM of the model.
-
-    floor rounding, bf16_steps gelu and MEDIUM's bfp16 macs reproduce the
-    engine's arithmetic bit for bit. k_tile=256 divides every K, so all shapes share one configuration, and
-    so one xclbin. B comes from DequantBFP, so the k slice is the one it
-    writes.
+    """Every GEMM of the model: floor rounding, bf16_steps gelu and MEDIUM's
+    bfp16 macs reproduce the engine's arithmetic bit for bit. ``k_tile=256``
+    divides every K, so one configuration serves all shapes; B's k slice
+    comes from DequantBFP's.
     """
     return ProjectionGEMM(
         M=M,

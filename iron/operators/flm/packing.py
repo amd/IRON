@@ -1,15 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Weight packing for flm.ProjectionGEMM.
-
-flm.ProjectionGEMM consumes B pre-packed into the order the compute tiles read it, so
-its B transfers are plain linear descriptors.
-The reorder is deliberately the caller's job: expressing it as a strided
-descriptor over an unpacked B leaves an innermost run of ``t`` bf16 values, so
-each transfer becomes thousands of scattered bursts -- measured 5.4x slower end
-to end. Weights are packed once and reused across dispatches, so the cost
-belongs here.
+"""Weight packing for flm.ProjectionGEMM, which consumes B pre-packed into
+compute-tile read order so its transfers are plain linear descriptors. The
+reorder is deliberately the caller's job: an unpacked B's strided descriptor
+scatters each transfer into many small bursts of ``t`` bf16 values; packing
+once and reusing it across dispatches amortizes that cost.
 """
 
 import numpy as np
@@ -30,15 +26,12 @@ def pack_b(
     """Reorder a row-major ``(K, N)`` weight matrix into consumption order.
 
     ``s``/``t`` are the mmul's register tiling and ``ct_k`` the k slice one
-    compute tile holds at a time; all three set the blocked layout, and packing
-    with the wrong value produces a wrongly ordered buffer of the RIGHT SIZE, so
-    it mis-computes silently rather than raising.
+    compute tile holds at a time; the wrong value silently produces a
+    wrongly ordered buffer of the right size rather than raising.
 
-    With ``bfp16`` the result is a flat uint8 tensor of bfp16ebs8 blocks (9
-    bytes per 8 values); otherwise a flat bf16 tensor. The quantization is not a
-    loss this adds: the AIE2P mmul only multiplies bfp16, so the bf16 path would
-    convert B inside every mac anyway. Doing it here hoists a rounding that
-    already happened, and makes B 9 bytes per 8 values instead of 16.
+    ``bfp16`` returns a flat uint8 tensor of bfp16ebs8 blocks (9 bytes per 8
+    values) instead of bf16; since the AIE2P mmul only multiplies bfp16
+    anyway, this hoists a rounding that would otherwise happen in every mac.
     """
     K, N = B.shape
     if K % k_tile or N % n_tile:

@@ -2,20 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Numpy reference of one Gemma 4 decode layer, as the flm_gemma4_decode
-kernels compute it.
-
-The reference takes the five buffers of DecodeLayer and returns x and the kv
-cache as the device leaves them:
-
-    g = LayerDims(FLM_GEMMA4_E2B_DECODE, LayerType.SWA)
-    x_out, kv_out = reference(g, x, proj, rms, rope_rms, kv, context_len=37, max_l=1024)
-
-It reproduces the kernels' rounding, accumulation order and lookup tables with
-aie2p_math_emulation. A product or an inverse square root can still differ
-from the device's in the last fp32 bit. Near a bf16 boundary that difference
-changes the bf16 result by one ulp.
-
-generate_inputs() draws synthetic buffers with a fixed seed.
+kernels compute it: takes ``DecodeLayer``'s five buffers and returns x and
+the kv cache as the device leaves them, reproducing the kernels' rounding,
+accumulation order and lookup tables via ``aie2p_math_emulation`` (a product
+or inverse square root may still differ by one bf16 ulp near a boundary).
 """
 
 import numpy as np
@@ -93,10 +83,9 @@ def rope_rms_layout(g: LayerDims) -> dict[str, int]:
 
 
 def _attention_rows(g: LayerDims, context_len: int) -> tuple[np.ndarray, int]:
-    """Cache rows in the order the attention core reads them, and how many hold
-    keys. The core reads whole rounds and masks the rows past the keys. A
-    sliding-window ring of L >= 512 tokens holds them in time order from row
-    L % 512.
+    """Cache rows in the order the attention core reads them, and how many
+    hold keys: whole rounds, masking rows past the keys; a sliding-window
+    ring of L >= 512 tokens holds them in time order from row L % 512.
     """
     L = context_len + 1
     if g.swa and L >= SLIDING_WINDOW:
@@ -148,11 +137,9 @@ def parse_bf16_blocked(proj_u8, offset, rows, cols):
 
 
 def q4_matvec(x, codes, scales, mins, chunk=2048):
-    """W x for a q4nx weight, in the kernel's order.
-
-    Per row and group of 32 inputs the kernel adds code * x in fp32 in column
-    order and rounds the sum t to bf16. It rounds the group sum s_x of x to bf16
-    once. It accumulates t * scale, then min * s_x, in fp32 over the groups.
+    """W x for a q4nx weight, in the kernel's exact order: per row and group of
+    32 inputs, sums ``code * x`` in fp32 and rounds to bf16 (t), bf16-rounds
+    each group's x sum (s_x) once, then accumulates t*scale and min*s_x in fp32.
     """
     x = np.asarray(x, np.float64)
     rows, cols = codes.shape
@@ -196,17 +183,9 @@ def rope_head(x, w_norm, cos, sin):
 
 
 def attention(q, K, V, valid, n_kv):
-    """One query against the cache rows K, V [rows, n_kv, dh] in read order.
-
-    Scale 1.0: q and k are RMS normalized. Per head the kernel runs an online
-    softmax over rounds of 16 keys:
-        s     = bf16(q . k)
-        mx    = max(m, max(s))
-        p     = bf16(exp(bf16(s - mx))), 0 for rows past `valid`
-        c     = exp(bf16(m - mx))
-        denom = denom * c + bf16(sum(p))
-        y     = y * c + p . V
-    and returns bf16(bf16(y) * inv(denom)). q . k and p . V run on bfp16 operands.
+    """One query against cache rows K, V [rows, n_kv, dh], in read order: an
+    online softmax over 16-key rounds, bit-exact with the kernel (scale
+    folded into q/k's RMS norm); q . k and p . V run on bfp16 operands.
     """
     H, dh = q.shape
     n_rows = K.shape[0]
@@ -259,12 +238,9 @@ def _u8(buf):
 def reference(
     g: LayerDims, x, proj, rms, rope_rms, kv, context_len: int, max_l: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    """One decode-layer dispatch on DecodeLayer's five buffers.
-
-    The buffers are numpy arrays of any dtype (bf16, uint16 or uint8) and may be
-    longer than the layer needs. Returns copies of x and kv as uint16 bf16 bit
-    patterns: the layer output in x[:D], and on a non-skip layer this token's K
-    and V rows in kv.
+    """One decode-layer dispatch on ``DecodeLayer``'s five buffers. Returns
+    copies of x and kv as uint16 bf16 bit patterns: the layer output in
+    x[:D], and on a non-skip layer this token's K/V rows in kv.
     """
     D, dh, H, n_kv, P, dk = (
         g.geometry.model_dim,
@@ -362,17 +338,10 @@ def pack_bf16_blocked(w):
 
 
 def generate_inputs(g: LayerDims, context_len: int, max_l: int, seed: int = 0):
-    """Random buffers (x, proj, rms, rope_rms, kv) for one dispatch, as uint16
-    bf16 bit patterns (proj as uint8).
-
-    The magnitudes follow the E2B checkpoint. The projections keep their
-    outputs near unit RMS. The k norm weight and the cached K rows are near 0.1,
-    so that the attention scores stay near unit size. With unit K rows the
-    softmax is so peaked that a 1-ulp change of one score moves the layer
-    output by 5e-3. The kv cache holds rows for every earlier token. A skip
-    layer also finds this token's row, which the layer that owns the cache
-    writes. _plant_needles makes the output depend strongly on which cache
-    rows the layer reads.
+    """Random buffers (x, proj, rms, rope_rms, kv) for one dispatch (uint16
+    bf16 bit patterns, proj uint8), E2B-checkpoint magnitudes. Keys are
+    scaled so a 1-ulp score change moves the output by 5e-3, and
+    ``_plant_needles`` makes it depend on which cache rows are read.
     """
     rng = np.random.default_rng(seed)
     D, P, dh, dk = g.geometry.model_dim, g.geometry.pli_d, g.dh, g.dk
@@ -447,15 +416,10 @@ NEEDLE_SCORE = 8.0
 
 
 def _plant_needles(g, context_len, kv, q, rng):
-    """Write needle rows into kv [K|V, rows, dk].
-
-    A needle K row scores NEEDLE_SCORE with every query head of its kv head; the
-    other keys score near 0. Each needle has its own random V row. V rows of
-    +-1 would cancel in the attention output and make it ill-conditioned.
-    The needles sit at the oldest and the newest cached key, at row 0, at the
-    row that a non-skip layer overwrites and at the first row past the keys. The softmax splits its weight among the
-    needles that the layer reads. A layer that reads one row too many or too
-    few, or a wrong row, changes its attention output by a large fraction.
+    """Write needle rows into kv [K|V, rows, dk] that each score
+    ``NEEDLE_SCORE`` with their kv head's queries (other keys near 0): the
+    oldest/newest cached key, row 0, the overwritten row, and the first row
+    past the keys, so a wrong read changes the output sharply.
     """
     order, valid = _attention_rows(g, context_len)
     # A non-skip layer writes its own key at the newest position.

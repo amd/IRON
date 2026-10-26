@@ -75,10 +75,8 @@ def _cases(cls, dev: Device):
 
 
 class GEMV(Operator):
-    """AIE-accelerated General Matrix-Vector Multiplication layer.
-
-    ``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per
-    mv.cc call. B rides each lane's A stream ahead of its rows, so every
+    """``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per
+    mv.cc call; B rides each lane's A stream ahead of its rows so every
     input channel of a column can carry A.
     """
 

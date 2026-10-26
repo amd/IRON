@@ -113,16 +113,11 @@ class GEMMPlacement(StrEnum):
 
 
 class GEMM(Operator):
-    """AIE-accelerated General Matrix Multiplication (GEMM) layer.
-
-    ``C = A @ B``, tiled m x k x n: A is broadcast across columns and split
-    across rows of cores, B split across columns and broadcast across rows,
-    C joined across rows and split across columns.
-
-    ``flm.ProjectionGEMM`` is ``F.linear``'s GEMM for a weight operand over
-    two or more rows at MEDIUM or HIGH; every other GEMM is this one:
-    Precision.HIGHEST, an activation times an activation, convolutions,
-    integer types and f32 output.
+    """``C = A @ B``, tiled m x k x n: A broadcasts across columns and splits
+    across cores' rows, B splits across columns and broadcasts across rows, C
+    joins across rows and splits across columns. Used wherever
+    ``flm.ProjectionGEMM`` doesn't apply (a weight operand, MEDIUM/HIGH, two
+    or more rows).
     """
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A,)))
@@ -215,12 +210,9 @@ class GEMM(Operator):
         return self.tile_n * self.num_aie_columns
 
     def mac_block(self, dev) -> tuple[int, int, int]:
-        """What `tile_m`, `tile_k` and `tile_n` must each be a multiple of:
-        mm.cc's r x s x t blocks, two in m and n (four in m on aie2).
-
-        Args:
-            dev: The device the kernel is built for, or None for aie2p's
-                geometry.
+        """What ``tile_m``, ``tile_k`` and ``tile_n`` must each be a multiple
+        of: mm.cc's r x s x t blocks, two in m and n (four in m on aie2).
+        ``dev=None`` assumes aie2p's geometry.
         """
         r, s, t = kernels.mm.mac_dims(
             self.input_dtype,
@@ -671,11 +663,10 @@ class GEMM(Operator):
         return C.astype(self.output_dtype)
 
     def tolerance(self) -> Tolerance:
-        """Each element of C within the roundings the design makes, in
-        units of 2^-8 of what each rounds: 2 of ``|A| @ |B|`` for C's own, 2
-        of every K tile's partial sum but the last when C accumulates in
-        bf16, and 2 more for bfp16 inputs. Measured on npu2 at no more than
-        0.83 of it over K = 256 to 8192.
+        """C's roundings, in units of 2^-8 of what each rounds: 2 of ``|A| @
+        |B|`` for C's own, 2 per K tile's partial sum but the last when C
+        accumulates in bf16, and 2 more for bfp16 inputs; measured at no more
+        than 0.83 of this over K = 256-8192 on npu2.
         """
         if np.issubdtype(np.dtype(self.input_dtype), np.integer):
             return Tolerance.exact(note="integer matmul")

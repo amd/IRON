@@ -63,14 +63,9 @@ class _GatherBuilt(Built):
 
 
 class Gather(Operator):
-    """``Copy(table[ids])`` with ``ids`` per call: the rows a call names.
-
-    Over each of ``feeds`` pairs of shims, shim (2k + 1, 0) streams control
-    packets to shim (2k, 0)'s TileControl, each writing a buffer descriptor
-    whose address is a row's; batches of ``chain`` alternate between two
-    descriptor sets, and (2k, 0)'s MM2S 1 streams the rows back to
-    (2k + 1, 0)'s S2MM 0. Under a bound each row past it moves
-    ``pad_bytes``: a descriptor moves one 16-byte unit at least.
+    """``Copy(table[ids])`` with ``ids`` per call: the rows a call names,
+    moved through ``feeds`` pairs of shims; a row past a bound moves
+    ``pad_bytes`` instead, a descriptor's minimum 16-byte unit.
     """
 
     chain: ClassVar[int] = 8
@@ -319,14 +314,8 @@ class Gather(Operator):
         """The control words gathering ``ids`` from a table at ``address``.
 
         Args:
-            ids: The rows, numpy's indices: negative ones count from the end.
-            address: The table's XRT buffer address.
-            valid: The rows a bounded call moves, the first ``valid`` of
-                ``ids``; each other moves ``pad_bytes`` of the table's first
-                row. ``None`` moves every row.
-
-        Returns:
-            The words ``ids`` takes, ``words`` of them.
+            valid: Rows past it move ``pad_bytes`` of the table's first row
+                instead of their own; ``None`` moves every row.
 
         Raises:
             IndexError: An id is past the table, either way, or ``valid`` is
@@ -369,14 +358,10 @@ class Gather(Operator):
 
 
 class GatherWords(Operator):
-    """A ``Gather``'s control words for ids the device made, in a graph.
-
-    A core turns each id, clipped to the table, into its row's address
-    words in their slots of ``control``. The table's address is split at
-    ``low_bits`` (a core reads 30 bits of a value). ``bounded``, the ids bounded per call to their
-    first ``valid_rows``, it also writes each row's length: a whole row's
-    for those, ``Gather.pad_bytes`` for the rest, as a bounded ``Gather``
-    drains them.
+    """A ``Gather``'s control words for ids the device made, in a graph: each
+    id, clipped to the table, becomes its row's address words, split at
+    ``low_bits``. Where ``bounded``, it also writes each row's length, capped
+    past ``valid_rows``.
     """
 
     low_bits: ClassVar[int] = 29
@@ -537,13 +522,10 @@ def _by_head(num_channels: int) -> dict[str, Any]:
 
 
 class Copy(Operator):
-    """AIE-accelerated copy between two views of two buffers.
-
-    Gathers by ``src`` and scatters by ``dst`` through ``num_channels``
-    memtile pass-throughs, split on the innermost run every pattern holds
-    whole, so each channel reads what it writes. ``tile_size`` divides each
-    channel's share: a descriptor shorter than the object never completes
-    it, and the drain hangs (ERT_CMD_STATE_TIMEOUT).
+    """A copy between two views, gathered by ``src`` and scattered by ``dst``
+    through ``num_channels`` memtile pass-throughs, split on the innermost run
+    every pattern holds whole. A ``tile_size`` short of a descriptor never
+    completes it, and the drain hangs (ERT_CMD_STATE_TIMEOUT).
     """
 
     accept_views = (("src", "in_offset"), ("dst", "out_offset"))

@@ -63,10 +63,9 @@ def _layer(geometry, layer_type):
 
 
 def _record_metrics(record, op, bufs, context_len, max_l):
-    """Time one more dispatch and record its latency, bandwidth and throughput.
-
-    The bytes count the weights and the K and V rows that the layer reads. The
-    FLOPs count the projections and the attention.
+    """Time one more dispatch and record its latency, bandwidth and
+    throughput; bytes count the weights and K/V rows read, FLOPs the
+    projections and attention.
     """
     g = op.dims
     blob = g.weights.values()
@@ -106,11 +105,9 @@ def _rel_l2(got, want):
 
 
 def check_outputs(op, context_len, max_l, inputs, x_out, kv_out):
-    """Compare x_out and kv_out (bf16) with op's reference on inputs.
-
-    Returns the relative L2 errors. Asserts that they are at most RTOL_X and
-    RTOL_KV, and that the rest of x and of the kv cache equals the input bit for
-    bit.
+    """Compare x_out and kv_out (bf16) with op's reference on inputs,
+    asserting RTOL_X/RTOL_KV relative L2 error and bit-exact agreement
+    elsewhere; returns the relative L2 errors.
     """
     ref_x, ref_kv = op.reference(*inputs, context_len, max_l)
     g = op.dims
@@ -271,10 +268,8 @@ def _proj_reads(module):
 @pytest.mark.parametrize("layer_type", LayerType)
 @pytest.mark.parametrize("geometry", GEOMETRIES, ids=str)
 def test_weight_reads_fit_proj(geometry, layer_type, npu2):
-    """Each layer type's sequence reads its whole blob and nothing past proj.
-
-    The test reads the BDs out of the generated runtime sequence. The build
-    needs no NPU.
+    """Each layer type's sequence reads its whole blob and nothing past proj,
+    checked from the generated runtime sequence's BDs; the build needs no NPU.
     """
     g = geometry
     op = DecodeLayer(geometry=g, layer_type=layer_type).resolved()

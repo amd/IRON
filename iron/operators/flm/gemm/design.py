@@ -1,25 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""bf16 GEMM over a 4-row compute-tile grid, as wide as the device.
-
-The GEMM ``F.linear`` runs for more than one row. Same dataflow as
-``iron.operators.gemm`` -- A broadcast along each compute row, B down each
-column, C joined through the memtile -- but with a fixed m tile, B read as
-stored or quantized to bfp16ebs8 and pre-packed into consumption order, an
-activation fused into the C drain, and asymmetric tile buffering so
-the A tile and the accumulator need not share a height.
-
-README.md has the per-choice breakdown against both the shipped FastFlowLM
-overlay and ``iron.operators.GEMM``.
-
-The constants below are the single source of truth: ``op.py`` passes them to
-the ``fused_mm`` kernel factory, so the C++ and the dataflow cannot drift apart.
-
-The array itself is ``ProjectionGEMM.build`` and the runtime sequence is
-``ProjectionGEMM.sequence`` in ``op.py``; this module keeps the geometry, the L1 and
-memtile budget helpers and the parameter-buffer layout they and
-the shipped overlay (``iron/tests/support/shipped.py``) share.
+"""bf16 GEMM over a 4-row compute-tile grid, as wide as the device: same
+dataflow as ``iron.operators.gemm`` but with a fixed m tile, B optionally
+quantized to bfp16ebs8 and pre-packed, a fused activation, and asymmetric
+tile buffering. The array is ``ProjectionGEMM.build``/``.sequence`` in
+``op.py``; this module holds the geometry, budget helpers and buffer layout.
 """
 
 from collections.abc import Callable
@@ -85,10 +71,9 @@ class _Slab(NamedTuple):
 
 
 class Epilogue(StrEnum):
-    """Activation folded into the C drain.
-
-    Declaration order is the wire format: it is both the kernel's
-    epilogue mode argument and the shipped overlay's ``output_mode``.
+    """Activation folded into the C drain; declaration order is the wire
+    format, both the kernel's epilogue mode argument and the shipped
+    overlay's ``output_mode``.
     """
 
     NONE = "none"
@@ -102,13 +87,10 @@ class Epilogue(StrEnum):
         return list(Epilogue).index(self)
 
     def apply(self, C):
-        """This output stage alone, on an already-accumulated ``C``: what a
-        test of the epilogue without the accumulation compares against
-        (test.py's, on the shipped image's own accumulator).
-
-        ``gelu`` is the sigmoid approximation ``x * sigmoid(1.702x)``, the
-        kernel's: not torch's erf-exact gelu, and not the tanh approximation
-        the standalone GELU operator uses.
+        """This output stage alone, on an already-accumulated ``C``: ``gelu``
+        is the kernel's sigmoid approximation ``x * sigmoid(1.702x)``, not
+        torch's erf-exact gelu nor the standalone GELU operator's tanh
+        approximation.
         """
         match self:
             case Epilogue.GELU:
@@ -127,10 +109,9 @@ def _sigmoid(x):
 
 
 class Rounding(StrEnum):
-    """Rounding for every f32->bf16 conversion.
-
-    conv_even by default: truncation biases every conversion the same way, so
-    the error accumulates over the K reduction. floor matches the overlay.
+    """Rounding for every f32->bf16 conversion: conv_even by default, since
+    truncation biases every conversion the same way and the error
+    accumulates over the K reduction; floor matches the overlay.
     """
 
     CONV_EVEN = "conv_even"
@@ -138,12 +119,9 @@ class Rounding(StrEnum):
 
 
 class Gelu(StrEnum):
-    """Arithmetic of the gelu epilogue, ``x * sigmoid(1.702x)``.
-
-    fp32 by default: the activation runs on the f32 accumulator and rounds once.
-    bf16_steps reproduces the shipped overlay: it rounds the accumulator to
-    bf16 and rounds again after each step of the activation. With
-    ``Rounding.FLOOR`` the result matches the overlay bit for bit.
+    """Arithmetic of the gelu epilogue, ``x * sigmoid(1.702x)``: ``fp32`` runs
+    it on the f32 accumulator and rounds once; ``bf16_steps`` rounds to bf16
+    each step, matching the shipped overlay bit for bit under ``Rounding.FLOOR``.
     """
 
     FP32 = "fp32"
@@ -178,17 +156,10 @@ def l1_tiles(
     ct_k: int | None = None,
 ) -> tuple[int, int, int]:
     """The working set that fits L1: (k slice, A-tile height, L1 B depth).
-
-    Double-buffered B first, then the deepest k slice, then the tallest A
-    that still fits. Each k slice reloads and stores the f32 accumulator, so
-    a deeper one runs the kernel's macs longer between them: on npu1, at
-    n=16, ct_k 128 takes 1932 cycles a call where 16 takes 4254, while the
-    A height moves nothing. ``t_ma`` and ``ct_k`` fix their values instead. A
-    depth divides the ``k_tile // ct_k`` B chunks a k step consumes, since
-    the core walks the ring that many at a time. ``budget`` is the whole
-    local memory; ``frame(height, ct_k)``, what the core's kernel holds
-    beside its buffers at an A band ``height`` and that k slice (its data,
-    AIE2's LUT tables among it, and stack), comes off it here.
+    Tries double-buffered B first, then the deepest k slice, then the
+    tallest A that fits; ``t_ma``/``ct_k`` fix the height/slice instead, and
+    ``ct_k`` also bounds the B ring depth. ``frame(height, ct_k)`` is the
+    kernel's own bytes beside its buffers at that band.
     """
     # m_chunk accumulators, since the core holds a B chunk across that many
     # row-blocks. The only term that scales with it.

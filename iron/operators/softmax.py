@@ -72,12 +72,10 @@ def _banded_case(cls, dev) -> list:
 
 
 class Softmax(Operator):
-    """AIE-accelerated Softmax over each row: one core per (column, channel),
-    each taking a contiguous run of rows.
-
-    A core holds a row whole or, ``streamed``, reads it in ``block``-element
-    blocks three times (maximum, sums, output). Under a per-call bound the
-    elements past it come out as zeros, and only the blocks it covers move.
+    """Softmax over each row, one core per (column, channel), each taking a
+    contiguous run of rows. ``streamed``, a core reads a row in ``block``-sized
+    chunks three times (maximum, sums, output); a per-call bound zeroes
+    elements past it and only its blocks move.
     """
 
     # Four cores, two columns of two: the fewest that exercise both splits.
@@ -389,12 +387,10 @@ class Softmax(Operator):
         return Built(workers)
 
     def _build_f32_banded(self, n_cores: int, rows_per_core: int, block: int) -> Built:
-        """The float32 banded path: one row a call, a real device loop (its
-        row count does not grow the core's code, unlike a resident mask's
-        row-by-row ``Buffer``s would), to ``softmax_rows_banded_f32_bf16``.
-        The band comes from ``window``, ``period`` and the row's own
-        position (the core's ``row_offset`` plus the loop index) computed
-        in the kernel, so there is no mask operand.
+        """The float32 banded path: one row a call, a real device loop (unlike
+        resident per-row ``Buffer`` masks, this doesn't grow the core's code),
+        to ``softmax_rows_banded_f32_bf16``; the band comes from ``window``,
+        ``period`` and the row's own position, computed in the kernel.
         """
         banded_k = _kernel(self, block)
         of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
@@ -503,12 +499,10 @@ class Softmax(Operator):
         return base
 
     def reference(self, x, *rest):
-        """The softmax kernel's contract reference, a row at a time.
-
-        ``rest`` is ``addend`` where ``has_addend``: ``_call_reference``
-        gives only the operands present, positional. The band, where given,
-        comes from the factory's own banded contract, ``row_offset`` each
-        row's own index.
+        """The softmax kernel's contract reference, a row at a time. ``rest``
+        is ``addend`` where ``has_addend``, positional; the band, where
+        given, comes from the factory's own banded contract, ``row_offset``
+        each row's index.
         """
         addend = rest[0] if self.has_addend else None
         # A bounded call's first ``length`` columns, the rest left zero.
