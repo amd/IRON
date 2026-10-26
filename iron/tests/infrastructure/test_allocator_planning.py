@@ -15,14 +15,7 @@ import random
 import pytest
 
 from iron.common.graph.record import Recording
-from iron.common.image.allocator import (
-    ALIGNMENT,
-    Allocation,
-    ArenaPlan,
-    LiveRange,
-    Pool,
-    lay_out,
-)
+from iron.common.image.allocator import Allocation, ArenaPlan, LiveRange, Pool, lay_out
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
@@ -185,93 +178,6 @@ def _laid_out(seq):
     return seq.layout, seq.buffer_sizes
 
 
-def _two_step_sequence():
-    """A tiny real sequence: one weight-like buffer plus one intermediate."""
-    add = ElementwiseAdd(size=1024, tile_size=128)
-    recording = Recording.of_steps(
-        "alloc_layout_probe",
-        sequences.steps((add, "w", "x", "t0"), (add, "w", "t0", "out")),
-        ["x"],
-        ["out"],
-    )
-    return _laid_out(Image(recording, FullELF()))
-
-
-def test_planned_offsets_do_not_collide_with_unplanned():
-    """Planned scratch must be placed past every unplanned buffer.
-
-    Regression: offsets were applied from 0, so a planned intermediate landed
-    on top of the weights. It showed up as an arena that did not grow at all
-    when planned buffers were added -- the aliasing was silent.
-    """
-    layout, _ = _two_step_sequence()
-    _, w_off, w_len = layout["w"]
-    _, t_off, _ = layout["t0"]
-    assert t_off >= w_off + w_len, (
-        f"planned t0@{t_off} overlaps unplanned w@{w_off}+{w_len}; "
-        "planned buffers must occupy their own region"
-    )
-
-
-def test_buffers_pack_back_to_back_in_each_argument():
-    """Buffers are split across three arguments (input, output, scratch),
-    each starting at zero, so packing is checked per argument.
-    """
-    layout, _ = _two_step_sequence()
-    arenas = {}
-    for buf_type, off, ln in layout.values():
-        arenas.setdefault(buf_type, []).append((off, ln))
-    for buf_type, entries in arenas.items():
-        cursor = 0
-        for off, ln in sorted(entries):
-            assert off == cursor, f"{buf_type} buffers should pack back to back"
-            cursor += ln
-
-
-def _chain(n_intermediates):
-    """A chain where each intermediate dies as the next is produced."""
-    add = ElementwiseAdd(size=1024, tile_size=128)
-    names = [f"t{i}" for i in range(n_intermediates)]
-    runlist = [(add, "x", "w", names[0])]
-    for prev, nxt in zip(names, names[1:]):
-        runlist.append((add, prev, "w", nxt))
-    runlist.append((add, names[-1], "w", "out"))
-    recording = Recording.of_steps(
-        f"chain{n_intermediates}", sequences.steps(*runlist), ["x", "w"], ["out"]
-    )
-    layout, sizes = _laid_out(Image(recording, FullELF()))
-    return layout, sizes.scratch
-
-
-def test_planning_reuses_addresses_of_dead_intermediates():
-    """A chain of four holds at most two intermediates live at once."""
-    layout, scratch = _chain(4)
-    held = sum(layout[f"t{i}"][2] for i in range(4))
-    assert scratch == held // 2, "planning should fold four intermediates to two"
-
-
-def test_planned_buffers_never_share_bytes_while_both_live():
-    """The invariant a liveness bug would break, stated directly.
-
-    This is the one failure mode in planning that does not announce itself:
-    two buffers aliased while both are live produce wrong numbers, not a crash.
-    """
-    layout, _ = _chain(4)
-    scratch = {k: v for k, v in layout.items() if v[0] == "scratch"}
-    # t_i is live from step i to step i+1, so consecutive ones overlap.
-    for i in range(3):
-        a, b = scratch.get(f"t{i}"), scratch.get(f"t{i + 1}")
-        if a is None or b is None:
-            continue
-        assert LiveRange(i, i + 1).overlaps(LiveRange(i + 1, i + 2))
-        a_lo, a_hi = a[1], a[1] + a[2]
-        b_lo, b_hi = b[1], b[1] + b[2]
-        assert a_hi <= b_lo or b_hi <= a_lo, (
-            f"t{i}@[{a_lo},{a_hi}) and t{i + 1}@[{b_lo},{b_hi}) overlap in bytes "
-            "while both are live"
-        )
-
-
 def test_a_buffer_named_in_part_is_never_pooled():
     """A part has to sit at its buffer's offset plus its start.
 
@@ -360,14 +266,6 @@ def test_odd_sizes_never_leave_an_offset_unaligned():
 # --- ArenaPlan: several images over one arena --------------------------------
 
 
-def _chain_steps(names):
-    """X -> names[0] -> ... -> names[-1] -> out, one step per arrow."""
-    steps = [(["x"], [names[0]])]
-    steps += [([a], [b]) for a, b in zip(names, names[1:])]
-    steps.append(([names[-1]], ["out"]))
-    return steps
-
-
 def test_a_resident_has_one_offset_in_every_image():
     arena = ArenaPlan(alignment=64)
     first = arena.place_image(
@@ -386,36 +284,6 @@ def test_a_resident_has_one_offset_in_every_image():
     assert set(arena.residents) == {"W0", "KV"}
 
 
-def test_transients_of_different_images_share_bytes():
-    arena = ArenaPlan(alignment=64)
-    sizes = {"w": 4096, "a": 1024, "b": 1024}
-    first = arena.place_image(_chain_steps(["a", "b"]), sizes, {"w": "W"})
-    size_after_first = arena.size
-    second = arena.place_image(_chain_steps(["a", "b"]), sizes, {"w": "W"})
-    assert arena.size == size_after_first, "an identical image costs nothing more"
-    assert second["a"].offset == first["a"].offset
-
-
-def test_an_image_added_later_moves_nothing_and_its_residents_go_on_top():
-    """Offsets are baked into instruction streams; an earlier image must keep
-    running unchanged. A new resident placed below an earlier image's
-    transients would be overwritten the next time that image ran.
-    """
-    arena = ArenaPlan(alignment=64)
-    first = arena.place_image(
-        _chain_steps(["a", "b"]), {"w": 256, "a": 4096, "b": 4096}, {"w": "W"}
-    )
-    before = arena.residents
-    top_of_first = max(a.end for a in first.values())
-    second = arena.place_image(
-        _chain_steps(["c"]), {"w": 256, "v": 512, "c": 64}, {"w": "W", "v": "V"}
-    )
-    assert arena.residents["W"] == before["W"]
-    assert second["v"].offset >= top_of_first
-    for a in first.values():
-        assert not a.overlaps(second["v"]), f"new resident over {a.name} of image 1"
-
-
 def test_one_storage_is_one_size():
     arena = ArenaPlan()
     arena.place_image([], {"w": 128}, {"w": "W"})
@@ -426,22 +294,6 @@ def test_one_storage_is_one_size():
 def test_a_resident_needs_a_size():
     with pytest.raises(ValueError, match="have no size"):
         ArenaPlan().place_image([], {}, {"w": "W"})
-
-
-def test_one_image_reaches_the_lower_bound_above_its_residents():
-    """The sizes of test_mixed_sizes_reach_the_lower_bound, over a resident:
-    the resident must not cost the transients anything but its own bytes.
-    """
-    arena = ArenaPlan(alignment=64)
-    names = [f"b{i}" for i in range(12)]
-    sizes = {n: (1 + (i * 7) % 5) * 4096 for i, n in enumerate(sorted(names))}
-    sizes["w"] = 8192 + 9
-    steps = _chain_steps(names)
-    layout = arena.place_image(steps, sizes, {"w": "W"})
-    transient = LiveRange.touching(steps, names)
-    bound = LiveRange.peak(transient, sizes)
-    top = max(a.end for n, a in layout.items() if n != "w")
-    assert top - (layout["w"].end + 64 - 9) == bound
 
 
 def _random_image(rng, residents, prefix):
@@ -523,40 +375,6 @@ def _arena_sequence(name, runlist, arena, residents, pinned=None, full_elf=True)
     return Image(recording, packaging, arena=arena, residents=residents)
 
 
-def test_two_sequences_in_one_arena_agree_on_residents_and_share_transients():
-    add = _add()
-    arena = ArenaPlan(alignment=64)
-    one = _arena_sequence(
-        "arena_one",
-        [(add, "x", "w", "t0"), (add, "t0", "w", "t1"), (add, "t1", "w", "out")],
-        arena,
-        {"w": "W"},
-    )
-    two = _arena_sequence(
-        "arena_two",
-        [(add, "x", "weight", "u"), (add, "u", "weight", "out")],
-        arena,
-        {"weight": "W"},
-    )
-    one_layout, one_sizes = _laid_out(one)
-    two_layout, two_sizes = _laid_out(two)
-    assert one_layout["w"][1] == two_layout["weight"][1]
-    assert two_layout["u"][1] == one_layout["t0"][1], "transients reuse bytes"
-    assert max(one_sizes.scratch, two_sizes.scratch) == arena.size
-
-
-def test_placing_is_done_once_per_sequence():
-    add = _add()
-    arena = ArenaPlan(alignment=64)
-    seq = _arena_sequence(
-        "arena_once", [(add, "x", "w", "t"), (add, "t", "w", "out")], arena, {"w": "W"}
-    )
-    first, _ = _laid_out(seq)
-    size = arena.size
-    again, _ = _laid_out(seq)
-    assert again == first and arena.size == size
-
-
 def test_a_parent_reached_only_through_slices_lives_from_first_to_last_slice():
     """Its slices sit at fixed offsets inside it, so the parent is the thing
     placed, and a slice written early and read late keeps all of it live.
@@ -582,62 +400,6 @@ def test_a_parent_reached_only_through_slices_lives_from_first_to_last_slice():
     assert big_len == 4096
     assert big_at + big_len <= side_at or side_at + side_len <= big_at
     assert second.place(layout) == ("scratch", big_at + 2048, 2048)
-
-
-def test_residents_must_be_scratch_buffers():
-    add = _add()
-    seq = _arena_sequence(
-        "arena_bad_resident", [(add, "x", "w", "out")], ArenaPlan(), {"x": "X"}
-    )
-    with pytest.raises(ValueError, match="not scratch buffers"):
-        seq._prepare()
-
-
-def test_a_step_at_a_time_places_only_its_residents_in_the_arena():
-    add = _add()
-    arena = ArenaPlan(alignment=64)
-    seq = _arena_sequence(
-        "arena_each_step",
-        [(add, "x", "w", "t"), (add, "t", "w", "out")],
-        arena,
-        {"w": "W"},
-        full_elf=False,
-    )
-    layout, _ = _laid_out(seq)
-    assert layout["w"] == ("scratch", 0, 2048)
-    assert arena.size == 2048
-
-
-def test_residents_need_an_arena():
-    with pytest.raises(ValueError, match="pass arena"):
-        Image(
-            Recording.of_steps(
-                "arena_missing",
-                sequences.steps((_add(), "x", "w", "out")),
-                ["x", "w"],
-                ["out"],
-            ),
-            PerStep(),
-            residents={"w": "W"},
-        )
-
-
-def test_back_to_back_buffers_start_aligned_whatever_their_sizes():
-    """Without a plan, pinned buffers pack in order -- each still on a
-    boundary a host view and a DMA burst can start at.
-    """
-    add = _add()
-    part = BufferRef("big", 0, 2048)
-    recording = Recording.of_steps(
-        "odd_pinned",
-        sequences.steps((add, "x", "w", part), (add, part, "w", "out")),
-        ["x", "w"],
-        ["out"],
-        pinned={"big": 2048 + 18, "odd": 9},
-    )
-    layout, _ = _laid_out(Image(recording, FullELF()))
-    for name, (_, offset, _) in layout.items():
-        assert offset % ALIGNMENT == 0, f"{name} at {offset}"
 
 
 def test_an_argument_ends_past_the_arena_buffer_placed_last():

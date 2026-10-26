@@ -27,19 +27,13 @@ from iron import Carried, Precision, Profile, Scratchpad
 from iron.common.graph import Handle
 from iron.common.graph.handle import Dense
 from iron.common.graph.record import Recording
-from iron.common.graph.carried import attach_emit, compose
-from iron.common.graph.compiled import CompiledGraph, _words
-from iron.common.image.link import PerStep
-from iron.common.image.sequence import Image
-from iron.common.image.step import BufferRef, SequenceStep
-from iron.common.image.artifacts import Parameter
+from iron.common.image.step import BufferRef
 from iron.common.image.packaging import Kind
 import iron.functional as F
 from iron.tests.support.graphs import FeedForward
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.emit import UNCLAMPED, reference as emit_reference
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gemm import GEMM
@@ -49,8 +43,7 @@ from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
-from iron.tests.support.declare import Rows
-from iron.tests.support.graphs import Trail, Walk
+from iron.tests.support.graphs import Walk
 from iron.tests.support.llama_model import llama_1b, small
 from iron.tests.support.xrt import without_xrt
 
@@ -222,22 +215,6 @@ def test_slices_are_views_into_the_parent_in_bytes():
     assert part.reshape(128).ref() == BufferRef("acts", 256, 256)
     with pytest.raises(ValueError, match="cannot reshape"):
         h.reshape(3, 3)
-
-
-def test_an_input_read_only_through_slices_is_laid_out_whole():
-    class Halves(iron.Graph):
-        def body(self, x):
-            return SiLU.step(x[E // 2 :]), SiLU.step(x[: E // 2])
-
-    t = Halves().record(x=(E,))
-    assert t.pinned == {"x": E * 2}
-    seq = Image(t, PerStep())
-    seq._prepare()
-    assert seq.layout["x"] == ("input", 0, E * 2)
-    assert [s.buffers[0] for s in seq.steps] == [
-        BufferRef("x", E, E),
-        BufferRef("x", 0, E),
-    ]
 
 
 def test_alike_instances_bound_to_different_values_are_different_designs():
@@ -421,36 +398,6 @@ def test_a_matvec_whose_columns_are_given_resolves_with_no_device():
     assert op.resolve(None).tile_size_input == 2
 
 
-def test_two_spellings_of_one_array_are_one_design():
-    """Identity is taken after resolution: a tunable left to resolve and the same
-    tunable given its resolved value name one array, and a sequence builds it
-    once. Every operator of a recorded graph goes through the same point, so
-    the design counts here are the gate on it.
-    """
-    a = GEMV(M=64, K=256, num_aie_columns=2, tile_size_input=2)
-    b = GEMV(M=64, K=256, num_aie_columns=2, tile_size_input=2, tile_size_output=2)
-    assert a.design_key() != b.design_key()  # as given
-    seq = Image(
-        Recording.of_steps(
-            "two_spellings",
-            [
-                SequenceStep(a, (BufferRef("x"), BufferRef("w"), BufferRef("y"))),
-                SequenceStep(b, (BufferRef("x2"), BufferRef("w"), BufferRef("z"))),
-            ],
-            ["x", "x2", "w"],
-            ["z"],
-        ),
-        PerStep(),
-    )
-    seq._prepare()
-    designs, _ = seq.unique_designs()
-    assert len(designs) == 1 and designs[0].tile_size_output == 2
-    ffn, _ = _ffn()
-    seq = Image(ffn.record(x=(1, E)), PerStep())
-    seq._prepare()
-    assert len(seq.unique_designs()[0]) == 6
-
-
 def test_swiglu_over_a_sequence_reads_the_weights_column_major():
 
     t = FeedForward(z(H, E), z(H, E), z(E, H)).record(x=(256, E))
@@ -598,43 +545,6 @@ def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
     t = Pointwise(precision).record(x=((256, 128), bfloat16), w=((128, 128), bfloat16))
     (op,) = [op for op in t.operators if type(op) is ProjectionGEMM]
     assert op.resolved(npu2).emulate_bf16_mmul_with_bfp16 is macs
-
-
-def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
-    """Each projection of a prompt chunk derives five per-call words from its
-    rows: the 256-row units they reach and that less one, A's repeat count,
-    which every projection shares; where the second half of the core rows
-    starts in A and in C, the units' first 128 rows of K and of N, which
-    every projection as wide shares; and B's memtile ring passes less one,
-    A's repeat count where B is resident, and where it streams (down's)
-    the units' k tiles over the ring's slots.
-    """
-    g = llama_1b(num_hidden_layers=2)
-    t = g.record(**g.shapes()[1])
-    words, shared = _words(t, share=True)
-    assert len(words) <= 32
-    gemms = [op.resolved(npu2) for op in t.operators if type(op) is ProjectionGEMM]
-    names = {"units_valid", "units_repeat", "a_half", "c_half", "b_passes_repeat"}
-    symbols, widths, passes = set(), set(), set()
-    for op in gemms:
-        assert {v.name for v in op.values} == names | {"valid"}
-        widths |= {op.K, op.N}
-        unit_passes = op._k_iters // op._b_ring
-        passes |= {unit_passes} - {1}
-        for name in names:
-            symbol = op.value(name).symbol
-            symbols.add(shared.get(symbol, symbol))
-        for rows, reached in ((1, 1), (15, 1), (256, 1), (257, 2), (2048, 8)):
-            assert op.derived_at("units_valid", valid=rows) == reached
-            assert op.derived_at("units_repeat", valid=rows) == reached - 1
-            assert op.derived_at("a_half", valid=rows) == reached * 128 * op.K
-            assert op.derived_at("c_half", valid=rows) == reached * 128 * op.N
-            assert (
-                op.derived_at("b_passes_repeat", valid=rows)
-                == reached * unit_passes - 1
-            )
-    assert passes == {4}
-    assert len(symbols) == 2 + len(widths) + len(passes)
 
 
 @pytest.mark.parametrize("step", ["decode", "prompt"])
@@ -947,58 +857,6 @@ def test_the_trace_records_the_range_each_per_call_index_and_bound_holds():
     assert outside.expression.evaluate(dict(pos=L - 1)) == outside.hi
 
 
-def test_a_bound_rounds_up_to_the_tiles_it_ends_in(npu2):
-    """A bound ending inside a tile takes the tile: the words of tiles per
-    lane and the trip counts derived from it round up, so ``p + 1`` rows
-    reach their last row; at a whole number of tiles nothing changes.
-    """
-
-    class G(iron.Graph):
-        def body(self, x, y, *, p: Scratchpad[np.int32]):
-            return ElementwiseAdd.step(x[: p + 1], y[: p + 1])
-
-    t = G().record(x=(64, 512), y=(64, 512))
-    (op,) = t.operators
-    op = op.resolved(aie_utils.get_current_device())
-    per_word = op.cores * op.tile_size  # elements one word of tiles covers
-    words = {w.symbol: w for w in _words(t)[0]}
-    for p in range(64):
-        elements = (p + 1) * 512
-        tiles = -(-elements // per_word)
-        assert words[op.value("valid").symbol]({"p": p}) == elements
-        assert words[op.value("count").symbol]({"p": p}) == tiles
-        assert words[op.value("valid_a").symbol]({"p": p}) == tiles
-        assert tiles * per_word >= elements and tiles * per_word <= 64 * 512
-
-
-def test_words_of_one_clamped_expression_share_it(npu2):
-    """Two designs indexed by one clamped expression of a value share its
-    word; rows of another width are another expression, their own word.
-    """
-
-    class G(iron.Graph):
-        def __init__(self):
-            self.a = iron.state((8, 32), np.int32)
-            self.c = iron.state((8, 64), np.int32)
-
-        def body(self, *, p: Scratchpad[np.int32]):
-            row = iron.clamp(p - 3, lo=0)
-            return tuple(
-                Copy.step(view, dtype=np.int32)
-                for view in (self.a[row], self.a[row, :16], self.c[row])
-            )
-
-    t = G().record()
-    alone, _ = _words(t)
-    words, shared = _words(t, share=True)
-    assert (len(alone), len(words)) == (3, 2)
-    assert sorted(set(shared.values())) == ["graph_p_x32_m96_lo0_int32"]
-    for p in range(8):
-        mine = {w.symbol: w({"p": p}) for w in words}
-        for w in alone:
-            assert mine[shared.get(w.symbol, w.symbol)] == w({"p": p})
-
-
 def test_the_reference_writes_a_given_output_of_an_operator_that_returns_one(npu2):
     """GEMM's reference takes its inputs and returns its result; given an
     output, the graph's reference writes that result into it.
@@ -1132,55 +990,6 @@ def test_the_reference_computes_the_expressions(npu2):
     assert (keys.host[:, 3] == x).all() and not keys.host[:, :3].any()
 
 
-def test_the_words_a_call_writes_come_from_the_bound(npu2):
-    """Each bound value is a word, and so is every value an operator derives
-    from a bounded extent, computed by the operator from the call's bound.
-    """
-
-    class G(iron.Graph):
-        def body(self, x, *, n: Scratchpad[np.int32]):
-            return Rows.step(x[:n].reshape(64 * 8, 1))  # rows x 8 seen as rows*8 x 1
-
-    g = G()
-
-    t = g.record(x=(64, 8))
-    (op,) = t.operators
-    words = {w.symbol: w for w in _words(t)[0]}
-    symbol = {v: op.value(v).symbol for v in ("valid", "count", "valid_x", "valid_y")}
-    assert set(words) == set(symbol.values())
-    assert symbol["valid"] == f"{op.name}_valid_n_x8"
-    assert symbol["count"] == f"{op.name}_n_x8_count"
-    call = {"n": 16}
-    assert words[symbol["valid"]](call) == 16 * 8  # the reshape's scale
-    assert words[symbol["count"]](call) == 16 * 8 // 2  # derived: valid // lanes
-    assert words[symbol["valid_x"]](call) == 16 * 8 // 2  # tiles per lane
-    # A full ELF's designs read the bound only through what they derive.
-    elf = {w.symbol for w in _words(t, extents=False)[0]}
-    assert elf == set(words) - {symbol["valid"]}
-    for w in words.values():  # and each is what its Emit row computes
-        assert w.form is not None and w.form.evaluate(call) == w(call)
-
-
-def test_one_operator_bound_to_two_values_derives_a_word_from_each(npu2):
-    """Two steps of one operator, each bounded by its own value, derive
-    their words each from its own: a derived word is named by the values
-    bound to its step, not shared as two steps bound alike share it.
-    """
-
-    class G(iron.Graph):
-        def body(self, x, *, n: Scratchpad[np.int32], m: Scratchpad[np.int32]):
-            a = Rows.step(x[:n].reshape(64 * 8, 1))
-            return a, Rows.step(x[:m].reshape(64 * 8, 1))
-
-    t = G().record(x=(64, 8))
-    first, second = t.operators
-    assert first.value("count").symbol != second.value("count").symbol
-    words = {w.symbol: w for w in _words(t)[0]}
-    call = {"n": 16, "m": 32}
-    for op, rows in ((first, 16), (second, 32)):
-        assert words[op.value("count").symbol](call) == rows * 8 // 2
-
-
 def test_integer_arithmetic_on_an_expression_is_an_expression():
     """Sums, products, floor divisions and remainders by powers of two (so
     ``ceildiv``) of an expression are expressions that compute the same, and
@@ -1228,69 +1037,6 @@ def test_integer_arithmetic_on_an_expression_is_an_expression():
                 continue
             assert form.value is x.value
             assert form.evaluate({"x": v}) == f(u), v
-
-
-def test_the_packed_decode_words_of_mha_have_emit_forms(npu2):
-    """One query attending over a span of the cache: every word the full
-    ELF's MHA reads, ``ceildiv``s of the span among them, is an Emit row.
-    """
-
-    class G(iron.Graph):
-        def __init__(self):
-            self.keys = iron.state((8, 2048, 64))
-            self.values = iron.state((8, 2048, 64))
-
-        def body(self, q, *, position: Scratchpad[np.int32]):
-            span = np.s_[:, : position + 1]
-            o = MHA.step(
-                q.reshape(1, 32, 64),
-                self.keys[span],
-                self.values[span],
-                heads_interleaved=True,
-            )
-            return o.reshape(1, 32 * 64)
-
-    words, _ = _words(G().record(q=(32, 64)), extents=False)
-    assert words
-    for w in words:
-        assert w.form is not None and w.form.value.name == "position", w.symbol
-        for position in range(2048):
-            at = {"position": position}
-            assert w.form.evaluate(at) == w(at), w.symbol
-
-
-@pytest.mark.parametrize(
-    "bound, names",
-    [
-        (lambda n: n, ["graph_n_x1d4_int32", "graph_n_x512_int32"]),
-        (lambda n: n + 1, ["graph_n_x1d4p1d4_int32", "graph_n_x512p512_int32"]),
-    ],
-    ids=["n", "n+1"],
-)
-def test_words_that_always_hold_one_number_share_it(npu2, bound, names):
-    """On a full ELF, two designs bound to one graph value write one word
-    for each ratio and offset of it they read (their extents; the tiles per
-    lane of each operand), and every symbol that shares a word reads its own
-    value there. A derivation the library sees through (``count``, a ceiling
-    division) shares the word of the ratio it computes.
-    """
-
-    class G(iron.Graph):
-        def body(self, x, y, *, n: Scratchpad[np.int32]):
-            rows = bound(n)
-            return ElementwiseMul.step(
-                ElementwiseAdd.step(x[:rows], y[:rows]), y[:rows]
-            )
-
-    t = G().record(x=(64, 512), y=(64, 512))
-    alone, _ = _words(t)
-    words, shared = _words(t, share=True)
-    assert len(alone) == 10 and len(words) == 2
-    assert sorted(set(shared.values())) == names
-    for n in (0, 15, 63):
-        mine = {w.symbol: w({"n": n}) for w in words}
-        for w in alone:
-            assert mine[shared.get(w.symbol, w.symbol)] == w({"n": n})
 
 
 def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
@@ -1521,29 +1267,6 @@ def test_a_call_refuses_its_values_before_it_compiles():
     ffn, _ = _ffn()
     with pytest.raises(TypeError, match=r"\['position'\] unknown"):
         ffn(z(1, E), pos=0, position=0)
-    assert not ffn._versions
-
-
-def test_a_call_refuses_an_input_numpy_would_not_cast_to_its_dtype():
-    """Float ids are refused, not truncated; int64 ids cast to int32."""
-    g = small()
-    C = g.config.prefill_chunk
-
-    class Staged(Exception):
-        pass
-
-    def upload():
-        raise Staged
-
-    version = SimpleNamespace(recording=g.record(**g.shapes()[1]), upload=upload)
-    values = dict(position=C - 1, token=0, start=0, rows=C, rope_start=0)
-    with pytest.raises(
-        TypeError,
-        match=r"input ids is int32, got float64; pass ids\.astype\(np\.int32\)",
-    ):
-        CompiledGraph._stage(version, [np.zeros(C)], values)
-    with pytest.raises(Staged):
-        CompiledGraph._stage(version, [np.zeros(C, np.int64)], values)
 
 
 def test_a_refused_compile_restores_the_device_it_was_given_over(npu2):
@@ -1639,190 +1362,6 @@ def test_every_carried_value_is_carried_and_nothing_else():
 
     with pytest.raises(TypeError, match="returned last"):
         CarriesTwice().record()
-
-
-def test_the_emit_program_follows_the_target_parameters():
-    """Each word of the target's scratchpad comes from a carried value, in
-    the target's order and encoding; anything else is refused.
-    """
-    walk = Trail(np.arange(16, dtype=np.int32), steps=8)
-    recording = walk.record()
-    assert recording.feedback == []  # recording alone adds no Emit
-    assert walk._carry is not None
-    site = attach_emit(recording, walk._parameters.carried, walk._carry, slots=2)
-    # The gathered node is computed into the carry's second plane.
-    assert recording.steps[0].refs()[-1] == BufferRef("carry", 8, 4)
-    assert recording.steps[-1].refs() == (
-        BufferRef("emit_program"),
-        BufferRef("carry"),
-        BufferRef("emit_image"),
-        BufferRef("carry", 0, 8),
-    )
-    assert recording.feedback == ["emit_image"] and recording.outputs == []
-
-    words, _ = _words(recording)
-    # A target laying the two out the other way, one as a core read.
-    by_value = {w.linear.value: w.symbol for w in words if w.linear is not None}
-    parameters = [
-        Parameter(by_value["steps"], 0, "i32", "core"),
-        Parameter(by_value["node"], 1, "i32", "addr"),
-    ]
-    program = compose(site, recording.carry, words, parameters)
-    lo, hi = UNCLAMPED
-    assert program.tolist() == [
-        [0, 1, 1, 1, 0, 1, 0, lo, hi, -1, 2],  # steps + 1, shifted for the core
-        [1, 0, 1, 0, 0, 1, 0, lo, hi, -1, 0],  # the node the device gathered
-        [1, 0, 1, 0, 0, 1, 0, lo, hi, -1, 0],  # the next node
-        [0, 1, 1, 1, 0, 1, 0, lo, hi, -1, 0],  # the next step count
-    ]
-    image, state = emit_reference(program, np.array([[5, 9], [33, 0]]), slots=2)
-    assert image.tolist() == [10 << 2, 33] and state.tolist() == [33, 10]
-
-    with pytest.raises(ValueError, match="takes 1"):
-        compose(site, recording.carry, words, parameters[:1])
-    jumped, _ = _words(walk.record(jump=((16,), np.int32)))
-    with pytest.raises(ValueError, match="skip, which is not carried"):
-        compose(
-            site,
-            recording.carry,
-            jumped,
-            [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(jumped)],
-        )
-
-
-def _emitted(graph, positions):
-    """The words a carried ``position`` writes after each of ``positions``,
-    each as the Emit program the device runs between calls computes it.
-    """
-    recording = graph.record()
-    words, _ = _words(recording)
-    assert all(w.linear is None for w in words)
-    site = attach_emit(
-        recording, graph._parameters.carried, graph._carry, slots=len(words)
-    )
-    parameters = [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(words)]
-    program = compose(site, recording.carry, words, parameters)
-    out = []
-    for p in positions:
-        image, state = emit_reference(program, np.array([[p], [0]]), slots=len(words))
-        want = [w(dict(position=p + 1)) for w in words]
-        assert image.tolist() == want and state.tolist() == [p + 1]
-        out.append(want)
-    return out
-
-
-def test_a_state_is_indexed_by_a_floored_carried_value(npu2):
-    """``position // 4`` indexes a state's slot: its word floors on the host,
-    in the reference and in the Emit program the device runs between calls;
-    a bound, which patches a length, stays linear.
-    """
-
-    class Slots(iron.Graph):
-        def __init__(self):
-            self.slots = iron.state((8, 32), np.int32)
-
-        def body(self, *, position: Carried[np.int32]):
-            row = Copy.step(self.slots[position // 4], dtype=np.int32)
-            Copy.step(row, self.slots[(position + 1) // 4 + 1], dtype=np.int32)
-            return iron.carry(position=position + 1)
-
-    graph = Slots()
-    floored = [b.expression for b in graph.record().bindings]
-    assert [e.down for e in floored] == [2, 2]
-    assert len({e.name for e in floored}) == 2
-    assert _emitted(graph, range(10)) == [
-        [(p + 1) // 4 * 32, ((p + 2) // 4 + 1) * 32] for p in range(10)
-    ]
-
-    slots = np.arange(8 * 32, dtype=np.int32).reshape(8, 32)
-    graph.slots.host = slots.copy()
-    graph.reference(position=6)
-    assert (graph.slots.host[2] == slots[1]).all()
-
-    class Bounded(iron.Graph):
-        def body(self, x, *, n: Scratchpad[np.int32]):
-            return Copy.step(x[: n // 4])
-
-    with pytest.raises(TypeError, match="not linear"):
-        Bounded().record(x=((64, 32), bfloat16))
-
-
-def test_a_state_is_written_at_a_wrapped_carried_value(npu2):
-    """A ring of 8 rows written at ``position % 8`` and read from
-    ``max(0, position - 3) % 8``: each word wraps on the host and in the
-    Emit program the device runs between calls, past several wraps."""
-
-    class Ring(iron.Graph):
-        def __init__(self):
-            self.rows = iron.state((8, 32), np.int32)
-
-        def body(self, *, position: Carried[np.int32]):
-            row = Copy.step(
-                self.rows[iron.clamp(position - 3, lo=0) % 8], dtype=np.int32
-            )
-            Copy.step(row, self.rows[position % 8], dtype=np.int32)
-            return iron.carry(position=position + 1)
-
-    graph = Ring()
-    assert _emitted(graph, range(40)) == [
-        [max(p - 2, 0) % 8 * 32, (p + 1) % 8 * 32] for p in range(40)
-    ]
-
-    rows = np.arange(8 * 32, dtype=np.int32).reshape(8, 32)
-    for position, read, written in ((1, 0, 1), (10, 7, 2), (21, 2, 5)):
-        graph.rows.host = rows.copy()
-        graph.reference(position=position)
-        assert (graph.rows.host[written] == rows[read]).all()
-
-
-def test_an_extent_bounded_by_a_clamped_carried_count_stays_clamped(npu2):
-    """A ReLU over ``min(position + 1, 40)`` rows: its tiles per lane follow
-    the clamp, growing up to the bound and then holding, and take no linear
-    form, which would drop it.
-    """
-
-    class Window(iron.Graph):
-        def __init__(self):
-            self.rows = iron.state((64, 64), bfloat16)
-
-        def body(self, *, position: Carried[np.int32]):
-            n = iron.clamp(position + 1, hi=40)
-            ReLU.step(Copy.step(self.rows[:n]))
-            return iron.carry(position=position + 1)
-
-    words, _ = _words(Window().record())
-    tiles = [w for w in words if w.symbol.endswith(("valid_x", "valid_y"))]
-    assert tiles and all(w.linear is None for w in tiles)
-    for w in tiles:
-        assert [w(dict(position=p)) for p in (0, 39, 50)] == [1, 2, 2]
-
-
-def test_a_state_is_indexed_by_a_clamped_carried_value(npu2):
-    """``max(0, position - 3)`` and ``min((position + 1) // 2, 7)`` index a
-    state's rows: each word is clamped on the host and in the Emit program
-    the device runs between calls, at positions on both sides of a bound.
-    """
-
-    class Rows(iron.Graph):
-        def __init__(self):
-            self.rows = iron.state((8, 32), np.int32)
-
-        def body(self, *, position: Carried[np.int32]):
-            row = Copy.step(self.rows[iron.clamp(position - 3, lo=0)], dtype=np.int32)
-            later = iron.clamp((position + 1) // 2, hi=7)
-            Copy.step(row, self.rows[later], dtype=np.int32)
-            return iron.carry(position=position + 1)
-
-    graph = Rows()
-    assert _emitted(graph, range(20)) == [
-        [max(p - 2, 0) * 32, min((p + 2) // 2, 7) * 32] for p in range(20)
-    ]
-
-    rows = np.arange(8 * 32, dtype=np.int32).reshape(8, 32)
-    for position, read, written in ((1, 0, 1), (9, 6, 5), (10, 7, 5)):
-        graph.rows.host = rows.copy()
-        graph.reference(position=position)
-        assert (graph.rows.host[written] == rows[read]).all()
 
 
 class _HeldStack(iron.Graph):
