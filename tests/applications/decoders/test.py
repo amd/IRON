@@ -45,7 +45,7 @@ def decoder(request):
     aie_utils.cleanup_npu_runtime()
 
 
-# Qwen3's bounds: none of these decoders has been measured on the NPU.
+# Gemma 4 E2B on npu2 measured mean 0.0055, P90 0.0086, max 0.100 over 40 steps.
 MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
 
 
