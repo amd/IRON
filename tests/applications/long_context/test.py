@@ -5,11 +5,10 @@
 a library guarantee: nothing a step runs grows with the context but the
 state it holds a row of per position, and on the NPU the deepest decode
 step (at ``max_seq_len - 1``) and the deepest prompt chunk (the one
-holding that position) agree with the graph's own reference.
-
-The context is the checkpoint's own (``max_position_embeddings``), or
-``--max-seq-len``; ``--random-weights SEED`` runs it on weights drawn in
-the checkpoint's shapes.
+holding that position) agree with the graph's own reference, at 4096,
+16384, 32768, 65536 and the whole context the host fits (or
+``--max-seq-len``).
+``--random-weights SEED`` runs on weights drawn in the checkpoint's shapes.
 """
 
 import dataclasses
@@ -70,10 +69,16 @@ APPLICATIONS = {
         "tokenizer.json",
         each_step=("npu1", "npu2"),
     ),
-    "llama_3.2_3b": Application(Llama, "llama3.2-3b", INDEX, "tokenizer.json"),
+    "llama_3.2_3b": Application(
+        Llama, "llama3.2-3b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
+    ),
     # Unmeasured: DEEP_KL until its first run.
     "gemma4_e2b": Application(
-        Gemma4, "gemma-4-e2b-it", "model.safetensors", "tokenizer.json"
+        Gemma4,
+        "gemma-4-e2b-it",
+        "model.safetensors",
+        "tokenizer.json",
+        each_step=("npu1", "npu2"),
     ),
 }
 
@@ -146,16 +151,36 @@ FORMS = [
 ]
 
 
-@pytest.fixture(scope="module", params=FORMS)
+# The context sizes each form is loaded at; None is the host's whole one
+# (``Model.fit``, or ``--max-seq-len``).
+CONTEXTS = (4096, 16384, 32768, 65536, None)
+
+SWEEP = [
+    pytest.param(
+        (form.values[0], context),
+        marks=form.marks,
+        id=f"{form.values[0]}-{context or 'whole'}",
+    )
+    for form in FORMS
+    for context in CONTEXTS
+]
+
+
+@pytest.fixture(scope="module", params=SWEEP)
 def loaded(request):
-    """An application's checkpoint and model, compiled and loaded once:
-    a full ELF, or with ``_each_step`` an xclbin a step, the host starting
-    each on the token the last one drew.
+    """An application's checkpoint and model, compiled and loaded once at
+    a context size: a full ELF, or with ``_each_step`` an xclbin a step, the
+    host starting each on the token the last one drew.
     """
-    app = APPLICATIONS[request.param.removesuffix("_each_step")]
+    form, context = request.param
+    app = APPLICATIONS[form.removesuffix("_each_step")]
     load = load_from_flags(request, app.model, app.path, app.tokenizer)
-    each_step = request.param.endswith("_each_step")
-    model = load(full_elf=False if each_step else None)
+    fitted = app.model.fit(app.model.default_config(app.path), app.path).max_seq_len
+    if context is not None and context >= fitted:
+        pytest.skip(f"{app.directory} holds {fitted} positions on this host")
+    each_step = form.endswith("_each_step")
+    sized = {} if context is None else {"max_seq_len": context}
+    model = load(full_elf=False if each_step else None, **sized)
     assert model.device_loop is not each_step
     yield app, model
     if aie_utils.DefaultNPURuntime is not None:
