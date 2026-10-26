@@ -324,6 +324,15 @@ class Graph:
                 held.setdefault(id(x), (path, x))
         return held
 
+    def release(self) -> None:
+        """Free the device memory this graph's versions and arena hold; a call
+        after it loads them again.
+        """
+        for version in self._versions.values():
+            version.release()
+        if "_arena" in vars(self):
+            self._arena.release()
+
     def load_state_dict(self, tree, *, path: str = "") -> None:
         """Bind each ``param`` held, at any depth, to the tensor at ``path``
         (this graph's prefix, ``"model."``) plus its dotted path in ``tree``,
@@ -762,6 +771,15 @@ class CompiledGraph:
         if self._callable is None:
             self._callable = self.sequence.get_callable(self.arena)
         return self._callable
+
+    def release(self) -> None:
+        """Free this version's runs, image and the buffers it holds outside the arena."""
+        if isinstance(self._callable, FullELFCallable):
+            self._callable.release()
+        self._callable = None
+        self._addressed.clear()
+        if self.arena is None:
+            self._loaded.clear()
 
     @property
     def parameters(self) -> list[Parameter]:

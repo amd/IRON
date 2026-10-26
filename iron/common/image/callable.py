@@ -106,6 +106,12 @@ class ScratchArena:
             self._generation += 1
         return list(self._banks)
 
+    def release(self) -> None:
+        """Free every bank; ``banks`` makes them again, so the weights load again."""
+        self._banks.clear()
+        self.loaded.clear()
+        self._generation += 1
+
 
 class FullELFRun:
     """One run of a full ELF's commands, back to back, with its own ctrl

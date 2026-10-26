@@ -565,9 +565,13 @@ class Model(iron.Graph):
             if not shapes and version.emit is not None:
                 decode = version
             compiled.append(version)
-        for version in compiled:
-            version.load(release=release)
-        self.loaded(compiled)
+        try:
+            for version in compiled:
+                version.load(release=release)
+            self.loaded(compiled)
+        except BaseException:
+            self.release()
+            raise
         return self
 
     def loaded(self, versions: list) -> None:

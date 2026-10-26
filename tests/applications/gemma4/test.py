@@ -74,7 +74,9 @@ def inputs(config, tokenizer, case: str):
 
 @pytest.fixture(scope="module")
 def model(request):
-    yield load_from_flags(request, Gemma4Multimodal, WEIGHTS)()
+    model = load_from_flags(request, Gemma4Multimodal, WEIGHTS)()
+    yield model
+    model.release()
 
 
 @pytest.fixture(scope="module")

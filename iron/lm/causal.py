@@ -335,6 +335,11 @@ class CausalLM(Model):
             raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         return self.decode_step.emit is not None
 
+    def release(self) -> None:
+        """Free the device loops' runs, then the graph's memory."""
+        self._loops.clear()
+        super().release()
+
     def loop(self, version: CompiledGraph) -> CarriedLoop:
         """The device loop of decode steps ``version`` starts, made once: its
         runs are bound to the versions, which every session shares.

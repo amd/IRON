@@ -50,7 +50,9 @@ def model(load):
     """The model, compiled and loaded once; the runtime is released after its
     checkpoint's last test.
     """
-    yield load()
+    model = load()
+    yield model
+    model.release()
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 
@@ -116,6 +118,7 @@ class TestEachStep:
         model = load(full_elf=False)
         assert not model.device_loop
         yield model
+        model.release()
         if aie_utils.DefaultNPURuntime is not None:
             aie_utils.DefaultNPURuntime.cleanup()
 

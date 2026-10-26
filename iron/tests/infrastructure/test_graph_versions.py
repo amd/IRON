@@ -17,6 +17,8 @@ The function below writes its state at one shape and reads it at the other:
 state``.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
@@ -265,3 +267,18 @@ def test_a_released_run_is_made_again_on_the_next_call():
     # A callable with another run out, as a loop makes, keeps its image.
     two.callable.new_run()
     assert not two.callable.release()
+
+
+def test_release_frees_the_buffers_and_the_next_call_loads_them_again():
+    """A model's test fixture releases it, so its buffers are gone before the
+    next model loads rather than when the garbage collector reaches them.
+    """
+    f, w, *_ = _function()
+    x = _numbers(E, 5)
+    maps = Path("/proc/self/maps")
+    f(x)
+    loaded = maps.read_text().count("/dev/accel/accel")
+    f.release()
+    assert maps.read_text().count("/dev/accel/accel") < loaded
+    np.testing.assert_array_equal(_f32(f(x).numpy()), _f32(x) + 2 * _f32(w))
+    assert maps.read_text().count("/dev/accel/accel") == loaded

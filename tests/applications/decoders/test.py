@@ -41,7 +41,9 @@ def decoder(request):
     """
     cls, weights, prompts = request.param
     load = load_from_flags(request, cls, weights_dir(weights))
-    yield load(), prompts
+    model = load()
+    yield model, prompts
+    model.release()
     aie_utils.cleanup_npu_runtime()
 
 

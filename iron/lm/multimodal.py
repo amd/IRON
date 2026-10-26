@@ -135,6 +135,11 @@ class Multimodal(Model):
             placed["before"] = ((len(self.towers),), np.int32)
         return [*text, *towers, placed]
 
+    def release(self) -> None:
+        """Free the text model's loops, then every version's and the arena's memory."""
+        self.text.release()
+        super().release()
+
     def loaded(self, versions: list) -> None:
         """Hand a causal text model its versions (``use``)."""
         if isinstance(self.text, CausalLM):

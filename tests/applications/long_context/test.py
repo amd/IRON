@@ -183,6 +183,7 @@ def loaded(request):
     model = load(full_elf=False if each_step else None, **sized)
     assert model.device_loop is not each_step
     yield app, model
+    model.release()
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 
