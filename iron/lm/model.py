@@ -86,11 +86,15 @@ def _cgroup_limit(root: Path = CGROUP, proc_cgroup: Path = PROC_CGROUP) -> int |
 def host_budget() -> int:
     """Return the bytes a model's arena may use on this host: physical memory
     minus ``HOST_RESERVE``, or the cgroup's limit minus ``CGROUP_RESERVE``
-    when a cgroup caps this process, whichever is smaller.
+    when a cgroup caps this process, whichever is smaller, and at most
+    ``IRON_MEMORY_BUDGET_GIB`` where it is set.
     """
     phys = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") - HOST_RESERVE
     limit = _cgroup_limit()
-    return phys if limit is None else min(phys, limit - CGROUP_RESERVE)
+    budget = phys if limit is None else min(phys, limit - CGROUP_RESERVE)
+    # A driver may hold fewer buffer bytes than the host has RAM.
+    cap = os.environ.get("IRON_MEMORY_BUDGET_GIB")
+    return min(budget, int(float(cap) * 2**30)) if cap else budget
 
 
 def prompt_text(chars: int, skip: int = 0) -> str:
