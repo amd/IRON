@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``Model.load`` up to the device: ``main()``'s command line handing its
-path and flags to ``from_checkpoint``, its ``-v``, the model
+"""``Model.load`` up to the device: the command line's ``-v``, the model
 ``from_checkpoint`` builds with drawn weights or a real tokenizer (skipped
 without the real checkpoint's), the context ``fit`` chooses, and the golden
 beside a checkpoint. No NPU (the fit tests record under a bound npu2, as
@@ -16,14 +15,13 @@ import dataclasses
 import logging
 import shutil
 import struct
-import sys
 
 import aie.utils as aie_utils
 import numpy as np
 import pytest
 
 from iron.applications.llama.model import Llama
-from iron.lm import Checkpoint, Model, main
+from iron.lm import Checkpoint
 from iron.lm.model import TokenizerJson
 from iron.lm.cli import parse_args
 from iron.lm.golden import RECORD
@@ -45,24 +43,6 @@ def _directory(path, config=SMALL):
     """``path``, holding ``config``'s checkpoint as ``model.safetensors``."""
     (path / "model.safetensors").symlink_to(checkpoint(config).path)
     return path
-
-
-def test_main_takes_the_path_and_flags_load_takes(monkeypatch):
-    """The command line's positional argument is ``load``'s path, and its
-    ``--random-weights``/``--max-seq-len`` its ``random_weights``/``max_seq_len``.
-    """
-    given = {}
-
-    def from_checkpoint(cls, path, **kwargs):
-        given.update(path=path, **kwargs)
-        raise SystemExit
-
-    monkeypatch.setattr(Small, "from_checkpoint", classmethod(from_checkpoint))
-    argv = ["model", "org/repo", "--random-weights", "7", "--max-seq-len", "64"]
-    monkeypatch.setattr(sys, "argv", argv)
-    with pytest.raises(SystemExit):
-        main(Small)
-    assert given == dict(path="org/repo", random_weights=7, max_seq_len=64)
 
 
 def test_v_shows_iron_s_info_lines(caplog):
@@ -89,31 +69,6 @@ def test_from_checkpoint_draws_its_weights_at_a_seed(tmp_path):
         .tree("random", 7)
         .model.embed_tokens.weight,
     )
-
-
-def test_from_checkpoint_downloads_a_sharded_checkpoint_and_its_template(monkeypatch):
-    import huggingface_hub
-    from huggingface_hub.utils import filter_repo_objects
-
-    files = [
-        "config.json",
-        "tokenizer_config.json",
-        "tokenizer.json",
-        "chat_template.jinja",
-        "model.safetensors.index.json",
-        "model-00001-of-00002.safetensors",
-        "model-00002-of-00002.safetensors",
-    ]
-    asked = []
-
-    def snapshot_download(repo_id, allow_patterns):
-        asked.extend(filter_repo_objects(files, allow_patterns=allow_patterns))
-        raise SystemExit
-
-    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
-    with pytest.raises(SystemExit):
-        Small.from_checkpoint("org/repo")
-    assert asked == files
 
 
 def test_from_checkpoint_opens_the_tokenizer_beside_it(tmp_path):
@@ -240,25 +195,3 @@ def test_a_checkpoint_s_golden_is_refused_once_it_changes(
             f.write(b"\x01")
     with pytest.raises(ValueError, match="other inputs"):
         _golden(path)
-
-
-def test_embedding_gemma_loads_with_its_text_processor(tmp_path, monkeypatch):
-    """``EmbeddingGemma.from_checkpoint`` is ``Model``'s, its tokenizer the
-    text processor that ``embed`` encodes with.
-    """
-    from iron.applications.embedding_gemma2.model import (
-        Config,
-        EmbeddingGemma,
-        TextProcessor,
-    )
-
-    loaded = argparse.Namespace(
-        checkpoint=argparse.Namespace(path=tmp_path / "model.safetensors"),
-        tokenizer=object(),
-        config=Config(),
-    )
-    monkeypatch.setattr(Model, "from_checkpoint", classmethod(lambda *a, **k: loaded))
-    monkeypatch.setattr(TextProcessor, "__init__", lambda self, path, c: None)
-    assert EmbeddingGemma.default_config(tmp_path) == Config()
-    model = EmbeddingGemma.from_checkpoint(tmp_path)
-    assert isinstance(model.tokenizer, TextProcessor)

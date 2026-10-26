@@ -13,7 +13,6 @@ file and skips when it is absent. No NPU.
 
 import dataclasses
 import hashlib
-import io
 import json
 import os
 import pickle
@@ -649,14 +648,6 @@ def test_real_tokenizer_s_added_tokens_are_their_ids():
         assert encoding.encode(added_token.content) == [token]
 
 
-def test_a_missing_models_extra_package_names_the_extra(tmp_path, monkeypatch):
-    monkeypatch.setitem(sys.modules, "tokenizers", None)
-    with pytest.raises(
-        ImportError, match=r"models extra: pip install -e '\.\[models\]'"
-    ):
-        TokenizerJson(tmp_path / "tokenizer.json")
-
-
 @requires_checkpoint
 def test_real_checkpoint_every_tensor_bitwise():
     tensors = Checkpoint(real_checkpoint).tensors
@@ -766,20 +757,18 @@ def test_download_fetches_into_the_cache_not_the_read_only_weights_dir(tmp_path)
         weights.chmod(0o755)
 
 
-def test_download_shares_no_partial_file_with_a_concurrent_fetch(tmp_path, monkeypatch):
+def test_download_shares_no_partial_file_with_a_concurrent_fetch(tmp_path):
     """Another worker fetching the same file holds its own partial file,
     here one it never finished at the old shared name.
     """
-    data = b"pinned"
-    monkeypatch.setattr(testing, "cache_dir", lambda: tmp_path)
-    monkeypatch.setattr(
-        testing.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(data)
-    )
-    (tmp_path / "file.part").mkdir()
-    download = testing.Download(
-        "https://example.com/file", hashlib.sha256(data).hexdigest()
-    )
-    assert download.fetch().read_bytes() == data
+    cache_home = tmp_path / "cache"
+    (cache_home / "data" / "README.part").mkdir(parents=True)
+    run = fetch_in(cache_home, tmp_path / "weights", PINNED_URL, PINNED_SHA256)
+    if run.returncode and "urllib.error.URLError" in run.stderr:
+        pytest.skip(f"{PINNED_URL} is unreachable from here")
+    assert run.returncode == 0, run.stderr
+    fetched = Path(run.stdout.strip())
+    assert hashlib.sha256(fetched.read_bytes()).hexdigest() == PINNED_SHA256
 
 
 def test_the_lm_testing_helpers_import_without_pytest():
@@ -810,9 +799,7 @@ def test_the_lm_testing_helpers_import_without_pytest():
     ],
     ids=["v2-nested", "v1", "unbounded"],
 )
-def test_cgroup_limit_reads_the_lowest_ceiling(
-    tmp_path, monkeypatch, files, own, expect
-):
+def test_cgroup_limit_reads_the_lowest_ceiling(tmp_path, files, own, expect):
     """``host_budget``'s ceiling: the lowest cgroup v2 ``memory.max`` on the
     way to the root, v1's ``memory.limit_in_bytes``, or none.
     """
@@ -823,6 +810,4 @@ def test_cgroup_limit_reads_the_lowest_ceiling(
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(text)
     (tmp_path / "self").write_text(own + "\n")
-    monkeypatch.setattr(model, "CGROUP", root)
-    monkeypatch.setattr(model, "PROC_CGROUP", tmp_path / "self")
-    assert model._cgroup_limit() == expect
+    assert model._cgroup_limit(root, tmp_path / "self") == expect

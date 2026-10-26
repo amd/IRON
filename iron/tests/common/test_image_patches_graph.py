@@ -9,7 +9,6 @@ image a call does not hold.
 
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad

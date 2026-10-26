@@ -33,7 +33,7 @@ from iron.common.image.link import PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, SequenceStep
 from iron.common.image.artifacts import Parameter
-from iron.common.image.packaging import Kind, require_device
+from iron.common.image.packaging import Kind
 import iron.functional as F
 from iron.tests.support.graphs import FeedForward
 from iron.operators.copy import Copy

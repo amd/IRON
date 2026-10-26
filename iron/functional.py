@@ -22,8 +22,8 @@ import ml_dtypes
 import iron
 from iron.common import Precision
 from iron.common.graph.handle import Handle, State
-from iron.common.image.packaging import require_device
-from iron.operators.flm.gemm.design import M_TILE, Epilogue, compute_rows
+
+from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM

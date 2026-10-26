@@ -48,16 +48,15 @@ CGROUP = Path("/sys/fs/cgroup")
 PROC_CGROUP = Path("/proc/self/cgroup")
 
 
-def _cgroup_limit() -> int | None:
+def _cgroup_limit(root: Path = CGROUP, proc_cgroup: Path = PROC_CGROUP) -> int | None:
     """This process's cgroup memory ceiling: cgroup v2's ``memory.max``,
     the lowest one set from its own cgroup up to the root, or else v1's
     ``memory.limit_in_bytes``; ``None`` where neither bounds it (no cgroup
     mounted, or every level reads ``max``).
     """
-    root = CGROUP
     unified = (root / "cgroup.controllers").exists()
     try:
-        lines = PROC_CGROUP.read_text().splitlines()
+        lines = proc_cgroup.read_text().splitlines()
     except FileNotFoundError:
         return None
     own = None
