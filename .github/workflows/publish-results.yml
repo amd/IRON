@@ -39,15 +39,27 @@ jobs:
         env:
           SUITE: ${{ inputs.suite }}
         run: |
-          for run in artifacts/results-*-"$SUITE"; do
-            runner=${run#artifacts/results-}
-            ci/scripts/merge_results.sh "$run" "results/${runner%-"$SUITE"}/$SUITE"
+          git -C results config user.name "github-actions[bot]"
+          git -C results config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Another suite's publish may push to ci first; merge again onto its tip.
+          for attempt in 1 2 3 4 5; do
+            for run in artifacts/results-*-"$SUITE"; do
+              runner=${run#artifacts/results-}
+              ci/scripts/merge_results.sh "$run" "results/${runner%-"$SUITE"}/$SUITE"
+            done
+            ./ci/scripts/pretty_aggregate.py --results-root results -o results/readme.md
+            git -C results add -A
+            if git -C results diff --cached --quiet; then
+              echo "No changes to commit"
+              exit 0
+            fi
+            git -C results commit -m "Add test results testing commit \`${GITHUB_SHA::7}\`"
+            if git -C results push origin ci; then
+              exit 0
+            fi
+            sleep $((attempt * 5 + RANDOM % 10))
+            git -C results fetch --depth=1 origin ci
+            git -C results reset --hard FETCH_HEAD
           done
-          ./ci/scripts/pretty_aggregate.py --results-root results -o results/readme.md
-          cd results
-          git add -A
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Add test results testing commit \`${GITHUB_SHA::7}\`" || echo "No changes to commit"
-          # A push that loses a race with another run's is not a failure.
-          git push origin ci || echo "Lost a race with another push; skipped"
+          echo "::error::Could not push the $SUITE results to ci in 5 attempts"
+          exit 1
