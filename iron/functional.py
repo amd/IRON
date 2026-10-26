@@ -1,18 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Functions for a graph's body, under ``torch.nn.functional``'s names.
+"""Functions for a graph's body, under ``torch.nn.functional``'s names: each
+records the operator steps that compute it and returns their handle.
 
-Each records the operator steps that compute it and returns their handle::
-
-    import iron.functional as F
-
-    h = F.rms_norm(x, x.shape[-1:], w.input_layernorm.weight, eps)
-    gate = F.linear(h, w.mlp.gate_proj.weight, precision=Precision.HIGH)
-    y = F.silu(gate) * F.linear(h, w.mlp.up_proj.weight, precision=Precision.HIGH)
-
-Weights are a checkpoint's ``(out, in)``, as ``torch.nn.Linear`` stores them.
-A handle's own ``+ - * /`` are steps too, and ``@`` of one row (``Handle``).
+Weights are a checkpoint's ``(out, in)``, as ``torch.nn.Linear`` stores
+them. A handle's own ``+ - * /`` are steps too, and ``@`` of one row.
 """
 
 import math
@@ -37,23 +30,11 @@ from iron.operators.silu import SiLU
 def linear(
     x: Handle | State, weight, bias=None, *, precision: Precision, **gemv
 ) -> Handle:
-    """Return ``x @ weight.T``, plus ``bias`` on every row if ``bias`` is given.
-
-    ``x`` is one row, ``(in,)`` or ``(1, in)``, or several rows,
-    ``(rows, in)``. ``weight`` is ``(out, in)``, as ``torch.nn.Linear``
-    stores it.
-
-    ``precision`` is the caller's choice; there is no default. One row runs
-    on GEMV, which sums in float32 and rounds once, as ``Precision.HIGHEST``
-    does, whatever ``precision`` says. Several rows run on
-    flm.ProjectionGEMM at ``precision``. At
-    ``Precision.HIGHEST`` they run on GEMM instead, which also sums in
-    float32 and handles row counts flm.ProjectionGEMM cannot tile. Nothing
-    is padded: a row count neither operator tiles raises when the graph is
-    recorded.
-
-    ``gemv`` passes tunables to the GEMV, for a call the profile cannot
-    tell apart from another call of the same shape.
+    """Return ``x @ weight.T``, plus ``bias`` on every row if given;
+    ``weight`` is ``(out, in)``, as ``torch.nn.Linear`` stores it. One row
+    runs on GEMV, which always rounds once in float32 regardless of
+    ``precision``; several rows run on flm.ProjectionGEMM at ``precision``,
+    or on GEMM at ``Precision.HIGHEST``.
 
     Raises:
         ValueError: ``x`` of another rank, or GEMV tunables for several rows.
@@ -114,11 +95,9 @@ def rms_norm(
 def layer_norm(
     x: Handle, normalized_shape, weight=None, bias=None, eps: float = 1e-5
 ) -> Handle:
-    """Layer-normalize ``x`` over its last axis, as torch's ``layer_norm``.
-
-    Subtracts the mean, divides by the standard deviation (``eps`` under
-    the root), then multiplies by ``weight`` and adds ``bias`` when they are
-    given.
+    """Layer-normalize ``x`` over its last axis, as torch's ``layer_norm``:
+    subtract the mean, divide by the standard deviation (``eps`` under the
+    root), then multiply by ``weight`` and add ``bias`` when given.
 
     Raises:
         ValueError: ``normalized_shape`` is not ``x``'s last axis.

@@ -3,14 +3,9 @@
 
 """EmbeddingGemma 2 on the NPU: the text encoder as one graph
 (``EmbeddingGemma``), and over text, audio and an image (``Multimodal``),
-Gemma 4's towers' soft tokens in their placeholders' places. Its shape is
-the checkpoint's ``config.json`` (``Config``); ``PROFILES`` holds every
-graph's tunables, one profile per device, as ``iron.lm.tune`` writes them.
-Text goes in behind its task's prefix and a unit-length embedding comes out:
-
-    python -m iron.applications.embedding_gemma2.model /path/to/embeddinggemma-2 \\
-        --query "What causes the northern lights?" \\
-        --document "Charged particles from the sun." "Photosynthesis in plants."
+Gemma 4's towers' soft tokens in their placeholders' places. Run with
+``python -m iron.applications.embedding_gemma2.model <checkpoint>
+--query ... --document ...``.
 """
 
 import argparse
@@ -126,15 +121,12 @@ class Config(lm.Config):
 
 
 class TextProcessor:
-    """EmbeddingGemma 2's text processor.
-
-    It tokenizes a text after its task's prefix, and expands the
-    placeholders for a clip's and an image's soft tokens as Hugging Face's
-    processor does.
+    """EmbeddingGemma 2's text processor: tokenizes a text behind its task's
+    prefix, and expands the placeholders for a clip's and an image's soft
+    tokens as Hugging Face's processor does.
 
     Args:
         path: The checkpoint's `tokenizer.json`; its `encode` adds BOS and EOS.
-        config: The text encoder's shape: its placeholder and marker ids.
     """
 
     # Each task's prefix, which a text is embedded behind: the model's
@@ -259,17 +251,10 @@ class LanguageModelPle(iron.Graph):
 
 class EmbeddingGemma(Encoder):
     """The text encoder over ``max_tokens`` rows at most, one compile for
-    every length.
-
-    A call takes the token ids, padded to ``max_tokens``, and ``rows``, the
-    real rows, which bound the gather and every operator after it. The
-    scaled table's rows are gathered on the device. It returns one unit-length
-    embedding per ``mrl_dims`` truncation, a row each, zero past its length.
-    Attention is bidirectional and unscaled, a sliding layer's within
-    ``sliding_window`` positions.
+    every length: it returns one unit-length embedding per ``mrl_dims``
+    truncation, zero past its length, attention bidirectional and unscaled.
 
     Args:
-        config: The encoder's shape.
         weights: The checkpoint's; the text encoder's tree is read.
         tokenizer: What ``embed`` encodes text with.
     """
@@ -392,15 +377,11 @@ class EmbeddingGemma(Encoder):
 
 
 class Multimodal(lm.Multimodal):
-    """The text encoder with one clip's and one image's soft tokens in
-    their placeholders' places (``iron.lm.Multimodal``), unscaled.
+    """The text encoder with one clip's and one image's soft tokens in their
+    placeholders' places (``iron.lm.Multimodal``), unscaled.
 
     Args:
-        config: The text encoder's shape.
         weights: The checkpoint's: the text encoder's tree and each tower's.
-        tokenizer: As ``EmbeddingGemma`` takes it.
-        audio_config: The audio tower's shape.
-        vision_config: The vision tower's shape.
     """
 
     profile = PROFILES
@@ -472,9 +453,8 @@ class Multimodal(lm.Multimodal):
         cls, parser: argparse.ArgumentParser, args: argparse.Namespace
     ) -> list[Timed]:
         """Every version (the text encoder, each tower and the merge) at its
-        longest call, on weights it never reads, unread from the shapes the
-        checkpoint's header gives. The towers' graphs alone run designs
-        these hold, so the one profile in ``profiles/`` serves them.
+        longest call, on weights it never reads, since the one profile in
+        ``profiles/`` serves every version's designs.
         """
         weights = Checkpoint(weights_file(args.checkpoint)).tree("unread")
         graph = cls(Config(), weights)

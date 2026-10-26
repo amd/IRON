@@ -52,34 +52,8 @@ def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarr
 
 class LogMel(iron.Graph):
     """The log-mel spectrogram of float32 samples, as Hugging Face's Gemma 4
-    feature extractor computes it.
-
-    Frame ``f`` is the ``frame`` samples from ``f * hop``, under a periodic
-    Hann window. Its rfft over ``fft`` points gives the magnitude, which
-    ``mels`` triangular filters up to ``max_hz`` reduce to bands
-    (``filterbank``). The result is the log of each band plus
-    ``mel_floor``, rounded once to bf16.
-
-    A call for ``F`` frames takes ``(F - 1) * hop + span`` samples, a whole
-    number of rows of four, where ``span`` is the frame in whole 32s. It
-    also takes the per-call ``frames`` to compute. It writes ``features``,
-    ``(F, mels)``, into the caller's buffer (a state's rows) when one is
-    given and returns them otherwise, leaving rows past ``frames``
-    unwritten.
-
-    The rfft and the filterbank are GEMMs with exact float32 products. Each
-    operand is six planes of its bf16 limbs (``Limbs``), and the bins are
-    padded with zeros to whole 64-column tiles. ``Magnitude`` and ``Log``
-    are float32.
-
-    Args:
-        frame: The samples of a frame.
-        hop: The samples between frames.
-        fft: The rfft's points, at least a frame.
-        mels: The mel bands.
-        sample_rate: The samples per second.
-        max_hz: The top of the highest band.
-        mel_floor: What the log adds to each energy.
+    feature extractor computes it, via bf16-limb GEMMs (``Limbs``) for exact
+    float32 rfft and filterbank products.
     """
 
     def __init__(
@@ -147,32 +121,10 @@ class LogMel(iron.Graph):
 
 class ImagePatches(iron.Graph):
     """A decoded image resized as torchvision's antialiased resize does it,
-    rescaled to ``[0, 1]`` (and normalized, given ``mean``) and cut into a
-    vision tower's ``patches`` rows of 16x16-pixel patches, each soft token's
-    ``pool ** 2`` patches consecutive, row-major within its window, the
-    tokens row-major over the image.
-
-    A call takes the image, ``(height, width, 3)`` uint8 laid out by
-    ``pack``, and per call its size and the ``pool * 16``-pixel windows it
-    is resized to. It returns the pixels, ``(patches, 768)`` bf16, each
-    patch's ``xy`` (x and y side by side) and ``position_ids`` (every x,
-    then every y plus ``positions``); rows past the image are the zero
-    patch at ids ``positions`` and ``2 * positions``, past each table, which
-    a gather bounded to the image's patches never reads.
+    rescaled to ``[0, 1]`` (and normalized, given ``mean``) and cut row-major
+    into a vision tower's ``patches`` rows of 16x16-pixel patches.
 
     Args:
-        patches: The patch rows of a call.
-        image: The ``(height, width)`` of the largest image a call takes
-            either way up.
-        pool: A soft token's side in patches.
-        positions: The rows of each axis's position table.
-        patch_columns: The patch columns a core holds; by default 8, or
-            the fewest ``out`` takes.
-        chunk: The bytes of an image row ``Resample`` receives at a time.
-        interpolation: The resize's filter.
-        mean: The processor's normalization after its rescale, per channel,
-            or None for the rescale alone.
-        std: Its standard deviations, given ``mean``.
         out: The ``(height, width)`` every call is resized to, which sizes
             the buffers, or None for any whole windows of ``patches``.
     """
@@ -282,8 +234,6 @@ class ImagePatches(iron.Graph):
 
         Args:
             image: ``(height, width, 3)`` uint8.
-            out_height: The rows it is resized to.
-            out_width: The columns it is resized to.
 
         Raises:
             ValueError: The image or its patches do not fit a call, or
@@ -346,11 +296,9 @@ class Linear(iron.Graph):
         return F.linear(x, self.weight, self.bias, precision=self.precision)
 
     def split(self, x, *rows: int, **gemv) -> list:
-        """Project ``x`` through each run of ``rows`` of the weight in turn.
-
-        This gives a fused projection's outputs, one ``F.linear`` each. Each
-        reads its rows of the weight in place. Splitting the output columns
-        instead would need a strided view that no bounded-row descriptor fits.
+        """Project ``x`` through each run of ``rows`` of the weight in turn,
+        each a fused projection's output; splitting the output columns
+        instead would need a strided view no bounded-row descriptor fits.
         """
         ends = np.cumsum(rows)
         return [
@@ -447,12 +395,9 @@ def residual_add(x, y, residual: float):
 
 
 class Rope(iron.Graph):
-    """A decoder's RoPE table, one row per position (``DecoderConfig.angles``).
-
-    q and k share the table unless ``q_scale`` is given. It is one factor per
-    row, and q then gets a scaled table of its own. A model copies each
-    call's rows of a ``Rope`` once (``rows``), and every layer holding that
-    ``Rope`` reads the copy.
+    """A decoder's RoPE table, one row per position (``DecoderConfig.angles``);
+    q and k share it unless ``q_scale`` gives q a scaled table of its own. A
+    model copies each call's rows once (``rows``) for every layer to read.
     """
 
     def __init__(self, c, q_scale: np.ndarray | None = None):
@@ -487,28 +432,14 @@ class Rope(iron.Graph):
 
 
 class KVCache(iron.Graph):
-    """A layer's keys and values and causal attention over them
-    (``attend``). A prompt chunk writes a run of rows, the last one short
-    where the chunk does not divide ``max_seq_len``; a decode step attends
-    with ``MHA`` of one query, which costs the context, not the cache.
-
-    Keys and values are each ``(max_seq_len, num_key_value_heads,
-    head_dim)``, so no descriptor steps by the context. Within a window
-    whose ring and staging, three rings' rows, are fewer than that, they
-    keep only the last ``ring`` positions, ``ring`` the power of two holding
-    a window and a chunk: position ``p`` at rows ``p % ring`` and ``ring +
-    p % ring``, so any ``ring`` positions in a row are one run. A call
-    copies the run it attends over to ``staged``: a chunk's ``ring``
-    positions ending at its last row, a decode step's window. A call stays
-    within a chunk and restarts where the ring still holds the window
-    before it (``restart``).
+    """A layer's keys and values and causal attention over them (``attend``).
+    A prompt chunk writes a run of rows; a decode step attends with ``MHA``
+    over one query, which costs the context, not the cache.
 
     Args:
-        c: The decoder's shape.
-        window: The positions before a query it attends to besides its own,
-            as ``MHA`` counts them; None is all. Hugging Face's
-            ``sliding_window`` counts the query's own, so a model passes
-            ``sliding_window - 1``.
+        window: The positions before a query it attends to besides its own
+            (None: all). Hugging Face's ``sliding_window`` counts the
+            query's own, so pass ``sliding_window - 1``.
 
     Raises:
         ValueError: A ring with a chunk of other than a power of two.
@@ -529,24 +460,18 @@ class KVCache(iron.Graph):
 
     def restart(self, held: int, ran: int) -> int:
         """Where a call may start to change the positions from ``held`` on,
-        after ``ran`` positions ran: at the chunk boundary before it while
-        the ring holds the window before that, else at the first. A call
-        from mid-chunk would stage its keys from another offset than one
-        from the boundary, and round otherwise.
+        after ``ran`` ran: the chunk boundary before it while the ring still
+        holds the window before that, else the first.
         """
         assert self.ring is not None and self.window is not None, "restart needs a ring"
         start = held // self.chunk * self.chunk
         return start if ran - (start - self.window) <= self.ring else 0
 
     def attend(self, call, q, k, v, scale: float | None = None):
-        """Write ``k`` and ``v`` at the call's positions, and attend ``q`` over them.
-
-        ``k`` and ``v`` are ``(rows, groups, head_dim)``, or None for a layer
-        that reads another layer's cache. ``q`` is ``(rows, heads, head_dim)``.
-        Each query sees every position up to its own, within ``window`` if
-        one is set. Logits are scaled by ``scale``, or by
-        ``1 / sqrt(head_dim)`` when it is None. Returns
-        ``(rows, heads * head_dim)``.
+        """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` at the call's
+        positions (None for a layer reading another's cache) and attend
+        ``q`` ``(rows, heads, head_dim)`` over them; ``(rows, heads *
+        head_dim)``.
         """
         C, (_, G, D), (n, H, _) = self.chunk, self.keys.shape, q.shape
         if self.ring is None:
@@ -575,12 +500,9 @@ class KVCache(iron.Graph):
         return o.reshape(n, H * D)
 
     def _ring(self, call, R: int, W: int, q, k, v):
-        """``attend``'s keys, values and queries within the window ``W``:
-        a chunk attends from all its rows (those past ``rows`` are later
-        than every query's, so masked) over the ``R`` positions of the ring
-        ending at its last; a decode step over its window. A layer reading
-        another's cache (``k`` None) reads its ``staged``, which that layer,
-        earlier in the call, copied.
+        """``attend``'s keys, values and queries within the window ``W``,
+        staged from the ``R``-position ring for the call's chunk or decode
+        step.
         """
         C = self.chunk
         if call.prompt:
@@ -633,26 +555,13 @@ class NoCache(iron.Graph):
 
 
 class Attention(iron.Graph):
-    """Self-attention for layer ``i`` of a decoder with config ``c``.
-
-    The input is projected by ``q_proj``, ``k_proj`` and ``v_proj``. If the
-    call carries RoPE angles (``Rope.rows``), q and k are rotated, only
-    their first ``rotary`` columns when the config sets ``rotary_dim``.
-    Attention then runs over the layer's ``KVCache``, and ``output`` turns
-    the heads into the block's output: ``o_proj`` unless a model overrides it.
-
-    q, k and v have a bias when ``config.attention_bias`` is set; o has one
-    when ``o_bias`` is. Every projection runs at ``config.precision``.
-    ``projections`` builds the projections that ``project`` applies.
-    ``scaling`` scales the logits and defaults to ``head_dim ** -0.5``. A
-    layer that shares another layer's ``KVCache`` sets ``k_proj`` and
-    ``v_proj`` to None and writes no keys or values.
+    """Self-attention for layer ``i`` of a decoder with config ``c``: q, k
+    and v project, RoPE rotates the first ``rotary`` columns when set, and
+    attention runs over the layer's ``KVCache``.
 
     Args:
-        c: The decoder's shape.
-        i: The layer.
-        norms: Which of q, k and v each head of is RMS-normed before RoPE:
-            q and k by ``q_norm`` and ``k_norm``, v unweighted.
+        norms: Which of q, k and v each head of is RMS-normed before RoPE
+            (``q_norm``, ``k_norm``; v unweighted).
 
     Raises:
         ValueError: ``norms`` names other than q, k and v.
@@ -754,12 +663,9 @@ class MLP(iron.Graph):
 
 
 class GatedMLP(iron.Graph):
-    """A gated feed-forward, ``down_proj(act(gate_proj(x)) * up_proj(x))``.
-
-    ``act`` is the config's ``hidden_act``. Each projection runs at the
-    config's ``precision`` and has a bias when ``mlp_bias`` is set.
-    ``projections`` builds the projections ``body`` reads other than
-    ``down_proj``.
+    """A gated feed-forward, ``down_proj(act(gate_proj(x)) * up_proj(x))``,
+    ``act`` the config's ``hidden_act``; each projection has a bias when
+    ``mlp_bias`` is set.
     """
 
     def __init__(self, c):
@@ -782,24 +688,9 @@ class GatedMLP(iron.Graph):
 
 
 class DecoderLayer(iron.Graph):
-    """Layer ``i`` of a pre-norm decoder with config ``c``.
-
-    The input goes through ``input_layernorm`` and ``self_attn``, which
-    attends over the layer's own ``cache``, then through
-    ``post_attention_layernorm`` and ``mlp``. Each block's output is
-    multiplied by ``residual_multiplier`` and added to its residual. Both
-    norms are ``norm``, which is ``RMSNorm`` unless a model sets another.
-
-    ``rope`` selects which of the call's RoPE angles (``Call.ropes``)
-    rotate q and k. It is the model's ``Rope`` unless a model sets another
-    key, and None means the layer applies no RoPE.
-
-    A model may pass its own ``self_attn``, ``mlp`` and ``cache``. The
-    default ``self_attn`` gives o a bias when ``attention_bias`` is set, as
-    it does q, k and v.
-
-    A layer that mixes its rows otherwise (a convolution, Mamba)
-    overrides ``mix``.
+    """Layer ``i`` of a pre-norm decoder with config ``c``: ``input_layernorm``
+    then ``self_attn`` over the layer's ``cache``, ``post_attention_layernorm``
+    then ``mlp``, each scaled by ``residual_multiplier`` before its residual.
     """
 
     norm = RMSNorm
@@ -829,12 +720,9 @@ class DecoderLayer(iron.Graph):
 
 
 class EncoderLayer(DecoderLayer):
-    """Layer ``i`` of a pre-norm encoder, as in SigLIP and Whisper.
-
-    It has ``DecoderLayer``'s two blocks, attention then MLP, each after a
-    ``LayerNorm``, with a plain (ungated) ``MLP``. Attention is bidirectional
-    over the call's rows and keeps no cache (``NoCache``). ``o_proj`` has a
-    bias whenever q, k and v do. A model may pass its own ``self_attn``.
+    """Layer ``i`` of a pre-norm encoder, as in SigLIP and Whisper:
+    ``DecoderLayer``'s two blocks after a ``LayerNorm``, bidirectional
+    attention with no cache (``NoCache``) and a plain (ungated) ``MLP``.
     """
 
     def __init__(self, c, i: int, self_attn=None):
@@ -851,9 +739,8 @@ class EncoderLayer(DecoderLayer):
 
 class SandwichLayer(DecoderLayer):
     """``DecoderLayer`` with each block's output normed again before its
-    residual, by ``post_attention_layernorm`` and
-    ``post_feedforward_layernorm``, and ``mlp``'s input by
-    ``pre_feedforward_layernorm`` (Gemma's).
+    residual (``post_attention_layernorm``, ``post_feedforward_layernorm``)
+    and ``mlp``'s input normed by ``pre_feedforward_layernorm`` (Gemma's).
     """
 
     def __init__(self, c, i: int, self_attn=None, mlp=None, cache=None):
@@ -871,10 +758,9 @@ class SandwichLayer(DecoderLayer):
 
 
 class PleLayer(SandwichLayer):
-    """``SandwichLayer``, then its per-layer input ``ple`` ``(rows,
-    ple_dim)`` gated in (``per_layer_input_gate``, ``per_layer_projection``,
-    ``post_per_layer_input_norm``) and the sum scaled by ``layer_scalar``
-    (Gemma 4's).
+    """``SandwichLayer``, then its per-layer input ``ple`` ``(rows, ple_dim)``
+    gated in (``per_layer_input_gate``, ``per_layer_projection``,
+    ``post_per_layer_input_norm``) and scaled by ``layer_scalar`` (Gemma 4's).
     """
 
     def __init__(self, c, i: int, self_attn=None, mlp=None, cache=None):

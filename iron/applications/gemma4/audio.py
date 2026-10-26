@@ -364,27 +364,7 @@ class AudioTower(Tower):
     tokens, one compile for every clip; called in another graph's body, its
     steps are that graph's.
 
-    A call takes the `4 * T + 1` hops of waveform its `4 * T` frames read
-    (the first the zeros in front of the clip, zero past it), `T` being
-    `max_tokens`, and per call the valid frames, `n`, the rows of the
-    first convolution's output that are valid, and `tokens`, the soft
-    tokens, which bound the operators over each. Its features are
-    `iron.lm.LogMel`'s. The frame after the valid ones is zeroed, as are the
-    first convolution's rows after its valid ones before the second reads
-    them, as Hugging Face's mask does. Past that nothing masks padding: the
-    attention and the light convolution look only back, so a valid token
-    never reads a padded one.
-
-    Each subsampling convolution is an `iron.lm.Conv2d`, its weight centered
-    over the output channels so that its layer norm is an RMS norm.
-    Attention is one GEMM a head over every key, of which each query's band
-    of `band` columns (its window, the rest masked) is gathered, its
-    relative-position terms keys of the same GEMM; the probabilities are
-    scattered back to the band of zeros for the GEMM with the values. Every
-    clipped linear's clamps run as `Clamp`s.
-
     Args:
-        config: The tower's shape.
         weights: The checkpoint's; the audio tower's tree is read.
     """
 
@@ -438,7 +418,6 @@ class AudioTower(Tower):
         Args:
             wave: `((F + 1) * hop,)` float32 samples: the `frame // 2` zeros
                 in front of the clip, then the clip, zero past it.
-            frames: The per-call valid frames, an int32 value.
         """
         F = wave.shape[0] // self.config.hop - 1
         self.log_mel(wave, self.features[1 : F + 1], frames=frames)
@@ -467,7 +446,6 @@ class AudioTower(Tower):
             wave: `((4 * max_tokens + 1) * hop,)` float32 samples, as
                 `logmel` takes them.
             n: The per-call `ceil(frames / 2)`.
-            frames: The per-call valid frames.
             tokens: The per-call `config.tokens(frames)`.
         """
         c = self.config

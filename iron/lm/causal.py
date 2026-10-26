@@ -3,12 +3,10 @@
 
 """A decoder-only language model on the NPU, as one graph.
 
-A call with no tensor is a decode step; ``prefill_chunk`` token ``ids`` are
-a prompt chunk from position ``start``, of which a call runs the first
-``rows``, their embedding rows gathered on the device. Both draw the next
-token on the device and carry it and ``position + 1`` into the next call.
-Where the decode step is not a full ELF (NPU1, or ``full_elf=False``) there
-is no device loop: the host starts each step on the token the last one drew.
+A call with no tensor is a decode step; ``prefill_chunk`` token ``ids``
+are a prompt chunk from ``start``, of which a call runs the first
+``rows``. Both draw the next token on the device and carry it and
+``position + 1`` into the next call.
 """
 
 import dataclasses
@@ -38,10 +36,9 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass(kw_only=True)
 class Call:
-    """One call's values, built once in ``body`` and read by every module
-    that keeps memory from call to call (``KVCache``, ``Rope``): a prompt chunk's ``rows`` from ``start``, or the decode
-    step's one at ``position``. Each is a per-call value in a recording and its
-    number in the reference.
+    """One call's values, built once in ``body`` and read by every module that
+    keeps memory from call to call (``KVCache``, ``Rope``): a prompt chunk's
+    ``rows`` from ``start``, or the decode step's one at ``position``.
     """
 
     prompt: bool
@@ -80,13 +77,8 @@ class Decoder(iron.Graph):
 
 class CausalLM(Model):
     """A decoder on ``config``'s shape: ``model``, a ``decoder_class`` of
-    ``layer_class`` layers, each holding its own ``KVCache``; ``lm_head``,
-    the embedding where tied, loaded from ``weights``; and ``rotary_emb``,
-    the RoPE table (``Rope``), None with no ``rope_theta``.
-
-    Args:
-        config: The decoder's shape.
-        weights: The checkpoint's tree (``Checkpoint.tree``).
+    ``layer_class`` layers each holding its own ``KVCache``; ``lm_head``; and
+    ``rotary_emb``, the RoPE table, None with no ``rope_theta``.
     """
 
     decoder_class: ClassVar[type[Decoder]] = Decoder
@@ -316,10 +308,10 @@ class CausalLM(Model):
         return {}
 
     def __call__(self, ids=None, before=None, **values) -> Any:
-        """One call of the prompt version on ``ids``
-        (``Session.prompt_ids``), of the placed one on ``ids`` and
-        ``before`` (``use``), else of the decode step, with ``call_values``
-        where ``values`` give none of their own.
+        """One call of the prompt version on ``ids`` (``Session.prompt_ids``),
+        the placed one on ``ids`` and ``before`` (``use``), or else the
+        decode step, with ``call_values`` where ``values`` give none of
+        their own.
 
         Raises:
             RuntimeError: Neither version is loaded: ``load_versions()``

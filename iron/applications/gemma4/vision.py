@@ -83,14 +83,6 @@ class VisionConfig(lm.Config):
         largest whole `pool * patch` blocks within `max_tokens` soft tokens
         at the image's aspect ratio.
 
-        Args:
-            height: The image's height in pixels.
-            width: The image's width in pixels.
-            max_tokens: The processor's `max_soft_tokens`.
-
-        Returns:
-            The resized `(height, width)`.
-
         Raises:
             ValueError: Both sides round to no block, or the size exceeds
                 the budget.
@@ -237,26 +229,7 @@ class VisionTower(Tower):
     one compile for every image; called in another graph's body, its steps
     are that graph's.
 
-    A call takes a decoded image, which `processor` (`iron.lm.ImagePatches`)
-    resizes as Hugging Face's image processor does and cuts into patches,
-    the 16x16-pixel squares the tower embeds a row each, in pooling-window
-    order on the NPU, so pooling is a fixed sum of row blocks, a GEMM by a
-    0/1 matrix. `n`, the real patches, bounds every operator after the
-    processor, the pooling's sum among them. Each head's channels are
-    reordered so that the axial RoPE, x on its first half and y on its
-    second, is one rotation of halves: a permutation within a head changes
-    neither its norm nor a query's product with a key.
-
-    The rows a call looks up by patch position, x's and y's position
-    embeddings and RoPE angles, are copied from tables of whole windows in
-    the same order: a window's x blocks by window column, its y blocks by
-    window row, repeated across the widest image that reaches the row. A
-    descriptor walks 64 window rows at most, so each copy walks `groups` in
-    turn, each its rows of the image or, past them, one more into rows no
-    later step reads.
-
     Args:
-        config: The tower's shape.
         weights: The checkpoint's; the vision tower's tree is read.
     """
 
@@ -408,11 +381,9 @@ class VisionTower(Tower):
         wk: Scratchpad[np.int32],
         walked: Scratchpad[np.int32],
     ):
-        """The `(tokens, text_dim)` soft tokens of the image `rgb`, `height`
-        by `width` pixels resized to `out_height` by `out_width`, its `n`
-        patches in `hk` by `wk` windows, `tokens` `patches // pool ** 2`
-        rounded up to whole `rows`; the first `n // pool ** 2` are the
-        image's, the rest zero. `walked` is the rows its windows' walks move.
+        """The `(tokens, text_dim)` soft tokens of the image `rgb`, `n`
+        patches in `hk` by `wk` windows; the first `n // pool ** 2` are the
+        image's, the rest zero.
         """
         pixels, _, _ = self.processor(
             rgb,
@@ -446,10 +417,6 @@ class VisionTower(Tower):
     def inputs(self, image, max_tokens: int) -> tuple[np.ndarray, dict]:
         """A call's image buffer and per-call sizes, `n` (its patches) among
         them, for a decoded `image` at the processor's `max_tokens`.
-
-        Args:
-            image: `(height, width, 3)` uint8.
-            max_tokens: The processor's `max_soft_tokens`.
 
         Raises:
             ValueError: The image or its patches do not fit a call, or

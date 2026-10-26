@@ -125,9 +125,8 @@ def fingerprint(*values) -> str:
 
 def _text(value) -> str:
     """``repr(value)``, but a dataclass names only its fields off their
-    defaults, so a field added with a default changes no fingerprint. A
-    changed default changes no fingerprint either: a golden recorded under
-    the old default is still accepted for a config left at the new one.
+    defaults, so adding a field with a default, or changing one, does not
+    change existing fingerprints.
     """
     if not dataclasses.is_dataclass(value) or isinstance(value, type):
         return repr(value)
@@ -155,9 +154,8 @@ def _is_default(field: dataclasses.Field, value) -> bool:
 class HuggingFace:
     """transformers' own model in float32, of the auto class
     ``model_class`` names (a causal model's by default): a checkpoint
-    directory's (``load``) or one built from an IRON config and a weights
-    tree (``build``). A model of another kind subclasses it for its class
-    and its ``logits``.
+    directory's (``load``) or one built from an IRON config and weights
+    (``build``).
     """
 
     model_class = "AutoModelForCausalLM"
@@ -176,9 +174,9 @@ class HuggingFace:
     @classmethod
     def build(cls, model_type: str, config, weights, **json) -> "HuggingFace":
         """``model_type``'s model on ``config``'s fields as its
-        ``config.json`` names them, ``json``'s merged in, over ``weights`` named as
-        the model's checkpoints name them: written to a checkpoint and
-        loaded, so transformers renames (and stacks) them as it loads one.
+        ``config.json`` names them, ``json``'s merged in, over ``weights``
+        written to a checkpoint and loaded, so transformers renames (and
+        stacks) them as it loads one.
 
         Raises:
             ValueError: ``weights`` lacks a parameter the model holds, other

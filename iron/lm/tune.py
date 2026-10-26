@@ -1,22 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tune a model's profile on this NPU:
-
-```bash
-python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors
-python -m iron.lm.tune embedding_gemma2
-```
-
-A model names the calls its operators are timed in (``tune_calls``): a
-decoder's are its decode step and its prompt chunk (``calls``).
-The fastest settings found rewrite the application's
-``profiles/<device>.json`` (``iron.tune.autotune``): review the change with
-``git diff`` and commit it. Times the cost cache holds are kept unless
-``--remeasure``; an operator a per-call value moves is also timed at
-contexts up to ``--context``. The model is built on weights it never
-reads, since a step's time does not follow them. Run with the NPU
-otherwise idle.
+"""Tune a model's profile on this NPU: ``python -m iron.lm.tune
+<application>`` times its calls' operators and rewrites
+``profiles/<device>.json`` with the fastest settings found; review and
+commit the change with ``git diff``.
 """
 
 import argparse
@@ -50,9 +38,8 @@ def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
 
 def arguments(parser: argparse.ArgumentParser) -> None:
     """The flags a decoder's ``calls`` follow from: the checkpoint whose
-    header gives the weights' shapes, the decode step's position and token,
-    the contexts attention over the cache is timed at, and the sampling
-    Sample is timed at.
+    header gives the weights' shapes, the contexts attention over the
+    cache is timed at, and the sampling Sample is timed at.
     """
     parser.add_argument(
         "--checkpoint",
@@ -99,13 +86,9 @@ def calls(
     points: int,
     sampler: Sampler,
 ) -> list[Timed]:
-    """The calls a decoder's designs are timed in: the decode step at
-    ``position`` and ``token``, and the prompt chunk at a whole first chunk,
-    Sample on the draw rows ``sampler`` gives. Each is timed over
-    ``contexts`` up to ``context``, ``points`` of them: the decode step at
-    their last position, the prompt chunk as the whole chunk ending there.
-    ``context`` is whole prompt chunks within ``max_seq_len``
-    (``CausalLM.tune_calls`` checks it).
+    """The calls a decoder's designs are timed in: the decode step and the
+    prompt chunk, each over ``contexts`` up to ``context``, ``points`` of
+    them, and Sample on the draw rows ``sampler`` gives.
     """
     L, C = model.config.max_seq_len, model.config.prefill_chunk
     decode_shapes, prompt_shapes = model.shapes()
@@ -191,9 +174,8 @@ def main(name: str, model: Any, argv: Sequence[str] | None = None) -> None:
 
 def cli() -> None:
     """``python -m iron.lm.tune <application>``: tune ``<application>``'s
-    profile (``main``), its model found by ``application_model``.
-    ``--help`` after ``<application>`` lists the rest of its flags; without
-    one, only ``application`` is required, since the flags follow from it.
+    profile (``main``), its model found by ``application_model``; ``--help``
+    after ``<application>`` lists the rest of its flags.
     """
     # No -h here: an unresolved --help passes through to main's parser,
     # which knows application's own flags.

@@ -31,10 +31,9 @@ class Session:
         self._seen = NOTHING  # the tokens in the caches
 
     def logits(self, tokens) -> np.ndarray:
-        """The logits after the last of ``tokens``, the whole history.
-
-        One more token than the last call's is a decode step; anything else
-        runs from the first token the caches do not hold (``resume``).
+        """The logits after the last of ``tokens``, the whole history: one
+        more token than the last call's is a decode step, anything else runs
+        from the first token the caches do not hold (``resume``).
 
         Raises:
             ValueError: ``tokens`` is empty or longer than ``max_seq_len``.
@@ -65,7 +64,7 @@ class Session:
         """Draw ``max_tokens`` after ``tokens`` on the device, each yielded
         as it is drawn (``Model.stream``): looped there where the decode
         step is a full ELF (``device_loop``), else each step started from
-        the host. The draws match ``generate_on_host`` with the same seed.
+        the host.
 
         Raises:
             ValueError: The tokens and those to draw do not fit the caches.
@@ -202,9 +201,8 @@ def host_draws(model, chunks, max_tokens: int) -> Iterator[int]:
 
 def device_draws(model, chunks, n: int, max_tokens: int, each: bool) -> Iterator[int]:
     """``max_tokens`` drawn after the prompt ``chunks`` of ``n`` tokens, the
-    last chunk starting a device loop of decode steps (``CausalLM.loop``):
-    with ``each``, each token read once its step completes, else the first
-    alone and the rest once the last has.
+    last chunk starting a device loop of decode steps (``CausalLM.loop``);
+    with ``each``, each token is read once its step completes.
     """
     for inputs, values in chunks:
         if values["position"] < n - 1:

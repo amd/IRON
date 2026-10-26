@@ -4,11 +4,9 @@
 """An encoder on the NPU as one graph: a sequence of at most ``max_tokens``
 rows in, attended bidirectionally, compiled once for every length.
 
-``Encoder`` looks up token ids' rows and runs ``forward`` over them: each
-layer, a ``layer_class`` module, the final norm (``final_norm``, none by
-default), ``pool`` and ``head``. A ``Tower`` is an encoder
-whose rows come from a front end and whose output is soft tokens
-in a text model's space.
+``Encoder`` looks up token ids and runs ``forward`` over them; a ``Tower``
+is an encoder whose rows come from a front end and whose output is soft
+tokens in a text model's space.
 """
 
 from typing import Any, ClassVar
@@ -29,14 +27,9 @@ class Encoder(Model):
     length: ``layers``, a ``layer_class(config, i)`` each, which a subclass
     loads from its checkpoint; it gives ``lookup`` and ``head``.
 
-    A call takes the token ids, padded to ``max_tokens`` with 0, and
-    ``rows``, the real rows, which bound the embedding gather and every
-    operator after it.
-
     Args:
         config: The model's shape: ``num_hidden_layers`` layers, and
             ``inputs`` reads its ``vocab_size``.
-        max_tokens: The longest sequence a call takes.
     """
 
     # A graph class taking (config, i).
@@ -95,8 +88,7 @@ class Encoder(Model):
     def forward(self, x: Handle, rows, ropes, ids=None):
         """The layers, the final norm, ``pool`` and ``head`` over the rows
         ``x`` of ``ids`` (None for a tower's), bounded to their first
-        ``rows``, rotated by ``ropes`` (``Call.ropes``): one prompt of
-        ``rows`` from position 0.
+        ``rows``, rotated by ``ropes`` (``Call.ropes``).
         """
         call = Call(
             prompt=True,
@@ -163,13 +155,7 @@ class Tower(Encoder):
     and whose output is soft tokens in a text model's space, ``text_dim``
     wide, which take a placeholder's places.
 
-    A subclass gives ``inputs`` and ``shapes``, and a ``body`` naming its
-    input and per-call values that runs ``forward`` on the rows its front
-    end gives.
-
     Args:
-        config: The tower's shape; ``soft_tokens`` reads its ``text_dim``.
-        max_tokens: The rows its layers take.
         soft_rows: The rows of soft tokens a call returns, the first
             ``soft`` of them valid.
     """

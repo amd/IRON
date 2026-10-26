@@ -74,10 +74,8 @@ def not_json(default, **kwargs) -> Any:
 @dataclasses.dataclass(frozen=True)
 class Config:
     """A model's shape, built from a checkpoint's ``config.json``
-    (``from_checkpoint``). ``DecoderConfig`` and EmbeddingGemma 2's config
-    subclass it; ``eps`` is every model's RMS norm epsilon, and
-    ``precision`` every projection's in iron.lm's blocks, which each
-    application chooses on its measured accuracy: it has no default here.
+    (``from_checkpoint``); ``precision`` is every projection's, chosen per
+    application on its measured accuracy, with no default here.
     """
 
     # Unbiased projections, RoPE over whole heads, unless a model says.
@@ -95,11 +93,9 @@ class Config:
 
     @classmethod
     def from_checkpoint(cls, path) -> "Config":
-        """``cls``'s fields read from ``path``'s own ``config.json``: each
-        at its ``metadata["json"]``, a dot-separated path under
-        ``json_prefix`` (its own name if unset), converted by its
-        ``metadata["convert"]`` if it names one; a ``not_json`` field keeps
-        its default, as does one the file leaves out or null.
+        """``cls``'s fields read from ``path``'s own ``config.json``, each
+        at its ``metadata["json"]`` path (under ``json_prefix``), converted
+        by ``metadata["convert"]`` if it names one.
 
         Args:
             path: A ``config.json``, or a checkpoint's directory or file
@@ -179,10 +175,8 @@ class Config:
 @dataclasses.dataclass(frozen=True)
 class DecoderConfig(Config):
     """A decoder's shape, named as a Hugging Face checkpoint's own
-    ``config.json`` does where it has one. ``max_seq_len``, the longest
-    context served, is the checkpoint's native ``max_position_embeddings``
-    unless a caller lowers it; ``prefill_chunk`` is IRON's own prompt
-    chunking, cut to ``max_seq_len``.
+    ``config.json`` does where it has one; ``max_seq_len`` is the
+    checkpoint's native context unless a caller lowers it.
     """
 
     vocab_size: int

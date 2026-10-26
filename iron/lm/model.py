@@ -49,10 +49,9 @@ PROC_CGROUP = Path("/proc/self/cgroup")
 
 
 def _cgroup_limit(root: Path = CGROUP, proc_cgroup: Path = PROC_CGROUP) -> int | None:
-    """This process's cgroup memory ceiling: cgroup v2's ``memory.max``,
-    the lowest one set from its own cgroup up to the root, or else v1's
-    ``memory.limit_in_bytes``; ``None`` where neither bounds it (no cgroup
-    mounted, or every level reads ``max``).
+    """This process's cgroup memory ceiling: cgroup v2's ``memory.max`` (the
+    lowest set from its own cgroup to the root) or else v1's
+    ``memory.limit_in_bytes``; ``None`` where neither bounds it.
     """
     unified = (root / "cgroup.controllers").exists()
     try:
@@ -85,11 +84,9 @@ def _cgroup_limit(root: Path = CGROUP, proc_cgroup: Path = PROC_CGROUP) -> int |
 
 
 def host_budget() -> int:
-    """Return the bytes a model's arena may use on this host.
-
-    That is physical memory minus ``HOST_RESERVE``. When a cgroup caps this
-    process (a container, or a systemd-limited CI job), it is the smaller of
-    that and the cgroup's limit minus ``CGROUP_RESERVE``.
+    """Return the bytes a model's arena may use on this host: physical memory
+    minus ``HOST_RESERVE``, or the cgroup's limit minus ``CGROUP_RESERVE``
+    when a cgroup caps this process, whichever is smaller.
     """
     phys = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") - HOST_RESERVE
     limit = _cgroup_limit()
@@ -120,11 +117,9 @@ def _models_extra(name: str):
 
 
 class Tokenizer:
-    """Text to a prompt's token ids, as transformers' tokenizer begins them
-    (``TokenizerJson.prompt``), and token ids back to text, over
-    ``encoding``, a ``TokenizerJson``. ``chat_template`` is the checkpoint's
-    own, from its ``chat_template.jinja`` or else ``tokenizer_config.json``,
-    if it has one, and ``bos_token`` the text it writes for ``bos_token``.
+    """Text to a prompt's token ids, as transformers' tokenizer begins them,
+    and token ids back to text, over ``encoding``, a ``TokenizerJson``.
+    ``chat_template`` is the checkpoint's own.
     """
 
     def __init__(
@@ -143,11 +138,9 @@ class Tokenizer:
         return self.encoding.decode(list(tokens))
 
     def chat(self, messages: list[dict]) -> list[int]:
-        """The ids of ``messages``, each ``{"role": ..., "content": ...}``,
-        as ``chat_template`` renders them (with jinja2, the ``models``
-        extra), the assistant's turn opened after them. The special tokens
-        the text names are their ids; a BOS is there only where the
-        template writes it, as transformers' ``apply_chat_template`` has it.
+        """The ids of ``messages``, each ``{"role": ..., "content": ...}``, as
+        ``chat_template`` renders them (jinja2, the ``models`` extra), the
+        assistant's turn opened after them.
 
         Raises:
             ValueError: The checkpoint has no chat template.
@@ -240,21 +233,9 @@ class Stats:
 
 
 class Model(iron.Graph):
-    """A model compiled as several versions of one graph, one per input shape.
-
-    ``shapes()`` lists the versions, the decode step (no input) first.
-    ``load_versions()`` compiles and loads all of them before the first
-    call, so the device arena is allocated once, and ``versions``
-    (``Graph``'s own) holds them in ``shapes()``'s order. When the decode
-    step is a full ELF, a version on token ids (``ids`` or ``placed``)
-    hands off to it directly: its Emit step starts the decode step.
-
-    A subclass sets ``config`` to the ``Config`` class that reads
-    ``config.json``, or to one fixed shape. ``load`` sets ``checkpoint`` and
-    ``tokenizer`` on the instance, and ``random_weights``, the seed, when the
-    weights are drawn at random. Then a prompt without a tokenizer is random tokens,
-    so speed, accuracy and determinism can be checked without real weights.
-    ``stats`` holds the last generation's timings.
+    """A model compiled as several versions of one graph, one per input
+    shape. ``load`` builds it from a checkpoint's files, or from random
+    weights at a seed (``random_weights``) for checks without real weights.
     """
 
     # Renames applied to the checkpoint's tensor names before loading: each
@@ -305,15 +286,12 @@ class Model(iron.Graph):
         its context ``max_seq_len`` or else fitted to this host (``fit``).
 
         Args:
-            path: A directory holding ``config.json``, ``model.safetensors``
-                or a sharded one's ``model.safetensors.index.json``, and
-                ``tokenizer.json``; or a repository's id, those files
-                downloaded to Hugging Face's cache.
-            random_weights: A seed: in place of the checkpoint's weights and
-                its tokenizer, weights drawn at it in its shapes (only its header is
-                read).
-            max_seq_len: The longest context served, prompt and generated
-                tokens together, at most the checkpoint's own.
+            path: A directory holding ``config.json``, weights and
+                ``tokenizer.json``, or a repository id to download them from.
+            random_weights: A seed: weights (and no tokenizer) drawn at it in
+                the checkpoint's shapes instead of read.
+            max_seq_len: The longest context served, at most the
+                checkpoint's own.
 
         Raises:
             ValueError: ``max_seq_len`` is past the checkpoint's own.
@@ -396,11 +374,6 @@ class Model(iron.Graph):
         """``config`` at its native context where the model's arena fits
         ``budget`` (``host_budget()`` by default), else at the longest whole
         number of prompt chunks that does, logged either way.
-
-        The arena is what the model holds, weights and states, measured by
-        recording its decode step at one and two prompt chunks of context:
-        what grows holds a row a position (``tests/applications/
-        long_context``).
         """
         if not isinstance(config, DecoderConfig):
             return config
@@ -448,9 +421,9 @@ class Model(iron.Graph):
 
     def cpu_reference(self):
         """What the model is judged by: with drawn weights, its own graph on
-        the host (``OnHost``); else ``hugging_face``'s logits, recorded
-        beside the checkpoint (``golden.npz``) from its ``config.json`` and
-        its tensors (``Checkpoint.fingerprint``).
+        the host (``OnHost``); else ``hugging_face``'s logits recorded beside
+        the checkpoint (``golden.npz``), keyed by ``config.json`` and
+        ``Checkpoint.fingerprint``.
         """
         if self.random_weights is not None:
 
@@ -467,12 +440,9 @@ class Model(iron.Graph):
         )
 
     def prompt(self, chars: int, skip: int = 0) -> list[int]:
-        """``chars`` characters of ``prompt.txt`` from ``skip`` on, tokenized.
-
-        With no tokenizer, ``chars // 3`` tokens drawn at the weights' seed and
-        ``skip``: a little more than the text encodes to (Llama 3's
-        tokenizer takes 3.7 characters a token), so a check sized in
-        characters runs at about its size on the text.
+        """``chars`` characters of ``prompt.txt`` from ``skip`` on, tokenized;
+        with no tokenizer, ``chars // 3`` tokens drawn at the weights' seed
+        and ``skip`` (roughly what the text would encode to).
         """
         if self.tokenizer is None:
             assert (
@@ -495,16 +465,13 @@ class Model(iron.Graph):
         self, prompt, max_tokens: int, sampler: Sampler | None = None, **inputs
     ) -> Iterator:
         """Draw up to ``max_tokens`` after ``prompt``, each yielded as it is
-        drawn, through the first of ``eos`` drawn, and its timings into
-        ``stats`` once the last is.
+        drawn, through the first of ``eos``, and its timings into ``stats``
+        once the last is drawn.
 
         Args:
-            prompt: Text, tokenized; a list of chat messages, each
-                ``{"role": ..., "content": ...}``, rendered by the
-                checkpoint's chat template (``Tokenizer.chat``); or token ids.
-                Text and messages yield text, each piece once its characters
-                are whole; ids yield ids.
-            max_tokens: The most tokens to draw.
+            prompt: Text or a list of chat messages (rendered by the
+                checkpoint's chat template, ``Tokenizer.chat``), yielded as
+                text piece by piece; or token ids, yielded as ids.
             sampler: How each is drawn; None is greedy.
             inputs: What the model takes beside the tokens
                 (``Multimodal``'s ``raw``).
@@ -623,9 +590,8 @@ def _is_text(prompt) -> bool:
 
 class OnHost:
     """A model with its versions stood in by its graph's reference
-    (``Graph.reference``), run at whatever shape it is called with: the
-    model with no NPU, tiled for the bound device, mixed in before the
-    model's own class. It compiles nothing, and ``generate`` draws on the
+    (``Graph.reference``), the model with no NPU, mixed in before the
+    model's own class; it compiles nothing, and ``generate`` draws on the
     host.
     """
 

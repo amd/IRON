@@ -2,26 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Gemma 4 E2B's text decoder on the shared decoder (``iron.lm``), its
-shape read from its checkpoint's ``config.json``, and the whole model, the
-decoder with its vision and audio towers (``vision.py``, ``audio.py``) as
-one ``iron.lm.Multimodal`` (``Gemma4Multimodal``). Run the text decoder
+shape read from its checkpoint's ``config.json``, and the whole model,
+the decoder with its vision and audio towers (``vision.py``, ``audio.py``)
+as one ``iron.lm.Multimodal`` (``Gemma4Multimodal``). Run the text decoder
 with ``python -m iron.applications.gemma4.model``.
-
-Gemma 4 is a sandwich-normed layer with a per-layer input gated in after
-its MLP (``PleLayer``), q, k and v normed per head (v unweighted),
-attention unscaled, GELU-tanh, the embedding scaled by
-``sqrt(hidden_size)``, a tied head and its logits soft-capped. Sliding
-layers attend to their own query and the ``sliding_window - 1`` keys
-before it; global layers to every key, with heads of
-``global_head_dim`` and a RoPE table of their own base, of which only the
-first ``partial_rotary_factor`` of the pairs turn. The last
-``num_kv_shared_layers`` layers project no keys or values: each attends
-over the cache of the last earlier layer of its kind, and has an MLP twice
-as wide where ``use_double_wide_mlp``.
-
-Each layer's input is (projection + table row) * 2 ** -0.5: its slice of a
-projection of the embedding, normed, and its row of a second token table
-(``embed_tokens_per_layer``, held a layer's columns at a time).
 """
 
 import dataclasses
@@ -170,9 +154,8 @@ class Gemma4Decoder(Decoder):
 
 class Gemma4Layer(PleLayer):
     """Layer ``i``: unscaled attention over normed q, k and v, its heads and
-    whole context a global layer's where it is one, else within the
-    window, and an MLP twice as wide on a shared layer where
-    ``use_double_wide_mlp``.
+    whole context a global layer's where it is one, else within the window,
+    and a double-wide MLP on a shared layer where ``use_double_wide_mlp``.
     """
 
     def __init__(self, c: Gemma4Config, i: int):
@@ -313,11 +296,9 @@ class Gemma4MultimodalConfig(Gemma4Config):
 
 
 class Gemma4Multimodal(Multimodal):
-    """Gemma 4 whole: its text decoder (``Gemma4``) with its vision and
-    audio towers' soft tokens at their placeholders, from its checkpoint and
-    ``tokenizer.json``. A call takes an image and a clip as
-    ``Multimodal.logits`` and ``generate`` take them, by placeholder: an
-    image as ``(image, max_soft_tokens)``, a clip as ``(waveform,)``.
+    """Gemma 4 whole: its text decoder (``Gemma4``) with its vision and audio
+    towers' soft tokens at their placeholders. A call takes an image as
+    ``(image, max_soft_tokens)`` and a clip as ``(waveform,)``, by placeholder.
     """
 
     config = Gemma4MultimodalConfig

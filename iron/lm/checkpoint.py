@@ -29,10 +29,9 @@ from .golden import fingerprint
 
 class _Shard:
     """One ``.safetensors`` file, or a PyTorch checkpoint (a ``.pth`` zip),
-    mapped: ``tensors`` are read-only views of it, read only when touched,
-    a PyTorch checkpoint's named by their dotted path from its root
-    (``model.backbone.stem.conv.weight``). Parsed here: safetensors' own
-    numpy loader has no bfloat16, and IRON reads PyTorch's without torch.
+    mapped so ``tensors`` are lazy read-only views, parsed here since
+    safetensors' numpy loader has no bfloat16 and IRON reads PyTorch
+    without torch.
     """
 
     # I64: a BatchNorm's num_batches_tracked.
@@ -117,9 +116,9 @@ class _Shard:
 
 class _TorchUnpickler(pickle.Unpickler):
     """A PyTorch checkpoint's pickle, read as data: each tensor a numpy view
-    of its storage, checked to lie inside it. ``GLOBALS`` is every global a
-    state dict's pickle names, and nothing else resolves, so loading one
-    runs no code of its own.
+    of its storage, checked to lie inside it. ``GLOBALS`` names every
+    global a state dict's pickle may use, so loading one runs no code of
+    its own.
     """
 
     GLOBALS = {
@@ -212,8 +211,7 @@ def weights_file(directory) -> Path:
 class Checkpoint:
     """A ``.safetensors`` file or a PyTorch checkpoint, or, given its
     ``.safetensors.index.json``, every shard a sharded checkpoint splits
-    across (``weight_map``, next to one another on disk), its tensors merged
-    into one mapping, ``tensors``.
+    across, its tensors merged into one mapping, ``tensors``.
     """
 
     def __init__(self, path):
@@ -262,17 +260,13 @@ class Checkpoint:
     def tree(
         self, fill: Literal["read", "random", "unread"] = "read", seed: int = 0
     ) -> SimpleNamespace:
-        """Return the checkpoint's tensors as a tree of ``param``, split at the dots.
-
-        ``model.layers.3.self_attn.q_proj.weight`` becomes
-        ``tree.model.layers[3].self_attn.q_proj.weight``. A run of indices
-        becomes a list. An index the checkpoint skips, such as a tensorless
-        ``Flatten`` in an ``nn.Sequential``, becomes an empty module.
+        """Return the checkpoint's tensors as a tree of ``param``, split at
+        the dots (``model.layers.3.weight`` becomes
+        ``tree.model.layers[3].weight``).
 
         Args:
-            fill: What the arrays hold. ``"read"``: the tensors, views of the
-                mapped file read only when touched. ``"random"`` (in the
-                file's order) or ``"unread"``: ``filled``'s, which reads
+            fill: What the arrays hold: ``"read"`` the tensors (lazy views);
+                ``"random"`` or ``"unread"`` ``filled``'s, which reads
                 nothing past the header.
             seed: The seed ``"random"`` draws at.
 
@@ -390,9 +384,9 @@ def subtree(tree, **modules):
 
 def renamed(tree, renames: Mapping[str, str]):
     """A copy of ``tree`` with each leaf under a run of whole dotted names
-    among ``renames``' keys, anywhere in its path, moved to the run its value
-    names, the rest where they are: its namespaces new, so a caller may
-    change them and leave ``tree`` as it was.
+    among ``renames``' keys moved to the run its value names, the rest
+    where they are; its namespaces are new, so a caller may change them
+    and leave ``tree`` as it was.
     """
 
     def moved(path):

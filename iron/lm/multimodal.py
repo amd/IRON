@@ -22,19 +22,11 @@ from .generation import Sampler
 
 
 class Multimodal(Model):
-    """A text model and its towers, keyed by placeholder token, as one graph.
-
-    Its versions are the text model's own, one per tower, and ``placed``,
-    each one dispatch. A tower's writes its soft tokens into ``merged`` from
-    its own row; ``placed``, the ids with their placeholders, writes the
-    text's rows from its first, and ``Merge`` gives each position its row of
-    ``merged``. A causal text model's ``placed`` is a prompt chunk and takes
-    ``before``, each placeholder's count before the chunk. A tower's per-call
-    values are named after its input: a vision tower's ``rows`` on input
-    ``rgb`` is ``rgb_rows``.
+    """A text model and its towers, keyed by placeholder token, as one graph:
+    a tower writes its soft tokens into ``merged``, and ``placed`` scatters
+    them into the text model's rows by placeholder position.
 
     Args:
-        text: The text model.
         towers: Each tower, by the token its placeholders are.
 
     Raises:
@@ -222,8 +214,8 @@ class Multimodal(Model):
     def place(self, tokens, raw: dict[int, tuple]) -> None:
         """Run each tower ``raw`` names, so a causal text model's prompt
         chunks find its soft tokens in ``merged``, unless each ran on the
-        same last time. Otherwise its caches are stale from the first
-        placeholder on, and it forgets them from there.
+        same last time, else forgetting its caches from the first stale
+        placeholder.
         """
         tokens = np.asarray(tokens)
         calls = self.tower_calls(tokens, raw)

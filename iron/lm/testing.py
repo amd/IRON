@@ -109,10 +109,8 @@ def load_from_flags(
     request, model, weights: Path, tokenizer="tokenizer.json", staged=True
 ):
     """``model.load`` of ``weights``' directory, to call with any further
-    options, as the CLI loads it at the ``--random-weights`` and
-    ``--max-seq-len`` pytest was given. ``require``s ``weights``, the
-    config.json beside it and, unless the weights are random, the
-    ``tokenizer`` file there.
+    options, as the CLI loads it at pytest's ``--random-weights`` and
+    ``--max-seq-len``; ``require``s the files it needs.
     """
     seed = request.config.getoption("--random-weights")
     files = [weights, weights.with_name("config.json")]
@@ -134,8 +132,7 @@ def prompt(model, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
 def check_generation(model, prompt_len: int, num_tokens: int, *, record):
     """Sample ``num_tokens`` on the device after a prompt of ``prompt_len``
     characters (``CausalLM.generate``), the whole prompt prefilled; record
-    the time to the first token and the tokens per second after it. Returns
-    the prompt and the tokens drawn.
+    the time to the first token and the tokens per second after it.
     """
     tokens = prompt(model, prompt_len, num_tokens)
     # A module's model holds the last test's tokens: its time is the prompt's.
@@ -151,8 +148,7 @@ def check_generation(model, prompt_len: int, num_tokens: int, *, record):
 def check_prompt_time(model, length: int, runs: int = 3, *, record):
     """Record the median seconds to the first token after a prompt of
     ``length`` tokens over ``runs`` timed runs, each a fresh prompt (random
-    ids: a prompt's time does not follow its ids), so no run reuses a chunk
-    another wrote.
+    ids, since a prompt's time does not follow its ids).
     """
     rng = np.random.default_rng(SEED)
     seconds = []
@@ -165,10 +161,9 @@ def check_prompt_time(model, length: int, runs: int = 3, *, record):
 
 
 def check_device_sampling(model, prompt_len: int, num_tokens: int, *, record):
-    """Sample ``num_tokens`` on the device after a prompt of ``prompt_len``
-    characters (``CausalLM.generate``); record its time to the first token
-    and tokens per second, then sample again on the host from each step's
-    logits from the same seed: the text is the same, token for token.
+    """Sample ``num_tokens`` on the device (``CausalLM.generate``) after a
+    prompt of ``prompt_len`` characters, then sample again on the host from
+    each step's logits at the same seed: the text must match, token for token.
     """
     tokens, drawn = check_generation(model, prompt_len, num_tokens, record=record)
     host = generate_on_host(model, tokens, num_tokens, Sampler())
@@ -189,10 +184,8 @@ def assert_close(
     got, want: np.ndarray, what: str = "the logits", *, share: float = LOGITS
 ) -> None:
     """``got`` within ``share`` of ``want``, the reference's logits, at
-    their largest magnitude; and where the reference's top two lie further
-    apart than that bound, the same argmax. A nearer pair may go either
-    way. The gate is the bound, not twice the error: a pair further apart
-    than twice the error cannot swap, so that gate would check nothing.
+    their largest magnitude; and, where the reference's top two differ by
+    more than that bound, the same argmax.
     """
     got = np.asarray(got, np.float32).reshape(want.shape)
     scale = np.abs(want).max()
@@ -215,10 +208,7 @@ def check_accuracy(
 ):
     """KL(reference || model) of the next-token distribution, teacher-forced
     over ``num_tokens`` steps from a ``chars``-character prompt, within
-    ``bounds`` (``{"Mean": .., "P90": .., "Max": ..}``). The mean and p90
-    bound a drift across many steps, the max a single broken step. The
-    prompt runs from its first token whatever the caches hold, so its chunks
-    start where a fresh session's would, whichever test ran before.
+    ``bounds`` (``{"Mean": .., "P90": .., "Max": ..}``).
     """
     tokens = prompt(model, chars, num_tokens)
     model.forget(0)
@@ -272,11 +262,9 @@ def check_determinism(
     *,
     record,
 ):
-    """Repeated runs produce bit-identical logits.
-
-    Two prompts of ``chars`` characters, alternated: a host write that never
-    reaches the device then reads the other prompt's data, so a missing
-    flush fails every run rather than some.
+    """Repeated runs produce bit-identical logits, over two prompts of
+    ``chars`` characters alternated so a host write that never reaches the
+    device reads the other prompt's data, failing every run rather than some.
     """
     prompts = [
         prompt(model, chars, num_tokens),
@@ -289,14 +277,9 @@ def check_determinism(
 
 
 def check_chat_turn(model, chars: int, turn: int, num_tokens: int = 2, *, record):
-    """A prompt extended by a turn, as a chat's next message extends it:
-    the model runs from the turn's first token (``CausalLM.resume``) over
-    the caches the prompt left, and its logits, and those of the greedy
-    steps after, are bit for bit those of the whole run from scratch.
-
-    The prompt is ``chars`` characters, the turn its last ``turn`` tokens.
-    Before the run from scratch a prompt of other text overwrites the
-    caches, so it reuses nothing of the turn's. Records both runs' seconds.
+    """A prompt extended by a turn, as a chat's next message extends it: the
+    model runs from the turn's first token (``CausalLM.resume``), and its
+    logits match bit for bit a fresh run of the whole prompt from scratch.
     """
     whole = prompt(model, chars, num_tokens)
     C = model.config.prefill_chunk
@@ -316,14 +299,8 @@ def check_chat_turn(model, chars: int, turn: int, num_tokens: int = 2, *, record
 
 def check_deep_decode(model, position: int, bound: float, chars: int = 1024, *, record):
     """A decode step at ``position``, deep in the caches, against the
-    graph's own reference (``Graph.reference``: each operator's
-    ``reference()`` on host tensors, the caches as state), for a context
-    transformers would take too long over, within ``bound`` of its
-    KL. Whether both rank the same token first is recorded, not required:
-    at a near-tie a step can differ in it at a KL of 0.014.
-
-    The caches hold a real prompt, ``chars`` characters of it, repeated up
-    to ``position`` (``_fill_caches``).
+    graph's own reference (``Graph.reference``), for a context transformers
+    would take too long over, within ``bound`` of its KL.
     """
     tokens = prompt(model, chars, 1)
     token = greedy(model.logits(tokens))
@@ -340,12 +317,10 @@ def check_deep_decode(model, position: int, bound: float, chars: int = 1024, *, 
 
 
 def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, record):
-    """The deepest prompt chunk, the one holding position ``max_seq_len -
-    1``, at most ``rows`` rows of it, against the graph's own reference
-    within ``bound`` of its KL, every position before it filled as
-    ``check_deep_decode`` fills them: the chunk attends over the whole
-    context. Records its seconds, the longest a prompt chunk takes: on a
-    full ELF, the longest command a model's prompt makes.
+    """The deepest prompt chunk (holding position ``max_seq_len - 1``), at
+    most ``rows`` rows of it, against the graph's own reference within
+    ``bound`` of its KL, every earlier position filled as
+    ``check_deep_decode`` fills them.
     """
     tokens = prompt(model, chars, 1)
     model.logits(tokens)
@@ -377,11 +352,8 @@ def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, reco
 @contextmanager
 def _fill_caches(model, n: int, position: int):
     """The caches' first ``n`` rows, a prompt's, repeated up to ``position``
-    on the device and as the graph reference's state (the device buffers'
-    own host memory, filled in place), for the body of the ``with``; the
-    prompt's own rows stay as it wrote them. A ring holds the ``ring``
-    positions before ``position`` so filled; past ``ring``, a prompt's
-    positions in it are as it left them.
+    on the device and as the graph reference's state, for the body of the
+    ``with``; the prompt's own rows stay as it wrote them.
     """
     version = next(iter(model.versions.values()))
     caches = [(x, p) for _, x, p, _ in walk(model) if isinstance(p, KVCache)]

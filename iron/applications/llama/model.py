@@ -4,14 +4,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Llama 3 on the shared decoder (``iron.lm``): Llama 3's RoPE scaling and
-Llama 3.2 1B's shape. Run it with ``python -m
-iron.applications.llama.model``.
+Llama 3.2 1B's shape. Run with ``python -m iron.applications.llama.model``.
 
-The operators' tunables are the graph's profile, ``profiles/<device>.json``,
-keyed by operator shape at Llama 3.2 1B's shape: a decode step's and a
-2048-row prompt chunk's, at any ``max_seq_len``, which sizes the caches and
-the RoPE table alone. A call site gives a tunable only where two operators of
-one shape want different ones.
+Tunables are keyed by operator shape in ``profiles/<device>.json``, at
+Llama 3.2 1B's: a decode step's and a 2048-row prompt chunk's.
 """
 
 import dataclasses
@@ -25,14 +21,9 @@ from iron.lm import CausalLM, DecoderConfig
 
 @dataclasses.dataclass(frozen=True)
 class Llama3RopeScaling:
-    """Llama 3's RoPE frequency scaling (``"rope_type": "llama3"``).
-
-    How Llama 3.1 and later stretch a model trained at
-    ``original_max_position_embeddings`` to a longer context, by frequency:
-    one whose wavelength is under ``original / high_freq_factor`` positions
-    is kept, one over ``original / low_freq_factor`` is divided by
-    ``factor``, and one between is interpolated between the two by where its
-    wavelength falls. The fields are the checkpoint's ``rope_scaling``.
+    """Llama 3's RoPE frequency scaling (``"rope_type": "llama3"``): Llama 3.1
+    and later stretch a model trained at ``original_max_position_embeddings``
+    to a longer context by frequency, per the checkpoint's ``rope_scaling``.
     """
 
     factor: float

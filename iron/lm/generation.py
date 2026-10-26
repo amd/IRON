@@ -22,20 +22,13 @@ SEED = 1608560892
 
 
 class Sampler:
-    """Temperature, then top-k, then a draw from the softmax, exactly as
-    the device draws.
+    """Temperature, then top-k, then a draw from the softmax, exactly as the
+    device draws (``aie.iron.kernels.sample.sample_ref``), so the host and
+    device pick the same token from the same logits and uniform.
 
-    Every draw is ``aie.iron.kernels.sample.sample_ref``, the definition the
-    ``Sample`` operator meets bit for bit, so
-    the host and the device pick the same token from the same logits and
-    the same uniform. Logits are rounded to bf16 first. Every logit below
-    the ``top_k``-th largest is dropped, ties with it kept; ``None`` keeps
-    the whole row (the host only: the device's top-k is bounded). A
-    temperature of 0 is greedy (the first largest).
-
-    Each draw takes one uniform from a generator seeded at ``seed``, greedy
-    or not, so the draws are reproducible, and ``rows`` hands the device
-    the same uniforms.
+    Args:
+        top_k: None keeps the whole row; only valid on the host, since the
+            device's top-k is bounded.
     """
 
     def __init__(
@@ -86,8 +79,9 @@ class Sampler:
         per position, taking the uniforms ``count`` host draws would, in
         order.
 
-        ``k_max`` is the device's largest top-k; a larger one, or ``None``,
-        would be clamped there, not honoured, so it is refused.
+        Raises:
+            ValueError: ``top_k`` is None or past ``k_max``, the device's
+                largest, where it would be clamped rather than honoured.
         """
         if self.top_k is None or self.top_k > k_max:
             raise ValueError(
@@ -128,12 +122,9 @@ def divergence(reference, logits) -> tuple[float, bool]:
 
 def accuracy(model, reference, tokens, num_tokens) -> list[tuple[float, bool]]:
     """``model``'s next-token distributions against ``reference``'s, over
-    ``num_tokens`` steps from ``tokens``.
-
-    Teacher-forced: both are fed the reference's greedy token, so a
-    divergence at a step is the model's own error there rather than the
-    consequence of an earlier different choice. One ``divergence`` per
-    step.
+    ``num_tokens`` steps from ``tokens``, teacher-forced on the reference's
+    greedy token so a divergence is the model's own error, not an earlier
+    different choice's consequence.
     """
     history, results = [int(t) for t in tokens], []
     for step in range(num_tokens):
@@ -146,10 +137,9 @@ def accuracy(model, reference, tokens, num_tokens) -> list[tuple[float, bool]]:
 
 
 def kl_stats(results) -> dict[str, float]:
-    """The mean, p90 and max KL of ``accuracy``'s results.
-
-    Over every step, prefill and decode alike: one step's KL depends as much
-    on how confident the reference is at that position as on the model.
+    """The mean, p90 and max KL of ``accuracy``'s results, over every step,
+    prefill and decode alike: one step's KL depends as much on how
+    confident the reference is there as on the model.
     """
     kl = np.array([k for k, _ in results])
     return {"Mean": kl.mean(), "P90": np.percentile(kl, 90), "Max": kl.max()}
@@ -175,12 +165,10 @@ def differing_steps(run, first) -> list[int]:
 
 
 def determinism(model, prompts, num_tokens, rounds) -> int:
-    """How many runs' logits differ bitwise from the first of their prompt.
-
-    Each prompt runs ``rounds`` times, alternating, ``num_tokens`` greedy
-    tokens each. Alternating prompts with different text matters: a host
-    write that never reaches the device then reads the other prompt's data,
-    not a leftover copy of its own.
+    """How many runs' logits differ bitwise from the first of their prompt,
+    over ``rounds`` repeats of each prompt, alternating so a host write
+    that never reaches the device reads the other prompt's data, not a
+    leftover copy of its own.
     """
     first: list = [None] * len(prompts)
     differ = 0

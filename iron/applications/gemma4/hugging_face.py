@@ -16,15 +16,9 @@ from iron.lm.golden import HuggingFace
 
 class HuggingFaceGemma4(HuggingFace):
     """transformers' ``Gemma4ForConditionalGeneration`` in float32 and the
-    checkpoint's image processor and feature extractor.
-
-    The per-layer token table stays bfloat16, as the checkpoint holds it: a
-    lookup of it widens exactly, and its scale, ``sqrt(256)``, is a power of
-    two, so the per-layer inputs are float32's, in 11 GB less.
-
-    Args:
-        model: The model.
-        processor: The checkpoint's ``Gemma4Processor``.
+    checkpoint's image processor and feature extractor; the per-layer token
+    table stays bfloat16 (a lookup widens it exactly, and its ``sqrt(256)``
+    scale is a power of two).
     """
 
     model_class = "AutoModelForImageTextToText"
