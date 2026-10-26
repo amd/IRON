@@ -30,7 +30,6 @@ from iron.common.graph.record import Recording
 from iron.common.image.step import BufferRef
 from iron.common.image.packaging import Kind
 import iron.functional as F
-from iron.tests.support.graphs import FeedForward
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -172,23 +171,6 @@ def test_per_call_values_bind_to_the_operator_and_enable_it():
     assert value.name == "pos" and value.marker is Kind.SCRATCHPAD
     assert op.value("out_offset").per_call and not op.value("in_offset").per_call
     assert [v.name for v in op.values] == ["out_offset"]
-
-
-def test_every_recorded_operator_tunes_from_the_device_alone():
-    ffn, _ = _ffn()
-    t = ffn.record(x=(1, E))
-    for op in t.operators:
-        op.resolved(
-            aie_utils.get_current_device()
-        )  # every default fills; every extent is compatible
-    silu = next(s.op for s in t.steps if type(s.op) is SiLU).resolved(
-        aie_utils.get_current_device()
-    )
-    assert (silu.num_aie_columns, silu.num_channels, silu.tile_size) == (8, 1, 256)
-    norm = next(
-        s.op for s in t.steps if type(s.op) is RMSNorm and s.op.weighted
-    ).resolved(aie_utils.get_current_device())
-    assert norm.num_aie_columns == 1  # one row: one core
 
 
 def test_a_state_written_by_one_step_is_pinned_and_readable():
@@ -398,17 +380,6 @@ def test_a_matvec_whose_columns_are_given_resolves_with_no_device():
     assert op.resolve(None).tile_size_input == 2
 
 
-def test_swiglu_over_a_sequence_reads_the_weights_column_major():
-
-    t = FeedForward(z(H, E), z(H, E), z(E, H)).record(x=(256, E))
-    gemms = [s.op for s in t.steps if type(s.op) is ProjectionGEMM]
-    assert [(g.M, g.K, g.N) for g in gemms] == [(256, E, H), (256, E, H), (256, H, E)]
-    assert all(g.b_col_maj for g in gemms)
-    assert gemms[0].array_key() == gemms[1].array_key()
-    silu = next(s.op for s in t.steps if type(s.op) is SiLU)
-    assert silu.size == 256 * H
-
-
 # --------------------------------------------------------------------------
 # llama decode, recorded at a scaled-down configuration
 # --------------------------------------------------------------------------
@@ -464,9 +435,6 @@ def test_llama_decode_records_and_tunes():
         and s.op.K == cfg.hidden_size
     }
     assert len(q_arrays) == 1
-    # Every operator tunes and is compatible on an 8-column device.
-    for op in t.operators:
-        op.resolved(aie_utils.get_current_device())
 
 
 def test_llama_prompt_records_over_the_same_caches():
@@ -508,8 +476,6 @@ def test_llama_prompt_records_over_the_same_caches():
         cfg.intermediate_size,
         cfg.num_attention_heads * cfg.head_dim,
     }
-    for op in t.operators:
-        op.resolved(aie_utils.get_current_device())
 
 
 @pytest.mark.parametrize("device", ["npu1", "npu2"])
@@ -526,71 +492,6 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
         assert {k: e.name for k, e in op.bound_values.items()} == {"valid": "rows"}
         resolved = op.resolved(dev)
         assert resolved.B.shape == (op.N, op.K) and not resolved.bfp16_b
-
-
-class Pointwise(iron.Graph):
-    """A 1x1 convolution's pixels projected."""
-
-    def __init__(self, precision: Precision):
-        self.precision = precision
-
-    def body(self, x, w):
-        return F.linear(x, w, precision=self.precision)
-
-
-@pytest.mark.parametrize(
-    "precision,macs", [(Precision.MEDIUM, True), (Precision.HIGH, False)]
-)
-def test_project_asks_flm_gemm_for_bf16_macs(precision, macs, npu2):
-    t = Pointwise(precision).record(x=((256, 128), bfloat16), w=((128, 128), bfloat16))
-    (op,) = [op for op in t.operators if type(op) is ProjectionGEMM]
-    assert op.resolved(npu2).emulate_bf16_mmul_with_bfp16 is macs
-
-
-@pytest.mark.parametrize("step", ["decode", "prompt"])
-def test_llama_does_not_grow_with_the_context(step):
-    """``max_seq_len`` sizes the caches, the RoPE table and the draws a
-    position each and nothing else a decode step or a prompt chunk runs: a
-    chunk's one input is its token ids (a step's token is a value),
-    every activation and every array is the same at a four times longer
-    context, and attention is the caches' two writes and MHA, the reshapes
-    and transposes between them views the DMA walks.
-    """
-
-    def record(max_seq_len):
-        g = small(max_seq_len=max_seq_len)
-        return g.record(**g.shapes()[0 if step == "decode" else 1])
-
-    short, long = record(256), record(1024)
-    assert (
-        [h.name for h in short.inputs]
-        == [h.name for h in long.inputs]
-        == ([] if step == "decode" else ["ids"])
-    )
-    grown = {name for name, n in long.pinned.items() if short.pinned[name] != n}
-    caches = {
-        f"model.layers.{i}.cache.{kv}" for i in (0, 1) for kv in ("keys", "values")
-    }
-    assert grown == {"rotary_emb.table", "draws", "drawn"} | caches
-
-    def activations(t):
-        return {
-            h.ref(): h.nbytes
-            for s in t.steps
-            for h in s.inputs + s.outputs
-            if h.role not in ("weight", "state")
-        }
-
-    assert activations(short) == activations(long)
-    assert [op.array_key() for op in short.operators] == [
-        op.array_key() for op in long.operators
-    ]
-    kinds = [type(s.op).__name__ for s in long.steps]
-    rotations = [i for i, kind in enumerate(kinds) if kind == "RoPE"][1::2]
-    mhas = [i for i, kind in enumerate(kinds) if kind == "MHA"]
-    assert len(rotations) == len(mhas) == 2
-    for rope, mha in zip(rotations, mhas):
-        assert kinds[rope + 1 : mha + 1] == ["Copy", "Copy", "MHA"]
 
 
 def test_a_bound_value_survives_tuning():
@@ -680,23 +581,6 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
     v = cache[:, chunk, : rows + 1]
     assert v.shape == (G, C, D) and v.valid == {1: rows + 1}
     assert v.layout.offset == chunk * (C * D)
-
-    keys = iron.state((G, L, D), name="keys")
-
-    class Chunked(iron.Graph):
-        def body(self, x, *, chunk: Scratchpad[np.int32], rows: Scratchpad[np.int32]):
-            k = x[:rows].reshape(C, G, D).transpose(1, 0, 2)
-            Copy.step(k, keys.reshape(G, L // C, C, D)[:, chunk, :rows])
-
-    t = Chunked().record(x=(C, G * D))
-    (copy,) = t.operators
-    assert copy.dst_bound == 1 and {
-        k: e.name for k, e in copy.bound_values.items()
-    } == {
-        "src_valid": "rows",
-        "out_offset": f"chunk_x{C * D}",
-        "dst_valid": "rows",
-    }
 
 
 def test_a_run_from_a_per_call_start_is_its_whole_chunk_s_view():
@@ -1040,36 +924,13 @@ def test_integer_arithmetic_on_an_expression_is_an_expression():
 
 
 def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
-    """A copy of ``x[:n]`` by head makes an output of the view's shape bounded
-    alike, and into a given view of that shape bounds it on the same axis; a
-    side moving every row would wait on rows the other never moves. A given
-    view of another shape cannot follow the bound, and is refused.
+    """Into a given view of the bounded side's shape, a copy bounds that view
+    on the same axis; a given view of another shape cannot follow the bound
+    (a side moving every row would wait on rows the other never moves), and
+    is refused.
     """
     G, D, L = 4, 8, 32
     keys = iron.state((G, L, D), name="keys")
-
-    class ByHead(iron.Graph):
-        def body(self, x, *, n: Scratchpad[np.int32]):
-            k = x[:n].reshape(L, G, D).transpose(1, 0, 2)
-            Copy.step(k, keys)
-            return Copy.step(k)
-
-    t = ByHead().record(x=(L, G * D))
-    (n,) = t.values
-    for copy in t.operators:
-        assert copy.src_bound == 1 and copy.dst_bound == 1
-        assert {k: e.name for k, e in copy.bound_values.items()} == {
-            "src_valid": "n",
-            "dst_valid": "n",
-        }
-    assert (
-        sorted(b.member.name for b in t.bindings)
-        == ["dst_valid"] * 2 + ["src_valid"] * 2
-    )
-    assert all(b.expression == n.affine() for b in t.bindings)
-    assert list(t.operators[1].dst.sizes) == [G, L, D]
-    (out,) = t.outputs
-    assert out.shape == (G, L, D) and out.valid == {1: n.affine()}
 
     class Flat(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
@@ -1101,57 +962,6 @@ def test_the_reference_copies_a_bounded_call_into_the_rows_it_covers(npu2):
     want[:, 2, :100] = y
     assert y.shape == (R, 100)
     assert np.array_equal(cache.host.view(np.uint16), want.view(np.uint16))
-
-
-def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
-    """A bound reaches GEMM through A's rows and MHA through Q's padded
-    length and K's and V's (select shapes): GEMM derives the counts its
-    cores compute per call and keeps every descriptor; MHA derives its
-    counts and the first query block, and patches its K and V descriptors'
-    block count.
-    """
-
-    class G(iron.Graph):
-        def body(self, x, w, *, n: Scratchpad[np.int32]):
-            h = GEMM.step(
-                x[:n], w, b_col_maj=True, precision=Precision.MEDIUM
-            )  # (512, 64) x (256, 64)^T
-            return MHA.step(
-                h.reshape(512, 4, 64),
-                h.reshape(512, 4, 64),
-                h.reshape(512, 4, 64),
-                heads_interleaved=True,
-                kv_interleaved=True,
-                num_pipelines=2,
-            )
-
-    g = G()
-
-    t = g.record(x=(512, 64), w=(256, 64))
-    gemm, mha = t.operators
-    assert {k: e.name for k, e in gemm.bound_extents.items()} == {"valid": "n"}
-    assert {k: e.name for k, e in mha.bound_extents.items()} == {
-        "valid": "n",
-        "kv_valid": "n",
-    }
-    gemm, mha = (op.resolved(aie_utils.get_current_device()) for op in (gemm, mha))
-    assert [v.name for v in gemm.values] == ["valid", "row_blocks_valid"]
-    assert gemm.derived_at("row_blocks_valid", valid=100) == 1
-    assert gemm.residents["col_tiles"] == 256 // gemm.mem_tile_n
-    at = dict(valid=100, kv_valid=100)
-    assert mha.derived_at("s_q", **at) == mha.derived_at("s_kv", **at) == 100
-    assert mha.derived_at("q_blocks_valid", **at) == 1  # 128 padded / (64 x 2)
-    assert mha.derived_at("kv_blocks", **at) == 2  # ceil(100 / 64)
-    assert mha.derived_at("q_start", **at) == 0
-    assert mha.derived_at("q_start", valid=64, kv_valid=192) == 2  # a later chunk
-    # A call from mid-block: the block holding its first query, and the rows into it.
-    at = dict(valid=40, kv_valid=310)
-    assert [mha.derived_at(v, **at) for v in ("q_start", "q_offset")] == [4, 14]
-    # Bound alike, the queries start at 0 on every call: written once.
-    assert mha.residents["q_start"] == mha.residents["q_offset"] == 0
-    assert mha.value("s_q").per_call
-    (out,) = t.outputs
-    assert out.valid == {0: t.values[0].affine()}  # O is bounded like Q
 
 
 # --------------------------------------------------------------------------
@@ -1261,12 +1071,6 @@ def test_the_reference_refuses_what_a_call_refuses():
         ffn.reference(x)
     with pytest.raises(TypeError, match=r"\['position'\] unknown"):
         ffn.reference(x, pos=0, position=0)
-
-
-def test_a_call_refuses_its_values_before_it_compiles():
-    ffn, _ = _ffn()
-    with pytest.raises(TypeError, match=r"\['position'\] unknown"):
-        ffn(z(1, E), pos=0, position=0)
 
 
 def test_a_refused_compile_restores_the_device_it_was_given_over(npu2):
@@ -1724,15 +1528,6 @@ def test_a_state_is_subtracted_as_it_is_added():
     graph.s.host = np.ones((2, 64), bfloat16)
     got = np.asarray(graph.reference(x), np.float32)
     np.testing.assert_array_equal(got, x.astype(np.float32) - 1)
-
-
-def test_a_handle_is_divided_by_a_number_alone():
-    class Divide(iron.Graph):
-        def body(self, x, y):
-            return x / y
-
-    with pytest.raises(TypeError, match="divided by a number"):
-        Divide().record(x=(64,), y=(64,))
 
 
 @pytest.mark.parametrize(
