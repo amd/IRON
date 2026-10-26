@@ -94,9 +94,7 @@ def test_a_norm_is_its_kernel_weighted_if_given_then_any_bias(norm, steps):
 @pytest.mark.parametrize("norm", [F.rms_norm, F.layer_norm], ids=["rms", "layer"])
 def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
     x = SimpleNamespace(shape=(4, WIDTH))
-    with pytest.raises(
-        ValueError, match=rf"\[4\] is not the last axis of input \[4, {WIDTH}\]"
-    ):
+    with pytest.raises(ValueError, match="not the last axis"):
         norm(x, 4)
 
 

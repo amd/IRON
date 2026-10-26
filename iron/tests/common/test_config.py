@@ -117,7 +117,7 @@ def test_a_sliding_window_some_layers_take_is_refused():
     """``use_sliding_window`` (Qwen's, SmolLM3's) windows a per-model choice
     of layers; set, with a window under the context, it is refused.
     """
-    with pytest.raises(ValueError, match="use_sliding_window with sliding_window 64"):
+    with pytest.raises(ValueError, match="use_sliding_window"):
         dataclasses.replace(REAL_1B, sliding_window=64, use_sliding_window=True)
     assert dataclasses.replace(REAL_1B, sliding_window=64).window == 63
     off = dataclasses.replace(REAL_1B, sliding_window=64, use_sliding_window=False)

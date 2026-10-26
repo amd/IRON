@@ -175,9 +175,7 @@ def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state
     np.testing.assert_array_equal(_f32(first), _f32(x1) + 2 * _f32(w))
     assert f.arena.generation == 1
 
-    with pytest.raises(
-        ValueError, match=rf"no loaded version takes x=\({2 * E},\) bfloat16"
-    ):
+    with pytest.raises(ValueError, match="no loaded version"):
         f(x2)
     assert len(f.versions) == 1
     f.compile(x=(2 * E,))

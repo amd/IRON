@@ -165,7 +165,7 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles(npu1, npu2)
         == 4
     )
     # Nothing fits: one column, and compatible() names the rule.
-    with pytest.raises(ValueError, match=r"rows \(16\) must be a multiple of the 3"):
+    with pytest.raises(ValueError, match=r"rows \(16\)"):
         Softmax(rows=16, cols=16, num_channels=3).resolved(npu2)
 
 

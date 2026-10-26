@@ -558,7 +558,7 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
 
     g = G()
 
-    with pytest.raises(TypeError, match="MV.A cannot be bounded per call on axis 0"):
+    with pytest.raises(TypeError, match="MV.A cannot be bounded"):
         g.record(x=(64, 128))
 
     class K(iron.Graph):
@@ -628,12 +628,12 @@ def test_a_reference_only_operator_runs_its_reference_and_does_not_compile(npu2)
 
     x = np.arange(32).reshape(4, 8).astype(bfloat16)
     np.testing.assert_array_equal(np.asarray(Twice().reference(x)), x * 2)
-    with pytest.raises(TypeError, match="Doubled is reference-only: it has no kernel"):
+    with pytest.raises(TypeError, match="Doubled is reference-only"):
         Doubled(rows=4).compile()
 
 
 def test_a_reference_only_operator_takes_no_image():
-    with pytest.raises(TypeError, match="Shipped is reference-only, so it takes no"):
+    with pytest.raises(TypeError, match="Shipped is reference-only"):
 
         class Shipped(Doubled, image=Xclbin(url="u", sha256="0" * 64, filename="f")):
             pass

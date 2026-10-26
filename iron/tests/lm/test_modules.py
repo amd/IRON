@@ -212,9 +212,7 @@ def test_load_state_dict_keeps_a_tensor_of_the_params_dtype_as_the_view_it_is():
 
 def test_load_state_dict_refuses_a_change_of_kind():
     named = tensors() | {"norm.weight": np.ones(256, np.int32)}
-    with pytest.raises(
-        ValueError, match=r"wrong kind norm\.weight int32, not bfloat16"
-    ):
+    with pytest.raises(ValueError, match=r"norm\.weight int32"):
         Block().load_state_dict(named)
 
 

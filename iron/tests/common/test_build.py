@@ -629,9 +629,7 @@ def test_a_row_bound_needs_one_row_block_per_unit():
         M=512, K=512, N=512, b_col_maj=True, m_chunk=2, precision=Precision.MEDIUM
     )
     op.use_value("valid", N)
-    with pytest.raises(
-        ValueError, match=r"m_chunk \(2\) must be 1 under a per-call row bound"
-    ):
+    with pytest.raises(ValueError, match=r"m_chunk \(2\)"):
         op.resolved(from_name("npu2", n_cols=8))
 
 

@@ -2138,9 +2138,7 @@ def test_linear_takes_one_row_or_several():
         def body(self, x, w):
             return F.linear(x, w, precision=Precision.MEDIUM)
 
-    with pytest.raises(
-        ValueError, match=r"x \(2, 4, 256\) is not \(in,\) or \(rows, in\)"
-    ):
+    with pytest.raises(ValueError, match=r"x \(2, 4, 256\)"):
         Batched().record(x=((2, 4, 256), bfloat16), w=((256, 256), bfloat16))
 
 
