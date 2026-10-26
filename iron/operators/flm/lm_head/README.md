@@ -5,6 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.LMHead`
 
+Ported from the `lm_head` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)'s Gemma 4 engine.
+
 Gemma 4's softcapped logits from a q4nx vocabulary, with the RMS norm folded
 in.
 

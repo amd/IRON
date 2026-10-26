@@ -168,6 +168,15 @@ What the text decoders (Llama and Gemma 4 above) share:
 - 📖 **Contributing**: See [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines
 - 📚 **Documentation**: [AGENTS.md](./AGENTS.md) for the rules and the map of the code, operator docstrings in `iron/operators/`, kernel docs in the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
 
+## Acknowledgements
+
+The operators in [`iron/operators/flm/`](./iron/operators/flm/) are ports of
+the NPU overlays of [FastFlowLM](https://github.com/ROCm/FastFlowLM)'s Gemma 4
+engine, and [`gemma4_engine`](./iron/operators/flm/gemma4_engine/) runs them
+inside that engine. FastFlowLM's runtime is MIT-licensed; its NPU binaries,
+which the engine example and the `Shipped` test reference fetch from
+FastFlowLM, are under its own binary license and are not redistributed here.
+
 ## License
 
 IRON is licensed under the Apache License 2.0. See [LICENSE](./LICENSE) for details.

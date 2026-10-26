@@ -5,6 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.PrefillAttention`, `iron.operators.flm.PrefillSlidingAttention`
 
+Ported from the `attn` and `swa` overlays of [FastFlowLM](https://github.com/ROCm/FastFlowLM)'s Gemma 4 engine.
+
 > Note: This operator uses hand-placed and hand-allocated components.
 > As a result it is less portable and less idiomatic than most of the other operators
 > in this repository. If your goal is to learn IRON operator programming,

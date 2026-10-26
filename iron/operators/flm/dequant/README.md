@@ -5,6 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.DequantBFP`
 
+Ported from the `dequant` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)'s Gemma 4 engine.
+
 Dequantizes q4nx weights into the bfp16ebs8 layout [`flm.ProjectionGEMM`](../gemm) reads
 as B, on the device.
 

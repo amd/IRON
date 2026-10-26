@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Ports of FastFlowLM overlays to IRON."""
+"""Ports of FastFlowLM's Gemma 4 NPU overlays to IRON
+(https://github.com/ROCm/FastFlowLM, MIT).
+"""
 
 from .dequant.op import DequantBFP
 from .gemm.op import ProjectionGEMM

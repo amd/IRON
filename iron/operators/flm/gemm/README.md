@@ -5,6 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.ProjectionGEMM` — bf16 GEMM with a fused epilogue
 
+Ported from the `mm` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)'s Gemma 4 engine.
+
 ```python
 from iron.operators.flm import ProjectionGEMM
 
