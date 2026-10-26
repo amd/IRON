@@ -18,8 +18,6 @@ Elsewhere:
 - [CONTRIBUTING.md](CONTRIBUTING.md): the pull request workflow, style,
   licence headers, the git hook, and short walkthroughs for adding a model
   or an operator.
-- [CHANGELOG.md](CHANGELOG.md): a public API change adds a line under
-  Unreleased.
 
 ## Environment
 
