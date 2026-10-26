@@ -33,7 +33,7 @@ jobs:
     timeout-minutes: 720
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
         env:
@@ -66,7 +66,7 @@ jobs:
           pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' --metric='MaxKL (mean)' --metric='Top1Mismatches (mean)'"
 
       - name: Upload test results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v4
         with:
           name: results-${{ matrix.runner }}-nightly
           path: results/
@@ -90,19 +90,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the scripts
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Check out the results
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@v4
         with:
           ref: ci
           path: history
           persist-credentials: false
 
       - name: Download each runner's results
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@v4
         with:
           pattern: results-*-nightly
           path: runs

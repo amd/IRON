@@ -311,7 +311,7 @@ Each hardware workflow runs one job per runner, Phoenix (NPU1) and Krackan
   each-step form, long_context's deep checks); a benched
   TTFT, TPS or Latency 10% worse than the night before's fails it
   (`pretty_trends.py --fail-on`).
-- `ci-lint.yml`: black, clang-format, reuse and actionlint, and pyright
+- `ci-lint.yml`: black, clang-format and reuse, and pyright
   over `[tool.pyright]`'s paths in `pyproject.toml`.
 - `pr-comment.yml` and `publish-pages.yml`: the performance trends of a PR
   and the benchmark history site.

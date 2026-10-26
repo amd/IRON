@@ -11,15 +11,12 @@ on:
         required: true
         default: 'latest'
 
-permissions:
-  contents: read
-
 jobs:
   test:
     runs-on: [self-hosted, docker]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@v4
         env:
           HOME: /workspace
 
@@ -32,7 +29,6 @@ jobs:
         shell: bash
         env:
           HOME: /workspace
-          WHEELS_VERSION: ${{ github.event.inputs.wheels-version }}
         run: |
           set -euxo pipefail
           source ci_env/bin/activate
@@ -40,10 +36,10 @@ jobs:
           pip uninstall -y mlir_aie
           
           WHEELS_URL="https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-2"
-          if [[ "$WHEELS_VERSION" == "latest" ]]; then
-            pip install --upgrade mlir-aie --find-links "$WHEELS_URL"
+          if [[ "${{ github.event.inputs.wheels-version }}" == "latest" ]]; then
+            pip install --upgrade mlir-aie --find-links ${WHEELS_URL}
           else
-            pip install --upgrade "mlir-aie==$WHEELS_VERSION" --find-links "$WHEELS_URL"
+            pip install --upgrade mlir-aie==${{ github.event.inputs.wheels-version }} --find-links ${WHEELS_URL}
           fi
 
       - name: Build

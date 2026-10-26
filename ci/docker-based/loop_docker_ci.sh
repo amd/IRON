@@ -3,6 +3,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+set -x
+
 ARCH="${1}"
 
 # Auto-detect architecture if not specified
@@ -62,7 +64,7 @@ while true; do
         echo "Failed to get runner registration token" >&2
         exit 1
     fi
-    echo "Got a runner registration token"
+    echo "Got token for runner registration: ${TOKEN}"
     echo "Running new container: ${NAME}"
     docker run \
         --rm \
@@ -72,11 +74,11 @@ while true; do
         -v /opt/xilinx/xrt:/opt/xilinx/xrt:ro \
         -v /dev/accel/accel0:/dev/accel/accel0 \
         -v /srv:/srv:ro \
+        -e GITHUB_RUNNER_TOKEN="${TOKEN}" \
         -e GITHUB_OWNER="${GITHUB_OWNER}" \
         -e GITHUB_REPO="${GITHUB_REPO}" \
         -e RUNNER_LABELS="${ARCH},docker" \
-        -i \
-        ${IMAGE_NAME} <<<"${TOKEN}"
+        ${IMAGE_NAME}
     echo "Container ${NAME} exited. Restarting in 2 seconds..."
     sleep 2
 done
