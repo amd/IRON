@@ -70,7 +70,7 @@ class VisionConfig(lm.Config):
     # A GEMM's row block at its default tile: the pooled rows are whole blocks.
     rows: int = lm.not_json(256)
     # The bytes of an image row Resample receives at a time, and a core's
-    # patch columns, as many as its memory holds: 127 across on 16 cores.
+    # patch columns, as many as its memory holds.
     chunk: int = lm.not_json(4096)
     patch_columns: int = lm.not_json(8)
 
@@ -266,10 +266,8 @@ class VisionTower(Tower):
         c = config
         window = c.pooling_kernel_size**2
         tokens = -(-(c.patches // window) // c.rows) * c.rows
-        # Named here, ahead of super().__init__()'s self.layers, so a
-        # recording names a layer's weights under this prefix, not bare
-        # "layers.N": the visualizer tells this tower's steps apart from
-        # another's sharing the same layer index.
+        # Set before super().__init__() so a recording names its layers
+        # "vision_tower.layers.N", apart from another model's "layers.N".
         self.vision_tower = SimpleNamespace()
         super().__init__(config, c.patches, tokens)
         self.processor = ImagePatches(

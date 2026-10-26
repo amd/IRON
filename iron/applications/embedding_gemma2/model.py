@@ -295,10 +295,6 @@ class EmbeddingGemma(Encoder):
     ):
         c = config
         self.tokenizer = tokenizer
-        # Named here, ahead of super().__init__()'s self.layers, so a
-        # recording names a layer's weights under this prefix, not bare
-        # "layers.N": the visualizer tells this model's steps apart from a
-        # tower's sharing the same layer index.
         self.language_model = SimpleNamespace()
         super().__init__(config, c.max_tokens)
         self.final_norm = RMSNorm(c.hidden_size, c.eps)

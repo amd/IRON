@@ -169,12 +169,8 @@ class DequantBFP(Operator):
     # occupies ``run_out_features`` of every ``run_period_out_features``.
     run_out_features: int | None = param(default=None)
     run_period_out_features: int | None = param(default=None)
-    # Each buffer is declared in the unit its transfers count in. The q4nx
-    # input is bytes, because a block interleaves three tables at 5 bits per
-    # weight and the fill walks it bytewise. The output is bfp16ebs8 blocks,
-    # because the drains index blocks; declared in its 9-byte equivalent,
-    # every offset and length would address a ninth of what it names.
-    # Filled by validate() from K, N and the interleave.
+    # The q4nx input is bytes, as a block interleaves three tables at 5 bits
+    # a weight; the output is bfp16ebs8 blocks, as the drains index them.
     quantized_bytes: int = param(derive=lambda op: op.quantized_size(), repr=False)
     packed_blocks: int = param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # cols follows the device. ROWS is baked into the split offsets and the

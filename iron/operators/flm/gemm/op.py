@@ -213,13 +213,9 @@ class ProjectionGEMM(Operator):
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     A = In(M, K, obj_shape=(a_l2,), per=(rows,), depth=A_DEPTH)
-    # Packed for bfp16 macs, B is quantized to bfp16ebs8, so it is declared
-    # as a count of those blocks, the unit the array, the core and every
-    # descriptor into B count in. Declared in bytes, the sequence's offsets
-    # and lengths would address a ui8 buffer with block-unit numbers and a
-    # transfer would move a ninth of what it named. Otherwise it is bf16, a
-    # (K, N) count pre-packed, or (N, K) as stored under b_col_maj. Its lanes
-    # are flows into each column's memtile pool, whose slots are one tile each.
+    # For bfp16 macs B is counted in bfp16ebs8 blocks, the unit every
+    # descriptor into it counts in: in bytes, a transfer would move a ninth
+    # of what it named.
     B = In(
         Select(bfp16_b, (packed_blocks,), (Select(b_col_maj, (N, K), (K, N)),)),
         dtype=b_dtype,
@@ -472,8 +468,7 @@ class ProjectionGEMM(Operator):
         if key in _FRAMES:
             return _FRAMES[key]
         arch = resolve_target_arch(dev)
-        # Only measured, never built, so it stays out of the build's registry.
-        # dev is bound because the factory reads its architecture from it.
+        # Measured, never built: kept out of the build's registry.
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
             k = self.kernel(*tiles)
             calls = (k.mm_fused_acc_init, k.mm_fused_k_step, k.mm_fused_epilogue_chunk)
@@ -519,8 +514,8 @@ class ProjectionGEMM(Operator):
         C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
         O_CHUNKS = C_SLICE_LEN // CT_OUT_LEN  # C objects an accumulator drains as
         B_ITERS = K_TILE // CT_K  # B chunks consumed per k step
-        # Under a row bound the cores read the units it reaches: from the
-        # scratchpad on a full ELF, else from their parameter buffer.
+        # Where the cores read a row bound: the scratchpad on a full ELF, else
+        # their parameter buffer.
         bounded = self.value("valid").per_call
         tm = get_target_model(self.dev.resolve())
 

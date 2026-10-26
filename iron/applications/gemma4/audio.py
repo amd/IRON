@@ -392,10 +392,6 @@ class AudioTower(Tower):
 
     def __init__(self, config: AudioConfig, weights: SimpleNamespace):
         c = config
-        # Named here, ahead of super().__init__()'s self.layers, so a
-        # recording names a layer's weights under this prefix, not bare
-        # "layers.N": the visualizer tells this tower's steps apart from
-        # another's sharing the same layer index.
         self.audio_tower = SimpleNamespace()
         super().__init__(config, c.max_tokens, c.max_tokens)
         sub = SubsampleConvProjection(c)
