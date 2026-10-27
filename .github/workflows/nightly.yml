@@ -27,8 +27,12 @@ jobs:
       matrix:
         include:
           - {runner: phoenix, name: Phoenix}
-          - {runner: krackan, name: Krackan}
+          # Krackan's device heap holds less control code than Gemma 4 E2B's
+          # and EmbeddingGemma 2's full ELFs need (29f679da).
+          - {runner: krackan, name: Krackan, xfail_device_heap: "1"}
     runs-on: [self-hosted, "${{ matrix.runner }}"]
+    env:
+      IRON_XFAIL_DEVICE_HEAP: ${{ matrix.xfail_device_heap }}
     # Past GitHub's 6 h default: a cancelled job uploads no results.
     timeout-minutes: 720
     steps:
