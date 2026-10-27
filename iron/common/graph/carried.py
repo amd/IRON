@@ -251,6 +251,7 @@ class CarriedLoop:
         """Run ``steps`` steps of ``body``, yielding each index once complete;
         closing early waits out the steps in flight.
         """
+        assert self._runs is not None, "start() builds body's runs first"
         in_flight: deque[int] = deque()
         for k in range(min(self.depth, steps)):
             self._runs[k].start()
