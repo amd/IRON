@@ -26,12 +26,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {runner: phoenix, name: Phoenix, memory_budget_gib: ""}
-          # Krackan's NPU driver ran out of buffer space at 11 GiB arenas; 6.3 GiB ran.
-          - {runner: krackan, name: Krackan, memory_budget_gib: "8"}
+          - {runner: phoenix, name: Phoenix}
+          - {runner: krackan, name: Krackan}
     runs-on: [self-hosted, "${{ matrix.runner }}"]
-    env:
-      IRON_MEMORY_BUDGET_GIB: ${{ matrix.memory_budget_gib }}
     # Past GitHub's 6 h default: a cancelled job uploads no results.
     timeout-minutes: 720
     steps:
