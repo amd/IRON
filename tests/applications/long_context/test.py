@@ -72,10 +72,10 @@ APPLICATIONS = {
     "llama_3.2_3b": Application(
         Llama, "llama3.2-3b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
     ),
-    # Gemma 4 E2B's decode measured 0.0002 to 0.072 on npu2 from 4k to the
-    # whole context: each size fills the cache with its own content up to
-    # max_seq_len - 1, not a continuation of the last, so sizes aren't
-    # directly comparable. npu1 unmeasured.
+    # Gemma 4 E2B's decode measured 0.0002 to 0.072 on npu2 and 0.0009 to
+    # 0.0256 on npu1, each 4k to the whole context: each size fills the
+    # cache with its own content up to max_seq_len - 1, not a continuation
+    # of the last, so sizes aren't directly comparable.
     "gemma4_e2b": Application(
         Gemma4,
         "gemma-4-e2b-it",
