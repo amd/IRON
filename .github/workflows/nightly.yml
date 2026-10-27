@@ -26,18 +26,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {runner: phoenix, name: Phoenix, memory_budget_gib: "", device_loop_depth: ""}
-          # Krackan's NPU driver ran out of buffer space at 11 GiB arenas,
-          # and was below Gemma 4 E2B's 8.6 GiB of weights alone at 8. 9 GiB
-          # clears both floors; unconfirmed on real hardware past this
-          # arithmetic (iron/lm/model.py's fit). The decode loop's own
-          # ctrlcode-heap exhaustion (Llama 3.2 3B) is CarriedLoop's fix, not
-          # a lower depth: depth 1 measured ~34% slower per step than 2.
-          - {runner: krackan, name: Krackan, memory_budget_gib: "9", device_loop_depth: ""}
+          - {runner: phoenix, name: Phoenix, memory_budget_gib: ""}
+          # Krackan's NPU driver ran out of buffer space at 11 GiB arenas; 6.3 GiB ran.
+          - {runner: krackan, name: Krackan, memory_budget_gib: "8"}
     runs-on: [self-hosted, "${{ matrix.runner }}"]
     env:
       IRON_MEMORY_BUDGET_GIB: ${{ matrix.memory_budget_gib }}
-      IRON_DEVICE_LOOP_DEPTH: ${{ matrix.device_loop_depth }}
     # Past GitHub's 6 h default: a cancelled job uploads no results.
     timeout-minutes: 720
     steps:
