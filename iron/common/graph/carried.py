@@ -217,9 +217,8 @@ class CarriedLoop:
         assert isinstance(body_call, FullELFCallable)
         self._first_call, self._body_call = first_call, body_call
         # Built on the first start(): first runs once and, where it is not
-        # body itself, is dead after, so its ctrlcode heap copy can go before
-        # body's depth copies ask for theirs, rather than both needing room
-        # for all 1 + depth at once.
+        # body itself, is dead after, so the heap holds first's ctrlcode and
+        # body's first copy, then body's depth copies, never 1 + depth.
         self._runs: list[FullELFRun] | None = None
 
     def run(self, steps: int, /, *tensors, **values) -> Iterator[int]:
@@ -231,13 +230,8 @@ class CarriedLoop:
         """Run ``first`` on ``tensors`` and ``values``, and wait for it."""
         self.body.upload()
         first_run = self._first_call.run
-        if self._runs is None:
-            runs = [self._body_call.run]
-            runs += [self._body_call.new_run() for _ in range(self.depth - 1)]
-            for k, run in enumerate(runs):
-                run.bind_feedback(runs[(k + 1) % self.depth].scratchpad_alias())
-            self._runs = runs
-        first_run.bind_feedback(self._runs[0].scratchpad_alias())
+        runs = self._runs or [self._body_call.run]
+        first_run.bind_feedback(runs[0].scratchpad_alias())
         self.first.start(first_run, *tensors, **values)
         self._first_call.wait(first_run)
         if self._first_call is not self._body_call:
@@ -246,6 +240,13 @@ class CarriedLoop:
             # just when a later new_run() happens to need the room.
             first_run.wired = False
             self._first_call.release()
+        # pyxrt frees a run's ctrlcode only once nothing references the run.
+        del first_run
+        if self._runs is None:
+            runs += [self._body_call.new_run() for _ in range(self.depth - 1)]
+            for k, run in enumerate(runs):
+                run.bind_feedback(runs[(k + 1) % self.depth].scratchpad_alias())
+            self._runs = runs
 
     def steps(self, steps: int) -> Iterator[int]:
         """Run ``steps`` steps of ``body``, yielding each index once complete;
