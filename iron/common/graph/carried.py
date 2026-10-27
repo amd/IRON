@@ -216,12 +216,11 @@ class CarriedLoop:
         assert isinstance(first_call, FullELFCallable)
         assert isinstance(body_call, FullELFCallable)
         self._first_call, self._body_call = first_call, body_call
-        self._runs: list[FullELFRun] = [body_call.run]
-        self._runs += [body_call.new_run() for _ in range(depth - 1)]
-        for k, run in enumerate(self._runs):
-            run.bind_feedback(self._runs[(k + 1) % depth].scratchpad_alias())
-        self._first = first_call.run
-        self._first.bind_feedback(self._runs[0].scratchpad_alias())
+        # Built on the first start(): first runs once and, where it is not
+        # body itself, is dead after, so its ctrlcode heap copy can go before
+        # body's depth copies ask for theirs, rather than both needing room
+        # for all 1 + depth at once.
+        self._runs: list[FullELFRun] | None = None
 
     def run(self, steps: int, /, *tensors, **values) -> Iterator[int]:
         """``start`` now, then ``steps``, each index yielded once complete."""
@@ -231,8 +230,22 @@ class CarriedLoop:
     def start(self, *tensors, **values) -> None:
         """Run ``first`` on ``tensors`` and ``values``, and wait for it."""
         self.body.upload()
-        self.first.start(self._first, *tensors, **values)
-        self._first_call.wait(self._first)
+        first_run = self._first_call.run
+        if self._runs is None:
+            runs = [self._body_call.run]
+            runs += [self._body_call.new_run() for _ in range(self.depth - 1)]
+            for k, run in enumerate(runs):
+                run.bind_feedback(runs[(k + 1) % self.depth].scratchpad_alias())
+            self._runs = runs
+        first_run.bind_feedback(self._runs[0].scratchpad_alias())
+        self.first.start(first_run, *tensors, **values)
+        self._first_call.wait(first_run)
+        if self._first_call is not self._body_call:
+            # first never runs again: free its ctrlcode heap copy, as any
+            # other callable's idle run is (FullELFCallable.release()), not
+            # just when a later new_run() happens to need the room.
+            first_run.wired = False
+            self._first_call.release()
 
     def steps(self, steps: int) -> Iterator[int]:
         """Run ``steps`` steps of ``body``, yielding each index once complete;

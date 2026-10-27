@@ -49,6 +49,9 @@ def test_a_carried_loop_walks_a_linked_list_on_the_device(depth):
         done = list(loop.run(STEPS, jump, node=0, steps=0, skip=skip))
         elapsed = time.perf_counter() - t0
         assert done == list(range(STEPS))
+        # first ran once and is dead now: its ctrlcode heap copy is freed
+        # (not held for the loop's life), each run recreating it the same.
+        assert first.callable._run is None
         got = body.read(walk.trail)
         want = _expected(successor, jump[skip])
         wrong = np.flatnonzero(got != want)
