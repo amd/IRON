@@ -11,6 +11,7 @@ are a prompt chunk from ``start``, of which a call runs the first
 
 import dataclasses
 import logging
+import os
 from collections.abc import Iterator
 from typing import Any, ClassVar
 
@@ -342,11 +343,19 @@ class CausalLM(Model):
 
     def loop(self, version: CompiledGraph) -> CarriedLoop:
         """The device loop of decode steps ``version`` starts, made once: its
-        runs are bound to the versions, which every session shares.
+        runs are bound to the versions, which every session shares. Its
+        ``depth`` (runs in flight, each a copy of the decode step's control
+        code in the device's ctrlcode heap) is 2 unless
+        ``IRON_DEVICE_LOOP_DEPTH`` caps it lower, for a driver whose heap
+        holds fewer.
         """
         if id(version) not in self._loops:
             assert self.decode_step is not None, "loaded with the version it starts"
-            self._loops[id(version)] = CarriedLoop(version, self.decode_step, depth=2)
+            cap = os.environ.get("IRON_DEVICE_LOOP_DEPTH")
+            depth = int(cap) if cap else 2
+            self._loops[id(version)] = CarriedLoop(
+                version, self.decode_step, depth=depth
+            )
         return self._loops[id(version)]
 
     def logits(self, tokens) -> np.ndarray:
