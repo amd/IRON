@@ -26,14 +26,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {runner: phoenix, name: Phoenix, memory_budget_gib: "", device_loop_depth: ""}
+          - {runner: phoenix, name: Phoenix, memory_budget_gib: "", device_loop_depth: "", test_flags: ""}
           # Krackan's NPU driver ran out of buffer space at 11 GiB arenas,
           # and was below Gemma 4 E2B's 8.6 GiB of weights alone at 8. 9 GiB
           # clears both floors; unconfirmed on real hardware past this
           # arithmetic (iron/lm/model.py's fit). The decode loop's own
           # ctrlcode-heap exhaustion (Llama 3.2 3B) is CarriedLoop's fix, not
           # a lower depth: depth 1 measured ~34% slower per step than 2.
-          - {runner: krackan, name: Krackan, memory_budget_gib: "9", device_loop_depth: ""}
+          - {runner: krackan, name: Krackan, memory_budget_gib: "9", device_loop_depth: "", test_flags: "--max-seq-len 4096"}
     # A fork's pull request never reaches the NPU runners, which hold /srv's
     # weights and the device, as in mlir-aie's self-hosted jobs.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -91,6 +91,7 @@ jobs:
         with:
           env_name: ci_env
           test_suite: "applications"
+          test_flags: ${{ matrix.test_flags }}
 
       - name: Format test results
         uses: ./.github/actions/format_results
