@@ -44,6 +44,7 @@ def model(load):
     loaded = load()
     assert loaded.device_loop
     yield loaded
+    loaded.release()
 
 
 # KL(fp32 CPU || NPU) over 40 steps measured mean 0.0031, p90 0.0062, max 0.0152.
@@ -82,6 +83,7 @@ class TestEachStep:
         model = load(full_elf=False)
         assert not model.device_loop
         yield model
+        model.release()
         if aie_utils.DefaultNPURuntime is not None:
             aie_utils.DefaultNPURuntime.cleanup()
 
