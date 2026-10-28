@@ -46,6 +46,13 @@ print(model.generate("The capital of France is", 8))   # greedy; pass an iron.lm
 
 `Llama.load` also takes a local directory holding `config.json`, the checkpoint and `tokenizer.json`.
 
+## Programming Guide
+
+Writing your own operator calls or graphs over `iron.Graph`? The
+[programming guide](./programming_guide/) walks through the API from an
+operator called on its own to a language model, each section a small
+runnable example.
+
 The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 
 > E. Hunhoff, J. Melber, K. Denolf, A. Bisca, S. Bayliss, S. Neuendorffer, J. Fifield, J. Lo, P. Vasireddy, P. James-Roxby, E. Keller. "[Efficiency, Expressivity, and Extensibility in a Close-to-Metal NPU Programming Interface](https://arxiv.org/abs/2504.18430)". In 33rd IEEE International Symposium On Field-Programmable Custom Computing Machines, May 2025.
