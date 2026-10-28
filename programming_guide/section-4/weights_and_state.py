@@ -63,13 +63,11 @@ def main(argv=None):
     rows = 4
     accumulate = Accumulate(rows, args.width)
     compiled = accumulate.compile(x=(args.width,))
-    # Copy (read, write) is exact; ElementwiseAdd is the one step that rounds.
-    (add,) = (
-        s.op
-        for s in compiled.recording.steps
-        if type(s.op).__name__ == "ElementwiseAdd"
+    # Copy (read, write) is exact; the arithmetic step is the one that rounds.
+    (arithmetic,) = (
+        s.op for s in compiled.recording.steps if not isinstance(s.op, Copy)
     )
-    tolerance = add.resolved().tolerance()
+    tolerance = arithmetic.resolved().tolerance()
     for pos in (0, 1, 0, 2):
         x = rng.standard_normal(args.width).astype(bfloat16)
         # Each call advances the device's state and the reference's own

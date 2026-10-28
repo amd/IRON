@@ -19,6 +19,9 @@ This hook runs at build time (``on_page_markdown``) and rewrites only the
 links that escape the doc tree into repo source, into absolute
 ``github.com`` URLs. Links between doc pages are left untouched so they keep
 resolving locally on the site.
+
+HTML images are matched to doc-tree assets, including symlinks, and use
+URLs relative to the rendered page.
 """
 
 import os
@@ -26,6 +29,7 @@ import re
 import urllib.parse
 
 from mkdocs.plugins import log
+from mkdocs.utils import get_relative_url
 
 GITHUB_REPO = "amd/IRON"
 GITHUB_BRANCH = os.environ.get("DOCS_GITHUB_REF", "devel")
@@ -51,6 +55,12 @@ _LINK_RE = re.compile(
     r"(?P<title>\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?"  # optional "title"
     r"\s*"
     r"\)"
+)
+
+_HTML_IMAGE_RE = re.compile(
+    r"(?P<prefix><img\b[^>]*?\s+src\s*=\s*)"
+    r"(?P<quote>[\"'])(?P<target>.*?)(?P=quote)",
+    re.IGNORECASE,
 )
 
 _SKIP_PREFIXES = ("http://", "https://", "mailto:", "ftp://", "//", "tel:")
@@ -211,4 +221,20 @@ def on_page_markdown(markdown, page, config, files):
         title = match.group("title") or ""
         return f"{label}({new_target}{title})"
 
-    return _LINK_RE.sub(_sub, markdown)
+    def _sub_image(match):
+        target = match.group("target")
+        if target.lower().startswith(_SKIP_PREFIXES) or target.startswith(("/", "#")):
+            return match.group(0)
+        path, suffix = _split_suffix(target)
+        resolved = os.path.realpath(
+            os.path.join(page_dir_real, urllib.parse.unquote(path))
+        )
+        for file in files:
+            if file.abs_src_path and os.path.realpath(file.abs_src_path) == resolved:
+                url = get_relative_url(file.url, page.url) + suffix
+                quote = match.group("quote")
+                return f"{match.group('prefix')}{quote}{url}{quote}"
+        return match.group(0)
+
+    markdown = _LINK_RE.sub(_sub, markdown)
+    return _HTML_IMAGE_RE.sub(_sub_image, markdown)
