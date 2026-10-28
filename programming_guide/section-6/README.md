@@ -72,10 +72,22 @@ known to work runs its normal, usually faster, packaging.
    `checked.compile(..., check=True).plan.full_elf` and read
    `plan.report("Pipeline")` for both — `check=True` is one of the reasons
    `plan()` gives for not choosing a full ELF.
-3. Swap `SiLU` for `GELU` in `Pipeline.body` and rerun; both checks should
-   still pass. Print both operators' `.tolerance()` and read the kernel
-   each is built on (`iron/operators/gelu.py`, `silu.py`) for what backs
-   the number.
+3. In `reference_and_check.py`, replace the `SiLU` import with `GELU` and
+   use `GELU.step(x)` in `Pipeline.body`. Update the hand-written reference
+   in `main()` too:
+
+   ```python
+   gelu = GELU(size=args.size, num_aie_columns=1, tile_size=args.size)
+   mul = ElementwiseMul(size=args.size, num_aie_columns=1, tile_size=args.size)
+   by_hand = mul.reference(gelu.reference(x), y)
+   ```
+
+   Update `Pipeline`'s docstring to say `gelu(x) * y`, then rerun; all three
+   checks should still pass. Changing only `body` leaves the manual reference
+   computing SiLU, so the first, device-free comparison would fail.
+   Print `SiLU`'s and `GELU`'s `.resolved().tolerance()` (import both to compare)
+   and read the kernel each is built on (`iron/operators/gelu.py`, `silu.py`)
+   for what backs the number.
 
 -----
 [Prev](../section-5/) &middot; [Top](..) &middot; [Next](../section-7/)

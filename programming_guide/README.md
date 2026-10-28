@@ -27,8 +27,9 @@ a graph of operators, compile it, and run it on an NPU.
   records a step and returns a `Handle` in place of a tensor.
 * `graph.compile(**shapes)` lowers one recorded shape to an image on the
   device: a full ELF on NPU2, an xclbin per step on NPU1. `graph(*tensors)`
-  compiles the first time a shape is seen and calls the compiled version
-  after.
+  finds and calls the matching compiled version. It can compile an unseen
+  shape automatically only while no version is loaded; compile every shape
+  you'll need before the first device call.
 * `graph.reference(*tensors)` runs the same `body()` on the host, through
   each operator's numpy `reference()`, so a design can be checked without
   touching the NPU.

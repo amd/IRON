@@ -62,11 +62,12 @@ the *recording*), then lowers the recorded steps to an image for the current
 device: one full ELF on NPU2, one xclbin per step on NPU1. The returned
 `CompiledGraph` is also stored on `graph` itself, keyed by shape, so you
 don't have to hold onto it: `graph(x, y)` finds the version whose shapes
-match `x` and `y`'s and calls it. Calling the graph before anything is
-compiled for that shape compiles it on the spot and logs that it did
-(`graph.compile(...)` up front just makes that explicit and lets you compile
-every shape you'll need before the first call, which matters once a version
-grows the shared scratch arena — see [Section 4](../section-4/)).
+match `x` and `y`'s and calls it. If no version is loaded yet, calling the
+graph with an uncompiled shape compiles it on the spot and logs that it did.
+Once any version is loaded, an uncompiled shape raises `ValueError` rather
+than compiling automatically. **Compile every shape you'll need before the
+first device call**: the versions share a scratch arena that a later compile
+can grow — see [Section 4](../section-4/).
 
 ## Checking it against numpy
 
