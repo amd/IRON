@@ -3,8 +3,8 @@
 
 """Serve graph models to a length-prefixed binary client."""
 
-import json
 import inspect
+import json
 import struct
 import sys
 

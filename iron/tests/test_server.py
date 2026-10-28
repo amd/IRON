@@ -8,7 +8,7 @@ import struct
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.lm import server
+from iron import server
 
 
 def request(header, payload=b""):

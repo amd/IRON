@@ -5,14 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # IRON models in FastFlowLM
 
-This application explicitly compiles the IRON graphs for Llama 3.2 1B and
-EmbeddingGemma 2, then serves them through FastFlowLM's HTTP API. FastFlowLM
-runs each model in a persistent Python worker over a Unix socket pair. The
-worker retrieves the compiled images from the shared MLIR-AIE cache, loads the
-images and weights, and dispatches inference on the NPU.
+This application serves Llama 3.2 1B and EmbeddingGemma 2 through FastFlowLM's
+HTTP API. FastFlowLM runs each model in IRON's persistent Python server over a
+Unix socket pair. The server compiles the graph versions through the MLIR-AIE
+cache on first use, then loads the images and weights.
 
 The Makefile pins the FastFlowLM fork to
-[`2aa64e5f`](https://github.com/andrej/FastFlowLM/commit/2aa64e5f47951f6b2330a44607a3b70a8fdcd723),
+[`6e8ee5cf`](https://github.com/andrej/FastFlowLM/commit/6e8ee5cf6f07515b41875cb5df0fabab0b870c9f),
 which contains the IRON backend and the EmbeddingGemma 2 model entry.
 
 > [Changes to FastFlowLM to add the IRON backend and EmbeddingGemma 2 model](https://github.com/ROCm/FastFlowLM/compare/3b72cd0535ffa82389797491e15e117497cc9f88...andrej:FastFlowLM:iron-backend)
@@ -46,27 +45,13 @@ Run these steps from `iron/applications/fastflowlm_iron`.
    export CACHE=$PWD/build/cache
    ```
 
-2. Compile all required graph versions. Llama builds its decode and prompt
-   versions. EmbeddingGemma 2 builds one graph for inputs of at most 2048
-   tokens. The scripts compile and link the images. They do not load the images
-   or upload weights.
-
-   ```bash
-   make compile MODELS=$MODELS CACHE=$CACHE IRON_PYTHON=$VIRTUAL_ENV/bin/python
-   ```
-
-   `compile_llama.py --max-seq-len` sets the longest context. It cannot exceed
-   the checkpoint's `max_position_embeddings` value.
-   `compile_embeddinggemma2.py --max-tokens` sets the encoder graph's row
-   count. Each script prints the compiled image and its designs under `$CACHE`.
-
-3. Clone and build the pinned FastFlowLM engine with `FLM_ENABLE_IRON=ON`.
+2. Clone and build the pinned FastFlowLM engine with `FLM_ENABLE_IRON=ON`.
 
    ```bash
    make flm IRON_PYTHON=$VIRTUAL_ENV/bin/python
    ```
 
-4. Pull FastFlowLM's serving packages. FastFlowLM uses its Llama package for
+3. Pull FastFlowLM's serving packages. FastFlowLM uses its Llama package for
    chat metadata and tokenization while the worker reads the BF16 IRON
    checkpoint from `$MODELS/llama3.2-1b`. EmbeddingGemma 2 uses the same public
    checkpoint for FastFlowLM and IRON.
@@ -75,15 +60,15 @@ Run these steps from `iron/applications/fastflowlm_iron`.
    make pull MODELS=$MODELS
    ```
 
-5. Start Llama 3.2 1B. This command uses the same cache as step 2, then loads
-   the images and uploads the weights.
+4. Start Llama 3.2 1B. The first invocation compiles the graph versions, then
+   loads the images and uploads the weights. Later invocations reuse the cache.
 
    ```bash
    make serve-llama MODELS=$MODELS CACHE=$CACHE \
        IRON_PYTHON=$VIRTUAL_ENV/bin/python PORT=52625
    ```
 
-6. Send a chat request from another terminal.
+5. Send a chat request from another terminal.
 
    ```bash
    curl -sS http://127.0.0.1:52625/v1/chat/completions \
@@ -92,14 +77,14 @@ Run these steps from `iron/applications/fastflowlm_iron`.
        | python3 -m json.tool
    ```
 
-7. Stop the Llama server with `Ctrl+C`, then start EmbeddingGemma 2.
+6. Stop the Llama server with `Ctrl+C`, then start EmbeddingGemma 2.
 
    ```bash
    make serve-embedding MODELS=$MODELS CACHE=$CACHE \
        IRON_PYTHON=$VIRTUAL_ENV/bin/python PORT=52625
    ```
 
-8. Request a normalized 768-element embedding.
+7. Request a normalized 768-element embedding.
 
    ```bash
    curl -sS http://127.0.0.1:52625/v1/embeddings \
@@ -112,6 +97,6 @@ The direct model commands in the
 [Llama guide](../llama_3.2_1b/README.md) and
 [EmbeddingGemma 2 guide](../embeddinggemma_2/README.md) run the same graph
 classes in the command's Python process. They do not use the FastFlowLM worker.
-The Makefile's server targets instead start `python -m flm_iron.worker`; C++
+The Makefile's server targets instead start `python -m iron.server`; C++
 sends token histories or text over the socket, and the worker returns BF16
 logits or float32 embeddings.
