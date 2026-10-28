@@ -58,8 +58,7 @@ Run these steps from `iron/applications/fastflowlm_iron`.
    `compile_llama.py --max-seq-len` sets the longest context. It cannot exceed
    the checkpoint's `max_position_embeddings` value.
    `compile_embeddinggemma2.py --max-tokens` sets the encoder graph's row
-   count. Each script prints the image and `artifacts.json` paths under
-   `$CACHE`.
+   count. Each script prints the compiled image and its designs under `$CACHE`.
 
 3. Clone and build the pinned FastFlowLM engine with `FLM_ENABLE_IRON=ON`.
 

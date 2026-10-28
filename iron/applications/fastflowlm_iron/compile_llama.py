@@ -22,8 +22,7 @@ def compile_model(directory: Path, max_seq_len: int) -> None:
         version = graph.compile(feeds=decode, **shapes)
         if not shapes and version.emit is not None:
             decode = version
-        print(f"{name}: {version.artifacts.image}", flush=True)
-        print(f"{name} manifest: {version.artifacts.dump()}", flush=True)
+        print(version.artifacts.report(name), flush=True)
 
 
 def main() -> None:

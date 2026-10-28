@@ -25,11 +25,7 @@ def compile_model(directory: Path, max_tokens: int) -> None:
     graph = EmbeddingGemma(config, Checkpoint(weights).tree())
 
     version = graph.compile(**graph.shapes()[0])
-    print(f"embedding {max_tokens} rows: {version.artifacts.image}", flush=True)
-    print(
-        f"embedding {max_tokens} rows manifest: {version.artifacts.dump()}",
-        flush=True,
-    )
+    print(version.artifacts.report(f"embedding {max_tokens} rows"), flush=True)
 
 
 def main() -> None:
