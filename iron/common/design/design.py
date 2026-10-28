@@ -32,20 +32,6 @@ from ..declare import Operator
 from .runtime import MergedRuntime, OperatorRuntime
 
 
-def capped_aiecc_flags(flags: Sequence[str]) -> list[str]:
-    """Return ``flags`` with one final two-job compiler limit."""
-    uncapped = []
-    skip = False
-    for flag in flags:
-        if skip:
-            skip = False
-        elif flag == "-j":
-            skip = True
-        else:
-            uncapped.append(flag)
-    return [*dict.fromkeys(uncapped), "-j", "2"]
-
-
 class OperatorDesign:
     """One operator's design (``module``, or ``Operator.exported_design``) as
     ``CompilableDesign`` compiles and caches it; ``identity`` adds to the cache
@@ -126,9 +112,7 @@ class OperatorDesign:
         """The ``CompilableDesign``, given ``options``, the operator's
         ``aiecc_flags`` added to theirs.
         """
-        flags = capped_aiecc_flags(
-            [*options.pop("aiecc_flags", ()), *self.op.aiecc_flags]
-        )
+        flags = [*options.pop("aiecc_flags", ()), *self.op.aiecc_flags]
         return CompilableDesign(
             self.generator,
             compile_kwargs={"op": self.op, "identity": self.identity},

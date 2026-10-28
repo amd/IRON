@@ -20,7 +20,6 @@ from aie.utils.npukernel import NPUKernel
 
 from ..declare import Operator
 from ..design import OperatorDesign
-from ..design.design import capped_aiecc_flags
 from .artifacts import Design
 from .callable import FullELFCallable, PerStepCallable
 from .compose import Composition
@@ -86,11 +85,17 @@ class FullELF:
                 generator,
                 compile_kwargs={"key": composition.identity},
                 full_elf=True,
-                aiecc_flags=capped_aiecc_flags(
-                    [
-                        *flags,
-                        *(f for op in seq.unique_operators() for f in op.aiecc_flags),
-                    ]
+                aiecc_flags=list(
+                    dict.fromkeys(
+                        [
+                            *flags,
+                            *(
+                                f
+                                for op in seq.unique_operators()
+                                for f in op.aiecc_flags
+                            ),
+                        ]
+                    )
                 ),
             )
             design.compile()

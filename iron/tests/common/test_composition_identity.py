@@ -9,15 +9,12 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import aie.utils as aie_utils
 import pytest
 from aie.iron.device import from_name
-from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from iron.common.design import OperatorDesign
-from iron.common.design.design import capped_aiecc_flags
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Composition
 from iron.common.image.link import FullELF
@@ -58,41 +55,6 @@ def _identity(shapes):
 
 
 SHAPES = [(512, 1024), (256, 1024), (512, 2048)]
-
-
-def test_compiler_job_limit_replaces_caller_value():
-    assert capped_aiecc_flags(
-        ["--flag", "-j", "1", "--other", "-j", "4", "--flag"]
-    ) == [
-        "--flag",
-        "--other",
-        "-j",
-        "2",
-    ]
-
-
-def test_operator_design_caps_compiler_jobs():
-    op = ReLU(size=1024, num_aie_columns=1, num_channels=1, tile_size=1024)
-    design = OperatorDesign(op.resolved()).compilable(aiecc_flags=["-j", "1"])
-    assert design.aiecc_flags == ("-j", "2")
-
-
-def test_full_elf_caps_compiler_jobs(monkeypatch, tmp_path):
-    monkeypatch.setattr(GEMV, "aiecc_flags", ("--reclaim-runtime-bds", "-j", "1"))
-    monkeypatch.setattr(CompilableDesign, "compile", lambda self: None)
-    monkeypatch.setattr(
-        CompilableDesign,
-        "get_cache_entry",
-        lambda self: SimpleNamespace(elf=tmp_path / "design.elf"),
-    )
-    seq = _sequence(SHAPES[:1])
-    seq.packaging.link(seq)
-    assert seq.packaging.design.aiecc_flags == (
-        "--get-scratchpad-parameters",
-        "--reclaim-runtime-bds",
-        "-j",
-        "2",
-    )
 
 
 def _objects_by_step(shapes):
