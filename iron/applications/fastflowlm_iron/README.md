@@ -11,7 +11,7 @@ Unix socket pair. The server compiles the graph versions through the MLIR-AIE
 cache on first use, then loads the images and weights.
 
 The Makefile pins the FastFlowLM fork to
-[`6e8ee5cf`](https://github.com/andrej/FastFlowLM/commit/6e8ee5cf6f07515b41875cb5df0fabab0b870c9f),
+[`a84802b8`](https://github.com/andrej/FastFlowLM/commit/a84802b81ee46cdd2aa82daff03e3426fe881701),
 which contains the IRON backend and the EmbeddingGemma 2 model entry.
 
 > [Changes to FastFlowLM to add the IRON backend and EmbeddingGemma 2 model](https://github.com/ROCm/FastFlowLM/compare/3b72cd0535ffa82389797491e15e117497cc9f88...andrej:FastFlowLM:iron-backend)
@@ -97,6 +97,6 @@ The direct model commands in the
 [Llama guide](../llama_3.2_1b/README.md) and
 [EmbeddingGemma 2 guide](../embeddinggemma_2/README.md) run the same graph
 classes in the command's Python process. They do not use the FastFlowLM worker.
-The Makefile's server targets instead start `python -m iron.server`; C++
+The Makefile's server targets instead start `python -m iron.lm_server`; C++
 sends token histories or text over the socket, and the worker returns BF16
 logits or float32 embeddings.
