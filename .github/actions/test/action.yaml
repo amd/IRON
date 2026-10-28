@@ -17,6 +17,10 @@ inputs:
     required: false
     default: "operators"
     description: "Which tests to run: 'operators', 'applications', or 'both'"
+  log_level:
+    required: false
+    default: "WARNING"
+    description: "pytest --log-cli-level; raise to DEBUG to see aiecc's compile trail"
 
 runs:
   using: "composite"
@@ -43,7 +47,7 @@ runs:
         esac
         
         if [ "${{ inputs.extensive }}" = "true" ]; then
-          pytest $TEST_PATH --csv-output=tests_latest.csv --log-cli-level=DEBUG ${{ inputs.test_flags }}
+          pytest $TEST_PATH --csv-output=tests_latest.csv --log-cli-level=${{ inputs.log_level }} ${{ inputs.test_flags }}
         else
-          pytest -m "not extensive" $TEST_PATH --csv-output=tests_latest.csv --log-cli-level=DEBUG ${{ inputs.test_flags }}
+          pytest -m "not extensive" $TEST_PATH --csv-output=tests_latest.csv --log-cli-level=${{ inputs.log_level }} ${{ inputs.test_flags }}
         fi

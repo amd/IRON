@@ -5,6 +5,11 @@ name: Test Example Applications
 
 on:
   workflow_dispatch:
+    inputs:
+      log_level:
+        description: "pytest --log-cli-level (DEBUG for aiecc's compile trail)"
+        required: false
+        default: "WARNING"
   pull_request:
   push:
     branches:
@@ -86,6 +91,7 @@ jobs:
         with:
           env_name: ci_env
           test_suite: "applications"
+          log_level: ${{ inputs.log_level }}
 
       - name: Format test results
         uses: ./.github/actions/format_results
