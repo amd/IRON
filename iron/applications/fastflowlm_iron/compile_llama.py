@@ -5,43 +5,25 @@
 """Compile Llama 3.2 1B's decode and prompt graph versions without loading them."""
 
 import argparse
-from dataclasses import replace
 from pathlib import Path
 
 import aie.utils as aie_utils
 from aie.iron.device import from_name
 
-from iron.lm.llama3.model import LLAMA_3_2_1B, Llama, Runner
+from iron.applications.llama import Llama
 
 
 def compile_model(directory: Path, max_seq_len: int) -> None:
-    if max_seq_len % LLAMA_3_2_1B.prefill_chunk:
-        raise ValueError(
-            f"--max-seq-len must be a multiple of {LLAMA_3_2_1B.prefill_chunk}"
-        )
-
     aie_utils.set_current_device(from_name("npu2", n_cols=8))
-    config = replace(LLAMA_3_2_1B, max_seq_len=max_seq_len)
-    runner = Runner(
-        directory / "model.safetensors",
-        directory / "tokenizer.model",
-        config,
-    )
-    graph = Llama(config, runner.weights)
+    graph = Llama.from_checkpoint(directory, max_seq_len=max_seq_len)
 
-    decode = graph.compile(record="disk", verbose=True, **graph.shapes(1))
-    print(f"decode: {decode.artifacts.image}", flush=True)
-    print(f"decode manifest: {decode.artifacts.dump()}", flush=True)
-
-    feeds = decode if decode.emit is not None else None
-    prompt = graph.compile(
-        record="disk",
-        verbose=True,
-        feeds=feeds,
-        **graph.shapes(config.prefill_chunk),
-    )
-    print(f"prompt: {prompt.artifacts.image}", flush=True)
-    print(f"prompt manifest: {prompt.artifacts.dump()}", flush=True)
+    decode = None
+    for name, shapes in zip(("decode", "prompt"), graph.shapes(), strict=True):
+        version = graph.compile(feeds=decode, **shapes)
+        if not shapes and version.emit is not None:
+            decode = version
+        print(f"{name}: {version.artifacts.image}", flush=True)
+        print(f"{name} manifest: {version.artifacts.dump()}", flush=True)
 
 
 def main() -> None:
@@ -49,13 +31,13 @@ def main() -> None:
     parser.add_argument(
         "directory",
         type=Path,
-        help="directory containing model.safetensors and tokenizer.model",
+        help="directory containing config.json, model weights and tokenizer.json",
     )
     parser.add_argument(
         "--max-seq-len",
         type=int,
         default=2048,
-        help="KV-cache rows; a multiple of 2048 (default: 2048)",
+        help="longest context served (default: 2048)",
     )
     args = parser.parse_args()
     compile_model(args.directory, args.max_seq_len)

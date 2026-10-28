@@ -12,10 +12,10 @@ worker retrieves the compiled images from the shared MLIR-AIE cache, loads the
 images and weights, and dispatches inference on the NPU.
 
 The Makefile pins the FastFlowLM fork to
-[`afbbd18d`](https://github.com/andrej/FastFlowLM/commit/afbbd18d3fb73c71b1eb3b3ea655da0ee7396faf),
+[`2aa64e5f`](https://github.com/andrej/FastFlowLM/commit/2aa64e5f47951f6b2330a44607a3b70a8fdcd723),
 which contains the IRON backend and the EmbeddingGemma 2 model entry.
 
-> [Changes to FastFlowLM to add the IRON backend and EmbeddingGemma 2 model](https://github.com/ROCm/FastFlowLM/compare/8d6768dab2fd8616ea3b814f611ff01a0758681f...andrej:FastFlowLM:iron-backend)
+> [Changes to FastFlowLM to add the IRON backend and EmbeddingGemma 2 model](https://github.com/ROCm/FastFlowLM/compare/3b72cd0535ffa82389797491e15e117497cc9f88...andrej:FastFlowLM:iron-backend)
 
 ## Prerequisites
 
@@ -27,9 +27,11 @@ and its `tokenizers-cpp` submodule. The Makefile initializes the submodule.
 The IRON checkpoint directories must contain:
 
 ```text
-<models>/llama3.2-1b/model.safetensors
-<models>/llama3.2-1b/tokenizer.model
-<models>/embeddinggemma-2/model.safetensors
+<models>/llama3.2-1b/config.json
+<models>/llama3.2-1b/model*.safetensors*
+<models>/llama3.2-1b/tokenizer.json
+<models>/embeddinggemma-2/config.json
+<models>/embeddinggemma-2/model*.safetensors*
 <models>/embeddinggemma-2/tokenizer.json
 ```
 
@@ -44,19 +46,20 @@ Run these steps from `iron/applications/fastflowlm_iron`.
    export CACHE=$PWD/build/cache
    ```
 
-2. Compile all required graph versions. Llama builds its decode and 2048-row
-   prompt versions. EmbeddingGemma 2 builds 64-, 128-, 256- and 512-row
-   versions. The scripts compile and link the images but do not load them or
-   upload weights.
+2. Compile all required graph versions. Llama builds its decode and prompt
+   versions. EmbeddingGemma 2 builds one graph for inputs of at most 2048
+   tokens. The scripts compile and link the images. They do not load the images
+   or upload weights.
 
    ```bash
    make compile MODELS=$MODELS CACHE=$CACHE IRON_PYTHON=$VIRTUAL_ENV/bin/python
    ```
 
-   `compile_llama.py --max-seq-len` accepts another multiple of 2048.
-   `compile_embeddinggemma2.py --max-tokens` accepts another multiple of 64 and
-   builds doubling versions from 64 rows, then the requested maximum. Each
-   script prints the image and `artifacts.json` paths under `$CACHE`.
+   `compile_llama.py --max-seq-len` sets the longest context. It cannot exceed
+   the checkpoint's `max_position_embeddings` value.
+   `compile_embeddinggemma2.py --max-tokens` sets the encoder graph's row
+   count. Each script prints the image and `artifacts.json` paths under
+   `$CACHE`.
 
 3. Clone and build the pinned FastFlowLM engine with `FLM_ENABLE_IRON=ON`.
 
