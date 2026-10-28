@@ -23,3 +23,8 @@ id_ed25519.pub
 *.egg-info
 **/*.prj/**
 /outputs/
+
+# MkDocs build output and the programming_guide symlink the Pages workflow
+# creates at build time (not committed: not every branch has that tree yet).
+/site/
+/docs/programming_guide
