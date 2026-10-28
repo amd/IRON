@@ -263,8 +263,8 @@ class Model(iron.Graph):
 
     @property
     def draws_at_once(self) -> bool:
-        """Whether ``generate`` draws all ``max_tokens`` before the second
-        arrives, whichever is ``eos``: none of them costs more to read.
+        """Whether, after a non-EOS first token, ``generate`` draws the rest
+        before the second arrives: even those past ``eos`` cost no more to read.
         """
         return False
 
@@ -530,7 +530,7 @@ class Model(iron.Graph):
                     if piece:
                         yield piece
                     seen, held = held, len(drawn)
-            if token in self.eos and not at_once:
+            if token in self.eos and (count == 1 or not at_once):
                 break
         if text and held < len(drawn):
             shown = tokenizer.decode(drawn[seen:held])
