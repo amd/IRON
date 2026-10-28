@@ -92,10 +92,9 @@ APPLICATIONS = {
         "tokenizer.json",
         each_step=("npu1", "npu2"),
     ),
-    # Granite 4.0-H 1B's decode measured 0.0035 at 131071 and its deepest
-    # prompt chunk 4.1e-5, one compile at its native 131072. The MoE sizes
-    # the package also builds stream every expert a row and have no
-    # checkpoint or test here.
+    # Granite 4.0-H 1B's decode measured 0.0007 to 0.0069 on npu2, 4k to
+    # the whole context; its deepest prompt chunk 4.1e-5 to 0.0052; npu1
+    # still unmeasured.
     "granite_4.0_h_1b": Application(
         GraniteHybrid, "granite-4.0-h-1b", "model.safetensors", "tokenizer.json"
     ),

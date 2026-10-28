@@ -99,6 +99,7 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    | Llama 3.2 3B | 131072 | 101 |
    | Granite 4.2 3B | 131072 | 86 |
    | Llama 3.2 1B | 131072 | 26 |
+   | Granite 4.0-H 1B | 131072 | 15 |
    | EmbeddingGemma 2, each tower and the encoder | its largest input | under 0.7 |
 
    On NPU1 a command is one operator, the longest an attention layer of the
