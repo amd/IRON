@@ -10,15 +10,20 @@ them. A handle's own ``+ - * /`` are steps too, and ``@`` of one row.
 
 import dataclasses
 import math
+from collections.abc import Sequence
 
 import ml_dtypes
+import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 
 import iron
 from iron.common import Precision
+from iron.common.feature_map import ConcatChannels, Conv2d, MaxPool2d
 from iron.common.graph.handle import Handle, State
+from iron.common.image.packaging import require_device
 
 from iron.operators.copy import Copy
-from iron.operators.flm.gemm.design import Epilogue
+from iron.operators.flm.gemm.design import M_TILE, Epilogue, compute_rows
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
@@ -172,3 +177,165 @@ def causal_conv1d(x: Handle, taps, state: ConvState) -> Handle:
         tail[j] = flat[first + rows + j]
     Copy.step(tail, write)
     return y
+
+
+def _feature_map(name: str, x: Handle) -> tuple[int, int, int]:
+    """``x``'s ``(H, W, C)``.
+
+    Raises:
+        ValueError: ``x`` is not of three axes.
+    """
+    if len(x.shape) != 3:
+        raise ValueError(f"{name}(): x {tuple(x.shape)} is not a map (H, W, C)")
+    return x.shape
+
+
+def conv2d(
+    x: Handle, weight, bias=None, stride=1, padding=0, dilation=1, groups=1
+) -> Handle:
+    """The feature map ``x`` convolved by ``weight`` ``(out, C / groups,
+    k, k)`` at ``stride``, inside ``padding`` zero pixels a side, plus
+    ``bias`` per output channel if given.
+
+    A 1x1 at stride 1 is ``linear`` of the pixels at ``Precision.HIGH``,
+    copied first into a held map of whole flm.ProjectionGEMM row blocks
+    if they are not, the rows past them computed and dropped. Any other is
+    ``Conv2d``, its input copied into a held zero border. ``groups`` is
+    ``1`` or depthwise, as ``Conv2d`` builds.
+
+    Raises:
+        ValueError: ``x`` is not a map, its channels are not the weight's
+            times ``groups``, the kernel is not square, or ``dilation`` is
+            not 1.
+    """
+    H, W, C = _feature_map("conv2d", x)
+    out, per_group, k, kw = weight.shape
+    if C != per_group * groups:
+        raise ValueError(
+            f"conv2d(): x has {C} channels, the weight reads {per_group} "
+            f"times {groups} groups"
+        )
+    if k != kw or dilation != 1:
+        raise ValueError(
+            f"conv2d(): only a square kernel at dilation 1 has an operator, not "
+            f"{k}x{kw} at dilation {dilation}"
+        )
+    if k == 1 and stride == 1 and groups == 1 and not padding:
+        n = H * W
+        pixels = x.reshape(n, C)
+        unit = M_TILE * compute_rows(require_device())
+        if n % unit:
+            held = iron.state((-(-n // unit) * unit, C))
+            held[:n] = pixels
+            pixels = held
+        y = linear(
+            pixels,
+            weight[:, :, 0, 0].astype(ml_dtypes.bfloat16),
+            bias,
+            precision=Precision.HIGH,
+        )
+        return y[:n].reshape(H, W, out)
+    rows = x.reshape(H, W * C)
+    # One channel a group pads its width in the band; patches read it held.
+    banded = per_group == 1
+    if banded:
+        conv = Conv2d(weight, W, stride, padding=padding, groups=groups)
+    else:
+        conv = Conv2d(weight, W + 2 * padding, stride, groups=groups)
+    if padding:
+        line = (W if banded else W + 2 * padding) * C
+        shape = (H + 2 * padding, line)
+        held = iron.state(shape)
+        Copy.step(np.zeros(shape, ml_dtypes.bfloat16), held)
+        offset = padding * line + (0 if banded else padding * C)
+        interior = TensorAccessPattern(shape, offset, [H, W * C], [line, 1])
+        Copy.step(rows, held, dst=interior)
+        rows = held
+    out_rows = (H + 2 * padding - k) // stride + 1
+    y = conv(rows, rows=out_rows).reshape(out_rows * conv.out_width, out)
+    if bias is not None:
+        y = y + bias
+    return y.reshape(out_rows, conv.out_width, out)
+
+
+def max_pool2d(x: Handle, kernel_size, stride=None, padding=0) -> Handle:
+    """The feature map ``x``'s max over each ``kernel_size`` square window
+    at ``stride`` (``kernel_size`` where None), each channel its own:
+    ``MaxPool2d``, which pools at stride 1 inside ``-inf`` padding of half
+    the window, then every ``stride``-th pixel of every ``stride``-th row.
+
+    Raises:
+        ValueError: ``x`` is not a map, or another ``padding``.
+    """
+    H, W, C = _feature_map("max_pool2d", x)
+    stride = kernel_size if stride is None else stride
+    if padding != kernel_size // 2:
+        raise ValueError(
+            f"max_pool2d(): only padding={kernel_size // 2} has an operator, "
+            f"not padding={padding}"
+        )
+    y = MaxPool2d(H, W, C, kernel_size)(x.reshape(H, W * C))
+    if stride == 1:
+        return y.reshape(H, W, C)
+    rows, width = (H - 1) // stride + 1, (W - 1) // stride + 1
+    strided = TensorAccessPattern(
+        (H, W * C), 0, [rows, width, C], [stride * W * C, stride * C, 1]
+    )
+    return Copy.step(y, src=strided).reshape(rows, width, C)
+
+
+def interpolate(
+    x: Handle, size=None, scale_factor=None, mode="nearest", align_corners=None
+) -> Handle:
+    """The feature map ``x`` upsampled 2x, each pixel a 2x2 block: each row
+    read twice into a held map, which is then written twice, into the even
+    and the odd pixels of another.
+
+    Raises:
+        ValueError: ``x`` is not a map, or the result is not its exact 2x
+            nearest upsampling.
+    """
+    H, W, C = _feature_map("interpolate", x)
+
+    def pair(v):
+        return tuple(v) if isinstance(v, (tuple, list)) else (v, v)
+
+    if (size is None) == (scale_factor is None):
+        doubles = False
+    elif size is not None:
+        doubles = pair(size) == (2 * H, 2 * W)
+    else:
+        doubles = pair(scale_factor) == (2, 2)
+    if not doubles or mode != "nearest" or align_corners is not None:
+        raise ValueError(
+            f"interpolate(): only the exact 2x nearest upsampling has an operator, "
+            f"not size={size}, scale_factor={scale_factor}, mode={mode!r}, "
+            f"align_corners={align_corners}"
+        )
+    doubled, out = iron.state((2 * H, W * C)), iron.state((2 * H, 2 * W * C))
+    twice = TensorAccessPattern((H, W * C), 0, [H, 2, W * C], [W * C, 0, 1])
+    Copy.step(x.reshape(H, W * C), doubled, src=twice)
+    for column in (0, C):
+        dst = TensorAccessPattern(
+            out.shape, column, [2 * H, W, C], [2 * W * C, 2 * C, 1]
+        )
+        Copy.step(doubled[:], out, dst=dst)
+    return Copy.step(out[:]).reshape(2 * H, 2 * W, C)
+
+
+def cat(tensors: Sequence[Handle], dim=0) -> Handle:
+    """Two to four feature maps of one height and width joined along their
+    channels, ``dim`` -1: ``ConcatChannels``.
+
+    Raises:
+        ValueError: A tensor is not a map, or ``dim`` is not the channels'.
+    """
+    maps = [_feature_map("cat", t) for t in tensors]
+    if dim not in (-1, 2):
+        raise ValueError(f"cat(): only the channels, dim -1, are joined, not {dim}")
+    H, W, _ = maps[0]
+    channels = tuple(c for _, _, c in maps)
+    y = ConcatChannels(H, W, channels)(
+        *(t.reshape(H, W * c) for t, c in zip(tensors, channels))
+    )
+    return y.reshape(H, W, sum(channels))

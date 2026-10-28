@@ -14,6 +14,7 @@ from .cli import main
 from .blocks import (
     MLP,
     Attention,
+    BatchNorm2d,
     DecoderLayer,
     Embedding,
     EncoderLayer,
@@ -32,7 +33,7 @@ from .blocks import (
     activation,
     residual_add,
 )
-from iron.common.feature_map import Conv2d
+from iron.common.feature_map import ConcatChannels, Conv2d, MaxPool2d
 from .causal import Call, CausalConv1d, CausalLM, Checkpoints, Decoder
 from .encoder import Encoder, Tower
 from .golden import Golden, HuggingFace
@@ -42,11 +43,13 @@ from .session import Session
 
 __all__ = [
     "Attention",
+    "BatchNorm2d",
     "Call",
     "CausalConv1d",
     "CausalLM",
     "Checkpoint",
     "Checkpoints",
+    "ConcatChannels",
     "Config",
     "Conv2d",
     "Decoder",
@@ -64,6 +67,7 @@ __all__ = [
     "Linear",
     "LogMel",
     "MLP",
+    "MaxPool2d",
     "Model",
     "Multimodal",
     "NoCache",

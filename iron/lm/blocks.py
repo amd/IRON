@@ -350,6 +350,29 @@ class LayerNorm(iron.Graph):
         return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
 
 
+class BatchNorm2d(iron.Graph):
+    """``torch.nn.BatchNorm2d``'s affine weights and running statistics,
+    float32, which ``fold`` folds into the conv before it.
+    """
+
+    def __init__(self, num_features: int, eps: float = 1e-5):
+        self.weight = iron.param(num_features, dtype=np.float32)
+        self.bias = iron.param(num_features, dtype=np.float32)
+        self.running_mean = iron.param(num_features, dtype=np.float32)
+        self.running_var = iron.param(num_features, dtype=np.float32)
+        self.num_batches_tracked = iron.param(dtype=np.int64)
+        self.eps = eps
+
+    def fold(self, weight) -> tuple[np.ndarray, np.ndarray]:
+        """The bias-free conv ``weight`` with this norm folded in, and the
+        bias it gives, float32 whatever the conv's dtype, so a bf16 weight
+        rounds once, after the fold.
+        """
+        scale = self.weight / np.sqrt(self.running_var + np.float32(self.eps))
+        weight = np.asarray(weight, np.float32) * scale[:, None, None, None]
+        return weight, (self.bias - self.running_mean * scale).astype(np.float32)
+
+
 def activation(name: str):
     """The function ``hidden_act`` ``name`` is.
 
