@@ -2330,82 +2330,89 @@
 ## Examples
 
 <details>
-<summary>iron/applications/gemma4_flm</summary>
+<summary>tests/applications/embedding_gemma2</summary>
 
 | Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
 |---|---|---|---|---|
-| test_iron_engine_reload_rebuilds_override_state[iter0] | ✅ | - | - | - |
-| test_iron_engine_reload_rebuilds_override_state[iter1] | ✅ | - | - | - |
-| test_iron_engine_reload_rebuilds_override_state[iter2] | ✅ | - | - | - |
-| test_iron_engine_reload_rebuilds_override_state[iter3] | ✅ | - | - | - |
-| test_iron_engine_reload_rebuilds_override_state[iter4] | ✅ | - | - | - |
-| test_iron_matches_engine[prompt_long_prompt] | ✅ | - | - | - |
-| test_iron_matches_engine[prompt_word_problem] | ✅ | - | - | - |
+| test_embeddinggemma_2_accuracy[document] | - | - | ✅ | - |
+| test_embeddinggemma_2_accuracy[long_document] | - | - | ✅ | - |
+| test_embeddinggemma_2_accuracy[near_the_limit] | - | - | ✅ | - |
+| test_embeddinggemma_2_accuracy[past_the_window] | - | - | ✅ | - |
+| test_embeddinggemma_2_accuracy[query] | - | - | ✅ | - |
+| test_image_processor_refuses[shape_(1, 5000)-tokens_280-refusal_patch columns] | ✅ | - | ✅ | - |
+| test_image_processor_refuses[shape_(5000, 4000)-tokens_280-refusal_does not fit] | ✅ | - | ✅ | - |
+| test_image_processor_refuses[shape_(97, 2003)-tokens_280-refusal_patch columns] | ✅ | - | ✅ | - |
+| test_image_processor_refuses_on_npu1[test_image_processor_refuses_on_npu1] | ✅ | - | ✅ | - |
+| test_vision_window_positions_are_each_patch_rows[hk_1-wk_1] | ✅ | - | ✅ | - |
+| test_vision_window_positions_are_each_patch_rows[hk_14-wk_19] | ✅ | - | ✅ | - |
+| test_vision_window_positions_are_each_patch_rows[hk_16-wk_16] | ✅ | - | ✅ | - |
+| test_vision_window_positions_are_each_patch_rows[hk_200-wk_1] | ✅ | - | ✅ | - |
+| test_vision_window_positions_are_each_patch_rows[hk_6-wk_42] | ✅ | - | ✅ | - |
+| test_vision_window_positions_are_each_patch_rows[hk_65-wk_4] | ✅ | - | ✅ | - |
+| test_vision_window_positions_are_each_patch_rows[hk_8-wk_35] | ✅ | - | ✅ | - |
 
 </details>
 
 <details>
-<summary>iron/applications/gemma4_flm/gemm_dequant</summary>
+<summary>tests/applications/gemma4/reference</summary>
 
 | Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
 |---|---|---|---|---|
-| test_all_gemm_dequant_selections[iter0] | ✅ | - | - | - |
-| test_all_gemm_dequant_selections[iter1] | ✅ | - | - | - |
-| test_all_gemm_dequant_selections[iter2] | ✅ | - | - | - |
-| test_all_gemm_dequant_selections[iter3] | ✅ | - | - | - |
-| test_all_gemm_dequant_selections[iter4] | ✅ | - | - | - |
-| test_example_overrides_only_gemm_and_dequant[iter0] | ✅ | - | ✅ | - |
-| test_example_overrides_only_gemm_and_dequant[iter1] | ✅ | - | ✅ | - |
-| test_example_overrides_only_gemm_and_dequant[iter2] | ✅ | - | ✅ | - |
-| test_example_overrides_only_gemm_and_dequant[iter3] | ✅ | - | ✅ | - |
-| test_example_overrides_only_gemm_and_dequant[iter4] | ✅ | - | ✅ | - |
-| test_offline_dequant_layout_is_a_permutation[iter0] | ✅ | - | ✅ | - |
-| test_offline_dequant_layout_is_a_permutation[iter1] | ✅ | - | ✅ | - |
-| test_offline_dequant_layout_is_a_permutation[iter2] | ✅ | - | ✅ | - |
-| test_offline_dequant_layout_is_a_permutation[iter3] | ✅ | - | ✅ | - |
-| test_offline_dequant_layout_is_a_permutation[iter4] | ✅ | - | ✅ | - |
-| test_offline_dequant_uses_floor_rounding[iter0] | ✅ | - | ✅ | - |
-| test_offline_dequant_uses_floor_rounding[iter1] | ✅ | - | ✅ | - |
-| test_offline_dequant_uses_floor_rounding[iter2] | ✅ | - | ✅ | - |
-| test_offline_dequant_uses_floor_rounding[iter3] | ✅ | - | ✅ | - |
-| test_offline_dequant_uses_floor_rounding[iter4] | ✅ | - | ✅ | - |
-| test_offline_dequant_writes_a_sidecar[iter0] | ✅ | - | ✅ | - |
-| test_offline_dequant_writes_a_sidecar[iter1] | ✅ | - | ✅ | - |
-| test_offline_dequant_writes_a_sidecar[iter2] | ✅ | - | ✅ | - |
-| test_offline_dequant_writes_a_sidecar[iter3] | ✅ | - | ✅ | - |
-| test_offline_dequant_writes_a_sidecar[iter4] | ✅ | - | ✅ | - |
-| test_plot_contains_all_selections[iter0] | ✅ | - | ✅ | - |
-| test_plot_contains_all_selections[iter1] | ✅ | - | ✅ | - |
-| test_plot_contains_all_selections[iter2] | ✅ | - | ✅ | - |
-| test_plot_contains_all_selections[iter3] | ✅ | - | ✅ | - |
-| test_plot_contains_all_selections[iter4] | ✅ | - | ✅ | - |
-| test_prepare_model_links_inputs_and_owns_sidecars[iter0] | ✅ | - | ✅ | - |
-| test_prepare_model_links_inputs_and_owns_sidecars[iter1] | ✅ | - | ✅ | - |
-| test_prepare_model_links_inputs_and_owns_sidecars[iter2] | ✅ | - | ✅ | - |
-| test_prepare_model_links_inputs_and_owns_sidecars[iter3] | ✅ | - | ✅ | - |
-| test_prepare_model_links_inputs_and_owns_sidecars[iter4] | ✅ | - | ✅ | - |
+| TestGemma4::test_a_prompt_longer_than_a_chunk_runs_in_chunks[test_a_prompt_longer_than_a_chunk_runs_in_chunks] | ✅ | - | ✅ | - |
+| TestGemma4::test_decode_from_an_empty_cache_matches_the_forward_token_by_token[test_decode_from_an_empty_cache_matches_the_forward_token_by_token] | ✅ | - | ✅ | - |
+| TestGemma4::test_every_step_of_every_version_resolves[test_every_step_of_every_version_resolves] | ✅ | - | ✅ | - |
+| TestGemma4::test_the_accuracy_check_scores_the_model_against_the_reference[test_the_accuracy_check_scores_the_model_against_the_reference] | ✅ | - | ✅ | - |
+| TestGemma4::test_the_determinism_check_finds_the_reference_deterministic[test_the_determinism_check_finds_the_reference_deterministic] | ✅ | - | ✅ | - |
+| TestGemma4::test_the_prompt_matches_the_forward_and_leaves_decode_its_caches[test_the_prompt_matches_the_forward_and_leaves_decode_its_caches] | ✅ | - | ✅ | - |
+| test_a_placeholder_s_per_layer_inputs_are_the_padding_token_s[test_a_placeholder_s_per_layer_inputs_are_the_padding_token_s] | ✅ | - | ✅ | - |
+| test_a_shared_layer_with_no_earlier_layer_of_its_kind_is_refused[test_a_shared_layer_with_no_earlier_layer_of_its_kind_is_refused] | ✅ | - | ✅ | - |
+| test_bidirectional_attention_for_images_alone_is_text_s_causal[test_bidirectional_attention_for_images_alone_is_text_s_causal] | ✅ | - | ✅ | - |
+| test_what_is_not_built_is_refused[text_{'attention_k_eq_v': True}] | ✅ | - | ✅ | - |
+| test_what_is_not_built_is_refused[text_{'attn_logit_softcapping': 50.0}] | ✅ | - | ✅ | - |
+| test_what_is_not_built_is_refused[text_{'enable_moe_block': True}] | ✅ | - | ✅ | - |
+| test_what_is_not_built_is_refused[text_{'rope_parameters': {'full_attention': {'rope_type': 'default'}}}] | ✅ | - | ✅ | - |
+| test_what_is_not_built_is_refused[text_{'use_bidirectional_attention': 'all'}] | ✅ | - | ✅ | - |
+| test_what_is_not_built_is_refused[text_{'use_bidirectional_attention': True}] | ✅ | - | ✅ | - |
+| test_what_is_not_built_is_refused[text_{'vocab_size_per_layer_input': 512}] | ✅ | - | ✅ | - |
 
 </details>
 
 <details>
-<summary>iron/applications/llama_3.2_1b</summary>
+<summary>tests/applications/llama</summary>
 
 | Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
 |---|---|---|---|---|
-| test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_1] | ✅ | - | - | - |
-| test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_40] | ✅ | - | - | - |
-| test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_1] | ✅ | - | - | - |
-| test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_40] | ✅ | - | - | - |
-| test_llama_3_2_1b_accuracy[iter0] | ✅ | - | - | - |
-| test_llama_3_2_1b_accuracy[iter1] | ✅ | - | - | - |
-| test_llama_3_2_1b_accuracy[iter2] | ✅ | - | - | - |
-| test_llama_3_2_1b_accuracy[iter3] | ✅ | - | - | - |
-| test_llama_3_2_1b_accuracy[iter4] | ✅ | - | - | - |
-| test_llama_3_2_1b_determinism[iter0] | ✅ | - | - | - |
-| test_llama_3_2_1b_determinism[iter1] | ✅ | - | - | - |
-| test_llama_3_2_1b_determinism[iter2] | ✅ | - | - | - |
-| test_llama_3_2_1b_determinism[iter3] | ✅ | - | - | - |
-| test_llama_3_2_1b_determinism[iter4] | ✅ | - | - | - |
+| test_llama_3_2[llama_3.2_1b-prompt_13_tokens_1] | ✅ | - | - | - |
+| test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1] | ✅ | - | - | - |
+
+</details>
+
+<details>
+<summary>tests/applications/llama/reference</summary>
+
+| Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
+|---|---|---|---|---|
+| TestBiasedLlama::test_a_prompt_longer_than_a_chunk_runs_in_chunks[test_a_prompt_longer_than_a_chunk_runs_in_chunks] | ✅ | - | ✅ | - |
+| TestBiasedLlama::test_decode_from_an_empty_cache_matches_the_forward_token_by_token[test_decode_from_an_empty_cache_matches_the_forward_token_by_token] | ✅ | - | ✅ | - |
+| TestBiasedLlama::test_every_step_of_every_version_resolves[test_every_step_of_every_version_resolves] | ✅ | - | ✅ | - |
+| TestBiasedLlama::test_the_accuracy_check_scores_the_model_against_the_reference[test_the_accuracy_check_scores_the_model_against_the_reference] | ✅ | - | ✅ | - |
+| TestBiasedLlama::test_the_determinism_check_finds_the_reference_deterministic[test_the_determinism_check_finds_the_reference_deterministic] | ✅ | - | ✅ | - |
+| TestBiasedLlama::test_the_prompt_matches_the_forward_and_leaves_decode_its_caches[test_the_prompt_matches_the_forward_and_leaves_decode_its_caches] | ✅ | - | ✅ | - |
+
+</details>
+
+<details>
+<summary>tests/applications/long_context</summary>
+
+| Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
+|---|---|---|---|---|
+| test_every_decoder_application_is_held_to_its_context[test_every_decoder_application_is_held_to_its_context] | ✅ | - | ✅ | - |
+| test_nothing_grows_with_the_context[application_gemma4_e2b-version_decode] | ✅ | - | ✅ | - |
+| test_nothing_grows_with_the_context[application_gemma4_e2b-version_prompt] | ✅ | - | ✅ | - |
+| test_nothing_grows_with_the_context[application_llama_3.2_1b-version_decode] | ✅ | - | ✅ | - |
+| test_nothing_grows_with_the_context[application_llama_3.2_1b-version_prompt] | ✅ | - | ✅ | - |
+| test_nothing_grows_with_the_context[application_llama_3.2_3b-version_decode] | ✅ | - | ✅ | - |
+| test_nothing_grows_with_the_context[application_llama_3.2_3b-version_prompt] | ✅ | - | ✅ | - |
 
 </details>
 

@@ -1,4 +1,6 @@
 # Performance trends
 
-No benchmark moved by 5% and by more than 2x the spread the runs measured.
+**Operators added:** `embedding_gemma2`, `gemma4/reference`, `llama`, `llama/reference`, `long_context`
+
+**Operators dropped:** `test`
 
