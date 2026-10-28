@@ -12,6 +12,7 @@ never a hand-picked number.
 """
 
 import importlib.util
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -153,12 +154,13 @@ def _linked_list(seed: int, n: int, steps: int):
 def test_section5_walk_matches_numpy_host_driven():
     mod = _example("section-5", "carried_loop")
     successor, trail = _linked_list(0, mod.N, steps=20)
-    walk = mod.Walk(successor)
+    walk = mod.Walk(successor, len(trail) - 1)
     node, steps = trail[0], 0
     for expected in trail[1:]:
         nxt = walk.reference(node=node, steps=steps)
         node, steps = int(nxt["node"]), int(nxt["steps"])
         assert node == expected
+    np.testing.assert_array_equal(walk.trail.host, trail[1:])
 
 
 @pytest.mark.supported_devices("npu2")
@@ -217,4 +219,24 @@ def test_section7_a_calls_own_value_wins_over_the_profile():
 def test_section7_profile_on_device():
     mod = _example("section-7", "profiles")
     # The profile's tile_size=1024 only divides the default size (2048).
+    mod.main([])
+
+
+def test_section8_toy_decoder_matches_numpy():
+    mod = _example("section-8", "toy_decoder")
+    with tempfile.TemporaryDirectory() as directory:
+        checkpoint = mod.toy_checkpoint(mod.TOY, directory)
+        model = mod.Llama(mod.TOY, checkpoint.tree("random", seed=0))
+        rng = np.random.default_rng(1)
+        tokens = rng.integers(0, mod.TOY.vocab_size, 8).astype(np.int64)
+        ids = np.zeros(mod.TOY.prefill_chunk, dtype=np.int32)
+        ids[:8] = tokens
+        values = dict(token=int(tokens[-1]), position=7, start=0, rows=8, rope_start=0)
+        _, carry = model.reference(ids, **values)
+        assert dict(carry) == {"token": 825, "position": 8}
+
+
+@pytest.mark.supported_devices("npu2")
+def test_section8_toy_decoder_on_device():
+    mod = _example("section-8", "toy_decoder")
     mod.main([])
