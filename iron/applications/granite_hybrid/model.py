@@ -2,20 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Granite 4.0-H on the shared decoder (``iron.lm``), its shape read from
-its checkpoint's ``config.json``.
+its checkpoint's ``config.json``. This package ships the dense sizes
+only; a checkpoint with experts is refused (``num_local_experts``).
 
 Granite 4.0-H is Granite's layer (its four scalars, ``GraniteConfig``)
-with most layers' attention replaced by a Mamba2 mixer (``Mamba``) and its
-feed-forward a shared gated MLP (``SharedMLP``), plus a mixture of experts
-where the config has experts (``GraniteMoE``). The attention layers rotate
-nothing unless ``position_embedding_type`` is ``"rope"``.
-
-A Mamba2 mixer projects its input to a gate, ``x``, ``B``, ``C`` and a
-time step per head; ``x``, ``B`` and ``C`` pass a short causal depthwise
-convolution, then a state space scan (``SelectiveScan``); the scan's
-output, gated, is RMS-normed and projected back.
-The convolution's last rows and the scan's state are the layer's
-``Checkpoints`` states, as LFM2's convolution is.
+with most layers' attention replaced by a Mamba2 mixer (``Mamba``) and
+its feed-forward a shared gated MLP (``SharedMLP``). The attention
+layers rotate nothing unless ``position_embedding_type`` is ``"rope"``.
+A Mamba2 mixer's convolution and state-space scan (``SelectiveScan``)
+carry state between calls as ``Checkpoints``, like LFM2's convolution.
 """
 
 import dataclasses
@@ -31,20 +26,18 @@ from iron.lm import (
     Checkpoints,
     Linear,
     RMSNorm,
-    Weights,
     residual_add,
 )
 from iron.operators.copy import Copy
-from iron.operators.experts import Experts
-from iron.operators.router import TopKRouter
 from iron.operators.selective_scan import SelectiveScan
 
 
 @dataclasses.dataclass(frozen=True)
 class GraniteHybridConfig(GraniteConfig):
     """``GraniteConfig``, which layers are attention, the Mamba2 mixer's
-    shape, the shared MLP's width and the experts, ``intermediate_size``
-    wide.
+    shape and the shared MLP's width. A checkpoint with experts
+    (``num_local_experts``) is refused; this package ships the dense
+    sizes only.
     """
 
     # transformers' default; __post_init__ sets None but under "rope".
@@ -68,6 +61,11 @@ class GraniteHybridConfig(GraniteConfig):
             raise ValueError(
                 f"GraniteHybridConfig: {len(self.layer_types)} layer_types for "
                 f"{self.num_hidden_layers} layers"
+            )
+        if self.num_local_experts:
+            raise ValueError(
+                f"GraniteHybridConfig: num_local_experts {self.num_local_experts}, "
+                "this package ships the dense sizes only"
             )
         if self.position_embedding_type != "rope":
             object.__setattr__(self, "rope_theta", None)
@@ -154,47 +152,15 @@ class SharedMLP(iron.Graph):
         return self.output_linear(F.silu(gate) * up)
 
 
-class Router(iron.Graph):
-    """The experts' router: ``layer``, a linear to a logit per expert."""
-
-    def __init__(self, c: GraniteHybridConfig):
-        self.layer = Linear(
-            c.hidden_size, c.num_local_experts, False, precision=c.precision
-        )
-
-
-class GraniteMoE(iron.Graph):
-    """A mixture of experts: ``router``, then ``Experts`` over the
-    checkpoint's stacked ``input_linear`` (each expert's gate over its up)
-    and ``output_linear``.
-    """
-
-    def __init__(self, c: GraniteHybridConfig):
-        X, E, M = c.num_local_experts, c.hidden_size, c.intermediate_size
-        self.router = Router(c)
-        self.input_linear = Weights(weight=(X, 2 * M, E))
-        self.output_linear = Weights(weight=(X, E, M))
-        self.top_k = c.num_experts_per_tok
-
-    def body(self, x):
-        gate_up, down = self.input_linear.weight, self.output_linear.weight
-        layer = self.router.layer
-        logits = F.linear(x, layer.weight, precision=layer.precision)
-        ids, weights = TopKRouter.step(logits, top_k=self.top_k)
-        return Experts.step(x, ids, weights, gate_up, down)
-
-
 class GraniteHybridLayer(GraniteLayer):
     """Granite's layer, ``mamba`` in attention's place where the layer is
-    Mamba2, its feed-forward ``shared_mlp`` plus ``block_sparse_moe`` where
-    the config has experts.
+    Mamba2, its feed-forward ``shared_mlp``.
     """
 
     def __init__(self, c: GraniteHybridConfig, i: int):
         super().__init__(c, i)
         del self.mlp
         self.shared_mlp = SharedMLP(c)
-        self.block_sparse_moe = GraniteMoE(c) if c.num_local_experts else None
         self.mamba = None
         if not c.attends(i):
             del self.self_attn, self.cache
@@ -209,14 +175,12 @@ class GraniteHybridLayer(GraniteLayer):
         )
         h = self.post_attention_layernorm(x)
         y = self.shared_mlp(h)
-        if self.block_sparse_moe is not None:
-            y = self.block_sparse_moe(h) + y
         return residual_add(x, y, self.residual_multiplier)
 
 
 class GraniteHybrid(Granite):
     """Granite 4.0-H on ``config``'s shape and a checkpoint's ``weights``,
-    from its sharded checkpoint and ``tokenizer.json``.
+    from its checkpoint and ``tokenizer.json``.
     """
 
     config = GraniteHybridConfig
