@@ -8,10 +8,13 @@ SPDX-License-Identifier: Apache-2.0
 Section 2's graph compiled for one fixed shape and ran it, over and over,
 unchanged. A language model's decoder is not that regular: a prompt chunk
 might run 1 row or 2048, and a `max_seq_len`-sized cache is read up to
-wherever the conversation currently is, not its full length, every call. A
-graph handles this the same way an operator's own tunables are a `param()`
-or a `tunable()`: by declaring a **per-call value**, read on the device
-rather than baked into the compiled image.
+wherever the conversation currently is, not its full length, every call.
+As in Section 1, an operator's `param()` describes a fixed property of the
+problem, such as the input size, while a `tunable()` describes a choice of
+how to map the work onto the device, such as how many columns to use.
+Both are fixed for a compiled image. A graph handles an extent that changes
+between calls by declaring a **per-call value**, read on the device rather
+than baked into the compiled image.
 
 ## Walkthrough of [bounded_graph.py](./bounded_graph.py)
 
@@ -57,7 +60,7 @@ graph(x, n=256)
 One `compile()` builds one image sized for `x`'s full shape; `n` is free to
 change every call, with no second compile and no second image. This is the
 "one array, every extent" rule the whole operator and graph layer is built
-around ([AGENTS.md](../../AGENTS.md#design-rationale-and-known-limits)):
+around:
 `build()` only ever sees an operator's declared shape, so a decoder's
 prompt-chunk version serves a 1-row call and a 2048-row one alike, bounded
 by a per-call value rather than rebuilt per length.
