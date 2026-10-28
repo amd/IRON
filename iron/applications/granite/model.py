@@ -3,22 +3,17 @@
 
 """Granite 4.2 3B over the shared decoder and layer (``iron.lm``): its
 embedding and head on the NPU (``Granite``) and its shape, read from its
-checkpoint's ``config.json``. Run it with ``python -m
+checkpoint's ``config.json``. Run with ``python -m
 iron.applications.granite.model``.
 
-Granite is Llama's layer with four scalars of its own config's: the
-attention logits scale by ``attention_multiplier`` rather than ``1 /
-sqrt(head_dim)``, each block's output joins its residual times
-``residual_multiplier`` (``GraniteLayer``), the embedding rows are scaled
-by ``embedding_multiplier`` and the logits divided by ``logits_scaling``,
-folded into the final norm's weight once it loads.
-Its output head is untied (``lm_head``). Its checkpoint is sharded;
-``Checkpoint`` reads the index.
+Granite is Llama's layer with four scalars from its config: attention
+scaled by ``attention_multiplier``, each block's residual by
+``residual_multiplier`` (``GraniteLayer``), the embedding rows by
+``embedding_multiplier`` and the logits by ``logits_scaling``. Its head is
+untied (``lm_head``); its checkpoint is sharded.
 
-The operators' tunables are the graph's profile, ``profiles/<device>.json``,
-keyed by operator shape at Granite 4.2 3B's shape: a decode step's and a
-2048-row prompt chunk's, at any ``max_seq_len``, which sizes the caches and
-the RoPE table alone.
+Tunables are keyed by operator shape in ``profiles/<device>.json``, at
+Granite 4.2 3B's: a decode step's and a 2048-row prompt chunk's.
 """
 
 import dataclasses
@@ -60,10 +55,10 @@ class GraniteLayer(DecoderLayer):
 
 
 class Granite(CausalLM):
-    """Granite on ``config``'s shape and a checkpoint's ``weights``, by its
-    names: the (untied) output head is ``lm_head``. Every matrix is read
-    ``(out, in)``, as the checkpoint ships it: GEMV's ``(M, K)`` and GEMM's
-    column-major B. From its sharded checkpoint and ``tokenizer.json``.
+    """Granite on ``config``'s shape and a checkpoint's ``weights``: the
+    untied output head is ``lm_head``, every matrix read ``(out, in)`` as
+    the checkpoint ships it. From its sharded checkpoint and
+    ``tokenizer.json``.
     """
 
     config = GraniteConfig
