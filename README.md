@@ -5,7 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # 🦾 - IRON: Unlocking the Full Potential of NPUs - 🦾
 
-<a href="https://discord.gg/cW99Ds85e8">
+<a href="https://amd.github.io/IRON/" title="IRON documentation and benchmarks">
+   <img src="https://img.shields.io/badge/docs-amd.github.io%2FIRON-blue" alt="Website" /></a>
+<a href="https://discord.gg/UbXzGdXsR5">
     <img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord" /></a>
 <a href="https://github.com/amd/iron/releases/latest" title="Download the latest release">
    <img src="https://img.shields.io/github/v/release/amd/iron?include_prereleases" alt="Latest Release" /></a>
@@ -170,7 +172,8 @@ What the text decoders (Llama and Gemma 4 above) share:
 
 ## Community and Support
 
-- 💬 **Discord**: Join our [Discord server](https://discord.gg/cW99Ds85e8) for discussions and support
+- 🌐 **Website**: [amd.github.io/IRON](https://amd.github.io/IRON/) for the full documentation and benchmark history
+- 💬 **Discord**: Join the [ROCm Discord](https://discord.gg/UbXzGdXsR5)'s **#ROCm-NPU** channel for discussions and support
 - 🐛 **Issues**: Report bugs and request features via [GitHub Issues](https://github.com/amd/iron/issues)
 - 📖 **Contributing**: See [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines
 - 📚 **Documentation**: [AGENTS.md](./AGENTS.md) for the rules and the map of the code, operator docstrings in `iron/operators/`, kernel docs in the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
