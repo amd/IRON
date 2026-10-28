@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 FLM_REPO   := https://github.com/andrej/FastFlowLM.git
-FLM_COMMIT := afbbd18d3fb73c71b1eb3b3ea655da0ee7396faf
+FLM_COMMIT := 2aa64e5f47951f6b2330a44607a3b70a8fdcd723
 BUILD      := $(CURDIR)/build
 FLM_ROOT   := $(BUILD)/FastFlowLM
 FLM_SRC    := $(FLM_ROOT)/src
@@ -25,7 +25,7 @@ compile-llama:
 	NPU_CACHE_HOME=$(CACHE) $(IRON_PYTHON) compile_llama.py $(LLAMA) --max-seq-len 2048
 
 compile-embedding:
-	NPU_CACHE_HOME=$(CACHE) $(IRON_PYTHON) compile_embeddinggemma2.py $(EMBED) --max-tokens 512
+	NPU_CACHE_HOME=$(CACHE) $(IRON_PYTHON) compile_embeddinggemma2.py $(EMBED) --max-tokens 2048
 
 $(FLM_ROOT):
 	git clone $(FLM_REPO) $@

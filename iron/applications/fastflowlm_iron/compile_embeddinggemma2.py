@@ -5,40 +5,31 @@
 """Compile every EmbeddingGemma 2 graph version without loading it."""
 
 import argparse
+import dataclasses
 from pathlib import Path
 
 import aie.utils as aie_utils
 from aie.iron.device import from_name
 
-from iron.lm import Checkpoint, load_weights
-from iron.lm.embeddinggemma2.model import (
-    EMBEDDINGGEMMA_2,
-    ROWS,
-    EmbeddingGemma,
-    layout,
-    text_tensors,
-)
+from iron.applications.embedding_gemma2 import EmbeddingGemma
+from iron.lm import Checkpoint
+from iron.lm.checkpoint import weights_file
 
 
 def compile_model(directory: Path, max_tokens: int) -> None:
-    if max_tokens % ROWS:
-        raise ValueError(f"--max-tokens must be a multiple of {ROWS}")
-
     aie_utils.set_current_device(from_name("npu2", n_cols=8))
-    config = EMBEDDINGGEMMA_2
-    checkpoint = Checkpoint(directory / "model.safetensors")
-    weights = load_weights(
-        text_tensors(checkpoint.tensors), layout(config), config.n_layers
+    weights = weights_file(directory)
+    config = dataclasses.replace(
+        EmbeddingGemma.default_config(weights), max_tokens=max_tokens
     )
-    graph = EmbeddingGemma(config, weights, max_tokens)
+    graph = EmbeddingGemma(config, Checkpoint(weights).tree())
 
-    shapes_to_compile = graph.shapes()
-    for index, shapes in enumerate(shapes_to_compile, 1):
-        rows = shapes["x"][0]
-        print(f"[{index}/{len(shapes_to_compile)}] compiling {rows} rows", flush=True)
-        version = graph.compile(record="disk", verbose=True, **shapes)
-        print(f"embedding {rows} rows: {version.artifacts.image}", flush=True)
-        print(f"embedding {rows} rows manifest: {version.artifacts.dump()}", flush=True)
+    version = graph.compile(**graph.shapes()[0])
+    print(f"embedding {max_tokens} rows: {version.artifacts.image}", flush=True)
+    print(
+        f"embedding {max_tokens} rows manifest: {version.artifacts.dump()}",
+        flush=True,
+    )
 
 
 def main() -> None:
@@ -51,8 +42,8 @@ def main() -> None:
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=512,
-        help="largest input version; a multiple of 64 (default: 512)",
+        default=2048,
+        help="largest input length (default: 2048)",
     )
     args = parser.parse_args()
     compile_model(args.directory, args.max_tokens)
