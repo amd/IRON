@@ -7,8 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 IBM's Granite 4.0-H, `GraniteHybrid` in `model.py`, whose docstring says how
 it differs from Granite: Mamba2 mixers in most layers' place of attention,
-a shared MLP, and a mixture of experts in the MoE sizes. The shared library
-is [AGENTS.md](../../../AGENTS.md#language-models).
+and a shared MLP. This package ships the dense 1B; a checkpoint with
+experts is refused. The shared library is
+[AGENTS.md](../../../AGENTS.md#language-models).
 
 The dense 1B runs on the NPU from its real checkpoint: every layer, the
 Mamba2 scan (`SelectiveScan`) and causal convolution included, one compile
@@ -16,7 +17,7 @@ serving every prompt length and its native 131072 positions, the scan's
 state checkpointed at each 2048-position chunk boundary so a chat turn
 reruns only its last chunk. `tests/applications/granite_hybrid/test.py`
 checks it against Hugging Face's float32 model, and `reference/` the graph
-at an MoE toy and a dense one, device-free.
+at a dense toy, device-free.
 
 ## Weights and tokenizer
 
@@ -63,14 +64,3 @@ bitwise identical. The first token takes 2.9 s after a 13-character
 prompt (a prompt chunk's scan streams all 2048 rows whatever the prompt's
 length), 3.6 s after 292 tokens and 8.0 s after 2048, and decode runs at
 6.7 tokens a second; none of it is tuned.
-
-## The mixture-of-experts sizes
-
-[`granite-4.0-h-tiny`](https://huggingface.co/ibm-granite/granite-4.0-h-tiny)
-(64 experts of width 512, 6 a token, in all 40 layers, 13.9 GB) builds, but
-does not run at a usable rate: `Experts` streams every expert's weights for
-each row through one core, 59.8 ms a row a layer at its shape on npu2
-(checked against its numpy reference), so about 2.4 s a decoded token and
-80 minutes a 2048-row prompt chunk, and its runtime sequence unrolls every
-row's every expert. It waits for a sparse, token-grouped prompt path and a
-gathered decode GEMV.

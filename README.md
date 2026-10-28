@@ -153,6 +153,7 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 |---|---|---|
 | Llama 3.2 1B, 3B | [llama](./iron/applications/llama/) | `llama3.2-1b`, `llama3.2-3b` |
 | Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` |
+| Granite 4.0-H 1B | [granite_hybrid](./iron/applications/granite_hybrid/) | `granite-4.0-h-1b` |
 | Gemma 4 E2B text decoder | [gemma4](./iron/applications/gemma4/) | `gemma-4-e2b-it` |
 | EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |
 | Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) |
