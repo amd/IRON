@@ -19,6 +19,7 @@ therefore has to clear both gates.
 import argparse
 import csv
 import re
+import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -79,6 +80,14 @@ def parse_args():
         help="Decimal places for values and percentages (default: 2)",
     )
     p.add_argument("--date-fmt", default=DATE_FMT)
+    p.add_argument(
+        "--fail-on",
+        action="append",
+        default=[],
+        metavar="METRIC",
+        help="Exit with status 1 when this metric got worse past both gates; "
+        "repeat for several",
+    )
     return p.parse_args()
 
 
@@ -95,9 +104,12 @@ def delta_pct(curr: Optional[float], prev: Optional[float]) -> Optional[float]:
     return (curr - prev) / prev * 100.0
 
 
+def improved(metric: str, pct: float) -> bool:
+    return pct > 0 if metric.startswith(HIGHER_IS_BETTER) else pct < 0
+
+
 def verdict(metric: str, pct: float) -> str:
-    improved = pct > 0 if metric.startswith(HIGHER_IS_BETTER) else pct < 0
-    return "🟢" if improved else "🔴"
+    return "🟢" if improved(metric, pct) else "🔴"
 
 
 def within_spread(curr, prev, metric, sigma):
@@ -134,6 +146,50 @@ def gate(sigma: float) -> str:
     return f" and by more than {sigma:g}x the spread the runs measured"
 
 
+def moves(
+    all_rows: List[Dict[str, str]],
+    field_order: List[str],
+    threshold: float,
+    sigma: float,
+    date_fmt: str = DATE_FMT,
+) -> List[Tuple[str, str, str, float, float, float]]:
+    """The benched metrics the newest run moved past both gates, against
+    each parametrization's run before it: (operator, parametrization,
+    metric, previous, current, percent change).
+    """
+    dates = [d for d in (parse_date(r, date_fmt) for r in all_rows) if d is not None]
+    run_date = max(dates, default=None)
+    # Group the benched parametrizations, newest row first.
+    by_test: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
+    for row in select_bench_rows(all_rows):
+        by_test.setdefault(row_key(row), []).append(row)
+    for test_rows in by_test.values():
+        test_rows.sort(
+            key=lambda r: parse_date(r, date_fmt) or datetime.min, reverse=True
+        )
+
+    changes = []
+    for (test_path, params), test_rows in by_test.items():
+        if len(test_rows) < 2:
+            continue
+        curr, prev = test_rows[0], test_rows[1]
+        if parse_date(curr, date_fmt) != run_date:
+            continue
+
+        operator = operator_name(test_path, params)
+        for column, metric in tracked_metrics([curr, prev], field_order):
+            prev_v = try_parse_float(prev.get(column))
+            curr_v = try_parse_float(curr.get(column))
+            pct = delta_pct(curr_v, prev_v)
+            if pct is None or abs(pct) < threshold:
+                continue
+            if within_spread(curr, prev, metric, sigma):
+                continue
+            changes.append((operator, params, metric, prev_v, curr_v, pct))
+
+    return changes
+
+
 def build_report(
     all_rows: List[Dict[str, str]],
     field_order: List[str],
@@ -168,39 +224,13 @@ def build_report(
         date = parse_date(row, date_fmt)
         if date is None:
             continue
-        operator = operator_name((row.get("Test Path") or "").strip())
+        operator = operator_name(*row_key(row))
         if date == run_date:
             operators_now.add(operator)
         elif date == previous_date:
             operators_before.add(operator)
 
-    # Group the benched parametrizations, newest row first.
-    by_test: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
-    for row in select_bench_rows(all_rows):
-        by_test.setdefault(row_key(row), []).append(row)
-    for test_rows in by_test.values():
-        test_rows.sort(
-            key=lambda r: parse_date(r, date_fmt) or datetime.min, reverse=True
-        )
-
-    changes = []
-    for (test_path, params), test_rows in by_test.items():
-        if len(test_rows) < 2:
-            continue
-        curr, prev = test_rows[0], test_rows[1]
-        if parse_date(curr, date_fmt) != run_date:
-            continue
-
-        operator = operator_name(test_path)
-        for column, metric in tracked_metrics([curr, prev], field_order):
-            prev_v = try_parse_float(prev.get(column))
-            curr_v = try_parse_float(curr.get(column))
-            pct = delta_pct(curr_v, prev_v)
-            if pct is None or abs(pct) < threshold:
-                continue
-            if within_spread(curr, prev, metric, sigma):
-                continue
-            changes.append((operator, params, metric, prev_v, curr_v, pct))
+    changes = moves(all_rows, field_order, threshold, sigma, date_fmt)
 
     added = sorted(operators_now - operators_before - {UNKNOWN_OPERATOR})
     dropped = sorted(operators_before - operators_now - {UNKNOWN_OPERATOR})
@@ -251,6 +281,20 @@ def main():
             date_fmt=args.date_fmt,
         ),
     )
+
+    worse = [
+        change
+        for change in moves(
+            all_rows, field_order, args.threshold, args.sigma, args.date_fmt
+        )
+        if change[2] in args.fail_on and not improved(change[2], change[5])
+    ]
+    if worse:
+        print(f"Worse than the run before by {args.threshold:g}%{gate(args.sigma)}:")
+    for operator, params, metric, prev_v, curr_v, pct in worse:
+        print(f"{operator} [{params}]: {metric} {prev_v:g} -> {curr_v:g} ({pct:+.1f}%)")
+    if worse:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

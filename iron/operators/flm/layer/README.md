@@ -5,7 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.DecodeLayer`
 
-> Note: This operator uses hand-placed and hand-allocated components.
+Ported from the `layer` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)'s Gemma 4 engine.
+
+> Note: This operator uses hand-written DMA programs, packet routes and kernel lock ids.
 > As a result it is less portable and less idiomatic than most of the other operators 
 > in this repository. If your goal is to learn IRON operator programming,
 > other operators are likely better examples.
@@ -18,11 +20,8 @@ The kernels come from mlir-aie's `flm_gemma4_decode_*` factories.
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 from iron.operators.flm import DecodeLayer
 
-op = DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type="swa", context=ctx)
-op.compile()
-run = op.get_callable()
-run.set_parameters(context_len=37, max_l=4096)
-run(x, proj, rms, rope_rms, kv)
+layer = DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type="swa")
+layer(x, proj, rms, rope_rms, kv, context_len=37, max_l=4096)
 ```
 
 `geometry` is `FLM_GEMMA4_E2B_DECODE` or `FLM_GEMMA4_E4B_DECODE` from
@@ -45,7 +44,8 @@ no k or v projection and writes no cache row. If `geometry.double_wide_mlp`
 is set, a skip layer has twice the intermediate size.
 
 The four layer types configure the device identically. They differ only in
-the runtime sequence. One xclbin therefore runs all four.
+the runtime sequence. One xclbin, the `global` layer's, therefore runs all
+four.
 
 ## What the layer computes
 
@@ -79,17 +79,19 @@ The attention matmuls run on bfp16 operands.
 | `max_l` | rows of the KV cache, at most 32768 |
 
 `max_l` sets where V starts in a global layer's cache. A sliding-window
-layer's cache is a ring of 512 rows.
+layer's cache is a ring of 512 rows. The host refuses a dispatch with a
+negative `context_len`, a `max_l` above 32768 or, in a global layer, a
+`context_len` of `max_l` or more.
 
 ## Buffers
 
-The design expects these buffers, in this order. The argument spec gives
-upper bounds on their sizes.
+The design expects these buffers, in this order. The operator's buffer sizes
+(`arg_sizes` in `design.py`) are upper bounds on what a layer reads.
 
 | Buffer | Holds |
 |---|---|
 | `x` | the hidden state at offset 0. The layer writes its output over it. The per-layer-input path reads the token embedding, `model_dim` values at `2 * model_dim`. |
-| `proj` | the layer's weights, at the offsets that `weight_layout` in `design.py` gives |
+| `proj` | the layer's weights, at the offsets that `LayerDims.weights` in `design.py` gives |
 | `rms` | the four RMS norm weights |
 | `rope_rms` | the cos and sin of the token's position and the q and k norm weights (`3 * head_dim`), then the token's per-layer embedding, its norm weight and `model_dim + 32` values for the up projection |
 | `kv` | the K cache, then the V cache. Every layer except a skip layer writes this token's k and v at row `context_len`. |

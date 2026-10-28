@@ -10,12 +10,34 @@ name = "iron"
 version = "0.1.0"
 description = "IRON: Unlocking the Full Potential of NPUs"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 dependencies = [
     "numpy",
     "ml_dtypes",
 ]
 
+[project.optional-dependencies]
+# Model.load: a Hugging Face download, its tokenizer and its chat template.
+models = ["huggingface_hub", "jinja2", "tokenizers"]
+
 [tool.setuptools.packages.find]
 include = ["iron*"]
+# The tests, their goldens and toy checkpoints, stay in the repository.
+exclude = ["iron.tests*"]
+
+[tool.setuptools.package-data]
+"iron.lm" = ["prompt.txt"]
+# In every package: what an application reads beside its code at run time.
+"*" = [
+    "profiles/*.json",
+    "profiles/*/*.json",
+    "*.json",
+    "*.hpp",
+    "Makefile",
+]
+
+[tool.pyright]
+include = ["iron/common/graph", "iron/functional.py", "iron/lm"]
+# A loop over chunks or calls, never empty, binds what follows it.
+reportPossiblyUnboundVariable = false

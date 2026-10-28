@@ -5,15 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.LMHead`
 
+Ported from the `lm_head` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)'s Gemma 4 engine.
+
 Gemma 4's softcapped logits from a q4nx vocabulary, with the RMS norm folded
 in.
 
 ```python
 from iron.operators.flm import LMHead
 
-op = LMHead(dim=1536, vocab=262144, softcap=30.0, context=ctx)
-op.compile()
-op.get_callable()(y, w, x)
+LMHead(dim=1536, vocab=262144, softcap=30.0)(y, w, x)
 ```
 
 `x` holds the token, then its RMS weight: `2 * dim` bf16. `w` is the

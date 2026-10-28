@@ -6,6 +6,8 @@
 import argparse, csv, os
 from datetime import datetime, timedelta
 
+from pretty_common import row_key
+
 
 def drop_rows_older_than(rows, max_age_days, date_fmt="%Y-%m-%d %H:%M:%S"):
     """Drop rows whose date is more than `max_age_days` behind the newest date.
@@ -38,8 +40,7 @@ def limit_rows_by_date(rows, limit, date_fmt="%Y-%m-%d %H:%M:%S"):
     # Operators share parametrization names, so the key carries the test path.
     test_groups = {}
     for row in rows:
-        key = (row.get("Test Path", ""), row.get("Test", ""))
-        test_groups.setdefault(key, []).append(row)
+        test_groups.setdefault(row_key(row), []).append(row)
 
     # For each test, sort by date and keep only the latest N entries
     limited_rows = []
@@ -122,17 +123,16 @@ def main():
     )  # Ignore empty/non-existant all.csv on first run
     latest_rows = get_rows(args.latest)
 
-    with open(args.all, "w", newline="") as f:
-        output_rows = all_rows + latest_rows
-        add_empty_columns(output_rows)
+    output_rows = all_rows + latest_rows
+    add_empty_columns(output_rows)
 
-        output_rows = drop_rows_older_than(output_rows, args.max_age_days)
+    output_rows = drop_rows_older_than(output_rows, args.max_age_days)
 
-        # Apply limit if specified
-        if args.limit:
-            output_rows = limit_rows_by_date(output_rows, args.limit)
+    # Apply limit if specified
+    if args.limit:
+        output_rows = limit_rows_by_date(output_rows, args.limit)
 
-        write_results(output_rows, args.all)
+    write_results(output_rows, args.all)
 
 
 if __name__ == "__main__":

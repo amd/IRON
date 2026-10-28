@@ -2,48 +2,69 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+import numbers
 import re
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
 import pytest
-import sys
 import statistics
 
-from iron.common import AIEContext
 import aie.utils as aie_utils
 from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
 
+from iron.lm.cli import FLAGS
+from iron.lm.golden import RECORD, Golden
+from iron.tests.support.tools import DEVICES
 
-@pytest.fixture
-def aie_context(request):
-    """Create a fresh AIEContext for each test"""
-    verbose_mlir = request.config.option.verbose > 0
-    compiler = request.config.getoption("--compiler", default="peano")
-    ctx = AIEContext(mlir_verbose=verbose_mlir, compiler=compiler)
-    yield ctx
-    aie_utils.DefaultNPURuntime.cleanup()
+
+def _bound_device(name: str):
+    """A fixture binding the device ``DEVICES[name]`` builds as current, the
+    previous one restored after: what a test that resolves or compiles
+    device-free needs.
+    """
+
+    def bound():
+        device = DEVICES[name]()
+        with aie_utils.set_current_device(device):
+            yield device
+
+    return pytest.fixture(bound, name=name)
+
+
+npu2 = _bound_device("npu2")
+npu1 = _bound_device("npu1")
 
 
 def pytest_addoption(parser):
     parser.addoption(
         "--csv-output",
-        default="tests_latest.csv",
-        help="Output CSV file for test metrics",
+        help="Write each test's metrics to this CSV file",
     )
     parser.addoption(
-        "--iterations",
-        type=int,
-        default=5,
-        help="Number of iterations to run each test for statistics",
+        "--record-goldens",
+        action="store_true",
+        help="Record the Hugging Face logits a test's goldens lack (needs "
+        "torch and transformers)",
     )
-    parser.addoption(
-        "--compiler",
-        default="peano",
-        choices=["peano", "chess"],
-        help="Kernel compiler: 'peano' (default) or 'chess' (requires Vitis/aietools)",
-    )
+    for flags, kwargs in FLAGS:
+        parser.addoption(*flags, **kwargs)
+
+
+@pytest.fixture(scope="module")
+def golden(request):
+    """``golden(name, reference, *inputs)``: the ``Golden`` file
+    ``goldens/<name>.npz`` beside the test, of what ``reference()`` (a
+    ``HuggingFace``) builds from ``inputs``.
+    """
+
+    def open_golden(name, reference, *inputs):
+        path = request.path.with_name("goldens") / f"{name}.npz"
+        return Golden(path, reference, inputs)
+
+    return open_golden
 
 
 def get_git_commit():
@@ -69,22 +90,15 @@ class CSVReporter:
         self.date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.test_metrics = {}  # test_name -> {metric_name -> [values]}
         self.bench = {}  # test_name -> bool
-        self.unmatched = set()  # (test_path, test_name, metric) a pass never printed
+        self.unmeasured = set()  # (test_path, test_name) a pass recorded nothing
 
-    def add_result(
-        self, test_path, test_name, passed, captured_output, metric_patterns, bench
-    ):
+    def add_result(self, test_path, test_name, passed, metrics, bench):
         key = (test_path, test_name)
         self.test_metrics.setdefault(key, {}).setdefault("passed", []).append(passed)
         self.bench[key] = bench
-
-        for metric_name, pattern in metric_patterns.items():
-            match = re.search(pattern, captured_output)
-            if not match:
-                if passed:
-                    self.unmatched.add((test_path, test_name, metric_name))
-                continue
-            value = float(match.group("value"))
+        if passed and not metrics:
+            self.unmeasured.add(key)
+        for metric_name, value in metrics:
             self.test_metrics[key].setdefault(metric_name, []).append(value)
 
     def finalize_results(self):
@@ -122,16 +136,16 @@ class CSVReporter:
                     )
             self.results.append(row)
 
-    def report_unmatched_metrics(self):
-        """Name the benched metrics that a passing test declared but never printed.
+    def report_unmeasured(self):
+        """Name the benched tests that passed without recording a metric.
 
-        A pattern that matches nothing leaves the column empty, and an empty
-        column drops out of the charts without any test failing.
+        A benched test that records nothing leaves its columns empty, and an
+        empty column drops out of the charts without any test failing.
         """
         return sorted(
-            f"{path}[{name}]: {metric}"
-            for path, name, metric in self.unmatched
-            if self.bench.get((path, name))
+            f"{path}[{name}]"
+            for path, name in self.unmeasured
+            if self.bench[path, name]
         )
 
     def write_csv(self):
@@ -148,35 +162,39 @@ class CSVReporter:
             writer.writerows(self.results)
 
 
-# Initialize the CSV writer once at test session setup
-@pytest.fixture(scope="session")
-def csv_reporter(request):
-    csv_path = request.config.getoption("--csv-output")
-    reporter = CSVReporter(csv_path)
-    yield reporter
-    reporter.write_csv()
-
-
-# Hook into test completion to capture metrics in CSVReporter
+# Hook into test completion to collect each test's metrics into the CSVReporter
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
 
-    if report.when == "call":
+    # A runner whose device heap holds less control code than a model's full
+    # ELF needs sets IRON_XFAIL_DEVICE_HEAP until its driver is fixed.
+    if (
+        report.failed
+        and call.excinfo is not None
+        and os.environ.get("IRON_XFAIL_DEVICE_HEAP")
+        and call.excinfo.errisinstance(RuntimeError)
+        and "DRM_IOCTL_AMDXDNA_CREATE_BO" in str(call.excinfo.value)
+        and "err=-28" in str(call.excinfo.value)
+    ):
+        report.outcome = "skipped"
+        report.wasxfail = "the device heap is full (CREATE_BO ENOSPC)"
+
+    # A test that fails in setup (a runner missing a model's files) is
+    # recorded too, or the model would drop out of the results.
+    if (report.when == "call" and not report.skipped) or report.failed:
         csv_reporter = item.session.config._csv_reporter
         if csv_reporter:
             # The pytest nodeid looks like this:
-            # iron/operators/dequant/test.py::test_dequant[iter0-dequant_8_cols_2_channels_2048_tile_128]
+            # iron/operators/flm/gemm/test.py::test_gemm[M_2048-K_2048-N_2048]
             # Split into:
-            #   test_path: iron/operators/dequant/test.py::test_dequant
-            #   test_name: just the parametrize id (without iter prefix)
-            nodeid_components = re.match(
-                r"^(.+?::[^\[]+)\[(iter\d+-)?(.+?)\]$", item.nodeid
-            )
+            #   test_path: iron/operators/flm/gemm/test.py::test_gemm
+            #   test_name: just the parametrize id
+            nodeid_components = re.match(r"^(.+?::[^\[]+)\[(.+?)\]$", item.nodeid)
             if nodeid_components:
                 test_path = nodeid_components.group(1)
-                test_name = nodeid_components.group(3)
+                test_name = nodeid_components.group(2)
             else:
                 # A test with no parameters carries no [...] suffix, so won't
                 # match the regex above.
@@ -184,81 +202,96 @@ def pytest_runtest_makereport(item, call):
                 test_name = item.nodeid.rsplit("::", 1)[-1]
 
             passed = report.outcome == "passed"
-            captured = report.capstdout
-
-            # Get metric patterns from test item's markers
-            metric_patterns = {}
-            for marker in item.iter_markers("metrics"):
-                metric_patterns = marker.kwargs
-                break
-
+            # The figures the test gave record_property (run_test's latency,
+            # its spread, bandwidth and throughput; a test's own, e.g. TTFT).
+            metrics = [
+                (name, float(value))
+                for name, value in item.user_properties
+                if isinstance(value, numbers.Real)
+            ]
             csv_reporter.add_result(
                 test_path,
                 test_name,
                 passed,
-                captured,
-                metric_patterns,
+                metrics,
                 item.get_closest_marker("bench") is not None,
             )
 
 
 def pytest_configure(config):
+    if config.getoption("--record-goldens"):
+        os.environ[RECORD] = "1"
     csv_path = config.getoption("--csv-output")
-    config._csv_reporter = CSVReporter(csv_path)
-    config.addinivalue_line(
-        "markers", "metrics(**patterns): specify metric patterns for this test"
-    )
+    config._csv_reporter = CSVReporter(csv_path) if csv_path else None
 
 
-def pytest_collection_modifyitems(config, items):
-    marked_items = [
-        (item, item.get_closest_marker("supported_devices")) for item in items
-    ]
-    marked_items = [(item, marker) for item, marker in marked_items if marker]
-    if not marked_items:
-        # Nothing collected needs the NPU. Resolving one here would open the
-        # single-tenant device at collection time, contending with whatever
-        # else holds it and erroring out when none is attached.
+ATTACHED = pytest.StashKey[str]()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Skip a device test the attached NPU is not among its
+    ``supported_devices``, before its fixtures build anything. The device is
+    opened here, at the first device test run, never at collection: it is
+    single-tenant, and a collect-only gate must not hold it.
+    """
+    marker = item.get_closest_marker("supported_devices")
+    if marker is None:
         return
-
-    if aie_utils.DefaultNPURuntime is None:
-        # Most often an unsourced XRT, which otherwise surfaces as a pile of
-        # failures that look like a toolchain regression.
-        raise pytest.UsageError(f"No NPU runtime: {npu_unavailable_reason()}")
-    device = aie_utils.DefaultNPURuntime.device().resolve().name
-    for item, marker in marked_items:
-        if device not in marker.args:
-            item.add_marker(
-                pytest.mark.skip(
-                    reason=f"Not supported on {device} (supported: {', '.join(marker.args)})"
-                )
-            )
+    if ATTACHED not in item.config.stash:
+        if aie_utils.DefaultNPURuntime is None:
+            # A host without an NPU runs everything else: the device tests
+            # are skipped, each saying why (most often no NPU, or an
+            # unsourced XRT, which would otherwise look like a pile of
+            # toolchain regressions).
+            item.config.stash[ATTACHED] = ""
+        else:
+            device = aie_utils.DefaultNPURuntime.device().resolve().name
+            item.config.stash[ATTACHED] = device
+    device = item.config.stash[ATTACHED]
+    if not device:
+        pytest.skip(f"No NPU runtime: {npu_unavailable_reason()}")
+    if device not in marker.args:
+        pytest.skip(f"Not supported on {device} (supported: {', '.join(marker.args)})")
 
 
 def pytest_sessionfinish(session, exitstatus):
-    if hasattr(session.config, "_csv_reporter"):
-        reporter = session.config._csv_reporter
+    reporter = getattr(session.config, "_csv_reporter", None)
+    if reporter:
         reporter.finalize_results()
         reporter.write_csv()
-        unmatched = reporter.report_unmatched_metrics()
-        if unmatched:
+        unmeasured = reporter.report_unmeasured()
+        if unmeasured:
             reporter.csv_path.with_suffix(".unmatched").write_text(
-                "\n".join(unmatched) + "\n"
+                "\n".join(unmeasured) + "\n"
             )
             print(
-                "\nBenched tests passed without printing a metric they declare:\n  "
-                + "\n  ".join(unmatched)
+                "\nBenched tests passed without recording a metric:\n  "
+                + "\n  ".join(unmeasured)
             )
 
 
-# Generate multiple iterations of each test
-def pytest_generate_tests(metafunc):
-    """Generate multiple iterations of each test for statistics gathering"""
-    iterations = metafunc.config.getoption("--iterations")
+SHARING_MODULES = pytest.StashKey[set]()
 
-    if iterations > 1:
-        metafunc.fixturenames.append("_iteration")
-        metafunc.parametrize("_iteration", range(iterations), ids=lambda i: f"iter{i}")
+
+def pytest_fixture_setup(fixturedef, request):
+    if fixturedef.scope in ("class", "module"):
+        request.config.stash.setdefault(SHARING_MODULES, set()).add(request.module)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    """Release the NPU runtime after a device test, or, in a module whose
+    class- or module-scoped fixtures may hold an image its tests share, after
+    its last.
+    """
+    try:
+        return (yield)
+    finally:
+        shared = item.module in item.config.stash.get(SHARING_MODULES, set())
+        last = nextitem is None or nextitem.module is not item.module
+        if item.get_closest_marker("supported_devices") and (last or not shared):
+            aie_utils.cleanup_npu_runtime()
 
 
 def pytest_make_parametrize_id(config, val, argname):

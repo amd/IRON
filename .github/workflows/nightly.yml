@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Every application test on the real checkpoints, the extensive ones too (the
+# README's quick start among them), each night. A time worse than the night
+# before's by the gate below fails the run.
+
+name: Nightly Applications
+
+on:
+  workflow_dispatch:
+  schedule:
+   - cron:  '0 10 * * *'  # 3 AM MT, after the extensive suite
+
+# A run takes hours; a later one waits for it rather than cancelling it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: read
+
+jobs:
+  test_nightly:
+    name: Test Applications Nightly on ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: phoenix, name: Phoenix}
+          # Krackan's device heap holds less control code than Gemma 4 E2B's
+          # and EmbeddingGemma 2's full ELFs need (29f679da).
+          - {runner: krackan, name: Krackan, xfail_device_heap: "1"}
+    runs-on: [self-hosted, "${{ matrix.runner }}"]
+    env:
+      IRON_XFAIL_DEVICE_HEAP: ${{ matrix.xfail_device_heap }}
+    # Past GitHub's 6 h default: a cancelled job uploads no results.
+    timeout-minutes: 720
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+        env:
+          HOME: /workspace
+
+      - name: Use a compile cache of this job's own
+        shell: bash
+        run: echo "NPU_CACHE_HOME=$RUNNER_TEMP/npu-cache" >> "$GITHUB_ENV"
+
+      - name: Prerequisites
+        uses: ./.github/actions/prereqs
+        with:
+          env_name: ci_env
+
+      - name: Run every application test
+        id: test
+        continue-on-error: true
+        uses: ./.github/actions/test
+        env:
+          PYTHONUNBUFFERED: "1"
+          FLM_MODEL_PATH: /srv/fastflowlm
+        with:
+          env_name: ci_env
+          extensive: "true"
+          test_suite: "applications"
+
+      - name: Format test results
+        uses: ./.github/actions/format_results
+        with:
+          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' --metric='MaxKL (mean)' --metric='Top1Mismatches (mean)'"
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.runner }}-nightly
+          path: results/
+          retention-days: 14
+
+      - name: Clean up this job's compile cache
+        # This runner is self-hosted, so $RUNNER_TEMP is not emptied for us
+        # between jobs; remove it ourselves, win or lose.
+        if: always()
+        shell: bash
+        run: rm -rf "$NPU_CACHE_HOME"
+
+      - name: Fail workflow if a test failed
+        if: steps.test.outcome == 'failure'
+        run: exit 1
+
+  timing:
+    name: Compare times with the night before
+    needs: test_nightly
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out the results
+        uses: actions/checkout@v4
+        with:
+          ref: ci
+          path: history
+          persist-credentials: false
+
+      - name: Download each runner's results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: results-*-nightly
+          path: runs
+
+      - name: Fail if a time is 10% worse than the night before's
+        run: |
+          for run in runs/results-*-nightly; do
+            runner=${run#runs/results-}
+            dir="history/${runner%-nightly}/nightly"
+            ci/scripts/merge_results.sh "$run" "$dir"
+            ci/scripts/pretty_trends.py "$dir/all.csv" -o /dev/null --threshold 10 \
+              --fail-on TTFT --fail-on TPS --fail-on Latency || failed=1
+          done
+          exit "${failed:-0}"
+
+  publish:
+    needs: test_nightly
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-results.yml
+    with:
+      suite: nightly

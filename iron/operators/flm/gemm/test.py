@@ -1,58 +1,47 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import os
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
-import torch
-import aie.utils as aie_utils
-
 from aie.dialects._aie_enum_gen import AIEArch
+from aie.utils.verify import Tolerance
+from ml_dtypes import bfloat16
 
-from iron.operators import GEMM as GenericGEMM
+from iron.common import Precision
+from iron.common.testing import run_test, vectors
 from iron.operators.flm.gemm.design import (
-    BFP16_GROUP,
-    BFP16_GROUP_BYTES,
-    CT_MAX_K_FOR_N,
-    M_CHUNK_FOR_N,
+    M_TILE,
     Epilogue,
     Gelu,
-    M_TILE,
     R,
     Rounding,
-    _b_depth_for,
-    _default_l1,
-    l1_budget,
+    TILE_NS,
+    k_slices,
 )
-from iron.operators.flm.gemm.op import GEMM
-from iron.operators.flm.mm_prebuilt.op import MMPrebuilt
-from iron.operators.flm.gemm.reference import generate_golden_reference
-from iron.operators.flm.testing import skip_flm_gemm_on_npu1
-from iron.common.test_utils import run_test
-
-pytestmark = skip_flm_gemm_on_npu1
+from iron.operators.flm.gemm.op import ProjectionGEMM
+from iron.tests.support.shipped import Shipped
+from iron.tests.support.tools import DEVICES
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue
 CONV_EVEN, FLOOR = Rounding
 
 # Activation tests run at a smaller scale so the result lands where the curve
-# is not flat. generate_golden_reference grows the result like sqrt(K)*scale**2,
+# is not flat. The golden product grows like sqrt(K)*scale**2,
 # so at the default 4.0 a K=512 product sits around +-200, where gelu and silu
 # are indistinguishable from the identity.
 INPUT_SCALE = 4.0
 ACTIVATION_INPUT_SCALE = 0.5
 
 
-def get_params():
-    dev = aie_utils.get_current_device()
-    if dev is None:
-        return []
-    dev_name = dev.resolve().name
-    if dev_name not in ("npu1", "npu2"):
-        return []
+def get_params(device: str):
+    """``test_gemm``'s shapes on ``device``, run only there: declared for its
+    model in ``DEVICES``, so collecting opens no device.
+    """
+    dev = DEVICES[device]()
 
     # One full sweep is N_TILE * COLS wide, so both it and the N values that
     # leave a trailing partial column-block differ per device. The trailing
@@ -60,66 +49,54 @@ def get_params():
     # rest only drain the A broadcast, and real o/down projections always land
     # there. At K = 512 tile_n defaults to 128, halving at K >= 1024.
     # fmt: off
-    if dev_name == "npu2":
-        #      M,    K,     N, epilogue,    clamp,     rounding
+    if dev.arch is AIEArch.AIE2p:
+        #      M,    K,     N, epilogue, rounding
         regular_params = [
-            (  256,  512,  1024, NONE,     None,       CONV_EVEN),  # smallest full sweep
-            (  512, 1024,  2048, NONE,     None,       CONV_EVEN),
-            (  256,  512,  1536, NONE,     None,       CONV_EVEN),  # remainder: 4 of 8 cols
-            (  256,  512,   128, NONE,     None,       CONV_EVEN),  # remainder only: 1 col
-            (  256,  512,  1024, SILU,     None,       CONV_EVEN),
-            (  256,  512,  1024, GELU,     None,       CONV_EVEN),
-            (  256,  512,  1024, NONE, (-2.0, 2.0),    CONV_EVEN),
+            (  256,  512,  1024, NONE,     CONV_EVEN),  # smallest full sweep
+            (  256,  512,  1536, NONE,     CONV_EVEN),  # remainder: 4 of 8 cols
+            (  256,  512,   128, NONE,     CONV_EVEN),  # remainder only: 1 col
+            # Qwen3.5's gate projection: tile_n 16, at a scale no other case
+            # or tile_option_params reaches.
+            ( 2048, 1024,    16, NONE,     CONV_EVEN),
+            (  256,  512,  1024, SILU,     CONV_EVEN),
+            (  256,  512,  1024, GELU,     CONV_EVEN),
             # floor reproduces the shipped FastFlowLM overlay's rounding mode
             # (bit for bit on NPU2; NPU1 sums the K reduction in a different
             # order). It is much less accurate, so it gets its own bound below.
-            (  256,  512,  1024, NONE,     None,       FLOOR),
+            (  256,  512,  1024, NONE,     FLOOR),
         ]
         extensive_params = [
-            ( 1024, 2048,  2048, NONE,     None,       CONV_EVEN),
-            ( 2048, 2048,  2048, NONE,     None,       CONV_EVEN),
-            ( 1024, 2560,  2560, NONE,     None,       CONV_EVEN),  # E4B o-proj
-            (  512, 1536,  1536, SILU,     None,       CONV_EVEN),  # E2B down-proj
-            (  256,  512,  1024, SIGMOID,  None,       CONV_EVEN),
-            (  512, 1024,  2048, SILU, (-4.0, 4.0),    CONV_EVEN),
-            (  256,  512,  1024, SILU,     None,       FLOOR),
+            (  256,  512,  1024, SIGMOID,  CONV_EVEN),
             # K or N = 10240 at M > 256 overflows the shim BD's 20-bit
             # mega_row iteration step, so the compiler cuts that leg into
             # pieces, bounded by its queue polls and BD reclaim. These are the
             # real E4B FFN projections, and M=2048 doubles the pieces.
-            ( 1024, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down
-            ( 1024,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup
-            ( 2048, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down, 2x
-            ( 2048,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup, 2x
+            ( 1024, 10240,  2560, NONE,     CONV_EVEN),  # E4B down
+            ( 1024,  2560, 10240, NONE,     CONV_EVEN),  # E4B gateup
+            ( 2048,  2560, 10240, NONE,     CONV_EVEN),  # E4B gateup, 2x
             # 64 row-block units, past the 63 a lock can count, so B is armed
             # twice: two slabs, each resident.
-            (16384,  512,  1024, NONE,     None,       CONV_EVEN),
+            (16384,  512,  1024, NONE,     CONV_EVEN),
         ]
     else:  # npu1: _default_tile_n always returns 64 here, so with 4 columns
         # every sweep is N_TILE*COLS = 256 wide, not the 128*4=512 an
         # NPU2-shaped sweep would give.
-        #      M,    K,     N, epilogue,    clamp,     rounding
+        #      M,    K,     N, epilogue, rounding
         regular_params = [
-            (  256,  512,   256, NONE,     None,       CONV_EVEN),  # smallest full sweep
-            (  512, 1024,   512, NONE,     None,       CONV_EVEN),
-            (  256,  512,   128, NONE,     None,       CONV_EVEN),  # remainder: 2 of 4 cols
-            (  256,  512,    64, NONE,     None,       CONV_EVEN),  # remainder only: 1 col
-            (  256,  512,   320, NONE,     None,       CONV_EVEN),  # full sweep + 1 col
-            (  256,  512,   512, SILU,     None,       CONV_EVEN),
-            (  256,  512,   512, GELU,     None,       CONV_EVEN),
-            (  256,  512,   512, NONE, (-2.0, 2.0),    CONV_EVEN),
-            (  256,  512,   512, NONE,     None,       FLOOR),
+            (  256,  512,   256, NONE,     CONV_EVEN),  # smallest full sweep
+            (  256,  512,   128, NONE,     CONV_EVEN),  # remainder: 2 of 4 cols
+            (  256,  512,    64, NONE,     CONV_EVEN),  # remainder only: 1 col
+            (  256,  512,   320, NONE,     CONV_EVEN),  # full sweep + 1 col
+            (  256,  512,   512, SILU,     CONV_EVEN),
+            (  256,  512,   512, GELU,     CONV_EVEN),
+            (  256,  512,   512, NONE,     FLOOR),
         ]
         extensive_params = [
-            ( 1024, 2048,  1024, NONE,     None,       CONV_EVEN),
-            ( 2048, 2048,  1024, NONE,     None,       CONV_EVEN),
-            ( 1024, 2560,  2560, NONE,     None,       CONV_EVEN),  # E4B o-proj
-            (  512, 1536,  1536, SILU,     None,       CONV_EVEN),  # E2B down-proj
-            (  256,  512,   512, SIGMOID,  None,       CONV_EVEN),
-            (  512, 1024,  1024, SILU, (-4.0, 4.0),    CONV_EVEN),
-            (  256,  512,   512, SILU,     None,       FLOOR),
+            ( 2048, 2048,  1024, NONE,     CONV_EVEN),  # bench-tracked below
+            ( 1024, 2560,  2560, NONE,     CONV_EVEN),  # E4B o-proj, bench-tracked
+            (  256,  512,   512, SIGMOID,  CONV_EVEN),
             # Two slabs, as on NPU2.
-            (16384,  512,   256, NONE,     None,       CONV_EVEN),
+            (16384,  512,   256, NONE,     CONV_EVEN),
         ]
     # fmt: on
 
@@ -127,14 +104,15 @@ def get_params():
     # the dispatch cost, where the measurement carries no trend.
     bench_shapes = (
         {(1024, 2560, 10240), (2048, 2560, 10240)}
-        if dev_name == "npu2"
+        if dev.arch is AIEArch.AIE2p
         else {(1024, 2560, 2560), (2048, 2048, 1024)}
     )
 
     def marks_for(p, extensive):
-        marks = [pytest.mark.extensive] if extensive else []
-        M, K, N, epilogue, clamp, rounding = p
-        if (M, K, N) in bench_shapes and epilogue is NONE and clamp is None:
+        marks = [pytest.mark.supported_devices(device)]
+        marks += [pytest.mark.extensive] if extensive else []
+        M, K, N, epilogue, rounding = p
+        if (M, K, N) in bench_shapes and epilogue is NONE:
             marks.append(pytest.mark.bench)
         return marks
 
@@ -143,173 +121,327 @@ def get_params():
         params.append(pytest.param(*p, marks=marks_for(p, extensive=False)))
     for p in extensive_params:
         params.append(pytest.param(*p, marks=marks_for(p, extensive=True)))
-    return params
+    names = ("M", "K", "N", "epilogue", "rounding")
+    return [
+        pytest.param(
+            *q.values,
+            marks=q.marks,
+            id="-".join([device, *(f"{n}_{v}" for n, v in zip(names, q.values))]),
+        )
+        for q in params
+    ]
 
 
-def check_on_device(operator, golden_ref, K, rounding=CONV_EVEN):
-    """Run ``operator`` against its golden reference and return run_test's result.
-
-    Bounds the error absolutely, as a fraction of the accumulated mass
-    K * mean|a| * mean|b|. A relative tolerance cannot work: with signed A the
-    K-sum cancels by ~sqrt(K), so |C| ends up far smaller than the mass the
-    error tracks, leaving near-zero outputs uncheckable.
-
-    The fraction is per-architecture, since NPU2 emulates the mmul with bfp16
-    while NPU1 accumulates four native bf16 macs in f32 (~20x tighter). floor
-    truncates, so its bias accumulates and gets a looser bound on both.
+def flm_vectors(operator, scale=4.0):
+    """Random A (signed) and B (non-negative) at ``scale``, and epilogue(A @ B).
+    A small ``scale`` keeps K=512 products away from +-200, where gelu/silu are
+    indistinguishable from the identity; B is row-major ``(K, N)``, packed by
+    ``ProjectionGEMM.pack_B``, or ``(N, K)`` as stored under ``b_col_maj``.
     """
-    mass = (
-        K
-        * golden_ref["input"].abs().float().mean()
-        * golden_ref["input_b"].abs().float().mean()
+    K, N = operator.K, operator.N
+    B = (N, K) if operator.b_col_maj else (K, N)
+    return vectors(operator, normal=(operator.A,), scale=scale, given={operator.B: B})
+
+
+def accumulated_mass(K, A, B):
+    """K * mean|a| * mean|b|: the magnitude the accumulator's error tracks."""
+    return float(
+        K * np.abs(A.astype(np.float32)).mean() * np.abs(B.astype(np.float32)).mean()
     )
-    if aie_utils.get_current_device().resolve().name == "npu1":
+
+
+def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
+    """Run ``operator`` against its drawn vectors and return run_test's result,
+    bounding error absolutely as a fraction of the accumulated mass
+    K * mean|a| * mean|b|: a relative tolerance can't work, since signed A's
+    K-sum cancels by ~sqrt(K), leaving near-zero outputs uncheckable. The
+    fraction is per-architecture and loosens under ``floor``'s truncation bias.
+    """
+    A, B = data["A"], data["B"]
+    mass = accumulated_mass(operator.K, A, B)
+    dev = aie_utils.get_current_device()
+    assert dev is not None
+    if dev.arch is AIEArch.AIE2:
         budget = 0.002 if rounding is FLOOR else 0.0002
     else:
         budget = 0.05 if rounding is FLOOR else 0.004
     return run_test(
         operator,
         {
-            "A": golden_ref["input"].flatten(),
-            # B is consumed pre-packed; see GEMM.pack_B.
-            "B": operator.pack_B(golden_ref["input_b"]),
+            "A": A.flatten(),
+            "B": B.flatten() if operator.b_col_maj else operator.pack_B(B),
         },
-        {"C": golden_ref["output"].flatten()},
-        rel_tol=0.04,
-        abs_tol=float(budget * mass),
+        {"C": data["C"].flatten()},
+        tolerance=Tolerance.relative(0.04, budget * mass),
+        record=record,
     )
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
+@pytest.mark.parametrize(
+    "M,K,N,epilogue,rounding", [*get_params("npu1"), *get_params("npu2")]
 )
-@pytest.mark.parametrize("M,K,N,epilogue,clamp,rounding", get_params())
-def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
+def test_gemm(M, K, N, epilogue, rounding, record_property):
     scale = INPUT_SCALE if epilogue is NONE else ACTIVATION_INPUT_SCALE
-    golden_ref = generate_golden_reference(
-        M=M, K=K, N=N, epilogue=epilogue, clamp=clamp, scale=scale
-    )
-
-    operator = GEMM(
+    operator = ProjectionGEMM(
         M=M,
         K=K,
         N=N,
-        epilogue=epilogue,
-        clamp=clamp,
         rounding=rounding,
-        context=aie_context,
+        epilogue=epilogue,
+        precision=Precision.MEDIUM,
     )
 
-    errors, latency_us, bandwidth_gbps = check_on_device(
-        operator, golden_ref, K, rounding
+    errors = check_on_device(
+        operator, flm_vectors(operator, scale), rounding, record=record_property
     )
-
-    gflops = (2.0 * M * K * N) / (latency_us * 1e-6) / 1e9
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s")
-    print(f"Throughput: {gflops:.6e} GFLOP/s\n")
 
     assert not errors, "Test failed"
 
 
-def test_gemm_split_leg_bounds_runs(aie_context):
-    """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so the
-    compiler cuts that leg into pieces, bounded by its queue polls and BD
-    reclaim. Overrunning either hangs or corrupts silently, which only running
-    can show.
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("M,K,N", [(256, 512, 256), (512, 1024, 512)])
+def test_gemm_without_activations(M, K, N, record_property):
+    """Compiling no activation links no LUT tables, so on AIE2 the bytes they
+    held go to B and the tiles differ from every case above."""
+    operator = ProjectionGEMM(
+        M=M, K=K, N=N, epilogue_modes=(NONE,), precision=Precision.MEDIUM
+    )
 
-    The square case splits both legs, which the real Gemma shapes never do
-    (E4B's down overflows on K and its gate/up on N, never both), so it is
-    the only cover for the two-sided path. Regular rather than extensive
-    despite the size: ~8s against the suite's ~13s.
-    """
-    M, K, N = 512, 10240, 10240
-    golden_ref = generate_golden_reference(M=M, K=K, N=N)
+    errors = check_on_device(operator, flm_vectors(operator), record=record_property)
 
-    operator = GEMM(M=M, K=K, N=N, context=aie_context)
-
-    errors, _latency_us, _bandwidth_gbps = check_on_device(operator, golden_ref, K)
     assert not errors, "Test failed"
 
 
-def tile_option_params():
-    """Every (tile_n, tile_ma) the design accepts on this device.
-
-    The shape parameters above only exercise the default geometry, since
-    __post_init__ resolves both knobs. These cover the knobs themselves, which
-    change the blocked L1 layout, and a mismatch is silently wrong output
-    rather than a build error, so each has to run on hardware. The defaults
-    stay in the regular suite; the overrides are extensive, since each is its
-    own kernel object and xclbin.
+def b_col_maj_params(device: str):
+    """Where B as stored reaches the kernel by another path than packed B: a
+    resident and streamed memtile pool, a trailing column, every tile width and
+    two slabs, on each mac kind ``device`` has (AIE2P's bfp16/bf16, AIE2's bf16).
     """
-    dev = aie_utils.get_current_device()
-    if dev is None or dev.resolve().name not in ("npu1", "npu2"):
-        return []
-    l1 = l1_budget(dev)
-    b_elem = BFP16_GROUP_BYTES / BFP16_GROUP if dev.arch == AIEArch.AIE2p else 2
+    dev = DEVICES[device]()
+    cols = dev.cols
+    params = [
+        pytest.param(256, 512, 64 * cols, None, (NONE,), id="resident"),
+        pytest.param(256, 512, 64 * cols + 64, None, (NONE,), id="trailing-col"),
+        pytest.param(512, 6144, 64 * cols, None, (NONE,), id="streamed"),
+        pytest.param(256, 512, 64 * cols, None, tuple(Epilogue), id="tables-linked"),
+    ]
+    for tile_n in sorted(set(TILE_NS) - {64}):
+        params.append(
+            pytest.param(256, 512, tile_n * cols, tile_n, (NONE,), id=f"tn{tile_n}")
+        )
+    params.append(
+        pytest.param(
+            16384,
+            512,
+            64 * cols,
+            None,
+            (NONE,),
+            marks=pytest.mark.extensive,
+            id="slabs",
+        )
+    )
+    levels = (
+        (Precision.MEDIUM, Precision.HIGH)
+        if dev.arch is AIEArch.AIE2p
+        else (Precision.HIGH,)
+    )
+    return [
+        pytest.param(
+            *p.values,
+            precision,
+            marks=[*p.marks, pytest.mark.supported_devices(device)],
+            id=f"{device}-{p.id}-{precision}",
+        )
+        for precision in levels
+        for p in params
+    ]
 
+
+@pytest.mark.parametrize(
+    "M,K,N,tile_n,epilogue_modes,precision",
+    [*b_col_maj_params("npu1"), *b_col_maj_params("npu2")],
+)
+def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, precision, record_property):
+    operator = ProjectionGEMM(
+        M=M,
+        K=K,
+        N=N,
+        tile_n=tile_n,
+        epilogue_modes=epilogue_modes,
+        b_col_maj=True,
+        precision=precision,
+    )
+    errors = check_on_device(operator, flm_vectors(operator), record=record_property)
+    assert not errors, "Test failed"
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_gemm_split_leg_bounds_runs():
+    """N = 20480 overflows the shim BD's 20-bit step from one row-block to the
+    next, and m_chunk = 2 gives A's leg a fifth dimension, so the compiler cuts
+    both legs into pieces; overrunning either hangs or corrupts silently, and
+    no model shape cuts a leg at m_chunk = 1, so this is their only cover.
+    """
+    M, K, N = 512, 512, 20480
+    operator = ProjectionGEMM(M=M, K=K, N=N, m_chunk=2, precision=Precision.MEDIUM)
+
+    errors = check_on_device(operator, flm_vectors(operator))
+    assert not errors, "Test failed"
+
+
+def tile_option_params(device: str):
+    """Every (tile_n, tile_ma) to try on ``device``: the shapes above only
+    exercise the default geometry, and a mismatched override is silently
+    wrong output rather than a build error, so it must run on hardware. The
+    default stays in the regular suite; overrides are extensive.
+    """
+    dev = DEVICES[device]()
     params = []
-    for tile_n, ct_k in sorted(CT_MAX_K_FOR_N.items()):
-        # m_chunk matters: the core holds a B chunk across that many
-        # accumulators, so it is what decides which A heights still fit.
-        m_chunk = M_CHUNK_FOR_N[tile_n]
-        default_ma = _default_l1(tile_n, ct_k, b_elem, l1, m_chunk)[0]
+    for tile_n in sorted(TILE_NS):
         # One full sweep of the grid at this tile_n, so every column has work.
-        M, K, N = 256, 512, tile_n * dev.cols
-        for tile_ma in (16, 32, 64):
-            if M_TILE % tile_ma or tile_ma % (2 * R):
+        N = tile_n * dev.cols
+        for tile_ma in (None, 16, 32, 64):
+            if tile_ma is not None and (M_TILE % tile_ma or tile_ma % (2 * R)):
                 continue
-            try:
-                _b_depth_for(tile_ma, tile_n, ct_k, b_elem, l1, m_chunk)
-            except ValueError:
-                continue  # this A height leaves no room for B at this width
-            marks = [] if tile_ma == default_ma else [pytest.mark.extensive]
             params.append(
                 pytest.param(
-                    M,
-                    K,
+                    256,
+                    512,
                     N,
                     tile_n,
                     tile_ma,
-                    marks=marks,
-                    id=f"tn{tile_n}-ma{tile_ma}" + ("-default" if not marks else ""),
+                    marks=[
+                        pytest.mark.supported_devices(device),
+                        *([] if tile_ma is None else [pytest.mark.extensive]),
+                    ],
+                    id=f"{device}-tn{tile_n}-"
+                    + ("default" if tile_ma is None else f"ma{tile_ma}"),
                 )
             )
     return params
 
 
-@pytest.mark.parametrize("M,K,N,tile_n,tile_ma", tile_option_params())
-def test_gemm_tile_options(M, K, N, tile_n, tile_ma, aie_context):
-    """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
-    golden_ref = generate_golden_reference(M=M, K=K, N=N, scale=INPUT_SCALE)
-    operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma, context=aie_context)
-    assert operator.tile_n == tile_n and operator.tile_ma == tile_ma
-    errors, _latency_us, _bandwidth_gbps = check_on_device(operator, golden_ref, K)
+@pytest.mark.parametrize(
+    "M,K,N,tile_n,tile_ma",
+    [*tile_option_params("npu1"), *tile_option_params("npu2")],
+)
+def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
+    """The default (tile_n, tile_ma), and each other A height the design
+    accepts, computes the right answer on hardware.
+    """
+    shape = dict(M=M, K=K, N=N, tile_n=tile_n, precision=Precision.MEDIUM)
+    default = ProjectionGEMM(**shape).resolved().tile_ma
+    if tile_ma == default:
+        pytest.skip(f"tile_ma {default} is the default, run as -default")
+    try:
+        operator = ProjectionGEMM(**shape, tile_ma=tile_ma or default)
+        resolved = operator.resolved()
+    except ValueError as e:
+        pytest.skip(f"this A height leaves no room for B at this width: {e}")
+    assert (resolved.tile_n, resolved.tile_ma) == (tile_n, tile_ma or default)
+    errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
     assert not errors, "Test failed"
 
 
-@pytest.mark.parametrize("M,K,N", [(256, 512, 1024), (512, 1024, 2048)])
-def test_artifact_stem_differs_from_generic_gemm(M, K, N, aie_context):
-    """``flm.GEMM`` must never share an artifact stem with ``GEMM``.
-
-    Both classes are named ``GEMM`` and MLIROperator.name derives the stem from
-    the class name, so with the cache keyed on filename the two operators would
-    silently satisfy each other's builds in one build dir.
+def k_slice_params(device: str):
+    """Every k slice to try at the default tile_n on ``device``: like the
+    tiles above, a mismatch is silently wrong rather than a build error; the
+    default stays in the regular suite, the others are extensive.
     """
-    assert (
-        GEMM(M=M, K=K, N=N, context=aie_context).name
-        != GenericGEMM(M=M, K=K, N=N, context=aie_context).name
+    return [
+        pytest.param(
+            ct_k,
+            marks=[
+                pytest.mark.supported_devices(device),
+                *([] if ct_k is None else [pytest.mark.extensive]),
+            ],
+            id=f"{device}-" + ("default" if ct_k is None else f"ck{ct_k}"),
+        )
+        for ct_k in (None, *k_slices(512))
+    ]
+
+
+@pytest.mark.parametrize("ct_k", [*k_slice_params("npu1"), *k_slice_params("npu2")])
+def test_gemm_k_slices(ct_k):
+    """The default k slice, and each other the design accepts, computes the
+    right answer on hardware.
+    """
+    dev = aie_utils.get_current_device()
+    assert dev is not None
+    shape = dict(M=256, K=512, N=64 * dev.cols, precision=Precision.MEDIUM)
+    default = ProjectionGEMM(**shape).resolved().ct_k
+    if ct_k == default:
+        pytest.skip(f"ct_k {default} is the default, run as -default")
+    try:
+        operator = ProjectionGEMM(**shape, ct_k=ct_k or default)
+        resolved = operator.resolved()
+    except ValueError as e:
+        pytest.skip(f"this slice leaves no room for the tiles in L1: {e}")
+    assert resolved.ct_k == (ct_k or default)
+    errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
+    assert not errors, "Test failed"
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("K", [256, 768])
+def test_gemm_k_tile(K):
+    """A k tile other than the default 512 computes the right answer: Gemma
+    4's per-layer-input projection has K=256 (512 doesn't divide it); K=768
+    takes three k steps, carrying the accumulator across smaller tiles too.
+    """
+    dev = aie_utils.get_current_device()
+    assert dev is not None
+    operator = ProjectionGEMM(
+        M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256, precision=Precision.MEDIUM
     )
+    errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
+    assert not errors, "Test failed"
 
 
-def test_one_xclbin_serves_every_shape(aie_context):
-    """Several shapes back to back on one loaded xclbin.
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize(
+    "precision", [Precision.MEDIUM, Precision.HIGH], ids=["medium", "high"]
+)
+@pytest.mark.parametrize(
+    "K,tile_n,k_tile,ct_k",
+    [(512, 64, 128, 128), (16, 16, 16, 16), (64, 32, 64, 32), (96, 32, 96, 32)],
+)
+def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, ct_k, precision):
+    """A k step of one B chunk (k_tile the compute tile's k slice), or of an
+    odd count of them, walks every chunk: small integers are exact in bfp16
+    and bf16, since check_on_device's bound is only fitted at K >= 256.
+    Covers both MEDIUM's bfp16 macs and HIGH's bf16 macs.
+    """
+    dev = aie_utils.get_current_device()
+    assert dev is not None
+    N = tile_n * dev.cols
+    operator = ProjectionGEMM(
+        M=256,
+        K=K,
+        N=N,
+        tile_n=tile_n,
+        k_tile=k_tile,
+        ct_k=ct_k,
+        precision=precision,
+    )
+    rng = np.random.default_rng(0)
+    A = rng.integers(-3, 4, (256, K)).astype(bfloat16)
+    B = rng.integers(0, 4, (K, N)).astype(bfloat16)
+    C = (A.astype(np.float32) @ B.astype(np.float32)).astype(bfloat16)
+    errors = run_test(
+        operator,
+        {"A": A.flatten(), "B": operator.pack_B(B)},
+        {"C": C.flatten()},
+        tolerance=Tolerance.exact(note="integers, exact in every sum"),
+    )
+    assert not errors, errors
 
-    The parametrised tests cannot cover this: each gets a fresh context, so
-    the array is reconfigured between cases. Here the shapes share one, they
-    disagree on every parameter, and none may rebuild the xclbin.
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_one_xclbin_serves_every_shape():
+    """Several shapes back to back on one loaded xclbin: the parametrised
+    tests can't cover this, since each gets a fresh context. Here the shapes
+    share one, disagree on every parameter, and none may rebuild the xclbin.
     """
     # Every shape must resolve to the same m_chunk, which shapes the core
     # program and so the xclbin. These are all even in m_row_blocks and exclude
@@ -323,124 +455,203 @@ def test_one_xclbin_serves_every_shape(aie_context):
     ]
     xclbin = None
     for M, K, N, epilogue in shapes:
-        operator = GEMM(M=M, K=K, N=N, epilogue=epilogue, context=aie_context)
-        golden_ref = generate_golden_reference(
-            M=M, K=K, N=N, epilogue=epilogue, scale=4.0 if epilogue == "none" else 0.5
+        operator = ProjectionGEMM(
+            M=M, K=K, N=N, epilogue=epilogue, precision=Precision.MEDIUM
         )
-        mass = (
-            K
-            * golden_ref["input"].abs().float().mean()
-            * golden_ref["input_b"].abs().float().mean()
-        )
-        errors, _, _ = run_test(
+        data = flm_vectors(operator, 4.0 if epilogue == "none" else 0.5)
+        mass = accumulated_mass(K, data["A"], data["B"])
+        errors = run_test(
             operator,
-            {
-                "A": golden_ref["input"].flatten(),
-                "B": operator.pack_B(golden_ref["input_b"]),
-            },
-            {"C": golden_ref["output"].flatten()},
-            rel_tol=0.04,
-            abs_tol=float(0.004 * mass),
+            {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])},
+            {"C": data["C"].flatten()},
+            tolerance=Tolerance.relative(0.04, 0.004 * mass),
         )
         assert not errors, f"{M}x{K}x{N} {epilogue} failed"
 
-        stamp = (
-            operator.xclbin_artifact.filename,
-            os.path.getmtime(operator.xclbin_artifact.filename),
-        )
+        # A cache hit: the image run_test built and ran.
+        image = operator.compile().image
+        stamp = (str(image), os.path.getmtime(image))
         if xclbin is None:
             xclbin = stamp
         assert stamp == xclbin, f"{M}x{K}x{N} rebuilt the xclbin"
 
 
-def test_one_xclbin_serves_every_clamp_bound(aie_context):
-    """Different clamp bounds back to back on one loaded xclbin.
+# The shipped overlay, the port's second reference: extensive (a download)
+# and NPU2 only.
 
-    The bounds are runtime parameters, so they must not rebuild anything.
-    Separate from test_one_xclbin_serves_every_shape, which never clamps and so
-    cannot catch bounds leaking back into the configuration.
+# Largest |d/dx| of each epilogue, used to carry the accumulator's error bound
+# through to the output. sigmoid's is exactly 1/4; silu and gelu both peak at
+# 1.0998 (gelu here being the x*sigmoid(1.702x) approximation the overlay
+# implements, whose derivative happens to share silu's maximum), rounded up.
+MAX_SLOPE = {NONE: 1.0, SIGMOID: 0.25, SILU: 1.1, GELU: 1.1}
+
+
+# Extensive, since constructing the operator downloads the image.
+SHIPPED = pytest.mark.extensive
+
+
+@pytest.fixture
+def eight_column_npu2():
+    """Skips unless the attached NPU is the eight-column NPU2 the shipped
+    binary was built for.
+    """
+    dev = aie_utils.get_current_device()
+    if dev.arch is not AIEArch.AIE2p or dev.cols < 8:
+        pytest.skip("the shipped overlay is an 8-column NPU2 binary")
+
+
+# The overlay never calls set_rounding, so it runs in the core's power-up floor
+# mode and carries a ~1% truncation bias -- not a bug. See README.md.
+BUDGET_FLOOR = 2e-2
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize(
+    "M,K,N,epilogue",
+    [
+        pytest.param(
+            256, 512, 1024, NONE, marks=SHIPPED
+        ),  # exactly one full 8-column sweep
+        pytest.param(512, 1024, 2048, NONE, marks=SHIPPED),  # two full sweeps
+        pytest.param(256, 512, 640, NONE, marks=SHIPPED),  # remainder only: 5 of 8 cols
+        pytest.param(
+            256, 512, 1280, NONE, marks=SHIPPED
+        ),  # full sweep + remainder: 1 of 8 cols
+        pytest.param(256, 512, 1024, SILU, marks=SHIPPED),
+        pytest.param(256, 512, 1024, GELU, marks=SHIPPED),
+    ],
+)
+def test_shipped_overlay(M, K, N, epilogue, record_property, eight_column_npu2):
+    """The shipped binary through the same operator: the second reference."""
+    operator = Shipped(M=M, K=K, N=N, epilogue=epilogue)
+    # B drawn row-major (K, N); the operator consumes it packed (pack_B).
+    data = vectors(operator, normal=(operator.A,), given={operator.B: (K, N)})
+
+    input_buffers = {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])}
+    output_buffers = {"C": data["C"].flatten()}
+
+    # The overlay's error is made in the ACCUMULATOR -- it runs in the core's
+    # power-up floor rounding, worth about BUDGET_FLOOR of the accumulated mass
+    # -- and the epilogue then maps that accumulator through an activation. So
+    # the output bound is the accumulator bound carried through the activation,
+    # |f(x+e) - f(x)| <= max|f'| * |e|, rather than a tolerance invented in the
+    # output domain.
+    #
+    # Only the unbounded epilogues are checked this way. For sigmoid no bound over this reference can be both correct and useful -- the
+    # accumulator error alone exceeds their whole output range -- so they are
+    # covered functionally by test_shipped_epilogue_matches_accumulator.
+    mass = accumulated_mass(K, data["A"], data["B"])
+    abs_tol = MAX_SLOPE[epilogue] * BUDGET_FLOOR * mass
+    errors = run_test(
+        operator,
+        input_buffers,
+        output_buffers,
+        tolerance=Tolerance.relative(0.04, abs_tol),
+        record=record_property,
+    )
+    assert not errors, "Test failed"
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize(
+    "epilogue",
+    [
+        pytest.param(SIGMOID, marks=SHIPPED),
+        pytest.param(SILU, marks=SHIPPED),
+    ],
+)
+def test_shipped_epilogue_matches_accumulator(epilogue, eight_column_npu2):
+    """The epilogue is the right function of the accumulator the device
+    produced. A bounded check against the idealized CPU reference can't
+    work: the overlay's floor-rounded accumulator error (~2% of the
+    accumulated mass) dwarfs sigmoid's (0,1) range, so a bound wide enough
+    to admit it also admits an all-zero result. Instead this compares
+    against the device's own no-epilogue accumulator, run through the same
+    activation on the host, so the accumulator error cancels and an
+    all-zero result still fails. gelu doesn't need this: its wider output
+    range lets test_shipped_overlay check it directly against the
+    accumulator-mass bound, and test_gemm_gelu_bf16_steps_matches_overlay
+    checks it bit for bit.
     """
     M, K, N = 256, 512, 1024
-    bounds = [(-2.0, 2.0), (-4.0, 4.0), (-0.5, 0.5)]
-    xclbin = None
-    for clamp in bounds:
-        operator = GEMM(M=M, K=K, N=N, clamp=clamp, context=aie_context)
-        golden_ref = generate_golden_reference(
-            M=M, K=K, N=N, clamp=clamp, scale=INPUT_SCALE
-        )
-        errors, _, _ = check_on_device(operator, golden_ref, K)
-        assert not errors, f"clamp={clamp} produced wrong output"
+    # A small input scale keeps the accumulator in the range where these curves
+    # are actually curved; at the default scale the product lands around +-900,
+    # where gelu and silu are indistinguishable from the identity.
+    probe = Shipped(M=M, K=K, N=N)
+    data = vectors(probe, normal=(probe.A,), scale=0.5, given={probe.B: (K, N)})
+    A, B = data["A"], data["B"]
 
-        stamp = (
-            operator.xclbin_artifact.filename,
-            os.path.getmtime(operator.xclbin_artifact.filename),
-        )
-        if xclbin is None:
-            xclbin = stamp
-        assert stamp == xclbin, f"clamp={clamp} rebuilt the xclbin"
+    def run(epi):
+        op = Shipped(M=M, K=K, N=N, epilogue=epi)
+        tensor = aie_utils.DEFAULT_TENSOR_CLASS
+        out = tensor((M, N), dtype=np.dtype("bfloat16"))
+        op(tensor(A.flatten()), tensor(op.pack_B(B)), out)
+        return out.numpy().reshape(M, N).astype(np.float32)
 
-    # ...and neither does dropping the clamp: the kernel always clamps, and an
-    # unclamped caller neutralises it with (-inf, +inf) rather than compiling
-    # a second build. config_name rather than xclbin_artifact, which only
-    # exists once compile() has run.
-    clamped = GEMM(M=M, K=K, N=N, clamp=bounds[0], context=aie_context)
-    unclamped = GEMM(M=M, K=K, N=N, context=aie_context)
-    assert unclamped.config_name == clamped.config_name
-    # The bounds do reach the instruction stream, though, so they must reach
-    # its stem or the build cache serves one caller's stream to another.
-    assert unclamped.name != clamped.name
-    assert (
-        clamped.name != GEMM(M=M, K=K, N=N, clamp=bounds[1], context=aie_context).name
+    acc = run(NONE)
+    got = run(epilogue)
+    expected = Epilogue(epilogue).apply(acc)
+
+    # Both sides see the same accumulator, so what is left is the epilogue.
+    # The bf16 term is per element (the read-back accumulator is good to 2^-8
+    # relatively; one global bound would be wider than sigmoid's range). The
+    # activation term is the overlay's own approximation, a LUT or native
+    # instruction: up to 0.018 past the bf16 interval, so 0.05, ~20x below
+    # where the bound would go vacuous (the last assertion).
+    approx = 0.0 if epilogue is NONE else 0.05
+    tol = MAX_SLOPE[epilogue] * np.abs(acc) * 2.0**-8 + 2.0**-8 + approx
+    err = np.abs(got - expected)
+    over = err > tol
+    assert not over.any(), (
+        f"{epilogue}: {int(over.sum())} of {over.size} elements "
+        f"differ from epilogue(device accumulator) by more than the bf16 bound; "
+        f"worst {float((err - tol).max()):.4f} over"
     )
+    # The bound must not be wide enough to admit a dead device.
+    assert (
+        np.abs(expected) > tol
+    ).any(), f"{epilogue}: tolerance is vacuous -- an all-zero result would pass"
 
 
-# Extensive: MMPrebuilt downloads the shipped mm.xclbin over the network.
-@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "M,K,N",
     [
-        (256, 512, 1024),  # tile_n 128
-        (512, 1536, 6144),  # Gemma 4 E2B gate_proj, tile_n 64
-        (512, 1536, 256),  # Gemma 4 E2B per-layer-input gate
+        pytest.param(256, 512, 1024, marks=SHIPPED),  # tile_n 128
+        pytest.param(512, 1536, 6144, marks=SHIPPED),  # Gemma 4 E2B gate_proj
+        pytest.param(512, 1536, 256, marks=SHIPPED),  # Gemma 4 E2B per-layer gate
     ],
 )
-def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N, aie_context):
+def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N, eight_column_npu2):
     """``gelu=bf16_steps`` with ``rounding=floor`` matches the shipped overlay's
-    gelu bit for bit, on identical inputs."""
-    dev = aie_utils.get_current_device()
-    if dev.resolve().name != "npu2" or dev.cols < 8:
-        pytest.skip("the shipped overlay is an 8-column NPU2 binary")
-    golden_ref = generate_golden_reference(
-        M=M, K=K, N=N, epilogue=GELU, scale=ACTIVATION_INPUT_SCALE
+    gelu bit for bit, on identical inputs.
+    """
+    probe = Shipped(M=M, K=K, N=N)
+    data = vectors(
+        probe, normal=(probe.A,), scale=ACTIVATION_INPUT_SCALE, given={probe.B: (K, N)}
     )
-    A, B = golden_ref["input"], golden_ref["input_b"]
+    A, B = data["A"], data["B"]
 
     def run(op):
-        op.compile()
         tensor = aie_utils.DEFAULT_TENSOR_CLASS
         out = tensor((M, N), dtype=np.dtype("bfloat16"))
-        op.get_callable()(
-            tensor.from_torch(A.flatten()),
-            tensor(np.ascontiguousarray(op.pack_B(B))),
-            out,
-        )
-        # A copy: to_torch() aliases the device buffer, which is freed with out.
-        return out.to_torch().reshape(M, N).clone()
+        op(tensor(A.flatten()), tensor(op.pack_B(B)), out)
+        return out.numpy().reshape(M, N).copy()
 
-    shipped = run(MMPrebuilt(M=M, K=K, N=N, epilogue=GELU, context=aie_context))
+    shipped = run(Shipped(M=M, K=K, N=N, epilogue=GELU))
     ported = run(
-        GEMM(
+        ProjectionGEMM(
             M=M,
             K=K,
             N=N,
             epilogue=GELU,
             rounding=FLOOR,
             gelu=Gelu.BF16_STEPS,
-            context=aie_context,
+            precision=Precision.MEDIUM,
         )
     )
     # The accumulator reaches about -15 at this scale. gelu's minimum is
     # about -0.17, so a lower minimum means the activation did not run.
-    assert float(shipped.float().min()) > -0.5, "the overlay applied no gelu"
-    same = int((shipped.view(torch.int16) == ported.view(torch.int16)).sum())
+    assert float(shipped.astype(np.float32).min()) > -0.5, "the overlay applied no gelu"
+    same = int((shipped.view(np.int16) == ported.view(np.int16)).sum())
     assert same == M * N, f"{M * N - same} of {M * N} elements differ"
