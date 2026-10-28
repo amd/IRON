@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Serve graph models to a length-prefixed binary client."""
+"""Serve language models to a length-prefixed binary client."""
 
 import inspect
 import json
@@ -13,18 +13,7 @@ import numpy as np
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
-from iron.applications.embedding_gemma2 import EmbeddingGemma
-from iron.applications.embedding_gemma2 import Multimodal as EmbeddingGemmaMultimodal
-from iron.applications.gemma4 import Gemma4, Gemma4Multimodal
-from iron.applications.llama import Llama
-
-MODELS = {
-    "embedding_gemma2": EmbeddingGemma,
-    "embedding_gemma2_multimodal": EmbeddingGemmaMultimodal,
-    "gemma4": Gemma4,
-    "gemma4_multimodal": Gemma4Multimodal,
-    "llama": Llama,
-}
+from iron.applications import model_class
 
 
 def read_exact(stream, size):
@@ -51,11 +40,11 @@ def send(stream, header, payload=b""):
 
 
 def load_model(command):
-    model_class = MODELS[command["model"]]
+    model = model_class(command["model"])
     options = {}
     if "context_length" in command:
         options["max_seq_len"] = command["context_length"]
-    return model_class.load(command["model_path"], **options)
+    return model.load(command["model_path"], **options)
 
 
 def logits(model, tokens):

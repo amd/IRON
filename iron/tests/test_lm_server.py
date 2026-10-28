@@ -4,11 +4,13 @@
 import io
 import json
 import struct
+import sys
 
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron import server
+from iron import lm_server
+from iron.applications import MODELS, model_class
 
 
 def request(header, payload=b""):
@@ -30,7 +32,7 @@ def responses(data, word_sizes):
 
 
 def test_registry_contains_graph_models():
-    assert set(server.MODELS) == {
+    assert set(MODELS) == {
         "embedding_gemma2",
         "embedding_gemma2_multimodal",
         "gemma4",
@@ -39,21 +41,30 @@ def test_registry_contains_graph_models():
     }
 
 
+def test_registry_resolves_model_class(monkeypatch):
+    class Model:
+        pass
+
+    monkeypatch.setitem(MODELS, "test", (__name__, "Model"))
+    monkeypatch.setattr(sys.modules[__name__], "Model", Model, raising=False)
+    assert model_class("test") is Model
+
+
 def test_load_model_uses_registry(monkeypatch):
     class Model:
         @classmethod
         def load(cls, path, **options):
             return path, options
 
-    monkeypatch.setitem(server.MODELS, "test", Model)
-    assert server.load_model(
+    monkeypatch.setattr(lm_server, "model_class", lambda name: Model)
+    assert lm_server.load_model(
         {
             "model": "test",
             "model_path": "/model",
             "context_length": 128,
         }
     ) == ("/model", {"max_seq_len": 128})
-    assert server.load_model({"model": "test", "model_path": "/model"}) == (
+    assert lm_server.load_model({"model": "test", "model_path": "/model"}) == (
         "/model",
         {},
     )
@@ -72,8 +83,8 @@ def test_multimodal_dispatch_uses_text_only_inputs():
             return tokens
 
     model = Model()
-    np.testing.assert_array_equal(server.logits(model, np.asarray([1, 2])), [1, 2])
-    server.reset(model)
+    np.testing.assert_array_equal(lm_server.logits(model, np.asarray([1, 2])), [1, 2])
+    lm_server.reset(model)
 
 
 def test_server_protocol(monkeypatch):
@@ -88,7 +99,7 @@ def test_server_protocol(monkeypatch):
             assert task == "query"
             return np.asarray([len(text), dimensions], dtype=np.float32)
 
-    monkeypatch.setattr(server, "load_model", lambda command: Model())
+    monkeypatch.setattr(lm_server, "load_model", lambda command: Model())
     commands = b"".join(
         [
             request({"command": "load_model", "model": "test", "model_path": "/m"}),
@@ -105,7 +116,7 @@ def test_server_protocol(monkeypatch):
         ]
     )
     output = io.BytesIO()
-    server.serve(io.BytesIO(commands), output)
+    lm_server.serve(io.BytesIO(commands), output)
     assert responses(output.getvalue(), [2, 4]) == [
         {"ok": True},
         {"ok": True, "count": 2},
