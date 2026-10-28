@@ -122,12 +122,21 @@ class CausalConv1d(iron.Graph):
     ``kernel - 1`` rows before a call are its ``state``, a slot per
     prompt-chunk boundary; ``CausalLM`` gives every one of a model the
     scratch ``F.causal_conv1d`` stages a call in (``window``, ``tail``).
+
+    Raises:
+        ValueError: ``prefill_chunk`` is smaller than ``kernel - 1``, the
+            history the staging window must hold.
     """
 
     window: State
     tail: State
 
     def __init__(self, c, channels: int, kernel: int, bias: bool = False):
+        if c.prefill_chunk < kernel - 1:
+            raise ValueError(
+                f"CausalConv1d: prefill_chunk {c.prefill_chunk} is smaller than "
+                f"kernel - 1 ({kernel - 1})"
+            )
         self.weight = iron.param(channels, 1, kernel)
         self.bias = iron.param(channels) if bias else None
         self.state = Checkpoints.of(
