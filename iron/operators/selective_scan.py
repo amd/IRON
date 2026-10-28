@@ -147,6 +147,18 @@ class SelectiveScan(Operator):
     def resolve(self, dev):
         return resolve_rows(resolve_heads(self, dev, self.heads), dev)
 
+    def compatible(self) -> None:
+        if self.block <= 0 or self.block % SLICE:
+            raise ValueError(
+                f"SelectiveScan: block ({self.block}) must be a positive "
+                f"multiple of {SLICE}"
+            )
+        if self.rows % (self.block // SLICE):
+            raise ValueError(
+                f"SelectiveScan: block ({self.block}) must hold a row count "
+                f"dividing rows ({self.rows})"
+            )
+
     def slice_bytes(self) -> tuple[int, int]:
         """Bytes of a slice's (dt_bias, A, D) then state in, and its final out."""
         return 4 * (3 + self.slice_state), 4 * self.slice_state

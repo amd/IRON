@@ -112,6 +112,8 @@ def test_granite_4_0_h_1b_rate_counts_the_draws_past_eos(model, record_property)
     stream reads each as it is drawn and counts those through eos. The two
     rates agree.
     """
+    if model.random_weights is not None:
+        pytest.skip("Early EOS is specific to the trained checkpoint")
     tokens = model.prompt(13)
     model.forget(0)
     drawn = model.generate(tokens, 40, Sampler())

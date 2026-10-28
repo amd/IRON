@@ -42,9 +42,27 @@ from iron.operators.resample.op import PatchPositions
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.sample import Sample
+from iron.operators.selective_scan import SelectiveScan
 from iron.operators.softmax import Softmax
 
 pytestmark = pytest.mark.usefixtures("npu2")
+
+
+@pytest.mark.parametrize("block", [0, -16, 1, 17, 32, 96])
+@pytest.mark.parametrize("columns", [None, 1])
+def test_selective_scan_rejects_invalid_blocks(block, columns):
+    with pytest.raises(ValueError, match="block"):
+        SelectiveScan(
+            rows=5, heads=2, head_dim=16, state_size=16, columns=columns, block=block
+        ).resolved()
+
+
+@pytest.mark.parametrize("rows,block", [(5, 16), (5, 80), (8, 32), (8, 128)])
+def test_selective_scan_accepts_blocks_dividing_rows(rows, block):
+    op = SelectiveScan(
+        rows=rows, heads=2, head_dim=16, state_size=16, columns=1, block=block
+    )
+    assert op.resolved().block == block
 
 
 def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():

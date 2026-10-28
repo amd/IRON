@@ -26,6 +26,7 @@ from iron.lm import (
     Checkpoints,
     Linear,
     RMSNorm,
+    main,
     residual_add,
 )
 from iron.operators.copy import Copy
@@ -186,3 +187,7 @@ class GraniteHybrid(Granite):
     config = GraniteHybridConfig
     profile = Path(__file__).with_name("profiles")
     layer_class = GraniteHybridLayer
+
+
+if __name__ == "__main__":
+    main(GraniteHybrid)

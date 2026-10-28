@@ -11,6 +11,8 @@ package ships the dense sizes only, so the toy has no experts.
 
 import dataclasses
 import json
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -121,6 +123,34 @@ class TestGraniteHybridDense(Decoder):
                     f"{m}.out_proj.weight": (E, I),
                 }
         return out
+
+    @pytest.mark.parametrize("position,start", [(0, 0), (64, 64), (70, 64), (100, 100)])
+    def test_forget_restarts_from_a_valid_recurrent_state(self, cpu, position, start):
+        """A non-boundary forget must not decode from the later state."""
+        model = self.host(cpu.config, cpu.weights)
+        tokens = np.random.default_rng(3).integers(0, cpu.config.vocab_size, 101)
+        model.logits(tokens[:100])
+        model.forget(position)
+        assert model.session._seen.size == start
+        resumed = model.logits(tokens[: position + 1])
+        model.forget(0)
+        if start:
+            model.logits(tokens[:start])
+        scratch = model.logits(tokens[: position + 1])
+        np.testing.assert_array_equal(resumed, scratch)
+
+
+def test_model_cli_help():
+    result = subprocess.run(
+        [sys.executable, "-m", "iron.applications.granite_hybrid.model", "--help"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert "GraniteHybrid on the NPU" in result.stdout
+    assert "--random-weights" in result.stdout
+    assert "path" in result.stdout
 
 
 def test_a_config_without_rope_reads_back_from_its_json(tmp_path):
