@@ -96,7 +96,11 @@ APPLICATIONS = {
     # the whole context; its deepest prompt chunk 4.1e-5 to 0.0052; npu1
     # still unmeasured.
     "granite_4.0_h_1b": Application(
-        GraniteHybrid, "granite-4.0-h-1b", "model.safetensors", "tokenizer.json"
+        GraniteHybrid,
+        "granite-4.0-h-1b",
+        "model.safetensors",
+        "tokenizer.json",
+        each_step=("npu1", "npu2"),
     ),
 }
 
