@@ -36,7 +36,6 @@ from iron.lm.testing import (
 # KL(graph reference || NPU) of one step deep in the caches. Llama 3.2 1B's
 # decode measured 0.002 to 0.015 just past the prompt, 0.009 to 0.033 at
 # 16k and 0.030 to 0.038 at 32k: it grows with the keys the step sums over.
-# Granite's decode measured 0.0033 at 4095 and its prompt chunk 2.3e-6.
 DEEP_KL = 0.1
 
 
@@ -74,7 +73,13 @@ APPLICATIONS = {
     "llama_3.2_3b": Application(
         Llama, "llama3.2-3b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
     ),
-    "granite_4.2_3b": Application(Granite, "granite-4.2-3b", INDEX, "tokenizer.json"),
+    # Granite's decode measured 0.0010 to 0.0022 on npu2, 4k to the whole
+    # context; npu1 still unmeasured. Each size fills the cache with its
+    # own content up to max_seq_len - 1, not a continuation of the last,
+    # so sizes aren't directly comparable.
+    "granite_4.2_3b": Application(
+        Granite, "granite-4.2-3b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
+    ),
     # Gemma 4 E2B's decode measured 0.0002 to 0.072 on npu2 and 0.0009 to
     # 0.0256 on npu1, each 4k to the whole context: each size fills the
     # cache with its own content up to max_seq_len - 1, not a continuation
