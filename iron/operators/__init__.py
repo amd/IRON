@@ -11,6 +11,7 @@ from .depthwise_conv1d import DepthwiseConv1d
 from .elementwise_add import ElementwiseAdd, RowwiseAdd
 from .elementwise_mul import ElementwiseMul, RowwiseMul
 from .emit import Emit
+from .experts import Experts
 from .gelu import GELU
 from .gemm import GEMM
 from .gemv import GEMV
@@ -24,6 +25,7 @@ from .relu import ReLU
 from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm
 from .rope import RoPE
+from .router import TopKRouter
 from .sample import Sample
 from .selective_scan import SelectiveScan
 from .sigmoid import Sigmoid
