@@ -35,7 +35,9 @@ def load(request):
 
 @pytest.fixture(scope="module")
 def model(load):
-    yield load()
+    loaded = load()
+    yield loaded
+    loaded.release()
 
 
 # KL(fp32 CPU || NPU) measured mean 0.0024, p90 0.0048, max 0.0063 over 40
