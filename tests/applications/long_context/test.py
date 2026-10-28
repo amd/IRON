@@ -24,6 +24,10 @@ from iron.applications.gemma4 import Gemma4
 from iron.applications.granite import Granite
 from iron.applications.granite_hybrid import GraniteHybrid
 from iron.applications.llama import Llama
+from iron.applications.qwen3 import Qwen3
+from iron.applications.qwen3_embedding import Qwen3Embedding
+from iron.applications.qwen3_moe import Qwen3Moe
+from iron.applications.qwen3_reranker import Qwen3Reranker
 from iron.lm import CausalLM, Checkpoint
 from iron.lm.testing import (
     check_deep_decode,
@@ -38,6 +42,9 @@ from iron.lm.testing import (
 # decode measured 0.002 to 0.015 just past the prompt, 0.009 to 0.033 at
 # 16k and 0.030 to 0.038 at 32k: it grows with the keys the step sums over.
 DEEP_KL = 0.1
+# Qwen3-Embedding's row is its final hidden state, held by its cosine to the
+# reference, not its KL.
+COSINE = 0.97
 
 
 @dataclasses.dataclass(frozen=True)
@@ -45,7 +52,9 @@ class Application:
     """A decoder application, a checkpoint its test runs and the forms it
     is held to here: the full ELF on NPU2 where ``full_elf``, and an xclbin a
     step on the ``each_step`` devices. CI holds every checkpoint, so one
-    missing there fails rather than skips.
+    missing there fails rather than skips, but where not ``staged``. A model
+    whose row is a hidden state, not logits, is held deep by its cosine, at
+    least ``deep_cosine``.
     """
 
     model: type[CausalLM]
@@ -55,6 +64,8 @@ class Application:
     full_elf: bool = True
     each_step: tuple[str, ...] = ()
     deep_kl: float = DEEP_KL
+    deep_cosine: float | None = None
+    staged: bool = True
 
     @property
     def path(self) -> Path:
@@ -102,6 +113,46 @@ APPLICATIONS = {
         "tokenizer.json",
         each_step=("npu1", "npu2"),
     ),
+    # Qwen3's decode measured 0.0020 (0.6B, native 32768) to 0.0385 (1.7B,
+    # native 32768), its deepest prompt chunk 0.0021 to 0.0565, on npu2.
+    "qwen3_0.6b": Application(
+        Qwen3, "qwen3-0.6b", "model.safetensors", "tokenizer.json", staged=False
+    ),
+    "qwen3_1.7b": Application(
+        Qwen3, "qwen3-1.7b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
+    ),
+    # Qwen3-Embedding's row is its final hidden state, held by its cosine:
+    # measured 0.98611 at its decode step at 32767 and 0.99859 over its
+    # deepest prompt chunk, the bound twice the decode's distance from 1.
+    "qwen3_embedding_0.6b": Application(
+        Qwen3Embedding,
+        "qwen3-embedding-0.6b",
+        "model.safetensors",
+        "tokenizer.json",
+        deep_cosine=COSINE,
+    ),
+    # Qwen3-Reranker's decode measured 0.0212 at 32767, its deepest prompt
+    # chunk 0.0038, well under DEEP_KL: it uses Qwen3's own head, not a
+    # cosine-held hidden state.
+    "qwen3_reranker_0.6b": Application(
+        Qwen3Reranker,
+        "qwen3-reranker-0.6b",
+        "model.safetensors",
+        "tokenizer.json",
+        staged=False,
+    ),
+    # 30B, its experts paged from the checkpoint; staged as decoders stages
+    # it. Its decode measured 0.069 at 40959 (top-1 swapped at a near tie,
+    # pre-#222's numeric fixes, not yet re-verified), its deepest prompt
+    # chunk 1.5e-5: twice the decode's, rounded up.
+    "qwen3_moe_30b_a3b": Application(
+        Qwen3Moe,
+        "qwen3-30b-a3b",
+        INDEX,
+        "tokenizer.json",
+        staged=False,
+        deep_kl=0.2,
+    ),
 }
 
 
@@ -128,7 +179,7 @@ def test_nothing_grows_with_the_context(application, version):
     row per position: its size is affine in the context.
     """
     app = APPLICATIONS[application]
-    require(app.path, app.path.with_name("config.json"))
+    require(app.path, app.path.with_name("config.json"), staged=app.staged)
     config = app.model.default_config(app.path)
     weights = Checkpoint(app.path).tree("unread")
     C = config.prefill_chunk
@@ -196,14 +247,18 @@ def loaded(request):
     """
     form, context = request.param
     app = APPLICATIONS[form.removesuffix("_each_step")]
-    load = load_from_flags(request, app.model, app.path, app.tokenizer)
+    load = load_from_flags(
+        request, app.model, app.path, app.tokenizer, staged=app.staged
+    )
     fitted = app.model.fit(app.model.default_config(app.path), app.path).max_seq_len
     if context is not None and context >= fitted:
         pytest.skip(f"{app.directory} holds {fitted} positions on this host")
     each_step = form.endswith("_each_step")
     sized = {} if context is None else {"max_seq_len": context}
     model = load(full_elf=False if each_step else None, **sized)
-    assert model.device_loop is not each_step
+    # The packaging, not device_loop: a full ELF with a host step (Qwen3-MoE's
+    # paged experts) is one but does not loop on the device.
+    assert model.decode_step.plan.full_elf is not each_step
     yield app, model
     model.release()
     if aie_utils.DefaultNPURuntime is not None:
@@ -215,7 +270,12 @@ def test_decode_deep_in_the_cache(loaded, record_property):
     """The deepest step the caches hold, at ``max_seq_len - 1``."""
     app, model = loaded
     position = model.config.max_seq_len - 1
-    check_deep_decode(model, position, app.deep_kl, record=record_property)
+    if app.deep_cosine is None:
+        check_deep_decode(model, position, app.deep_kl, record=record_property)
+    else:
+        check_deep_decode(
+            model, position, app.deep_cosine, cosine=True, record=record_property
+        )
 
 
 @pytest.mark.extensive
@@ -225,7 +285,12 @@ def test_prompt_deep_in_the_cache(loaded, record_property):
     """
     app, model = loaded
     rows = model.config.prefill_chunk
-    check_deep_prompt(model, rows, app.deep_kl, record=record_property)
+    if app.deep_cosine is None:
+        check_deep_prompt(model, rows, app.deep_kl, record=record_property)
+    else:
+        check_deep_prompt(
+            model, rows, app.deep_cosine, cosine=True, record=record_property
+        )
 
 
 @pytest.mark.extensive
