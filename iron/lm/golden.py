@@ -31,19 +31,23 @@ class Golden:
         path: The file; it need not exist yet.
         reference: Builds what records a sequence ``path`` lacks (a
             ``HuggingFace``), called once on the first such sequence, and only
-            while ``RECORD`` is set; otherwise such a sequence raises
+            while recording; otherwise such a sequence raises
             ``LookupError``, or ``FileNotFoundError`` naming ``path`` where
             there is no file.
         inputs: What the reference is built from (a config, weights); the
             file holds their ``fingerprint`` and is refused if they change.
+        record: Whether to record what ``path`` lacks; None while ``RECORD``
+            is set.
 
     Raises:
         ValueError: ``path`` was recorded from other ``inputs``.
     """
 
-    def __init__(self, path, reference=None, inputs=()):
+    def __init__(self, path, reference=None, inputs=(), *, record=None):
         self.path = Path(path)
-        self.build = reference if os.environ.get(RECORD) else None
+        if record is None:
+            record = bool(os.environ.get(RECORD))
+        self.build = reference if record else None
         self.reference = None
         self.fingerprint = fingerprint(*inputs) if inputs else None
         self.rows = self.read()

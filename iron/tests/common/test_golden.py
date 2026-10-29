@@ -8,7 +8,7 @@ import dataclasses
 import numpy as np
 import pytest
 
-from iron.lm.golden import RECORD, Golden, HuggingFace, fingerprint
+from iron.lm.golden import Golden, HuggingFace, fingerprint
 from iron.tests.support.llama_model import SMALL, checkpoint
 from iron.tests.support.llama_reference import OnHost
 
@@ -21,34 +21,30 @@ def model(seed):
 
 
 def test_it_records_only_while_asked_and_reads_back_without_the_reference(
-    tmp_path, monkeypatch
+    tmp_path, npu2
 ):
     path = tmp_path / "golden.npz"
     expected = np.array(model(2).logits(TOKENS), np.float32)
-    monkeypatch.delenv(RECORD, raising=False)
     with pytest.raises(FileNotFoundError, match=f"{path} is missing"):
-        Golden(path, lambda: model(2), (TOY, 2)).logits(TOKENS)
-    monkeypatch.setenv(RECORD, "1")
+        Golden(path, lambda: model(2), (TOY, 2), record=False).logits(TOKENS)
     np.testing.assert_array_equal(
-        Golden(path, lambda: model(2), (TOY, 2)).logits(TOKENS), expected
+        Golden(path, lambda: model(2), (TOY, 2), record=True).logits(TOKENS),
+        expected,
     )
     assert [p.name for p in tmp_path.iterdir()] == ["golden.npz"]
-    monkeypatch.delenv(RECORD)
-    np.testing.assert_array_equal(Golden(path, None, (TOY, 2)).logits(TOKENS), expected)
+    reread = Golden(path, None, (TOY, 2), record=False)
+    np.testing.assert_array_equal(reread.logits(TOKENS), expected)
     with pytest.raises(LookupError, match="holds no logits"):
-        Golden(path, None, (TOY, 2)).logits(TOKENS + 1)
+        reread.logits(TOKENS + 1)
 
 
-def test_a_file_of_other_inputs_is_refused_and_rerecorded(tmp_path, monkeypatch):
+def test_a_file_of_other_inputs_is_refused_and_rerecorded(tmp_path, npu2):
     path = tmp_path / "golden.npz"
-    monkeypatch.setenv(RECORD, "1")
-    Golden(path, lambda: model(2), (TOY, 2)).logits(TOKENS)
-    Golden(path, lambda: model(2), (TOY, 2)).logits(TOKENS + 1)
-    monkeypatch.delenv(RECORD)
+    Golden(path, lambda: model(2), (TOY, 2), record=True).logits(TOKENS)
+    Golden(path, lambda: model(2), (TOY, 2), record=True).logits(TOKENS + 1)
     with pytest.raises(ValueError, match="other inputs"):
-        Golden(path, lambda: model(3), (TOY, 3))
-    monkeypatch.setenv(RECORD, "1")
-    golden = Golden(path, lambda: model(3), (TOY, 3))
+        Golden(path, lambda: model(3), (TOY, 3), record=False)
+    golden = Golden(path, lambda: model(3), (TOY, 3), record=True)
     np.testing.assert_array_equal(
         golden.logits(TOKENS), np.array(model(3).logits(TOKENS), np.float32)
     )

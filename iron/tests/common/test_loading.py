@@ -13,6 +13,7 @@ read.
 import argparse
 import dataclasses
 import logging
+import os
 import shutil
 import struct
 import subprocess
@@ -182,13 +183,12 @@ def _golden(path):
 
 
 @pytest.mark.parametrize("change", ["config", "first weight", "last weight"])
-def test_a_checkpoint_s_golden_is_refused_once_it_changes(
-    tmp_path, monkeypatch, change
-):
+def test_a_checkpoint_s_golden_is_refused_once_it_changes(tmp_path, change):
     """A fine-tune keeps every name and shape: the bytes at either end of a
     tensor tell it from its base.
     """
-    monkeypatch.delenv(RECORD, raising=False)
+    if os.environ.get(RECORD):
+        pytest.skip("recording rewrites a changed golden rather than refusing it")
     path = tmp_path / "model.safetensors"
     shutil.copy(checkpoint(SMALL).path, path)
     (tmp_path / "config.json").write_text('{"bos_token_id": 7}')
