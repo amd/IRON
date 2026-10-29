@@ -54,6 +54,8 @@ class Call:
     position: Any
     # The row a prompt chunk's first position reads of a stacked RoPE table.
     rope_start: Any = None
+    # The encoder's rows a cross attention reads (``EncoderDecoder``).
+    source: Any = None
     # By each Rope a layer holds, its rows of the call (Rope.rows).
     ropes: dict = dataclasses.field(default_factory=dict)
     # The token ids the call embeds, a prompt chunk's rows or the decode
