@@ -40,6 +40,15 @@ class CostModel:
     samples: list[tuple[dict[str, float], float]] = dataclasses.field(
         default_factory=list
     )
+    # What the terms are pulled toward: PRIOR, or a device's measured switch.
+    prior: dict[str, float] = dataclasses.field(default_factory=lambda: dict(PRIOR))
+
+    @classmethod
+    def calibrated(cls, fixed_us: float, per_core_us: float) -> CostModel:
+        """A model without samples whose prior is a measured switch's cost
+        (``measure.switch_cost``)."""
+        prior = {**PRIOR, "switches": fixed_us, "switch_cores": per_core_us}
+        return cls(terms=dict(prior), prior=prior)
 
     def predict(self, features: Mapping[str, float]) -> float:
         """The time, in us, ``features`` add beyond the steps' own."""
@@ -54,22 +63,23 @@ class CostModel:
         )
         x = np.array([[s[f] for f in FEATURES] for s, _ in self.samples])
         y = np.array([t for _, t in self.samples])
-        prior = np.array([PRIOR[f] for f in FEATURES])
+        prior = np.array([self.prior[f] for f in FEATURES])
         # The prior weighs as PRIOR_WEIGHT samples of each feature's mean size.
         ridge = PRIOR_WEIGHT * np.diag(np.maximum((x**2).mean(axis=0), 1.0))
         fitted = np.linalg.solve(x.T @ x + ridge, x.T @ y + ridge @ prior)
         self.terms = {f: float(v) for f, v in zip(FEATURES, fitted)}
 
     @classmethod
-    def load(cls, device: str, directory: Path = COSTS) -> CostModel:
-        """``device``'s model, or the prior where none is kept."""
+    def load(cls, device: str, directory: Path = COSTS) -> CostModel | None:
+        """``device``'s model, or None where none is kept."""
         path = Path(directory) / f"{device}.json"
         if not path.exists():
-            return cls()
+            return None
         data = json.loads(path.read_text())
         return cls(
             terms=data["terms"],
             samples=[(dict(s["change"]), s["extra_us"]) for s in data["samples"]],
+            prior=data["prior"],
         )
 
     def save(self, device: str, directory: Path = COSTS) -> Path:
@@ -77,7 +87,6 @@ class CostModel:
         path = Path(directory) / f"{device}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         samples = [{"change": c, "extra_us": t} for c, t in self.samples]
-        path.write_text(
-            json.dumps({"terms": self.terms, "samples": samples}, indent=1) + "\n"
-        )
+        data = {"terms": self.terms, "prior": self.prior, "samples": samples}
+        path.write_text(json.dumps(data, indent=1) + "\n")
         return path

@@ -36,7 +36,7 @@ from .fusions import price_fusions
 from .costmodel import CostModel
 from .failures import Ledger
 from .packings import price_packings
-from .measure import Cache, Timing, pmode
+from .measure import Cache, Timing, pmode, switch_cost
 
 
 def parser(description: str) -> argparse.ArgumentParser:
@@ -181,6 +181,15 @@ def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: boo
     ``path``; return it.
     """
     model = CostModel.load(dev.name)
+    if model is None:
+        model = CostModel.calibrated(
+            *switch_cost(
+                dev,
+                cache=Cache.here(),
+                log=functools.partial(print, flush=True),
+                lock=args.lock_in_process,
+            )
+        )
     packed = price_packings(
         calls() if callable(calls) else calls,
         dev,

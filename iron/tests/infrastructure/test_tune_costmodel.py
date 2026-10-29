@@ -34,4 +34,11 @@ def test_a_model_round_trips_through_its_file(tmp_path):
     model.save("npu2", tmp_path)
     loaded = CostModel.load("npu2", tmp_path)
     assert loaded == model
-    assert CostModel.load("npu1", tmp_path) == CostModel()
+    assert CostModel.load("npu1", tmp_path) is None
+
+
+def test_a_calibrated_model_is_pulled_toward_its_measured_switch():
+    model = CostModel.calibrated(40.0, 3.0)
+    assert model.predict({"switches": 2, "switch_cores": 10}) == pytest.approx(110.0)
+    model.add({"switches": -1, "switch_cores": -1, "packed_steps": 0}, -43.0)
+    assert model.terms["switches"] == pytest.approx(40.0, rel=0.2)

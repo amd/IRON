@@ -688,6 +688,37 @@ class Cache:
             json.dumps(dataclasses.asdict(m)) + "\n",
         )
 
+    @staticmethod
+    def switch_cost_key(dev) -> str:
+        """The entry a device-configuration switch's cost at ``dev`` is kept
+        in: the probe designs ``switch_cost`` alternates, so editing how
+        they are generated misses rather than reusing a stale cost.
+        """
+        designs = [
+            OperatorDesign(op.resolved(dev)).compilable()
+            for op in _switch_cost_probes(dev)
+        ]
+        key = tuple((d.recipe_hash, d.artifact_hash) for d in designs)
+        return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
+
+    def get_switch_cost(self, key: str) -> tuple[float, float] | None:
+        """The ``(fixed_us, per_core_us)`` at ``key``; None if there is none,
+        or it was written with other fields than that pair has.
+        """
+        path = self.directory / "switch_cost" / f"{key}.json"
+        if not path.exists():
+            return None
+        fields = json.loads(path.read_text())
+        if fields.keys() != {"fixed_us", "per_core_us"}:
+            return None
+        return fields["fixed_us"], fields["per_core_us"]
+
+    def put_switch_cost(self, key: str, cost: tuple[float, float]) -> None:
+        write(
+            self.directory / "switch_cost" / f"{key}.json",
+            json.dumps({"fixed_us": cost[0], "per_core_us": cost[1]}) + "\n",
+        )
+
 
 def write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` whole, as another process may read it."""
@@ -1116,4 +1147,91 @@ def measure_fusion(
     result = FusionMeasurement(fused_m, apart_m, refused)
     if cache is not None:
         cache.put_fusion(key, result)
+    return result
+
+
+def _switch_cost_probes(dev) -> tuple[ElementwiseAdd, ElementwiseAdd, ElementwiseAdd]:
+    """``x``, a 1-core ``ElementwiseAdd``; ``narrow``, one of 1 column at
+    ``dev``'s other size; ``wide``, one of every column ``dev`` has: the
+    three designs ``switch_cost`` alternates ``x`` against.
+    """
+    x = ElementwiseAdd(size=256, tile_size=128, num_aie_columns=1)
+    narrow = ElementwiseAdd(size=2048, tile_size=256, num_aie_columns=1)
+    wide = ElementwiseAdd(size=2048, tile_size=256, num_aie_columns=dev.cols)
+    return x, narrow, wide
+
+
+def switch_cost(
+    dev,
+    timing: Timing = Timing(),
+    short: int = 4,
+    long: int = 20,
+    cache: Cache | None = None,
+    remeasure: bool = False,
+    log: Callable[[str], None] = print,
+    lock: bool = False,
+) -> tuple[float, float]:
+    """The cost of a device-configuration switch at ``dev``: ``fixed_us``,
+    and ``per_core_us`` of the array switched into: a 1-core ``ElementwiseAdd`` (``x``)
+    alternated with one of 1 column and one of ``dev.cols`` columns (each
+    its own ``y``), each pair against itself repeated ``short`` and
+    ``long`` times, so a repeat's own configure cancels (``per_step``) and
+    only the alternation's excess switch remains (``excess``); the two
+    columns' excess then fit to a line in the column count.
+
+    Args:
+        cache: The cost is taken from it rather than measured, unless
+            `remeasure`; what is measured is written to it.
+        lock: Take ``NPU_LOCK_PATH`` from the first load through releasing
+            every probe's context, not just under ``coord/npu``.
+
+    Returns:
+        ``(fixed_us, per_core_us)``.
+    """
+    if dev.cols <= 1:
+        raise ValueError(f"{dev} has {dev.cols} column(s): no per-core cost to fit")
+    mode = pmode()
+    if cache is not None and cache.mode != mode:
+        raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    key = None
+    if cache is not None:
+        key = Cache.switch_cost_key(dev)
+        if not remeasure:
+            cached = cache.get_switch_cost(key)
+            if cached is not None:
+                return cached
+    x, narrow, wide = (op.resolved(dev) for op in _switch_cost_probes(dev))
+    runs = {}
+    for y, cols in ((narrow, 1), (wide, dev.cols)):
+        for n in (short, long):
+            kinds = {
+                "x": [x] * n,
+                "y": [y] * n,
+                "alt": [x if k % 2 == 0 else y for k in range(n)],
+            }
+            for kind, steps in kinds.items():
+                runs[(cols, kind, n)] = Standalone(
+                    f"sw_{cols}_{kind}{n}", steps, full_elf=True, load=False
+                )
+    keys = list(runs)
+    with npu_lock(lock):
+        for run in runs.values():
+            run.load()
+        stats = time_interleaved(
+            [runs[k].callable for k in keys], timing, log=log, lock=lock
+        )
+        del runs
+    med = {k: statistics.median(s.samples_us) for k, s in zip(keys, stats)}
+    excess = {}
+    for cols in (1, dev.cols):
+        per_step = {
+            kind: (med[(cols, kind, long)] - med[(cols, kind, short)]) / (long - short)
+            for kind in ("x", "y", "alt")
+        }
+        excess[cols] = per_step["alt"] - (per_step["x"] + per_step["y"]) / 2
+    per_core_us = (excess[dev.cols] - excess[1]) / (dev.cols - 1)
+    fixed_us = excess[1] - per_core_us
+    result = (fixed_us, per_core_us)
+    if cache is not None:
+        cache.put_switch_cost(key, result)
     return result
