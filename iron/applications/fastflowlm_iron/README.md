@@ -7,11 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 
 This application serves Llama 3.2 1B and EmbeddingGemma 2 through FastFlowLM's
 HTTP API. FastFlowLM runs each model in IRON's persistent Python server over a
-Unix socket pair. The server compiles the graph versions through the MLIR-AIE
-cache on first use, then loads the images and weights.
+pair of standard input and output pipes. The server compiles the graph versions
+through the MLIR-AIE cache on first use, then loads the images and weights.
 
 The Makefile pins the FastFlowLM fork to
-[`a84802b8`](https://github.com/andrej/FastFlowLM/commit/a84802b81ee46cdd2aa82daff03e3426fe881701),
+[`c8fd1b69`](https://github.com/andrej/FastFlowLM/commit/c8fd1b69a5389e9fabfdd2be6c53f50adab00b64),
 which contains the IRON backend and the EmbeddingGemma 2 model entry.
 
 > [Changes to FastFlowLM to add the IRON backend and EmbeddingGemma 2 model](https://github.com/ROCm/FastFlowLM/compare/3b72cd0535ffa82389797491e15e117497cc9f88...andrej:FastFlowLM:iron-backend)
