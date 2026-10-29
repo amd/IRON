@@ -239,6 +239,23 @@ class DecoderConfig(Config):
         return self.sliding_window - 1
 
     @property
+    def sample_vocab_size(self) -> int:
+        """``vocab_size`` padded to the next multiple of 1024: a width an
+        elementwise op over the whole row always tiles into whole lines,
+        unlike a bare pad to even. A vocabulary that is itself close to a
+        multiple of 1024 may still have no better factor: Whisper-small's
+        51865 pads to even at 51866, 2 x 25933 (25933 prime), which no
+        tile size under an elementwise core's 4096-element cap divides.
+        ``Sample``'s own ``drawable=vocab_size`` keeps every padding row
+        from ever being drawn; a quantum past ``vocab_size`` itself (a
+        toy's small one) would pad past what ``Sample``'s own per-core
+        slice can hold as padding, so the quantum is capped at the
+        largest power of two at or under ``vocab_size``.
+        """
+        quantum = min(1024, 1 << (self.vocab_size.bit_length() - 1))
+        return -(-self.vocab_size // quantum) * quantum
+
+    @property
     def rope_width(self) -> int:
         """The angle table's own width: ``head_dim``, or ``rotary_dim`` under
         partial rotary.

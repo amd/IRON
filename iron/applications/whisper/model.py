@@ -447,8 +447,7 @@ class Whisper(EncoderDecoder):
         # no-op, with no checkpoint: a toy's). begin_suppress_bias is the
         # prompt chunk's own, which draws the first generated token;
         # suppress_bias every call after.
-        v = config.vocab_size + config.vocab_size % 2
-        bias = np.zeros(v, bfloat16)
+        bias = np.zeros(config.sample_vocab_size, bfloat16)
         bias[list(config.suppress_tokens)] = -np.inf
         bias[config.first_special_token_id :] = -np.inf
         self.suppress_bias = iron.param(bias)
