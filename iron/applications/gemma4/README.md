@@ -31,19 +31,21 @@ token's row at the image, audio and video placeholders.
 
 An image is decoded `(height, width, 3)` uint8 of up to 12.6 MP either way
 up, resized, cut into patches and embedded on the NPU at the processor's
-280 soft tokens; a clip is 16 kHz mono of up to 30 s, its log-mel
-features computed on the NPU. `Gemma4Multimodal.logits(tokens, raw)` and
+280 soft tokens; a clip is 16 kHz mono, its log-mel features computed on
+the NPU. A clip past 30 s is cut to its first 30 s, as the feature
+extractor does. `Gemma4Multimodal.logits(tokens, raw)` and
 `generate(tokens, n, raw=raw)` take them by placeholder, `raw =
 {image_token_id: (image, 280), audio_token_id: (waveform,)}`, the tokens
 laid out by `expand`.
 
 ## Precision
 
-The towers' projections run at `Precision.HIGHEST` (their configs'): float32
-partial sums, rounded once. The text decoder's are its config's. Measured on
-npu2 over the tests' cases, KL(float32 transformers || device) is 0.00005
-to 0.0053 on average over a case's eight steps, 0.042 at the worst step.
-Cheaper tower precisions were not measured.
+The towers' projections run at `Precision.HIGHEST`, `VisionConfig`'s and
+`AudioConfig`'s default: float32 partial sums, rounded once. The text
+decoder's prompt chunk runs at `Precision.MEDIUM`, `Gemma4Config`'s default.
+`tests/applications/gemma4/test.py`'s `MAX_KL` bounds each multimodal case,
+set from NPU2 measurements in its comment. Cheaper tower precisions were not
+measured.
 
 ## Weights and tokenizer
 
@@ -69,3 +71,11 @@ the recorder keeps the per-layer token table bfloat16 (its lookup widens
 exactly and its scale, 16, is a power of two, so the per-layer inputs are
 float32's), which saves 11 GB. `reference/` checks the text decoder
 device-free at a toy shape over random weights.
+
+The text decoder's generation, accuracy, determinism and chat-turn tests
+are shared with the other decoders, in `tests/applications/decoders/`
+(`pytest tests/applications/decoders/ -k gemma4`).
+
+On NPU1, the text decoder runs a dispatch per step and
+`tests/applications/long_context/` holds it there. The towers and
+`Gemma4Multimodal` are tested on NPU2 only.

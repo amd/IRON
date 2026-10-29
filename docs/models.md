@@ -11,12 +11,14 @@ built on `iron/lm/`, the library every model shares (see
 [AGENTS.md](agents.md#language-models)). Each model's README says what is
 specific to it and where to get its weights.
 
-| Model | Application | Checkpoint |
-|---|---|---|
-| Llama 3.2 1B, 3B | [llama](https://github.com/amd/IRON/blob/devel/iron/applications/llama/README.md) | `llama3.2-1b`, `llama3.2-3b` |
-| Gemma 4 E2B: text decoder, vision and audio towers | [gemma4](https://github.com/amd/IRON/blob/devel/iron/applications/gemma4/README.md) | `gemma-4-e2b-it` |
-| EmbeddingGemma 2 | [embedding_gemma2](https://github.com/amd/IRON/blob/devel/iron/applications/embedding_gemma2/README.md) | `embeddinggemma-2` |
-| Gemma 4 E2B in FastFlowLM | [gemma4_engine](https://github.com/amd/IRON/tree/devel/iron/operators/flm/gemma4_engine) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) |
+| Model | Application | Checkpoint | NPU1 (Phoenix, Hawk Point) | NPU2 (Strix, Strix Halo, Krackan) |
+|---|---|---|---|---|
+| Llama 3.2 1B, 3B | [llama](https://github.com/amd/IRON/blob/devel/iron/applications/llama/README.md) | `llama3.2-1b`, `llama3.2-3b` | Yes, a dispatch per step | Yes |
+| Granite 4.2 3B | [granite](https://github.com/amd/IRON/blob/devel/iron/applications/granite/README.md) | `granite-4.2-3b` | Yes, a dispatch per step | Yes |
+| Granite 4.0-H 1B | [granite_hybrid](https://github.com/amd/IRON/blob/devel/iron/applications/granite_hybrid/README.md) | `granite-4.0-h-1b` | Not yet run; its tests are enabled | Yes |
+| Gemma 4 E2B: text decoder, vision and audio towers | [gemma4](https://github.com/amd/IRON/blob/devel/iron/applications/gemma4/README.md) | `gemma-4-e2b-it` | Text decoder, a dispatch per step; towers untested | Yes |
+| EmbeddingGemma 2 | [embedding_gemma2](https://github.com/amd/IRON/blob/devel/iron/applications/embedding_gemma2/README.md) | `embeddinggemma-2` | Yes, a dispatch per step; the widest images are refused | Yes |
+| Gemma 4 E2B in FastFlowLM | [gemma4_engine](https://github.com/amd/IRON/tree/devel/iron/operators/flm/gemma4_engine) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) | No | Yes |
 
 For the `iron/lm` models (all but the FastFlowLM engine), every step of
 the model's graph runs on the NPU: embeddings, layers, the LM head, and for
@@ -35,9 +37,10 @@ The host:
 - prepares weights once at load (RoPE tables, layouts).
 
 The FastFlowLM engine runs IRON's operators inside FastFlowLM's own runtime,
-which keeps its tokenizer, sampling and serving.
+which keeps its tokenizer, sampling, serving, and the vision and audio
+towers' own operators.
 
-What the text decoders (Llama and Gemma 4 above) share, and how to run,
+What the text decoders (Llama, Granite and Gemma 4 above) share, and how to run,
 test and tune any of them, is in the [Models section](installation.md#models)
 of the installation guide. Their performance is measured by CI; see
 [Benchmarks](benchmarks.md).

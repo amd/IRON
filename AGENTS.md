@@ -25,8 +25,8 @@ Install as the README says. XRT must be sourced
 (`source /opt/xilinx/xrt/setup.sh`) before anything runs on a device.
 `requirements.txt` pins the mlir-aie wheel IRON is tested with, a release
 or a nightly (`latest-wheels-4`), which brings the kernel library, and the
-llvm-aie (Peano) nightly that mlir-aie commit validated
-(`utils/peano-requirements.txt`). `.github/workflows/ci-lint.yml`'s `ref:`
+llvm-aie (Peano) nightly that mlir-aie commit validated, pinned beside it.
+`.github/workflows/ci-lint.yml`'s `ref:`
 is the same commit, the Python pyright types against. A pull request that
 needs a newer mlir-aie bumps all three in the same pull request
 (`update-mlir-aie.yml` does it for a release or a nightly).
@@ -246,8 +246,8 @@ Check the code before relying on a line here; it is the authority.
   and a prompt chunk; `max_seq_len` sizes only the caches and the RoPE
   table. Caches are `(max_seq_len, num_key_value_heads, head_dim)` so a
   call's write is contiguous and no descriptor strides by the context.
-  `test_llama_does_not_grow_with_the_context` and
-  `tests/applications/long_context/` hold every decoder to this.
+  `tests/applications/long_context/`'s
+  `test_nothing_grows_with_the_context` holds every decoder to this.
 - **DMA descriptors.** A pattern past one buffer descriptor's limits is
   split by the compiler; one whose size a call bounds must fit a single
   descriptor (`operand.fits`, `operand.split`).

@@ -80,7 +80,7 @@ class LlamaConfig(DecoderConfig):
     @classmethod
     def from_json(cls, data: dict, source="config.json") -> "LlamaConfig":
         """``DecoderConfig.from_json``, at ``Precision.HIGH`` from 3B's width
-        up: its accuracy needs bf16 macs on its projections (decision 40).
+        up: its accuracy needs bf16 macs on its projections.
         """
         config = super().from_json(data, source)
         if config.hidden_size < 3072:
