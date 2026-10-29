@@ -1,15 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What SelectiveScan and GatedDeltaRule share: a head's state taken
+"""How a recurrent state operator lays out its cores: a head's state taken
 ``SLICE`` at a time, a block of rows a kernel call, and the cores resolved
 over whole heads.
 """
 
 from iron.common import Unresolvable
 
-#: The rows (SelectiveScan) or columns (GatedDeltaRule) of a head's state a
-#: kernel call carries.
+#: The rows of a head's state a kernel call carries.
 SLICE = 16
 
 
@@ -20,31 +19,36 @@ def block_rows(op) -> int:
     return max(d for d in range(1, 33) if op.rows % d == 0)
 
 
+def fits(op, dev, rows: int) -> bool:
+    """Whether a core of ``dev`` holds ``op.held`` at ``rows`` rows per call
+    plus one slice's state and final state."""
+    state, final = op.slice_bytes()
+    return op.held(dev, rows) + state + final <= dev.core_memory_bytes
+
+
 def resolve_rows(op, dev):
     """Return ``op`` with its ``block`` set.
 
     ``block`` is the most rows, up to ``block_rows``, that divide
-    ``op.rows`` and leave room in a core for ``op.held`` plus one slice's
-    state and final state.
+    ``op.rows`` and that a core ``fits``.
 
     Raises:
         Unresolvable: Not even one row fits.
     """
     if op.block is not None:
         return op
-    state, final = op.slice_bytes()
-    mem = dev.core_memory_bytes
     rows = next(
         (
             t
             for t in range(block_rows(op), 0, -1)
-            if op.rows % t == 0 and op.held(dev, t) + state + final <= mem
+            if op.rows % t == 0 and fits(op, dev, t)
         ),
         None,
     )
     if rows is None:
         raise Unresolvable(
-            f"{type(op).__name__}: no block of rows fits a core's {mem} bytes"
+            f"{type(op).__name__}: no block of rows fits a core's "
+            f"{dev.core_memory_bytes} bytes"
         )
     return op.replace(block=rows * SLICE)
 

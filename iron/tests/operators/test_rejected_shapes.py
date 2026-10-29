@@ -65,6 +65,20 @@ def test_selective_scan_accepts_blocks_dividing_rows(rows, block):
     assert op.resolved().block == block
 
 
+@pytest.mark.parametrize("state_size", [8, 24, 136])
+def test_selective_scan_rejects_a_state_not_whole_slices(state_size):
+    with pytest.raises(ValueError, match="state_size"):
+        SelectiveScan(rows=4, heads=2, head_dim=16, state_size=state_size, columns=1)
+
+
+def test_selective_scan_rejects_an_explicit_block_past_core_memory():
+    # The resolver takes 4 rows here; 8 rows need about 68 KB of a 64 KB core.
+    shape = dict(rows=32, heads=2, head_dim=16, state_size=256, columns=1)
+    assert SelectiveScan(**shape).resolved().block == 64
+    with pytest.raises(ValueError, match="does not fit"):
+        SelectiveScan(**shape, block=128).resolved()
+
+
 def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():
     """A BD shorter than the ObjectFifo object hangs the device.
 

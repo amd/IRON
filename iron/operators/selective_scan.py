@@ -20,7 +20,13 @@ from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
-from iron.operators.state_slices import SLICE, depths, resolve_heads, resolve_rows
+from iron.operators.state_slices import (
+    SLICE,
+    depths,
+    fits,
+    resolve_heads,
+    resolve_rows,
+)
 
 
 def _slices(op) -> int:
@@ -143,6 +149,11 @@ class SelectiveScan(Operator):
                 f"({self.groups}) and even, so a row's dt after its xbc is "
                 "whole 4-byte words"
             )
+        if self.state_size % SLICE:
+            raise ValueError(
+                f"SelectiveScan: state_size ({self.state_size}) must be whole "
+                f"{SLICE}-element vectors, the width a core gathers B and C in"
+            )
 
     def resolve(self, dev):
         return resolve_rows(resolve_heads(self, dev, self.heads), dev)
@@ -157,6 +168,11 @@ class SelectiveScan(Operator):
             raise ValueError(
                 f"SelectiveScan: block ({self.block}) must hold a row count "
                 f"dividing rows ({self.rows})"
+            )
+        if not fits(self, self.dev, self.block // SLICE):
+            raise ValueError(
+                f"SelectiveScan: block ({self.block}) does not fit a core's "
+                f"{self.dev.core_memory_bytes} bytes with one slice's state"
             )
 
     def slice_bytes(self) -> tuple[int, int]:
