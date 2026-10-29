@@ -712,7 +712,15 @@ def confirm_fusions(
             )
             try:
                 plain_cg = CompiledGraph(recording, chosen, fusions=())
-                fused_cg = CompiledGraph(patched, chosen, fusions=fused)
+                narrowed = plan(
+                    dev,
+                    patched,
+                    full_elf,
+                    False,
+                    step_words=_step_words(patched),
+                    fusions=fused,
+                )
+                fused_cg = CompiledGraph(patched, narrowed, fusions=fused)
             except (ValueError, RuntimeError, ir.MLIRError) as e:
                 # A build failure is a property of this version (this
                 # particular combination of active groups' fusions), not of
