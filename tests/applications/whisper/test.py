@@ -28,6 +28,7 @@ from iron.applications.whisper.model import (
 )
 from iron.applications.whisper.wer import word_error_rate
 from iron.lm.generation import divergence
+from iron.lm.golden import Tokens
 from iron.lm.testing import LOGITS, assert_close, require, weights_dir
 from iron.tests.support.llama_model import checkpoint
 from iron.tests.support.librispeech import utterance
@@ -391,3 +392,38 @@ def test_the_joined_clip_spans_at_least_four_30s_windows():
     seconds = sum(load_wav(CLIPS_DIR / f"{n}.wav").size for n in names) / 16000
     windows = -(-int(round(seconds * 1000)) // 30000)
     assert windows == 4, f"{seconds:.1f} s needs {windows} 30 s windows, not 4"
+
+
+#: Deliverable 1's bar: Whisper.transcribe's generated ids exactly match
+#: transformers' own greedy generate (language="en", task="transcribe", no
+#: timestamps), recorded once per (checkpoint, clip) with pytest
+#: --record-goldens, read without torch otherwise.
+EXACT_MATCH_CLIPS = [SPEECH, *SINGLE_WINDOW_CLIPS]
+
+
+def _record_hf_generate(checkpoint_name, clip):
+    from iron.applications.whisper.hugging_face import HuggingFaceWhisper
+
+    hf = HuggingFaceWhisper.load(weights_dir(checkpoint_name))
+    return hf.generate(load_wav(CLIPS_DIR / f"{clip}.wav"))
+
+
+GENERATED_TOKENS = Tokens(
+    Path(__file__).with_name("goldens") / "generated_tokens.npz", _record_hf_generate
+)
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("clip", EXACT_MATCH_CLIPS)
+def test_single_window_matches_hugging_face_exactly(model, clip):
+    """Whisper.transcribe's generated ids, exactly: transformers' own
+    greedy generate never repeats its own internal prompt or (usually)
+    its final eos, which Whisper.transcribe's own ids always end in.
+    """
+    require(CLIPS_DIR / f"{clip}.wav", staged=False)
+    name = Path(model.checkpoint.path).parent.name
+    want = GENERATED_TOKENS(f"{name}/{clip}", name, clip)
+    eos = min(model.eos)
+    got, _ = model.transcribe(load_wav(CLIPS_DIR / f"{clip}.wav"))
+    assert got == want or got == want + [eos], f"{clip}: {got} != {want}"
