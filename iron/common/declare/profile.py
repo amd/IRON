@@ -22,15 +22,24 @@ if TYPE_CHECKING:
 
 _Op = TypeVar("_Op", bound="Operator")
 
+# A chain entry: fuse ``producer``'s output into ``consumer``'s ``input``,
+# each matched on its own dims (``Profile.dims``, ``Profile.matches``).
+_ChainEntry = tuple[type, dict[str, Any], type, dict[str, Any], str]
+
 
 class Profile:
     """Tunable values by operator shape, as ``(cls, dims, tunables)`` entries. An
     open tunable comes from the most specific match (a dimension left out matches
     any, a subclass its base's); equally specific ones that disagree raise.
+
+    ``chains`` names producer -> consumer edges to run fused on-chip, each
+    matched the same way, by class and dims alone (no tunable, since a chain
+    is not a value).
     """
 
     def __init__(self) -> None:
         self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
+        self._chains: list[_ChainEntry] = []
 
     def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
         """``cls(**kwargs)``, its open tunables filled from this profile's
@@ -70,6 +79,55 @@ class Profile:
         if not tunables:
             raise TypeError(f"an entry for {cls.__name__} must give a tunable")
         self._entries.append((cls, dims, tunables))
+
+    def add_chain(
+        self,
+        producer: type,
+        consumer: type,
+        input: str,
+        *,
+        producer_dims: Mapping[str, Any] | None = None,
+        consumer_dims: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Add a chain entry: fuse ``producer``'s output into ``consumer``'s
+        ``input`` on-chip, where each matches (a dim left out matches any,
+        a subclass its base's, as a tunable entry does).
+
+        Raises:
+            TypeError: A dim is not a non-tunable ``param()`` of its class, or
+                ``consumer`` declares no input ``input``.
+        """
+        producer_dims, consumer_dims = dict(producer_dims or {}), dict(
+            consumer_dims or {}
+        )
+        for cls, dims in ((producer, producer_dims), (consumer, consumer_dims)):
+            unknown = [
+                name
+                for name in dims
+                if name not in cls.declaration.params
+                or cls.declaration.params[name].tunable
+            ]
+            if unknown:
+                raise TypeError(f"{cls.__name__} declares no dim {unknown}")
+        if not any(m.name == input and m.fills for m in consumer.declaration.operands):
+            raise TypeError(f"{consumer.__name__} declares no input {input!r}")
+        self._chains.append((producer, producer_dims, consumer, consumer_dims, input))
+
+    def chained(self, producer: Operator, consumer: Operator, input: str) -> bool:
+        """Whether this profile's chains fuse ``producer``'s output into
+        ``consumer``'s ``input``: a chain entry whose producer and consumer
+        classes and dims (``Profile.dims``, ``Profile.matches``) match them.
+        """
+        p_dims = self.dims(type(producer), vars(producer))
+        c_dims = self.dims(type(consumer), vars(consumer))
+        return any(
+            input == entry_input
+            and isinstance(producer, p_cls)
+            and isinstance(consumer, c_cls)
+            and self.matches(p_entry, p_dims)
+            and self.matches(c_entry, c_dims)
+            for p_cls, p_entry, c_cls, c_entry, entry_input in self._chains
+        )
 
     def tunables_for(self, cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
         """The tunables for the ``cls`` a call with ``given`` keywords makes,
@@ -124,7 +182,10 @@ class Profile:
 
         with open(path) as f:
             data = json.load(f)
-        if not isinstance(data, dict) or set(data) != {"entries"}:
+        if not isinstance(data, dict) or not {"entries"} <= set(data) <= {
+            "entries",
+            "chains",
+        }:
             raise ValueError(f"{path}: a profile is {{'entries': [...]}}")
         profile = cls()
         for entry in data["entries"]:
@@ -144,13 +205,36 @@ class Profile:
                 ):
                     fields[key] = domain(fields[key])
             profile.add(op_cls, **fields)
+        for chain in data.get("chains", ()):
+            if set(chain) != {"producer", "consumer", "input"}:
+                raise ValueError(
+                    f"{path}: a chain is {{'producer': {{...}}, 'consumer': "
+                    f"{{...}}, 'input': ...}}"
+                )
+            sides = []
+            for side in (chain["producer"], chain["consumer"]):
+                fields = dict(side)
+                name = fields.pop("operator")
+                if name not in CATALOG:
+                    raise ValueError(f"{path}: no operator {name!r} in iron.operators")
+                sides.append((CATALOG[name], fields))
+            (producer, producer_dims), (consumer, consumer_dims) = sides
+            profile.add_chain(
+                producer,
+                consumer,
+                chain["input"],
+                producer_dims=producer_dims,
+                consumer_dims=consumer_dims,
+            )
         return profile
 
     def save(self, path: str | Path) -> None:
-        """Write the profile as JSON, one entry to a line.
+        """Write the profile as JSON, one entry to a line, then its chains
+        where there are any.
 
         Raises:
-            ValueError: An entry's operator is not in ``iron.operators.CATALOG``.
+            ValueError: An entry's or a chain's operator is not in
+                ``iron.operators.CATALOG``.
         """
         from ...operators import CATALOG  # the operators import this module
 
@@ -161,8 +245,27 @@ class Profile:
                 raise ValueError(f"{cls.__qualname__} is not in iron.operators.CATALOG")
             name = names[cls]
             lines.append(json.dumps({"operator": name, **dims, **tunables}))
+        chain_lines = []
+        for producer, producer_dims, consumer, consumer_dims, input in self._chains:
+            for cls in (producer, consumer):
+                if cls not in names:
+                    raise ValueError(
+                        f"{cls.__qualname__} is not in iron.operators.CATALOG"
+                    )
+            chain_lines.append(
+                json.dumps(
+                    {
+                        "producer": {"operator": names[producer], **producer_dims},
+                        "consumer": {"operator": names[consumer], **consumer_dims},
+                        "input": input,
+                    }
+                )
+            )
+        body = '{"entries": [\n  ' + ",\n  ".join(lines) + "\n]"
+        if chain_lines:
+            body += ',\n"chains": [\n  ' + ",\n  ".join(chain_lines) + "\n]"
         with open(path, "w") as f:
-            f.write('{"entries": [\n  ' + ",\n  ".join(lines) + "\n]}\n")
+            f.write(body + "}\n")
 
     def __iter__(self) -> Iterator[tuple[type, dict[str, Any], dict[str, Any]]]:
         return iter(self._entries)

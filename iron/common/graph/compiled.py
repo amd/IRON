@@ -15,7 +15,7 @@ import dataclasses
 import functools
 import inspect
 import logging
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,8 +41,9 @@ from ..image.callable import (
 from ..image.packaging import Kind, Plan, plan, require_device
 from ..image.link import FullELF, PerStep
 from ..image.sequence import Image
-from ..image.step import BufferRef
+from ..image.step import BufferRef, Chain
 from .carried import CARRY, EmitSite, attach_emit, compose
+from .chain import chains as graph_chains
 from .handle import Carry, Dense, Handle, State, Weight, is_operand
 from .record import HostStep, Recording, Recorder
 
@@ -560,12 +561,19 @@ class Graph:
                 {h.name: (h.shape, h.dtype) for h in recording.inputs}
             )
             emit, sized = self._emit(recording, chosen, feeds)
+            profile = self._profile()
+            chained = (
+                graph_chains(recording, profile)
+                if chosen.full_elf and not check and profile is not None
+                else ()
+            )
             version = CompiledGraph(
                 recording,
                 chosen,
                 check=check,
                 arena=self._arena,
                 emit=emit,
+                chains=chained,
             )
             if sized is not None and len(version.parameters) != len(sized):
                 read = {p.name for p in version.parameters}
@@ -734,6 +742,7 @@ class CompiledGraph:
         check: bool = False,
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
+        chains: Sequence[Chain] = (),
     ):
         self.recording = recording
         self.plan = plan
@@ -752,7 +761,9 @@ class CompiledGraph:
             if arena is None
             else dict(arena=arena.plan, residents=recording.residents)
         )
-        self.sequence = Image(recording, packaging, **placement).compile()
+        self.sequence = Image(
+            recording, packaging, chains=chains, **placement
+        ).compile()
         self.image = self.sequence.image
         self.artifacts = self.sequence.artifacts
         if plan.full_elf:
