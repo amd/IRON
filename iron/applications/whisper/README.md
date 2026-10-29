@@ -44,3 +44,30 @@ but 0.05% of features, those one bf16 ulp away
 Every version (the decode step, a prompt chunk, the encode version) compiles
 for NPU1 at both checkpoints, device-free: `supported_devices("npu1",
 "npu2")` on the device tests.
+
+## Transcription
+
+`Whisper.transcribe(audio)` runs one window (up to 30 s at large-v3-turbo's):
+encode, the `<|startoftranscript|> <|language|> <|task|> <|notimestamps|>`
+prompt, greedy generation through `Model.generate`, and the decoded text.
+`sampled()` adds a suppression bias (-inf at `generation_config.json`'s
+`suppress_tokens`, `begin_suppress_tokens` on the prompt's own call, and
+every token from the task block on) to the logits `Sample` draws from on
+the device, before `Model.generate`'s `logits` is returned; a model's
+returned logits themselves stay unsuppressed, so accuracy checks against
+Hugging Face's own forward pass are unaffected. `audio.py` loads and saves
+mono 16 kHz PCM16 WAV; `wer.py` scores a transcript's word error rate.
+
+```text
+python -m iron.applications.whisper.model <path> --wav clip.wav
+```
+
+Audio longer than one window raises rather than silently truncating:
+long-form transcription (OpenAI Whisper's sequential windowed decoding
+with timestamps, `transcribe_long`) is not yet built. This ports the
+decoding algorithms of amd/IRON#218 (Giuseppe Capaldo)'s Whisper-small on
+Phoenix/NPU1, built on pre-refactor kernel plumbing, onto `iron.lm`'s
+`EncoderDecoder`: its token suppression, prompt structure and WER scoring
+carry over; its timestamp-pairing rules (`TokenPolicy`) still need a
+device-side equivalent of their own, since every draw, timestamps
+included, runs on the NPU here.
