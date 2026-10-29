@@ -73,6 +73,7 @@ y = ffn(x, n=37)                  # the device runs the first 37 rows
 | Checking a design without an NPU | [Section 6](./section-6/) |
 | Tunables, and a profile that sets them for a whole model | [Section 7](./section-7/) |
 | From graphs to a language model (`iron.lm`) | [Section 8](./section-8/) |
+| Several steps fused into one device configuration | [Section 9](./section-9/) |
 | The rules a contributor or agent follows | [AGENTS.md](../AGENTS.md) |
 
 ## Sections
@@ -86,6 +87,7 @@ y = ffn(x, n=37)                  # the device runs the first 37 rows
 * [Section 6 — The host reference and check mode](./section-6/)
 * [Section 7 — Profiles and tunables](./section-7/)
 * [Section 8 — From graphs to a language model](./section-8/)
+* [Section 9 — Fusing steps on-chip](./section-9/)
 
 -----
 [Section 0 — Getting started →](./section-0/)
