@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from iron.applications.whisper import timestamp_policy as tp
+from iron.operators.emit import reference as emit_reference
 
 VOCAB = 600
 EOS = 257
@@ -90,6 +91,23 @@ def walk(logits_of_step, steps):
         if generated[-1] == EOS:
             break
     return generated
+
+
+def test_is_stamp_row_matches_the_device_free_emit_reference():
+    """``is_stamp_row``'s ``Emit`` program, against ``token >=
+    timestamp_begin`` over a wide range of token ids, through ``Emit``'s
+    own (already verified) reference rather than asserted by hand: the
+    device half of ``step``'s ``last``/``penultimate_is_stamp``.
+    """
+    program = np.array(
+        [tp.is_stamp_row(0, 0, timestamp_begin=TIMESTAMP_BEGIN)], dtype=np.int32
+    )
+    tokens = [0, 1, TIMESTAMP_BEGIN - 1, TIMESTAMP_BEGIN, TIMESTAMP_BEGIN + 1, 50363]
+    tokens += list(np.random.default_rng(0).integers(0, 1 << 20, 50))
+    for token in tokens:
+        planes = np.array([[token], [0]], dtype=np.int32)
+        _, state = emit_reference(program, planes, slots=0)
+        assert state[0] == int(token >= TIMESTAMP_BEGIN), token
 
 
 @pytest.mark.parametrize("seed", range(30))

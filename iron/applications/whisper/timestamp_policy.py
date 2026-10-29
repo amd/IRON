@@ -30,6 +30,17 @@ import numpy as np
 NO_STAMP = -1
 
 
+def is_stamp_row(plane: int, index: int, *, timestamp_begin: int) -> list[int]:
+    """An ``iron.operators.emit.Emit`` program row: 1 if the carried token
+    at ``planes[plane, index]`` is a timestamp (``>= timestamp_begin``),
+    else 0, in exact int32 arithmetic (unlike the bf16 ``Clamp`` operator,
+    which rounds a token id past bf16's exact integer range, token ids
+    running past 50000): an affine shift by ``1 - timestamp_begin``,
+    clamped to ``[0, 1]``.
+    """
+    return [plane, index, 1, 1 - timestamp_begin, 0, 1, 0, 0, 1, -1, 0]
+
+
 def initial_state() -> tuple[bool, int]:
     """``(penultimate_is_stamp, last_stamp)`` before any token of a window
     is drawn, for the window's first generated token's own call
