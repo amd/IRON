@@ -32,15 +32,11 @@ jobs:
       matrix:
         include:
           - {runner: phoenix, name: Phoenix}
-          # Krackan's device heap holds less control code than Gemma 4 E2B's
-          # and EmbeddingGemma 2's full ELFs need (29f679da).
-          - {runner: krackan, name: Krackan, xfail_device_heap: "1"}
+          - {runner: krackan, name: Krackan}
     # A fork's pull request never reaches the NPU runners, which hold /srv's
     # weights and the device, as in mlir-aie's self-hosted jobs.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, "${{ matrix.runner }}"]
-    env:
-      IRON_XFAIL_DEVICE_HEAP: ${{ matrix.xfail_device_heap }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
