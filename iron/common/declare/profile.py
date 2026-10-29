@@ -129,8 +129,7 @@ class Profile:
             if name not in CATALOG:
                 raise ValueError(f"{path}: no operator {name!r} in iron.operators")
             op_cls = CATALOG[name]
-            # An Enum-domain tunable is JSON's string, its member's value
-            # (should 1: a Pinned member's own value, not its ordinal).
+            # An Enum-domain tunable is its member's value in JSON, not its ordinal.
             for key, param in op_cls.declaration.params.items():
                 domain = param.domain
                 if (

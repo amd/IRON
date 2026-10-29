@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from aie.iron import ExternalFunction
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.declare import Operator, Profile
@@ -53,10 +52,8 @@ KERNEL_CHECKS = "https://xilinx.github.io/mlir-aie/kernel-checks/{npu}/latest.js
 def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
     """Each kernel's cycles per call as mlir-aie's nightly last timed it on
     ``dev``'s NPU, by ``ExternalFunction.recipe_key``; empty where they
-    cannot be read or this mlir-aie names no builds.
+    cannot be read.
     """
-    if not hasattr(ExternalFunction, "recipe_key"):
-        return {}
     url = KERNEL_CHECKS.format(npu=dev.name)
     try:
         with urllib.request.urlopen(url, timeout=30) as response:
