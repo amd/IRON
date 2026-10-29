@@ -35,6 +35,17 @@ class BufferRef:
 
 
 @dataclass(frozen=True)
+class Chain:
+    """Step ``producer``'s output ``output`` streamed on-chip into the next
+    step's input ``input``: the two run as one, with no host transfer between.
+    """
+
+    producer: int
+    output: str
+    input: str
+
+
+@dataclass(frozen=True)
 class SequenceStep:
     """One step: an operator, and where each of its declared buffers is."""
 

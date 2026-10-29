@@ -278,16 +278,23 @@ def identities(arrays: Mapping[str, BuiltArray]) -> dict[str, Hashable]:
 
 
 def configuration(
-    name: str, arrays: Mapping[str, BuiltArray], steps: Sequence[str] = ()
+    name: str,
+    arrays: Mapping[str, BuiltArray],
+    steps: Sequence[str] = (),
+    fuse: bool = False,
 ) -> DeviceConfiguration:
     """``arrays`` as one device configuration ``name``: one array per identity, and
     each entry's sequence over it, ``sequence`` if it is alone, else named for its
-    key. Given ``steps`` (keys of ``arrays``), one ``sequence`` runs theirs in order.
+    key. Given ``steps`` (keys of ``arrays``), one ``sequence`` runs theirs in order,
+    back to back (``MergedRuntime.merge``), or, ``fuse``, in one task group
+    (``MergedRuntime.fuse``) for steps whose streams meet on-chip.
 
     Raises:
-        ValueError: The arrays are built for different devices, or traced
-            with different trace sizes.
+        ValueError: The arrays are built for different devices, traced with
+            different trace sizes, or ``fuse`` is given no ``steps``.
     """
+    if fuse and not steps:
+        raise ValueError("fuse needs steps to fuse")
     of = identities(arrays)
     owners: dict[Hashable, BuiltArray] = {}
     for key, array in arrays.items():
@@ -302,12 +309,9 @@ def configuration(
             f"{name}: its traced arrays ask for trace sizes {sorted(sizes)}; one "
             f"configuration has one trace buffer, so give them one size"
         )
+    merge = MergedRuntime.fuse if fuse else MergedRuntime.merge
     runtimes = (
-        [
-            MergedRuntime.merge(
-                [owners[of[k]].runtime(arrays[k], None) for k in steps], "sequence"
-            )
-        ]
+        [merge([owners[of[k]].runtime(arrays[k], None) for k in steps], "sequence")]
         if steps
         else [
             owners[of[key]].runtime(array, "sequence" if len(arrays) == 1 else key)

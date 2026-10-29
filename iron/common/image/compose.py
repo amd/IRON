@@ -28,7 +28,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
 from ..design import BuiltArray, OperatorDesign, configuration, identities
-from .step import BufferRef
+from .step import BufferRef, Chain
 
 logger = logging.getLogger(__name__)
 
@@ -181,27 +181,70 @@ class Composition:
         designs, design_of = seq.unique_designs()
         # unique_designs() made one design per identity, so one name is a collision.
         own = [OperatorDesign(op) for op in designs]
-        self.designs: dict[str, OperatorDesign] = {}
+        named: dict[str, OperatorDesign] = {}
         for design in own:
-            existing = self.designs.setdefault(design.name, design)
+            existing = named.setdefault(design.name, design)
             if existing is not design:
                 raise ValueError(
                     f"{existing.op.name} and {design.op.name} are different designs "
                     f"whose device names collide, {design.name}; a tunable given "
                     f"to either one (a tile size, a column count) separates them"
                 )
-        self.steps = [(own[design_of[id(s.op)]].name, s.buffers) for s in seq.steps]
+        # A producer built to feed another array is not the producer alone.
+        consumed = {chain.producer + 1 for chain in seq.chains}
+        self.chains: dict[str, tuple[OperatorDesign, OperatorDesign, Chain]] = {}
+        steps = []
+        for i, s in enumerate(seq.steps):
+            if i in consumed:
+                continue
+            chain = next((c for c in seq.chains if c.producer == i), None)
+            if chain is None:
+                steps.append((own[design_of[id(s.op)]].name, s.buffers))
+                continue
+            producer_design = own[design_of[id(s.op)]]
+            consumer_step = seq.steps[i + 1]
+            consumer_design = own[design_of[id(consumer_step.op)]]
+            symbol = self.chain_name(
+                producer_design.name, chain.output, consumer_design.name, chain.input
+            )
+            self.chains[symbol] = (producer_design, consumer_design, chain)
+            producer_buffers = [
+                ref for ref, b in zip(s.buffers, s.op.buffers) if b.name != chain.output
+            ]
+            consumer_buffers = [
+                ref
+                for ref, b in zip(consumer_step.buffers, consumer_step.op.buffers)
+                if b.name != chain.input
+            ]
+            steps.append((symbol, tuple(producer_buffers + consumer_buffers)))
+        self.steps = steps
+        used = {name for name, _ in steps}
+        self.designs = {name: design for name, design in named.items() if name in used}
         # A full ELF expands its loads, configuring the array at every call,
         # where it runs more than one design: one design is configured by the
         # first dispatch alone, as the firmware skips an unexpanded load of
         # the PDI it has loaded, unless the build is traced or asks to
         # reconfigure.
-        self.expands = len(self.designs) > 1 or seq.traced or full_elf.reconfigure
+        self.expands = (
+            len(self.designs) + len(self.chains) > 1
+            or seq.traced
+            or full_elf.reconfigure
+        )
         self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
         self.commands = full_elf.commands
         self.shared_words = full_elf.shared_words
         self.packing = Packing()
+
+    @staticmethod
+    def chain_name(producer: str, output: str, consumer: str, input_: str) -> str:
+        """A chained pair's device symbol: content-named, so one hits the cache
+        across processes, and distinct from either member's own.
+        """
+        digest = hashlib.sha256(
+            f"{producer}>{output}>{consumer}>{input_}".encode()
+        ).hexdigest()[:8]
+        return f"chain2_{digest}"
 
     @property
     def identity(self) -> str:
@@ -211,6 +254,11 @@ class Composition:
         h = hashlib.sha256()
         for name, design in self.designs.items():
             h.update(f"{name}={design.compilable().recipe_hash};".encode())
+        for symbol, (producer, consumer, _) in self.chains.items():
+            h.update(
+                f"{symbol}={producer.compilable().recipe_hash}+"
+                f"{consumer.compilable().recipe_hash};".encode()
+            )
         state = (
             self.steps,
             self.layout,
@@ -254,7 +302,10 @@ class Composition:
         packing = self.packing.sharing(
             {n: of[n] if n in arrays else n for n in self.designs}
         )
-        device = next(iter(self.designs.values())).op.array_device()
+        sample = next(iter(self.designs.values()), None)
+        if sample is None:
+            sample = next(iter(self.chains.values()))[0]
+        device = sample.op.array_device()
         configurations: dict[str, DeviceConfiguration] = {}
         runtimes: dict[str, Runtime] = {}
         types: dict[str, list] = {}
@@ -271,9 +322,29 @@ class Composition:
             else:
                 configured = configuration(symbol, {m: arrays[m] for m in members})
                 for m in members:
-                    types[m] = [b.flat_type for b in arrays[m].op.buffers]
+                    types[m] = [
+                        b.flat_type for b in arrays[m].op.buffers if not b.on_chip
+                    ]
             configurations[symbol] = configured
             runtimes.update(zip(members, configured.runtimes))
+
+        for symbol, (producer_design, consumer_design, chain) in self.chains.items():
+            producer_array = BuiltArray(producer_design, words)
+            [source] = [b for b in producer_array.op.buffers if b.name == chain.output]
+            consumer_array = BuiltArray(
+                consumer_design, words, fed={chain.input: source}
+            )
+            configured = configuration(
+                symbol,
+                {"producer": producer_array, "consumer": consumer_array},
+                steps=("producer", "consumer"),
+                fuse=True,
+            )
+            configurations[symbol] = configured
+            runtimes[symbol] = configured.runtimes[0]
+            types[symbol] = [
+                b.flat_type for b in producer_array.op.buffers if not b.on_chip
+            ] + [b.flat_type for b in consumer_array.op.buffers if not b.on_chip]
 
         calls = [
             (

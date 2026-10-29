@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 import aie.utils as aie_utils
@@ -18,7 +18,7 @@ from .allocator import Allocation, ArenaPlan, lay_out
 from .artifacts import Artifacts, Step
 from .callable import BF16, FullELFCallable, PerStepCallable, ScratchArena
 from .link import FullELF, PerStep
-from .step import BufferRef, SequenceStep
+from .step import BufferRef, Chain, SequenceStep
 
 if TYPE_CHECKING:
     from ..graph.record import Recording
@@ -44,6 +44,7 @@ class Image:
         packaging: FullELF | PerStep,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
+        chains: Sequence[Chain] = (),
     ):
         if residents and arena is None:
             raise ValueError("residents are placed in an arena; pass arena= too")
@@ -57,9 +58,71 @@ class Image:
         self.packaging = packaging
         self.arena = arena
         self.residents = dict(residents or {})
+        self.chains = tuple(chains)
+        if self.chains and isinstance(packaging, PerStep):
+            raise ValueError(
+                "chains need a FullELF image; PerStep compiles one xclbin per "
+                "step, which cannot stream a buffer on-chip between two of them"
+            )
+        self._validate_chains()
         self._arena_layout: dict[str, Allocation] | None = None
         self.layout: dict[str, tuple[str, int, int]] | None = None
         self._artifacts: Artifacts | None = None
+
+    def _validate_chains(self) -> None:
+        """Each ``Chain`` names a real hand-off: ``producer + 1`` is a step, its
+        named buffers are the producer's drained output and the consumer's
+        filled input, both the whole of one buffer, and no step is chained twice.
+
+        Raises:
+            ValueError: Any of the above does not hold.
+        """
+        claimed: set[int] = set()
+        for chain in self.chains:
+            p = chain.producer
+            if not 0 <= p < len(self.steps) - 1:
+                raise ValueError(
+                    f"chain producer step {p} names no step with a step after "
+                    f"it ({len(self.steps)} steps)"
+                )
+            c = p + 1
+            if p in claimed:
+                raise ValueError(f"step {p} is in two chains")
+            if c in claimed:
+                raise ValueError(f"step {c} is in two chains")
+            claimed |= {p, c}
+            producer, consumer = self.steps[p], self.steps[c]
+            out = next(
+                (
+                    ref
+                    for ref, b in zip(producer.buffers, producer.op.buffers)
+                    if b.name == chain.output and b.drains
+                ),
+                None,
+            )
+            if out is None:
+                raise ValueError(
+                    f"step {p} ({type(producer.op).__name__}) has no drained "
+                    f"buffer {chain.output!r}"
+                )
+            in_ = next(
+                (
+                    ref
+                    for ref, b in zip(consumer.buffers, consumer.op.buffers)
+                    if b.name == chain.input and b.fills
+                ),
+                None,
+            )
+            if in_ is None:
+                raise ValueError(
+                    f"step {c} ({type(consumer.op).__name__}) has no filled "
+                    f"buffer {chain.input!r}"
+                )
+            if out.nbytes is not None or in_.nbytes is not None or out.root != in_.root:
+                raise ValueError(
+                    f"chain {p}->{c}: {chain.output!r} ({out}) and "
+                    f"{chain.input!r} ({in_}) do not name one whole buffer"
+                )
 
     @property
     def traced(self) -> bool:
@@ -236,6 +299,14 @@ class Image:
         records, entry, insts = self.packaging.record(designs, sharing)
         labels = [d.name for d in records]
         by_design = {id(op): labels[design_of[id(op)]] for op in operators}
+        # A chained pair is one design in the composed module: its two steps
+        # report one label, not their separate standalone ones.
+        for chain in self.chains:
+            producer_op = self.steps[chain.producer].op
+            consumer_op = self.steps[chain.producer + 1].op
+            paired = f"{by_design[id(producer_op)]}+{by_design[id(consumer_op)]}"
+            by_design[id(producer_op)] = paired
+            by_design[id(consumer_op)] = paired
         steps = tuple(
             Step(i, s.op.name, by_design[id(s.op)], s.buffers)
             for i, s in enumerate(self.steps)
