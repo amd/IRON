@@ -15,6 +15,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, ClassVar, Self
 
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
@@ -23,7 +24,14 @@ from aie.iron import kernels
 from aie.iron.kernels import eltwise
 from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance, Verdict
-from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.compile.jit.params import (
+    Select,
+    divisors,
+    param,
+    per_call,
+    tunable,
+    widths,
+)
 from ml_dtypes import bfloat16
 
 from .declare import Built, Operand, Operator, Rtp, Unresolvable
@@ -220,11 +228,12 @@ class Elementwise(Operator):
 
     # A chain of steps folded into this one's cores, its output their tile,
     # each but at most one unary: its one free input channel is the one
-    # binary step's.
+    # binary step's, or, a channel-full producer, its first input's own.
     finish: tuple[FinishStep, ...] = param(default=(), array=True)
     # A plain default, not derived: shim_columns() reads it from the class
     # alone (a Sweep's cases), before any instance exists to derive it from.
     uses_extra: bool = param(default=False)
+    rides: bool = param(default=False, array=True)
 
     default_tile: ClassVar[int] = DEFAULT_TILE
     tile_cap: ClassVar[int] = 4096
@@ -236,6 +245,19 @@ class Elementwise(Operator):
                 f"another input; its one free input channel is already another's"
             )
 
+    def _can_ride(self) -> bool:
+        """Whether this producer's first input could carry a finish's other
+        input beside its own: no per-call bound to chunk around, and exactly
+        one tile a lane, so a single extra transfer a lane suffices (the
+        general multi-tile case needs its own re-read chunking, not this).
+        """
+        if self.bound_extents or not self.inputs:
+            return False
+        try:
+            return self.lines == self.cores
+        except (TypeError, ZeroDivisionError):
+            return False
+
     def fold(self, consumer: Operator, at: int) -> Self | None:
         if not isinstance(consumer, Elementwise):
             return None
@@ -244,10 +266,11 @@ class Elementwise(Operator):
             return None
         binary = bool(others)
         used = sum(b.streamed for b in self.inputs)
-        # A binary producer's own two streams could carry it instead, same
-        # size as its own tile, but riding an existing stream is not built.
+        rides = False
         if binary and used + 1 > self.dev.core_dma_channels_in:
-            return None
+            if self.rides or not self._can_ride():
+                return None
+            rides = True
         dims = tuple(
             sorted(
                 (n, vars(consumer)[n])
@@ -261,13 +284,16 @@ class Elementwise(Operator):
                     "num_channels",
                     "finish",
                     "uses_extra",
+                    "rides",
                 )
                 and vars(consumer)[n] is not None
             )
         )
         step = FinishStep(type(consumer), dims, at, binary)
         return self.replace(
-            finish=self.finish + (step,), uses_extra=self.uses_extra or binary
+            rides=self.rides or rides,
+            finish=self.finish + (step,),
+            uses_extra=self.uses_extra or binary,
         )
 
     def resolve(self, dev) -> Self:
@@ -625,9 +651,15 @@ class Elementwise(Operator):
         # The chain of steps folded into these cores: each kernel runs after
         # the one before it, over the tile the previous call wrote; it
         # ping-pongs between two scratch buffers until the last call writes
-        # the real output. At most one step's other input, if any, rides
-        # finish_in's stream, acquired alongside the tile that call.
+        # the real output. At most one step's other input, if any, streams
+        # in on finish_in, or, this producer's cores already full, rides
+        # its first input's own stream, one more acquire of the same fifo.
         of_finish = finish_in.fifos() if finish_in is not None else None
+        ride_index = (
+            next(i for i, b in enumerate(ins) if b is self.inputs[0])
+            if self.rides
+            else None
+        )
         chain_meta = []
         chain_kernels = []
         for step in self.finish:
@@ -684,6 +716,13 @@ class Elementwise(Operator):
                             for i in range(n_args)
                         )
                     )
+                    # Released here, not in the loop below: a finish step
+                    # rides this same fifo for its own transfer next, and
+                    # acquiring it again before releasing a's would be
+                    # cumulative on the same outstanding acquire, not a new
+                    # one.
+                    if ride_index is not None and not held[ride_index]:
+                        fifos[ride_index].release(1)
                     tile = scratch_a
                     for idx, (c_fn, meta) in enumerate(zip(chain_fns, chain_meta)):
                         c_positions, c_scalars, c_order, n_c_args, at, binary = meta
@@ -693,7 +732,13 @@ class Elementwise(Operator):
                             if last
                             else (scratch_b if tile is scratch_a else scratch_a)
                         )
-                        extra = finish_fifo.acquire(1) if binary else None
+                        extra = None
+                        if binary:
+                            extra = (
+                                fifos[ride_index].acquire(1)
+                                if ride_index is not None
+                                else finish_fifo.acquire(1)
+                            )
                         c_inputs = [
                             tile if i == at else extra
                             for i in range(len(c_positions) - 1)
@@ -706,10 +751,13 @@ class Elementwise(Operator):
                             )
                         )
                         if binary:
-                            finish_fifo.release(1)
+                            if ride_index is not None:
+                                fifos[ride_index].release(1)
+                            else:
+                                finish_fifo.release(1)
                         tile = dst
                     for j, f in enumerate(fifos):
-                        if not held[j]:
+                        if not held[j] and j != ride_index:
                             f.release(1)
             for j in kept:
                 fifos[j].release(segments)
@@ -798,12 +846,58 @@ class BinaryElementwise(Elementwise):
         obj_shape=(Elementwise.tile_size,),
         per=CORES,
     )
+    # A finish step's other input: a and b already hold both of a core's
+    # input channels, so it rides a's instead of streaming of its own.
+    finish0 = In(
+        size,
+        obj_shape=Select(Elementwise.rides, None, (Elementwise.tile_size,)),
+        per=CORES,
+        when=Elementwise.uses_extra,
+    )
 
     @property
     def valid_elements(self) -> int:
         return self.valid
 
     over = UnaryElementwise.over
+
+    def sequence(self, rt) -> None:
+        """The derived sequence, every input filled and every output
+        drained; riding, ``a``'s lane also carries a finish's other input,
+        its own transfer right after ``a``'s own.
+        """
+        tg = rt.task_group()
+        ridden = self.a if self.rides else None
+        riding_finish0 = self.finish0 if self.rides and self.uses_extra else None
+        for buf in self.inputs:
+            if buf is riding_finish0:
+                # Not streamed while riding: no transfers() of its own, it
+                # rides ridden's instead, below.
+                continue
+            for lane, tap, word, unit in buf.transfers():
+                buf.fill(
+                    tap, lane=lane, group=tg, length_parameter=word, length_unit=unit
+                )
+            if buf is ridden and riding_finish0 is not None:
+                # finish0 isn't streamed while riding, so its own .lanes/
+                # .batch_axes aren't available; it shares ridden's shape and
+                # placement, so partition by those instead.
+                parts = TensorAccessPattern.full(riding_finish0.shape).partition(
+                    ridden.lanes, ridden.batch_axes
+                )
+                for lane, part in enumerate(parts):
+                    ridden.fill(part, lane=lane, source=riding_finish0, group=tg)
+        for buf in self.outputs:
+            for lane, tap, word, unit in buf.transfers():
+                buf.drain(
+                    tap,
+                    lane=lane,
+                    group=tg,
+                    wait=True,
+                    length_parameter=word,
+                    length_unit=unit,
+                )
+        rt.finish(tg)
 
 
 class Rowwise(Elementwise):

@@ -7,6 +7,8 @@ consumer takes no cores and no DMA hop of its own. No toolchain and no NPU
 above the "On the device" line.
 """
 
+import contextlib
+import signal
 import statistics
 
 import numpy as np
@@ -34,6 +36,25 @@ from iron.tests.support.llama_model import llama_1b, small
 from iron.tune.measure import Timing, time_interleaved
 
 pytestmark = pytest.mark.usefixtures("npu2")
+
+
+@contextlib.contextmanager
+def _bounded(seconds: int):
+    """Fail, rather than hang, a device call past ``seconds``: a new finish
+    chain's host/core acquire order is exactly the kind of mistake that
+    hangs silently instead of erroring.
+    """
+
+    def _raise(signum, frame):
+        raise TimeoutError(f"a device call ran past {seconds}s: likely a hang")
+
+    previous = signal.signal(signal.SIGALRM, _raise)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _stream(producer: int, output: str, input: str) -> Fusion:
@@ -187,11 +208,71 @@ def test_a_binary_producer_has_no_free_channel():
     assert fusion.steps == (0, 1)
 
 
+def test_binary_elementwise_rides_a_when_channel_full():
+    """A core's two channels are both ``add``'s own, but one tile is this
+    whole call, so ``a``'s channel can carry ``mul``'s other input too, one
+    more acquire of the same fifo (not its own stream).
+    """
+    add = ElementwiseAdd(size=256, num_aie_columns=1, num_channels=1, tile_size=256)
+    mul = ElementwiseMul(size=256, num_aie_columns=1, num_channels=1, tile_size=256)
+    steps = sequences.steps((add, "a", "b", "mid"), (mul, "mid", "up", "out"))
+    rec = Recording.of_steps("rides", steps, ["a", "b", "up"], ["out"])
+    (fusion,) = fold_candidates(rec)
+    folded = apply_folds(rec, (fusion,))
+    (step,) = folded.steps
+    assert step.op.rides is True
+    assert [h.name for h in step.inputs] == ["a", "b", "up"]
+    op = step.op.resolved(step.op.dev)
+    BuiltArray(OperatorDesign(op))
+
+
 def test_feed_b_leaves_no_channel_for_a_finish():
+    """With neither its columns resolved nor riding built for it (batched),
+    feed_b's two channels leave no room for a finish's other input.
+    """
     gemv = GEMV(M=2048, K=2048, tile_size_input=4, tile_size_output=256, feed_b=True)
     add = ElementwiseAdd(size=2048, tile_size=256)
     rec = _gemv_add_recording("feed_b", gemv, add)
     assert fold_candidates(rec) == ()
+
+    batched = GEMV(
+        M=2048,
+        K=2048,
+        tile_size_input=4,
+        tile_size_output=256,
+        num_aie_columns=8,
+        num_channels=1,
+        feed_b=True,
+        num_batches=2,
+    )
+    add2 = ElementwiseAdd(size=2 * 2048, tile_size=256)
+    rec2 = _gemv_add_recording("feed_b_batched", batched, add2)
+    assert fold_candidates(rec2) == ()
+
+
+def test_gemv_rides_a_when_feed_b_leaves_no_channel():
+    """feed_b's two channels leave none free, but A's own tile, one column's
+    whole share and so one call's only tile, can carry the residual's row
+    re-read instead (the old branch's re-read trick, not a stream of its own).
+    """
+    gemv = GEMV(
+        M=2048,
+        K=2048,
+        tile_size_input=4,
+        tile_size_output=256,
+        num_aie_columns=8,
+        num_channels=1,
+        feed_b=True,
+    )
+    add = ElementwiseAdd(size=2048, tile_size=256)
+    rec = _gemv_add_recording("feed_b_rides", gemv, add)
+    (fusion,) = fold_candidates(rec)
+    folded = apply_folds(rec, (fusion,))
+    (step,) = folded.steps
+    assert step.op.rides is True
+    assert [h.name for h in step.inputs] == ["A", "B", "r"]
+    op = step.op.resolved(step.op.dev)
+    BuiltArray(OperatorDesign(op))
 
 
 def test_chosen_folds_matches_the_profile_and_is_applied_once():
@@ -519,3 +600,160 @@ def test_a_bounded_fold_matches_across_different_per_call_counts():
         assert np.array_equal(
             out[:valid].view(np.uint16), want[:valid].view(np.uint16)
         ), f"n={valid}: the folded device differs from the graph's own reference"
+
+
+@pytest.mark.supported_devices("npu2")
+def test_binary_elementwise_rides_matches_reference_and_unfused_on_device():
+    """ElementwiseAdd(a, b) -> ElementwiseMul, folded by riding a's channel
+    (one tile, the whole call, so no stream of its own for Mul's other
+    input), holds to the two operators' references composed and is
+    bit-equal to the pair run unfused.
+    """
+    size, tile = 256, 256
+    add = ElementwiseAdd(size=size, num_aie_columns=1, num_channels=1, tile_size=tile)
+    mul = ElementwiseMul(size=size, num_aie_columns=1, num_channels=1, tile_size=tile)
+    ride_op = add.fold(mul, 0)
+    assert ride_op is not None and ride_op.rides
+
+    ride_rec = Recording.of_step(ride_op)
+    unfused_steps = sequences.steps((add, "a", "b", "mid"), (mul, "mid", "up", "out"))
+    unfused_rec = Recording.of_steps(
+        "binary_ride_unfused", unfused_steps, ["a", "b", "up"], ["out"]
+    )
+
+    ride_img = Image(ride_rec, FullELF())
+    ride_img.compile()
+    ride_run = ride_img.get_callable()
+
+    unfused_img = Image(unfused_rec, FullELF())
+    unfused_img.compile()
+    unfused_run = unfused_img.get_callable()
+
+    a_vec = vectors(add).inputs["a"]
+    b_vec = vectors(add).inputs["b"]
+    up = vectors(mul, seed=7).inputs["b"]
+    y_ref = np.asarray(ride_op.reference(a_vec, b_vec, up))
+
+    def dispatch(run, names):
+        run.get_buffer(BufferRef(names[0])).numpy_view()[:] = a_vec.reshape(-1)
+        run.get_buffer(BufferRef(names[1])).numpy_view()[:] = b_vec.reshape(-1)
+        run.get_buffer(BufferRef(names[2])).numpy_view()[:] = up.reshape(-1)
+        with _bounded(30):
+            run()
+        return run.get_buffer(BufferRef(names[3])).numpy()[:size].copy()
+
+    out = dispatch(ride_run, ("a", "b", "finish0", "y"))
+    baseline = dispatch(unfused_run, ("a", "b", "up", "out"))
+
+    tol = ride_op.tolerance()
+    verdict = compare(
+        out,
+        y_ref,
+        tol,
+        bound=tol.bound(a_vec, b_vec, up) if tol.kind == "bound" else None,
+    )
+    assert verdict, verdict.detail
+    assert np.array_equal(
+        out.view(np.uint16), baseline.view(np.uint16)
+    ), "the ridden and unfused devices differ"
+
+
+@pytest.mark.supported_devices("npu2")
+def test_gemv_rides_a_matches_reference_unfused_and_stream_on_device(record_property):
+    """GEMV(2048, 2048) -> ElementwiseAdd residual, folded by riding A's
+    channel (``feed_b=True`` leaves no channel of its own for it), holds to
+    the two operators' references composed and is bit-equal to the pair run
+    unfused; timed against the unfused pair and the same pair stream-fused.
+
+    4 columns, not the decode tunable's 8: at 8, GEMV(feed_b=True)'s stream
+    fusion into Add needs the shim's whole 16-channel output budget plus
+    one more (A/B already claim it as two input streams a lane, so C can't
+    land on-chip and still needs its own output channel, same as Add's);
+    that is an existing stream-placement limit, not a riding one, so this
+    column count is the one where all three variants are buildable.
+    """
+    M, K = 2048, 2048
+    tile_size_input, cols = 4, 4
+    tile_size_output = M // cols
+    gemv = GEMV(
+        M=M,
+        K=K,
+        tile_size_input=tile_size_input,
+        tile_size_output=tile_size_output,
+        num_aie_columns=cols,
+        num_channels=1,
+        feed_b=True,
+    )
+    add = ElementwiseAdd(size=M, tile_size=tile_size_output)
+    ride_op = gemv.fold(add, 1)
+    assert ride_op is not None and ride_op.rides
+
+    ride_rec = Recording.of_step(ride_op)
+    unfused_rec = _gemv_add_recording(
+        "gemv_ride_unfused",
+        GEMV(
+            M=M,
+            K=K,
+            tile_size_input=tile_size_input,
+            tile_size_output=tile_size_output,
+            num_aie_columns=cols,
+            num_channels=1,
+            feed_b=True,
+        ),
+        ElementwiseAdd(size=M, tile_size=tile_size_output),
+    )
+    stream_rec = _gemv_add_recording(
+        "gemv_ride_stream",
+        GEMV(
+            M=M,
+            K=K,
+            tile_size_input=tile_size_input,
+            tile_size_output=tile_size_output,
+            num_aie_columns=cols,
+            num_channels=1,
+            feed_b=True,
+        ),
+        ElementwiseAdd(size=M, tile_size=tile_size_output),
+    )
+
+    ride_img = Image(ride_rec, FullELF())
+    ride_img.compile()
+    ride_run = ride_img.get_callable()
+
+    unfused_img = Image(unfused_rec, FullELF())
+    unfused_img.compile()
+    unfused_run = unfused_img.get_callable()
+
+    stream_img = Image(stream_rec, FullELF(), fusions=(_stream(0, "C", "b"),))
+    stream_img.compile()
+    stream_run = stream_img.get_callable()
+
+    A = vectors(gemv).inputs["A"]
+    B = vectors(gemv).inputs["B"]
+    r = vectors(add, seed=7).inputs["a"]
+    y_ref = np.asarray(ride_op.reference(A, B, r))
+
+    def dispatch(run, names):
+        run.get_buffer(BufferRef(names[0])).numpy_view()[:] = A.reshape(-1)
+        run.get_buffer(BufferRef(names[1])).numpy_view()[:] = B.reshape(-1)
+        run.get_buffer(BufferRef(names[2])).numpy_view()[:] = r.reshape(-1)
+        with _bounded(30):
+            run()
+        return run.get_buffer(BufferRef(names[3])).numpy()[:M].copy()
+
+    out = dispatch(ride_run, ("A", "B", "finish0", "C"))
+    baseline = dispatch(unfused_run, ("A", "B", "r", "out"))
+
+    tol = ride_op.tolerance()
+    verdict = compare(
+        out, y_ref, tol, bound=tol.bound(A, B, r) if tol.kind == "bound" else None
+    )
+    assert verdict, verdict.detail
+    assert np.array_equal(
+        out.view(np.uint16), baseline.view(np.uint16)
+    ), "the ridden and unfused devices differ"
+
+    times = _time(ride_run, unfused_run, stream_run)
+    for name, (lo, med) in times.items():
+        record_property(f"{name} min us", lo)
+        record_property(f"{name} median us", med)

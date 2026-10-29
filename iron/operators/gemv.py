@@ -5,9 +5,11 @@ import math
 from typing import Any, ClassVar
 
 import aie.dialects.index as index
+import aie.dialects.memref as memref
 import numpy as np
-from aie.dialects.aie import T
+from aie.dialects.aie import AIETileType, T
 from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import Buffer, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
@@ -132,12 +134,14 @@ class GEMV(Operator):
     # False (the head-tile layout) unless a fed B, or fusion pricing, asks
     # for B's own stream: that costs a shim input channel, so it is not free.
     feed_b: bool = tunable(default=False, domain=(False, True))
-    # One step folded into these cores, its output C's tile; refused with
-    # feed_b, which already holds both of a core's input channels.
+    # One step folded into these cores, its output C's tile.
     finish: tuple[FinishStep, ...] = param(default=(), array=True)
     # A plain default, not derived: shim_columns() reads it from the class
     # alone (a Testing case), before any instance exists to derive it from.
     uses_extra: bool = param(default=False)
+    # feed_b already holds both of a core's input channels; a finish input
+    # then rides A's instead of its own (A's own tile re-read, below C's).
+    rides: bool = param(default=False, array=True)
 
     A = In(
         num_matrices,
@@ -155,11 +159,12 @@ class GEMV(Operator):
         per=(num_aie_columns, num_channels),
         depth=2,
     )
-    # A finish step's other input, on the channel feed_b would otherwise use.
+    # A finish step's other input, on the channel feed_b would otherwise use,
+    # or, riding, no stream of its own (A's tile carries it, re-read).
     finish0 = In(
         num_batches,
         M,
-        obj_shape=(tile_size_output,),
+        obj_shape=Select(rides, None, (tile_size_output,)),
         per=(num_aie_columns, num_channels),
         depth=2,
         when=uses_extra,
@@ -208,12 +213,11 @@ class GEMV(Operator):
                     "GEMV: only one of its finish steps takes another input; "
                     "its one free input channel is already another's"
                 )
-            if self.feed_b:
-                # A's own tile could carry it instead (as it does B's row),
-                # but A's tile and a finish's are not the same size; not built.
+            if self.feed_b and not self.rides:
                 raise ValueError(
                     "GEMV: feed_b already holds both of a core's input "
-                    "channels, leaving none for a finish step's other input"
+                    "channels, leaving none for a finish step's other input "
+                    "that does not ride A's"
                 )
             if self.repeat > 1:
                 raise ValueError(
@@ -306,15 +310,18 @@ class GEMV(Operator):
                 raise ValueError(f"GEMV: {name} ({tile}) must divide M/lanes ({rows})")
 
     def fold(self, consumer, at: int):
-        if not isinstance(consumer, Elementwise) or self.feed_b or self.repeat > 1:
+        if not isinstance(consumer, Elementwise) or self.repeat > 1:
             return None
         others = [i for i in range(len(consumer.inputs)) if i != at]
         if len(others) > 1:
             return None
         binary = bool(others)
         used = sum(b.streamed for b in self.inputs)
+        rides = False
         if binary and used + 1 > self.dev.core_dma_channels_in:
-            return None
+            if self.rides or not self._can_ride():
+                return None
+            rides = True
         dims = tuple(
             sorted(
                 (n, vars(consumer)[n])
@@ -328,14 +335,50 @@ class GEMV(Operator):
                     "num_channels",
                     "finish",
                     "uses_extra",
+                    "rides",
                 )
                 and vars(consumer)[n] is not None
             )
         )
         step = FinishStep(type(consumer), dims, at, binary)
         return self.replace(
-            finish=self.finish + (step,), uses_extra=self.uses_extra or binary
+            finish=self.finish + (step,),
+            uses_extra=self.uses_extra or binary,
+            rides=self.rides or rides,
         )
+
+    def _can_ride(self) -> bool:
+        """Whether A's own tile could carry a finish's other input instead
+        of a stream of its own: no batches or per-call bound to walk it by
+        (one tile is this whole call, so one extra transfer a lane
+        suffices), A's tile holds a whole number of a finish tile's,
+        re-read at most a descriptor's iteration limit, and a lane's extra
+        transfer still fits its shim tile's descriptor budget.
+        """
+        if self.bound_extents or self.num_batches is not None:
+            return False
+        try:
+            lanes = self.num_aie_columns * self.num_channels
+            if self.M != lanes * self.tile_size_output:
+                return False
+            carried, line = self.tile_size_input * self.K, self.tile_size_output
+            if carried % line:
+                return False
+        except TypeError:  # a tunable not yet resolved: not decidable here
+            return False
+        dev = self.dev
+        if carried // line > (1 << dev.get_dma_bd_iter_bits(0, 0)):
+            return False
+        shims = sum(
+            dev.get_tile_type(col, 0) is AIETileType.ShimNOCTile
+            for col in range(dev.cols)
+        )
+        held = (
+            dev.get_num_bds(AIETileType.ShimNOCTile)
+            * shims
+            // (dev.shim_dma_channels_in + dev.shim_dma_channels_out)
+        )
+        return 2 <= held
 
     def build(self) -> Built:
         K, lanes = self.K, self.num_aie_columns * self.num_channels
@@ -405,10 +448,19 @@ class GEMV(Operator):
             # The chain of steps folded into these cores: each kernel runs
             # after the one before it, over the tile the previous call
             # wrote in a scratch buffer, ping-ponging between two until the
-            # last writes C; at most one step's other input rides finish0
-            # instead of the channel feed_b would otherwise take.
+            # last writes C; at most one step's other input streams in on
+            # finish0, or, riding, is A's own tile re-read, cast down to one
+            # finish tile's size (A's holds several, identical repeats).
+            binary_finish = any(f.binary for f in self.finish)
             of_finish = (
-                self.finish0.fifos() if any(f.binary for f in self.finish) else None
+                self.finish0.fifos() if binary_finish and not self.rides else None
+            )
+            ride_view = (
+                np_ndarray_type_to_memref_type(
+                    np.ndarray[(tile_size_output,), np.dtype[bfloat16]]
+                )
+                if binary_finish and self.rides
+                else None
             )
             chain_meta = []
             chain_kernels = []
@@ -470,7 +522,21 @@ class GEMV(Operator):
                                 if last
                                 else (scratch_b if tile is scratch_a else scratch_a)
                             )
-                            extra = finish_fifo.acquire(1) if binary else None
+                            extra = None
+                            if binary and ride_view is not None:
+                                ridden = A_fifo.acquire(1)
+                                extra = memref.reinterpret_cast(
+                                    ride_view,
+                                    ridden,
+                                    [],
+                                    [],
+                                    [],
+                                    [0],
+                                    [tile_size_output],
+                                    [1],
+                                )
+                            elif binary:
+                                extra = finish_fifo.acquire(1)
                             c_inputs = [
                                 tile if i == at else extra
                                 for i in range(len(c_positions) - 1)
@@ -486,7 +552,9 @@ class GEMV(Operator):
                                     for i in range(n_c_args)
                                 )
                             )
-                            if binary:
+                            if binary and ride_view is not None:
+                                A_fifo.release(1)
+                            elif binary:
                                 finish_fifo.release(1)
                             tile = dst
                         C_fifo.release(1)
@@ -558,12 +626,16 @@ class GEMV(Operator):
             )
             for k, tap, word, unit in self.C.transfers()
         ]
-        if any(f.binary for f in self.finish):
+        binary_finish = any(f.binary for f in self.finish)
+        riding = binary_finish and self.rides
+        if binary_finish and not self.rides:
             # finish0's shape matches C's, so the same per-lane walk fills it.
             for k, tap, word, unit in self.finish0.transfers():
                 self.finish0.fill(
                     tap, lane=k, length_parameter=word, length_unit=unit, managed=False
                 )
+        ride_taps = {k: tap for k, tap, _, _ in self.C.transfers()} if riding else {}
+        reads = (tsi * K) // self.tile_size_output if riding else 0
         rows = self.A.transfers()
         if (self.num_matrices or 1) > 1 and self.A.bounded is None:
             parts = TensorAccessPattern.full((M, K)).partition(len(rows), 0)
@@ -620,6 +692,14 @@ class GEMV(Operator):
                     length_unit=unit,
                     managed=False,
                 )
+                if riding:
+                    # The finish's row, re-read to fill one of A's tiles.
+                    self.A.fill(
+                        ride_taps[k].repeat(reads),
+                        lane=k,
+                        source=self.finish0,
+                        managed=False,
+                    )
         for task in drains:
             if task is not None:
                 task.await_()
