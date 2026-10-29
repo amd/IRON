@@ -24,6 +24,7 @@ from iron.applications.gemma4 import Gemma4
 from iron.applications.granite import Granite
 from iron.applications.granite_hybrid import GraniteHybrid
 from iron.applications.llama import Llama
+from iron.applications.phi3 import Phi4
 from iron.applications.qwen2 import Qwen2
 from iron.applications.qwen3 import Qwen3
 from iron.applications.qwen3_embedding import Qwen3Embedding
@@ -105,6 +106,16 @@ APPLICATIONS = {
     # so sizes aren't directly comparable.
     "granite_4.2_3b": Application(
         Granite, "granite-4.2-3b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
+    ),
+    # Phi-4-mini's full-ELF link is impractically slow at 32 layers;
+    # unmeasured deep in the caches.
+    "phi4_mini": Application(
+        Phi4,
+        "phi-4-mini-instruct",
+        INDEX,
+        "tokenizer.json",
+        full_elf=False,
+        each_step=("npu2",),
     ),
     # Gemma 4 E2B's decode measured 0.0002 to 0.072 on npu2 and 0.0009 to
     # 0.0256 on npu1, each 4k to the whole context: each size fills the
