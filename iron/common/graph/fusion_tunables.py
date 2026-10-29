@@ -53,8 +53,9 @@ def rebuild(
     steps = list(recording.steps)
     rebuilt: dict[int, list] = {}
     for i, t in tunables.items():
-        op = recording.steps[i].op.resolved(dev)
-        narrowed = op._with_tunables(**t).resolved(dev)
+        # From the recorded operator: a tunable resolved at its old widths
+        # resolves again at the new ones.
+        narrowed = recording.steps[i].op._with_tunables(**t).resolved(dev)
         rebuilt.setdefault(id(recording.steps[i].op), []).append(narrowed)
         steps[i] = dataclasses.replace(steps[i], op=narrowed)
     if not rebuilt:

@@ -19,6 +19,7 @@ from iron.common.image.compose import Composition, Packing
 from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.common.image.step import Edge, Fusion, FusionKind
+from iron.operators.copy import Copy
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
@@ -35,6 +36,11 @@ class Projection(iron.Graph):
         y = GEMV.step(w, x)
         gate = SiLU.step(y, tile_size=256)
         return ElementwiseMul.step(gate, UP, tile_size=256)
+
+
+class Copied(iron.Graph):
+    def body(self, x):
+        return Copy.step(x)
 
 
 def _packed(*members):
@@ -95,6 +101,19 @@ def test_apply_narrows_the_members_and_groups_their_designs(npu2):
     # Every per-call value the narrowed steps read is bound to them.
     bound = {id(b.op) for b in packed.bindings}
     assert all(id(s.op) in bound for s in packed.steps if s.op.values)
+
+
+def test_apply_resolves_a_member_afresh_at_its_tunables(npu2):
+    """A Copy's tile_size follows its channels: given two, a 64-element copy
+    resolves 32-element tiles, not the 64 it resolved at one."""
+    recording = Copied().record(x=(64,))
+    assert recording.steps[0].op.resolved(npu2).tile_size == 64
+    profile = _packed(
+        (Copy, {"input_buffer_size": 64}, {"num_channels": 2}), (SiLU, {"size": 2048})
+    )
+    packed, _ = apply_packings(recording, profile, [], npu2)
+    op = packed.steps[0].op.resolved(npu2)
+    assert (op.num_channels, op.tile_size) == (2, 32)
 
 
 def test_a_packing_composes_its_designs_into_one_device(npu2):
