@@ -1,67 +1,90 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generation's EOS exits and rate accounting over a device loop, without an NPU."""
+"""Generation's EOS exits and token counts over a real device loop: a small
+Llama on drawn weights, loaded from a repository directory whose
+``generation_config.json`` names the eos.
+"""
 
-import math
-from types import SimpleNamespace
-from unittest.mock import Mock
+import json
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 
-from iron.lm.model import Model
-from iron.lm.session import device_draws
+from iron.applications.llama import Llama
+from iron.tests.support.llama_model import PROFILE, SMALL, checkpoint
+
+pytestmark = pytest.mark.supported_devices("npu2")
+
+PROMPT = [int(t) for t in np.random.default_rng(3).integers(0, SMALL.vocab_size, 8)]
+MAX_TOKENS = 12
 
 
-@pytest.mark.parametrize("each", [False, True], ids=["generate", "stream"])
-@pytest.mark.parametrize(
-    "eos", [10, 12, None], ids=["first-eos", "later-eos", "no-eos"]
-)
-@pytest.mark.parametrize("max_tokens", [1, 6])
-def test_device_generation_stops_only_before_undrawn_tokens(
-    monkeypatch, each, eos, max_tokens
-):
-    clock = [0.0]
-    monkeypatch.setattr("iron.lm.model.time.perf_counter", lambda: clock[0])
+def _load(directory, eos=None) -> Llama:
+    directory.mkdir()
+    (directory / "config.json").write_text(json.dumps(SMALL.to_json()))
+    (directory / "model.safetensors").symlink_to(checkpoint(SMALL).path)
+    if eos is not None:
+        (directory / "generation_config.json").write_text(
+            json.dumps({"eos_token_id": eos})
+        )
+    model = Llama.from_checkpoint(directory, random_weights=0)
+    model.profile = PROFILE
+    model.load_versions()
+    assert model.device_loop
+    return model
 
-    def start(*args, **kwargs):
-        clock[0] += 1.0
 
-    def steps(n):
-        for _ in range(n):
-            clock[0] += 2.0
-            yield None
+@pytest.fixture
+def release():
+    held = []
+    yield held.append
+    for model in held:
+        model.release()
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
 
-    loop = SimpleNamespace(start=Mock(side_effect=start), steps=Mock(side_effect=steps))
-    draws = np.arange(10, 16, dtype=np.int32)
 
-    class DeviceModel(Model):
-        draws_at_once = True
+@pytest.fixture(scope="module")
+def draws(tmp_path_factory):
+    """The greedy draws after ``PROMPT``, with no eos to stop at."""
+    model = _load(tmp_path_factory.mktemp("draws") / "repo")
+    try:
+        drawn = model.generate(PROMPT, MAX_TOKENS)
+        assert model.stats.tokens == MAX_TOKENS
+        assert len(drawn) == MAX_TOKENS
+        return drawn
+    finally:
+        model.release()
 
-        def _draw(self, tokens, max_tokens, sampler, each, **inputs):
-            chunks = [((tokens,), {"position": len(tokens) - 1})]
-            yield from device_draws(self, chunks, len(tokens), max_tokens, each)
 
-    model = DeviceModel()
-    model.eos = set() if eos is None else {eos}
-    model.prompt_chunk = object()
-    model.drawn = object()
-    model.decode_step = SimpleNamespace(read=lambda _: draws)
-    model.loop = Mock(return_value=loop)
-    tokens = (
-        list(model.stream([1], max_tokens)) if each else model.generate([1], max_tokens)
-    )
-    end = max_tokens if eos is None else min(max_tokens, eos - 10 + 1)
-    assert tokens == list(draws[:end])
-    ran = end - 1 if each or eos == 10 else max_tokens - 1
-    assert clock[0] == 1.0 + 2.0 * ran
-    if eos == 10:
-        loop.steps.assert_not_called()
-    else:
-        loop.steps.assert_called_once_with(max_tokens - 1)
-    assert model.stats.ttft == 1.0
-    if ran:
-        assert model.stats.tokens_per_s == 0.5
-    else:
-        assert math.isnan(model.stats.tokens_per_s)
+def test_generate_counts_the_draws_past_eos(draws, tmp_path, release):
+    """The device loop draws all ``MAX_TOKENS`` before generate reads them,
+    so its count holds every one; stream reads each as it is drawn and
+    stops at eos.
+    """
+    k = next((i for i in range(1, MAX_TOKENS) if draws[i] not in draws[:i]), 0)
+    assert 0 < k < MAX_TOKENS - 1, f"no later first-seen draw in {draws}"
+    model = _load(tmp_path / "repo", eos=draws[k])
+    release(model)
+    assert model.generate(PROMPT, MAX_TOKENS) == draws[: k + 1]
+    assert model.stats.tokens == MAX_TOKENS
+    model.forget(0)
+    assert list(model.stream(PROMPT, MAX_TOKENS)) == draws[: k + 1]
+    assert model.stats.tokens == k + 1
+
+
+def test_a_first_token_eos_runs_no_decode_step(draws, tmp_path, release):
+    """The prompt chunk draws eos: no decode step runs, so the device's
+    ``drawn`` rows past the prompt are still the zeros they started as.
+    """
+    assert any(draws[1:]), "a decode step would leave no trace"
+    model = _load(tmp_path / "repo", eos=draws[0])
+    release(model)
+    assert model.generate(PROMPT, MAX_TOKENS) == draws[:1]
+    assert model.stats.tokens == 1
+    rows = model.decode_step.read(model.drawn)
+    n = len(PROMPT)
+    assert rows[n - 1] == draws[0]
+    assert not rows[n : n - 1 + MAX_TOKENS].any()

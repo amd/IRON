@@ -106,6 +106,7 @@ def test_granite_4_0_h_1b(model, prompt_len, num_tokens, record_property):
 
 
 @pytest.mark.extensive
+@pytest.mark.bench
 def test_granite_4_0_h_1b_rate_counts_the_draws_past_eos(model, record_property):
     """After 13 characters the model draws eos 8th. generate's device loop
     draws all 40 tokens before reading them, so its rate counts all 40;

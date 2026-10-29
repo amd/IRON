@@ -224,13 +224,14 @@ class TokenizerJson:
 
 @dataclasses.dataclass(frozen=True)
 class Stats:
-    """A generation's timings: the seconds to the first token, and the
-    tokens per second drawn after it (NaN for one token), each token drawn
-    counted, those past the first ``eos`` too where they were drawn anyway.
+    """A generation's timings: the seconds to the first token, the tokens
+    per second drawn after it (NaN for one token), and ``tokens``, how many
+    were drawn: those past the first ``eos`` too where they were drawn anyway.
     """
 
     ttft: float
     tokens_per_s: float
+    tokens: int
 
 
 class Model(iron.Graph):
@@ -538,7 +539,7 @@ class Model(iron.Graph):
                 yield piece
         later = count - 1
         rate = later / (last - first) if later else math.nan
-        self.stats = Stats(first - began, rate)
+        self.stats = Stats(first - began, rate, count)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version, the decode step (no input)
