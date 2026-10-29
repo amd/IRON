@@ -37,7 +37,7 @@ fi
 echo ""
 echo "Checking Python formatting with black..."
 if command -v black &> /dev/null; then
-    if ! black --check . 2>&1 | grep -v "would reformat" | grep -v "files would be left unchanged"; then
+    if ! black --check --quiet .; then
         echo "❌ Python formatting check failed"
         echo "   Run: black ."
         FAILED=1
