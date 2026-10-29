@@ -142,6 +142,38 @@ def test_each_version_resolves(clip, request, device_name, version):
         op.resolved(device)
 
 
+def test_the_suppression_bias_is_zero_with_no_checkpoint(clip):
+    """A toy's ``WhisperConfig``, built directly rather than read from a
+    checkpoint's generation_config.json, suppresses nothing.
+    """
+    weights, _ = clip
+    model = Whisper(TOY, weights)
+    assert np.all(np.asarray(model.suppress_bias) == 0)
+    assert np.all(np.asarray(model.begin_suppress_bias) == 0)
+
+
+def test_the_suppression_bias_matches_the_config(clip):
+    """``-inf`` at ``suppress_tokens`` and from ``first_special_token_id``
+    on, in both biases; ``begin_suppress_tokens`` only in the prompt
+    chunk's own (``begin_suppress_bias``).
+    """
+    weights, _ = clip
+    config = dataclasses.replace(
+        TOY,
+        suppress_tokens=(1, 2, 300),
+        begin_suppress_tokens=(5,),
+        first_special_token_id=400,
+    )
+    model = Whisper(config, weights)
+    bias = np.asarray(model.suppress_bias)
+    begin = np.asarray(model.begin_suppress_bias)
+    suppressed = {1, 2, 300} | set(range(400, bias.size))
+    for i in range(bias.size):
+        expected = -np.inf if i in suppressed else 0.0
+        assert bias[i] == expected, i
+    assert np.isneginf(begin[5]) and bias[5] == 0.0
+
+
 class Encoder:
     """Hugging Face's encoder over the toy's weights, what records
     ``goldens/encoder.npz``: its output over a clip's samples' features,
