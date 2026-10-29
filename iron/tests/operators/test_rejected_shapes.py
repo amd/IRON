@@ -41,6 +41,7 @@ from iron.operators.mha import MHA
 from iron.operators.resample.op import PatchPositions
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
+from iron.operators.router import TopKRouter
 from iron.operators.sample import Sample
 from iron.operators.selective_scan import SelectiveScan
 from iron.operators.softmax import Softmax
@@ -585,6 +586,17 @@ def test_flm_lm_head_rejects_unservable_shapes(dim, vocab, softcap, match, npu2)
 def test_flm_decode_layer_rejects_unknown_configurations(kwargs, match):
     with pytest.raises(ValueError, match=match):
         DecodeLayer(**kwargs)
+
+
+def test_top_k_router_refuses_more_experts_than_it_routes_between():
+    with pytest.raises(ValueError, match="top_k \\(9\\) must be from 1"):
+        TopKRouter(experts=8, top_k=9)
+
+
+@pytest.mark.parametrize("rows, pairs", [(6, 4), (16, 9)])
+def test_top_k_router_refuses_rows_its_pairs_do_not_split(rows, pairs, npu2):
+    with pytest.raises(Unresolvable, match="pairs of cores"):
+        TopKRouter(experts=32, top_k=8, rows=rows, pairs=pairs).resolved(npu2)
 
 
 @pytest.mark.parametrize(

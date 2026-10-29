@@ -298,10 +298,14 @@ def check_chat_turn(model, chars: int, turn: int, num_tokens: int = 2, *, record
     assert not steps, f"the turn's logits differ from scratch's at steps {steps}"
 
 
-def check_deep_decode(model, position: int, bound: float, chars: int = 1024, *, record):
+def check_deep_decode(
+    model, position: int, bound: float, chars: int = 1024, *, cosine=False, record
+):
     """A decode step at ``position``, deep in the caches, against the
     graph's own reference (``Graph.reference``), for a context transformers
-    would take too long over, within ``bound`` of its KL.
+    would take too long over, within ``bound`` of its KL, or with
+    ``cosine`` (a model whose row is a hidden state, not logits) at a
+    cosine of at least ``bound``.
     """
     tokens = prompt(model, chars, 1)
     token = greedy(model.logits(tokens))
@@ -311,17 +315,16 @@ def check_deep_decode(model, position: int, bound: float, chars: int = 1024, *, 
         got, _ = model(**values)
         got = got.numpy()
         expected, _ = model.reference(**values)
-    kl, top1 = divergence(expected, got)
-    record("DeepKL", kl)
-    record("DeepTop1", top1)
-    assert kl <= bound, f"at {position}: KL {kl} > {bound}"
+    _hold_deep(expected, got, bound, cosine, "Deep", f"at {position}", record)
 
 
-def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, record):
+def check_deep_prompt(
+    model, rows: int, bound: float, chars: int = 1024, *, cosine=False, record
+):
     """The deepest prompt chunk (holding position ``max_seq_len - 1``), at
     most ``rows`` rows of it, against the graph's own reference within
-    ``bound`` of its KL, every earlier position filled as
-    ``check_deep_decode`` fills them.
+    ``bound`` of its KL (or ``cosine``, as ``check_deep_decode`` holds it),
+    every earlier position filled as ``check_deep_decode`` fills them.
     """
     tokens = prompt(model, chars, 1)
     model.logits(tokens)
@@ -344,10 +347,29 @@ def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, reco
         record("DeepPromptSeconds", time.perf_counter() - start)
         got = got.numpy()
         expected, _ = model.reference(ids, **values)
+    _hold_deep(
+        expected, got, bound, cosine, "DeepPrompt", f"the chunk at {begin}", record
+    )
+
+
+def _hold_deep(
+    expected, got, bound: float, cosine: bool, name: str, where: str, record
+):
+    """``got``'s row against the reference's ``expected``: KL within
+    ``bound``, or with ``cosine`` a cosine of at least ``bound``; recorded
+    under ``name``.
+    """
+    if cosine:
+        e = np.asarray(expected, np.float64).reshape(-1)
+        g = np.asarray(got, np.float64).reshape(-1)[: e.size]
+        value = float(e @ g / (np.linalg.norm(e) * np.linalg.norm(g)))
+        record(f"{name}Cosine", value)
+        assert value >= bound, f"{where}: cosine {value} < {bound}"
+        return
     kl, top1 = divergence(expected, got)
-    record("DeepPromptKL", kl)
-    record("DeepPromptTop1", top1)
-    assert kl <= bound, f"the chunk at {begin}: KL {kl} > {bound}"
+    record(f"{name}KL", kl)
+    record(f"{name}Top1", top1)
+    assert kl <= bound, f"{where}: KL {kl} > {bound}"
 
 
 @contextmanager
