@@ -41,8 +41,9 @@ def model(load):
     loaded.release()
 
 
-# KL(fp32 CPU || NPU) measured over 40 steps after a 1024-character prompt.
-MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.1}
+# KL(fp32 CPU || NPU) measured on npu2 (Strix Halo) mean 0.0003, p90 0.0007,
+# max 0.0018 over 40 steps after a 1024-character prompt, 1 top-1 mismatch.
+MAX_KL = {"Mean": 0.001, "P90": 0.002, "Max": 0.01}
 
 
 GENERATION = pytest.mark.parametrize(
