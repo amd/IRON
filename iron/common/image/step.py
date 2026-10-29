@@ -36,13 +36,13 @@ class BufferRef:
 
 
 class FusionKind(Enum):
-    """How a fusion's steps run as one device configuration. ``STREAM``
+    """How a fusion's steps run as one device configuration: ``STREAM``
     (consecutive steps, each edge a fifo its lanes meet directly),
     ``STAGED`` (as a stream, an edge whose lanes do not meet restaged
     through memtiles), ``PACK`` (independent steps co-resident, issued
-    concurrently) and ``MERGE`` (consecutive steps sharing a configuration,
-    run back to back with no edge) build today; ``FOLD`` (an in-core fold)
-    is not yet built.
+    concurrently), ``MERGE`` (consecutive steps sharing a configuration,
+    run back to back with no edge), or ``FOLD`` (a consumer's kernel run in
+    its producer's cores, applied to the recording before planning).
     """
 
     STREAM = "stream"
