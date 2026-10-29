@@ -54,6 +54,7 @@ from .measure import (
     Timing,
     _sample,
     measure_fusion,
+    npu_lock,
     standard_error,
     time_interleaved,
     write,
@@ -203,6 +204,7 @@ def time_fusion_group(
     remeasure: bool = False,
     fused: Sequence[Operator] | None = None,
     log: Callable[[str], None] = print,
+    lock: bool = False,
 ) -> Trial:
     """``group`` priced as a whole: ``measure_fusion`` at each of its points,
     weighted as ``autotune._time`` weighs an operator's; refused where any
@@ -228,6 +230,7 @@ def time_fusion_group(
             kind=group.kind,
             fused_steps=fused,
             log=log,
+            lock=lock,
         )
         if m.refused is not None:
             refused = refused or m.refused
@@ -351,6 +354,30 @@ def _device_timeout(e: Exception) -> bool:
     return "ERT_CMD_STATE_TIMEOUT" in str(e)
 
 
+def _refused_key(group: FusionGroup) -> str:
+    """``group``'s content-hash identity among refused groups: stable
+    across a restart, unlike ``id(group)``, and over ``group.key`` alone so
+    a progress file holds it as a plain string.
+    """
+    return hashlib.sha256(repr(group.key).encode()).hexdigest()[:32]
+
+
+def _load_refused(path: Path) -> dict[str, str]:
+    """A hung group never retried, by ``_refused_key``, with why: empty
+    where ``path`` holds none yet.
+    """
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _save_refused(refused: Mapping[str, str], path: Path) -> None:
+    """``refused`` written atomically, as ``_checkpoint`` writes a profile:
+    another process may be reading ``path``.
+    """
+    partial = path.with_suffix(f".{os.getpid()}")
+    partial.write_text(json.dumps(refused))
+    partial.replace(path)
+
+
 def _dominates(a: Sequence[Mapping[str, Any]], b: Sequence[Mapping[str, Any]]) -> bool:
     """Whether combination ``a`` is at least as wide as ``b`` in every
     member, strictly in one: ``b`` can then never be faster than ``a`` and
@@ -369,22 +396,32 @@ def narrowings(
     fit_cache: Path = FIT_CACHE,
     exhaustive: int = NARROWING_EXHAUSTIVE,
 ) -> list[tuple[dict[str, Any], ...]]:
-    """Every combination of the group's members' widths (``_widths``), the
-    ones no feasible combination dominates in every member (``_dominates``),
-    most columns overall first: a member is never faster narrower than
+    """Every combination of the group's members' widths (``_widths``), most
+    columns overall first: a member is never faster narrower than
     ``autotune`` already found it alone, so the fastest fitting combination
     is among these.
 
-    A pack's or a merge's co-resides where ``group_fit_verdict`` says so; an
-    edge's own feed (a stream, a staged one, a fan-out) shares its buffer
+    A pack's or a merge's co-resides where ``group_fit_verdict`` says so,
+    which lets dominance prune one combination no feasible one can ever beat
+    (``_dominates``): among combinations that already co-reside, a member
+    is never faster narrower, so one no feasible combination dominates in
+    every member is never worse than the one dominating it, and the search
+    need not try it.
+
+    An edge's own feed (a stream, a staged one, a fan-out) shares its buffer
     rather than needing one of its own per member, which
     ``group_fit_verdict``'s generic placement check does not model (nor
     whether a feed's lanes meet, broadcast or not), so every combination is
     a candidate, left to ``narrow_group``'s own build to refuse one that
-    does not.
+    does not: with no feasibility check to back it, dominance does not
+    prune here (every width list's own-widest entry co-occurs in the
+    all-widest combination, which would always dominate every other one,
+    collapsing the search to that single, usually non-co-resident
+    combination alone) — every one of these (up to ``exhaustive``) is tried.
 
     Past ``exhaustive`` combinations, only the ones using the most columns
-    overall are checked for fit, since those are the likeliest to dominate.
+    overall are checked for fit, since those are the likeliest to dominate
+    (a pack or a merge) or fastest if they do build (an edge).
 
     A member an edge feeds into its ``B`` searches ``feed_b`` true too
     (``_fed_widths``): the edge may only be admissible there, a setting its
@@ -400,21 +437,21 @@ def narrowings(
         combos = sorted(
             combos, key=lambda c: -sum(s.get("num_aie_columns", 0) for s in c)
         )[:exhaustive]
-    feasible = (
-        combos
-        if group.edges
-        else [
-            c
-            for c in combos
-            if group_fit_verdict(
-                [op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, c)],
-                fit_cache,
-                kind=group.kind,
-                edges=group.edges,
-            )
-            is None
-        ]
-    )
+    if group.edges:
+        return sorted(
+            combos, key=lambda c: -sum(s.get("num_aie_columns", 0) for s in c)
+        )
+    feasible = [
+        c
+        for c in combos
+        if group_fit_verdict(
+            [op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, c)],
+            fit_cache,
+            kind=group.kind,
+            edges=group.edges,
+        )
+        is None
+    ]
     maximal = [
         c for c in feasible if not any(_dominates(o, c) for o in feasible if o is not c)
     ]
@@ -433,6 +470,7 @@ def narrow_group(
     fit_cache: Path = FIT_CACHE,
     exhaustive: int = NARROWING_EXHAUSTIVE,
     log: Callable[[str], None] = print,
+    lock: bool = False,
 ) -> tuple[Trial, tuple[dict[str, Any], ...] | None]:
     """``group`` priced at the fastest setting of its members that
     co-resides, against ``group.steps`` run apart at their own: its own (as
@@ -476,6 +514,7 @@ def narrow_group(
                 cache=cache,
                 remeasure=remeasure,
                 log=log,
+                lock=lock,
             )
         except (ValueError, RuntimeError, ir.MLIRError) as e:
             if _device_timeout(e):
@@ -484,6 +523,7 @@ def narrow_group(
         else:
             if own.refused is None:
                 return own, None
+            log(f"  {group}: refused at its own width: {own.refused}")
     elif (
         group_fit_verdict(group.steps, fit_cache, kind=group.kind, edges=group.edges)
         is None
@@ -498,6 +538,7 @@ def narrow_group(
                     cache=cache,
                     remeasure=remeasure,
                     log=log,
+                    lock=lock,
                 ),
                 None,
             )
@@ -528,6 +569,7 @@ def narrow_group(
                 remeasure=remeasure,
                 fused=fused,
                 log=log,
+                lock=lock,
             )
         except (ValueError, RuntimeError, ir.MLIRError) as e:
             if _device_timeout(e):
@@ -537,8 +579,11 @@ def narrow_group(
             log(f"  {group} narrowed to {cols}: does not build: {e}")
             continue
         noise = "?" if trial.noise_us is None else f"{trial.noise_us:.1f}"
+        if trial.refused is not None:
+            log(f"  {group} narrowed to {cols}: refused: {trial.refused}")
+            continue
         log(f"  {group} narrowed to {cols}: {trial.delta_us:+.1f} ± {noise} us")
-        if trial.refused is None and (best is None or trial.delta_us < best.delta_us):
+        if best is None or trial.delta_us < best.delta_us:
             best, best_combo = trial, combo
     if best is None:
         return (
@@ -610,7 +655,9 @@ def confirm_fusions(
     full_elf: bool,
     timing: Timing = Timing(rounds=3, calls=10),
     seed: int = 0,
+    refused: dict[str, str] | None = None,
     log: Callable[[str], None] = print,
+    lock: bool = False,
 ) -> list[FusionGroup]:
     """``taken`` with a group dropped wherever the version it runs in does
     not gain from it beyond the noise: ``time_fusion_group`` prices a fusion
@@ -622,6 +669,14 @@ def confirm_fusions(
     smallest predicted gain (``priced``) among those active in a version
     that regresses, retrying it, until what is left gains or none is left
     to drop.
+
+    Args:
+        refused: A hang's reason recorded here, by ``_refused_key``, for
+            every group dropped on it: a caller persists this so the group
+            is never retried past this run either.
+        lock: Take ``NPU_LOCK_PATH`` from each version's first dispatch
+            through releasing its graphs' contexts, not just under
+            ``coord/npu``.
 
     Raises:
         RuntimeError: A version's fused output is not bit-identical to its
@@ -660,40 +715,54 @@ def confirm_fusions(
             for state, _, content in states:
                 plain_cg.write(state, content)
                 fused_cg.write(state, content)
-            try:
-                plain_cg(*inputs, **call.values)
-                fused_cg(*inputs, **call.values)
-            except (RuntimeError, ir.MLIRError) as e:
-                if not _device_timeout(e):
-                    raise
-                # A hang is a property of this version running at all, which
-                # dropping only one of several active groups may not fix;
-                # none of them is retried in this run.
-                names = ", ".join(str(g) for g in active)
-                log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
-                for g in active:
-                    remaining.remove(g)
-                break
-            plain_out = [plain_cg.read(h) for h in recording.returned]
-            fused_out = [fused_cg.read(h) for h in recording.returned]
-            if not all(np.array_equal(p, f) for p, f in zip(plain_out, fused_out)):
-                names = ", ".join(str(g) for g in active)
-                raise RuntimeError(
-                    f"{recording.name}: fused ({names}) is not bit-identical to "
-                    f"it unfused"
-                )
-            try:
-                times = time_interleaved(
-                    [plain_cg.callable, fused_cg.callable], timing, log=log
-                )
-            except (RuntimeError, ir.MLIRError) as e:
-                if not _device_timeout(e):
-                    raise
-                names = ", ".join(str(g) for g in active)
-                log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
-                for g in active:
-                    remaining.remove(g)
-                break
+            # Held from the first dispatch (each graph's context created
+            # lazily on it) through ``del`` below, not just around a
+            # dispatch: both graphs' contexts stay loaded past their own
+            # call otherwise, past the window another process holding this
+            # lock is kept out of.
+            with npu_lock(lock):
+                try:
+                    plain_cg(*inputs, **call.values)
+                    fused_cg(*inputs, **call.values)
+                except (RuntimeError, ir.MLIRError) as e:
+                    if not _device_timeout(e):
+                        raise
+                    # A hang is a property of this version running at all,
+                    # which dropping only one of several active groups may
+                    # not fix; none of them is retried in this run.
+                    names = ", ".join(str(g) for g in active)
+                    log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
+                    for g in active:
+                        remaining.remove(g)
+                        if refused is not None:
+                            refused[_refused_key(g)] = f"hung on the device: {e}"
+                    break
+                plain_out = [plain_cg.read(h) for h in recording.returned]
+                fused_out = [fused_cg.read(h) for h in recording.returned]
+                if not all(np.array_equal(p, f) for p, f in zip(plain_out, fused_out)):
+                    names = ", ".join(str(g) for g in active)
+                    raise RuntimeError(
+                        f"{recording.name}: fused ({names}) is not bit-identical to "
+                        f"it unfused"
+                    )
+                try:
+                    times = time_interleaved(
+                        [plain_cg.callable, fused_cg.callable],
+                        timing,
+                        log=log,
+                        lock=lock,
+                    )
+                except (RuntimeError, ir.MLIRError) as e:
+                    if not _device_timeout(e):
+                        raise
+                    names = ", ".join(str(g) for g in active)
+                    log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
+                    for g in active:
+                        remaining.remove(g)
+                        if refused is not None:
+                            refused[_refused_key(g)] = f"hung on the device: {e}"
+                    break
+                del plain_cg, fused_cg
             paired = list(zip(times[0].samples_us, times[1].samples_us))
             delta = statistics.median(f - p for p, f in paired)
             noise = standard_error([f - p for p, f in paired])
@@ -753,6 +822,7 @@ def price_fusions(
     checkpoint: Path | None = None,
     max_price: int | None = None,
     log: Callable[[str], None] = print,
+    lock: bool = False,
 ) -> Profile | None:
     """``profile`` with a fusion entry for each fusion ``calls``' graphs
     admit that gains beyond the noise, each priced at the fastest setting of
@@ -773,7 +843,11 @@ def price_fusions(
     Args:
         checkpoint: Where to write the decisions so far (``_checkpoint``)
             after every group is priced, so a run that dies partway still
-            leaves something behind beyond the cache alone.
+            leaves something behind beyond the cache alone. A group a device
+            timeout refused is written beside it (``_refused_key``,
+            ``checkpoint.with_suffix(".refused.json")``) and loaded back
+            here first, so a later call, batched or a restart after one,
+            never retries it.
         max_price: Price at most this many of the found groups in this
             call (already-cached ones cost little to recheck); where that
             leaves any unpriced, return None without selecting, confirming
@@ -782,11 +856,27 @@ def price_fusions(
             short run is never kept waiting behind a whole multi-hour
             sweep) until it gets a profile back, never holds the lock past
             one batch.
+        lock: Take ``NPU_LOCK_PATH`` for each measurement's own lifetime (a
+            caller running this whole sweep without the ``coord/npu``
+            wrapper, which takes it for the wrapped command's whole life
+            instead).
 
     Returns:
         The profile, or None where ``max_price`` left groups unpriced.
     """
-    found = fusion_groups(calls, dev)
+    refused_path = (
+        None if checkpoint is None else checkpoint.with_suffix(".refused.json")
+    )
+    refused = {} if refused_path is None else _load_refused(refused_path)
+
+    all_found = fusion_groups(calls, dev)
+    found = []
+    for group in all_found:
+        why = refused.get(_refused_key(group))
+        if why is None:
+            found.append(group)
+        else:
+            log(f"{group}: skipped, refused earlier: {why}")
     if max_price is not None and max_price < len(found):
         found_now, rest = found[:max_price], found[max_price:]
     else:
@@ -806,12 +896,17 @@ def price_fusions(
             fit_cache=fit_cache,
             exhaustive=exhaustive,
             log=log,
+            lock=lock,
         )
         noise = "?" if trial.noise_us is None else f"{trial.noise_us:.1f}"
         why = "" if trial.refused is None else f"  refused: {trial.refused}"
         log(f"{group}: {trial.delta_us:+.1f} ± {noise} us{why}")
         priced.append((group, trial))
         combos[group] = combo
+        if trial.refused is not None and trial.refused.startswith("hung on the device"):
+            refused[_refused_key(group)] = trial.refused
+            if refused_path is not None:
+                _save_refused(refused, refused_path)
         if checkpoint is not None:
             _checkpoint(profile, priced, combos, checkpoint)
 
@@ -830,7 +925,7 @@ def price_fusions(
     for kind, steps, edges in existing:
         probe = Profile()
         probe.add_fusion(kind, steps, edges)
-        if not any(probe.fused(g.kind, g.steps, g.edges) for g in found):
+        if not any(probe.fused(g.kind, g.steps, g.edges) for g in all_found):
             out.add_fusion(kind, steps, edges)
 
     if confirm:
@@ -843,8 +938,12 @@ def price_fusions(
             combos,
             full_elf=full_elf,
             timing=confirm_timing,
+            refused=refused,
             log=log,
+            lock=lock,
         )
+        if refused_path is not None:
+            _save_refused(refused, refused_path)
     for group in taken:
         out.add_fusion(group.kind, group.dims(combos[group]), group.edges)
     return out

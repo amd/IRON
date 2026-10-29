@@ -77,6 +77,15 @@ def parser(description: str) -> argparse.ArgumentParser:
         "device lock for one call, not a whole multi-hour sweep, calls "
         "again for the rest)",
     )
+    p.add_argument(
+        "--lock-in-process",
+        action="store_true",
+        help="take the device lock here, per measurement, instead of "
+        "relying on coord/npu to hold it for this whole process's life: "
+        "for a sweep run without that wrapper, so another agent's short "
+        "run is never kept waiting behind it. Never pass this while also "
+        "running under coord/npu (nesting the two deadlocks both)",
+    )
     return p
 
 
@@ -132,6 +141,7 @@ def tune(
         full_elf=full_elf,
         checkpoint=path.with_suffix(".progress.json"),
         max_price=args.max_price,
+        lock=args.lock_in_process,
         **_timing(args),
     )
     if priced is None:

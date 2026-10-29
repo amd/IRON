@@ -5,9 +5,12 @@
 choosing among them cheapest first. No device below the line.
 """
 
+import getpass
 import hashlib
+import json
 import math
 import re
+import subprocess
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -38,6 +41,9 @@ from iron.tune.fusions import (
     _device_timeout,
     _dominates,
     _fed_widths,
+    _load_refused,
+    _refused_key,
+    _save_refused,
     _widths,
     confirm_fusions,
     fusion_groups,
@@ -48,10 +54,13 @@ from iron.tune.fusions import (
     select_rewrites,
     time_fusion_group,
 )
+from iron.tune import measure as tune_measure
 from iron.tune.measure import (
     Cache,
     Standalone,
     Timing,
+    _rewrite_mismatch,
+    npu_lock,
     platform,
     repeat_fusion,
     written_steps,
@@ -254,6 +263,73 @@ def test_written_steps_keys_by_step_so_same_named_outputs_do_not_collide():
     assert set(written_steps(run)) == {"0.y", "1.y"}
 
 
+def test_rewrite_mismatch_is_none_when_every_key_matches_bit_for_bit():
+    out = {"0.y": np.arange(4, dtype=np.float32)}
+    assert _rewrite_mismatch(out, dict(out)) is None
+
+
+def test_rewrite_mismatch_names_the_differing_key_count_and_max_diff():
+    recorded = {"0.y": np.array([1.0, 2.0, 3.0], dtype=np.float32)}
+    rewritten = {"0.y": np.array([1.0, 2.0, 3.5], dtype=np.float32)}
+    reason = _rewrite_mismatch(recorded, rewritten)
+    assert reason is not None
+    assert "0.y: 1/3 elements differ, max abs diff 0.5" in reason
+
+
+def test_rewrite_mismatch_names_missing_and_extra_keys():
+    reason = _rewrite_mismatch({"0.y": np.zeros(2)}, {"1.y": np.zeros(2)})
+    assert reason == "keys differ: missing ['0.y'], extra ['1.y']"
+
+
+def test_npu_lock_is_a_noop_unless_told_to_lock():
+    """Every existing caller (every test run under ``coord/npu``) passes no
+    ``lock``, taking none here at all; only a long sweep run without that
+    wrapper passes ``lock=True``, taking the same lock per measurement
+    instead.
+    """
+    with npu_lock():
+        pass
+    with npu_lock(False):
+        pass
+
+
+def test_npu_lock_nested_reenters_without_a_second_flock(tmp_path):
+    """A caller already holding this lock (an outer ``npu_lock(lock=True)``
+    spanning a whole measurement's loaded images) enters it again
+    (``time_interleaved``'s own, say) without blocking on itself: only the
+    outermost entry takes the real flock, over a private file here, not the
+    shared ``coord`` one.
+    """
+    path = tmp_path / "test.lock"
+    old_path = tune_measure.NPU_LOCK_PATH
+    tune_measure.NPU_LOCK_PATH = path
+    try:
+        with npu_lock(True):
+            assert tune_measure._LOCK_DEPTH == 1
+            with npu_lock(True):
+                assert tune_measure._LOCK_DEPTH == 2
+            assert tune_measure._LOCK_DEPTH == 1
+        assert tune_measure._LOCK_DEPTH == 0
+    finally:
+        tune_measure.NPU_LOCK_PATH = old_path
+
+
+def test_other_user_on_npu_ignores_a_run_on_npu_under_my_own_name():
+    """Parses real ``ps`` output: a ``run_on_npu.py`` under a name that isn't
+    mine is someone else on the device; the same process under my own name
+    (what ``ps`` reports me spawning it as) is not.
+    """
+    proc = subprocess.Popen(
+        ["python3", "-c", "import time; time.sleep(5)", "run_on_npu.py"]
+    )
+    try:
+        assert tune_measure._other_user_on_npu("a-name-nobody-has") is True
+        assert tune_measure._other_user_on_npu(getpass.getuser()) is False
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
 def test_standalone_refuses_shared_buffers_for_a_fused_edge():
     """Not distinct, a repeat past the first resolves an edge's buffer name
     from another repeat's canonical slot, silently unwiring the feed; a
@@ -381,6 +457,32 @@ def test_group_fit_verdict_caches_a_different_record_for_a_different_kind(tmp_pa
     assert len(list(tmp_path.iterdir())) == 2
 
 
+def test_narrowings_tries_every_combination_for_a_fan_out_not_just_the_widest():
+    """A fan-out's all-widest combination dominates every other
+    (``_dominates``) but, with no feasibility check behind it
+    (``group_fit_verdict`` does not model a feed's shared buffer), that
+    gives dominance nothing to prune on: pruning it anyway would collapse
+    the search to that one combination alone, which rarely co-resides,
+    and never discover a narrower one (q/k/v at (8,4,2) columns, say) that
+    does.
+    """
+    dev = aie_utils.ensure_current_device()
+    rms = LLAMA_NPU2_PROFILE.make(RMSNorm, rows=1, tile_size=2048, weighted=True)
+    q = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048, num_batches=1, num_matrices=1)
+    k = LLAMA_NPU2_PROFILE.make(GEMV, M=512, K=2048, num_batches=1, num_matrices=1)
+    v = LLAMA_NPU2_PROFILE.make(GEMV, M=512, K=2048, num_batches=1, num_matrices=1)
+    group = FusionGroup(
+        FusionKind.STAGED,
+        [rms.resolved(dev), q.resolved(dev), k.resolved(dev), v.resolved(dev)],
+        [(0, "y", 1, "B"), (0, "y", 2, "B"), (0, "y", 3, "B")],
+    )
+    combos = narrowings(group, dev)
+    found = [tuple(s.get("num_aie_columns") for s in c) for c in combos]
+    assert len(found) > 1
+    assert (1, 8, 4, 2) in found
+    assert all(s["feed_b"] for c in combos for s in c[1:])
+
+
 def test_narrowings_narrows_only_the_member_that_needs_it(tmp_path):
     dev = aie_utils.ensure_current_device()
     rms, gemv, add = _merge_members(dev)
@@ -472,6 +574,60 @@ def test_checkpoint_overwrites_the_previous_one_atomically(tmp_path):
     # Only the final, whole file is ever on disk at that name: no partial
     # left behind beside it.
     assert list(tmp_path.iterdir()) == [checkpoint]
+
+
+def test_refused_round_trips_through_its_file_atomically(tmp_path):
+    dev = aie_utils.ensure_current_device()
+    group = _group(dev, 0)
+    path = tmp_path / "profile.progress.refused.json"
+    assert _load_refused(path) == {}
+
+    _save_refused({_refused_key(group): "hung on the device: ..."}, path)
+    loaded = _load_refused(path)
+    assert loaded == {_refused_key(group): "hung on the device: ..."}
+    # Only the final, whole file is ever on disk at that name.
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_price_fusions_skips_a_group_already_refused_as_hung(tmp_path):
+    """A group a prior call's device timeout refused is never retried: its
+    key, persisted beside the checkpoint, is loaded back and the group
+    dropped before ``narrow_group`` (and so the device) ever sees it again.
+    Every group the graph admits is pre-refused, so ``narrow_group`` is
+    never called at all here: device-free by construction, not by luck.
+    """
+    dev = aie_utils.ensure_current_device()
+    recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
+    calls = [Timed(recording)]
+    groups = fusion_groups(calls, dev)
+    assert groups
+
+    checkpoint = tmp_path / "profile.progress.json"
+    refused_path = checkpoint.with_suffix(".refused.json")
+    refused_path.write_text(
+        json.dumps(
+            {
+                _refused_key(g): "hung on the device: ERT_CMD_STATE_TIMEOUT"
+                for g in groups
+            }
+        )
+    )
+
+    logs: list[str] = []
+    profile = price_fusions(
+        calls,
+        dev,
+        full_elf=True,
+        checkpoint=checkpoint,
+        confirm=False,
+        log=logs.append,
+    )
+    assert profile is not None
+    assert profile.fusions() == []
+    assert len([line for line in logs if "skipped, refused earlier" in line]) == len(
+        groups
+    )
+    assert not any(" us" in line for line in logs)  # narrow_group's own price line
 
 
 # ---------------------------------------------------------------------------
