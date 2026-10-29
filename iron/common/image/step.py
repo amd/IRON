@@ -36,12 +36,12 @@ class BufferRef:
 
 
 class FusionKind(Enum):
-    """How a fusion's steps run as one device configuration. Only
-    ``STREAM`` builds today (adjacent steps, each feeding the next, through
-    a fifo); ``STAGED`` (an edge staged through a memtile), ``FOLD`` (an
-    in-core fold), ``PACK`` (independent steps co-resident) and ``MERGE``
-    (consecutive steps sharing a configuration without an edge) are not
-    yet built.
+    """How a fusion's steps run as one device configuration. ``STREAM``
+    (adjacent steps, each feeding the next, through a fifo), ``PACK``
+    (independent steps co-resident, issued concurrently) and ``MERGE``
+    (consecutive steps sharing a configuration, run back to back with no
+    edge) build today; ``STAGED`` (an edge staged through a memtile) and
+    ``FOLD`` (an in-core fold) are not yet built.
     """
 
     STREAM = "stream"
@@ -88,6 +88,8 @@ class Fusion:
             raise ValueError(
                 f"fusion steps {self.steps} must be increasing and distinct"
             )
+        if self.kind in (FusionKind.PACK, FusionKind.MERGE) and self.edges:
+            raise ValueError(f"a {self.kind.value} fusion takes no edges")
         members = set(self.steps)
         fed: set[tuple[int, str]] = set()
         for edge in self.edges:
