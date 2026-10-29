@@ -379,7 +379,8 @@ def subtree(tree, **modules):
     checkpoint's part as a model loads it (a text decoder of a
     vision-language checkpoint), a missing name naming ``tree``'s file.
     """
-    return _tree(modules, "", getattr(tree, "_file", _FILE))
+    file = tree._file if isinstance(tree, (_Module, _Layers)) else _FILE
+    return _tree(modules, "", file)
 
 
 def renamed(tree, renames: Mapping[str, str]):
@@ -396,8 +397,9 @@ def renamed(tree, renames: Mapping[str, str]):
                 return path[:at] + new + path[at + len(old) :]
         return path
 
+    held = isinstance(tree, (_Module, _Layers))
     return nest(
         {moved(path): value for path, value in leaves(tree)},
-        getattr(tree, "_path", ""),
-        getattr(tree, "_file", _FILE),
+        tree._path if held else "",
+        tree._file if held else _FILE,
     )

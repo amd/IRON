@@ -95,7 +95,7 @@ def test_a_norm_is_its_kernel_weighted_if_given_then_any_bias(norm, steps):
 
     recorded = Normed().record(x=(T, WIDTH)).steps
     assert [
-        (type(s.op).__name__, getattr(s.op, "weighted", None)) for s in recorded
+        (type(s.op).__name__, vars(s.op).get("weighted")) for s in recorded
     ] == steps
 
 
@@ -254,7 +254,7 @@ def test_gemma_s_text_layer_projects_at_highest_precision():
         .record(x=(ROWS, WIDTH), ple=(ROWS, PLE))
         .steps
     )
-    gemms = [s.op for s in steps if hasattr(s.op, "precision")]
+    gemms = [s.op for s in steps if "precision" in vars(s.op)]
     assert gemms and {op.precision for op in gemms} == {Precision.HIGHEST}
 
 

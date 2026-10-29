@@ -112,7 +112,7 @@ def test_every_decoder_application_is_held_to_its_context():
     found = set()
     for package in pkgutil.iter_modules(iron.applications.__path__):
         module = importlib.import_module(f"iron.applications.{package.name}")
-        for name in getattr(module, "__all__", ()):
+        for name in vars(module).get("__all__", ()):
             model = getattr(module, name)
             if issubclass(model, CausalLM):
                 found.add(package.name)

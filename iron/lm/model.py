@@ -590,10 +590,10 @@ class Model(iron.Graph):
         """
 
     def __repr__(self) -> str:
-        max_seq_len = getattr(getattr(self, "config", None), "max_seq_len", None)
+        config = vars(self).get("config")
         fields = []
-        if max_seq_len is not None:
-            fields.append(f"max_seq_len={max_seq_len}")
+        if isinstance(config, DecoderConfig):
+            fields.append(f"max_seq_len={config.max_seq_len}")
         loaded = self._versions and all(v.is_loaded for v in self._versions.values())
         fields.append("loaded" if loaded else "not loaded")
         return f"{self.name}({', '.join(fields)})"

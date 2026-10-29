@@ -496,9 +496,10 @@ class Handle:
         if method == "__call__" and name and len(inputs) == 2 and not kwargs:
             a, b = inputs
             if a is self:
-                return getattr(self, f"__{name}__")(b)
-            if hasattr(self, f"__r{name}__"):
-                return getattr(self, f"__r{name}__")(a)
+                return vars(Handle)[f"__{name}__"](self, b)
+            reflected = vars(Handle).get(f"__r{name}__")
+            if reflected is not None:
+                return reflected(self, a)
         raise TypeError(
             f"numpy's {ufunc.__name__} cannot compute {self!r}: a handle is a "
             f"buffer of a recorded graph. Use + - * / @ on it, iron.functional, "
@@ -633,9 +634,9 @@ def _broadcast(whole, rowwise, x: Handle, y) -> Handle:
     if _is_number(y):
         recorder = graph_recorder.get()
         y = recorder.constant(y, x.shape[-1] if x.shape else 1, x.dtype)
-    if len(x.shape) == 1 and len(getattr(y, "shape", ())) > 1:
+    if len(x.shape) == 1 and is_operand(y) and len(y.shape) > 1:
         x, y = (y if isinstance(y, Handle) else graph_recorder.get().operand(y)), x
-    shape = tuple(getattr(y, "shape", ()))
+    shape = tuple(y.shape) if is_operand(y) else ()
     if len(x.shape) > 1 and shape == x.shape[-1:]:
         rows = x.elements // x.shape[-1]
         if rows == 1 and rowwise.segments_for(x.shape[-1]) is None:

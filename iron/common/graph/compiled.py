@@ -357,8 +357,9 @@ class Graph:
         for n, p, parent, _ in walk(self, shared=shared):
             if not isinstance(p, _Unbound):
                 continue
-            if isinstance(parent, tuple) or getattr(
-                getattr(parent, "__dataclass_params__", None), "frozen", False
+            if isinstance(parent, tuple) or (
+                dataclasses.is_dataclass(parent)
+                and type(parent).__dataclass_params__.frozen
             ):
                 raise TypeError(
                     f"{self.name}: {path}{n} is in a tuple or a frozen "
@@ -1133,10 +1134,9 @@ def _words(
                 continue  # another instance of the design, bound alike
             derived.add(symbol)
             linear = None
-            spec = word
-            count = counts.get(getattr(spec, "extent", None))
-            if isinstance(spec, ExtentWord) and count is not None and count.linear:
-                divisor = spec.divisor(op)
+            count = counts.get(word.extent) if isinstance(word, ExtentWord) else None
+            if count is not None and count.linear:
+                divisor = word.divisor(op)
                 linear = Linear(
                     count.value.name,
                     Fraction(count.scale, divisor),
