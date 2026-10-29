@@ -817,7 +817,9 @@ def confirm_fusions(
                     # which dropping only one of several active groups may
                     # not fix; none of them is retried in this run.
                     names = ", ".join(str(g) for g in active)
-                    log(f"  {names}: dropped, {recording.name} hung on the device: {hung}")
+                    log(
+                        f"  {names}: dropped, {recording.name} hung on the device: {hung}"
+                    )
                     for g in active:
                         remaining.remove(g)
                         if refused is not None:

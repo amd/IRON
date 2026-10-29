@@ -94,7 +94,8 @@ def test_rmsnorm_to_gemv_b_matches_reference_and_unfused(record_property):
     gemv_tol = gemv.tolerance()
     own = np.maximum(
         gemv_tol.atol or 0.0,
-        gemv_tol.rtol * (np.abs(out.astype(np.float32)) + np.abs(y_ref.astype(np.float32))),
+        gemv_tol.rtol
+        * (np.abs(out.astype(np.float32)) + np.abs(y_ref.astype(np.float32))),
     )
     tol = Tolerance.bounded(
         lambda *_: own + propagated,
