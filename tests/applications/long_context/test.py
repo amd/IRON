@@ -24,6 +24,7 @@ from iron.applications.gemma4 import Gemma4
 from iron.applications.granite import Granite
 from iron.applications.granite_hybrid import GraniteHybrid
 from iron.applications.llama import Llama
+from iron.applications.qwen2 import Qwen2
 from iron.applications.qwen3 import Qwen3
 from iron.applications.qwen3_embedding import Qwen3Embedding
 from iron.applications.qwen3_moe import Qwen3Moe
@@ -125,6 +126,16 @@ APPLICATIONS = {
         "model.safetensors",
         "tokenizer.json",
         each_step=("npu1", "npu2"),
+    ),
+    # Qwen 2.5's full-ELF link does not finish in a practical time at this
+    # shape; unmeasured deep in the caches.
+    "qwen2.5_1.5b": Application(
+        Qwen2,
+        "qwen2.5-1.5b-instruct",
+        "model.safetensors",
+        "tokenizer.json",
+        full_elf=False,
+        each_step=("npu2",),
     ),
     # Qwen3's decode measured 0.0020 (0.6B, native 32768) to 0.0385 (1.7B,
     # native 32768), its deepest prompt chunk 0.0021 to 0.0565, on npu2.

@@ -157,6 +157,7 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | Granite 4.0-H 1B | [granite_hybrid](./iron/applications/granite_hybrid/) | `granite-4.0-h-1b` |
 | SmolLM2 1.7B Instruct | [smollm2](./iron/applications/smollm2/) | `smollm2-1.7b-instruct` |
 | SmolLM3 3B | [smollm3](./iron/applications/smollm3/) | `smollm3-3b` |
+| Qwen 2.5 1.5B Instruct | [qwen2](./iron/applications/qwen2/) | `qwen2.5-1.5b-instruct` |
 | Qwen3 1.7B, 0.6B | [qwen3](./iron/applications/qwen3/) | `qwen3-1.7b`, `qwen3-0.6b` |
 | Qwen3-Reranker 0.6B (`score`) | [qwen3_reranker](./iron/applications/qwen3_reranker/) | `qwen3-reranker-0.6b` |
 | Qwen3-Embedding 0.6B (`embed`) | [qwen3_embedding](./iron/applications/qwen3_embedding/) | `qwen3-embedding-0.6b` |
@@ -165,7 +166,7 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |
 | Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) |
 
-What the text decoders (Llama, Granite, SmolLM2, SmolLM3, Qwen3 and Gemma 4 above) share:
+What the text decoders (Llama, Granite, SmolLM2, SmolLM3, Qwen 2.5, Qwen3 and Gemma 4 above) share:
 
 - **Setup**: `requirements_examples.txt`, as [installing](#installation-linux) says. XRT maps every device buffer locked, and a model's weights and caches are banks of at most 3.5 GiB (`iron.common.image.allocator.BANK`), so `ulimit -l` must cover one bank.
 
