@@ -23,7 +23,7 @@ Run with XRT sourced and the NPU otherwise idle.
 import argparse
 import functools
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -32,6 +32,7 @@ from iron import operators
 from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
 from .autotune import Shape, Timed, autotune, kernel_cycles, time_shape
+from .chains import price_chains
 from .measure import Cache, Timing, pmode
 
 
@@ -61,6 +62,12 @@ def parser(description: str) -> argparse.ArgumentParser:
         action="store_true",
         help="time settings the cache already holds again",
     )
+    p.add_argument(
+        "--chains-only",
+        action="store_true",
+        help="price only the chains a graph admits against the profile as it "
+        "stands, skipping the (hours-long) tunable search",
+    )
     return p
 
 
@@ -75,25 +82,49 @@ def _timing(args: argparse.Namespace) -> dict:
     )
 
 
-def tune(args: argparse.Namespace, calls: Sequence[Timed], profiles: Path) -> Path:
+def tune(
+    args: argparse.Namespace,
+    calls: Sequence[Timed] | Callable[[], Sequence[Timed]],
+    profiles: Path,
+) -> Path:
     """Rewrite ``profiles/<device>.json`` with the settings ``calls`` time
-    fastest at (``autotune``), timed as ``args`` says; return its path.
+    fastest at (``autotune``), then price the chains its graphs admit
+    against the result (``price_chains``); ``--chains-only`` skips straight
+    to pricing chains against the profile as it stands. Timed as ``args``
+    says; return its path.
+
+    ``calls`` may be a thunk: re-recording under the profile tuning just
+    wrote picks up its tunables (``Graph.record`` reloads a profile that is
+    a path every time), so chain pricing sees the shapes the graph actually
+    runs.
     """
     print(f"power mode: {pmode()}", flush=True)
     dev = require_device()
     path = profiles / f"{dev.name}.json"
     profile = Profile.load(path) if path.exists() else None
-    tuned = autotune(
-        calls,
+    full_elf = dev.can_dispatch_full_elf
+    if not args.chains_only:
+        profile = autotune(
+            calls() if callable(calls) else calls,
+            dev,
+            profile,
+            full_elf=full_elf,
+            cycles=kernel_cycles(dev),
+            core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
+            **_timing(args),
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        profile.save(path)
+        print(f"wrote {path}")
+    profile = price_chains(
+        calls() if callable(calls) else calls,
         dev,
         profile,
-        full_elf=dev.can_dispatch_full_elf,
-        cycles=kernel_cycles(dev),
-        core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
+        full_elf=full_elf,
         **_timing(args),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    tuned.save(path)
+    profile.save(path)
     print(f"wrote {path}")
     return path
 

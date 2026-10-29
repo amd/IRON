@@ -39,7 +39,7 @@ from iron.common.graph.record import Recording
 from iron.common.image.callable import ImageCallable
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
-from iron.common.image.step import BufferRef, SequenceStep
+from iron.common.image.step import BufferRef, Chain, SequenceStep
 
 
 @dataclasses.dataclass(frozen=True)
@@ -115,6 +115,13 @@ class Standalone:
             would not be representative (a draw row's temperature and top-k).
         load: Write the per-call values now; with `False` the image is built
             and seeded, and `load()` writes them.
+        chains: Edges to feed a consumer step's input from the producer
+            step's output just before it, each a `Chain` whose `producer` is
+            an index into `runlist`: the consumer's named buffer shares the
+            producer's, rather than a name of its own.
+        fuse: `chains` are passed to `Image`, so each streams on-chip. With
+            `False` the shared buffer stays a normal host round trip, the
+            baseline a chain is priced against.
     """
 
     def __init__(
@@ -127,7 +134,13 @@ class Standalone:
         inputs: Mapping[Operator, Mapping[str, np.ndarray]] | None = None,
         full_elf: bool = True,
         load: bool = True,
+        chains: Sequence[Chain] = (),
+        fuse: bool = True,
     ):
+        if chains and not distinct:
+            raise ValueError(
+                "chained steps need distinct=True: each pair its own buffers"
+            )
         self.steps = list(runlist)
         values, inputs = values or {}, inputs or {}
         self._values = {op: dict(values.get(op, {})) for op in self.steps}
@@ -138,10 +151,18 @@ class Standalone:
             k if distinct else firsts[id(op)] for k, op in enumerate(self.steps)
         ]
         self._filled = sorted(set(self._slot))
+        # A chained consumer's input is named for the producer's output: no
+        # buffer of its own, host-visible or not.
+        self._shared = {
+            (c.producer + 1, c.input): f"s{c.producer}_{c.output}" for c in chains
+        }
+        self._internal = set(self._shared.values())
         in_names, out_names = [], []
         for k in self._filled:
             op = self.steps[k]
             for buf, name_ in zip(op.buffers, self._names(k, op)):
+                if name_ in self._internal:
+                    continue
                 (out_names if buf.role is Out else in_names).append(name_)
         steps = [
             SequenceStep(op, tuple(map(BufferRef, self._names(self._slot[k], op))))
@@ -151,7 +172,9 @@ class Standalone:
         # model's image is, so one timed alone pays that too.
         packaging = FullELF(reconfigure=True) if full_elf else PerStep()
         self.sequence = Image(
-            Recording.of_steps(name, steps, in_names, out_names), packaging
+            Recording.of_steps(name, steps, in_names, out_names),
+            packaging,
+            chains=chains if fuse else (),
         ).compile()
         self.callable = self.sequence.get_callable()
         rng = np.random.default_rng(seed)
@@ -163,6 +186,8 @@ class Standalone:
                 {buf.name: self.address(n) for buf, n in zip(op.buffers, names)}, rng
             )
             for buf, name_ in zip(op.buffers, names):
+                if name_ in self._internal:
+                    continue
                 if buf.name in addressed:
                     content = np.ascontiguousarray(addressed[buf.name], buf.dtype)
                     self._bytes(name_)[: buf.nbytes] = content.view(np.uint8)
@@ -217,9 +242,8 @@ class Standalone:
             )
         return content.reshape(-1).view(np.uint8)
 
-    @staticmethod
-    def _names(k: int, op: Operator) -> list[str]:
-        return [f"s{k}_{b.name}" for b in op.buffers]
+    def _names(self, k: int, op: Operator) -> list[str]:
+        return [self._shared.get((k, b.name), f"s{k}_{b.name}") for b in op.buffers]
 
     def _bytes(self, name: str) -> np.ndarray:
         return self.callable.get_storage(name).numpy_view().view(np.uint8)
@@ -246,6 +270,8 @@ class Standalone:
         op = self.steps[k]
         out = {}
         for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
+            if name in self._internal:
+                continue
             if buf.fills:
                 data = self._before.get(name, self._bytes(name)[: buf.nbytes])
                 out[buf.name] = data.view(buf.host_dtype).reshape(buf.host_shape)
@@ -253,12 +279,13 @@ class Standalone:
 
     def written(self, k: int = 0) -> dict[str, np.ndarray]:
         """What step ``k`` wrote in the last run, by buffer name: along a
-        bounded axis only the rows under the call's bound.
+        bounded axis only the rows under the call's bound; a chained step's
+        elided buffer (no host copy once fused) is left out.
         """
         op = self.steps[k]
         out = {}
         for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
-            if not buf.drains:
+            if not buf.drains or name in self._internal:
                 continue
             under = [slice(None)] * len(buf.shape)
             for extent in op.bound_extents:
@@ -393,6 +420,40 @@ class Measurement:
         return delta, math.hypot(*noises)
 
 
+@dataclasses.dataclass(frozen=True)
+class ChainMeasurement:
+    """A candidate edge's step, as ``measure_chain`` timed it: the pair fused
+    on-chip against the same pair unchained, its buffer shared through the
+    host instead, timed in one run so their rounds pair.
+
+    Attributes:
+        chained: The fused pair's step.
+        unchained: The same pair's, its buffer a normal host round trip.
+        refused: Why the chain may not replace the unchained pair: its
+            output was not bit-identical. None where it may.
+    """
+
+    chained: Measurement
+    unchained: Measurement
+    refused: str | None = None
+
+    def difference(self) -> tuple[float, float | None]:
+        """How much longer the chained pair's step takes than the unchained
+        pair's, and that difference's standard error (``Measurement.difference``).
+        """
+        return self.chained.difference(self.unchained)
+
+
+def _hashed(arrays: Mapping[str, np.ndarray] | None) -> list[tuple[str, str]]:
+    """``arrays`` by name, each a sha256 of its contents, so a cache key
+    follows what an input holds rather than its identity.
+    """
+    return sorted(
+        (name, hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest())
+        for name, a in (arrays or {}).items()
+    )
+
+
 class Cache:
     """Every design measured on one NPU platform at one power mode, one
     JSON file each under ``root/<platform>/<power mode>/``.
@@ -432,15 +493,46 @@ class Cache:
         as one full ELF or not.
         """
         design = OperatorDesign(op.resolved()).compilable()
-        given = sorted(
-            (name, hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest())
-            for name, a in (inputs or {}).items()
-        )
         key = (
             design.recipe_hash,
             design.artifact_hash,
             sorted((values or {}).items()),
-            given,
+            _hashed(inputs),
+            full_elf,
+        )
+        return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
+
+    @staticmethod
+    def chain_key(
+        producer: Operator,
+        consumer: Operator,
+        output: str,
+        input: str,
+        producer_values: Mapping[str, int] | None = None,
+        consumer_values: Mapping[str, int] | None = None,
+        producer_inputs: Mapping[str, np.ndarray] | None = None,
+        consumer_inputs: Mapping[str, np.ndarray] | None = None,
+        full_elf: bool = True,
+    ) -> str:
+        """The entry a ``producer`` -> ``consumer`` edge at ``output`` ->
+        ``input`` is kept in as each operator, resolved for the current
+        device, is run at its own values on its own inputs, packaged as one
+        full ELF or not: both designs' builds and the edge, so an existing
+        operator figure's key (``Cache.key``) is untouched.
+        """
+        p_design = OperatorDesign(producer.resolved()).compilable()
+        c_design = OperatorDesign(consumer.resolved()).compilable()
+        key = (
+            p_design.recipe_hash,
+            p_design.artifact_hash,
+            c_design.recipe_hash,
+            c_design.artifact_hash,
+            output,
+            input,
+            sorted((producer_values or {}).items()),
+            sorted((consumer_values or {}).items()),
+            _hashed(producer_inputs),
+            _hashed(consumer_inputs),
             full_elf,
         )
         return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
@@ -465,6 +557,36 @@ class Cache:
 
     def put(self, key: str, m: Measurement) -> None:
         write(self.directory / f"{key}.json", json.dumps(dataclasses.asdict(m)) + "\n")
+
+    def get_chain(self, key: str) -> ChainMeasurement | None:
+        """The chain measurement at ``key``; None if there is none, or it was
+        written with other fields than ``ChainMeasurement`` has.
+        """
+        path = self.directory / "chains" / f"{key}.json"
+        if not path.exists():
+            return None
+        fields = json.loads(path.read_text())
+        if fields.keys() != {f.name for f in dataclasses.fields(ChainMeasurement)}:
+            return None
+        sides = {}
+        for side in ("chained", "unchained"):
+            m = fields[side]
+            if m.keys() != {f.name for f in dataclasses.fields(Measurement)}:
+                return None
+            sides[side] = Measurement(
+                **{
+                    **m,
+                    "round_us": tuple(m["round_us"]),
+                    "default_round_us": tuple(m["default_round_us"]),
+                }
+            )
+        return ChainMeasurement(sides["chained"], sides["unchained"], fields["refused"])
+
+    def put_chain(self, key: str, m: ChainMeasurement) -> None:
+        write(
+            self.directory / "chains" / f"{key}.json",
+            json.dumps(dataclasses.asdict(m)) + "\n",
+        )
 
 
 def write(path: Path, text: str) -> None:
@@ -592,3 +714,177 @@ def measure(
         # A probe holds its context while it lives; the next batch needs them.
         del short, long
     return out
+
+
+def _digest(written: Mapping[str, np.ndarray]) -> str:
+    h = hashlib.sha256()
+    for k in sorted(written):
+        h.update(k.encode())
+        h.update(np.ascontiguousarray(written[k]).tobytes())
+    return h.hexdigest()
+
+
+def measure_rewrite(
+    as_recorded: Callable[[str, int], Standalone],
+    rewritten: Callable[[str, int], Standalone],
+    output: Callable[[Standalone], Mapping[str, np.ndarray]],
+    *,
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    mode: str | None = None,
+    log: Callable[[str], None] = print,
+) -> tuple[Measurement, Measurement, str | None]:
+    """Time the steps ``rewritten`` builds against the same steps
+    ``as_recorded`` builds, each ``repeats`` times over one, interleaved in
+    one run so rounds pair, the per-pair step excess as ``measure`` finds an
+    operator's. Each built once (at one repeat) first and compared via
+    ``output``: a rewrite whose output is not bit-identical to the recorded
+    steps' is refused. Kind-agnostic: a chain, a fold or a pack calls this
+    the same way, each building its own two designs over one dataflow.
+
+    Args:
+        as_recorded, rewritten: Each takes a run's name and its repeat
+            count, and returns a loaded (``load=False``) ``Standalone``.
+        output: What a run wrote, by name, to compare the two designs by.
+        mode: The NPU's power mode, read now if not given.
+
+    Returns:
+        The recorded steps' measurement, the rewrite's, and why the rewrite
+        may not replace the recorded steps (None where it may).
+    """
+    one_recorded = as_recorded("recorded1", 1)
+    one_rewritten = rewritten("rewritten1", 1)
+    many_recorded = as_recorded(f"recorded{repeats}", repeats)
+    many_rewritten = rewritten(f"rewritten{repeats}", repeats)
+    for run in (one_recorded, one_rewritten, many_recorded, many_rewritten):
+        run.load()
+
+    one_recorded.callable()
+    recorded_out = output(one_recorded)
+    one_rewritten.callable()
+    rewritten_out = output(one_rewritten)
+    refused = (
+        None
+        if recorded_out.keys() == rewritten_out.keys()
+        and all(np.array_equal(recorded_out[k], rewritten_out[k]) for k in recorded_out)
+        else "the rewrite's output is not bit-identical to the recorded steps'"
+    )
+
+    times = time_interleaved(
+        [
+            one_recorded.callable,
+            one_rewritten.callable,
+            many_recorded.callable,
+            many_rewritten.callable,
+        ],
+        timing,
+        log=log,
+    )
+    run_id = uuid.uuid4().hex
+    mode = pmode() if mode is None else mode
+
+    def excess(one: Stats, many: Stats) -> tuple[float, ...]:
+        return tuple(
+            (m - o) / (repeats - 1) for o, m in zip(one.samples_us, many.samples_us)
+        )
+
+    recorded_steps = excess(times[0], times[2])
+    rewritten_steps = excess(times[1], times[3])
+    recorded_m = Measurement(
+        statistics.median(recorded_steps),
+        recorded_steps,
+        _digest(recorded_out),
+        run_id,
+        mode,
+        timing.calls,
+    )
+    rewritten_m = Measurement(
+        statistics.median(rewritten_steps),
+        rewritten_steps,
+        _digest(rewritten_out),
+        run_id,
+        mode,
+        timing.calls,
+    )
+    return recorded_m, rewritten_m, refused
+
+
+def measure_chain(
+    producer: Operator,
+    consumer: Operator,
+    output: str,
+    input: str,
+    *,
+    full_elf: bool,
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    producer_values: Mapping[str, int] | None = None,
+    consumer_values: Mapping[str, int] | None = None,
+    producer_inputs: Mapping[str, np.ndarray] | None = None,
+    consumer_inputs: Mapping[str, np.ndarray] | None = None,
+    cache: Cache | None = None,
+    remeasure: bool = False,
+    log: Callable[[str], None] = print,
+) -> ChainMeasurement:
+    """Time ``producer`` -> ``consumer`` fused on-chip at ``output`` ->
+    ``input`` against the same pair unchained, its buffer a normal host
+    round trip instead (``measure_rewrite``). A chain whose consumer output
+    is not bit-identical to the unchained pair's is refused.
+
+    Args:
+        producer_values, consumer_values: The per-call values each operator
+            is written at.
+        producer_inputs, consumer_inputs: What each operator's input buffers
+            hold, by name, where random bytes would not be representative.
+        cache: The edge's figure is taken from it rather than run, unless
+            `remeasure`; what is run is written to it.
+    """
+    mode = pmode()
+    if cache is not None and cache.mode != mode:
+        raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    key = None
+    if cache is not None:
+        key = Cache.chain_key(
+            producer,
+            consumer,
+            output,
+            input,
+            producer_values,
+            consumer_values,
+            producer_inputs,
+            consumer_inputs,
+            full_elf,
+        )
+        if not remeasure:
+            cached = cache.get_chain(key)
+            if cached is not None:
+                return cached
+    values = {producer: producer_values or {}, consumer: consumer_values or {}}
+    inputs = {producer: producer_inputs or {}, consumer: consumer_inputs or {}}
+
+    def build(name: str, reps: int, fuse: bool) -> Standalone:
+        edges = [Chain(2 * r, output, input) for r in range(reps)]
+        return Standalone(
+            name,
+            [producer, consumer] * reps,
+            values=values,
+            inputs=inputs,
+            chains=edges,
+            fuse=fuse,
+            full_elf=full_elf,
+            load=False,
+        )
+
+    unchained_m, chained_m, refused = measure_rewrite(
+        lambda name, reps: build(f"un{name}", reps, False),
+        lambda name, reps: build(f"chain_{name}", reps, True),
+        lambda run: run.written(1),
+        timing=timing,
+        repeats=repeats,
+        mode=mode,
+        log=log,
+    )
+    result = ChainMeasurement(chained_m, unchained_m, refused)
+    if cache is not None:
+        cache.put_chain(key, result)
+    return result

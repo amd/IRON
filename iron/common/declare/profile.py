@@ -129,6 +129,11 @@ class Profile:
             for p_cls, p_entry, c_cls, c_entry, entry_input in self._chains
         )
 
+    def chains(self) -> list[_ChainEntry]:
+        """Each chain entry as ``(producer, producer_dims, consumer,
+        consumer_dims, input)``, in the order added."""
+        return list(self._chains)
+
     def tunables_for(self, cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
         """The tunables for the ``cls`` a call with ``given`` keywords makes,
         each from the most specific entry naming it.
