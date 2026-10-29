@@ -28,6 +28,8 @@ from iron.applications.qwen3 import Qwen3
 from iron.applications.qwen3_embedding import Qwen3Embedding
 from iron.applications.qwen3_moe import Qwen3Moe
 from iron.applications.qwen3_reranker import Qwen3Reranker
+from iron.applications.smollm2 import SmolLM2
+from iron.applications.smollm3 import SmolLM3
 from iron.lm import CausalLM, Checkpoint
 from iron.lm.testing import (
     check_deep_decode,
@@ -84,6 +86,17 @@ APPLICATIONS = {
     ),
     "llama_3.2_3b": Application(
         Llama, "llama3.2-3b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
+    ),
+    # SmolLM2 is Llama's layer at its own, narrower shape (full attention, no
+    # KV groups): unmeasured deep in the caches, its shallow bounds above
+    # Llama's.
+    "smollm2_1.7b": Application(
+        SmolLM2,
+        "smollm2-1.7b-instruct",
+        "model.safetensors",
+        "tokenizer.json",
+        each_step=("npu1", "npu2"),
+        deep_kl=0.2,
     ),
     # Granite's decode measured 0.0010 to 0.0022 on npu2, 4k to the whole
     # context; npu1 still unmeasured. Each size fills the cache with its
@@ -151,6 +164,16 @@ APPLICATIONS = {
         INDEX,
         "tokenizer.json",
         staged=False,
+        deep_kl=0.2,
+    ),
+    # SmolLM3 skips RoPE on every fourth layer (NoPE): unmeasured deep in the
+    # caches, its shallow bounds above Llama 3B's.
+    "smollm3_3b": Application(
+        SmolLM3,
+        "smollm3-3b",
+        INDEX,
+        "tokenizer.json",
+        each_step=("npu1", "npu2"),
         deep_kl=0.2,
     ),
 }

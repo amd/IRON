@@ -17,6 +17,7 @@ import pytest
 
 from iron.applications.gemma4 import Gemma4
 from iron.applications.qwen3_moe import Qwen3Moe
+from iron.applications.smollm3 import SmolLM3
 from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
@@ -32,6 +33,7 @@ INDEX = "model.safetensors.index.json"
 # short prompt it generates from.
 DECODERS = [
     pytest.param((Gemma4, "gemma-4-e2b-it/model.safetensors", (256, 13)), id="gemma4"),
+    pytest.param((SmolLM3, f"smollm3-3b/{INDEX}", (1024, 13)), id="smollm3"),
     # 30B, its experts paged from the checkpoint: nightly only, a toy one per PR
     # (tests/applications/qwen3_moe).
     pytest.param(
