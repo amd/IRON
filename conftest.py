@@ -168,19 +168,6 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
 
-    # A runner whose device heap holds less control code than a model's full
-    # ELF needs sets IRON_XFAIL_DEVICE_HEAP until its driver is fixed.
-    if (
-        report.failed
-        and call.excinfo is not None
-        and os.environ.get("IRON_XFAIL_DEVICE_HEAP")
-        and call.excinfo.errisinstance(RuntimeError)
-        and "DRM_IOCTL_AMDXDNA_CREATE_BO" in str(call.excinfo.value)
-        and "err=-28" in str(call.excinfo.value)
-    ):
-        report.outcome = "skipped"
-        report.wasxfail = "the device heap is full (CREATE_BO ENOSPC)"
-
     # A test that fails in setup (a runner missing a model's files) is
     # recorded too, or the model would drop out of the results.
     if (report.when == "call" and not report.skipped) or report.failed:

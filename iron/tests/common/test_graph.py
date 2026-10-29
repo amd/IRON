@@ -42,7 +42,7 @@ from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
-from iron.tests.support.graphs import Walk
+from iron.tests.support.graphs import Chain, Walk
 from iron.tests.support.llama_model import llama_1b, small
 from iron.tests.support.xrt import without_xrt
 
@@ -264,6 +264,20 @@ def test_a_graph_carries_its_profile():
     assert (b.tile_size_input, b.tile_size_output) == (4, E // 8)  # the profile's
     assert two.reference(z(E)).shape == (E,)  # constructs under the profile too
     assert GEMV(M=E, K=256).tile_size_output is None  # nothing outside it
+
+
+@pytest.mark.parametrize("columns", [None, 1])
+def test_a_chain_applies_its_profile(columns):
+    chain = Chain(8192, 256, columns=columns)
+    chain.profile = Profile()
+    for cls in (ElementwiseAdd, SiLU, ElementwiseMul):
+        chain.profile.add(cls, size=8192, num_aie_columns=2, tile_size=512)
+
+    recording = chain.record(a=(8192,), b=(8192,))
+    assert len(recording.steps) == 5
+    for step in recording.steps:
+        assert step.op.num_aie_columns == (2 if columns is None else columns)
+        assert step.op.tile_size == 256  # the call's explicit setting wins
 
 
 def test_a_graph_reads_as_its_name_and_recorded_shapes():
