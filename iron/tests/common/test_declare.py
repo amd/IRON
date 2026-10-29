@@ -363,6 +363,13 @@ def test_a_profile_fills_the_tunables_a_call_leaves_open():
     assert len(p) == 2
 
 
+def test_a_tunable_given_as_none_is_left_to_the_profile():
+    p = Profile()
+    p.add(MV, columns=4, tile_out=32)
+    op = p.make(MV, M=1024, K=128, columns=None, tile_out=None)
+    assert (op.columns, op.tile_out, op.pinned) == (4, 32, frozenset())
+
+
 def test_saving_an_operator_outside_the_catalog_names_it(tmp_path):
     p = Profile()
     p.add(MV, columns=4)

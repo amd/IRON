@@ -37,13 +37,9 @@ class Profile:
         entries: standalone use of what a graph's recorder applies implicitly
         to every step it constructs.
         """
-        pinned = frozenset(
-            name
-            for name, value in kwargs.items()
-            if name in cls.declaration.tunables and value is not None
-        )
-        given = {**self.tunables_for(cls, kwargs), **kwargs}
-        return cls(**given, pinned=pinned)
+        given = {name: value for name, value in kwargs.items() if value is not None}
+        pinned = frozenset(given.keys() & set(cls.declaration.tunables))
+        return cls(**{**self.tunables_for(cls, given), **given}, pinned=pinned)
 
     def add(self, cls: type, **fields: Any) -> None:
         """Add an entry for ``cls``: ``param()`` values to match (one left out
