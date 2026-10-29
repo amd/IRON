@@ -4,8 +4,13 @@
 name: Small Benchmark/Test Suite
 
 on:
-  pull_request: 
+  pull_request:
   workflow_dispatch:
+    inputs:
+      log_level:
+        description: "pytest --log-cli-level (DEBUG for aiecc's compile trail)"
+        required: false
+        default: "WARNING"
   push:
      branches:
        - main
@@ -55,6 +60,7 @@ jobs:
           env_name: ci_env
           extensive: "false"
           test_suite: "operators"
+          log_level: ${{ inputs.log_level }}
 
       - name: Format test results
         uses: ./.github/actions/format_results

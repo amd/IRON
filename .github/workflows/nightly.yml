@@ -9,6 +9,11 @@ name: Nightly Applications
 
 on:
   workflow_dispatch:
+    inputs:
+      log_level:
+        description: "pytest --log-cli-level (DEBUG for aiecc's compile trail)"
+        required: false
+        default: "WARNING"
   schedule:
    - cron:  '0 10 * * *'  # 3 AM MT, after the extensive suite
 
@@ -63,6 +68,7 @@ jobs:
           env_name: ci_env
           extensive: "true"
           test_suite: "applications"
+          log_level: ${{ inputs.log_level }}
 
       - name: Format test results
         uses: ./.github/actions/format_results

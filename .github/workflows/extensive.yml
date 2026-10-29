@@ -5,6 +5,11 @@ name: Extensive Benchmark/Test Suite
 
 on:
   workflow_dispatch:
+    inputs:
+      log_level:
+        description: "pytest --log-cli-level (DEBUG for aiecc's compile trail)"
+        required: false
+        default: "WARNING"
   schedule:
    - cron:  '0 9 * * *'  # 2 AM MT
   push:
@@ -52,6 +57,7 @@ jobs:
           env_name: ci_env
           extensive: "true"
           test_suite: "operators"
+          log_level: ${{ inputs.log_level }}
 
       - name: Format test results
         uses: ./.github/actions/format_results
