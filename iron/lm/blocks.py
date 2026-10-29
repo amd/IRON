@@ -708,16 +708,10 @@ class EncoderLayer(DecoderLayer):
     attention with no cache (``NoCache``) and a plain (ungated) ``MLP``.
     """
 
+    norm = LayerNorm
+
     def __init__(self, c, i: int, self_attn=None):
-        self.input_layernorm = LayerNorm(c.hidden_size, c.eps)
-        self.self_attn = (
-            Attention(c, i, o_bias=c.attention_bias) if self_attn is None else self_attn
-        )
-        self.post_attention_layernorm = LayerNorm(c.hidden_size, c.eps)
-        self.mlp = MLP(c)
-        self.cache = NoCache()
-        self.rope = None
-        self.residual_multiplier = 1.0
+        super().__init__(c, i, self_attn, MLP(c), NoCache())
 
 
 class SandwichLayer(DecoderLayer):
