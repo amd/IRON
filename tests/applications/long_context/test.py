@@ -23,6 +23,7 @@ import iron.applications
 from iron.applications.gemma4 import Gemma4
 from iron.applications.granite import Granite
 from iron.applications.granite_hybrid import GraniteHybrid
+from iron.applications.lfm2 import Lfm2
 from iron.applications.llama import Llama
 from iron.applications.phi3 import Phi4
 from iron.applications.qwen2 import Qwen2
@@ -148,6 +149,9 @@ APPLICATIONS = {
         full_elf=False,
         each_step=("npu2",),
     ),
+    # LFM2's decode measured at most mean 0.0057, p90 0.0068, max 0.0071 over
+    # its 1024-32640 context sweep; unmeasured past that.
+    "lfm2_1.2b": Application(Lfm2, "lfm2-1.2b", "model.safetensors", "tokenizer.json"),
     # Qwen3's decode measured 0.0020 (0.6B, native 32768) to 0.0385 (1.7B,
     # native 32768), its deepest prompt chunk 0.0021 to 0.0565, on npu2.
     "qwen3_0.6b": Application(

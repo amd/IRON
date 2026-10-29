@@ -156,6 +156,7 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` |
 | Granite 4.0-H 1B | [granite_hybrid](./iron/applications/granite_hybrid/) | `granite-4.0-h-1b` |
 | Phi-4-mini-instruct | [phi3](./iron/applications/phi3/) | `phi-4-mini-instruct` |
+| LFM2-1.2B | [lfm2](./iron/applications/lfm2/) | `lfm2-1.2b` |
 | SmolLM2 1.7B Instruct | [smollm2](./iron/applications/smollm2/) | `smollm2-1.7b-instruct` |
 | SmolLM3 3B | [smollm3](./iron/applications/smollm3/) | `smollm3-3b` |
 | Qwen 2.5 1.5B Instruct | [qwen2](./iron/applications/qwen2/) | `qwen2.5-1.5b-instruct` |
@@ -167,7 +168,7 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |
 | Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) |
 
-What the text decoders (Llama, Granite, SmolLM2, SmolLM3, Phi-4-mini, Qwen 2.5, Qwen3 and Gemma 4 above) share:
+What the text decoders (Llama, Granite, SmolLM2, SmolLM3, Phi-4-mini, LFM2, Qwen 2.5, Qwen3 and Gemma 4 above) share:
 
 - **Setup**: `requirements_examples.txt`, as [installing](#installation-linux) says. XRT maps every device buffer locked, and a model's weights and caches are banks of at most 3.5 GiB (`iron.common.image.allocator.BANK`), so `ulimit -l` must cover one bank.
 
