@@ -108,10 +108,11 @@ class Session:
 
     def forget(self, position: int) -> None:
         """Hold nothing the caches have from ``position`` on: the next call
-        runs from there, as a change before it (a placeholder's soft tokens)
-        would leave them stale.
+        runs from there or an earlier restart boundary, as a change before
+        it (a placeholder's soft tokens) would leave them stale.
         """
-        self._seen = self._seen[:position]
+        held = self._seen[:position].size
+        self._seen = self._seen[: self.resume(held)]
 
     def resume(self, held: int) -> int:
         """The position calls start from to run the tokens from ``held`` on:

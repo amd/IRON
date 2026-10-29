@@ -97,7 +97,9 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    |---|---|---|
    | Gemma 4 E2B | 131072 | 182 |
    | Llama 3.2 3B | 131072 | 101 |
+   | Granite 4.2 3B | 131072 | 86 |
    | Llama 3.2 1B | 131072 | 26 |
+   | Granite 4.0-H 1B | 131072 | 15 |
    | EmbeddingGemma 2, each tower and the encoder | its largest input | under 0.7 |
 
    On NPU1 a command is one operator, the longest an attention layer of the
@@ -151,11 +153,13 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | Model | Application | Checkpoint |
 |---|---|---|
 | Llama 3.2 1B, 3B | [llama](./iron/applications/llama/) | `llama3.2-1b`, `llama3.2-3b` |
+| Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` |
+| Granite 4.0-H 1B | [granite_hybrid](./iron/applications/granite_hybrid/) | `granite-4.0-h-1b` |
 | Gemma 4 E2B text decoder | [gemma4](./iron/applications/gemma4/) | `gemma-4-e2b-it` |
 | EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |
 | Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) |
 
-What the text decoders (Llama and Gemma 4 above) share:
+What the text decoders (Llama, Granite and Gemma 4 above) share:
 
 - **Setup**: `requirements_examples.txt`, as [installing](#installation-linux) says. XRT maps every device buffer locked, and a model's weights and caches are banks of at most 3.5 GiB (`iron.common.image.allocator.BANK`), so `ulimit -l` must cover one bank.
 

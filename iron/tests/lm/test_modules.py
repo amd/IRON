@@ -16,6 +16,7 @@ import iron
 from iron import Precision
 from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
 from iron.lm.blocks import KVCache, Rope
+from iron.lm.causal import CausalConv1d
 from iron.lm.checkpoint import nest, leaves
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close, check_generation
@@ -26,6 +27,21 @@ from iron.tests.support.llama_reference import OnHost
 from iron.tests.support.llama_model import SMALL, checkpoint, small
 
 pytestmark = pytest.mark.usefixtures("npu2")
+
+
+@pytest.mark.parametrize("chunk,kernel", [(1, 3), (2, 4), (2, 5)])
+def test_causal_conv_refuses_a_chunk_shorter_than_its_history(chunk, kernel):
+    config = dataclasses.replace(SMALL, prefill_chunk=chunk)
+    with pytest.raises(ValueError, match="prefill_chunk .* kernel - 1"):
+        CausalConv1d(config, channels=64, kernel=kernel)
+
+
+@pytest.mark.parametrize("chunk,kernel", [(1, 2), (2, 3), (4, 4), (4, 5), (8, 4)])
+def test_causal_conv_accepts_a_chunk_that_holds_its_history(chunk, kernel):
+    config = dataclasses.replace(SMALL, prefill_chunk=chunk)
+    conv = CausalConv1d(config, channels=64, kernel=kernel)
+    assert conv.state.chunk == chunk
+    assert conv.state.slots.shape[1:] == (kernel - 1, 64)
 
 
 class Block(iron.Graph):

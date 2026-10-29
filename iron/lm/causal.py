@@ -16,11 +16,14 @@ from typing import Any, ClassVar
 
 import numpy as np
 from aie.iron.kernels.sample import ROW_WORDS
+from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.compiled import walk
+from iron.common.graph.handle import State
 from iron.operators.copy import Copy
 from iron.operators.sample import Sample
 
@@ -37,8 +40,9 @@ logger = logging.getLogger(__name__)
 @dataclasses.dataclass(kw_only=True)
 class Call:
     """One call's values, built once in ``body`` and read by every module that
-    keeps memory from call to call (``KVCache``, ``Rope``): a prompt chunk's
-    ``rows`` from ``start``, or the decode step's one at ``position``.
+    keeps memory from call to call (``KVCache``, ``Checkpoints``, ``Rope``): a
+    prompt chunk's ``rows`` from ``start``, or the decode step's one at
+    ``position``.
     """
 
     prompt: bool
@@ -61,6 +65,95 @@ class Call:
     token: Any = None
     # The embedding rows the layers start from (``forward``).
     embeddings: Any = None
+
+
+@dataclasses.dataclass(frozen=True)
+class Checkpoints:
+    """A state a decoder carries from position to position, a slot per
+    prompt-chunk boundary: slot ``k`` holds it after the positions up to
+    ``k * chunk`` run so far, slot 0 (never written) before the sequence.
+    """
+
+    slots: State
+    chunk: int
+
+    @classmethod
+    def of(
+        cls, shape: tuple[int, ...], max_seq_len: int, chunk: int, dtype=bfloat16
+    ) -> "Checkpoints":
+        """A state of ``shape``, a slot for every boundary of ``chunk``-position
+        prompt chunks up to ``max_seq_len`` positions.
+
+        Raises:
+            ValueError: ``chunk`` is not a power of two, which a decode step's
+                slot (``position // chunk``) needs.
+        """
+        if chunk < 1 or chunk & (chunk - 1):
+            raise ValueError(
+                f"Checkpoints: a {chunk}-position chunk is no power of two"
+            )
+        slots = (max_seq_len - 1) // chunk + 2
+        return cls(iron.state((slots, *shape), dtype), chunk)
+
+    def at(self, call: Call) -> tuple[Handle, Handle]:
+        """The slot ``call`` reads, the state before its first position, and
+        the slot it writes, the state after its last, in a graph's body. A
+        call ends within the chunk it starts in (``CausalLM`` splits them).
+        """
+        C = self.chunk
+        return self.slots[(call.start - 1) // C + 1], self.slots[call.position // C + 1]
+
+    def restart(self, held: int, ran: int) -> int:
+        """Where a call may start to change the positions from ``held`` on,
+        after ``ran`` positions ran: there where the last call ended, else at
+        the boundary before it.
+        """
+        return held if held == ran else held // self.chunk * self.chunk
+
+    def slot(self, position: int) -> int:
+        """The slot holding the state after the first ``position`` positions."""
+        return 0 if position == 0 else (position - 1) // self.chunk + 1
+
+
+class CausalConv1d(iron.Graph):
+    """A depth-wise causal convolution of ``kernel`` taps over a call's
+    rows, each of ``channels`` its own taps (``weight``, torch's
+    ``(channels, 1, kernel)``), plus ``bias`` where it holds one. The
+    ``kernel - 1`` rows before a call are its ``state``, a slot per
+    prompt-chunk boundary; ``CausalLM`` gives every one of a model the
+    scratch ``F.causal_conv1d`` stages a call in (``window``, ``tail``).
+
+    Raises:
+        ValueError: ``prefill_chunk`` is smaller than ``kernel - 1``, the
+            history the staging window must hold.
+    """
+
+    window: State
+    tail: State
+
+    def __init__(self, c, channels: int, kernel: int, bias: bool = False):
+        if c.prefill_chunk < kernel - 1:
+            raise ValueError(
+                f"CausalConv1d: prefill_chunk {c.prefill_chunk} is smaller than "
+                f"kernel - 1 ({kernel - 1})"
+            )
+        self.weight = iron.param(channels, 1, kernel)
+        self.bias = iron.param(channels) if bias else None
+        self.state = Checkpoints.of(
+            (kernel - 1, channels), c.max_seq_len, c.prefill_chunk
+        )
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        # A row per tap, each the row RowwiseMul takes.
+        C, _, K = self.weight.shape
+        self.taps = iron.param(np.ascontiguousarray(self.weight.reshape(C, K).T))
+
+    def body(self, x, call):
+        read, write = self.state.at(call)
+        state = F.ConvState(read, write, self.window, self.tail)
+        y = F.causal_conv1d(x, self.taps, state)
+        return y if self.bias is None else y + self.bias
 
 
 class Decoder(iron.Graph):
@@ -118,15 +211,28 @@ class CausalLM(Model):
             head = np.asarray(self.lm_head.weight)
             self.lm_head.weight = iron.param(np.pad(head, ((0, 1), (0, 0))))
         self.layers = self.model.layers
+        # The scratch every causal conv of a shape stages its calls in.
+        scratch = {}
+        for conv in {id(p): p for _, _, p, _ in walk(self)}.values():
+            if isinstance(conv, CausalConv1d):
+                (K, C), chunk = conv.taps.shape, config.prefill_chunk
+                if (K, C) not in scratch:
+                    scratch[K, C] = iron.state((2, chunk, C)), iron.state((K - 1, C))
+                conv.window, conv.tail = scratch[K, C]
 
     @property
-    def recurrent(self) -> list[KVCache]:
-        """Each ``KVCache`` keeping a ring, which restarts only at some
-        positions (``restart``).
+    def recurrent(self) -> list[Checkpoints | KVCache]:
+        """Each state a layer carries from position to position, which
+        restarts only at some (``restart``): ``Checkpoints``, and a
+        ``KVCache`` keeping a ring.
         """
         found = {}
         for _, _, p, _ in walk(self):
-            if isinstance(p, KVCache) and p.ring is not None:
+            if (
+                isinstance(p, Checkpoints)
+                or isinstance(p, KVCache)
+                and p.ring is not None
+            ):
                 found.setdefault(id(p), p)
         return list(found.values())
 
@@ -334,6 +440,11 @@ class CausalLM(Model):
         if self.decode_step is None:
             raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         return self.decode_step.emit is not None
+
+    @property
+    def draws_at_once(self) -> bool:
+        """A device loop's: ``generate`` reads its draws once the last is drawn."""
+        return self.device_loop
 
     def release(self) -> None:
         """Free the device loops' runs, then the graph's memory."""

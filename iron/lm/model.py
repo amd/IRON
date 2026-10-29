@@ -225,7 +225,8 @@ class TokenizerJson:
 @dataclasses.dataclass(frozen=True)
 class Stats:
     """A generation's timings: the seconds to the first token, and the
-    tokens per second after it (NaN for one token).
+    tokens per second drawn after it (NaN for one token), each token drawn
+    counted, those past the first ``eos`` too where they were drawn anyway.
     """
 
     ttft: float
@@ -259,6 +260,13 @@ class Model(iron.Graph):
         def __init__(self, config: Any, weights: Any) -> None: ...
 
         def _draw(self, *args, **kwargs) -> Iterator[int]: ...
+
+    @property
+    def draws_at_once(self) -> bool:
+        """Whether, after a non-EOS first token, ``generate`` draws the rest
+        before the second arrives: even those past ``eos`` cost no more to read.
+        """
+        return False
 
     @classmethod
     def load(
@@ -500,12 +508,17 @@ class Model(iron.Graph):
         sampler = Sampler(temperature=0) if sampler is None else sampler
         # The text of drawn[held:] is yet to be shown; drawn[seen:held] is
         # decoded with it, since a token's text can depend on the one before.
-        drawn, seen, held = [], 0, 0
+        drawn, seen, held, count = [], 0, 0, 0
+        # Past eos, tokens drawn at once still count in the time they took.
+        at_once = not each and self.draws_at_once
         began = first = last = time.perf_counter()
         for token in self._draw(tokens, max_tokens, sampler, each, **inputs):
             last = time.perf_counter()
-            if not drawn:
+            count += 1
+            if count == 1:
                 first = last
+            if drawn and drawn[-1] in self.eos:
+                continue
             drawn.append(token)
             if not text:
                 yield token
@@ -517,13 +530,13 @@ class Model(iron.Graph):
                     if piece:
                         yield piece
                     seen, held = held, len(drawn)
-            if token in self.eos:
+            if token in self.eos and (count == 1 or not at_once):
                 break
         if text and held < len(drawn):
             shown = tokenizer.decode(drawn[seen:held])
             if piece := tokenizer.decode(drawn[seen:])[len(shown) :]:
                 yield piece
-        later = len(drawn) - 1
+        later = count - 1
         rate = later / (last - first) if later else math.nan
         self.stats = Stats(first - began, rate)
 
@@ -604,6 +617,10 @@ class OnHost:
         def logits(self, tokens) -> np.ndarray: ...
 
         def reference(self, *tensors, dev=None, **values) -> Any: ...
+
+    @property
+    def draws_at_once(self) -> bool:
+        return False
 
     def _draw(self, tokens, max_tokens: int, sampler: Sampler, each=True):
         history = [int(t) for t in tokens]
