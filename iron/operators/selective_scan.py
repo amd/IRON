@@ -29,11 +29,6 @@ from iron.operators.state_slices import (
 )
 
 
-def _slices(op) -> int:
-    """A core's slices: its heads' ``SLICE``-row runs of state."""
-    return op.heads // op.columns * op.head_dim // SLICE
-
-
 def _trained(op: "SelectiveScan") -> dict:
     """Heads as a trained Mamba2's are: ``A < 0``, so the state decays."""
     rng = np.random.default_rng(3)
@@ -175,6 +170,11 @@ class SelectiveScan(Operator):
                 f"{self.dev.core_memory_bytes} bytes with one slice's state"
             )
 
+    @property
+    def core_slices(self) -> int:
+        """A core's slices: its heads' ``SLICE``-row runs of state."""
+        return self.heads // self.columns * self.head_dim // SLICE
+
     def slice_bytes(self) -> tuple[int, int]:
         """Bytes of a slice's (dt_bias, A, D) then state in, and its final out."""
         return 4 * (3 + self.slice_state), 4 * self.slice_state
@@ -207,13 +207,11 @@ class SelectiveScan(Operator):
         H, P, N, I = self.heads, self.head_dim, self.state_size, self.inner
         T, per_group, heads = self.block // SLICE, H // self.groups, H // self.columns
         kernel = self.kernel(T)
-        f32 = lambda n: np.ndarray[(n,), np.dtype[np.float32]]
-        bf16 = lambda n: np.ndarray[(n,), np.dtype[bfloat16]]
         deep_in, deep_out = depths(self)
         # A core takes two streams, a memtile joining each: a row's xbc
         # then its dt, one stream every core reads, and a slice's (dt_bias,
         # A, D) then its state.
-        row = ObjectFifo(bf16(self.width + H), depth=1)
+        row = ObjectFifo(np.ndarray[(self.width + H,), np.dtype[bfloat16]], depth=1)
         parts = row.prod().join(
             [0, self.width], obj_types=[self.xbc.obj_type, self.dt.obj_type]
         )
@@ -221,7 +219,9 @@ class SelectiveScan(Operator):
             o.bind([f.prod()])
         starts, ends = [], ([], [])
         for _ in range(self.columns):
-            start = ObjectFifo(f32(3 + SLICE * N), depth=deep_in)
+            start = ObjectFifo(
+                np.ndarray[(3 + SLICE * N,), np.dtype[np.float32]], depth=deep_in
+            )
             part = start.prod().join(
                 [0, 3], obj_types=[self.head.obj_type, self.state.obj_type]
             )
@@ -243,7 +243,7 @@ class SelectiveScan(Operator):
             i32 = valid.type
             zero, size = arith.constant(0, i32), arith.constant(T, i32)
             bc, dt = T * SLICE, T * (SLICE + 2 * N)
-            for q in range_(_slices(self) // heads):
+            for q in range_(self.core_slices // heads):
                 for r in range_(heads):
                     # Slice q of head r of the core's heads in turn, q and r
                     # each their own loop counter rather than a flattened
@@ -311,12 +311,15 @@ class SelectiveScan(Operator):
         """
         R, H, W, I = self.rows, self.heads, self.width, self.inner
         P, SN = self.head_dim, SLICE * self.state_size
-        S, heads = _slices(self), H // self.columns
+        S, heads = self.core_slices, H // self.columns
         per, states, run = S // heads, H * P * self.state_size, S * SN
         # A core's heads' states, a slice of each head in turn.
-        slices = lambda k: TensorAccessPattern(
-            (states,), k * run, [per, heads, SN], [SN, P * self.state_size, 1]
-        )
+        slices = [
+            TensorAccessPattern(
+                (states,), k * run, [per, heads, SN], [SN, P * self.state_size, 1]
+            )
+            for k in range(self.columns)
+        ]
         tg = TaskGroup()
         self.xbc.fill(TensorAccessPattern((R, W), 0, [S, R, W], [0, W, 1]), group=tg)
         self.dt.fill(TensorAccessPattern((R, H), 0, [S, R, H], [0, H, 1]), group=tg)
@@ -326,7 +329,7 @@ class SelectiveScan(Operator):
                 lane=k,
                 group=tg,
             )
-            self.state.fill(slices(k), lane=k, group=tg)
+            self.state.fill(slices[k], lane=k, group=tg)
         for k in range(self.columns):
             self.y.drain(
                 TensorAccessPattern(
@@ -336,7 +339,7 @@ class SelectiveScan(Operator):
                 group=tg,
                 wait=True,
             )
-            self.final.drain(slices(k), lane=k, group=tg, wait=True)
+            self.final.drain(slices[k], lane=k, group=tg, wait=True)
         tg.finish()
 
     def tolerance(self):
