@@ -15,6 +15,7 @@ runs in a full ELF or in an xclbin.
 
 import numpy as np
 import pytest
+from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 
 import iron
@@ -353,6 +354,25 @@ def test_ids_past_the_table_are_refused(table, outside):
         graph(ids)
     with pytest.raises(IndexError):
         graph.reference(ids)
+
+
+@pytest.mark.bench
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_prompt_chunk_s_rows_are_gathered_each_call(table, record_property):
+    """A prompt chunk's 2048 ids from EmbeddingGemma 2's table, checked each
+    call, then timed end to end: the gather CI tracks.
+    """
+    n_ids = 2048
+    graph = PerCall(table)
+    graph.compile(ids=((n_ids,), np.int32))
+    rng = np.random.default_rng(n_ids)
+    calls = [rng.integers(0, VOCAB, n_ids).astype(np.int32) for _ in range(4)]
+    for k, ids in enumerate(calls):
+        assert_equal(graph(ids), np.take(table, ids, axis=0), f"call {k}")
+    latency = run_iters(graph, arg_sets=[(ids,) for ids in calls], warmup=1, iters=8)
+    us = latency.e2e.median_us
+    record_property("Latency", us)
+    record_property("Bandwidth", n_ids * WIDTH * table.itemsize / (us * 1e-6) / 1e9)
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
