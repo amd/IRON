@@ -29,19 +29,19 @@ dialect.
 <a class="iron-card" href="programming_guide/" markdown>
 <span class="iron-card-icon">📖</span>
 <span class="iron-card-title">Programming Guide</span>
-<span class="iron-card-desc">Tiles, ObjectFifos, data movement, and building a design from scratch.</span>
+<span class="iron-card-desc">Declare an operator, record a graph of operators, compile it and run it on the NPU.</span>
 </a>
 
 <a class="iron-card" href="models/" markdown>
 <span class="iron-card-icon">🤖</span>
 <span class="iron-card-title">Models</span>
-<span class="iron-card-desc">End-to-end language models running on the NPU, from Llama to Gemma 4.</span>
+<span class="iron-card-desc">Language models compiled for the NPU, from Llama to Gemma 4.</span>
 </a>
 
 <a class="iron-card" href="benchmarks/" markdown>
 <span class="iron-card-icon">📊</span>
 <span class="iron-card-title">Benchmarks</span>
-<span class="iron-card-desc">Operator throughput and latency, tracked over the project's history.</span>
+<span class="iron-card-desc">Operator and model performance, as measured by CI.</span>
 </a>
 
 </div>
@@ -51,7 +51,7 @@ dialect.
 - An operator library (GEMM, MHA, RMSNorm, RoPE, activations, ...) over mlir-aie's `aie.iron`, each operator one declared class
 - Graphs: a model's operators recorded once per input shape and compiled into one image, so intermediate values stay on the device
 - Autotuning of each operator's tunables into a per-device profile
-- End-to-end models on the NPU, from Llama 3.2 1B to a vision-language model (see [Models](models.md))
+- Language models compiled for the NPU, from Llama 3.2 1B to a vision-language model; tokenization stays on the host (see [Models](models.md))
 
 ## Quick start
 

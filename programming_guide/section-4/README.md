@@ -5,11 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Section 4 - Weights and State
 
-So far every tensor a graph's `body` saw came in through its call: `x`,
-`y`. Two more kinds of tensor live in the graph itself, uploaded once and
-reused every call, rather than passed in each time: **weights**, read-only
-and fixed for the graph's life, and **state**, device-resident and read and
-written by the graph's own steps, outliving any one call.
+So far every tensor a graph's `body` used was passed in on the call (`x`,
+`y`). A graph can also hold tensors of its own, which live on the device
+and are not passed again:
+
+* **Weights** are read-only and fixed for the graph's life.
+* **State** is read and written by the graph's own steps, and keeps its
+  contents from one call to the next.
 
 ## Walkthrough of [weights_and_state.py](./weights_and_state.py)
 
@@ -26,15 +28,18 @@ class Scale(iron.Graph):
         return x * self.weight
 ```
 
-`iron.param(array)` holds `array` as a weight of this graph: uploaded to the
-device once, on the first compile, never again. Passed an already-known
-array, as here, it is bound immediately; a model layer that loads weights
-later (Section 8) instead declares `iron.param(shape)` and binds it with
-`Graph.load_state_dict`. `x * self.weight` records an `ElementwiseMul` step
-the same way `AXPY.step(...)` did in Section 2 — `*`, `+`, `-`, `/` and `@`
-on a handle are shorthand for an operator's `.step(...)`, for the common
-cases (see [`Handle`](../../iron/common/graph/handle.py)'s arithmetic
-methods for which operator each reaches).
+`iron.param(array)` makes `array` a weight of this graph. It is copied to
+the device once, on the first call (or earlier, if you call the compiled
+graph's `load()`), and never again. A model whose weights are loaded later
+(Section 8) declares it by shape instead, as in
+`iron.param(out_features, in_features)`, and binds it with
+`Graph.load_state_dict`.
+
+`x * self.weight` records an `ElementwiseMul` step. Arithmetic on a handle
+is shorthand for an operator's `.step(...)`: `+` and `*` reach the
+elementwise add and multiply, `-` reaches `AXPY`, `/` divides by a number,
+and `@` multiplies a single row by a matrix with `GEMV`. See
+[`Handle`](../../iron/common/graph/handle.py) for the details.
 
 ### State
 
@@ -53,33 +58,31 @@ class Accumulate(iron.Graph):
         return new
 ```
 
-`iron.state(shape, dtype, name=)` declares a tensor that lives on the
-device across calls, zero the first time it is uploaded — a KV cache is the
-model-layer example (Section 8); this one is a plain running total, `rows`
-independent slots of `width` elements. `self.total[pos]` indexes it by the
-per-call value `pos`, dropping that axis to give one row; `Copy.step(...)`
-reads a state row into a fresh handle, and `Copy.step(value, view)` writes
-one back into it, the same two-argument shape as any other write into a
-view (Section 3's bounds, Section 5's carried values).
+`iron.state(shape, dtype, name=)` declares a tensor that stays on the
+device across calls and starts at zero. A KV cache is the real-world
+example (Section 8). This one is a running total: `rows` independent slots
+of `width` elements each.
 
-`accumulate(x, pos=0)` called twice adds into the same row both times:
-state is not reset between calls the way a weight is never touched again,
-and not supplied fresh by the host the way `x` is. `pos` can also move
-between calls — `accumulate(x, pos=2)` touches a different row of the same
-state, with no new compile.
+`self.total[pos]` indexes the state by the per-call value `pos`, which
+selects one row. `Copy.step(view)` reads that row into a new handle, and
+`Copy.step(value, view)` writes a handle back into it.
+
+Calling `accumulate(x, pos=0)` twice adds into the same row both times,
+because state is never reset between calls. Calling `accumulate(x, pos=2)`
+works on a different row of the same state, with no new compile.
 
 ## <u>Exercises</u>
 
-1. Run `python3 weights_and_state.py`; it checks `Scale` against numpy, then
-   calls `Accumulate` four times at three different `pos` values, checking
-   each running total against a plain numpy accumulator.
-2. Call `accumulate.reference(x, pos=0)` a few times and read
-   `accumulate.total.host` after each: it mirrors state the way the host
-   reference path sees it. On a real device, the equivalent read is
+1. Run `python3 weights_and_state.py`. It checks `Scale` against numpy,
+   then calls `Accumulate` four times at three different `pos` values and
+   checks each running total against a numpy accumulator.
+2. Call `accumulate.reference(x, pos=0)` a few times and print
+   `accumulate.total.host` after each. That array is the state as the host
+   reference sees it. On a device, read it with
    `accumulate.compile(x=(width,)).read(accumulate.total)`.
 3. Change `Accumulate.body` to subtract instead of add
-   (`new = old - x`) and rerun; confirm the reference still matches, since
-   `reference()` runs the exact same `body` on the host.
+   (`new = old - x`) and rerun. The reference still matches, because
+   `reference()` runs the same `body` on the host.
 
 -----
 [Prev](../section-3/) &middot; [Top](..) &middot; [Next](../section-5/)

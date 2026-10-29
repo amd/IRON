@@ -5,10 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Section 0 - Getting Set Up
 
-This guide assumes IRON is already installed, as the top-level
-[README](../../README.md#installation-linux) describes: the XDNA driver and
-XRT, `pip install -r requirements.txt`, and `pip install -e .` from this
-checkout.
+This guide assumes IRON is installed as the top-level
+[README](../../README.md#installation-linux) describes: the XDNA driver,
+XRT, and `pip install -r requirements.txt`, which also installs this
+checkout in editable mode.
 
 ## Check your installation
 
@@ -18,14 +18,14 @@ xrt-smi examine            # confirms XRT sees the NPU
 pytest iron/tests/operators/test_catalog.py -k AXPY
 ```
 
-If that test passes, the toolchain compiles and runs on your attached NPU.
+If the test passes, the toolchain can compile for and run on your NPU.
 
 ## The device
 
-Every operator and graph compiles for *the current device*, which `iron`
-detects automatically from XRT when one is attached. On a host with no NPU
-(to compile without running, or to record and check a design against its
-numpy reference), bind one explicitly before anything else runs:
+Every operator and graph compiles for *the current device*. When an NPU is
+attached, IRON finds it through XRT. On a host without one, for example to
+compile without running or to check a design against its numpy reference,
+bind a device before anything else runs:
 
 ```python
 import aie.utils as aie_utils
@@ -34,30 +34,29 @@ from aie.iron.device import from_name
 aie_utils.set_current_device(from_name("npu2", n_cols=8))
 ```
 
-`npu1` is Phoenix and Hawk Point (4 columns usable); `npu2` is Strix, Strix
-Halo and Krackan (8 columns). The rest of this guide's examples call
-`iron.operators` and `iron.Graph` the same way whether a real NPU answers or
-not; only the device run itself (calling a compiled graph) needs one
-attached.
+`npu1` is Phoenix and Hawk Point, with 4 usable columns. `npu2` is Strix,
+Strix Halo and Krackan, with 8. The examples in this guide build operators
+and graphs the same way either way. Only calling a compiled graph or
+operator needs a real NPU.
 
 ## The cache
 
-Compiled artifacts are cached by content hash under `${NPU_CACHE_HOME:-~/.npu/cache}`,
-nothing is written next to your source. Point a session at its own cache
-with:
+Compiled artifacts are cached by content hash under
+`${NPU_CACHE_HOME:-~/.npu/cache}`. Nothing is written next to your source.
+To give a session its own cache:
 
 ```bash
 export NPU_CACHE_HOME=/scratch/$USER/iron_cache
 ```
 
-The first compile of a design is the slow one; a later compile of the same
-shape, on the same machine, with the same cache, is near-instant.
+The first compile of a design is the slow one. Compiling the same design
+again with the same cache reuses what is already there.
 
 ## Where to go next
 
-* [Section 1 — An operator on its own](../section-1/) to call one operator
-  without recording a graph.
-* [Section 2 — Your first graph](../section-2/) to compose several operators
+* [Section 1 — An operator on its own](../section-1/) calls one operator
+  without a graph.
+* [Section 2 — Your first graph](../section-2/) composes several operators
   into one compiled image.
 
 -----
