@@ -504,9 +504,11 @@ class Operand:
     def transfers(
         self,
     ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]]:
-        """The derived ``(lane, tap, length_parameter, length_unit)`` transfers:
-        the whole buffer (one lane or replicated) or one block of the first
-        non-batch axis per lane; under a bound, round-robin by tile instead.
+        """The ``(lane, tap, length_parameter, length_unit)`` transfers: what
+        an operator writing its own sequence describes (``lane_transfers``),
+        else derived: the whole buffer (one lane or replicated) or one block
+        of the first non-batch axis per lane; under a bound, round-robin by
+        tile instead.
 
         Raises:
             ValueError: No ``obj_shape=``, or the split does not divide, cannot
@@ -518,6 +520,9 @@ class Operand:
                 f"{name} has no obj_shape=, so its sequence cannot be derived; add "
                 f"obj_shape= or override sequence(rt)"
             )
+        described = self.op.lane_transfers(self)
+        if described is not None:
+            return described
         count, shape = self.lanes, self.shape
         bounded = self.bounded
         if bounded is None:

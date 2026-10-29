@@ -985,3 +985,33 @@ class Copy(Operator):
                 length_unit=unit,
             )
         rt.finish(tg)
+
+    def lane_transfers(self, operand):
+        """Each channel's share of ``src``/``dst``, as ``sequence`` moves it; a
+        per-call view offset (``accept_views``) or a repeated or multi-walk
+        source is not describable here.
+        """
+        if operand not in (self.x, self.y):
+            return None
+        if (
+            self.src_repeat
+            or isinstance(self.src, tuple)
+            or isinstance(self.dst, tuple)
+        ):
+            return None
+        if self.in_offset.per_call or self.out_offset.per_call:
+            return None
+        if operand is self.x:
+            taps, length_parameter = (
+                self._taps(self.src, self.src_bound, self.x),
+                self.src_valid,
+            )
+        else:
+            taps, length_parameter = (
+                self._taps(self.dst, self.dst_bound, self.y),
+                self.dst_valid,
+            )
+        return [
+            (c, tap, None if unit is None else length_parameter, unit)
+            for c, (tap, unit) in enumerate(taps)
+        ]

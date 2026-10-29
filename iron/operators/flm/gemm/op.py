@@ -1222,6 +1222,65 @@ class ProjectionGEMM(Operator):
         for slab in slabs:
             emit_slab(slab)
 
+    def _single_slab(self) -> bool:
+        """Whether ``sequence`` arms M in one slab: the same accept test
+        ``cut()`` runs for ``n_slabs=1``, without a build to read ``rt.built``
+        from (the hardware limits ``_BPool`` carries are the device's own).
+        """
+        tm = get_target_model(self.dev.resolve())
+        queue, passes_cap = tm.get_dma_task_queue_depth(), tm.get_max_repeat_count() + 1
+        k_iters, n_units, b_slots = self._k_iters, self._n_units, self._b_slots
+        if self._b_resident:
+            passes = (1, n_units)
+        elif k_iters > b_slots:
+            divisor = max(
+                s for s in range(1, b_slots + 1) if (n_units * k_iters) % s == 0
+            )
+            passes = (n_units * k_iters // divisor,) * 2
+        else:
+            return False
+        return all(p <= queue * passes_cap for p in passes)
+
+    def lane_transfers(self, operand):
+        """A and C's order, one slab and ``m_chunk=1``: past that a leg's
+        ``offset_parameter``/``repeat_parameter`` (a row bound) or a second
+        slab is not one of ``Operand.transfers()``'s tuples.
+        """
+        if operand is not self.A and operand is not self.C:
+            return None
+        if "valid" in self.bound_extents or self.m_chunk > 1:
+            return None
+        COLS, ROWS, JOINS = self.cols, self.rows, self.joins
+        N_TILE, K_TILE = self.tile_n, self.k_tile
+        k_iters, n_units = self._k_iters, self._n_units
+        HALF = ROWS // JOINS
+        N = self.N
+        if N // N_TILE < COLS or not self._single_slab():
+            return None
+        n_full = N // (N_TILE * COLS)
+        rem_blocks = (N % (N_TILE * COLS)) // N_TILE
+        n_blocks = n_full + (1 if rem_blocks else 0)
+        if operand is self.A:
+            A = TensorAccessPattern.full(
+                (JOINS, n_units, 1, HALF, M_TILE, k_iters, K_TILE)
+            )
+            out = []
+            for r in range(ROWS):
+                half, p = divmod(r, HALF)
+                # B's column-block sweep resends A's K-sweep, unchanged, once
+                # a column-block (``n_blocks`` of them).
+                rows = A[half, :, :, p].permute((0, 3, 1, 2, 4))
+                out.append((r, rows.repeat(n_blocks), None, None))
+            return out
+        C = TensorAccessPattern.full(
+            (JOINS, n_units, HALF * M_TILE, N // N_TILE, N_TILE)
+        )
+        return [
+            (c * JOINS + half, C[half, :, :, c::COLS].permute((0, 2, 1, 3)), None, None)
+            for c in range(COLS)
+            for half in range(JOINS)
+        ]
+
     @property
     def _reference_shape(self) -> tuple[int, int, int]:
         """The shape the configuration-only module is emitted at: the smallest

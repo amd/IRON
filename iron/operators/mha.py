@@ -1182,3 +1182,100 @@ class MHA(Operator):
                         length_unit=B_kv * pv_width,
                     )
             rt.finish(tg)
+
+    def lane_transfers(self, operand):
+        """Q and O stream every row whatever ``kv_valid`` bounds (the rationale
+        in AGENTS.md: a bound limits compute, not their DMA), so their order
+        follows only the static shape; K and V move only the blocks a bound
+        reaches, so their order carries ``kv_blocks`` as a ``length_parameter``.
+        """
+        if operand not in (self.Q, self.O, self.K, self.V):
+            return None
+
+        def by_head(shape, interleaved):
+            tap = TensorAccessPattern.full(shape)
+            return tap.permute((1, 0, 2)) if interleaved else tap
+
+        def insert_repeat(tap, axis, count):
+            sizes = [*tap.sizes[:axis], count, *tap.sizes[axis:]]
+            strides = [*tap.strides[:axis], 0, *tap.strides[axis:]]
+            return TensorAccessPattern(tap.tensor_dims, tap.offset, sizes, strides)
+
+        rows = self.join_rows
+        if operand is self.Q or operand is self.O:
+            if self.packed:
+                group = self.num_heads // self.num_KV_heads
+                steps = self.num_KV_heads // self.num_pipelines
+                width = 1 << (group.bit_length() - 1)
+                # The num_heads axis, one KV group (its packed block) at a
+                # time, reindexed (step, pipeline) in the order the sequence
+                # visits them.
+                base = by_head(operand.shape, self.heads_interleaved)[:, 0]
+                by_step_p = base.split(0, group).split(0, steps).permute((1, 0, 2, 3))
+                if width == group:
+                    tap = insert_repeat(by_step_p, 2, self.B_q // group)
+                else:
+                    s = by_step_p.strides[2]
+                    both = TensorAccessPattern(
+                        by_step_p.tensor_dims,
+                        by_step_p.offset,
+                        [*by_step_p.sizes[:2], 2, width, by_step_p.sizes[3]],
+                        [
+                            *by_step_p.strides[:2],
+                            (group - width) * s,
+                            s,
+                            by_step_p.strides[3],
+                        ],
+                    )
+                    tap = insert_repeat(both, 2, self.B_q // (2 * width))
+                return [(0, tap, None, None)]
+            full = by_head(operand.shape, self.heads_interleaved).split(
+                1, self.q_shims * rows
+            )
+            if operand is self.O:
+                pv_width = self.pv_width
+                return [
+                    (
+                        shim * self.pv_cores + h,
+                        full[:, :, shim * rows : (shim + 1) * rows][
+                            ..., h * pv_width : (h + 1) * pv_width
+                        ],
+                        None,
+                        None,
+                    )
+                    for shim in range(self.q_shims)
+                    for h in range(self.pv_cores)
+                ]
+            return [
+                (shim, full[:, :, shim * rows : (shim + 1) * rows], None, None)
+                for shim in range(self.q_shims)
+            ]
+
+        # K or V.
+        kv_blocks = ceildiv(self.kv_tokens, self.B_kv)
+        length_parameter = self.kv_blocks if self.kv_blocks.per_call else None
+        full = by_head(operand.shape, self.kv_interleaved)[
+            :, : kv_blocks * self.B_kv
+        ].split(1, self.B_kv)
+        if self.packed:
+            steps = self.num_KV_heads // self.num_pipelines
+            length_unit = self.B_kv * operand.shape[-1]
+            return [
+                (p, full[p * steps : (p + 1) * steps], length_parameter, length_unit)
+                for p in range(self.num_pipelines)
+            ]
+        group = self.num_heads // self.num_KV_heads
+        blocks = ceildiv(self.seq_pad, rows * self.q_shims)
+        tap = insert_repeat(full, 1, group * blocks)
+        if operand is self.V:
+            pv_width = self.pv_width
+            return [
+                (
+                    h,
+                    tap[..., h * pv_width : (h + 1) * pv_width],
+                    length_parameter,
+                    self.B_kv * pv_width,
+                )
+                for h in range(self.pv_cores)
+            ]
+        return [(0, tap, length_parameter, self.B_kv * operand.shape[-1])]

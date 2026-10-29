@@ -403,6 +403,17 @@ class Operator(jit.Operator, library=True):
     def has_sequence_override(cls) -> bool:
         return cls.sequence is not Operator.sequence
 
+    def lane_transfers(
+        self, operand: Operand
+    ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]] | None:
+        """``operand``'s per-lane host access order, where ``sequence(rt)`` is
+        hand-written and the derived order does not hold: ``Operand.transfers()``'s
+        own ``(lane, tap, length_parameter, length_unit)`` tuples, one lane at
+        a time. None where this operator does not describe ``operand``
+        (``transfers()`` then falls back to the derived order, or raises).
+        """
+        return None
+
     def design_key(self):
         """Identity for sharing a build: equal keys generate byte-identical
         MLIR. A graph's bound per-call values add their names.

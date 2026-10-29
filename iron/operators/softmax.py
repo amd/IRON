@@ -470,6 +470,32 @@ class Softmax(Operator):
             )
         rt.finish(tg)
 
+    def lane_transfers(self, operand):
+        """``x``'s rows are read thrice (streamed) or once, over blocks a
+        bound may shorten; ``addend`` and ``y`` read or write that span once.
+        """
+        if operand not in (self.x, self.y) and not (
+            self.has_addend and operand is self.addend
+        ):
+            return None
+        lanes = self.cores
+        rows = self.rows // lanes
+        blocks = ceildiv(self.length, self.block)
+        blocks_valid = self.blocks if self.streamed and self.blocks.per_call else None
+        full = TensorAccessPattern.full((self.rows, self.cols))
+        taps = [
+            full[k * rows : (k + 1) * rows, : blocks * self.block]
+            .split(1, self.block)
+            .permute((1, 0, 2))
+            for k in range(lanes)
+        ]
+        reads = 3 if self.streamed and operand is self.x else 1
+        length_unit = rows * self.block
+        return [
+            (k, tap.repeat(reads), blocks_valid, length_unit)
+            for k, tap in enumerate(taps)
+        ]
+
     def tolerance(self) -> Tolerance | None:
         base = _kernel(self, self.cols).contract.tolerance
         if self.window is not None:
