@@ -52,7 +52,7 @@ class Convolution:
         self.conv, self.groups = conv, groups
 
     def logits(self, tokens, x, weight):
-        import torch
+        import torch  # records a golden only: not a requirement
 
         c = self.conv
         image = np.asarray(x, np.float32).reshape(-1, c.width, c.channels)

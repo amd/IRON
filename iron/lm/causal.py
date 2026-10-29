@@ -346,14 +346,14 @@ class CausalLM(Model):
     @classmethod
     def tune_arguments(cls, parser) -> None:
         """The flags ``tune_calls`` follows from (``tune.arguments``)."""
-        from .tune import arguments
+        from .tune import arguments  # which imports this module
 
         arguments(parser)
 
     @classmethod
     def tune_calls(cls, parser, args) -> list:
         """``tune.calls`` on ``args``, built on weights it never reads."""
-        from .tune import calls
+        from .tune import calls  # which imports this module
 
         weights = weights_file(args.checkpoint)
         config = cls.default_config(weights)

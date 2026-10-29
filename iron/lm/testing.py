@@ -95,7 +95,7 @@ def require(*files: Path, staged: bool = True) -> None:
     missing = [str(f) for f in files if not f.exists()]
     if not missing:
         return
-    import pytest
+    import pytest  # a test's: a model imports this module for weights_dir
 
     if staged and os.environ.get("CI"):
         pytest.fail(

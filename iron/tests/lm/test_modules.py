@@ -364,7 +364,7 @@ class SharedKeys(HuggingFace):
 
     @classmethod
     def build(cls, config, weights) -> "SharedKeys":
-        import torch
+        import torch  # records a golden only: not a requirement
 
         model = super().build("llama", config, weights).model
         first, second = (layer.self_attn for layer in model.model.layers)

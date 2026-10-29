@@ -151,7 +151,7 @@ class Tokenizer:
         if self.chat_template is None:
             raise ValueError("the checkpoint has no chat template")
         _models_extra("jinja2")
-        from jinja2 import TemplateError
+        from jinja2 import TemplateError  # the models extra's: optional
 
         def raise_exception(message):
             raise TemplateError(message)
@@ -171,6 +171,7 @@ def _chat_template(source: str):
     """``source`` compiled once, in jinja2's sandbox, as transformers sets it
     up: a ``{% generation %}`` block (SmolLM3's) renders its body.
     """
+    # The models extra's: optional.
     from jinja2 import nodes
     from jinja2.ext import Extension
     from jinja2.sandbox import ImmutableSandboxedEnvironment

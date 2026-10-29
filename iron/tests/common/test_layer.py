@@ -19,6 +19,7 @@ from iron import Precision
 from iron.applications.embedding_gemma2.model import Config, EmbeddingGemma, TextLayer
 from iron.lm import Call, blocks
 from iron.lm.checkpoint import nest
+from iron.lm.golden import flat
 from iron.tests.support.layer import shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -157,10 +158,9 @@ class HuggingFaceGemma:
     """
 
     def __init__(self, w, x, ple):
+        # Record a golden only: not requirements.
         import torch
         from transformers.models.gemma4 import modeling_gemma4 as gemma4
-
-        from iron.lm.golden import flat
 
         config = gemma4.Gemma4TextConfig(
             hidden_size=WIDTH,
@@ -183,7 +183,7 @@ class HuggingFaceGemma:
         self.layer, self.x, self.ple = layer, x, ple
 
     def logits(self, _):
-        import torch
+        import torch  # records a golden only: not a requirement
 
         x = torch.from_numpy(np.asarray(self.x, np.float32))[None]
         ple = torch.from_numpy(np.asarray(self.ple, np.float32))[None]

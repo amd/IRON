@@ -155,7 +155,7 @@ class TextProcessor:
     }
 
     def __init__(self, path, config: Config = Config()):
-        import tokenizers
+        import tokenizers  # the models extra's: optional
 
         self.tokenizer = tokenizers.Tokenizer.from_file(str(path))
         self.config = config

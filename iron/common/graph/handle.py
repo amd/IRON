@@ -510,7 +510,7 @@ class Handle:
         """``self + other``, elementwise, or ``other`` a row added to every
         row, or a number added to every element.
         """
-        from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
+        from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd  # a cycle
 
         return _broadcast(ElementwiseAdd, RowwiseAdd, self, other)
 
@@ -518,7 +518,7 @@ class Handle:
         """``self * other``, elementwise, or every row times the row
         ``other``, or every element times a number.
         """
-        from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
+        from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul  # a cycle
 
         return _broadcast(ElementwiseMul, RowwiseMul, self, other)
 
@@ -530,7 +530,7 @@ class Handle:
 
     def __sub__(self, other) -> "Handle":
         """``self - other``: one AXPY step for a handle of this shape."""
-        from iron.operators.axpy import AXPY
+        from iron.operators.axpy import AXPY  # a cycle
 
         if isinstance(other, _Viewed):
             other = other._as_operand()
@@ -555,7 +555,7 @@ class Handle:
             TypeError: ``self`` is several rows, whose precision the caller
                 chooses (``iron.functional.linear``).
         """
-        import iron.functional as F
+        import iron.functional as F  # a cycle
 
         if prod(self.shape[:-1]) != 1:
             raise TypeError(
@@ -566,7 +566,7 @@ class Handle:
 
     def __rmatmul__(self, other) -> "Handle":
         """``W @ self``, ``self`` one row: as ``self @ W.T``."""
-        import iron.functional as F
+        import iron.functional as F  # a cycle
 
         if len(self.shape) != 1:
             raise TypeError(
@@ -652,7 +652,7 @@ def _broadcast(whole, rowwise, x: Handle, y) -> Handle:
 
 
 def _write(view: Handle, value) -> None:
-    from iron.operators.copy import Copy
+    from iron.operators.copy import Copy  # a cycle
 
     Copy.step(value, view)
 

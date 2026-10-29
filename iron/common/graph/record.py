@@ -22,6 +22,7 @@ from ..declare.operator import graph_recorder
 from ..declare.profile import Profile
 from ..image.packaging import Kind
 from ..image.step import BufferRef, SequenceStep
+from .visualize import dot
 from .handle import (
     Dense,
     Gather,
@@ -315,8 +316,6 @@ class Recording:
 
     def dot(self) -> str:
         """This graph drawn as Graphviz text (``visualize.dot``)."""
-        from .visualize import dot
-
         return dot(self)
 
     def check_limits(self, values: Mapping[str, int]) -> None:
@@ -706,8 +705,7 @@ class Recorder:
         host encodes an input's ids into control words each call, and a word
         source writes device-made ids into the template.
         """
-        from iron.operators.copy import Copy
-        from iron.operators.copy import Gather as GatherRows
+        from iron.operators.copy import Copy, Gather as GatherRows  # a cycle
 
         view = operands[0]
         assert isinstance(view.layout, Gather), "a gather"

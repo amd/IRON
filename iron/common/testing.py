@@ -237,7 +237,7 @@ def run_test(
         ValueError: ``inputs`` or ``outputs`` do not name the operator's
             buffers, or an expected result is None.
     """
-    from .declare import Operator
+    from .declare import Operator  # which imports this module
 
     if isinstance(inputs, Vectors):
         inputs, outputs = inputs.inputs, inputs.outputs
