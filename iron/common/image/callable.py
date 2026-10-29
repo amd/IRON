@@ -596,14 +596,36 @@ class PerStepCallable(ImageCallable):
             view = _line_view(self._scratch_banks[bank], offset, length, dtype)
             self._storage[root] = view
             self._buffers[BufferRef(root)] = view
-        # Each step is its own dispatch, over its own buffers.
+        # Each step is its own dispatch, over its own buffers; a fusion's
+        # steps are one dispatch, over every member's buffers but the ones
+        # an edge feeds on-chip (fed_edges), in fusion order.
         self._steps = []
         # The step each dispatch starts at.
         self._starts: list[int] = []
-        for i, step in enumerate(seq.steps):
-            link = seq.packaging.links[id(step.op)]
-            self._steps.append((step.op, link.kernel, step.buffers, []))
+        starts = {fusion.steps[0]: fusion for fusion in seq.fusions}
+        i, n = 0, len(seq.steps)
+        while i < n:
+            fusion = starts.get(i)
+            if fusion is None:
+                step = seq.steps[i]
+                link = seq.packaging.step_links[i]
+                self._steps.append((step.op, link.kernel, step.buffers, []))
+                self._starts.append(i)
+                i += 1
+                continue
+            fed_edges = {(e.producer, e.output) for e in fusion.edges} | {
+                (e.consumer, e.input) for e in fusion.edges
+            }
+            refs = tuple(
+                ref
+                for j in fusion.steps
+                for ref, b in zip(seq.steps[j].buffers, seq.steps[j].op.buffers)
+                if (j, b.name) not in fed_edges
+            )
+            link = seq.packaging.step_links[i]
+            self._steps.append((seq.steps[fusion.steps[0]].op, link.kernel, refs, []))
             self._starts.append(i)
+            i = fusion.steps[-1] + 1
         self._follow_arena()
         self._bind_steps()
 
@@ -669,14 +691,15 @@ class PerStepCallable(ImageCallable):
         self, between: Mapping[int, Callable[[], None]] | None = None
     ) -> tuple[None, XRTKernelResult]:
         """Dispatch each step, ``between[i]()`` running on the host before step
-        ``i``, never inside a pack's run; the handle is None, no one dispatch timed.
+        ``i``, never inside a pack's or a fusion's run; the handle is None, no
+        one dispatch timed.
         """
         between = dict(between or {})
         inside = set(between) - {*self._starts, len(self.op.steps)}
         if inside:
             raise ValueError(
                 f"{self.op.name}: host steps at {sorted(inside)} fall inside a "
-                f"run of a pack, one dispatch"
+                f"run of a pack or a fusion, one dispatch"
             )
         self._follow_arena()
         for root in self.op.inputs:

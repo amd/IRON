@@ -7,7 +7,6 @@ toolchain and no NPU below ``test_fusion_device.py``'s line.
 """
 
 import statistics
-import time
 
 import numpy as np
 import pytest
@@ -28,6 +27,7 @@ from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 from iron.tests.support import sequences
+from iron.tune.measure import Timing, time_interleaved
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -256,11 +256,19 @@ def test_step_in_two_fusions_refused():
         Image(recording, FullELF(), fusions=(_fuse(0, "y", "a"), _fuse(0, "y", "a")))
 
 
-def test_perstep_fusions_refused():
+def test_perstep_builds_fusions_but_check_refuses_them():
+    """A per-step image links a fusion's steps as one xclbin
+    (``iron.common.image.link.FusedDesign``); ``check=True`` still refuses,
+    since it holds each step to its reference on its own dispatch."""
     silu, mul = _silu_mul(2048, 1, 1024)
-    recording = _recording("fuse_perstep", silu, mul)
-    with pytest.raises(ValueError, match="FullELF"):
-        Image(recording, PerStep(), fusions=(_fuse(0, "y", "a"),))
+    Image(
+        _recording("fuse_perstep", silu, mul), PerStep(), fusions=(_fuse(0, "y", "a"),)
+    )
+
+    silu2, mul2 = _silu_mul(2048, 1, 1024)
+    recording = _recording("fuse_perstep_check", silu2, mul2)
+    with pytest.raises(ValueError, match="check=True"):
+        Image(recording, PerStep(check=True), fusions=(_fuse(0, "y", "a"),))
 
 
 def test_fusion_needs_at_least_two_steps():
@@ -480,8 +488,10 @@ def test_fused_per_call_shared_value():
 def test_gemv_to_elementwiseadd_matches_reference_and_unfused(record_property):
     """Llama decode's GEMV(M=2048, K=2048) -> ElementwiseAdd residual add,
     fused on-chip, holds to the operators' references fused and is
-    bit-equal to the same two steps run unfused; also times both, min and
-    median over interleaved rounds.
+    bit-equal to the same two steps run unfused; also times both the
+    tuner's way (``time_interleaved``: each image's calls run in turn within
+    a round, so a round pays one hardware-context load per image rather
+    than one per call), min and median over interleaved rounds.
     """
     M, K = 2048, 2048
 
@@ -522,19 +532,13 @@ def test_gemv_to_elementwiseadd_matches_reference_and_unfused(record_property):
         out.view(np.uint16), baseline.view(np.uint16)
     ), "the fused and unfused devices differ"
 
-    rounds = 20
-    fused_us, unfused_us = [], []
-    for _ in range(rounds):
-        start = time.perf_counter()
-        dispatch(fused_run)
-        fused_us.append((time.perf_counter() - start) * 1e6)
-        start = time.perf_counter()
-        dispatch(plain_run)
-        unfused_us.append((time.perf_counter() - start) * 1e6)
-    record_property("Fused min us", min(fused_us))
-    record_property("Fused median us", statistics.median(fused_us))
-    record_property("Unfused min us", min(unfused_us))
-    record_property("Unfused median us", statistics.median(unfused_us))
+    fused_stats, unfused_stats = time_interleaved(
+        [fused_run, plain_run], Timing(rounds=20), log=lambda _: None
+    )
+    record_property("Fused min us", min(fused_stats.samples_us))
+    record_property("Fused median us", statistics.median(fused_stats.samples_us))
+    record_property("Unfused min us", min(unfused_stats.samples_us))
+    record_property("Unfused median us", statistics.median(unfused_stats.samples_us))
 
 
 @pytest.mark.supported_devices("npu2")

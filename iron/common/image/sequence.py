@@ -59,10 +59,10 @@ class Image:
         self.arena = arena
         self.residents = dict(residents or {})
         self.fusions = tuple(fusions)
-        if self.fusions and isinstance(packaging, PerStep):
+        if self.fusions and isinstance(packaging, PerStep) and packaging.check:
             raise ValueError(
-                "fusions need a FullELF image; PerStep compiles one xclbin per "
-                "step, which cannot stream a buffer on-chip between two of them"
+                "fusions need their own single dispatch; check=True checks "
+                "each step on its own, against its reference"
             )
         self._validate_fusions()
         self._arena_layout: dict[str, Allocation] | None = None

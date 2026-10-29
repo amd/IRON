@@ -564,7 +564,7 @@ class Graph:
             profile = self._profile()
             fused = (
                 graph_fusions(recording, profile)
-                if chosen.full_elf and not check and profile is not None
+                if not check and profile is not None
                 else ()
             )
             version = CompiledGraph(

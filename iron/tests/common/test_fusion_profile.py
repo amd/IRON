@@ -363,14 +363,15 @@ def test_compile_passes_full_elf_fusions_to_the_image():
     assert version.sequence.fusions == (_fuse(0, "y", "a"),)
 
 
-def test_compile_withholds_fusions_under_check_or_a_step_per_xclbin():
+def test_compile_withholds_fusions_under_check_but_not_a_step_per_xclbin():
     checked = _fused_graph(_fusion_profile()).compile(check=True, x=(2048,))
     assert checked.plan.full_elf is False and checked.sequence.fusions == ()
 
     per_step = _fused_graph(_fusion_profile()).compile(
         full_elf=False, check=False, x=(2048,)
     )
-    assert per_step.plan.full_elf is False and per_step.sequence.fusions == ()
+    assert per_step.plan.full_elf is False
+    assert per_step.sequence.fusions == (_fuse(0, "y", "a"),)
 
 
 def test_a_profile_with_no_fusion_entries_compiles_unaffected():
