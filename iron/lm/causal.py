@@ -322,10 +322,13 @@ class CausalLM(Model):
         return self.draw(self.head(x), call)
 
     def draw(self, logits, call: Call):
-        """What a call returns: ``logits``'s first ``vocab_size`` columns
-        (``head``'s own row, padded past it to ``sample_vocab_size``'s
-        tileable width), and the token ``Sample`` draws from
-        ``sampled(logits, call)``, carried with the next position.
+        """What a call returns: ``logits``, ``head``'s own row, padded past
+        ``vocab_size`` to ``sample_vocab_size``'s tileable width (a view a
+        caller past ``Session``, which already narrows it, slices on the
+        host: a device-side copy of an odd ``vocab_size`` span of this
+        padding is itself not whole 4-byte words), and the token ``Sample``
+        draws from ``sampled(logits, call)``, carried with the next
+        position.
         """
         c = self.config
         _, drawn = Sample.step(
@@ -336,12 +339,7 @@ class CausalLM(Model):
             at=call.position,
             drawable=c.vocab_size,
         )
-        returned = (
-            logits
-            if c.sample_vocab_size == c.vocab_size
-            else Copy.step(logits[:, : c.vocab_size])
-        )
-        return returned, iron.carry(token=drawn, position=call.position + 1)
+        return logits, iron.carry(token=drawn, position=call.position + 1)
 
     def sampled(self, logits, call: Call):
         """``logits``, as ``draw`` samples from: unchanged by default. A
