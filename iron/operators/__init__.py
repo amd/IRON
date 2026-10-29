@@ -19,6 +19,7 @@ from .gemv import GEMV
 from .layer_norm import LayerNorm
 from .limbs import Limbs
 from .log import Log
+from .log10_clamp import Log10Clamp
 from .magnitude import Magnitude
 from .merge import Merge
 from .mha import MHA
@@ -26,6 +27,7 @@ from .relu import ReLU
 from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm
 from .rope import RoPE
+from .row_max import RowMax
 from .router import TopKRouter
 from .sample import Sample
 from .selective_scan import SelectiveScan

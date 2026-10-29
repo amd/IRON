@@ -29,30 +29,101 @@ from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs, stacked
 from iron.operators.log import Log
+from iron.operators.log10_clamp import Log10Clamp
 from iron.operators.magnitude import Magnitude
 from iron.operators.mha import MHA
 from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleTaps
+from iron.operators.row_max import RowMax
 
 
-def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarray:
-    """The ``(fft // 2 + 1, mels)`` unnormalized mel triangles over the
-    rfft's bins on HTK's mel scale, from 0 Hz to ``max_hz``, float64, as
-    transformers' ``mel_filter_bank``.
+def filterbank(
+    fft: int,
+    mels: int,
+    sample_rate: int,
+    max_hz: float,
+    mel_scale: str = "htk",
+    norm: str | None = None,
+) -> np.ndarray:
+    """The ``(fft // 2 + 1, mels)`` mel triangles over the rfft's bins, from
+    0 Hz to ``max_hz``, float64, as transformers' ``mel_filter_bank``:
+    spaced on HTK's mel scale or Slaney's (``mel_scale``), and unnormalized
+    or (``norm="slaney"``) each scaled to unit area.
+
+    Raises:
+        ValueError: ``mel_scale`` or ``norm`` is not one of these.
     """
-    mel = np.linspace(0, 2595 * math.log10(1 + max_hz / 700), mels + 2)
-    edges = 700 * (10 ** (mel / 2595) - 1)
+    if mel_scale == "htk":
+        mel = np.linspace(0, 2595 * math.log10(1 + max_hz / 700), mels + 2)
+        edges = 700 * (10 ** (mel / 2595) - 1)
+    elif mel_scale == "slaney":
+        # Linear to 1 kHz, 15 mels, and logarithmic past it.
+        top = 3 * max_hz / 200
+        if max_hz >= 1000:
+            top = 15 + math.log(max_hz / 1000) * (27 / math.log(6.4))
+        mel = np.linspace(0, top, mels + 2)
+        edges = np.where(
+            mel >= 15, 1000 * np.exp(math.log(6.4) / 27 * (mel - 15)), 200 * mel / 3
+        )
+    else:
+        raise ValueError(f"filterbank: mel_scale {mel_scale!r} is not htk or slaney")
+    if norm not in (None, "slaney"):
+        raise ValueError(f"filterbank: norm {norm!r} is not None or slaney")
     bins = np.linspace(0, sample_rate // 2, fft // 2 + 1)
     slopes = edges[None, :] - bins[:, None]
     widths = np.diff(edges)
-    return np.maximum(
+    filters = np.maximum(
         0, np.minimum(-slopes[:, :-2] / widths[:-1], slopes[:, 2:] / widths[1:])
     )
+    if norm is None:
+        return filters
+    return filters * (2 / (edges[2:] - edges[:-2]))
 
 
 class LogMel(iron.Graph):
-    """The log-mel spectrogram of float32 samples, as Hugging Face's Gemma 4
-    feature extractor computes it, via bf16-limb GEMMs (``Limbs``) for exact
-    float32 rfft and filterbank products.
+    """The log-mel spectrogram of float32 samples, as Gemma 4 or Whisper computes it.
+
+    Hugging Face's Gemma 4 feature extractor is the default, and
+    ``decades`` selects Whisper's.
+
+    Frame ``f`` is the ``frame`` samples from ``f * hop``, under a periodic
+    Hann window. Its rfft over ``fft`` points gives the magnitude
+    (``power=1``) or its square (``power=2``), which ``mels`` triangular
+    filters up to ``max_hz`` reduce to bands (``filterbank``'s ``mel_scale``
+    and ``norm``). The result is the log of each band plus ``mel_floor``,
+    rounded once to bf16. With ``decades`` it is Whisper's instead: the
+    log10 of each band floored at ``mel_floor``, held to ``decades`` below
+    the clip's largest, scaled as ``(x + 4) / 4`` and rounded once
+    (``Log10Clamp``).
+
+    A call for ``F`` frames takes ``(F - 1) * hop + span`` samples, a whole
+    number of rows of four, where ``span`` is the frame in whole 32s. It
+    also takes the per-call ``frames`` to compute. It writes ``features``,
+    ``(F, mels)``, into the caller's buffer (a state's rows) when one is
+    given and returns them otherwise, leaving rows past ``frames``
+    unwritten. With ``decades``, ``frames`` is a fixed number, the clip's
+    (30 s for Whisper): every call computes all ``F``, since the GEMMs take
+    them in whole 128-row blocks, and writes the first ``frames``, held
+    below their largest.
+
+    The rfft and the filterbank are GEMMs with exact float32 products. Each
+    operand is six planes of its bf16 limbs (``Limbs``), and the bins are
+    padded with zeros to whole 64-column tiles. ``Magnitude``, ``Log`` and
+    the clip's largest (``RowMax``) are float32.
+
+    Args:
+        frame: The samples of a frame.
+        hop: The samples between frames.
+        fft: The rfft's points, at least a frame.
+        mels: The mel bands.
+        sample_rate: The samples per second.
+        max_hz: The top of the highest band.
+        mel_floor: What the log adds to each energy, or with ``decades``
+            the least energy it takes.
+        mel_scale: ``filterbank``'s.
+        norm: ``filterbank``'s.
+        power: 1 for the magnitude, 2 for its square.
+        decades: Whisper's range below the clip's largest; None for the
+            plain log.
     """
 
     def __init__(
@@ -64,17 +135,21 @@ class LogMel(iron.Graph):
         sample_rate: int = 16000,
         max_hz: float = 8000.0,
         mel_floor: float = 1e-3,
+        mel_scale: str = "htk",
+        norm: str | None = None,
+        power: int = 1,
+        decades: float | None = None,
     ):
         if fft < frame:
             raise ValueError(
                 f"LogMel: an rfft of {fft} points is shorter than a frame of {frame}"
             )
         self.frame, self.hop, self.fft, self.mels = frame, hop, fft, mels
-        self.mel_floor = mel_floor
+        self.mel_floor, self.power, self.decades = mel_floor, power, decades
         # The samples a frame is read as: six limb planes of them are the
         # rfft GEMM's K, whole 64s; the rfft's rows past the frame are zero.
         self.span = -(-frame // 32) * 32
-        filters = filterbank(fft, mels, sample_rate, max_hz)
+        filters = filterbank(fft, mels, sample_rate, max_hz, mel_scale, norm)
         bins = fft // 2 + 1
         width = -(-bins // 64) * 64
         angle = 2 * np.pi * np.arange(frame)[:, None] * np.arange(bins) / fft
@@ -105,17 +180,40 @@ class LogMel(iron.Graph):
             wave.shape, 0, [F // 4, 4, self.span], [4 * self.hop, self.hop, 1]
         )
         a = Copy.step(wave, src=windows, dtype=np.float32).reshape(F, self.span)
-        a = a[:frames]
+        if self.decades is None:
+            a = a[:frames]
+        elif not isinstance(frames, int):
+            raise ValueError("LogMel: with decades, frames is the clip's number")
         exact = dict(tile_m=32, output_dtype=np.float32, precision=Precision.HIGHEST)
         spectrum = GEMM.step(Limbs.step(a), self.dft, **exact)
         energy = GEMM.step(
-            Limbs.step(Magnitude.step(spectrum)),
+            Limbs.step(Magnitude.step(spectrum, power=self.power)),
             self.filterbank,
             **exact,
         )
+        if self.decades is None:
+            if features is None:
+                return Log.step(energy, offset=self.mel_floor)
+            return Log.step(energy, features, offset=self.mel_floor)
+        # The clip's largest in two passes, each over whole 16-lane vectors:
+        # the largest of each line of the energies, then of those.
+        energy = energy[:frames]
+        size = frames * self.mels
+        line = next(
+            (n for n in range(4096, 0, -16) if size % n == 0 and size // n % 16 == 0),
+            None,
+        )
+        if line is None:
+            raise ValueError(
+                f"LogMel: {frames} frames of {self.mels} mels are no rows of "
+                f"16-lane vectors, 16 rows at a time"
+            )
+        peaks = RowMax.step(energy.reshape(size // line, line))
+        peak = RowMax.step(peaks.reshape(1, size // line))
+        clamp = dict(mel_floor=self.mel_floor, decades=self.decades)
         if features is None:
-            return Log.step(energy, offset=self.mel_floor)
-        return Log.step(energy, features, offset=self.mel_floor)
+            return Log10Clamp.step(energy, peak, **clamp)
+        return Log10Clamp.step(energy, peak, features, **clamp)
 
 
 class Conv1d(iron.Graph):
