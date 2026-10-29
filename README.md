@@ -167,6 +167,7 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | Gemma 4 E2B text decoder | [gemma4](./iron/applications/gemma4/) | `gemma-4-e2b-it` |
 | Qwen3.5 0.8B text decoder | [qwen3_5](./iron/applications/qwen3_5/) | `qwen3.5-0.8b` |
 | Qwen3-30B-A3B (reference only) | [qwen3_moe](./iron/applications/qwen3_moe/) | `qwen3-30b-a3b` |
+| SmolVLM-256M-Instruct | [idefics3](./iron/applications/idefics3/) | `smolvlm-256m-instruct` |
 | EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |
 | Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) |
 
