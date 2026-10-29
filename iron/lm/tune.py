@@ -91,7 +91,9 @@ def calls(
     them, and Sample on the draw rows ``sampler`` gives.
     """
     L, C = model.config.max_seq_len, model.config.prefill_chunk
-    decode_shapes, prompt_shapes = model.shapes()
+    # The decoder's own two, first: an EncoderDecoder's shapes() also holds
+    # its encoder's, which this tunes nothing for (not a decoder's call).
+    decode_shapes, prompt_shapes, *_ = model.shapes()
     versions = [
         (
             decode_shapes,

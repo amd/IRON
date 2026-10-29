@@ -17,6 +17,7 @@ before them as its convolutions' padding.
 
 import dataclasses
 import functools
+from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -381,6 +382,7 @@ class Whisper(EncoderDecoder):
     decoder_class = WhisperDecoder
     layer_class = WhisperDecoderLayer
     renames = RENAMES
+    profile = Path(__file__).with_name("profiles")
 
     def __init__(self, config: WhisperConfig, weights):
         weights = bf16(weights)
