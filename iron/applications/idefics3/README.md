@@ -14,6 +14,9 @@ The shared library is [AGENTS.md](../../../AGENTS.md#language-models).
 Its vision LayerNorms run at the LayerNorm kernel's epsilon, 1e-5
 (`iron.functional.LAYER_NORM_EPS`), not the checkpoint's 1e-6.
 
+Its text backbone's projections are at `Precision.HIGH`, as SmolLM3's are,
+checked against its own real checkpoint in `tests/applications/idefics3/test.py`.
+
 ## Scope: one image of any size, no splitting
 
 By default (`do_image_splitting=True`), the real processor splits a large

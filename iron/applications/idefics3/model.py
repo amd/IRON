@@ -19,7 +19,7 @@ import dataclasses
 from pathlib import Path
 
 
-from iron import lm
+from iron import Precision, lm
 from iron.lm import CausalLM, DecoderConfig, Multimodal, not_json, subtree
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 
@@ -36,6 +36,9 @@ class SmolVLMTextConfig(DecoderConfig):
         default=1e-5, kw_only=True, metadata={"json": "rms_norm_eps"}
     )
     tie_word_embeddings: bool = False
+    # Provisional, matching SmolLM2/3's choice at a similar scale: not yet
+    # checked against a real checkpoint's accuracy.
+    precision: Precision = not_json(Precision.HIGH, kw_only=True)
 
 
 #: ``<|im_start|>``, the turn marker every prompt starts with.

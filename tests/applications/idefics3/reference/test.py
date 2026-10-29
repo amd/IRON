@@ -186,15 +186,13 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
     tokens[220 : 220 + VISION.tokens] = IMAGE
     image = rng.integers(0, 256, (160, 240, 3), dtype=np.uint8)
     raw = {IMAGE: (image,)}
-    calls, towers = model.tower_calls(tokens, raw)
-    for inputs in calls:
-        model.reference(
-            *inputs, token=0, position=0, start=0, rows=1, rope_start=0, **towers
-        )
-    logits, carry = prompt(model, tokens, **towers)
+    zero = dict(token=0, position=0, start=0, rows=1, rope_start=0)
+    for inputs, values in model.tower_calls(tokens, raw):
+        model.reference(*inputs, **zero, **values)
+    logits, carry = prompt(model, tokens, **model.idle)
     assert_close(logits, reference.logits(tokens, image))
     tokens = np.append(tokens, carry["token"])
-    logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)
+    logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **model.idle)
     assert_close(logits, reference.logits(tokens, image))
 
 

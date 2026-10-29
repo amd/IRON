@@ -73,6 +73,8 @@ class VisionConfig(Config):
     image_std: tuple[float, ...] = not_json((0.5, 0.5, 0.5), kw_only=True)
     # The largest image a call takes either way up, 12.6 MP.
     largest: tuple[int, int] = not_json((3072, 4096), kw_only=True)
+    # Unused here: every projection is Precision.HIGHEST regardless.
+    precision: Precision = not_json(Precision.HIGHEST, kw_only=True)
 
     def __post_init__(self):
         if self.head_dim is None:
