@@ -411,6 +411,10 @@ class Operator(jit.Operator, library=True):
         own ``(lane, tap, length_parameter, length_unit)`` tuples, one lane at
         a time. None where this operator does not describe ``operand``
         (``transfers()`` then falls back to the derived order, or raises).
+
+        A lane whose bound start is not static, or whose ``length_parameter``
+        does not reach ``Operand.transfers()``'s own round-robin axis, is
+        also not describable here; return None for it too.
         """
         return None
 

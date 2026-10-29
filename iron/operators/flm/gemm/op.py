@@ -1242,13 +1242,14 @@ class ProjectionGEMM(Operator):
         return all(p <= queue * passes_cap for p in passes)
 
     def lane_transfers(self, operand):
-        """A and C's order, one slab and ``m_chunk=1``: past that a leg's
-        ``offset_parameter``/``repeat_parameter`` (a row bound) or a second
-        slab is not one of ``Operand.transfers()``'s tuples.
+        """A and C's order, one slab, ``m_chunk=1`` and unbounded: past that
+        a second slab, or a row bound's dynamic start (the second half of the
+        core rows, ``a_half``/``c_half``) and its ``n_units`` axis
+        truncation, are not one of ``Operand.transfers()``'s tuples.
         """
         if operand is not self.A and operand is not self.C:
             return None
-        if "valid" in self.bound_extents or self.m_chunk > 1:
+        if self.m_chunk > 1 or "valid" in self.bound_extents:
             return None
         COLS, ROWS, JOINS = self.cols, self.rows, self.joins
         N_TILE, K_TILE = self.tile_n, self.k_tile
@@ -1275,8 +1276,10 @@ class ProjectionGEMM(Operator):
         C = TensorAccessPattern.full(
             (JOINS, n_units, HALF * M_TILE, N // N_TILE, N_TILE)
         )
+        # The N-tile axis is outermost: C is resent column-block by
+        # column-block, each one's whole row range before the next.
         return [
-            (c * JOINS + half, C[half, :, :, c::COLS].permute((0, 2, 1, 3)), None, None)
+            (c * JOINS + half, C[half, :, :, c::COLS].permute((2, 0, 1, 3)), None, None)
             for c in range(COLS)
             for half in range(JOINS)
         ]

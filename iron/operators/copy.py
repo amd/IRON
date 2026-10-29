@@ -266,6 +266,26 @@ class Gather(Operator):
         for task in drained:
             task.await_()
 
+    def lane_transfers(self, operand):
+        """``y``'s lanes, a feed's own run of batches, as ``sequence`` moves
+        them; the bound shortens the drain's length (``drainedN``, in
+        16-byte units), not which elements a lane starts from.
+        """
+        if operand is not self.y:
+            return None
+        bounded = "valid_rows" in self.bound_extents
+        unit = 16 // np.dtype(self.dtype).itemsize
+        out = []
+        for k, run in enumerate(self.runs):
+            first = run.start * self.chain * self.row
+            size = min(run.stop * self.chain, self.rows) * self.row - first
+            tap = TensorAccessPattern(
+                (self.rows * self.row,), first, [1, 1, 1, size], [0, 0, 0, 1]
+            )
+            length_parameter = self.value(f"drained{k}") if bounded else None
+            out.append((k, tap, length_parameter, unit if bounded else None))
+        return out
+
     def word_source(self) -> "GatherWords":
         """The step writing row addresses into the template, for ids the device made."""
         return GatherWords(
