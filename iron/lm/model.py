@@ -379,9 +379,10 @@ class Model(iron.Graph):
 
     @classmethod
     def fit(cls, config: Config, weights_path, budget: int | None = None) -> Config:
-        """``config`` at its native context where the model's arena fits
-        ``budget`` (``host_budget()`` by default), else at the longest whole
-        number of prompt chunks that does, logged either way.
+        """``config`` at its native context where the model's arena (its
+        pinned weights and caches, and its scratch, which XRT pins the same
+        way) fits ``budget`` (``host_budget()`` by default), else at the
+        longest whole number of prompt chunks that does, logged either way.
         """
         if not isinstance(config, DecoderConfig):
             return config
@@ -394,7 +395,12 @@ class Model(iron.Graph):
             model = cls(dataclasses.replace(config, max_seq_len=length), tree)
             # What it holds does not follow its tunables, nor need a device.
             model.profile = None
-            held.append(sum(model.record(**model.shapes()[0]).pinned.values()))
+            shapes = model.shapes()[0]
+            pinned = sum(model.record(**shapes).pinned.values())
+            # The scratch arena is pinned too (XRT maps every bank locked),
+            # but record() does not size it: only compile()'s arena plan does.
+            scratch = model.compile(full_elf=None, **shapes).arena.plan.size
+            held.append(pinned + scratch)
         per_position = (held[1] - held[0]) / C
         fixed = held[0] - per_position * C
         budget = host_budget() if budget is None else budget

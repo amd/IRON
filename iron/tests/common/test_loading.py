@@ -114,12 +114,31 @@ def test_from_checkpoint_lowers_the_context_and_refuses_to_raise_it(tmp_path):
         Small.from_checkpoint(directory, random_weights=1, max_seq_len=512)
 
 
-def _held(config, length: int) -> int:
-    """What the model holds at ``length`` positions: its arena, recorded."""
+def _pinned(config, length: int) -> int:
+    """The model's pinned weights and caches at ``length`` positions, recorded."""
     config = dataclasses.replace(config, max_seq_len=length)
     model = Llama(config, checkpoint(config).tree("unread"))
     model.profile = None
     return sum(model.record(**model.shapes()[0]).pinned.values())
+
+
+def _scratch(config, length: int) -> int:
+    """The model's scratch arena at ``length`` positions, compiled: pinned
+    the same way its weights and caches are (XRT maps every bank locked),
+    but not sized by ``record()`` alone.
+    """
+    config = dataclasses.replace(config, max_seq_len=length)
+    model = Llama(config, checkpoint(config).tree("unread"))
+    model.profile = None
+    shapes = model.shapes()[0]
+    return model.compile(full_elf=None, **shapes).arena.plan.size
+
+
+def _held(config, length: int) -> int:
+    """What the model holds at ``length`` positions, real: pinned and
+    scratch together, as ``fit`` must budget for both.
+    """
+    return _pinned(config, length) + _scratch(config, length)
 
 
 def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2, caplog):
@@ -142,6 +161,22 @@ def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2, capl
     assert short_log.levelno == logging.WARNING
     assert "max_seq_len 768, not the native 1024" in short_log.message
     assert "--max-seq-len asks for up to 1024" in short_log.message
+
+
+def test_fit_counts_the_scratch_arena_not_only_pinned_weights_and_caches(npu2):
+    """A budget that fits the native context's pinned weights and caches
+    alone, but not with its scratch arena too (XRT pins scratch banks the
+    same way it pins weights and caches, ``ScratchArena.banks``), must not
+    be accepted as fitting: fit() clamps to the longest whole chunk count
+    whose pinned and scratch together fit, not just its pinned alone.
+    """
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    path = checkpoint(config).path
+    budget = _held(config, 768)
+    assert _pinned(config, 1024) <= budget < _held(config, 1024)
+    fitted = Small.fit(config, path, budget=budget)
+    assert fitted.max_seq_len == 768
+    assert _held(config, fitted.max_seq_len) <= budget
 
 
 def test_a_model_fits_its_context_with_no_device_bound(tmp_path):
