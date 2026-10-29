@@ -133,11 +133,13 @@ def reference(clip, golden, toy):
 
 
 @pytest.mark.parametrize("version", [0, 1, 2], ids=["decode", "prompt", "encode"])
-def test_each_version_resolves(clip, npu2, version):
+@pytest.mark.parametrize("device_name", ["npu1", "npu2"])
+def test_each_version_resolves(clip, request, device_name, version):
     weights, _ = clip
+    device = request.getfixturevalue(device_name)
     model = Whisper(TOY, weights)
     for op in model.record(**model.shapes()[version]).operators:
-        op.resolved(npu2)
+        op.resolved(device)
 
 
 class Encoder:
@@ -201,7 +203,7 @@ def test_the_decoder_attends_over_the_encoded_clip(clip, toy, reference):
     assert_close(logits, want, "a decode step's logits")
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_whisper_toy_on_the_device(clip, toy, reference):
     """The encode version, the prompt's two chunks and two decode steps,
     each within 5% of Hugging Face's largest logit, as the references are.
@@ -265,7 +267,7 @@ def model(request):
 
 @pytest.mark.extensive
 @pytest.mark.bench
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_whisper_accuracy(model, record_property):
     """A LibriSpeech clip, then the transcript's preamble and three decode
     steps: each next-token distribution against transformers', teacher-forced.
