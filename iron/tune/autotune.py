@@ -271,19 +271,6 @@ class Trial:
         )
 
 
-def _json_safe(value: Any) -> bool:
-    """Whether ``value`` is what a profile's JSON can hold: a dim an exact
-    access pattern (Copy's src and dst) or a raw dtype class is not, and
-    neither recurs identically across calls anyway, so an entry does not
-    name it.
-    """
-    try:
-        json.dumps(value)
-    except TypeError:
-        return False
-    return True
-
-
 class Shape:
     """The operators of the calls one profile entry covers: one class at one
     set of dimensions (``Profile.dims``).
@@ -307,15 +294,14 @@ class Shape:
 
     def named(self, covering: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         """The dimensions its entry names: those off their field's default,
-        and every one an entry ``covering`` it names, so it outranks them;
-        never one ``_json_safe`` refuses.
+        and every one an entry ``covering`` it names, so it outranks them.
         """
         defaults = Profile.dims(self.cls, {})
         names = {n for matched in covering for n in matched}
         return {
             k: v
             for k, v in self.dims.items()
-            if (k in names or k not in defaults or v != defaults[k]) and _json_safe(v)
+            if k in names or k not in defaults or v != defaults[k]
         }
 
     def __str__(self) -> str:
@@ -589,7 +575,9 @@ def autotune(
             gains = [t for t in tried if t.gains]
             best = min(gains, key=lambda t: t.delta_us, default=tried[0])
             if gains:
-                log(f"    {best.tunables}: {best.delta_us:+.1f} ± {best.noise_us:.1f} us")
+                log(
+                    f"    {best.tunables}: {best.delta_us:+.1f} ± {best.noise_us:.1f} us"
+                )
             out.add(
                 shape.cls,
                 **shape.named(covering[shape.key]),

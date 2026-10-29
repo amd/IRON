@@ -108,17 +108,19 @@ def test_autotune_resumes_a_profile_s_finished_shapes(npu2, tmp_path):
     assert len(Profile.load(path)) == len(prior)
 
 
-def test_shape_named_excludes_an_access_pattern(npu2):
-    """A dimension an exact access pattern (Copy's src, given its own
-    strided view rather than its contiguous default) is one no future call
-    recurs identically, so it is not named: a profile entry naming it could
-    not be saved as JSON at all (iron.lm.tune whisper hit this for real, on
-    Copy's first found shape, before this).
+def test_two_copies_differing_only_in_access_pattern_do_not_share_a_shape(npu2):
+    """Two Copy calls whose only difference is the view src walks (one
+    contiguous, one strided) are different shapes: a profile entry timed
+    for one's access pattern must not apply to the other's.
     """
-    op = Copy(input_buffer_size=1024, src=TensorAccessPattern.full((2, 512))).resolved(
-        npu2
-    )
-    named = Shape(op).named(())
-    assert "src" not in named
-    assert named == {"input_buffer_size": 1024, "output_buffer_size": 1024}
-    json.dumps(named)
+    plain = Copy(input_buffer_size=1024).resolved(npu2)
+    strided = Copy(
+        input_buffer_size=1024, src=TensorAccessPattern.full((2, 512))
+    ).resolved(npu2)
+    assert Shape(plain).key != Shape(strided).key
+    named = Shape(strided).named(())
+    assert named["src"] == TensorAccessPattern.full((2, 512))
+    # named() keeps the real pattern; Profile.save()'s own encoding, not
+    # this, is what makes an entry naming one writable as JSON.
+    with pytest.raises(TypeError):
+        json.dumps(named)

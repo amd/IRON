@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import In, Out, ScratchpadParameter
 from aie.iron.device import from_name
 from aie.utils import bfp
@@ -27,6 +28,7 @@ from iron.common import Built, Operator, Rtp, Unresolvable, Value, Xclbin
 from iron.common.declare.operand import active_runtime, axis_of
 from iron.common.design import OperatorDesign
 from iron.tests.support.declare import Rows
+from iron.operators.copy import Copy
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.mha import MHA
@@ -390,6 +392,28 @@ def test_a_profile_restores_a_tuple_dim_a_call_still_matches(tmp_path):
     path = tmp_path / "profile.json"
     p.save(path)
     assert Profile.load(path).tunables_for(ProjectionGEMM, dims) == tunables
+
+
+def test_a_profile_round_trips_an_access_pattern_and_matches_only_it(tmp_path):
+    """A dim an exact access pattern (Copy's src), saved and reloaded,
+    still matches the call it was recorded at, and not a different
+    pattern of the same buffer sizes: a profile entry matches on what an
+    operator is constructed with, not merely a round-trippable guess at it.
+    """
+    dims = dict(
+        input_buffer_size=1024,
+        output_buffer_size=1024,
+        src=TensorAccessPattern.full((2, 512)),
+    )
+    tunables = dict(tile_size=512, num_channels=1)
+    p = Profile()
+    p.add(Copy, **dims, **tunables)
+    path = tmp_path / "profile.json"
+    p.save(path)
+    loaded = Profile.load(path)
+    assert loaded.tunables_for(Copy, dims) == tunables
+    other = dict(dims, src=TensorAccessPattern.full((4, 256)))
+    assert loaded.tunables_for(Copy, other) == {}
 
 
 def test_a_profile_is_checked_as_it_is_written_and_as_it_is_read():
