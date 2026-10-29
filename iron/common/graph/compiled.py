@@ -43,6 +43,7 @@ from ..image.link import FullELF, PerStep
 from ..image.sequence import Image
 from ..image.step import BufferRef, Fusion
 from .carried import CARRY, EmitSite, attach_emit, compose
+from .fold import apply_folds, chosen_folds
 from .fusion import fusions as graph_fusions
 from .handle import Carry, Dense, Handle, State, Weight, is_operand
 from .record import HostStep, Recording, Recorder
@@ -549,6 +550,11 @@ class Graph:
             else contextlib.nullcontext()
         ):
             recording = self.record(**shapes)
+            profile = self._profile()
+            if not check and profile is not None:
+                folds = chosen_folds(recording, profile)
+                if folds:
+                    recording = apply_folds(recording, folds)
             chosen = plan(
                 require_device(),
                 recording,
@@ -561,7 +567,6 @@ class Graph:
                 {h.name: (h.shape, h.dtype) for h in recording.inputs}
             )
             emit, sized = self._emit(recording, chosen, feeds)
-            profile = self._profile()
             fused = (
                 graph_fusions(recording, profile)
                 if not check and profile is not None

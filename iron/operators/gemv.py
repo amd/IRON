@@ -8,7 +8,7 @@ import aie.dialects.index as index
 import numpy as np
 from aie.dialects.aie import T
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv
+from aie.iron import Buffer, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import eltwise, linalg
@@ -24,6 +24,12 @@ from aie.utils.compile.jit.params import (
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp
+from iron.common.elementwise import (
+    Elementwise,
+    FinishStep,
+    finish_bound,
+    finish_reference,
+)
 from iron.common.testing import Case, Testing
 
 
@@ -126,6 +132,12 @@ class GEMV(Operator):
     # False (the head-tile layout) unless a fed B, or fusion pricing, asks
     # for B's own stream: that costs a shim input channel, so it is not free.
     feed_b: bool = tunable(default=False, domain=(False, True))
+    # One step folded into these cores, its output C's tile; refused with
+    # feed_b, which already holds both of a core's input channels.
+    finish: tuple[FinishStep, ...] = param(default=(), array=True)
+    # A plain default, not derived: shim_columns() reads it from the class
+    # alone (a Testing case), before any instance exists to derive it from.
+    uses_extra: bool = param(default=False)
 
     A = In(
         num_matrices,
@@ -142,6 +154,15 @@ class GEMV(Operator):
         obj_shape=(tile_size_output,),
         per=(num_aie_columns, num_channels),
         depth=2,
+    )
+    # A finish step's other input, on the channel feed_b would otherwise use.
+    finish0 = In(
+        num_batches,
+        M,
+        obj_shape=(tile_size_output,),
+        per=(num_aie_columns, num_channels),
+        depth=2,
+        when=uses_extra,
     )
     valid = per_call(bounds=M)
     tiles = per_call(
@@ -181,6 +202,19 @@ class GEMV(Operator):
                 f"each core copies B out of its A stream in "
                 f"{self._COPY_ELEMENTS}-element vectors"
             )
+        if self.finish:
+            if len(self.finish) > 1:
+                raise ValueError("GEMV: at most one step folds into its cores")
+            if self.feed_b:
+                raise ValueError(
+                    "GEMV: feed_b already holds both of a core's input "
+                    "channels, leaving none for a finish step's other input"
+                )
+            if self.repeat > 1:
+                raise ValueError(
+                    f"GEMV: repeat ({self.repeat}) computes its batches out of "
+                    f"order, which a finish step's input does not follow"
+                )
 
     def _legal_kernel_vector_size(self) -> int:
         """The vector width the matvec kernel is compiled at: mv.cc's
@@ -266,6 +300,38 @@ class GEMV(Operator):
             if rows % tile:
                 raise ValueError(f"GEMV: {name} ({tile}) must divide M/lanes ({rows})")
 
+    def fold(self, consumer, at: int):
+        if (
+            not isinstance(consumer, Elementwise)
+            or self.finish
+            or self.feed_b
+            or self.repeat > 1
+        ):
+            return None
+        others = [i for i in range(len(consumer.inputs)) if i != at]
+        if len(others) > 1:
+            return None
+        dims = tuple(
+            sorted(
+                (n, vars(consumer)[n])
+                for n, p in type(consumer).declaration.params.items()
+                if p.init
+                and n
+                not in (
+                    "size",
+                    "tile_size",
+                    "num_aie_columns",
+                    "num_channels",
+                    "finish",
+                    "uses_extra",
+                )
+                and vars(consumer)[n] is not None
+            )
+        )
+        binary = bool(others)
+        step = FinishStep(type(consumer), dims, at, binary)
+        return self.replace(finish=(step,), uses_extra=binary)
+
     def build(self) -> Built:
         K, lanes = self.K, self.num_aie_columns * self.num_channels
         tile_size_input, tile_size_output = (
@@ -301,12 +367,60 @@ class GEMV(Operator):
             )
             vectors = [Buffer(vector) for _ in range(lanes)]
 
-            def core_body(A_fifo, C_fifo, b, matvec, copy, rtp):
+            if not self.finish:
+
+                def core_body(A_fifo, C_fifo, b, matvec, copy, rtp):
+                    words = rtp.read()
+                    n = words[self.tiles]
+                    batches = words[self.batches]
+                    for _ in range_(batches):
+                        # The batch's head tile carries B.
+                        head = A_fifo.acquire(1)
+                        copy(head, b, K)
+                        A_fifo.release(1)
+                        for _ in range_(n):
+                            c = C_fifo.acquire(1)
+                            for j_idx in range_(tile_size_output // tile_size_input):
+                                j_i32: Any = index.casts(T.i32(), j_idx)
+                                output_row_offset = j_i32 * tile_size_input
+                                a = A_fifo.acquire(1)
+                                matvec(tile_size_input, output_row_offset, a, b, c)
+                                A_fifo.release(1)
+                            C_fifo.release(1)
+
+                workers = [
+                    Worker(
+                        core_body,
+                        [A_ends[i], C_ends[i], vectors[i], matvec, copy, rtps[i]],
+                    )
+                    for i in range(lanes)
+                ]
+                return Built(workers, rtps)
+
+            # The one step folded into these cores: its kernel runs after the
+            # matvec's, over the tile it just wrote in a scratch buffer,
+            # writing C; its other input, if any, rides finish0 instead of
+            # the channel feed_b would otherwise take.
+            (step,) = self.finish
+            of_finish = self.finish0.fifos() if step.binary else None
+            consumer = step.consumer_at(tile_size_output, self.dev)
+            c_kernel = consumer.layout().kernel()
+            c_positions, c_scalars = consumer.arguments(
+                c_kernel, consumer.scalars(), len(consumer.inputs), 1
+            )
+            c_order = {i: j for j, i in enumerate(c_positions)}
+            n_c_args = len(c_positions) + len(c_scalars)
+            at = step.at
+            scratch_ty = np.ndarray[(tile_size_output,), np.dtype[bfloat16]]
+            scratches = [Buffer(scratch_ty) for _ in range(lanes)]
+
+            def core_body_chain(
+                A_fifo, C_fifo, b, matvec, copy, finish_fifo, chain_fn, scratch, rtp
+            ):
                 words = rtp.read()
                 n = words[self.tiles]
                 batches = words[self.batches]
                 for _ in range_(batches):
-                    # The batch's head tile carries B.
                     head = A_fifo.acquire(1)
                     copy(head, b, K)
                     A_fifo.release(1)
@@ -316,35 +430,42 @@ class GEMV(Operator):
                             j_i32: Any = index.casts(T.i32(), j_idx)
                             output_row_offset = j_i32 * tile_size_input
                             a = A_fifo.acquire(1)
-                            matvec(tile_size_input, output_row_offset, a, b, c)
+                            matvec(tile_size_input, output_row_offset, a, b, scratch)
                             A_fifo.release(1)
+                        extra = (
+                            finish_fifo.acquire(1) if finish_fifo is not None else None
+                        )
+                        c_inputs = [
+                            scratch if i == at else extra
+                            for i in range(len(c_positions) - 1)
+                        ]
+                        c_elements = c_inputs + [c]
+                        chain_fn(
+                            *(
+                                c_elements[c_order[i]] if i in c_order else c_scalars[i]
+                                for i in range(n_c_args)
+                            )
+                        )
+                        if extra is not None:
+                            finish_fifo.release(1)
                         C_fifo.release(1)
 
             workers = [
                 Worker(
-                    core_body,
-                    [A_ends[i], C_ends[i], vectors[i], matvec, copy, rtps[i]],
+                    core_body_chain,
+                    [A_ends[i], C_ends[i], vectors[i], matvec, copy]
+                    + ([of_finish[i]] if of_finish is not None else [])
+                    + [c_kernel, scratches[i], rtps[i]],
                 )
                 for i in range(lanes)
             ]
             return Built(workers, rtps)
 
-        if self.B.fed_from is not None:
-            B_ends = self.B.fifos()
-            if len(B_ends) != lanes:
-                raise ValueError(
-                    f"GEMV: B is fed {len(B_ends)} lane(s), but every one of "
-                    f"this GEMV's {lanes} cores reads the whole vector; "
-                    f"broadcasting a fed B to more lanes than its source has "
-                    f"is not yet supported"
-                )
-        else:
-            # One fifo, a fresh cons() per core: every lane reads the same
-            # vector, not a share of it. Depth 1, as the local buffer it
-            # replaces held: resolve()'s memory budget counts one copy.
-            b_fifo = ObjectFifo(self.B.obj_type, depth=1)
-            self.B.bind([b_fifo.prod()])
-            B_ends = [b_fifo.cons() for _ in range(lanes)]
+        # One fifo, a fresh cons() per core: every lane reads the same
+        # vector, not a share of it. Depth 1, as the local buffer it
+        # replaces held: resolve()'s memory budget counts one copy. Fed,
+        # this gives every core its own reader end of the source's fifo.
+        (B_ends,) = self.B.fifos(1, readers=lanes)
 
         def core_body(A_fifo, B_fifo, C_fifo, matvec, rtp):
             words = rtp.read()
@@ -393,6 +514,12 @@ class GEMV(Operator):
             )
             for k, tap, word, unit in self.C.transfers()
         ]
+        if self.finish and self.finish[0].binary:
+            # finish0's shape matches C's, so the same per-lane walk fills it.
+            for k, tap, word, unit in self.finish0.transfers():
+                self.finish0.fill(
+                    tap, lane=k, length_parameter=word, length_unit=unit, managed=False
+                )
         rows = self.A.transfers()
         if (self.num_matrices or 1) > 1 and self.A.bounded is None:
             parts = TensorAccessPattern.full((M, K)).partition(len(rows), 0)
@@ -454,10 +581,26 @@ class GEMV(Operator):
                 task.await_()
 
     def ops(self) -> int:
-        return 2 * self.M * self.K * (self.num_batches or 1)
+        total = 2 * self.M * self.K * (self.num_batches or 1)
+        for step in self.finish:
+            consumer = step.consumer_at(self.tile_size_output, self.dev)
+            total += (
+                consumer.ops()
+                * self.M
+                * (self.num_batches or 1)
+                // self.tile_size_output
+            )
+        return total
 
-    def reference(self, A, B):
-        """``C = A @ B``, one product per batch."""
+    def reference(self, A, B, finish0=None):
+        """``C = A @ B``, one product per batch, then its finish step's."""
+        c = self._matvec_reference(A, B)
+        if not self.finish:
+            return c
+        extra = () if finish0 is None else (finish0,)
+        return finish_reference(self.finish, c, extra, self.dev, self.tile_size_output)
+
+    def _matvec_reference(self, A, B):
         if self.repeat > 1:
             A = np.repeat(A.reshape(-1, *A.shape[-2:]), self.repeat, axis=0)
         # float32: numpy's bf16 matmul accumulates in bf16, the kernel in f32.
@@ -468,5 +611,21 @@ class GEMV(Operator):
         return (a @ b.reshape(A.shape[-1])).astype(A.dtype)
 
     def tolerance(self) -> Tolerance:
-        """C accumulates in f32 and rounds once; tighter than linalg.mv's contract."""
-        return Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")
+        """C accumulates in f32 and rounds once; tighter than linalg.mv's
+        contract, then each finish step's own.
+        """
+        own = Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")
+        if not self.finish:
+            return own
+        return Tolerance.bounded(
+            finish_bound(
+                self.finish,
+                own,
+                self._matvec_reference,
+                2,
+                bfloat16,
+                self.dev,
+                self.tile_size_output,
+            ),
+            note="f32 accumulation rounded once, then each finish step's contract",
+        )

@@ -163,6 +163,15 @@ class Operator(jit.Operator, library=True):
         """
         raise NotImplementedError(f"{type(self).__name__}.build() is not implemented")
 
+    def fold(self, consumer: Self, at: int) -> Self | None:
+        """This operator with ``consumer`` finishing its output tile in its
+        own cores: ``consumer``'s kernel runs there before the tile leaves
+        L1, input ``at`` the tile and its others new streams of this
+        operator's. None where this operator does not finish others, or
+        not this one.
+        """
+        return None
+
     def tolerance(self) -> Tolerance | None:
         """What each output of the resolved operator is judged by; None where
         nothing bounds it, which check mode refuses.

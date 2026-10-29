@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Iterable, Mapping
-from typing import ClassVar, Self
+from typing import Any, ClassVar, Self
 
 import numpy as np
-from aie.iron import In, ObjectFifo, Out, Worker, ceildiv
+from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
@@ -144,6 +144,55 @@ class KernelCall:
     operands: tuple[Operand | None, ...] = ()
 
 
+@dataclasses.dataclass(frozen=True)
+class FinishStep:
+    """A step folded into its producer's cores: ``consumer`` runs on the
+    producer's output tile, held at its input ``at``; ``dims`` are its
+    other constructor keywords (its shape and grid always match the tile).
+    ``binary`` is whether an input besides the tile streams in beside it,
+    the one a producer's free input channel may carry.
+    """
+
+    consumer: type[Elementwise]
+    dims: tuple[tuple[str, Any], ...]
+    at: int
+    binary: bool
+
+    def consumer_at(self, line: int, dev, elements: int | None = None) -> Elementwise:
+        """``consumer`` whose cores run a ``line``-element tile, the
+        producer's own (so its kernel matches), resolved for ``dev``: sized
+        to run on ``elements`` total, or one tile alone where None (a
+        build's own kernel, which never reads more than one).
+        """
+        op = self.consumer(
+            size=line if elements is None else elements,
+            num_aie_columns=1,
+            num_channels=1,
+            tile_size=line,
+            **dict(self.dims),
+        )
+        return op.resolved(dev)
+
+
+def finish_reference(
+    finish: tuple[FinishStep, ...], y: np.ndarray, extra: tuple, dev, line: int
+) -> np.ndarray:
+    """``y``, a producer's own output, through its finish chain on the host:
+    each step's reference over the tile, taking the next of ``extra`` where
+    it reads another input, as ``Finish.apply`` runs on the device. ``line``
+    is the producer's own tile, which its finish's kernel matches.
+    """
+    given = iter(extra)
+    tile = np.ravel(y)
+    for step in finish:
+        consumer = step.consumer_at(line, dev, elements=tile.size)
+        args = [
+            tile if i == step.at else next(given) for i in range(len(consumer.inputs))
+        ]
+        tile = np.ravel(np.asarray(consumer.reference(*args)))
+    return tile.reshape(y.shape).astype(y.dtype, copy=False)
+
+
 class Elementwise(Operator):
     """The array for an elementwise kernel over lines of ``tile_size`` elements.
     Subclasses declare operands with the line as their tile, most split over every
@@ -162,8 +211,52 @@ class Elementwise(Operator):
         derive=lambda op: ceildiv(op.valid_elements, op.cores * op.tile_size),
     )
 
+    # One step folded into this one's cores, its output their tile. A tuple
+    # of at most one: deeper chains need a second free input channel, or a
+    # ping-ponged scratch tile past the one this core already holds, neither
+    # built yet.
+    finish: tuple[FinishStep, ...] = param(default=(), array=True)
+    # A plain default, not derived: shim_columns() reads it from the class
+    # alone (a Sweep's cases), before any instance exists to derive it from.
+    uses_extra: bool = param(default=False)
+
     default_tile: ClassVar[int] = DEFAULT_TILE
     tile_cap: ClassVar[int] = 4096
+
+    def validate(self) -> None:
+        if len(self.finish) > 1:
+            raise ValueError(
+                f"{type(self).__name__}: at most one step folds into its cores"
+            )
+
+    def fold(self, consumer: Operator, at: int) -> Self | None:
+        if not isinstance(consumer, Elementwise) or self.finish:
+            return None
+        others = [i for i in range(len(consumer.inputs)) if i != at]
+        if len(others) > 1:
+            return None
+        binary = bool(others)
+        if binary and len(self.inputs) + 1 > self.dev.core_dma_channels_in:
+            return None
+        dims = tuple(
+            sorted(
+                (n, vars(consumer)[n])
+                for n, p in type(consumer).declaration.params.items()
+                if p.init
+                and n
+                not in (
+                    "size",
+                    "tile_size",
+                    "num_aie_columns",
+                    "num_channels",
+                    "finish",
+                    "uses_extra",
+                )
+                and vars(consumer)[n] is not None
+            )
+        )
+        step = FinishStep(type(consumer), dims, at, binary)
+        return self.replace(finish=self.finish + (step,), uses_extra=binary)
 
     def resolve(self, dev) -> Self:
         (out,) = self.outputs
@@ -220,10 +313,24 @@ class Elementwise(Operator):
 
     def chain(self) -> tuple[KernelCall, ...]:
         """The kernel calls a core makes over one line, in order, which ``reference``
-        and ``judge`` follow; more than ``kernel()`` only with an array of its own.
+        and ``judge`` follow; more than ``kernel()`` with an array of its own, or a
+        step folded into this one's cores.
         """
         config = self.layout()
-        return (KernelCall(config.kernel(), config.scalars(), tuple(self.inputs)),)
+        own = tuple(b for b in self.inputs if b.name != "finish0")
+        calls = [KernelCall(config.kernel(), config.scalars(), own)]
+        for step in self.finish:
+            consumer = step.consumer_at(self.tile_size, self.dev)
+            operands = tuple(
+                None if i == step.at else self.finish0
+                for i in range(len(consumer.inputs))
+            )
+            calls.append(
+                KernelCall(
+                    consumer.layout().kernel(), consumer.layout().scalars(), operands
+                )
+            )
+        return tuple(calls)
 
     def over(self, elements: int, line: int) -> Self:
         """This operator over ``elements`` elements in lines of ``line``, on one core.
@@ -235,14 +342,35 @@ class Elementwise(Operator):
 
     def tolerance(self) -> Tolerance | None:
         kernel = self.layout().kernel()
-        if kernel.contract is None:
-            return None
-        return kernel.contract_for(resolve_target_arch(self.dev)).tolerance
+        own = (
+            None
+            if kernel.contract is None
+            else kernel.contract_for(resolve_target_arch(self.dev)).tolerance
+        )
+        if not self.finish:
+            return own
+        n_own = len(self.inputs) - (1 if self.uses_extra else 0)
+        (out,) = self.outputs
+        return Tolerance.bounded(
+            finish_bound(
+                self.finish,
+                own,
+                lambda *a: self._own_reference(a),
+                n_own,
+                out.host_dtype,
+                self.dev,
+                self.tile_size,
+            ),
+            note="its own kernel's contract, then each finish step's, in turn",
+        )
 
     def ops(self) -> int:
         contract = self.layout().kernel().contract
         per_call = None if contract is None else contract.ops_per_call
-        return super().ops() if per_call is None else per_call * self.lines
+        total = super().ops() if per_call is None else per_call * self.lines
+        for step in self.finish:
+            total += step.consumer_at(self.tile_size, self.dev).ops() * self.lines
+        return total
 
     def reference(self, *inputs):
         """The kernel contract's reference, line by line: what the cores compute. A
@@ -265,7 +393,20 @@ class Elementwise(Operator):
             ]
             y = np.asarray(self.over(whole, line).reference(*padded))
             return y.reshape(-1)[: out.elements].reshape(out.host_shape)
-        op, lines, scalars = self._kernel_arguments(inputs)
+        n_own = len(self.inputs) - (1 if self.uses_extra else 0)
+        own, extra = inputs[:n_own], inputs[n_own:]
+        y = self._own_reference(own)
+        return (
+            finish_reference(self.finish, y, extra, self.dev, line)
+            if self.finish
+            else y
+        )
+
+    def _own_reference(self, own: tuple) -> np.ndarray:
+        """This operator's own kernel's reference, line by line, its finish
+        chain left out.
+        """
+        op, lines, scalars = self._kernel_arguments(own)
         (out,) = op.outputs
         y = (
             op.layout()
@@ -395,7 +536,8 @@ class Elementwise(Operator):
 
     def build(self) -> Built:
         streams = [b for b in self.buffers if b.streamed]
-        ins = [b for b in streams if b.role is In]
+        finish_in = next((b for b in streams if b.name == "finish0"), None)
+        ins = [b for b in streams if b.role is In and b is not finish_in]
         outs = [b for b in streams if b.drains]
         n_in = len(ins)
         cores = self.cores
@@ -449,15 +591,97 @@ class Elementwise(Operator):
             for j in kept:
                 fifos[j].release(segments)
 
+        if not self.finish:
+            workers = [
+                Worker(
+                    core_fn,
+                    [
+                        (
+                            of[k % len(of)][k // len(of)]
+                            if s.replicate
+                            else of[k % len(of)]
+                        )
+                        for s, of in zip(ins, of_ins)
+                    ]
+                    + [of[k] for of in of_outs]
+                    + [kernel, rtps[k]],
+                )
+                for k in range(cores)
+            ]
+            return Built(workers, rtps)
+
+        # The one step folded into these cores: its kernel runs after this
+        # one's, over the tile this core just wrote in a scratch buffer,
+        # writing the real output; its other input, if any, rides finish_in's
+        # stream, acquired alongside the tile.
+        (step,) = self.finish
+        of_finish = finish_in.fifos() if finish_in is not None else None
+        consumer = step.consumer_at(self.tile_size, self.dev)
+        c_kernel = consumer.layout().kernel()
+        c_positions, c_scalars = consumer.arguments(
+            c_kernel, consumer.scalars(), len(consumer.inputs), 1
+        )
+        c_order = {i: j for j, i in enumerate(c_positions)}
+        n_c_args = len(c_positions) + len(c_scalars)
+        at = step.at
+        scratches = [Buffer(self.outputs[0].obj_type) for _ in range(cores)]
+
+        def core_fn_chain(*args):
+            fifos = args[:n_fifos]
+            tail = args[n_fifos:]
+            finish_fifo = tail[0] if of_finish is not None else None
+            tail = tail[1:] if of_finish is not None else tail
+            kernel_fn, chain_fn, scratch, rtp = tail
+            n = rtp.read()[self.count]
+            kept = {j: f.acquire(segments) for j, f in enumerate(fifos) if held[j]}
+            for _ in range_(n):
+                for s in range(segments):
+                    elements = [
+                        (
+                            (kept[j] if segments == 1 else kept[j][s])
+                            if held[j]
+                            else f.acquire(1)
+                        )
+                        for j, f in enumerate(fifos)
+                    ]
+                    targets = list(elements)
+                    targets[n_in] = scratch
+                    kernel_fn(
+                        *(
+                            targets[order[i]] if i in order else scalars[i]
+                            for i in range(n_args)
+                        )
+                    )
+                    extra = finish_fifo.acquire(1) if finish_fifo is not None else None
+                    c_inputs = [
+                        scratch if i == at else extra
+                        for i in range(len(c_positions) - 1)
+                    ]
+                    c_elements = c_inputs + [elements[n_in]]
+                    chain_fn(
+                        *(
+                            c_elements[c_order[i]] if i in c_order else c_scalars[i]
+                            for i in range(n_c_args)
+                        )
+                    )
+                    if extra is not None:
+                        finish_fifo.release(1)
+                    for j, f in enumerate(fifos):
+                        if not held[j]:
+                            f.release(1)
+            for j in kept:
+                fifos[j].release(segments)
+
         workers = [
             Worker(
-                core_fn,
+                core_fn_chain,
                 [
                     (of[k % len(of)][k // len(of)] if s.replicate else of[k % len(of)])
                     for s, of in zip(ins, of_ins)
                 ]
                 + [of[k] for of in of_outs]
-                + [kernel, rtps[k]],
+                + ([of_finish[k]] if of_finish is not None else [])
+                + [kernel, c_kernel, scratches[k], rtps[k]],
             )
             for k in range(cores)
         ]
@@ -484,6 +708,13 @@ class UnaryElementwise(Elementwise):
         like=x,
         obj_shape=(Elementwise.tile_size,),
         per=CORES,
+    )
+    # A finish step's other input, on x's one free input channel.
+    finish0 = In(
+        size,
+        obj_shape=(Elementwise.tile_size,),
+        per=CORES,
+        when=Elementwise.uses_extra,
     )
 
     @property
@@ -588,6 +819,60 @@ def _admitted(tolerance: Tolerance, ref: np.ndarray) -> np.ndarray:
         rtol = tolerance.rtol or 0.0
         return np.maximum(tolerance.atol or 0.0, 2 * rtol * ref / (1 - rtol))
     raise ValueError(f"no absolute bound for a {tolerance.kind} tolerance")
+
+
+def finish_bound(
+    finish: tuple[FinishStep, ...],
+    own: Tolerance | None,
+    own_reference,
+    n_own: int,
+    dtype,
+    dev,
+    line: int,
+) -> Any:
+    """A bound function (``Tolerance.bounded``) over ``n_own`` own inputs
+    then each finish step's other input in turn: ``own``'s tolerance around
+    ``own_reference``'s exact result, then each step's own, propagated as
+    ``WeightedRowwise.tolerance`` composes one weight multiply, generalized
+    to any number of elementwise steps. ``line`` is the producer's own tile,
+    which its finish's kernel matches.
+    """
+    tiny = float(np.finfo(np.float32).tiny)
+
+    def bound(*inputs):
+        own_inputs, extra = list(inputs[:n_own]), list(inputs[n_own:])
+        x = np.asarray(own_reference(*own_inputs), np.float64)
+        if own is None:
+            lo = hi = x
+        else:
+            delta = _admitted(own, x)
+            lo, hi = x - delta, x + delta
+        pos = 0
+        for step in finish:
+            consumer = step.consumer_at(line, dev, elements=x.size)
+            gate = consumer.tolerance() or Tolerance.default_for(dtype)
+            k = len(consumer.inputs) - 1
+            others = extra[pos : pos + k]
+            pos += k
+
+            def apply(v, others=others):
+                args = [
+                    v if i == step.at else others[i - (i > step.at)]
+                    for i in range(len(consumer.inputs))
+                ]
+                return np.asarray(consumer.reference(*args), np.float64)
+
+            exact, lo_y, hi_y = apply(x), apply(lo), apply(hi)
+            lo, hi = np.minimum(lo_y, hi_y), np.maximum(lo_y, hi_y)
+            half = sum(
+                np.exp2(np.floor(np.log2(np.maximum(np.abs(v), tiny))) - 8)
+                for v in (exact, hi)
+            )
+            spread = _admitted(gate, exact)
+            x, lo, hi = exact, lo - spread - half, hi + spread + half
+        return np.maximum(hi - x, x - lo).reshape(x.shape)
+
+    return bound
 
 
 class WeightedRowwise(Rowwise):
