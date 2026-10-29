@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Gemma 3 1B on the shared decoder (``iron.lm``), its shape read from its
+checkpoint's ``config.json``. Run it with ``python -m
+iron.applications.gemma3.model``.
+
+Gemma 3 is a sandwich-normed layer (``SandwichLayer``) with q and k normed
+per head, GELU-tanh, attention scaled by ``query_pre_attn_scalar ** -0.5``,
+every norm scaling by ``1 + weight`` (``RMSNorm.plus_one``), the embedding
+scaled by ``sqrt(hidden_size)`` and the output head tied to it. Its
+sliding layers attend to their own query and the ``sliding_window - 1``
+keys before it, and turn q and k by a RoPE table of their own base
+(``rope_local_base_freq``).
+"""
+
+import dataclasses
+
+import numpy as np
+from ml_dtypes import bfloat16
+
+from iron import Precision, lm
+from iron.lm import (
+    Attention,
+    CausalLM,
+    DecoderConfig,
+    KVCache,
+    RMSNorm,
+    Rope,
+    SandwichLayer,
+)
+from iron.lm.config import unscaled
+
+
+@dataclasses.dataclass(frozen=True)
+class Gemma3Config(DecoderConfig):
+    """``DecoderConfig``, the attention scale, the sliding layers' RoPE
+    base and which layers slide.
+    """
+
+    precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
+    hidden_act: str = dataclasses.field(
+        default="gelu_pytorch_tanh", metadata={"json": "hidden_activation"}
+    )
+    query_pre_attn_scalar: float = 256
+    rope_local_base_freq: float = 10000.0
+    # Hugging Face's default: five sliding layers, then a global one.
+    layer_types: tuple[str, ...] | None = dataclasses.field(
+        default=None, kw_only=True, metadata={"convert": tuple}
+    )
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.layer_types is None:
+            kinds = ("sliding_attention",) * 5 + ("full_attention",)
+            types = tuple(kinds[i % 6] for i in range(self.num_hidden_layers))
+            object.__setattr__(self, "layer_types", types)
+
+    @classmethod
+    def from_json(cls, data: dict, source="config.json") -> "Gemma3Config":
+        """``DecoderConfig.from_json``, the RoPE bases from a transformers 5
+        ``rope_parameters`` where it has one.
+
+        Raises:
+            ValueError: ``data`` asks for what is not built: a logit
+                soft-cap, bidirectional attention or a scaled RoPE.
+        """
+        for key in (
+            "final_logit_softcapping",
+            "attn_logit_softcapping",
+            "use_bidirectional_attention",
+        ):
+            if data.get(key):
+                raise ValueError(f"{source}: {key} {data[key]!r} is not built here")
+        data = dict(data)
+        if data.get("rope_parameters"):
+            rope = data.pop("rope_parameters")
+            for kind in rope.values():
+                unscaled(kind)
+            data["rope_theta"] = rope["full_attention"]["rope_theta"]
+            data["rope_local_base_freq"] = rope["sliding_attention"]["rope_theta"]
+        return super().from_json(data, source)
+
+
+class Gemma3Layer(SandwichLayer):
+    """Gemma 3's layer: q and k normed per head, scaled by
+    ``query_pre_attn_scalar ** -0.5``, over all positions or a sliding
+    layer's window.
+    """
+
+    def __init__(self, c: Gemma3Config, i: int):
+        sliding = c.layer_types[i] == "sliding_attention"
+        cache = KVCache(c, c.window if sliding else None)
+        super().__init__(c, i, Attention(c, i, norms="qk"), cache=cache)
+        self.self_attn.scaling = c.query_pre_attn_scalar**-0.5
+
+
+class Gemma3(CausalLM):
+    """Gemma 3 on ``config``'s shape and a checkpoint's ``weights``, from
+    its checkpoint and ``tokenizer.json``.
+    """
+
+    config = Gemma3Config
+    layer_class = Gemma3Layer
+
+    def __init__(self, config: Gemma3Config, weights):
+        super().__init__(config, weights)
+        local = Rope(
+            dataclasses.replace(config, rope_theta=config.rope_local_base_freq)
+        )
+        for layer, kind in zip(self.layers, config.layer_types):
+            if kind == "sliding_attention":
+                layer.rope = local
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        RMSNorm.plus_one(self)
+
+    def lookup(self, ids):
+        # The embedding times sqrt(hidden_size) in the weights' dtype.
+        return super().lookup(ids) * float(bfloat16(np.sqrt(self.config.hidden_size)))
+
+
+if __name__ == "__main__":
+    lm.main(Gemma3)
