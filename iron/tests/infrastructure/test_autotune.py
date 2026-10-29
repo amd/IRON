@@ -5,6 +5,7 @@
 line, and a tuned profile a graph then runs bit-identically with.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -12,11 +13,13 @@ import sys
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 from iron.common.declare import Profile
+from iron.operators.copy import Copy
 from iron.tests.support.graphs import Chain
-from iron.tune.autotune import Timed, autotune, shapes
+from iron.tune.autotune import Shape, Timed, autotune, shapes
 from iron.tune.measure import Cache, Timing, platform
 
 SIZE = 8192
@@ -103,3 +106,19 @@ def test_autotune_resumes_a_profile_s_finished_shapes(npu2, tmp_path):
     assert not any(line.startswith("[") for line in logged)
     # Saved after each shape resumed, same as one actually timed.
     assert len(Profile.load(path)) == len(prior)
+
+
+def test_shape_named_excludes_an_access_pattern(npu2):
+    """A dimension an exact access pattern (Copy's src, given its own
+    strided view rather than its contiguous default) is one no future call
+    recurs identically, so it is not named: a profile entry naming it could
+    not be saved as JSON at all (iron.lm.tune whisper hit this for real, on
+    Copy's first found shape, before this).
+    """
+    op = Copy(input_buffer_size=1024, src=TensorAccessPattern.full((2, 512))).resolved(
+        npu2
+    )
+    named = Shape(op).named(())
+    assert "src" not in named
+    assert named == {"input_buffer_size": 1024, "output_buffer_size": 1024}
+    json.dumps(named)

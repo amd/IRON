@@ -271,6 +271,19 @@ class Trial:
         )
 
 
+def _json_safe(value: Any) -> bool:
+    """Whether ``value`` is what a profile's JSON can hold: a dim an exact
+    access pattern (Copy's src and dst) or a raw dtype class is not, and
+    neither recurs identically across calls anyway, so an entry does not
+    name it.
+    """
+    try:
+        json.dumps(value)
+    except TypeError:
+        return False
+    return True
+
+
 class Shape:
     """The operators of the calls one profile entry covers: one class at one
     set of dimensions (``Profile.dims``).
@@ -294,14 +307,15 @@ class Shape:
 
     def named(self, covering: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         """The dimensions its entry names: those off their field's default,
-        and every one an entry ``covering`` it names, so it outranks them.
+        and every one an entry ``covering`` it names, so it outranks them;
+        never one ``_json_safe`` refuses.
         """
         defaults = Profile.dims(self.cls, {})
         names = {n for matched in covering for n in matched}
         return {
             k: v
             for k, v in self.dims.items()
-            if k in names or k not in defaults or v != defaults[k]
+            if (k in names or k not in defaults or v != defaults[k]) and _json_safe(v)
         }
 
     def __str__(self) -> str:
