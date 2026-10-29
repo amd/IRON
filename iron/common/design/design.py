@@ -294,12 +294,11 @@ def configuration(
     steps: Sequence[str] = (),
     fuse: bool = False,
 ) -> DeviceConfiguration:
-    """``arrays`` as one device configuration ``name``: one array per identity (an
-    array with an on-chip operand always its own), and each entry's sequence over
-    it, ``sequence`` if it is alone, else named for its key. Given ``steps`` (keys
-    of ``arrays``), one ``sequence`` runs theirs in order, back to back
-    (``MergedRuntime.merge``), or, ``fuse``, in one task group
-    (``MergedRuntime.fuse``) for steps whose streams meet on-chip.
+    """``arrays`` as one device configuration ``name``: one array per identity, and
+    each entry's sequence over it, ``sequence`` if it is alone, else named for its
+    key. Given ``steps`` (keys of ``arrays``), one ``sequence`` runs theirs in
+    order, back to back (``MergedRuntime.merge``), or, ``fuse``, in one task group
+    (``MergedRuntime.fuse``), each step on an array of its own.
 
     Raises:
         ValueError: The arrays are built for different devices, traced with
@@ -307,11 +306,14 @@ def configuration(
     """
     if fuse and not steps:
         raise ValueError("fuse needs steps to fuse")
-    of = identities(arrays)
-    # An array fed on-chip, or feeding, is its own: its lanes are an edge's.
-    for key, array in arrays.items():
-        if any(b.on_chip for b in array.op.buffers):
-            of[key] = id(array)
+    # Fused steps issue at once, so each keeps its own array: on one, a later
+    # step's preamble rewrites the words and re-sets the barrier the core has
+    # not yet read for an earlier one, losing a pass (the core then stalls).
+    of = (
+        {key: id(array) for key, array in arrays.items()}
+        if fuse
+        else identities(arrays)
+    )
     owners: dict[Hashable, BuiltArray] = {}
     for key, array in arrays.items():
         owners.setdefault(of[key], array)

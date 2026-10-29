@@ -7,9 +7,12 @@ back to back with no edge). No toolchain and no NPU below ``# On the
 device``'s line, as ``test_fusion.py``'s own.
 """
 
+import multiprocessing
+import re
 import statistics
 from pathlib import Path
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie import ir
@@ -37,10 +40,11 @@ LLAMA_NPU2_PROFILE = Profile.load(
 )
 
 
-def _qkv(num_aie_columns=(8, 8, 8)):
+def _qkv(num_aie_columns=(8, 4, 4)):
     """Llama decode's q/k/v GEMVs (M=2048/512/512, K=2048) over one normed
     row: independent, each only reading the row and writing its own output.
-    The profile's own tunables (each the whole chip wide) co-fit packed.
+    Packed, each runs its own array, so k and v are narrowed to four columns:
+    the three at the chip's width take 24 shim channels of npu2's 16.
     """
     qc, kc, vc = num_aie_columns
     q = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048, num_aie_columns=qc)
@@ -129,7 +133,7 @@ def test_pack_refuses_when_columns_cannot_co_reside():
     """q/k/v plus a fourth, independent full-width GEMV (gate_proj) cannot
     share one device: too many shim DMA channels between four designs each
     the whole chip wide. Fit is decided by placing, not refused up front;
-    q/k/v alone (``_qkv``'s default) co-fit at the profile's own tunables.
+    q/k/v alone co-fit at ``_qkv``'s default widths.
     """
     q, k, v = _qkv()
     gate = LLAMA_NPU2_PROFILE.make(GEMV, M=8192, K=2048, num_aie_columns=8)
@@ -175,10 +179,44 @@ def test_pack_of_independent_gemvs_is_one_device_configuration():
 
     # k and v share one shape (M=512, K=2048), so unfused they share one
     # design and its array (two aie.devices: that design's and q's); packed,
-    # each gets its own build (one aie.device, all three): one dropped.
+    # each gets its own array (one aie.device, all three): one dropped.
     assert (
         unfused_text.count("aie.device(") - fused_text.count("aie.device(") == 1
     ), "a pack sharing no design with its unfused baseline should drop one aie.device"
+
+
+def _adds():
+    """Three ElementwiseAdds of one design, one column each."""
+    return [
+        ElementwiseAdd(size=2048, num_aie_columns=1, tile_size=1024) for _ in range(3)
+    ]
+
+
+def _adds_recording(name, adds):
+    steps = sequences.steps(
+        *((add, f"a{i}", f"b{i}", f"y{i}") for i, add in enumerate(adds))
+    )
+    inputs = [f"{side}{i}" for i in range(3) for side in "ab"]
+    return Recording.of_steps(name, steps, inputs, [f"y{i}" for i in range(3)])
+
+
+def test_packed_steps_of_one_design_each_run_their_own_array():
+    """Packed steps issue in one task group: on one array, the second's and
+    third's preambles would rewrite the words and re-set the barrier its core
+    had not yet read for the first, so one pass never ran. Each step keeps
+    an array of its own, its barrier set once.
+    """
+    image = Image(
+        _adds_recording("pack_same_design", _adds()),
+        FullELF(),
+        fusions=(Fusion(FusionKind.PACK, (0, 1, 2)),),
+    )
+    image._prepare()
+    text = Composition(image).text()
+    assert text.count("aie.core(") == 3
+    sequence = text[text.index("aie.runtime_sequence") :]
+    locks = re.findall(r"aiex\.set_lock\((%[^,]+),", sequence[: sequence.index("}")])
+    assert len(locks) == 3 and len(set(locks)) == 3, locks
 
 
 def test_merge_of_a_short_decode_run_is_one_device_configuration():
@@ -405,3 +443,62 @@ def test_merge_of_a_short_decode_run_matches_reference_and_unfused(record_proper
     record_property("Merged median us", statistics.median(merged_stats.samples_us))
     record_property("Unfused min us", min(unfused_stats.samples_us))
     record_property("Unfused median us", statistics.median(unfused_stats.samples_us))
+
+
+def _run_adds(results) -> None:
+    """The three adds packed and apart, in a child process: their outputs, or
+    the error, on ``results``."""
+    try:
+        aie_utils.ensure_current_device()
+        outs = []
+        for fusions in ((Fusion(FusionKind.PACK, (0, 1, 2)),), ()):
+            adds = _adds()
+            image = Image(
+                _adds_recording("pack_adds", adds), FullELF(), fusions=fusions
+            )
+            image.compile()
+            run = image.get_callable()
+            for i, add in enumerate(adds):
+                drawn = vectors(add, seed=10 + i).inputs
+                for side in "ab":
+                    run.get_buffer(BufferRef(f"{side}{i}")).numpy_view()[:] = drawn[
+                        side
+                    ]
+            run()
+            outs.append(
+                [
+                    run.get_buffer(BufferRef(f"y{i}")).numpy()[:2048].copy()
+                    for i in range(3)
+                ]
+            )
+        results.put(outs)
+    except Exception as e:  # the parent reports it
+        results.put(repr(e))
+
+
+# Two compiles and two dispatches; a hang fails the test instead of wedging the run.
+_ADDS_TIMEOUT_S = 600
+
+
+@pytest.mark.supported_devices("npu2")
+def test_pack_of_three_steps_of_one_design_matches_reference_and_unfused():
+    """Three adds of one design packed (on one shared array this lost a pass
+    and hung) hold to numpy and are bit-equal apart, in a child process a hang
+    cannot outlive."""
+    context = multiprocessing.get_context("spawn")
+    results = context.Queue()
+    child = context.Process(target=_run_adds, args=(results,))
+    child.start()
+    child.join(_ADDS_TIMEOUT_S)
+    if child.is_alive():
+        child.kill()
+        pytest.fail(f"the pack did not finish in {_ADDS_TIMEOUT_S} s: a hang")
+    got = results.get(timeout=10)
+    assert not isinstance(got, str), got
+    packed, apart = got
+    for i, add in enumerate(_adds()):
+        drawn = vectors(add, seed=10 + i).inputs
+        ref = np.asarray(add.reference(drawn["a"], drawn["b"])).reshape(-1)
+        verdict = compare(packed[i], ref, add.resolved().tolerance())
+        assert verdict, f"y{i}: {verdict.detail}"
+        assert np.array_equal(packed[i].view(np.uint16), apart[i].view(np.uint16))
