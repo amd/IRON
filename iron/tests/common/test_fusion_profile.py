@@ -218,14 +218,21 @@ def test_candidates_finds_silu_mul_and_decodes_gemv_add_residuals(llama_recordin
     assert ("Copy", "RMSNorm") in kinds
 
 
-def test_mismatched_tile_sizes_refuse_the_edge():
+def test_mismatched_tile_sizes_stage_the_edge():
+    """A stream edge refuses SiLU's 1024-element tiles into ElementwiseMul's
+    512; a staged one forwards them through a memtile.
+    """
+
     class Mismatched(iron.Graph):
         def body(self, x):
             gate = SiLU.step(x, tile_size=1024, num_aie_columns=1)
             return ElementwiseMul.step(gate, W, tile_size=512, num_aie_columns=1)
 
     recording = Mismatched().record(x=(2048,))
-    assert candidates(recording) == ()
+    assert candidates(recording, (FusionKind.STREAM,)) == ()
+    assert candidates(recording) == (
+        Fusion(FusionKind.STAGED, (0, 1), (Edge(0, "y", 1, "a"),)),
+    )
 
 
 def test_matching_tile_sizes_admit_the_edge():

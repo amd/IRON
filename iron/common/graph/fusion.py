@@ -14,44 +14,65 @@ from ..image.compose import fits
 from ..image.step import Edge, Fusion, FusionKind
 from .record import Recording
 
-# Whether a producer's output can feed a consumer's input, by the pair's
+# How a producer's output can feed a consumer's input, by the pair's
 # OperatorDesign identities and buffer names: layers of one shape, repeated
 # down a model, build once.
-_built: dict[tuple[str, str, str, str], bool] = {}
+_built: dict[tuple[str, str, str, str], FusionKind | None] = {}
 
 
-def _admits(producer: Operator, output: str, consumer: Operator, input_: str) -> bool:
-    """Whether ``producer``'s resolved ``output`` can feed ``consumer``'s resolved
-    ``input_`` on-chip: ``Operand.feed``'s checks pass and the pair's
-    ``BuiltArray``s actually build.
+def _admits(
+    producer: Operator, output: str, consumer: Operator, input_: str
+) -> FusionKind | None:
+    """How ``producer``'s resolved ``output`` can feed ``consumer``'s resolved
+    ``input_`` on-chip: ``STREAM`` where the pair's ``BuiltArray``s build fed
+    directly (``Operand.feed``'s checks pass), else ``STAGED`` where they build
+    staged through memtiles and the pair places so (``fits``); None where
+    neither does.
     """
     try:
         producer_design = OperatorDesign(producer)
         consumer_design = OperatorDesign(consumer)
     except TypeError:  # reference-only: no kernel, so no array to feed
-        return False
+        return None
     key = (producer_design.identity, output, consumer_design.identity, input_)
-    if key not in _built:
+    if key in _built:
+        return _built[key]
+    _built[key] = None
+    for kind in (FusionKind.STREAM, FusionKind.STAGED):
         try:
             producer_array = BuiltArray(producer_design)
             (source,) = (b for b in producer_array.op.buffers if b.name == output)
-            BuiltArray(consumer_design, fed={input_: source})
-            _built[key] = True
+            BuiltArray(
+                consumer_design,
+                fed={input_: source},
+                staged=kind is FusionKind.STAGED,
+            )
         except ValueError:
-            _built[key] = False
+            continue
+        pair = Fusion(kind, (0, 1), (Edge(0, output, 1, input_),))
+        designs = {"0": producer_design, "1": consumer_design}
+        if kind is FusionKind.STREAM or fits(designs, fusion=pair) is None:
+            _built[key] = kind
+        break
     return _built[key]
 
 
-def _adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
-    """Index ``i`` admissible to feed step ``i + 1`` on-chip: its ``(output,
-    input)`` buffer names, the first found, where step ``i``'s drained
-    output is read by step ``i + 1`` alone, nowhere else and never again,
-    and is not a graph output, feedback, pinned or resident buffer; both
-    name the whole buffer; the producer's buffer is a streamed output and
-    the consumer's a streamed, non-``replicate`` input; and the pair's
-    resolved designs actually build fused (``_admits``), which is where
-    ``Operand.feed``'s own checks (lane counts, ``obj_type``, and a matching
-    host access order per lane) are run.
+# Bounds a stream window's length: each start tries every window up to it.
+_STREAM_MAX_RUN = 8
+
+_placed: dict[tuple, bool] = {}
+
+
+def _hand_offs(
+    recording: Recording, ops: Sequence[Operator]
+) -> dict[str, tuple[int, str, dict[int, str]]]:
+    """Each buffer root one step's output can hand on-chip to every step that
+    reads it, ``ops`` the steps' resolved operators: ``(writer, output,
+    {reader: input})``. The output is a streamed drain of the whole root,
+    which only that step writes and is not a graph output, feedback, pinned
+    or resident buffer; each reader comes later and reads the whole root
+    through one streamed, non-``replicate`` input, no host step reads it,
+    and every reader's edge admits (``_admits``).
     """
     excluded = (
         {h.name for h in recording.outputs}
@@ -73,62 +94,119 @@ def _adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
         for h in host_step.writes:
             writers.setdefault(h.ref().root, []).append(-1)
 
-    found: dict[int, tuple[str, str]] = {}
-    for i in range(len(recording.steps) - 1):
-        step, nxt = recording.steps[i], recording.steps[i + 1]
-        producer, consumer = step.op.resolved(), nxt.op.resolved()
+    found: dict[str, tuple[int, str, dict[int, str]]] = {}
+    for i, step in enumerate(recording.steps):
         for buf, ref in zip(step.op.buffers, step.refs()):
-            if not buf.drains or ref.nbytes is not None or ref.root in excluded:
+            root = ref.root
+            if not buf.drains or not buf.streamed or ref.nbytes is not None:
                 continue
-            if readers.get(ref.root) != [i + 1] or writers.get(ref.root) != [i]:
+            if root in excluded or writers.get(root) != [i]:
                 continue
-            match = next(
-                (
+            reads = readers.get(root, [])
+            if not reads or min(reads) <= i:
+                continue
+            fed: dict[int, str] = {}
+            for j in dict.fromkeys(reads):
+                nxt = recording.steps[j]
+                inputs = [
                     (cbuf, cref)
                     for cbuf, cref in zip(nxt.op.buffers, nxt.refs())
-                    if cbuf.fills and cref.root == ref.root and cref.nbytes is None
-                ),
-                None,
-            )
-            if match is None:
-                continue
-            cbuf, _ = match
-            if not (buf.streamed and cbuf.streamed) or cbuf.replicate:
-                continue
-            if not _admits(producer, buf.name, consumer, cbuf.name):
-                continue
-            found[i] = (buf.name, cbuf.name)
-            break
+                    if cbuf.fills and cref.root == root
+                ]
+                if len(inputs) != 1:
+                    break
+                ((cbuf, cref),) = inputs
+                if cref.nbytes is not None or not cbuf.streamed or cbuf.replicate:
+                    break
+                if _admits(ops[i], buf.name, ops[j], cbuf.name) is None:
+                    break
+                fed[j] = cbuf.name
+            else:
+                found[root] = (i, buf.name, fed)
     return found
 
 
 def _stream_runs(recording: Recording) -> list[Fusion]:
-    """Every admissible stream fusion of 2+ consecutive steps of
-    ``recording``: the longest admissible runs (``_adjacent``) and all of
-    their contiguous sub-runs, overlapping ones included, ordered by first
-    step, then by length.
+    """Every window of 2 to ``_STREAM_MAX_RUN`` consecutive steps, no host step
+    crossing it, that runs as one stream or staged fusion: each root two of
+    its steps share, one writing, is a hand-off (``_hand_offs``) whose writer
+    and every reader are in it, an edge each; every step is on an edge. The
+    fusion is staged where an edge admits only staged; one fanning out, or
+    staged, must place (``fits``). Ordered by first step, then by length.
     """
-    adjacent = _adjacent(recording)
+    resolved = [step.op.resolved() for step in recording.steps]
+    hand_offs = _hand_offs(recording, resolved)
+    uses: list[tuple[set[str], set[str]]] = []
+    for step in recording.steps:
+        reads, writes = set(), set()
+        for buf, ref in zip(step.op.buffers, step.refs()):
+            if buf.fills:
+                reads.add(ref.root)
+            if buf.drains:
+                writes.add(ref.root)
+        uses.append((reads, writes))
     found: list[Fusion] = []
     n = len(recording.steps)
-    start = 0
-    while start < n:
-        end = start
-        while end in adjacent:
-            end += 1
-        if end > start:
-            for lo in range(start, end + 1):
-                for hi in range(lo + 1, end + 1):
-                    steps = tuple(range(lo, hi + 1))
-                    edges = tuple(
-                        Edge(i, adjacent[i][0], i + 1, adjacent[i][1])
-                        for i in range(lo, hi)
-                    )
-                    found.append(Fusion(FusionKind.STREAM, steps, edges))
-            start = end + 1
-        else:
-            start += 1
+    for lo in range(n):
+        for hi in range(lo + 1, min(lo + _STREAM_MAX_RUN, n)):
+            if _crosses_host(recording, lo, hi):
+                break
+            window = range(lo, hi + 1)
+            touched: dict[str, list[int]] = {}
+            for s in window:
+                for root in uses[s][0] | uses[s][1]:
+                    touched.setdefault(root, []).append(s)
+            edges: list[Edge] = []
+            valid = True
+            for root, steps in touched.items():
+                if len(steps) < 2 or not any(root in uses[s][1] for s in steps):
+                    continue
+                if root not in hand_offs:
+                    valid = False
+                    break
+                writer, output, fed = hand_offs[root]
+                if set(steps) != {writer, *fed}:
+                    valid = False
+                    break
+                edges.extend(Edge(writer, output, j, fed[j]) for j in sorted(fed))
+            on_edge = {e.producer for e in edges} | {e.consumer for e in edges}
+            if not valid or set(window) != on_edge:
+                continue
+            edges.sort(key=lambda e: (e.producer, e.consumer))
+            ops = resolved[lo : hi + 1]
+            staged = any(
+                _admits(ops[e.producer - lo], e.output, ops[e.consumer - lo], e.input)
+                is FusionKind.STAGED
+                for e in edges
+            )
+            kind = FusionKind.STAGED if staged else FusionKind.STREAM
+            fusion = Fusion(kind, tuple(window), tuple(edges))
+            fans = len(edges) > len({(e.producer, e.output) for e in edges})
+            if (staged or fans) and not _fused_fits(fusion, ops, lo):
+                continue
+            found.append(fusion)
     return found
+
+
+def _fused_fits(fusion: Fusion, ops: Sequence[Operator], lo: int) -> bool:
+    """Whether ``fusion``, over ``ops`` (its steps' resolved operators, the
+    first at step ``lo``), places and allocates built fused (``fits``),
+    cached by its designs and wiring.
+    """
+    designs = [OperatorDesign(op) for op in ops]
+    local = Fusion(
+        fusion.kind,
+        tuple(s - lo for s in fusion.steps),
+        tuple(
+            Edge(e.producer - lo, e.output, e.consumer - lo, e.input)
+            for e in fusion.edges
+        ),
+    )
+    key = (local, tuple(d.identity for d in designs))
+    if key not in _placed:
+        named = {str(i): d for i, d in enumerate(designs)}
+        _placed[key] = fits(named, fusion=local) is None
+    return _placed[key]
 
 
 def _crosses_host(recording: Recording, lo: int, hi: int) -> bool:
@@ -237,17 +315,18 @@ def _merge_runs(recording: Recording) -> list[Fusion]:
 
 
 def candidates(
-    recording: Recording, kinds: Sequence[FusionKind] = (FusionKind.STREAM,)
+    recording: Recording,
+    kinds: Sequence[FusionKind] = (FusionKind.STREAM, FusionKind.STAGED),
 ) -> tuple[Fusion, ...]:
-    """Every admissible fusion of ``kinds`` (default the stream kind alone,
-    what every caller but ``fusions`` asks for): stream runs
-    (``_stream_runs``), pack runs (``_pack_runs``) and merge runs
-    (``_merge_runs``), each ordered by first step, then by length. The tuner
-    prices each and ``fusions`` picks among them.
+    """Every admissible fusion of ``kinds`` (default the on-chip edge kinds,
+    stream and staged, what every caller but ``fusions`` asks for): stream
+    and staged runs (``_stream_runs``), pack runs (``_pack_runs``) and merge
+    runs (``_merge_runs``), each ordered by first step, then by length. The
+    tuner prices each and ``fusions`` picks among them.
     """
     found: list[Fusion] = []
-    if FusionKind.STREAM in kinds:
-        found.extend(_stream_runs(recording))
+    if FusionKind.STREAM in kinds or FusionKind.STAGED in kinds:
+        found.extend(f for f in _stream_runs(recording) if f.kind in kinds)
     if FusionKind.PACK in kinds:
         found.extend(_pack_runs(recording))
     if FusionKind.MERGE in kinds:
@@ -255,7 +334,12 @@ def candidates(
     return tuple(found)
 
 
-_EVERY_KIND = (FusionKind.STREAM, FusionKind.PACK, FusionKind.MERGE)
+_EVERY_KIND = (
+    FusionKind.STREAM,
+    FusionKind.STAGED,
+    FusionKind.PACK,
+    FusionKind.MERGE,
+)
 
 
 def fusions(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:

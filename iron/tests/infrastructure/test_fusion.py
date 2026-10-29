@@ -15,7 +15,7 @@ from aie.utils.verify import Tolerance, compare
 
 from iron.common.design import BuiltArray, OperatorDesign
 from iron.common.graph.record import Recording
-from iron.common.image.compose import CoResidenceError, Composition, places
+from iron.common.image.compose import Composition, places
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
@@ -304,39 +304,6 @@ def test_fusion_input_fed_twice_refused():
             (0, 1, 2),
             (Edge(0, "y", 2, "a"), Edge(1, "y", 2, "a")),
         )
-
-
-def test_fan_out_representable_but_not_yet_buildable():
-    """One producer output feeding two consumers' inputs is a valid
-    ``Fusion``: the representation and its validation admit it. Building it
-    (``Composition``) is not yet done, pending ``Operand.fifos()`` feeding
-    more than one reader from one lane, so it raises a clear error instead
-    of silently building something wrong.
-    """
-    fanout = Fusion(
-        FusionKind.STREAM,
-        (0, 1, 2),
-        (Edge(0, "y", 1, "a"), Edge(0, "y", 2, "a")),
-    )
-    assert fanout.edges[0].producer == fanout.edges[1].producer == 0
-
-    silu = SiLU(size=2048, num_aie_columns=1, tile_size=1024)
-    mul1 = ElementwiseMul(size=2048, num_aie_columns=1, tile_size=1024)
-    mul2 = ElementwiseMul(size=2048, num_aie_columns=1, tile_size=1024)
-    recording = Recording.of_steps(
-        "fan_out",
-        sequences.steps(
-            (silu, "x", "mid"),
-            (mul1, "mid", "up1", "out1"),
-            (mul2, "mid", "up2", "out2"),
-        ),
-        ["x", "up1", "up2"],
-        ["out1", "out2"],
-    )
-    image = Image(recording, FullELF(), fusions=(fanout,))
-    image._prepare()
-    with pytest.raises(CoResidenceError, match="fan-out"):
-        Composition(image).text()
 
 
 def test_bind_refuses_a_fed_input():

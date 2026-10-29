@@ -37,11 +37,12 @@ class BufferRef:
 
 class FusionKind(Enum):
     """How a fusion's steps run as one device configuration. ``STREAM``
-    (adjacent steps, each feeding the next, through a fifo), ``PACK``
-    (independent steps co-resident, issued concurrently) and ``MERGE``
-    (consecutive steps sharing a configuration, run back to back with no
-    edge) build today; ``STAGED`` (an edge staged through a memtile) and
-    ``FOLD`` (an in-core fold) are not yet built.
+    (consecutive steps, each edge a fifo its lanes meet directly),
+    ``STAGED`` (as a stream, an edge whose lanes do not meet restaged
+    through memtiles), ``PACK`` (independent steps co-resident, issued
+    concurrently) and ``MERGE`` (consecutive steps sharing a configuration,
+    run back to back with no edge) build today; ``FOLD`` (an in-core fold)
+    is not yet built.
     """
 
     STREAM = "stream"
@@ -74,7 +75,7 @@ class Fusion:
 
     An edge between two steps that are not adjacent in ``steps`` is only
     valid where every step between them (by index) is also a member; a
-    stream fusion's edges run forward, producer before consumer.
+    stream or staged fusion's edges run forward, producer before consumer.
     """
 
     kind: FusionKind
@@ -95,9 +96,12 @@ class Fusion:
         for edge in self.edges:
             if edge.producer == edge.consumer:
                 raise ValueError(f"{edge} feeds a step from itself")
-            if self.kind is FusionKind.STREAM and edge.producer >= edge.consumer:
+            if (
+                self.kind in (FusionKind.STREAM, FusionKind.STAGED)
+                and edge.producer >= edge.consumer
+            ):
                 raise ValueError(
-                    f"a stream fusion's edges run forward; {edge} does not"
+                    f"a {self.kind.value} fusion's edges run forward; {edge} does not"
                 )
             if edge.producer not in members or edge.consumer not in members:
                 raise ValueError(f"{edge} names a step outside {self.steps}")

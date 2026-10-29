@@ -145,11 +145,14 @@ class BuiltArray:
             with others that always hold the same number.
         dispatch: On an xclbin, each per-call value's dispatch-time scalar,
             by device symbol.
+        fed: Input name -> the built output it is fed on-chip (``Operand.feed``).
+        staged: A fed input whose lanes do not meet its source's is staged
+            through memtiles rather than refused.
 
     Raises:
         ValueError: A full ELF is asked to carry a ``DispatchTime`` value, an
-            xclbin is given no scalar for a value, or a trace would reuse
-            an output a full ELF consolidates.
+            xclbin is given no scalar for a value, a trace would reuse an
+            output a full ELF consolidates, or ``Operand.feed`` refuses.
     """
 
     def __init__(
@@ -158,6 +161,7 @@ class BuiltArray:
         words: Mapping[str, str] | None = None,
         dispatch: Mapping[str, object] | None = None,
         fed: Mapping[str, Operand] | None = None,
+        staged: bool = False,
     ):
         words = words or {}
         dispatch = dispatch or {}
@@ -187,14 +191,13 @@ class BuiltArray:
         # feed() reads host shapes, which the layout view does not carry.
         operands = {b.name: b for b in op.buffers}
         for name, source in fed.items():
-            operands[name].feed(source)
+            operands[name].feed(source, staged=staged)
         for mine, built in zip(op.buffers, view.buffers):
-            built.fed_from = mine.fed_from
+            built.fed_from, built.staged = mine.fed_from, mine.staged
         self.built = view.build()
         for mine, built in zip(op.buffers, view.buffers):
             mine.lane_handles = built.lane_handles
             mine.lane_fifos = built.lane_fifos
-            mine.fed_from = built.fed_from
         self.design = design
         self.op = op
         self.workers = [w for w in self.built.objects if isinstance(w, Worker)]
@@ -287,10 +290,11 @@ def configuration(
     steps: Sequence[str] = (),
     fuse: bool = False,
 ) -> DeviceConfiguration:
-    """``arrays`` as one device configuration ``name``: one array per identity, and
-    each entry's sequence over it, ``sequence`` if it is alone, else named for its
-    key. Given ``steps`` (keys of ``arrays``), one ``sequence`` runs theirs in order,
-    back to back (``MergedRuntime.merge``), or, ``fuse``, in one task group
+    """``arrays`` as one device configuration ``name``: one array per identity (an
+    array with an on-chip operand always its own), and each entry's sequence over
+    it, ``sequence`` if it is alone, else named for its key. Given ``steps`` (keys
+    of ``arrays``), one ``sequence`` runs theirs in order, back to back
+    (``MergedRuntime.merge``), or, ``fuse``, in one task group
     (``MergedRuntime.fuse``) for steps whose streams meet on-chip.
 
     Raises:
@@ -300,6 +304,10 @@ def configuration(
     if fuse and not steps:
         raise ValueError("fuse needs steps to fuse")
     of = identities(arrays)
+    # An array fed on-chip, or feeding, is its own: its lanes are an edge's.
+    for key, array in arrays.items():
+        if any(b.on_chip for b in array.op.buffers):
+            of[key] = id(array)
     owners: dict[Hashable, BuiltArray] = {}
     for key, array in arrays.items():
         owners.setdefault(of[key], array)

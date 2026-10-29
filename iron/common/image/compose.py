@@ -173,11 +173,50 @@ def places(module: ir.Module) -> str | None:
     return "\n".join(diagnostics) if diagnostics else None
 
 
+def fused_configuration(
+    name: str,
+    fusion: Fusion,
+    designs: Sequence[OperatorDesign],
+    words: Mapping[str, str] | None = None,
+    dispatch: Mapping[str, object] | None = None,
+) -> tuple[DeviceConfiguration, list[BuiltArray]]:
+    """``fusion``'s members, ``designs`` in its step order, as one device
+    configuration ``name`` and their arrays: each array fed where an edge
+    feeds it (staged through memtiles in a staged fusion), and one sequence
+    running every member, in one task group, or back to back in a merge.
+    """
+    incoming: dict[int, list[Edge]] = {}
+    for e in fusion.edges:
+        incoming.setdefault(e.consumer, []).append(e)
+    arrays: dict[int, BuiltArray] = {}
+    for design, j in zip(designs, fusion.steps, strict=True):
+        fed = {}
+        for e in incoming.get(j, ()):
+            (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
+            fed[e.input] = source
+        arrays[j] = BuiltArray(
+            design, words, dispatch, fed=fed, staged=fusion.kind is FusionKind.STAGED
+        )
+    configured = configuration(
+        name,
+        {str(j): arrays[j] for j in fusion.steps},
+        steps=[str(j) for j in fusion.steps],
+        # A merge's steps have no edge to keep alive across a shared task
+        # group; run them back to back, each fully awaited.
+        fuse=fusion.kind is not FusionKind.MERGE,
+    )
+    return configured, [arrays[j] for j in fusion.steps]
+
+
 def fits(
-    designs: Mapping[str, OperatorDesign], words: Mapping[str, str] | None = None
+    designs: Mapping[str, OperatorDesign],
+    words: Mapping[str, str] | None = None,
+    fusion: Fusion | None = None,
 ) -> str | None:
     """``None`` if ``designs``, by device name, place and allocate, else the
     diagnostic; ``words`` maps a design symbol to the scratchpad word it shares.
+    Given ``fusion``, ``designs`` are its members in step order, built fused
+    (``fused_configuration``).
     """
     exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
     try:
@@ -186,8 +225,13 @@ def fits(
             (design,) = designs.values()
             module = ir.Module.parse(str(design.build()), ir.Context())
         else:
-            arrays = {n: BuiltArray(d, words) for n, d in designs.items()}
-            configured = configuration(next(iter(arrays)), arrays)
+            if fusion is None:
+                arrays = {n: BuiltArray(d, words) for n, d in designs.items()}
+                configured = configuration(next(iter(arrays)), arrays)
+            else:
+                configured, _ = fused_configuration(
+                    "fused", fusion, list(designs.values()), words
+                )
             module = Program.compose(
                 [configured], entry=configured.runtimes[0]
             ).resolve_program()
@@ -362,45 +406,13 @@ class Composition:
             runtimes.update(zip(members, configured.runtimes))
 
         for symbol, (designs, fusion) in self.fusions.items():
-            fanout = {}
-            for e in fusion.edges:
-                fanout[(e.producer, e.output)] = (
-                    fanout.get((e.producer, e.output), 0) + 1
-                )
-            shared = next(((p, o) for (p, o), n in fanout.items() if n > 1), None)
-            if shared is not None:
-                raise CoResidenceError(
-                    f"{symbol}: step {shared[0]}'s {shared[1]!r} feeds more than "
-                    f"one input on-chip; fan-out is not yet buildable"
-                )
-            incoming: dict[int, list[Edge]] = {}
-            for e in fusion.edges:
-                incoming.setdefault(e.consumer, []).append(e)
-            step_arrays: dict[int, BuiltArray] = {}
-            for pos, j in enumerate(fusion.steps):
-                fed = {}
-                for e in incoming.get(j, ()):
-                    (source,) = [
-                        b
-                        for b in step_arrays[e.producer].op.buffers
-                        if b.name == e.output
-                    ]
-                    fed[e.input] = source
-                step_arrays[j] = BuiltArray(designs[pos], words, fed=fed)
-            configured = configuration(
-                symbol,
-                {str(j): step_arrays[j] for j in fusion.steps},
-                steps=[str(j) for j in fusion.steps],
-                # A merge's steps have no edge to keep alive across a shared
-                # task group; run them back to back, each fully awaited.
-                fuse=fusion.kind is not FusionKind.MERGE,
-            )
+            configured, members = fused_configuration(symbol, fusion, designs, words)
             configurations[symbol] = configured
             runtimes[symbol] = configured.runtimes[0]
             types[symbol] = [
                 b.flat_type
-                for j in fusion.steps
-                for b in step_arrays[j].op.buffers
+                for array in members
+                for b in array.op.buffers
                 if not b.on_chip
             ]
 

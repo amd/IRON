@@ -22,10 +22,10 @@ from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.npukernel import NPUKernel
 
 from ..declare import Operator
-from ..design import BuiltArray, OperatorDesign, configuration
+from ..design import OperatorDesign
 from .artifacts import Design
 from .callable import FullELFCallable, PerStepCallable
-from .compose import Composition
+from .compose import Composition, fused_configuration
 from .packaging import require_device
 from .step import Fusion
 
@@ -134,10 +134,10 @@ class Link:
 
 
 class FusedDesign:
-    """A stream fusion's steps as one design: each member's array, fed where
-    an edge feeds it on-chip, and one ``MergedRuntime.fuse`` sequence
-    (``configuration(..., fuse=True)``), compiled as one xclbin, dispatched
-    once with every member's per-call values as dispatch-time scalars.
+    """A fusion's steps as one design (``fused_configuration``): each member's
+    array, fed where an edge feeds it on-chip, and one sequence, compiled as
+    one xclbin, dispatched once with every member's per-call values as
+    dispatch-time scalars.
     """
 
     def __init__(self, fusion: Fusion, ops: Sequence[Operator]):
@@ -182,26 +182,11 @@ class FusedDesign:
 
     def module(self, **dispatch):
         """The fused module: each member's array, in fusion order, wired by
-        its edges, as one device configuration and sequence.
+        its edges, as one device configuration and sequence
+        (``fused_configuration``).
         """
-        incoming: dict[int, list] = {}
-        for e in self.fusion.edges:
-            incoming.setdefault(e.consumer, []).append(e)
-        arrays: dict[int, BuiltArray] = {}
-        for pos, j in enumerate(self.fusion.steps):
-            fed = {}
-            for e in incoming.get(j, ()):
-                (source,) = (
-                    b for b in arrays[e.producer].op.buffers if b.name == e.output
-                )
-                fed[e.input] = source
-            arrays[j] = BuiltArray(self.designs[pos], dispatch=dispatch, fed=fed)
-        keys = [str(j) for j in self.fusion.steps]
-        configured = configuration(
-            self.name,
-            dict(zip(keys, (arrays[j] for j in self.fusion.steps))),
-            steps=keys,
-            fuse=True,
+        configured, _ = fused_configuration(
+            self.name, self.fusion, self.designs, dispatch=dispatch
         )
         return Program.compose(
             [configured], entry=configured.runtimes[0]
