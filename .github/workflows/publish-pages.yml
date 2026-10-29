@@ -1,15 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Publishes the benchmark history site to GitHub Pages. The benchmark workflows
-# push their results to the `ci` branch. This workflow runs after they finish
-# and rebuilds the site from that branch.
+# Publishes the IRON website: the MkDocs site (docs/) and the benchmark
+# history charts, as one GitHub Pages deployment. The benchmark workflows
+# push their results to the `ci` branch; this workflow also runs after they
+# finish, so the charts stay current between doc changes.
 #
 # The repository must have Pages enabled with "GitHub Actions" as its source.
 
-name: Publish Benchmark History
+name: Publish Pages
 
 on:
+  push:
+    branches:
+      - devel
   workflow_run:
     workflows:
       - Small Benchmark/Test Suite
@@ -35,6 +39,7 @@ jobs:
     # The `github-pages` environment admits `devel` alone. A run from any other
     # branch reaches the deploy step and GitHub rejects it there.
     if: >-
+      github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event != 'pull_request' &&
        github.event.workflow_run.head_branch == 'devel')
@@ -43,7 +48,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - name: Check out the scripts
+      - name: Check out the repository
         uses: actions/checkout@v4
 
       - name: Check out the results
@@ -57,8 +62,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Build the site
-        run: python ci/scripts/build_pages.py --results-root results -o site
+      - name: Install MkDocs
+        run: pip install -r docs/requirements-mkdocs.txt
+
+      # docs/programming_guide is gitignored; conditional_nav.py drops the nav
+      # section if this symlink isn't created (not every branch has the tree).
+      - name: Link programming_guide into docs tree
+        run: test -d programming_guide && ln -s ../programming_guide docs/programming_guide || true
+
+      - name: Build the MkDocs site
+        run: mkdocs build --strict
+
+      - name: Build the benchmark charts
+        run: python ci/scripts/build_pages.py --results-root results -o site/benchmarks/charts
 
       - name: Upload the site
         uses: actions/upload-pages-artifact@v3

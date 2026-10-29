@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+site_name: IRON
+site_url: https://amd.github.io/IRON/
+site_description: >-
+  IRON — a close-to-metal Python API for programming AMD Ryzen™ AI NPUs,
+  built on the open-source MLIR-AIE compiler toolchain.
+site_author: AMD Advanced Micro Devices
+repo_name: amd/IRON
+repo_url: https://github.com/amd/IRON
+edit_uri: edit/devel/
+
+# Fail the build on any warning (broken link, missing nav target, ...), so
+# problems surface in CI before they reach the deployed site.
+strict: true
+
+copyright: >-
+  Copyright © 2025–2026 Advanced Micro Devices, Inc. Licensed under the
+  Apache License 2.0.
+
+docs_dir: docs
+site_dir: site
+
+# Build tooling, not site content.
+exclude_docs: |
+  hooks/
+  requirements-mkdocs.txt
+
+# Links to source files (*.py, profiles/*.json, ...) are intentional "go read
+# the source" links that work on GitHub but don't resolve as doc pages, and
+# the benchmark charts page links to a sibling static build (charts/) that
+# only exists after ci/scripts/build_pages.py runs, not during `mkdocs build`.
+# Suppress that noise; keep absolute_links warnings for real broken links.
+validation:
+  links:
+    absolute_links: warn
+    unrecognized_links: ignore
+    anchors: warn
+    not_found: ignore
+
+theme:
+  name: material
+  logo: assets/images/XDNA2.png
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.indexes
+    - navigation.path
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+
+extra_css:
+  - assets/css/iron.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/amd/IRON
+      name: IRON on GitHub
+    - icon: fontawesome/brands/discord
+      link: https://discord.gg/UbXzGdXsR5
+      name: Join us on the ROCm Discord (#ROCm-NPU)
+
+plugins:
+  - search
+
+# Drops the Programming Guide nav section when its tree isn't symlinked in.
+hooks:
+  - docs/hooks/conditional_nav.py
+  # Rewrites links that escape the doc tree into repo source to GitHub URLs.
+  - docs/hooks/rewrite_source_links.py
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+      # GitHub-compatible slugifier, so heading anchors match what GitHub
+      # generates. Matters for pages like installation.md that render the
+      # same source (README.md) on both the docs site and GitHub.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Programming Guide:
+    - programming_guide/README.md
+  - Models: models.md
+  - Benchmarks: benchmarks.md
+  - Contributing:
+    - Contributing: contributing.md
+    - Agent Instructions: agents.md
