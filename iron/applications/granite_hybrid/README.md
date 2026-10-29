@@ -25,7 +25,7 @@ From Hugging Face (Apache-2.0, ungated), over plain https, with no account:
 
 ```bash
 D=/path/to/granite-4.0-h-1b
-REV=d18cca4c121edb87d022116d281ce212c9136f57  # the revision every KL figure here is against
+REV=d18cca4c121edb87d022116d281ce212c9136f57  # the revision the tests' bounds were set against
 for f in config.json generation_config.json tokenizer_config.json \
     special_tokens_map.json tokenizer.json chat_template.jinja model.safetensors; do
   curl -fL -o "$D/$f" \
@@ -39,28 +39,24 @@ attention layers' caches (1 GiB) make the model 7.2 GiB on the device.
 
 ## Precision
 
-Its projections run at `Precision.HIGH` (Granite's config's): bf16 macs,
-each K tile's partial sums rounded once. On the checks below, against
-MEDIUM (bfp16 macs):
+Its prompt chunk's projections run at `Precision.HIGH`, `GraniteConfig`'s
+default: bf16 macs, each K tile's partial sums rounded once. Against
+MEDIUM (bfp16 macs), HIGH held the 40 teacher-forced steps closer to the
+float32 model, and MEDIUM the two-chunk prompt. A decode step's projections are GEMVs, which sum in float32 at
+any precision. HIGHEST (float32 partial sums) has not been measured.
 
-| Precision | KL over 40 steps (mean / p90 / max) | 2 chunks, 3 steps (mean / max) | TTFT, 1024 chars | TPS |
-|---|---|---|---|---|
-| HIGH | 0.0029 / 0.0051 / 0.0105 | 0.0098 / 0.025 | 3.7 s | 6.7 |
-| MEDIUM | 0.0040 / 0.0066 / 0.0186 | 0.0063 / 0.0099 | 3.35 s | 6.7 |
+## Testing
 
-HIGH holds the 40 steps closer, at 10% of the first token's time; a
-decode step is a GEMV, which sums in float32 whatever the precision.
-HIGHEST (float32 partial sums) is not measured yet.
+`tests/applications/granite_hybrid/test.py` holds the device, at one compile
+for the native context, to the float32 golden recorded beside the checkpoint
+(`golden.npz`): the KL over 40 teacher-forced steps, and over a prompt of
+two chunks and the decode steps after it, within its `MAX_KL`. A chat turn
+rerun from the states checkpointed at the chunk boundary must match the run
+from scratch bit for bit, and repeated runs must be bitwise identical. A
+prompt chunk's scan streams all 2048 rows whatever the prompt's length.
+Time to first token and tokens per second are recorded to CI
+([benchmarks](https://amd.github.io/IRON/benchmarks/)).
 
-## Accuracy and speed
-
-On Strix Halo (npu2, xcoradaie220), one compile at the native context,
-against the float32 golden recorded beside the checkpoint (`golden.npz`):
-KL over 40 teacher-forced steps after 292 tokens, mean 0.0024, p90 0.0048,
-max 0.0063; over a prompt of 3261 tokens, two chunks, and two decode steps
-after it, max 0.0049. A chat turn rerun from the states checkpointed at the
-chunk boundary is bit for bit the run from scratch, and repeated runs are
-bitwise identical. The first token takes 2.9 s after a 13-character
-prompt (a prompt chunk's scan streams all 2048 rows whatever the prompt's
-length), 3.6 s after 292 tokens and 8.0 s after 2048, and decode runs at
-6.7 tokens a second; none of it is tuned.
+On NPU1 the each-step tests (`TestEachStep`) and `long_context`'s are
+enabled, with an empty `profiles/npu1.json` (every operator's device
+defaults), but have not run on an NPU1 device yet.

@@ -10,7 +10,7 @@ with most layers' attention replaced by a Mamba2 mixer (``Mamba``) and
 its feed-forward a shared gated MLP (``SharedMLP``). The attention
 layers rotate nothing unless ``position_embedding_type`` is ``"rope"``.
 A Mamba2 mixer's convolution and state-space scan (``SelectiveScan``)
-carry state between calls as ``Checkpoints``, like LFM2's convolution.
+carry state between calls as ``Checkpoints``.
 """
 
 import dataclasses
@@ -118,7 +118,6 @@ class Mamba(iron.Graph):
     def body(self, x, call):
         I, C = self.inner, self.channels
         w, p = self.in_proj.weight, self.in_proj.precision
-        # Three projections, not one split three ways, as LFM2's conv.
         gate, xbc, dt = (
             F.linear(x, part, precision=p) for part in (w[:I], w[I : I + C], w[I + C :])
         )

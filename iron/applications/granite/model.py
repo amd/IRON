@@ -38,7 +38,7 @@ class GraniteConfig(DecoderConfig):
     embedding_multiplier: float = dataclasses.field(default=1.0, kw_only=True)
     logits_scaling: float = dataclasses.field(default=1.0, kw_only=True)
     # 4.2-3B's prompt over two chunks needs bf16 macs on its projections, as
-    # Llama 3B's does (decision 40).
+    # Llama 3B's does.
     precision: Precision = lm.not_json(Precision.HIGH, kw_only=True)
 
 

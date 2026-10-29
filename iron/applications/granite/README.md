@@ -17,7 +17,7 @@ Apache-2.0, ungated), over plain https, with no account:
 
 ```bash
 D=/path/to/granite-4.2-3b
-REV=e459acceac81e5fe67c07d9cfc72329a332e7eb1  # the revision every KL figure here is against
+REV=e459acceac81e5fe67c07d9cfc72329a332e7eb1  # the revision the tests' bounds were set against
 for f in config.json generation_config.json tokenizer_config.json \
     special_tokens_map.json tokenizer.json model.safetensors.index.json \
     model-00001-of-00002.safetensors model-00002-of-00002.safetensors; do
@@ -36,6 +36,6 @@ has room for both (`Model.fit`).
 (`TestEachStep`, `--no-full-elf`), a two-chunk prompt and a chat turn.
 
 NPU1 runs `TestEachStep` from an empty `profiles/npu1.json` (every
-operator's device defaults, as smollm2's, phi3's and qwen2's are), and
-all of it passes there: generation, accuracy and determinism. Not yet
-run on NPU1: `tests/applications/long_context`'s deep checks.
+operator's device defaults), and all of it passes there: generation,
+accuracy and determinism. Not yet run on NPU1:
+`tests/applications/long_context`'s deep checks.
