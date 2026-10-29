@@ -4,20 +4,21 @@
 """Choosing which arrays share one device configuration (a profile's
 packings).
 
-A full ELF configures a device each time a version switches to it, about
-``SWITCH_US`` plus ``SWITCH_CORE_US`` per core it holds. ``Packer`` groups a
-version's arrays to minimize one estimate of the version's time
-(``Packer.objective``): every step's measured time at its array's setting,
-plus every switch into a group. Groups grow by the merge that most improves
-the estimate, then single arrays move between groups while that improves
-it. A group that does not co-reside is fitted (``Packer.fit``): the member
-whose change costs least per core it frees is narrowed (its ``widths``
-tunables) or aligned to another member's setting so the two share one
-array, and members are then widened back while the group still fits; a
-member left narrowed has its other tunables searched at its width
-(``Packer.retile``). A version's grouping is kept only where the version,
-built with it, is bit-identical and faster end to end (``compare_graphs``),
-and no other version a packing matches gets slower.
+A full ELF configures a device each time a version switches to it.
+``Packer`` groups a version's units (the arrays a shape runs on) to minimize
+one estimate of the version's time (``Packer.objective``): every step's
+measured time at its unit's setting, plus what the device's cost model
+(``costmodel.CostModel``) adds for the grouping's switches and packed steps.
+Groups grow by the merge that most improves the estimate, then single units
+move between groups while that improves it. A group that does not co-reside
+is fitted (``Packer.fit``): the unit whose change costs least per core it
+frees is narrowed (its ``widths`` tunables) or aligned to another array's
+setting so the two share one, and units are then widened back while the
+group still fits; a unit left narrowed has its other tunables searched at
+its width (``Packer.retile``). A version's grouping is kept only where the
+version, built with it, is bit-identical and faster end to end
+(``compare_graphs``), each such check teaching the cost model, and no other
+version a packing matches gets slower.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from aie import ir
 from aie.utils.compile.jit.params import widths
 
 from iron.common.declare import Operator, Profile
@@ -37,15 +39,21 @@ from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.image.packaging import plan
 from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, settings
-from .fusions import _json_safe, compare_graphs, group_fit_verdict
+from .costmodel import FEATURES, CostModel
+from .failures import Kind, Ledger, first_error
+from .fusions import (
+    _device_timeout,
+    _json_safe,
+    compare_graphs,
+    group_fit_verdict,
+    refuse_group,
+)
 from .measure import Cache, Timing, measure
 
-# npu2 (Strix Halo, turbo): a 1-core design alternated with designs of 1 to
-# 8 cores cost 40 to 68 us a switch more than each run alone.
-SWITCH_US = 37.0
-SWITCH_CORE_US = 7.0
 # Merges tried each round, the most adjacent pairs of groups first.
 MERGE_CANDIDATES = 8
+# Searches of one version, each after refusing what failed the last.
+ATTEMPTS = 3
 
 Setting = dict[str, Any]
 Group = dict[Any, Setting]
@@ -94,12 +102,13 @@ class Packer:
         fit_cache: Path,
         log: Callable[[str], None],
         lock: bool,
-        switch: tuple[float, float] = (SWITCH_US, SWITCH_CORE_US),
+        model: CostModel,
+        ledger: Ledger | None = None,
     ):
         self.call, self.dev = call, dev
         self.timing, self.repeats, self.cache = timing, repeats, cache
         self.fit_cache, self.log, self.lock = fit_cache, log, lock
-        self.switch = switch
+        self.model, self.ledger = model, ledger
         # Each step's array and shape, None for a step no unit holds.
         placed: list[tuple[Any, Any, Operator] | None] = []
         unit_of: dict[Any, int] = {}
@@ -184,7 +193,9 @@ class Packer:
     def fits(self, group: Group) -> bool:
         """Whether ``group``'s distinct arrays place in one device."""
         return (
-            group_fit_verdict(list(self._distinct(group).values()), self.fit_cache)
+            group_fit_verdict(
+                list(self._distinct(group).values()), self.fit_cache, ledger=self.ledger
+            )
             is None
         )
 
@@ -244,52 +255,91 @@ class Packer:
         return found
 
     def cost(self, key, setting: Mapping[str, Any]) -> float:
-        """Array ``key``'s steps' time at ``setting``, summed, each shape
+        """Unit ``key``'s steps' time at ``setting``, summed, each shape
         weighted over its points (``Timed.op_points``); infinite where it
-        does not build there.
+        does not build there. Timing one setting times every width option of
+        the unit not yet timed beside it, in one ``measure`` batch.
         """
         frozen = (key, tuple(sorted(setting.items())))
         if frozen not in self._costs:
-            total = 0.0
-            for op, count in self.shapes[key].values():
-                try:
-                    variants = [op, op._with_tunables(**setting)] if setting else [op]
-                except ValueError:
-                    total = float("inf")
-                    break
-                for weight, values in self.call.op_points(op):
-                    m = measure(
-                        variants,
-                        full_elf=True,
-                        timing=self.timing,
-                        repeats=self.repeats,
-                        values=values,
-                        inputs=self.call.op_inputs(op),
-                        cache=self.cache,
-                        log=self.log,
-                        lock=self.lock,
-                    )
-                    index = len(variants) - 1
-                    if index not in m:
-                        total = float("inf")
-                        break
-                    total += weight * count * m[index].t_step_us
-            self._costs[frozen] = total
+            pending = [dict(setting)] + [
+                o
+                for o in self.options(key)
+                if o != setting and (key, tuple(sorted(o.items()))) not in self._costs
+            ]
+            self._price(key, pending)
         return self._costs[frozen]
 
-    def objective(self, groups: Sequence[Group]) -> float:
-        """The version's estimated time under ``groups``: every array's steps
-        at its setting, and every switch into a group, fixed plus per core
-        of the group switched into.
+    def _price(self, key, pending: Sequence[Setting]) -> None:
+        """Time unit ``key`` at each of ``pending``, one ``measure`` batch per
+        shape and point, into ``_costs``.
+        """
+        if not pending:
+            return
+        totals = [0.0] * len(pending)
+        for op, count in self.shapes[key].values():
+            variants: list[Operator] = [op]
+            index: list[int | None] = []
+            for setting in pending:
+                if not setting:
+                    index.append(0)
+                    continue
+                try:
+                    variants.append(op._with_tunables(**setting))
+                except ValueError:
+                    index.append(None)
+                    continue
+                index.append(len(variants) - 1)
+            for weight, values in self.call.op_points(op):
+                m = measure(
+                    variants,
+                    full_elf=True,
+                    timing=self.timing,
+                    repeats=self.repeats,
+                    values=values,
+                    inputs=self.call.op_inputs(op),
+                    cache=self.cache,
+                    log=self.log,
+                    lock=self.lock,
+                )
+                for n, i in enumerate(index):
+                    if i is None or i not in m:
+                        totals[n] = float("inf")
+                    else:
+                        totals[n] += weight * count * m[i].t_step_us
+        for setting, total in zip(pending, totals):
+            self._costs[(key, tuple(sorted(setting.items())))] = total
+
+    def steps(self, groups: Sequence[Group]) -> float:
+        """Every unit's steps' time at its setting under ``groups``, summed."""
+        return sum(self.cost(k, s) for g in groups for k, s in g.items())
+
+    def features(self, groups: Sequence[Group]) -> dict[str, float]:
+        """What ``groups`` cost beyond their steps' own times depends on
+        (``costmodel.FEATURES``): the switches into a group, the cores of the
+        groups switched into, and the steps run in a group of several units.
         """
         group_of = {k: i for i, g in enumerate(groups) for k in g}
         cores = [self.cores(g) for g in groups]
-        fixed, per_core = self.switch
-        total = sum(self.cost(k, s) for g in groups for k, s in g.items())
+        switches = switch_cores = 0
         for a, b in zip(self.order, self.order[1:]):
             if b is not None and (a is None or group_of[a] != group_of[b]):
-                total += fixed + per_core * cores[group_of[b]]
-        return total
+                switches += 1
+                switch_cores += cores[group_of[b]]
+        packed = sum(
+            1 for k in self.order if k is not None and len(groups[group_of[k]]) > 1
+        )
+        return {
+            "switches": switches,
+            "switch_cores": switch_cores,
+            "packed_steps": packed,
+        }
+
+    def objective(self, groups: Sequence[Group]) -> float:
+        """The version's estimated time under ``groups``: its steps' own
+        times and what the cost model adds for their features.
+        """
+        return self.steps(groups) + self.model.predict(self.features(groups))
 
     def changes(self, group: Group) -> list[tuple[Any, Setting]]:
         """Every one-unit change of ``group``: a unit at another width option,
@@ -362,7 +412,16 @@ class Packer:
         for key, setting in group.items():
             if not setting:
                 continue
-            for candidate in self.tiles(key, setting):
+            candidates = self.tiles(key, setting)
+            self._price(
+                key,
+                [
+                    c
+                    for c in candidates
+                    if (key, tuple(sorted(c.items()))) not in self._costs
+                ],
+            )
+            for candidate in candidates:
                 if self.cost(key, candidate) >= self.cost(key, current[key]):
                     continue
                 trial = {**current, key: candidate}
@@ -477,7 +536,8 @@ def price_packings(
     repeats: int = 9,
     cache: Cache | None = None,
     fit_cache: Path = FIT_CACHE,
-    switch: tuple[float, float] = (SWITCH_US, SWITCH_CORE_US),
+    model: CostModel | None = None,
+    ledger: Ledger | None = None,
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Profile:
@@ -487,9 +547,15 @@ def price_packings(
     beyond the noise, adds none, and an entry that slows another version it
     matches is dropped. ``profile``'s own packings are replaced.
 
+    A grouping whose version does not build, hangs or is not bit-identical
+    is refused (``refuse_group``) and the version searched again, up to
+    ``ATTEMPTS`` times, recorded in ``ledger`` where one is given.
+
     Args:
-        switch: A configuration switch's cost, fixed and per core, in us.
+        model: What a version pays beyond its steps' times; each end-to-end
+            check adds it a sample. The prior where None.
     """
+    model = CostModel() if model is None else model
     base = _profile(profile, [])
     if not full_elf:
         log("packings: an xclbin per step configures every step; nothing to pack")
@@ -507,29 +573,60 @@ def price_packings(
             fit_cache=fit_cache,
             log=log,
             lock=lock,
-            switch=switch,
+            model=model,
+            ledger=ledger,
         )
-        groups = packer.group()
-        estimate = packer.objective(groups) - packer.objective(
-            [{k: {}} for k in packer.shapes]
-        )
-        entries = [
-            packer.members(g)
-            for g in groups
-            if sum(len(packer.shapes[k]) for k in g) > 1
-        ]
-        if not entries:
-            log(f"{recording.name}: no packing gains")
-            continue
-        trial = _profile(base, [*(m for _, m in found), *entries])
-        delta, noise = _end_to_end(call, dev, current, trial, confirm_timing, log, lock)
-        noise_s = "?" if noise is None else f"{noise:.1f}"
-        log(
-            f"{recording.name}: packed {delta:+.1f} ± {noise_s} us end to end, "
-            f"{estimate:+.1f} us estimated"
-        )
-        if noise is not None and delta < -CONFIDENCE * noise:
-            found.extend((index, members) for members in entries)
+        alone = [{k: {}} for k in packer.shapes]
+        for attempt in range(ATTEMPTS):
+            groups = packer.group()
+            packed = [g for g in groups if sum(len(packer.shapes[k]) for k in g) > 1]
+            if not packed:
+                log(f"{recording.name}: no packing gains")
+                break
+            entries = [packer.members(g) for g in packed]
+            trial = _profile(base, [*(m for _, m in found), *entries])
+            try:
+                delta, noise = _end_to_end(
+                    call, dev, current, trial, confirm_timing, log, lock
+                )
+            except (ValueError, RuntimeError, ir.MLIRError) as e:
+                kind = (
+                    Kind.HANG
+                    if _device_timeout(e)
+                    else Kind.MISMATCH if "bit-identical" in str(e) else Kind.BUILD
+                )
+                log(f"{recording.name}: refused, {kind.value}: {first_error(str(e))}")
+                if ledger is not None:
+                    trial_path = ledger.directory / "profiles"
+                    trial_path.mkdir(parents=True, exist_ok=True)
+                    trial.save(trial_path / f"{recording.name}-{attempt}.json")
+                    ledger.record(
+                        kind,
+                        dev.name,
+                        str(e),
+                        f"{recording.name} packed, profile "
+                        f"profiles/{recording.name}-{attempt}.json",
+                    )
+                for g in packed:
+                    refuse_group(
+                        list(packer._distinct(g).values()),
+                        f"{kind.value}: {first_error(str(e))}",
+                        fit_cache,
+                    )
+                continue
+            estimate = packer.objective(groups) - packer.objective(alone)
+            steps = packer.steps(groups) - packer.steps(alone)
+            before, after = packer.features(alone), packer.features(groups)
+            model.add({f: after[f] - before[f] for f in FEATURES}, delta - steps)
+            noise_s = "?" if noise is None else f"{noise:.1f}"
+            log(
+                f"{recording.name}: packed {delta:+.1f} ± {noise_s} us end to end, "
+                f"{estimate:+.1f} us estimated; cost model now "
+                + ", ".join(f"{f} {v:.1f}" for f, v in model.terms.items())
+            )
+            if noise is not None and delta < -CONFIDENCE * noise:
+                found.extend((index, members) for members in entries)
+            break
 
     # Each version against the packings found on the others.
     for index, call in enumerate(calls):

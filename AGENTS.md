@@ -248,7 +248,14 @@ values, weights, state and profiles are named. The rules:
   (`iron.common.graph.packing`). `python -m iron.lm.tune <application>
   --packings-only` groups a graph's arrays and narrows their widths
   (`iron.tune.packings`), keeping a grouping only where its version is
-  bit-identical and faster end to end.
+  bit-identical and faster end to end. Its estimate of what a grouping
+  costs beyond its steps' own times is a per-device model
+  (`iron/tune/costs/<device>.json`) every end-to-end check refits and a
+  tune writes back, so one device's tunes start from the last. With
+  `--record-failures` a tune keeps each compiler crash, build failure,
+  hang or mismatch it hits in this machine's ledger with a repro;
+  `python -m iron.tune.failures --recheck` tries them again with the
+  current toolchain.
 - `python -m iron.lm.tune <application> --fusions-only` prices a graph's
   candidates against its profile and writes the ones that gain.
 

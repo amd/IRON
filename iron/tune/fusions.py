@@ -45,9 +45,10 @@ from iron.common.graph.compiled import CompiledGraph, _step_words
 from iron.common.graph.fusion import candidates
 from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.fusion_tunables import apply as fusion_tunables_apply
-from iron.common.image.compose import fused_configuration, places, unvalued
+from iron.common.image.compose import fused_configuration, unvalued
 from iron.common.image.packaging import plan
 from iron.common.image.step import Edge, Fusion, FusionKind
+from .failures import Kind, Ledger, first_error, place
 from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, Trial, line, settings
 from .measure import (
     Cache,
@@ -316,6 +317,7 @@ def group_fit_verdict(
     fit_cache: Path = FIT_CACHE,
     kind: FusionKind | None = None,
     edges: Sequence[tuple[int, str, int, str]] = (),
+    ledger: Ledger | None = None,
 ) -> str | None:
     """Why the placer refuses ``ops``' resolved designs sharing one device
     configuration (plain, or as ``kind``'s fusion wires ``edges``), or None
@@ -323,29 +325,72 @@ def group_fit_verdict(
     module's own text (``_composed_module``) and each design's build
     (``artifact_hash``, as ``autotune.refusal`` keeps a single design's): a
     change to any code path composing takes invalidates it by construction,
-    not only one to ``compose.py``'s own source.
+    not only one to ``compose.py``'s own source. The placer runs in a
+    process of its own (``failures.place``): a compiler crash refuses the
+    group, recorded in ``ledger`` where one is given.
+    """
+    found = _fit_record(ops, fit_cache, kind, edges)
+    if isinstance(found, str):
+        return found  # composing itself refused; no placement pass to cache
+    text, record = found
+    if record.exists():
+        verdict = record.read_text()
+    else:
+        outcome, diagnostic = place(text)
+        if outcome == "crash":
+            if ledger is not None:
+                ledger.record(
+                    Kind.CRASH,
+                    ops[0].dev.name,
+                    diagnostic or "",
+                    "placing "
+                    + ", ".join(type(op).__name__ for op in ops)
+                    + " in one device",
+                    module=text,
+                )
+            diagnostic = f"the compiler crashed: {first_error(diagnostic or '')}"
+        verdict = "fits" if outcome == "fits" else f"refused: {diagnostic}"
+        write(record, verdict)
+    return None if verdict == "fits" else verdict.removeprefix("refused: ")
+
+
+def refuse_group(
+    ops: Sequence[Operator],
+    reason: str,
+    fit_cache: Path = FIT_CACHE,
+    kind: FusionKind | None = None,
+    edges: Sequence[tuple[int, str, int, str]] = (),
+) -> None:
+    """Record ``ops`` as refused to share one device for ``reason`` (a build,
+    a run or a comparison that failed past placement), so
+    ``group_fit_verdict`` answers it so until the toolchain changes.
+    """
+    found = _fit_record(ops, fit_cache, kind, edges)
+    if not isinstance(found, str):
+        write(found[1], f"refused: {reason}")
+
+
+def _fit_record(
+    ops: Sequence[Operator],
+    fit_cache: Path,
+    kind: FusionKind | None,
+    edges: Sequence[tuple[int, str, int, str]],
+) -> tuple[str, Path] | str:
+    """``ops`` composed into one module, its text and its verdict's file
+    under ``fit_cache``; or why composing them refused.
     """
     designs = {str(i): OperatorDesign(op.resolved()) for i, op in enumerate(ops)}
     try:
         module = _composed_module(designs, kind, edges)
     except (ValueError, RuntimeError, ir.MLIRError) as e:
-        return str(e)  # composing itself refused; no placement pass to cache
+        return str(e)
+    text = str(module)
     key = hashlib.sha256(
         repr(
-            (
-                str(module),
-                sorted(d.compilable().artifact_hash for d in designs.values()),
-            )
+            (text, sorted(d.compilable().artifact_hash for d in designs.values()))
         ).encode()
     ).hexdigest()[:24]
-    record = fit_cache / key
-    if record.exists():
-        verdict = record.read_text()
-    else:
-        diagnostic = places(module)
-        verdict = "fits" if diagnostic is None else f"refused: {diagnostic}"
-        write(record, verdict)
-    return None if verdict == "fits" else verdict.removeprefix("refused: ")
+    return text, fit_cache / key
 
 
 def _device_timeout(e: Exception) -> bool:

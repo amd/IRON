@@ -18,6 +18,7 @@ from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
 from iron.tune.autotune import Timed
+from iron.tune.costmodel import CostModel
 from iron.tune.measure import Cache, Timing, platform
 from iron.tune.packings import Packer, adjacent, price_packings, width_tunables
 
@@ -68,6 +69,7 @@ def _packer(recording, dev, tmp_path):
         fit_cache=tmp_path / "fit",
         log=lambda _: None,
         lock=False,
+        model=CostModel(),
     )
 
 

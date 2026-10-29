@@ -33,6 +33,8 @@ from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
 from .autotune import Shape, Timed, autotune, kernel_cycles, time_shape
 from .fusions import price_fusions
+from .costmodel import CostModel
+from .failures import Ledger
 from .packings import price_packings
 from .measure import Cache, Timing, pmode
 
@@ -75,6 +77,13 @@ def parser(description: str) -> argparse.ArgumentParser:
         help="group a graph's arrays into shared device configurations "
         "against the profile as it stands (price_packings), skipping the "
         "tunable search and the fusions",
+    )
+    p.add_argument(
+        "--record-failures",
+        action="store_true",
+        help="keep each failure tuning hits (a compiler crash, a build, a "
+        "hang, a version not bit-identical) in this machine's ledger, with "
+        "a repro (python -m iron.tune.failures lists and rechecks them)",
     )
     p.add_argument(
         "--max-price",
@@ -171,6 +180,7 @@ def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: boo
     """``profile`` with the packings ``price_packings`` finds, written to
     ``path``; return it.
     """
+    model = CostModel.load(dev.name)
     packed = price_packings(
         calls() if callable(calls) else calls,
         dev,
@@ -179,9 +189,12 @@ def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: boo
         timing=_timing(args)["timing"],
         repeats=args.repeats,
         cache=Cache.here(),
+        model=model,
+        ledger=Ledger() if args.record_failures else None,
         log=functools.partial(print, flush=True),
         lock=args.lock_in_process,
     )
+    print(f"wrote {model.save(dev.name)}")
     path.parent.mkdir(parents=True, exist_ok=True)
     packed.save(path)
     print(f"wrote {path}")
