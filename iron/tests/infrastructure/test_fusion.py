@@ -186,7 +186,7 @@ def test_three_step_fusion_is_one_device_configuration():
     """GEMV -> SiLU -> ElementwiseMul, all three fused, drops two
     ``aie.device``s against the same steps unfused.
     """
-    gemv, silu, mul = _gemv_silu_mul(2048, 1, 1024)
+    gemv, silu, mul = _gemv_silu_mul(2048, 1, 2048)
     fused = Image(
         _gemv_silu_mul_recording("three_step_struct_fused", gemv, silu, mul),
         FullELF(),
@@ -547,7 +547,7 @@ def test_three_step_fusion_matches_reference_and_unfused():
     operators' references fused and is bit-equal to the same three steps
     run unfused.
     """
-    M, cols, tile = 2048, 1, 1024
+    M, cols, tile = 2048, 1, 2048
 
     def build(fusions):
         gemv, silu, mul = _gemv_silu_mul(M, cols, tile)

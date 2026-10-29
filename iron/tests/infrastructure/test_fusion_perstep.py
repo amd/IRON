@@ -84,11 +84,8 @@ def _gemv_add_recording(name, gemv, add):
 
 
 def _gemv_silu_mul():
-    # tile_size_output=2048 keeps C to one lane, matching SiLU and
-    # ElementwiseMul's own (tile_size=1024, num_aie_columns=1): feed() refuses
-    # a lane-count mismatch.
     gemv = GEMV(M=2048, K=2048, tile_size_input=4, tile_size_output=2048)
-    silu, mul = _silu_mul(2048, 1, 1024)
+    silu, mul = _silu_mul(2048, 1, 2048)
     return gemv, silu, mul
 
 
@@ -103,17 +100,6 @@ def _three_step_fusion() -> Fusion:
     return Fusion(
         FusionKind.STREAM, (0, 1, 2), (Edge(0, "C", 1, "x"), Edge(1, "y", 2, "a"))
     )
-
-
-def _skip_if_gemv_does_not_admit(fn):
-    """``fn()``, skipping with the raw error where GEMV's current state
-    (another agent's work in progress at the time this test was written)
-    does not construct, build or place the fusion.
-    """
-    try:
-        return fn()
-    except (ValueError, RuntimeError, TypeError) as e:
-        pytest.skip(f"GEMV does not currently admit this fusion: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -207,9 +193,7 @@ def test_silu_mul_fused_per_call_bound_value():
 
 
 # ---------------------------------------------------------------------------
-# On the device, forced to npu2: GEMV's current tiling (another agent's work
-# in progress) is only verified compatible with SiLU/ElementwiseMul/
-# ElementwiseAdd's own at this shape; _skip_if_gemv_does_not_admit covers it.
+# On the device, npu2: GEMV fusions.
 # ---------------------------------------------------------------------------
 
 
@@ -226,9 +210,7 @@ def test_gemv_to_elementwiseadd_fused_matches_reference_and_unfused(npu2):
         img.compile()
         return img.get_callable(), gemv, add
 
-    fused_run, gemv, add = _skip_if_gemv_does_not_admit(
-        lambda: build("gemv_add_fused", (_fuse(0, "C", "b"),))
-    )
+    fused_run, gemv, add = build("gemv_add_fused", (_fuse(0, "C", "b"),))
     plain_run, _, _ = build("gemv_add_plain", ())
 
     A = vectors(gemv).inputs["A"]
@@ -265,9 +247,7 @@ def test_three_step_fusion_matches_reference_and_unfused(npu2):
         img.compile()
         return img.get_callable(), gemv, silu, mul
 
-    fused_run, gemv, silu, mul = _skip_if_gemv_does_not_admit(
-        lambda: build("three_step_fused", (_three_step_fusion(),))
-    )
+    fused_run, gemv, silu, mul = build("three_step_fused", (_three_step_fusion(),))
     plain_run, _, _, _ = build("three_step_plain", ())
 
     A = vectors(gemv).inputs["A"]
@@ -362,12 +342,8 @@ def test_gemv_fusions_build_an_xclbin_per_fused_step_on_npu1(npu1):
         img.compile()
         return img
 
-    _skip_if_gemv_does_not_admit(
-        lambda: build((_fuse(0, "C", "b"),), _gemv_add_recording, _gemv_add)
-    )
-    _skip_if_gemv_does_not_admit(
-        lambda: build((_three_step_fusion(),), _gemv_silu_mul_recording, _gemv_silu_mul)
-    )
+    build((_fuse(0, "C", "b"),), _gemv_add_recording, _gemv_add)
+    build((_three_step_fusion(),), _gemv_silu_mul_recording, _gemv_silu_mul)
 
 
 # ---------------------------------------------------------------------------
@@ -395,8 +371,7 @@ def test_llama_1b_finds_its_fusion_candidates_on_npu1(npu1, record_property):
         decode_shapes, prompt_shapes = model.shapes()
         return model.record(**decode_shapes), model.record(**prompt_shapes)
 
-    # Llama is all GEMV: skip rather than fail while it does not construct.
-    decode, prompt = _skip_if_gemv_does_not_admit(load)
+    decode, prompt = load()
 
     def pairs(recording):
         return [
