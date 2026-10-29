@@ -125,3 +125,34 @@ def test_accuracy_across_chunks(decoder, record_property):
 def test_chat_turn(decoder, record_property):
     """A turn of 1000 tokens reruns the chunks it reaches alone."""
     check_chat_turn(decoder[0], LONG, 1000, record=record_property)
+
+
+# SmolVLMText's own KL bound: a smaller model than the npu2-only decoders
+# above share MAX_KL for.
+IDEFICS3_TEXT_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.1}
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
+class TestIdefics3TextEachStep:
+    """SmolVLMText compiles clean on npu1 (device-free, every version);
+    npu2's TestEachStep pattern run on both, the form npu1 dispatches
+    (``full_elf=False``; ``full_elf=None`` already picks it there)."""
+
+    @pytest.fixture(scope="class")
+    def model(self, request):
+        load = load_from_flags(
+            request, SmolVLMText, weights_dir("smolvlm-256m-instruct/model.safetensors")
+        )
+        model = load(full_elf=False)
+        assert not model.device_loop
+        yield model
+        model.release()
+        if aie_utils.DefaultNPURuntime is not None:
+            aie_utils.DefaultNPURuntime.cleanup()
+
+    def test_idefics3_text_each_step_accuracy(self, model, record_property):
+        check_accuracy(model, IDEFICS3_TEXT_KL, 20, 256, record=record_property)
+
+    def test_idefics3_text_each_step_determinism(self, model, record_property):
+        check_determinism(model, 4, 3, 128, record=record_property)
