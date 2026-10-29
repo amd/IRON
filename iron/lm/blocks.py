@@ -152,6 +152,10 @@ class LogMel(iron.Graph):
         filters = filterbank(fft, mels, sample_rate, max_hz, mel_scale, norm)
         bins = fft // 2 + 1
         width = -(-bins // 64) * 64
+        # The filterbank GEMM's N (80 mels, Whisper's small sizes, is not a
+        # whole 64; 128, large-v3-turbo's, already is): padded with zero
+        # columns, sliced back off in body() right after that GEMM.
+        self.mel_pad = -(-mels // 64) * 64
         angle = 2 * np.pi * np.arange(frame)[:, None] * np.arange(bins) / fft
         window = np.hanning(frame + 1)[:-1, None].astype(np.float32)
         # The rfft as a matrix, the window folded in: the real parts, then
@@ -161,7 +165,7 @@ class LogMel(iron.Graph):
         dft[:frame, width : width + bins] = -window * np.sin(angle)
         self.dft = iron.param(stacked(dft))
         self.filterbank = iron.param(
-            stacked(np.pad(filters, ((0, width - bins), (0, 0))))
+            stacked(np.pad(filters, ((0, width - bins), (0, self.mel_pad - mels))))
         )
 
     def body(
@@ -192,28 +196,47 @@ class LogMel(iron.Graph):
             **exact,
         )
         if self.decades is None:
+            if self.mel_pad == self.mels:
+                narrow = energy
+            else:
+                # Log needs a contiguous operand, which a column-sliced view
+                # (the filterbank's zero pad columns past mels) is not.
+                narrow = iron.state((F, self.mels), dtype=np.float32)
+                Copy.step(energy[:, : self.mels], narrow, dtype=np.float32)
             if features is None:
-                return Log.step(energy, offset=self.mel_floor)
-            return Log.step(energy, features, offset=self.mel_floor)
+                return Log.step(narrow, offset=self.mel_floor)
+            return Log.step(narrow, features, offset=self.mel_floor)
         # The clip's largest in two passes, each over whole 16-lane vectors:
-        # the largest of each line of the energies, then of those.
-        energy = energy[:frames]
-        size = frames * self.mels
+        # the largest of each line of the energies, then of those. Over all
+        # F frames and mel_pad mels, not just the real ones (frames, mels
+        # alone may not factor into two 16-lane passes: 80 mels, 3000
+        # frames): the padding beyond them is the wave's zero tail and the
+        # filterbank's zero columns, never above the real ones' largest.
+        size = F * self.mel_pad
         line = next(
             (n for n in range(4096, 0, -16) if size % n == 0 and size // n % 16 == 0),
             None,
         )
         if line is None:
             raise ValueError(
-                f"LogMel: {frames} frames of {self.mels} mels are no rows of "
+                f"LogMel: {F} frames of {self.mel_pad} (padded) mels are no rows of "
                 f"16-lane vectors, 16 rows at a time"
             )
         peaks = RowMax.step(energy.reshape(size // line, line))
         peak = RowMax.step(peaks.reshape(1, size // line))
         clamp = dict(mel_floor=self.mel_floor, decades=self.decades)
+        if self.mel_pad == self.mels:
+            narrow = energy[:frames]
+        else:
+            # Log10Clamp needs a contiguous operand too, so the real mels
+            # are copied out of energy's padded columns before it, into a
+            # buffer just the real frames (energy itself is F rows, padded
+            # with the wave's zero tail past frames).
+            narrow = iron.state((frames, self.mels), dtype=np.float32)
+            Copy.step(energy[:frames, : self.mels], narrow, dtype=np.float32)
         if features is None:
-            return Log10Clamp.step(energy, peak, **clamp)
-        return Log10Clamp.step(energy, peak, features, **clamp)
+            return Log10Clamp.step(narrow, peak, **clamp)
+        return Log10Clamp.step(narrow, peak, features, **clamp)
 
 
 class Conv1d(iron.Graph):

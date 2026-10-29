@@ -51,13 +51,14 @@ BLOCK = 64
 
 
 def bf16(weights):
-    """``weights``, a checkpoint's tree, each float16 array rounded once to
-    bf16, the device's copy of an fp16 checkpoint (the reference widens the
-    float16 itself); any other array as it is.
+    """``weights``, a checkpoint's tree, each float array (float16, as
+    large-v3-turbo ships, or float32, as small ships) rounded once to bf16,
+    the device's copy (the reference widens the checkpoint's own dtype
+    itself); any other array as it is.
     """
     return nest(
         {
-            name: w.astype(bfloat16) if w.dtype == np.float16 else w
+            name: w.astype(bfloat16) if np.issubdtype(w.dtype, np.floating) else w
             for name, w in leaves(weights)
         }
     )
@@ -135,6 +136,14 @@ class WhisperEncoderConfig(Config):
         output rows.
         """
         return -(-self.frames // BLOCK) * BLOCK
+
+    @property
+    def conv1_channels(self) -> int:
+        """``num_mel_bins`` rounded up to 64, the first convolution's GEMM's
+        K (3 taps a channel) a whole tile of 64 at any mel count Whisper
+        ships (80 or 128): the extra channels are zero-weighted, never read.
+        """
+        return -(-self.num_mel_bins // 64) * 64
 
 
 @dataclasses.dataclass(frozen=True)
@@ -274,7 +283,20 @@ class WhisperEncoder(Tower):
         )
         # The first convolution's input: a zero row, the features, zero rows.
         self.features = iron.state((c.conv_rows + 2, c.num_mel_bins))
-        self.conv1 = Conv1d(e.conv1.weight, e.conv1.bias, c.num_mel_bins)
+        # At 80 mels (every Whisper but large), conv1's channels are padded
+        # to conv1_channels so its GEMM's K (3 taps a channel) is a whole
+        # tile; the pad columns are never read, since conv1's padded weight
+        # rows are zero. Log10Clamp needs a contiguous destination, so
+        # features is copied in rather than written there directly.
+        if c.conv1_channels == c.num_mel_bins:
+            self.conv1_input, conv1_weight = None, e.conv1.weight
+        else:
+            self.conv1_input = iron.state((c.conv_rows + 2, c.conv1_channels))
+            conv1_weight = np.pad(
+                np.asarray(e.conv1.weight),
+                ((0, 0), (0, c.conv1_channels - c.num_mel_bins), (0, 0)),
+            )
+        self.conv1 = Conv1d(conv1_weight, e.conv1.bias, c.conv1_channels)
         self.conv2 = Conv1d(e.conv2.weight, e.conv2.bias, c.hidden_size, stride=2)
         # The convolutions' GELU is the layers' hidden_act.
         self.act = activation(c.hidden_act)
@@ -300,7 +322,12 @@ class WhisperEncoder(Tower):
         """
         c = self.config
         self.log_mel(wave, self.features[1 : c.frames + 1], frames=c.frames)
-        h = self.act(self.conv1(self.features, rows=c.conv_rows))
+        if self.conv1_input is None:
+            conv1_in = self.features
+        else:
+            Copy.step(self.features, self.conv1_input[:, : c.num_mel_bins])
+            conv1_in = self.conv1_input
+        h = self.act(self.conv1(conv1_in, rows=c.conv_rows))
         self.convolved[1 : c.frames + 1] = h[: c.frames]
         h = self.act(self.conv2(self.convolved, rows=rows))
         table = iron.weight(self.embed_positions)
