@@ -206,6 +206,19 @@ class WhisperConfig(DecoderConfig):
         kw_only=True,
         metadata={"json": "/task_to_id", "convert": lambda d: min(d.values())},
     )
+    # <|notimestamps|>: timestamps begin at the token after it.
+    no_timestamps_token_id: int = dataclasses.field(
+        default=1 << 30, kw_only=True, metadata={"json": "/no_timestamps_token_id"}
+    )
+    # <|endoftext|>; Model.eos reads the same file, but only once a
+    # checkpoint is loaded, too late for a config field Whisper.__init__
+    # builds a bias array from.
+    eos_token_id: int = dataclasses.field(
+        default=-1, kw_only=True, metadata={"json": "/eos_token_id"}
+    )
+    max_initial_timestamp_index: int = dataclasses.field(
+        default=50, kw_only=True, metadata={"json": "/max_initial_timestamp_index"}
+    )
 
     @classmethod
     def from_checkpoint(cls, path) -> "WhisperConfig":
