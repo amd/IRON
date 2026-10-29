@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_10_29_04_00_37` at commit `f1c2967`.
+Tested on `2026_10_29_05_52_13` at commit `e51452d`.
 
 <details>
 <summary>tests/applications/decoders</summary>
@@ -11,7 +11,7 @@ Tested on `2026_10_29_04_00_37` at commit `f1c2967`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_generation[gemma4-short-1]</td><td>✅ 1/1</td><td>5.79</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_generation[gemma4-short-1]</td><td>✅ 1/1</td><td>5.80</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -84,7 +84,7 @@ Tested on `2026_10_29_04_00_37` at commit `f1c2967`.
     </thead>
     <tbody>
         <tr><td>test_llama_3_2[llama_3.2_1b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.44</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.95</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.96</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
