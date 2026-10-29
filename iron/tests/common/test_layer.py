@@ -66,9 +66,12 @@ def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
     # Unrefused, normalized_shape is checked against the last axis but
     # otherwise unused: the kernel would silently normalize the last axis
     # regardless of what the caller asked for.
-    x = SimpleNamespace(shape=(4, WIDTH))
+    class Normed(iron.Graph):
+        def body(self, x):
+            return norm(x, 4)
+
     with pytest.raises(ValueError, match="not the last axis"):
-        norm(x, 4)
+        Normed().record(x=(4, WIDTH))
 
 
 @pytest.mark.parametrize(
