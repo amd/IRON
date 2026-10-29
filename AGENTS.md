@@ -38,6 +38,8 @@ needs a newer mlir-aie bumps all three in the same pull request
   checkpoints (`iron.lm.testing.weights_dir`).
 - `MLIR_AIE_KERNEL_SOURCES=/path/to/mlir-aie` builds kernels from another
   tree; the path is part of the compile key.
+- `NPU_RUNTIME` selects the host NPU runtime backend; the programming
+  guide's "Getting Set Up" (`programming_guide/section-0`) says more.
 - No build context: an operator compiles for the current device and
   nothing else. On a host without an NPU, bind one with
   `aie_utils.set_current_device(from_name("npu2", n_cols=8))`

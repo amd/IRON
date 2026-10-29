@@ -23,7 +23,8 @@ If the test passes, the toolchain can compile for and run on your NPU.
 ## The device
 
 Every operator and graph compiles for *the current device*. When an NPU is
-attached, IRON finds it through XRT. On a host without one, for example to
+attached, IRON finds it through XRT; `NPU_RUNTIME` selects which runtime
+backend looks for one. On a host without one, for example to
 compile without running or to check a design against its numpy reference,
 bind a device before anything else runs:
 

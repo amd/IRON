@@ -347,6 +347,13 @@ class SelectiveScan(Operator):
             8e-3, range_frac=1e-3, note="f32 throughout, y rounded once: a bf16 ulp"
         )
 
+    def ops(self) -> int:
+        """Per row, per head: the state update (two multiplies and an add
+        over its ``head_dim * state_size`` elements) and the C readout (a
+        ``state_size``-deep dot product per ``head_dim`` row).
+        """
+        return 5 * self.rows * self.heads * self.head_dim * self.state_size
+
     def reference(self, xbc, dt, head, state):
         H, P, N, G = self.heads, self.head_dim, self.state_size, self.groups
         xbc, dt = np.asarray(xbc, np.float32), np.asarray(dt, np.float32)
