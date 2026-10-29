@@ -40,3 +40,18 @@ Slaney's mel filters, then each log10 held to 8 below the clip's largest
 they are transformers' `WhisperFeatureExtractor`'s rounded to bf16 at all
 but 0.05% of features, those one bf16 ulp away
 (`iron/tests/lm/test_log_mel.py`).
+
+Every version (the decode step, a prompt chunk, the encode version) compiles
+for NPU1 at both checkpoints, device-free: `supported_devices("npu1",
+"npu2")` on the device tests. `profiles/npu1.json` is not a timed tune, no
+Phoenix being reachable where it was built; its entries are `resolve(dev)`'s
+own choices at every operator shape the real checkpoints record, a
+compile-validated starting point `python -m iron.lm.tune whisper` can
+re-tune for real there. `profiles/npu2.json` is still the untuned, empty
+profile `{"entries": []}`: a real tune of large-v3-turbo's decode step and
+prompt chunk alone (29 operator shapes, several settings each) ran past
+570 s of real NPU2 time without finishing one of `coord/heavy`'s slots, and
+`autotune()` only writes its profile once every shape is timed, so nothing
+from a cut-off run is kept. A longer, dedicated tuning session fills this
+in; the encoder tower's operators are not timed by `python -m iron.lm.tune`
+at all yet (`iron.lm.tune.calls` times only a decoder's own two versions).
