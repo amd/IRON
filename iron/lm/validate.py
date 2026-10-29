@@ -94,20 +94,21 @@ def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
 
 
 def changed_versions(stock_live: dict, candidate_live: dict) -> list[str]:
-    """``version_labels`` whose candidate compile holds a live fusion or a
-    packed group: each must not share stock's compiled image.
+    """``version_labels`` whose candidate compile is not stock's image: its
+    fusions, packings or tunables changed it.
 
     Raises:
-        AssertionError: A changed version shares stock's compiled image.
+        AssertionError: A version holding a live fusion or a packed group
+            shares stock's compiled image.
     """
     changed = []
     for label, candidate_v in candidate_live.items():
-        if not (candidate_v["n_fusions"] or candidate_v["packed_groups"]):
-            continue
-        changed.append(label)
-        assert (
-            stock_live[label]["image_path"] != candidate_v["image_path"]
+        shared = stock_live[label]["image_path"] == candidate_v["image_path"]
+        assert not (
+            shared and (candidate_v["n_fusions"] or candidate_v["packed_groups"])
         ), f"{label}: candidate and stock share one compiled image"
+        if not shared:
+            changed.append(label)
     return changed
 
 

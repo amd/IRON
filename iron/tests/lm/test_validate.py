@@ -126,6 +126,15 @@ def test_changed_versions_rejects_a_live_candidate_sharing_stocks_image():
         validate.changed_versions(stock_live, candidate_live)
 
 
+def test_changed_versions_counts_a_candidate_changing_only_tunables():
+    stock_live = {"decode": {"image_path": "a"}, "prompt": {"image_path": "p"}}
+    candidate_live = {
+        "decode": {"image_path": "b", "n_fusions": 0, "packed_groups": []},
+        "prompt": {"image_path": "p", "n_fusions": 0, "packed_groups": []},
+    }
+    assert validate.changed_versions(stock_live, candidate_live) == ["decode"]
+
+
 def test_changed_versions_ignores_an_unchanged_candidate():
     stock_live = {"decode": {"image_path": "a"}}
     candidate_live = {
