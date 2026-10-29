@@ -399,8 +399,8 @@ class Model(iron.Graph):
             pinned = sum(model.record(**shapes).pinned.values())
             # The scratch arena is pinned too (XRT maps every bank locked),
             # but record() does not size it: only compile()'s arena plan does.
-            scratch = model.compile(full_elf=None, **shapes).arena.plan.size
-            held.append(pinned + scratch)
+            arena = model.compile(full_elf=None, **shapes).arena
+            held.append(pinned + (0 if arena is None else arena.plan.size))
         per_position = (held[1] - held[0]) / C
         fixed = held[0] - per_position * C
         budget = host_budget() if budget is None else budget
