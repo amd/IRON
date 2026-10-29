@@ -33,6 +33,7 @@ from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
 from .autotune import Shape, Timed, autotune, kernel_cycles, time_shape
 from .fusions import price_fusions
+from .packings import price_packings
 from .measure import Cache, Timing, pmode
 
 
@@ -67,6 +68,13 @@ def parser(description: str) -> argparse.ArgumentParser:
         action="store_true",
         help="price only the fusions a graph admits against the profile as "
         "it stands, skipping the (hours-long) tunable search",
+    )
+    p.add_argument(
+        "--packings-only",
+        action="store_true",
+        help="group a graph's arrays into shared device configurations "
+        "against the profile as it stands (price_packings), skipping the "
+        "tunable search and the fusions",
     )
     p.add_argument(
         "--max-price",
@@ -107,9 +115,11 @@ def tune(
 ) -> Path:
     """Rewrite ``profiles/<device>.json`` with the settings ``calls`` time
     fastest at (``autotune``), then price the fusions its graphs admit
-    against the result (``price_fusions``); ``--fusions-only`` skips
-    straight to pricing fusions against the profile as it stands. Timed as
-    ``args`` says; return its path.
+    against the result (``price_fusions``), then group their arrays into
+    shared device configurations (``price_packings``); ``--fusions-only``
+    skips straight to the fusions and ``--packings-only`` to the packings,
+    against the profile as it stands. Timed as ``args`` says; return its
+    path.
 
     ``calls`` may be a thunk: re-recording under the profile tuning just
     wrote picks up its tunables (``Graph.record`` reloads a profile that is
@@ -121,6 +131,10 @@ def tune(
     path = profiles / f"{dev.name}.json"
     profile = Profile.load(path) if path.exists() else None
     full_elf = dev.can_dispatch_full_elf
+    if args.packings_only:
+        if profile is None:
+            raise ValueError(f"{path}: --packings-only needs a profile to pack")
+        return _save_packings(args, calls, dev, profile, path, full_elf)
     if not args.fusions_only:
         profile = autotune(
             calls() if callable(calls) else calls,
@@ -149,6 +163,27 @@ def tune(
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     priced.save(path)
+    print(f"wrote {path}")
+    return _save_packings(args, calls, dev, priced, path, full_elf)
+
+
+def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: bool):
+    """``profile`` with the packings ``price_packings`` finds, written to
+    ``path``; return it.
+    """
+    packed = price_packings(
+        calls() if callable(calls) else calls,
+        dev,
+        profile,
+        full_elf=full_elf,
+        timing=_timing(args)["timing"],
+        repeats=args.repeats,
+        cache=Cache.here(),
+        log=functools.partial(print, flush=True),
+        lock=args.lock_in_process,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    packed.save(path)
     print(f"wrote {path}")
     return path
 

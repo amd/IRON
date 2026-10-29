@@ -684,6 +684,71 @@ def _bound_points(recording, values: Mapping[str, int]) -> list[dict[str, int]]:
     return points
 
 
+def compare_graphs(
+    call: Timed,
+    before: CompiledGraph,
+    after: CompiledGraph,
+    *,
+    timing: Timing,
+    seed: int = 0,
+    log: Callable[[str], None] = print,
+    lock: bool = False,
+) -> tuple[float, float | None]:
+    """How much longer ``after`` takes than ``before``, two builds of
+    ``call``'s recording, run interleaved on the same seeded inputs and
+    states, and that difference's standard error; both are released after.
+
+    Raises:
+        RuntimeError: ``after``'s outputs are not bit-identical to
+            ``before``'s at the call's values or at one of its bounds halved
+            (``_bound_points``); a device timeout propagates as it is raised.
+    """
+    recording = call.recording
+    rng = np.random.default_rng(seed)
+    table_rows = _gather_table_rows(recording)
+    inputs = [
+        (
+            rng.integers(0, table_rows[h.name], h.shape).astype(h.dtype)
+            if h.name in table_rows
+            else _random_tensor(h, rng)
+        )
+        for h in recording.inputs
+    ]
+    states = [(s, h, _random_tensor(h, rng)) for s, h in recording.states.values()]
+    # The call's own values last: timing below dispatches what was staged last.
+    checks = [*_bound_points(recording, call.values), dict(call.values)]
+    # Held from the first dispatch (each graph's context created lazily on
+    # it) through the release below, not just around a dispatch: both
+    # graphs' contexts stay loaded past their own call otherwise, past the
+    # window another process holding this lock is kept out of.
+    with npu_lock(lock):
+        try:
+            for values in checks:
+                for state, _, content in states:
+                    before.write(state, content)
+                    after.write(state, content)
+                before(*inputs, **values)
+                after(*inputs, **values)
+                if not all(
+                    np.array_equal(before.read(h), after.read(h))
+                    for h in recording.returned
+                ):
+                    raise RuntimeError(
+                        f"{recording.name}: not bit-identical to it as before at "
+                        f"{values}"
+                    )
+            times = time_interleaved(
+                [before.callable, after.callable], timing, log=log, lock=lock
+            )
+        finally:
+            before.release()
+            after.release()
+    paired = list(zip(times[0].samples_us, times[1].samples_us))
+    return statistics.median(a - b for b, a in paired), standard_error(
+        [a - b for b, a in paired]
+    )
+
+
 def confirm_fusions(
     calls: Sequence[Timed],
     dev,
@@ -732,17 +797,6 @@ def confirm_fusions(
         chosen = plan(
             dev, recording, full_elf, False, step_words=_step_words(recording)
         )
-        rng = np.random.default_rng(seed)
-        table_rows = _gather_table_rows(recording)
-        inputs = [
-            (
-                rng.integers(0, table_rows[h.name], h.shape).astype(h.dtype)
-                if h.name in table_rows
-                else _random_tensor(h, rng)
-            )
-            for h in recording.inputs
-        ]
-        states = [(s, h, _random_tensor(h, rng)) for s, h in recording.states.values()]
         while active:
             trial_profile = Profile()
             for cls, dims, tunables in profile:
@@ -780,72 +834,29 @@ def confirm_fusions(
                 remaining.remove(worst)
                 active.remove(worst)
                 continue
-            # The call's own values last: timing below dispatches what was
-            # staged last.
-            checks = [*_bound_points(recording, call.values), dict(call.values)]
-            hung = None
-            # Held from the first dispatch (each graph's context created
-            # lazily on it) through ``del`` below, not just around a
-            # dispatch: both graphs' contexts stay loaded past their own
-            # call otherwise, past the window another process holding this
-            # lock is kept out of.
-            with npu_lock(lock):
-                for values in checks:
-                    for state, _, content in states:
-                        plain_cg.write(state, content)
-                        fused_cg.write(state, content)
-                    try:
-                        plain_cg(*inputs, **values)
-                        fused_cg(*inputs, **values)
-                    except (RuntimeError, ir.MLIRError) as e:
-                        if not _device_timeout(e):
-                            raise
-                        hung = e
-                        break
-                    plain_out = [plain_cg.read(h) for h in recording.returned]
-                    fused_out = [fused_cg.read(h) for h in recording.returned]
-                    if not all(
-                        np.array_equal(p, f) for p, f in zip(plain_out, fused_out)
-                    ):
-                        names = ", ".join(str(g) for g in active)
-                        raise RuntimeError(
-                            f"{recording.name}: fused ({names}) is not "
-                            f"bit-identical to it unfused at {values}"
-                        )
-                if hung is not None:
-                    # A hang is a property of this version running at all,
-                    # which dropping only one of several active groups may
-                    # not fix; none of them is retried in this run.
-                    names = ", ".join(str(g) for g in active)
-                    log(
-                        f"  {names}: dropped, {recording.name} hung on the device: {hung}"
-                    )
-                    for g in active:
-                        remaining.remove(g)
-                        if refused is not None:
-                            refused[_refused_key(g)] = f"hung on the device: {hung}"
-                    break
-                try:
-                    times = time_interleaved(
-                        [plain_cg.callable, fused_cg.callable],
-                        timing,
-                        log=log,
-                        lock=lock,
-                    )
-                except (RuntimeError, ir.MLIRError) as e:
-                    if not _device_timeout(e):
-                        raise
-                    names = ", ".join(str(g) for g in active)
-                    log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
-                    for g in active:
-                        remaining.remove(g)
-                        if refused is not None:
-                            refused[_refused_key(g)] = f"hung on the device: {e}"
-                    break
-                del plain_cg, fused_cg
-            paired = list(zip(times[0].samples_us, times[1].samples_us))
-            delta = statistics.median(f - p for p, f in paired)
-            noise = standard_error([f - p for p, f in paired])
+            try:
+                delta, noise = compare_graphs(
+                    call,
+                    plain_cg,
+                    fused_cg,
+                    timing=timing,
+                    seed=seed,
+                    log=log,
+                    lock=lock,
+                )
+            except (RuntimeError, ir.MLIRError) as e:
+                if not _device_timeout(e):
+                    raise
+                # A hang is a property of this version running at all,
+                # which dropping only one of several active groups may not
+                # fix; none of them is retried in this run.
+                names = ", ".join(str(g) for g in active)
+                log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
+                for g in active:
+                    remaining.remove(g)
+                    if refused is not None:
+                        refused[_refused_key(g)] = f"hung on the device: {e}"
+                break
             noise_s = "?" if noise is None else f"{noise:.1f}"
             log(
                 f"{recording.name}: [{', '.join(str(g) for g in active)}] "

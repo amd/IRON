@@ -245,7 +245,10 @@ values, weights, state and profiles are named. The rules:
   tunables every step of its shape takes there (narrower, so they
   co-reside). A switch between configurations costs about 40 us plus 7 us
   per column on npu2, the cost a packing removes
-  (`iron.common.graph.packing`).
+  (`iron.common.graph.packing`). `python -m iron.lm.tune <application>
+  --packings-only` groups a graph's arrays and narrows their widths
+  (`iron.tune.packings`), keeping a grouping only where its version is
+  bit-identical and faster end to end.
 - `python -m iron.lm.tune <application> --fusions-only` prices a graph's
   candidates against its profile and writes the ones that gain.
 

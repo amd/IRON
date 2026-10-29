@@ -557,16 +557,8 @@ class Graph:
             fused: tuple[Fusion, ...] = ()
             packing = Packing()
             if not check and profile is not None:
-                folds = chosen_folds(recording, profile)
-                if folds:
-                    recording = apply_folds(recording, folds)
-                fused = graph_fusions(recording, profile)
-                if fused:
-                    recording = apply_fusion_tunables(
-                        recording, profile, fused, require_device()
-                    )
-                recording, packing = apply_packings(
-                    recording, profile, fused, require_device()
+                recording, fused, packing = apply_profile(
+                    recording, profile, require_device()
                 )
             chosen = plan(
                 require_device(),
@@ -743,6 +735,22 @@ class Graph:
                 raise ValueError(f"{self.name}: no profile {path}")
             profile = Profile.load(path)
         return profile
+
+
+def apply_profile(
+    recording: Recording, profile: Profile, dev
+) -> tuple[Recording, tuple[Fusion, ...], Packing]:
+    """``recording`` as ``profile`` compiles it on ``dev``: its folds applied,
+    its fusions and their steps' tunables, and its packings.
+    """
+    folds = chosen_folds(recording, profile)
+    if folds:
+        recording = apply_folds(recording, folds)
+    fused = graph_fusions(recording, profile)
+    if fused:
+        recording = apply_fusion_tunables(recording, profile, fused, dev)
+    recording, packing = apply_packings(recording, profile, fused, dev)
+    return recording, fused, packing
 
 
 class CompiledGraph:
