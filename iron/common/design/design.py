@@ -225,7 +225,11 @@ class BuiltArray:
         """The scratchpad words this design's cores read: beside its ``array_key``,
         all its array depends on. Read off the design built anew and resolved alone,
         since a core reads a word through the parameter its function closes over.
+        An xclbin has no scratchpad: its values are dispatch-time scalars, which
+        resolving it alone would bind, leaving none for its own sequence.
         """
+        if not self.design.full_elf:
+            return frozenset()
         alone = BuiltArray(self.design, self._words, self._dispatch)
         module = alone.program().resolve_program()
         words: set[str] = set()

@@ -12,7 +12,7 @@ import functools
 import hashlib
 import inspect
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -131,43 +131,47 @@ class Link:
     configuration: CompilableDesign | None
     name: str
     kernel: NPUKernel
+    # A fused design's dispatch parameter -> the per-call symbol the host
+    # writes it under; any other parameter is its symbol.
+    symbols: Mapping[str, str] = field(default_factory=dict)
 
 
 class FusedDesign:
     """A fusion's steps as one design (``fused_configuration``): each member's
     array, fed where an edge feeds it on-chip, and one sequence, compiled as
     one xclbin, dispatched once with every member's per-call values as
-    dispatch-time scalars.
+    dispatch-time scalars, each member's its own (``symbols``) where two
+    members of one design share a symbol.
     """
 
     def __init__(self, fusion: Fusion, ops: Sequence[Operator]):
+        # A member that runs another configuration's xclbin alone builds its
+        # own array here, as a full ELF builds it.
         foreign = [
             op
             for op in ops
-            if op.external is not None or op.xclbin_operator() is not op
+            if op.external is not None or op.exported_design() is not None
         ]
         if foreign:
             raise ValueError(
                 f"{fusion.kind.value} fusion: "
-                f"{[type(op).__name__ for op in foreign]} ships or shares another "
-                f"operator's xclbin, which a fusion cannot build into one"
+                f"{[type(op).__name__ for op in foreign]} ships its xclbin or is "
+                f"exported by another tool, which a fusion cannot build into one"
             )
         self.fusion = fusion
         self.designs = [OperatorDesign(op, full_elf=False) for op in ops]
+        # A dispatch parameter is bound by one runtime, so each member takes its
+        # own, named by its place in the fusion, written from the shared symbol.
+        self.symbols: dict[str, str] = {}
         dtypes: dict[str, object] = {}
-        for design in self.designs:
+        for pos, design in enumerate(self.designs):
             for v in design.op.values:
-                seen = dtypes.setdefault(v.symbol, v.dtype)
-                if seen != v.dtype:
-                    raise ValueError(
-                        f"{type(design.op).__name__}.{v.name}: per-call value "
-                        f"{v.symbol!r} is {seen} in one fusion member and "
-                        f"{v.dtype} in another"
-                    )
+                self.symbols[f"{v.symbol}_{pos}"] = v.symbol
+                dtypes[f"{v.symbol}_{pos}"] = v.dtype
         P = inspect.Parameter
         params = [
-            P(symbol, P.KEYWORD_ONLY, annotation=DispatchTime[dtype])
-            for symbol, dtype in dtypes.items()
+            P(name, P.KEYWORD_ONLY, annotation=DispatchTime[dtype])
+            for name, dtype in dtypes.items()
         ]
         keys = [
             P("ops", P.KEYWORD_ONLY, annotation=CompileTime[tuple]),
@@ -186,7 +190,13 @@ class FusedDesign:
         (``fused_configuration``).
         """
         configured, _ = fused_configuration(
-            self.name, self.fusion, self.designs, dispatch=dispatch
+            self.name,
+            self.fusion,
+            self.designs,
+            dispatch=[
+                {v.symbol: dispatch[f"{v.symbol}_{pos}"] for v in design.op.values}
+                for pos, design in enumerate(self.designs)
+            ],
         )
         return Program.compose(
             [configured], entry=configured.runtimes[0]
@@ -356,7 +366,9 @@ class PerStep:
                     self.step_links[i] = links[idx]
                 continue
             design = fused_designs[id(fusion)]
-            base = linked(*chained[id(fusion)], design.name)
+            base = replace(
+                linked(*chained[id(fusion)], design.name), symbols=design.symbols
+            )
             self.step_links[i] = base
             for j in fusion.steps:
                 # Shares the fused xclbin (kernel, design, configuration);

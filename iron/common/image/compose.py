@@ -178,24 +178,26 @@ def fused_configuration(
     fusion: Fusion,
     designs: Sequence[OperatorDesign],
     words: Mapping[str, str] | None = None,
-    dispatch: Mapping[str, object] | None = None,
+    dispatch: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[DeviceConfiguration, list[BuiltArray]]:
     """``fusion``'s members, ``designs`` in its step order, as one device
     configuration ``name`` and their arrays: each array fed where an edge
     feeds it (staged through memtiles in a staged fusion), and one sequence
     running every member, in one task group, or back to back in a merge.
+    On an xclbin, ``dispatch`` is each member's dispatch-time scalars.
     """
     incoming: dict[int, list[Edge]] = {}
     for e in fusion.edges:
         incoming.setdefault(e.consumer, []).append(e)
     arrays: dict[int, BuiltArray] = {}
-    for design, j in zip(designs, fusion.steps, strict=True):
+    scalars = [None] * len(designs) if dispatch is None else dispatch
+    for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
         fed = {}
         for e in incoming.get(j, ()):
             (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
             fed[e.input] = source
         arrays[j] = BuiltArray(
-            design, words, dispatch, fed=fed, staged=fusion.kind is FusionKind.STAGED
+            design, words, own, fed=fed, staged=fusion.kind is FusionKind.STAGED
         )
     configured = configuration(
         name,

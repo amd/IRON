@@ -600,8 +600,9 @@ class PerStepCallable(ImageCallable):
         # steps are one dispatch, over every member's buffers but the ones
         # an edge feeds on-chip (fed_edges), in fusion order.
         self._steps = []
-        # The step each dispatch starts at.
+        # The step each dispatch starts at, and its link.
         self._starts: list[int] = []
+        self._links = []
         starts = {fusion.steps[0]: fusion for fusion in seq.fusions}
         i, n = 0, len(seq.steps)
         while i < n:
@@ -611,6 +612,7 @@ class PerStepCallable(ImageCallable):
                 link = seq.packaging.step_links[i]
                 self._steps.append((step.op, link.kernel, step.buffers, []))
                 self._starts.append(i)
+                self._links.append(link)
                 i += 1
                 continue
             fed_edges = {(e.producer, e.output) for e in fusion.edges} | {
@@ -625,6 +627,7 @@ class PerStepCallable(ImageCallable):
             link = seq.packaging.step_links[i]
             self._steps.append((seq.steps[fusion.steps[0]].op, link.kernel, refs, []))
             self._starts.append(i)
+            self._links.append(link)
             i = fusion.steps[-1] + 1
         self._follow_arena()
         self._bind_steps()
@@ -719,9 +722,13 @@ class PerStepCallable(ImageCallable):
                 )
             if checked:
                 inputs, expected = self._reference(step_op, args)
+            symbols = self._links[index].symbols
             kernel(
                 *args,
-                **{name: self.dispatch_values[name] for name in kernel.dispatch_params},
+                **{
+                    name: self.dispatch_values[symbols.get(name, name)]
+                    for name in kernel.dispatch_params
+                },
             )
             if checked:
                 written = {

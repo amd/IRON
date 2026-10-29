@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
@@ -37,17 +38,19 @@ from iron.applications.llama import Llama
 from iron.common.graph.fusion import candidates
 from iron.common.graph.record import Recording
 from iron.common.image.callable import PerStepCallable
-from iron.common.image.link import PerStep
+from iron.common.image.link import FusedDesign, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
 from iron.common.testing import vectors
 from iron.lm.testing import require
+from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 from iron.tests.support import sequences
 from iron.tests.support.graphs import Chain
+from iron.tests.support.llama_model import llama_1b
 
 LLAMA_1B_WEIGHTS = Path("/scratch/ehunhoff/iron-next/weights-220/llama3.2-1b")
 
@@ -273,6 +276,111 @@ def test_three_step_fusion_matches_reference_and_unfused(npu2):
     verdict = compare(out, y_ref, tol)
     assert verdict, verdict.detail
     assert np.array_equal(out.view(np.uint16), baseline.view(np.uint16))
+
+
+# A pack of two Copies of one design, each writing its own row into its own
+# buffer at one per-call offset: Llama decode's K- and V-cache writes.
+ROW, SLOTS = 64, 4
+
+
+def _cache_write():
+    write = Copy(
+        input_buffer_size=ROW,
+        src=TensorAccessPattern((ROW,), 0, [1, 1, 1, ROW], [0, 0, 0, 1]),
+        output_buffer_size=SLOTS * ROW,
+        dst=TensorAccessPattern((SLOTS * ROW,), 0, [1, 1, 1, ROW], [0, 0, 0, 1]),
+        dtype=np.int32,
+    )
+    write.use_value("out_offset")
+    return write
+
+
+def _cache_writes_recording(name, k, v):
+    steps = sequences.steps((k, "xk", "ck"), (v, "xv", "cv"))
+    return Recording.of_steps(name, steps, ["xk", "xv"], ["ck", "cv"])
+
+
+def test_packed_members_of_one_design_take_their_own_dispatch_parameters(npu2):
+    """Two Copies of one design share their per-call symbol, as one graph
+    value drives both; a fused xclbin binds a dispatch parameter in one
+    runtime, so each member takes its own, written from that symbol.
+    """
+    k, v = _cache_write().resolved(), _cache_write().resolved()
+    (symbol,) = {val.symbol for op in (k, v) for val in op.values}
+    design = FusedDesign(Fusion(FusionKind.PACK, (0, 1)), [k, v])
+    assert design.symbols == {f"{symbol}_0": symbol, f"{symbol}_1": symbol}
+    design.module(**{name: 0 for name in design.symbols})
+
+
+def test_a_pack_of_projections_on_a_shared_xclbin_builds_per_step(npu2):
+    """Llama 1B's prompt q/k/v projections (flm.ProjectionGEMM) each run
+    their configuration's xclbin alone; packed, the fused design builds each
+    one's own array, as a full ELF does.
+    """
+    model = llama_1b(num_hidden_layers=1)
+    prompt = model.record(**model.shapes()[1])
+    pack = next(
+        f
+        for f in candidates(prompt, (FusionKind.PACK,))
+        if len(f.steps) == 3
+        and all(type(prompt.steps[i].op).__name__ == "ProjectionGEMM" for i in f.steps)
+    )
+    ops = [prompt.steps[i].op.resolved() for i in pack.steps]
+    assert all(op.xclbin_operator() is not op for op in ops)
+    design = FusedDesign(Fusion(FusionKind.PACK, (0, 1, 2)), ops)
+    design.module(**{name: 0 for name in design.symbols})
+
+
+@pytest.mark.supported_devices("npu2")
+def test_packed_cache_writes_match_reference_and_unfused(npu2):
+    """The pack of two cache writes, one per-step dispatch, lands each row in
+    its own buffer's slot at every offset, bit-equal to the writes apart."""
+
+    def build(fusions):
+        k, v = _cache_write(), _cache_write()
+        image = Image(
+            _cache_writes_recording("perstep_cache_writes", k, v),
+            PerStep(),
+            fusions=fusions,
+        )
+        image.compile()
+        return image.get_callable(), k.resolved()
+
+    packed_run, k = build((Fusion(FusionKind.PACK, (0, 1)),))
+    plain_run, _ = build(())
+    (symbol,) = {val.symbol for val in k.values}
+    rng = np.random.default_rng(5)
+    expected = {
+        name: np.full((SLOTS, ROW), -1, dtype=np.int32) for name in ("ck", "cv")
+    }
+    for run in (packed_run, plain_run):
+        for name in ("ck", "cv"):
+            run.get_buffer(BufferRef(name)).numpy_view()[:] = -1
+            run.get_buffer(BufferRef(name)).to("npu")
+    for slot in (2, 0, 3):
+        rows = {
+            "xk": rng.integers(-(2**31), 2**31 - 1, ROW, dtype=np.int32),
+            "xv": rng.integers(-(2**31), 2**31 - 1, ROW, dtype=np.int32),
+        }
+        expected["ck"][slot], expected["cv"][slot] = rows["xk"], rows["xv"]
+        got = []
+        for run in (packed_run, plain_run):
+            for name, row in rows.items():
+                run.get_buffer(BufferRef(name)).numpy_view()[:ROW] = row
+            run.write_values({symbol: np.int32(slot * ROW)})
+            run()
+            got.append(
+                {
+                    name: run.get_buffer(BufferRef(name)).numpy()[: SLOTS * ROW]
+                    for name in ("ck", "cv")
+                }
+            )
+        packed, plain = got
+        for name in ("ck", "cv"):
+            assert np.array_equal(
+                packed[name].reshape(SLOTS, ROW), expected[name]
+            ), f"slot {slot}: {name} holds the wrong rows"
+            assert np.array_equal(packed[name], plain[name]), f"{name} differs apart"
 
 
 # ---------------------------------------------------------------------------
