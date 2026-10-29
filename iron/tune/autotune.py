@@ -118,13 +118,16 @@ class Timed:
     def op_values(
         self, op: Operator, values: Mapping[str, int] | None = None
     ) -> dict[str, int]:
-        """The per-call values ``op`` is written in this call, or at the
-        graph's ``values``, by member name.
+        """The per-call values ``op`` is written in this call, ``values``
+        (a point's) over the graph's own, by member name: a point need only
+        give what it moves from the call's, not every value an op's binding
+        might read.
         """
         # A table's address the graph fills in; a word step alone reads none.
         values = {
             **dict.fromkeys(self.recording.addresses, 0),
-            **(self.values if values is None else values),
+            **self.values,
+            **(values or {}),
         }
         return {
             b.member.name: b.expression.evaluate(values)
@@ -501,6 +504,35 @@ def _judged(
     return judge(default, op, run.inputs(), run.written(), values)
 
 
+def replacing(
+    profile: Profile | None, found: Sequence[Shape]
+) -> tuple[
+    Profile, dict[Hashable, list[Mapping[str, Any]]], dict[Hashable, dict[str, Any]]
+]:
+    """``profile``'s entries covering none of ``found``'s shapes, copied into
+    a fresh ``Profile``; by shape key, what covered it (``covering``, for
+    ``Shape.named``) and what it already gave (``held``, kept where a new
+    entry for it does not move it, as GEMM's ``tile_k`` below ``HIGHEST``):
+    what to rebuild a profile from before writing a shape's own new tunables
+    (``autotune``, ``price_fusions``).
+    """
+    covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
+    held: dict[Hashable, dict[str, Any]] = {s.key: {} for s in found}
+    out = Profile()
+    for cls, matched, tunables in profile or ():
+        covered = [
+            s
+            for s in found
+            if issubclass(s.cls, cls) and Profile.matches(matched, s.dims)
+        ]
+        for s in covered:
+            covering[s.key].append(matched)
+            held[s.key].update(tunables)
+        if not covered:
+            out.add(cls, **matched, **tunables)
+    return out, covering, held
+
+
 def autotune(
     calls: Sequence[Timed],
     dev,
@@ -530,22 +562,7 @@ def autotune(
             ``cycles`` are timed at; None times every setting.
     """
     found = shapes(calls, dev)
-    covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
-    # What the covering entries set that the search does not move, as
-    # GEMM's tile_k below HIGHEST.
-    held: dict[Hashable, dict[str, Any]] = {s.key: {} for s in found}
-    out = Profile()
-    for cls, matched, tunables in profile or ():
-        covered = [
-            s
-            for s in found
-            if issubclass(s.cls, cls) and Profile.matches(matched, s.dims)
-        ]
-        for s in covered:
-            covering[s.key].append(matched)
-            held[s.key].update(tunables)
-        if not covered:
-            out.add(cls, **matched, **tunables)
+    out, covering, held = replacing(profile, found)
     for i, shape in enumerate(found):
         log(f"[{i + 1}/{len(found)}] {shape}")
         tried = time_shape(

@@ -511,19 +511,31 @@ class Cache:
         values: Sequence[Mapping[str, int]] | None = None,
         inputs: Sequence[Mapping[str, np.ndarray]] | None = None,
         full_elf: bool = True,
+        kind: FusionKind = FusionKind.STREAM,
+        fused: Sequence[Operator] | None = None,
     ) -> str:
         """The entry a fusion of ``steps`` wired by ``edges`` (local indices)
         is kept in as each operator, resolved for the current device, is run
         at its own values on its own inputs, packaged as one full ELF or
         not: every step's build and the wiring, so an existing operator
-        figure's key (``Cache.key``) is untouched.
+        figure's key (``Cache.key``) is untouched. ``fused``, where it
+        differs from ``steps`` (a joint narrowing search's on-chip
+        combination), is part of the key too, so a narrower setting prices
+        apart from the fusion at its members' own.
         """
         designs = [OperatorDesign(op.resolved()).compilable() for op in steps]
         values = values or [{}] * len(steps)
         inputs = inputs or [{}] * len(steps)
+        fused_designs = (
+            ()
+            if fused is None
+            else [OperatorDesign(op.resolved()).compilable() for op in fused]
+        )
         key = (
             tuple((d.recipe_hash, d.artifact_hash) for d in designs),
+            tuple((d.recipe_hash, d.artifact_hash) for d in fused_designs),
             tuple(edges),
+            kind.value,
             tuple(sorted(v.items()) for v in values),
             tuple(_hashed(i) for i in inputs),
             full_elf,
@@ -717,6 +729,20 @@ def _digest(written: Mapping[str, np.ndarray]) -> str:
     return h.hexdigest()
 
 
+def written_steps(run: Standalone) -> dict[str, np.ndarray]:
+    """Every host-visible output ``run``'s steps wrote (``Standalone
+    .written``, which already leaves out an on-chip one), keyed by step
+    index and buffer name so two steps' same-named output does not collide:
+    what a rewrite's output is judged by, however many final steps it has
+    (a fan-out's several, a fold's one in place of many).
+    """
+    return {
+        f"{k}.{name}": v
+        for k in range(len(run.steps))
+        for name, v in run.written(k).items()
+    }
+
+
 def measure_rewrite(
     as_recorded: Callable[[str, int], Standalone],
     rewritten: Callable[[str, int], Standalone],
@@ -807,15 +833,17 @@ def measure_rewrite(
 _SPACER_SIZES = (1024, 2048, 4096, 8192, 16384)
 
 
-def _spacer(steps: Sequence[Operator]) -> ElementwiseAdd:
-    """An operator of a design distinct from ``steps``, to split a many-repeat
-    probe's repeats apart (``measure_fusion``): spliced between them, it
-    makes each configure on entry as it would beside another design in a
-    model's image, rather than merging with the repeat before it. Its own
-    cost is the same whichever side of a fusion's price it is spliced into,
-    so it cancels in the difference.
+def _spacer(
+    steps: Sequence[Operator], fused: Sequence[Operator] = ()
+) -> ElementwiseAdd:
+    """An operator of a design distinct from ``steps`` or ``fused``, to split
+    a many-repeat probe's repeats apart (``measure_fusion``): spliced
+    between them, it makes each configure on entry as it would beside
+    another design in a model's image, rather than merging with the repeat
+    before it. Its own cost is the same whichever side of a fusion's price
+    it is spliced into, so it cancels in the difference.
     """
-    taken = {OperatorDesign(op.resolved()).identity for op in steps}
+    taken = {OperatorDesign(op.resolved()).identity for op in (*steps, *fused)}
     for size in _SPACER_SIZES:
         spacer = ElementwiseAdd(size=size, tile_size=128, num_aie_columns=1).resolved(
             require_device()
@@ -823,6 +851,22 @@ def _spacer(steps: Sequence[Operator]) -> ElementwiseAdd:
         if OperatorDesign(spacer).identity not in taken:
             return spacer
     raise RuntimeError("no cheap spacer design distinct from the fusion's own steps")
+
+
+def repeat_fusion(
+    kind: FusionKind, base: int, n: int, edges: Sequence[tuple[int, str, int, str]]
+) -> Fusion:
+    """The ``Fusion`` one repeat of a fused probe wires, at step index
+    ``base`` through ``base + n - 1``: ``edges`` kept for any kind that
+    takes them (``Fusion`` itself refuses any for ``PACK`` or ``MERGE``), so
+    a fan-out's several edges, or a staged one, stay wired the way
+    ``candidates`` found them.
+    """
+    return Fusion(
+        kind,
+        tuple(base + i for i in range(n)),
+        tuple(Edge(base + p, out, base + c, inp) for p, out, c, inp in edges),
+    )
 
 
 def measure_fusion(
@@ -836,19 +880,17 @@ def measure_fusion(
     inputs: Sequence[Mapping[str, np.ndarray]] | None = None,
     cache: Cache | None = None,
     remeasure: bool = False,
+    kind: FusionKind = FusionKind.STREAM,
+    fused_steps: Sequence[Operator] | None = None,
     log: Callable[[str], None] = print,
 ) -> FusionMeasurement:
-    """Time a stream fusion of ``steps`` wired by ``edges`` (local indices,
-    ``producer``'s drained output into ``consumer``'s filled input) against
-    the same steps run apart, each edge's buffer a normal host round trip
-    instead (``measure_rewrite``). A fusion whose last step's output is not
+    """Time a ``kind`` fusion of ``steps`` (``STREAM`` and ``STAGED`` wired
+    by ``edges``, local indices, ``producer``'s drained output into
+    ``consumer``'s filled input, one or more; ``PACK`` or ``MERGE`` take
+    none) against the same steps run apart, an edge a normal host round
+    trip instead (``measure_rewrite``). A fusion whose host-visible outputs
+    (``written_steps``, every step's, a fan-out's several) are not
     bit-identical to the steps run apart is refused.
-
-    A many-repeat probe splices a cheap spacer of another design
-    (``_spacer``) between its repeats on both sides, so a repeat configures
-    on entry as its design does beside another in a model's image, rather
-    than an unfused repeat's two designs costing a configure each while a
-    bare run of the fused one shares a single configure across every repeat.
 
     Args:
         values: Each of ``steps``' per-call values, in its order.
@@ -856,46 +898,54 @@ def measure_fusion(
             random bytes would not be representative.
         cache: The fusion's figure is taken from it rather than run, unless
             `remeasure`; what is run is written to it.
+        fused_steps: The same steps at another setting (a joint narrowing
+            search's candidate, narrower columns so they co-reside) to run
+            fused on-chip, priced against ``steps`` run apart at their own;
+            defaults to ``steps`` themselves.
+
+    A many-repeat probe splices a cheap spacer of another design
+    (``_spacer``) between its repeats on both sides, so a repeat configures
+    on entry as its design does beside another in a model's image, rather
+    than an unfused repeat's two designs costing a configure each while a
+    bare run of the fused one shares a single configure across every repeat.
     """
     mode = pmode()
     if cache is not None and cache.mode != mode:
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
     n = len(steps)
+    fused_steps = list(fused_steps) if fused_steps is not None else list(steps)
+    if len(fused_steps) != n:
+        raise ValueError(f"fused_steps has {len(fused_steps)} steps, steps has {n}")
     values = list(values) if values is not None else [{}] * n
     inputs = list(inputs) if inputs is not None else [{}] * n
     key = None
     if cache is not None:
-        key = Cache.fusion_key(steps, edges, values, inputs, full_elf)
+        key = Cache.fusion_key(
+            steps, edges, values, inputs, full_elf, kind=kind, fused=fused_steps
+        )
         if not remeasure:
             cached = cache.get_fusion(key)
             if cached is not None:
                 return cached
-    spacer = _spacer(steps)
-    op_values = {**dict(zip(steps, values)), spacer: {"valid": spacer.size}}
-    op_inputs = dict(zip(steps, inputs))
+    spacer = _spacer(steps, fused_steps)
 
     def build(name: str, reps: int, fuse: bool) -> Standalone:
+        bsteps = fused_steps if fuse else steps
+        bvalues = {**dict(zip(bsteps, values)), spacer: {"valid": spacer.size}}
+        binputs = dict(zip(bsteps, inputs))
         runlist: list[Operator] = []
         fusions = []
         for r in range(reps):
             base = len(runlist)
-            runlist.extend(steps)
-            fusions.append(
-                Fusion(
-                    FusionKind.STREAM,
-                    tuple(base + i for i in range(n)),
-                    tuple(
-                        Edge(base + p, out, base + c, inp) for p, out, c, inp in edges
-                    ),
-                )
-            )
+            runlist.extend(bsteps)
+            fusions.append(repeat_fusion(kind, base, n, edges))
             if r < reps - 1:
                 runlist.append(spacer)
         return Standalone(
             name,
             runlist,
-            values=op_values,
-            inputs=op_inputs,
+            values=bvalues,
+            inputs=binputs,
             fusions=fusions,
             fuse=fuse,
             full_elf=full_elf,
@@ -905,7 +955,7 @@ def measure_fusion(
     apart_m, fused_m, refused = measure_rewrite(
         lambda name, reps: build(f"un{name}", reps, False),
         lambda name, reps: build(f"fuse_{name}", reps, True),
-        lambda run: run.written(n - 1),
+        written_steps,
         timing=timing,
         repeats=repeats,
         mode=mode,
