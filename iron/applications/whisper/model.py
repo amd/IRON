@@ -15,6 +15,7 @@ log-mel features from them (``iron.lm.LogMel``, Whisper's), a zero row
 before them as its convolutions' padding.
 """
 
+import argparse
 import dataclasses
 import functools
 import json
@@ -46,7 +47,10 @@ from iron.lm import (
     subtree,
 )
 from iron.lm.checkpoint import leaves, nest
+from iron.lm.cli import parse_args
 from iron.operators.copy import Copy
+
+from .audio import load_wav
 
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.
 BLOCK = 64
@@ -498,3 +502,75 @@ class Whisper(EncoderDecoder):
         else:
             rows = Copy.step(table[call.position]).reshape(1, c.hidden_size)
         return x + rows
+
+    def transcribe(
+        self,
+        audio,
+        *,
+        language: str = "en",
+        task: str = "transcribe",
+        max_tokens: int = 224,
+    ) -> tuple[list[int], str]:
+        """One window's transcript of ``audio``, 16 kHz mono float32 samples
+        no longer than the checkpoint's own clip (30 s at large-v3-turbo's):
+        its generated token ids, greedy, and their decoded text.
+
+        Raises:
+            ValueError: ``audio`` is longer than one window: long-form audio
+                needs timestamp-aware decoding, ``transcribe_long`` (not yet
+                built).
+        """
+        c = self.config.encoder()
+        if audio.size > c.samples:
+            raise ValueError(
+                f"{audio.size / c.sample_rate:.1f} s is longer than one "
+                f"{c.samples / c.sample_rate:.0f} s window; long-form audio "
+                "needs timestamp-aware decoding (transcribe_long), not yet built"
+            )
+        self.encode(audio)
+        prompt = self.prompt_tokens(language=language, task=task)
+        generated = self.generate(prompt, max_tokens=max_tokens)
+        # Every text token is below the first special token after it
+        # (<|endoftext|>, the lowest of self.eos); suppressed on the device,
+        # a stray one would still decode to nothing a listener reads as text.
+        boundary = min(self.eos)
+        text = self.tokenizer.decode([t for t in generated if t < boundary]).strip()
+        return generated, text
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Transcribe 16 kHz mono PCM16 audio with Whisper on the NPU."
+    )
+    parser.add_argument(
+        "path",
+        help="a directory holding config.json, the checkpoint and the "
+        "tokenizer, or a Hugging Face repository's id",
+    )
+    parser.add_argument(
+        "--wav", required=True, type=Path, help="the audio to transcribe"
+    )
+    parser.add_argument("--language", default="en", help="the audio's language code")
+    parser.add_argument(
+        "--task", default="transcribe", choices=["transcribe", "translate"]
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=224, help="generated tokens per window"
+    )
+    args = parse_args(parser)
+
+    model = Whisper.load(args.path)
+    audio = load_wav(args.wav)
+    generated, text = model.transcribe(
+        audio, language=args.language, task=args.task, max_tokens=args.max_tokens
+    )
+    print(f"Token IDs: {generated}")
+    print(f"Text: {text}")
+    stats = model.stats
+    assert stats is not None, "set once the last token is drawn"
+    print(f"Time to first token: {stats.ttft:.3f} s")
+    print(f"Tokens per second:   {stats.tokens_per_s:.3f}")
+
+
+if __name__ == "__main__":
+    main()
