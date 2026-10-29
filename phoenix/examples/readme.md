@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_10_29_05_37_55` at commit `e51452d`.
+Tested on `2026_10_29_18_33_45` at commit `169ae38`.
 
 <details>
 <summary>tests/applications/embedding_gemma2</summary>
