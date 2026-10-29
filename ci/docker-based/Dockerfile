@@ -18,8 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev libboost-dev libboost-filesystem-dev libboost-program-options-dev uuid-dev \
     # Required by MHA kernel
     llvm-18 \
-    # graphviz provides the `dot` binary iron.common.graph.visualize renders with.
-    graphviz \
     # FastFlowLM, which iron/operators/flm/gemma4_engine builds. Its tokenizers
     # need rustc 1.80 or newer; Ubuntu's default rustc is 1.75.
     cmake pkg-config cargo-1.85 rustc-1.85 libdrm-dev \

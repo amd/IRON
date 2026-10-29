@@ -22,7 +22,6 @@ from ..declare.operator import graph_recorder
 from ..declare.profile import Profile
 from ..image.packaging import Kind
 from ..image.step import BufferRef, SequenceStep
-from .visualize import dot
 from .handle import (
     Dense,
     Gather,
@@ -313,10 +312,6 @@ class Recording:
         }
         found.update((h.name, key) for key, (_, h) in self.states.items())
         return found
-
-    def dot(self) -> str:
-        """This graph drawn as Graphviz text (``visualize.dot``)."""
-        return dot(self)
 
     def check_limits(self, values: Mapping[str, int]) -> None:
         """Raise ``IndexError`` if ``values`` index or bound a view outside it."""
