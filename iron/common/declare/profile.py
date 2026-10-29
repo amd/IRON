@@ -15,16 +15,35 @@ from dataclasses import MISSING
 from enum import Enum
 from types import FunctionType
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Mapping, TypeVar
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence, TypeVar
+
+from ..image.step import FusionKind
 
 if TYPE_CHECKING:
     from .operator import Operator
 
 _Op = TypeVar("_Op", bound="Operator")
 
-# A chain entry: fuse ``producer``'s output into ``consumer``'s ``input``,
-# each matched on its own dims (``Profile.dims``, ``Profile.matches``).
-_ChainEntry = tuple[type, dict[str, Any], type, dict[str, Any], str]
+# A fusion entry: ``kind`` steps, each ``(operator class, dims)`` in order,
+# wired by ``edges`` (local indices into ``steps``, ``(producer, output,
+# consumer, input)``); dims are matched the same way a tunable entry's are
+# (``Profile.dims``, ``Profile.matches``).
+_FusionEntry = tuple[
+    FusionKind,
+    tuple[tuple[type, dict[str, Any]], ...],
+    tuple[tuple[int, str, int, str], ...],
+]
+
+
+def _with_enum_fields(cls: type, fields: dict[str, Any]) -> dict[str, Any]:
+    """``fields`` with an Enum-domain one, JSON's string, its member (should
+    `1`: a `Pinned` member's own value, not its ordinal).
+    """
+    for key, param in cls.declaration.params.items():
+        domain = param.domain
+        if key in fields and isinstance(domain, type) and issubclass(domain, Enum):
+            fields[key] = domain(fields[key])
+    return fields
 
 
 class Profile:
@@ -32,14 +51,14 @@ class Profile:
     open tunable comes from the most specific match (a dimension left out matches
     any, a subclass its base's); equally specific ones that disagree raise.
 
-    ``chains`` names producer -> consumer edges to run fused on-chip, each
-    matched the same way, by class and dims alone (no tunable, since a chain
-    is not a value).
+    ``fusions`` names steps to run fused as one device configuration, each
+    matched the same way, by class and dims alone (no tunable, since a
+    fusion is not a value).
     """
 
     def __init__(self) -> None:
         self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
-        self._chains: list[_ChainEntry] = []
+        self._fusions: list[_FusionEntry] = []
 
     def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
         """``cls(**kwargs)``, its open tunables filled from this profile's
@@ -80,27 +99,30 @@ class Profile:
             raise TypeError(f"an entry for {cls.__name__} must give a tunable")
         self._entries.append((cls, dims, tunables))
 
-    def add_chain(
+    def add_fusion(
         self,
-        producer: type,
-        consumer: type,
-        input: str,
-        *,
-        producer_dims: Mapping[str, Any] | None = None,
-        consumer_dims: Mapping[str, Any] | None = None,
+        kind: FusionKind,
+        steps: Sequence[tuple[type, Mapping[str, Any] | None]],
+        edges: Sequence[tuple[int, str, int, str]],
     ) -> None:
-        """Add a chain entry: fuse ``producer``'s output into ``consumer``'s
-        ``input`` on-chip, where each matches (a dim left out matches any,
-        a subclass its base's, as a tunable entry does).
+        """Add a fusion entry: ``kind`` steps (each ``(operator class, dims)``,
+        in order) run as one device configuration, wired by ``edges`` (local
+        indices into ``steps``, ``producer``'s drained ``output`` into
+        ``consumer``'s filled ``input``); each step matches by class and dims
+        (a dim left out matches any, a subclass its base's, as a tunable
+        entry does).
 
         Raises:
-            TypeError: A dim is not a non-tunable ``param()`` of its class, or
-                ``consumer`` declares no input ``input``.
+            TypeError: Fewer than two steps are given, a dim is not a
+                non-tunable ``param()`` of its class, an edge names a step
+                out of range or itself, or either side of an edge declares
+                no such operand.
         """
-        producer_dims, consumer_dims = dict(producer_dims or {}), dict(
-            consumer_dims or {}
-        )
-        for cls, dims in ((producer, producer_dims), (consumer, consumer_dims)):
+        if len(steps) < 2:
+            raise TypeError("a fusion entry needs at least two steps")
+        resolved: list[tuple[type, dict[str, Any]]] = []
+        for cls, dims in steps:
+            dims = dict(dims or {})
             unknown = [
                 name
                 for name in dims
@@ -109,30 +131,52 @@ class Profile:
             ]
             if unknown:
                 raise TypeError(f"{cls.__name__} declares no dim {unknown}")
-        if not any(m.name == input and m.fills for m in consumer.declaration.operands):
-            raise TypeError(f"{consumer.__name__} declares no input {input!r}")
-        self._chains.append((producer, producer_dims, consumer, consumer_dims, input))
+            resolved.append((cls, dims))
+        for producer, output, consumer, input in edges:
+            if not 0 <= producer < len(steps) or not 0 <= consumer < len(steps):
+                raise TypeError(
+                    f"edge names step {(producer, consumer)}, outside "
+                    f"0..{len(steps) - 1}"
+                )
+            if producer == consumer:
+                raise TypeError("an edge cannot feed a step from itself")
+            p_cls, c_cls = steps[producer][0], steps[consumer][0]
+            if not any(
+                m.name == output and m.drains for m in p_cls.declaration.operands
+            ):
+                raise TypeError(f"{p_cls.__name__} declares no output {output!r}")
+            if not any(m.name == input and m.fills for m in c_cls.declaration.operands):
+                raise TypeError(f"{c_cls.__name__} declares no input {input!r}")
+        self._fusions.append((kind, tuple(resolved), tuple(edges)))
 
-    def chained(self, producer: Operator, consumer: Operator, input: str) -> bool:
-        """Whether this profile's chains fuse ``producer``'s output into
-        ``consumer``'s ``input``: a chain entry whose producer and consumer
-        classes and dims (``Profile.dims``, ``Profile.matches``) match them.
+    def fused(
+        self,
+        kind: FusionKind,
+        steps: Sequence[Operator],
+        edges: Sequence[tuple[int, str, int, str]],
+    ) -> bool:
+        """Whether this profile fuses ``steps`` (resolved operators, in
+        order) of ``kind``, wired by ``edges`` (local indices): a fusion
+        entry of the same kind, length and wiring whose steps' classes and
+        dims (``Profile.dims``, ``Profile.matches``) match them, in order.
         """
-        p_dims = self.dims(type(producer), vars(producer))
-        c_dims = self.dims(type(consumer), vars(consumer))
+        step_dims = [self.dims(type(s), vars(s)) for s in steps]
+        edges = tuple(edges)
         return any(
-            input == entry_input
-            and isinstance(producer, p_cls)
-            and isinstance(consumer, c_cls)
-            and self.matches(p_entry, p_dims)
-            and self.matches(c_entry, c_dims)
-            for p_cls, p_entry, c_cls, c_entry, entry_input in self._chains
+            entry_kind is kind
+            and len(entry_steps) == len(steps)
+            and entry_edges == edges
+            and all(
+                isinstance(s, cls) and self.matches(matched, dims)
+                for s, (cls, matched), dims in zip(steps, entry_steps, step_dims)
+            )
+            for entry_kind, entry_steps, entry_edges in self._fusions
         )
 
-    def chains(self) -> list[_ChainEntry]:
-        """Each chain entry as ``(producer, producer_dims, consumer,
-        consumer_dims, input)``, in the order added."""
-        return list(self._chains)
+    def fusions(self) -> list[_FusionEntry]:
+        """Each fusion entry as ``(kind, steps, edges)``, ``steps`` each
+        ``(operator class, dims)``, in the order added."""
+        return list(self._fusions)
 
     def tunables_for(self, cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
         """The tunables for the ``cls`` a call with ``given`` keywords makes,
@@ -189,7 +233,7 @@ class Profile:
             data = json.load(f)
         if not isinstance(data, dict) or not {"entries"} <= set(data) <= {
             "entries",
-            "chains",
+            "fusions",
         }:
             raise ValueError(f"{path}: a profile is {{'entries': [...]}}")
         profile = cls()
@@ -199,46 +243,31 @@ class Profile:
             if name not in CATALOG:
                 raise ValueError(f"{path}: no operator {name!r} in iron.operators")
             op_cls = CATALOG[name]
-            # An Enum-domain tunable is JSON's string, its member's value
-            # (should 1: a Pinned member's own value, not its ordinal).
-            for key, param in op_cls.declaration.params.items():
-                domain = param.domain
-                if (
-                    key in fields
-                    and isinstance(domain, type)
-                    and issubclass(domain, Enum)
-                ):
-                    fields[key] = domain(fields[key])
-            profile.add(op_cls, **fields)
-        for chain in data.get("chains", ()):
-            if set(chain) != {"producer", "consumer", "input"}:
+            profile.add(op_cls, **_with_enum_fields(op_cls, fields))
+        for fusion in data.get("fusions", ()):
+            if set(fusion) != {"kind", "steps", "edges"}:
                 raise ValueError(
-                    f"{path}: a chain is {{'producer': {{...}}, 'consumer': "
-                    f"{{...}}, 'input': ...}}"
+                    f"{path}: a fusion is {{'kind': ..., 'steps': [...], "
+                    f"'edges': [...]}}"
                 )
-            sides = []
-            for side in (chain["producer"], chain["consumer"]):
-                fields = dict(side)
+            steps = []
+            for entry in fusion["steps"]:
+                fields = dict(entry)
                 name = fields.pop("operator")
                 if name not in CATALOG:
                     raise ValueError(f"{path}: no operator {name!r} in iron.operators")
-                sides.append((CATALOG[name], fields))
-            (producer, producer_dims), (consumer, consumer_dims) = sides
-            profile.add_chain(
-                producer,
-                consumer,
-                chain["input"],
-                producer_dims=producer_dims,
-                consumer_dims=consumer_dims,
-            )
+                op_cls = CATALOG[name]
+                steps.append((op_cls, _with_enum_fields(op_cls, fields)))
+            edges = [tuple(e) for e in fusion["edges"]]
+            profile.add_fusion(FusionKind(fusion["kind"]), steps, edges)
         return profile
 
     def save(self, path: str | Path) -> None:
-        """Write the profile as JSON, one entry to a line, then its chains
+        """Write the profile as JSON, one entry to a line, then its fusions
         where there are any.
 
         Raises:
-            ValueError: An entry's or a chain's operator is not in
+            ValueError: An entry's or a fusion step's operator is not in
                 ``iron.operators.CATALOG``.
         """
         from ...operators import CATALOG  # the operators import this module
@@ -250,25 +279,27 @@ class Profile:
                 raise ValueError(f"{cls.__qualname__} is not in iron.operators.CATALOG")
             name = names[cls]
             lines.append(json.dumps({"operator": name, **dims, **tunables}))
-        chain_lines = []
-        for producer, producer_dims, consumer, consumer_dims, input in self._chains:
-            for cls in (producer, consumer):
+        fusion_lines = []
+        for kind, steps, edges in self._fusions:
+            for cls, _ in steps:
                 if cls not in names:
                     raise ValueError(
                         f"{cls.__qualname__} is not in iron.operators.CATALOG"
                     )
-            chain_lines.append(
+            fusion_lines.append(
                 json.dumps(
                     {
-                        "producer": {"operator": names[producer], **producer_dims},
-                        "consumer": {"operator": names[consumer], **consumer_dims},
-                        "input": input,
+                        "kind": kind.value,
+                        "steps": [
+                            {"operator": names[cls], **dims} for cls, dims in steps
+                        ],
+                        "edges": [list(e) for e in edges],
                     }
                 )
             )
         body = '{"entries": [\n  ' + ",\n  ".join(lines) + "\n]"
-        if chain_lines:
-            body += ',\n"chains": [\n  ' + ",\n  ".join(chain_lines) + "\n]"
+        if fusion_lines:
+            body += ',\n"fusions": [\n  ' + ",\n  ".join(fusion_lines) + "\n]"
         with open(path, "w") as f:
             f.write(body + "}\n")
 

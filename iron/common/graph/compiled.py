@@ -41,9 +41,9 @@ from ..image.callable import (
 from ..image.packaging import Kind, Plan, plan, require_device
 from ..image.link import FullELF, PerStep
 from ..image.sequence import Image
-from ..image.step import BufferRef, Chain
+from ..image.step import BufferRef, Fusion
 from .carried import CARRY, EmitSite, attach_emit, compose
-from .chain import chains as graph_chains
+from .fusion import fusions as graph_fusions
 from .handle import Carry, Dense, Handle, State, Weight, is_operand
 from .record import HostStep, Recording, Recorder
 
@@ -562,8 +562,8 @@ class Graph:
             )
             emit, sized = self._emit(recording, chosen, feeds)
             profile = self._profile()
-            chained = (
-                graph_chains(recording, profile)
+            fused = (
+                graph_fusions(recording, profile)
                 if chosen.full_elf and not check and profile is not None
                 else ()
             )
@@ -573,7 +573,7 @@ class Graph:
                 check=check,
                 arena=self._arena,
                 emit=emit,
-                chains=chained,
+                fusions=fused,
             )
             if sized is not None and len(version.parameters) != len(sized):
                 read = {p.name for p in version.parameters}
@@ -742,7 +742,7 @@ class CompiledGraph:
         check: bool = False,
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
-        chains: Sequence[Chain] = (),
+        fusions: Sequence[Fusion] = (),
     ):
         self.recording = recording
         self.plan = plan
@@ -762,7 +762,7 @@ class CompiledGraph:
             else dict(arena=arena.plan, residents=recording.residents)
         )
         self.sequence = Image(
-            recording, packaging, chains=chains, **placement
+            recording, packaging, fusions=fusions, **placement
         ).compile()
         self.image = self.sequence.image
         self.artifacts = self.sequence.artifacts

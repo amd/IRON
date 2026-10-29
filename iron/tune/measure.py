@@ -39,7 +39,7 @@ from iron.common.graph.record import Recording
 from iron.common.image.callable import ImageCallable
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
-from iron.common.image.step import BufferRef, Chain, SequenceStep
+from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind, SequenceStep
 
 
 @dataclasses.dataclass(frozen=True)
@@ -115,13 +115,13 @@ class Standalone:
             would not be representative (a draw row's temperature and top-k).
         load: Write the per-call values now; with `False` the image is built
             and seeded, and `load()` writes them.
-        chains: Edges to feed a consumer step's input from the producer
-            step's output just before it, each a `Chain` whose `producer` is
-            an index into `runlist`: the consumer's named buffer shares the
+        fusions: Edges to feed a consumer step's input from a producer
+            step's output on-chip, each a `Fusion` whose `steps` are indices
+            into `runlist`: a fed consumer's named buffer shares its
             producer's, rather than a name of its own.
-        fuse: `chains` are passed to `Image`, so each streams on-chip. With
+        fuse: `fusions` are passed to `Image`, so each streams on-chip. With
             `False` the shared buffer stays a normal host round trip, the
-            baseline a chain is priced against.
+            baseline a fusion is priced against.
     """
 
     def __init__(
@@ -134,13 +134,11 @@ class Standalone:
         inputs: Mapping[Operator, Mapping[str, np.ndarray]] | None = None,
         full_elf: bool = True,
         load: bool = True,
-        chains: Sequence[Chain] = (),
+        fusions: Sequence[Fusion] = (),
         fuse: bool = True,
     ):
-        if chains and not distinct:
-            raise ValueError(
-                "chained steps need distinct=True: each pair its own buffers"
-            )
+        if fusions and not distinct:
+            raise ValueError("fused steps need distinct=True: each its own buffers")
         self.steps = list(runlist)
         values, inputs = values or {}, inputs or {}
         self._values = {op: dict(values.get(op, {})) for op in self.steps}
@@ -151,10 +149,12 @@ class Standalone:
             k if distinct else firsts[id(op)] for k, op in enumerate(self.steps)
         ]
         self._filled = sorted(set(self._slot))
-        # A chained consumer's input is named for the producer's output: no
+        # A fed consumer's input is named for its producer's output: no
         # buffer of its own, host-visible or not.
         self._shared = {
-            (c.producer + 1, c.input): f"s{c.producer}_{c.output}" for c in chains
+            (e.consumer, e.input): f"s{e.producer}_{e.output}"
+            for fusion in fusions
+            for e in fusion.edges
         }
         self._internal = set(self._shared.values())
         in_names, out_names = [], []
@@ -174,7 +174,7 @@ class Standalone:
         self.sequence = Image(
             Recording.of_steps(name, steps, in_names, out_names),
             packaging,
-            chains=chains if fuse else (),
+            fusions=fusions if fuse else (),
         ).compile()
         self.callable = self.sequence.get_callable()
         rng = np.random.default_rng(seed)
@@ -199,7 +199,7 @@ class Standalone:
         ops = {id(op): op for op in self.steps}.values()
         artifacts = self.sequence.artifacts
         # An extent read only through its derivations has no word in a full
-        # ELF; an xclbin chain has no parameter table, its values dispatch-time.
+        # ELF; an xclbin fusion has no parameter table, its values dispatch-time.
         self._symbols = {
             v.symbol: np.int32(self._value(op, self._values[op], v))
             for op in ops
@@ -279,7 +279,7 @@ class Standalone:
 
     def written(self, k: int = 0) -> dict[str, np.ndarray]:
         """What step ``k`` wrote in the last run, by buffer name: along a
-        bounded axis only the rows under the call's bound; a chained step's
+        bounded axis only the rows under the call's bound; a fused step's
         elided buffer (no host copy once fused) is left out.
         """
         op = self.steps[k]
@@ -421,27 +421,27 @@ class Measurement:
 
 
 @dataclasses.dataclass(frozen=True)
-class ChainMeasurement:
-    """A candidate edge's step, as ``measure_chain`` timed it: the pair fused
-    on-chip against the same pair unchained, its buffer shared through the
-    host instead, timed in one run so their rounds pair.
+class FusionMeasurement:
+    """A candidate fusion's step, as ``measure_fusion`` timed it: its steps
+    fused on-chip against the same steps run apart, each edge's buffer
+    shared through the host instead, timed in one run so their rounds pair.
 
     Attributes:
-        chained: The fused pair's step.
-        unchained: The same pair's, its buffer a normal host round trip.
-        refused: Why the chain may not replace the unchained pair: its
+        fused: The fused steps' step.
+        apart: The same steps', each edge's buffer a normal host round trip.
+        refused: Why the fusion may not replace the steps run apart: its
             output was not bit-identical. None where it may.
     """
 
-    chained: Measurement
-    unchained: Measurement
+    fused: Measurement
+    apart: Measurement
     refused: str | None = None
 
     def difference(self) -> tuple[float, float | None]:
-        """How much longer the chained pair's step takes than the unchained
-        pair's, and that difference's standard error (``Measurement.difference``).
+        """How much longer the fused steps' step takes than run apart, and
+        that difference's standard error (``Measurement.difference``).
         """
-        return self.chained.difference(self.unchained)
+        return self.fused.difference(self.apart)
 
 
 def _hashed(arrays: Mapping[str, np.ndarray] | None) -> list[tuple[str, str]]:
@@ -503,36 +503,27 @@ class Cache:
         return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
 
     @staticmethod
-    def chain_key(
-        producer: Operator,
-        consumer: Operator,
-        output: str,
-        input: str,
-        producer_values: Mapping[str, int] | None = None,
-        consumer_values: Mapping[str, int] | None = None,
-        producer_inputs: Mapping[str, np.ndarray] | None = None,
-        consumer_inputs: Mapping[str, np.ndarray] | None = None,
+    def fusion_key(
+        steps: Sequence[Operator],
+        edges: Sequence[tuple[int, str, int, str]],
+        values: Sequence[Mapping[str, int]] | None = None,
+        inputs: Sequence[Mapping[str, np.ndarray]] | None = None,
         full_elf: bool = True,
     ) -> str:
-        """The entry a ``producer`` -> ``consumer`` edge at ``output`` ->
-        ``input`` is kept in as each operator, resolved for the current
-        device, is run at its own values on its own inputs, packaged as one
-        full ELF or not: both designs' builds and the edge, so an existing
-        operator figure's key (``Cache.key``) is untouched.
+        """The entry a fusion of ``steps`` wired by ``edges`` (local indices)
+        is kept in as each operator, resolved for the current device, is run
+        at its own values on its own inputs, packaged as one full ELF or
+        not: every step's build and the wiring, so an existing operator
+        figure's key (``Cache.key``) is untouched.
         """
-        p_design = OperatorDesign(producer.resolved()).compilable()
-        c_design = OperatorDesign(consumer.resolved()).compilable()
+        designs = [OperatorDesign(op.resolved()).compilable() for op in steps]
+        values = values or [{}] * len(steps)
+        inputs = inputs or [{}] * len(steps)
         key = (
-            p_design.recipe_hash,
-            p_design.artifact_hash,
-            c_design.recipe_hash,
-            c_design.artifact_hash,
-            output,
-            input,
-            sorted((producer_values or {}).items()),
-            sorted((consumer_values or {}).items()),
-            _hashed(producer_inputs),
-            _hashed(consumer_inputs),
+            tuple((d.recipe_hash, d.artifact_hash) for d in designs),
+            tuple(edges),
+            tuple(sorted(v.items()) for v in values),
+            tuple(_hashed(i) for i in inputs),
             full_elf,
         )
         return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
@@ -558,18 +549,18 @@ class Cache:
     def put(self, key: str, m: Measurement) -> None:
         write(self.directory / f"{key}.json", json.dumps(dataclasses.asdict(m)) + "\n")
 
-    def get_chain(self, key: str) -> ChainMeasurement | None:
-        """The chain measurement at ``key``; None if there is none, or it was
-        written with other fields than ``ChainMeasurement`` has.
+    def get_fusion(self, key: str) -> FusionMeasurement | None:
+        """The fusion measurement at ``key``; None if there is none, or it
+        was written with other fields than ``FusionMeasurement`` has.
         """
-        path = self.directory / "chains" / f"{key}.json"
+        path = self.directory / "fusions" / f"{key}.json"
         if not path.exists():
             return None
         fields = json.loads(path.read_text())
-        if fields.keys() != {f.name for f in dataclasses.fields(ChainMeasurement)}:
+        if fields.keys() != {f.name for f in dataclasses.fields(FusionMeasurement)}:
             return None
         sides = {}
-        for side in ("chained", "unchained"):
+        for side in ("fused", "apart"):
             m = fields[side]
             if m.keys() != {f.name for f in dataclasses.fields(Measurement)}:
                 return None
@@ -580,11 +571,11 @@ class Cache:
                     "default_round_us": tuple(m["default_round_us"]),
                 }
             )
-        return ChainMeasurement(sides["chained"], sides["unchained"], fields["refused"])
+        return FusionMeasurement(sides["fused"], sides["apart"], fields["refused"])
 
-    def put_chain(self, key: str, m: ChainMeasurement) -> None:
+    def put_fusion(self, key: str, m: FusionMeasurement) -> None:
         write(
-            self.directory / "chains" / f"{key}.json",
+            self.directory / "fusions" / f"{key}.json",
             json.dumps(dataclasses.asdict(m)) + "\n",
         )
 
@@ -739,8 +730,8 @@ def measure_rewrite(
     one run so rounds pair, the per-pair step excess as ``measure`` finds an
     operator's. Each built once (at one repeat) first and compared via
     ``output``: a rewrite whose output is not bit-identical to the recorded
-    steps' is refused. Kind-agnostic: a chain, a fold or a pack calls this
-    the same way, each building its own two designs over one dataflow.
+    steps' is refused. Kind-agnostic: a stream fusion, a fold or a pack
+    calls this the same way, each building its own designs over one dataflow.
 
     Args:
         as_recorded, rewritten: Each takes a run's name and its repeat
@@ -809,82 +800,78 @@ def measure_rewrite(
     return recorded_m, rewritten_m, refused
 
 
-def measure_chain(
-    producer: Operator,
-    consumer: Operator,
-    output: str,
-    input: str,
+def measure_fusion(
+    steps: Sequence[Operator],
+    edges: Sequence[tuple[int, str, int, str]],
     *,
     full_elf: bool,
     timing: Timing = Timing(),
     repeats: int = 9,
-    producer_values: Mapping[str, int] | None = None,
-    consumer_values: Mapping[str, int] | None = None,
-    producer_inputs: Mapping[str, np.ndarray] | None = None,
-    consumer_inputs: Mapping[str, np.ndarray] | None = None,
+    values: Sequence[Mapping[str, int]] | None = None,
+    inputs: Sequence[Mapping[str, np.ndarray]] | None = None,
     cache: Cache | None = None,
     remeasure: bool = False,
     log: Callable[[str], None] = print,
-) -> ChainMeasurement:
-    """Time ``producer`` -> ``consumer`` fused on-chip at ``output`` ->
-    ``input`` against the same pair unchained, its buffer a normal host
-    round trip instead (``measure_rewrite``). A chain whose consumer output
-    is not bit-identical to the unchained pair's is refused.
+) -> FusionMeasurement:
+    """Time a stream fusion of ``steps`` wired by ``edges`` (local indices,
+    ``producer``'s drained output into ``consumer``'s filled input) against
+    the same steps run apart, each edge's buffer a normal host round trip
+    instead (``measure_rewrite``). A fusion whose last step's output is not
+    bit-identical to the steps run apart is refused.
 
     Args:
-        producer_values, consumer_values: The per-call values each operator
-            is written at.
-        producer_inputs, consumer_inputs: What each operator's input buffers
-            hold, by name, where random bytes would not be representative.
-        cache: The edge's figure is taken from it rather than run, unless
+        values: Each of ``steps``' per-call values, in its order.
+        inputs: What each of ``steps``' input buffers hold, by name, where
+            random bytes would not be representative.
+        cache: The fusion's figure is taken from it rather than run, unless
             `remeasure`; what is run is written to it.
     """
     mode = pmode()
     if cache is not None and cache.mode != mode:
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    n = len(steps)
+    values = list(values) if values is not None else [{}] * n
+    inputs = list(inputs) if inputs is not None else [{}] * n
     key = None
     if cache is not None:
-        key = Cache.chain_key(
-            producer,
-            consumer,
-            output,
-            input,
-            producer_values,
-            consumer_values,
-            producer_inputs,
-            consumer_inputs,
-            full_elf,
-        )
+        key = Cache.fusion_key(steps, edges, values, inputs, full_elf)
         if not remeasure:
-            cached = cache.get_chain(key)
+            cached = cache.get_fusion(key)
             if cached is not None:
                 return cached
-    values = {producer: producer_values or {}, consumer: consumer_values or {}}
-    inputs = {producer: producer_inputs or {}, consumer: consumer_inputs or {}}
+    op_values = dict(zip(steps, values))
+    op_inputs = dict(zip(steps, inputs))
 
     def build(name: str, reps: int, fuse: bool) -> Standalone:
-        edges = [Chain(2 * r, output, input) for r in range(reps)]
+        fusions = [
+            Fusion(
+                FusionKind.STREAM,
+                tuple(r * n + i for i in range(n)),
+                tuple(Edge(r * n + p, out, r * n + c, inp) for p, out, c, inp in edges),
+            )
+            for r in range(reps)
+        ]
         return Standalone(
             name,
-            [producer, consumer] * reps,
-            values=values,
-            inputs=inputs,
-            chains=edges,
+            list(steps) * reps,
+            values=op_values,
+            inputs=op_inputs,
+            fusions=fusions,
             fuse=fuse,
             full_elf=full_elf,
             load=False,
         )
 
-    unchained_m, chained_m, refused = measure_rewrite(
+    apart_m, fused_m, refused = measure_rewrite(
         lambda name, reps: build(f"un{name}", reps, False),
-        lambda name, reps: build(f"chain_{name}", reps, True),
-        lambda run: run.written(1),
+        lambda name, reps: build(f"fuse_{name}", reps, True),
+        lambda run: run.written(n - 1),
         timing=timing,
         repeats=repeats,
         mode=mode,
         log=log,
     )
-    result = ChainMeasurement(chained_m, unchained_m, refused)
+    result = FusionMeasurement(fused_m, apart_m, refused)
     if cache is not None:
-        cache.put_chain(key, result)
+        cache.put_fusion(key, result)
     return result

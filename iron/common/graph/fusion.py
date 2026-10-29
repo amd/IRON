@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A recording's admissible on-chip chains, and which a profile names."""
+"""A recording's admissible on-chip fusions, and which a profile names."""
 
 from __future__ import annotations
 
 from ..declare import Operator
 from ..declare.profile import Profile
 from ..design import BuiltArray, OperatorDesign
-from ..image.step import Chain
+from ..image.step import Edge, Fusion, FusionKind
 from .record import Recording
 
 # Whether a producer's output can feed a consumer's input, by the pair's
@@ -39,19 +39,16 @@ def _admits(producer: Operator, output: str, consumer: Operator, input_: str) ->
     return _built[key]
 
 
-def candidates(recording: Recording) -> tuple[Chain, ...]:
-    """Every admissible producer -> consumer edge of ``recording``, in step
-    order: a pair ``Operand.feed`` could run fused on-chip. Edges may overlap
-    (a step both a producer and the next edge's consumer, as a run of chained
-    steps does); the tuner prices each and ``chains`` picks among them.
-
-    Admissible: adjacent steps whose producer's drained output is read by the
-    consumer alone, nowhere else and never again, and is not a graph output,
-    feedback, pinned or resident buffer; both name the whole buffer; the
-    producer's buffer is a streamed output and the consumer's a streamed,
-    non-``replicate`` input; and the pair's resolved designs actually build
-    fused (``_admits``), which is where ``Operand.feed``'s own checks (lane
-    counts, ``obj_type``, and a matching host access order per lane) are run.
+def _adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
+    """Index ``i`` admissible to feed step ``i + 1`` on-chip: its ``(output,
+    input)`` buffer names, the first found, where step ``i``'s drained
+    output is read by step ``i + 1`` alone, nowhere else and never again,
+    and is not a graph output, feedback, pinned or resident buffer; both
+    name the whole buffer; the producer's buffer is a streamed output and
+    the consumer's a streamed, non-``replicate`` input; and the pair's
+    resolved designs actually build fused (``_admits``), which is where
+    ``Operand.feed``'s own checks (lane counts, ``obj_type``, and a matching
+    host access order per lane) are run.
     """
     excluded = (
         {h.name for h in recording.outputs}
@@ -73,7 +70,7 @@ def candidates(recording: Recording) -> tuple[Chain, ...]:
         for h in host_step.writes:
             writers.setdefault(h.ref().root, []).append(-1)
 
-    found: list[Chain] = []
+    found: dict[int, tuple[str, str]] = {}
     for i in range(len(recording.steps) - 1):
         step, nxt = recording.steps[i], recording.steps[i + 1]
         producer, consumer = step.op.resolved(), nxt.op.resolved()
@@ -97,24 +94,58 @@ def candidates(recording: Recording) -> tuple[Chain, ...]:
                 continue
             if not _admits(producer, buf.name, consumer, cbuf.name):
                 continue
-            found.append(Chain(i, buf.name, cbuf.name))
+            found[i] = (buf.name, cbuf.name)
             break
+    return found
+
+
+def candidates(recording: Recording) -> tuple[Fusion, ...]:
+    """Every admissible stream fusion of 2+ consecutive steps of
+    ``recording``: the longest admissible runs (``_adjacent``) and all of
+    their contiguous sub-runs, overlapping ones included, ordered by first
+    step, then by length. The tuner prices each and ``fusions`` picks among
+    them.
+    """
+    adjacent = _adjacent(recording)
+    found: list[Fusion] = []
+    n = len(recording.steps)
+    start = 0
+    while start < n:
+        end = start
+        while end in adjacent:
+            end += 1
+        if end > start:
+            for lo in range(start, end + 1):
+                for hi in range(lo + 1, end + 1):
+                    steps = tuple(range(lo, hi + 1))
+                    edges = tuple(
+                        Edge(i, adjacent[i][0], i + 1, adjacent[i][1])
+                        for i in range(lo, hi)
+                    )
+                    found.append(Fusion(FusionKind.STREAM, steps, edges))
+            start = end + 1
+        else:
+            start += 1
     return tuple(found)
 
 
-def chains(recording: Recording, profile: Profile) -> tuple[Chain, ...]:
-    """``candidates(recording)`` that ``profile`` names (``Profile.chained``),
-    a step in at most one: first in step order wins.
+def fusions(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
+    """``candidates(recording)`` that ``profile`` names (``Profile.fused``),
+    a step in at most one fusion: first in step order wins.
     """
-    found: list[Chain] = []
+    found: list[Fusion] = []
     taken: set[int] = set()
-    for edge in candidates(recording):
-        if edge.producer in taken or edge.producer + 1 in taken:
+    for fusion in candidates(recording):
+        if taken & set(fusion.steps):
             continue
-        producer = recording.steps[edge.producer].op.resolved()
-        consumer = recording.steps[edge.producer + 1].op.resolved()
-        if not profile.chained(producer, consumer, edge.input):
+        steps = [recording.steps[i].op.resolved() for i in fusion.steps]
+        local = {step: i for i, step in enumerate(fusion.steps)}
+        edges = tuple(
+            (local[e.producer], e.output, local[e.consumer], e.input)
+            for e in fusion.edges
+        )
+        if not profile.fused(fusion.kind, steps, edges):
             continue
-        found.append(edge)
-        taken.update((edge.producer, edge.producer + 1))
+        found.append(fusion)
+        taken.update(fusion.steps)
     return tuple(found)

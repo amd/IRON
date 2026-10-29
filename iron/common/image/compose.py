@@ -28,7 +28,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
 from ..design import BuiltArray, OperatorDesign, configuration, identities
-from .step import BufferRef, Chain
+from .step import BufferRef, Edge, Fusion, FusionKind
 
 logger = logging.getLogger(__name__)
 
@@ -190,33 +190,34 @@ class Composition:
                     f"whose device names collide, {design.name}; a tunable given "
                     f"to either one (a tile size, a column count) separates them"
                 )
-        # A producer built to feed another array is not the producer alone.
-        consumed = {chain.producer + 1 for chain in seq.chains}
-        self.chains: dict[str, tuple[OperatorDesign, OperatorDesign, Chain]] = {}
+        # A step fed by another in its fusion is not a step of its own; the
+        # fusion reports one combined entry, at its first member's place.
+        consumed = {s for fusion in seq.fusions for s in fusion.steps[1:]}
+        starts = {fusion.steps[0]: fusion for fusion in seq.fusions}
+        self.fusions: dict[str, tuple[tuple[OperatorDesign, ...], Fusion]] = {}
         steps = []
         for i, s in enumerate(seq.steps):
             if i in consumed:
                 continue
-            chain = next((c for c in seq.chains if c.producer == i), None)
-            if chain is None:
+            fusion = starts.get(i)
+            if fusion is None:
                 steps.append((own[design_of[id(s.op)]].name, s.buffers))
                 continue
-            producer_design = own[design_of[id(s.op)]]
-            consumer_step = seq.steps[i + 1]
-            consumer_design = own[design_of[id(consumer_step.op)]]
-            symbol = self.chain_name(
-                producer_design.name, chain.output, consumer_design.name, chain.input
+            member_designs = tuple(
+                own[design_of[id(seq.steps[j].op)]] for j in fusion.steps
             )
-            self.chains[symbol] = (producer_design, consumer_design, chain)
-            producer_buffers = [
-                ref for ref, b in zip(s.buffers, s.op.buffers) if b.name != chain.output
-            ]
-            consumer_buffers = [
+            symbol = self.fusion_name(fusion, [d.name for d in member_designs])
+            self.fusions[symbol] = (member_designs, fusion)
+            elided = {(e.producer, e.output) for e in fusion.edges} | {
+                (e.consumer, e.input) for e in fusion.edges
+            }
+            buffers = tuple(
                 ref
-                for ref, b in zip(consumer_step.buffers, consumer_step.op.buffers)
-                if b.name != chain.input
-            ]
-            steps.append((symbol, tuple(producer_buffers + consumer_buffers)))
+                for j in fusion.steps
+                for ref, b in zip(seq.steps[j].buffers, seq.steps[j].op.buffers)
+                if (j, b.name) not in elided
+            )
+            steps.append((symbol, buffers))
         self.steps = steps
         used = {name for name, _ in steps}
         self.designs = {name: design for name, design in named.items() if name in used}
@@ -226,7 +227,7 @@ class Composition:
         # the PDI it has loaded, unless the build is traced or asks to
         # reconfigure.
         self.expands = (
-            len(self.designs) + len(self.chains) > 1
+            len(self.designs) + len(self.fusions) > 1
             or seq.traced
             or full_elf.reconfigure
         )
@@ -237,14 +238,21 @@ class Composition:
         self.packing = Packing()
 
     @staticmethod
-    def chain_name(producer: str, output: str, consumer: str, input_: str) -> str:
-        """A chained pair's device symbol: content-named, so one hits the cache
-        across processes, and distinct from either member's own.
+    def fusion_name(fusion: Fusion, designs: Sequence[str]) -> str:
+        """A fusion's device symbol: content-named, so one hits the cache
+        across processes, and distinct from any member's own. Wiring is
+        spelled by each member's place in the fusion, not in the sequence,
+        so one recurring down a model shares a symbol.
         """
+        local = {step: i for i, step in enumerate(fusion.steps)}
+        wiring = ",".join(
+            f"{local[e.producer]}:{e.output}>{local[e.consumer]}:{e.input}"
+            for e in fusion.edges
+        )
         digest = hashlib.sha256(
-            f"{producer}>{output}>{consumer}>{input_}".encode()
+            f"{fusion.kind.value}[{'|'.join(designs)}]({wiring})".encode()
         ).hexdigest()[:8]
-        return f"chain2_{digest}"
+        return f"fusion{len(designs)}_{digest}"
 
     @property
     def identity(self) -> str:
@@ -254,11 +262,9 @@ class Composition:
         h = hashlib.sha256()
         for name, design in self.designs.items():
             h.update(f"{name}={design.compilable().recipe_hash};".encode())
-        for symbol, (producer, consumer, _) in self.chains.items():
-            h.update(
-                f"{symbol}={producer.compilable().recipe_hash}+"
-                f"{consumer.compilable().recipe_hash};".encode()
-            )
+        for symbol, (designs, _) in self.fusions.items():
+            recipe = "+".join(d.compilable().recipe_hash for d in designs)
+            h.update(f"{symbol}={recipe};".encode())
         state = (
             self.steps,
             self.layout,
@@ -304,7 +310,7 @@ class Composition:
         )
         sample = next(iter(self.designs.values()), None)
         if sample is None:
-            sample = next(iter(self.chains.values()))[0]
+            sample = next(iter(self.fusions.values()))[0][0]
         device = sample.op.array_device()
         configurations: dict[str, DeviceConfiguration] = {}
         runtimes: dict[str, Runtime] = {}
@@ -328,23 +334,46 @@ class Composition:
             configurations[symbol] = configured
             runtimes.update(zip(members, configured.runtimes))
 
-        for symbol, (producer_design, consumer_design, chain) in self.chains.items():
-            producer_array = BuiltArray(producer_design, words)
-            [source] = [b for b in producer_array.op.buffers if b.name == chain.output]
-            consumer_array = BuiltArray(
-                consumer_design, words, fed={chain.input: source}
-            )
+        for symbol, (designs, fusion) in self.fusions.items():
+            fanout = {}
+            for e in fusion.edges:
+                fanout[(e.producer, e.output)] = (
+                    fanout.get((e.producer, e.output), 0) + 1
+                )
+            shared = next(((p, o) for (p, o), n in fanout.items() if n > 1), None)
+            if shared is not None:
+                raise CoResidenceError(
+                    f"{symbol}: step {shared[0]}'s {shared[1]!r} feeds more than "
+                    f"one input on-chip; fan-out is not yet buildable"
+                )
+            incoming: dict[int, list[Edge]] = {}
+            for e in fusion.edges:
+                incoming.setdefault(e.consumer, []).append(e)
+            step_arrays: dict[int, BuiltArray] = {}
+            for pos, j in enumerate(fusion.steps):
+                fed = {}
+                for e in incoming.get(j, ()):
+                    (source,) = [
+                        b
+                        for b in step_arrays[e.producer].op.buffers
+                        if b.name == e.output
+                    ]
+                    fed[e.input] = source
+                step_arrays[j] = BuiltArray(designs[pos], words, fed=fed)
             configured = configuration(
                 symbol,
-                {"producer": producer_array, "consumer": consumer_array},
-                steps=("producer", "consumer"),
+                {str(j): step_arrays[j] for j in fusion.steps},
+                steps=[str(j) for j in fusion.steps],
                 fuse=True,
             )
             configurations[symbol] = configured
             runtimes[symbol] = configured.runtimes[0]
             types[symbol] = [
-                b.flat_type for b in producer_array.op.buffers if not b.on_chip
-            ] + [b.flat_type for b in consumer_array.op.buffers if not b.on_chip]
+                b.flat_type
+                for j in fusion.steps
+                for b in step_arrays[j].op.buffers
+                if not b.on_chip
+            ]
 
         calls = [
             (

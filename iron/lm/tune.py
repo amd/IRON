@@ -162,8 +162,9 @@ def application_model(name: str) -> type[Model]:
 def main(name: str, model: Any, argv: Sequence[str] | None = None) -> None:
     """The command line that tunes ``name``'s profile: the calls ``model``
     plans (``tune_calls``, on the flags ``tune_arguments`` adds), into its
-    profiles directory. ``tune_calls`` is called again to price chains under
-    the tunables just written, so ``tune`` sees the profile fresh each time.
+    profiles directory. ``tune_calls`` is called again to price fusions
+    under the tunables just written, so ``tune`` sees the profile fresh
+    each time.
     """
     parser = tune_cli.parser(f"Tune {name}'s profile")
     if model.profile is None:

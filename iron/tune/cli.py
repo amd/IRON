@@ -32,7 +32,7 @@ from iron import operators
 from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
 from .autotune import Shape, Timed, autotune, kernel_cycles, time_shape
-from .chains import price_chains
+from .fusions import price_fusions
 from .measure import Cache, Timing, pmode
 
 
@@ -63,10 +63,10 @@ def parser(description: str) -> argparse.ArgumentParser:
         help="time settings the cache already holds again",
     )
     p.add_argument(
-        "--chains-only",
+        "--fusions-only",
         action="store_true",
-        help="price only the chains a graph admits against the profile as it "
-        "stands, skipping the (hours-long) tunable search",
+        help="price only the fusions a graph admits against the profile as "
+        "it stands, skipping the (hours-long) tunable search",
     )
     return p
 
@@ -88,22 +88,22 @@ def tune(
     profiles: Path,
 ) -> Path:
     """Rewrite ``profiles/<device>.json`` with the settings ``calls`` time
-    fastest at (``autotune``), then price the chains its graphs admit
-    against the result (``price_chains``); ``--chains-only`` skips straight
-    to pricing chains against the profile as it stands. Timed as ``args``
-    says; return its path.
+    fastest at (``autotune``), then price the fusions its graphs admit
+    against the result (``price_fusions``); ``--fusions-only`` skips
+    straight to pricing fusions against the profile as it stands. Timed as
+    ``args`` says; return its path.
 
     ``calls`` may be a thunk: re-recording under the profile tuning just
     wrote picks up its tunables (``Graph.record`` reloads a profile that is
-    a path every time), so chain pricing sees the shapes the graph actually
-    runs.
+    a path every time), so fusion pricing sees the shapes the graph
+    actually runs.
     """
     print(f"power mode: {pmode()}", flush=True)
     dev = require_device()
     path = profiles / f"{dev.name}.json"
     profile = Profile.load(path) if path.exists() else None
     full_elf = dev.can_dispatch_full_elf
-    if not args.chains_only:
+    if not args.fusions_only:
         profile = autotune(
             calls() if callable(calls) else calls,
             dev,
@@ -116,7 +116,7 @@ def tune(
         path.parent.mkdir(parents=True, exist_ok=True)
         profile.save(path)
         print(f"wrote {path}")
-    profile = price_chains(
+    profile = price_fusions(
         calls() if callable(calls) else calls,
         dev,
         profile,

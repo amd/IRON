@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 
 from ..declare import Operator
 
@@ -34,15 +35,78 @@ class BufferRef:
         return f"{self.root}[{self.start}:{self.start + self.nbytes}]"
 
 
+class FusionKind(Enum):
+    """How a fusion's steps run as one device configuration. Only
+    ``STREAM`` builds today (adjacent steps, each feeding the next, through
+    a fifo); ``STAGED`` (an edge staged through a memtile), ``FOLD`` (an
+    in-core fold), ``PACK`` (independent steps co-resident) and ``MERGE``
+    (consecutive steps sharing a configuration without an edge) are not
+    yet built.
+    """
+
+    STREAM = "stream"
+    STAGED = "staged"
+    FOLD = "fold"
+    PACK = "pack"
+    MERGE = "merge"
+
+
 @dataclass(frozen=True)
-class Chain:
-    """Step ``producer``'s output ``output`` streamed on-chip into the next
-    step's input ``input``: the two run as one, with no host transfer between.
+class Edge:
+    """Step ``producer``'s output ``output`` streamed on-chip into step
+    ``consumer``'s input ``input``, both indices into one ``Fusion``'s
+    ``steps``; several edges may share one ``(producer, output)``, fanning
+    out to more than one consumer.
     """
 
     producer: int
     output: str
+    consumer: int
     input: str
+
+
+@dataclass(frozen=True)
+class Fusion:
+    """A set of steps that build and dispatch as one device configuration,
+    with no host transfer between: ``kind`` how, ``steps`` its members
+    (increasing, distinct indices into a sequence) and ``edges`` each
+    on-chip hand-off among them.
+
+    An edge between two steps that are not adjacent in ``steps`` is only
+    valid where every step between them (by index) is also a member; a
+    stream fusion's edges run forward, producer before consumer.
+    """
+
+    kind: FusionKind
+    steps: tuple[int, ...]
+    edges: tuple[Edge, ...] = ()
+
+    def __post_init__(self) -> None:
+        if len(self.steps) < 2:
+            raise ValueError("a fusion needs at least two steps")
+        if list(self.steps) != sorted(set(self.steps)):
+            raise ValueError(
+                f"fusion steps {self.steps} must be increasing and distinct"
+            )
+        members = set(self.steps)
+        fed: set[tuple[int, str]] = set()
+        for edge in self.edges:
+            if edge.producer == edge.consumer:
+                raise ValueError(f"{edge} feeds a step from itself")
+            if self.kind is FusionKind.STREAM and edge.producer >= edge.consumer:
+                raise ValueError(
+                    f"a stream fusion's edges run forward; {edge} does not"
+                )
+            if edge.producer not in members or edge.consumer not in members:
+                raise ValueError(f"{edge} names a step outside {self.steps}")
+            lo, hi = sorted((edge.producer, edge.consumer))
+            if not set(range(lo, hi + 1)) <= members:
+                raise ValueError(f"{edge} skips a step between {lo} and {hi} not in it")
+            if (edge.consumer, edge.input) in fed:
+                raise ValueError(
+                    f"step {edge.consumer}'s input {edge.input!r} is fed twice"
+                )
+            fed.add((edge.consumer, edge.input))
 
 
 @dataclass(frozen=True)
