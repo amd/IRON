@@ -55,6 +55,12 @@ from .audio import load_wav
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.
 BLOCK = 64
 
+# A suppressed token's bias, finite rather than -inf: every real logit is
+# many orders above it (argmax is identical), and a mask row at this value
+# scales by a runtime 0/1 without 0 * -inf becoming NaN (timestamp_policy's
+# dynamic rules, not yet wired in: see timestamp_policy.py).
+NEG_BIG = np.float32(-1e30).astype(bfloat16)
+
 
 def bf16(weights):
     """``weights``, a checkpoint's tree, each float array (float16, as
@@ -219,6 +225,13 @@ class WhisperConfig(DecoderConfig):
     max_initial_timestamp_index: int = dataclasses.field(
         default=50, kw_only=True, metadata={"json": "/max_initial_timestamp_index"}
     )
+
+    @property
+    def timestamp_begin(self) -> int:
+        """``<|0.00|>``, the first timestamp token: the one after
+        ``<|notimestamps|>``.
+        """
+        return self.no_timestamps_token_id + 1
 
     @classmethod
     def from_checkpoint(cls, path) -> "WhisperConfig":
@@ -454,6 +467,29 @@ class Whisper(EncoderDecoder):
         begin_bias = bias.copy()
         begin_bias[list(config.begin_suppress_tokens)] = -np.inf
         self.begin_suppress_bias = iron.param(begin_bias)
+
+        # timestamps mode's own static bias (long-form windows, generated
+        # with timestamps on): suppress_tokens and the specials between
+        # the text vocabulary and the timestamps, stopping at
+        # timestamp_begin rather than running to the vocabulary's end, so
+        # a timestamp is never suppressed by this bias alone. The dynamic
+        # rules (the pair rule, the floor, the forced-timestamp
+        # probability compare) are not wired in yet: see timestamp_policy.py.
+        ts = np.zeros(config.sample_vocab_size, bfloat16)
+        ts[list(config.suppress_tokens)] = NEG_BIG
+        ts[config.first_special_token_id : config.timestamp_begin] = NEG_BIG
+        self.timestamps_bias = iron.param(ts)
+        # The window's first generated token: begin_suppress_tokens too,
+        # and held to an early timestamp (max_initial_timestamp_index
+        # steps past timestamp_begin), as no generated token exists yet
+        # for the pair rule or the floor to read.
+        ts_begin = ts.copy()
+        ts_begin[list(config.begin_suppress_tokens)] = NEG_BIG
+        ts_begin[: config.timestamp_begin] = NEG_BIG
+        ts_begin[config.timestamp_begin + config.max_initial_timestamp_index + 1 :] = (
+            NEG_BIG
+        )
+        self.timestamps_begin_bias = iron.param(ts_begin)
 
     @functools.cached_property
     def bos(self) -> int:

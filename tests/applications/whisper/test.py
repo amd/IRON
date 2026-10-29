@@ -18,7 +18,12 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.applications.whisper.model import Whisper, WhisperConfig, WhisperEncoder
+from iron.applications.whisper.model import (
+    NEG_BIG,
+    Whisper,
+    WhisperConfig,
+    WhisperEncoder,
+)
 from iron.lm.generation import divergence
 from iron.lm.testing import LOGITS, assert_close, require, weights_dir
 from iron.tests.support.llama_model import checkpoint
@@ -172,6 +177,36 @@ def test_the_suppression_bias_matches_the_config(clip):
         expected = -np.inf if i in suppressed else 0.0
         assert bias[i] == expected, i
     assert np.isneginf(begin[5]) and bias[5] == 0.0
+
+
+def test_the_timestamps_mode_static_bias_matches_the_config(clip):
+    """``timestamps_bias`` suppresses ``suppress_tokens`` and the specials
+    up to (not past) ``timestamp_begin``, so a timestamp is never
+    suppressed by it alone; ``timestamps_begin_bias`` also holds the
+    window's first token to an early one, ``max_initial_timestamp_index``
+    steps past ``timestamp_begin``.
+    """
+    weights, _ = clip
+    config = dataclasses.replace(
+        TOY,
+        suppress_tokens=(1, 2, 300),
+        begin_suppress_tokens=(5,),
+        first_special_token_id=400,
+        no_timestamps_token_id=449,
+        max_initial_timestamp_index=10,
+    )
+    assert config.timestamp_begin == 450
+    model = Whisper(config, weights)
+    bias = np.asarray(model.timestamps_bias)
+    begin = np.asarray(model.timestamps_begin_bias)
+    suppressed = {1, 2, 300} | set(range(400, 450))
+    for i in range(bias.size):
+        expected = NEG_BIG if i in suppressed else 0.0
+        assert bias[i] == expected, i
+    assert begin[450] == 0.0 and begin[460] == 0.0  # the allowed early timestamps
+    assert begin[461] == NEG_BIG  # past max_initial_timestamp_index
+    assert begin[449] == NEG_BIG and begin[5] == NEG_BIG  # before timestamp_begin
+    assert bias[10] == 0.0 and begin[10] == NEG_BIG  # [:timestamp_begin) only in begin
 
 
 class Encoder:
