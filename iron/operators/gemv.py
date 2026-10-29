@@ -49,15 +49,16 @@ def _cases(cls, dev: Device):
     # ... and two lanes a column.
     laned = [(8192, 2048, 8, 4, 512)]
 
+    widest = dev.cols
+
+    # A case of 8 columns takes all of a narrower device.
     def case(M, K, cols, tsi, tso, *, bench=False, lower=False, **extra):
-        kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)
+        kwargs = dict(M=M, K=K, num_aie_columns=min(cols, widest), tile_size_input=tsi)
         kwargs.update(tile_size_output=tso, **extra)
         return Case(kwargs, bench=bench, lower=lower)
 
-    widest = dev.cols
-
     def bench(M, K, cols, *_):
-        return cols == widest and M * K >= 2048 * 8192
+        return min(cols, widest) == widest and M * K >= 2048 * 8192
 
     return (
         [case(*p, bench=bench(*p)) for p in plain]
