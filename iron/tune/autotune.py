@@ -513,12 +513,15 @@ def autotune(
     remeasure: bool = False,
     cycles: Mapping[str, int] | None = None,
     core_mhz: float | None = None,
+    path: Path | None = None,
     log: Callable[[str], None] = print,
 ) -> Profile:
     """``profile`` with an entry for each shape of ``calls`` (``shapes``)
     naming the fastest setting taken (``time_shape``), the recorded one where
     none gains. Its entries covering any of those shapes are replaced; the
-    rest are kept.
+    rest are kept. A shape ``profile`` already names every searched tunable
+    of is reused rather than timed again, so a profile a killed run wrote
+    (``path``) resumes from what it already decided.
 
     Args:
         calls: The calls whose graphs were recorded under ``profile``.
@@ -528,6 +531,8 @@ def autotune(
         cycles: Kernel cycles per call by recipe key (``kernel_cycles``).
         core_mhz: The cores' clock the runtime reads (``core_mhz``), which
             ``cycles`` are timed at; None times every setting.
+        path: Where to save after each shape, so a search a device run or a
+            time budget cuts off keeps every shape it already finished.
     """
     found = shapes(calls, dev)
     covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
@@ -547,26 +552,35 @@ def autotune(
         if not covered:
             out.add(cls, **matched, **tunables)
     for i, shape in enumerate(found):
-        log(f"[{i + 1}/{len(found)}] {shape}")
-        tried = time_shape(
-            shape,
-            dev,
-            full_elf=full_elf,
-            timing=timing,
-            repeats=repeats,
-            cache=cache,
-            remeasure=remeasure,
-            cycles=cycles,
-            core_mhz=core_mhz,
-            log=log,
-        )
-        gains = [t for t in tried if t.gains]
-        best = min(gains, key=lambda t: t.delta_us, default=tried[0])
-        if gains:
-            log(f"    {best.tunables}: {best.delta_us:+.1f} ± {best.noise_us:.1f} us")
-        out.add(
-            shape.cls,
-            **shape.named(covering[shape.key]),
-            **{**held[shape.key], **best.tunables},
-        )
+        domains = shape.members[0][0].resolved(dev)._domains(dev)
+        if set(held[shape.key]) >= set(domains):
+            # profile already named every tunable this shape searches:
+            # nothing left to time, as a shape a prior, interrupted run
+            # already finished.
+            out.add(shape.cls, **shape.named(covering[shape.key]), **held[shape.key])
+        else:
+            log(f"[{i + 1}/{len(found)}] {shape}")
+            tried = time_shape(
+                shape,
+                dev,
+                full_elf=full_elf,
+                timing=timing,
+                repeats=repeats,
+                cache=cache,
+                remeasure=remeasure,
+                cycles=cycles,
+                core_mhz=core_mhz,
+                log=log,
+            )
+            gains = [t for t in tried if t.gains]
+            best = min(gains, key=lambda t: t.delta_us, default=tried[0])
+            if gains:
+                log(f"    {best.tunables}: {best.delta_us:+.1f} ± {best.noise_us:.1f} us")
+            out.add(
+                shape.cls,
+                **shape.named(covering[shape.key]),
+                **{**held[shape.key], **best.tunables},
+            )
+        if path is not None:
+            out.save(path)
     return out

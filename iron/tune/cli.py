@@ -83,6 +83,7 @@ def tune(args: argparse.Namespace, calls: Sequence[Timed], profiles: Path) -> Pa
     dev = require_device()
     path = profiles / f"{dev.name}.json"
     profile = Profile.load(path) if path.exists() else None
+    path.parent.mkdir(parents=True, exist_ok=True)
     tuned = autotune(
         calls,
         dev,
@@ -90,9 +91,9 @@ def tune(args: argparse.Namespace, calls: Sequence[Timed], profiles: Path) -> Pa
         full_elf=dev.can_dispatch_full_elf,
         cycles=kernel_cycles(dev),
         core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
+        path=path,
         **_timing(args),
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
     tuned.save(path)
     print(f"wrote {path}")
     return path
