@@ -36,16 +36,17 @@ from typing import Any, Protocol, TypeVar
 
 import numpy as np
 from aie import ir
+from aie.iron import Program
 
 from iron.common.declare import Operator, Profile
-from iron.common.design import OperatorDesign
+from iron.common.design import BuiltArray, OperatorDesign, configuration
 from iron.common.graph.compiled import CompiledGraph, _step_words
 from iron.common.graph.fusion import candidates
 from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.fusion_tunables import apply as fusion_tunables_apply
-from iron.common.image.compose import fits
+from iron.common.image.compose import fused_configuration, places, unvalued
 from iron.common.image.packaging import plan
-from iron.common.image.step import FusionKind
+from iron.common.image.step import Edge, Fusion, FusionKind
 from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, Trial, line, settings
 from .measure import (
     Cache,
@@ -273,23 +274,66 @@ def _fed_widths(op: Operator, dev) -> list[dict[str, Any]]:
     return _widths(op, dev) + [{**s, "feed_b": True} for s in _widths(fed, dev)]
 
 
+def _composed_module(
+    designs: Mapping[str, OperatorDesign],
+    kind: FusionKind | None = None,
+    edges: Sequence[tuple[int, str, int, str]] = (),
+) -> ir.Module:
+    """The one module ``fits`` places ``designs`` as, built the same way it
+    does: plain (``configuration``), or, given ``kind``, as ``kind``'s own
+    fusion wires ``edges`` (``fused_configuration``, which also tells a
+    pack's or a stream's own array per member, fuse=True, from a merge's
+    shared one). Composing is cheap next to running the placement pipeline
+    on the result, so a group-fit verdict's cache key is this module's own
+    text: it reflects every code path composing takes (``configuration``,
+    ``BuiltArray``, ...), not only ``compose.py``'s.
+    """
+    unvalued(designs)
+    if kind is None:
+        arrays = {n: BuiltArray(d) for n, d in designs.items()}
+        configured = configuration(next(iter(arrays)), arrays)
+    else:
+        fusion = Fusion(
+            kind,
+            tuple(range(len(designs))),
+            tuple(Edge(p, out, c, inp) for p, out, c, inp in edges),
+        )
+        configured, _ = fused_configuration("fused", fusion, list(designs.values()))
+    return Program.compose([configured], entry=configured.runtimes[0]).resolve_program()
+
+
 def group_fit_verdict(
-    ops: Sequence[Operator], fit_cache: Path = FIT_CACHE
+    ops: Sequence[Operator],
+    fit_cache: Path = FIT_CACHE,
+    kind: FusionKind | None = None,
+    edges: Sequence[tuple[int, str, int, str]] = (),
 ) -> str | None:
     """Why the placer refuses ``ops``' resolved designs sharing one device
-    configuration, or None if they co-reside (``fits``); kept under
-    ``fit_cache``, keyed on their recipes, as ``autotune.refusal`` keeps a
-    single design's.
+    configuration (plain, or as ``kind``'s fusion wires ``edges``), or None
+    if they co-reside; kept under ``fit_cache``, keyed on the composed
+    module's own text (``_composed_module``) and each design's build
+    (``artifact_hash``, as ``autotune.refusal`` keeps a single design's): a
+    change to any code path composing takes invalidates it by construction,
+    not only one to ``compose.py``'s own source.
     """
     designs = {str(i): OperatorDesign(op.resolved()) for i, op in enumerate(ops)}
+    try:
+        module = _composed_module(designs, kind, edges)
+    except (ValueError, RuntimeError, ir.MLIRError) as e:
+        return str(e)  # composing itself refused; no placement pass to cache
     key = hashlib.sha256(
-        repr(sorted(d.compilable().recipe_hash for d in designs.values())).encode()
+        repr(
+            (
+                str(module),
+                sorted(d.compilable().artifact_hash for d in designs.values()),
+            )
+        ).encode()
     ).hexdigest()[:24]
     record = fit_cache / key
     if record.exists():
         verdict = record.read_text()
     else:
-        diagnostic = fits(designs)
+        diagnostic = places(module)
         verdict = "fits" if diagnostic is None else f"refused: {diagnostic}"
         write(record, verdict)
     return None if verdict == "fits" else verdict.removeprefix("refused: ")
@@ -353,6 +397,8 @@ def narrowings(
             if group_fit_verdict(
                 [op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, c)],
                 fit_cache,
+                kind=group.kind,
+                edges=group.edges,
             )
             is None
         ]
@@ -417,7 +463,10 @@ def narrow_group(
         else:
             if own.refused is None:
                 return own, None
-    elif group_fit_verdict(group.steps, fit_cache) is None:
+    elif (
+        group_fit_verdict(group.steps, fit_cache, kind=group.kind, edges=group.edges)
+        is None
+    ):
         return (
             time_fusion_group(
                 group,

@@ -5,6 +5,7 @@
 choosing among them cheapest first. No device below the line.
 """
 
+import hashlib
 import math
 import re
 from pathlib import Path
@@ -16,6 +17,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile
+from iron.common.design import OperatorDesign
 from iron.common.graph.fusion import candidates
 from iron.common.graph.record import Recording
 from iron.common.image.step import Edge, Fusion, FusionKind
@@ -329,9 +331,50 @@ def test_dominates_requires_every_member_at_least_as_wide():
 def test_group_fit_verdict_finds_the_merge_that_only_fits_narrowed(tmp_path):
     dev = aie_utils.ensure_current_device()
     rms, gemv, add = _merge_members(dev)
-    assert group_fit_verdict([rms, gemv, add], fit_cache=tmp_path) is not None
+    kind = FusionKind.MERGE
+    assert group_fit_verdict([rms, gemv, add], tmp_path, kind=kind) is not None
     _, _, narrow_add = _merge_members(dev, add_cols=2)
-    assert group_fit_verdict([rms, gemv, narrow_add], fit_cache=tmp_path) is None
+    assert group_fit_verdict([rms, gemv, narrow_add], tmp_path, kind=kind) is None
+
+
+def test_group_fit_verdict_misses_a_record_keyed_on_recipes_alone(tmp_path):
+    """A verdict cached by recipe hash alone, as a key that composed
+    nothing and so could not reflect how ``iron.common.image.compose``
+    actually built these designs together, is never read: the real key is
+    the composed module's own text plus each design's build, which cannot
+    collide with a recipe-only one.
+    """
+    dev = aie_utils.ensure_current_device()
+    ops = [
+        SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev),
+        ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev),
+    ]
+    designs = [OperatorDesign(op.resolved()) for op in ops]
+    recipe_only_key = hashlib.sha256(
+        repr(sorted(d.compilable().recipe_hash for d in designs)).encode()
+    ).hexdigest()[:24]
+    (tmp_path / recipe_only_key).write_text(
+        "refused: a verdict from a key that never composed these designs"
+    )
+
+    # These two co-reside; a verdict read from the stale record above would
+    # wrongly refuse them. The real key is the composed module's own text,
+    # which cannot be the recipe-only one above.
+    assert group_fit_verdict(ops, tmp_path, kind=FusionKind.MERGE) is None
+
+
+def test_group_fit_verdict_caches_a_different_record_for_a_different_kind(tmp_path):
+    """The module ``fits`` composes differs by kind even over the same
+    designs (a pack gives each member its own array, fuse=True; a merge
+    shares one by identity), so each kind gets its own cache record, never
+    reusing the other's verdict.
+    """
+    dev = aie_utils.ensure_current_device()
+    a = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
+    b = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
+    group_fit_verdict([a, b], tmp_path, kind=FusionKind.PACK)
+    group_fit_verdict([a, b], tmp_path, kind=FusionKind.MERGE)
+    assert len(list(tmp_path.iterdir())) == 2
 
 
 def test_narrowings_narrows_only_the_member_that_needs_it(tmp_path):
