@@ -20,6 +20,7 @@ from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 from iron.tests.support.graphs import Chain as ChainGraph
 from iron.tests.support.llama_model import small
@@ -80,6 +81,107 @@ def test_a_profile_round_trips_a_fusion(tmp_path):
     roundtrip = tmp_path / "roundtrip.json"
     loaded.save(roundtrip)
     assert roundtrip.read_text() == path.read_text()
+
+
+def test_a_fusion_steps_own_tunables_round_trip(tmp_path):
+    """A step may give the tunables it takes running inside this fusion
+    (narrower than the same shape unfused), kept apart from its own
+    ``add`` entry.
+    """
+    p = Profile()
+    p.add_fusion(
+        FusionKind.STREAM,
+        [
+            (SiLU, dict(size=2048), None),
+            (ElementwiseMul, dict(size=2048), {"num_aie_columns": 2}),
+        ],
+        [(0, "y", 1, "a")],
+    )
+    gate = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    up = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    assert p.fusion_tunables(FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")]) == [
+        None,
+        {"num_aie_columns": 2},
+    ]
+
+    path = tmp_path / "profile.json"
+    p.save(path)
+    assert json.loads(path.read_text())["fusions"][0]["steps"][1]["tunables"] == {
+        "num_aie_columns": 2
+    }
+    loaded = Profile.load(path)
+    assert loaded.fusion_tunables(
+        FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")]
+    ) == [None, {"num_aie_columns": 2}]
+
+    roundtrip = tmp_path / "roundtrip.json"
+    loaded.save(roundtrip)
+    assert roundtrip.read_text() == path.read_text()
+
+
+def test_fusion_tunables_is_none_without_a_matching_entry():
+    p = Profile()
+    gate = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    up = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    assert p.fusion_tunables(FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")]) is None
+
+
+def test_add_fusion_checks_a_steps_tunables():
+    with pytest.raises(TypeError, match="has no tunable"):
+        Profile().add_fusion(
+            FusionKind.STREAM,
+            [(SiLU, {}, None), (ElementwiseMul, {}, {"nope": 1})],
+            [],
+        )
+
+
+def test_a_fusion_over_tuple_valued_params_matches_after_save_and_load(tmp_path):
+    """A derived dim a step's build reads but a call never gives (GEMV's,
+    SiLU's, ... own ``finish``) is a tuple live, a list once JSON gives it
+    back; ``matches`` must still count them equal, or a fusion over any
+    such step goes inert the moment its profile is loaded from a file.
+    """
+    gate = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    up = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    assert gate.finish == () and up.finish == ()  # the tuple this guards
+
+    p = Profile()
+    p.add_fusion(
+        FusionKind.STREAM,
+        [
+            (SiLU, dict(size=2048, finish=gate.finish)),
+            (ElementwiseMul, dict(size=2048, finish=up.finish)),
+        ],
+        [(0, "y", 1, "a")],
+    )
+    path = tmp_path / "profile.json"
+    p.save(path)
+    loaded = Profile.load(path)
+    assert loaded.fused(FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")])
+
+
+def test_a_tunable_entry_over_a_tuple_valued_dim_matches_after_save_and_load(tmp_path):
+    gemv = GEMV(M=2048, K=2048).resolved()
+    assert gemv.finish == ()  # the tuple this guards
+
+    p = Profile()
+    p.add(GEMV, M=2048, K=2048, finish=gemv.finish, num_aie_columns=8)
+    path = tmp_path / "profile.json"
+    p.save(path)
+    loaded = Profile.load(path)
+    assert loaded.tunables_for(GEMV, dict(M=2048, K=2048, finish=gemv.finish)) == {
+        "num_aie_columns": 8
+    }
+
+
+def test_a_loaded_profiles_fusion_is_live_in_a_compiled_graph(tmp_path):
+    p = _fusion_profile()
+    path = tmp_path / "profile.json"
+    p.save(path)
+    version = _fused_graph(Profile.load(path)).compile(
+        full_elf=True, check=False, x=(2048,)
+    )
+    assert version.sequence.fusions == (_fuse(0, "y", "a"),)
 
 
 def test_a_profile_with_a_copy_fusion_round_trips():
@@ -368,6 +470,36 @@ def test_compile_passes_full_elf_fusions_to_the_image():
         full_elf=True, check=False, x=(2048,)
     )
     assert version.sequence.fusions == (_fuse(0, "y", "a"),)
+
+
+def test_compile_applies_a_fusions_own_tunables_to_its_steps():
+    """A step inside a taken fusion is rebuilt at the tunables its entry
+    gives it (``iron.common.graph.fusion_tunables``), narrower than how the
+    graph itself recorded it; a stream edge's producer and consumer must
+    still meet at the same lane count, so both give the same narrower width.
+    """
+    size = 8192
+    w = np.zeros(size, bfloat16)
+
+    class Fused(iron.Graph):
+        def body(self, x):
+            gate = SiLU.step(x, tile_size=2048, num_aie_columns=4)
+            return ElementwiseMul.step(gate, w, tile_size=2048, num_aie_columns=4)
+
+    p = Profile()
+    p.add_fusion(
+        FusionKind.STREAM,
+        [
+            (SiLU, dict(size=size), {"num_aie_columns": 2}),
+            (ElementwiseMul, dict(size=size), {"num_aie_columns": 2}),
+        ],
+        [(0, "y", 1, "a")],
+    )
+    Fused.profile = p
+    version = Fused().compile(full_elf=True, check=False, x=(size,))
+    silu, mul = version.recording.steps[0].op, version.recording.steps[1].op
+    assert silu.num_aie_columns == 2  # the fusion's own, narrower than recorded (4)
+    assert mul.num_aie_columns == 2  # a stream edge's lanes must still match
 
 
 def test_compile_withholds_fusions_under_check_but_not_a_step_per_xclbin():

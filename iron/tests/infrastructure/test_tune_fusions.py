@@ -18,7 +18,7 @@ import iron
 from iron import Profile
 from iron.common.graph.fusion import candidates
 from iron.common.graph.record import Recording
-from iron.common.image.step import Edge, FusionKind
+from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
@@ -33,7 +33,7 @@ from iron.tune.fusions import (
     FusionGroup,
     NARROWING_EXHAUSTIVE,
     _dominates,
-    _resolve_narrowing,
+    _fed_widths,
     _widths,
     confirm_fusions,
     fusion_groups,
@@ -250,6 +250,27 @@ def test_written_steps_keys_by_step_so_same_named_outputs_do_not_collide():
     assert set(written_steps(run)) == {"0.y", "1.y"}
 
 
+def test_standalone_refuses_shared_buffers_for_a_fused_edge():
+    """Not distinct, a repeat past the first resolves an edge's buffer name
+    from another repeat's canonical slot, silently unwiring the feed; a
+    pack or a merge takes no edges, so it is spared the refusal below.
+    """
+    dev = aie_utils.ensure_current_device()
+    silu = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
+    mul = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
+    fusion = Fusion(FusionKind.STREAM, (0, 1), (Edge(0, "y", 1, "a"),))
+    with pytest.raises(ValueError, match="distinct=True"):
+        Standalone("x", [silu, mul], distinct=False, fusions=[fusion], full_elf=True)
+
+
+def test_standalone_allows_shared_buffers_for_a_pack():
+    dev = aie_utils.ensure_current_device()
+    a = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
+    b = SiLU(size=4096, tile_size=4096, num_aie_columns=1).resolved(dev)
+    fusion = Fusion(FusionKind.PACK, (0, 1))
+    Standalone("x", [a, b], distinct=False, fusions=[fusion], full_elf=True)
+
+
 # ---------------------------------------------------------------------------
 # Joint narrowing: searching the fused form's tunables, and sharing a
 # member's shape safely with an occurrence a fusion does not narrow
@@ -280,6 +301,23 @@ def test_widths_orders_widest_first_and_keeps_its_own_setting():
     assert any(w["num_aie_columns"] == own for w in found)
 
 
+def test_fed_widths_also_tries_feed_b_true():
+    """A member fed into its ``B`` may only admit the edge at ``feed_b``
+    true, a setting its own (unfused, ``feed_b=False``) width never takes.
+    """
+    dev = aie_utils.ensure_current_device()
+    gemv = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048)
+    found = _fed_widths(gemv, dev)
+    assert any(w["feed_b"] for w in found)
+    assert any(not w["feed_b"] for w in found)
+
+
+def test_fed_widths_is_plain_widths_without_feed_b():
+    dev = aie_utils.ensure_current_device()
+    rms = LLAMA_NPU2_PROFILE.make(RMSNorm, rows=1, tile_size=2048, weighted=True)
+    assert _fed_widths(rms, dev) == _widths(rms, dev)
+
+
 def test_dominates_requires_every_member_at_least_as_wide():
     wide = [{"num_aie_columns": 8}, {"num_aie_columns": 4}]
     narrower = [{"num_aie_columns": 4}, {"num_aie_columns": 4}]
@@ -307,62 +345,18 @@ def test_narrowings_narrows_only_the_member_that_needs_it(tmp_path):
     assert cols[2] < vars(add)["num_aie_columns"]  # ElementwiseAdd does
 
 
-def test_resolve_narrowing_locks_a_narrowed_members_shape():
-    dev = aie_utils.ensure_current_device()
-    rms, gemv, add = _merge_members(dev)
-    group = FusionGroup(FusionKind.MERGE, [rms, gemv, add], [])
-    group.occurrences = [(0, 0)]
-    narrowed_add = {"num_aie_columns": 2}
-    kept, entries = _resolve_narrowing(
-        [group],
-        {group: ({}, {}, narrowed_add)},
-        {group: Trial({}, -50.0, 1.0)},
-        [],
-        dev,
-        full_elf=True,
-        timing=Timing(),
-        repeats=9,
-        cache=None,
-        remeasure=False,
-        log=lambda _: None,
-    )
-    assert kept == [group]
-    [tunables] = [t for s, t in entries.values() if s.cls is ElementwiseAdd]
-    assert tunables["num_aie_columns"] == 2
-
-
-def test_resolve_narrowing_drops_a_group_whose_narrowing_conflicts():
-    """Two groups sharing ElementwiseAdd(2048) each narrow it, to a
-    different width: the cheaper, priced first, locks its own; the costlier
-    cannot match it (no narrowing of its own it was priced at) and is
-    dropped rather than silently narrowed to the cheaper's width.
+def test_group_dims_carries_the_narrowed_combos_tunables():
+    """``FusionGroup.dims(combo)`` names each step's tunables for
+    ``Profile.add_fusion``, so a member narrowed to co-reside takes that
+    setting only inside this fusion, not wherever its shape runs unfused.
     """
     dev = aie_utils.ensure_current_device()
     rms, gemv, add = _merge_members(dev)
-    cheaper = FusionGroup(FusionKind.MERGE, [rms, gemv, add], [])
-    cheaper.occurrences = [(0, 0)]
-    costlier = FusionGroup(FusionKind.MERGE, [rms, gemv, add], [])
-    costlier.occurrences = [(0, 4)]
-    narrowed_2 = {"num_aie_columns": 2}
-    narrowed_4 = {"num_aie_columns": 4}
-    taken = select_rewrites(
-        [(cheaper, Trial({}, -50.0, 1.0)), (costlier, Trial({}, -10.0, 1.0))],
-        log=lambda _: None,
-    )
-    kept, entries = _resolve_narrowing(
-        taken,
-        {cheaper: ({}, {}, narrowed_2), costlier: ({}, {}, narrowed_4)},
-        {cheaper: Trial({}, -50.0, 1.0), costlier: Trial({}, -10.0, 1.0)},
-        [],
-        dev,
-        full_elf=True,
-        timing=Timing(),
-        repeats=9,
-        cache=None,
-        remeasure=False,
-        log=lambda _: None,
-    )
-    assert kept == [cheaper]
+    group = FusionGroup(FusionKind.MERGE, [rms, gemv, add], [])
+    combo = ({}, {}, {"num_aie_columns": 2})
+    dims = group.dims(combo)
+    assert [t for _, _, t in dims] == list(combo)
+    assert group.dims(None) == [(cls, d, None) for cls, d, _ in dims]
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +494,7 @@ def test_fixed_frame_agrees_with_decode_groups_priced_in_the_whole_step(
             [group],
             {group: Trial({}, -1e6, 1.0)},  # the only candidate: its figure unread
             Profile(),
+            {group: None},  # no narrowing: its own (recorded) setting throughout
             full_elf=True,
             timing=timing,
             log=logged.append,

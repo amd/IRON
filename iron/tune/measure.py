@@ -109,7 +109,8 @@ class Standalone:
         full_elf: How the runlist is packaged: one full ELF, else an xclbin
             per design dispatched step by step.
         distinct: Every step runs on buffers of its own, as a graph's do, so
-            no step finds its inputs in a SoC cache.
+            no step finds its inputs in a SoC cache. A fused edge needs this
+            (see `fusions`); a pack or a merge, with no edge, does not.
         values: Per operator, each per-call value by name: the tuner cannot
             know what a value means. One derived from bound extents follows
             from theirs.
@@ -139,8 +140,14 @@ class Standalone:
         fusions: Sequence[Fusion] = (),
         fuse: bool = True,
     ):
-        if fusions and not distinct:
-            raise ValueError("fused steps need distinct=True: each its own buffers")
+        if any(f.edges for f in fusions) and not distinct:
+            # An edge's buffer is named from its repeat-local producer and
+            # consumer indices (_shared below); not distinct, every repeat
+            # but the first resolves to another repeat's canonical slot, so
+            # the name never matches and the feed silently goes unwired. A
+            # pack or a merge takes no edges, so its repeats may still share
+            # buffers.
+            raise ValueError("a fused edge needs distinct=True: each its own buffers")
         self.steps = list(runlist)
         values, inputs = values or {}, inputs or {}
         self._values = {op: dict(values.get(op, {})) for op in self.steps}
@@ -933,6 +940,12 @@ def measure_fusion(
         bsteps = fused_steps if fuse else steps
         bvalues = {**dict(zip(bsteps, values)), spacer: {"valid": spacer.size}}
         binputs = dict(zip(bsteps, inputs))
+        # Past DISTINCT_BYTES, distinct copies of the group's buffers per
+        # repeat would not fit a full ELF; shared ones time a cache instead.
+        distinct = (
+            sum(b.nbytes for op in bsteps for b in op.resolved().buffers)
+            <= DISTINCT_BYTES
+        )
         runlist: list[Operator] = []
         fusions = []
         for r in range(reps):
@@ -946,6 +959,7 @@ def measure_fusion(
             runlist,
             values=bvalues,
             inputs=binputs,
+            distinct=distinct,
             fusions=fusions,
             fuse=fuse,
             full_elf=full_elf,

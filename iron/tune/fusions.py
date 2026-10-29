@@ -14,17 +14,16 @@ own ``Candidate``).
 
 A ``PACK`` or ``MERGE`` group often co-resides only at narrower tunables
 than its members' own standalone best (fewer columns, say): ``narrow_group``
-searches the members' settings for the fused form (``narrowings``), prices
-the fastest that co-resides against the members run apart at their own, and
-``_resolve_narrowing`` decides, for a member whose shape also runs unfused or
-fused differently elsewhere, whether narrowing it everywhere (the only way a
-profile, matching by shape alone, can say it) still gains once what it costs
-there is priced too.
+searches the members' settings for the fused form (``narrowings``) and
+prices the fastest that co-resides against the members run apart at their
+own; a member narrowed writes its own tunables into the fusion entry itself
+(``FusionGroup.dims``, ``Profile.add_fusion``), applied only inside this
+fusion (``iron.common.graph.fusion_tunables``), so the same shape running
+unfused, or fused differently, elsewhere is untouched.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import itertools
 import json
@@ -43,26 +42,15 @@ from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import CompiledGraph, _step_words
 from iron.common.graph.fusion import candidates
 from iron.common.graph.fusion import fusions as graph_fusions
-from iron.common.graph.record import Recording
+from iron.common.graph.fusion_tunables import apply as fusion_tunables_apply
 from iron.common.image.compose import fits
 from iron.common.image.packaging import plan
 from iron.common.image.step import FusionKind
-from .autotune import (
-    CONFIDENCE,
-    FIT_CACHE,
-    Shape,
-    Timed,
-    Trial,
-    line,
-    replacing,
-    settings,
-)
-from .autotune import shapes as autotune_shapes
+from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, Trial, line, settings
 from .measure import (
     Cache,
     Timing,
     _sample,
-    measure,
     measure_fusion,
     standard_error,
     time_interleaved,
@@ -80,16 +68,19 @@ NARROWING_EXHAUSTIVE = 32
 
 def _json_safe(dims: Mapping[str, Any]) -> dict[str, Any]:
     """``dims`` (a ``Shape.named`` result) with any value JSON cannot
-    round-trip (an access pattern, say) left out: a profile entry still
-    names what it can of a step whose shape is not wholly representable.
+    round-trip to an equal one (an access pattern, which it cannot
+    serialize at all; a tuple, which it gives back a list) left out: a
+    profile entry still names what it can of a step whose shape is not
+    wholly representable.
     """
     out = {}
     for k, v in dims.items():
         try:
-            json.dumps(v)
+            same = json.loads(json.dumps(v)) == v
         except TypeError:
             continue
-        out[k] = v
+        if same:
+            out[k] = v
     return out
 
 
@@ -136,11 +127,18 @@ class FusionGroup:
         rid = id(recording)
         return any(r == rid for r, _ in self.occurrences)
 
-    def dims(self) -> list[tuple[type, dict[str, Any]]]:
-        """This fusion's steps as a profile entry names them (``Profile.add_fusion``)."""
+    def dims(
+        self, combo: Sequence[Mapping[str, Any]] | None = None
+    ) -> list[tuple[type, dict[str, Any], Mapping[str, Any] | None]]:
+        """This fusion's steps as a profile entry names them
+        (``Profile.add_fusion``), each with the tunables ``combo`` (a joint
+        narrowing search's chosen setting, ``narrow_group``'s) gives it;
+        None throughout where ``combo`` is, a group that needed no
+        narrowing.
+        """
         return [
-            (type(op), _json_safe(shape.named(())))
-            for op, shape in zip(self.steps, self.shapes)
+            (type(op), _json_safe(shape.named(())), None if combo is None else combo[i])
+            for i, (op, shape) in enumerate(zip(self.steps, self.shapes))
         ]
 
     def __str__(self) -> str:
@@ -259,6 +257,22 @@ def _widths(op: Operator, dev) -> list[dict[str, Any]]:
     )
 
 
+def _fed_widths(op: Operator, dev) -> list[dict[str, Any]]:
+    """``op``'s settings (``_widths``), plus its settings with ``feed_b``
+    held true: a member an edge feeds into its ``B`` may need it to admit
+    the feed at all, a setting its own (unfused) width never tries since
+    ``_widths`` holds every tunable but the column count closest to the
+    member's own (``feed_b=False``, unfused).
+    """
+    if "feed_b" not in op.declaration.tunables:
+        return _widths(op, dev)
+    fed = op.replace(pinned=op.pinned | {"feed_b"}, feed_b=True)
+    # feed_b is pinned on fed, so _widths leaves it out of what it found;
+    # put it back so _with_tunables(**s) overrides it rather than keeping
+    # op's own.
+    return _widths(op, dev) + [{**s, "feed_b": True} for s in _widths(fed, dev)]
+
+
 def group_fit_verdict(
     ops: Sequence[Operator], fit_cache: Path = FIT_CACHE
 ) -> str | None:
@@ -315,8 +329,16 @@ def narrowings(
 
     Past ``exhaustive`` combinations, only the ones using the most columns
     overall are checked for fit, since those are the likeliest to dominate.
+
+    A member an edge feeds into its ``B`` searches ``feed_b`` true too
+    (``_fed_widths``): the edge may only be admissible there, a setting its
+    own (unfused) width never takes.
     """
-    per_member = [_widths(op, dev) for op in group.steps]
+    fed = {e[2] for e in group.edges if e[3] == "B"}
+    per_member = [
+        _fed_widths(op, dev) if i in fed else _widths(op, dev)
+        for i, op in enumerate(group.steps)
+    ]
     combos = list(itertools.product(*per_member))
     if len(combos) > exhaustive:
         combos = sorted(
@@ -490,183 +512,6 @@ def select_rewrites(
     return taken
 
 
-def _shape_key(op: Operator, dev) -> Hashable:
-    """``op``'s identity as a profile entry matches it (``Shape.key``),
-    resolved for ``dev`` so a derived dimension reads its real value, not an
-    unresolved placeholder.
-    """
-    return Shape(op.resolved(dev)).key
-
-
-def _shape_occurrences(calls: Sequence[Timed], dev, key: Hashable) -> int:
-    """How many steps across ``calls``' recordings are shape ``key``
-    (``_shape_key``): every physical occurrence, not folded to one identity
-    as ``autotune.shapes`` keeps.
-    """
-    return sum(
-        1
-        for call in calls
-        for step in call.recording.steps
-        if _shape_key(step.op, dev) == key
-    )
-
-
-def _claimed_occurrences(group: FusionGroup, dev, key: Hashable) -> int:
-    """How many of shape ``key``'s physical occurrences ``group`` accounts
-    for: its own occurrences, times how many of its members are that shape.
-    """
-    matches = sum(1 for op in group.steps if _shape_key(op, dev) == key)
-    return matches * len(group.occurrences)
-
-
-def _collateral_us(
-    shape: Shape,
-    tunables: Mapping[str, Any],
-    *,
-    full_elf: bool,
-    timing: Timing,
-    repeats: int,
-    cache: Cache | None,
-    remeasure: bool,
-    log: Callable[[str], None],
-) -> float:
-    """How much slower ``shape`` runs at ``tunables`` than at its own,
-    weighted over its points as ``autotune._time`` weighs an operator's:
-    what forcing the profile's entry for it to a fusion's narrower setting
-    would cost the occurrence the fusion itself does not narrow.
-    """
-    op, points, inputs = shape.members[0]
-    ops = [op.resolved(), op._with_tunables(**tunables).resolved()]
-    total = 0.0
-    for weight, values in points:
-        ran = measure(
-            ops,
-            full_elf=full_elf,
-            timing=timing,
-            repeats=repeats,
-            values=values,
-            inputs=inputs,
-            cache=cache,
-            remeasure=remeasure,
-            log=log,
-        )
-        if 1 not in ran:
-            return math.inf
-        delta, _ = ran[1].against_default()
-        total += weight * delta
-    return total
-
-
-def _resolve_narrowing(
-    taken: Sequence[FusionGroup],
-    combos: Mapping[FusionGroup, tuple[dict[str, Any], ...] | None],
-    priced: Mapping[FusionGroup, Trial],
-    calls: Sequence[Timed],
-    dev,
-    *,
-    full_elf: bool,
-    timing: Timing,
-    repeats: int,
-    cache: Cache | None,
-    remeasure: bool,
-    log: Callable[[str], None],
-) -> tuple[list[FusionGroup], dict[Hashable, tuple[Shape, dict[str, Any]]]]:
-    """``taken``, with a group dropped wherever narrowing a member whose
-    shape also runs unfused, or fused differently, elsewhere
-    (``_shape_occurrences``, ``_claimed_occurrences``) costs more there
-    (``_collateral_us``) than the group gains: a profile matches a shape by
-    its dims alone, not where it runs, so narrowing one member narrows every
-    occurrence of its shape, and a narrowing only pays where the net still
-    gains. The tunable settings the kept groups' narrowings need, by
-    ``_shape_key`` (``price_fusions`` writes a profile entry for each); a
-    shape no kept group narrows is untouched here, left to the profile it
-    already has.
-
-    ``taken`` cheapest first (its own order out of ``select_rewrites``), so
-    a shape two groups would narrow differently is decided by whichever
-    gains more; the later one either matches it or is dropped.
-    """
-    kept: list[FusionGroup] = []
-    locked: dict[Hashable, dict[str, Any]] = {}
-    entries: dict[Hashable, tuple[Shape, dict[str, Any]]] = {}
-    for group in taken:
-        combo = combos[group]
-        if combo is None:
-            kept.append(group)
-            continue
-        trial = priced[group]
-        changes: list[tuple[Hashable, Shape, dict[str, Any]]] = []
-        collateral = 0.0
-        ok = True
-        for op, tunables in zip(group.steps, combo):
-            recorded = {n: vars(op.resolved(dev))[n] for n in tunables}
-            if tunables == recorded:
-                continue
-            shape = Shape(op.resolved(dev))
-            key = shape.key
-            if key in locked:
-                if locked[key] != tunables:
-                    ok = False
-                    log(
-                        f"  {group}: dropped, {shape} is already narrowed to "
-                        f"{locked[key]} for another fusion"
-                    )
-                    break
-                continue
-            total = _shape_occurrences(calls, dev, key)
-            claimed = _claimed_occurrences(group, dev, key)
-            if claimed < total:
-                cost = _collateral_us(
-                    shape,
-                    tunables,
-                    full_elf=full_elf,
-                    timing=timing,
-                    repeats=repeats,
-                    cache=cache,
-                    remeasure=remeasure,
-                    log=log,
-                )
-                log(f"  {group}: narrowing {shape} elsewhere costs {cost:+.1f} us")
-                collateral += cost
-            changes.append((key, shape, tunables))
-        if not ok:
-            continue
-        if collateral and -trial.delta_us <= collateral:
-            log(
-                f"  {group}: dropped, narrowing its members costs "
-                f"{collateral:.1f} us elsewhere, past its {-trial.delta_us:.1f} us gain"
-            )
-            continue
-        for key, shape, tunables in changes:
-            locked[key] = tunables
-            entries[key] = (shape, tunables)
-        kept.append(group)
-    return kept, entries
-
-
-def _apply_tunables(
-    recording: Recording, narrowed: Mapping[Hashable, Mapping[str, Any]], dev
-) -> Recording:
-    """``recording`` with every step whose shape (``_shape_key``) is in
-    ``narrowed`` rebuilt at its tunables: the profile entries a joint
-    narrowing search wrote, applied everywhere that shape runs, fused or
-    not, as they will be once the profile ships (``confirm_fusions``).
-    """
-    if not narrowed:
-        return recording
-    steps = list(recording.steps)
-    changed = False
-    for i, step in enumerate(steps):
-        tunables = narrowed.get(_shape_key(step.op, dev))
-        if tunables is None:
-            continue
-        steps[i] = dataclasses.replace(
-            step, op=step.op._with_tunables(**tunables).resolved(dev)
-        )
-        changed = True
-    return dataclasses.replace(recording, steps=steps) if changed else recording
-
-
 def _random_tensor(handle, rng: np.random.Generator) -> np.ndarray:
     """``handle``'s shape and dtype, filled with ``rng``'s bytes: an end to
     end confirmation only compares a fused version's output to the same
@@ -683,39 +528,34 @@ def confirm_fusions(
     taken: Sequence[FusionGroup],
     priced: Mapping[FusionGroup, Trial],
     profile: Profile,
+    combos: Mapping[FusionGroup, tuple[dict[str, Any], ...] | None],
     *,
     full_elf: bool,
     timing: Timing = Timing(rounds=3, calls=10),
-    narrowed: Mapping[Hashable, Mapping[str, Any]] | None = None,
     seed: int = 0,
     log: Callable[[str], None] = print,
 ) -> list[FusionGroup]:
     """``taken`` with a group dropped wherever the version it runs in does
     not gain from it beyond the noise: ``time_fusion_group`` prices a fusion
     against the steps it fuses alone, over one call; this times each
-    recording's version with every group ``taken`` still holds fused against
-    the same version unfused, interleaved, and drops the smallest predicted
-    gain (``priced``) among those active in a version that regresses,
-    retrying it, until what is left gains or none is left to drop.
-
-    Args:
-        narrowed: A joint narrowing search's chosen tunables, by
-            ``_shape_key``, applied to every step of that shape in a
-            version, fused or not (``_apply_tunables``): the profile being
-            confirmed runs it everywhere that shape occurs, not only inside
-            the fusions that needed it narrower.
+    recording's version with every group ``taken`` still holds fused
+    (``combos``' narrowing, where it has one, applied via
+    ``iron.common.graph.fusion_tunables`` the way a shipped profile would)
+    against the same version unfused at its own, interleaved, and drops the
+    smallest predicted gain (``priced``) among those active in a version
+    that regresses, retrying it, until what is left gains or none is left
+    to drop.
 
     Raises:
         RuntimeError: A version's fused output is not bit-identical to its
             unfused one.
     """
     remaining = list(taken)
-    narrowed = narrowed or {}
     for call in calls:
-        active = [g for g in remaining if g.occurs_in(call.recording)]
+        recording = call.recording
+        active = [g for g in remaining if g.occurs_in(recording)]
         if not active:
             continue
-        recording = _apply_tunables(call.recording, narrowed, dev)
         chosen = plan(
             dev, recording, full_elf, False, step_words=_step_words(recording)
         )
@@ -729,10 +569,17 @@ def confirm_fusions(
             for kind, steps, edges in profile.fusions():
                 trial_profile.add_fusion(kind, steps, edges)
             for group in remaining:
-                trial_profile.add_fusion(group.kind, group.dims(), group.edges)
+                trial_profile.add_fusion(
+                    group.kind, group.dims(combos.get(group)), group.edges
+                )
             fused = graph_fusions(recording, trial_profile)
+            patched = (
+                fusion_tunables_apply(recording, trial_profile, fused, dev)
+                if fused
+                else recording
+            )
             plain_cg = CompiledGraph(recording, chosen, fusions=())
-            fused_cg = CompiledGraph(recording, chosen, fusions=fused)
+            fused_cg = CompiledGraph(patched, chosen, fusions=fused)
             for state, _, content in states:
                 plain_cg.write(state, content)
                 fused_cg.write(state, content)
@@ -789,13 +636,14 @@ def price_fusions(
     (``confirm_fusions``), taken cheapest first, skipping one that would
     share a step with a fusion already taken (``select_rewrites``).
 
-    A member narrowed to co-reside writes its own tunable entry too
-    (``_resolve_narrowing``): dropped instead where its shape also runs
-    unfused, or fused differently, elsewhere and costs more there than the
-    fusion gains, since a profile narrows every occurrence of a shape, not
-    only the one a fusion needed narrower. Fusion entries covering the
-    shapes found, and tunable entries covering a shape narrowed, are
-    replaced; the rest is kept as ``profile`` has it.
+    A member narrowed to co-reside writes its own tunables into the fusion
+    entry itself (``FusionGroup.dims``, ``Profile.add_fusion``), applied
+    only to a step running inside this fusion
+    (``iron.common.graph.fusion_tunables``): the same shape running unfused,
+    or fused differently, elsewhere keeps what it already takes there.
+    Fusion entries covering the shapes found are replaced; every tunable
+    entry, and a fusion entry covering none of them, is kept as ``profile``
+    has it.
     """
     found = fusion_groups(calls, dev)
 
@@ -822,27 +670,10 @@ def price_fusions(
 
     taken = select_rewrites(priced, log)
     priced_dict = dict(priced)
-    taken, narrowed_entries = _resolve_narrowing(
-        taken,
-        combos,
-        priced_dict,
-        calls,
-        dev,
-        full_elf=full_elf,
-        timing=timing,
-        repeats=repeats,
-        cache=cache,
-        remeasure=remeasure,
-        log=log,
-    )
 
-    out, covering, held = replacing(profile, [s for s, _ in narrowed_entries.values()])
-    for shape, tunables in narrowed_entries.values():
-        out.add(
-            shape.cls,
-            **shape.named(covering[shape.key]),
-            **{**held[shape.key], **tunables},
-        )
+    out = Profile()
+    for cls, dims, tunables in profile or ():
+        out.add(cls, **dims, **tunables)
 
     existing = profile.fusions() if profile is not None else []
     for kind, steps, edges in existing:
@@ -852,18 +683,17 @@ def price_fusions(
             out.add_fusion(kind, steps, edges)
 
     if confirm:
-        narrowed_tunables = {key: t for key, (_, t) in narrowed_entries.items()}
         taken = confirm_fusions(
             calls,
             dev,
             taken,
             priced_dict,
             out,
+            combos,
             full_elf=full_elf,
             timing=confirm_timing,
-            narrowed=narrowed_tunables,
             log=log,
         )
     for group in taken:
-        out.add_fusion(group.kind, group.dims(), group.edges)
+        out.add_fusion(group.kind, group.dims(combos[group]), group.edges)
     return out
