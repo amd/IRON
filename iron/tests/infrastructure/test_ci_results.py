@@ -3,13 +3,15 @@
 
 """The root conftest.py's results CSV, run as a real pytest session: a test
 whose fixture fails in setup, as one does for a CI runner's missing files, is
-a failed check, not missing from the CSV, and a session not given
-``--csv-output`` writes none.
+a failed check, not missing from the CSV; a session whose process dies
+keeps every result before it and the test it died in, a failed check; and
+a session not given ``--csv-output`` writes none.
 """
 
 import csv
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -48,11 +50,25 @@ def test_skipped():
 """
 
 
-def _pytest(tmp_path, *args):
-    """Run pytest over ``_TESTS`` under the root conftest."""
+_CRASHING = """\
+import os
+
+def test_measured(record_property):
+    record_property("Latency", 2.5)
+
+def test_aborts():
+    os.abort()
+
+def test_never_reached():
+    pass
+"""
+
+
+def _pytest(tmp_path, *args, tests=_TESTS, returncode=1):
+    """Run pytest over ``tests`` under the root conftest."""
     shutil.copy(_ROOT_CONFTEST, tmp_path / "conftest.py")
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
-    (tmp_path / "test_model.py").write_text(_TESTS)
+    (tmp_path / "test_model.py").write_text(tests)
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "test_model.py"]
         + list(args),
@@ -61,7 +77,7 @@ def _pytest(tmp_path, *args):
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 1, result.stdout + result.stderr
+    assert result.returncode == returncode, result.stdout + result.stderr
 
 
 def test_a_test_failing_in_setup_is_a_failed_check(tmp_path):
@@ -74,6 +90,23 @@ def test_a_test_failing_in_setup_is_a_failed_check(tmp_path):
         "test_unstaged": "0/1",
         "test_plain": "1/1",
     }
+
+
+def test_a_session_that_dies_keeps_its_results_and_names_the_test(tmp_path):
+    out = tmp_path / "out.csv"
+    _pytest(
+        tmp_path,
+        f"--csv-output={out}",
+        tests=_CRASHING,
+        returncode=-signal.SIGABRT,
+    )
+    with open(out) as f:
+        rows = {row["Test"]: row for row in csv.DictReader(f)}
+    assert {test: row["Checks"] for test, row in rows.items()} == {
+        "test_measured": "1/1",
+        "test_aborts": "0/1",
+    }
+    assert float(rows["test_measured"]["Latency (mean)"]) == 2.5
 
 
 def test_a_session_not_asked_for_a_csv_writes_none(tmp_path):
