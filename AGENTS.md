@@ -239,6 +239,13 @@ values, weights, state and profiles are named. The rules:
   - `merge`: consecutive steps in one configuration, run back to back.
   - `fold`: a consumer's kernel run in its producer's cores
     (`Operator.fold`).
+- A profile's `"packings"` entries name shapes whose designs share one
+  device configuration in a full ELF, wherever a version runs them, so its
+  steps run without reconfiguring between them; a member gives the
+  tunables every step of its shape takes there (narrower, so they
+  co-reside). A switch between configurations costs about 40 us plus 7 us
+  per column on npu2, the cost a packing removes
+  (`iron.common.graph.packing`).
 - `python -m iron.lm.tune <application> --fusions-only` prices a graph's
   candidates against its profile and writes the ones that gain.
 

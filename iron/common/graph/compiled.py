@@ -32,6 +32,7 @@ from ..declare.value import ExtentWord
 from ..declare.profile import Profile
 from ..image.allocator import ALIGNMENT, ArenaPlan
 from ..image.artifacts import Parameter
+from ..image.compose import Packing
 from ..image.callable import (
     FullELFCallable,
     FullELFRun,
@@ -46,6 +47,7 @@ from .carried import CARRY, EmitSite, attach_emit, compose
 from .fold import apply_folds, chosen_folds
 from .fusion import fusions as graph_fusions
 from .fusion_tunables import apply as apply_fusion_tunables
+from .packing import apply as apply_packings
 from .handle import Carry, Dense, Handle, State, Weight, is_operand
 from .record import HostStep, Recording, Recorder
 
@@ -553,6 +555,7 @@ class Graph:
             recording = self.record(**shapes)
             profile = self._profile()
             fused: tuple[Fusion, ...] = ()
+            packing = Packing()
             if not check and profile is not None:
                 folds = chosen_folds(recording, profile)
                 if folds:
@@ -562,6 +565,9 @@ class Graph:
                     recording = apply_fusion_tunables(
                         recording, profile, fused, require_device()
                     )
+                recording, packing = apply_packings(
+                    recording, profile, fused, require_device()
+                )
             chosen = plan(
                 require_device(),
                 recording,
@@ -582,6 +588,7 @@ class Graph:
                 arena=self._arena,
                 emit=emit,
                 fusions=fused,
+                packing=packing,
             )
             if sized is not None and len(version.parameters) != len(sized):
                 read = {p.name for p in version.parameters}
@@ -751,6 +758,7 @@ class CompiledGraph:
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
         fusions: Sequence[Fusion] = (),
+        packing: Packing = Packing(),
     ):
         self.recording = recording
         self.plan = plan
@@ -760,7 +768,7 @@ class CompiledGraph:
             recording, share=plan.full_elf, extents=not plan.full_elf
         )
         packaging = (
-            FullELF(commands=plan.commands, shared_words=self.shared)
+            FullELF(commands=plan.commands, shared_words=self.shared, packing=packing)
             if plan.full_elf
             else PerStep(check)
         )

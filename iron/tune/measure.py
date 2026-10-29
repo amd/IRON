@@ -40,6 +40,7 @@ from iron.common.declare.value import Value
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.callable import ImageCallable
+from iron.common.image.compose import Packing
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.packaging import require_device
 from iron.common.image.sequence import Image
@@ -128,6 +129,7 @@ class Standalone:
         fuse: `fusions` are passed to `Image`, so each streams on-chip. With
             `False` the shared buffer stays a normal host round trip, the
             baseline a fusion is priced against.
+        packing: The designs a full ELF configures as one device.
     """
 
     def __init__(
@@ -142,6 +144,7 @@ class Standalone:
         load: bool = True,
         fusions: Sequence[Fusion] = (),
         fuse: bool = True,
+        packing: Packing = Packing(),
     ):
         if any(f.edges for f in fusions) and not distinct:
             # An edge's buffer is named from its repeat-local producer and
@@ -182,7 +185,9 @@ class Standalone:
         ]
         # Configure the array every call, as a design beside others in a
         # model's image is, so one timed alone pays that too.
-        packaging = FullELF(reconfigure=True) if full_elf else PerStep()
+        packaging = (
+            FullELF(reconfigure=True, packing=packing) if full_elf else PerStep()
+        )
         self.sequence = Image(
             Recording.of_steps(name, steps, in_names, out_names),
             packaging,

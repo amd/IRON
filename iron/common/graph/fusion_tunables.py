@@ -11,7 +11,8 @@ the shape's own entry.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from ..declare import Profile
 from ..image.step import Fusion
@@ -27,8 +28,7 @@ def apply(
     itself); a step whose entry gives none, or whose fusion matches no
     entry, is untouched.
     """
-    steps = list(recording.steps)
-    rebuilt: dict[int, list] = {}
+    given: dict[int, Mapping[str, Any]] = {}
     for fusion in fused:
         ops = [recording.steps[i].op.resolved(dev) for i in fusion.steps]
         local = {step: i for i, step in enumerate(fusion.steps)}
@@ -39,12 +39,24 @@ def apply(
         tunables = profile.fusion_tunables(fusion.kind, ops, edges)
         if tunables is None:
             continue
-        for i, op, t in zip(fusion.steps, ops, tunables):
-            if not t:
-                continue
-            narrowed = op._with_tunables(**t).resolved(dev)
-            rebuilt.setdefault(id(recording.steps[i].op), []).append(narrowed)
-            steps[i] = dataclasses.replace(steps[i], op=narrowed)
+        given.update((i, t) for i, t in zip(fusion.steps, tunables) if t)
+    return rebuild(recording, given, dev)
+
+
+def rebuild(
+    recording: Recording, tunables: Mapping[int, Mapping[str, Any]], dev
+) -> Recording:
+    """``recording`` with each step ``tunables`` names, by index, rebuilt at
+    its tunables there, the per-call values bound to its operator bound to
+    the rebuilt one.
+    """
+    steps = list(recording.steps)
+    rebuilt: dict[int, list] = {}
+    for i, t in tunables.items():
+        op = recording.steps[i].op.resolved(dev)
+        narrowed = op._with_tunables(**t).resolved(dev)
+        rebuilt.setdefault(id(recording.steps[i].op), []).append(narrowed)
+        steps[i] = dataclasses.replace(steps[i], op=narrowed)
     if not rebuilt:
         return recording
     # A narrowed design reads its own value symbols, so each per-call value

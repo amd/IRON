@@ -318,7 +318,7 @@ class Composition:
             )
         self.commands = tuple(place[i] for i in full_elf.commands)
         self.shared_words = full_elf.shared_words
-        self.packing = Packing()
+        self.packing = full_elf.packing
 
     @staticmethod
     def fusion_name(fusion: Fusion, designs: Sequence[str]) -> str:

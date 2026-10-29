@@ -40,6 +40,11 @@ _FusionStep = (
     tuple[type, Mapping[str, Any] | None]
     | tuple[type, Mapping[str, Any] | None, Mapping[str, Any] | None]
 )
+# A packing entry: the shapes whose designs share one device configuration
+# wherever a version runs them, each ``(operator class, dims, tunables)``;
+# ``tunables`` what every step of that shape takes there so they co-reside,
+# None where it keeps its own.
+_PackingEntry = tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...]
 
 
 def _normalized(value: Any) -> Any:
@@ -74,11 +79,16 @@ class Profile:
     fusion itself takes, not which it is); a step may give the tunables it
     takes running inside this fusion, where they differ from what the same
     shape takes unfused.
+
+    ``packings`` names shapes whose designs share one device configuration
+    in a full ELF, so a version runs them without reconfiguring between
+    them; a member may give the tunables every step of its shape takes there.
     """
 
     def __init__(self) -> None:
         self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
         self._fusions: list[_FusionEntry] = []
+        self._packings: list[_PackingEntry] = []
 
     def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
         """``cls(**kwargs)``, its open tunables filled from this profile's
@@ -144,6 +154,47 @@ class Profile:
         """
         if len(steps) < 2:
             raise TypeError("a fusion entry needs at least two steps")
+        resolved = self._members(steps)
+        for producer, output, consumer, input in edges:
+            if not 0 <= producer < len(steps) or not 0 <= consumer < len(steps):
+                raise TypeError(
+                    f"edge names step {(producer, consumer)}, outside "
+                    f"0..{len(steps) - 1}"
+                )
+            if producer == consumer:
+                raise TypeError("an edge cannot feed a step from itself")
+            p_cls, c_cls = steps[producer][0], steps[consumer][0]
+            if not any(
+                m.name == output and m.drains for m in p_cls.declaration.operands
+            ):
+                raise TypeError(f"{p_cls.__name__} declares no output {output!r}")
+            if not any(m.name == input and m.fills for m in c_cls.declaration.operands):
+                raise TypeError(f"{c_cls.__name__} declares no input {input!r}")
+        self._fusions.append((kind, resolved, tuple(edges)))
+
+    def add_packing(self, members: Sequence[_FusionStep]) -> None:
+        """Add a packing entry: the designs of ``members``' shapes (each
+        ``(operator class, dims)`` or ``(operator class, dims, tunables)``,
+        matched as a fusion's steps are) share one device configuration in
+        a full ELF wherever a version runs them. ``tunables``, where a member
+        gives them, are what every step of its shape takes in such a version.
+
+        Raises:
+            TypeError: Fewer than two members are given, a dim is not a
+                non-tunable ``param()`` of its class, or a name in
+                ``tunables`` is not a ``tunable()`` of its class.
+        """
+        if len(members) < 2:
+            raise TypeError("a packing entry needs at least two members")
+        self._packings.append(self._members(members))
+
+    @staticmethod
+    def _members(
+        steps: Sequence[_FusionStep],
+    ) -> tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...]:
+        """``steps`` as ``(class, dims, tunables)``, each name checked
+        against its class's declaration.
+        """
         resolved: list[tuple[type, dict[str, Any], dict[str, Any] | None]] = []
         for cls, dims, *rest in steps:
             dims = dict(dims or {})
@@ -162,22 +213,7 @@ class Profile:
                     raise TypeError(f"{cls.__name__} has no tunable {unknown_t}")
                 tunables = dict(tunables)
             resolved.append((cls, dims, tunables))
-        for producer, output, consumer, input in edges:
-            if not 0 <= producer < len(steps) or not 0 <= consumer < len(steps):
-                raise TypeError(
-                    f"edge names step {(producer, consumer)}, outside "
-                    f"0..{len(steps) - 1}"
-                )
-            if producer == consumer:
-                raise TypeError("an edge cannot feed a step from itself")
-            p_cls, c_cls = steps[producer][0], steps[consumer][0]
-            if not any(
-                m.name == output and m.drains for m in p_cls.declaration.operands
-            ):
-                raise TypeError(f"{p_cls.__name__} declares no output {output!r}")
-            if not any(m.name == input and m.fills for m in c_cls.declaration.operands):
-                raise TypeError(f"{c_cls.__name__} declares no input {input!r}")
-        self._fusions.append((kind, tuple(resolved), tuple(edges)))
+        return tuple(resolved)
 
     def fused(
         self,
@@ -233,6 +269,23 @@ class Profile:
         """Each fusion entry as ``(kind, steps, edges)``, ``steps`` each
         ``(operator class, dims, tunables)``, in the order added."""
         return list(self._fusions)
+
+    def packing_of(self, op: Operator) -> tuple[int, dict[str, Any] | None] | None:
+        """The first packing entry with a member matching ``op`` (a resolved
+        operator, by class and dims), as its index in ``packings()`` and the
+        member's tunables; None where no entry names its shape.
+        """
+        dims = self.dims(type(op), vars(op))
+        for index, members in enumerate(self._packings):
+            for cls, matched, tunables in members:
+                if isinstance(op, cls) and self.matches(matched, dims):
+                    return index, tunables
+        return None
+
+    def packings(self) -> list[_PackingEntry]:
+        """Each packing entry's members, ``(operator class, dims,
+        tunables)``, in the order added."""
+        return list(self._packings)
 
     def tunables_for(self, cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
         """The tunables for the ``cls`` a call with ``given`` keywords makes,
@@ -296,6 +349,7 @@ class Profile:
         if not isinstance(data, dict) or not {"entries"} <= set(data) <= {
             "entries",
             "fusions",
+            "packings",
         }:
             raise ValueError(f"{path}: a profile is {{'entries': [...]}}")
         profile = cls()
@@ -306,23 +360,31 @@ class Profile:
                 raise ValueError(f"{path}: no operator {name!r} in iron.operators")
             op_cls = CATALOG[name]
             profile.add(op_cls, **_with_enum_fields(op_cls, fields))
-        for fusion in data.get("fusions", ()):
-            if set(fusion) != {"kind", "steps", "edges"}:
-                raise ValueError(
-                    f"{path}: a fusion is {{'kind': ..., 'steps': [...], "
-                    f"'edges': [...]}}"
-                )
-            steps = []
-            for entry in fusion["steps"]:
+
+        def members(entries) -> list[tuple[type, dict[str, Any], Any]]:
+            out = []
+            for entry in entries:
                 fields = dict(entry)
                 name = fields.pop("operator")
                 tunables = fields.pop("tunables", None)
                 if name not in CATALOG:
                     raise ValueError(f"{path}: no operator {name!r} in iron.operators")
                 op_cls = CATALOG[name]
-                steps.append((op_cls, _with_enum_fields(op_cls, fields), tunables))
+                out.append((op_cls, _with_enum_fields(op_cls, fields), tunables))
+            return out
+
+        for fusion in data.get("fusions", ()):
+            if set(fusion) != {"kind", "steps", "edges"}:
+                raise ValueError(
+                    f"{path}: a fusion is {{'kind': ..., 'steps': [...], "
+                    f"'edges': [...]}}"
+                )
             edges = [tuple(e) for e in fusion["edges"]]
-            profile.add_fusion(FusionKind(fusion["kind"]), steps, edges)
+            profile.add_fusion(
+                FusionKind(fusion["kind"]), members(fusion["steps"]), edges
+            )
+        for packing in data.get("packings", ()):
+            profile.add_packing(members(packing))
         return profile
 
     def save(self, path: str | Path) -> None:
@@ -336,38 +398,44 @@ class Profile:
         from ...operators import CATALOG  # the operators import this module
 
         names = {cls: name for name, cls in CATALOG.items()}
+
+        def members(entries) -> list[dict[str, Any]]:
+            for cls, _, _ in entries:
+                if cls not in names:
+                    raise ValueError(
+                        f"{cls.__qualname__} is not in iron.operators.CATALOG"
+                    )
+            return [
+                {
+                    "operator": names[cls],
+                    **dims,
+                    **({"tunables": tunables} if tunables else {}),
+                }
+                for cls, dims, tunables in entries
+            ]
+
         lines = []
         for cls, dims, tunables in self._entries:
             if cls not in names:
                 raise ValueError(f"{cls.__qualname__} is not in iron.operators.CATALOG")
             name = names[cls]
             lines.append(json.dumps({"operator": name, **dims, **tunables}))
-        fusion_lines = []
-        for kind, steps, edges in self._fusions:
-            for cls, _, _ in steps:
-                if cls not in names:
-                    raise ValueError(
-                        f"{cls.__qualname__} is not in iron.operators.CATALOG"
-                    )
-            fusion_lines.append(
-                json.dumps(
-                    {
-                        "kind": kind.value,
-                        "steps": [
-                            {
-                                "operator": names[cls],
-                                **dims,
-                                **({"tunables": tunables} if tunables else {}),
-                            }
-                            for cls, dims, tunables in steps
-                        ],
-                        "edges": [list(e) for e in edges],
-                    }
-                )
+        fusion_lines = [
+            json.dumps(
+                {
+                    "kind": kind.value,
+                    "steps": members(steps),
+                    "edges": [list(e) for e in edges],
+                }
             )
+            for kind, steps, edges in self._fusions
+        ]
+        packing_lines = [json.dumps(members(p)) for p in self._packings]
         body = '{"entries": [\n  ' + ",\n  ".join(lines) + "\n]"
         if fusion_lines:
             body += ',\n"fusions": [\n  ' + ",\n  ".join(fusion_lines) + "\n]"
+        if packing_lines:
+            body += ',\n"packings": [\n  ' + ",\n  ".join(packing_lines) + "\n]"
         with open(path, "w") as f:
             f.write(body + "}\n")
 

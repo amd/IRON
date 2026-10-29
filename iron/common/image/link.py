@@ -25,7 +25,7 @@ from ..declare import Operator
 from ..design import OperatorDesign
 from .artifacts import Design
 from .callable import FullELFCallable, PerStepCallable
-from .compose import Composition, fused_configuration
+from .compose import Composition, Packing, fused_configuration
 from .packaging import require_device
 from .step import Fusion
 
@@ -37,6 +37,8 @@ class FullELF:
         reconfigure: Configure the array at every call, even for one design.
         commands: The steps that each start a command after the first.
         shared_words: Design symbol -> the scratchpad word it shares.
+        packing: Designs configured as one device, whose steps run without
+            reconfiguring between them.
     """
 
     # --get-scratchpad-parameters emits the parameter table the host writes
@@ -51,10 +53,12 @@ class FullELF:
         reconfigure: bool = False,
         commands: Sequence[int] = (),
         shared_words: Mapping[str, str] | None = None,
+        packing: Packing = Packing(),
     ):
         self.reconfigure = reconfigure
         self.commands = tuple(commands)
         self.shared_words = dict(shared_words or {})
+        self.packing = packing
         self.composition: Composition | None = None
         self.design: CompilableDesign | None = None
 
