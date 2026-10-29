@@ -128,7 +128,13 @@ class Profile:
             raise ValueError(f"{path}: a profile is {{'entries': [...]}}")
         profile = cls()
         for entry in data["entries"]:
-            fields = dict(entry)
+            # JSON holds no tuples: a param() declared one (ProjectionGEMM's
+            # epilogue_modes) would otherwise never match again, a list
+            # equalling no tuple.
+            # JSON holds no tuples: a param() declared one (ProjectionGEMM's
+            # epilogue_modes) would otherwise never match again, a list
+            # equalling no tuple.
+            fields = {k: tuple(v) if isinstance(v, list) else v for k, v in entry.items()}
             name = fields.pop("operator")
             if name not in CATALOG:
                 raise ValueError(f"{path}: no operator {name!r} in iron.operators")
