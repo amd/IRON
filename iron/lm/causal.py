@@ -372,6 +372,13 @@ class CausalLM(Model):
             model, args.position, args.token, args.context, args.points, sampler
         )
 
+    def tune_values(self) -> dict:
+        """The per-call values every one of ``tune_calls``' timed points
+        needs besides position, token and the prompt chunk's own; none of a
+        plain decoder's own.
+        """
+        return {}
+
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the decode step's (none), then
         the prompt chunk's token ids.

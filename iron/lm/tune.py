@@ -19,7 +19,6 @@ from iron.tune.autotune import Point, Timed
 
 from .causal import CausalLM
 from .cli import parse_args, sampling_arguments
-from .encoder_decoder import EncoderDecoder
 from .generation import Sampler
 from .model import Model
 
@@ -95,12 +94,10 @@ def calls(
     # The decoder's own two, first: an EncoderDecoder's shapes() also holds
     # its encoder's, which this tunes nothing for (not a decoder's call).
     decode_shapes, prompt_shapes, *_ = model.shapes()
-    # An EncoderDecoder's cross attention bounds itself to source, the
-    # encoder's valid rows (encode() sets it); a full clip's at every point,
-    # since every Point's values stand alone (Timed.op_values takes no other).
-    extra = (
-        dict(source=model.encoder.soft_rows) if isinstance(model, EncoderDecoder) else {}
-    )
+    # Every Point's values stand alone (Timed.op_values takes no other), so
+    # whatever a subclass's own calls need besides position and token goes
+    # into every one of them.
+    extra = model.tune_values()
     versions = [
         (
             decode_shapes,

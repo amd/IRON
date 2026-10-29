@@ -119,6 +119,13 @@ class EncoderDecoder(CausalLM):
         ]
         return [*super().shapes(), *encoded]
 
+    def tune_values(self) -> dict:
+        """``source`` at a full clip's rows, what ``encode()`` sets it to for
+        a real call: the decoder's own two versions' cross attention bounds
+        itself to it at every timed point.
+        """
+        return dict(source=self.encoder.soft_rows)
+
     def loaded(self, versions: list) -> None:
         """Run the decoder's versions (``use``) and hold the encode
         version.
