@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 FLM_REPO   := https://github.com/andrej/FastFlowLM.git
-FLM_COMMIT := c8fd1b69a5389e9fabfdd2be6c53f50adab00b64
+FLM_COMMIT := 00ed92066bb538b05ecf312d523e809be61ad12d
 BUILD      := $(CURDIR)/build
 FLM_ROOT   := $(BUILD)/FastFlowLM
 FLM_SRC    := $(FLM_ROOT)/src
 FLM_BIN    := $(FLM_SRC)/build/flm
 CACHE      ?= $(BUILD)/cache
 MODELS     ?= $(CURDIR)/models
-LLAMA      ?= $(MODELS)/llama3.2-1b
 EMBED      ?= $(MODELS)/embeddinggemma-2
 PORT       ?= 52625
 JOBS       ?= 2
@@ -36,10 +35,12 @@ pull: flm
 	FLM_CONFIG_PATH=$(FLM_SRC)/model_list.json \
 	FLM_MODELINFO_PATH=$(FLM_SRC)/model_info.json \
 	FLM_MODEL_PATH=$(MODELS)/.. \
-	$(FLM_BIN) pull llama3.2:1b
+	FLM_XCLBIN_PATH=$(FLM_SRC)/xclbins \
+	$(FLM_BIN) pull llama3.2-iron:1b
 	FLM_CONFIG_PATH=$(FLM_SRC)/model_list.json \
 	FLM_MODELINFO_PATH=$(FLM_SRC)/model_info.json \
 	FLM_MODEL_PATH=$(MODELS)/.. \
+	FLM_XCLBIN_PATH=$(FLM_SRC)/xclbins \
 	$(FLM_BIN) pull embeddinggemma-2
 
 serve-llama: flm
@@ -47,11 +48,10 @@ serve-llama: flm
 	FLM_MODELINFO_PATH=$(FLM_SRC)/model_info.json \
 	FLM_MODEL_PATH=$(MODELS)/.. \
 	FLM_XCLBIN_PATH=$(FLM_SRC)/xclbins \
-	FLM_IRON_MODEL_PATH=$(LLAMA) \
 	FLM_IRON_PYTHON=$(IRON_PYTHON) \
 	PYTHONPATH=$(FLM_ROOT)/python:$(CURDIR)/../../..:$${PYTHONPATH} \
 	NPU_CACHE_HOME=$(CACHE) \
-	$(FLM_BIN) serve llama3.2:1b --backend iron --ctx-len 2048 --port $(PORT)
+	$(FLM_BIN) serve llama3.2-iron:1b --ctx-len 2048 --port $(PORT)
 
 serve-embedding: flm
 	FLM_CONFIG_PATH=$(FLM_SRC)/model_list.json \
