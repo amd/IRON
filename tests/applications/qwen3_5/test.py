@@ -12,6 +12,7 @@ in-process.
 a host without the checkpoint, and ``--max-seq-len`` at another context.
 """
 
+import aie.utils as aie_utils
 import pytest
 
 from iron.applications.qwen3_5 import Qwen35
@@ -44,6 +45,30 @@ def model(load):
 # KL(fp32 CPU || NPU) measured on npu2 (Strix Halo) mean 0.0003, p90 0.0007,
 # max 0.0018 over 40 steps after a 1024-character prompt, 1 top-1 mismatch.
 MAX_KL = {"Mean": 0.001, "P90": 0.002, "Max": 0.01}
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
+class TestEachStep:
+    """The form NPU1 runs: each step its own dispatch of one xclbin, the
+    host drawing each token. Its model is built and dropped with the class,
+    first: after any other test it would be held beside the module's
+    full-ELF one.
+    """
+
+    @pytest.fixture(scope="class")
+    def model(self, load):
+        model = load(full_elf=False)
+        assert not model.device_loop
+        yield model
+        if aie_utils.DefaultNPURuntime is not None:
+            aie_utils.DefaultNPURuntime.cleanup()
+
+    def test_qwen3_5_0_8b_each_step_accuracy(self, model, record_property):
+        check_accuracy(model, MAX_KL, 20, 256, record=record_property)
+
+    def test_qwen3_5_0_8b_each_step_determinism(self, model, record_property):
+        check_determinism(model, 4, 3, 128, record=record_property)
 
 
 GENERATION = pytest.mark.parametrize(
