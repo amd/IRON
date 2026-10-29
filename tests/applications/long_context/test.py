@@ -208,17 +208,27 @@ APPLICATIONS = {
     # Gemma 3's sliding layers' ring holds only sliding_window positions:
     # unmeasured deep in the caches; npu1 still unmeasured.
     "gemma3_1b": Application(
-        Gemma3, "gemma-3-1b-it", "model.safetensors", "tokenizer.json"
+        Gemma3,
+        "gemma-3-1b-it",
+        "model.safetensors",
+        "tokenizer.json",
+        each_step=("npu1", "npu2"),
     ),
     # Qwen3.5's Gated DeltaNet layers carry a fixed-size state, not a cache
     # that grows with the context: unmeasured deep in the caches; npu1 still
     # unmeasured.
-    "qwen3_5_0.8b": Application(Qwen35, "qwen3.5-0.8b", INDEX, "tokenizer.json"),
+    "qwen3_5_0.8b": Application(
+        Qwen35, "qwen3.5-0.8b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
+    ),
     # SmolVLM's text backbone alone, text-only (its vision tower is
     # tests/applications/idefics3's): unmeasured deep in the caches; npu1
     # still unmeasured.
     "idefics3_text": Application(
-        SmolVLMText, "smolvlm-256m-instruct", "model.safetensors", "tokenizer.json"
+        SmolVLMText,
+        "smolvlm-256m-instruct",
+        "model.safetensors",
+        "tokenizer.json",
+        each_step=("npu1", "npu2"),
     ),
 }
 
