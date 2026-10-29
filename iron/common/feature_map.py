@@ -12,6 +12,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Precision, Scratchpad
 from iron.operators.copy import Copy
+from iron.operators.elementwise_max import ElementwiseMax
 from iron.operators.gemm import GEMM
 
 # What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
@@ -165,3 +166,121 @@ class Conv2d(iron.Graph):
             h = h[:n]
         h = h if y is not None else h[: rows * self.out_width]
         return None if y is not None else h.reshape(out_rows, self.out_line)
+
+
+class MaxPool2d(iron.Graph):
+    """Max pooling of ``rows`` rows of ``width`` channels-last pixels, each
+    channel on its own, by a ``kernel``-wide square window at stride 1,
+    padded with ``-inf`` so the output is the input's shape.
+
+    The input is written into a held ``-inf`` border, and the ``kernel *
+    kernel`` shifted views of it are combined by a running
+    ``ElementwiseMax``, a selection, so exact.
+
+    Args:
+        rows: The input's rows.
+        width: The input's pixels a row.
+        channels: The channels a pixel.
+        kernel: The window's side, odd.
+    """
+
+    def __init__(self, rows: int, width: int, channels: int, kernel: int):
+        if kernel % 2 == 0:
+            raise ValueError(
+                f"MaxPool2d: kernel ({kernel}) must be odd, for same padding"
+            )
+        self.rows, self.width, self.channels, self.kernel = (
+            rows,
+            width,
+            channels,
+            kernel,
+        )
+        pad = kernel // 2
+        shape = (rows + 2 * pad, (width + 2 * pad) * channels)
+        self.border = iron.param(np.full(shape, -np.inf, bfloat16))
+        self.padded = iron.state(shape)
+
+    def body(self, x):
+        k, C, pad = self.kernel, self.channels, self.kernel // 2
+        shape = self.padded.shape
+        line = shape[1]
+        Copy.step(self.border, self.padded)
+        interior = TensorAccessPattern(
+            shape, pad * line + pad * C, [self.rows, self.width * C], [line, 1]
+        )
+        Copy.step(x, self.padded, dst=interior)
+        pooled = None
+        for a in range(k):
+            for b in range(k):
+                view = TensorAccessPattern(
+                    shape, a * line + b * C, [self.rows, self.width * C], [line, 1]
+                )
+                window = Copy.step(self.padded, src=view)
+                # A pixel's channels are a line any plane divides into.
+                pooled = (
+                    window
+                    if pooled is None
+                    else ElementwiseMax.step(pooled, window, tile_size=C)
+                )
+        return pooled.reshape(self.rows, self.width * C)
+
+    def exact(self, x: np.ndarray) -> np.ndarray:
+        """The max pooling of ``x`` ``(rows, width * channels)`` in float32."""
+        k, pad = self.kernel, self.kernel // 2
+        image = np.asarray(x, np.float32).reshape(self.rows, self.width, self.channels)
+        image = np.pad(image, ((pad, pad), (pad, pad), (0, 0)), constant_values=-np.inf)
+        windows = np.stack(
+            [
+                image[a : a + self.rows, b : b + self.width]
+                for a in range(k)
+                for b in range(k)
+            ]
+        )
+        return windows.max(axis=0).reshape(self.rows, self.width * self.channels)
+
+
+class ConcatChannels(iron.Graph):
+    """Two to four inputs of ``rows`` rows of ``width`` channels-last pixels
+    concatenated along their channels, ``channels`` each input's a pixel.
+
+    Each input is copied into its channels of a held buffer, which a last
+    copy returns.
+
+    Args:
+        rows: The inputs' rows.
+        width: The inputs' pixels a row.
+        channels: Each input's channels a pixel, two to four of them.
+    """
+
+    def __init__(self, rows: int, width: int, channels: tuple[int, ...]):
+        if not 2 <= len(channels) <= 4:
+            raise ValueError(
+                f"ConcatChannels: {len(channels)} inputs; it joins two to four"
+            )
+        if any(c % 2 for c in channels):
+            raise ValueError(
+                f"ConcatChannels: channels {tuple(channels)} are not all even; "
+                f"each input's run of a pixel is one transfer of whole 4-byte units"
+            )
+        self.rows, self.width, self.channels = rows, width, tuple(channels)
+        self.out = iron.state((rows, width * sum(channels)))
+
+    def body(self, x0, x1, x2=None, x3=None):
+        xs = [x for x in (x0, x1, x2, x3) if x is not None]
+        if len(xs) != len(self.channels):
+            raise TypeError(
+                f"ConcatChannels: {len(xs)} inputs given, {len(self.channels)} "
+                f"declared"
+            )
+        total = sum(self.channels)
+        offset = 0
+        for x, c in zip(xs, self.channels):
+            dst = TensorAccessPattern(
+                self.out.shape,
+                offset,
+                [self.rows, self.width, c],
+                [self.width * total, total, 1],
+            )
+            Copy.step(x, self.out, dst=dst)
+            offset += c
+        return Copy.step(self.out[:])
