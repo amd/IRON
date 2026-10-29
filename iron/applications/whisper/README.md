@@ -5,11 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Whisper on the NPU
 
-OpenAI's Whisper (large-v3-turbo's shape: a 32-layer audio encoder, a
-4-layer text decoder) as an `iron.lm.EncoderDecoder`; `model.py`'s
-docstrings describe the encoder (`WhisperEncoder`), the decoder (`Whisper`)
-and the config. `hugging_face.py`, which only the tests import, is what it
-is judged by. The shared library is [AGENTS.md](../../../AGENTS.md#language-models).
+OpenAI's Whisper (large-v3-turbo's shape by default: a 32-layer audio
+encoder, a 4-layer text decoder; small's: 12 and 12) as an
+`iron.lm.EncoderDecoder`; `model.py`'s docstrings describe the encoder
+(`WhisperEncoder`), the decoder (`Whisper`) and the config. `hugging_face.py`,
+which only the tests import, is what it is judged by. The shared library is
+[AGENTS.md](../../../AGENTS.md#language-models).
 
 ## Status
 
@@ -17,11 +18,14 @@ The model runs at a toy shape on drawn weights, with tanh GELU and with
 exact (`tests/applications/whisper/test.py`): device-free, each version's
 reference against Hugging Face's logits recorded in
 `tests/applications/whisper/goldens/`, and the same checks on the NPU.
-`Whisper.load` builds large-v3-turbo from its checkpoint (`config.json`,
-`model.safetensors`, `tokenizer.json`), held on the NPU to transformers'
-logits recorded in `golden.npz` beside it; the tests find it at
-`$IRON_EXAMPLE_WEIGHTS_DIR/whisper-large-v3-turbo`. A prompt starts at
-`<|startoftranscript|>`, the checkpoint's `decoder_start_token_id`.
+`Whisper.load` builds large-v3-turbo or small from its checkpoint
+(`config.json`, `model.safetensors`, `tokenizer.json`), held on the NPU to
+transformers' logits recorded in `golden.npz` beside it; the tests find
+them at `$IRON_EXAMPLE_WEIGHTS_DIR/whisper-large-v3-turbo` and
+`whisper-small`. A prompt starts at `<|startoftranscript|>`, the
+checkpoint's `decoder_start_token_id`. Small ships 80 mel bins, not
+large-v3-turbo's 128; `WhisperEncoderConfig.conv1_channels` and
+`LogMel.mel_pad` pad the GEMM tiles their shape would otherwise miss.
 
 `hidden_act` `"gelu"`, Whisper's own, is the exact GELU, `GELU`'s
 `approximate="none"` on mlir-aie's `gelu_erf`.
