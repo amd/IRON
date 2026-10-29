@@ -103,13 +103,14 @@ class Chain(iron.Graph):
         shape = dict(size=size, tile_size=tile)
         if columns is not None:
             shape["num_aie_columns"] = columns
-        self.add = ElementwiseAdd(**shape)
-        self.silu = SiLU(**shape)
-        self.mul = ElementwiseMul(**shape)
+        self.shape = shape
 
     def body(self, a, b):
-        x = self.mul(self.silu(self.add(a, b)), b)
-        return self.silu(self.add(x, b))
+        x = ElementwiseAdd.step(a, b, **self.shape)
+        x = SiLU.step(x, **self.shape)
+        x = ElementwiseMul.step(x, b, **self.shape)
+        x = ElementwiseAdd.step(x, b, **self.shape)
+        return SiLU.step(x, **self.shape)
 
 
 class Adds(iron.Graph):

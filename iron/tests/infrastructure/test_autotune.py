@@ -36,9 +36,9 @@ def test_a_tuned_profile_runs_bit_identically(tmp_path):
         log=lambda _: None,
     )
     assert len(profile)
-    tuned = Chain(SIZE, TILE).compile(
-        full_elf=True, profile=profile, a=(SIZE,), b=(SIZE,)
-    )
+    graph = Chain(SIZE, TILE)
+    graph.profile = profile
+    tuned = graph.compile(full_elf=True, a=(SIZE,), b=(SIZE,))
     plain = Chain(SIZE, TILE).compile(full_elf=True, a=(SIZE,), b=(SIZE,))
     rng = np.random.default_rng(0)
     a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
