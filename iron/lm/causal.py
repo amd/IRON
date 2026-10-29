@@ -317,16 +317,16 @@ class CausalLM(Model):
             x = Copy.step(x[call.rows - 1]).reshape(
                 1, c.hidden_size
             )  # the last row's logits alone
-        return self.draw(self.head(x), call)
+        return self.draw(self.head(x), call, x)
 
-    def draw(self, logits, call: Call):
+    def draw(self, logits, call: Call, hidden: Handle):
         """What a call returns: ``logits``, ``head``'s output unchanged, and
-        the token ``Sample`` draws from ``sampled(logits, call)``, carried
-        with the next position.
+        the token ``Sample`` draws from ``sampled(logits, call, hidden)``,
+        carried with the next position.
         """
         c = self.config
         _, drawn = Sample.step(
-            self.sampled(logits, call).reshape(c.vocab_size + c.vocab_size % 2),
+            self.sampled(logits, call, hidden).reshape(c.vocab_size + c.vocab_size % 2),
             self.draws,
             self.drawn,
             row=call.position * ROW_WORDS,
@@ -335,9 +335,12 @@ class CausalLM(Model):
         )
         return logits, iron.carry(token=drawn, position=call.position + 1)
 
-    def sampled(self, logits, call: Call):
+    def sampled(self, logits, call: Call, hidden: Handle):
         """``logits``, as ``draw`` samples from: unchanged by default. A
-        subclass biases or masks them here (Whisper's suppressed tokens)
+        subclass biases or masks them here (Whisper's suppressed tokens),
+        from ``hidden``, the head's own input, where redoing part of
+        ``head`` is lighter than a pass over ``logits`` (Whisper's own
+        vocabulary has no tiling an elementwise op over it divides into),
         while ``logits`` itself, what a call returns, stays ``head``'s own.
         """
         return logits

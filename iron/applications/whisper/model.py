@@ -442,19 +442,30 @@ class Whisper(EncoderDecoder):
         weights = bf16(weights)
         encoder = WhisperEncoder(config.encoder(), weights)
         super().__init__(config, decoder_weights(weights), encoder)
-        # Added to the head's logits before Sample draws: -inf at every
-        # token generation_config.json holds unspeakable (empty, and so a
-        # no-op, with no checkpoint: a toy's). begin_suppress_bias is the
-        # prompt chunk's own, which draws the first generated token;
-        # suppress_bias every call after.
+        # Sample draws from a second projection of the same (tied) weight,
+        # biased by -inf at every token generation_config.json holds
+        # unspeakable (empty, and so unbiased, with no checkpoint: a
+        # toy's): Whisper's vocabulary (51865, small's) has no factor an
+        # elementwise add could tile a bias row over, so the bias is this
+        # GEMM's own, not a separate pass over the head's output.
+        # begin_suppress_head is the prompt chunk's own call, which draws
+        # the first generated token; suppress_head every call after.
         v = config.vocab_size + config.vocab_size % 2
         bias = np.zeros(v, bfloat16)
         bias[list(config.suppress_tokens)] = -np.inf
         bias[config.first_special_token_id :] = -np.inf
-        self.suppress_bias = iron.param(bias)
+        self.suppress_head = Linear(
+            config.hidden_size, config.vocab_size, bias=True, precision=config.precision
+        )
+        self.suppress_head.weight = self.lm_head.weight
+        self.suppress_head.bias = iron.param(bias)
         begin_bias = bias.copy()
         begin_bias[list(config.begin_suppress_tokens)] = -np.inf
-        self.begin_suppress_bias = iron.param(begin_bias)
+        self.begin_suppress_head = Linear(
+            config.hidden_size, config.vocab_size, bias=True, precision=config.precision
+        )
+        self.begin_suppress_head.weight = self.lm_head.weight
+        self.begin_suppress_head.bias = iron.param(begin_bias)
 
     @functools.cached_property
     def bos(self) -> int:
@@ -497,14 +508,15 @@ class Whisper(EncoderDecoder):
             self.special("<|notimestamps|>"),
         ]
 
-    def sampled(self, logits, call):
-        """``logits`` plus this call's suppression bias: ``begin_suppress_bias``
-        for the prompt chunk, which draws the first generated token,
-        ``suppress_bias`` after. ``logits`` itself, the call's own return
+    def sampled(self, logits, call, hidden):
+        """``hidden`` through ``begin_suppress_head`` for the prompt chunk,
+        which draws the first generated token, or ``suppress_head`` after:
+        the same (tied) weight as ``head``'s, biased by -inf at this
+        call's suppressed tokens. ``logits`` itself, the call's own return
         value, is never suppressed.
         """
-        bias = self.begin_suppress_bias if call.prompt else self.suppress_bias
-        return logits + iron.weight(bias)
+        head = self.begin_suppress_head if call.prompt else self.suppress_head
+        return head(hidden)
 
     def positions(self, x, call):
         c = self.config

@@ -37,7 +37,7 @@ class Qwen3Embedding(Qwen3):
     def head(self, x):
         return self.model.norm(x)
 
-    def draw(self, logits, call):
+    def draw(self, logits, call, hidden):
         return logits, iron.carry(token=call.token, position=call.position + 1)
 
     def embed(self, text: str, task: str | None = None) -> np.ndarray:
