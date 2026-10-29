@@ -611,13 +611,17 @@ class Staging:
     it and each one's slot of a round, in elements; ``splits``, per lane of
     ``source``, the lanes of ``sink`` it is split into and each one's slot.
 
+    A per-call bound is honored where both sides follow one graph value and
+    move, a tile a lane, the same elements a call, in tiles of whole rounds:
+    every call is then the same whole rounds on both sides.
+
     Raises:
-        ValueError: Either side is bounded per call, the two are not one
-            buffer, a side's lanes do not visit each element once or in
-            whole objects, neither a join nor a split reproduces ``sink``'s
-            order, or a memtile cannot take one: a split to more lanes than
-            its DMA channels, or a round past its memory. A join of more lanes
-            than a memtile takes is a join of joins.
+        ValueError: The two are not one buffer, a side's lanes do not visit
+            each element once or in whole objects, a bound is not honored as
+            above, neither a join nor a split reproduces ``sink``'s order, or
+            a memtile cannot take one: a split to more lanes than its DMA
+            channels, or a round past its memory. A join of more lanes than a
+            memtile takes is a join of joins.
     """
 
     def __init__(self, source: Operand, sink: Operand) -> None:
@@ -633,13 +637,26 @@ class Staging:
                 f"are not one buffer"
             )
         streams: list[list[np.ndarray]] = []
+        # Per side, under a bound: the graph expression its extent follows,
+        # the extent every lane together moves a tile at a time and those
+        # elements, and a lane's tile.
+        bounds: list[tuple[Any, int, int, int] | None] = []
         for side in (source, sink):
             transfers = side.transfers()
-            if any(word is not None for _, _, word, _ in transfers):
-                raise ValueError(
-                    f"{edge}: {side.name} is bounded per call, but a memtile's "
-                    f"rounds are fixed at build, and a call bounded short of a "
-                    f"whole round would stall it"
+            bounded = side.bounded
+            if bounded is None:
+                bounds.append(None)
+            else:
+                extent, axis, word = bounded
+                (unit,) = {u for _, _, _, u in transfers}
+                rows = word.divisor(side.op)
+                bounds.append(
+                    (
+                        side.op.bound_values.get(extent.name),
+                        rows,
+                        rows * math.prod(side.shape[axis + 1 :]),
+                        unit,
+                    )
                 )
             taps = {lane: tap for lane, tap, _, _ in transfers}
             if len(transfers) != side.lanes or sorted(taps) != list(range(side.lanes)):
@@ -657,6 +674,35 @@ class Staging:
             streams.append(stream)
         produced, consumed = streams
         produce, consume = math.prod(source.obj_shape), math.prod(sink.obj_shape)
+        # A memtile's rounds are fixed at build: a call bounded short of a whole
+        # round would stall it, so both sides must move the same whole rounds.
+        if (bounds[0] is None) != (bounds[1] is None):
+            raise ValueError(
+                f"{edge}: one side is bounded per call and the other moves its "
+                f"whole buffer"
+            )
+        if bounds[0] is not None:
+            (graph_p, rows_p, round_p, _), (graph_c, rows_c, round_c, _) = bounds
+            # A call moves ceil(extent / rows) rounds a side: one count for
+            # every value where the two extents are one linear expression
+            # of it, a round of each side's rows apart.
+            if (
+                graph_p is None
+                or graph_c is None
+                or graph_p.value.name != graph_c.value.name
+                or not (graph_p.linear and graph_c.linear)
+                or round_p != round_c
+                or graph_p.scale * rows_c != graph_c.scale * rows_p
+                or graph_p.bias * rows_c != graph_c.bias * rows_p
+            ):
+                raise ValueError(
+                    f"{edge}: bounded per call by "
+                    f"{None if graph_p is None else graph_p.name} in rounds of "
+                    f"{round_p} elements and by "
+                    f"{None if graph_c is None else graph_c.name} in rounds of "
+                    f"{round_c}: not one graph value moving whole rounds alike"
+                )
+        units = (None, None) if bounds[0] is None else (bounds[0][3], bounds[1][3])
 
         tm = get_target_model(sink.op.dev.resolve())
         row = next(r for r in range(tm.rows()) if tm.is_mem_tile(0, r))
@@ -703,6 +749,15 @@ class Staging:
                         f"{edge}: a round of {sum(slots)} elements is past a "
                         f"memtile's {self.capacity} bytes"
                     )
+                tile_p, tile_c = units
+                if tile_p is not None and any(
+                    tile_p % s or tile_p // s * sum(slots) != tile_c for s in slots
+                ):
+                    raise ValueError(
+                        f"{edge}: a call's bound moves {tile_p}-element tiles of "
+                        f"{source.name} and {tile_c} of {sink.name}, not whole "
+                        f"rounds of slots {slots}"
+                    )
                 self.joins.append((group, slots))
             return
         reader = np.empty(sink.elements, dtype=np.int64)
@@ -726,6 +781,15 @@ class Staging:
                     f"{edge}: neither a join of whole lanes of {source.name} nor "
                     f"a split of each of its objects gives {sink.name}'s lanes "
                     f"their host order"
+                )
+            tile_p, tile_c = units
+            if tile_p is not None and any(
+                tile_p // produce * s != tile_c for s in slots
+            ):
+                raise ValueError(
+                    f"{edge}: a call's bound moves {tile_p}-element tiles of "
+                    f"{source.name} and {tile_c} of {sink.name}, not whole rounds "
+                    f"of its {produce}-element objects"
                 )
             if len(group) > channels_out:
                 raise ValueError(

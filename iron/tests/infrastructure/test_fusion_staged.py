@@ -6,14 +6,20 @@ memtiles, ``Staging``) and fan-out (one output feeding several inputs). No
 toolchain and no NPU above the "On the device" line.
 """
 
+import multiprocessing
+import re
 import statistics
+from pathlib import Path
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie import ir
 from aie.utils.verify import Tolerance, compare
+from ml_dtypes import bfloat16
 
-from iron import Profile
+import iron
+from iron import Profile, Scratchpad
 from iron.common.declare.operand import Staging
 from iron.common.design import BuiltArray, OperatorDesign
 from iron.common.graph.fusion import candidates
@@ -33,6 +39,10 @@ from iron.tests.support.llama_model import llama_1b
 from iron.tune.measure import Timing, time_interleaved
 
 pytestmark = pytest.mark.usefixtures("npu2")
+
+LLAMA_NPU2_PROFILE = Profile.load(
+    Path(__file__).resolve().parents[2] / "applications/llama/profiles/npu2.json"
+)
 
 
 def _staged(*edges: Edge) -> Fusion:
@@ -151,6 +161,35 @@ def _silu_muls_fusion() -> Fusion:
     )
 
 
+def _mlp():
+    """Llama 3.2 1B decode's gate and up projections (M=8192, K=2048) into
+    SiLU and the multiply, at the profile's own tunables: all 32 cores.
+    """
+    gate = LLAMA_NPU2_PROFILE.make(GEMV, M=8192, K=2048)
+    up = LLAMA_NPU2_PROFILE.make(GEMV, M=8192, K=2048)
+    silu = LLAMA_NPU2_PROFILE.make(SiLU, size=8192)
+    mul = LLAMA_NPU2_PROFILE.make(ElementwiseMul, size=8192)
+    return gate, up, silu, mul
+
+
+def _mlp_recording(name, gate, up, silu, mul):
+    steps = sequences.steps(
+        (gate, "Wg", "x", "g"),
+        (up, "Wu", "x", "u"),
+        (silu, "g", "s"),
+        (mul, "s", "u", "out"),
+    )
+    return Recording.of_steps(name, steps, ["Wg", "Wu", "x"], ["out"])
+
+
+def _mlp_fusion() -> Fusion:
+    return Fusion(
+        FusionKind.STREAM,
+        (0, 1, 2, 3),
+        (Edge(0, "C", 2, "x"), Edge(1, "C", 3, "b"), Edge(2, "y", 3, "a")),
+    )
+
+
 def _plan(producer, output, consumer, input_) -> Staging:
     producer, consumer = producer.resolved(), consumer.resolved()
     return Staging(getattr(producer, output), getattr(consumer, input_))
@@ -244,17 +283,61 @@ def test_an_order_neither_a_join_nor_a_split_gives_is_refused():
         _plan(norm, "y", add, "b")
 
 
-def test_a_per_call_bound_is_refused():
-    """A bounded call moves as many rows as the call says, but a memtile's
-    rounds are fixed at build: a call short of a round would stall it.
+def _bounded(tile=4096):
+    """SiLU's eight lanes of 2048 into ElementwiseMul's four of ``tile``,
+    both bounded by the graph's own per-call element count ``n``, as a prompt
+    chunk's rows are.
     """
+
+    class Staged(iron.Graph):
+        def body(self, x, up, *, n: Scratchpad[np.int32]):
+            y = SiLU.step(x[:n], tile_size=2048, num_aie_columns=8)
+            return ElementwiseMul.step(y, up, tile_size=tile, num_aie_columns=4)
+
+    return Staged()
+
+
+BOUNDED_SIZE = 8 * 16384
+
+
+def test_a_bound_moving_whole_rounds_alike_is_staged():
+    """Both sides move ceil(n / 16384) rounds of 16384 elements a call, each
+    of Mul's 4096-element tiles two of SiLU's 2048 joined: every call is the
+    same whole rounds on both sides, so the static link stays in step."""
+    recording = _bounded().record(x=(BOUNDED_SIZE,), up=(BOUNDED_SIZE,))
+    silu, mul = (s.op.resolved() for s in recording.steps)
+    plan = Staging(silu.y, mul.a)
+    assert plan.joins == [([2 * k, 2 * k + 1], [2048, 2048]) for k in range(4)]
+    assert candidates(recording) == (_staged(Edge(0, "y", 1, "a")),)
+
+
+def test_a_bound_moving_other_rounds_is_refused():
+    """Mul at 2048-element tiles moves rounds of 8192 a call against SiLU's
+    16384: a call of 8192 would leave SiLU's link half a round short."""
+    recording = _bounded(2048).record(x=(BOUNDED_SIZE,), up=(BOUNDED_SIZE,))
+    silu, mul = (s.op.resolved() for s in recording.steps)
+    with pytest.raises(ValueError, match="not one graph value moving whole rounds"):
+        Staging(silu.y, mul.a)
+
+
+def test_a_bound_without_a_graph_value_is_refused():
+    """Bound to no graph value, the two counts cannot be known to agree."""
     add = ElementwiseAdd(
         size=8 * 2048, num_aie_columns=8, tile_size=2048, bound_values={"valid": None}
     )
     norm = RMSNorm(
         rows=8, tile_size=2048, num_aie_columns=4, bound_values={"valid": None}
     )
-    with pytest.raises(ValueError, match="bounded per call"):
+    with pytest.raises(ValueError, match="not one graph value"):
+        _plan(add, "y", norm, "x")
+
+
+def test_one_side_bounded_is_refused():
+    add = ElementwiseAdd(
+        size=8 * 2048, num_aie_columns=8, tile_size=2048, bound_values={"valid": None}
+    )
+    norm = RMSNorm(rows=8, tile_size=2048, num_aie_columns=4)
+    with pytest.raises(ValueError, match="one side is bounded"):
         _plan(add, "y", norm, "x")
 
 
@@ -369,6 +452,19 @@ def test_candidates_fan_out_to_every_reader():
     assert candidates(recording) == (_silu_muls_fusion(),)
 
 
+def test_candidates_fan_out_into_b_a_flipped_flag_streams():
+    """q/k/v as recorded (``feed_b`` False) take B riding A, which no edge can
+    feed; ``feed_b`` streams it, so the fan-out is proposed with the steps as
+    recorded, for a tuner to run at the setting that builds."""
+    norm = RMSNorm(rows=1, tile_size=2048)
+    q, k, v = (
+        GEMV(M=m, K=2048, num_aie_columns=c) for m, c in ((2048, 8), (512, 4), (512, 2))
+    )
+    recording = _norm_qkv_recording("fan_out_flag", norm, q, k, v)
+    assert _norm_qkv_fusion() in candidates(recording)
+    assert not any(s.op.resolved().feed_b for s in recording.steps[1:])
+
+
 def test_profile_round_trips_staged_and_fan_out_entries(tmp_path):
     add, norm = _add_norm()
     silu, mul1, mul2 = _silu_muls()
@@ -419,6 +515,33 @@ def test_llama_1b_decode_fuses_its_mlp_up_to_the_down_projection():
         ("GEMV", "GEMV", "SiLU", "ElementwiseMul"),
         ((0, "C", 2, "x"), (1, "C", 3, "b"), (2, "y", 3, "a")),
     ) in found
+
+
+def test_a_fused_sequence_pushes_every_task_before_it_waits():
+    """The MLP window's one sequence (every member's, in one task group)
+    issues every transfer before its first wait, and no channel more than its
+    task queue holds: no member's wait or full queue can stop the instruction
+    stream before a later member's inputs are queued.
+    """
+    text = _composed(_mlp_recording("mlp_order", *_mlp()), (_mlp_fusion(),))
+    (fused,) = re.findall(r"aie\.device\(npu2\) @(fusion\S+) \{", text)
+    body = text[text.index(f"@{fused} {{") :]
+    body = body[body.index("aie.runtime_sequence") : body.index("aie.device(", 1)]
+    tasks, ops = {}, []
+    for m in re.finditer(
+        r"(%\S+) = aiex\.dma_configure_task_for @(\S+) \{|"
+        r"aiex\.dma_start_task\((%[^)]+)\)|aiex\.dma_await_task",
+        body,
+    ):
+        if m.group(1):
+            tasks[m.group(1)] = m.group(2)
+        else:
+            ops.append(tasks[m.group(3)] if m.group(3) else None)
+    first_wait = ops.index(None)
+    assert all(op is None for op in ops[first_wait:])
+    depth = aie_utils.get_current_device().dma_task_queue_depth
+    pushes = {op: ops[:first_wait].count(op) for op in ops[:first_wait]}
+    assert max(pushes.values()) <= depth, pushes
 
 
 # ---------------------------------------------------------------------------
@@ -676,3 +799,105 @@ def test_fan_out_silu_into_two_muls_matches_reference_and_unfused():
         verdict = compare(fused[name], ref, tol)
         assert verdict, f"{name}: {verdict.detail}"
     _bit_equal(fused, plain)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_bounded_staged_pair_matches_across_per_call_counts():
+    """The bounded join (SiLU's eight lanes into Mul's four), compiled once
+    with a profile naming it and called at several counts, whole rounds and
+    not, each bit-equal to the same call unfused and to the graph's own
+    reference over the valid elements."""
+    profile = Profile()
+    profile.add_fusion(
+        FusionKind.STAGED, [(SiLU, {}), (ElementwiseMul, {})], [(0, "y", 1, "a")]
+    )
+    staged_graph = _bounded()
+    staged_graph.profile = profile
+    staged = staged_graph.compile(x=(BOUNDED_SIZE,), up=(BOUNDED_SIZE,))
+    assert staged.sequence.fusions, "the profile's staged fusion was not taken"
+    staged.load()
+    plain = _bounded().compile(x=(BOUNDED_SIZE,), up=(BOUNDED_SIZE,))
+    plain.load()
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal(BOUNDED_SIZE).astype(np.float32).astype(bfloat16)
+    up = rng.standard_normal(BOUNDED_SIZE).astype(np.float32).astype(bfloat16)
+    for n in (BOUNDED_SIZE, 16384, 2048, 3 * 16384 + 512):
+        out = np.asarray(staged(x, up, n=n))[:n]
+        baseline = np.asarray(plain(x, up, n=n))[:n]
+        want = np.asarray(staged_graph.reference(x, up, n=n))[:n]
+        assert np.array_equal(
+            out.view(np.uint16), baseline.view(np.uint16)
+        ), f"n={n}: the staged and unfused devices differ"
+        verdict = compare(
+            out,
+            want,
+            Tolerance.bf16_ulps(
+                3,
+                atol=1.2e-38,
+                note="SiLU's 1 ulp through the multiply, both roundings",
+            ),
+        )
+        assert verdict, f"n={n}: {verdict.detail}"
+
+
+def _run_mlp(packaging_name: str, results) -> None:
+    """The MLP window fused and apart, in a child process: its outputs, or
+    the error, on ``results``."""
+    try:
+        aie_utils.ensure_current_device()
+        packaging = {"full_elf": FullELF, "per_step": PerStep}[packaging_name]
+        outs = []
+        for fusions in ((_mlp_fusion(),), ()):
+            gate, up, silu, mul = _mlp()
+            image = Image(
+                _mlp_recording("mlp_device", gate, up, silu, mul),
+                packaging(),
+                fusions=fusions,
+            )
+            image.compile()
+            run = image.get_callable()
+            x = vectors(gate).inputs["B"]
+            inputs = {
+                "Wg": vectors(gate, seed=3).inputs["A"],
+                "Wu": vectors(up, seed=5).inputs["A"],
+                "x": x,
+            }
+            outs.append(_dispatch(run, inputs, {"out": 8192})["out"])
+        results.put(outs)
+    except Exception as e:  # the parent reports it
+        results.put(repr(e))
+
+
+# Ample for two compiles and two dispatches; a hang fails the test instead of
+# wedging the run.
+_MLP_TIMEOUT_S = 900
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("packaging", ["full_elf", "per_step"])
+def test_mlp_window_matches_reference_and_unfused(packaging):
+    """Llama decode's gate/up projections, SiLU and the multiply fused as one
+    window (edges skipping a step, all 32 cores), held to numpy and bit-equal
+    to the steps apart, run in a child process a hang cannot outlive."""
+    context = multiprocessing.get_context("spawn")
+    results = context.Queue()
+    child = context.Process(target=_run_mlp, args=(packaging, results))
+    child.start()
+    child.join(_MLP_TIMEOUT_S)
+    if child.is_alive():
+        child.kill()
+        pytest.fail(f"the MLP window did not finish in {_MLP_TIMEOUT_S} s: a hang")
+    got = results.get(timeout=10)
+    assert not isinstance(got, str), got
+    fused, apart = got
+    gate, up, silu, mul = (op.resolved() for op in _mlp())
+    x = vectors(gate).inputs["B"]
+    ref = np.asarray(
+        mul.reference(
+            silu.reference(gate.reference(vectors(gate, seed=3).inputs["A"], x)),
+            up.reference(vectors(up, seed=5).inputs["A"], x),
+        )
+    ).reshape(-1)
+    verdict = compare(fused, ref, gate.tolerance())
+    assert verdict, verdict.detail
+    _bit_equal({"out": fused}, {"out": apart})

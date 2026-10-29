@@ -10,7 +10,6 @@ from collections.abc import Sequence
 from ..declare import Operator
 from ..declare.profile import Profile
 from ..design import BuiltArray, OperatorDesign
-from ..image.compose import fits
 from ..image.step import Edge, Fusion, FusionKind
 from .record import Recording
 
@@ -26,8 +25,8 @@ def _admits(
     """How ``producer``'s resolved ``output`` can feed ``consumer``'s resolved
     ``input_`` on-chip: ``STREAM`` where the pair's ``BuiltArray``s build fed
     directly (``Operand.feed``'s checks pass), else ``STAGED`` where they build
-    staged through memtiles and the pair places so (``fits``); None where
-    neither does.
+    staged through memtiles; None where neither does. Whether it places is
+    left to the widths its members run at fused, which a tuner chooses.
     """
     try:
         producer_design = OperatorDesign(producer)
@@ -49,10 +48,7 @@ def _admits(
             )
         except ValueError:
             continue
-        pair = Fusion(kind, (0, 1), (Edge(0, output, 1, input_),))
-        designs = {"0": producer_design, "1": consumer_design}
-        if kind is FusionKind.STREAM or fits(designs, fusion=pair) is None:
-            _built[key] = kind
+        _built[key] = kind
         break
     return _built[key]
 
@@ -60,11 +56,9 @@ def _admits(
 # Bounds a stream window's length: each start tries every window up to it.
 _STREAM_MAX_RUN = 8
 
-_placed: dict[tuple, bool] = {}
-
 
 def _hand_offs(
-    recording: Recording, ops: Sequence[Operator]
+    recording: Recording, ops: list[Operator]
 ) -> dict[str, tuple[int, str, dict[int, str]]]:
     """Each buffer root one step's output can hand on-chip to every step that
     reads it, ``ops`` the steps' resolved operators: ``(writer, output,
@@ -72,7 +66,10 @@ def _hand_offs(
     which only that step writes and is not a graph output, feedback, pinned
     or resident buffer; each reader comes later and reads the whole root
     through one streamed, non-``replicate`` input, no host step reads it,
-    and every reader's edge admits (``_admits``).
+    and every reader's edge admits (``_admits``). An input that streams only
+    with one of its reader's bool tunables flipped (GEMV's ``B``, at
+    ``feed_b``) is admitted so, that variant replacing the reader in ``ops``:
+    a tuner finds and writes the setting the fusion runs at.
     """
     excluded = (
         {h.name for h in recording.outputs}
@@ -116,10 +113,38 @@ def _hand_offs(
                 if len(inputs) != 1:
                     break
                 ((cbuf, cref),) = inputs
-                if cref.nbytes is not None or not cbuf.streamed or cbuf.replicate:
+                if cref.nbytes is not None or cbuf.replicate:
                     break
-                if _admits(ops[i], buf.name, ops[j], cbuf.name) is None:
+                reader = ops[j]
+                if not cbuf.streamed:
+                    flipped = []
+                    for name in type(reader).declaration.tunables:
+                        if not isinstance(vars(reader)[name], bool):
+                            continue
+                        try:
+                            flipped.append(
+                                reader._with_tunables(
+                                    **{name: not vars(reader)[name]}
+                                ).resolved()
+                            )
+                        except ValueError:  # the flip does not resolve here
+                            continue
+                    reader = next(
+                        (
+                            v
+                            for v in flipped
+                            if next(
+                                b for b in v.buffers if b.name == cbuf.name
+                            ).streamed
+                            and _admits(ops[i], buf.name, v, cbuf.name) is not None
+                        ),
+                        None,
+                    )
+                    if reader is None:
+                        break
+                elif _admits(ops[i], buf.name, reader, cbuf.name) is None:
                     break
+                ops[j] = reader
                 fed[j] = cbuf.name
             else:
                 found[root] = (i, buf.name, fed)
@@ -131,8 +156,8 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
     crossing it, that runs as one stream or staged fusion: each root two of
     its steps share, one writing, is a hand-off (``_hand_offs``) whose writer
     and every reader are in it, an edge each; every step is on an edge. The
-    fusion is staged where an edge admits only staged; one fanning out, or
-    staged, must place (``fits``). Ordered by first step, then by length.
+    fusion is staged where an edge admits only staged. Ordered by first step,
+    then by length; whether one places is left to a tuner's widths.
     """
     resolved = [step.op.resolved() for step in recording.steps]
     hand_offs = _hand_offs(recording, resolved)
@@ -181,32 +206,8 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
             )
             kind = FusionKind.STAGED if staged else FusionKind.STREAM
             fusion = Fusion(kind, tuple(window), tuple(edges))
-            fans = len(edges) > len({(e.producer, e.output) for e in edges})
-            if (staged or fans) and not _fused_fits(fusion, ops, lo):
-                continue
             found.append(fusion)
     return found
-
-
-def _fused_fits(fusion: Fusion, ops: Sequence[Operator], lo: int) -> bool:
-    """Whether ``fusion``, over ``ops`` (its steps' resolved operators, the
-    first at step ``lo``), places and allocates built fused (``fits``),
-    cached by its designs and wiring.
-    """
-    designs = [OperatorDesign(op) for op in ops]
-    local = Fusion(
-        fusion.kind,
-        tuple(s - lo for s in fusion.steps),
-        tuple(
-            Edge(e.producer - lo, e.output, e.consumer - lo, e.input)
-            for e in fusion.edges
-        ),
-    )
-    key = (local, tuple(d.identity for d in designs))
-    if key not in _placed:
-        named = {str(i): d for i, d in enumerate(designs)}
-        _placed[key] = fits(named, fusion=local) is None
-    return _placed[key]
 
 
 def _crosses_host(recording: Recording, lo: int, hi: int) -> bool:
@@ -269,48 +270,34 @@ def _pack_runs(recording: Recording) -> list[Fusion]:
     return found
 
 
-# Bounds merge's window enumeration: each window past the first needs its own
-# fits() (an MLIR placement pass), and the reconfigure a merge saves is one
+# Bounds merge's window enumeration: the reconfigure a merge saves is one
 # regardless of how many steps share it, so a handful is where the search
 # stops paying for itself.
 _MERGE_MAX_RUN = 4
 
-_coresident: dict[tuple[str, ...], bool] = {}
-
-
-def _co_fits(designs: Sequence[OperatorDesign]) -> bool:
-    """Whether ``designs`` place and allocate in one device configuration
-    (``fits``), cached by their identities: a shape repeated down a model
-    checks once.
-    """
-    key = tuple(d.identity for d in designs)
-    if key not in _coresident:
-        _coresident[key] = fits({str(i): d for i, d in enumerate(designs)}) is None
-    return _coresident[key]
-
 
 def _merge_runs(recording: Recording) -> list[Fusion]:
     """Every consecutive run of 2 to ``_MERGE_MAX_RUN`` steps, no host step
-    crossing it (``_crosses_host``), whose designs co-fit (``_co_fits``),
-    overlapping ones included. A longer run only adds designs to place, so
-    the first window from a start that does not fit ends the search there.
+    crossing it (``_crosses_host``), overlapping ones included, whose steps
+    each build an array of their own here: not reference-only, shipped or
+    exported by another tool. Whether a run fits is left to the widths its
+    members run at fused, which a tuner chooses.
     """
     n = len(recording.steps)
     found: list[Fusion] = []
     for lo in range(n):
-        designs: list[OperatorDesign] = []
         for hi in range(lo, min(lo + _MERGE_MAX_RUN, n)):
             if _crosses_host(recording, lo, hi):
                 break
-            try:
-                designs.append(OperatorDesign(recording.steps[hi].op.resolved()))
-            except TypeError:  # reference-only: no kernel, so no array to place
+            op = recording.steps[hi].op.resolved()
+            if (
+                op.reference_only
+                or op.external is not None
+                or op.exported_design() is not None
+            ):
                 break
-            if len(designs) < 2:
-                continue
-            if not _co_fits(designs):
-                break
-            found.append(Fusion(FusionKind.MERGE, tuple(range(lo, hi + 1))))
+            if hi > lo:
+                found.append(Fusion(FusionKind.MERGE, tuple(range(lo, hi + 1))))
     return found
 
 
