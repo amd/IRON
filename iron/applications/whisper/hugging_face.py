@@ -40,3 +40,22 @@ class HuggingFaceWhisper(HuggingFace):
                 use_cache=False,
             )
         return out.logits[0, -1].numpy()
+
+    def generate(
+        self, audio, *, max_tokens=224, language="en", task="transcribe"
+    ) -> list[int]:
+        """Greedy ``generate``'s own token ids over ``audio``: its own
+        prompt (``language``, ``task``, no timestamps) built internally,
+        not included in the returned ids.
+        """
+        with torch.no_grad():
+            out = self.model.generate(
+                torch.from_numpy(self.features(audio))[None],
+                language=language,
+                task=task,
+                do_sample=False,
+                num_beams=1,
+                return_timestamps=False,
+                max_new_tokens=max_tokens,
+            )
+        return out[0].tolist()
