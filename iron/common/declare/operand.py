@@ -40,6 +40,8 @@ class Operand:
     def __init__(self, member: Any, op: Operator) -> None:
         self.op = op
         self.lane_handles: list[Any] = []
+        self.fed_from: Operand | None = None
+        self.feeds: Operand | None = None
         self._decl = member.of(op)
 
     def __getattr__(self, name: str) -> Any:
@@ -111,6 +113,37 @@ class Operand:
         if self.lane_handles:
             raise ValueError(f"{self.name} is already bound")
         self.lane_handles = handles
+
+    def feed(self, source: Operand) -> None:
+        """Take this input's stream on-chip from ``source``, another operator's
+        output: its cores read the fifos ``source``'s cores write, so neither
+        is a host transfer.
+
+        Args:
+            source: The output, its lanes bound, whose stream this input reads.
+
+        Raises:
+            ValueError: This is not a streamed input, ``source`` not a bound
+                output, or their lanes or objects differ.
+        """
+        if not (self.streamed and self.fills) or not source.drains:
+            raise ValueError(
+                f"{self.name} can be fed only as a streamed input, from an output"
+            )
+        if len(source.handles) != self.lanes or source.obj_type != self.obj_type:
+            raise ValueError(
+                f"{source.name} streams {len(source.handles)} lanes of "
+                f"{source.obj_type}, but {self.name} reads {self.lanes} lanes of "
+                f"{self.obj_type}"
+            )
+        self.fed_from = source
+        source.feeds = self
+
+    @property
+    def on_chip(self) -> bool:
+        """Whether this operand's stream stays on-chip, fed to or from another
+        operator, with no host transfer."""
+        return self.fed_from is not None or self.feeds is not None
 
     def pin(self, endpoints: list[DmaEndpoint]) -> None:
         """Pin each lane, in lane order, to a shim ``DmaEndpoint`` (MM2S for an

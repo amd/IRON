@@ -29,6 +29,7 @@ from aie.iron import (
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from ..declare import Operator
+from ..declare.operand import Operand
 from .runtime import MergedRuntime, OperatorRuntime
 
 
@@ -156,9 +157,11 @@ class BuiltArray:
         design: OperatorDesign,
         words: Mapping[str, str] | None = None,
         dispatch: Mapping[str, object] | None = None,
+        fed: Mapping[str, Operand] | None = None,
     ):
         words = words or {}
         dispatch = dispatch or {}
+        fed = fed or {}
         self._words, self._dispatch = words, dispatch
         op = design.op.copy()  # a build binds streams
         # Before build(), which may hand a core-read value to a worker.
@@ -181,9 +184,13 @@ class BuiltArray:
             else:
                 value.param = dispatch[value.symbol]
         view = op.layout()
+        operands = {b.name: b for b in view.buffers}
+        for name, source in fed.items():
+            operands[name].feed(source)
         self.built = view.build()
         for mine, built in zip(op.buffers, view.buffers):
             mine.lane_handles = built.lane_handles
+            mine.fed_from = built.fed_from
         self.design = design
         self.op = op
         self.workers = [w for w in self.built.objects if isinstance(w, Worker)]

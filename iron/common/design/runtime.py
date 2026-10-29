@@ -57,9 +57,13 @@ class OperatorRuntime(Runtime):
         self.buffers = [b for b in built.objects if isinstance(b, Buffer)]
         self._tensors: dict[str, Any] = {}
         self._queues: dict[str, list[Task]] = {}
-        # Raises if any stream of a built array is unbound.
+        # Raises if any stream of a built array is unbound. A stream kept
+        # on-chip has no host end.
         lanes = [
-            (b, i, h) for b in op.buffers if b.streamed for i, h in enumerate(b.handles)
+            (b, i, h)
+            for b in op.buffers
+            if b.streamed and not b.on_chip
+            for i, h in enumerate(b.handles)
         ]
         # A shared array's pins are declared by the runtime of the array that built them.
         ours = {id(e) for e in built.objects if isinstance(e, DmaEndpoint)}
@@ -73,7 +77,7 @@ class OperatorRuntime(Runtime):
         super().__init__(
             self.body,
             [
-                *(b.flat_type for b in op.buffers),
+                *(b.flat_type for b in self.host_buffers),
                 handles,
                 *(v.param for v in op.values),
             ],
@@ -94,15 +98,16 @@ class OperatorRuntime(Runtime):
                     f"and Buffers; got {obj!r}"
                 )
 
+    @property
+    def host_buffers(self) -> list[Operand]:
+        """The operands the host passes: all but those kept on-chip."""
+        return [b for b in self.op.buffers if not b.on_chip]
+
     def body(self, *args) -> None:
         """The sequence body, given the operator's runtime tensors, its lanes'
         handles, then each per-call value not in the scratchpad as its scalar.
         """
-        buffers = self.op.buffers
-        self._tensors = {b.name: a for b, a in zip(buffers, args)}
-        for value, arg in zip(self.op.values, args[len(buffers) + 1 :]):
-            if not value.in_scratchpad:
-                value.ssa = arg
+        self.take(*args)
         token = active_runtime.set(self)
         try:
             if not self.op.own_preamble:
@@ -110,6 +115,18 @@ class OperatorRuntime(Runtime):
             self.run()
         finally:
             active_runtime.reset(token)
+        self.await_queues()
+
+    def take(self, *args) -> None:
+        """Hold ``body``'s arguments: the host tensors and per-call scalars."""
+        buffers = self.host_buffers
+        self._tensors = {b.name: a for b, a in zip(buffers, args)}
+        for value, arg in zip(self.op.values, args[len(buffers) + 1 :]):
+            if not value.in_scratchpad:
+                value.ssa = arg
+
+    def await_queues(self) -> None:
+        """Await every managed transfer still in flight."""
         for queue in self._queues.values():
             for task in queue:
                 task.await_()
@@ -135,12 +152,22 @@ class OperatorRuntime(Runtime):
             self.op.sequence(self)
             return
         tg = TaskGroup()
+        self.issue(tg)
+        tg.finish()
+
+    def issue(self, tg: TaskGroup) -> None:
+        """Fill every host input and drain every host output in ``tg``, the
+        drains awaited when ``tg`` finishes."""
         for buf in self.op.inputs:
+            if buf.on_chip:
+                continue
             for lane, tap, word, unit in buf.transfers():
                 buf.fill(
                     tap, lane=lane, group=tg, length_parameter=word, length_unit=unit
                 )
         for buf in self.op.outputs:
+            if buf.on_chip:
+                continue
             for lane, tap, word, unit in buf.transfers():
                 buf.drain(
                     tap,
@@ -150,7 +177,6 @@ class OperatorRuntime(Runtime):
                     length_parameter=word,
                     length_unit=unit,
                 )
-        tg.finish()
 
     def transfer(
         self,
@@ -356,10 +382,49 @@ class MergedRuntime(Runtime):
     runtimes: list[OperatorRuntime]
 
     @classmethod
-    def merge(cls, runtimes, name=None) -> MergedRuntime:
-        merged = super().merge(runtimes, name)
+    def merge(cls, runtimes, name=None, run=None) -> MergedRuntime:
+        merged = super().merge(runtimes, name, run)
         merged.runtimes = list(runtimes)
         return merged
+
+    @classmethod
+    def fuse(cls, runtimes, name=None) -> MergedRuntime:
+        """Operator runtimes whose streams meet on-chip, as one sequence: each
+        runs its preamble, then all their transfers go in one task group that
+        finishes once, since an operator's input completes only once a later
+        operator drains.
+
+        Raises:
+            ValueError: One of ``runtimes`` overrides its sequence.
+        """
+        for runtime in runtimes:
+            if runtime.op.has_sequence_override():
+                raise ValueError(
+                    f"{type(runtime.op).__name__} writes its own sequence, which "
+                    f"a fused sequence cannot interleave"
+                )
+
+        def run(calls) -> None:
+            for runtime, args in calls:
+                runtime.take(*args)
+                token = active_runtime.set(runtime)
+                try:
+                    if not runtime.op.own_preamble:
+                        runtime.preamble()
+                finally:
+                    active_runtime.reset(token)
+            tg = TaskGroup()
+            for runtime, _ in calls:
+                token = active_runtime.set(runtime)
+                try:
+                    runtime.issue(tg)
+                finally:
+                    active_runtime.reset(token)
+            tg.finish()
+            for runtime, _ in calls:
+                runtime.await_queues()
+
+        return cls.merge(runtimes, name, run)
 
     def resolve(self, loc=None, ip=None, *, device=None, **options) -> None:
         # Steps of one design share its array: one runtime declares it.

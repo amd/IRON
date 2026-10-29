@@ -421,7 +421,16 @@ class Elementwise(Operator):
             depth = stream.l1_depth
             return [ObjectFifo(stream.obj_type, depth=depth) for k in range(cores)]
 
-        of_ins = [fifos(s, f"in{i}") for i, s in enumerate(ins)]
+        if any(s.fed_from is not None and s.replicate for s in ins):
+            raise ValueError(
+                f"{type(self).__qualname__}: a held input reads one fifo per lane, "
+                f"so it cannot be fed one per core"
+            )
+        # A fed input reads the fifos its source's cores write.
+        of_ins = [
+            None if s.fed_from is not None else fifos(s, f"in{i}")
+            for i, s in enumerate(ins)
+        ]
         of_outs = [
             fifos(s, f"out{i}" if len(outs) > 1 else "out") for i, s in enumerate(outs)
         ]
@@ -459,14 +468,18 @@ class Elementwise(Operator):
         workers = [
             Worker(
                 core_fn,
-                [of[k % len(of)].cons() for of in of_ins]
+                [
+                    s.fed_from.handles[k] if of is None else of[k % len(of)].cons()
+                    for s, of in zip(ins, of_ins)
+                ]
                 + [of[k].prod() for of in of_outs]
                 + [kernel, rtps[k]],
             )
             for k in range(cores)
         ]
         for stream, of in zip(ins, of_ins):
-            stream.bind([f.prod() for f in of])
+            if of is not None:
+                stream.bind([f.prod() for f in of])
         for stream, of in zip(outs, of_outs):
             stream.bind([f.cons() for f in of])
         return Built(workers, rtps)
