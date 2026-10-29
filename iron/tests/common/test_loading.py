@@ -15,6 +15,8 @@ import dataclasses
 import logging
 import shutil
 import struct
+import subprocess
+import sys
 
 import aie.utils as aie_utils
 import numpy as np
@@ -55,6 +57,19 @@ def test_v_shows_iron_s_info_lines(caplog):
     finally:
         iron_logger.setLevel(level)
     assert "compiling for" in caplog.text
+
+
+@pytest.mark.parametrize("rounds", [0, 1])
+def test_check_determinism_needs_two_rounds_before_any_load(tmp_path, rounds):
+    result = subprocess.run(
+        [sys.executable, "-m", "iron.applications.llama.model", str(tmp_path)]
+        + ["--check-determinism", str(rounds)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "--check-determinism compares rounds: give 2 or more" in result.stderr
 
 
 def test_from_checkpoint_draws_its_weights_at_a_seed(tmp_path):
