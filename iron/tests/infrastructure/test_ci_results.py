@@ -50,6 +50,13 @@ def test_skipped():
 """
 
 
+_BENCHED = """
+@pytest.mark.bench
+def test_benched(record_property):
+    record_property("Latency", 1.5)
+"""
+
+
 _CRASHING = """\
 import os
 
@@ -90,6 +97,22 @@ def test_a_test_failing_in_setup_is_a_failed_check(tmp_path):
         "test_unstaged": "0/1",
         "test_plain": "1/1",
     }
+
+
+def test_a_session_split_over_workers_writes_every_result(tmp_path):
+    out = tmp_path / "out.csv"
+    _pytest(tmp_path, f"--csv-output={out}", "-n", "2", tests=_TESTS + _BENCHED)
+    with open(out) as f:
+        rows = {row["Test"]: row for row in csv.DictReader(f)}
+    assert {test: row["Checks"] for test, row in rows.items()} == {
+        "test_accuracy": "0/1",
+        "test_latency": "0/1",
+        "test_unstaged": "0/1",
+        "test_plain": "1/1",
+        "test_benched": "1/1",
+    }
+    assert rows["test_benched"]["Bench"] == "yes"
+    assert float(rows["test_benched"]["Latency (mean)"]) == 1.5
 
 
 def test_a_session_that_dies_keeps_its_results_and_names_the_test(tmp_path):
