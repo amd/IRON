@@ -200,10 +200,9 @@ class Sample(Operator):
         runs, combine = self.runs, self.combine()
         selects = {run: self.select(*run) for run in set(runs)}
         words = sample.summary_words(self.slice_size, self.k_max)
-        # Every core reads the draw row, a fresh cons() each: fifos() gives
-        # one end per lane, not one per reader.
-        of_draw = ObjectFifo(self.draws.obj_type, depth=self.draws.depth)
-        self.draws.bind(of_draw.prod())
+        # Every select core and the combine core read the draw row, a fresh
+        # cons() each.
+        (draw_ends,) = self.draws.fifos(self.draws.depth, readers=self.cores + 1)
         (token,) = self.token.fifos(self.token.depth)
         (record,) = self.tokens.fifos(self.tokens.depth)
         # The summaries meet in a memtile, column 0 first. A join input fills
@@ -261,7 +260,7 @@ class Sample(Operator):
                     select_body,
                     [
                         of_x.cons(),
-                        of_draw.cons(),
+                        draw_ends[c],
                         of_summary[c].prod(),
                         selects[run, chunk, drawable],
                         state,
@@ -275,7 +274,7 @@ class Sample(Operator):
                 combine_body,
                 [
                     of_summaries.cons(),
-                    of_draw.cons(),
+                    draw_ends[self.cores],
                     token,
                     record,
                     combine,

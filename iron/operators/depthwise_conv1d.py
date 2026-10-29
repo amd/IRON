@@ -4,7 +4,7 @@
 
 import numpy as np
 from aie.extras.dialects import arith
-from aie.iron import Buffer, In, ObjectFifo, Out, Worker
+from aie.iron import Buffer, In, Out, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import conv
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
@@ -80,8 +80,7 @@ class DepthwiseConv1d(Operator):
         y_ends = self.y.fifos(self.y.depth)
         # One fifo, each column taking its own cons(): every core reads the
         # same weights.
-        of_w = ObjectFifo(self.weight.obj_type, depth=self.weight.depth)
-        self.weight.bind(of_w.prod())
+        (w_ends,) = self.weight.fifos(self.weight.depth, readers=cols)
         zero = Buffer(plane, initial_value=np.zeros(C, bfloat16))
         limit = np.ndarray[(1,), np.dtype[np.float32]]
         rtps = [Rtp([self.steps]) for _ in range(cols)]
@@ -113,7 +112,7 @@ class DepthwiseConv1d(Operator):
                 core_fn,
                 [
                     x_ends[k],
-                    of_w.cons(),
+                    w_ends[k],
                     y_ends[k],
                     kernel,
                     zero if k == 0 else None,

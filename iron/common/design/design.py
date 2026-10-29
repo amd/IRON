@@ -193,6 +193,7 @@ class BuiltArray:
         self.built = view.build()
         for mine, built in zip(op.buffers, view.buffers):
             mine.lane_handles = built.lane_handles
+            mine.lane_fifos = built.lane_fifos
             mine.fed_from = built.fed_from
         self.design = design
         self.op = op

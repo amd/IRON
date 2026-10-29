@@ -575,13 +575,11 @@ class MHA(Operator):
         accurate_exp2 = self.dev.arch is AIEArch.AIE2p
 
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
-        k_ty = np.ndarray[(d, B_kv), np.dtype[dtype]]
         v_ty = np.ndarray[(B_kv, pv_width), np.dtype[dtype]]
         o_ty = np.ndarray[(B_q, pv_width), np.dtype[dtype]]
         qk_ty = np.ndarray[(B_q, B_kv), np.dtype[dtype]]
         s_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
         acc_ty = np.ndarray[(B_q, pv_width), np.dtype[np.float32]]
-        joined_ty = self.Q.obj_type  # (n_join * B_q, d)
 
         # The rest bind from mha.cc's object: declared apart, each would
         # redefine it. Never on bfp16 macs: bfp16 shares an exponent over 8
@@ -642,33 +640,67 @@ class MHA(Operator):
         # Split, Q is one block deep: the QK core's L1 holds one d=512 block.
         q_depth = 1 if split else of_depth
         layout = MHA.SPLIT_COLUMNS[self.width] if split else None
-        inQ, memQ, memO = [], [], []
+        # Q and O are placed at the split layout's shim tiles; fifos()
+        # returns the raw fifo, not an end, since each is split or joined
+        # further below.
+        inQ = self.Q.fifos(
+            of_depth,
+            tiles=[
+                Tile(layout.q[s], 0) if split else AnyShimTile
+                for s in range(self.q_shims)
+            ],
+        )
+        memO = self.O.fifos(
+            of_depth,
+            tiles=[
+                Tile(layout.o[s][h], 0) if split else AnyShimTile
+                for s in range(self.q_shims)
+                for h in range(pv_cores)
+            ],
+            to_stream=pv.C,
+        )
+        memQ = []
         outO = [[] for _ in range(pv_cores)]
         for shim in range(self.q_shims):
-            in_q = ObjectFifo(joined_ty)
-            inQ.append(in_q)
-            memQ += in_q.cons().split(
-                offsets=[B_q * d * i for i in range(n_join)],
-                obj_types=[q_ty] * n_join,
-                to_stream=None if qk.A is None else [qk.A] * n_join,
-                depths=[q_depth] * n_join,
-                tile=Tile(layout.q[shim], 1) if split else AnyMemTile,
+            memQ += (
+                inQ[shim]
+                .cons()
+                .split(
+                    offsets=[B_q * d * i for i in range(n_join)],
+                    obj_types=[q_ty] * n_join,
+                    to_stream=None if qk.A is None else [qk.A] * n_join,
+                    depths=[q_depth] * n_join,
+                    tile=Tile(layout.q[shim], 1) if split else AnyMemTile,
+                )
             )
             for h in range(pv_cores):
-                mem_o = ObjectFifo(self.O.obj_type, to_stream=pv.C)
-                memO.append(mem_o)
-                outO[h] += mem_o.prod().join(
-                    offsets=[B_q * pv_width * i for i in range(n_join)],
-                    obj_types=[o_ty] * n_join,
-                    # One O block: the PV core's L1 also holds its float32 O.
-                    depths=[1] * n_join,
-                    tile=Tile(layout.o[shim][h], 1) if split else AnyMemTile,
+                outO[h] += (
+                    memO[shim * pv_cores + h]
+                    .prod()
+                    .join(
+                        offsets=[B_q * pv_width * i for i in range(n_join)],
+                        obj_types=[o_ty] * n_join,
+                        # One O block: the PV core's L1 also holds its float32 O.
+                        depths=[1] * n_join,
+                        tile=Tile(layout.o[shim][h], 1) if split else AnyMemTile,
+                    )
                 )
 
         kv_lanes = self.kv_lanes
-        inK, inV, memK, memV = [], [], [], []
+        inK = self.K.fifos(
+            of_depth,
+            tiles=[Tile(layout.k_shim, 0) if split else AnyShimTile] * kv_lanes,
+        )
+        inV = self.V.fifos(
+            of_depth,
+            tiles=[
+                Tile(layout.v[h], 0) if split else AnyShimTile
+                for _ in range(kv_lanes)
+                for h in range(pv_cores)
+            ],
+        )
+        memK, memV = [], []
         for lane in range(kv_lanes):
-            inK.append(ObjectFifo(k_ty, depth=of_depth))
             memK.append(
                 inK[lane]
                 .cons()
@@ -679,9 +711,8 @@ class MHA(Operator):
                 )
             )
             for h in range(pv_cores):
-                inV.append(ObjectFifo(v_ty, depth=of_depth))
                 memV.append(
-                    inV[-1]
+                    inV[lane * pv_cores + h]
                     .cons()
                     .forward(
                         to_stream=pv.B,
@@ -978,30 +1009,6 @@ class MHA(Operator):
                         tile=Tile(i, 3 + 2 * h) if split else AnyComputeTile,
                     )
                 )
-
-        qs, outs, ks, vs = [], [], [], []
-        for s in range(self.q_shims):
-            qs.append(inQ[s].prod(tile=Tile(layout.q[s], 0) if split else AnyShimTile))
-            for h in range(pv_cores):
-                outs.append(
-                    memO[s * pv_cores + h].cons(
-                        tile=Tile(layout.o[s][h], 0) if split else AnyShimTile
-                    )
-                )
-        for lane in range(kv_lanes):
-            ks.append(
-                inK[lane].prod(tile=Tile(layout.k_shim, 0) if split else AnyShimTile)
-            )
-            for h in range(pv_cores):
-                vs.append(
-                    inV[lane * pv_cores + h].prod(
-                        tile=Tile(layout.v[h], 0) if split else AnyShimTile
-                    )
-                )
-        self.Q.bind(qs)
-        self.O.bind(outs)
-        self.K.bind(ks)
-        self.V.bind(vs)
 
         return Built(
             matmul_workers + softmax_workers + matmul_pv_workers,

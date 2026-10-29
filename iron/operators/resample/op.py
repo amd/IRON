@@ -755,10 +755,10 @@ class Resample(Operator):
             self.words, chunk=self.chunk, patch_columns=self.patch_columns, cores=cores
         )
         counts_ty = np.ndarray[(5,), np.dtype[np.int32]]
-        # image and taps are each one lane broadcast to every core, a fresh
-        # cons() per core: fifos() gives one end per lane, not one per reader.
-        of_image = ObjectFifo(self.image.obj_type, depth=self.image.depth)
-        of_taps = ObjectFifo(self.taps_w.obj_type, depth=self.taps_w.depth)
+        # image and taps are each one lane broadcast to every core: a fresh
+        # cons() per core.
+        (image_ends,) = self.image.fifos(self.image.depth, readers=cores)
+        (taps_ends,) = self.taps_w.fifos(self.taps_w.depth, readers=cores)
         patches = self.patches.fifos(self.patches.depth)
 
         sizes = [self.src_rows, self.src_columns, self.dst_rows, self.dst_columns]
@@ -807,8 +807,8 @@ class Resample(Operator):
                 core_fn,
                 [
                     k,
-                    of_image.cons(),
-                    of_taps.cons(),
+                    image_ends[k],
+                    taps_ends[k],
                     patches[k],
                     Buffer(counts_ty),
                     resize.resize_setup,
@@ -822,8 +822,6 @@ class Resample(Operator):
             )
             for k in range(cores)
         ]
-        self.image.bind(of_image.prod())
-        self.taps_w.bind(of_taps.prod())
         return Built(workers, rtps)
 
 

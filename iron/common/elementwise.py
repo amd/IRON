@@ -410,25 +410,13 @@ class Elementwise(Operator):
 
         segments = self.held_segments()
 
-        if any(s.fed_from is not None and s.replicate for s in ins):
-            raise ValueError(
-                f"{type(self).__qualname__}: a held input reads one fifo per lane, "
-                f"so it cannot be fed one per core"
-            )
-
-        def held_fifos(stream):
-            # A held line, acquired once per call, is one fifo per lane; its
-            # cores each take their own cons() of it, so the fifos themselves
-            # (not fifos()'s one handle per lane) are what build() keeps.
-            made = [
-                ObjectFifo(stream.obj_type, depth=segments) for _ in range(stream.lanes)
-            ]
-            stream.bind([f.prod() for f in made])
-            return made
-
-        # A fed input (never held, checked above) reads the fifos its source's
-        # cores write.
-        of_ins = [held_fifos(s) if s.replicate else s.fifos() for s in ins]
+        # A held line, acquired once per call, is one fifo per lane, every
+        # core of the lane taking its own cons() (fifos()'s readers=); feed()
+        # refuses a held input, so a fed one is never replicate.
+        of_ins = [
+            s.fifos(segments, readers=cores // s.lanes) if s.replicate else s.fifos()
+            for s in ins
+        ]
         of_outs = [s.fifos() for s in outs]
         rtps = [Rtp([self.count]) for _ in range(cores)]
         n_fifos = n_in + len(outs)
@@ -465,7 +453,7 @@ class Elementwise(Operator):
             Worker(
                 core_fn,
                 [
-                    of[k % len(of)].cons() if s.replicate else of[k % len(of)]
+                    (of[k % len(of)][k // len(of)] if s.replicate else of[k % len(of)])
                     for s, of in zip(ins, of_ins)
                 ]
                 + [of[k] for of in of_outs]
@@ -709,8 +697,7 @@ class WeightedRowwise(Rowwise):
         x_ends = self.x.fifos(depth)
         # One fifo per channel, each column of it taking its own cons(): a
         # weight row is shared by every column of its channel.
-        of_ws = [ObjectFifo(self.weight.obj_type, depth=depth) for j in range(chans)]
-        self.weight.bind([f.prod() for f in of_ws])
+        w_ends = self.weight.fifos(depth, readers=cols)
         of_mid = [
             ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
         ]
@@ -764,7 +751,7 @@ class WeightedRowwise(Rowwise):
                         core_mul,
                         [
                             of_mid[k].cons(),
-                            of_ws[j].cons(),
+                            w_ends[j][i],
                             y_ends[k],
                             eltwise_mul,
                             rtps[n_cores + k],

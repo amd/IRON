@@ -514,9 +514,8 @@ class ProjectionGEMM(Operator):
         ct_b_ty = np.ndarray[(CT_K * N_TILE // B_GROUP,), b_elem_ty]
         ct_out_ty = np.ndarray[(CT_OUT_LEN,), bf16_ty]
         ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
-        # L2 (per memtile): the declared stream tiles.
+        # L2 (per memtile): the declared stream tile.
         mt_a_ty = self.A.obj_type
-        mt_out_ty = self.C.obj_type
 
         # Every field that changes the object reaches the factory, so its
         # object name keys the build. The activation is absent: the cores
@@ -568,18 +567,25 @@ class ProjectionGEMM(Operator):
         ]
 
         # C: a join per column and half of the core rows; each core drops its
-        # slice at its own offset in its half's memtile buffer.
+        # slice at its own offset in its half's memtile buffer. Placed at
+        # column c's shim, as the shared image has them: where the placer
+        # chose, a shape whose transfers differ would move them.
         HALF = ROWS // JOINS
-        c_l2l3_fifos, c_prod = [], {}
+        c_fifos = self.C.fifos(
+            C_DEPTH, tiles=[Tile(c, 0) for c in range(COLS) for _ in range(JOINS)]
+        )
+        c_prod = {}
         for c in range(COLS):
             for h in range(JOINS):
-                of_c = ObjectFifo(mt_out_ty, depth=C_DEPTH)
-                c_l2l3_fifos.append((c, of_c))
-                sub = of_c.prod().join(
-                    [C_SLICE_LEN * p for p in range(HALF)],
-                    tile=mt_tiles[c],
-                    obj_types=[ct_out_ty] * HALF,
-                    from_stream=[gather_dims] * HALF,
+                sub = (
+                    c_fifos[c * JOINS + h]
+                    .prod()
+                    .join(
+                        [C_SLICE_LEN * p for p in range(HALF)],
+                        tile=mt_tiles[c],
+                        obj_types=[ct_out_ty] * HALF,
+                        from_stream=[gather_dims] * HALF,
+                    )
                 )
                 for p in range(HALF):
                     c_prod[(h * HALF + p, c)] = sub[p]
@@ -841,9 +847,6 @@ class ProjectionGEMM(Operator):
 
         self.A.bind([f.prod() for f in a_l3l2_fifos])
         self.B.bind(b_shim_flows)
-        # C's drains on column c's shim, as the shared image has them: where
-        # the placer chose, a shape whose transfers differ would move them.
-        self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in c_l2l3_fifos])
         return _Built(workers + unrouted, rtps, b_pool=b_pool)
 
     @property

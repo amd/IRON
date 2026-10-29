@@ -35,11 +35,15 @@ class Operand:
     """An operand as one operator holds it (``op.x``): the resolved ``In``, ``Out``
     or ``InOut``, read through on use (a shape may follow a tunable), and its
     bound ``lane_handles``. An ``InOut`` keeps what its stream does not drain.
+    ``lane_fifos`` is the ``ObjectFifo`` ``fifos()`` made each lane from, kept
+    past binding so a fed consumer with several readers, or ``fifos()`` asked
+    for several, can add more ends to the one already bound.
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
         self.op = op
         self.lane_handles: list[Any] = []
+        self.lane_fifos: list[Any] = []
         self.fed_from: Operand | None = None
         self.feeds: Operand | None = None
         self._decl = member.of(op)
@@ -120,20 +124,82 @@ class Operand:
             raise ValueError(f"{self.name} is already bound")
         self.lane_handles = handles
 
-    def fifos(self, depth: int | None = None) -> list[Any]:
-        """A fifo per lane, ``depth`` deep (else ``l1_depth``), bound as this
-        operand's lanes; returns the build's end of each: an input's consumer
-        end, an output's producer end. A fed input gets its source's ends.
+    def fifos(
+        self,
+        depth: int | None = None,
+        *,
+        readers: int | None = None,
+        tiles: list | None = None,
+        obj_type: Any = None,
+        **objectfifo_kwargs: Any,
+    ) -> list[Any]:
+        """A fifo per lane, ``depth`` deep (else ``l1_depth``), of ``obj_type``
+        (else this operand's own), bound as this operand's lanes. Plain
+        (``readers=None``, ``tiles=None``), returns the build's end of each:
+        an input's consumer end, an output's producer end.
+
+        ``readers`` several consumer ends a lane instead of one -- a lane
+        several cores read -- each lane then its own list of them (even at
+        ``readers=1``, so a caller that always indexes a lane's list need not
+        special-case one reader), not a bare end; refused on an output, which
+        has one producer. ``tiles`` places each lane's host end (the shim
+        tile its runtime transfer binds to) and, since placement is usually
+        followed by more of the fifo's own wiring (a ``split()``, ``join()``
+        or ``forward()``), returns the fifo itself, one per lane, rather than
+        an end. ``objectfifo_kwargs`` reach every lane's ``ObjectFifo(...)``.
+
+        A fed input gets its source's ends or fifos the same way: ``readers``
+        reuses the end already bound for the source's drain as its first, so
+        it is read rather than left a dangling extra consumer, and asks the
+        source's own fifos for the rest. ``depth``, ``tiles`` and
+        ``obj_type`` are the source's own, already built; an input fed is
+        given none of them.
+
+        Raises:
+            ValueError: ``readers`` and ``tiles`` are both given, ``readers``
+                is asked of an output, or ``tiles`` does not name one tile a
+                lane.
         """
+        if readers is not None and tiles is not None:
+            raise ValueError(f"{self.name}.fifos(): readers= and tiles= do not combine")
         if self.fed_from is not None:
-            return list(self.fed_from.handles)
+            if tiles is not None:
+                return list(self.fed_from.lane_fifos)
+            if readers is None:
+                return list(self.fed_from.handles)
+            firsts = self.fed_from.handles
+            return [
+                [first] + [of.cons() for _ in range(readers - 1)]
+                for first, of in zip(firsts, self.fed_from.lane_fifos)
+            ]
+        if readers is not None and self.drains:
+            raise ValueError(
+                f"{self.name} is an output: readers= reads a streamed input's "
+                f"lane, not an output's own"
+            )
         depth = self.l1_depth if depth is None else depth
-        made = [ObjectFifo(self.obj_type, depth=depth) for _ in range(self.lanes)]
+        obj_type = self.obj_type if obj_type is None else obj_type
+        lane_tiles = [None] * self.lanes if tiles is None else tiles
+        if len(lane_tiles) != self.lanes:
+            raise ValueError(
+                f"{self.name} has {self.lanes} lanes; tiles has {len(lane_tiles)}"
+            )
+        made = [
+            ObjectFifo(obj_type, depth=depth, **objectfifo_kwargs)
+            for _ in range(self.lanes)
+        ]
+        self.lane_fifos = made
         if self.drains:
-            self.bind([f.cons() for f in made])
+            self.bind([f.cons(tile=t) for f, t in zip(made, lane_tiles)])
+            if tiles is not None:
+                return made
             return [f.prod() for f in made]
-        self.bind([f.prod() for f in made])
-        return [f.cons() for f in made]
+        self.bind([f.prod(tile=t) for f, t in zip(made, lane_tiles)])
+        if tiles is not None:
+            return made
+        if readers is None:
+            return [f.cons() for f in made]
+        return [[f.cons() for _ in range(readers)] for f in made]
 
     def feed(self, source: Operand) -> None:
         """Take this input's stream on-chip from ``source``, another operator's
@@ -145,13 +211,19 @@ class Operand:
 
         Raises:
             ValueError: This is not a streamed input, ``source`` not a bound
-                output, ``source`` is pinned rather than streamed, their lanes
-                or objects differ, or a lane's host access pattern does not
-                visit the same elements in the same order on both sides.
+                output, this is a held (``replicate``) input, ``source`` is
+                pinned rather than streamed, their lanes or objects differ,
+                or a lane's host access pattern does not visit the same
+                elements in the same order on both sides.
         """
         if not (self.streamed and self.fills) or not source.drains:
             raise ValueError(
                 f"{self.name} can be fed only as a streamed input, from an output"
+            )
+        if self.replicate:
+            raise ValueError(
+                f"{self.name} holds one line the whole call, every core meeting "
+                f"it: it cannot be fed a source's per-iteration stream"
             )
         if any(isinstance(h, DmaEndpoint) for h in source.handles):
             raise ValueError(
