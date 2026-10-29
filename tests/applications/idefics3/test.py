@@ -90,3 +90,26 @@ def test_smolvlm_accuracy_at_another_size(model, reference, size, record_propert
     rng = np.random.default_rng(size[0])
     image = rng.integers(0, 256, (*size, 3), dtype=np.uint8)
     check(model, reference, image, QUESTIONS[0], rng, record_property)
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
+class TestEachStep:
+    """The form NPU1 runs: each step its own dispatch of one xclbin, its
+    image resized in passes where a core's memory needs them.
+    """
+
+    @pytest.fixture(scope="class")
+    def model(self, request):
+        loaded = load_from_flags(request, SmolVLM, WEIGHTS)(full_elf=False)
+        yield loaded
+        loaded.release()
+
+    @pytest.fixture(scope="class")
+    def reference(self, model):
+        return model.cpu_reference()
+
+    def test_smolvlm_accuracy_each_step(self, model, reference, record_property):
+        rng = np.random.default_rng(10)
+        image = rng.integers(0, 256, (512, 512, 3), dtype=np.uint8)
+        check(model, reference, image, QUESTIONS[0], rng, record_property)
