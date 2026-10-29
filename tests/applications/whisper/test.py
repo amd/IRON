@@ -12,18 +12,21 @@ logits recorded beside it.
 """
 
 import dataclasses
+from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+from iron.applications.whisper.audio import load_wav
 from iron.applications.whisper.model import (
     NEG_BIG,
     Whisper,
     WhisperConfig,
     WhisperEncoder,
 )
+from iron.applications.whisper.wer import word_error_rate
 from iron.lm.generation import divergence
 from iron.lm.testing import LOGITS, assert_close, require, weights_dir
 from iron.tests.support.llama_model import checkpoint
@@ -353,3 +356,38 @@ def test_whisper_accuracy(model, record_property):
     record_property("MaxKL", worst)
     record_property("Top1Mismatches", sum(not top1 for _, top1 in results))
     assert worst <= MAX_KL, f"KL {worst} > {MAX_KL}"
+
+
+#: amd/IRON#218's single-window validation clips and its own measured WER
+#: (its README: 1919-142785-0007 0.0%, 3170-137482-0000 1.5%): both decode
+#: in one window (<= 30 s), so Whisper.transcribe already covers them.
+CLIPS_DIR = Path("/proj/rdi/staff/ehunhoff/models/librispeech-clips")
+SINGLE_WINDOW_CLIPS = ["1919-142785-0007", "3170-137482-0000"]
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("clip", SINGLE_WINDOW_CLIPS)
+def test_single_window_wer_against_librispeech(model, clip, record_property):
+    """One window's transcript against its own LibriSpeech reference line,
+    amd/IRON#218's own clips (Giuseppe Capaldo).
+    """
+    require(CLIPS_DIR / f"{clip}.wav", CLIPS_DIR / f"{clip}.txt", staged=False)
+    audio = load_wav(CLIPS_DIR / f"{clip}.wav")
+    reference = (CLIPS_DIR / f"{clip}.txt").read_text()
+    _, text = model.transcribe(audio)
+    wer = word_error_rate(reference, text)
+    record_property("WER", wer)
+    assert wer <= 0.05, f"{clip}: WER {100 * wer:.1f}% > 5%"
+
+
+def test_the_joined_clip_spans_at_least_four_30s_windows():
+    """2902-9006-0005, -0007 and -0015 joined end to end (no gap): fewer
+    than 4 of Whisper's own 30 s windows cannot cover it, the long-form
+    clip amd/IRON#218's README (Giuseppe Capaldo) reports as 4 windows.
+    """
+    names = ["2902-9006-0005", "2902-9006-0007", "2902-9006-0015"]
+    require(*(CLIPS_DIR / f"{n}.wav" for n in names), staged=False)
+    seconds = sum(load_wav(CLIPS_DIR / f"{n}.wav").size for n in names) / 16000
+    windows = -(-int(round(seconds * 1000)) // 30000)
+    assert windows == 4, f"{seconds:.1f} s needs {windows} 30 s windows, not 4"
