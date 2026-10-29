@@ -23,7 +23,10 @@ import iron.applications
 from iron.applications.gemma4 import Gemma4
 from iron.applications.granite import Granite
 from iron.applications.granite_hybrid import GraniteHybrid
+from iron.applications.lfm2 import Lfm2
 from iron.applications.llama import Llama
+from iron.applications.phi3 import Phi4
+from iron.applications.qwen2 import Qwen2
 from iron.applications.qwen3 import Qwen3
 from iron.applications.qwen3_embedding import Qwen3Embedding
 from iron.applications.qwen3_moe import Qwen3Moe
@@ -105,6 +108,16 @@ APPLICATIONS = {
     "granite_4.2_3b": Application(
         Granite, "granite-4.2-3b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
     ),
+    # Phi-4-mini's full-ELF link is impractically slow at 32 layers;
+    # unmeasured deep in the caches.
+    "phi4_mini": Application(
+        Phi4,
+        "phi-4-mini-instruct",
+        INDEX,
+        "tokenizer.json",
+        full_elf=False,
+        each_step=("npu2",),
+    ),
     # Gemma 4 E2B's decode measured 0.0002 to 0.072 on npu2 and 0.0009 to
     # 0.0256 on npu1, each 4k to the whole context: each size fills the
     # cache with its own content up to max_seq_len - 1, not a continuation
@@ -126,6 +139,19 @@ APPLICATIONS = {
         "tokenizer.json",
         each_step=("npu1", "npu2"),
     ),
+    # Qwen 2.5's full-ELF link does not finish in a practical time at this
+    # shape; unmeasured deep in the caches.
+    "qwen2.5_1.5b": Application(
+        Qwen2,
+        "qwen2.5-1.5b-instruct",
+        "model.safetensors",
+        "tokenizer.json",
+        full_elf=False,
+        each_step=("npu2",),
+    ),
+    # LFM2's decode measured at most mean 0.0057, p90 0.0068, max 0.0071 over
+    # its 1024-32640 context sweep; unmeasured past that.
+    "lfm2_1.2b": Application(Lfm2, "lfm2-1.2b", "model.safetensors", "tokenizer.json"),
     # Qwen3's decode measured 0.0020 (0.6B, native 32768) to 0.0385 (1.7B,
     # native 32768), its deepest prompt chunk 0.0021 to 0.0565, on npu2.
     "qwen3_0.6b": Application(
