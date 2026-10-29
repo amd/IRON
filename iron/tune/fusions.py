@@ -62,6 +62,10 @@ from .measure import (
 
 logger = logging.getLogger(__name__)
 
+# What ``price_fusions`` prices: not ``MERGE``, consecutive steps in one
+# configuration, which a profile's packings do for a whole version.
+PRICED_KINDS = tuple(k for k in FusionKind if k is not FusionKind.MERGE)
+
 # Past this many combinations of the members' widths, only the ones using
 # the most columns overall are checked for fit: a member is never faster
 # narrower than at the width ``autotune`` already found it alone, only
@@ -912,6 +916,7 @@ def price_fusions(
     exhaustive: int = NARROWING_EXHAUSTIVE,
     checkpoint: Path | None = None,
     max_price: int | None = None,
+    kinds: Sequence[FusionKind] = PRICED_KINDS,
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Profile | None:
@@ -932,6 +937,7 @@ def price_fusions(
     has it.
 
     Args:
+        kinds: The kinds priced (``PRICED_KINDS``).
         checkpoint: Where to write the decisions so far (``_checkpoint``)
             after every group is priced, so a run that dies partway still
             leaves something behind beyond the cache alone. A group a device
@@ -960,7 +966,7 @@ def price_fusions(
     )
     refused = {} if refused_path is None else _load_refused(refused_path)
 
-    all_found = fusion_groups(calls, dev)
+    all_found = fusion_groups(calls, dev, kinds)
     found = []
     for group in all_found:
         why = refused.get(_refused_key(group))

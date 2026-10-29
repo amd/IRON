@@ -36,6 +36,7 @@ from iron.tests.support.graphs import Rotate
 from iron.tests.support.llama_model import small
 from iron.tune.autotune import Point, Timed, Trial
 from iron.tune.fusions import (
+    PRICED_KINDS,
     FusionGroup,
     NARROWING_EXHAUSTIVE,
     _bound_points,
@@ -602,7 +603,7 @@ def test_price_fusions_skips_a_group_already_refused_as_hung(tmp_path):
     dev = aie_utils.ensure_current_device()
     recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
     calls = [Timed(recording)]
-    groups = fusion_groups(calls, dev)
+    groups = fusion_groups(calls, dev, PRICED_KINDS)
     assert groups
 
     checkpoint = tmp_path / "profile.progress.json"
@@ -1014,6 +1015,7 @@ def test_price_fusions_takes_the_cheaper_of_two_overlapping_fusions(tmp_path):
         timing=Timing(rounds=2, calls=5),
         cache=cache,
         fit_cache=tmp_path / "fits",
+        kinds=tuple(FusionKind),
         log=lambda _: None,
     )
     rms, gemv, add = _merge_members(dev)

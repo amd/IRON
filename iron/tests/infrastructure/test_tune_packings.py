@@ -49,6 +49,15 @@ class Wide(iron.Graph):
         return x
 
 
+class Projections(iron.Graph):
+    """One shape's GEMV twice, at two output tiles: two arrays, as q and o
+    were with only q given half a head's tiles."""
+
+    def body(self, w, x):
+        y = GEMV.step(w, x, tile_size_output=32)
+        return GEMV.step(w, y, tile_size_output=256)
+
+
 def _packer(recording, dev, tmp_path):
     return Packer(
         Timed(recording),
@@ -79,11 +88,26 @@ def test_a_packer_finds_each_array_and_its_narrower_widths(npu2, tmp_path):
     packer = _packer(Alternating().record(x=(SIZE,)), npu2, tmp_path)
     assert len(packer.shapes) == 2
     assert [k is not None for k in packer.order] == [True] * 8
-    relu = packer.order[0]
-    assert packer.cores(relu, {}) == 8
+    relu, tanh = packer.order[:2]
+    assert packer.cores({relu: {}}) == 8
     narrow = {"num_aie_columns": 1, "num_channels": 1}
     assert narrow in packer.options(relu)
-    assert packer.cores(relu, narrow) == 1
+    assert packer.cores({relu: narrow, tanh: {}}) == 9
+
+
+def test_one_shapes_two_arrays_are_one_unit_a_change_aligns(npu2, tmp_path):
+    """A profile names shapes, so the two GEMVs of one shape are one unit,
+    set as one; aligning it to one of its arrays' settings puts both on it.
+    """
+    packer = _packer(Projections().record(w=(2048, 2048), x=(2048,)), npu2, tmp_path)
+    (unit,) = set(packer.order)
+    assert len(packer.arrays(unit, {})) == 2
+    aligned = [
+        packer.cores({unit: s})
+        for k, s in packer.changes({unit: {}})
+        if len(packer.arrays(k, s)) == 1
+    ]
+    assert min(aligned) * 2 == packer.cores({unit: {}})
 
 
 # ---------------------------------------------------------------------------
