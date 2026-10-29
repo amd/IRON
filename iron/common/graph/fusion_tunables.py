@@ -28,7 +28,7 @@ def apply(
     entry, is untouched.
     """
     steps = list(recording.steps)
-    changed = False
+    rebuilt: dict[int, list] = {}
     for fusion in fused:
         ops = [recording.steps[i].op.resolved(dev) for i in fusion.steps]
         local = {step: i for i, step in enumerate(fusion.steps)}
@@ -42,8 +42,22 @@ def apply(
         for i, op, t in zip(fusion.steps, ops, tunables):
             if not t:
                 continue
-            steps[i] = dataclasses.replace(
-                steps[i], op=op._with_tunables(**t).resolved(dev)
+            narrowed = op._with_tunables(**t).resolved(dev)
+            rebuilt.setdefault(id(recording.steps[i].op), []).append(narrowed)
+            steps[i] = dataclasses.replace(steps[i], op=narrowed)
+    if not rebuilt:
+        return recording
+    # A narrowed design reads its own value symbols, so each per-call value
+    # bound to the step's operator is bound to its narrowed one instead.
+    kept = {id(s.op) for s in steps}
+    bindings = []
+    for b in recording.bindings:
+        if id(b.op) in kept:
+            bindings.append(b)
+        for narrowed in rebuilt.get(id(b.op), ()):
+            bindings.append(
+                dataclasses.replace(
+                    b, op=narrowed, member=narrowed.value(b.member.name)
+                )
             )
-            changed = True
-    return dataclasses.replace(recording, steps=steps) if changed else recording
+    return dataclasses.replace(recording, steps=steps, bindings=bindings)

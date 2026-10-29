@@ -14,13 +14,16 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Profile
+from iron import Profile, Scratchpad
+from iron.common.graph.compiled import _words
 from iron.common.graph.fusion import candidates, fusions
+from iron.common.graph.fusion_tunables import apply as apply_fusion_tunables
 from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
+from iron.operators.relu import ReLU
 from iron.operators.silu import SiLU
 from iron.tests.support.graphs import Chain as ChainGraph
 from iron.tests.support.llama_model import small
@@ -500,6 +503,36 @@ def test_compile_applies_a_fusions_own_tunables_to_its_steps():
     silu, mul = version.recording.steps[0].op, version.recording.steps[1].op
     assert silu.num_aie_columns == 2  # the fusion's own, narrower than recorded (4)
     assert mul.num_aie_columns == 2  # a stream edge's lanes must still match
+
+
+class BoundedPair(iron.Graph):
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return ReLU.step(ReLU.step(x[:n], num_aie_columns=4), num_aie_columns=4)
+
+
+def test_a_narrowed_step_keeps_its_per_call_values(npu2):
+    """A step narrowed inside a fusion is a design of its own, reading its own
+    value symbols: each value bound to the recorded step is written to the
+    narrowed one's, or its rows stay whatever the scratchpad last held.
+    """
+    recording = BoundedPair().record(x=(4096,))
+    p = Profile()
+    p.add_fusion(
+        FusionKind.MERGE,
+        [
+            (ReLU, dict(size=4096), {"num_aie_columns": 2}),
+            (ReLU, dict(size=4096), {"num_aie_columns": 2}),
+        ],
+        [],
+    )
+    fused = fusions(recording, p)
+    assert fused
+    patched = apply_fusion_tunables(recording, p, fused, npu2)
+    written = {w.symbol for w in _words(patched)[0]}
+    for old, new in zip(recording.steps, patched.steps):
+        names = {b.member.name for b in recording.bindings if b.op is old.op}
+        assert names and new.op.num_aie_columns == 2
+        assert {new.op.value(n).symbol for n in names} <= written
 
 
 def test_compile_withholds_fusions_under_check_but_not_a_step_per_xclbin():
