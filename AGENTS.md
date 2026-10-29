@@ -408,6 +408,11 @@ tunables and profiles already do that job.
 - `cli.py`: `main`, the command line every model shares (`--help` lists
   its options, `-v` logs iron's INFO lines), and `exports`, a model
   package's lazy `__getattr__`.
+- `validate.py`: `python -m iron.lm.validate <application> --checkpoint DIR
+  --candidate PROFILE_DIR`, a candidate profile against the model's own on
+  real weights: live fusions and packings, bit identity over a prompt
+  ending in a partial chunk, KL against golden, TTFT and decode tok/s
+  interleaved, and with `--bisect` the entries a mismatch comes from.
 - `generation.py`, `testing.py`: sampling and the device tests' checks;
   they need only `logits(tokens)`. `tune.py`: `python -m iron.lm.tune`.
 
