@@ -24,7 +24,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.hostruntime.tensor_class import NpuTensor
 from aie.utils.compile.jit import operator as jit
 from aie.utils.compile.jit.operator import Unresolvable
-from aie.utils.compile.jit.params import PerCallMember
+from aie.utils.compile.jit.params import PerCallMember, Select
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
@@ -197,7 +197,8 @@ class Operator(jit.Operator, library=True):
     ) -> int:
         """How many of ``dev``'s columns fit the class's streams in the shim DMA
         budget: a ``replicate`` stream costs once per channel, one with no
-        ``per=`` once, and a ``when=`` flag ``flags`` leaves out is its default.
+        ``per=`` once, and a ``when=`` flag, or an obj_shape ``Select``'s,
+        ``flags`` leaves out is its default.
 
         Raises:
             Unresolvable: Not even one column's streams fit.
@@ -206,7 +207,18 @@ class Operator(jit.Operator, library=True):
         streams = [
             m
             for m in cls.declaration.operands
-            if m.streamed and (m.when is None or flags.get(m.when.name, m.when.default))
+            if m.streamed
+            and (m.when is None or flags.get(m.when.name, m.when.default))
+            and not any(
+                isinstance(d, Select)
+                and (
+                    d.when_true
+                    if flags.get(d.flag.name, d.flag.default)
+                    else d.when_false
+                )
+                is None
+                for d in m.obj_dims
+            )
         ]
         cols = dev.cols
         for drains, budget in (
