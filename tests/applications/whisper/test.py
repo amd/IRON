@@ -6,8 +6,9 @@ against Hugging Face's own model in float32 over the same weights, its
 logits recorded in ``goldens/``: device-free, the encoder over a clip's
 samples, then the decoder's prompt chunks and a decode step over its
 output, each version's reference in turn; and the same on the NPU, with
-tanh and exact GELU. Then large-v3-turbo from its checkpoint on the NPU
-over a LibriSpeech clip, against transformers' logits recorded beside it.
+tanh and exact GELU. Then each real checkpoint (large-v3-turbo, small)
+from its own on the NPU over a LibriSpeech clip, against transformers'
+logits recorded beside it.
 """
 
 import dataclasses
@@ -44,7 +45,8 @@ TOY = WhisperConfig(
 #: The toy with Whisper's own GELU, the exact one.
 EXACT = dataclasses.replace(TOY, hidden_act="gelu")
 
-DIRECTORY = weights_dir("whisper-large-v3-turbo")
+#: Each checkpoint CI holds, by its directory under $IRON_EXAMPLE_WEIGHTS_DIR.
+CHECKPOINTS = ["whisper-large-v3-turbo", "whisper-small"]
 #: A LibriSpeech test-clean utterance, 7.3 s of speech.
 SPEECH = "4446-2275-0016"
 
@@ -246,16 +248,17 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
 MAX_KL = 0.05
 
 
-@pytest.fixture(scope="module")
-def large():
-    """large-v3-turbo from its checkpoint, compiled and loaded once."""
+@pytest.fixture(scope="module", params=CHECKPOINTS, ids=str)
+def model(request):
+    """A checkpoint, compiled and loaded once."""
+    directory = weights_dir(request.param)
     require(
-        DIRECTORY / "model.safetensors",
-        DIRECTORY / "config.json",
-        DIRECTORY / "tokenizer.json",
+        directory / "model.safetensors",
+        directory / "config.json",
+        directory / "tokenizer.json",
         staged=False,
     )
-    yield Whisper.load(DIRECTORY)
+    yield Whisper.load(directory)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 
@@ -263,19 +266,19 @@ def large():
 @pytest.mark.extensive
 @pytest.mark.bench
 @pytest.mark.supported_devices("npu2")
-def test_whisper_large_v3_turbo_accuracy(large, record_property):
+def test_whisper_accuracy(model, record_property):
     """A LibriSpeech clip, then the transcript's preamble and three decode
     steps: each next-token distribution against transformers', teacher-forced.
     KL is held to its bound and a top-1 mismatch recorded.
     """
     audio = utterance(SPEECH)
-    large.encode(audio)
-    reference = large.cpu_reference()
-    tokens = large.tokenizer("<|en|><|transcribe|><|notimestamps|>")
+    model.encode(audio)
+    reference = model.cpu_reference()
+    tokens = model.tokenizer("<|en|><|transcribe|><|notimestamps|>")
     results = []
     for _ in range(4):
         want = reference.logits(tokens, audio)
-        results.append(divergence(want, large.logits(tokens)))
+        results.append(divergence(want, model.logits(tokens)))
         tokens.append(int(want.argmax()))
     worst = max(kl for kl, _ in results)
     record_property("MaxKL", worst)
