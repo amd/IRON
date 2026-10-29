@@ -29,6 +29,7 @@ from iron.common.image.link import FullELF, FusedDesign, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
 from iron.common.testing import vectors
+from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
@@ -339,6 +340,22 @@ def test_one_side_bounded_is_refused():
     norm = RMSNorm(rows=8, tile_size=2048, num_aie_columns=4)
     with pytest.raises(ValueError, match="one side is bounded"):
         _plan(add, "y", norm, "x")
+
+
+def test_a_length_no_bound_names_is_refused():
+    """Copy of SiLU's whole output cut to ``n`` rows moves ``n`` a call
+    against SiLU's every element, with no bound on either side to compare."""
+
+    class Tail(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32]):
+            y = SiLU.step(x, tile_size=2048, num_aie_columns=8)
+            return Copy.step(y[:n])
+
+    recording = Tail().record(x=(BOUNDED_SIZE,))
+    silu, copy = (s.op.resolved() for s in recording.steps)
+    with pytest.raises(ValueError, match="no bound of its operator names it"):
+        Staging(silu.y, copy.x)
+    assert candidates(recording) == ()
 
 
 def test_feed_refuses_a_mismatch_unless_staged():

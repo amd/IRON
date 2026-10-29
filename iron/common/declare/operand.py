@@ -644,6 +644,13 @@ class Staging:
         for side in (source, sink):
             transfers = side.transfers()
             bounded = side.bounded
+            if bounded is None and any(w is not None for _, _, w, _ in transfers):
+                # An operator's own description moving a per-call length no
+                # declared bound names: no round count is known to compare.
+                raise ValueError(
+                    f"{edge}: {side.name}'s lanes move a per-call length, but "
+                    f"no bound of its operator names it"
+                )
             if bounded is None:
                 bounds.append(None)
             else:
