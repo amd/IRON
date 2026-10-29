@@ -155,9 +155,8 @@ class Tokens:
     def _write(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         partial = self.path.with_name(f".{self.path.stem}.{os.getpid()}.npz")
-        np.savez_compressed(
-            partial, **{k: np.array(v, np.int32) for k, v in self.rows.items()}
-        )
+        ids: dict[str, Any] = {k: np.array(v, np.int32) for k, v in self.rows.items()}
+        np.savez_compressed(partial, **ids)
         os.replace(partial, self.path)
 
 
