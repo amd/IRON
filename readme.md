@@ -3417,15 +3417,24 @@
 ## Examples
 
 <details>
+<summary>tests/applications/decoders</summary>
+
+| Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
+|---|---|---|---|---|
+| test_generation[gemma4-short-1] | ✅ | - | - | - |
+
+</details>
+
+<details>
 <summary>tests/applications/embedding_gemma2</summary>
 
 | Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
 |---|---|---|---|---|
-| test_embeddinggemma_2_accuracy[document] | - | - | ✅ | - |
-| test_embeddinggemma_2_accuracy[long_document] | - | - | ✅ | - |
-| test_embeddinggemma_2_accuracy[near_the_limit] | - | - | ✅ | - |
-| test_embeddinggemma_2_accuracy[past_the_window] | - | - | ✅ | - |
-| test_embeddinggemma_2_accuracy[query] | - | - | ✅ | - |
+| test_embeddinggemma_2_accuracy[document] | ✅ | - | ✅ | - |
+| test_embeddinggemma_2_accuracy[long_document] | ✅ | - | ✅ | - |
+| test_embeddinggemma_2_accuracy[near_the_limit] | ✅ | - | ✅ | - |
+| test_embeddinggemma_2_accuracy[past_the_window] | ✅ | - | ✅ | - |
+| test_embeddinggemma_2_accuracy[query] | ✅ | - | ✅ | - |
 | test_image_processor_refuses[shape_(1, 5000)-tokens_280-refusal_patch columns] | ✅ | - | ✅ | - |
 | test_image_processor_refuses[shape_(5000, 4000)-tokens_280-refusal_does not fit] | ✅ | - | ✅ | - |
 | test_image_processor_refuses[shape_(97, 2003)-tokens_280-refusal_patch columns] | ✅ | - | ✅ | - |
