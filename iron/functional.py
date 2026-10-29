@@ -8,6 +8,7 @@ Weights are a checkpoint's ``(out, in)``, as ``torch.nn.Linear`` stores
 them. A handle's own ``+ - * /`` are steps too, and ``@`` of one row.
 """
 
+import dataclasses
 import math
 
 import ml_dtypes
@@ -16,6 +17,7 @@ import iron
 from iron.common import Precision
 from iron.common.graph.handle import Handle, State
 
+from iron.operators.copy import Copy
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gelu import GELU
@@ -121,3 +123,52 @@ def gelu(x: Handle, approximate: str = "none") -> Handle:
 def rope(x: Handle, angles: Handle) -> Handle:
     """``x`` ``(rows, head_dim)`` turned by RoPE, a row of ``angles`` per row."""
     return RoPE.step(x, angles)
+
+
+@dataclasses.dataclass(frozen=True)
+class ConvState:
+    """What a short causal conv carries between calls: ``read``, the
+    ``K - 1`` rows before a call's first, and ``write``, where the ``K - 1``
+    ending it go; and the scratch states a call stages them in, ``window``
+    ``(2, chunk, channels)`` and ``tail`` ``(K - 1, channels)``.
+    """
+
+    read: Handle
+    write: Handle
+    window: State
+    tail: State
+
+
+def causal_conv1d(x: Handle, taps, state: ConvState) -> Handle:
+    """``x`` ``(rows, channels)`` through a depth-wise causal filter of
+    ``K`` taps, each channel its own column of ``taps`` ``(K, channels)``:
+    output row ``t`` is ``sum_k taps[k] * x[t - K + 1 + k]``. The ``K - 1``
+    rows before ``x``'s first row are read from ``state.read``, and the
+    ``K - 1`` rows ending this call (counting those read) are written to
+    ``state.write`` for the next call. When ``x``'s rows are bounded per
+    call (``x[:n]``), the call is a prompt chunk of at most ``chunk`` rows;
+    otherwise ``x`` is one row, a decode step.
+    """
+    read, write, window, tail = state.read, state.write, state.window, state.tail
+    K, C = taps.shape[0], window.shape[1]
+    # Block 0 ends with the rows before the call; block 1 is the call's.
+    flat = window.reshape(2 * C, x.shape[1])
+    first = C - (K - 1)
+    flat[first:C] = read
+    rows = x.valid.get(0)
+    if rows is None:
+        flat[C] = x.reshape(x.shape[1])
+        y = x * taps[K - 1]
+        for k in range(K - 1):
+            y = y + flat[first + k : first + k + 1] * taps[k]
+        Copy.step(flat[first + 1 : C + 1], write)
+        return y
+    window[1, :rows] = x
+    y = flat[first : first + C] * taps[0]
+    for k in range(1, K):
+        y = y + flat[first + k : first + k + C] * taps[k]
+    y = y[:rows]
+    for j in range(K - 1):
+        tail[j] = flat[first + rows + j]
+    Copy.step(tail, write)
+    return y

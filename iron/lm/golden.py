@@ -7,12 +7,13 @@ so a test or an accuracy run needs neither torch nor transformers, which
 are not IRON's requirements, only to record.
 """
 
-# torch and transformers: only recording imports them.
+# torch, transformers and safetensors: only recording imports them.
 # pyright: reportMissingImports=false
 
 import dataclasses
 import hashlib
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -31,19 +32,23 @@ class Golden:
         path: The file; it need not exist yet.
         reference: Builds what records a sequence ``path`` lacks (a
             ``HuggingFace``), called once on the first such sequence, and only
-            while ``RECORD`` is set; otherwise such a sequence raises
+            while recording; otherwise such a sequence raises
             ``LookupError``, or ``FileNotFoundError`` naming ``path`` where
             there is no file.
         inputs: What the reference is built from (a config, weights); the
             file holds their ``fingerprint`` and is refused if they change.
+        record: Whether to record what ``path`` lacks; None while ``RECORD``
+            is set.
 
     Raises:
         ValueError: ``path`` was recorded from other ``inputs``.
     """
 
-    def __init__(self, path, reference=None, inputs=()):
+    def __init__(self, path, reference=None, inputs=(), *, record=None):
         self.path = Path(path)
-        self.build = reference if os.environ.get(RECORD) else None
+        if record is None:
+            record = bool(os.environ.get(RECORD))
+        self.build = reference if record else None
         self.reference = None
         self.fingerprint = fingerprint(*inputs) if inputs else None
         self.rows = self.read()
@@ -110,7 +115,7 @@ def fingerprint(*values) -> str:
     """A digest of ``values``, a weights tree's leaves by name (``leaves``):
     arrays by their bytes, shapes and types, anything else by ``repr``.
     """
-    from .checkpoint import leaves
+    from .checkpoint import leaves  # which imports this module
 
     digest = hashlib.sha256()
     for name, value in leaves(list(values)):
@@ -182,8 +187,6 @@ class HuggingFace:
             ValueError: ``weights`` lacks a parameter the model holds, other
                 than one tied to another, or holds one it does not.
         """
-        import tempfile
-
         import torch
         import transformers
         from safetensors.torch import save_file
@@ -226,6 +229,6 @@ def _merged(a: dict, b: dict) -> dict:
 
 def flat(tree):
     """``tree``'s arrays by their dotted names, in float32."""
-    from .checkpoint import leaves
+    from .checkpoint import leaves  # which imports this module
 
     return ((name, value.astype(np.float32)) for name, value in leaves(tree))

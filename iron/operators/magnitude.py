@@ -18,7 +18,9 @@ class Magnitude(Rowwise):
         [
             Case(dict(rows=64, width=640, num_aie_columns=1)),
             Case(dict(rows=512, width=640, num_aie_columns=4)),
-            Case(dict(rows=4096, width=640, num_aie_columns=8), bench=True),
+            lambda cls, dev: [
+                Case(dict(rows=4096, width=640, num_aie_columns=dev.cols), bench=True)
+            ],
         ],
         # Spectra span many decades and pad with zero bins.
         draw=lambda op: dict(

@@ -22,6 +22,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 from iron.common.graph.compiled import walk
 
 from .blocks import KVCache
+from .causal import Checkpoints
 from .generation import (
     SEED,
     Sampler,
@@ -94,7 +95,7 @@ def require(*files: Path, staged: bool = True) -> None:
     missing = [str(f) for f in files if not f.exists()]
     if not missing:
         return
-    import pytest
+    import pytest  # a test's: a model imports this module for weights_dir
 
     if staged and os.environ.get("CI"):
         pytest.fail(
@@ -353,7 +354,12 @@ def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, reco
 def _fill_caches(model, n: int, position: int):
     """The caches' first ``n`` rows, a prompt's, repeated up to ``position``
     on the device and as the graph reference's state, for the body of the
-    ``with``; the prompt's own rows stay as it wrote them.
+    ``with``; the prompt's own rows stay as it wrote them. A ring holds the
+    ``ring`` positions before ``position`` so filled; past ``ring``, a
+    prompt's positions in it are as it left them. A state checkpointed at
+    each chunk boundary (``Checkpoints``) holds, in the slot a call at
+    ``position`` reads, the state the prompt left; the reference reads a
+    copy of its slots.
     """
     version = next(iter(model.versions.values()))
     caches = [(x, p) for _, x, p, _ in walk(model) if isinstance(p, KVCache)]
@@ -370,9 +376,17 @@ def _fill_caches(model, n: int, position: int):
                 rows[q % p.ring] = rows[p.ring + q % p.ring] = held[q % n]
         version.push(cache)
         cache.host = rows
+    checkpoints = [c for c in model.recurrent if isinstance(c, Checkpoints)]
+    for c in checkpoints:
+        slots = version.read(c.slots)
+        slots[c.slot(position)] = slots[c.slot(n)]
+        version.push(c.slots)
+        # A step may read and write one slot: the reference, run after the
+        # device's step, reads it as it was, not as the device left it.
+        c.slots.host = slots.copy()
     try:
         yield
     finally:
-        for state in (x for x, _ in caches):
+        for state in [*(x for x, _ in caches), *(c.slots for c in checkpoints)]:
             version.push(state)
             state.host = None

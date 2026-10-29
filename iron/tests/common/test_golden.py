@@ -4,51 +4,51 @@
 """``Golden``: what it records, when, and the file it refuses."""
 
 import dataclasses
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from iron.lm.golden import RECORD, Golden, HuggingFace, fingerprint
+from iron.lm.golden import Golden, HuggingFace, fingerprint
 from iron.tests.support.llama_model import SMALL, checkpoint
+from iron.tests.support.llama_reference import OnHost
 
 TOKENS = np.arange(4)
+TOY = dataclasses.replace(SMALL, num_hidden_layers=1)
 
 
-def reference(scale):
-    return lambda: SimpleNamespace(logits=lambda tokens: tokens * scale)
+def model(seed):
+    return OnHost(TOY, checkpoint(TOY).tree("random", seed))
 
 
 def test_it_records_only_while_asked_and_reads_back_without_the_reference(
-    tmp_path, monkeypatch
+    tmp_path, npu2
 ):
     path = tmp_path / "golden.npz"
-    monkeypatch.delenv(RECORD, raising=False)
+    expected = np.array(model(2).logits(TOKENS), np.float32)
     with pytest.raises(FileNotFoundError, match=f"{path} is missing"):
-        Golden(path, reference(2), (2,)).logits(TOKENS)
-    monkeypatch.setenv(RECORD, "1")
+        Golden(path, lambda: model(2), (TOY, 2), record=False).logits(TOKENS)
     np.testing.assert_array_equal(
-        Golden(path, reference(2), (2,)).logits(TOKENS), TOKENS * 2
+        Golden(path, lambda: model(2), (TOY, 2), record=True).logits(TOKENS),
+        expected,
     )
     assert [p.name for p in tmp_path.iterdir()] == ["golden.npz"]
-    monkeypatch.delenv(RECORD)
-    np.testing.assert_array_equal(Golden(path, None, (2,)).logits(TOKENS), TOKENS * 2)
+    reread = Golden(path, None, (TOY, 2), record=False)
+    np.testing.assert_array_equal(reread.logits(TOKENS), expected)
     with pytest.raises(LookupError, match="holds no logits"):
-        Golden(path, None, (2,)).logits(TOKENS + 1)
+        reread.logits(TOKENS + 1)
 
 
-def test_a_file_of_other_inputs_is_refused_and_rerecorded(tmp_path, monkeypatch):
+def test_a_file_of_other_inputs_is_refused_and_rerecorded(tmp_path, npu2):
     path = tmp_path / "golden.npz"
-    monkeypatch.setenv(RECORD, "1")
-    Golden(path, reference(2), (2,)).logits(TOKENS)
-    Golden(path, reference(2), (2,)).logits(TOKENS + 1)
-    monkeypatch.delenv(RECORD)
+    Golden(path, lambda: model(2), (TOY, 2), record=True).logits(TOKENS)
+    Golden(path, lambda: model(2), (TOY, 2), record=True).logits(TOKENS + 1)
     with pytest.raises(ValueError, match="other inputs"):
-        Golden(path, reference(3), (3,))
-    monkeypatch.setenv(RECORD, "1")
-    golden = Golden(path, reference(3), (3,))
-    np.testing.assert_array_equal(golden.logits(TOKENS), TOKENS * 3)
-    assert len(Golden(path, None, (3,)).rows) == 1
+        Golden(path, lambda: model(3), (TOY, 3), record=False)
+    golden = Golden(path, lambda: model(3), (TOY, 3), record=True)
+    np.testing.assert_array_equal(
+        golden.logits(TOKENS), np.array(model(3).logits(TOKENS), np.float32)
+    )
+    assert len(Golden(path, None, (TOY, 3)).rows) == 1
 
 
 def test_a_weight_the_model_does_not_hold_is_refused():

@@ -45,10 +45,11 @@ class Operand:
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):  # unset while a copy is made
             raise AttributeError(name)
-        if hasattr(type(self), name):
+        prop = vars(Operand).get(name)
+        if isinstance(prop, property):
             # One of this class's properties raised: raise its error again,
             # not the declaration's lacking the name.
-            return getattr(type(self), name).__get__(self)
+            return prop.__get__(self)
         return getattr(self._decl, name)
 
     role = property(lambda self: type(self._decl))

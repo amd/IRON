@@ -32,22 +32,40 @@ runs:
       shell: "bash"
       run: |
         source ${{ inputs.env_name }}/bin/activate
-        
+
+        MARKS=()
+        if [ "${{ inputs.extensive }}" != "true" ]; then
+          MARKS=(-m "not extensive")
+        fi
+        FLAGS=(--log-cli-level=${{ inputs.log_level || 'WARNING' }} ${{ inputs.test_flags }})
+        rm -f tests_latest.csv
+
         case "${{ inputs.test_suite }}" in
           operators)
-            TEST_PATH="iron/operators/ iron/tests/"
+            pytest "${MARKS[@]}" iron/operators/ iron/tests/ --csv-output=tests_latest.csv "${FLAGS[@]}"
             ;;
           applications)
-            TEST_PATH="tests/applications/"
+            # One process per application, so a crash or an OOM kill ends only
+            # that model's tests and frees its memory before the next loads.
+            parts=$(mktemp -d)
+            status=0
+            for dir in tests/applications/*/; do
+              name=$(basename "$dir")
+              code=0
+              pytest "${MARKS[@]}" "$dir" --csv-output="$parts/$name.csv" "${FLAGS[@]}" || code=$?
+              # 5: every test in it deselected.
+              if [ "$code" -ne 0 ] && [ "$code" -ne 5 ]; then
+                echo "::error title=$name::pytest exited $code"
+                status=1
+              fi
+              if [ -s "$parts/$name.csv" ]; then
+                ./ci/scripts/merge_all.py --all tests_latest.csv --latest "$parts/$name.csv" --max-age-days 0
+              fi
+            done
+            exit "$status"
             ;;
           *)
             echo "Invalid test_suite: ${{ inputs.test_suite }}"
             exit 1
             ;;
         esac
-        
-        if [ "${{ inputs.extensive }}" = "true" ]; then
-          pytest $TEST_PATH --csv-output=tests_latest.csv --log-cli-level=${{ inputs.log_level || 'WARNING' }} ${{ inputs.test_flags }}
-        else
-          pytest -m "not extensive" $TEST_PATH --csv-output=tests_latest.csv --log-cli-level=${{ inputs.log_level || 'WARNING' }} ${{ inputs.test_flags }}
-        fi

@@ -33,7 +33,7 @@ from .blocks import (
     residual_add,
 )
 from iron.common.feature_map import Conv2d
-from .causal import Call, CausalLM, Decoder
+from .causal import Call, CausalConv1d, CausalLM, Checkpoints, Decoder
 from .encoder import Encoder, Tower
 from .golden import Golden, HuggingFace
 from .generation import Sampler, accuracy, determinism, generate_on_host
@@ -43,8 +43,10 @@ from .session import Session
 __all__ = [
     "Attention",
     "Call",
+    "CausalConv1d",
     "CausalLM",
     "Checkpoint",
+    "Checkpoints",
     "Config",
     "Conv2d",
     "Decoder",

@@ -5,19 +5,18 @@ SPDX-License-Identifier: Apache-2.0
 
 # Section 8 - From Graphs to a Language Model
 
-Every primitive this guide covered — `body`, handles and `.step(...)`
-(Section 2), per-call bounds (Section 3), weights and state (Section 4),
-carried values (Section 5), the host reference and `check=True` (Section 6),
-profiles (Section 7) — is what [`iron/lm/`](../../iron/lm/) is built from. A
-language model is not a new layer of machinery on top of `iron.Graph`; it is
-a `Graph` recorded the same way the rest of this guide's graphs were, over a
-module tree of weights that load from a checkpoint by name instead of being
-constructed as plain numpy arrays.
+[`iron/lm/`](../../iron/lm/) is built from the pieces this guide has
+covered: `body`, handles and `.step(...)` (Section 2), per-call bounds
+(Section 3), weights and state (Section 4), carried values (Section 5), the
+host reference and `check=True` (Section 6), and profiles (Section 7). A
+language model is an `iron.Graph` like the others. The difference is that
+its weights are a module tree loaded from a checkpoint by name, rather than
+numpy arrays you build yourself.
 
-## A whole model, named
+## A whole model
 
 [`iron/applications/llama/model.py`](../../iron/applications/llama/model.py)
-is the whole of Llama 3 on top of the shared decoder:
+defines Llama 3 on top of the shared decoder:
 
 ```python
 class Llama(CausalLM):
@@ -27,21 +26,20 @@ class Llama(CausalLM):
     profile = Path(__file__).with_name("profiles")
 ```
 
-Everything Llama-specific is `LlamaConfig` (RoPE frequency scaling, and the
-precision its wider GEMMs need — Section 4 and 7's territory) and a
-directory of profiles (Section 7). The rest — the decoder's layers, its
-attention and feed-forward blocks, its KV cache, sampling, chat turns — is
-[`CausalLM`](../../iron/lm/causal.py), one shared graph every text decoder
-(`Llama`, `Gemma4`) composes.
+What is specific to Llama is `LlamaConfig` (Llama 3's RoPE frequency
+scaling and the precision of its projections) and a directory of profiles
+(Section 7). The decoder's layers, attention, feed-forward blocks, KV caches
+and on-device sampling come from [`CausalLM`](../../iron/lm/causal.py),
+which `Gemma4` builds on too. A conversation's chat turns and cache
+bookkeeping live in [`Session`](../../iron/lm/session.py).
 
 ## Walkthrough of [toy_decoder.py](./toy_decoder.py)
 
-A real checkpoint's weights are gated on Hugging Face and are more setup
-than a guide should ask for. `toy_decoder.py` instead draws Llama's own
-`Llama` class a tiny, one-layer config and random weights, the same way
-`tests/applications/llama/reference/test.py` and
-[`iron/tests/support/llama_model.py`](../../iron/tests/support/llama_model.py)
-build toy-sized decoders for their own device-free and device tests:
+Llama's real checkpoints are gated on Hugging Face, so `toy_decoder.py`
+uses the real `Llama` class with a tiny one-layer config and random
+weights instead. The tests build toy decoders the same way
+(`tests/applications/llama/reference/test.py` and
+[`iron/tests/support/llama_model.py`](../../iron/tests/support/llama_model.py)).
 
 ```python
 TOY = LlamaConfig(
@@ -55,14 +53,14 @@ checkpoint = toy_checkpoint(TOY, directory)        # a sparse .safetensors file
 model = Llama(TOY, checkpoint.tree("random", seed=0))
 ```
 
-`Checkpoint(path).tree("random", seed)` is what a model's own `load`
-reads from a real checkpoint directory; given a sparse file (a header and a
-hole, `toy_checkpoint`'s), it draws every weight at `seed` instead, reading
-nothing past the header. `Llama(config, weights)` then runs exactly what the
-real `Llama.load` does under the hood: `CausalLM.__init__` builds the module
-tree and calls `Graph.load_state_dict` (Section 4) to bind it.
+`toy_checkpoint` writes a sparse `.safetensors` file: a header naming every
+tensor and its shape, and no data. `Checkpoint.tree("random", seed)` reads
+only that header and draws each weight from `seed`. A real load uses
+`tree("read")` instead, which reads the weights. Either way,
+`Llama(config, weights)` runs `CausalLM.__init__`, which builds the module
+tree and binds the weights with `Graph.load_state_dict` (Section 4).
 
-### `CausalLM.body`, in the vocabulary this guide taught
+### `CausalLM.body`
 
 ```python
 def body(
@@ -78,27 +76,26 @@ def body(
     ...
 ```
 
-* `ids`, an optional positional input (Section 2): a prompt chunk's token
-  ids when given, `None` for a decode step, which instead reads the last
-  sampled `token`.
-* `token` and `position`, **carried** (Section 5): the host seeds them once
-  per conversation; after that, each call carries forward the token it just
-  sampled and the position one past what it just ran.
-  [`Session`](../../iron/lm/session.py) is what manages one conversation's
-  carried values and caches across many calls; `toy_decoder.py` drives the
-  compiled versions directly, the same way Section 5's `Walk` did, to show
-  the values themselves rather than `Session`'s bookkeeping.
-* `start`, `rows` and `rope_start`, **scratchpad** (Section 3): `rows`
-  bounds how much of a prompt chunk's compiled capacity this call actually
-  runs, the same `x[:n]` mechanism Section 3's `BoundedRelu` used, here
-  reaching every layer's attention and KV cache writes through `Call`.
+* `ids` is an optional positional input (Section 2). A prompt chunk passes
+  its token ids. A decode step passes nothing and embeds the carried
+  `token`.
+* `token` and `position` are **carried** values (Section 5). The host seeds
+  them at the start. Each call then carries forward the token it drew and
+  the next position.
+* `start`, `rows` and `rope_start` are **scratchpad** values (Section 3).
+  `rows` bounds how many of the prompt chunk's compiled rows a call runs,
+  the same `x[:n]` mechanism as Section 3's `BoundedRelu`.
 
-Each layer's attention keeps its KV cache in `iron.state` (Section 4), one
-`KVCache` per layer, sized by `max_seq_len` once and read only up to the
-current position every call ("one compile, any context",
-[AGENTS.md](../../AGENTS.md#design-rationale-and-known-limits)).
+Each call ends with a `Sample` step that draws the next token on the NPU
+from the logits. The host writes only the sampling settings; with none
+written, the draw is greedy.
 
-### Compiling its two versions and running a prompt plus a few decode steps
+Each layer keeps its KV cache in `iron.state` (Section 4), one `KVCache`
+per layer. The cache is sized once by `max_seq_len`, and each call reads it
+only up to the current position. See "One compile, any context" in
+[AGENTS.md](../../AGENTS.md#design-rationale-and-known-limits).
+
+### Two versions: a prompt chunk and a decode step
 
 ```python
 decode = model.compile(**model.shapes()[0])          # no input: the decode step
@@ -109,14 +106,16 @@ for _ in range(decode_steps):
     _, carry = decode(**carry)                       # carry is exactly decode's kwargs
 ```
 
-`model.shapes()` names each version's input shape, the decode step first
-(none); `feeds=decode` sizes the decode step's Emit to start from the
-prompt chunk's carried values, on NPU2. The prompt call's `carry` comes back
-as exactly the keyword arguments the decode step's `body` takes, so
-`decode(**carry)` chains one call into the next — the pattern
-[`iron/lm/session.py`](../../iron/lm/session.py)'s `host_draws` uses to walk
-a device decoder the same way, and that CausalLM is built to support once
-dispatched end-to-end on the full-ELF device loop (`CarriedLoop`, Section 5).
+`model.shapes()` lists each version's input shapes, the decode step first
+(it takes no input). On NPU2, `feeds=decode` lets the prompt chunk's carried
+values start the decode step. The prompt call's `carry` holds exactly the
+keyword arguments the decode step takes, so `decode(**carry)` chains one
+call into the next.
+
+`Session` drives a model the same way. Where each decode step is started
+from the host, it uses this loop (`host_draws` in `session.py`). On NPU2,
+where the decode step is a full ELF, it instead runs the decode steps as a
+device loop, `CausalLM.loop`, which is the `CarriedLoop` from Section 5.
 
 ### Checking it
 
@@ -126,40 +125,32 @@ for _ in range(decode_steps):
     _, ref_carry = model.reference(**ref_carry)
 ```
 
-`graph.reference(...)` (Section 6) runs the identical `body` on the host.
-Greedy sampling is deterministic, so a correct device run draws the exact
-same tokens as the host reference — `toy_decoder.py` checks the drawn token
-sequences for equality, which needs no tolerance at all: either the device
-drew the same token or it did not.
+`model.reference(...)` runs the same `body` on the host (Section 6). With
+no sampling settings, the draw is greedy and deterministic, so a correct
+device run draws exactly the same tokens as the reference.
+`toy_decoder.py` asserts that the two token sequences are equal.
 
-A whole decoder has dozens of chained rounding steps (every projection,
-norm, activation), so no single step's tolerance covers its logits the way
-one did in Sections 2 and 4. `compile(check=True)` is what verifies a graph
-like this: each step checked against its own operator's `reference()` and
-`tolerance()`, on its own dispatch, raising at the first one that misses.
-Most of a prompt chunk's steps are bounded per call (`rows`, Section 3), and
-a per-call bound's reference is not known until the call, so `check=True`
-logs those as skipped rather than silently passing them:
+A decoder chains many rounding steps: every projection, norm and
+activation. No single step's tolerance covers its logits, so
+`compile(check=True)` is the way to check each step. The example
+recompiles both versions with it. A prompt chunk's steps are mostly bounded
+per call by `rows`, and `check=True` skips those with a warning such as:
 
 ```
 [check step 3] ProjectionGEMM not checked: ['valid'] bounded per call
 ```
 
-— an honest limit, not a gap in the guide: a per-call-bounded step still
-runs and still produces a result, just one `check=True` cannot judge
-without the bound it receives only at the call it is checking.
+Those steps still run. The token comparison above covers them end to end.
 
 ## <u>Exercises</u>
 
-1. Run `python3 toy_decoder.py` on an attached NPU2; it compiles both
+1. Run `python3 toy_decoder.py` on an attached NPU2. It compiles both
    versions, runs a prompt and a few decode steps, checks the drawn tokens
-   against the host reference, and recompiles with `check=True` to verify
-   every step that can be.
-2. Raise `--decode-steps` and watch how many tokens still agree with the
-   host reference — a toy model's random weights make for an arbitrary
-   sequence, but correctness never depends on what the weights mean.
-3. Read the quick start in the top-level [README](../../README.md#quick-start)
-   again:
+   against the host reference, and then reruns with `check=True`.
+2. Raise `--decode-steps`. The device and the reference should still agree
+   on every token. Random weights make the sequence meaningless, but the
+   two must still match.
+3. Reread the quick start in the top-level [README](../../README.md#quick-start):
 
    ```python
    from iron.applications.llama import Llama
@@ -168,10 +159,10 @@ without the bound it receives only at the call it is checking.
    print(model.generate("The capital of France is", 8))
    ```
 
-   `load` does what `toy_decoder.py` did by hand — build the model, compile
-   its versions, `use` them — over a real checkpoint's weights instead of
-   drawn ones; `generate` drives a `Session` the way this section's loop
-   drove the compiled versions directly.
+   `Llama.load` does what `toy_decoder.py` did by hand, with a real
+   checkpoint: it builds the model, compiles both versions and loads them.
+   `generate` tokenizes the prompt on the host and hands the tokens to a
+   `Session`, which drives the compiled versions as above.
 
 -----
 [Prev](../section-7/) &middot; [Top](..)

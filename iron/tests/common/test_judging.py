@@ -28,6 +28,22 @@ def test_every_declared_case_resolves_on_npu2():
     assert not [r for r in reasons if r[2]]
 
 
+def test_npu1_runs_every_case_of_an_operator_it_runs():
+    """A case wider than npu1 would only skip there; an operator npu1 cannot
+    run at all (an AIE2P-only kernel) refuses every case.
+    """
+    dev = from_name("npu1", n_cols=4)
+    reasons: dict[str, list] = {}
+    for name, cls, case in declared(dev):
+        reasons.setdefault(name, []).append((case.label, unresolvable(cls, case, dev)))
+    partial = {
+        name: [r for r in found if r[1]]
+        for name, found in reasons.items()
+        if any(r for _, r in found) and not all(r for _, r in found)
+    }
+    assert not partial
+
+
 def _cases():
     first = {}
     # Every case resolves on npu2 (test_every_declared_case_resolves_on_npu2).

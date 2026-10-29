@@ -1092,7 +1092,8 @@ class _Array:
         first argument of its ``round``, or ``s_begin`` for two KV heads.
         """
         kv = self.kernels[name]
-        first = getattr(kv, f"{name}_round", None) or getattr(kv, f"{name}_s_begin")
+        entries = vars(kv)
+        first = entries.get(f"{name}_round") or entries[f"{name}_s_begin"]
         return first.arg_types()[0]
 
     def attn_kv(

@@ -227,7 +227,7 @@ def run_test(
         inputs: A ``Vectors``, or every input by buffer name (an ``inout``
             buffer among them).
         outputs: Each buffer the operator writes, its expected result by
-            name; ``operator.call_reference`` on ``inputs`` where None.
+            name; ``operator.reference`` on ``inputs`` where None.
         record: ``time_call``'s.
 
     Returns:
@@ -237,7 +237,7 @@ def run_test(
         ValueError: ``inputs`` or ``outputs`` do not name the operator's
             buffers, or an expected result is None.
     """
-    from .declare import Operator
+    from .declare import Operator  # which imports this module
 
     if isinstance(inputs, Vectors):
         inputs, outputs = inputs.inputs, inputs.outputs
@@ -250,10 +250,7 @@ def run_test(
             f"not {sorted(inputs)}"
         )
     operator.compile()
-    # The device tensor type of whichever host runtime is selected (IRON_RUNTIME):
-    # XRTTensor under XRT, HRXTensor under HRX. Both implement the Tensor interface
-    # this function uses, and the operator dispatches through DefaultNPURuntime, which
-    # is the matching runtime.
+    # The tensor type of the host runtime NPU_RUNTIME selects, which the operator dispatches on.
     tensor_class = aie_utils.DEFAULT_TENSOR_CLASS
     args, produced, total_bytes = [], {}, 0
     for b in operator.buffers:

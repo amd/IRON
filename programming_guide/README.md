@@ -5,42 +5,41 @@ SPDX-License-Identifier: Apache-2.0
 
 # IRON Programming Guide
 
-This is the programming guide for `iron`, the operator and graph layer on
-top of mlir-aie's `aie.iron`. It teaches how to declare an operator, record
-a graph of operators, compile it, and run it on an NPU.
+This guide teaches `iron`, the operator and graph layer on top of
+mlir-aie's `aie.iron`. You will declare an operator, record a graph of
+operators, compile it, and run it on an NPU.
 
-> **New to the NPU itself?** This guide assumes you already know what a
-> Worker, an ObjectFifo and `@iron.jit` are. If you don't, start with
-> mlir-aie's [programming guide](https://github.com/Xilinx/mlir-aie/tree/main/programming_guide)
-> first; `iron`'s operators are built out of exactly those pieces, one level
-> up.
+> **New to the NPU itself?** This guide assumes you know what a Worker, an
+> ObjectFifo and `@iron.jit` are. If not, start with mlir-aie's
+> [programming guide](https://github.com/Xilinx/mlir-aie/tree/main/programming_guide).
+> IRON's operators are built from exactly those pieces.
 
-## The mental model in 60 seconds
+## The mental model
 
-* An **operator** (`iron.operators.GEMM`, `ReLU`, `MHA`, ...) is one declared
-  class: its shape and tunables are `param()`/`tunable()` fields, its
-  compute is a `build()` over `aie.iron`. Called on its own, `op(*tensors)`
-  compiles once and runs on the device.
-* A **graph** (a subclass of `iron.Graph`) records a model's operators, once
-  per input shape, into a `body()` method. Its positional parameters are
-  the graph's inputs; its return is its outputs. Inside `body()`, `Op.step(...)`
-  records a step and returns a `Handle` in place of a tensor.
-* `graph.compile(**shapes)` lowers one recorded shape to an image on the
-  device: a full ELF on NPU2, an xclbin per step on NPU1. `graph(*tensors)`
-  finds and calls the matching compiled version. It can compile an unseen
-  shape automatically only while no version is loaded; compile every shape
-  you'll need before the first device call.
-* `graph.reference(*tensors)` runs the same `body()` on the host, through
-  each operator's numpy `reference()`, so a design can be checked without
-  touching the NPU.
+* An **operator** (`iron.operators.GEMM`, `ReLU`, `MHA`, ...) is a declared
+  class. Its shape and tunables are `param()` and `tunable()` fields, and
+  its compute is a `build()` over `aie.iron`. Called on its own,
+  `op(*tensors)` compiles once and runs on the device.
+* A **graph** is a subclass of `iron.Graph` whose `body()` method records a
+  model's operators, once per input shape. The positional parameters of
+  `body()` are the graph's inputs and its return value is the output.
+  Inside `body()`, `Op.step(...)` records a step and returns a `Handle` in
+  place of a tensor.
+* `graph.compile(**shapes)` lowers one recorded shape to an image for the
+  device: one full ELF on NPU2, an xclbin per step on NPU1.
+  `graph(*tensors)` calls the compiled version that matches the inputs'
+  shapes. Compile every shape you need before the first call: once a
+  version is loaded, a call with a new shape raises instead of compiling.
+* `graph.reference(*tensors)` runs the same `body()` on the host through
+  each operator's numpy `reference()`, so you can check a design without
+  an NPU.
 
 ```python
 import numpy as np
-from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.operators import GEMM, SiLU, ElementwiseMul
+from iron.operators import GEMM, SiLU
 
 
 class FeedForward(iron.Graph):

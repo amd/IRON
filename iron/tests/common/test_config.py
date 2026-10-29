@@ -16,6 +16,7 @@ from iron import Precision
 from iron.applications.embedding_gemma2.model import Config as EmbeddingGemmaConfig
 from iron.applications.gemma4.audio import AudioConfig
 from iron.applications.gemma4.vision import VisionConfig
+from iron.applications.granite.model import GraniteConfig
 from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig
 from iron.lm import DecoderConfig
 from iron.tests.support.llama_model import REAL_1B
@@ -52,6 +53,7 @@ def test_from_checkpoint_takes_either_the_file_or_its_directory():
     "cls",
     [
         LlamaConfig,
+        GraniteConfig,
         EmbeddingGemmaConfig,
         AudioConfig,
         VisionConfig,

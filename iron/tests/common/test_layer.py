@@ -19,6 +19,7 @@ from iron import Precision
 from iron.applications.embedding_gemma2.model import Config, EmbeddingGemma, TextLayer
 from iron.lm import Call, blocks
 from iron.lm.checkpoint import nest
+from iron.lm.golden import flat
 from iron.tests.support.layer import shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -66,9 +67,12 @@ def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
     # Unrefused, normalized_shape is checked against the last axis but
     # otherwise unused: the kernel would silently normalize the last axis
     # regardless of what the caller asked for.
-    x = SimpleNamespace(shape=(4, WIDTH))
+    class Normed(iron.Graph):
+        def body(self, x):
+            return norm(x, 4)
+
     with pytest.raises(ValueError, match="not the last axis"):
-        norm(x, 4)
+        Normed().record(x=(4, WIDTH))
 
 
 @pytest.mark.parametrize(
@@ -92,7 +96,7 @@ def test_a_norm_is_its_kernel_weighted_if_given_then_any_bias(norm, steps):
 
     recorded = Normed().record(x=(T, WIDTH)).steps
     assert [
-        (type(s.op).__name__, getattr(s.op, "weighted", None)) for s in recorded
+        (type(s.op).__name__, vars(s.op).get("weighted")) for s in recorded
     ] == steps
 
 
@@ -154,10 +158,9 @@ class HuggingFaceGemma:
     """
 
     def __init__(self, w, x, ple):
+        # Record a golden only: not requirements.
         import torch
         from transformers.models.gemma4 import modeling_gemma4 as gemma4
-
-        from iron.lm.golden import flat
 
         config = gemma4.Gemma4TextConfig(
             hidden_size=WIDTH,
@@ -180,7 +183,7 @@ class HuggingFaceGemma:
         self.layer, self.x, self.ple = layer, x, ple
 
     def logits(self, _):
-        import torch
+        import torch  # records a golden only: not a requirement
 
         x = torch.from_numpy(np.asarray(self.x, np.float32))[None]
         ple = torch.from_numpy(np.asarray(self.ple, np.float32))[None]
@@ -251,7 +254,7 @@ def test_gemma_s_text_layer_projects_at_highest_precision():
         .record(x=(ROWS, WIDTH), ple=(ROWS, PLE))
         .steps
     )
-    gemms = [s.op for s in steps if hasattr(s.op, "precision")]
+    gemms = [s.op for s in steps if "precision" in vars(s.op)]
     assert gemms and {op.precision for op in gemms} == {Precision.HIGHEST}
 
 

@@ -90,14 +90,16 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
     sudo modprobe -r amdxdna && sudo modprobe amdxdna
     ```
    On NPU2 a model's prompt chunk is one command, and the deepest chunk, at
-   the model's native context, is the longest. Measured on Strix Halo, one
-   command each:
+   the model's native context, is the longest. The timeout must cover it,
+   with room to spare on a slower device:
 
-   | Model | Native context | Deepest chunk, s |
+   | Model | Native context | Deepest chunk, s (one Strix Halo run) |
    |---|---|---|
    | Gemma 4 E2B | 131072 | 182 |
    | Llama 3.2 3B | 131072 | 101 |
+   | Granite 4.2 3B | 131072 | 86 |
    | Llama 3.2 1B | 131072 | 26 |
+   | Granite 4.0-H 1B | 131072 | 15 |
    | EmbeddingGemma 2, each tower and the encoder | its largest input | under 0.7 |
 
    On NPU1 a command is one operator, the longest an attention layer of the
@@ -124,8 +126,8 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    ```
 
 1. Install required Python packages (from requirements.txt). The mlir-aie
-   it pins is the last release; [AGENTS.md](AGENTS.md#environment) says
-   how to run against the newer one this branch needs:
+   it pins is a nightly wheel ([AGENTS.md](AGENTS.md#environment) says how
+   the pins move):
    ```bash
    pip install -r requirements.txt
    ```
@@ -148,25 +150,34 @@ The commands that run the operator and model tests are in [AGENTS.md](./AGENTS.m
 
 Each model is a package under [iron/applications/](./iron/applications/) over [iron/lm/](./iron/lm/), the library every model shares ([AGENTS.md](./AGENTS.md#language-models) describes it). Each model's README says which code is specific to it and where its files come from. The tests find a checkpoint at `$IRON_EXAMPLE_WEIGHTS_DIR/<checkpoint>`, default `/srv` (`iron.lm.testing.weights_dir`).
 
-| Model | Application | Checkpoint |
-|---|---|---|
-| Llama 3.2 1B, 3B | [llama](./iron/applications/llama/) | `llama3.2-1b`, `llama3.2-3b` |
-| Gemma 4 E2B text decoder | [gemma4](./iron/applications/gemma4/) | `gemma-4-e2b-it` |
-| EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |
-| Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) |
+This table is also [docs/models.md](./docs/models.md)'s, with GitHub-absolute links in place of these relative ones; a new row goes in both.
 
-What the text decoders (Llama and Gemma 4 above) share:
+| Model | Application | Checkpoint | NPU1 (Phoenix, Hawk Point) | NPU2 (Strix, Strix Halo, Krackan) |
+|---|---|---|---|---|
+| Llama 3.2 1B, 3B | [llama](./iron/applications/llama/) | `llama3.2-1b`, `llama3.2-3b` | Yes, a dispatch per step | Yes |
+| Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` | Yes, a dispatch per step | Yes |
+| Granite 4.0-H 1B | [granite_hybrid](./iron/applications/granite_hybrid/) | `granite-4.0-h-1b` | Not yet run; its tests are enabled | Yes |
+| Gemma 4 E2B: text decoder, vision and audio towers | [gemma4](./iron/applications/gemma4/) | `gemma-4-e2b-it` | Text decoder, a dispatch per step; towers untested | Yes |
+| EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` | Yes, a dispatch per step; the widest images are refused | Yes |
+| Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) | No | Yes |
+
+NPU1 has no full-ELF dispatch, so each step is its own xclbin dispatch and
+the host starts each decode step on the token the last one drew; NPU2 runs
+the decode loop on the device. Each model's README says what its NPU1 tests
+cover.
+
+What the text decoders (Llama, Granite and Gemma 4 above) share:
 
 - **Setup**: `requirements_examples.txt`, as [installing](#installation-linux) says. XRT maps every device buffer locked, and a model's weights and caches are banks of at most 3.5 GiB (`iron.common.image.allocator.BANK`), so `ulimit -l` must cover one bank.
 
 - **Run**: `python -m iron.applications.<application>.model <directory or repository id> [--prompt TEXT]`, the directory holding `config.json`, the checkpoint and the tokenizer; `-v` logs each compile; `--help` lists the options, and [Llama's README](./iron/applications/llama/README.md#running) explains them.
-- **Test**: `pytest tests/applications/<application>/` (or `tests/applications/decoders/ -k <application>` for the decoders that share one test) loads the model once and checks throughput, accuracy against transformers' logits recorded in `golden.npz` beside the checkpoint, and determinism. `pytest <test> --record-goldens -p no:xdist` records missing logits where torch and transformers are installed; they are not IRON's requirements.
+- **Test**: `pytest tests/applications/<application>/` (or `tests/applications/decoders/ -k <application>` for the decoders that share one test) loads the model once, records its time to first token and tokens per second (CI publishes them, and the nightly run fails on a regression; see [benchmarks](https://amd.github.io/IRON/benchmarks/)), and checks accuracy against transformers' logits recorded in `golden.npz` beside the checkpoint, and determinism. `pytest <test> --record-goldens -p no:xdist` records missing logits where torch and transformers are installed; they are not IRON's requirements.
 - **Tune**: `python -m iron.lm.tune <application> --checkpoint <directory>` times each operator at every setting of its tunables and rewrites the application's `profiles/<device>.json`; review it with `git diff` and commit it.
 
 ## Architecture
 
 1. **Operators** (`iron/operators/`): each operator is one class, imported in [iron/operators/\_\_init\_\_.py](./iron/operators/__init__.py); its docstring says what it computes. Its parameters are declared with mlir-aie's `param()` (a tunable with `tunable()`, a per-call value with `per_call()`); its operands are aie.iron's `In`/`Out`/`InOut`, declared by shape. Its `build()` builds the array with ObjectFIFOs and Workers around a kernel; the library derives the runtime sequence unless the operator writes it. Its `reference()` and `test = Testing(...)` are what `iron/tests/operators/test_catalog.py` checks it by.
-2. **Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): C++ compute kernels, vectorized with the AIE API, reached through mlir-aie's kernel factories (`aie.iron.kernels`), which also carry each kernel's reference and tolerance. IRON hosts no kernels of its own, apart from the FastFlowLM Gemma 4 engine's overrides (`iron/operators/flm/gemma4_engine/`).
+2. **Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): C++ compute kernels, vectorized with the AIE API, reached through mlir-aie's kernel factories (`aie.iron.kernels`), which also carry each kernel's reference and tolerance. IRON hosts no kernels of its own. (The FastFlowLM Gemma 4 engine's `overrides.hpp` is C++ too, but it holds dispatch hooks, not kernels.)
 3. **Graphs and images** (`iron/common/`): a graph is recorded on handles and lowered onto an image: its buffers placed in one arena, and on NPU2 its operators' designs composed into one full ELF that runs them in turn (on NPU1, an xclbin per step), run through XRT.
 4. **Models** (`iron/lm/`, `iron/applications/`): see [Models](#models).
 

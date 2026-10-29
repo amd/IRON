@@ -29,7 +29,7 @@ from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
 from iron.lm import Checkpoint, Sampler
-from iron.lm.model import TokenizerJson, prompt_text
+from iron.lm.model import TokenizerJson, _cgroup_limit, prompt_text
 from iron.applications.llama.model import LlamaConfig
 from iron.lm import testing
 from iron.lm.checkpoint import renamed
@@ -790,11 +790,9 @@ def test_cgroup_limit_reads_the_lowest_ceiling(tmp_path, files, own, expect):
     """``host_budget``'s ceiling: the lowest cgroup v2 ``memory.max`` on the
     way to the root, v1's ``memory.limit_in_bytes``, or none.
     """
-    from iron.lm import model
-
     root = tmp_path / "cgroup"
     for name, text in files.items():
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(text)
     (tmp_path / "self").write_text(own + "\n")
-    assert model._cgroup_limit(root, tmp_path / "self") == expect
+    assert _cgroup_limit(root, tmp_path / "self") == expect

@@ -19,7 +19,8 @@ from iron.operators.gemm import GEMM
 from iron.operators.mha import MHA
 from iron.tests.support.llama_model import small
 from iron.tests.support.lowering import lower, lower_all
-from iron.tests.support.tools import requires, shipped, swiglu
+from iron.tests.support.shipped import Shipped
+from iron.tests.support.tools import requires, swiglu
 
 pytestmark = [requires("aiecc", "peano"), pytest.mark.usefixtures("npu2")]
 
@@ -74,7 +75,7 @@ def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path)
 
 
 def test_shipped_external_sequence_lowers(tmp_path):
-    op = shipped(M=256, K=1024, N=1152, epilogue="gelu")
+    op = Shipped(M=256, K=1024, N=1152, epilogue="gelu")
     lower(op, tmp_path)
 
 
@@ -83,7 +84,7 @@ def test_instructions_compile_alone_against_an_external_image():
     so its link step lowers only the sequence. No kernel, no Peano, and the
     second request is a cache hit.
     """
-    op = shipped(M=256, K=1024, N=1152)
+    op = Shipped(M=256, K=1024, N=1152)
     artifacts = op.compile()
     insts = artifacts.insts
     assert insts is not None and insts.stat().st_size > 0
@@ -91,7 +92,7 @@ def test_instructions_compile_alone_against_an_external_image():
     assert artifacts.entry.xclbin is None
     assert artifacts.image.suffix == ".xclbin"
     first = insts.stat().st_mtime_ns
-    again = shipped(M=256, K=1024, N=1152).compile()
+    again = Shipped(M=256, K=1024, N=1152).compile()
     assert again.insts == insts
     assert insts.stat().st_mtime_ns == first, "the same sequence recompiled"
 

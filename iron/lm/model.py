@@ -151,7 +151,7 @@ class Tokenizer:
         if self.chat_template is None:
             raise ValueError("the checkpoint has no chat template")
         _models_extra("jinja2")
-        from jinja2 import TemplateError
+        from jinja2 import TemplateError  # the models extra's: optional
 
         def raise_exception(message):
             raise TemplateError(message)
@@ -171,6 +171,7 @@ def _chat_template(source: str):
     """``source`` compiled once, in jinja2's sandbox, as transformers sets it
     up: a ``{% generation %}`` block (SmolLM3's) renders its body.
     """
+    # The models extra's: optional.
     from jinja2 import nodes
     from jinja2.ext import Extension
     from jinja2.sandbox import ImmutableSandboxedEnvironment
@@ -224,12 +225,14 @@ class TokenizerJson:
 
 @dataclasses.dataclass(frozen=True)
 class Stats:
-    """A generation's timings: the seconds to the first token, and the
-    tokens per second after it (NaN for one token).
+    """A generation's timings: the seconds to the first token, the tokens
+    per second drawn after it (NaN for one token), and ``tokens``, how many
+    were drawn: those past the first ``eos`` too where they were drawn anyway.
     """
 
     ttft: float
     tokens_per_s: float
+    tokens: int
 
 
 class Model(iron.Graph):
@@ -259,6 +262,13 @@ class Model(iron.Graph):
         def __init__(self, config: Any, weights: Any) -> None: ...
 
         def _draw(self, *args, **kwargs) -> Iterator[int]: ...
+
+    @property
+    def draws_at_once(self) -> bool:
+        """Whether, after a non-EOS first token, ``generate`` draws the rest
+        before the second arrives: even those past ``eos`` cost no more to read.
+        """
+        return False
 
     @classmethod
     def load(
@@ -500,12 +510,17 @@ class Model(iron.Graph):
         sampler = Sampler(temperature=0) if sampler is None else sampler
         # The text of drawn[held:] is yet to be shown; drawn[seen:held] is
         # decoded with it, since a token's text can depend on the one before.
-        drawn, seen, held = [], 0, 0
+        drawn, seen, held, count = [], 0, 0, 0
+        # Past eos, tokens drawn at once still count in the time they took.
+        at_once = not each and self.draws_at_once
         began = first = last = time.perf_counter()
         for token in self._draw(tokens, max_tokens, sampler, each, **inputs):
             last = time.perf_counter()
-            if not drawn:
+            count += 1
+            if count == 1:
                 first = last
+            if drawn and drawn[-1] in self.eos:
+                continue
             drawn.append(token)
             if not text:
                 yield token
@@ -517,15 +532,15 @@ class Model(iron.Graph):
                     if piece:
                         yield piece
                     seen, held = held, len(drawn)
-            if token in self.eos:
+            if token in self.eos and (count == 1 or not at_once):
                 break
         if text and held < len(drawn):
             shown = tokenizer.decode(drawn[seen:held])
             if piece := tokenizer.decode(drawn[seen:])[len(shown) :]:
                 yield piece
-        later = len(drawn) - 1
+        later = count - 1
         rate = later / (last - first) if later else math.nan
-        self.stats = Stats(first - began, rate)
+        self.stats = Stats(first - began, rate, count)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version, the decode step (no input)
@@ -576,10 +591,10 @@ class Model(iron.Graph):
         """
 
     def __repr__(self) -> str:
-        max_seq_len = getattr(getattr(self, "config", None), "max_seq_len", None)
+        config = vars(self).get("config")
         fields = []
-        if max_seq_len is not None:
-            fields.append(f"max_seq_len={max_seq_len}")
+        if isinstance(config, DecoderConfig):
+            fields.append(f"max_seq_len={config.max_seq_len}")
         loaded = self._versions and all(v.is_loaded for v in self._versions.values())
         fields.append("loaded" if loaded else "not loaded")
         return f"{self.name}({', '.join(fields)})"
@@ -604,6 +619,10 @@ class OnHost:
         def logits(self, tokens) -> np.ndarray: ...
 
         def reference(self, *tensors, dev=None, **values) -> Any: ...
+
+    @property
+    def draws_at_once(self) -> bool:
+        return False
 
     def _draw(self, tokens, max_tokens: int, sampler: Sampler, each=True):
         history = [int(t) for t in tokens]

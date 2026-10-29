@@ -151,15 +151,18 @@ class Config:
 
     def to_json(self) -> dict:
         """The fields as ``config.json`` names them, ``from_checkpoint``'s
-        inverse: a value its ``convert`` built gives its own ``to_json()``.
-        A ``not_json`` field, or one that is None or not JSON, is left out.
+        inverse: a nested ``Config`` gives its own ``to_json()``, another
+        dataclass its fields. A ``not_json`` field, or one that is None or
+        not JSON, is left out.
         """
         out = {}
         for f in dataclasses.fields(self):
             key = self.json_key(f)
             value = getattr(self, f.name)
-            if hasattr(value, "to_json"):
+            if isinstance(value, Config):
                 value = value.to_json()
+            elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+                value = dataclasses.asdict(value)
             if key is None or not isinstance(
                 value, (bool, int, float, str, tuple, dict)
             ):
