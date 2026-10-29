@@ -267,9 +267,11 @@ class Composition:
         starts = {fusion.steps[0]: fusion for fusion in seq.fusions}
         self.fusions: dict[str, tuple[tuple[OperatorDesign, ...], Fusion]] = {}
         steps = []
+        place: dict[int, int] = {}
         for i, s in enumerate(seq.steps):
             if i in consumed:
                 continue
+            place[i] = len(steps)
             fusion = starts.get(i)
             if fusion is None:
                 steps.append((own[design_of[id(s.op)]].name, s.buffers))
@@ -306,7 +308,15 @@ class Composition:
         )
         self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
-        self.commands = full_elf.commands
+        inside = {
+            i for f in seq.fusions for i in range(f.steps[0] + 1, f.steps[-1] + 1)
+        }
+        if inside & set(full_elf.commands):
+            raise ValueError(
+                f"a command starts at steps {sorted(inside & set(full_elf.commands))}, "
+                f"within a fusion's members, which are one call"
+            )
+        self.commands = tuple(place[i] for i in full_elf.commands)
         self.shared_words = full_elf.shared_words
         self.packing = Packing()
 

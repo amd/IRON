@@ -568,6 +568,7 @@ class Graph:
                 full_elf,
                 check,
                 step_words=_step_words(recording),
+                fusions=fused,
             )
             logger.info("%s", chosen.report(self.name))
             signature = self._signature(

@@ -13,8 +13,11 @@ from __future__ import annotations
 import dataclasses
 import enum
 import os
+from collections.abc import Sequence
 
 import aie.utils as aie_utils
+
+from .step import Fusion
 
 # The command processor's state table: each word a command reads takes an entry.
 SCRATCHPAD_WORDS = 32
@@ -85,10 +88,13 @@ def plan(
     full_elf: bool | None = None,
     check: bool = False,
     step_words: list[frozenset[str]] | None = None,
+    fusions: Sequence[Fusion] = (),
 ) -> Plan:
     """Derive the packaging for ``recording`` on ``dev``, refusing a shipped image,
     ``full_elf=True`` where the device or ``check`` forbids it, or a step reading
     over ``SCRATCHPAD_WORDS`` (``step_words``, each step's by its shared symbol).
+    A command never starts within the span of one of ``fusions``: its members
+    are one call.
     """
     shipped = [op for op in recording.operators if op.external is not None]
     if shipped:
@@ -131,15 +137,26 @@ def plan(
     # A version taking no tensor stays one command: a loop drains its values
     # into one. A host step ends one, and a version with one does not loop.
     commands: list[int] = []
-    hosted = {s.at for s in recording.host if 0 < s.at < len(recording.steps)}
+    n = len(recording.steps)
+    hosted = {s.at for s in recording.host if 0 < s.at < n}
+    inside = {i for f in fusions for i in range(f.steps[0] + 1, f.steps[-1] + 1)}
+    if hosted & inside:
+        raise ValueError(
+            f"{recording.name}: a host step runs within a fusion, before steps "
+            f"{sorted(hosted & inside)}"
+        )
     if full_elf and (recording.inputs or recording.host):
+        per_step = step_words or [frozenset()] * n
+        starts = [i for i in range(n) if i not in inside]
         held: frozenset[str] = frozenset()
         split = []
-        for i, words in enumerate(step_words or [frozenset()] * len(recording.steps)):
+        for i, end in zip(starts, [*starts[1:], n]):
+            words = frozenset().union(*per_step[i:end])
             if len(words) > SCRATCHPAD_WORDS:
+                names = ", ".join(s.op.name for s in recording.steps[i:end])
                 raise ValueError(
-                    f"{recording.name}: step {i} ({recording.steps[i].op.name}) "
-                    f"reads {len(words)} scratchpad words; a command's "
+                    f"{recording.name}: steps {i} to {end - 1} ({names}), one "
+                    f"call, read {len(words)} scratchpad words; a command's "
                     f"scratchpad holds {SCRATCHPAD_WORDS}"
                 )
             full = len(held | words) > SCRATCHPAD_WORDS
