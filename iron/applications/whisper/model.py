@@ -17,6 +17,7 @@ before them as its convolutions' padding.
 
 import dataclasses
 import functools
+import json
 from pathlib import Path
 
 import numpy as np
@@ -179,6 +180,42 @@ class WhisperConfig(DecoderConfig):
     max_source_positions: int = dataclasses.field(kw_only=True)
     # <|startoftranscript|>, every Whisper checkpoint's.
     decoder_start_token_id: int = dataclasses.field(default=50258, kw_only=True)
+    # Decoding-time token ids a real checkpoint's generation_config.json
+    # holds beside config.json (from_checkpoint merges the two); empty or
+    # past vocab_size with no checkpoint (a toy's), so Whisper's draw()
+    # suppresses nothing.
+    suppress_tokens: tuple[int, ...] = dataclasses.field(
+        default=(),
+        kw_only=True,
+        metadata={"json": "/suppress_tokens", "convert": tuple},
+    )
+    begin_suppress_tokens: tuple[int, ...] = dataclasses.field(
+        default=(),
+        kw_only=True,
+        metadata={"json": "/begin_suppress_tokens", "convert": tuple},
+    )
+    # The first token of the task/language/timestamp block, from
+    # task_to_id's smallest value: every text token and <|endoftext|> come
+    # before it.
+    first_special_token_id: int = dataclasses.field(
+        default=1 << 30,
+        kw_only=True,
+        metadata={"json": "/task_to_id", "convert": lambda d: min(d.values())},
+    )
+
+    @classmethod
+    def from_checkpoint(cls, path) -> "WhisperConfig":
+        """``Config.from_checkpoint``, its ``config.json`` over the same
+        directory's ``generation_config.json`` where one ships (every real
+        Whisper checkpoint's): ``suppress_tokens`` and the rest above.
+        """
+        path = Path(path)
+        if path.name != "config.json":
+            path = (path if path.is_dir() else path.parent) / "config.json"
+        generation = path.parent / "generation_config.json"
+        data = json.loads(generation.read_text()) if generation.exists() else {}
+        data |= json.loads(path.read_text())
+        return cls.from_json(data, path)
 
     def encoder(self) -> WhisperEncoderConfig:
         """The encoder's shape."""
@@ -388,6 +425,19 @@ class Whisper(EncoderDecoder):
         weights = bf16(weights)
         encoder = WhisperEncoder(config.encoder(), weights)
         super().__init__(config, decoder_weights(weights), encoder)
+        # Added to the head's logits before Sample draws: -inf at every
+        # token generation_config.json holds unspeakable (empty, and so a
+        # no-op, with no checkpoint: a toy's). begin_suppress_bias is the
+        # prompt chunk's own, which draws the first generated token;
+        # suppress_bias every call after.
+        v = config.vocab_size + config.vocab_size % 2
+        bias = np.zeros(v, bfloat16)
+        bias[list(config.suppress_tokens)] = -np.inf
+        bias[config.first_special_token_id :] = -np.inf
+        self.suppress_bias = iron.param(bias)
+        begin_bias = bias.copy()
+        begin_bias[list(config.begin_suppress_tokens)] = -np.inf
+        self.begin_suppress_bias = iron.param(begin_bias)
 
     @functools.cached_property
     def bos(self) -> int:
@@ -400,6 +450,44 @@ class Whisper(EncoderDecoder):
         from .hugging_face import HuggingFaceWhisper
 
         return HuggingFaceWhisper
+
+    def special(self, token: str) -> int:
+        """The id of ``token`` (``<|transcribe|>``, a language), by the
+        checkpoint's own tokenizer.
+
+        Raises:
+            RuntimeError: Drawn weights loaded no tokenizer.
+            KeyError: The checkpoint's tokenizer has no such token.
+        """
+        if self.tokenizer is None:
+            raise RuntimeError(f"{type(self).__name__}: no tokenizer; drawn weights")
+        id = self.tokenizer.token_to_id(token)
+        if id is None:
+            raise KeyError(f"{type(self).__name__}: no token {token!r}")
+        return id
+
+    def prompt_tokens(
+        self, language: str = "en", task: str = "transcribe"
+    ) -> list[int]:
+        """``<|startoftranscript|> <|language|> <|task|> <|notimestamps|>``:
+        one 30 s window decoded without timestamps. ``transcribe_long``'s
+        windows leave ``<|notimestamps|>`` off instead.
+        """
+        return [
+            self.bos,
+            self.special(f"<|{language}|>"),
+            self.special(f"<|{task}|>"),
+            self.special("<|notimestamps|>"),
+        ]
+
+    def sampled(self, logits, call):
+        """``logits`` plus this call's suppression bias: ``begin_suppress_bias``
+        for the prompt chunk, which draws the first generated token,
+        ``suppress_bias`` after. ``logits`` itself, the call's own return
+        value, is never suppressed.
+        """
+        bias = self.begin_suppress_bias if call.prompt else self.suppress_bias
+        return logits + iron.weight(bias)
 
     def positions(self, x, call):
         c = self.config

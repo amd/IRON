@@ -320,12 +320,13 @@ class CausalLM(Model):
         return self.draw(self.head(x), call)
 
     def draw(self, logits, call: Call):
-        """What a call returns: ``logits``, ``head``'s output, and the
-        token drawn from them on the device, carried with the next position.
+        """What a call returns: ``logits``, ``head``'s output unchanged, and
+        the token ``Sample`` draws from ``sampled(logits, call)``, carried
+        with the next position.
         """
         c = self.config
         _, drawn = Sample.step(
-            logits.reshape(c.vocab_size + c.vocab_size % 2),
+            self.sampled(logits, call).reshape(c.vocab_size + c.vocab_size % 2),
             self.draws,
             self.drawn,
             row=call.position * ROW_WORDS,
@@ -333,6 +334,13 @@ class CausalLM(Model):
             drawable=c.vocab_size,
         )
         return logits, iron.carry(token=drawn, position=call.position + 1)
+
+    def sampled(self, logits, call: Call):
+        """``logits``, as ``draw`` samples from: unchanged by default. A
+        subclass biases or masks them here (Whisper's suppressed tokens)
+        while ``logits`` itself, what a call returns, stays ``head``'s own.
+        """
+        return logits
 
     def rotary(self, config: DecoderConfig) -> Rope:
         """``rotary_emb``, the RoPE table every layer holds: ``Rope``'s."""
