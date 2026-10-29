@@ -795,7 +795,7 @@ extern "C" void resize_take(int32_t *chunk, int32_t k) {
     if (!ok || k % CORES != core)
         return;
     int i = k / CORES, p = chunk[0], win = chunk[1];
-    if (p < 1 || p > 22 || win < 1 || win > WIN || chunk[2] != k * SIDE ||
+    if (p < 1 || p > 22 || win < 1 || win > WIN || chunk[2] != (FIRST + k) * SIDE ||
         chunk[3] < 1 || chunk[3] > SIDE) {
         ok = false;
         return;
@@ -935,13 +935,14 @@ extern "C" void resize_finish(int32_t *counts) {
 """
 
 
-def _decode_taps(table: np.ndarray, out_size: int) -> Taps:
-    """The axis's `Taps` a ``ResampleTaps`` table encodes, its first
-    ``out_size`` real slots taken in the table's own row order: a pass
-    covering only part of a wider resize reads its own share of a table
-    computed at the resize's real width, so a chunk's ``first`` header
-    field (an offset into that wider resize) is not where this axis's
-    slots land; the table's row order is.
+def _decode_taps(table: np.ndarray, out_size: int, first_chunk: int) -> Taps:
+    """The axis's `Taps` for the first ``out_size`` outputs of a
+    ``ResampleTaps`` table whose row 0 is chunk ``first_chunk`` of the
+    resize it was computed for.
+
+    Raises:
+        ValueError: A row's header names other outputs than its chunk's,
+            which ``resize_take`` refuses.
     """
     precision, taps_window = int(table[0, 0]), int(table[0, 1])
     slot = 2 + (taps_window + 1) // 2
@@ -950,9 +951,14 @@ def _decode_taps(table: np.ndarray, out_size: int) -> Taps:
     count = np.zeros(out_size, np.int64)
     weights = np.zeros((out_size, taps_window), np.int16)
     pos = 0
-    for row in table:
+    for i, row in enumerate(table):
         if pos >= out_size:
             break
+        if int(row[2]) != (first_chunk + i) * SIDE:
+            raise ValueError(
+                f"Resample: taps chunk {i} covers outputs from {int(row[2])}, "
+                f"not {(first_chunk + i) * SIDE} (first_chunk={first_chunk})"
+            )
         n = min(int(row[3]), out_size - pos)
         slots = row[HEADER : HEADER + per * slot].reshape(per, slot)
         start[pos : pos + n] = slots[:n, 0]
@@ -1102,6 +1108,9 @@ class Resample(Operator):
     )
     # Multiples of 16, as ResampleTaps's are.
     width_chunks: int = param(default=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
+    # The taps_w chunk patch column 0 reads: a pass over part of a wider
+    # resize reads a slice of its table, whose headers name the wide columns.
+    first_chunk: int = param(default=0, array=True)
     height_chunks: int = param(default=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
     patch_rows: int = param(default=lambda op: op.padded_rows())
     interpolation: Interpolation = param(default=Interpolation.BICUBIC)
@@ -1328,8 +1337,9 @@ class Resample(Operator):
         # The given tables' own weights, not a resize recomputed from ho/wo
         # alone: a pass over part of a wider resize gives a table that
         # covers only its share, which a recomputed resize would not.
-        out = apply_taps(img, _decode_taps(np.asarray(taps_w), wo), axis=1)
-        out = apply_taps(out, _decode_taps(np.asarray(taps_h), ho), axis=0)
+        taps_w = _decode_taps(np.asarray(taps_w), wo, self.first_chunk)
+        out = apply_taps(img, taps_w, axis=1)
+        out = apply_taps(out, _decode_taps(np.asarray(taps_h), ho, 0), axis=0)
         bands, strips = -(-ho // SIDE), -(-wo // SIDE)
         edge = ((0, bands * SIDE - ho), (0, strips * SIDE - wo), (0, 0))
         out = np.pad(out, edge, mode="edge")
@@ -1442,9 +1452,11 @@ class Resample(Operator):
                 f"-DCORES={cores}",
                 f"-DCHANNELS={len(levels)}",
                 f"-DOUT8={int(self.writes_image)}",
+                f"-DFIRST={self.first_chunk}",
             ],
             symbol_prefix=(
                 f"resize_{self.words}_{self.chunk}_{self.patch_columns}_{cores}_"
+                f"{self.first_chunk}_"
                 f"{'u8' if self.writes_image else 'bf16'}_"
                 f"{hashlib.sha256(levels.tobytes()).hexdigest()[:8]}"
             ),
