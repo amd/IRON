@@ -8,8 +8,10 @@ image a call does not hold. Through iron.lm.ImageResize, its pixels are
 both resizes and the normalization computed on their own.
 """
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
@@ -129,3 +131,19 @@ def test_patches_through_a_resized_image_are_both_resizes(image, mid):
     want = ((out.astype(np.float32) - 127.5) / np.float32(127.5)).astype(bfloat16)
     want = want.reshape(16, 16, 16, 16, 3).transpose(0, 2, 1, 3, 4).reshape(256, -1)
     assert np.array_equal(np.asarray(got).view(np.uint16), want.view(np.uint16))
+
+
+def test_a_resize_past_a_core_s_memory_splits_into_passes_that_resize_alike():
+    """npu1's cores can't hold a 2048-wide resize's patch columns in one
+    pass; two passes over halves of one taps table give the same image.
+    """
+    lanczos = Interpolation.LANCZOS
+    pixels = np.random.default_rng(1).integers(0, 256, (900, 1000, 3), dtype=np.uint8)
+    with aie_utils.set_current_device(from_name("npu1", n_cols=4)):
+        split = ImageResize((1024, 1024), (2048, 2048), lanczos)
+        rgb, sizes = split.pack(pixels, 2048, 2048)
+        got = np.asarray(split.reference(rgb, **sizes))
+    assert split.passes == 2
+    assert ImageResize((1024, 1024), (2048, 2048), lanczos).passes == 1
+    image = got.reshape(-1, split.pitch // 3, 3)[:2048, :2048]
+    assert np.array_equal(image, resize(pixels, 2048, 2048, lanczos))
