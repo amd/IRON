@@ -118,6 +118,52 @@ class LogMel(iron.Graph):
         return Log.step(energy, features, offset=self.mel_floor)
 
 
+class Conv1d(iron.Graph):
+    """A 1-D convolution over rows (time) of ``(rows, channels)``, at
+    ``stride``, plus ``bias``: the ``kernel`` consecutive rows gathered whole
+    and projected in one GEMM, plus the bias on every row. A
+    call computes the per-call ``rows`` and writes ``(out_rows,
+    out_channels)`` where a caller gives it, else returns it; padding in
+    rows is rows the input holds.
+
+    Args:
+        weight: ``(out_channels, channels, kernel)``.
+        bias: ``(out_channels,)``.
+        channels: The input's channels a row.
+        stride: The step between output rows.
+    """
+
+    def __init__(
+        self,
+        weight: np.ndarray,
+        bias: np.ndarray,
+        channels: int,
+        stride: int = 1,
+    ):
+        w = np.asarray(weight, np.float32)
+        C_out, C, k = w.shape
+        if C != channels:
+            raise ValueError(f"Conv1d: weight holds {C} channels, not {channels}")
+        self.channels, self.out_channels, self.kernel, self.stride = C, C_out, k, stride
+        # Kernel tap as the slower axis, channel the faster: the same order
+        # a contiguous k * channels row gather reads them in.
+        self.matrix = iron.param(
+            w.transpose(2, 1, 0).reshape(k * C, C_out).astype(bfloat16)
+        )
+        self.bias = iron.weight(np.asarray(bias, np.float32).astype(bfloat16))
+
+    def body(
+        self, x: Handle, y: Handle | None = None, *, rows: Scratchpad[np.int32]
+    ) -> Handle:
+        k, s = self.kernel, self.stride
+        R, line = x.shape
+        out_rows = (R - k) // s + 1
+        pattern = TensorAccessPattern((R, line), 0, [out_rows, k * line], [s * line, 1])
+        a = Copy.step(x, src=pattern).reshape(out_rows, k * line)[:rows]
+        h = GEMM.step(a, self.matrix, precision=Precision.HIGHEST) + self.bias
+        return Copy.step(h, y) if y is not None else h
+
+
 class ImagePatches(iron.Graph):
     """A decoded image resized as torchvision's antialiased bicubic resize
     does it, rescaled to ``[0, 1]`` and cut row-major into a vision tower's
