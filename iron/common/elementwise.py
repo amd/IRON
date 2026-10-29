@@ -410,30 +410,26 @@ class Elementwise(Operator):
 
         segments = self.held_segments()
 
-        def fifos(stream, name):
-            # A held line, acquired once per call, is one fifo per lane that
-            # the cores of its lane share.
-            if stream.replicate:
-                return [
-                    ObjectFifo(stream.obj_type, depth=segments)
-                    for j in range(stream.lanes)
-                ]
-            depth = stream.l1_depth
-            return [ObjectFifo(stream.obj_type, depth=depth) for k in range(cores)]
-
         if any(s.fed_from is not None and s.replicate for s in ins):
             raise ValueError(
                 f"{type(self).__qualname__}: a held input reads one fifo per lane, "
                 f"so it cannot be fed one per core"
             )
-        # A fed input reads the fifos its source's cores write.
-        of_ins = [
-            None if s.fed_from is not None else fifos(s, f"in{i}")
-            for i, s in enumerate(ins)
-        ]
-        of_outs = [
-            fifos(s, f"out{i}" if len(outs) > 1 else "out") for i, s in enumerate(outs)
-        ]
+
+        def held_fifos(stream):
+            # A held line, acquired once per call, is one fifo per lane; its
+            # cores each take their own cons() of it, so the fifos themselves
+            # (not fifos()'s one handle per lane) are what build() keeps.
+            made = [
+                ObjectFifo(stream.obj_type, depth=segments) for _ in range(stream.lanes)
+            ]
+            stream.bind([f.prod() for f in made])
+            return made
+
+        # A fed input (never held, checked above) reads the fifos its source's
+        # cores write.
+        of_ins = [held_fifos(s) if s.replicate else s.fifos() for s in ins]
+        of_outs = [s.fifos() for s in outs]
         rtps = [Rtp([self.count]) for _ in range(cores)]
         n_fifos = n_in + len(outs)
         held = [s.replicate for s in ins] + [False] * len(outs)
@@ -469,19 +465,14 @@ class Elementwise(Operator):
             Worker(
                 core_fn,
                 [
-                    s.fed_from.handles[k] if of is None else of[k % len(of)].cons()
+                    of[k % len(of)].cons() if s.replicate else of[k % len(of)]
                     for s, of in zip(ins, of_ins)
                 ]
-                + [of[k].prod() for of in of_outs]
+                + [of[k] for of in of_outs]
                 + [kernel, rtps[k]],
             )
             for k in range(cores)
         ]
-        for stream, of in zip(ins, of_ins):
-            if of is not None:
-                stream.bind([f.prod() for f in of])
-        for stream, of in zip(outs, of_outs):
-            stream.bind([f.cons() for f in of])
         return Built(workers, rtps)
 
 
@@ -709,23 +700,21 @@ class WeightedRowwise(Rowwise):
         if not self.weighted:
             return super().build()
         tile_ty = self.x.obj_type
-        weights_ty = self.weight.obj_type
         cols, chans = self.num_aie_columns, self.num_channels
         depth = self.x.l1_depth
         kernel = self.kernel()
         positions, scalars = self.arguments(kernel, self.scalars(), 1, 1)
         n_args = len(positions) + len(scalars)
         eltwise_mul = eltwise.mul_sized(self.tile_size)
-        of_ins = [
-            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
-        ]
-        of_ws = [ObjectFifo(weights_ty, depth=depth) for j in range(chans)]
+        x_ends = self.x.fifos(depth)
+        # One fifo per channel, each column of it taking its own cons(): a
+        # weight row is shared by every column of its channel.
+        of_ws = [ObjectFifo(self.weight.obj_type, depth=depth) for j in range(chans)]
+        self.weight.bind([f.prod() for f in of_ws])
         of_mid = [
             ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
         ]
-        of_outs = [
-            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
-        ]
+        y_ends = self.y.fifos(depth)
         n_cores = cols * chans
         rtps = [Rtp([self.count]) for _ in range(2 * n_cores)]
 
@@ -760,7 +749,7 @@ class WeightedRowwise(Rowwise):
                     Worker(
                         core_kernel,
                         [
-                            of_ins[k].cons(),
+                            x_ends[k],
                             of_mid[k].prod(),
                             kernel,
                             rtps[k],
@@ -776,15 +765,12 @@ class WeightedRowwise(Rowwise):
                         [
                             of_mid[k].cons(),
                             of_ws[j].cons(),
-                            of_outs[k].prod(),
+                            y_ends[k],
                             eltwise_mul,
                             rtps[n_cores + k],
                         ],
                     )
                 )
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
-        self.weight.bind([f.prod() for f in of_ws])
         return Built(workers, rtps)
 
 

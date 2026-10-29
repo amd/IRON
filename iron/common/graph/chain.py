@@ -5,10 +5,38 @@
 
 from __future__ import annotations
 
+from ..declare import Operator
 from ..declare.profile import Profile
-from ..elementwise import Elementwise
+from ..design import BuiltArray, OperatorDesign
 from ..image.step import Chain
 from .record import Recording
+
+# Whether a producer's output can feed a consumer's input, by the pair's
+# OperatorDesign identities and buffer names: layers of one shape, repeated
+# down a model, build once.
+_built: dict[tuple[str, str, str, str], bool] = {}
+
+
+def _admits(producer: Operator, output: str, consumer: Operator, input_: str) -> bool:
+    """Whether ``producer``'s resolved ``output`` can feed ``consumer``'s resolved
+    ``input_`` on-chip: ``Operand.feed``'s checks pass and the pair's
+    ``BuiltArray``s actually build.
+    """
+    try:
+        producer_design = OperatorDesign(producer)
+        consumer_design = OperatorDesign(consumer)
+    except TypeError:  # reference-only: no kernel, so no array to feed
+        return False
+    key = (producer_design.identity, output, consumer_design.identity, input_)
+    if key not in _built:
+        try:
+            producer_array = BuiltArray(producer_design)
+            (source,) = (b for b in producer_array.op.buffers if b.name == output)
+            BuiltArray(consumer_design, fed={input_: source})
+            _built[key] = True
+        except ValueError:
+            _built[key] = False
+    return _built[key]
 
 
 def candidates(recording: Recording) -> tuple[Chain, ...]:
@@ -21,9 +49,9 @@ def candidates(recording: Recording) -> tuple[Chain, ...]:
     consumer alone, nowhere else and never again, and is not a graph output,
     feedback, pinned or resident buffer; both name the whole buffer; the
     producer's buffer is a streamed output and the consumer's a streamed,
-    non-``replicate`` input; both operators resolve to ``Elementwise``, with
-    no ``sequence()`` override; and their ``layout()`` buffers agree in lanes
-    and ``obj_type``, as ``Operand.feed`` requires.
+    non-``replicate`` input; and the pair's resolved designs actually build
+    fused (``_admits``), which is where ``Operand.feed``'s own checks (lane
+    counts, ``obj_type``, and a matching host access order per lane) are run.
     """
     excluded = (
         {h.name for h in recording.outputs}
@@ -49,12 +77,6 @@ def candidates(recording: Recording) -> tuple[Chain, ...]:
     for i in range(len(recording.steps) - 1):
         step, nxt = recording.steps[i], recording.steps[i + 1]
         producer, consumer = step.op.resolved(), nxt.op.resolved()
-        if not (
-            isinstance(producer, Elementwise) and isinstance(consumer, Elementwise)
-        ):
-            continue
-        if producer.has_sequence_override() or consumer.has_sequence_override():
-            continue
         for buf, ref in zip(step.op.buffers, step.refs()):
             if not buf.drains or ref.nbytes is not None or ref.root in excluded:
                 continue
@@ -73,9 +95,7 @@ def candidates(recording: Recording) -> tuple[Chain, ...]:
             cbuf, _ = match
             if not (buf.streamed and cbuf.streamed) or cbuf.replicate:
                 continue
-            src = next(b for b in producer.layout().buffers if b.name == buf.name)
-            dst = next(b for b in consumer.layout().buffers if b.name == cbuf.name)
-            if src.lanes != dst.lanes or src.obj_type != dst.obj_type:
+            if not _admits(producer, buf.name, consumer, cbuf.name):
                 continue
             found.append(Chain(i, buf.name, cbuf.name))
             break

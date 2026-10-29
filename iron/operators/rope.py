@@ -9,7 +9,7 @@ re-permuted for the halves (huggingface/transformers#25199).
 """
 
 import numpy as np
-from aie.iron import In, ObjectFifo, Out, Worker, ceildiv
+from aie.iron import In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
@@ -117,12 +117,11 @@ class RoPE(Operator):
 
     def build(self) -> Built:
 
-        tile = self.x.obj_type
         n = self.num_aie_columns
         kernel = self.kernel()
-        of_in = [ObjectFifo(tile) for i in range(n)]
-        of_lut = [ObjectFifo(self.angles.obj_type) for i in range(n)]
-        of_out = [ObjectFifo(tile) for i in range(n)]
+        x_ends = self.x.fifos(self.x.depth)
+        lut_ends = self.angles.fifos(self.angles.depth)
+        y_ends = self.y.fifos(self.y.depth)
         rtps = [Rtp([self.lut_rows, self.rows_per_lut]) for _ in range(n)]
 
         def core_body(of_in, of_lut, of_out, rope_kernel, rtp):
@@ -142,18 +141,15 @@ class RoPE(Operator):
             Worker(
                 core_body,
                 [
-                    of_in[i].cons(),
-                    of_lut[i].cons(),
-                    of_out[i].prod(),
+                    x_ends[i],
+                    lut_ends[i],
+                    y_ends[i],
                     kernel,
                     rtps[i],
                 ],
             )
             for i in range(n)
         ]
-        self.x.bind([f.prod() for f in of_in])
-        self.angles.bind([f.prod() for f in of_lut])
-        self.y.bind([f.cons() for f in of_out])
         return Built(workers, rtps)
 
     def kernel(self):

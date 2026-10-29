@@ -184,9 +184,12 @@ class BuiltArray:
             else:
                 value.param = dispatch[value.symbol]
         view = op.layout()
-        operands = {b.name: b for b in view.buffers}
+        # feed() reads host shapes, which the layout view does not carry.
+        operands = {b.name: b for b in op.buffers}
         for name, source in fed.items():
             operands[name].feed(source)
+        for mine, built in zip(op.buffers, view.buffers):
+            built.fed_from = mine.fed_from
         self.built = view.build()
         for mine, built in zip(op.buffers, view.buffers):
             mine.lane_handles = built.lane_handles

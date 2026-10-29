@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import DmaEndpoint
+from aie.iron import DmaEndpoint, ObjectFifo
 from aie.utils import bfp
 
 from aie.utils.compile.jit.params import OperatorParam, PerCallMember, Select, resolve
@@ -102,8 +102,14 @@ class Operand:
         it; a one-lane operand may take its handle bare.
 
         Raises:
-            ValueError: Not one handle per lane, or the operand is bound already.
+            ValueError: Not one handle per lane, the operand is bound already,
+                or it is fed: a fed input takes its lanes from ``fifos()``.
         """
+        if self.fed_from is not None:
+            raise ValueError(
+                f"{self.name} is fed from {self.fed_from.name}: its build must "
+                f"take its lanes from fifos(), not bind()"
+            )
         handles = list(handles) if isinstance(handles, (list, tuple)) else [handles]
         if len(handles) != self.lanes:
             raise ValueError(
@@ -113,6 +119,21 @@ class Operand:
         if self.lane_handles:
             raise ValueError(f"{self.name} is already bound")
         self.lane_handles = handles
+
+    def fifos(self, depth: int | None = None) -> list[Any]:
+        """A fifo per lane, ``depth`` deep (else ``l1_depth``), bound as this
+        operand's lanes; returns the build's end of each: an input's consumer
+        end, an output's producer end. A fed input gets its source's ends.
+        """
+        if self.fed_from is not None:
+            return list(self.fed_from.handles)
+        depth = self.l1_depth if depth is None else depth
+        made = [ObjectFifo(self.obj_type, depth=depth) for _ in range(self.lanes)]
+        if self.drains:
+            self.bind([f.cons() for f in made])
+            return [f.prod() for f in made]
+        self.bind([f.prod() for f in made])
+        return [f.cons() for f in made]
 
     def feed(self, source: Operand) -> None:
         """Take this input's stream on-chip from ``source``, another operator's
@@ -124,11 +145,18 @@ class Operand:
 
         Raises:
             ValueError: This is not a streamed input, ``source`` not a bound
-                output, or their lanes or objects differ.
+                output, ``source`` is pinned rather than streamed, their lanes
+                or objects differ, or a lane's host access pattern does not
+                visit the same elements in the same order on both sides.
         """
         if not (self.streamed and self.fills) or not source.drains:
             raise ValueError(
                 f"{self.name} can be fed only as a streamed input, from an output"
+            )
+        if any(isinstance(h, DmaEndpoint) for h in source.handles):
+            raise ValueError(
+                f"{source.name} is pinned to shim channels, not a fifo: it "
+                f"cannot feed {self.name} on-chip"
             )
         if len(source.handles) != self.lanes or source.obj_type != self.obj_type:
             raise ValueError(
@@ -136,6 +164,15 @@ class Operand:
                 f"{source.obj_type}, but {self.name} reads {self.lanes} lanes of "
                 f"{self.obj_type}"
             )
+        mine = {lane: tap for lane, tap, _, _ in self.transfers()}
+        theirs = {lane: tap for lane, tap, _, _ in source.transfers()}
+        for lane in sorted(mine):
+            if not theirs[lane].compare_access_orders(mine[lane]):
+                raise ValueError(
+                    f"{self.name} and {source.name} disagree on lane {lane}'s "
+                    f"host access order: {source.name} visits {theirs[lane]}, "
+                    f"{self.name} visits {mine[lane]}"
+                )
         self.fed_from = source
         source.feeds = self
 
@@ -186,9 +223,10 @@ class Operand:
         managed: bool = True,
     ):
         """Fill ``lane`` of this operand's stream from the host in
-        ``sequence(rt)``; returns the ``Task``. A per-call ``Value`` is patched
-        into the descriptor on a full ELF; on an xclbin it regenerates the
-        instruction stream every call.
+        ``sequence(rt)``; returns the ``Task``, or None and emits nothing for
+        an on-chip operand, fed on-chip from another operator's output. A
+        per-call ``Value`` is patched into the descriptor on a full ELF; on an
+        xclbin it regenerates the instruction stream every call.
 
         Args:
             tap: The walk over ``source``; all of it where None.
@@ -204,6 +242,8 @@ class Operand:
             managed: False hands the queue slot and descriptors to the
                 compiler, which frees them after a later wait; joins no group.
         """
+        if self.on_chip:
+            return None
         return self._runtime().transfer(
             "fill",
             self,
@@ -232,10 +272,13 @@ class Operand:
         repeat_parameter: Value | None = None,
         managed: bool = True,
     ):
-        """Drain lane ``lane`` of this operand's stream to the host; the
-        arguments are ``fill``'s, and a drain the sequence must see finish
-        before it ends passes ``wait=True``.
+        """Drain lane ``lane`` of this operand's stream to the host, or emit
+        nothing and return None for an on-chip operand, fed to another
+        operator's input; the arguments are ``fill``'s, and a drain the
+        sequence must see finish before it ends passes ``wait=True``.
         """
+        if self.on_chip:
+            return None
         return self._runtime().transfer(
             "drain",
             self,
@@ -369,6 +412,11 @@ class Operand:
         lanes = 1 if self.replicate else count
         inner = math.prod(shape[axis + 1 :])
         tile_rows = self.extent_unit(axis)
+        if tile_rows == 0:
+            raise ValueError(
+                f"{name}: {type(self.op).__name__}.extent_unit({axis!r}) is 0, so "
+                f"this operand's sequence is not derived; it must override sequence(rt)"
+            )
         if shape[axis] % (lanes * tile_rows):
             raise ValueError(
                 f"{self.name} {shape}: axis {axis} does not divide into "

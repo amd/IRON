@@ -133,20 +133,42 @@ def llama_recordings():
     return model.record(**decode_shapes), model.record(**prompt_shapes)
 
 
-def test_candidates_finds_one_silu_to_elementwisemul_chain_per_layer(
-    llama_recordings,
-):
-    for recording in llama_recordings:
+def test_candidates_finds_silu_mul_and_decodes_gemv_add_residuals(llama_recordings):
+    """Decode finds SiLU -> ElementwiseMul (one per layer) and GEMV.C ->
+    ElementwiseAdd.b (the attention and MLP residual adds, two per layer); the
+    prompt chunk, whose projections are GEMM, finds none of the latter (and,
+    not Elementwise-restricted any more, also its final Copy.y -> RMSNorm.x).
+    """
+    decode, prompt = llama_recordings
+    for recording, gemv_add_edges in ((decode, 4), (prompt, 0)):
         edges = candidates(recording)
-        assert len(edges) == 2  # SMALL's num_hidden_layers
-        for edge in edges:
-            producer = recording.steps[edge.producer].op.resolved()
-            consumer = recording.steps[edge.producer + 1].op.resolved()
-            assert (type(producer).__name__, type(consumer).__name__) == (
-                "SiLU",
-                "ElementwiseMul",
+        kinds = [
+            (
+                type(recording.steps[e.producer].op.resolved()).__name__,
+                e.output,
+                type(recording.steps[e.producer + 1].op.resolved()).__name__,
+                e.input,
             )
-            assert (edge.output, edge.input) == ("y", "a")
+            for e in edges
+        ]
+        silu_mul = [k for k in kinds if k[0] == "SiLU"]
+        gemv_add = [k for k in kinds if k[0] == "GEMV"]
+        assert all(k == ("SiLU", "y", "ElementwiseMul", "a") for k in silu_mul)
+        assert all(k == ("GEMV", "C", "ElementwiseAdd", "b") for k in gemv_add)
+        assert len(silu_mul) == 2  # SMALL's num_hidden_layers
+        assert len(gemv_add) == gemv_add_edges
+
+    # The prompt chunk's last step is a plain, non-Elementwise Copy feeding
+    # the final RMSNorm: admissible now that candidates() tries a real build
+    # rather than requiring both ends to be Elementwise.
+    kinds = {
+        (
+            type(prompt.steps[e.producer].op.resolved()).__name__,
+            type(prompt.steps[e.producer + 1].op.resolved()).__name__,
+        )
+        for e in candidates(prompt)
+    }
+    assert ("Copy", "RMSNorm") in kinds
 
 
 def test_mismatched_tile_sizes_refuse_the_edge():
@@ -238,10 +260,22 @@ def test_chains_falls_back_to_the_second_edge_when_only_it_is_named():
     assert chains(recording, second_only) == (second,)
 
 
+def _silu_edges(recording):
+    """``recording``'s SiLU -> ElementwiseMul candidates: decode's also has
+    GEMV -> ElementwiseAdd ones, which ``size`` means nothing to.
+    """
+    return tuple(
+        e
+        for e in candidates(recording)
+        if type(recording.steps[e.producer].op.resolved()).__name__ == "SiLU"
+    )
+
+
 def test_chains_returns_candidates_a_matching_profile_names(llama_recordings):
     decode, prompt = llama_recordings
-    decode_size = decode.steps[candidates(decode)[0].producer].op.resolved().size
-    prompt_size = prompt.steps[candidates(prompt)[0].producer].op.resolved().size
+    decode_edges, prompt_edges = _silu_edges(decode), _silu_edges(prompt)
+    decode_size = decode.steps[decode_edges[0].producer].op.resolved().size
+    prompt_size = prompt.steps[prompt_edges[0].producer].op.resolved().size
     assert decode_size != prompt_size
 
     matching = Profile()
@@ -252,7 +286,9 @@ def test_chains_returns_candidates_a_matching_profile_names(llama_recordings):
         producer_dims=dict(size=decode_size),
         consumer_dims=dict(size=decode_size),
     )
-    assert chains(decode, matching) == candidates(decode)
+    # The profile names only SiLU -> ElementwiseMul: decode's GEMV -> Add
+    # candidates are left out, unnamed.
+    assert chains(decode, matching) == decode_edges
     assert chains(prompt, matching) == ()  # the prompt's size does not match
 
     empty = Profile()

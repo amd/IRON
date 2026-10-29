@@ -57,6 +57,7 @@ class OperatorRuntime(Runtime):
         self.buffers = [b for b in built.objects if isinstance(b, Buffer)]
         self._tensors: dict[str, Any] = {}
         self._queues: dict[str, list[Task]] = {}
+        self.group: TaskGroup | None = None
         # Raises if any stream of a built array is unbound. A stream kept
         # on-chip has no host end.
         lanes = [
@@ -147,27 +148,37 @@ class OperatorRuntime(Runtime):
             device.resolve_tile(buffer.tile)
             buffer.resolve()
 
+    def task_group(self) -> TaskGroup:
+        """The group a sequence issues transfers in: a fused sequence's own
+        while it runs, else a new one.
+        """
+        return TaskGroup() if self.group is None else self.group
+
+    def finish(self, tg: TaskGroup) -> None:
+        """Finish ``tg``, unless it is a fused sequence's, finished once every
+        operator in it has issued.
+        """
+        if tg is not self.group:
+            tg.finish()
+
     def run(self) -> None:
         if self.op.has_sequence_override():
             self.op.sequence(self)
             return
-        tg = TaskGroup()
+        tg = self.task_group()
         self.issue(tg)
-        tg.finish()
+        self.finish(tg)
 
     def issue(self, tg: TaskGroup) -> None:
         """Fill every host input and drain every host output in ``tg``, the
-        drains awaited when ``tg`` finishes."""
+        drains awaited when ``tg`` finishes; an on-chip operand's fill/drain
+        emit nothing."""
         for buf in self.op.inputs:
-            if buf.on_chip:
-                continue
             for lane, tap, word, unit in buf.transfers():
                 buf.fill(
                     tap, lane=lane, group=tg, length_parameter=word, length_unit=unit
                 )
         for buf in self.op.outputs:
-            if buf.on_chip:
-                continue
             for lane, tap, word, unit in buf.transfers():
                 buf.drain(
                     tap,
@@ -391,18 +402,9 @@ class MergedRuntime(Runtime):
     def fuse(cls, runtimes, name=None) -> MergedRuntime:
         """Operator runtimes whose streams meet on-chip, as one sequence: each
         runs its preamble, then all their transfers go in one task group that
-        finishes once, since an operator's input completes only once a later
-        operator drains.
-
-        Raises:
-            ValueError: One of ``runtimes`` overrides its sequence.
+        finishes once (``task_group``), since an operator's input completes only
+        once a later operator drains.
         """
-        for runtime in runtimes:
-            if runtime.op.has_sequence_override():
-                raise ValueError(
-                    f"{type(runtime.op).__name__} writes its own sequence, which "
-                    f"a fused sequence cannot interleave"
-                )
 
         def run(calls) -> None:
             for runtime, args in calls:
@@ -416,9 +418,11 @@ class MergedRuntime(Runtime):
             tg = TaskGroup()
             for runtime, _ in calls:
                 token = active_runtime.set(runtime)
+                runtime.group = tg
                 try:
-                    runtime.issue(tg)
+                    runtime.run()
                 finally:
+                    runtime.group = None
                     active_runtime.reset(token)
             tg.finish()
             for runtime, _ in calls:

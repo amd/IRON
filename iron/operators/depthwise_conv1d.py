@@ -4,7 +4,7 @@
 
 import numpy as np
 from aie.extras.dialects import arith
-from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import Buffer, In, ObjectFifo, Out, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import conv
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
@@ -76,9 +76,12 @@ class DepthwiseConv1d(Operator):
         cols, C = self.num_aie_columns, self.channels
         plane = self.x.obj_type
         kernel = self.kernel()
-        of_ins = [ObjectFifo(plane, depth=self.x.depth) for k in range(cols)]
-        of_outs = [ObjectFifo(plane) for k in range(cols)]
-        of_w = ObjectFifo(plane, depth=self.weight.depth)
+        x_ends = self.x.fifos(self.x.depth)
+        y_ends = self.y.fifos(self.y.depth)
+        # One fifo, each column taking its own cons(): every core reads the
+        # same weights.
+        of_w = ObjectFifo(self.weight.obj_type, depth=self.weight.depth)
+        self.weight.bind(of_w.prod())
         zero = Buffer(plane, initial_value=np.zeros(C, bfloat16))
         limit = np.ndarray[(1,), np.dtype[np.float32]]
         rtps = [Rtp([self.steps]) for _ in range(cols)]
@@ -109,9 +112,9 @@ class DepthwiseConv1d(Operator):
             Worker(
                 core_fn,
                 [
-                    of_ins[k].cons(),
+                    x_ends[k],
                     of_w.cons(),
-                    of_outs[k].prod(),
+                    y_ends[k],
                     kernel,
                     zero if k == 0 else None,
                     Buffer(limit, initial_value=np.zeros(1, np.float32)),
@@ -121,9 +124,6 @@ class DepthwiseConv1d(Operator):
             )
             for k in range(cols)
         ]
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
-        self.weight.bind(of_w.prod())
         return Built(workers, rtps)
 
     def tolerance(self):
@@ -143,13 +143,13 @@ class DepthwiseConv1d(Operator):
     def sequence(self, rt):
         """The weights to every core, then each run with the four rows before it."""
         run = self.rows // self.num_aie_columns
-        weights = TaskGroup()
+        weights = rt.task_group()
         self.weight.fill(group=weights)
-        tg = TaskGroup()
+        tg = rt.task_group()
         for k in range(self.num_aie_columns):
             start = max(0, k * run - (TAPS - 1))
             self.x.fill(self.x[start : (k + 1) * run], lane=k, group=tg)
         for k in range(self.num_aie_columns):
             self.y.drain(self.y[k * run : (k + 1) * run], lane=k, group=tg, wait=True)
-        tg.finish()
-        weights.finish()
+        rt.finish(tg)
+        rt.finish(weights)

@@ -8,7 +8,7 @@ import aie.dialects.index as index
 import numpy as np
 from aie.dialects.aie import T
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv
+from aie.iron import Buffer, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import eltwise, linalg
@@ -274,12 +274,8 @@ class GEMV(Operator):
             "passThroughLine", [self.A.obj_type, vector, np.int32]
         )
 
-        A_fifos = [
-            ObjectFifo(self.A.obj_type, depth=self.a_depth) for i in range(lanes)
-        ]
-        C_fifos = [
-            ObjectFifo(self.C.obj_type, depth=self.C.depth) for i in range(lanes)
-        ]
+        A_ends = self.A.fifos(self.a_depth)
+        C_ends = self.C.fifos(self.C.depth)
         vectors = [Buffer(vector) for _ in range(lanes)]
         rtps = [Rtp([self.tiles, self.batches]) for _ in range(lanes)]
 
@@ -306,8 +302,8 @@ class GEMV(Operator):
             Worker(
                 core_body,
                 [
-                    A_fifos[i].cons(),
-                    C_fifos[i].prod(),
+                    A_ends[i],
+                    C_ends[i],
                     vectors[i],
                     matvec,
                     copy,
@@ -316,8 +312,6 @@ class GEMV(Operator):
             )
             for i in range(lanes)
         ]
-        self.A.bind([f.prod() for f in A_fifos])
-        self.C.bind([f.cons() for f in C_fifos])
         return Built(workers, rtps)
 
     def sequence(self, rt):
@@ -393,7 +387,8 @@ class GEMV(Operator):
                     managed=False,
                 )
         for task in drains:
-            task.await_()
+            if task is not None:
+                task.await_()
 
     def ops(self) -> int:
         return 2 * self.M * self.K * (self.num_batches or 1)

@@ -9,7 +9,7 @@ import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv, kernels
+from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv, kernels
 from aie.iron.controlflow import if_, range_
 from aie.iron.device import (
     NPU1,
@@ -607,7 +607,7 @@ class GEMM(Operator):
                 return C_grid[col::n_aie_cols, pieces]
             return C_grid[c_row_base : c_row_base + c_n_rows, col::n_aie_cols]
 
-        tg = TaskGroup()
+        tg = rt.task_group()
         for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
             for pingpong in [0, 1]:
                 row_base = tb * tb_max_n_rows + pingpong * tb_max_n_rows // 2
@@ -635,9 +635,9 @@ class GEMM(Operator):
                         for col in range(n_aie_cols):
                             fill(col, row_base + tile_row, tg)
                 if b_unrolled or tb > 0 or (tb == 0 and pingpong > 0):
-                    tg.finish()
-                    tg = TaskGroup()
-        tg.finish()
+                    rt.finish(tg)
+                    tg = rt.task_group()
+        rt.finish(tg)
 
     def ops(self) -> int:
         return 2 * self.M * self.K * self.N
