@@ -11,8 +11,11 @@ import statistics
 
 import numpy as np
 import pytest
-from aie.utils.verify import Tolerance, compare
+from aie.utils.verify import compare
+from ml_dtypes import bfloat16
 
+import iron
+from iron import Scratchpad
 from iron.common.declare.profile import Profile
 from iron.common.design import OperatorDesign, BuiltArray
 from iron.common.graph.fold import apply_folds, chosen_folds, fold_candidates
@@ -23,6 +26,7 @@ from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
 from iron.common.testing import vectors
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gelu import GELU
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 from iron.tests.support import sequences
@@ -95,6 +99,54 @@ def test_gemv_folds_elementwise_add_candidate():
     assert [h.name for h in step.inputs] == ["A", "B", "r"]
     (link,) = step.op.finish
     assert (link.consumer, link.at, link.binary) == (ElementwiseAdd, 1, True)
+
+
+def test_a_chain_of_three_steps_admits_overlapping_candidates():
+    """SiLU -> ElementwiseMul -> GELU: each pair, and the whole chain, is a
+    separate candidate (overlapping ones included, as a stream run's are);
+    applying the deepest collapses all three into one step, its finish the
+    two consumers in order, only the first (binary) riding finish0.
+    """
+    silu = SiLU(size=2048, tile_size=256)
+    mul = ElementwiseMul(size=2048, tile_size=256)
+    gelu = GELU(size=2048, tile_size=256)
+    steps = sequences.steps(
+        (silu, "x", "mid1"), (mul, "mid1", "up", "mid2"), (gelu, "mid2", "out")
+    )
+    rec = Recording.of_steps("chain3", steps, ["x", "up"], ["out"])
+    candidates = fold_candidates(rec)
+    assert sorted(f.steps for f in candidates) == [(0, 1), (0, 1, 2), (1, 2)]
+    (deepest,) = (f for f in candidates if len(f.steps) == 3)
+    folded = apply_folds(rec, (deepest,))
+    (step,) = folded.steps
+    assert type(step.op).__name__ == "SiLU"
+    assert [h.name for h in step.inputs] == ["x", "up"]
+    assert [h.name for h in step.outputs] == ["out"]
+    links = step.op.finish
+    assert [(link.consumer, link.binary) for link in links] == [
+        (ElementwiseMul, True),
+        (GELU, False),
+    ]
+    op = step.op.resolved(step.op.dev)
+    BuiltArray(OperatorDesign(op))
+
+
+def test_a_second_binary_link_is_refused():
+    """Only one step of a chain may take another input: its one free
+    channel is the first's. SiLU folding Mul takes it; chaining Add in too
+    would need a second (refused, chained or not: ``ElementwiseAdd`` into
+    bare ``ElementwiseMul`` has no free channel of its own either, both of
+    its own already a core's two).
+    """
+    silu = SiLU(size=2048, tile_size=256)
+    mul = ElementwiseMul(size=2048, tile_size=256)
+    add = ElementwiseAdd(size=2048, tile_size=256)
+    steps = sequences.steps(
+        (silu, "x", "mid1"), (mul, "mid1", "up", "mid2"), (add, "mid2", "r", "out")
+    )
+    rec = Recording.of_steps("two_binary", steps, ["x", "up", "r"], ["out"])
+    candidates = fold_candidates(rec)
+    assert sorted(f.steps for f in candidates) == [(0, 1)]
 
 
 def test_a_graph_output_is_not_folded_away():
@@ -182,9 +234,10 @@ def _kinds(recording, fusion) -> tuple[str, ...]:
 
 def test_fold_candidates_on_small_llama():
     """Decode's residual adds after o_proj and down_proj, and SwiGLU's
-    gate activation, fold; the prompt chunk's own projections are
-    ``ProjectionGEMM``, which declares no ``fold()``, and its residual adds
-    are bounded per call (the prompt's row count), which a fold refuses.
+    gate activation, fold. The prompt chunk's own projections are
+    ``ProjectionGEMM``, which declares no ``fold()``, so its residual adds
+    stay; its SwiGLU gate, ``Elementwise`` like decode's, folds too, bound
+    to the prompt chunk's own row count on both sides alike.
     """
     model = small()
     decode_shapes, prompt_shapes = model.shapes()
@@ -194,7 +247,11 @@ def test_fold_candidates_on_small_llama():
     assert kinds == sorted(
         [("GEMV", "ElementwiseAdd")] * 4 + [("SiLU", "ElementwiseMul")] * 2
     )
-    assert fold_candidates(prompt) == ()
+    prompt_folds = fold_candidates(prompt)
+    assert (
+        sorted(_kinds(prompt, f) for f in prompt_folds)
+        == [("SiLU", "ElementwiseMul")] * 2
+    )
 
 
 def test_fold_candidates_on_llama_1b_header():
@@ -206,7 +263,10 @@ def test_fold_candidates_on_llama_1b_header():
     assert kinds == sorted(
         [("GEMV", "ElementwiseAdd")] * 2 + [("SiLU", "ElementwiseMul")]
     )
-    assert fold_candidates(prompt) == ()
+    prompt_folds = fold_candidates(prompt)
+    assert sorted(_kinds(prompt, f) for f in prompt_folds) == [
+        ("SiLU", "ElementwiseMul")
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -359,3 +419,103 @@ def test_gemv_folds_elementwise_add_on_device(M, K, record_property):
     for name, (lo, med) in times.items():
         record_property(f"{name} min us", lo)
         record_property(f"{name} median us", med)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_three_step_chain_matches_reference_and_unfused_on_device():
+    """GEMV -> ElementwiseAdd -> SiLU, all three folded into GEMV's own
+    cores (a residual add then an activation), holds to the three
+    operators' references composed and is bit-equal to the same three
+    steps run unfused.
+    """
+    M, K = 2048, 2048
+    gemv, add = _gemv_add(M, K, 4, 256)
+    silu = SiLU(size=M, tile_size=256)
+    chain_op = gemv.fold(add, 1).fold(silu, 0)
+    assert chain_op is not None
+
+    chain_rec = Recording.of_step(chain_op)
+    plain_steps = sequences.steps(
+        (gemv, "A", "B", "mid1"), (add, "r", "mid1", "mid2"), (silu, "mid2", "out")
+    )
+    unfused_rec = Recording.of_steps(
+        "chain3_unfused", plain_steps, ["A", "B", "r"], ["out"]
+    )
+
+    chain_img = Image(chain_rec, FullELF())
+    chain_img.compile()
+    chain_run = chain_img.get_callable()
+
+    unfused_img = Image(unfused_rec, FullELF())
+    unfused_img.compile()
+    unfused_run = unfused_img.get_callable()
+
+    A = vectors(gemv).inputs["A"]
+    B = vectors(gemv).inputs["B"]
+    r = vectors(add, seed=7).inputs["a"]
+    y_ref = np.asarray(chain_op.reference(A, B, r))
+
+    def dispatch(run, names):
+        run.get_buffer(BufferRef(names[0])).numpy_view()[:] = A.reshape(-1)
+        run.get_buffer(BufferRef(names[1])).numpy_view()[:] = B.reshape(-1)
+        run.get_buffer(BufferRef(names[2])).numpy_view()[:] = r.reshape(-1)
+        run()
+        return run.get_buffer(BufferRef(names[3])).numpy()[:M].copy()
+
+    out = dispatch(chain_run, ("A", "B", "finish0", "C"))
+    baseline = dispatch(unfused_run, ("A", "B", "r", "out"))
+
+    tol = chain_op.tolerance()
+    verdict = compare(
+        out, y_ref, tol, bound=tol.bound(A, B, r) if tol.kind == "bound" else None
+    )
+    assert verdict, verdict.detail
+    assert np.array_equal(
+        out.view(np.uint16), baseline.view(np.uint16)
+    ), "the chained and unfused devices differ"
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_bounded_fold_matches_across_different_per_call_counts():
+    """SiLU -> ElementwiseMul, folded, bound to a graph's own per-call row
+    count (as the prompt chunk's SwiGLU gate is): compiled once, called
+    with several row counts, each bit-equal to the same call unfused and
+    matching the graph's own reference over just the valid rows -- the
+    prompt chunk's own regime, without needing the real model.
+    """
+    size, tile = 2048, 256
+
+    class Gated(iron.Graph):
+        def body(self, x, up, *, n: Scratchpad[np.int32]):
+            y = SiLU.step(x[:n], tile_size=tile)
+            return ElementwiseMul.step(y, up, tile_size=tile)
+
+    profile = Profile()
+    profile.add_fusion(
+        FusionKind.FOLD, [(SiLU, {}), (ElementwiseMul, {})], [(0, "y", 1, "a")]
+    )
+    folded_graph = Gated()
+    folded_graph.profile = profile
+    folded = folded_graph.compile(x=(size,), up=(size,))
+    assert len(folded.recording.steps) == 1
+    folded.load()
+
+    plain_graph = Gated()
+    plain = plain_graph.compile(x=(size,), up=(size,))
+    assert len(plain.recording.steps) == 2
+    plain.load()
+
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal(size).astype(np.float32).astype(bfloat16)
+    up = rng.standard_normal(size).astype(np.float32).astype(bfloat16)
+
+    for valid in (1024, 2048, 512):
+        out = np.asarray(folded(x, up, n=valid))
+        baseline = np.asarray(plain(x, up, n=valid))
+        want = np.asarray(folded_graph.reference(x, up, n=valid))
+        assert np.array_equal(
+            out[:valid].view(np.uint16), baseline[:valid].view(np.uint16)
+        ), f"n={valid}: the folded and unfused devices differ"
+        assert np.array_equal(
+            out[:valid].view(np.uint16), want[:valid].view(np.uint16)
+        ), f"n={valid}: the folded device differs from the graph's own reference"

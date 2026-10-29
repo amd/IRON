@@ -47,16 +47,27 @@ def _admits(producer: Operator, consumer: Operator, at: int) -> Operator | None:
     return fused
 
 
-def _adjacent(recording: Recording) -> dict[int, tuple[Operator, int]]:
-    """Index ``i`` admissible to fold step ``i + 1`` into step ``i``: the
-    fused operator and the input of step ``i + 1`` the tile enters at, where
-    step ``i`` has one output, read only by step ``i + 1``, never again, is
-    not a graph output, feedback, pinned or resident buffer, and names its
-    whole buffer, unbounded; step ``i + 1``'s other inputs do too, of the
-    tile's element count and dtype; step ``i``'s operator runs one step; and
-    ``producer.fold(consumer, at)`` (``_admits``) admits it, which is where
-    the channel budget, the shapes and dtypes, and a tile a later call reads
-    are refused.
+def _bounds_match(a: Operator, b: Operator) -> bool:
+    """Whether ``a`` and ``b`` are bound to the same per-call extent, or
+    neither is bound at all: a fold then walks the same tiles this call,
+    a prompt chunk's row count included (``bound_extents``, each operator's
+    own per-call ``Binding`` already carries).
+    """
+    return set(a.bound_extents.values()) == set(b.bound_extents.values())
+
+
+def _buffer_adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
+    """Index ``i``'s (producer's output operand name, consumer's input
+    operand name) where step ``i``'s one output is read only by step
+    ``i + 1``, never again, is not a graph output, feedback, pinned or
+    resident buffer, and names its whole buffer; step ``i + 1`` has one
+    output, and its matching input, and every other input it fills, do too,
+    of the tile's element count and dtype; and the two operators are bound
+    to the same per-call extent, or neither is (``_bounds_match``) -- a
+    prompt chunk's own row count folds, its buffers walking it alike.
+    Independent of any fold already taken: the buffer graph these read is
+    the recording's own, unaffected by ``Operator.fold`` replacing an
+    operator.
     """
     excluded = _excluded(recording)
     readers: dict[str, list[int]] = {}
@@ -72,16 +83,15 @@ def _adjacent(recording: Recording) -> dict[int, tuple[Operator, int]]:
             readers.setdefault(h.ref().root, []).append(-1)
         for h in host_step.writes:
             writers.setdefault(h.ref().root, []).append(-1)
-    calls = Counter(id(s.op) for s in recording.steps)
 
-    found: dict[int, tuple[Operator, int]] = {}
+    found: dict[int, tuple[str, str]] = {}
     for i in range(len(recording.steps) - 1):
         step, nxt = recording.steps[i], recording.steps[i + 1]
-        if calls[id(step.op)] != 1:
+        if not _bounds_match(step.op, nxt.op):
             continue
-        # Handle-level shapes and bounds, not the (possibly unresolved)
-        # Operand's: a Select()-shaped operand (GEMM's bfp16_b) needs its
-        # tunable resolved before its own elements/dtype read.
+        # Handle-level shapes, not the (possibly unresolved) Operand's: a
+        # Select()-shaped operand (GEMM's bfp16_b) needs its tunable
+        # resolved before its own elements/dtype read.
         outs = [
             (buf, ref, h)
             for buf, ref, h in zip(step.op.buffers, step.refs(), step.slots)
@@ -92,7 +102,6 @@ def _adjacent(recording: Recording) -> dict[int, tuple[Operator, int]]:
         buf, ref, tile = outs[0]
         if (
             ref.nbytes is not None
-            or tile.valid
             or ref.root in excluded
             or readers.get(ref.root) != [i + 1]
             or writers.get(ref.root) != [i]
@@ -103,10 +112,9 @@ def _adjacent(recording: Recording) -> dict[int, tuple[Operator, int]]:
             for cbuf, cref, ch in zip(nxt.op.buffers, nxt.refs(), nxt.slots)
             if cbuf.fills and cref.root == ref.root
         ]
-        if len(matches) != 1 or matches[0][1].nbytes is not None or matches[0][2].valid:
+        if len(matches) != 1 or matches[0][1].nbytes is not None:
             continue
         cbuf, _, _ = matches[0]
-        at = next(k for k, b in enumerate(nxt.op.inputs) if b.name == cbuf.name)
         if len([b for b in nxt.op.buffers if b.drains]) != 1:
             continue
         others = [
@@ -115,33 +123,66 @@ def _adjacent(recording: Recording) -> dict[int, tuple[Operator, int]]:
             if b.fills and b.name != cbuf.name
         ]
         if any(
-            r.nbytes is not None
-            or h.valid
-            or h.elements != tile.elements
-            or h.dtype != tile.dtype
+            r.nbytes is not None or h.elements != tile.elements or h.dtype != tile.dtype
             for _, r, h in others
         ):
             continue
-        fused = _admits(step.op, nxt.op, at)
-        if fused is None:
-            continue
-        found[i] = (fused, at)
+        found[i] = (buf.name, cbuf.name)
     return found
 
 
-def fold_candidates(recording: Recording) -> tuple[Fusion, ...]:
-    """Every admissible fold of two consecutive steps of ``recording``
-    (``_adjacent``), overlapping ones included: a step that admits folding
-    both its predecessor's output and feeding its successor's appears in two
-    candidates, at most one of which a caller may take.
+def _chain_from(
+    recording: Recording, lo: int, buffer_adjacent: dict[int, tuple[str, str]]
+) -> list[tuple[int, Operator, int]]:
+    """The admissible chain folding into step ``lo``: each entry (the index
+    folded in, the fused operator after it, the input its tile entered at),
+    in order, stopping at the first hop the buffers (``buffer_adjacent``) or
+    ``producer.fold(consumer, at)`` (``_admits``, where the channel budget,
+    the shapes and dtypes, and a tile a later call reads are refused) does
+    not admit.
     """
-    adjacent = _adjacent(recording)
+    chain: list[tuple[int, Operator, int]] = []
+    current = recording.steps[lo].op
+    k = lo
+    while True:
+        names = buffer_adjacent.get(k)
+        if names is None:
+            break
+        _, in_name = names
+        nxt = recording.steps[k + 1].op
+        at = next((i for i, b in enumerate(nxt.inputs) if b.name == in_name), None)
+        if at is None:
+            break
+        fused = _admits(current, nxt, at)
+        if fused is None:
+            break
+        current = fused
+        k += 1
+        chain.append((k, current, at))
+    return chain
+
+
+def fold_candidates(recording: Recording) -> tuple[Fusion, ...]:
+    """Every admissible fold of a run of two or more consecutive steps
+    (``_chain_from``), overlapping ones included: a maximal chain from
+    ``lo`` of length ``n`` admits every depth from 1 to ``n``, and a step
+    that admits folding both its predecessor's output and feeding its
+    successor's starts a chain of its own, found separately.
+    """
+    buffer_adjacent = _buffer_adjacent(recording)
+    calls = Counter(id(s.op) for s in recording.steps)
     found = []
-    for i, (_, at) in adjacent.items():
-        step, nxt = recording.steps[i], recording.steps[i + 1]
-        (buf,) = (b for b in step.op.buffers if b.drains)
-        edge = Edge(i, buf.name, i + 1, nxt.op.inputs[at].name)
-        found.append(Fusion(FusionKind.FOLD, (i, i + 1), (edge,)))
+    for lo in range(len(recording.steps) - 1):
+        if calls[id(recording.steps[lo].op)] != 1:
+            continue
+        chain = _chain_from(recording, lo, buffer_adjacent)
+        for depth in range(1, len(chain) + 1):
+            hi = chain[depth - 1][0]
+            edges = tuple(
+                Edge(i, buffer_adjacent[i][0], i + 1, buffer_adjacent[i][1])
+                for i in range(lo, hi)
+            )
+            found.append(Fusion(FusionKind.FOLD, tuple(range(lo, hi + 1)), edges))
     return tuple(found)
 
 
@@ -190,49 +231,57 @@ def _handle_at(step: Step, name: str) -> tuple[int, object]:
 
 def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
     """``recording`` with each of ``folds`` (``fold_candidates``'s, not
-    overlapping) applied: the pair's steps collapsed into one at the
-    producer's position, its operator ``Operator.fold``-ed, its slots the
-    producer's with the consumer's other input appended, its output the
-    consumer's.
+    overlapping) applied: a run's steps collapsed into one at its first's
+    position, its operator ``Operator.fold``-ed in at each edge in turn,
+    its slots the running operator's with each hop's other input appended,
+    its output the run's last step's.
 
     Raises:
-        ValueError: Two of ``folds`` share a step, or a fold no longer
+        ValueError: Two of ``folds`` share a step, or a hop no longer
             admits (its operator changed since ``fold_candidates`` ran).
     """
     taken: dict[int, Fusion] = {}
     for fusion in folds:
         if fusion.kind is not FusionKind.FOLD:
             raise ValueError(f"apply_folds: {fusion.kind.value} is not a fold")
-        i, j = fusion.steps
-        if j != i + 1:
+        if list(fusion.steps) != list(range(fusion.steps[0], fusion.steps[-1] + 1)):
             raise ValueError(f"a fold's steps must be consecutive, not {fusion.steps}")
-        if i in taken or j in taken:
-            raise ValueError(f"step {i if i in taken else j} is folded twice")
-        taken[i] = taken[j] = fusion
+        for s in fusion.steps:
+            if s in taken:
+                raise ValueError(f"step {s} is folded twice")
+            taken[s] = fusion
     steps: list[Step | None] = list(recording.steps)
     bindings = list(recording.bindings)
     for fusion in dict.fromkeys(taken.values()):
-        i, j = fusion.steps
-        (edge,) = fusion.edges
-        step, nxt = recording.steps[i], recording.steps[j]
-        at = next(k for k, b in enumerate(nxt.op.inputs) if b.name == edge.input)
-        fused = step.op.fold(nxt.op, at)
-        if fused is None:
-            raise ValueError(f"{fusion} no longer admits: {step.op!r} refuses it")
-        _, tile = _handle_at(step, edge.output)
-        (result_name,) = (b.name for b in nxt.op.buffers if b.drains)
-        _, result = _handle_at(nxt, result_name)
-        extra = [
-            h
-            for b, h in zip(nxt.op.buffers, nxt.slots)
-            if b.fills and b.name != edge.input
-        ]
-        slots = [result if h is tile else h for h in step.slots] + extra
-        steps[i] = Step(
-            fused, slots, [*step.inputs, *extra], [result], gather=step.gather
-        )
-        steps[j] = None
-        bindings = _rebind(step.op, fused, bindings)
-        bindings = _rebind(nxt.op, fused, bindings)
+        lo = fusion.steps[0]
+        start = recording.steps[lo]
+        current = start.op
+        (out_name,) = (b.name for b in current.buffers if b.drains)
+        out_idx = next(k for k, b in enumerate(current.buffers) if b.name == out_name)
+        slots = list(start.slots)
+        inputs = list(start.inputs)
+        result = None
+        for edge in fusion.edges:
+            nxt = recording.steps[edge.consumer]
+            at = next(k for k, b in enumerate(nxt.op.inputs) if b.name == edge.input)
+            fused = current.fold(nxt.op, at)
+            if fused is None:
+                raise ValueError(f"{fusion} no longer admits: {current!r} refuses it")
+            current = fused
+            (result_name,) = (b.name for b in nxt.op.buffers if b.drains)
+            _, result = _handle_at(nxt, result_name)
+            extra = [
+                h
+                for b, h in zip(nxt.op.buffers, nxt.slots)
+                if b.fills and b.name != edge.input
+            ]
+            slots[out_idx] = result
+            slots += extra
+            inputs += extra
+        steps[lo] = Step(current, slots, inputs, [result], gather=start.gather)
+        for s in fusion.steps[1:]:
+            steps[s] = None
+        for s in fusion.steps:
+            bindings = _rebind(recording.steps[s].op, current, bindings)
     kept = [s for s in steps if s is not None]
     return dataclasses.replace(recording, steps=kept, bindings=bindings)

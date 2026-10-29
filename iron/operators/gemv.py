@@ -203,9 +203,14 @@ class GEMV(Operator):
                 f"{self._COPY_ELEMENTS}-element vectors"
             )
         if self.finish:
-            if len(self.finish) > 1:
-                raise ValueError("GEMV: at most one step folds into its cores")
+            if sum(f.binary for f in self.finish) > 1:
+                raise ValueError(
+                    "GEMV: only one of its finish steps takes another input; "
+                    "its one free input channel is already another's"
+                )
             if self.feed_b:
+                # A's own tile could carry it instead (as it does B's row),
+                # but A's tile and a finish's are not the same size; not built.
                 raise ValueError(
                     "GEMV: feed_b already holds both of a core's input "
                     "channels, leaving none for a finish step's other input"
@@ -301,15 +306,14 @@ class GEMV(Operator):
                 raise ValueError(f"GEMV: {name} ({tile}) must divide M/lanes ({rows})")
 
     def fold(self, consumer, at: int):
-        if (
-            not isinstance(consumer, Elementwise)
-            or self.finish
-            or self.feed_b
-            or self.repeat > 1
-        ):
+        if not isinstance(consumer, Elementwise) or self.feed_b or self.repeat > 1:
             return None
         others = [i for i in range(len(consumer.inputs)) if i != at]
         if len(others) > 1:
+            return None
+        binary = bool(others)
+        used = sum(b.streamed for b in self.inputs)
+        if binary and used + 1 > self.dev.core_dma_channels_in:
             return None
         dims = tuple(
             sorted(
@@ -328,9 +332,10 @@ class GEMV(Operator):
                 and vars(consumer)[n] is not None
             )
         )
-        binary = bool(others)
         step = FinishStep(type(consumer), dims, at, binary)
-        return self.replace(finish=(step,), uses_extra=binary)
+        return self.replace(
+            finish=self.finish + (step,), uses_extra=self.uses_extra or binary
+        )
 
     def build(self) -> Built:
         K, lanes = self.K, self.num_aie_columns * self.num_channels
@@ -397,26 +402,50 @@ class GEMV(Operator):
                 ]
                 return Built(workers, rtps)
 
-            # The one step folded into these cores: its kernel runs after the
-            # matvec's, over the tile it just wrote in a scratch buffer,
-            # writing C; its other input, if any, rides finish0 instead of
-            # the channel feed_b would otherwise take.
-            (step,) = self.finish
-            of_finish = self.finish0.fifos() if step.binary else None
-            consumer = step.consumer_at(tile_size_output, self.dev)
-            c_kernel = consumer.layout().kernel()
-            c_positions, c_scalars = consumer.arguments(
-                c_kernel, consumer.scalars(), len(consumer.inputs), 1
+            # The chain of steps folded into these cores: each kernel runs
+            # after the one before it, over the tile the previous call
+            # wrote in a scratch buffer, ping-ponging between two until the
+            # last writes C; at most one step's other input rides finish0
+            # instead of the channel feed_b would otherwise take.
+            of_finish = (
+                self.finish0.fifos() if any(f.binary for f in self.finish) else None
             )
-            c_order = {i: j for j, i in enumerate(c_positions)}
-            n_c_args = len(c_positions) + len(c_scalars)
-            at = step.at
+            chain_meta = []
+            chain_kernels = []
+            for step in self.finish:
+                consumer = step.consumer_at(tile_size_output, self.dev)
+                c_kernel = consumer.layout().kernel()
+                c_positions, c_scalars = consumer.arguments(
+                    c_kernel, consumer.scalars(), len(consumer.inputs), 1
+                )
+                c_order = {i: j for j, i in enumerate(c_positions)}
+                n_c_args = len(c_positions) + len(c_scalars)
+                chain_kernels.append(c_kernel)
+                chain_meta.append(
+                    (c_positions, c_scalars, c_order, n_c_args, step.at, step.binary)
+                )
             scratch_ty = np.ndarray[(tile_size_output,), np.dtype[bfloat16]]
-            scratches = [Buffer(scratch_ty) for _ in range(lanes)]
+            # A second scratch buffer, to ping-pong, only past one finish
+            # step: an L1 line this core otherwise never holds at once.
+            scratch_as = [Buffer(scratch_ty) for _ in range(lanes)]
+            scratch_bs = (
+                [Buffer(scratch_ty) for _ in range(lanes)]
+                if len(chain_meta) > 1
+                else None
+            )
 
-            def core_body_chain(
-                A_fifo, C_fifo, b, matvec, copy, finish_fifo, chain_fn, scratch, rtp
-            ):
+            def core_body_chain(*args):
+                A_fifo, C_fifo, b, matvec, copy = args[:5]
+                tail = args[5:]
+                finish_fifo = tail[0] if of_finish is not None else None
+                tail = tail[1:] if of_finish is not None else tail
+                chain_fns = tail[: len(chain_meta)]
+                tail = tail[len(chain_meta) :]
+                if scratch_bs is not None:
+                    scratch_a, scratch_b, rtp = tail
+                else:
+                    scratch_a, rtp = tail
+                    scratch_b = None
                 words = rtp.read()
                 n = words[self.tiles]
                 batches = words[self.batches]
@@ -430,24 +459,36 @@ class GEMV(Operator):
                             j_i32: Any = index.casts(T.i32(), j_idx)
                             output_row_offset = j_i32 * tile_size_input
                             a = A_fifo.acquire(1)
-                            matvec(tile_size_input, output_row_offset, a, b, scratch)
+                            matvec(tile_size_input, output_row_offset, a, b, scratch_a)
                             A_fifo.release(1)
-                        extra = (
-                            finish_fifo.acquire(1) if finish_fifo is not None else None
-                        )
-                        c_inputs = [
-                            scratch if i == at else extra
-                            for i in range(len(c_positions) - 1)
-                        ]
-                        c_elements = c_inputs + [c]
-                        chain_fn(
-                            *(
-                                c_elements[c_order[i]] if i in c_order else c_scalars[i]
-                                for i in range(n_c_args)
+                        tile = scratch_a
+                        for idx, (c_fn, meta) in enumerate(zip(chain_fns, chain_meta)):
+                            c_positions, c_scalars, c_order, n_c_args, at, binary = meta
+                            last = idx == len(chain_meta) - 1
+                            dst = (
+                                c
+                                if last
+                                else (scratch_b if tile is scratch_a else scratch_a)
                             )
-                        )
-                        if extra is not None:
-                            finish_fifo.release(1)
+                            extra = finish_fifo.acquire(1) if binary else None
+                            c_inputs = [
+                                tile if i == at else extra
+                                for i in range(len(c_positions) - 1)
+                            ]
+                            c_elements = c_inputs + [dst]
+                            c_fn(
+                                *(
+                                    (
+                                        c_elements[c_order[i]]
+                                        if i in c_order
+                                        else c_scalars[i]
+                                    )
+                                    for i in range(n_c_args)
+                                )
+                            )
+                            if binary:
+                                finish_fifo.release(1)
+                            tile = dst
                         C_fifo.release(1)
 
             workers = [
@@ -455,7 +496,10 @@ class GEMV(Operator):
                     core_body_chain,
                     [A_ends[i], C_ends[i], vectors[i], matvec, copy]
                     + ([of_finish[i]] if of_finish is not None else [])
-                    + [c_kernel, scratches[i], rtps[i]],
+                    + chain_kernels
+                    + [scratch_as[i]]
+                    + ([scratch_bs[i]] if scratch_bs is not None else [])
+                    + [rtps[i]],
                 )
                 for i in range(lanes)
             ]
@@ -514,7 +558,7 @@ class GEMV(Operator):
             )
             for k, tap, word, unit in self.C.transfers()
         ]
-        if self.finish and self.finish[0].binary:
+        if any(f.binary for f in self.finish):
             # finish0's shape matches C's, so the same per-lane walk fills it.
             for k, tap, word, unit in self.finish0.transfers():
                 self.finish0.fill(
