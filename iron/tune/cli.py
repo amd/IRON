@@ -68,6 +68,15 @@ def parser(description: str) -> argparse.ArgumentParser:
         help="price only the fusions a graph admits against the profile as "
         "it stands, skipping the (hours-long) tunable search",
     )
+    p.add_argument(
+        "--max-price",
+        type=int,
+        default=None,
+        help="price at most this many fusion groups this call, then stop "
+        "without selecting, confirming or saving (a caller holding the "
+        "device lock for one call, not a whole multi-hour sweep, calls "
+        "again for the rest)",
+    )
     return p
 
 
@@ -116,15 +125,20 @@ def tune(
         path.parent.mkdir(parents=True, exist_ok=True)
         profile.save(path)
         print(f"wrote {path}")
-    profile = price_fusions(
+    priced = price_fusions(
         calls() if callable(calls) else calls,
         dev,
         profile,
         full_elf=full_elf,
+        checkpoint=path.with_suffix(".progress.json"),
+        max_price=args.max_price,
         **_timing(args),
     )
+    if priced is None:
+        print(f"{path}: priced a batch; some groups still unpriced, call again")
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    profile.save(path)
+    priced.save(path)
     print(f"wrote {path}")
     return path
 

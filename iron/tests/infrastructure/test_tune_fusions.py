@@ -34,6 +34,8 @@ from iron.tune.autotune import Point, Timed, Trial
 from iron.tune.fusions import (
     FusionGroup,
     NARROWING_EXHAUSTIVE,
+    _checkpoint,
+    _device_timeout,
     _dominates,
     _fed_widths,
     _widths,
@@ -303,15 +305,17 @@ def test_widths_orders_widest_first_and_keeps_its_own_setting():
     assert any(w["num_aie_columns"] == own for w in found)
 
 
-def test_fed_widths_also_tries_feed_b_true():
+def test_fed_widths_only_tries_feed_b_true():
     """A member fed into its ``B`` may only admit the edge at ``feed_b``
-    true, a setting its own (unfused, ``feed_b=False``) width never takes.
+    true, a setting its own (unfused, ``feed_b=False``) width never takes;
+    ``feed_b=False`` never builds for it, so it is never even tried (a
+    large group's exhaustive cap would otherwise crowd the only
+    combinations that can work out with ones that never can).
     """
     dev = aie_utils.ensure_current_device()
     gemv = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048)
     found = _fed_widths(gemv, dev)
-    assert any(w["feed_b"] for w in found)
-    assert any(not w["feed_b"] for w in found)
+    assert found and all(w["feed_b"] for w in found)
 
 
 def test_fed_widths_is_plain_widths_without_feed_b():
@@ -424,6 +428,53 @@ def test_price_fusions_with_no_candidates_keeps_tunables_and_fusion_entries():
 
 
 # ---------------------------------------------------------------------------
+# A device command timeout refuses a group outright, never retried; and
+# price_fusions checkpoints its decisions so far as it goes
+# ---------------------------------------------------------------------------
+
+
+def test_device_timeout_recognizes_the_drivers_own_error():
+    hung = RuntimeError(
+        "fuse_rewritten1: the run ended in ert_cmd_state.ERT_CMD_STATE_TIMEOUT"
+    )
+    assert _device_timeout(hung)
+
+
+def test_device_timeout_is_false_for_an_ordinary_build_failure():
+    assert not _device_timeout(ValueError("GEMV: B is fed 1 lane(s), but ..."))
+    assert not _device_timeout(
+        RuntimeError("[aiecc] Compilation failed with exit code 1")
+    )
+
+
+def test_checkpoint_writes_the_fusions_taken_so_far(tmp_path):
+    dev = aie_utils.ensure_current_device()
+    gaining, flat = _group(dev, 0), _group(dev, 4)
+    priced = [(gaining, Trial({}, -10.0, 1.0)), (flat, Trial({}, 2.0, 1.0))]
+    checkpoint = tmp_path / "profile.progress.json"
+    _checkpoint(None, priced, {gaining: None, flat: None}, checkpoint)
+
+    loaded = Profile.load(checkpoint)
+    silu = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
+    mul = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
+    assert loaded.fused(FusionKind.STREAM, [silu, mul], [(0, "y", 1, "a")])
+
+
+def test_checkpoint_overwrites_the_previous_one_atomically(tmp_path):
+    dev = aie_utils.ensure_current_device()
+    gaining = _group(dev, 0)
+    checkpoint = tmp_path / "profile.progress.json"
+    _checkpoint(None, [], {}, checkpoint)
+    assert Profile.load(checkpoint).fusions() == []
+
+    _checkpoint(None, [(gaining, Trial({}, -10.0, 1.0))], {gaining: None}, checkpoint)
+    assert len(Profile.load(checkpoint).fusions()) == 1
+    # Only the final, whole file is ever on disk at that name: no partial
+    # left behind beside it.
+    assert list(tmp_path.iterdir()) == [checkpoint]
+
+
+# ---------------------------------------------------------------------------
 # On the device: a gaining fusion is written and runs bit-identically.
 # ---------------------------------------------------------------------------
 
@@ -440,6 +491,28 @@ def _big_fused_graph():
             )
 
     return Fused()
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.extensive
+def test_max_price_prices_a_batch_then_stops_until_every_group_is_priced(tmp_path):
+    """A caller holding the device lock for one call, not a whole sweep,
+    calls again for the rest: ``max_price`` below the groups found returns
+    None without selecting, confirming or saving; at or above it, the
+    profile.
+    """
+    dev = aie_utils.ensure_current_device()
+    recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
+    calls = [Timed(recording)]
+    n = len(fusion_groups(calls, dev))
+    assert n > 1
+    report = platform()
+    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    kwargs = dict(
+        full_elf=True, timing=Timing(rounds=2, calls=5), cache=cache, log=lambda _: None
+    )
+    assert price_fusions(calls, dev, max_price=1, **kwargs) is None
+    assert price_fusions(calls, dev, max_price=n, **kwargs) is not None
 
 
 @pytest.mark.supported_devices("npu2")

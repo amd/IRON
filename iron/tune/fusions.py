@@ -29,6 +29,7 @@ import itertools
 import json
 import logging
 import math
+import os
 import statistics
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
@@ -259,11 +260,12 @@ def _widths(op: Operator, dev) -> list[dict[str, Any]]:
 
 
 def _fed_widths(op: Operator, dev) -> list[dict[str, Any]]:
-    """``op``'s settings (``_widths``), plus its settings with ``feed_b``
-    held true: a member an edge feeds into its ``B`` may need it to admit
-    the feed at all, a setting its own (unfused) width never tries since
-    ``_widths`` holds every tunable but the column count closest to the
-    member's own (``feed_b=False``, unfused).
+    """``op``'s settings with ``feed_b`` held true, only: an edge into its
+    ``B`` can only be fed there (an unfed ``B`` is not a streamed input at
+    all, so ``feed_b=False`` never builds for this member), and a large
+    group's exhaustive cap sorts combinations by column count alone, so
+    keeping the never-buildable ``feed_b=False`` ones here would crowd the
+    only combinations that can actually work out of it.
     """
     if "feed_b" not in op.declaration.tunables:
         return _widths(op, dev)
@@ -271,7 +273,7 @@ def _fed_widths(op: Operator, dev) -> list[dict[str, Any]]:
     # feed_b is pinned on fed, so _widths leaves it out of what it found;
     # put it back so _with_tunables(**s) overrides it rather than keeping
     # op's own.
-    return _widths(op, dev) + [{**s, "feed_b": True} for s in _widths(fed, dev)]
+    return [{**s, "feed_b": True} for s in _widths(fed, dev)]
 
 
 def _composed_module(
@@ -337,6 +339,16 @@ def group_fit_verdict(
         verdict = "fits" if diagnostic is None else f"refused: {diagnostic}"
         write(record, verdict)
     return None if verdict == "fits" else verdict.removeprefix("refused: ")
+
+
+def _device_timeout(e: Exception) -> bool:
+    """Whether ``e`` is the driver's own command timeout
+    (``ert_cmd_state.ERT_CMD_STATE_TIMEOUT``, ``iron.common.image.callable``
+    ``.wait``'s), not a build or placement failure: a hang, which another
+    setting of the same group may share, so a caller refuses the group
+    outright rather than trying one.
+    """
+    return "ERT_CMD_STATE_TIMEOUT" in str(e)
 
 
 def _dominates(a: Sequence[Mapping[str, Any]], b: Sequence[Mapping[str, Any]]) -> bool:
@@ -446,6 +458,13 @@ def narrow_group(
         order, or None where its own setting already co-resides or builds,
         or none of its members' widths co-reside (or build fused) at all
         (refused).
+
+    A device command timeout (the driver's own, not a build or placement
+    failure) refuses the group outright, without trying another setting:
+    a hang is a property of actually running it, which another setting may
+    share, so retrying risks hanging the NPU again rather than finding one
+    that works. It is never caught past here, so one run never retries a
+    group it has already hung on.
     """
     if group.edges:
         try:
@@ -459,6 +478,8 @@ def narrow_group(
                 log=log,
             )
         except (ValueError, RuntimeError, ir.MLIRError) as e:
+            if _device_timeout(e):
+                return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
             log(f"  {group}: does not build at its own width: {e}")
         else:
             if own.refused is None:
@@ -467,18 +488,23 @@ def narrow_group(
         group_fit_verdict(group.steps, fit_cache, kind=group.kind, edges=group.edges)
         is None
     ):
-        return (
-            time_fusion_group(
-                group,
-                full_elf=full_elf,
-                timing=timing,
-                repeats=repeats,
-                cache=cache,
-                remeasure=remeasure,
-                log=log,
-            ),
-            None,
-        )
+        try:
+            return (
+                time_fusion_group(
+                    group,
+                    full_elf=full_elf,
+                    timing=timing,
+                    repeats=repeats,
+                    cache=cache,
+                    remeasure=remeasure,
+                    log=log,
+                ),
+                None,
+            )
+        except (ValueError, RuntimeError, ir.MLIRError) as e:
+            if _device_timeout(e):
+                return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
+            log(f"  {group}: does not build at its own (fitting) width: {e}")
     combos = narrowings(group, dev, fit_cache, exhaustive)
     if not combos:
         return (
@@ -504,6 +530,8 @@ def narrow_group(
                 log=log,
             )
         except (ValueError, RuntimeError, ir.MLIRError) as e:
+            if _device_timeout(e):
+                return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
             # fits() places each design alone; narrowed together they may
             # still not build (a feed's lanes, say).
             log(f"  {group} narrowed to {cols}: does not build: {e}")
@@ -632,8 +660,20 @@ def confirm_fusions(
             for state, _, content in states:
                 plain_cg.write(state, content)
                 fused_cg.write(state, content)
-            plain_cg(*inputs, **call.values)
-            fused_cg(*inputs, **call.values)
+            try:
+                plain_cg(*inputs, **call.values)
+                fused_cg(*inputs, **call.values)
+            except (RuntimeError, ir.MLIRError) as e:
+                if not _device_timeout(e):
+                    raise
+                # A hang is a property of this version running at all, which
+                # dropping only one of several active groups may not fix;
+                # none of them is retried in this run.
+                names = ", ".join(str(g) for g in active)
+                log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
+                for g in active:
+                    remaining.remove(g)
+                break
             plain_out = [plain_cg.read(h) for h in recording.returned]
             fused_out = [fused_cg.read(h) for h in recording.returned]
             if not all(np.array_equal(p, f) for p, f in zip(plain_out, fused_out)):
@@ -642,9 +682,18 @@ def confirm_fusions(
                     f"{recording.name}: fused ({names}) is not bit-identical to "
                     f"it unfused"
                 )
-            times = time_interleaved(
-                [plain_cg.callable, fused_cg.callable], timing, log=log
-            )
+            try:
+                times = time_interleaved(
+                    [plain_cg.callable, fused_cg.callable], timing, log=log
+                )
+            except (RuntimeError, ir.MLIRError) as e:
+                if not _device_timeout(e):
+                    raise
+                names = ", ".join(str(g) for g in active)
+                log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
+                for g in active:
+                    remaining.remove(g)
+                break
             paired = list(zip(times[0].samples_us, times[1].samples_us))
             delta = statistics.median(f - p for p, f in paired)
             noise = standard_error([f - p for p, f in paired])
@@ -662,6 +711,31 @@ def confirm_fusions(
     return remaining
 
 
+def _checkpoint(
+    profile: Profile | None,
+    priced: Sequence[tuple[FusionGroup, Trial]],
+    combos: Mapping[FusionGroup, tuple[dict[str, Any], ...] | None],
+    checkpoint: Path,
+) -> None:
+    """``profile`` with a fusion entry for each group ``priced`` so far
+    gains beyond the noise (``select_rewrites``, not yet confirmed end to
+    end, which needs its own device time this does not spend), written
+    atomically: a restart after a run dies partway at least starts from
+    every group already priced (``price_fusions``'s own cache does that
+    regardless), and whoever is waiting on it can see the decisions so far.
+    """
+    out = Profile()
+    for cls, dims, tunables in profile or ():
+        out.add(cls, **dims, **tunables)
+    for group in select_rewrites(priced, log=lambda _: None):
+        out.add_fusion(group.kind, group.dims(combos.get(group)), group.edges)
+    # Profile.save() writes in place; another process reading checkpoint
+    # must never see a half-written file, so write beside it and rename.
+    partial = checkpoint.with_suffix(f".{os.getpid()}")
+    out.save(partial)
+    partial.replace(checkpoint)
+
+
 def price_fusions(
     calls: Sequence[Timed],
     dev,
@@ -676,8 +750,10 @@ def price_fusions(
     confirm_timing: Timing = Timing(rounds=3, calls=10),
     fit_cache: Path = FIT_CACHE,
     exhaustive: int = NARROWING_EXHAUSTIVE,
+    checkpoint: Path | None = None,
+    max_price: int | None = None,
     log: Callable[[str], None] = print,
-) -> Profile:
+) -> Profile | None:
     """``profile`` with a fusion entry for each fusion ``calls``' graphs
     admit that gains beyond the noise, each priced at the fastest setting of
     its members that co-resides (``narrow_group``) and, unless ``confirm``
@@ -693,12 +769,32 @@ def price_fusions(
     Fusion entries covering the shapes found are replaced; every tunable
     entry, and a fusion entry covering none of them, is kept as ``profile``
     has it.
+
+    Args:
+        checkpoint: Where to write the decisions so far (``_checkpoint``)
+            after every group is priced, so a run that dies partway still
+            leaves something behind beyond the cache alone.
+        max_price: Price at most this many of the found groups in this
+            call (already-cached ones cost little to recheck); where that
+            leaves any unpriced, return None without selecting, confirming
+            or saving. A caller holding the device lock for this call
+            alone, and calling again (fresh lock, so another agent's own
+            short run is never kept waiting behind a whole multi-hour
+            sweep) until it gets a profile back, never holds the lock past
+            one batch.
+
+    Returns:
+        The profile, or None where ``max_price`` left groups unpriced.
     """
     found = fusion_groups(calls, dev)
+    if max_price is not None and max_price < len(found):
+        found_now, rest = found[:max_price], found[max_price:]
+    else:
+        found_now, rest = found, []
 
     priced: list[tuple[FusionGroup, Trial]] = []
     combos: dict[FusionGroup, tuple[dict[str, Any], ...] | None] = {}
-    for group in found:
+    for group in found_now:
         trial, combo = narrow_group(
             group,
             dev,
@@ -716,6 +812,12 @@ def price_fusions(
         log(f"{group}: {trial.delta_us:+.1f} ± {noise} us{why}")
         priced.append((group, trial))
         combos[group] = combo
+        if checkpoint is not None:
+            _checkpoint(profile, priced, combos, checkpoint)
+
+    if rest:
+        log(f"{len(rest)} group(s) left unpriced this batch; call again for them")
+        return None
 
     taken = select_rewrites(priced, log)
     priced_dict = dict(priced)
