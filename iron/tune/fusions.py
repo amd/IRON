@@ -644,6 +644,20 @@ def _random_tensor(handle, rng: np.random.Generator) -> np.ndarray:
     return sampled.view(handle.dtype).reshape(handle.shape)
 
 
+def _gather_table_rows(recording) -> dict[str, int]:
+    """An input ids handle's buffer name to the table row count a ``Gather``
+    holds it to: random bytes are not valid ids (``Gather.control_words``
+    raises past the table), so these need drawing in range instead. Keyed
+    by name, not identity: the handle a step's ``gather`` holds is its own
+    view, a different object from ``recording.inputs``' of the same buffer.
+    """
+    return {
+        step.gather.name: step.op.table_rows
+        for step in recording.steps
+        if step.gather is not None and step.gather.role == "input"
+    }
+
+
 def confirm_fusions(
     calls: Sequence[Timed],
     dev,
@@ -692,7 +706,15 @@ def confirm_fusions(
             dev, recording, full_elf, False, step_words=_step_words(recording)
         )
         rng = np.random.default_rng(seed)
-        inputs = [_random_tensor(h, rng) for h in recording.inputs]
+        table_rows = _gather_table_rows(recording)
+        inputs = [
+            (
+                rng.integers(0, table_rows[h.name], h.shape).astype(h.dtype)
+                if h.name in table_rows
+                else _random_tensor(h, rng)
+            )
+            for h in recording.inputs
+        ]
         states = [(s, h, _random_tensor(h, rng)) for s, h in recording.states.values()]
         while active:
             trial_profile = Profile()

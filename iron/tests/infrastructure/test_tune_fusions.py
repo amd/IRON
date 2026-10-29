@@ -41,6 +41,7 @@ from iron.tune.fusions import (
     _device_timeout,
     _dominates,
     _fed_widths,
+    _gather_table_rows,
     _load_refused,
     _refused_key,
     _save_refused,
@@ -742,6 +743,28 @@ def test_confirm_fusions_drops_the_worst_group_on_a_build_failure(llama_recordin
     )
     assert taken == []
     assert any("does not build fused" in line for line in logged)
+
+
+def test_gather_table_rows_names_an_input_roles_ids_handle(llama_recordings):
+    """The prompt chunk's embedding reads its ``ids`` input through a
+    ``Gather``; its table row count is what ``confirm_fusions`` draws
+    random ids within, not raw bytes (which range over the whole dtype,
+    past any real vocabulary, and ``Gather.control_words`` refuses them).
+    """
+    _, prompt = llama_recordings
+    recording = prompt.recording
+    table_rows = _gather_table_rows(recording)
+    [ids] = [h for h in recording.inputs if h.role == "input"]
+    assert table_rows == {ids.name: 1024}
+
+    gather = next(s for s in recording.steps if s.gather is not None)
+    rng = np.random.default_rng(0)
+    bounded = rng.integers(0, table_rows[ids.name], ids.shape).astype(ids.dtype)
+    gather.op.control_words(bounded, address=0)  # must not raise
+
+    raw = rng.integers(0, 2**31, ids.shape, dtype=np.int64).astype(ids.dtype)
+    with pytest.raises(IndexError, match="gathering"):
+        gather.op.control_words(raw, address=0)
 
 
 @pytest.mark.supported_devices("npu2")
