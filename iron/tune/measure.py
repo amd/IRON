@@ -38,8 +38,10 @@ from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.callable import ImageCallable
 from iron.common.image.link import FullELF, PerStep
+from iron.common.image.packaging import require_device
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind, SequenceStep
+from iron.operators.elementwise_add import ElementwiseAdd
 
 
 @dataclasses.dataclass(frozen=True)
@@ -800,6 +802,29 @@ def measure_rewrite(
     return recorded_m, rewritten_m, refused
 
 
+# Cheap, surely-built sizes for a spacer distinct from any fusion this prices;
+# the first whose design does not collide with the fusion's own steps.
+_SPACER_SIZES = (1024, 2048, 4096, 8192, 16384)
+
+
+def _spacer(steps: Sequence[Operator]) -> ElementwiseAdd:
+    """An operator of a design distinct from ``steps``, to split a many-repeat
+    probe's repeats apart (``measure_fusion``): spliced between them, it
+    makes each configure on entry as it would beside another design in a
+    model's image, rather than merging with the repeat before it. Its own
+    cost is the same whichever side of a fusion's price it is spliced into,
+    so it cancels in the difference.
+    """
+    taken = {OperatorDesign(op.resolved()).identity for op in steps}
+    for size in _SPACER_SIZES:
+        spacer = ElementwiseAdd(size=size, tile_size=128, num_aie_columns=1).resolved(
+            require_device()
+        )
+        if OperatorDesign(spacer).identity not in taken:
+            return spacer
+    raise RuntimeError("no cheap spacer design distinct from the fusion's own steps")
+
+
 def measure_fusion(
     steps: Sequence[Operator],
     edges: Sequence[tuple[int, str, int, str]],
@@ -818,6 +843,12 @@ def measure_fusion(
     the same steps run apart, each edge's buffer a normal host round trip
     instead (``measure_rewrite``). A fusion whose last step's output is not
     bit-identical to the steps run apart is refused.
+
+    A many-repeat probe splices a cheap spacer of another design
+    (``_spacer``) between its repeats on both sides, so a repeat configures
+    on entry as its design does beside another in a model's image, rather
+    than an unfused repeat's two designs costing a configure each while a
+    bare run of the fused one shares a single configure across every repeat.
 
     Args:
         values: Each of ``steps``' per-call values, in its order.
@@ -839,21 +870,30 @@ def measure_fusion(
             cached = cache.get_fusion(key)
             if cached is not None:
                 return cached
-    op_values = dict(zip(steps, values))
+    spacer = _spacer(steps)
+    op_values = {**dict(zip(steps, values)), spacer: {"valid": spacer.size}}
     op_inputs = dict(zip(steps, inputs))
 
     def build(name: str, reps: int, fuse: bool) -> Standalone:
-        fusions = [
-            Fusion(
-                FusionKind.STREAM,
-                tuple(r * n + i for i in range(n)),
-                tuple(Edge(r * n + p, out, r * n + c, inp) for p, out, c, inp in edges),
+        runlist: list[Operator] = []
+        fusions = []
+        for r in range(reps):
+            base = len(runlist)
+            runlist.extend(steps)
+            fusions.append(
+                Fusion(
+                    FusionKind.STREAM,
+                    tuple(base + i for i in range(n)),
+                    tuple(
+                        Edge(base + p, out, base + c, inp) for p, out, c, inp in edges
+                    ),
+                )
             )
-            for r in range(reps)
-        ]
+            if r < reps - 1:
+                runlist.append(spacer)
         return Standalone(
             name,
-            list(steps) * reps,
+            runlist,
             values=op_values,
             inputs=op_inputs,
             fusions=fusions,

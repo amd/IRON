@@ -18,17 +18,28 @@ from __future__ import annotations
 import json
 import logging
 import math
+import statistics
 from collections.abc import Callable, Hashable, Mapping, Sequence
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import numpy as np
 
 from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
+from iron.common.graph.compiled import CompiledGraph, _step_words
 from iron.common.graph.fusion import candidates
+from iron.common.graph.fusion import fusions as graph_fusions
+from iron.common.image.packaging import plan
 from iron.common.image.step import FusionKind
-from .autotune import Shape, Timed, Trial
-from .measure import Cache, Timing, measure_fusion
+from .autotune import CONFIDENCE, Shape, Timed, Trial
+from .measure import (
+    Cache,
+    Timing,
+    _sample,
+    measure_fusion,
+    standard_error,
+    time_interleaved,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +96,18 @@ class FusionGroup:
         for rid, first in self.occurrences:
             out.update((rid, first + i) for i in range(len(self.steps)))
         return out
+
+    def occurs_in(self, recording) -> bool:
+        """Whether this fusion runs in ``recording``."""
+        rid = id(recording)
+        return any(r == rid for r, _ in self.occurrences)
+
+    def dims(self) -> list[tuple[type, dict[str, Any]]]:
+        """This fusion's steps as a profile entry names them (``Profile.add_fusion``)."""
+        return [
+            (type(op), _json_safe(shape.named(())))
+            for op, shape in zip(self.steps, self.shapes)
+        ]
 
     def __str__(self) -> str:
         return " -> ".join(str(s) for s in self.shapes)
@@ -186,15 +209,18 @@ class Candidate(Protocol):
     def __str__(self) -> str: ...
 
 
+CandidateT = TypeVar("CandidateT", bound=Candidate)
+
+
 def select_rewrites(
-    priced: Sequence[tuple[Candidate, Trial]], log: Callable[[str], None] = print
-) -> list[Candidate]:
+    priced: Sequence[tuple[CandidateT, Trial]], log: Callable[[str], None] = print
+) -> list[CandidateT]:
     """Of ``priced`` candidates and their trials, those that gain beyond the
     noise (``Trial.gains``), cheapest first, skipping one whose steps
     overlap a candidate already taken. Kind-agnostic: a fusion, a fold or a
     pack is a ``Candidate`` the same way.
     """
-    taken: list[Candidate] = []
+    taken: list[CandidateT] = []
     claimed: set[tuple[int, int]] = set()
     for candidate, trial in sorted(
         (ct for ct in priced if ct[1].gains), key=lambda ct: ct[1].delta_us
@@ -208,6 +234,96 @@ def select_rewrites(
     return taken
 
 
+def _random_tensor(handle, rng: np.random.Generator) -> np.ndarray:
+    """``handle``'s shape and dtype, filled with ``rng``'s bytes: an end to
+    end confirmation only compares a fused version's output to the same
+    recording's unfused one, not a numpy reference, so the content need not
+    be representative.
+    """
+    sampled = _sample(handle.dtype, handle.nbytes, rng)
+    return sampled.view(handle.dtype).reshape(handle.shape)
+
+
+def confirm_fusions(
+    calls: Sequence[Timed],
+    dev,
+    taken: Sequence[FusionGroup],
+    priced: Mapping[FusionGroup, Trial],
+    profile: Profile,
+    *,
+    full_elf: bool,
+    timing: Timing = Timing(rounds=3, calls=10),
+    seed: int = 0,
+    log: Callable[[str], None] = print,
+) -> list[FusionGroup]:
+    """``taken`` with a group dropped wherever the version it runs in does
+    not gain from it beyond the noise: ``time_fusion_group`` prices a fusion
+    against the steps it fuses alone, over one call; this times each
+    recording's version with every group ``taken`` still holds fused against
+    the same version unfused, interleaved, and drops the smallest predicted
+    gain (``priced``) among those active in a version that regresses,
+    retrying it, until what is left gains or none is left to drop.
+
+    Raises:
+        RuntimeError: A version's fused output is not bit-identical to its
+            unfused one.
+    """
+    remaining = list(taken)
+    for call in calls:
+        recording = call.recording
+        active = [g for g in remaining if g.occurs_in(recording)]
+        if not active:
+            continue
+        chosen = plan(
+            dev, recording, full_elf, False, step_words=_step_words(recording)
+        )
+        rng = np.random.default_rng(seed)
+        inputs = [_random_tensor(h, rng) for h in recording.inputs]
+        states = [(s, h, _random_tensor(h, rng)) for s, h in recording.states.values()]
+        while active:
+            trial_profile = Profile()
+            for cls, dims, tunables in profile:
+                trial_profile.add(cls, **dims, **tunables)
+            for kind, steps, edges in profile.fusions():
+                trial_profile.add_fusion(kind, steps, edges)
+            for group in remaining:
+                trial_profile.add_fusion(group.kind, group.dims(), group.edges)
+            fused = graph_fusions(recording, trial_profile)
+            plain_cg = CompiledGraph(recording, chosen, fusions=())
+            fused_cg = CompiledGraph(recording, chosen, fusions=fused)
+            for state, _, content in states:
+                plain_cg.write(state, content)
+                fused_cg.write(state, content)
+            plain_cg(*inputs, **call.values)
+            fused_cg(*inputs, **call.values)
+            plain_out = [plain_cg.read(h) for h in recording.returned]
+            fused_out = [fused_cg.read(h) for h in recording.returned]
+            if not all(np.array_equal(p, f) for p, f in zip(plain_out, fused_out)):
+                names = ", ".join(str(g) for g in active)
+                raise RuntimeError(
+                    f"{recording.name}: fused ({names}) is not bit-identical to "
+                    f"it unfused"
+                )
+            times = time_interleaved(
+                [plain_cg.callable, fused_cg.callable], timing, log=log
+            )
+            paired = list(zip(times[0].samples_us, times[1].samples_us))
+            delta = statistics.median(f - p for p, f in paired)
+            noise = standard_error([f - p for p, f in paired])
+            noise_s = "?" if noise is None else f"{noise:.1f}"
+            log(
+                f"{recording.name}: [{', '.join(str(g) for g in active)}] "
+                f"{delta:+.1f} ± {noise_s} us end to end"
+            )
+            if noise is not None and delta < -CONFIDENCE * noise:
+                break
+            worst = max(active, key=lambda g: priced[g].delta_us)
+            log(f"  {worst}: dropped, does not gain {recording.name} end to end")
+            remaining.remove(worst)
+            active.remove(worst)
+    return remaining
+
+
 def price_fusions(
     calls: Sequence[Timed],
     dev,
@@ -218,14 +334,18 @@ def price_fusions(
     repeats: int = 9,
     cache: Cache | None = None,
     remeasure: bool = False,
+    confirm: bool = True,
+    confirm_timing: Timing = Timing(rounds=3, calls=10),
     log: Callable[[str], None] = print,
 ) -> Profile:
     """``profile`` with a fusion entry for each stream fusion ``calls``'
     graphs admit that gains beyond the noise (``time_fusion_group``,
-    ``select_rewrites``), taken cheapest first, skipping one that would
-    share a step with a fusion already taken. Fusion entries covering the
-    shapes found are replaced; every tunable entry, and a fusion entry
-    covering none of them, is kept as ``profile`` has it.
+    ``select_rewrites``) and, unless ``confirm`` is False, still gains each
+    version it runs in end to end (``confirm_fusions``), taken cheapest
+    first, skipping one that would share a step with a fusion already taken.
+    Fusion entries covering the shapes found are replaced; every tunable
+    entry, and a fusion entry covering none of them, is kept as ``profile``
+    has it.
     """
     found = fusion_groups(calls, dev)
     out = Profile()
@@ -256,13 +376,18 @@ def price_fusions(
         probe.add_fusion(kind, steps, edges)
         if not any(probe.fused(g.kind, g.steps, g.edges) for g in found):
             out.add_fusion(kind, steps, edges)
-    for group in taken:
-        out.add_fusion(
-            group.kind,
-            [
-                (type(op), _json_safe(shape.named(())))
-                for op, shape in zip(group.steps, group.shapes)
-            ],
-            group.edges,
+
+    if confirm:
+        taken = confirm_fusions(
+            calls,
+            dev,
+            taken,
+            dict(priced),
+            out,
+            full_elf=full_elf,
+            timing=confirm_timing,
+            log=log,
         )
+    for group in taken:
+        out.add_fusion(group.kind, group.dims(), group.edges)
     return out
