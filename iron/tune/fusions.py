@@ -658,6 +658,32 @@ def _gather_table_rows(recording) -> dict[str, int]:
     }
 
 
+def _bound_points(recording, values: Mapping[str, int]) -> list[dict[str, int]]:
+    """``values`` with each per-call value that bounds an extent halved, one
+    at a time, where the recording's limits allow it: a design reading a
+    bound wrongly agrees with the right one when every bound is at its
+    largest, as it is in a full prompt chunk.
+    """
+    bounding = sorted(
+        {
+            b.expression.value.name
+            for b in recording.bindings
+            if b.member.bounds is not None and b.expression.linear
+        }
+    )
+    points = []
+    for name in bounding:
+        if values.get(name, 0) < 2:
+            continue
+        point = {**values, name: values[name] // 2}
+        try:
+            recording.check_limits(point)
+        except IndexError:
+            continue
+        points.append(point)
+    return points
+
+
 def confirm_fusions(
     calls: Sequence[Timed],
     dev,
@@ -694,7 +720,8 @@ def confirm_fusions(
 
     Raises:
         RuntimeError: A version's fused output is not bit-identical to its
-            unfused one.
+            unfused one, at the call's values or at one of its bounds
+            halved (``_bound_points``).
     """
     remaining = list(taken)
     for call in calls:
@@ -753,39 +780,49 @@ def confirm_fusions(
                 remaining.remove(worst)
                 active.remove(worst)
                 continue
-            for state, _, content in states:
-                plain_cg.write(state, content)
-                fused_cg.write(state, content)
+            # The call's own values last: timing below dispatches what was
+            # staged last.
+            checks = [*_bound_points(recording, call.values), dict(call.values)]
+            hung = None
             # Held from the first dispatch (each graph's context created
             # lazily on it) through ``del`` below, not just around a
             # dispatch: both graphs' contexts stay loaded past their own
             # call otherwise, past the window another process holding this
             # lock is kept out of.
             with npu_lock(lock):
-                try:
-                    plain_cg(*inputs, **call.values)
-                    fused_cg(*inputs, **call.values)
-                except (RuntimeError, ir.MLIRError) as e:
-                    if not _device_timeout(e):
-                        raise
+                for values in checks:
+                    for state, _, content in states:
+                        plain_cg.write(state, content)
+                        fused_cg.write(state, content)
+                    try:
+                        plain_cg(*inputs, **values)
+                        fused_cg(*inputs, **values)
+                    except (RuntimeError, ir.MLIRError) as e:
+                        if not _device_timeout(e):
+                            raise
+                        hung = e
+                        break
+                    plain_out = [plain_cg.read(h) for h in recording.returned]
+                    fused_out = [fused_cg.read(h) for h in recording.returned]
+                    if not all(
+                        np.array_equal(p, f) for p, f in zip(plain_out, fused_out)
+                    ):
+                        names = ", ".join(str(g) for g in active)
+                        raise RuntimeError(
+                            f"{recording.name}: fused ({names}) is not "
+                            f"bit-identical to it unfused at {values}"
+                        )
+                if hung is not None:
                     # A hang is a property of this version running at all,
                     # which dropping only one of several active groups may
                     # not fix; none of them is retried in this run.
                     names = ", ".join(str(g) for g in active)
-                    log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
+                    log(f"  {names}: dropped, {recording.name} hung on the device: {hung}")
                     for g in active:
                         remaining.remove(g)
                         if refused is not None:
-                            refused[_refused_key(g)] = f"hung on the device: {e}"
+                            refused[_refused_key(g)] = f"hung on the device: {hung}"
                     break
-                plain_out = [plain_cg.read(h) for h in recording.returned]
-                fused_out = [fused_cg.read(h) for h in recording.returned]
-                if not all(np.array_equal(p, f) for p, f in zip(plain_out, fused_out)):
-                    names = ", ".join(str(g) for g in active)
-                    raise RuntimeError(
-                        f"{recording.name}: fused ({names}) is not bit-identical to "
-                        f"it unfused"
-                    )
                 try:
                     times = time_interleaved(
                         [plain_cg.callable, fused_cg.callable],

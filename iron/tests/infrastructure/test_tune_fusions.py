@@ -19,7 +19,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Profile
+from iron import Profile, Scratchpad
 from iron.common.design import OperatorDesign
 from iron.common.graph.fusion import candidates
 from iron.common.graph.record import Recording
@@ -27,6 +27,7 @@ from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
+from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.tests.support import sequences
@@ -37,6 +38,7 @@ from iron.tune.autotune import Point, Timed, Trial
 from iron.tune.fusions import (
     FusionGroup,
     NARROWING_EXHAUSTIVE,
+    _bound_points,
     _checkpoint,
     _device_timeout,
     _dominates,
@@ -743,6 +745,50 @@ def test_confirm_fusions_drops_the_worst_group_on_a_build_failure(llama_recordin
     )
     assert taken == []
     assert any("does not build fused" in line for line in logged)
+
+
+class BoundedReLUs(iron.Graph):
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return ReLU.step(ReLU.step(x[:n], num_aie_columns=4), num_aie_columns=4)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_confirm_fusions_holds_a_narrowed_merge_bit_identical_at_partial_bounds():
+    """A merge narrowing two bounded ReLUs, confirmed against them unfused
+    at the full bound and at half of it: a narrowed design whose per-call
+    values went unwritten agrees at the full bound but not at half.
+    """
+    dev = aie_utils.ensure_current_device()
+    call = Timed(BoundedReLUs().record(x=(4096,)), values=dict(n=4096))
+    assert _bound_points(call.recording, call.values) == [dict(n=2048)]
+    [group] = fusion_groups([call], dev, kinds=(FusionKind.MERGE,))
+    logged = []
+    confirm_fusions(
+        [call],
+        dev,
+        [group],
+        {group: Trial({}, -1e6, 1.0)},
+        Profile(),
+        {group: ({"num_aie_columns": 2}, {"num_aie_columns": 2})},
+        full_elf=True,
+        timing=Timing(rounds=1, calls=2),
+        log=logged.append,
+    )
+    assert any("end to end" in line for line in logged)
+
+
+def test_bound_points_confirm_a_prompt_chunk_at_partial_rows(llama_recordings):
+    """A full chunk runs every bound at its largest, where a design reading
+    its rows wrongly still agrees: confirmation also runs each bound
+    halved, a partial chunk among them, each within the recording's limits.
+    """
+    _, prompt = llama_recordings
+    recording, values = prompt.recording, prompt.values
+    points = _bound_points(recording, values)
+    assert {**values, "rows": values["rows"] // 2} in points
+    assert dict(values) not in points
+    for point in points:
+        recording.check_limits(point)
 
 
 def test_gather_table_rows_names_an_input_roles_ids_handle(llama_recordings):
