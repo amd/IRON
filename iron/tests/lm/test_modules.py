@@ -19,11 +19,12 @@ from iron.lm.blocks import KVCache, Rope
 from iron.lm.checkpoint import nest, leaves
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close, check_generation
+from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.operators.sample import Sample
 from iron.tests.support.llama_reference import OnHost
-from iron.tests.support.llama_model import SMALL, checkpoint, small
+from iron.tests.support.llama_model import SMALL, checkpoint, llama_1b, small
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -402,3 +403,15 @@ def test_a_random_tree_draws_a_scalar_as_an_array():
     tree = checkpoint(SMALL, {"linear.input_min": (), "norm.weight": (8,)})
     bound = tree.tree("random").linear.input_min
     assert isinstance(bound, np.ndarray) and bound.shape == ()
+
+
+def test_a_decode_steps_q_and_o_share_one_array(npu2):
+    """Where heads * head_dim is the width, o takes q's one-row tiles, so a
+    decode step runs the two on one array, and a full ELF switches to it once.
+    """
+    model = llama_1b(num_hidden_layers=1)
+    decode_shapes, _ = model.shapes()
+    steps = model.record(**decode_shapes).steps
+    gemvs = [s.op.resolved(npu2) for s in steps if isinstance(s.op, GEMV)]
+    q, o = (g for g in gemvs if (g.M, g.K) == (2048, 2048))
+    assert q.array_key() == o.array_key()

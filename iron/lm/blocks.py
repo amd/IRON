@@ -619,13 +619,19 @@ class Attention(iron.Graph):
         if k is not None:
             k, v = k.reshape(n, G, D), v.reshape(n, G, D)
         o = cache.attend(call, q.reshape(n, H, D), k, v, scale=self.scaling)
-        return self.output(o, x)
+        # Given q's tiles where its shape is o's, the two share one array.
+        shared = isinstance(self.o_proj, Linear) and self.o_proj.out_features == H * D
+        return self.output(o, x, **(tiles if shared else {}))
 
-    def output(self, o: Handle, x: Handle) -> Handle:
+    def output(self, o: Handle, x: Handle, **gemv) -> Handle:
         """The block's output from the heads ``o`` ``(rows, heads *
-        head_dim)`` of the input ``x``.
+        head_dim)`` of the input ``x``; ``gemv``, where given, its one-row
+        GEMV's tunables.
         """
-        return self.o_proj(o)
+        if not gemv:
+            return self.o_proj(o)
+        p = self.o_proj
+        return F.linear(o, p.weight, p.bias, precision=p.precision, **gemv)
 
 
 class MLP(iron.Graph):
