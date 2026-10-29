@@ -9,7 +9,7 @@ import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import np_dtype_to_mlir_type
-from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv
+from aie.iron import Buffer, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
@@ -260,8 +260,8 @@ class Softmax(Operator):
         mask_k = obj.bind("mask_bf16", [tile_ty, np.int32, np.int32])
         zero_k = zero(block, ml_dtypes.bfloat16)
         state_ty = np.ndarray[(_STATE,), np.dtype[np.float32]]
-        of_ins = [ObjectFifo(tile_ty) for k in range(n_cores)]
-        of_outs = [ObjectFifo(tile_ty) for k in range(n_cores)]
+        x_ins = self.x.fifos(self.x.depth)
+        y_outs = self.y.fifos(self.y.depth)
         counts = [self.valid_cols, self.blocks] if self.streamed else [self.valid_cols]
         rtps = [Rtp(counts) for _ in range(n_cores)]
 
@@ -320,7 +320,7 @@ class Softmax(Operator):
             workers = [
                 Worker(
                     streamed,
-                    [of_ins[k].cons(), of_outs[k].prod(), *kernels, mask_k, zero_k]
+                    [x_ins[k], y_outs[k], *kernels, mask_k, zero_k]
                     + [rtps[k]]
                     + [Buffer(state_ty) for r in range(rows_per_core)],
                 )
@@ -331,8 +331,8 @@ class Softmax(Operator):
                 Worker(
                     whole,
                     [
-                        of_ins[k].cons(),
-                        of_outs[k].prod(),
+                        x_ins[k],
+                        y_outs[k],
                         softmax_k,
                         mask_k,
                         zero_k,
@@ -341,8 +341,6 @@ class Softmax(Operator):
                 )
                 for k in range(n_cores)
             ]
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
         return Built(workers, rtps)
 
     def _build_f32(self, n_cores: int, rows_per_core: int, block: int) -> Built:
@@ -350,13 +348,9 @@ class Softmax(Operator):
         ``softmax_f32_bf16`` a row, its ``n`` bound to ``block`` at build time.
         """
         softmax_k = _kernel(self, block)
-        of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
-        of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
-        of_addends = (
-            [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
-            if self.has_addend
-            else None
-        )
+        x_ins = self.x.fifos(self.x.depth)
+        y_outs = self.y.fifos(self.y.depth)
+        addend_ins = self.addend.fifos(self.addend.depth) if self.has_addend else None
 
         def whole(of_in, of_out, softmax, *rest):
             of_addend = rest[0] if self.has_addend else None
@@ -375,15 +369,11 @@ class Softmax(Operator):
         workers = [
             Worker(
                 whole,
-                [of_ins[k].cons(), of_outs[k].prod(), softmax_k]
-                + ([of_addends[k].cons()] if of_addends else []),
+                [x_ins[k], y_outs[k], softmax_k]
+                + ([addend_ins[k]] if addend_ins else []),
             )
             for k in range(n_cores)
         ]
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
-        if of_addends is not None:
-            self.addend.bind([f.prod() for f in of_addends])
         return Built(workers)
 
     def _build_f32_banded(self, n_cores: int, rows_per_core: int, block: int) -> Built:
@@ -393,9 +383,9 @@ class Softmax(Operator):
         ``period`` and the row's own position, computed in the kernel.
         """
         banded_k = _kernel(self, block)
-        of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
-        of_addends = [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
-        of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
+        x_ins = self.x.fifos(self.x.depth)
+        addend_ins = self.addend.fifos(self.addend.depth)
+        y_outs = self.y.fifos(self.y.depth)
 
         def _whole(core_offset):
             def whole(of_in, of_addend, of_out, fn):
@@ -426,17 +416,14 @@ class Softmax(Operator):
             Worker(
                 _whole(k * rows_per_core),
                 [
-                    of_ins[k].cons(),
-                    of_addends[k].cons(),
-                    of_outs[k].prod(),
+                    x_ins[k],
+                    addend_ins[k],
+                    y_outs[k],
                     banded_k,
                 ],
             )
             for k in range(n_cores)
         ]
-        self.x.bind([f.prod() for f in of_ins])
-        self.addend.bind([f.prod() for f in of_addends])
-        self.y.bind([f.cons() for f in of_outs])
         return Built(workers)
 
     def sequence(self, rt):
@@ -454,7 +441,7 @@ class Softmax(Operator):
             for k in range(lanes)
         ]
         reads = 3 if self.streamed else 1
-        tg = TaskGroup()
+        tg = rt.task_group()
         for k, tap in enumerate(taps):
             self.x.fill(
                 tap.repeat(reads),
@@ -481,7 +468,7 @@ class Softmax(Operator):
                 length_parameter=blocks_valid,
                 length_unit=rows * self.block,
             )
-        tg.finish()
+        rt.finish(tg)
 
     def tolerance(self) -> Tolerance | None:
         base = _kernel(self, self.cols).contract.tolerance

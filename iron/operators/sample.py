@@ -12,7 +12,7 @@ from functools import cache
 import numpy as np
 from aie.dialects.aie import WireBundle, get_target_model
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, In, InOut, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import Buffer, In, InOut, ObjectFifo, Out, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import sample
 from aie.utils.verify import Tolerance
@@ -200,13 +200,12 @@ class Sample(Operator):
         runs, combine = self.runs, self.combine()
         selects = {run: self.select(*run) for run in set(runs)}
         words = sample.summary_words(self.slice_size, self.k_max)
-        # Every core reads the draw row.
+        # Every core reads the draw row, a fresh cons() each: fifos() gives
+        # one end per lane, not one per reader.
         of_draw = ObjectFifo(self.draws.obj_type, depth=self.draws.depth)
         self.draws.bind(of_draw.prod())
-        of_token = ObjectFifo(self.token.obj_type, depth=self.token.depth)
-        self.token.bind(of_token.cons())
-        of_record = ObjectFifo(self.tokens.obj_type, depth=self.tokens.depth)
-        self.tokens.bind(of_record.cons())
+        (token,) = self.token.fifos(self.token.depth)
+        (record,) = self.tokens.fifos(self.tokens.depth)
         # The summaries meet in a memtile, column 0 first. A join input fills
         # its object up to the next offset, so a shorter last summary ends it.
         of_summaries = ObjectFifo(
@@ -277,8 +276,8 @@ class Sample(Operator):
                 [
                     of_summaries.cons(),
                     of_draw.cons(),
-                    of_token.prod(),
-                    of_record.prod(),
+                    token,
+                    record,
                     combine,
                 ],
             )
@@ -289,7 +288,7 @@ class Sample(Operator):
         """One group: the draw and the logits in, then the record and the token."""
         row = self.row if self.row.per_call else None
         at = self.at if self.at.per_call else None
-        tg = TaskGroup()
+        tg = rt.task_group()
         self.draws.fill(self.draws[0], group=tg, offset_parameter=row)
         for c, (run, chunk, _) in enumerate(self.layout().runs):
             # Core c's slice, once per select stream.
@@ -303,7 +302,7 @@ class Sample(Operator):
                 self.logits.fill(tap, lane=c, group=tg)
         self.tokens.drain(self.tokens[:1], group=tg, wait=True, offset_parameter=at)
         self.token.drain(group=tg, wait=True)
-        tg.finish()
+        rt.finish(tg)
 
     def ops(self) -> int:
         return 0  # a draw, not arithmetic: its figure is latency

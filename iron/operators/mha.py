@@ -14,7 +14,7 @@ from typing import ClassVar
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv, kernels
+from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import AnyComputeTile, AnyMemTile, AnyShimTile, Device, Tile
 from aie.iron.kernels.linalg import mm_stream_dims
@@ -1115,7 +1115,7 @@ class MHA(Operator):
 
             for step in range(steps):
                 owned = [p * steps + step for p in range(self.num_pipelines)]
-                tg = TaskGroup()
+                tg = rt.task_group()
                 for kv_head in owned:
                     self.Q.fill(packed_rows(self.Q, kv_head), lane=0, group=tg)
                 for p, kv_head in enumerate(owned):
@@ -1131,7 +1131,7 @@ class MHA(Operator):
                     self.O.drain(
                         packed_rows(self.O, kv_head), lane=0, group=tg, wait=True
                     )
-                tg.finish()
+                rt.finish(tg)
             return
 
         cores, pv_width = self.pv_cores, self.pv_width
@@ -1139,7 +1139,7 @@ class MHA(Operator):
         iterations = 1 << self.dev.get_dma_bd_iter_bits(0, 0)
         for kv_head in range(kv_heads):
             head0 = kv_head * group
-            tg = TaskGroup()
+            tg = rt.task_group()
             for shim in range(self.q_shims):
                 self.Q.fill(q_rows(self.Q, head0, shim), lane=shim, group=tg)
             # O drains before K and V fill: past the queue's depth a fill
@@ -1174,4 +1174,4 @@ class MHA(Operator):
                         length_parameter=kv_valid,
                         length_unit=B_kv * pv_width,
                     )
-            tg.finish()
+            rt.finish(tg)

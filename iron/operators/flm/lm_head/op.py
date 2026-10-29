@@ -7,7 +7,7 @@ import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import Buffer, In, ObjectFifo, Out, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernels import flm_gemma4
@@ -232,16 +232,16 @@ class LMHead(Operator):
         w_taps = TensorAccessPattern.full((self.w_words,)).partition(n)
         window = []
         for rnd in range(rounds):
-            tg = TaskGroup()
+            tg = rt.task_group()
             for col in range(self.cols):
                 i = rnd * self.cols + col
                 self.y.drain(y_taps[i], lane=col, wait=True, group=tg)
                 self.w.fill(w_taps[i], lane=col, group=tg)
             window.append(tg)
             if len(window) > DEPTH:
-                window.pop(0).finish()
+                rt.finish(window.pop(0))
         for tg in window:
-            tg.finish()
+            rt.finish(tg)
         x.free()
 
     def tolerance(self) -> Tolerance:
