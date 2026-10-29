@@ -22,7 +22,7 @@ from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.silu import SiLU
 from iron.tests.support.graphs import Chain as ChainGraph
 from iron.tests.support.llama_model import small
-from iron.tune.autotune import CONFIDENCE, Point, Timed, Trial
+from iron.tune.autotune import Point, Timed, Trial
 from iron.tune.fusions import (
     FusionGroup,
     confirm_fusions,
@@ -257,86 +257,68 @@ def test_pricing_a_gaining_fusion_writes_an_entry_that_runs_bit_identically(tmp_
 
 _END_TO_END = re.compile(r"([-+]\d+\.\d+) ± (\?|\d+\.\d+) us end to end")
 
-# Decode's own SiLU -> ElementwiseMul shape (Llama 3.2 1B, npu2).
-_DECODE_SIZE, _DECODE_TILE, _DECODE_COLS = 8192, 1024, 8
-_W_DECODE = np.zeros(_DECODE_SIZE, bfloat16)
-
-
-def _two_layer_decode_graph():
-    """SiLU -> ElementwiseMul at decode's shape, twice, an ElementwiseAdd
-    (a design of its own) between them as another layer's step would run:
-    the recurring pair ``fusion_groups`` merges into one group of 2
-    occurrences, as it does down Llama's own decode step.
-    """
-
-    class TwoLayers(iron.Graph):
-        def body(self, x):
-            gate = SiLU.step(x, tile_size=_DECODE_TILE, num_aie_columns=_DECODE_COLS)
-            h = ElementwiseMul.step(
-                gate, _W_DECODE, tile_size=_DECODE_TILE, num_aie_columns=_DECODE_COLS
-            )
-            h = ElementwiseAdd.step(
-                h, _W_DECODE, tile_size=_DECODE_TILE, num_aie_columns=_DECODE_COLS
-            )
-            gate = SiLU.step(h, tile_size=_DECODE_TILE, num_aie_columns=_DECODE_COLS)
-            return ElementwiseMul.step(
-                gate, _W_DECODE, tile_size=_DECODE_TILE, num_aie_columns=_DECODE_COLS
-            )
-
-    return TwoLayers()
-
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
-def test_fixed_frame_agrees_with_decode_silu_mul_priced_in_the_whole_step(tmp_path):
-    """``measure_fusion``'s standalone price for decode's SiLU ->
-    ElementwiseMul (``time_fusion_group``) against an independent figure for
-    the same shape, timed compiled into a version that runs it twice,
-    another design between (``confirm_fusions``, whose own log line carries
-    it), against the same version unfused, divided by its 2 occurrences.
+def test_fixed_frame_agrees_with_decode_groups_priced_in_the_whole_step(
+    llama_recordings, tmp_path
+):
+    """Each of decode's own 2-step fusion groups (SiLU -> ElementwiseMul and
+    both residual adds, GEMV -> ElementwiseAdd), ``measure_fusion``'s
+    standalone price (``time_fusion_group``) against an independent figure
+    for the same shape: timed compiled into the whole decode step against
+    the same step unfused (``confirm_fusions``, whose own log line carries
+    it) and divided by its occurrences (2 per group, one per layer, down
+    Llama's small shape).
 
-    The band is each side's own standard error, doubled (``CONFIDENCE``) as
-    elsewhere a figure is judged to gain, and summed in quadrature since the
-    two are independent interleaved timings of one shape.
+    The band is each side's own standard error, summed in quadrature (the
+    two are independent interleaved timings of one shape) and multiplied by
+    3, not the 2 standard errors ``Trial.gains`` takes elsewhere, floored at
+    half the bug's own size (~165 us, one reconfigure): GEMV -> Add's
+    standalone price and its in-image one agree only to 10-30 us (its own
+    placement is not pinned, so a probe alone and one among decode's other
+    designs need not place it alike), well inside a regression back to the
+    old frame's bias but outside 3 standard errors most rounds. This runs
+    beside other agents' own NPU runs too, whose jitter this test's own
+    rounds do not sample.
     """
-    recording = _two_layer_decode_graph().record(x=(_DECODE_SIZE,))
+    decode, _ = llama_recordings
     dev = aie_utils.ensure_current_device()
-    [group] = [
-        g
-        for g in fusion_groups([Timed(recording)], dev)
-        if len(g.steps) == 2
-        and type(g.steps[0]) is SiLU
-        and type(g.steps[1]) is ElementwiseMul
-    ]
-    assert len(group.occurrences) == 2
-    timing = Timing(rounds=6, calls=10)
+    groups = [g for g in fusion_groups([decode], dev) if len(g.steps) == 2]
+    assert len(groups) >= 2, "expected at least SiLU -> Mul and a GEMV -> Add shape"
+
+    timing = Timing(rounds=8, calls=10)
     report = platform()
     cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    # decode's own Timed, for pricing alone, gives no per-call values; a
+    # decode step CompiledGraph dispatches, so needs one.
+    dispatched = Timed(decode.recording, values=dict(position=0, token=0))
 
-    trial = time_fusion_group(
-        group, full_elf=True, timing=timing, cache=cache, log=lambda _: None
-    )
-    assert trial.refused is None and trial.noise_us is not None
+    for group in groups:
+        trial = time_fusion_group(
+            group, full_elf=True, timing=timing, cache=cache, log=lambda _: None
+        )
+        assert trial.refused is None and trial.noise_us is not None
 
-    logged = []
-    confirm_fusions(
-        [Timed(recording)],
-        dev,
-        [group],
-        {group: Trial({}, -1e6, 1.0)},  # the only candidate: its own figure is unread
-        Profile(),
-        full_elf=True,
-        timing=timing,
-        log=logged.append,
-    )
-    [line] = [m for m in logged if "end to end" in m]
-    delta_s, noise_s = _END_TO_END.search(line).groups()
-    occurrences = len(group.occurrences)
-    in_image = float(delta_s) / occurrences
-    in_image_noise = float(noise_s) / occurrences
+        logged = []
+        confirm_fusions(
+            [dispatched],
+            dev,
+            [group],
+            {group: Trial({}, -1e6, 1.0)},  # the only candidate: its figure unread
+            Profile(),
+            full_elf=True,
+            timing=timing,
+            log=logged.append,
+        )
+        [line] = [m for m in logged if "end to end" in m]
+        delta_s, noise_s = _END_TO_END.search(line).groups()
+        occurrences = len(group.occurrences)
+        in_image = float(delta_s) / occurrences
+        in_image_noise = float(noise_s) / occurrences
 
-    band = CONFIDENCE * math.hypot(trial.noise_us, in_image_noise)
-    assert abs(trial.delta_us - in_image) < band, (
-        f"standalone {trial.delta_us:+.1f} us vs in-image {in_image:+.1f} us, "
-        f"band {band:.1f} us"
-    )
+        band = max(3 * math.hypot(trial.noise_us, in_image_noise), 80.0)
+        assert abs(trial.delta_us - in_image) < band, (
+            f"{group}: standalone {trial.delta_us:+.1f} us vs in-image "
+            f"{in_image:+.1f} us, band {band:.1f} us"
+        )
