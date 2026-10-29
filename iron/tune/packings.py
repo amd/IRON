@@ -38,7 +38,7 @@ from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.image.packaging import plan
-from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, settings
+from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, time_shape
 from .costmodel import FEATURES, CostModel
 from .failures import Kind, Ledger, first_error
 from .fusions import (
@@ -54,6 +54,9 @@ from .measure import Cache, Timing, measure
 MERGE_CANDIDATES = 8
 # Searches of one version, each after refusing what failed the last.
 ATTEMPTS = 3
+# A version is searched only where its switches cost at least this share of
+# its steps' own time: packing removes switches, and narrowing slows steps.
+MIN_SWITCH_SHARE = 0.05
 
 Setting = dict[str, Any]
 Group = dict[Any, Setting]
@@ -104,11 +107,14 @@ class Packer:
         lock: bool,
         model: CostModel,
         ledger: Ledger | None = None,
+        cycles: Mapping[str, int] | None = None,
+        core_mhz: float | None = None,
     ):
         self.call, self.dev = call, dev
         self.timing, self.repeats, self.cache = timing, repeats, cache
         self.fit_cache, self.log, self.lock = fit_cache, log, lock
         self.model, self.ledger = model, ledger
+        self.cycles, self.core_mhz = cycles, core_mhz
         # Each step's array and shape, None for a step no unit holds.
         placed: list[tuple[Any, Any, Operator] | None] = []
         unit_of: dict[Any, int] = {}
@@ -233,25 +239,6 @@ class Packer:
                 found.append(candidate)
                 break
         self._options[key] = found
-        return found
-
-    def tiles(self, key, setting: Setting) -> list[Setting]:
-        """``setting`` with each combination of unit ``key``'s other
-        tunables' domains at its widths that every shape of it resolves at,
-        ``setting`` itself first.
-        """
-        names = width_tunables(self.recorded(key))
-        at = self.op(key, setting)
-        found = [setting]
-        for s in settings(at, self.dev, frozenset(names)):
-            candidate = {**setting, **{n: v for n, v in s.items() if n not in names}}
-            if candidate == setting:
-                continue
-            try:
-                self.arrays(key, candidate)
-            except ValueError:
-                continue
-            found.append(candidate)
         return found
 
     def cost(self, key, setting: Mapping[str, Any]) -> float:
@@ -406,27 +393,39 @@ class Packer:
 
     def retile(self, group: Group) -> Group:
         """``group`` with each member off its own setting at the fastest of
-        its other tunables there that still fits.
+        its other tunables there that still fits, searched as an operator's
+        own tuning searches them (``time_shape``), its widths held.
         """
         current = dict(group)
         for key, setting in group.items():
             if not setting:
                 continue
-            candidates = self.tiles(key, setting)
-            self._price(
-                key,
-                [
-                    c
-                    for c in candidates
-                    if (key, tuple(sorted(c.items()))) not in self._costs
-                ],
+            shape = Shape(self.recorded(key))
+            shape.pinned = frozenset(width_tunables(self.recorded(key)))
+            shape.members = [
+                (
+                    op._with_tunables(**setting),
+                    self.call.op_points(op),
+                    self.call.op_inputs(op),
+                )
+                for op, _ in self.shapes[key].values()
+            ]
+            tried = time_shape(
+                shape,
+                self.dev,
+                full_elf=True,
+                timing=self.timing,
+                repeats=self.repeats,
+                cache=self.cache,
+                cycles=self.cycles,
+                core_mhz=self.core_mhz,
+                log=self.log,
             )
-            for candidate in candidates:
-                if self.cost(key, candidate) >= self.cost(key, current[key]):
-                    continue
-                trial = {**current, key: candidate}
+            for t in sorted((t for t in tried if t.gains), key=lambda t: t.delta_us):
+                trial = {**current, key: {**setting, **t.tunables}}
                 if self.fits(trial):
                     current = trial
+                    break
         return current
 
     def group(self) -> list[Group]:
@@ -538,6 +537,8 @@ def price_packings(
     fit_cache: Path = FIT_CACHE,
     model: CostModel | None = None,
     ledger: Ledger | None = None,
+    cycles: Mapping[str, int] | None = None,
+    core_mhz: float | None = None,
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Profile:
@@ -545,7 +546,9 @@ def price_packings(
     gains from sharing one device configuration (``Packer``), its members'
     settings in it; a version whose grouping does not gain end to end,
     beyond the noise, adds none, and an entry that slows another version it
-    matches is dropped. ``profile``'s own packings are replaced.
+    matches is dropped. ``profile``'s own packings are replaced. A version
+    whose every switch, priced by ``model``, costs under
+    ``MIN_SWITCH_SHARE`` of its steps' own time is not searched.
 
     A grouping whose version does not build, hangs or is not bit-identical
     is refused (``refuse_group``) and the version searched again, up to
@@ -554,6 +557,10 @@ def price_packings(
     Args:
         model: What a version pays beyond its steps' times; each end-to-end
             check adds it a sample. The prior where None.
+        cycles: Kernel cycles per call by recipe key, which spare a narrowed
+            array's tile search the settings its kernel alone makes slower
+            (``time_shape``).
+        core_mhz: The cores' clock ``cycles`` are timed at.
     """
     model = CostModel() if model is None else model
     base = _profile(profile, [])
@@ -575,8 +582,19 @@ def price_packings(
             lock=lock,
             model=model,
             ledger=ledger,
+            cycles=cycles,
+            core_mhz=core_mhz,
         )
         alone = [{k: {}} for k in packer.shapes]
+        for k in packer.shapes:
+            packer._price(k, [{}])
+        switching, own = model.predict(packer.features(alone)), packer.steps(alone)
+        if switching < MIN_SWITCH_SHARE * own:
+            log(
+                f"{recording.name}: its switches cost ~{switching:.0f} us of "
+                f"{own:.0f} us of steps; not searched"
+            )
+            continue
         for attempt in range(ATTEMPTS):
             groups = packer.group()
             packed = [g for g in groups if sum(len(packer.shapes[k]) for k in g) > 1]

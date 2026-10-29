@@ -141,9 +141,7 @@ def tune(
     profile = Profile.load(path) if path.exists() else None
     full_elf = dev.can_dispatch_full_elf
     if args.packings_only:
-        if profile is None:
-            raise ValueError(f"{path}: --packings-only needs a profile to pack")
-        return _save_packings(args, calls, dev, profile, path, full_elf)
+        return _save_packings(args, calls, dev, profile or Profile(), path, full_elf)
     if not args.fusions_only:
         profile = autotune(
             calls() if callable(calls) else calls,
@@ -200,6 +198,8 @@ def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: boo
         cache=Cache.here(),
         model=model,
         ledger=Ledger() if args.record_failures else None,
+        cycles=kernel_cycles(dev),
+        core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
         log=functools.partial(print, flush=True),
         lock=args.lock_in_process,
     )

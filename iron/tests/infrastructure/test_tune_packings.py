@@ -50,6 +50,20 @@ class Wide(iron.Graph):
         return x
 
 
+LONG = 2**24
+
+
+class Runs(iron.Graph):
+    """Four ReLUs then four Tanhs over a long vector: one switch among eight
+    long steps."""
+
+    def body(self, x):
+        for op in (ReLU, Tanh):
+            for _ in range(4):
+                x = op.step(x, num_aie_columns=8)
+        return x
+
+
 class Projections(iron.Graph):
     """One shape's GEMV twice, at two output tiles: two arrays, as q and o
     were with only q given half a head's tiles."""
@@ -153,6 +167,31 @@ def test_price_packings_packs_alternating_arrays_bit_identically(tmp_path):
     for _ in range(3):
         reference = np.tanh(np.maximum(reference, 0))
     np.testing.assert_allclose(got.astype(np.float32), reference, atol=2e-2)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_price_packings_skips_a_version_its_switches_cannot_pay(tmp_path):
+    """One switch beside eight long steps: no grouping could gain the
+    share packing is worth searching for, so the version is not searched."""
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    logged = []
+    profile = price_packings(
+        [Timed(Runs().record(x=(LONG,)))],
+        dev,
+        iron.Profile(),
+        full_elf=True,
+        timing=Timing(rounds=2, calls=5),
+        repeats=5,
+        cache=cache,
+        fit_cache=tmp_path / "fit",
+        log=logged.append,
+    )
+    print("\n".join(logged))
+    assert not profile.packings()
+    assert any(line.endswith("not searched") for line in logged)
+    assert not any("grouped" in line for line in logged)
 
 
 @pytest.mark.supported_devices("npu2")
