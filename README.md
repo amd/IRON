@@ -150,6 +150,8 @@ The commands that run the operator and model tests are in [AGENTS.md](./AGENTS.m
 
 Each model is a package under [iron/applications/](./iron/applications/) over [iron/lm/](./iron/lm/), the library every model shares ([AGENTS.md](./AGENTS.md#language-models) describes it). Each model's README says which code is specific to it and where its files come from. The tests find a checkpoint at `$IRON_EXAMPLE_WEIGHTS_DIR/<checkpoint>`, default `/srv` (`iron.lm.testing.weights_dir`).
 
+This table is also [docs/models.md](./docs/models.md)'s, with GitHub-absolute links in place of these relative ones; a new row goes in both.
+
 | Model | Application | Checkpoint | NPU1 (Phoenix, Hawk Point) | NPU2 (Strix, Strix Halo, Krackan) |
 |---|---|---|---|---|
 | Llama 3.2 1B, 3B | [llama](./iron/applications/llama/) | `llama3.2-1b`, `llama3.2-3b` | Yes, a dispatch per step | Yes |

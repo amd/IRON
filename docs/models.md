@@ -11,6 +11,9 @@ built on `iron/lm/`, the library every model shares (see
 [AGENTS.md](agents.md#language-models)). Each model's README says what is
 specific to it and where to get its weights.
 
+This table is also [README.md](installation.md#models)'s, with relative links
+in place of these GitHub-absolute ones; a new row goes in both.
+
 | Model | Application | Checkpoint | NPU1 (Phoenix, Hawk Point) | NPU2 (Strix, Strix Halo, Krackan) |
 |---|---|---|---|---|
 | Llama 3.2 1B, 3B | [llama](https://github.com/amd/IRON/blob/devel/iron/applications/llama/README.md) | `llama3.2-1b`, `llama3.2-3b` | Yes, a dispatch per step | Yes |
