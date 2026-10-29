@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import ExternalFunction, In, ObjectFifo, Out, Worker
+from aie.iron import ExternalFunction, In, Out, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, per_call
@@ -153,12 +153,9 @@ class Merge(Operator):
                 + ("_offset" if self.offset else "")
             ),
         )
-        of_ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
-        of_merge = ObjectFifo(self.merge.obj_type, depth=self.merge.depth)
-        of_before = None
-        if self.offset:
-            of_before = ObjectFifo(self.before.obj_type, depth=self.before.depth)
-            self.before.bind(of_before.prod())
+        (ids_end,) = self.ids.fifos(self.ids.depth)
+        (merge_end,) = self.merge.fifos(self.merge.depth)
+        before_end = self.before.fifos(self.before.depth)[0] if self.offset else None
         rtp = Rtp([self.count])
 
         def core_fn(of_in, of_out, kernel_fn, rtp, of_before):
@@ -174,14 +171,6 @@ class Merge(Operator):
 
         worker = Worker(
             core_fn,
-            [
-                of_ids.cons(),
-                of_merge.prod(),
-                kernel,
-                rtp,
-                None if of_before is None else of_before.cons(),
-            ],
+            [ids_end, merge_end, kernel, rtp, before_end],
         )
-        self.ids.bind(of_ids.prod())
-        self.merge.bind(of_merge.cons())
         return Built([worker], [rtp])

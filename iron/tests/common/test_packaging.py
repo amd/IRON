@@ -12,7 +12,11 @@ import iron
 from iron import Carried, Scratchpad
 from iron.common.graph.compiled import _step_words
 from iron.common.graph.record import Recording
+from iron.common.image.compose import Composition
+from iron.common.image.link import FullELF
 from iron.common.image.packaging import SCRATCHPAD_WORDS, Kind, plan
+from iron.common.image.sequence import Image
+from iron.common.image.step import Fusion, FusionKind
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.tests.support.llama_model import small
@@ -156,6 +160,28 @@ def test_a_command_reads_at_most_a_scratchpads_words(npu2):
     assert any("scratchpad holds 32 words" in r for r in p.reasons)
 
 
+def test_a_command_never_starts_within_a_fusion(npu2):
+    """A fusion of the steps either side of a split moves the split to its
+    first member; the composition starts each command at that step's place
+    among the fused steps, one fewer past the fusion.
+    """
+    recording = ManyWords().record(x=(4096,))
+    words = _step_words(recording)
+    first = plan(npu2, recording, step_words=words).commands[0]
+    pack = Fusion(FusionKind.PACK, (first - 1, first))
+    p = plan(npu2, recording, step_words=words, fusions=(pack,))
+    assert p.commands[0] == first - 1
+    edges = (0, *p.commands, len(recording.steps))
+    held = [frozenset().union(*words[a:b]) for a, b in zip(edges, edges[1:])]
+    assert all(len(h) <= SCRATCHPAD_WORDS for h in held)
+    image = Image(recording, FullELF(commands=p.commands), fusions=(pack,))
+    image._prepare()
+    assert Composition(image).commands == (
+        p.commands[0],
+        *(c - 1 for c in p.commands[1:]),
+    )
+
+
 class Shrinks(iron.Graph):
     def __init__(self):
         self.staged = iron.state((4096,))
@@ -175,3 +201,9 @@ def test_a_call_skips_the_commands_its_values_leave_without_work(npu2):
     assert p.commands == (1,)
     assert p.idle(recording.steps, dict(n=0)) == {1}
     assert p.idle(recording.steps, dict(n=1)) == set()
+
+
+def test_a_host_step_within_a_fusion_is_refused(npu2):
+    recording = Shrinks().record(x=(4096,))
+    with pytest.raises(ValueError, match=r"host step runs within a fusion"):
+        plan(npu2, recording, fusions=(Fusion(FusionKind.PACK, (0, 1)),))

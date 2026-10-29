@@ -9,7 +9,7 @@ import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv, kernels
+from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv, kernels
 from aie.iron.controlflow import if_, range_
 from aie.iron.device import (
     NPU1,
@@ -607,7 +607,7 @@ class GEMM(Operator):
                 return C_grid[col::n_aie_cols, pieces]
             return C_grid[c_row_base : c_row_base + c_n_rows, col::n_aie_cols]
 
-        tg = TaskGroup()
+        tg = rt.task_group()
         for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
             for pingpong in [0, 1]:
                 row_base = tb * tb_max_n_rows + pingpong * tb_max_n_rows // 2
@@ -635,9 +635,59 @@ class GEMM(Operator):
                         for col in range(n_aie_cols):
                             fill(col, row_base + tile_row, tg)
                 if b_unrolled or tb > 0 or (tb == 0 and pingpong > 0):
-                    tg.finish()
-                    tg = TaskGroup()
-        tg.finish()
+                    rt.finish(tg)
+                    tg = rt.task_group()
+        rt.finish(tg)
+
+    def lane_transfers(self, operand):
+        """A, B and C's host order never shortens under a bound (``sequence``
+        moves every tile regardless; a bound only zeroes compute past it), so
+        each lane's order is the same whole-buffer walk ``sequence`` emits.
+        """
+        M, K, N = self.M, self.K, self.N
+        tm, tk, tn = self.tile_m, self.tile_k, self.tile_n
+        n_cols, n_shim_a = self.num_aie_columns, self.n_shim_mem_a
+        n_row_tiles = M // self.mem_tile_m_c
+        n_col_tiles = N // self.mem_tile_n
+        if operand is self.A:
+            grid = TensorAccessPattern.full((M, K)).tile((self.mem_tile_m_a, tk))
+            out = []
+            for col in range(n_shim_a):
+                lane = grid[col::n_shim_a]
+                # The K-sweep of each A row tile is resent once per N column
+                # tile: a repeat axis inserted between the row-tile and K axes.
+                sizes = [lane.sizes[0], n_col_tiles, *lane.sizes[1:]]
+                strides = [lane.strides[0], 0, *lane.strides[1:]]
+                tap = TensorAccessPattern(lane.tensor_dims, lane.offset, sizes, strides)
+                out.append((col, tap, None, None))
+            return out
+        if operand is self.B:
+            out = []
+            for col in range(n_cols):
+                if self.b_col_maj:
+                    grid = TensorAccessPattern.full((N, K)).tile((tn, tk))
+                    lane = grid[col::n_cols]
+                else:
+                    grid = TensorAccessPattern.full((K, N)).tile((tk, tn))
+                    lane = grid[:, col::n_cols].permute((1, 0, 2, 3))
+                # B is refetched, unchanged, once per A row tile.
+                out.append((col, lane.repeat(n_row_tiles), None, None))
+            return out
+        if operand is self.C:
+            if self.c_col_maj:
+                # The M grid axis splits into (row-tile, piece of n_aie_rows),
+                # the piece moved outermost: each drain joins n_aie_rows row
+                # tiles across the compute rows.
+                grid = (
+                    TensorAccessPattern.full((N, M))
+                    .tile((tn, tm))
+                    .split(1, self.n_aie_rows)
+                    .permute((1, 0, 2, 3, 4))
+                )
+            else:
+                grid = TensorAccessPattern.full((M, N)).tile((self.mem_tile_m_c, tn))
+            return [(col, grid[:, col::n_cols], None, None) for col in range(n_cols)]
+        return None
 
     def ops(self) -> int:
         return 2 * self.M * self.K * self.N

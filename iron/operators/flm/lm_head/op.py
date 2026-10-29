@@ -7,7 +7,7 @@ import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import Buffer, In, Out, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernels import flm_gemma4
@@ -164,28 +164,33 @@ class LMHead(Operator):
                 y_out.release(1)
             x_in.release(1)
 
-        # The host addresses the DMAs by column. The build therefore pins
-        # the shim tiles. The placer places the other tiles.
+        # The host addresses the DMAs by column. The build therefore places
+        # x, w and y at the shim tiles. The placer places the other tiles.
         shim = [Tile(j, 0) for j in range(cols)]
-        of_x = ObjectFifo(x_ty)
-        self.x.bind(of_x.prod(tile=shim[0]))
+        (of_x,) = self.x.fifos(2, tiles=[shim[0]], obj_type=x_ty)
+        w_fifos = self.w.fifos(2, tiles=shim, obj_type=w_col_ty)
+        y_fifos = self.y.fifos(2, tiles=shim)
 
-        workers, ws, ys, softcaps = [], [], [], []
+        workers, softcaps = [], []
         for j in range(cols):
-            of_w = ObjectFifo(w_col_ty)
-            ws.append(of_w.prod(tile=shim[j]))
-            w_cores = of_w.cons().split(
-                [w_blk * i for i in range(rows)],
-                obj_types=[w_blk_ty] * rows,
-                names=[f"w{j}_{i}" for i in range(rows)],
+            w_cores = (
+                w_fifos[j]
+                .cons()
+                .split(
+                    [w_blk * i for i in range(rows)],
+                    obj_types=[w_blk_ty] * rows,
+                    names=[f"w{j}_{i}" for i in range(rows)],
+                )
             )
 
-            of_y = ObjectFifo(self.y.obj_type)
-            ys.append(of_y.cons(tile=shim[j]))
-            y_cores = of_y.prod().join(
-                [M_TILE * i for i in range(rows)],
-                obj_types=[y_blk_ty] * rows,
-                names=[f"y{j}_{i}" for i in range(rows)],
+            y_cores = (
+                y_fifos[j]
+                .prod()
+                .join(
+                    [M_TILE * i for i in range(rows)],
+                    obj_types=[y_blk_ty] * rows,
+                    names=[f"y{j}_{i}" for i in range(rows)],
+                )
             )
 
             for i in range(rows):
@@ -210,8 +215,6 @@ class LMHead(Operator):
                         ],
                     )
                 )
-        self.w.bind(ws)
-        self.y.bind(ys)
         return _Built(workers, softcaps=softcaps)
 
     def sequence(self, rt):
@@ -232,16 +235,16 @@ class LMHead(Operator):
         w_taps = TensorAccessPattern.full((self.w_words,)).partition(n)
         window = []
         for rnd in range(rounds):
-            tg = TaskGroup()
+            tg = rt.task_group()
             for col in range(self.cols):
                 i = rnd * self.cols + col
                 self.y.drain(y_taps[i], lane=col, wait=True, group=tg)
                 self.w.fill(w_taps[i], lane=col, group=tg)
             window.append(tg)
             if len(window) > DEPTH:
-                window.pop(0).finish()
+                rt.finish(window.pop(0))
         for tg in window:
-            tg.finish()
+            rt.finish(tg)
         x.free()
 
     def tolerance(self) -> Tolerance:

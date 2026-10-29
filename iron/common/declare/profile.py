@@ -15,22 +15,70 @@ from dataclasses import MISSING
 from enum import Enum
 from types import FunctionType
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Mapping, TypeVar
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence, TypeVar
+
+from ..image.step import FusionKind
 
 if TYPE_CHECKING:
     from .operator import Operator
 
 _Op = TypeVar("_Op", bound="Operator")
 
+# A fusion entry: ``kind`` steps, each ``(operator class, dims, tunables)``
+# in order, wired by ``edges`` (local indices into ``steps``, ``(producer,
+# output, consumer, input)``); dims are matched the same way a tunable
+# entry's are (``Profile.dims``, ``Profile.matches``). ``tunables``, where a
+# step gives them, are what it takes running inside this fusion, which may
+# differ from what the same shape takes unfused (``Profile.fusion_tunables``);
+# None where a step moves none from its own.
+_FusionEntry = tuple[
+    FusionKind,
+    tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...],
+    tuple[tuple[int, str, int, str], ...],
+]
+_FusionStep = (
+    tuple[type, Mapping[str, Any] | None]
+    | tuple[type, Mapping[str, Any] | None, Mapping[str, Any] | None]
+)
+
+
+def _normalized(value: Any) -> Any:
+    """``value``, a list (what JSON gives back a tuple-valued field as, a
+    ``finish=()``, say) turned into a tuple, recursively: a dim or a
+    tunable loaded from a file must still match the same value a live
+    operator holds.
+    """
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalized(v) for v in value)
+    return value
+
+
+def _with_enum_fields(cls: type, fields: dict[str, Any]) -> dict[str, Any]:
+    """``fields`` with an Enum-domain one, JSON's string, its member (should
+    `1`: a `Pinned` member's own value, not its ordinal).
+    """
+    for key, param in cls.declaration.params.items():
+        domain = param.domain
+        if key in fields and isinstance(domain, type) and issubclass(domain, Enum):
+            fields[key] = domain(fields[key])
+    return fields
+
 
 class Profile:
     """Tunable values by operator shape, as ``(cls, dims, tunables)`` entries. An
     open tunable comes from the most specific match (a dimension left out matches
     any, a subclass its base's); equally specific ones that disagree raise.
+
+    ``fusions`` names steps to run fused as one device configuration, each
+    matched the same way, by class and dims alone (a tunable moves what a
+    fusion itself takes, not which it is); a step may give the tunables it
+    takes running inside this fusion, where they differ from what the same
+    shape takes unfused.
     """
 
     def __init__(self) -> None:
         self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
+        self._fusions: list[_FusionEntry] = []
 
     def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
         """``cls(**kwargs)``, its open tunables filled from this profile's
@@ -70,6 +118,121 @@ class Profile:
         if not tunables:
             raise TypeError(f"an entry for {cls.__name__} must give a tunable")
         self._entries.append((cls, dims, tunables))
+
+    def add_fusion(
+        self,
+        kind: FusionKind,
+        steps: Sequence[_FusionStep],
+        edges: Sequence[tuple[int, str, int, str]],
+    ) -> None:
+        """Add a fusion entry: ``kind`` steps (each ``(operator class, dims)``
+        or ``(operator class, dims, tunables)``, in order) run as one device
+        configuration, wired by ``edges`` (local indices into ``steps``,
+        ``producer``'s drained ``output`` into ``consumer``'s filled
+        ``input``); each step matches by class and dims (a dim left out
+        matches any, a subclass its base's, as a tunable entry does).
+        ``tunables``, where a step gives them, are what it takes running
+        inside this fusion (``fusion_tunables``); a step giving none keeps
+        what it takes unfused.
+
+        Raises:
+            TypeError: Fewer than two steps are given, a dim is not a
+                non-tunable ``param()`` of its class, a name in ``tunables``
+                is not a ``tunable()`` of its class, an edge names a step
+                out of range or itself, or either side of an edge declares
+                no such operand.
+        """
+        if len(steps) < 2:
+            raise TypeError("a fusion entry needs at least two steps")
+        resolved: list[tuple[type, dict[str, Any], dict[str, Any] | None]] = []
+        for cls, dims, *rest in steps:
+            dims = dict(dims or {})
+            unknown = [
+                name
+                for name in dims
+                if name not in cls.declaration.params
+                or cls.declaration.params[name].tunable
+            ]
+            if unknown:
+                raise TypeError(f"{cls.__name__} declares no dim {unknown}")
+            tunables = rest[0] if rest else None
+            if tunables is not None:
+                unknown_t = [n for n in tunables if n not in cls.declaration.tunables]
+                if unknown_t:
+                    raise TypeError(f"{cls.__name__} has no tunable {unknown_t}")
+                tunables = dict(tunables)
+            resolved.append((cls, dims, tunables))
+        for producer, output, consumer, input in edges:
+            if not 0 <= producer < len(steps) or not 0 <= consumer < len(steps):
+                raise TypeError(
+                    f"edge names step {(producer, consumer)}, outside "
+                    f"0..{len(steps) - 1}"
+                )
+            if producer == consumer:
+                raise TypeError("an edge cannot feed a step from itself")
+            p_cls, c_cls = steps[producer][0], steps[consumer][0]
+            if not any(
+                m.name == output and m.drains for m in p_cls.declaration.operands
+            ):
+                raise TypeError(f"{p_cls.__name__} declares no output {output!r}")
+            if not any(m.name == input and m.fills for m in c_cls.declaration.operands):
+                raise TypeError(f"{c_cls.__name__} declares no input {input!r}")
+        self._fusions.append((kind, tuple(resolved), tuple(edges)))
+
+    def fused(
+        self,
+        kind: FusionKind,
+        steps: Sequence[Operator],
+        edges: Sequence[tuple[int, str, int, str]],
+    ) -> bool:
+        """Whether this profile fuses ``steps`` (resolved operators, in
+        order) of ``kind``, wired by ``edges`` (local indices): a fusion
+        entry of the same kind, length and wiring whose steps' classes and
+        dims (``Profile.dims``, ``Profile.matches``) match them, in order.
+        """
+        return self._matching(kind, steps, edges) is not None
+
+    def fusion_tunables(
+        self,
+        kind: FusionKind,
+        steps: Sequence[Operator],
+        edges: Sequence[tuple[int, str, int, str]],
+    ) -> list[dict[str, Any] | None] | None:
+        """The matching fusion entry's per-step tunables (``add_fusion``'s
+        ``tunables``), in order; None where no entry matches ``kind``,
+        ``steps`` and ``edges`` (``fused``). A step's own entry is None
+        where it keeps what it takes unfused.
+        """
+        entry = self._matching(kind, steps, edges)
+        return None if entry is None else [t for _, _, t in entry]
+
+    def _matching(
+        self,
+        kind: FusionKind,
+        steps: Sequence[Operator],
+        edges: Sequence[tuple[int, str, int, str]],
+    ) -> tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...] | None:
+        step_dims = [self.dims(type(s), vars(s)) for s in steps]
+        edges = tuple(edges)
+        return next(
+            (
+                entry_steps
+                for entry_kind, entry_steps, entry_edges in self._fusions
+                if entry_kind is kind
+                and len(entry_steps) == len(steps)
+                and entry_edges == edges
+                and all(
+                    isinstance(s, cls) and self.matches(matched, dims)
+                    for s, (cls, matched, _), dims in zip(steps, entry_steps, step_dims)
+                )
+            ),
+            None,
+        )
+
+    def fusions(self) -> list[_FusionEntry]:
+        """Each fusion entry as ``(kind, steps, edges)``, ``steps`` each
+        ``(operator class, dims, tunables)``, in the order added."""
+        return list(self._fusions)
 
     def tunables_for(self, cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
         """The tunables for the ``cls`` a call with ``given`` keywords makes,
@@ -114,8 +277,14 @@ class Profile:
 
     @staticmethod
     def matches(matched: Mapping[str, Any], dims: Mapping[str, Any]) -> bool:
-        """Whether an entry's ``matched`` dimensions cover ``dims``."""
-        return all(name in dims and dims[name] == v for name, v in matched.items())
+        """Whether an entry's ``matched`` dimensions cover ``dims``: equal,
+        a value JSON round-tripped to a list (``_normalized``) where a live
+        one is still the tuple it held, counted equal too.
+        """
+        return all(
+            name in dims and _normalized(dims[name]) == _normalized(v)
+            for name, v in matched.items()
+        )
 
     @classmethod
     def load(cls, path: str | Path) -> Profile:
@@ -124,7 +293,10 @@ class Profile:
 
         with open(path) as f:
             data = json.load(f)
-        if not isinstance(data, dict) or set(data) != {"entries"}:
+        if not isinstance(data, dict) or not {"entries"} <= set(data) <= {
+            "entries",
+            "fusions",
+        }:
             raise ValueError(f"{path}: a profile is {{'entries': [...]}}")
         profile = cls()
         for entry in data["entries"]:
@@ -133,24 +305,33 @@ class Profile:
             if name not in CATALOG:
                 raise ValueError(f"{path}: no operator {name!r} in iron.operators")
             op_cls = CATALOG[name]
-            # An Enum-domain tunable is JSON's string, its member's value
-            # (should 1: a Pinned member's own value, not its ordinal).
-            for key, param in op_cls.declaration.params.items():
-                domain = param.domain
-                if (
-                    key in fields
-                    and isinstance(domain, type)
-                    and issubclass(domain, Enum)
-                ):
-                    fields[key] = domain(fields[key])
-            profile.add(op_cls, **fields)
+            profile.add(op_cls, **_with_enum_fields(op_cls, fields))
+        for fusion in data.get("fusions", ()):
+            if set(fusion) != {"kind", "steps", "edges"}:
+                raise ValueError(
+                    f"{path}: a fusion is {{'kind': ..., 'steps': [...], "
+                    f"'edges': [...]}}"
+                )
+            steps = []
+            for entry in fusion["steps"]:
+                fields = dict(entry)
+                name = fields.pop("operator")
+                tunables = fields.pop("tunables", None)
+                if name not in CATALOG:
+                    raise ValueError(f"{path}: no operator {name!r} in iron.operators")
+                op_cls = CATALOG[name]
+                steps.append((op_cls, _with_enum_fields(op_cls, fields), tunables))
+            edges = [tuple(e) for e in fusion["edges"]]
+            profile.add_fusion(FusionKind(fusion["kind"]), steps, edges)
         return profile
 
     def save(self, path: str | Path) -> None:
-        """Write the profile as JSON, one entry to a line.
+        """Write the profile as JSON, one entry to a line, then its fusions
+        where there are any.
 
         Raises:
-            ValueError: An entry's operator is not in ``iron.operators.CATALOG``.
+            ValueError: An entry's or a fusion step's operator is not in
+                ``iron.operators.CATALOG``.
         """
         from ...operators import CATALOG  # the operators import this module
 
@@ -161,8 +342,34 @@ class Profile:
                 raise ValueError(f"{cls.__qualname__} is not in iron.operators.CATALOG")
             name = names[cls]
             lines.append(json.dumps({"operator": name, **dims, **tunables}))
+        fusion_lines = []
+        for kind, steps, edges in self._fusions:
+            for cls, _, _ in steps:
+                if cls not in names:
+                    raise ValueError(
+                        f"{cls.__qualname__} is not in iron.operators.CATALOG"
+                    )
+            fusion_lines.append(
+                json.dumps(
+                    {
+                        "kind": kind.value,
+                        "steps": [
+                            {
+                                "operator": names[cls],
+                                **dims,
+                                **({"tunables": tunables} if tunables else {}),
+                            }
+                            for cls, dims, tunables in steps
+                        ],
+                        "edges": [list(e) for e in edges],
+                    }
+                )
+            )
+        body = '{"entries": [\n  ' + ",\n  ".join(lines) + "\n]"
+        if fusion_lines:
+            body += ',\n"fusions": [\n  ' + ",\n  ".join(fusion_lines) + "\n]"
         with open(path, "w") as f:
-            f.write('{"entries": [\n  ' + ",\n  ".join(lines) + "\n]}\n")
+            f.write(body + "}\n")
 
     def __iter__(self) -> Iterator[tuple[type, dict[str, Any], dict[str, Any]]]:
         return iter(self._entries)

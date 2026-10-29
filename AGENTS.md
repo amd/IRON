@@ -223,6 +223,24 @@ values, weights, state and profiles are named. The rules:
   reference and raises at the first step outside its tolerance.
 - `graph.reference(...)` runs the body through each operator's
   `reference()` on the host.
+- A profile's `"fusions"` entries name steps to run fused: a kind, its
+  steps' classes and dims, the edges between them, and the tunables a step
+  takes only inside it. `iron.common.graph.fusion.candidates` lists what a
+  recording admits. `Graph.compile` (not with `check=True`) applies the
+  folds a profile names, then builds each other fusion as one device
+  configuration: in a full ELF, one call; per step, one xclbin dispatched
+  once. The kinds:
+  - `stream`: an edge feeds a consumer's input from a producer's output
+    on-chip, their lanes meeting directly (`Operand.feed`); one output may
+    feed several consumers.
+  - `staged`: as `stream`, an edge whose lanes differ in count, tile or
+    order joined or split through memtiles (`Staging`).
+  - `pack`: independent steps issued concurrently.
+  - `merge`: consecutive steps in one configuration, run back to back.
+  - `fold`: a consumer's kernel run in its producer's cores
+    (`Operator.fold`).
+- `python -m iron.lm.tune <application> --fusions-only` prices a graph's
+  candidates against its profile and writes the ones that gain.
 
 `iron/applications/llama/model.py` is the worked example;
 `iron/tests/common/test_graph.py` records it device-free and
@@ -261,15 +279,22 @@ Check the code before relying on a line here; it is the authority.
 
 ### Not built, or limited
 
-- An xclbin image is one dispatch per step; several steps in one xclbin
-  dispatch are refused.
+- An xclbin image is one dispatch per step, or per fusion; `check=True`,
+  which checks each step on its own dispatch, refuses fusions.
 - A full ELF call is one command however long it runs: a prompt chunk's
   attention grows with the context, and a tower's with its image. The
   driver's command timeout must cover the longest, as the README's
   [installation](README.md#installation-linux) sets it.
-- Tuning times each operator alone, not inside the image it runs in.
-  Kernel cycle counts skip only GEMM settings, only on npu2, and never with
-  a column-major B.
+- Tuning times each operator's settings alone. A fusion is priced against
+  its steps apart, at the widths its members co-reside at, and kept only
+  where its whole version still gains and stays bit-identical. Kernel cycle
+  counts skip only GEMM settings, only on npu2, and never with a
+  column-major B.
+- Fusion: a staged edge under a per-call bound needs both sides to move
+  the same whole rounds every call; a staged lane must visit each element
+  once, so `flm.ProjectionGEMM`'s A, re-read once per column block, is not
+  fed on-chip; fused members never share an array, so steps of one design
+  packed each take their own cores.
 
 ## Tests
 

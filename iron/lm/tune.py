@@ -162,14 +162,16 @@ def application_model(name: str) -> type[Model]:
 def main(name: str, model: Any, argv: Sequence[str] | None = None) -> None:
     """The command line that tunes ``name``'s profile: the calls ``model``
     plans (``tune_calls``, on the flags ``tune_arguments`` adds), into its
-    profiles directory.
+    profiles directory. ``tune_calls`` is called again to price fusions
+    under the tunables just written, so ``tune`` sees the profile fresh
+    each time.
     """
     parser = tune_cli.parser(f"Tune {name}'s profile")
     if model.profile is None:
         parser.error(f"{name} has no profiles directory to tune into")
     model.tune_arguments(parser)
     args = parse_args(parser, argv)
-    tune_cli.tune(args, model.tune_calls(parser, args), Path(model.profile))
+    tune_cli.tune(args, lambda: model.tune_calls(parser, args), Path(model.profile))
 
 
 def cli() -> None:

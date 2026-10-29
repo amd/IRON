@@ -24,7 +24,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.hostruntime.tensor_class import NpuTensor
 from aie.utils.compile.jit import operator as jit
 from aie.utils.compile.jit.operator import Unresolvable
-from aie.utils.compile.jit.params import PerCallMember
+from aie.utils.compile.jit.params import PerCallMember, Select
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
@@ -163,6 +163,15 @@ class Operator(jit.Operator, library=True):
         """
         raise NotImplementedError(f"{type(self).__name__}.build() is not implemented")
 
+    def fold(self, consumer: Self, at: int) -> Self | None:
+        """This operator with ``consumer`` finishing its output tile in its
+        own cores: ``consumer``'s kernel runs there before the tile leaves
+        L1, input ``at`` the tile and its others new streams of this
+        operator's. None where this operator does not finish others, or
+        not this one.
+        """
+        return None
+
     def tolerance(self) -> Tolerance | None:
         """What each output of the resolved operator is judged by; None where
         nothing bounds it, which check mode refuses.
@@ -197,7 +206,8 @@ class Operator(jit.Operator, library=True):
     ) -> int:
         """How many of ``dev``'s columns fit the class's streams in the shim DMA
         budget: a ``replicate`` stream costs once per channel, one with no
-        ``per=`` once, and a ``when=`` flag ``flags`` leaves out is its default.
+        ``per=`` once, and a ``when=`` flag, or an obj_shape ``Select``'s,
+        ``flags`` leaves out is its default.
 
         Raises:
             Unresolvable: Not even one column's streams fit.
@@ -206,7 +216,18 @@ class Operator(jit.Operator, library=True):
         streams = [
             m
             for m in cls.declaration.operands
-            if m.streamed and (m.when is None or flags.get(m.when.name, m.when.default))
+            if m.streamed
+            and (m.when is None or flags.get(m.when.name, m.when.default))
+            and not any(
+                isinstance(d, Select)
+                and (
+                    d.when_true
+                    if flags.get(d.flag.name, d.flag.default)
+                    else d.when_false
+                )
+                is None
+                for d in m.obj_dims
+            )
         ]
         cols = dev.cols
         for drains, budget in (
@@ -381,6 +402,21 @@ class Operator(jit.Operator, library=True):
     @classmethod
     def has_sequence_override(cls) -> bool:
         return cls.sequence is not Operator.sequence
+
+    def lane_transfers(
+        self, operand: Operand
+    ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]] | None:
+        """``operand``'s per-lane host access order, where ``sequence(rt)`` is
+        hand-written and the derived order does not hold: ``Operand.transfers()``'s
+        own ``(lane, tap, length_parameter, length_unit)`` tuples, one lane at
+        a time. None where this operator does not describe ``operand``
+        (``transfers()`` then falls back to the derived order, or raises).
+
+        A lane whose bound start is not static, or whose ``length_parameter``
+        does not reach ``Operand.transfers()``'s own round-robin axis, is
+        also not describable here; return None for it too.
+        """
+        return None
 
     def design_key(self):
         """Identity for sharing a build: equal keys generate byte-identical

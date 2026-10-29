@@ -14,7 +14,7 @@ from typing import ClassVar
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv, kernels
+from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import AnyComputeTile, AnyMemTile, AnyShimTile, Device, Tile
 from aie.iron.kernels.linalg import mm_stream_dims
@@ -575,13 +575,11 @@ class MHA(Operator):
         accurate_exp2 = self.dev.arch is AIEArch.AIE2p
 
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
-        k_ty = np.ndarray[(d, B_kv), np.dtype[dtype]]
         v_ty = np.ndarray[(B_kv, pv_width), np.dtype[dtype]]
         o_ty = np.ndarray[(B_q, pv_width), np.dtype[dtype]]
         qk_ty = np.ndarray[(B_q, B_kv), np.dtype[dtype]]
         s_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
         acc_ty = np.ndarray[(B_q, pv_width), np.dtype[np.float32]]
-        joined_ty = self.Q.obj_type  # (n_join * B_q, d)
 
         # The rest bind from mha.cc's object: declared apart, each would
         # redefine it. Never on bfp16 macs: bfp16 shares an exponent over 8
@@ -642,33 +640,67 @@ class MHA(Operator):
         # Split, Q is one block deep: the QK core's L1 holds one d=512 block.
         q_depth = 1 if split else of_depth
         layout = MHA.SPLIT_COLUMNS[self.width] if split else None
-        inQ, memQ, memO = [], [], []
+        # Q and O are placed at the split layout's shim tiles; fifos()
+        # returns the raw fifo, not an end, since each is split or joined
+        # further below.
+        inQ = self.Q.fifos(
+            of_depth,
+            tiles=[
+                Tile(layout.q[s], 0) if split else AnyShimTile
+                for s in range(self.q_shims)
+            ],
+        )
+        memO = self.O.fifos(
+            of_depth,
+            tiles=[
+                Tile(layout.o[s][h], 0) if split else AnyShimTile
+                for s in range(self.q_shims)
+                for h in range(pv_cores)
+            ],
+            to_stream=pv.C,
+        )
+        memQ = []
         outO = [[] for _ in range(pv_cores)]
         for shim in range(self.q_shims):
-            in_q = ObjectFifo(joined_ty)
-            inQ.append(in_q)
-            memQ += in_q.cons().split(
-                offsets=[B_q * d * i for i in range(n_join)],
-                obj_types=[q_ty] * n_join,
-                to_stream=None if qk.A is None else [qk.A] * n_join,
-                depths=[q_depth] * n_join,
-                tile=Tile(layout.q[shim], 1) if split else AnyMemTile,
+            memQ += (
+                inQ[shim]
+                .cons()
+                .split(
+                    offsets=[B_q * d * i for i in range(n_join)],
+                    obj_types=[q_ty] * n_join,
+                    to_stream=None if qk.A is None else [qk.A] * n_join,
+                    depths=[q_depth] * n_join,
+                    tile=Tile(layout.q[shim], 1) if split else AnyMemTile,
+                )
             )
             for h in range(pv_cores):
-                mem_o = ObjectFifo(self.O.obj_type, to_stream=pv.C)
-                memO.append(mem_o)
-                outO[h] += mem_o.prod().join(
-                    offsets=[B_q * pv_width * i for i in range(n_join)],
-                    obj_types=[o_ty] * n_join,
-                    # One O block: the PV core's L1 also holds its float32 O.
-                    depths=[1] * n_join,
-                    tile=Tile(layout.o[shim][h], 1) if split else AnyMemTile,
+                outO[h] += (
+                    memO[shim * pv_cores + h]
+                    .prod()
+                    .join(
+                        offsets=[B_q * pv_width * i for i in range(n_join)],
+                        obj_types=[o_ty] * n_join,
+                        # One O block: the PV core's L1 also holds its float32 O.
+                        depths=[1] * n_join,
+                        tile=Tile(layout.o[shim][h], 1) if split else AnyMemTile,
+                    )
                 )
 
         kv_lanes = self.kv_lanes
-        inK, inV, memK, memV = [], [], [], []
+        inK = self.K.fifos(
+            of_depth,
+            tiles=[Tile(layout.k_shim, 0) if split else AnyShimTile] * kv_lanes,
+        )
+        inV = self.V.fifos(
+            of_depth,
+            tiles=[
+                Tile(layout.v[h], 0) if split else AnyShimTile
+                for _ in range(kv_lanes)
+                for h in range(pv_cores)
+            ],
+        )
+        memK, memV = [], []
         for lane in range(kv_lanes):
-            inK.append(ObjectFifo(k_ty, depth=of_depth))
             memK.append(
                 inK[lane]
                 .cons()
@@ -679,9 +711,8 @@ class MHA(Operator):
                 )
             )
             for h in range(pv_cores):
-                inV.append(ObjectFifo(v_ty, depth=of_depth))
                 memV.append(
-                    inV[-1]
+                    inV[lane * pv_cores + h]
                     .cons()
                     .forward(
                         to_stream=pv.B,
@@ -979,30 +1010,6 @@ class MHA(Operator):
                     )
                 )
 
-        qs, outs, ks, vs = [], [], [], []
-        for s in range(self.q_shims):
-            qs.append(inQ[s].prod(tile=Tile(layout.q[s], 0) if split else AnyShimTile))
-            for h in range(pv_cores):
-                outs.append(
-                    memO[s * pv_cores + h].cons(
-                        tile=Tile(layout.o[s][h], 0) if split else AnyShimTile
-                    )
-                )
-        for lane in range(kv_lanes):
-            ks.append(
-                inK[lane].prod(tile=Tile(layout.k_shim, 0) if split else AnyShimTile)
-            )
-            for h in range(pv_cores):
-                vs.append(
-                    inV[lane * pv_cores + h].prod(
-                        tile=Tile(layout.v[h], 0) if split else AnyShimTile
-                    )
-                )
-        self.Q.bind(qs)
-        self.O.bind(outs)
-        self.K.bind(ks)
-        self.V.bind(vs)
-
         return Built(
             matmul_workers + softmax_workers + matmul_pv_workers,
             [*qk_rtps, *softmax_rtps, *(r for rtps in pv_rtps for r in rtps)],
@@ -1115,7 +1122,7 @@ class MHA(Operator):
 
             for step in range(steps):
                 owned = [p * steps + step for p in range(self.num_pipelines)]
-                tg = TaskGroup()
+                tg = rt.task_group()
                 for kv_head in owned:
                     self.Q.fill(packed_rows(self.Q, kv_head), lane=0, group=tg)
                 for p, kv_head in enumerate(owned):
@@ -1131,7 +1138,7 @@ class MHA(Operator):
                     self.O.drain(
                         packed_rows(self.O, kv_head), lane=0, group=tg, wait=True
                     )
-                tg.finish()
+                rt.finish(tg)
             return
 
         cores, pv_width = self.pv_cores, self.pv_width
@@ -1139,7 +1146,7 @@ class MHA(Operator):
         iterations = 1 << self.dev.get_dma_bd_iter_bits(0, 0)
         for kv_head in range(kv_heads):
             head0 = kv_head * group
-            tg = TaskGroup()
+            tg = rt.task_group()
             for shim in range(self.q_shims):
                 self.Q.fill(q_rows(self.Q, head0, shim), lane=shim, group=tg)
             # O drains before K and V fill: past the queue's depth a fill
@@ -1174,4 +1181,101 @@ class MHA(Operator):
                         length_parameter=kv_valid,
                         length_unit=B_kv * pv_width,
                     )
-            tg.finish()
+            rt.finish(tg)
+
+    def lane_transfers(self, operand):
+        """Q and O stream every row whatever ``kv_valid`` bounds (the rationale
+        in AGENTS.md: a bound limits compute, not their DMA), so their order
+        follows only the static shape; K and V move only the blocks a bound
+        reaches, so their order carries ``kv_blocks`` as a ``length_parameter``.
+        """
+        if operand not in (self.Q, self.O, self.K, self.V):
+            return None
+
+        def by_head(shape, interleaved):
+            tap = TensorAccessPattern.full(shape)
+            return tap.permute((1, 0, 2)) if interleaved else tap
+
+        def insert_repeat(tap, axis, count):
+            sizes = [*tap.sizes[:axis], count, *tap.sizes[axis:]]
+            strides = [*tap.strides[:axis], 0, *tap.strides[axis:]]
+            return TensorAccessPattern(tap.tensor_dims, tap.offset, sizes, strides)
+
+        rows = self.join_rows
+        if operand is self.Q or operand is self.O:
+            if self.packed:
+                group = self.num_heads // self.num_KV_heads
+                steps = self.num_KV_heads // self.num_pipelines
+                width = 1 << (group.bit_length() - 1)
+                # The num_heads axis, one KV group (its packed block) at a
+                # time, reindexed (step, pipeline) in the order the sequence
+                # visits them.
+                base = by_head(operand.shape, self.heads_interleaved)[:, 0]
+                by_step_p = base.split(0, group).split(0, steps).permute((1, 0, 2, 3))
+                if width == group:
+                    tap = insert_repeat(by_step_p, 2, self.B_q // group)
+                else:
+                    s = by_step_p.strides[2]
+                    both = TensorAccessPattern(
+                        by_step_p.tensor_dims,
+                        by_step_p.offset,
+                        [*by_step_p.sizes[:2], 2, width, by_step_p.sizes[3]],
+                        [
+                            *by_step_p.strides[:2],
+                            (group - width) * s,
+                            s,
+                            by_step_p.strides[3],
+                        ],
+                    )
+                    tap = insert_repeat(both, 2, self.B_q // (2 * width))
+                return [(0, tap, None, None)]
+            full = by_head(operand.shape, self.heads_interleaved).split(
+                1, self.q_shims * rows
+            )
+            if operand is self.O:
+                pv_width = self.pv_width
+                return [
+                    (
+                        shim * self.pv_cores + h,
+                        full[:, :, shim * rows : (shim + 1) * rows][
+                            ..., h * pv_width : (h + 1) * pv_width
+                        ],
+                        None,
+                        None,
+                    )
+                    for shim in range(self.q_shims)
+                    for h in range(self.pv_cores)
+                ]
+            return [
+                (shim, full[:, :, shim * rows : (shim + 1) * rows], None, None)
+                for shim in range(self.q_shims)
+            ]
+
+        # K or V.
+        kv_blocks = ceildiv(self.kv_tokens, self.B_kv)
+        length_parameter = self.kv_blocks if self.kv_blocks.per_call else None
+        full = by_head(operand.shape, self.kv_interleaved)[
+            :, : kv_blocks * self.B_kv
+        ].split(1, self.B_kv)
+        if self.packed:
+            steps = self.num_KV_heads // self.num_pipelines
+            length_unit = self.B_kv * operand.shape[-1]
+            return [
+                (p, full[p * steps : (p + 1) * steps], length_parameter, length_unit)
+                for p in range(self.num_pipelines)
+            ]
+        group = self.num_heads // self.num_KV_heads
+        blocks = ceildiv(self.seq_pad, rows * self.q_shims)
+        tap = insert_repeat(full, 1, group * blocks)
+        if operand is self.V:
+            pv_width = self.pv_width
+            return [
+                (
+                    h,
+                    tap[..., h * pv_width : (h + 1) * pv_width],
+                    length_parameter,
+                    self.B_kv * pv_width,
+                )
+                for h in range(self.pv_cores)
+            ]
+        return [(0, tap, length_parameter, self.B_kv * operand.shape[-1])]

@@ -15,7 +15,7 @@ import dataclasses
 import functools
 import inspect
 import logging
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,8 +41,11 @@ from ..image.callable import (
 from ..image.packaging import Kind, Plan, plan, require_device
 from ..image.link import FullELF, PerStep
 from ..image.sequence import Image
-from ..image.step import BufferRef
+from ..image.step import BufferRef, Fusion
 from .carried import CARRY, EmitSite, attach_emit, compose
+from .fold import apply_folds, chosen_folds
+from .fusion import fusions as graph_fusions
+from .fusion_tunables import apply as apply_fusion_tunables
 from .handle import Carry, Dense, Handle, State, Weight, is_operand
 from .record import HostStep, Recording, Recorder
 
@@ -548,12 +551,24 @@ class Graph:
             else contextlib.nullcontext()
         ):
             recording = self.record(**shapes)
+            profile = self._profile()
+            fused: tuple[Fusion, ...] = ()
+            if not check and profile is not None:
+                folds = chosen_folds(recording, profile)
+                if folds:
+                    recording = apply_folds(recording, folds)
+                fused = graph_fusions(recording, profile)
+                if fused:
+                    recording = apply_fusion_tunables(
+                        recording, profile, fused, require_device()
+                    )
             chosen = plan(
                 require_device(),
                 recording,
                 full_elf,
                 check,
                 step_words=_step_words(recording),
+                fusions=fused,
             )
             logger.info("%s", chosen.report(self.name))
             signature = self._signature(
@@ -566,6 +581,7 @@ class Graph:
                 check=check,
                 arena=self._arena,
                 emit=emit,
+                fusions=fused,
             )
             if sized is not None and len(version.parameters) != len(sized):
                 read = {p.name for p in version.parameters}
@@ -734,6 +750,7 @@ class CompiledGraph:
         check: bool = False,
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
+        fusions: Sequence[Fusion] = (),
     ):
         self.recording = recording
         self.plan = plan
@@ -752,7 +769,9 @@ class CompiledGraph:
             if arena is None
             else dict(arena=arena.plan, residents=recording.residents)
         )
-        self.sequence = Image(recording, packaging, **placement).compile()
+        self.sequence = Image(
+            recording, packaging, fusions=fusions, **placement
+        ).compile()
         self.image = self.sequence.image
         self.artifacts = self.sequence.artifacts
         if plan.full_elf:

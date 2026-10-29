@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Iterable, Mapping
-from typing import ClassVar, Self
+from typing import Any, ClassVar, Self
 
 import numpy as np
-from aie.iron import In, ObjectFifo, Out, Worker, ceildiv
+from aie.helpers.taplib import TensorAccessPattern
+from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
@@ -23,7 +24,14 @@ from aie.iron import kernels
 from aie.iron.kernels import eltwise
 from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance, Verdict
-from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.compile.jit.params import (
+    Select,
+    divisors,
+    param,
+    per_call,
+    tunable,
+    widths,
+)
 from ml_dtypes import bfloat16
 
 from .declare import Built, Operand, Operator, Rtp, Unresolvable
@@ -144,6 +152,62 @@ class KernelCall:
     operands: tuple[Operand | None, ...] = ()
 
 
+@dataclasses.dataclass(frozen=True)
+class FinishStep:
+    """A step folded into its producer's cores: ``consumer`` runs on the
+    producer's output tile, held at its input ``at``; ``dims`` are its
+    other constructor keywords (its shape and grid always match the tile).
+    ``binary`` is whether an input besides the tile streams in beside it,
+    the one a producer's free input channel may carry.
+    """
+
+    consumer: type[Elementwise]
+    dims: tuple[tuple[str, Any], ...]
+    at: int
+    binary: bool
+
+    def consumer_at(self, line: int, dev, elements: int | None = None) -> Elementwise:
+        """``consumer`` whose cores run a ``line``-element tile, the
+        producer's own (so its kernel matches), resolved for ``dev``: sized
+        to run on ``elements`` total, or one tile alone where None (a
+        build's own kernel, which never reads more than one). A one-core
+        grid, where ``consumer`` takes it as a constructor argument; some
+        (``SiLU``'s ``num_channels``) fix it instead.
+        """
+        params = self.consumer.declaration.params
+        one = {
+            n: 1
+            for n in ("num_aie_columns", "num_channels")
+            if n in params and params[n].init
+        }
+        op = self.consumer(
+            size=line if elements is None else elements,
+            tile_size=line,
+            **one,
+            **dict(self.dims),
+        )
+        return op.resolved(dev)
+
+
+def finish_reference(
+    finish: tuple[FinishStep, ...], y: np.ndarray, extra: tuple, dev, line: int
+) -> np.ndarray:
+    """``y``, a producer's own output, through its finish chain on the host:
+    each step's reference over the tile, taking the next of ``extra`` where
+    it reads another input, as ``Finish.apply`` runs on the device. ``line``
+    is the producer's own tile, which its finish's kernel matches.
+    """
+    given = iter(extra)
+    tile = np.ravel(y)
+    for step in finish:
+        consumer = step.consumer_at(line, dev, elements=tile.size)
+        args = [
+            tile if i == step.at else next(given) for i in range(len(consumer.inputs))
+        ]
+        tile = np.ravel(np.asarray(consumer.reference(*args)))
+    return tile.reshape(y.shape).astype(y.dtype, copy=False)
+
+
 class Elementwise(Operator):
     """The array for an elementwise kernel over lines of ``tile_size`` elements.
     Subclasses declare operands with the line as their tile, most split over every
@@ -162,8 +226,75 @@ class Elementwise(Operator):
         derive=lambda op: ceildiv(op.valid_elements, op.cores * op.tile_size),
     )
 
+    # A chain of steps folded into this one's cores, its output their tile,
+    # each but at most one unary: its one free input channel is the one
+    # binary step's, or, a channel-full producer, its first input's own.
+    finish: tuple[FinishStep, ...] = param(default=(), array=True)
+    # A plain default, not derived: shim_columns() reads it from the class
+    # alone (a Sweep's cases), before any instance exists to derive it from.
+    uses_extra: bool = param(default=False)
+    rides: bool = param(default=False, array=True)
+
     default_tile: ClassVar[int] = DEFAULT_TILE
     tile_cap: ClassVar[int] = 4096
+
+    def validate(self) -> None:
+        if sum(f.binary for f in self.finish) > 1:
+            raise ValueError(
+                f"{type(self).__name__}: only one of its finish steps takes "
+                f"another input; its one free input channel is already another's"
+            )
+
+    def _can_ride(self) -> bool:
+        """Whether this producer's first input could carry a finish's other
+        input beside its own: no per-call bound to chunk around, and exactly
+        one tile a lane, so a single extra transfer a lane suffices (the
+        general multi-tile case needs its own re-read chunking, not this).
+        """
+        if self.bound_extents or not self.inputs:
+            return False
+        try:
+            return self.lines == self.cores
+        except (TypeError, ZeroDivisionError):
+            return False
+
+    def fold(self, consumer: Operator, at: int) -> Self | None:
+        if not isinstance(consumer, Elementwise):
+            return None
+        others = [i for i in range(len(consumer.inputs)) if i != at]
+        if len(others) > 1:
+            return None
+        binary = bool(others)
+        used = sum(b.streamed for b in self.inputs)
+        rides = False
+        if binary and used + 1 > self.dev.core_dma_channels_in:
+            if self.rides or not self._can_ride():
+                return None
+            rides = True
+        dims = tuple(
+            sorted(
+                (n, vars(consumer)[n])
+                for n, p in type(consumer).declaration.params.items()
+                if p.init
+                and n
+                not in (
+                    "size",
+                    "tile_size",
+                    "num_aie_columns",
+                    "num_channels",
+                    "finish",
+                    "uses_extra",
+                    "rides",
+                )
+                and vars(consumer)[n] is not None
+            )
+        )
+        step = FinishStep(type(consumer), dims, at, binary)
+        return self.replace(
+            rides=self.rides or rides,
+            finish=self.finish + (step,),
+            uses_extra=self.uses_extra or binary,
+        )
 
     def resolve(self, dev) -> Self:
         (out,) = self.outputs
@@ -220,10 +351,24 @@ class Elementwise(Operator):
 
     def chain(self) -> tuple[KernelCall, ...]:
         """The kernel calls a core makes over one line, in order, which ``reference``
-        and ``judge`` follow; more than ``kernel()`` only with an array of its own.
+        and ``judge`` follow; more than ``kernel()`` with an array of its own, or a
+        step folded into this one's cores.
         """
         config = self.layout()
-        return (KernelCall(config.kernel(), config.scalars(), tuple(self.inputs)),)
+        own = tuple(b for b in self.inputs if b.name != "finish0")
+        calls = [KernelCall(config.kernel(), config.scalars(), own)]
+        for step in self.finish:
+            consumer = step.consumer_at(self.tile_size, self.dev)
+            operands = tuple(
+                None if i == step.at else self.finish0
+                for i in range(len(consumer.inputs))
+            )
+            calls.append(
+                KernelCall(
+                    consumer.layout().kernel(), consumer.layout().scalars(), operands
+                )
+            )
+        return tuple(calls)
 
     def over(self, elements: int, line: int) -> Self:
         """This operator over ``elements`` elements in lines of ``line``, on one core.
@@ -235,14 +380,35 @@ class Elementwise(Operator):
 
     def tolerance(self) -> Tolerance | None:
         kernel = self.layout().kernel()
-        if kernel.contract is None:
-            return None
-        return kernel.contract_for(resolve_target_arch(self.dev)).tolerance
+        own = (
+            None
+            if kernel.contract is None
+            else kernel.contract_for(resolve_target_arch(self.dev)).tolerance
+        )
+        if not self.finish:
+            return own
+        n_own = len(self.inputs) - (1 if self.uses_extra else 0)
+        (out,) = self.outputs
+        return Tolerance.bounded(
+            finish_bound(
+                self.finish,
+                own,
+                lambda *a: self._own_reference(a),
+                n_own,
+                out.host_dtype,
+                self.dev,
+                self.tile_size,
+            ),
+            note="its own kernel's contract, then each finish step's, in turn",
+        )
 
     def ops(self) -> int:
         contract = self.layout().kernel().contract
         per_call = None if contract is None else contract.ops_per_call
-        return super().ops() if per_call is None else per_call * self.lines
+        total = super().ops() if per_call is None else per_call * self.lines
+        for step in self.finish:
+            total += step.consumer_at(self.tile_size, self.dev).ops() * self.lines
+        return total
 
     def reference(self, *inputs):
         """The kernel contract's reference, line by line: what the cores compute. A
@@ -265,7 +431,20 @@ class Elementwise(Operator):
             ]
             y = np.asarray(self.over(whole, line).reference(*padded))
             return y.reshape(-1)[: out.elements].reshape(out.host_shape)
-        op, lines, scalars = self._kernel_arguments(inputs)
+        n_own = len(self.inputs) - (1 if self.uses_extra else 0)
+        own, extra = inputs[:n_own], inputs[n_own:]
+        y = self._own_reference(own)
+        return (
+            finish_reference(self.finish, y, extra, self.dev, line)
+            if self.finish
+            else y
+        )
+
+    def _own_reference(self, own: tuple) -> np.ndarray:
+        """This operator's own kernel's reference, line by line, its finish
+        chain left out.
+        """
+        op, lines, scalars = self._kernel_arguments(own)
         (out,) = op.outputs
         y = (
             op.layout()
@@ -395,7 +574,8 @@ class Elementwise(Operator):
 
     def build(self) -> Built:
         streams = [b for b in self.buffers if b.streamed]
-        ins = [b for b in streams if b.role is In]
+        finish_in = next((b for b in streams if b.name == "finish0"), None)
+        ins = [b for b in streams if b.role is In and b is not finish_in]
         outs = [b for b in streams if b.drains]
         n_in = len(ins)
         cores = self.cores
@@ -410,21 +590,14 @@ class Elementwise(Operator):
 
         segments = self.held_segments()
 
-        def fifos(stream, name):
-            # A held line, acquired once per call, is one fifo per lane that
-            # the cores of its lane share.
-            if stream.replicate:
-                return [
-                    ObjectFifo(stream.obj_type, depth=segments)
-                    for j in range(stream.lanes)
-                ]
-            depth = stream.l1_depth
-            return [ObjectFifo(stream.obj_type, depth=depth) for k in range(cores)]
-
-        of_ins = [fifos(s, f"in{i}") for i, s in enumerate(ins)]
-        of_outs = [
-            fifos(s, f"out{i}" if len(outs) > 1 else "out") for i, s in enumerate(outs)
+        # A held line, acquired once per call, is one fifo per lane, every
+        # core of the lane taking its own cons() (fifos()'s readers=); feed()
+        # refuses a held input, so a fed one is never replicate.
+        of_ins = [
+            s.fifos(segments, readers=cores // s.lanes) if s.replicate else s.fifos()
+            for s in ins
         ]
+        of_outs = [s.fifos() for s in outs]
         rtps = [Rtp([self.count]) for _ in range(cores)]
         n_fifos = n_in + len(outs)
         held = [s.replicate for s in ins] + [False] * len(outs)
@@ -456,19 +629,156 @@ class Elementwise(Operator):
             for j in kept:
                 fifos[j].release(segments)
 
+        if not self.finish:
+            workers = [
+                Worker(
+                    core_fn,
+                    [
+                        (
+                            of[k % len(of)][k // len(of)]
+                            if s.replicate
+                            else of[k % len(of)]
+                        )
+                        for s, of in zip(ins, of_ins)
+                    ]
+                    + [of[k] for of in of_outs]
+                    + [kernel, rtps[k]],
+                )
+                for k in range(cores)
+            ]
+            return Built(workers, rtps)
+
+        # The chain of steps folded into these cores: each kernel runs after
+        # the one before it, over the tile the previous call wrote; it
+        # ping-pongs between two scratch buffers until the last call writes
+        # the real output. At most one step's other input, if any, streams
+        # in on finish_in, or, this producer's cores already full, rides
+        # its first input's own stream, one more acquire of the same fifo.
+        of_finish = finish_in.fifos() if finish_in is not None else None
+        ride_index = (
+            next(i for i, b in enumerate(ins) if b is self.inputs[0])
+            if self.rides
+            else None
+        )
+        chain_meta = []
+        chain_kernels = []
+        for step in self.finish:
+            consumer = step.consumer_at(self.tile_size, self.dev)
+            c_kernel = consumer.layout().kernel()
+            c_positions, c_scalars = consumer.arguments(
+                c_kernel, consumer.scalars(), len(consumer.inputs), 1
+            )
+            c_order = {i: j for j, i in enumerate(c_positions)}
+            n_c_args = len(c_positions) + len(c_scalars)
+            chain_kernels.append(c_kernel)
+            chain_meta.append(
+                (c_positions, c_scalars, c_order, n_c_args, step.at, step.binary)
+            )
+        # A second scratch buffer, to ping-pong, only past one finish step:
+        # an L1 line this core otherwise never holds at once.
+        scratch_as = [Buffer(self.outputs[0].obj_type) for _ in range(cores)]
+        scratch_bs = (
+            [Buffer(self.outputs[0].obj_type) for _ in range(cores)]
+            if len(chain_meta) > 1
+            else None
+        )
+
+        def core_fn_chain(*args):
+            fifos = args[:n_fifos]
+            tail = args[n_fifos:]
+            finish_fifo = tail[0] if of_finish is not None else None
+            tail = tail[1:] if of_finish is not None else tail
+            kernel_fn = tail[0]
+            chain_fns = tail[1 : 1 + len(chain_meta)]
+            tail = tail[1 + len(chain_meta) :]
+            if scratch_bs is not None:
+                scratch_a, scratch_b, rtp = tail
+            else:
+                scratch_a, rtp = tail
+                scratch_b = None
+            n = rtp.read()[self.count]
+            kept = {j: f.acquire(segments) for j, f in enumerate(fifos) if held[j]}
+            for _ in range_(n):
+                for s in range(segments):
+                    elements = [
+                        (
+                            (kept[j] if segments == 1 else kept[j][s])
+                            if held[j]
+                            else f.acquire(1)
+                        )
+                        for j, f in enumerate(fifos)
+                    ]
+                    targets = list(elements)
+                    targets[n_in] = scratch_a
+                    kernel_fn(
+                        *(
+                            targets[order[i]] if i in order else scalars[i]
+                            for i in range(n_args)
+                        )
+                    )
+                    # Released here, not in the loop below: a finish step
+                    # rides this same fifo for its own transfer next, and
+                    # acquiring it again before releasing a's would be
+                    # cumulative on the same outstanding acquire, not a new
+                    # one.
+                    if ride_index is not None and not held[ride_index]:
+                        fifos[ride_index].release(1)
+                    tile = scratch_a
+                    for idx, (c_fn, meta) in enumerate(zip(chain_fns, chain_meta)):
+                        c_positions, c_scalars, c_order, n_c_args, at, binary = meta
+                        last = idx == len(chain_meta) - 1
+                        dst = (
+                            elements[n_in]
+                            if last
+                            else (scratch_b if tile is scratch_a else scratch_a)
+                        )
+                        extra = None
+                        if binary:
+                            extra = (
+                                fifos[ride_index].acquire(1)
+                                if ride_index is not None
+                                else finish_fifo.acquire(1)
+                            )
+                        c_inputs = [
+                            tile if i == at else extra
+                            for i in range(len(c_positions) - 1)
+                        ]
+                        c_elements = c_inputs + [dst]
+                        c_fn(
+                            *(
+                                c_elements[c_order[i]] if i in c_order else c_scalars[i]
+                                for i in range(n_c_args)
+                            )
+                        )
+                        if binary:
+                            if ride_index is not None:
+                                fifos[ride_index].release(1)
+                            else:
+                                finish_fifo.release(1)
+                        tile = dst
+                    for j, f in enumerate(fifos):
+                        if not held[j] and j != ride_index:
+                            f.release(1)
+            for j in kept:
+                fifos[j].release(segments)
+
         workers = [
             Worker(
-                core_fn,
-                [of[k % len(of)].cons() for of in of_ins]
-                + [of[k].prod() for of in of_outs]
-                + [kernel, rtps[k]],
+                core_fn_chain,
+                [
+                    (of[k % len(of)][k // len(of)] if s.replicate else of[k % len(of)])
+                    for s, of in zip(ins, of_ins)
+                ]
+                + [of[k] for of in of_outs]
+                + ([of_finish[k]] if of_finish is not None else [])
+                + [kernel]
+                + chain_kernels
+                + [scratch_as[k]]
+                + ([scratch_bs[k]] if scratch_bs is not None else [])
+                + [rtps[k]],
             )
             for k in range(cores)
         ]
-        for stream, of in zip(ins, of_ins):
-            stream.bind([f.prod() for f in of])
-        for stream, of in zip(outs, of_outs):
-            stream.bind([f.cons() for f in of])
         return Built(workers, rtps)
 
 
@@ -492,6 +802,13 @@ class UnaryElementwise(Elementwise):
         like=x,
         obj_shape=(Elementwise.tile_size,),
         per=CORES,
+    )
+    # A finish step's other input, on x's one free input channel.
+    finish0 = In(
+        size,
+        obj_shape=(Elementwise.tile_size,),
+        per=CORES,
+        when=Elementwise.uses_extra,
     )
 
     @property
@@ -529,12 +846,58 @@ class BinaryElementwise(Elementwise):
         obj_shape=(Elementwise.tile_size,),
         per=CORES,
     )
+    # A finish step's other input: a and b already hold both of a core's
+    # input channels, so it rides a's instead of streaming of its own.
+    finish0 = In(
+        size,
+        obj_shape=Select(Elementwise.rides, None, (Elementwise.tile_size,)),
+        per=CORES,
+        when=Elementwise.uses_extra,
+    )
 
     @property
     def valid_elements(self) -> int:
         return self.valid
 
     over = UnaryElementwise.over
+
+    def sequence(self, rt) -> None:
+        """The derived sequence, every input filled and every output
+        drained; riding, ``a``'s lane also carries a finish's other input,
+        its own transfer right after ``a``'s own.
+        """
+        tg = rt.task_group()
+        ridden = self.a if self.rides else None
+        riding_finish0 = self.finish0 if self.rides and self.uses_extra else None
+        for buf in self.inputs:
+            if buf is riding_finish0:
+                # Not streamed while riding: no transfers() of its own, it
+                # rides ridden's instead, below.
+                continue
+            for lane, tap, word, unit in buf.transfers():
+                buf.fill(
+                    tap, lane=lane, group=tg, length_parameter=word, length_unit=unit
+                )
+            if buf is ridden and riding_finish0 is not None:
+                # finish0 isn't streamed while riding, so its own .lanes/
+                # .batch_axes aren't available; it shares ridden's shape and
+                # placement, so partition by those instead.
+                parts = TensorAccessPattern.full(riding_finish0.shape).partition(
+                    ridden.lanes, ridden.batch_axes
+                )
+                for lane, part in enumerate(parts):
+                    ridden.fill(part, lane=lane, source=riding_finish0, group=tg)
+        for buf in self.outputs:
+            for lane, tap, word, unit in buf.transfers():
+                buf.drain(
+                    tap,
+                    lane=lane,
+                    group=tg,
+                    wait=True,
+                    length_parameter=word,
+                    length_unit=unit,
+                )
+        rt.finish(tg)
 
 
 class Rowwise(Elementwise):
@@ -596,6 +959,60 @@ def _admitted(tolerance: Tolerance, ref: np.ndarray) -> np.ndarray:
         rtol = tolerance.rtol or 0.0
         return np.maximum(tolerance.atol or 0.0, 2 * rtol * ref / (1 - rtol))
     raise ValueError(f"no absolute bound for a {tolerance.kind} tolerance")
+
+
+def finish_bound(
+    finish: tuple[FinishStep, ...],
+    own: Tolerance | None,
+    own_reference,
+    n_own: int,
+    dtype,
+    dev,
+    line: int,
+) -> Any:
+    """A bound function (``Tolerance.bounded``) over ``n_own`` own inputs
+    then each finish step's other input in turn: ``own``'s tolerance around
+    ``own_reference``'s exact result, then each step's own, propagated as
+    ``WeightedRowwise.tolerance`` composes one weight multiply, generalized
+    to any number of elementwise steps. ``line`` is the producer's own tile,
+    which its finish's kernel matches.
+    """
+    tiny = float(np.finfo(np.float32).tiny)
+
+    def bound(*inputs):
+        own_inputs, extra = list(inputs[:n_own]), list(inputs[n_own:])
+        x = np.asarray(own_reference(*own_inputs), np.float64)
+        if own is None:
+            lo = hi = x
+        else:
+            delta = _admitted(own, x)
+            lo, hi = x - delta, x + delta
+        pos = 0
+        for step in finish:
+            consumer = step.consumer_at(line, dev, elements=x.size)
+            gate = consumer.tolerance() or Tolerance.default_for(dtype)
+            k = len(consumer.inputs) - 1
+            others = extra[pos : pos + k]
+            pos += k
+
+            def apply(v, others=others):
+                args = [
+                    v if i == step.at else others[i - (i > step.at)]
+                    for i in range(len(consumer.inputs))
+                ]
+                return np.asarray(consumer.reference(*args), np.float64)
+
+            exact, lo_y, hi_y = apply(x), apply(lo), apply(hi)
+            lo, hi = np.minimum(lo_y, hi_y), np.maximum(lo_y, hi_y)
+            half = sum(
+                np.exp2(np.floor(np.log2(np.maximum(np.abs(v), tiny))) - 8)
+                for v in (exact, hi)
+            )
+            spread = _admitted(gate, exact)
+            x, lo, hi = exact, lo - spread - half, hi + spread + half
+        return np.maximum(hi - x, x - lo).reshape(x.shape)
+
+    return bound
 
 
 class WeightedRowwise(Rowwise):
@@ -696,23 +1113,20 @@ class WeightedRowwise(Rowwise):
         if not self.weighted:
             return super().build()
         tile_ty = self.x.obj_type
-        weights_ty = self.weight.obj_type
         cols, chans = self.num_aie_columns, self.num_channels
         depth = self.x.l1_depth
         kernel = self.kernel()
         positions, scalars = self.arguments(kernel, self.scalars(), 1, 1)
         n_args = len(positions) + len(scalars)
         eltwise_mul = eltwise.mul_sized(self.tile_size)
-        of_ins = [
-            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
-        ]
-        of_ws = [ObjectFifo(weights_ty, depth=depth) for j in range(chans)]
+        x_ends = self.x.fifos(depth)
+        # One fifo per channel, each column of it taking its own cons(): a
+        # weight row is shared by every column of its channel.
+        w_ends = self.weight.fifos(depth, readers=cols)
         of_mid = [
             ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
         ]
-        of_outs = [
-            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
-        ]
+        y_ends = self.y.fifos(depth)
         n_cores = cols * chans
         rtps = [Rtp([self.count]) for _ in range(2 * n_cores)]
 
@@ -747,7 +1161,7 @@ class WeightedRowwise(Rowwise):
                     Worker(
                         core_kernel,
                         [
-                            of_ins[k].cons(),
+                            x_ends[k],
                             of_mid[k].prod(),
                             kernel,
                             rtps[k],
@@ -762,16 +1176,13 @@ class WeightedRowwise(Rowwise):
                         core_mul,
                         [
                             of_mid[k].cons(),
-                            of_ws[j].cons(),
-                            of_outs[k].prod(),
+                            w_ends[j][i],
+                            y_ends[k],
                             eltwise_mul,
                             rtps[n_cores + k],
                         ],
                     )
                 )
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
-        self.weight.bind([f.prod() for f in of_ws])
         return Built(workers, rtps)
 
 

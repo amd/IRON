@@ -6,7 +6,7 @@ import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
-from aie.iron import In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import In, Out, TaskGroup, Worker
 from aie.iron.kernels import quant
 from aie.utils import bfp
 from aie.utils.verify import Tolerance
@@ -228,7 +228,6 @@ class DequantBFP(Operator):
 
     def build(self) -> Built:
         cols = self.cols
-        qw_col_ty, out_half_ty = self.qw.obj_type, self.out.obj_type
         qw_blk_ty = np.ndarray[(BLOCK_BYTES,), np.dtype[np.uint8]]
         out_blk_ty = np.ndarray[(CORE_BLOCKS,), np.dtype[v8bfp16ebs8]]
 
@@ -245,20 +244,18 @@ class DequantBFP(Operator):
             qw_in.release(1)
             out_of.release(1)
 
-        workers, qws, outs = [], [], []
+        qws = self.qw.fifos(self.qw.depth)
+        outs = self.out.fifos(self.out.depth)
+        workers = []
         for c in range(cols):
-            of_qw = ObjectFifo(qw_col_ty, depth=2)
-            qws.append(of_qw.prod())
-            qw_cores = of_qw.cons().split(
+            qw_cores = qws[c].split(
                 [BLOCK_BYTES * r for r in range(ROWS)],
                 obj_types=[qw_blk_ty] * ROWS,
             )
 
             out_cores = []
             for h in range(HALVES):
-                of_out = ObjectFifo(out_half_ty, depth=2)
-                outs.append(of_out.cons())
-                out_cores += of_out.prod().join(
+                out_cores += outs[c * HALVES + h].join(
                     CORE_JOIN_OFFSETS,
                     obj_types=[out_blk_ty] * (ROWS // HALVES),
                 )
@@ -271,8 +268,6 @@ class DequantBFP(Operator):
                 )
                 for r in range(ROWS)
             ]
-        self.qw.bind(qws)
-        self.out.bind(outs)
         return Built(workers)
 
     @property
@@ -311,7 +306,7 @@ class DequantBFP(Operator):
         for cb0 in range(0, n_blocks, cols):
             columns = [(c, cb0 + c) for c in range(cols) if cb0 + c < n_blocks]
 
-            tg_fill = TaskGroup()
+            tg_fill = rt.task_group()
             for c, cb in columns:
                 self.qw.fill(qw[column_blocks[cb]], lane=c, group=tg_fill)
 
@@ -328,7 +323,7 @@ class DequantBFP(Operator):
             # The fill is not awaited. A core reads it before it writes the
             # output a drain takes, so a completed drain implies a completed
             # fill.
-            tg_fill.finish()
+            rt.finish(tg_fill)
 
     @property
     def _reference_shape(self) -> tuple[int, int]:

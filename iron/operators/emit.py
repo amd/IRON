@@ -10,7 +10,7 @@ values, then those it computed; unclamped/unmasked rows use ``UNCLAMPED``/-1.
 
 import numpy as np
 from aie.extras.dialects import arith
-from aie.iron import In, ObjectFifo, Out, Worker
+from aie.iron import In, Out, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param
@@ -88,14 +88,10 @@ class Emit(Operator):
 
     def build(self) -> Built:
         slots, carried = self.slots, self.carried
-        of_program = ObjectFifo(self.program.obj_type, depth=self.program.depth)
-        of_planes = ObjectFifo(self.planes.obj_type, depth=self.planes.depth)
-        of_image = ObjectFifo(self.image.obj_type, depth=self.image.depth)
-        of_state = ObjectFifo(self.state.obj_type, depth=self.state.depth)
-        self.program.bind(of_program.prod())
-        self.planes.bind(of_planes.prod())
-        self.image.bind(of_image.cons())
-        self.state.bind(of_state.cons())
+        (program_end,) = self.program.fifos(self.program.depth)
+        (planes_end,) = self.planes.fifos(self.planes.depth)
+        (image_end,) = self.image.fifos(self.image.depth)
+        (state_end,) = self.state.fifos(self.state.depth)
 
         def core_body(of_p, of_v, of_i, of_s):
             program = of_p.acquire(1)
@@ -129,17 +125,7 @@ class Emit(Operator):
             of_s.release(1)
 
         return Built(
-            [
-                Worker(
-                    core_body,
-                    [
-                        of_program.cons(),
-                        of_planes.cons(),
-                        of_image.prod(),
-                        of_state.prod(),
-                    ],
-                )
-            ]
+            [Worker(core_body, [program_end, planes_end, image_end, state_end])]
         )
 
     def ops(self) -> int:

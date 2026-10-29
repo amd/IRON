@@ -514,9 +514,8 @@ class ProjectionGEMM(Operator):
         ct_b_ty = np.ndarray[(CT_K * N_TILE // B_GROUP,), b_elem_ty]
         ct_out_ty = np.ndarray[(CT_OUT_LEN,), bf16_ty]
         ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
-        # L2 (per memtile): the declared stream tiles.
+        # L2 (per memtile): the declared stream tile.
         mt_a_ty = self.A.obj_type
-        mt_out_ty = self.C.obj_type
 
         # Every field that changes the object reaches the factory, so its
         # object name keys the build. The activation is absent: the cores
@@ -568,18 +567,25 @@ class ProjectionGEMM(Operator):
         ]
 
         # C: a join per column and half of the core rows; each core drops its
-        # slice at its own offset in its half's memtile buffer.
+        # slice at its own offset in its half's memtile buffer. Placed at
+        # column c's shim, as the shared image has them: where the placer
+        # chose, a shape whose transfers differ would move them.
         HALF = ROWS // JOINS
-        c_l2l3_fifos, c_prod = [], {}
+        c_fifos = self.C.fifos(
+            C_DEPTH, tiles=[Tile(c, 0) for c in range(COLS) for _ in range(JOINS)]
+        )
+        c_prod = {}
         for c in range(COLS):
             for h in range(JOINS):
-                of_c = ObjectFifo(mt_out_ty, depth=C_DEPTH)
-                c_l2l3_fifos.append((c, of_c))
-                sub = of_c.prod().join(
-                    [C_SLICE_LEN * p for p in range(HALF)],
-                    tile=mt_tiles[c],
-                    obj_types=[ct_out_ty] * HALF,
-                    from_stream=[gather_dims] * HALF,
+                sub = (
+                    c_fifos[c * JOINS + h]
+                    .prod()
+                    .join(
+                        [C_SLICE_LEN * p for p in range(HALF)],
+                        tile=mt_tiles[c],
+                        obj_types=[ct_out_ty] * HALF,
+                        from_stream=[gather_dims] * HALF,
+                    )
                 )
                 for p in range(HALF):
                     c_prod[(h * HALF + p, c)] = sub[p]
@@ -841,9 +847,6 @@ class ProjectionGEMM(Operator):
 
         self.A.bind([f.prod() for f in a_l3l2_fifos])
         self.B.bind(b_shim_flows)
-        # C's drains on column c's shim, as the shared image has them: where
-        # the placer chose, a shape whose transfers differ would move them.
-        self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in c_l2l3_fifos])
         return _Built(workers + unrouted, rtps, b_pool=b_pool)
 
     @property
@@ -1218,6 +1221,68 @@ class ProjectionGEMM(Operator):
         # Back to back: a slab returns only once its C has all drained.
         for slab in slabs:
             emit_slab(slab)
+
+    def _single_slab(self) -> bool:
+        """Whether ``sequence`` arms M in one slab: the same accept test
+        ``cut()`` runs for ``n_slabs=1``, without a build to read ``rt.built``
+        from (the hardware limits ``_BPool`` carries are the device's own).
+        """
+        tm = get_target_model(self.dev.resolve())
+        queue, passes_cap = tm.get_dma_task_queue_depth(), tm.get_max_repeat_count() + 1
+        k_iters, n_units, b_slots = self._k_iters, self._n_units, self._b_slots
+        if self._b_resident:
+            passes = (1, n_units)
+        elif k_iters > b_slots:
+            divisor = max(
+                s for s in range(1, b_slots + 1) if (n_units * k_iters) % s == 0
+            )
+            passes = (n_units * k_iters // divisor,) * 2
+        else:
+            return False
+        return all(p <= queue * passes_cap for p in passes)
+
+    def lane_transfers(self, operand):
+        """A and C's order, one slab, ``m_chunk=1`` and unbounded: past that
+        a second slab, or a row bound's dynamic start (the second half of the
+        core rows, ``a_half``/``c_half``) and its ``n_units`` axis
+        truncation, are not one of ``Operand.transfers()``'s tuples.
+        """
+        if operand is not self.A and operand is not self.C:
+            return None
+        if self.m_chunk > 1 or "valid" in self.bound_extents:
+            return None
+        COLS, ROWS, JOINS = self.cols, self.rows, self.joins
+        N_TILE, K_TILE = self.tile_n, self.k_tile
+        k_iters, n_units = self._k_iters, self._n_units
+        HALF = ROWS // JOINS
+        N = self.N
+        if N // N_TILE < COLS or not self._single_slab():
+            return None
+        n_full = N // (N_TILE * COLS)
+        rem_blocks = (N % (N_TILE * COLS)) // N_TILE
+        n_blocks = n_full + (1 if rem_blocks else 0)
+        if operand is self.A:
+            A = TensorAccessPattern.full(
+                (JOINS, n_units, 1, HALF, M_TILE, k_iters, K_TILE)
+            )
+            out = []
+            for r in range(ROWS):
+                half, p = divmod(r, HALF)
+                # B's column-block sweep resends A's K-sweep, unchanged, once
+                # a column-block (``n_blocks`` of them).
+                rows = A[half, :, :, p].permute((0, 3, 1, 2, 4))
+                out.append((r, rows.repeat(n_blocks), None, None))
+            return out
+        C = TensorAccessPattern.full(
+            (JOINS, n_units, HALF * M_TILE, N // N_TILE, N_TILE)
+        )
+        # The N-tile axis is outermost: C is resent column-block by
+        # column-block, each one's whole row range before the next.
+        return [
+            (c * JOINS + half, C[half, :, :, c::COLS].permute((2, 0, 1, 3)), None, None)
+            for c in range(COLS)
+            for half in range(JOINS)
+        ]
 
     @property
     def _reference_shape(self) -> tuple[int, int, int]:

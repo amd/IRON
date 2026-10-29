@@ -29,6 +29,7 @@ from aie.iron import (
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from ..declare import Operator
+from ..declare.operand import Operand
 from .runtime import MergedRuntime, OperatorRuntime
 
 
@@ -144,11 +145,14 @@ class BuiltArray:
             with others that always hold the same number.
         dispatch: On an xclbin, each per-call value's dispatch-time scalar,
             by device symbol.
+        fed: Input name -> the built output it is fed on-chip (``Operand.feed``).
+        staged: A fed input whose lanes do not meet its source's is staged
+            through memtiles rather than refused.
 
     Raises:
         ValueError: A full ELF is asked to carry a ``DispatchTime`` value, an
-            xclbin is given no scalar for a value, or a trace would reuse
-            an output a full ELF consolidates.
+            xclbin is given no scalar for a value, a trace would reuse an
+            output a full ELF consolidates, or ``Operand.feed`` refuses.
     """
 
     def __init__(
@@ -156,9 +160,12 @@ class BuiltArray:
         design: OperatorDesign,
         words: Mapping[str, str] | None = None,
         dispatch: Mapping[str, object] | None = None,
+        fed: Mapping[str, Operand] | None = None,
+        staged: bool = False,
     ):
         words = words or {}
         dispatch = dispatch or {}
+        fed = fed or {}
         self._words, self._dispatch = words, dispatch
         op = design.op.copy()  # a build binds streams
         # Before build(), which may hand a core-read value to a worker.
@@ -181,9 +188,16 @@ class BuiltArray:
             else:
                 value.param = dispatch[value.symbol]
         view = op.layout()
+        # feed() reads host shapes, which the layout view does not carry.
+        operands = {b.name: b for b in op.buffers}
+        for name, source in fed.items():
+            operands[name].feed(source, staged=staged)
+        for mine, built in zip(op.buffers, view.buffers):
+            built.fed_from, built.staged = mine.fed_from, mine.staged
         self.built = view.build()
         for mine, built in zip(op.buffers, view.buffers):
             mine.lane_handles = built.lane_handles
+            mine.lane_fifos = built.lane_fifos
         self.design = design
         self.op = op
         self.workers = [w for w in self.built.objects if isinstance(w, Worker)]
@@ -211,7 +225,11 @@ class BuiltArray:
         """The scratchpad words this design's cores read: beside its ``array_key``,
         all its array depends on. Read off the design built anew and resolved alone,
         since a core reads a word through the parameter its function closes over.
+        An xclbin has no scratchpad: its values are dispatch-time scalars, which
+        resolving it alone would bind, leaving none for its own sequence.
         """
+        if not self.design.full_elf:
+            return frozenset()
         alone = BuiltArray(self.design, self._words, self._dispatch)
         module = alone.program().resolve_program()
         words: set[str] = set()
@@ -271,17 +289,31 @@ def identities(arrays: Mapping[str, BuiltArray]) -> dict[str, Hashable]:
 
 
 def configuration(
-    name: str, arrays: Mapping[str, BuiltArray], steps: Sequence[str] = ()
+    name: str,
+    arrays: Mapping[str, BuiltArray],
+    steps: Sequence[str] = (),
+    fuse: bool = False,
 ) -> DeviceConfiguration:
     """``arrays`` as one device configuration ``name``: one array per identity, and
     each entry's sequence over it, ``sequence`` if it is alone, else named for its
-    key. Given ``steps`` (keys of ``arrays``), one ``sequence`` runs theirs in order.
+    key. Given ``steps`` (keys of ``arrays``), one ``sequence`` runs theirs in
+    order, back to back (``MergedRuntime.merge``), or, ``fuse``, in one task group
+    (``MergedRuntime.fuse``), each step on an array of its own.
 
     Raises:
-        ValueError: The arrays are built for different devices, or traced
-            with different trace sizes.
+        ValueError: The arrays are built for different devices, traced with
+            different trace sizes, or ``fuse`` is given no ``steps``.
     """
-    of = identities(arrays)
+    if fuse and not steps:
+        raise ValueError("fuse needs steps to fuse")
+    # Fused steps issue at once, so each keeps its own array: on one, a later
+    # step's preamble rewrites the words and re-sets the barrier the core has
+    # not yet read for an earlier one, losing a pass (the core then stalls).
+    of = (
+        {key: id(array) for key, array in arrays.items()}
+        if fuse
+        else identities(arrays)
+    )
     owners: dict[Hashable, BuiltArray] = {}
     for key, array in arrays.items():
         owners.setdefault(of[key], array)
@@ -295,12 +327,9 @@ def configuration(
             f"{name}: its traced arrays ask for trace sizes {sorted(sizes)}; one "
             f"configuration has one trace buffer, so give them one size"
         )
+    merge = MergedRuntime.fuse if fuse else MergedRuntime.merge
     runtimes = (
-        [
-            MergedRuntime.merge(
-                [owners[of[k]].runtime(arrays[k], None) for k in steps], "sequence"
-            )
-        ]
+        [merge([owners[of[k]].runtime(arrays[k], None) for k in steps], "sequence")]
         if steps
         else [
             owners[of[key]].runtime(array, "sequence" if len(arrays) == 1 else key)

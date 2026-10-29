@@ -28,7 +28,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
 from ..design import BuiltArray, OperatorDesign, configuration, identities
-from .step import BufferRef
+from .step import BufferRef, Edge, Fusion, FusionKind
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,31 @@ class Packing:
         return f"pack{len(group)}_{digest}"
 
 
+def independent(seq, fusion: Fusion) -> None:
+    """Raise ``CoResidenceError`` where ``fusion`` (a pack) joins two steps
+    of ``seq`` that are not independent: one drains a buffer root another
+    fills or drains too, a hazard were they issued concurrently.
+    """
+    reads: dict[int, set[str]] = {}
+    writes: dict[int, set[str]] = {}
+    for j in fusion.steps:
+        step = seq.steps[j]
+        r, w = set(), set()
+        for ref, b in zip(step.buffers, step.op.buffers):
+            if b.fills:
+                r.add(ref.root)
+            if b.drains:
+                w.add(ref.root)
+        reads[j], writes[j] = r, w
+    for a, i in enumerate(fusion.steps):
+        for k in fusion.steps[a + 1 :]:
+            if writes[i] & (reads[k] | writes[k]) or writes[k] & reads[i]:
+                raise CoResidenceError(
+                    f"pack {fusion.steps}: step {i} and step {k} are not "
+                    f"independent, so issuing them concurrently is a hazard"
+                )
+
+
 def unvalued(designs: Mapping[str, OperatorDesign]) -> None:
     """Raise ``CoResidenceError`` where one of ``designs`` is built for an xclbin
     and takes a per-call value, a dispatch parameter a pack's sequence cannot carry.
@@ -148,11 +173,52 @@ def places(module: ir.Module) -> str | None:
     return "\n".join(diagnostics) if diagnostics else None
 
 
+def fused_configuration(
+    name: str,
+    fusion: Fusion,
+    designs: Sequence[OperatorDesign],
+    words: Mapping[str, str] | None = None,
+    dispatch: Sequence[Mapping[str, object]] | None = None,
+) -> tuple[DeviceConfiguration, list[BuiltArray]]:
+    """``fusion``'s members, ``designs`` in its step order, as one device
+    configuration ``name`` and their arrays: each array fed where an edge
+    feeds it (staged through memtiles in a staged fusion), and one sequence
+    running every member, in one task group, or back to back in a merge.
+    On an xclbin, ``dispatch`` is each member's dispatch-time scalars.
+    """
+    incoming: dict[int, list[Edge]] = {}
+    for e in fusion.edges:
+        incoming.setdefault(e.consumer, []).append(e)
+    arrays: dict[int, BuiltArray] = {}
+    scalars = [None] * len(designs) if dispatch is None else dispatch
+    for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
+        fed = {}
+        for e in incoming.get(j, ()):
+            (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
+            fed[e.input] = source
+        arrays[j] = BuiltArray(
+            design, words, own, fed=fed, staged=fusion.kind is FusionKind.STAGED
+        )
+    configured = configuration(
+        name,
+        {str(j): arrays[j] for j in fusion.steps},
+        steps=[str(j) for j in fusion.steps],
+        # A merge's steps have no edge to keep alive across a shared task
+        # group; run them back to back, each fully awaited.
+        fuse=fusion.kind is not FusionKind.MERGE,
+    )
+    return configured, [arrays[j] for j in fusion.steps]
+
+
 def fits(
-    designs: Mapping[str, OperatorDesign], words: Mapping[str, str] | None = None
+    designs: Mapping[str, OperatorDesign],
+    words: Mapping[str, str] | None = None,
+    fusion: Fusion | None = None,
 ) -> str | None:
     """``None`` if ``designs``, by device name, place and allocate, else the
     diagnostic; ``words`` maps a design symbol to the scratchpad word it shares.
+    Given ``fusion``, ``designs`` are its members in step order, built fused
+    (``fused_configuration``).
     """
     exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
     try:
@@ -161,8 +227,13 @@ def fits(
             (design,) = designs.values()
             module = ir.Module.parse(str(design.build()), ir.Context())
         else:
-            arrays = {n: BuiltArray(d, words) for n, d in designs.items()}
-            configured = configuration(next(iter(arrays)), arrays)
+            if fusion is None:
+                arrays = {n: BuiltArray(d, words) for n, d in designs.items()}
+                configured = configuration(next(iter(arrays)), arrays)
+            else:
+                configured, _ = fused_configuration(
+                    "fused", fusion, list(designs.values()), words
+                )
             module = Program.compose(
                 [configured], entry=configured.runtimes[0]
             ).resolve_program()
@@ -181,27 +252,90 @@ class Composition:
         designs, design_of = seq.unique_designs()
         # unique_designs() made one design per identity, so one name is a collision.
         own = [OperatorDesign(op) for op in designs]
-        self.designs: dict[str, OperatorDesign] = {}
+        named: dict[str, OperatorDesign] = {}
         for design in own:
-            existing = self.designs.setdefault(design.name, design)
+            existing = named.setdefault(design.name, design)
             if existing is not design:
                 raise ValueError(
                     f"{existing.op.name} and {design.op.name} are different designs "
                     f"whose device names collide, {design.name}; a tunable given "
                     f"to either one (a tile size, a column count) separates them"
                 )
-        self.steps = [(own[design_of[id(s.op)]].name, s.buffers) for s in seq.steps]
+        # A step fed by another in its fusion is not a step of its own; the
+        # fusion reports one combined entry, at its first member's place.
+        consumed = {s for fusion in seq.fusions for s in fusion.steps[1:]}
+        starts = {fusion.steps[0]: fusion for fusion in seq.fusions}
+        self.fusions: dict[str, tuple[tuple[OperatorDesign, ...], Fusion]] = {}
+        steps = []
+        place: dict[int, int] = {}
+        for i, s in enumerate(seq.steps):
+            if i in consumed:
+                continue
+            place[i] = len(steps)
+            fusion = starts.get(i)
+            if fusion is None:
+                steps.append((own[design_of[id(s.op)]].name, s.buffers))
+                continue
+            if fusion.kind is FusionKind.PACK:
+                independent(seq, fusion)
+            member_designs = tuple(
+                own[design_of[id(seq.steps[j].op)]] for j in fusion.steps
+            )
+            symbol = self.fusion_name(fusion, [d.name for d in member_designs])
+            self.fusions[symbol] = (member_designs, fusion)
+            elided = {(e.producer, e.output) for e in fusion.edges} | {
+                (e.consumer, e.input) for e in fusion.edges
+            }
+            buffers = tuple(
+                ref
+                for j in fusion.steps
+                for ref, b in zip(seq.steps[j].buffers, seq.steps[j].op.buffers)
+                if (j, b.name) not in elided
+            )
+            steps.append((symbol, buffers))
+        self.steps = steps
+        used = {name for name, _ in steps}
+        self.designs = {name: design for name, design in named.items() if name in used}
         # A full ELF expands its loads, configuring the array at every call,
         # where it runs more than one design: one design is configured by the
         # first dispatch alone, as the firmware skips an unexpanded load of
         # the PDI it has loaded, unless the build is traced or asks to
         # reconfigure.
-        self.expands = len(self.designs) > 1 or seq.traced or full_elf.reconfigure
+        self.expands = (
+            len(self.designs) + len(self.fusions) > 1
+            or seq.traced
+            or full_elf.reconfigure
+        )
         self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
-        self.commands = full_elf.commands
+        inside = {
+            i for f in seq.fusions for i in range(f.steps[0] + 1, f.steps[-1] + 1)
+        }
+        if inside & set(full_elf.commands):
+            raise ValueError(
+                f"a command starts at steps {sorted(inside & set(full_elf.commands))}, "
+                f"within a fusion's members, which are one call"
+            )
+        self.commands = tuple(place[i] for i in full_elf.commands)
         self.shared_words = full_elf.shared_words
         self.packing = Packing()
+
+    @staticmethod
+    def fusion_name(fusion: Fusion, designs: Sequence[str]) -> str:
+        """A fusion's device symbol: content-named, so one hits the cache
+        across processes, and distinct from any member's own. Wiring is
+        spelled by each member's place in the fusion, not in the sequence,
+        so one recurring down a model shares a symbol.
+        """
+        local = {step: i for i, step in enumerate(fusion.steps)}
+        wiring = ",".join(
+            f"{local[e.producer]}:{e.output}>{local[e.consumer]}:{e.input}"
+            for e in fusion.edges
+        )
+        digest = hashlib.sha256(
+            f"{fusion.kind.value}[{'|'.join(designs)}]({wiring})".encode()
+        ).hexdigest()[:8]
+        return f"fusion{len(designs)}_{digest}"
 
     @property
     def identity(self) -> str:
@@ -211,6 +345,9 @@ class Composition:
         h = hashlib.sha256()
         for name, design in self.designs.items():
             h.update(f"{name}={design.compilable().recipe_hash};".encode())
+        for symbol, (designs, _) in self.fusions.items():
+            recipe = "+".join(d.compilable().recipe_hash for d in designs)
+            h.update(f"{symbol}={recipe};".encode())
         state = (
             self.steps,
             self.layout,
@@ -254,7 +391,10 @@ class Composition:
         packing = self.packing.sharing(
             {n: of[n] if n in arrays else n for n in self.designs}
         )
-        device = next(iter(self.designs.values())).op.array_device()
+        sample = next(iter(self.designs.values()), None)
+        if sample is None:
+            sample = next(iter(self.fusions.values()))[0][0]
+        device = sample.op.array_device()
         configurations: dict[str, DeviceConfiguration] = {}
         runtimes: dict[str, Runtime] = {}
         types: dict[str, list] = {}
@@ -271,9 +411,22 @@ class Composition:
             else:
                 configured = configuration(symbol, {m: arrays[m] for m in members})
                 for m in members:
-                    types[m] = [b.flat_type for b in arrays[m].op.buffers]
+                    types[m] = [
+                        b.flat_type for b in arrays[m].op.buffers if not b.on_chip
+                    ]
             configurations[symbol] = configured
             runtimes.update(zip(members, configured.runtimes))
+
+        for symbol, (designs, fusion) in self.fusions.items():
+            configured, members = fused_configuration(symbol, fusion, designs, words)
+            configurations[symbol] = configured
+            runtimes[symbol] = configured.runtimes[0]
+            types[symbol] = [
+                b.flat_type
+                for array in members
+                for b in array.op.buffers
+                if not b.on_chip
+            ]
 
         calls = [
             (
