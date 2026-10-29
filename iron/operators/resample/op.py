@@ -32,7 +32,7 @@ from ml_dtypes import bfloat16
 from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 
-from .reference import Interpolation, resize, taps, window
+from .reference import Interpolation, Taps, apply_taps, taps, window
 
 HEADER = 4
 
@@ -935,6 +935,33 @@ extern "C" void resize_finish(int32_t *counts) {
 """
 
 
+def _decode_taps(table: np.ndarray, out_size: int) -> Taps:
+    """The axis's `Taps` a ``ResampleTaps`` table encodes, its first
+    ``out_size`` real slots taken in the table's own row order: a pass
+    covering only part of a wider resize reads its own share of a table
+    computed at the resize's real width, so a chunk's ``first`` header
+    field (an offset into that wider resize) is not where this axis's
+    slots land; the table's row order is.
+    """
+    precision, taps_window = int(table[0, 0]), int(table[0, 1])
+    slot = 2 + (taps_window + 1) // 2
+    per = (table.shape[1] - HEADER) // slot
+    start = np.zeros(out_size, np.int64)
+    count = np.zeros(out_size, np.int64)
+    weights = np.zeros((out_size, taps_window), np.int16)
+    pos = 0
+    for row in table:
+        if pos >= out_size:
+            break
+        n = min(int(row[3]), out_size - pos)
+        slots = row[HEADER : HEADER + per * slot].reshape(per, slot)
+        start[pos : pos + n] = slots[:n, 0]
+        count[pos : pos + n] = slots[:n, 1]
+        weights[pos : pos + n] = slots[:n, 2:].view(np.int16)[:, :taps_window]
+        pos += n
+    return Taps(start, count, weights, precision)
+
+
 class Resample(Operator):
     """An image resized as torchvision's antialiased bicubic or Lanczos
     resize does it on the CPU, written as the vision tower's patches, each
@@ -1297,7 +1324,12 @@ class Resample(Operator):
         wo = self.out_width if out_columns is None else int(out_columns)
         line = -(-3 * w // self.chunk) * self.chunk
         pixels = np.asarray(image).reshape(-1)[: h * line].reshape(h, line)
-        out = resize(pixels[:, : 3 * w].reshape(h, w, 3), ho, wo, self.interpolation)
+        img = pixels[:, : 3 * w].reshape(h, w, 3)
+        # The given tables' own weights, not a resize recomputed from ho/wo
+        # alone: a pass over part of a wider resize gives a table that
+        # covers only its share, which a recomputed resize would not.
+        out = apply_taps(img, _decode_taps(np.asarray(taps_w), wo), axis=1)
+        out = apply_taps(out, _decode_taps(np.asarray(taps_h), ho), axis=0)
         bands, strips = -(-ho // SIDE), -(-wo // SIDE)
         edge = ((0, bands * SIDE - ho), (0, strips * SIDE - wo), (0, 0))
         out = np.pad(out, edge, mode="edge")

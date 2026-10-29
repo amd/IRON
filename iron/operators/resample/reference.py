@@ -114,6 +114,33 @@ def taps(
     return Taps(start, count, weights, precision)
 
 
+def apply_taps(image: np.ndarray, t: Taps, axis: int) -> np.ndarray:
+    """`image` resampled along `axis` by `t`'s fixed-point weights, one pass
+    of the antialiased resize `resize()` runs across then down, rounded to
+    uint8.
+
+    Args:
+        image: Any shape with `axis`'s input samples.
+        t: The axis's filter, `t.start` and `t.weights` over `t.weights`'s
+            width of input samples each output reads.
+        axis: The axis `t` resamples.
+
+    Returns:
+        `image`, `axis` now `len(t.start)`, uint8.
+    """
+    acc = np.full(
+        image.shape[:axis] + (len(t.start),) + image.shape[axis + 1 :],
+        1 << (t.precision - 1),
+        np.int32,
+    )
+    weight_shape = (len(t.start),) + (1,) * (image.ndim - axis - 1)
+    for k in range(t.weights.shape[1]):
+        index = np.minimum(t.start + k, image.shape[axis] - 1)
+        pixels = np.take(image, index, axis=axis).astype(np.int32)
+        acc += pixels * t.weights[:, k].astype(np.int32).reshape(weight_shape)
+    return np.clip(acc >> t.precision, 0, 255).astype(np.uint8)
+
+
 def resize(
     image: np.ndarray,
     height: int,
@@ -137,16 +164,5 @@ def resize(
     for axis, size_out in ((1, width), (0, height)):
         if out.shape[axis] == size_out:
             continue
-        t = taps(out.shape[axis], size_out, interpolation)
-        acc = np.full(
-            out.shape[:axis] + (size_out,) + out.shape[axis + 1 :],
-            1 << (t.precision - 1),
-            np.int32,
-        )
-        weight_shape = (size_out,) + (1,) * (out.ndim - axis - 1)
-        for k in range(t.weights.shape[1]):
-            index = np.minimum(t.start + k, out.shape[axis] - 1)
-            pixels = np.take(out, index, axis=axis).astype(np.int32)
-            acc += pixels * t.weights[:, k].astype(np.int32).reshape(weight_shape)
-        out = np.clip(acc >> t.precision, 0, 255).astype(np.uint8)
+        out = apply_taps(out, taps(out.shape[axis], size_out, interpolation), axis)
     return out
