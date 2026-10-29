@@ -40,6 +40,9 @@ class Case:
         bench: CI tracks it over time (``pytest.mark.bench``).
         lower: The toolchain tests lower it to instructions on every
             device, as they do each operator's first default case.
+        run: The catalog runs it on a device; False only lowers it
+            (``lower``), for a shape whose one command outlasts the
+            driver's watchdog.
     """
 
     kwargs: dict = field(default_factory=dict)
@@ -47,6 +50,7 @@ class Case:
     id: str | None = None
     bench: bool = False
     lower: bool = False
+    run: bool = True
 
     @property
     def label(self) -> str:
