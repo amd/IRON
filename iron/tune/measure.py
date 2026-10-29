@@ -200,7 +200,9 @@ class Standalone:
             op = self.steps[k]
             names = self._names(k, op)
             addressed = op.addressed_inputs(
-                {buf.name: self.address(n) for buf, n in zip(op.buffers, names)}, rng
+                {buf.name: self.address(n) for buf, n in zip(op.buffers, names)},
+                rng,
+                self._values[op],
             )
             for buf, name_ in zip(op.buffers, names):
                 if name_ in self._internal:

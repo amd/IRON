@@ -366,10 +366,17 @@ class Gather(Operator):
         return words
 
     def addressed_inputs(
-        self, addresses: Mapping[str, int], rng: np.random.Generator
+        self,
+        addresses: Mapping[str, int],
+        rng: np.random.Generator,
+        values: Mapping[str, int],
     ) -> dict[str, np.ndarray]:
         ids = rng.integers(0, self.table_rows, self.rows)
-        return {"control": self.control_words(ids, addresses["table"])}
+        return {
+            "control": self.control_words(
+                ids, addresses["table"], values.get("valid_rows")
+            )
+        }
 
     def tolerance(self) -> Tolerance:
         return Tolerance.exact()

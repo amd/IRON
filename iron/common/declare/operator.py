@@ -301,11 +301,18 @@ class Operator(jit.Operator, library=True):
         return next((c for c in range(budget, 0, -1) if fits is None or fits(c)), 1)
 
     def addressed_inputs(
-        self, addresses: Mapping[str, int], rng: np.random.Generator
+        self,
+        addresses: Mapping[str, int],
+        rng: np.random.Generator,
+        values: Mapping[str, int],
     ) -> dict[str, np.ndarray]:
         """For a run alone, the content of each input that names device
         ``addresses`` (every buffer's, by name), by buffer name: random bytes
         there would steer the DMA anywhere. Other inputs are filled at random.
+
+        Args:
+            values: The call's per-call values by member name; an input built
+                from a bound (``valid_rows``) must follow it, as the call does.
         """
         return {}
 
