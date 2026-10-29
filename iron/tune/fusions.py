@@ -710,8 +710,19 @@ def confirm_fusions(
                 if fused
                 else recording
             )
-            plain_cg = CompiledGraph(recording, chosen, fusions=())
-            fused_cg = CompiledGraph(patched, chosen, fusions=fused)
+            try:
+                plain_cg = CompiledGraph(recording, chosen, fusions=())
+                fused_cg = CompiledGraph(patched, chosen, fusions=fused)
+            except (ValueError, RuntimeError, ir.MLIRError) as e:
+                # A build failure is a property of this version (this
+                # particular combination of active groups' fusions), not of
+                # any one group alone; drop the one predicted to gain least
+                # and retry, as for a version that regresses once run.
+                worst = max(active, key=lambda g: priced[g].delta_us)
+                log(f"  {worst}: dropped, {recording.name} does not build fused: {e}")
+                remaining.remove(worst)
+                active.remove(worst)
+                continue
             for state, _, content in states:
                 plain_cg.write(state, content)
                 fused_cg.write(state, content)

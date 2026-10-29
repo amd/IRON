@@ -713,6 +713,37 @@ def test_pricing_a_gaining_fusion_writes_an_entry_that_runs_bit_identically(tmp_
 _END_TO_END = re.compile(r"([-+]\d+\.\d+) ± (\?|\d+\.\d+) us end to end")
 
 
+def test_confirm_fusions_drops_the_worst_group_on_a_build_failure(llama_recordings):
+    """A version (this particular combination of active groups' fusions)
+    that fails to BUILD is a real aiecc compile error, device-free to hit:
+    decode's GEMV -> ElementwiseAdd -> RMSNorm merge, every member at its
+    own (unnarrowed) width, does not place (confirmed by this same failure
+    in the real sweep that crashed it). This must drop the one candidate
+    and return no fusion taken, not crash the whole sweep.
+    """
+    decode, _ = llama_recordings
+    dev = aie_utils.ensure_current_device()
+    group = next(
+        g
+        for g in fusion_groups([decode], dev)
+        if g.kind is FusionKind.MERGE
+        and [type(s).__name__ for s in g.steps] == ["GEMV", "ElementwiseAdd", "RMSNorm"]
+    )
+    logged = []
+    taken = confirm_fusions(
+        [decode],
+        dev,
+        [group],
+        {group: Trial({}, -1e6, 1.0)},
+        Profile(),
+        {group: None},  # no narrowing: its own (recorded, non-co-resident) width
+        full_elf=True,
+        log=logged.append,
+    )
+    assert taken == []
+    assert any("does not build fused" in line for line in logged)
+
+
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 def test_fixed_frame_agrees_with_decode_groups_priced_in_the_whole_step(
