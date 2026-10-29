@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterator, Mapping
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, Any, get_args, get_origin
+from typing import Annotated, Any, cast, get_args, get_origin
 
 import aie.utils as aie_utils
 import numpy as np
@@ -359,7 +359,7 @@ class Graph:
                 continue
             if isinstance(parent, tuple) or (
                 dataclasses.is_dataclass(parent)
-                and type(parent).__dataclass_params__.frozen
+                and cast(Any, parent).__dataclass_params__.frozen
             ):
                 raise TypeError(
                     f"{self.name}: {path}{n} is in a tuple or a frozen "
@@ -1134,15 +1134,16 @@ def _words(
                 continue  # another instance of the design, bound alike
             derived.add(symbol)
             linear = None
-            count = counts.get(word.extent) if isinstance(word, ExtentWord) else None
-            if count is not None and count.linear:
-                divisor = word.divisor(op)
-                linear = Linear(
-                    count.value.name,
-                    Fraction(count.scale, divisor),
-                    Fraction(count.bias, divisor),
-                    np.dtype(word.dtype).name,
-                )
+            if isinstance(word, ExtentWord):
+                count = counts.get(word.extent)
+                if count is not None and count.linear:
+                    divisor = word.divisor(op)
+                    linear = Linear(
+                        count.value.name,
+                        Fraction(count.scale, divisor),
+                        Fraction(count.bias, divisor),
+                        np.dtype(word.dtype).name,
+                    )
             words.append(
                 Word(
                     symbol,

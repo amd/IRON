@@ -161,7 +161,7 @@ class Config:
             value = getattr(self, f.name)
             if isinstance(value, Config):
                 value = value.to_json()
-            elif dataclasses.is_dataclass(value):
+            elif dataclasses.is_dataclass(value) and not isinstance(value, type):
                 value = dataclasses.asdict(value)
             if key is None or not isinstance(
                 value, (bool, int, float, str, tuple, dict)
