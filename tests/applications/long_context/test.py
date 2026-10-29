@@ -20,14 +20,17 @@ import aie.utils as aie_utils
 import pytest
 
 import iron.applications
+from iron.applications.gemma3 import Gemma3
 from iron.applications.gemma4 import Gemma4
 from iron.applications.granite import Granite
 from iron.applications.granite_hybrid import GraniteHybrid
+from iron.applications.idefics3 import SmolVLMText
 from iron.applications.lfm2 import Lfm2
 from iron.applications.llama import Llama
 from iron.applications.phi3 import Phi4
 from iron.applications.qwen2 import Qwen2
 from iron.applications.qwen3 import Qwen3
+from iron.applications.qwen3_5 import Qwen35
 from iron.applications.qwen3_embedding import Qwen3Embedding
 from iron.applications.qwen3_moe import Qwen3Moe
 from iron.applications.qwen3_reranker import Qwen3Reranker
@@ -201,6 +204,21 @@ APPLICATIONS = {
         "tokenizer.json",
         each_step=("npu1", "npu2"),
         deep_kl=0.2,
+    ),
+    # Gemma 3's sliding layers' ring holds only sliding_window positions:
+    # unmeasured deep in the caches; npu1 still unmeasured.
+    "gemma3_1b": Application(
+        Gemma3, "gemma-3-1b-it", "model.safetensors", "tokenizer.json"
+    ),
+    # Qwen3.5's Gated DeltaNet layers carry a fixed-size state, not a cache
+    # that grows with the context: unmeasured deep in the caches; npu1 still
+    # unmeasured.
+    "qwen3_5_0.8b": Application(Qwen35, "qwen3.5-0.8b", INDEX, "tokenizer.json"),
+    # SmolVLM's text backbone alone, text-only (its vision tower is
+    # tests/applications/idefics3's): unmeasured deep in the caches; npu1
+    # still unmeasured.
+    "idefics3_text": Application(
+        SmolVLMText, "smolvlm-256m-instruct", "model.safetensors", "tokenizer.json"
     ),
 }
 
