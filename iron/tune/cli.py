@@ -35,7 +35,7 @@ from .autotune import Shape, Timed, autotune, kernel_cycles, time_shape
 from .fusions import price_fusions
 from .costmodel import CostModel
 from .failures import Ledger
-from .packings import price_packings
+from .packings import price_folds_before_packing
 from .measure import Cache, Timing, pmode, switch_cost
 
 
@@ -74,9 +74,10 @@ def parser(description: str) -> argparse.ArgumentParser:
     p.add_argument(
         "--packings-only",
         action="store_true",
-        help="group a graph's arrays into shared device configurations "
-        "against the profile as it stands (price_packings), skipping the "
-        "tunable search and the fusions",
+        help="fold what a graph's arrays admit and group the result into "
+        "shared device configurations against the profile as it stands "
+        "(price_folds_before_packing), skipping the tunable search and the "
+        "fusions",
     )
     p.add_argument(
         "--record-failures",
@@ -124,11 +125,11 @@ def tune(
 ) -> Path:
     """Rewrite ``profiles/<device>.json`` with the settings ``calls`` time
     fastest at (``autotune``), then price the fusions its graphs admit
-    against the result (``price_fusions``), then group their arrays into
-    shared device configurations (``price_packings``); ``--fusions-only``
-    skips straight to the fusions and ``--packings-only`` to the packings,
-    against the profile as it stands. Timed as ``args`` says; return its
-    path.
+    against the result (``price_fusions``), then fold what their arrays
+    admit and group the result into shared device configurations
+    (``price_folds_before_packing``); ``--fusions-only`` skips straight to
+    the fusions and ``--packings-only`` to the folds and packings, against
+    the profile as it stands. Timed as ``args`` says; return its path.
 
     ``calls`` may be a thunk: re-recording under the profile tuning just
     wrote picks up its tunables (``Graph.record`` reloads a profile that is
@@ -175,8 +176,8 @@ def tune(
 
 
 def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: bool):
-    """``profile`` with the packings ``price_packings`` finds, written to
-    ``path``; return it.
+    """``profile`` with the folds and packings ``price_folds_before_packing``
+    finds, written to ``path``; return it.
     """
     model = CostModel.load(dev.name)
     if model is None:
@@ -195,7 +196,7 @@ def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: boo
         fitted.save(dev.name)
         print(f"wrote {path} and the cost model so far", flush=True)
 
-    packed = price_packings(
+    packed = price_folds_before_packing(
         calls() if callable(calls) else calls,
         dev,
         profile,

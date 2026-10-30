@@ -43,6 +43,7 @@ from iron.common.image.packaging import plan
 from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, time_shape
 from .costmodel import FEATURES, CostModel
 from .failures import Kind, Ledger, first_error
+from .fold import fold_profile
 from .fusions import (
     _device_timeout,
     _json_safe,
@@ -667,6 +668,103 @@ def price_packings(
     return widen_packings(
         calls, dev, _profile(base, found), timing=confirm_timing, log=log, lock=lock
     )
+
+
+def price_folds_before_packing(
+    calls: Sequence[Timed],
+    dev,
+    profile: Profile,
+    *,
+    full_elf: bool,
+    timing: Timing = Timing(),
+    confirm_timing: Timing = Timing(rounds=3, calls=10),
+    repeats: int = 9,
+    cache: Cache | None = None,
+    fit_cache: Path = FIT_CACHE,
+    model: CostModel | None = None,
+    ledger: Ledger | None = None,
+    cycles: Mapping[str, int] | None = None,
+    core_mhz: float | None = None,
+    progress: Callable[[Profile, CostModel], None] | None = None,
+    log: Callable[[str], None] = print,
+    lock: bool = False,
+) -> Profile:
+    """``price_packings``, over each call's recording with the folds its
+    arrays admit applied first (``iron.tune.fold.propose_folds``, scoped so
+    a fold never splits a device array a call site that does not take it
+    still shares), so the packing search groups the same folded step list a
+    build does (``apply_profile``'s own fold-then-pack order). The fold
+    entries this adds are the tuner's own proposal, not Erika's
+    (``chosen_folds`` still takes any a hand-written profile names,
+    unscoped): a call admitting none leaves ``profile`` untouched.
+
+    Each call's folds are kept only where every one of ``calls``, folded and
+    packed, is bit-identical to and faster than it packed alone
+    (``compare_graphs``, the same way every other packing decision here
+    already is): a fold that does not pay for the array it splits, or does
+    not pay at all, is dropped and the plain packing kept throughout.
+    """
+    packed_only = price_packings(
+        calls,
+        dev,
+        profile,
+        full_elf=full_elf,
+        timing=timing,
+        confirm_timing=confirm_timing,
+        repeats=repeats,
+        cache=cache,
+        fit_cache=fit_cache,
+        model=model,
+        ledger=ledger,
+        cycles=cycles,
+        core_mhz=core_mhz,
+        progress=progress,
+        log=log,
+        lock=lock,
+    )
+    with_folds = fold_profile(profile, calls)
+    if with_folds.fusions() == profile.fusions():
+        log(
+            "price_folds_before_packing: no fold the tuner's own array "
+            "scoping admits; keeping the plain packing"
+        )
+        return packed_only
+    packed_and_folded = price_packings(
+        calls,
+        dev,
+        with_folds,
+        full_elf=full_elf,
+        timing=timing,
+        confirm_timing=confirm_timing,
+        repeats=repeats,
+        cache=cache,
+        fit_cache=fit_cache,
+        model=model,
+        ledger=ledger,
+        cycles=cycles,
+        core_mhz=core_mhz,
+        progress=progress,
+        log=log,
+        lock=lock,
+    )
+    keep = True
+    for call in calls:
+        delta, noise = _end_to_end(
+            call, dev, packed_only, packed_and_folded, confirm_timing, log, lock
+        )
+        noise_s = "?" if noise is None else f"{noise:.1f}"
+        log(
+            f"{call.recording.name}: folded and packed {delta:+.1f} ± "
+            f"{noise_s} us end to end against packed alone"
+        )
+        if noise is None or delta >= -CONFIDENCE * noise:
+            keep = False
+    if not keep:
+        log(
+            "price_folds_before_packing: the folds do not gain beyond the "
+            "noise in every call; keeping the plain packing"
+        )
+    return packed_and_folded if keep else packed_only
 
 
 def widen_packings(
