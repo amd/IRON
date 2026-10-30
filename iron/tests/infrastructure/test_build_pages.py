@@ -1,22 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CI's pages script, run as publish-pages.yml runs it.
+"""CI's Benchmarks page data, run as publish-pages.yml writes it.
 
-Draws one chart per runner for each operator's, or each shared-test
-decoder's, nightly results.
+The page's data names each benchmark as the comment does, holds one series
+per parametrization with each device's runs, says which ran in each suite's
+latest run and which checks failed, and judges a move by the comment's gates.
 """
 
 import csv
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
 
-# (test path, test id, the chart it belongs to)
+# (test path, test id, the benchmark it belongs to)
 TESTS = [
     (
         "tests/applications/llama/test.py::test_llama_3_2",
@@ -30,46 +30,119 @@ TESTS = [
     ),
     ("iron/tests/lm/test_conv2d.py::test_conv2d", "case_band-share_1.0", "conv2d"),
     (
-        "iron/tests/operators/test_catalog.py::test_operator",
-        "npu2-GEMV-M_2048-K_8192-num_aie_columns_8",
-        "GEMV",
-    ),
-    (
         "tests/applications/decoders/test.py::test_generation",
         "gemma3-long-40",
         "gemma3",
     ),
+    (
+        "iron/applications/llama_3.2_1b/test.py::test_llama_3_2_1b",
+        "llama_3.2_1b_prompt_13_tokens_1",
+        "llama_3.2_1b",
+    ),
 ]
-COLUMNS = ["Commit", "Date", "Test Path", "Test", "Checks", "Bench", "TTFT (mean)"]
+GEMV = "iron/tests/operators/test_catalog.py::test_operator"
+COLUMNS = ["Commit", "Date", "Test Path", "Test", "Checks", "Bench"]
+NIGHTS = ["2026-10-01 10:00:00", "2026-10-02 10:00:00"]
 
 
-def test_each_runner_s_nightly_results_get_charts_of_their_own(tmp_path):
-    for arch, value in (("krackan", "1.0"), ("phoenix", "2.0")):
-        directory = tmp_path / arch / "nightly"
-        directory.mkdir(parents=True)
-        with open(directory / "all.csv", "w", newline="") as f:
-            writer = csv.DictWriter(f, COLUMNS)
-            writer.writeheader()
-            for path, test, _ in TESTS:
-                writer.writerow(
-                    dict(zip(COLUMNS, ("2026-10-02", "2026-10-02 00:00:00")))
-                    | {"Test Path": path, "Test": test, "Checks": "1/1"}
-                    | {"Bench": "yes", "TTFT (mean)": value}
-                )
+def _row(date, path, test, checks="1/1", **metrics):
+    return {
+        "Commit": f"{date[8:10]}abcdef12345",
+        "Date": date,
+        "Test Path": path,
+        "Test": test,
+        "Checks": checks,
+        "Bench": "yes",
+    } | {f"{m} (mean)": v for m, v in metrics.items()}
 
-    script = SCRIPTS / "build_pages.py"
-    site = tmp_path / "site"
+
+def _write(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    columns = list(dict.fromkeys(COLUMNS + [c for row in rows for c in row]))
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _page_data(root):
+    out = root / "data.json"
     subprocess.run(
-        [sys.executable, script, "--results-root", tmp_path, "-o", site],
+        [sys.executable, "build_pages.py", "--results-root", root, "-o", out],
         check=True,
         cwd=SCRIPTS,
     )
-    page = (site / "index.html").read_text()
-    data = json.loads(
-        re.search(r'<script id="data" type="application/json">(.*?)</script>', page)[1]
+    return json.loads(out.read_text())
+
+
+def test_each_runner_s_nightly_results_are_series_of_their_own(tmp_path):
+    for arch, value in (("krackan", 1.0), ("phoenix", 2.0)):
+        _write(
+            tmp_path / arch / "nightly" / "all.csv",
+            [_row(NIGHTS[1], path, test, TTFT=value) for path, test, _ in TESTS],
+        )
+
+    data = _page_data(tmp_path)
+    for *_, name in TESTS:
+        benchmark = data["benchmarks"][name]
+        assert benchmark["group"] == "Models" and benchmark["current"]
+        (series,) = benchmark["suites"]["nightly"]["series"]
+        for arch, value in (("krackan", 1.0), ("phoenix", 2.0)):
+            run = series["devices"][arch]
+            assert run["current"]
+            assert run["points"] == [[NIGHTS[1], "02abcdef12", True, {"TTFT": value}]]
+
+
+def test_a_catalog_parametrization_is_one_series_over_its_devices(tmp_path):
+    for arch, npu in (("krackan", "npu2"), ("phoenix", "npu1")):
+        _write(
+            tmp_path / arch / "small" / "all.csv",
+            [_row(NIGHTS[1], GEMV, f"{npu}-GEMV-M_2048-K_8192", Latency=10.0)],
+        )
+
+    (series,) = _page_data(tmp_path)["benchmarks"]["GEMV"]["suites"]["small"]["series"]
+    assert series["label"] == "GEMV-M_2048-K_8192"
+    assert set(series["devices"]) == {"krackan", "phoenix"}
+
+
+def test_the_latest_run_says_what_ran_failed_and_moved(tmp_path):
+    kept, dropped, failing = "M_2048", "M_4096", "M_8192"
+    _write(
+        tmp_path / "krackan" / "small" / "all.csv",
+        [
+            _row(NIGHTS[0], GEMV, f"npu2-GEMV-{kept}", Latency=10.0),
+            _row(NIGHTS[0], GEMV, f"npu2-GEMV-{dropped}", Latency=10.0),
+            _row(NIGHTS[0], GEMV, f"npu2-GEMV-{failing}", Latency=10.0),
+            _row(NIGHTS[1], GEMV, f"npu2-GEMV-{kept}", Latency=15.0),
+            _row(NIGHTS[1], GEMV, f"npu2-GEMV-{failing}", "0/1", Latency=10.2),
+        ],
     )
-    for *_, chart in TESTS:
-        krackan, phoenix = data[chart]["charts"]
-        assert krackan["name"] == "krackan — nightly"
-        assert phoenix["name"] == "phoenix — nightly"
-        assert phoenix["series"][0]["points"]["TTFT"] == [2.0]
+
+    data = _page_data(tmp_path)
+    (run,) = data["runs"]
+    assert (run["date"], run["tests"], run["failed"]) == (NIGHTS[1], 2, 1)
+    assert run["moved"] == [["GEMV", kept, "Latency", 50.0, "worse"]]
+
+    series = {
+        s["label"]: s["devices"]["krackan"]
+        for s in data["benchmarks"]["GEMV"]["suites"]["small"]["series"]
+    }
+    assert not series[dropped]["current"]
+    assert series[kept]["changes"]["Latency"] == [50.0, "worse"]
+    assert series[failing]["changes"]["Latency"][1] is None
+    assert series[failing]["points"][-1][2] is False
+
+
+def test_a_benchmark_no_longer_run_anywhere_is_not_current(tmp_path):
+    _write(
+        tmp_path / "krackan" / "small" / "all.csv",
+        [
+            _row(
+                NIGHTS[0], "iron/operators/gemv/test.py::test_gemv", "M_2048", Latency=1
+            ),
+            _row(NIGHTS[1], GEMV, "npu2-GEMV-M_2048", Latency=1.0),
+        ],
+    )
+    benchmarks = _page_data(tmp_path)["benchmarks"]
+    assert not benchmarks["gemv"]["current"]
+    assert benchmarks["GEMV"]["current"]

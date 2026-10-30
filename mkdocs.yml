@@ -28,9 +28,7 @@ exclude_docs: |
   requirements-mkdocs.txt
 
 # Links to source files (*.py, profiles/*.json, ...) are intentional "go read
-# the source" links that work on GitHub but don't resolve as doc pages, and
-# the benchmark charts page links to a sibling static build (charts/) that
-# only exists after ci/scripts/build_pages.py runs, not during `mkdocs build`.
+# the source" links that work on GitHub but don't resolve as doc pages.
 # Suppress that noise; keep absolute_links warnings for real broken links.
 validation:
   links:

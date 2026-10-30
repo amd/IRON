@@ -21,7 +21,7 @@ from typing import Dict, List, Tuple
 
 from merge_all import limit_rows_by_date
 from pretty_common import ARCHS, PR_SUITES, results_dir, suite_label
-from pretty_trends import build_report
+from pretty_trends import SIGMA, THRESHOLD, build_report
 
 # The posting step matches this to update its own comment.
 MARKER = "<!-- iron-ci-aggregate -->"
@@ -92,8 +92,8 @@ def main():
     parser.add_argument("--commit", default="")
     parser.add_argument("--date", default="")
     parser.add_argument("--commit-url", default="")
-    parser.add_argument("--threshold", type=float, default=5.0)
-    parser.add_argument("--sigma", type=float, default=2.0)
+    parser.add_argument("--threshold", type=float, default=THRESHOLD)
+    parser.add_argument("--sigma", type=float, default=SIGMA)
     parser.add_argument("--round", type=int, default=2, dest="ndigits")
     parser.add_argument("-o", "--output", default="comment.md")
     args = parser.parse_args()

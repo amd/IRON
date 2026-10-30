@@ -37,6 +37,11 @@ from pretty_common import (
 
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
+# The two gates a move must clear to be reported, in percent and in multiples
+# of the spread the runs measured.
+THRESHOLD = 5.0
+SIGMA = 2.0
+
 # Test names reach a pull request comment. A pull request from a fork chooses
 # them, so they are cut to length and stripped of the characters that would end
 # the code span or the table cell holding them.
@@ -60,16 +65,16 @@ def parse_args():
     p.add_argument(
         "--threshold",
         type=float,
-        default=5.0,
-        help="Report a metric once it moves this many percent (default: 5.0)",
+        default=THRESHOLD,
+        help=f"Report a metric once it moves this many percent (default: {THRESHOLD})",
     )
     p.add_argument(
         "--sigma",
         type=float,
-        default=2.0,
+        default=SIGMA,
         help="Also require the move to exceed this many standard deviations of "
         "the spread a run measured. Pass 0 to report on the percentage alone. "
-        "(default: 2.0)",
+        f"(default: {SIGMA})",
     )
     p.add_argument(
         "--round",
@@ -197,8 +202,8 @@ def moves(
 def build_report(
     all_rows: List[Dict[str, str]],
     field_order: List[str],
-    threshold: float = 5.0,
-    sigma: float = 2.0,
+    threshold: float = THRESHOLD,
+    sigma: float = SIGMA,
     ndigits: int = 2,
     date_fmt: str = DATE_FMT,
 ) -> List[str]:
