@@ -1010,17 +1010,16 @@ def test_narrow_group_prices_the_merge_that_only_fits_narrowed(tmp_path):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 def test_price_fusions_takes_the_cheaper_of_two_overlapping_fusions(tmp_path):
-    """RMSNorm -> GEMV -> ElementwiseAdd admits both a GEMV -> ElementwiseAdd
-    stream and an RMSNorm -> GEMV merge, overlapping at GEMV: ``candidates``
-    finds the merge only at 2 steps here (``iron.common.graph.fusion``'s own
-    ``_merge_runs`` filters a window by fit at the profile's own width
-    before proposing it, so the 3-step merge that only fits ElementwiseAdd
-    narrowed is not among its candidates today). The stream already builds
-    fused at its members' own width (``narrow_group`` tries that before any
-    narrowing search), so no tunable moves; it prices cheaper than the
-    merge, so ``select_rewrites`` takes it and skips the merge
-    (``confirm_fusions`` would raise were the stream not bit-identical to
-    the same steps unfused).
+    """RMSNorm -> GEMV -> ElementwiseAdd admits a GEMV -> ElementwiseAdd
+    stream, an RMSNorm -> GEMV merge, and, since ``candidates`` also proposes
+    an edge into an input that streams only with a reader's bool tunable
+    flipped (``iron.common.graph.fusion``, GEMV's ``B`` under ``feed_b``),
+    the whole chain as one RMSNorm -> GEMV -> ElementwiseAdd stream too, all
+    three overlapping at GEMV. The whole-chain stream prices cheapest (one
+    reconfigure instead of two), so ``select_rewrites`` takes it and skips
+    both the plain stream and the merge, each only a part of what it already
+    claims (``confirm_fusions`` would raise were it not bit-identical to the
+    same steps unfused).
     """
     dev = aie_utils.ensure_current_device()
     recording = _short_decode_recording(dev)
@@ -1037,5 +1036,8 @@ def test_price_fusions_takes_the_cheaper_of_two_overlapping_fusions(tmp_path):
         log=lambda _: None,
     )
     rms, gemv, add = _merge_members(dev)
-    assert profile.fused(FusionKind.STREAM, [gemv, add], [(0, "C", 1, "b")])
+    assert profile.fused(
+        FusionKind.STREAM, [rms, gemv, add], [(0, "y", 1, "B"), (1, "C", 2, "b")]
+    )
     assert not profile.fused(FusionKind.MERGE, [rms, gemv], ())
+    assert not profile.fused(FusionKind.STREAM, [gemv, add], [(0, "C", 1, "b")])
