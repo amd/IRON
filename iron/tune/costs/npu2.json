@@ -1,0 +1,22 @@
+{
+ "terms": {
+  "switches": 37.782411674318716,
+  "switch_cores": 3.9209505377823515,
+  "packed_steps": -1.687207927547087
+ },
+ "prior": {
+  "switches": 35.4475078125,
+  "switch_cores": 3.5437187500000005,
+  "packed_steps": 0.0
+ },
+ "samples": [
+  {
+   "change": {
+    "switches": -211.0,
+    "switch_cores": -1306.0,
+    "packed_steps": 292.0
+   },
+   "extra_us": -15063.509124999997
+  }
+ ]
+}
