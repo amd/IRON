@@ -7,7 +7,7 @@ import os
 import re
 import statistics
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -38,11 +38,18 @@ def _bound_device(name: str):
 npu2 = _bound_device("npu2")
 npu1 = _bound_device("npu1")
 
+CSV_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 
 def pytest_addoption(parser):
     parser.addoption(
         "--csv-output",
         help="Write each test's metrics to this CSV file",
+    )
+    parser.addoption(
+        "--csv-date",
+        help=f"The run's date in the CSV, as '{CSV_DATE_FORMAT}' UTC "
+        "(default: now); a run of several sessions gives each the same one",
     )
     parser.addoption(
         "--record-goldens",
@@ -92,10 +99,13 @@ class CSVReporter:
     the reports its workers send.
     """
 
-    def __init__(self, csv_path):
+    def __init__(self, csv_path, date=None):
         self.csv_path = Path(csv_path)
         self.commit = get_git_commit()
-        self.date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if date is None:
+            date = datetime.now(timezone.utc).strftime(CSV_DATE_FORMAT)
+        datetime.strptime(date, CSV_DATE_FORMAT)
+        self.date = date
         # Without the device: describing it opens the single-tenant NPU.
         self.source = provenance()
         self.test_metrics = {}  # test_name -> {metric_name -> [values]}
@@ -252,7 +262,8 @@ def pytest_configure(config):
     csv_path = config.getoption("--csv-output")
     # An xdist worker reports to the controller, which writes the CSV.
     if csv_path and "workerinput" not in vars(config):
-        config.pluginmanager.register(CSVReporter(csv_path), "csv_reporter")
+        reporter = CSVReporter(csv_path, config.getoption("--csv-date"))
+        config.pluginmanager.register(reporter, "csv_reporter")
 
 
 ATTACHED = pytest.StashKey[str]()

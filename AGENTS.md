@@ -330,7 +330,9 @@ A run publishes what it got through. `examples.yml` and `nightly.yml` run
 each `tests/applications/<name>/` in its own pytest process, so a crash
 ends only that model's tests, and conftest.py rewrites the CSV as each test
 starts, counting the running test a failed check until it ends: a process
-that dies keeps every result before it and names the test it died in.
+that dies keeps every result before it and names the test it died in. Every
+process of one run stamps the run's one date (`--csv-date`), which is how the
+reports tell one run from the next.
 
 ## Language models
 

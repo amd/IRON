@@ -48,12 +48,15 @@ runs:
           applications)
             # One process per application, so a crash or an OOM kill ends only
             # that model's tests and frees its memory before the next loads.
+            # Every process stamps the run's one date, which is how the
+            # reports tell this run's rows from the run before's.
             parts=$(mktemp -d)
+            date=$(date -u '+%Y-%m-%d %H:%M:%S')
             status=0
             for dir in tests/applications/*/; do
               name=$(basename "$dir")
               code=0
-              pytest "${MARKS[@]}" "$dir" --csv-output="$parts/$name.csv" "${FLAGS[@]}" || code=$?
+              pytest "${MARKS[@]}" "$dir" --csv-output="$parts/$name.csv" --csv-date="$date" "${FLAGS[@]}" || code=$?
               # 5: every test in it deselected.
               if [ "$code" -ne 0 ] && [ "$code" -ne 5 ]; then
                 echo "::error title=$name::pytest exited $code"
