@@ -47,7 +47,14 @@ def test_validate_battery_on_small_llama():
     stock.random_weights = seed
     entry = _silu_mul_entry(stock.record(**stock.shapes()[0]))
 
+    # A real candidate profile is stock's own tunables plus whatever changed
+    # (iron.lm.tune writes one that way, never a bare diff): a profile holding
+    # the fusion alone would also lose SMALL's own tuned tile sizes, and the
+    # prompt chunk, which the fusion never touches, would build differently
+    # from stock's for that reason alone.
     candidate_profile = Profile()
+    for cls, dims, tunables in stock.profile:
+        candidate_profile.add(cls, **dims, **tunables)
     candidate_profile.add_fusion(*entry)
     candidate = small(seed=seed)
     candidate.random_weights = seed
