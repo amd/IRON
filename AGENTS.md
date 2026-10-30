@@ -26,10 +26,9 @@ Install as the README says. XRT must be sourced
 `requirements.txt` pins the mlir-aie wheel IRON is tested with, a release
 or a nightly (`latest-wheels-4`), which brings the kernel library, and the
 llvm-aie (Peano) nightly that mlir-aie commit validated
-(`utils/peano-requirements.txt`). `.github/workflows/ci-lint.yml`'s `ref:`
-is the same commit, the Python pyright types against. A pull request that
-needs a newer mlir-aie bumps all three in the same pull request
-(`update-mlir-aie.yml` does it for a release or a nightly).
+(`utils/peano-requirements.txt`); pyright types against that wheel too. A
+pull request that needs a newer mlir-aie bumps both in the same pull
+request (`update-mlir-aie.yml` does it for a release or a nightly).
 
 - Compiled artifacts live in mlir-aie's content-keyed cache,
   `~/.npu/cache/<hash>/` or `$NPU_CACHE_HOME`; nothing is written to the
@@ -54,12 +53,15 @@ pytest iron/tests/operators/test_catalog.py -k AXPY     # one declared operator
 pytest tests/applications/                              # model tests
 pytest ... -n auto                                      # in parallel
 pytest ... --csv-output=tests_latest.csv                # write benchmark figures
+pre-commit run --all-files --hook-stage pre-push        # black, ruff, pyright, ..., as CI's lint
 pyright                                                 # types, as CI's Types job
 ```
 
 Without an NPU, the device-free suite is
 `pytest iron/tests/common iron/tests/lm tests/applications iron/tests/operators iron/tests/infrastructure -m "not extensive"`.
-Formatting and licence checks are in CONTRIBUTING.md.
+Formatting, lint, type and licence checks are in CONTRIBUTING.md
+("Formatting and hooks"); docstrings pass ruff's Google-convention
+pydocstyle rules, `D205` and `D401` included.
 
 ## Where things live
 
@@ -310,8 +312,9 @@ Each hardware workflow runs one job per runner, Phoenix (NPU1) and Krackan
   each-step form, long_context's deep checks); a benched
   TTFT, TPS or Latency 10% worse than the night before's fails it
   (`pretty_trends.py --fail-on`).
-- `ci-lint.yml`: black, clang-format and reuse, and pyright
-  over `[tool.pyright]`'s paths in `pyproject.toml`.
+- `ci-lint.yml`: `reuse lint` and every pre-commit hook (black, ruff,
+  clang-format, actionlint, hygiene) over the repository, and pyright over
+  `[tool.pyright]`'s paths in `pyproject.toml` on Python 3.11 to 3.14.
 - `pr-comment.yml` and `publish-pages.yml`: the performance trends of a PR
   and the benchmark history site.
 

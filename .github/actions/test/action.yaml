@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: "Run test suite"
+description: "Run the operator or application pytest suite in the venv the prereqs action made."
 
 inputs:
   test_flags:
@@ -32,7 +33,7 @@ runs:
       shell: "bash"
       run: |
         source ${{ inputs.env_name }}/bin/activate
-        
+
         case "${{ inputs.test_suite }}" in
           operators)
             TEST_PATH="iron/operators/ iron/tests/"
@@ -45,7 +46,7 @@ runs:
             exit 1
             ;;
         esac
-        
+
         if [ "${{ inputs.extensive }}" = "true" ]; then
           pytest $TEST_PATH --csv-output=tests_latest.csv --log-cli-level=${{ inputs.log_level || 'WARNING' }} ${{ inputs.test_flags }}
         else

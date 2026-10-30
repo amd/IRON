@@ -21,6 +21,10 @@ SPDX-License-Identifier: Apache-2.0
     <img src="https://img.shields.io/badge/license-Apache-yellow.svg" alt="license: Apache" /></a>
 <a href="https://github.com/psf/black">
     <img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black" /></a>
+<a href="https://github.com/astral-sh/ruff">
+    <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff" /></a>
+<a href="https://github.com/microsoft/pyright">
+    <img src="https://img.shields.io/badge/types-pyright-blue.svg" alt="Types: pyright" /></a>
 
 <p align="center">
    <img src="./images/XDNA2.png" alt="IRON Logo" style="max-width: 100%; height: auto;">
@@ -106,7 +110,7 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 1. Install the packages needed for IRON and MLIR-AIE:
 
     ```bash
-    # IRON needs Python 3.11 or later; our wheels support 3.12 and 3.13
+    # IRON needs Python 3.11 to 3.14, the versions the mlir-aie wheels are built for
     sudo apt install \
     build-essential clang clang-14 lld lld-14 python3-venv python3-pip
     ```

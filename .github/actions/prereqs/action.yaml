@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: "Install IRON Prerequisites"
+description: "Create a venv and install requirements.txt and requirements_examples.txt into it."
 
 inputs:
   env_name:
