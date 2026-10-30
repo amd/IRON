@@ -9,6 +9,7 @@ This application serves Llama 3.2 1B and EmbeddingGemma 2 through FastFlowLM's
 HTTP API. FastFlowLM runs each model in IRON's persistent Python server over a
 pair of standard input and output pipes. The server compiles the graph versions
 through the MLIR-AIE cache on first use, then loads the images and weights.
+The Llama entry uses Meta's base checkpoint, intended for text continuation.
 
 The Makefile pins the FastFlowLM fork to
 [`ea31ca5a`](https://github.com/andrej/FastFlowLM/commit/ea31ca5a6f8738e691e5f323a0c99f01e676f0d8),
@@ -94,8 +95,8 @@ Run these steps from `iron/applications/fastflowlm_iron`.
    ```
 
 The direct model commands in the
-[Llama guide](../llama_3.2_1b/README.md) and
-[EmbeddingGemma 2 guide](../embeddinggemma_2/README.md) run the same graph
+[Llama guide](../llama/README.md) and
+[EmbeddingGemma 2 guide](../embedding_gemma2/README.md) run the same graph
 classes in the command's Python process. They do not use the FastFlowLM worker.
 The Makefile's server targets instead start `python -m iron.lm_server`; C++
 sends token histories or text through pipes, and the worker returns BF16
