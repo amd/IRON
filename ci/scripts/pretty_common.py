@@ -5,10 +5,54 @@
 
 import os
 import re
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 # Columns that identify a row rather than measure it.
 NON_METRIC_COLUMNS = {"Commit", "Date", "Test Path", "Test", "Checks", "Bench"}
+
+
+class Metric(NamedTuple):
+    """What a recorded metric measures, as the CSV does not say.
+
+    `higher_is_better` is None for a figure that is neither better nor worse
+    when it moves: an input size a test reports, or a norm held to 1.
+    """
+
+    unit: str
+    higher_is_better: Optional[bool]
+
+
+# Every metric the tests record. A metric missing here is reported without a
+# unit and without a verdict on its moves.
+METRICS = {
+    "Latency": Metric("µs", False),
+    "Latency MAD": Metric("µs", None),
+    "Bandwidth": Metric("GB/s", True),
+    "Throughput": Metric("GOP/s", True),
+    "TTFT": Metric("s", False),
+    "TPS": Metric("tokens/s", True),
+    "GenerateTPS": Metric("tokens/s", True),
+    "StreamTPS": Metric("tokens/s", True),
+    "DeepPromptSeconds": Metric("s", False),
+    "Cosine": Metric("", True),
+    "Worst cosine": Metric("", True),
+    "Exact": Metric("", True),
+    "DeepTop1": Metric("", True),
+    "DeepPromptTop1": Metric("", True),
+    "DivergesAt": Metric("tokens", True),
+    "MeanKL": Metric("", False),
+    "MaxKL": Metric("", False),
+    "P90KL": Metric("", False),
+    "DeepKL": Metric("", False),
+    "DeepPromptKL": Metric("", False),
+    "Top1Mismatches": Metric("", False),
+    "DifferingTokens": Metric("", False),
+    "DifferingRuns": Metric("", False),
+    "Relative error": Metric("", False),
+    "Norm": Metric("", None),
+    "Tokens": Metric("tokens", None),
+}
+UNKNOWN_METRIC = Metric("", None)
 
 # Every metric is written out as mean, median, min, max and stddev. Reports and
 # charts track the mean.
@@ -125,7 +169,8 @@ def operator_name(test_path: str, test_name: str = "") -> str:
             parts = parts[1:]
         return parts[0] or UNKNOWN_OPERATOR
     directory, _ = split_test_path(test_path)
-    for prefix in ("iron/operators/", "tests/applications/"):
+    # iron/applications/ held the application tests before tests/applications/.
+    for prefix in ("iron/operators/", "tests/applications/", "iron/applications/"):
         if directory.startswith(prefix):
             return directory[len(prefix) :] or UNKNOWN_OPERATOR
     stem = os.path.splitext(os.path.basename(file_part))[0]

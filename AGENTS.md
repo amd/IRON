@@ -324,7 +324,8 @@ On `main` and `devel`, `publish-results.yml`, the only job that can push,
 merges each run's `tests_latest.csv` into `{arch}/{suite}/all.csv` on the
 `ci` branch (`ci/scripts/merge_results.sh`); `ci/scripts/` turns those into
 the PR comment and the charts. Only cases marked `@pytest.mark.bench` (a
-`Case(bench=True)`) are tracked.
+`Case(bench=True)`) are tracked, and a metric's unit and direction are named
+in `ci/scripts/pretty_common.py`'s `METRICS`.
 
 A run publishes what it got through. `examples.yml` and `nightly.yml` run
 each `tests/applications/<name>/` in its own pytest process, so a crash
