@@ -8,30 +8,48 @@ import csv
 import os
 from datetime import datetime, timedelta
 
-from pretty_common import row_key
+from pretty_common import row_key, select_bench_rows
+
+# The retention mlir-aie keeps its kernel checks' history to.
+KEEP_DAYS = 90
+MAX_RUNS = 400
 
 
-def drop_rows_older_than(rows, max_age_days, date_fmt="%Y-%m-%d %H:%M:%S"):
-    """Drop rows whose date is more than `max_age_days` behind the newest date.
+def prune(rows, date_fmt="%Y-%m-%d %H:%M:%S"):
+    """Keep the runs the reports and the Benchmarks page read.
 
-    A skewed clock on one runner can then not empty the file.
+    A run is the rows of one date. A benched parametrization keeps every run of
+    the last `KEEP_DAYS` before the newest, the newest run of each ISO week
+    before that, and at most `MAX_RUNS` runs. The trends compare a run with
+    the one before it, so every other row keeps the last two runs. Measured
+    from the newest run, a skewed clock on one runner cannot empty the file.
     """
-    if not max_age_days or not rows:
-        return rows
-
-    def parse(row):
+    dated = []
+    for row in rows:
         try:
-            return datetime.strptime(row.get("Date", ""), date_fmt)
+            dated.append((datetime.strptime(row.get("Date", ""), date_fmt), row))
         except (ValueError, TypeError):
-            return None
+            continue
+    runs = sorted({date for date, _ in dated})
+    if not runs:
+        return []
 
-    dated = [(parse(row), row) for row in rows]
-    newest = max((d for d, _ in dated if d is not None), default=None)
-    if newest is None:
-        return rows
+    cutoff = runs[-1] - timedelta(days=KEEP_DAYS)
+    weekly = {}
+    for date in runs:
+        if date < cutoff:
+            weekly[date.isocalendar()[:2]] = date
+    kept = set(
+        sorted({d for d in runs if d >= cutoff} | set(weekly.values()))[-MAX_RUNS:]
+    )
+    last_two = set(runs[-2:])
 
-    cutoff = newest - timedelta(days=max_age_days)
-    return [row for date, row in dated if date is None or date >= cutoff]
+    benched = {row_key(row) for row in select_bench_rows(rows)}
+    return [
+        row
+        for date, row in dated
+        if date in last_two or (date in kept and row_key(row) in benched)
+    ]
 
 
 def limit_rows_by_date(rows, limit, date_fmt="%Y-%m-%d %H:%M:%S"):
@@ -113,10 +131,10 @@ def main():
         help="Limit to only the N latest results by date for each test. If not specified, all results are kept.",
     )
     parser.add_argument(
-        "--max-age-days",
-        type=int,
-        default=365,
-        help="Drop results older than this many days. Pass 0 to keep every result.",
+        "--prune",
+        action="store_true",
+        help=f"Keep a benched test's runs of the last {KEEP_DAYS} days, then its "
+        f"newest of each week, at most {MAX_RUNS}; and every other test's last two",
     )
     args = parser.parse_args()
 
@@ -128,7 +146,8 @@ def main():
     output_rows = all_rows + latest_rows
     add_empty_columns(output_rows)
 
-    output_rows = drop_rows_older_than(output_rows, args.max_age_days)
+    if args.prune:
+        output_rows = prune(output_rows)
 
     # Apply limit if specified
     if args.limit:

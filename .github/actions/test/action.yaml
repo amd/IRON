@@ -63,7 +63,7 @@ runs:
                 status=1
               fi
               if [ -s "$parts/$name.csv" ]; then
-                ./ci/scripts/merge_all.py --all tests_latest.csv --latest "$parts/$name.csv" --max-age-days 0
+                ./ci/scripts/merge_all.py --all tests_latest.csv --latest "$parts/$name.csv"
               fi
             done
             exit "$status"
