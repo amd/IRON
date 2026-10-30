@@ -103,6 +103,9 @@ class Clipped(iron.Graph):
     def __init__(self, c, in_features: int, out_features: int):
         self.linear = Linear(in_features, out_features, False, precision=c.precision)
         bound = partial(iron.param, dtype=np.float32)
+        # These four names are also iron.common.graph.fill._CLIP_BOUNDS's own
+        # (a random draw's fixed value, so same_input holds without real
+        # calibration): rename here only together with there.
         self.input_min = self.input_max = self.output_min = self.output_max = None
         if c.use_clipped_linears:
             self.input_min, self.input_max = bound(), bound()
