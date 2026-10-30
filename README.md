@@ -95,16 +95,10 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
     ```
    On NPU2 a model's prompt chunk is one command, and the deepest chunk, at
    the model's native context, is the longest. The timeout must cover it,
-   with room to spare on a slower device:
-
-   | Model | Native context | Deepest chunk, s (one Strix Halo run) |
-   |---|---|---|
-   | Gemma 4 E2B | 131072 | 182 |
-   | Llama 3.2 3B | 131072 | 101 |
-   | Granite 4.2 3B | 131072 | 86 |
-   | Llama 3.2 1B | 131072 | 26 |
-   | Granite 4.0-H 1B | 131072 | 15 |
-   | EmbeddingGemma 2, each tower and the encoder | its largest input | under 0.7 |
+   with room to spare on a slower device. CI's nightly times a whole prompt
+   at the native context, which bounds its deepest chunk from above:
+   `long_context`'s TTFT on the
+   [Benchmarks page](https://amd.github.io/IRON/benchmarks/#bench=long_context&suite=nightly&metric=TTFT).
 
    On NPU1 a command is one operator, the longest an attention layer of the
    deepest chunk.

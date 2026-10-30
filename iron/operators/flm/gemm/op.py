@@ -224,8 +224,8 @@ class ProjectionGEMM(Operator):
     # per-call word reaches. B moves as it does unbounded.
     valid = per_call(bounds=M)
     # The parameter words every core reads once a call. The unit counts are
-    # read only at m_chunk > 1: the sequence writes a word per core, ~2 us of
-    # dispatch latency against a ~107 us floor. The clamp bounds are read
+    # read only at m_chunk > 1: each word costs every dispatch (README.md, "A
+    # word is not free"). The clamp bounds are read
     # always, the identity: the kernel's clamp is not compiled out.
     n_val = per_call(derive=lambda op: op.N)
     m_row_blocks = per_call(derive=lambda op: op._m_row_blocks)
@@ -1063,8 +1063,8 @@ class ProjectionGEMM(Operator):
             # Every (mega_row, k) chunk this column consumes. B arrives
             # pre-packed, or under b_col_maj as stored, so each slot is
             # k_tile-long runs or longer; reordering into the kernel's blocks
-            # here instead gives an innermost run of T=8 bf16 and measured
-            # 5.4x slower, so b_col_maj's reorder is the memtile's.
+            # here instead gives an innermost run of T=8 bf16, several times
+            # slower (README.md), so b_col_maj's reorder is the memtile's.
             #
             # Resident, one k sweep for the whole column-block. Otherwise one
             # per unit, not per row-block: the cores hold each B chunk across

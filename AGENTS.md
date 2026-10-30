@@ -175,8 +175,8 @@ CONTRIBUTING.md walks through the common case. The rules:
 6. `test = Testing(cases, draw=...)` on the class. A tolerance that is not
    exact says where its number comes from in `note=`. Every operator
    without a `test.py` of its own has at least one `bench=True` case in
-   the default suite, large enough that
-   dispatch overhead (about 160 us) does not dominate, and a `lower=True`
+   the default suite, large enough that one dispatch's fixed cost (about
+   160 us, whatever the operator) does not dominate, and a `lower=True`
    case for each layout or dtype its first default case does not reach.
    `iron/tests/operators/test_catalog.py` runs every declaration; a test with a
    body of its own goes beside the operator as `test.py`.
