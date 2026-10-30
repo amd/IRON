@@ -187,6 +187,7 @@ class VisionLayer(SandwichLayer):
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
         a = self.self_attn
+        assert isinstance(a, VisionAttention), "VisionLayer's own self_attn"
         half, E = a.head_dim // 2, a.q_proj.linear.in_features
         quarter = np.arange(half // 2)
         # The x half's first and second quarters, then the y half's.
@@ -197,6 +198,7 @@ class VisionLayer(SandwichLayer):
             w = p.weight.reshape(a.heads, a.head_dim, E)[:, order]
             p.weight = iron.param(w.reshape(E, E))
         for norm in (a.q_norm, a.k_norm):
+            assert norm is not None, "VisionAttention's own q_norm and k_norm"
             norm.weight = iron.param(norm.weight[order])
 
 
@@ -377,7 +379,7 @@ class VisionTower(Tower):
         projection = self.embed_vision.embedding_projection.weight
         return F.linear(x, projection, precision=c.precision)
 
-    def body(
+    def body(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         rgb,
         *,

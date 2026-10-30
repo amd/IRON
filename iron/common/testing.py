@@ -115,16 +115,18 @@ def vectors(
     Raises:
         ValueError: An operand named is not one of ``op``'s inputs.
     """
-    given = {o.name: v for o, v in (given or {}).items()}
-    normal = {o.name for o in normal}
-    centered = {o.name for o in centered}
-    unknown = (given.keys() | normal | centered) - {b.name for b in op.inputs}
+    given_names = {o.name: v for o, v in (given or {}).items()}
+    normal_names = {o.name for o in normal}
+    centered_names = {o.name for o in centered}
+    unknown = (given_names.keys() | normal_names | centered_names) - {
+        b.name for b in op.inputs
+    }
     if unknown:
         raise ValueError(f"{type(op).__name__} has no input {sorted(unknown)}")
     rng = np.random.default_rng(seed)
     inputs = {}
     for b in op.inputs:
-        value = given.get(b.name)
+        value = given_names.get(b.name)
         if isinstance(value, np.ndarray):
             inputs[b.name] = value
             continue
@@ -134,9 +136,9 @@ def vectors(
         if dtype.kind not in "fc" and dtype != bfloat16:
             t = rng.integers(0, int(scale) + 1, shape).astype(dtype)
         else:
-            draw = rng.standard_normal if b.name in normal else rng.random
+            draw = rng.standard_normal if b.name in normal_names else rng.random
             t = (draw(shape) * scale).astype(dtype)
-            if b.name in centered:
+            if b.name in centered_names:
                 t = (t.astype(np.float32) - scale / 2).astype(dtype)
         inputs[b.name] = t
     return Vectors(inputs, op._call_reference(inputs))

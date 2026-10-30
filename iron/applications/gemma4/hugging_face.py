@@ -9,8 +9,8 @@ requirements, only to record.
 """
 
 import numpy as np
-import torch
-import transformers
+import torch  # pyright: ignore[reportMissingImports]
+import transformers  # pyright: ignore[reportMissingImports]
 
 from iron.lm.golden import HuggingFace
 

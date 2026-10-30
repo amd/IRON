@@ -63,9 +63,10 @@ class Encoder(Model):
         """Return the embedding rows of ``ids``, bounded as ``ids`` is."""
         raise NotImplementedError(f"{type(self).__name__} defines no lookup()")
 
-    def angles(self, rows):
-        """The RoPE angles of the first ``rows`` positions, by the ``rope``
-        each layer names (``Call.ropes``); None: no RoPE.
+    def angles(self, rows, /) -> dict | None:
+        """Return the RoPE angles of the first ``rows`` positions, by the ``rope`` each layer names.
+
+        ``Call.ropes``; None: no RoPE.
         """
         return None
 
@@ -76,13 +77,14 @@ class Encoder(Model):
         """
         return x
 
-    def layer(self, call: Call, i: int, weights, x):
+    def layer(self, call: Call, i: int, weights, x, /):
         """Layer ``i``, the module ``weights``, on ``x``."""
         return weights(x, call)
 
-    def pool(self, x, rows):
-        """The rows ``head`` reads from the ``rows`` valid rows of ``x``; all
-        of them by default.
+    def pool(self, x, rows, /):
+        """Return the rows ``head`` reads from the ``rows`` valid rows of ``x``.
+
+        All of them by default.
         """
         return x
 
@@ -171,10 +173,8 @@ class Tower(Encoder):
         super().__init__(config, max_tokens)
         self.soft_rows = soft_rows
 
-    def inputs(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self, *raw
-    ) -> tuple[np.ndarray, dict]:
-        """A call's input buffer and per-call values for ``raw``."""
+    def inputs(self, *raw: Any, **kwargs: Any) -> tuple[np.ndarray, dict]:
+        """Return a call's input buffer and per-call values for ``raw``."""
         raise NotImplementedError(f"{type(self).__name__} defines no inputs()")
 
     def calls(self, *raw) -> list[tuple[np.ndarray, dict]]:

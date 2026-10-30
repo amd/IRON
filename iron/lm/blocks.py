@@ -587,7 +587,7 @@ class Attention(iron.Graph):
         self.q_norm = RMSNorm(D, c.eps) if "q" in norms else None
         self.k_norm = RMSNorm(D, c.eps) if "k" in norms else None
         self.v_norm, self.eps = "v" in norms, c.eps
-        self.scaling = None
+        self.scaling: float | None = None
         self.rotary = c.rotary_dim
 
     def projections(self, c) -> None:

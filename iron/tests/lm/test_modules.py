@@ -17,7 +17,7 @@ import iron
 from iron import Precision
 from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
 from iron.lm.blocks import KVCache, Rope
-from iron.lm.checkpoint import nest, leaves
+from iron.lm.checkpoint import leaves, nest
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close, check_generation
 from iron.operators.mha import MHA

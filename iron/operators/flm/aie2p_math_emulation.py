@@ -53,7 +53,7 @@ def fmul(a, b):
     last bit for a few inputs.
     """
     a, b = np.broadcast_arrays(np.asarray(a, np.float64), np.asarray(b, np.float64))
-    A, B = ([l.astype(np.float32) for l in limbs_f32_split(v)] for v in (a, b))
+    A, B = ([limb.astype(np.float32) for limb in limbs_f32_split(v)] for v in (a, b))
     acc = None
     for i, j in (
         (0, 0),

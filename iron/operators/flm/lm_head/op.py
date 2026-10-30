@@ -148,6 +148,8 @@ class LMHead(Operator):
         )
         # The kernels' argument types are the x and w fifos' element types
         # and the core-local scratch.
+        # _LmHeadKernel (flm_gemma4.py) declares these entry points; the factory's
+        # return type is annotated as the base ExternalFunction.
         w_blk_ty, x_ty, y_acc_ty, sums_ty, _ = kernel.q4nx_lm_head_block.arg_types()
         y_blk_ty, _, rtp_ty = kernel.q4nx_lm_head_epilogue.arg_types()
         # The w fifos move the host's words as bf16 elements. The kernel

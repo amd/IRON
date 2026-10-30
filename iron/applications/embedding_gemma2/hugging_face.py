@@ -11,10 +11,15 @@ and transformers, which are not IRON's requirements, only to record.
 from pathlib import Path
 
 import numpy as np
-import torch
-import transformers
-from transformers.models.embedding_gemma2 import modeling_embedding_gemma2
-from transformers.models.gemma4 import image_processing_gemma4, modeling_gemma4
+import torch  # pyright: ignore[reportMissingImports]
+import transformers  # pyright: ignore[reportMissingImports]
+from transformers.models.embedding_gemma2 import (  # pyright: ignore[reportMissingImports]
+    modeling_embedding_gemma2,
+)
+from transformers.models.gemma4 import (  # pyright: ignore[reportMissingImports]
+    image_processing_gemma4,
+    modeling_gemma4,
+)
 
 from iron.lm import Checkpoint
 
@@ -86,7 +91,7 @@ class HuggingFace:
 
         For a decoded `image` at `max_tokens`.
         """
-        out = self.image_processor(
+        out = self.image_processor.preprocess(
             torch.from_numpy(image).permute(2, 0, 1),
             max_soft_tokens=max_tokens,
             return_tensors="pt",

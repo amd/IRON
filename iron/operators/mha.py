@@ -34,6 +34,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp, Unresolvable
+from iron.common.declare.operand import concrete
 from iron.common.testing import Case, Testing
 
 
@@ -236,17 +237,29 @@ class MHA(Operator):
     }
 
     Q = In(
-        Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
+        Select(
+            heads_interleaved,
+            (seq_pad, num_heads, d),
+            (num_heads, seq_pad, d),
+        ),
         obj_shape=(join_rows, d),
         per=(q_shims,),
     )
     K = In(
-        Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
+        Select(
+            kv_interleaved,
+            (kv_len, num_KV_heads, d),
+            (num_KV_heads, kv_len, d),
+        ),
         obj_shape=(d, B_kv),
         per=(kv_lanes,),
     )
     V = In(
-        Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
+        Select(
+            kv_interleaved,
+            (kv_len, num_KV_heads, d),
+            (num_KV_heads, kv_len, d),
+        ),
         obj_shape=(B_kv, pv_width),
         per=(kv_lanes, pv_cores),
     )
@@ -384,7 +397,9 @@ class MHA(Operator):
             (False, ("B_q", "d", "B_kv")),
             (True, ("B_q", "B_kv", "pv_width")),
         ):
-            mac = kernels.linalg.mha.mac_dims(pv=pv, device=self.dev)
+            mac = kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
+                pv=pv, device=self.dev
+            )
             for name, m in zip(dims, mac):
                 if vars(self)[name] % m:
                     raise ValueError(
@@ -449,13 +464,13 @@ class MHA(Operator):
                 f"{dev.name} ({dev.arch}) with {dev.cols}"
             )
         B_q, pv_cores = self.B_q, self.pv_cores
-        mem = None if dev is None else dev.core_memory_bytes
         if B_q is None or pv_cores is None:
             if dev is None:
                 raise Unresolvable(
                     "MHA's block size and P*V cores follow the cores' memory; "
                     "none is bound and not both were given"
                 )
+            mem = dev.core_memory_bytes
             group = self.num_heads // self.num_KV_heads
             # Every row of a packed block is computed: the narrowest holding the group.
             blocks = (8, 16, 32, 64) if self.packed else (64, 32, 16)
@@ -583,8 +598,11 @@ class MHA(Operator):
 
         # partial_softmax takes exp2, so the scale is in the log2 domain.
         inv_scale = float(bfloat16(self.scale * np.log2(np.e)))
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("MHA: build() needs a bound device")
         # AIE2P's exp2 instruction is up to 6% high; AIE2 has none to replace.
-        accurate_exp2 = self.dev.arch is AIEArch.AIE2p
+        accurate_exp2 = dev.arch is AIEArch.AIE2p
 
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
         k_ty = np.ndarray[(d, B_kv), np.dtype[dtype]]
@@ -649,7 +667,14 @@ class MHA(Operator):
 
         # Each stream is blocked as the product that reads or writes it takes it.
         qk = matmul_QK.stream_dims
-        pv = mm_stream_dims(B_q, B_kv, pv_width, kernels.linalg.mha.mac_dims(pv=True))
+        pv = mm_stream_dims(
+            B_q,
+            B_kv,
+            pv_width,
+            kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
+                pv=True
+            ),
+        )
 
         # Split, Q is one block deep: the QK core's L1 holds one d=512 block.
         q_depth = 1 if split else of_depth
@@ -664,7 +689,7 @@ class MHA(Operator):
                 obj_types=[q_ty] * n_join,
                 to_stream=None if qk.A is None else [qk.A] * n_join,
                 depths=[q_depth] * n_join,
-                tile=Tile(layout.q[shim], 1) if split else AnyMemTile,
+                tile=Tile(layout.q[shim], 1) if layout is not None else AnyMemTile,
             )
             for h in range(pv_cores):
                 mem_o = ObjectFifo(self.O.obj_type, to_stream=pv.C)
@@ -674,7 +699,9 @@ class MHA(Operator):
                     obj_types=[o_ty] * n_join,
                     # One O block: the PV core's L1 also holds its float32 O.
                     depths=[1] * n_join,
-                    tile=Tile(layout.o[shim][h], 1) if split else AnyMemTile,
+                    tile=(
+                        Tile(layout.o[shim][h], 1) if layout is not None else AnyMemTile
+                    ),
                 )
 
         kv_lanes = self.kv_lanes
@@ -686,7 +713,7 @@ class MHA(Operator):
                 .cons()
                 .forward(
                     to_stream=qk.B,
-                    tile=Tile(layout.k, 1) if split else AnyMemTile,
+                    tile=Tile(layout.k, 1) if layout is not None else AnyMemTile,
                     depth=of_depth,
                 )
             )
@@ -697,7 +724,7 @@ class MHA(Operator):
                     .cons()
                     .forward(
                         to_stream=pv.B,
-                        tile=Tile(layout.v[h], 1) if split else AnyMemTile,
+                        tile=Tile(layout.v[h], 1) if layout is not None else AnyMemTile,
                         depth=of_depth,
                     )
                 )
@@ -995,21 +1022,31 @@ class MHA(Operator):
 
         qs, outs, ks, vs = [], [], [], []
         for s in range(self.q_shims):
-            qs.append(inQ[s].prod(tile=Tile(layout.q[s], 0) if split else AnyShimTile))
+            qs.append(
+                inQ[s].prod(
+                    tile=Tile(layout.q[s], 0) if layout is not None else AnyShimTile
+                )
+            )
             for h in range(pv_cores):
                 outs.append(
                     memO[s * pv_cores + h].cons(
-                        tile=Tile(layout.o[s][h], 0) if split else AnyShimTile
+                        tile=(
+                            Tile(layout.o[s][h], 0)
+                            if layout is not None
+                            else AnyShimTile
+                        )
                     )
                 )
         for lane in range(kv_lanes):
             ks.append(
-                inK[lane].prod(tile=Tile(layout.k_shim, 0) if split else AnyShimTile)
+                inK[lane].prod(
+                    tile=Tile(layout.k_shim, 0) if layout is not None else AnyShimTile
+                )
             )
             for h in range(pv_cores):
                 vs.append(
                     inV[lane * pv_cores + h].prod(
-                        tile=Tile(layout.v[h], 0) if split else AnyShimTile
+                        tile=Tile(layout.v[h], 0) if layout is not None else AnyShimTile
                     )
                 )
         self.Q.bind(qs)
@@ -1063,7 +1100,8 @@ class MHA(Operator):
             position = offset + np.arange(block.start, block.stop)[:, None]
             masked = np.zeros((len(position), k.shape[1]), dtype=bool)
             if self.causal or self.window:
-                masked |= key > position + (0 if self.causal else self.window)
+                # The enclosing "if" means self.window is set whenever not causal.
+                masked |= key > position + (0 if self.causal else (self.window or 0))
             if self.window:
                 masked |= key < position - self.window
             mask = np.where(masked, -np.inf, 0).astype(np.float32)
@@ -1123,11 +1161,12 @@ class MHA(Operator):
                     heads = heads[kv_head * group : (kv_head + 1) * group, 0]
                     return heads.coalesce().repeat(self.B_q // group)
                 first = heads[kv_head * group : kv_head * group + width, 0]
+                (stride0,) = concrete(first.strides[:1], first)
                 both = TensorAccessPattern(
                     first.tensor_dims,
                     first.offset,
                     (2, *first.sizes),
-                    ((group - width) * first.strides[0], *first.strides),
+                    ((group - width) * stride0, *first.strides),
                 )
                 return both.coalesce().repeat(self.B_q // (2 * width))
 
@@ -1153,8 +1192,11 @@ class MHA(Operator):
             return
 
         cores, pv_width = self.pv_cores, self.pv_width
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("MHA: sequence() needs a bound device")
         # A shim descriptor's iteration count.
-        iterations = 1 << self.dev.get_dma_bd_iter_bits(0, 0)
+        iterations = 1 << dev.get_dma_bd_iter_bits(0, 0)
         for kv_head in range(kv_heads):
             head0 = kv_head * group
             tg = TaskGroup()

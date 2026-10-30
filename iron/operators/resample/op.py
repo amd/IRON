@@ -14,11 +14,13 @@ with two such tables into 16x16 patches of u8 / 255 (`vision.resize`), and
 """
 
 import math
+from typing import Any
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ExternalFunction, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
+from aie.iron.kernel import ArgType
 from aie.iron.kernels import datamovement, vision
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
 from aie.utils.verify import Tolerance
@@ -330,7 +332,7 @@ class ResampleTaps(Operator):
         # The kernels' references as one core writing every chunk: the table
         # does not depend on how the cores deal its chunks.
         filled = self.filled(n_in, n_out)
-        kw = dict(words=self.words, cores=1, slots=self.slots)
+        kw: dict[str, Any] = dict(words=self.words, cores=1, slots=self.slots)
         peak = vision.resample_peak_ref(n_in, n_out, 0, filled, **kw)
         table = np.zeros((self.chunks, self.words), np.int32)
         table[:filled] = vision.resample_quantize_ref(
@@ -378,7 +380,8 @@ class ResampleTaps(Operator):
             ],
             symbol_prefix=f"resample_{self.words}_{cores}_{self.slots or 0}",
         )
-        join_k = peak_k.object_file.bind("resample_join", [peak_ty] * 3)
+        join_args: list[ArgType] = [peak_ty] * 3
+        join_k = peak_k.object_file.bind("resample_join", join_args)
         quantize_k = peak_k.object_file.bind(
             "resample_quantize", [peak_ty, self.table.obj_type] + [np.int32] * 5
         )
@@ -434,7 +437,7 @@ class ResampleTaps(Operator):
         for k in range(cores):
             final = k == cores - 1
             shared = None
-            if of_peak is not None:
+            if of_peak is not None and of_all is not None:
                 shared = of_peak.prod() if final else of_all.cons()
             workers.append(
                 Worker(

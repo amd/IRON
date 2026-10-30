@@ -99,13 +99,14 @@ class Profile:
         return {name: value for name, (_, value) in chosen.items()}
 
     @staticmethod
-    def dims(cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
-        """Every dimension (``param()``) of the ``cls`` a call with
-        ``given`` keywords makes, as an entry is matched against: one it
-        leaves out is its default, None where a function computes it.
+    def dims(kind: type, given: Mapping[str, Any]) -> dict[str, Any]:
+        """Collect every dimension (``param()``) a ``kind`` call with ``given`` makes.
+
+        This is what an entry is matched against: one it leaves out is its
+        default, ``None`` where a function computes it.
         """
         dims = {}
-        for name, p in cls.declaration.params.items():
+        for name, p in kind.declaration.params.items():
             if p.tunable:
                 continue
             if name in given:

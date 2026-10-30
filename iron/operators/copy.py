@@ -32,6 +32,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operand, Operator, Rtp, Unresolvable
+from iron.common.declare.operand import concrete
 from iron.common.testing import Case, Testing
 
 # kDDRAIEAddrOffset (TxnEncoding.h)
@@ -664,7 +665,7 @@ class Copy(Operator):
                 f"Copy: a repeated source walks at most {self.max_walks} patterns, a "
                 f"descriptor each, on one channel into one pattern; got {walks}"
             )
-        src, dst = (sum(prod(p.sizes) for p in w) for w in self.walks())
+        src, dst = (sum(prod(concrete(p.sizes, p)) for p in w) for w in self.walks())
         if src != dst and not self.src_repeat:
             raise ValueError(
                 f"Copy: a copy moves the same element count both ways: src has {src} "
@@ -695,7 +696,11 @@ class Copy(Operator):
     @property
     def channel_share(self) -> int:
         """What each channel's transfers split into."""
-        pieces = [prod(p.sizes) // self.num_channels for w in self.walks() for p in w]
+        pieces = [
+            prod(concrete(p.sizes, p)) // self.num_channels
+            for w in self.walks()
+            for p in w
+        ]
         return gcd(*pieces, *self._row_shares())
 
     def build(self) -> Built:
@@ -711,7 +716,9 @@ class Copy(Operator):
 
     def compatible(self) -> None:
         channels = self.num_channels
-        step = gcd(*(tap.sizes[-1] for walk in self.walks() for tap in walk))
+        step = gcd(
+            *(concrete(tap.sizes, tap)[-1] for walk in self.walks() for tap in walk)
+        )
         if step % channels:
             raise ValueError(
                 f"Copy: the innermost axes of {self.src} and {self.dst} have a common "
@@ -719,11 +726,12 @@ class Copy(Operator):
             )
         for walk in self.walks():
             for tap in walk:
-                per_channel = prod(tap.sizes) // channels
+                sizes = concrete(tap.sizes, tap)
+                per_channel = prod(sizes) // channels
                 if per_channel % self.tile_size:
                     raise ValueError(
                         f"Copy: tile_size ({self.tile_size}) must divide the per-channel "
-                        f"transfer {per_channel} (= {prod(tap.sizes)} / {channels} "
+                        f"transfer {per_channel} (= {prod(sizes)} / {channels} "
                         f"channels)"
                     )
         for row in self._row_shares():
@@ -737,24 +745,26 @@ class Copy(Operator):
     def _row_shares(self) -> list[int]:
         """Per bounded pattern, the elements per channel one bounded row moves."""
         src, dst = self.walks()
-        return [
-            int(
-                prod(tap.sizes[bound + 1 :])
-                if repeated
-                else prod(tap.sizes) // tap.sizes[bound]
-            )
-            // self.num_channels
-            for walk, bound, repeated in (
-                (src, self.src_bound, self.src_repeat),
-                (dst, self.dst_bound, False),
-            )
-            if bound is not None
-            for tap in walk
-        ]
+        shares = []
+        for walk, bound, repeated in (
+            (src, self.src_bound, self.src_repeat),
+            (dst, self.dst_bound, False),
+        ):
+            if bound is None:
+                continue
+            for tap in walk:
+                sizes = concrete(tap.sizes, tap)
+                row = (
+                    prod(sizes[bound + 1 :])
+                    if repeated
+                    else prod(sizes) // sizes[bound]
+                )
+                shares.append(row // self.num_channels)
+        return shares
 
     def _shares(self, tap: TensorAccessPattern) -> list[TensorAccessPattern]:
         """``tap``'s share per channel, in order."""
-        step = gcd(*(p.sizes[-1] for walk in self.walks() for p in walk))
+        step = gcd(*(concrete(p.sizes, p)[-1] for walk in self.walks() for p in walk))
         if tap.sizes[-1] != step:
             tap = tap.split(tap.rank - 1, step)
         share = step // self.num_channels
@@ -781,7 +791,10 @@ class Copy(Operator):
         on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
         out = []
         for share in shares:
-            dims = list(share.transformation_dims)
+            ns, ss = zip(*share.transformation_dims)
+            dims: list[tuple[int, int]] = list(
+                zip(concrete(ns, share), concrete(ss, share))
+            )
             if on_d2:
                 lead, inner = dims[:bound], dims[bound + 1 :]
                 dims = (
@@ -813,7 +826,8 @@ class Copy(Operator):
                     f"Copy: {tap} does not fit one descriptor per channel, which a "
                     f"bounded axis needs (its size is patched in place)"
                 )
-            _, sizes, _ = shim_dims(placed)
+            _, raw_sizes, _ = shim_dims(placed)
+            sizes = concrete(raw_sizes, placed)
             out.append((placed, prod(sizes[(1 if on_d2 else dim) + 1 :])))
         return out
 
@@ -862,7 +876,9 @@ class Copy(Operator):
         src = tuple(at(tap, self.src_bound, src_valid) for tap in src)
         dst = tuple(at(tap, self.dst_bound, dst_valid) for tap in dst)
         gather, scatter = (
-            np.concatenate([p.gather(np.arange(prod(p.tensor_dims))) for p in tap])
+            np.concatenate(
+                [p.gather(np.arange(prod(concrete(p.tensor_dims, p)))) for p in tap]
+            )
             + int(offset)
             for tap, offset in ((src, in_offset), (dst, out_offset))
         )
@@ -899,11 +915,12 @@ class Copy(Operator):
             for p in pieces:
                 if runs:
                     first, n, step = runs[-1]
-                    step = p.offset - first.offset if n == 1 else step
+                    offset, first_offset = concrete((p.offset, first.offset), p)
+                    step = offset - first_offset if n == 1 else step
                     if (
                         (p.sizes, p.strides) == (first.sizes, first.strides)
                         and step >= 0
-                        and p.offset == first.offset + n * step
+                        and offset == first_offset + n * step
                         and operand.fits(
                             TensorAccessPattern(
                                 first.tensor_dims,
@@ -937,6 +954,8 @@ class Copy(Operator):
         if self.src_repeat:
             # The drain first, so the walks' fills queue behind a consumer.
             tg = TaskGroup()
+            # validate() refuses src_repeat with a tuple dst.
+            assert not isinstance(self.dst, tuple)
             ((tap, unit),) = self._taps(self.dst, self.dst_bound, self.y)
             self.y.drain(
                 tap,
@@ -968,7 +987,7 @@ class Copy(Operator):
                     shares = [self._shares(p)[c] for p in walk]
                     for tap in self._stacked(shares, operand):
                         issued.append((at, c, side == 0, tap))
-                        at += prod(tap.sizes)
+                        at += prod(concrete(tap.sizes, tap))
             issued.sort(key=lambda t: t[:3])
             # A channel's drains finish in order, so its last one is the copy's.
             last = {c: i for i, (_, c, fill, _) in enumerate(issued) if not fill}

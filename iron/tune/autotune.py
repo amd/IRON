@@ -437,6 +437,7 @@ def _least(
     total = 0.0
     for op, points, _ in shape.members:
         moved = op._with_tunables(**s).resolved(dev)
+        assert isinstance(moved, GEMM), "called only where shape.cls is a GEMM"
         for weight, values in points:
             bound = least_us(moved, values, cycles, core_mhz)
             if bound is None:
@@ -486,10 +487,11 @@ def _time(
                     continue
                 delta, noise = ran[i].against_default()
                 deltas[i] += weight * delta
+                variance = variances[i]
                 variances[i] = (
                     None
-                    if variances[i] is None or noise is None
-                    else variances[i] + (weight * noise) ** 2
+                    if variance is None or noise is None
+                    else variance + (weight * noise) ** 2
                 )
                 if refused[i] is None and ran[i].output != default.output:
                     refused[i] = _judged(ops[0], ops[i], values, inputs, full_elf)
@@ -510,6 +512,8 @@ def _judged(
     run = Standalone(
         f"judge_{_identity(op, op.dev)}",
         [op],
+        # Operator is hashable by identity at runtime (object.__hash__); pyright
+        # infers __hash__ = None from jit.Operator's dataclass_transform defaults.
         values={op: values},
         inputs={op: inputs},
         full_elf=full_elf,

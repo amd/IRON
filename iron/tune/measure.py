@@ -229,6 +229,8 @@ class Standalone:
         """Return the device address of buffer ``name``."""
         view = self.callable.get_storage(name)
         root = view.storage.binding_handle(0, view.storage.nbytes)
+        if root is None:
+            raise ValueError(f"{name} has no device binding to address")
         return root.address() + view.storage_offset
 
     def digest(self) -> str:
@@ -299,10 +301,13 @@ def judge(
         return "only a bit-identical output is admitted"
     values = values or {}
     for extent in op.bound_extents:
-        if values.get(extent) != vars(op)[op.value(extent).bounds.name]:
+        bounds = op.value(extent).bounds
+        assert bounds is not None, "bound_extents holds only extents that bound one"
+        if values.get(extent) != vars(op)[bounds.name]:
             return "only a bit-identical output is admitted under a bound"
     want = op._call_reference(inputs, values=values)
     for which, gate in gates.items():
+        assert gate is not None, "a None gate already returned above"
         for name, verdict in op.judge(inputs, written, gate, want).items():
             if not verdict:
                 return f"{name} under {which} gate: {verdict.detail}"
@@ -393,10 +398,10 @@ class Measurement:
             return delta, standard_error(
                 [a - b for a, b in zip(self.round_us, other.round_us)]
             )
-        noises = [standard_error(m.round_us) for m in (self, other)]
-        if None in noises:
+        own_noise, other_noise = (standard_error(m.round_us) for m in (self, other))
+        if own_noise is None or other_noise is None:
             return delta, None
-        return delta, math.hypot(*noises)
+        return delta, math.hypot(own_noise, other_noise)
 
 
 class Cache:
@@ -525,11 +530,14 @@ def measure(
     mode = pmode()
     if cache is not None and cache.mode != mode:
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
-    keys = [
-        None if cache is None else cache.key(op, values, inputs, full_elf) for op in ops
-    ]
+    keys = (
+        None
+        if cache is None
+        else [cache.key(op, values, inputs, full_elf) for op in ops]
+    )
     out: dict[int, Measurement] = {}
     if cache is not None and not remeasure:
+        assert keys is not None, "built above whenever cache is not None"
         for i, key in enumerate(keys):
             if (m := cache.get(key)) is not None:
                 out[i] = m
@@ -549,6 +557,9 @@ def measure(
         built, short, long = [], [], []
         for i in batch:
             try:
+                # Operator is hashable by identity at runtime (object.__hash__);
+                # pyright infers __hash__ = None from jit.Operator's
+                # dataclass_transform defaults.
                 one = Standalone(
                     f"probe1_{i}",
                     [ops[i]],
@@ -604,6 +615,7 @@ def measure(
                 () if i == 0 else steps[0],
             )
             if cache is not None:
+                assert keys is not None, "built above whenever cache is not None"
                 cache.put(keys[i], out[i])
         fastest = min(fastest, *(times[n + j].median_us for j in range(n)))
         # A probe holds its context while it lives; the next batch needs them.

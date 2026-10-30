@@ -138,7 +138,9 @@ class DepthwiseConv1d(Operator):
             [np.zeros((TAPS - 1, self.channels), np.float32), x.astype(np.float32)]
         )
         w = weight.astype(np.float32)
-        y = sum(w[j] * padded[j : j + self.rows] for j in range(TAPS))
+        y = np.zeros((self.rows, self.channels), np.float32)
+        for j in range(TAPS):
+            y += w[j] * padded[j : j + self.rows]
         return y.astype(bfloat16)
 
     def sequence(self, rt):

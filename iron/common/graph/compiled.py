@@ -44,7 +44,7 @@ from ..image.sequence import Image
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .handle import Carry, Dense, Handle, State, Weight, is_operand
-from .record import HostStep, Recording, Recorder
+from .record import HostStep, Recorder, Recording
 
 logger = logging.getLogger(__name__)
 

@@ -134,13 +134,19 @@ def main(engine_xclbins, out):
         layers = [
             DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type=t) for t in LayerType
         ]
-        heads = dict(
-            max_context=32768,  # bounds the KV cache rows; the stride is a dispatch parameter
-            num_heads=config["num_attention_heads"],
-            num_kv_heads=config["num_key_value_heads"],
+        # Bounds the KV cache rows; the stride is a dispatch parameter.
+        max_context = 32768
+        num_heads = config["num_attention_heads"]
+        num_kv_heads = config["num_key_value_heads"]
+        attn = PrefillAttention(
+            max_context=max_context, num_heads=num_heads, num_kv_heads=num_kv_heads
         )
-        attn = PrefillAttention(**heads)
-        swa = PrefillSlidingAttention(window=config["sliding_window"], **heads)
+        swa = PrefillSlidingAttention(
+            window=config["sliding_window"],
+            max_context=max_context,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+        )
         lm_head = LMHead(
             dim=config["hidden_size"],
             vocab=config["vocab_size"],

@@ -99,7 +99,7 @@ class Value(PerCallMember):
             return "_".join(
                 [self.op.name, self.name, *([] if own is None else [own.name])]
             )
-        names = [bound[k].name for k in sorted(bound) if bound[k] is not None]
+        names = [v.name for k in sorted(bound) if (v := bound[k]) is not None]
         return "_".join([self.op.name, *names, self.name])
 
     @property

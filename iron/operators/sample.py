@@ -12,7 +12,10 @@ draws the token from them.
 from functools import cache
 
 import numpy as np
-from aie.dialects.aie import WireBundle, get_target_model
+from aie.dialects.aie import (
+    WireBundle,
+    get_target_model,
+)
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, In, InOut, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
@@ -53,6 +56,8 @@ def slices(vocab: int, cores: int, k_max: int) -> tuple[int, int]:
         chunk = _largest_chunk(size, calls)
         tail = chunk and _largest_chunk(last, calls)
         if tail:
+            # tail = chunk and ...: tail truthy means chunk is too.
+            assert chunk is not None
             best = (max(size // chunk, last // tail), size, last)
             if best[0] == fewest:
                 break
@@ -77,7 +82,7 @@ def reference(logits, draw_row, k_max: int | None = None) -> int:
 def _logits(op: "Sample") -> dict:
     """Logits with a few ties at the top, and one draw row per position."""
     rng = np.random.default_rng(11)
-    logits = rng.normal(0, 3, op.vocab).astype(bfloat16)
+    logits: np.ndarray = rng.normal(0, 3, op.vocab).astype(bfloat16)
     logits[rng.choice(op.vocab, 8, replace=False)] = logits.max()
     # Padding above every token's logit, which no draw may take.
     logits[op.drawable :] = logits.max() + 1
@@ -183,6 +188,11 @@ class Sample(Operator):
         """
         size, last = slices(self.vocab, self.cores, self.k_max)
         tail = self.chunk if last == size else _largest_chunk(last, last // 2)
+        if tail is None:
+            raise ValueError(
+                f"Sample: the last slice of {last} logits does not split into even "
+                f"chunks (4-byte DMA)"
+            )
         padding = self.vocab - self.drawable
         return [(size, self.chunk, size)] * (self.cores - 1) + [
             (last, tail, last - padding)

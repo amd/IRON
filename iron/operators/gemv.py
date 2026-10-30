@@ -17,6 +17,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp
+from iron.common.declare.operand import concrete
 from iron.common.testing import Case, Testing
 
 
@@ -383,9 +384,10 @@ class GEMV(Operator):
             )
             for k, tap, word, unit in rows:
                 self.A.fill(head, lane=k, source=self.B, managed=False)
+                (offset,) = concrete((tap.offset,), tap)
                 matrix = TensorAccessPattern(
                     tap.tensor_dims,
-                    tap.offset + b // self.repeat * M * K,
+                    offset + b // self.repeat * M * K,
                     tap.sizes,
                     tap.strides,
                 )

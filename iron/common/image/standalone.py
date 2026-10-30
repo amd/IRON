@@ -47,5 +47,6 @@ class OperatorImage:
         Returns the handle ``aie.utils.benchmark`` times, and the result.
         """
         self.compile()
+        assert self._sequence is not None, "compile() built it"
         (step,) = self._sequence.steps
         return self._chain.links[id(step.op)].kernel(*args, **scalars)

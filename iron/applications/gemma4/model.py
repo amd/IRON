@@ -47,12 +47,12 @@ class Gemma4Config(DecoderConfig):
     inputs and the logits' cap.
     """
 
-    precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
     json_prefix = "text_config."
 
     rope_theta: float = dataclasses.field(
         metadata={"json": "rope_parameters.sliding_attention.rope_theta"}
     )
+    precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
     hidden_act: str = dataclasses.field(
         default="gelu_pytorch_tanh", metadata={"json": "hidden_activation"}
     )
@@ -151,7 +151,8 @@ class Gemma4Decoder(Decoder):
     def __init__(self, c: Gemma4Config, layer):
         super().__init__(c, layer)
         L, P, E = c.num_hidden_layers, c.ple_dim, c.hidden_size
-        self.embed_tokens_per_layer = Embedding(c.vocab_size, L * P)
+        # Dropped once load_state_dict has split it into the layers.
+        self.embed_tokens_per_layer: Embedding | None = Embedding(c.vocab_size, L * P)
         self.per_layer_model_projection = Linear(E, L * P, False, precision=c.precision)
         self.per_layer_projection_norm = RMSNorm(P, c.eps)
 
@@ -187,6 +188,7 @@ class Gemma4(CausalLM):
     config = Gemma4Config
     decoder_class = Gemma4Decoder
     layer_class = Gemma4Layer
+    model: Gemma4Decoder
 
     def __init__(self, config: Gemma4Config, weights):
         super().__init__(config, subtree(weights, model=weights.model.language_model))
@@ -212,13 +214,14 @@ class Gemma4(CausalLM):
         super().load_state_dict(tree, path=path)
         c, m = self.config, self.model
         P, scale = c.ple_dim, np.float32(bfloat16(np.sqrt(c.ple_dim)))
+        assert m.embed_tokens_per_layer is not None, "split into the layers once"
         table = m.embed_tokens_per_layer.weight
         placeholders = [
             t
             for t in (c.image_token_id, c.audio_token_id, c.video_token_id)
             if t is not None
         ]
-        for i, layer in enumerate(m.layers):
+        for i, layer in enumerate(self.layers):
             # A layer's own columns, scaled, contiguous: one gather a layer.
             rows = table[:, i * P : (i + 1) * P].astype(np.float32) * scale
             rows[placeholders] = rows[c.pad_token_id]
@@ -289,9 +292,8 @@ class Gemma4MultimodalConfig(Gemma4Config):
         runs = {}
         if self.image_token_id in raw:
             image, max_tokens = raw[self.image_token_id]
-            run = [self.image_token_id] * vision.tokens(
-                *np.shape(image)[:2], max_tokens
-            )
+            height, width = np.shape(image)[:2]
+            run = [self.image_token_id] * vision.tokens(height, width, max_tokens)
             runs[self.image_token_id] = [self.boi_token_id, *run, self.eoi_token_id]
         if self.audio_token_id in raw:
             (wave,) = raw[self.audio_token_id]

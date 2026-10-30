@@ -94,6 +94,7 @@ class Operand:
         device's core memory.
         """
         dev = self.op.dev
+        assert dev is not None, "l1_depth is read during build(), with a device bound"
         # Half a programmer bank: at the whole one, two 16 KB streams no longer fit.
         bank = dev.core_memory_bytes // (2 * dev.core_memory_banks)
         obj_bytes = math.prod(self.obj_shape) * bfp.itemsize(self.dtype)
@@ -255,6 +256,8 @@ class Operand:
 
         None where no axis matches, or ``extent`` bounds no parameter.
         """
+        if extent.bounds is None:
+            return None
         return axis_of(self.dims, extent.bounds.name, self.op)
 
     def fits(self, tap: TensorAccessPattern) -> bool:
@@ -262,8 +265,12 @@ class Operand:
 
         ``tap`` is a pattern over this operand.
         """
+        dev = self.op.dev
+        assert (
+            dev is not None
+        ), "fits() is read during sequence derivation, with a device bound"
         # Every shim tile's descriptor is alike; column 0's stands for a lane's.
-        return self.op.dev.dma_bd_fits(0, 0, tap, self.dtype)
+        return dev.dma_bd_fits(0, 0, tap, self.dtype)
 
     def split(self, elements: int) -> tuple[int, int] | None:
         """Return a contiguous run of ``elements`` of this operand as ``(d1, d0)``.
@@ -271,6 +278,10 @@ class Operand:
         ``d0`` is the largest a lane's shim descriptor holds as its
         innermost dimension with ``d1`` beside it, or None where no ``d0`` does.
         """
+        dev = self.op.dev
+        assert (
+            dev is not None
+        ), "split() is read during sequence derivation, with a device bound"
         for d0 in range(elements, 0, -1):
             if elements % d0:
                 continue
@@ -282,7 +293,7 @@ class Operand:
                 [1, 2, elements // d0, d0],
                 [0, 4 * elements, d0, 1],
             )
-            if self.op.dev.dma_bd_fits(0, 0, probe, self.dtype):
+            if dev.dma_bd_fits(0, 0, probe, self.dtype):
                 return elements // d0, d0
         return None
 
@@ -372,10 +383,14 @@ class Operand:
             raise ValueError(
                 f"{self.name}: a {run}-element tile does not fit one descriptor"
             )
+        dev = self.op.dev
+        assert (
+            dev is not None
+        ), "transfers() is read during sequence derivation, with a device bound"
         # A unit D1 is stripped, which would drop the tile count into D1's
         # wrap; past it, a tile split in two keeps the count on D2, which has
         # none (and a half of no whole granules fits no descriptor below).
-        wrap = (1 << self.op.dev.get_dma_bd_wrap_bits(0, 0)) - 1
+        wrap = (1 << dev.get_dma_bd_wrap_bits(0, 0)) - 1
         if halves[0] == 1 and tiles > wrap and run % 2 == 0:
             halves = (2, run // 2)
         iterations = shape[0] if axis else 1
@@ -401,6 +416,24 @@ class Operand:
 
     def __repr__(self) -> str:
         return repr(self._decl)
+
+
+def concrete(values, where) -> tuple[int, ...]:
+    """Return a static pattern's sizes, strides or offset as ints.
+
+    Args:
+        values: Entries read off a ``TensorAccessPattern``, which mlir-aie
+            types as possibly symbolic.
+        where: What they were read from, for the error.
+
+    Raises:
+        TypeError: An entry is a symbolic value; only a per-call bound makes
+            one, never a pattern an operator builds.
+    """
+    out = tuple(int(v) for v in values if isinstance(v, (int, np.integer)))
+    if len(out) != len(values):
+        raise TypeError(f"{where}: a symbolic size, stride or offset, read as static")
+    return out
 
 
 def axis_of(dims: tuple, name: str, op) -> int | None:

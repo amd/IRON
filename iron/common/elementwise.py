@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Iterable, Mapping
-from typing import ClassVar, Self
+from typing import Any, ClassVar, Self
 
 import numpy as np
-from aie.iron import In, ObjectFifo, Out, Worker, ceildiv
+from aie.iron import In, ObjectFifo, Out, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
@@ -252,10 +252,11 @@ class Elementwise(Operator):
         per_call = None if contract is None else contract.ops_per_call
         return super().ops() if per_call is None else per_call * self.lines
 
-    def reference(self, *inputs):
-        """The kernel contract's reference, line by line: what the cores compute. A
-        bounded call's elements short of a whole line are zero-padded to whole lines,
-        as the device runs whole tiles.
+    def reference(self, *inputs: Any, **kwargs: Any):
+        """Run the kernel contract's reference, line by line, what the cores compute.
+
+        A bounded call's elements short of a whole line are zero-padded
+        to whole lines, as the device runs whole tiles.
         """
         (out,) = self.outputs
         line = self.default_tile if self.tile_size is None else self.tile_size
@@ -604,6 +605,7 @@ def _admitted(tolerance: Tolerance, ref: np.ndarray) -> np.ndarray:
         raise ValueError("no element-wise bound for a range_frac tolerance")
     ref = np.abs(np.asarray(ref, np.float32))
     if tolerance.kind == "ulps":
+        assert tolerance.ulps is not None, "kind == 'ulps' iff ulps is set"
         # n ulps away is furthest upward in magnitude, where the steps grow.
         bits = ref.astype(bfloat16).view(np.uint16).astype(np.int32)
         up = (bits + tolerance.ulps).astype(np.uint16).view(bfloat16)

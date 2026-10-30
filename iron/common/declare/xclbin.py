@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import os
 import tempfile
@@ -32,9 +31,11 @@ class Xclbin(NPUKernel):
         self.url, self.sha256, self.filename = url, sha256, filename
         self.settings = kernel
 
-    @functools.cached_property
+    @property
     def xclbin_path(self) -> Path:
-        return self.fetch()
+        if self._xclbin_path is None:
+            self._xclbin_path = self.fetch()
+        return Path(self._xclbin_path)
 
     def with_instructions(self, insts_path, **kernel) -> Xclbin:
         """Return this image running ``insts_path``.
@@ -48,8 +49,7 @@ class Xclbin(NPUKernel):
             self.filename,
             **{**self.settings, **kernel, "insts_path": insts_path},
         )
-        if "xclbin_path" in vars(self):
-            vars(run)["xclbin_path"] = self.xclbin_path
+        run._xclbin_path = self._xclbin_path
         return run
 
     def __call__(self, *args, **kwargs):

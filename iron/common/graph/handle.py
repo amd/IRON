@@ -16,6 +16,7 @@ from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
+from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
 from ..declare.precision import Precision
 from ..image.packaging import Kind
@@ -463,10 +464,11 @@ class Handle:
         recorder = graph_recorder.get()
         if recorder is not None:
             for walk, r in zip(walks, repeats or ()):
-                recorder.limit(r, 1, walk.sizes[0] + 1, self)
+                (size0,) = concrete(walk.sizes[:1], walk)
+                recorder.limit(r, 1, size0 + 1, self)
             if length is not None:
-                hi = min(walk.sizes[1] for walk in walks)
-                recorder.limit(length, 1, hi + 1, self)
+                sizes1 = concrete([walk.sizes[1] for walk in walks], walks)
+                recorder.limit(length, 1, min(sizes1) + 1, self)
         layout = Strided(self._over(tap), repeat=repeats, length=length)
         return Handle(self.buffer, shape, self.dtype, bounds, layout)
 

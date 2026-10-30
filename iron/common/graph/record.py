@@ -17,7 +17,7 @@ from aie.iron import In, InOut, Out
 from aie.utils import bfp
 
 from ..declare import Operator, Value
-from ..declare.operand import param_names
+from ..declare.operand import concrete, param_names
 from ..declare.operator import graph_recorder
 from ..declare.profile import Profile
 from ..image.packaging import Kind
@@ -182,7 +182,7 @@ def _take_views(cls, operands, kwargs, values):
             values[offset_member] = view.offset
         # What the pattern walks: the whole buffer, in the pattern's shape.
         walked = view.tap[0] if isinstance(view.tap, tuple) else view.tap
-        out.append(Handle(h.buffer, tuple(map(int, walked.tensor_dims)), h.dtype))
+        out.append(Handle(h.buffer, concrete(walked.tensor_dims, walked), h.dtype))
     return out
 
 

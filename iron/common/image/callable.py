@@ -24,7 +24,7 @@ from .compose import Composition
 from .step import BufferRef
 
 if TYPE_CHECKING:
-    import pyxrt
+    import pyxrt  # pyright: ignore[reportMissingImports]
     from aie.utils.hostruntime.xrtruntime.hostruntime import (
         XRTKernelHandle,
         XRTKernelResult,
@@ -405,6 +405,7 @@ class FullELFCallable(ImageCallable):
         if not force and (self._run.wired or self._runs != [self._run]):
             return False
         image = self.kernel.elf_path
+        assert image is not None, "a FullELFCallable's kernel has an elf_path"
         if not force:
             holding = FullELFCallable._holding.values()
             if any(c.kernel.elf_path == image for c in holding if c is not self):
@@ -457,7 +458,7 @@ class FullELFCallable(ImageCallable):
         return made
 
     @property
-    def params(self) -> ParameterScratchpad | None:
+    def params(self) -> list[ParameterScratchpad] | None:
         return self.run.params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
@@ -514,6 +515,7 @@ class FullELFCallable(ImageCallable):
     def _follow_arena(self) -> None:
         if not self._arena_grew():
             return
+        assert self.arena is not None, "_arena_grew() returned True"
         self.scratch_banks = self.arena.banks
         arguments = self._arguments()
         for run in self._runs:
@@ -651,6 +653,7 @@ class PerStepCallable(ImageCallable):
         """View the residents in the arena's banks, again once it has grown."""
         if not self._arena_grew():
             return
+        assert self.arena is not None, "_arena_grew() returned True"
         banks = self.arena.banks
         for root in self.op.residents:
             _, offset, length = self.op.layout[root]

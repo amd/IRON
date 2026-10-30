@@ -214,8 +214,12 @@ class HuggingFace:
             )
         return cls(model)
 
-    def logits(self, tokens) -> np.ndarray:
-        """The logits after the last of ``tokens``, float32."""
+    def logits(self, tokens, *arrays: Any, **kwargs: Any) -> np.ndarray:
+        """Return the logits after the last of ``tokens``, float32.
+
+        A subclass whose model takes more than token ids (an image, a clip)
+        reads them from ``arrays``.
+        """
         import torch
 
         with torch.no_grad():

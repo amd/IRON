@@ -135,7 +135,8 @@ class Softmax(Operator):
     window: int | None = param(default=None, array=True)
     period: int | None = param(default=None, array=True)
 
-    length = per_call(bounds=cols)  # cols, or fewer per call
+    # cols, or fewer per call
+    length = per_call(bounds=cols)
 
     x = In(
         rows,
@@ -295,17 +296,30 @@ class Softmax(Operator):
                 for b in range_(blocks):
                     b32 = arith.index_cast(b, to=i32)
                     in_block = arith.minsi(
-                        valid - b32 * block, arith.constant(block, i32)
+                        valid - b32 * block,  # pyright: ignore[reportOperatorIssue]
+                        arith.constant(block, i32),
                     )
                     span = arith.minsi(
-                        (in_block + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
+                        (
+                            in_block + (_VECTOR_STEP - 1)
+                        )  # pyright: ignore[reportOperatorIssue]
+                        & -_VECTOR_STEP,
                         arith.constant(block, i32),
                     )
                     for state in states:
                         elem_in = of_in.acquire(1)
                         mask(elem_in, in_block, span)
                         if step == 0:
-                            row_max(elem_in, state, arith.extui(i32, b32 == 0), span)
+                            # ArithValue.__eq__ can fall back to a plain bool
+                            # when `other` isn't coercible; it always is here.
+                            row_max(
+                                elem_in,
+                                state,
+                                arith.extui(
+                                    i32, b32 == 0  # pyright: ignore[reportArgumentType]
+                                ),
+                                span,
+                            )
                         elif step == 1:
                             row_sum(elem_in, state, span)
                         else:

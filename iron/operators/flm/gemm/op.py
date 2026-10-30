@@ -12,7 +12,9 @@ from typing import Any, ClassVar, NamedTuple
 
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch, AIETileType, DMAChannelDir
-from aie.dialects.aie import get_target_model
+from aie.dialects.aie import (
+    get_target_model,
+)
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron import (
@@ -33,10 +35,7 @@ from aie.iron import (
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernels import fused_mm
-from aie.utils import bfp
-from aie.utils.verify import Tolerance
-from aie.utils import set_current_device
-from aie.utils.compile.utils import resolve_target_arch
+from aie.utils import bfp, set_current_device
 from aie.utils.compile.jit.context import compile_context
 from aie.utils.compile.jit.params import Select, divisors, param, per_call, tunable
 from aie.utils.compile.utils import resolve_target_arch
@@ -208,7 +207,11 @@ class ProjectionGEMM(Operator):
     # descriptor into it counts in: in bytes, a transfer would move a ninth
     # of what it named.
     B = In(
-        Select(bfp16_b, (packed_blocks,), (Select(b_col_maj, (N, K), (K, N)),)),
+        Select(
+            bfp16_b,
+            (packed_blocks,),
+            (Select(b_col_maj, (N, K), (K, N)),),
+        ),
         dtype=b_dtype,
         obj_shape=(b_l2,),
         per=(cols,),
@@ -494,6 +497,11 @@ class ProjectionGEMM(Operator):
         )
 
     def build(self) -> Built:
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable(
+                "flm.ProjectionGEMM: build() runs on a bound device; none is bound"
+            )
         COLS, ROWS, JOINS = self.cols, self.rows, self.joins
         N_TILE, CT_K, M_CHUNK, T_MA = (
             self.tile_n,
@@ -512,7 +520,7 @@ class ProjectionGEMM(Operator):
         # Where the cores read a row bound: the scratchpad on a full ELF, else
         # their parameter buffer.
         bounded = self.value("valid").per_call
-        tm = get_target_model(self.dev.resolve())
+        tm = get_target_model(dev.resolve())
 
         bf16_ty = np.dtype[bfloat16]
         f32 = np.dtype[np.float32]
@@ -554,7 +562,7 @@ class ProjectionGEMM(Operator):
         # Emits (b_iter, mc, band): the order the core acquires A in while
         # holding a B chunk across the group.
         # A mem tile's run is bounded in elements; one past the wrap splits.
-        run, wrap = R * CT_K, (1 << self.dev.get_dma_bd_wrap_bits(0, 1)) - 1
+        run, wrap = R * CT_K, (1 << dev.get_dma_bd_wrap_bits(0, 1)) - 1
         a_lo = max(d for d in range(1, min(run, wrap) + 1) if run % d == 0)
         a_hi = run // a_lo
         a_send_dims = TensorAccessPattern.full((a_bands, B_ITERS, R * CT_K)).permute(
@@ -877,8 +885,13 @@ class ProjectionGEMM(Operator):
         forward (uniform across columns, though only every (cols //
         rows)-th does).
         """
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable(
+                "flm.ProjectionGEMM: B's memtile budget is per device; none is bound"
+            )
         free = (
-            get_target_model(self.dev.resolve()).get_mem_tile_size()
+            get_target_model(dev.resolve()).get_mem_tile_size()
             - A_DEPTH * self.m_chunk * M_TILE * self.k_tile * 2
             - C_DEPTH * M_TILE * self.tile_n * self.rows * 2
         )
@@ -889,7 +902,12 @@ class ProjectionGEMM(Operator):
     @property
     def _b_resident(self) -> bool:
         """Whether a column-block of B stays in the memtile for all of M's units."""
-        lock_max = get_target_model(self.dev.resolve()).get_max_lock_value()
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable(
+                "flm.ProjectionGEMM: B's residency depends on the device; none is bound"
+            )
+        lock_max = get_target_model(dev.resolve()).get_max_lock_value()
         return self._k_iters <= self._b_slots and self._n_units <= lock_max
 
     @property
@@ -1309,7 +1327,7 @@ class ProjectionGEMM(Operator):
         """
         b = B.T if self.b_col_maj else B
         C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
-        return self.epilogue.apply(C)
+        return Epilogue(self.epilogue).apply(C)
 
     def tolerance(self) -> Tolerance | None:
         """Return C's roundings, in units of 2^-8 of ``|A| @ |B|``.

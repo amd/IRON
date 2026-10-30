@@ -76,7 +76,7 @@ def attach_emit(
     inputs = [_resident(recording, program), planes]
     recording.steps.append(
         Step(
-            Emit(slots=slots, carried=n),  # pyright: ignore[reportCallIssue]
+            Emit(slots=slots, carried=n),
             inputs + [image, current],
             inputs,
             [image, current],

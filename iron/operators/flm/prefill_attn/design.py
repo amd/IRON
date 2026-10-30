@@ -313,11 +313,25 @@ def prefill_attn(
         kv_cache = TensorAccessPattern.full((2, _as_i32(max_l_arg), num_kv_heads, g.dh))
         L_begin = _as_i32(lb_arg)
         L_end = _as_i32(le_arg)
-        require(L_begin >= 0, "L_begin must be >= 0")
-        require(L_begin % ROUND == 0, f"L_begin must be a multiple of {ROUND}")
-        require(L_end % ROUND == 0, f"L_end must be a multiple of {ROUND}")
+        # _as_i32 (aie.dialects.aie) returns None only when given None; these
+        # dispatch args never are, but it is unannotated so pyright infers "| None".
+        require(
+            L_begin >= 0,
+            "L_begin must be >= 0",
+        )
+        require(
+            L_begin % ROUND == 0,
+            f"L_begin must be a multiple of {ROUND}",
+        )
+        require(
+            L_end % ROUND == 0,
+            f"L_end must be a multiple of {ROUND}",
+        )
         require(_as_i32(max_l_arg) <= max_context, "max_l exceeds max_context")
-        rounds = arith.divsi(L_end - L_begin + (ROUND - 1), _as_i32(ROUND))
+        rounds = arith.divsi(
+            L_end - L_begin + (ROUND - 1),
+            _as_i32(ROUND),
+        )
 
         for key in sorted(rtp):
             lb, le, ws = rtp[key]
@@ -333,9 +347,13 @@ def prefill_attn(
                 r = arith.index_cast(T.i32(), rnd)
                 if window is None:
                     kv_begin = 0
-                    kv_length = r * ROUND + (L_begin + ROUND)
+                    kv_length = r * ROUND + (  # pyright: ignore[reportOperatorIssue]
+                        L_begin + ROUND
+                    )
                 else:
-                    lq_current = L_begin + r * ROUND
+                    lq_current = (
+                        L_begin + r * ROUND  # pyright: ignore[reportOperatorIssue]
+                    )
                     x = lq_current - _as_i32(window)
                     # max(x, 0) without a branch: x & (x >> 31) is x when x < 0,
                     # else 0.
@@ -348,7 +366,13 @@ def prefill_attn(
                         o_tasks.append(
                             o_shim[cu * group_cols + col].drain(
                                 o,
-                                qo_blocks[r * blocks_per_round + col, :, head_off],
+                                qo_blocks[
+                                    r
+                                    * blocks_per_round  # pyright: ignore[reportOperatorIssue]
+                                    + col,
+                                    :,
+                                    head_off,
+                                ],
                                 wait=True,
                                 managed=False,
                             )
@@ -358,7 +382,13 @@ def prefill_attn(
                         q_tasks.append(
                             q_shim[key].fill(
                                 q,
-                                qo_blocks[r * blocks_per_round + qi, :, head_off],
+                                qo_blocks[
+                                    r
+                                    * blocks_per_round  # pyright: ignore[reportOperatorIssue]
+                                    + qi,
+                                    :,
+                                    head_off,
+                                ],
                                 wait=False,
                                 managed=False,
                             )
@@ -523,7 +553,7 @@ def prefill_attn(
     # k and v: two shim flows into the k/v memtile, and one broadcast from it
     # to every core. The compiler assigns their channels.
     kv_mt = MT[v.kv_memtile]
-    kv_flows = [Flow(IT[v.kv_memtile], kv_mt) for _ in ("k", "v")]
+    kv_flows = (Flow(IT[v.kv_memtile], kv_mt), Flow(IT[v.kv_memtile], kv_mt))
     kv_out = Flow(kv_mt, list(CT.values()))
     for flow in (*kv_flows, kv_out):
         rt.add_flow(flow)

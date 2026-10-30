@@ -939,6 +939,11 @@ class _Array:
             y0 = Buffer(type=y_ty, name=f"y_0_{n}", tile=pt)
             y1 = Buffer(type=y_ty, name=f"y_1_{n}", tile=pt)
         else:
+            if main_y0 is None or main_y1 is None:
+                raise TypeError(
+                    "proj_core: main_y0 and main_y1 are required when send_x_out "
+                    "is False"
+                )
             y0, y1 = main_y0, main_y1
         pk = self.locks(pt, PROJ_LOCKS)
         self.sync_locks[n] = pk["rtp_available_lock"]
@@ -1418,13 +1423,21 @@ def _sequence(
     """
     dims = LayerDims(g, LayerType(layer_type))
     D = g.model_dim
+    # _as_i32 (aie.dialects.aie) returns None only when given None; len_arg and
+    # max_l_arg never are, but it is unannotated so pyright infers "| None".
     L = _as_i32(len_arg) + 1
     MAX_L_v = _as_i32(max_l_arg)
     SW = SLIDING_WINDOW
     weights = dims.weights
 
-    require(_as_i32(len_arg) >= 0, "context_len must be >= 0")
-    require(MAX_L_v <= MAX_CONTEXT, f"max_l exceeds {MAX_CONTEXT}")
+    require(
+        _as_i32(len_arg) >= 0,
+        "context_len must be >= 0",
+    )
+    require(
+        MAX_L_v <= MAX_CONTEXT,
+        f"max_l exceeds {MAX_CONTEXT}",
+    )
     if not dims.swa:
         require(L <= MAX_L_v, "context_len must be below max_l")
 
@@ -1512,7 +1525,9 @@ def _sequence(
     if not dims.skip:
         # recv_k carries the global layers' k and v, recv_v the sliding-window
         # layers'.
-        L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if dims.swa else (L - 1)) * dims.dk
+        L_off = (
+            arith.andi(L - 1, _as_i32(SW - 1)) if dims.swa else (L - 1)
+        ) * dims.dk  # pyright: ignore[reportOperatorIssue]
         recv = "recv_v" if dims.swa else "recv_k"
         for off in (L_off, L_off + v_cache_off):
             task = shim[recv].drain(
@@ -1545,14 +1560,29 @@ def _sequence(
         start = arith.andi(_m, _lb)
         # All ones if start is 0, else 0.
         _z = arith.xori(_mask_ge(start, 1), _as_i32(-1))
-        p1_off = start * dims.dk
-        p1_len = (rows - start) * dims.dk - arith.andi(_z, _as_i32(dims.dk))
+        p1_off = start * dims.dk  # pyright: ignore[reportOperatorIssue]
+        p1_len = (
+            rows - start
+        ) * dims.dk - arith.andi(  # pyright: ignore[reportOperatorIssue]
+            _z, _as_i32(dims.dk)
+        )
         p2_off = arith.andi(_z, p1_len)
-        p2_len = arith.ori(start * dims.dk, arith.andi(_z, _as_i32(dims.dk)))
+        p2_len = arith.ori(
+            start * dims.dk,  # pyright: ignore[reportOperatorIssue]
+            arith.andi(_z, _as_i32(dims.dk)),
+        )
         emit(leg(move_k, kv_arg, p1_off, p1_len))
         emit(leg(move_v, kv_arg, p1_off + v_cache_off, p1_len))
         emit(leg(move_k, kv_arg, p2_off, p2_len, token=False))
-        emit(leg(move_v, kv_arg, p2_off + v_cache_off, p2_len, token=False))
+        emit(
+            leg(
+                move_v,
+                kv_arg,
+                p2_off + v_cache_off,  # pyright: ignore[reportOperatorIssue]
+                p2_len,
+                token=False,
+            )
+        )
     for name in ("o", "up_gate", "down"):
         move_weights(weights[name])
     emit(pli_leg("pli_gate"))

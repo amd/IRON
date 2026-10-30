@@ -13,7 +13,7 @@ import aie.utils as aie_utils
 import numpy as np
 from aie.utils import bfp
 
-from ..declare import Operator
+from ..declare import Operand, Operator
 from .allocator import Allocation, ArenaPlan, lay_out
 from .artifacts import Artifacts, Step
 from .callable import BF16, FullELFCallable, PerStepCallable, ScratchArena
@@ -141,7 +141,7 @@ class Image:
         declare.
         """
         sizes: dict[str, int] = {}
-        declared: dict[str, object] = {}
+        declared: dict[str, Operand] = {}
         parts = []
         for s in self.steps:
             if len(s.buffers) != len(s.op.buffers):
@@ -236,7 +236,8 @@ class Image:
         return self._artifacts
 
     def _record(self):
-        """What this image consists of: its designs, its steps, its buffers."""
+        """Record what this image consists of: its designs, its steps, its buffers."""
+        assert self.layout is not None, "_prepare() ran before _link()"
         designs, design_of = self.unique_designs()
         operators = list(self.unique_operators())
         sharing = [

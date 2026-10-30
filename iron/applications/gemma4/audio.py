@@ -19,6 +19,7 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, Scratchpad, lm
+from iron.common.graph.handle import State
 from iron.lm import Conv2d, Linear, RMSNorm, Tower, blocks
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
@@ -115,14 +116,18 @@ class Clipped(iron.Graph):
             self.output_min, self.output_max = bound(), bound()
 
     def clamp(self, x):
-        if self.input_min is None:
+        lo, hi = self.input_min, self.input_max
+        if lo is None:
             return x
-        return Clamp.step(x, low=float(self.input_min), high=float(self.input_max))
+        assert hi is not None, "input_min and input_max are bound together"
+        return Clamp.step(x, low=float(lo), high=float(hi))
 
     def output(self, y):
-        if self.output_min is None:
+        lo, hi = self.output_min, self.output_max
+        if lo is None:
             return y
-        return Clamp.step(y, low=float(self.output_min), high=float(self.output_max))
+        assert hi is not None, "output_min and output_max are bound together"
+        return Clamp.step(y, low=float(lo), high=float(hi))
 
     @staticmethod
     def same_input(*linears: "Clipped") -> None:
@@ -135,7 +140,12 @@ class Clipped(iron.Graph):
         """
         if linears[0].input_min is None:
             return
-        bounds = {(float(p.input_min), float(p.input_max)) for p in linears}
+        bounds = set()
+        for p in linears:
+            assert (
+                p.input_min is not None and p.input_max is not None
+            ), "input_min and input_max are bound together"
+            bounds.add((float(p.input_min), float(p.input_max)))
         if len(bounds) > 1:
             raise ValueError(f"linears sharing an input clamp it to {sorted(bounds)}")
 
@@ -191,7 +201,7 @@ class ConformerAttention(iron.Graph):
         self.logit_cap = c.attention_logit_cap
         self.precision = c.precision
         # The tower's keys, values, scores and probabilities, every layer's.
-        self._buffers = None
+        self._buffers: tuple[State, State, State, State] | None = None
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         """``Graph.load_state_dict``, then the derived tensors.
@@ -225,6 +235,7 @@ class ConformerAttention(iron.Graph):
         gathered, its relative-position terms keys of the same GEMM.
         """
         T, (H, D, W, B) = h.shape[0], self.dims
+        assert self._buffers is not None, "AudioTower sets every layer's buffers"
         keys, values, scores, probs = self._buffers
         K = keys.shape[1]
         h = self.q_proj.clamp(h)
@@ -447,7 +458,7 @@ class AudioTower(Tower):
         projection = self.embed_audio.embedding_projection.weight
         return F.linear(x, projection, precision=c.precision)
 
-    def body(
+    def body(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         wave,
         *,

@@ -101,7 +101,13 @@ class Merge(Operator):
     kinds: int = param(derive=lambda op: len(op.placeholders), repr=False)
 
     ids = In(rows, dtype=np.int32, obj_shape=(block,))
-    before = In(kinds, dtype=np.int32, obj_shape=(kinds,), depth=1, when=offset)
+    before = In(
+        kinds,
+        dtype=np.int32,
+        obj_shape=(kinds,),
+        depth=1,
+        when=offset,
+    )
     merge = Out(rows, dtype=np.int32, obj_shape=(block,))
 
     count = per_call(derive=lambda op: op.rows // op.block)

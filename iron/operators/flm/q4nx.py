@@ -39,12 +39,13 @@ def unpack(grid):
     codes = np.empty((len(b), M_TILE * K_TILE), np.uint8)
     codes[:, 0::2], codes[:, 1::2] = packed & 15, packed >> 4
     codes = codes.reshape(-1, M_TILE // 16, K_TILE, 16).transpose(0, 1, 3, 2)
-    return tuple(
+    codes, scales, mins = (
         part.reshape(nb_r, nb_c, M_TILE, -1)
         .transpose(0, 2, 1, 3)
         .reshape(nb_r * M_TILE, -1)
         for part in (codes, scales, mins)
     )
+    return codes, scales, mins
 
 
 def dequantize(grid):

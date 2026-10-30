@@ -71,7 +71,7 @@ class DecodeLayer(Operator):
     @property
     def dims(self) -> LayerDims:
         """This layer type's dimensions and weight blob."""
-        return LayerDims(self.geometry, self.layer_type)
+        return LayerDims(self.geometry, LayerType(self.layer_type))
 
     def xclbin_operator(self):
         # The four layer types share one array; they differ in their sequences.

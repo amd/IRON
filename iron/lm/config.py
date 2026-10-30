@@ -11,7 +11,7 @@ import dataclasses
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import numpy as np
 
@@ -95,10 +95,11 @@ class Config:
     precision: Precision = dataclasses.field(kw_only=True, metadata={"json": None})
 
     @classmethod
-    def from_checkpoint(cls, path) -> "Config":
-        """``cls``'s fields read from ``path``'s own ``config.json``, each
-        at its ``metadata["json"]`` path (under ``json_prefix``), converted
-        by ``metadata["convert"]`` if it names one.
+    def from_checkpoint(cls, path) -> Self:
+        """``cls``'s fields read from ``path``'s own ``config.json``.
+
+        Each at its ``metadata["json"]`` path (under ``json_prefix``),
+        converted by ``metadata["convert"]`` if it names one.
 
         Args:
             path: A ``config.json``, or a checkpoint's directory or file
@@ -114,9 +115,10 @@ class Config:
         return cls.from_json(json.loads(path.read_text()), path)
 
     @classmethod
-    def from_json(cls, data: dict, source: str | Path = "config.json") -> "Config":
-        """``from_checkpoint`` on ``data``, a ``config.json`` already
-        parsed; ``source`` names it in an error.
+    def from_json(cls, data: dict, source: str | Path = "config.json") -> Self:
+        """``from_checkpoint`` on ``data``, a ``config.json`` already parsed.
+
+        ``source`` names it in an error.
 
         Raises:
             ValueError: ``data`` lacks a field that has no default, or

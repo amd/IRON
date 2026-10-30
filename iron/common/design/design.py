@@ -89,6 +89,9 @@ class OperatorDesign:
         array = BuiltArray(self, dispatch=dispatch)
         prog = array.program()
         if array.traced:
+            assert (
+                array.op.trace is not None
+            ), "traced is non-empty only when op.trace is set"
             prog.enable_trace(array.op.trace.trace_size, workers=array.traced)
         return prog.resolve_program()
 
@@ -172,7 +175,8 @@ class BuiltArray:
         for value in op.values:
             if design.full_elf and not value.dispatch:
                 value.param = ScratchpadParameter(
-                    words.get(value.symbol, value.symbol), value.dtype
+                    words.get(value.symbol, value.symbol),
+                    value.dtype,
                 )
             elif design.full_elf:
                 raise ValueError(
@@ -225,7 +229,11 @@ class BuiltArray:
         module = alone.program().resolve_program()
         words: set[str] = set()
 
-        def read(op: ir.Operation) -> ir.WalkResult:
+        # aie.ir re-exports MLIR's compiled bindings with a wildcard import,
+        # which pyright's stub does not see through.
+        def read(
+            op: ir.Operation,
+        ) -> ir.WalkResult:
             if op.name == "aiex.read_scratchpad_parameter":
                 words.add(ir.FlatSymbolRefAttr(op.attributes["parameter"]).value)
             return ir.WalkResult.ADVANCE
@@ -302,7 +310,12 @@ def configuration(
     if len(kinds) != 1:
         raise ValueError(f"{list(arrays)} are built for different devices {kinds}")
     traced = [owner for owner in owners.values() if owner.traced]
-    sizes = {owner.op.trace.trace_size for owner in traced}
+    sizes = set()
+    for owner in traced:
+        assert (
+            owner.op.trace is not None
+        ), "traced is non-empty only when op.trace is set"
+        sizes.add(owner.op.trace.trace_size)
     if len(sizes) > 1:
         raise ValueError(
             f"{name}: its traced arrays ask for trace sizes {sorted(sizes)}; one "

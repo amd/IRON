@@ -132,14 +132,19 @@ def unvalued(designs: Mapping[str, OperatorDesign]) -> None:
             )
 
 
-def places(module: ir.Module) -> str | None:
-    """``None`` if ``module``'s devices place and allocate, else the
-    diagnostic.
-    """
+# aie.ir re-exports MLIR's compiled bindings with a wildcard import, which
+# pyright's stub does not see through: every ir.<X> below is suppressed for it.
+def places(
+    module: ir.Module,
+) -> str | None:
+    """Return ``None`` if ``module``'s devices place and allocate, else the diagnostic."""
     diagnostics: list[str] = []
 
-    def collect(d: ir.Diagnostic) -> bool:
-        if d.severity == ir.DiagnosticSeverity.ERROR:
+    def collect(
+        d: ir.Diagnostic,
+    ) -> bool:
+        severity = ir.DiagnosticSeverity
+        if d.severity == severity.ERROR:
             diagnostics.append(f"{d.location}: {d.message}")
         return True
 
@@ -165,14 +170,21 @@ def fits(
         unvalued(designs)
         if exported:
             (design,) = designs.values()
-            module = ir.Module.parse(str(design.build()), ir.Context())
+            module = ir.Module.parse(
+                str(design.build()),
+                ir.Context(),
+            )
         else:
             arrays = {n: BuiltArray(d, words) for n, d in designs.items()}
             configured = configuration(next(iter(arrays)), arrays)
             module = Program.compose(
                 [configured], entry=configured.runtimes[0]
             ).resolve_program()
-    except (ValueError, RuntimeError, ir.MLIRError) as e:
+    except (
+        ValueError,
+        RuntimeError,
+        ir.MLIRError,
+    ) as e:
         return str(e)
     return places(module)
 
@@ -356,8 +368,14 @@ class Composition:
 
         None of its parameters may be a shared word.
         """
-        with ir.Context(), ir.Location.unknown():
-            configured = DeviceConfiguration.from_module(symbol, ir.Module.parse(text))
+        with (
+            ir.Context(),
+            ir.Location.unknown(),
+        ):
+            configured = DeviceConfiguration.from_module(
+                symbol,
+                ir.Module.parse(text),
+            )
         (runtime,) = configured.runtimes
         renamed = sorted(
             {p.name for p in runtime.scratchpad_parameters} & set(self.shared_words)

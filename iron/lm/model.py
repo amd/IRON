@@ -255,8 +255,6 @@ class Model(iron.Graph):
     # key is a run of dotted name parts, matched anywhere in a name, and its
     # value is the name the model's modules use instead.
     renames: ClassVar[dict[str, str]] = {}
-    # What loads the checkpoint into transformers to record its goldens.
-    hugging_face: type = HuggingFace
     checkpoint: Checkpoint | None = None
     random_weights: int | None = None
     tokenizer: Tokenizer | None = None
@@ -279,6 +277,15 @@ class Model(iron.Graph):
         """
         raise NotImplementedError(f"{type(self).__name__} does not generate tokens")
 
+    @property
+    def hugging_face(self) -> type:
+        """What loads the checkpoint into transformers to record its goldens.
+
+        A subclass needing another import (torch, transformers) only to
+        record overrides this as a property of its own.
+        """
+        return HuggingFace
+
     @classmethod
     def load(
         cls,
@@ -287,8 +294,9 @@ class Model(iron.Graph):
         random_weights: int | None = None,
         max_seq_len: int | None = None,
         full_elf: bool | None = None,
-    ) -> "Model":
-        """``from_checkpoint``'s model compiled and loaded, weights uploaded;
+    ) -> Self:
+        """``from_checkpoint``'s model compiled and loaded, weights uploaded.
+
         ``full_elf`` is every version's packaging (``load_versions``).
         """
         model = cls.from_checkpoint(
@@ -300,9 +308,10 @@ class Model(iron.Graph):
     @classmethod
     def from_checkpoint(
         cls, path, *, random_weights: int | None = None, max_seq_len: int | None = None
-    ) -> "Model":
-        """The model of a Hugging Face repository's files, not yet loaded,
-        its context ``max_seq_len`` or else fitted to this host (``fit``).
+    ) -> Self:
+        """Return the model of a Hugging Face repository's files, not yet loaded.
+
+        Its context is ``max_seq_len`` or else fitted to this host (``fit``).
 
         Args:
             path: A directory holding ``config.json``, weights and

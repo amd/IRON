@@ -16,7 +16,8 @@ import hashlib
 import inspect
 from collections.abc import Mapping
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Self
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Self, cast
 
 import aie.utils as aie_utils
 import numpy as np
@@ -35,6 +36,7 @@ from .value import ExtentWord, Value
 
 if TYPE_CHECKING:
     from aie.helpers.taplib import Affine
+    from aie.iron.device import Device
 
     from ..graph.handle import Handle
     from ..image.artifacts import Artifacts
@@ -195,8 +197,8 @@ class Operator(jit.Operator, library=True):
         """Return the operator whose xclbin this one runs when it runs alone."""
         return self
 
-    def exported_design(self):
-        """The design another tool exports for this operator; ``None`` derives it."""
+    def exported_design(self) -> Callable[..., Any] | None:
+        """Return another tool's design for this operator; ``None`` derives it."""
         return None
 
     @classmethod
@@ -301,7 +303,7 @@ class Operator(jit.Operator, library=True):
         """
         return {}
 
-    def reference(self, *inputs):
+    def reference(self, *inputs: Any, **kwargs: Any) -> Any:
         raise NotImplementedError(
             f"{type(self).__name__}.reference() is not implemented"
         )
@@ -379,6 +381,7 @@ class Operator(jit.Operator, library=True):
             raise ValueError(f"{type(self).__name__}: no expected result for {unknown}")
         bound = None
         if tolerance.kind == "bound":
+            assert tolerance.bound is not None, "kind == 'bound' iff bound is set"
             bound = tolerance.bound(*(inputs[b.name] for b in self.inputs))
         return {
             n: compare(
@@ -411,9 +414,14 @@ class Operator(jit.Operator, library=True):
             own += (("values", tuple(sorted(names.items()))),)
         return cls, own
 
-    def resolved(self, dev=None) -> Self:
-        """This operator resolved for ``dev``, the bound device unless given."""
-        return super().resolved(self.dev if dev is None else dev)
+    def resolved(self, dev: Device | None = None) -> Self:
+        """Return this operator resolved for ``dev``, the bound device unless given."""
+        dev = self.dev if dev is None else dev
+        if dev is None:
+            raise Unresolvable(
+                f"{type(self).__name__}: resolved() needs a device; none is bound"
+            )
+        return super().resolved(dev)
 
     def replace(self, **changes: Any) -> Self:
         """Return a copy with ``changes``, checked against the device once complete.
@@ -451,7 +459,7 @@ class Operator(jit.Operator, library=True):
             start = vars(self)[name]
             if isinstance(domain, tuple):
                 values = domain if start in domain else (start, *domain)
-            elif isinstance(domain, type):
+            elif isinstance(domain, type) and issubclass(domain, Enum):
                 values = (start, *(m for m in domain if m != start))
             else:
                 values = domain(self, dev, start)
@@ -514,7 +522,11 @@ class Operator(jit.Operator, library=True):
             return {}
         op = self
         probe = copy.copy(op)
-        forms = None if None in bound.values() else bound
+        forms = (
+            None
+            if None in bound.values()
+            else {k: v for k, v in bound.items() if v is not None}
+        )
         out: dict[str, int | None] = {}
         for m in self._value_members:
             if m.derive is None:
@@ -538,8 +550,12 @@ class Operator(jit.Operator, library=True):
                 out[m.name] = int(got)
         return out
 
-    def derived_at(self, name: str, **extents: int) -> Any:
-        """The word the host writes for ``name`` with the extents at the given bounds."""
+    def derived_at(self, name: str, **extents: int | Affine) -> Any:
+        """Return the word the host writes for ``name``.
+
+        With the extents at the given bounds (an ``Affine`` form where the
+        caller evaluates it symbolically rather than at one number).
+        """
         member = next((m for m in self._value_members if m.name == name), None)
         if member is None or member.derive is None:
             raise TypeError(f"{type(self).__name__}.{name} is not a derived value")
@@ -552,8 +568,8 @@ class Operator(jit.Operator, library=True):
             )
         return member.derive(self._at_extents(**extents))
 
-    def _at_extents(self, **extents: int) -> Self:
-        """A copy whose extents (``per_call(bounds=)``) read as the given numbers."""
+    def _at_extents(self, **extents: int | Affine) -> Self:
+        """Return a copy whose extents read as given numbers (``per_call(bounds=)``)."""
         at = copy.copy(self)
         vars(at)["_bound"] = {**self._bound, **extents}
         return at
@@ -617,6 +633,7 @@ class Operator(jit.Operator, library=True):
                 f"{[type(a).__name__ for a in args]}"
             )
         self.compile()
+        assert self._image is not None, "compile() built it"
         return self._image(*args, **kwargs)
 
     def _bind(self) -> None:
@@ -632,6 +649,7 @@ class Operator(jit.Operator, library=True):
                 # Bound as mlir-aie binds a member (Member.of), now a Value.
                 value = m.of(self)
                 value.__class__ = Value
+                value = cast(Value, value)
                 self._values[m.name] = value
                 self._bound[m.name] = (
                     value if m.bounds is None else vars(self)[m.bounds.name]

@@ -27,8 +27,7 @@ from aie.helpers.taplib import PerCall
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Precision
-from iron import Scratchpad
+from iron import Precision, Scratchpad
 from iron.common import Unresolvable
 from iron.common.image.packaging import Kind
 from iron.lm import Conv2d, ImagePatches, LogMel

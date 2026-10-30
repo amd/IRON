@@ -71,7 +71,9 @@ def _cases(cls, dev: Device):
         for M, K, N, cols, b_col_maj, c_col_maj, m, k, n in rows:
             if m < min_tile_m:
                 continue
-            kwargs = dict(M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k)
+            kwargs: dict[str, Any] = dict(
+                M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k
+            )
             kwargs.update(tile_n=n, b_col_maj=b_col_maj, c_col_maj=c_col_maj)
             kwargs.update(precision=Precision.HIGHEST)
             lower = c_col_maj and not extensive
@@ -87,7 +89,9 @@ def _cases(cls, dev: Device):
         Case(dict(f32, tile_n=32, precision=Precision.MEDIUM), id="f32_out", lower=True)
     )
     # The placement the tuner tries beside the default.
-    kwargs = dict(M=2048, K=2048, N=2048, num_aie_columns=2, b_col_maj=True)
+    kwargs: dict[str, Any] = dict(
+        M=2048, K=2048, N=2048, num_aie_columns=2, b_col_maj=True
+    )
     kwargs.update(precision=Precision.MEDIUM)
     out.append(Case(dict(kwargs, placement=GEMMPlacement.TILES), extensive=True))
     return out
@@ -218,7 +222,7 @@ class GEMM(Operator):
         mm.cc's r x s x t blocks, two in m and n (four in m on aie2).
         ``dev=None`` assumes aie2p's geometry.
         """
-        r, s, t = kernels.mm.mac_dims(
+        r, s, t = kernels.mm.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
             self.input_dtype,
             self.output_dtype,
             device=dev,
@@ -348,7 +352,10 @@ class GEMM(Operator):
             )
 
     def array_device(self):
-        if self.dev.arch is AIEArch.AIE2:
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("GEMM: array_device() needs a bound device")
+        if dev.arch is AIEArch.AIE2:
             return {1: NPU1Col1, 2: NPU1Col2, 4: NPU1}[self.num_aie_columns]()
         return NPU2()
 
@@ -484,6 +491,7 @@ class GEMM(Operator):
             words = rtp.read()
             rtp_K_div_k = words[self.k_div_k]
             rtp_n_tiles_per_core = words[self.n_tiles]
+            row_blocks = col_tiles = 0
             if bounded:
                 row_blocks = words[self.row_blocks_valid]
                 col_tiles = words[self.col_tiles]

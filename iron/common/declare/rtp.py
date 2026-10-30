@@ -85,6 +85,9 @@ class Rtp(tuple):
                 words[value] = value.param.read()
                 continue
             at = self.slots[value]
+            assert (
+                self.buffer is not None
+            ), "a slot exists, so some value is not scratchpad"
             block = [self.buffer[at + i] for i in range(value.words)]
             words[value] = block if value.words > 1 else block[0]
         self.barrier.release_with_value(1)
@@ -107,5 +110,8 @@ class Rtp(tuple):
                     f"{value.name} holds {value.words} words; it was given "
                     f"{len(block)}"
                 )
+            assert (
+                self.buffer is not None
+            ), "a slot exists, so some value is not scratchpad"
             for i, w in enumerate(block):
                 self.buffer[at + i] = w
