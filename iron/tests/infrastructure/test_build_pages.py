@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CI's Benchmarks page data, run as publish-pages.yml writes it.
+"""CI's Benchmarks page data and the pull request comment, run as CI runs them.
 
 The page's data names each benchmark as the comment does, holds one series
 per parametrization with each device's runs, says which ran in each suite's
-latest run and which checks failed, and judges a move by the comment's gates.
+latest run and which checks failed, and judges a move by the comment's gates;
+the comment links each moved benchmark to its history on the page.
 """
 
 import csv
@@ -13,8 +14,10 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
+PAGE = "https://amd.github.io/IRON/benchmarks/"
 
 # (test path, test id, the benchmark it belongs to)
 TESTS = [
@@ -146,3 +149,43 @@ def test_a_benchmark_no_longer_run_anywhere_is_not_current(tmp_path):
     benchmarks = _page_data(tmp_path)["benchmarks"]
     assert not benchmarks["gemv"]["current"]
     assert benchmarks["GEMV"]["current"]
+
+
+def test_the_comment_links_each_move_to_its_history_on_the_page(tmp_path):
+    history = tmp_path / "history"
+    artifacts = tmp_path / "artifacts"
+    test = "npu2-GEMV-M_2048"
+    _write(
+        history / "krackan" / "small" / "all.csv",
+        [_row(NIGHTS[0], GEMV, test, Bandwidth=100.0)],
+    )
+    _write(
+        artifacts / "krackan" / "small" / "latest.csv",
+        [_row(NIGHTS[1], GEMV, test, Bandwidth=50.0)],
+    )
+    status = tmp_path / "status.json"
+    status.write_text(json.dumps({"krackan/small": "success"}))
+    comment = tmp_path / "comment.md"
+    subprocess.run(
+        [sys.executable, "pr_comment.py", "--artifacts", artifacts]
+        + ["--history", history, "--status", status, "--commit", "abc1234"]
+        + ["--benchmarks-page", PAGE, "-o", comment],
+        check=True,
+        cwd=SCRIPTS,
+    )
+    (row,) = [line for line in comment.read_text().splitlines() if "GEMV" in line]
+    assert "50.00 GB/s" in row and "🔴 -50.00%" in row
+    url = row.split("](", 1)[1].split(")", 1)[0]
+    assert url.startswith(PAGE + "#")
+    state = {k: v for k, (v,) in parse_qs(urlsplit(url).fragment).items()}
+    assert state == {"bench": "GEMV", "suite": "small", "metric": "Bandwidth"}
+
+    _write(
+        history / "krackan" / "small" / "all.csv",
+        [
+            _row(NIGHTS[0], GEMV, test, Bandwidth=100.0),
+            _row(NIGHTS[1], GEMV, test, Bandwidth=50.0),
+        ],
+    )
+    page = _page_data(history)["benchmarks"][state["bench"]]["suites"]
+    assert state["metric"] in page[state["suite"]]["metrics"]

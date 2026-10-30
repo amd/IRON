@@ -22,6 +22,7 @@ import re
 import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 
 from pretty_common import (
     MEAN_SUFFIX,
@@ -206,11 +207,15 @@ def build_report(
     sigma: float = SIGMA,
     ndigits: int = 2,
     date_fmt: str = DATE_FMT,
+    history: str = "",
+    suite: str = "",
 ) -> List[str]:
     """Render the markdown lines for one suite's results.
 
     `all_rows` holds the last two runs of each test. Their values reach a pull
-    request comment, so every cell passes through `cell`.
+    request comment, so every cell passes through `cell`. Given `history`, the
+    website's Benchmarks page, each moved benchmark links to its history in
+    `suite` there.
     """
     dates = sorted(
         {d for d in (parse_date(r, date_fmt) for r in all_rows) if d is not None}
@@ -259,10 +264,14 @@ def build_report(
             "|---|---|---|---|---|---|",
         ]
         for operator, params, metric, prev_v, curr_v, pct in sorted(changes):
+            name = cell(operator)
+            if history:
+                query = urlencode({"bench": operator, "suite": suite, "metric": metric})
+                name = f"[{name}]({history}#{query})"
             unit = METRICS.get(metric, UNKNOWN_METRIC).unit
             unit = f" {unit}" if unit else ""
             out.append(
-                f"| {cell(operator)} | {cell(params)} | {cell(metric)} "
+                f"| {name} | {cell(params)} | {cell(metric)} "
                 f"| {fmt.format(prev_v)}{unit} | {fmt.format(curr_v)}{unit} "
                 f"| {verdict(metric, pct)} {pct:+.{ndigits}f}% |"
             )

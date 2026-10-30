@@ -192,6 +192,7 @@ jobs:
             --commit "$COMMIT_SHA" \
             --commit-url "$SERVER_URL/$REPOSITORY/commit/$COMMIT_SHA" \
             --date "$RUN_DATE" \
+            --benchmarks-page "https://amd.github.io/IRON/benchmarks/" \
             -o "$RESULTS_ROOT/comment.md"
 
       - name: Comment on PR

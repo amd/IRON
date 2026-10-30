@@ -318,7 +318,8 @@ Each hardware workflow runs one job per runner, Phoenix (NPU1) and Krackan
   clang-format, actionlint, hygiene) over the repository, and pyright over
   `[tool.pyright]`'s paths in `pyproject.toml` on Python 3.11 to 3.14.
 - `pr-comment.yml` and `publish-pages.yml`: the performance trends of a PR,
-  and the website, whose Benchmarks page draws their history.
+  each linked to its history, and the website, whose Benchmarks page draws
+  that history.
 
 On `main` and `devel`, `publish-results.yml`, the only job that can push,
 merges each run's `tests_latest.csv` into `{arch}/{suite}/all.csv` on the
