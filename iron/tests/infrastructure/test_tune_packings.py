@@ -25,10 +25,13 @@ from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
 from iron.tune.autotune import Point, Timed
 from iron.tune.costmodel import CostModel
+from iron.tune.fold import fold_profile
 from iron.tune.measure import Cache, Timing, platform
 from iron.tune.packings import (
     Packer,
     _end_to_end,
+    _gains_report,
+    _keep_folded,
     adjacent,
     price_packings,
     widen_packings,
@@ -194,6 +197,48 @@ def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
         _, packing = apply_packings(m.record(**m.shapes()[0]), profile, [], npu2)
         sizes.append([len(g) for g in packing.groups])
     assert sizes[0] == sizes[1] and sizes[0], sizes
+
+
+class Single(iron.Graph):
+    """One step: ``fold_candidates`` needs a pair, so this recording,
+    unlike ``Alternating``'s own chain of unary ones, never admits one.
+    """
+
+    def body(self, x):
+        return ReLU.step(x)
+
+
+def test_keep_folded_requires_every_call_to_gain_beyond_noise():
+    """``_keep_folded`` of real ``_end_to_end``-shaped results (a call, its
+    delta and its noise): kept only where every one is beyond ``CONFIDENCE``
+    standard errors ahead; a regression, an unmeasurable noise, or no call
+    to have gained anything at all each refuse it.
+    """
+    decode = Timed(Alternating().record(x=(SIZE,)))
+    prompt = Timed(Single().record(x=(SIZE,)))
+    assert _keep_folded([(decode, -50.0, 5.0), (prompt, -80.0, 10.0)])
+    assert not _keep_folded([(decode, -50.0, 5.0), (prompt, 5.0, 10.0)])
+    assert not _keep_folded([(decode, -50.0, 5.0), (prompt, -1.0, 10.0)])
+    assert not _keep_folded([(decode, -50.0, None)])
+    assert not _keep_folded([])
+
+
+def test_gains_report_names_each_calls_own_delta_and_noise():
+    decode = Timed(Alternating().record(x=(SIZE,)))
+    report = _gains_report([(decode, -12.5, 3.5), (decode, 4.0, None)])
+    name = decode.recording.name
+    assert report == f"{name} -12.5 ± 3.5 us, {name} +4.0 ± ? us"
+
+
+def test_fold_profile_leaves_a_profile_with_nothing_to_fold_unchanged():
+    """``price_folds_before_packing``'s own early branch (no fold the
+    scoping admits) follows from this alone, device-free: a recording with
+    no pair to fold (``Single``) adds nothing ``fold_profile`` did not
+    already carry.
+    """
+    base = iron.Profile()
+    with_folds = fold_profile(base, [Timed(Single().record(x=(SIZE,)))])
+    assert with_folds.fusions() == base.fusions() == []
 
 
 # ---------------------------------------------------------------------------
