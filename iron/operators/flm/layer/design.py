@@ -1423,8 +1423,6 @@ def _sequence(
     """
     dims = LayerDims(g, LayerType(layer_type))
     D = g.model_dim
-    # _as_i32 (aie.dialects.aie) returns None only when given None; len_arg and
-    # max_l_arg never are, but it is unannotated so pyright infers "| None".
     L = _as_i32(len_arg) + 1
     MAX_L_v = _as_i32(max_l_arg)
     SW = SLIDING_WINDOW

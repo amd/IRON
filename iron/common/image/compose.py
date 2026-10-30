@@ -149,6 +149,8 @@ def places(
         return True
 
     handler = module.context.attach_diagnostic_handler(collect)
+    # MLIR's generated ir.pyi types the handler as object.
+    assert isinstance(handler, ir.DiagnosticHandler)
     try:
         PassManager.parse(_FIT_PIPELINE, module.context).run(module.operation)
     except ir.MLIRError as e:
