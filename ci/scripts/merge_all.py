@@ -18,11 +18,13 @@ MAX_RUNS = 400
 def prune(rows, date_fmt="%Y-%m-%d %H:%M:%S"):
     """Keep the runs the reports and the Benchmarks page read.
 
-    A run is the rows of one date. A benched parametrization keeps every run of
-    the last `KEEP_DAYS` before the newest, the newest run of each ISO week
-    before that, and at most `MAX_RUNS` runs. The trends compare a run with
-    the one before it, so every other row keeps the last two runs. Measured
-    from the newest run, a skewed clock on one runner cannot empty the file.
+    A run is the rows of one date. Each benched parametrization keeps its own
+    runs of the last `KEEP_DAYS` before the suite's newest, its newest run of
+    each ISO week before that, and at most `MAX_RUNS` runs: a week another
+    test ran later in keeps this one's run too. The trends compare a run with
+    the one before it, so every other row keeps the suite's last two runs.
+    Measured from the newest run, a skewed clock on one runner cannot empty
+    the file.
     """
     dated = []
     for row in rows:
@@ -33,22 +35,27 @@ def prune(rows, date_fmt="%Y-%m-%d %H:%M:%S"):
     runs = sorted({date for date, _ in dated})
     if not runs:
         return []
-
     cutoff = runs[-1] - timedelta(days=KEEP_DAYS)
-    weekly = {}
-    for date in runs:
-        if date < cutoff:
-            weekly[date.isocalendar()[:2]] = date
-    kept = set(
-        sorted({d for d in runs if d >= cutoff} | set(weekly.values()))[-MAX_RUNS:]
-    )
     last_two = set(runs[-2:])
 
     benched = {row_key(row) for row in select_bench_rows(rows)}
+    runs_of = {}
+    for date, row in dated:
+        if row_key(row) in benched:
+            runs_of.setdefault(row_key(row), set()).add(date)
+    kept = {}
+    for key, dates in runs_of.items():
+        weekly = {}
+        for date in sorted(dates):
+            if date < cutoff:
+                weekly[date.isocalendar()[:2]] = date
+        recent = {date for date in dates if date >= cutoff}
+        kept[key] = set(sorted(recent | set(weekly.values()))[-MAX_RUNS:])
+
     return [
         row
         for date, row in dated
-        if date in last_two or (date in kept and row_key(row) in benched)
+        if date in last_two or date in kept.get(row_key(row), ())
     ]
 
 
