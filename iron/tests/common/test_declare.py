@@ -11,6 +11,7 @@ identity) is mlir-aie's and tested there. The design-generating half is
 ``iron/common/design/`` and needs the toolchain.
 """
 
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -198,6 +199,35 @@ def test_an_exported_design_replaces_the_derived_one():
 # --------------------------------------------------------------------------
 # The key's parameters, resolution, identity
 # --------------------------------------------------------------------------
+
+
+def test_a_tuple_of_floats_in_a_repr_field_is_still_a_valid_symbol():
+    """A per-step (npu1) compile names each per-call value's parameter from
+    the operator's own repr (``Operator.name``); a float inside a tuple
+    field used to reach it through ``str()``, not ``spelled()``, leaving a
+    literal ``.`` a Python parameter name cannot hold.
+    """
+
+    class Floaty(Operator):
+        n: int = param()
+        bias: tuple[float, ...] = param(default=(0.5, 0.5, 0.5), array=True)
+        x = In(n)
+        y = Out(n)
+        count = per_call()
+
+        def build(self) -> Built:
+            return Built([self.n])
+
+        def reference(self, x):
+            return x
+
+    op = Floaty(n=64).resolved(NPU2)
+    design = OperatorDesign(op, full_elf=False)
+    assert all(
+        p.isidentifier()
+        for p in inspect.signature(design.generator).parameters
+        if p not in ("op", "identity")
+    )
 
 
 def test_an_operand_with_a_tile_is_its_own_stream():

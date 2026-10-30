@@ -12,10 +12,10 @@ import dataclasses
 import math
 from collections.abc import Hashable
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
-from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.taplib import Affine, TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
@@ -32,6 +32,7 @@ from iron.operators.log import Log
 from iron.operators.magnitude import Magnitude
 from iron.operators.mha import MHA
 from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleTaps
+from iron.operators.resample.reference import Interpolation
 
 
 def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarray:
@@ -119,9 +120,35 @@ class LogMel(iron.Graph):
 
 
 class ImagePatches(iron.Graph):
-    """A decoded image resized as torchvision's antialiased bicubic resize
-    does it, rescaled to ``[0, 1]`` and cut row-major into a vision tower's
-    ``patches`` rows of 16x16-pixel patches.
+    """A decoded image resized as torchvision's antialiased resize does it,
+    rescaled to ``[0, 1]`` (and normalized, given ``mean``) and cut into a
+    vision tower's ``patches`` rows of 16x16-pixel patches, each soft token's
+    ``pool ** 2`` patches consecutive, row-major within its window, the
+    tokens row-major over the image.
+
+    A call takes the image, ``(height, width, 3)`` uint8 laid out by
+    ``pack``, and per call its size and the ``pool * 16``-pixel windows it
+    is resized to. It returns the pixels, ``(patches, 768)`` bf16, each
+    patch's ``xy`` (x and y side by side) and ``position_ids`` (every x,
+    then every y plus ``positions``); rows past the image are the zero
+    patch at ids ``positions`` and ``2 * positions``, past each table, which
+    a gather bounded to the image's patches never reads.
+
+    Args:
+        patches: The patch rows of a call.
+        image: The ``(height, width)`` of the largest image a call takes
+            either way up.
+        pool: A soft token's side in patches.
+        positions: The rows of each axis's position table.
+        patch_columns: The patch columns a core holds; by default 8, or
+            the fewest ``out`` takes.
+        chunk: The bytes of an image row ``Resample`` receives at a time.
+        interpolation: The resize's filter.
+        mean: The processor's normalization after its rescale, per channel,
+            or None for the rescale alone.
+        std: Its standard deviations, given ``mean``.
+        out: The ``(height, width)`` every call is resized to, which sizes
+            the buffers, or None for any whole windows of ``patches``.
     """
 
     def __init__(
@@ -130,18 +157,26 @@ class ImagePatches(iron.Graph):
         image: tuple[int, int],
         pool: int = 3,
         positions: int = 10240,
-        patch_columns: int = 8,
+        patch_columns: int | None = None,
         chunk: int = 4096,
+        interpolation: Interpolation = Interpolation.BICUBIC,
+        mean: tuple[float, ...] | None = None,
+        std: tuple[float, ...] | None = None,
+        out: tuple[int, int] | None = None,
     ):
         self.patches, self.image, self.pool, self.chunk = patches, image, pool, chunk
         k, side = pool, pool * SIDE
         cores = 2 * require_device().cols
+        if patch_columns is None:
+            patch_columns = 8 if out is None else out[1] // SIDE // cores + 1
         # The most pooling windows across: Resample's cores hold
         # `patch_columns` patch columns each, one a zero column past the image.
         self.across = (patch_columns * cores - 1) // k
         # Every grid of whole pooling windows the rows hold; the fewest patch
         # columns give the most bands and padded raster rows.
         grids = [(patches // s // k * k, s) for s in range(k, patches // k + 1, k)]
+        if out is not None:
+            grids = [(out[0] // SIDE, out[1] // SIDE)]
         shared: dict[str, Any] = dict(
             height=side,
             width=side,
@@ -158,6 +193,9 @@ class ImagePatches(iron.Graph):
         a, b = image
         self.resample = Resample(
             image_chunks=max(a * -(-3 * b // chunk), b * -(-3 * a // chunk)),
+            interpolation=interpolation,
+            mean=mean,
+            std=std,
             **shared,
         )
         self.raster = iron.state((shared["patch_rows"], 3 * SIDE**2))
@@ -166,6 +204,7 @@ class ImagePatches(iron.Graph):
             out_size=side,
             words=self.resample.words,
             slots=SIDE,
+            interpolation=interpolation,
             num_aie_columns=cores // 2,
             num_channels=2,
         )
@@ -217,6 +256,8 @@ class ImagePatches(iron.Graph):
 
         Args:
             image: ``(height, width, 3)`` uint8.
+            out_height: The rows it is resized to.
+            out_width: The columns it is resized to.
 
         Raises:
             ValueError: The image or its patches do not fit a call, or
@@ -239,6 +280,198 @@ class ImagePatches(iron.Graph):
             )
         # Resample's own checks refuse a size it cannot resize.
         op.replace(height=H, width=W, out_height=out_height, out_width=out_width)
+        buffer = np.zeros((op.image_chunks, self.chunk), np.uint8)
+        rows = buffer.reshape(-1)[: H * line].reshape(H, line)
+        rows[:, : 3 * W] = image.reshape(H, 3 * W)
+        return buffer, dict(
+            height=H, width=W, out_height=out_height, out_width=out_width
+        )
+
+
+class ImageResize(iron.Graph):
+    """A decoded image resized as torchvision's antialiased resize does it,
+    to a uint8 image another resize reads, as ``ImagePatches`` with ``chunk``
+    its ``pitch``: rows of ``pitch`` bytes, every row of a call one chunk.
+
+    A call takes the image, ``(height, width, 3)`` uint8 laid out by
+    ``pack``, and per call its size and the size it is resized to. Past that
+    size the rows and columns of its last 16x16 patches repeat its last, and
+    past them it is zero.
+
+    Args:
+        image: The ``(height, width)`` of the largest image a call takes
+            either way up.
+        out: The ``(height, width)`` of the largest size a call resizes to.
+        interpolation: The filter.
+        patch_columns: The patch columns a core holds; by default the
+            fewest ``out`` takes, over as few passes of the device's cores
+            as fit a core's memory.
+        chunk: The bytes of an image row ``Resample`` receives at a time.
+        words: The words of a filter table's chunk, which bound its window.
+    """
+
+    def __init__(
+        self,
+        image: tuple[int, int],
+        out: tuple[int, int],
+        interpolation: Interpolation = Interpolation.BICUBIC,
+        patch_columns: int | None = None,
+        chunk: int = 4096,
+        words: int = 244,
+    ):
+        self.chunk = chunk
+        cores = 2 * require_device().cols
+        a, b = image
+        strips = 16 * -(-out[1] // (16 * SIDE))
+        bands = -(-out[0] // SIDE)
+        # Past a core's memory, the width splits over passes of the same cores.
+        refused = None
+        for passes in range(1, -(-strips // cores) + 1):
+            pc = patch_columns or -(-strips // (cores * passes))
+            width_chunks = pc * cores
+            try:
+                self.resamples = [
+                    Resample(
+                        height=SIDE,
+                        width=SIDE,
+                        out_height=SIDE,
+                        out_width=SIDE,
+                        chunk=chunk,
+                        words=words,
+                        patch_columns=pc,
+                        image_chunks=max(
+                            a * -(-3 * b // chunk), b * -(-3 * a // chunk)
+                        ),
+                        width_chunks=width_chunks,
+                        first_chunk=p * width_chunks,
+                        height_chunks=16 * -(-bands // 16),
+                        patch_rows=bands * pc * cores,
+                        interpolation=interpolation,
+                        dtype=np.uint8,
+                        num_aie_columns=cores // 2,
+                        num_channels=2,
+                    )
+                    for p in range(passes)
+                ]
+                break
+            except ValueError as error:
+                if patch_columns is not None:
+                    raise
+                refused = error
+        else:
+            raise ValueError(f"ImageResize: no pass count fits {out}") from refused
+        self.passes, self.width_chunks = passes, width_chunks
+        self.resample = self.resamples[0]
+        taps: dict[str, Any] = dict(
+            in_size=SIDE,
+            out_size=SIDE,
+            words=words,
+            slots=SIDE,
+            interpolation=interpolation,
+            num_aie_columns=cores // 2,
+            num_channels=2,
+        )
+        self.taps_w = ResampleTaps(chunks=passes * width_chunks, **taps)
+        self.taps_h = ResampleTaps(chunks=16 * -(-bands // 16), **taps)
+        pass_shape = (self.resample.patch_rows, 3 * SIDE**2)
+        if passes == 1:
+            self.resized = iron.state(pass_shape, np.uint8)
+            self.resized_each = []
+        else:
+            self.resized_each = [
+                iron.state(pass_shape, np.uint8) for _ in range(passes)
+            ]
+            self.resized = iron.state(
+                (bands * 16, passes * self.resample.pitch), np.uint8
+            )
+
+    @property
+    def pitch(self) -> int:
+        """The bytes of a row of the image a call writes."""
+        return self.passes * self.resample.pitch
+
+    def body(
+        self,
+        rgb: Handle,
+        *,
+        height: Scratchpad[np.int32],
+        width: Scratchpad[np.int32],
+        out_height: Scratchpad[np.int32],
+        out_width: Scratchpad[np.int32],
+    ) -> Handle:
+        taps_w = self.taps_w(in_samples=width, out_samples=out_width)
+        taps_h = self.taps_h(in_samples=height, out_samples=out_height)
+        px, pitch = self.width_chunks * SIDE, self.resample.pitch
+        buffers = self.resized_each or [self.resized]
+        for p, (op, buf) in enumerate(zip(self.resamples, buffers)):
+            first = p * self.width_chunks
+            columns = (
+                out_width
+                if self.passes == 1
+                else iron.clamp(cast(Affine, out_width - p * px), lo=0, hi=px)
+            )
+            op(
+                rgb,
+                taps_w[first : first + self.width_chunks],
+                taps_h,
+                buf,
+                rows=height,
+                columns=width,
+                out_rows=out_height,
+                out_columns=columns,
+            )
+            if self.passes > 1:
+                image = buf.reshape(math.prod(buf.shape) // pitch, pitch)
+                rows = image.shape[0]
+                dst = TensorAccessPattern(
+                    (rows, self.pitch),
+                    p * pitch,
+                    [1, rows, 1, pitch],
+                    [0, self.pitch, 0, 1],
+                )
+                Copy.step(image, self.resized, dst=dst, dtype=np.uint8)
+        resized = self.resized
+        if self.passes > 1:
+            # A graph returns a step's own buffer, which a merged state is not.
+            resized = Copy.step(resized, dtype=np.uint8)
+        return resized.reshape(math.prod(resized.shape) // self.pitch, self.pitch)
+
+    def pack(self, image, out_height: int, out_width: int) -> tuple[np.ndarray, dict]:
+        """A call's image buffer and per-call sizes for a decoded ``image``
+        resized to ``out_height`` by ``out_width``.
+
+        Args:
+            image: ``(height, width, 3)`` uint8.
+            out_height: The rows it is resized to.
+            out_width: The columns it is resized to.
+
+        Raises:
+            ValueError: The image or the size it is resized to does not fit
+                a call, or ``Resample`` cannot resize it.
+        """
+        image = np.asarray(image)
+        if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(
+                f"an image is (height, width, 3) uint8, not {image.shape} {image.dtype}"
+            )
+        H, W, _ = image.shape
+        op = self.resample
+        width_cap = self.passes * self.width_chunks * SIDE
+        if out_width > width_cap:
+            raise ValueError(
+                f"ImageResize: {out_width} columns is past the {width_cap} its "
+                f"{self.passes} pass(es) of {self.width_chunks} patch columns "
+                "a pass cover"
+            )
+        # Resample's own checks refuse a size it cannot resize, or hold; its
+        # own out_width is one pass's share, the whole call's checked above.
+        op.replace(
+            height=H,
+            width=W,
+            out_height=out_height,
+            out_width=min(out_width, self.width_chunks * SIDE),
+        )
+        line = -(-3 * W // self.chunk) * self.chunk
         buffer = np.zeros((op.image_chunks, self.chunk), np.uint8)
         rows = buffer.reshape(-1)[: H * line].reshape(H, line)
         rows[:, : 3 * W] = image.reshape(H, 3 * W)

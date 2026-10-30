@@ -12,6 +12,7 @@ The ``model`` fixture packages it ``--each-step``: at 32 layers the full
 ELF links far slower.
 """
 
+import aie.utils as aie_utils
 import pytest
 
 from iron.applications.phi3 import Phi4
@@ -36,8 +37,14 @@ def load(request):
 
 @pytest.fixture(scope="module")
 def model(load):
-    """The model, compiled and loaded once, packaged ``--each-step``."""
-    yield load(full_elf=False)
+    """The model, compiled and loaded once, packaged ``--each-step``; the
+    runtime is released after its last test.
+    """
+    loaded = load(full_elf=False)
+    yield loaded
+    loaded.release()
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
 
 
 # KL(fp32 CPU || NPU) over 13 steps measured 0.00039 to 0.0224, every top-1 matching.
