@@ -924,7 +924,15 @@ def _short_decode_recording(dev):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
-def test_narrow_group_takes_the_qkv_pack_without_narrowing(tmp_path):
+def test_narrow_group_narrows_the_qkv_pack_to_fit(tmp_path):
+    """q, k and v each resolve to 8 columns alone, one output DMA channel a
+    column; three such streams want 24 of npu2's 16, so the pack never
+    co-resides at the profile's own width (``group_fit_verdict`` composes
+    the real fused module, each member its own array, since
+    ``d9a96bf8``'s fix: the earlier, unfused check shared the three by
+    identity and missed this). ``narrow_group`` finds the Pareto-maximal
+    combination that does co-reside instead.
+    """
     dev = aie_utils.ensure_current_device()
     q = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048).resolved(dev)
     k = LLAMA_NPU2_PROFILE.make(GEMV, M=512, K=2048).resolved(dev)
@@ -941,8 +949,9 @@ def test_narrow_group_takes_the_qkv_pack_without_narrowing(tmp_path):
         fit_cache=tmp_path / "fits",
         log=lambda _: None,
     )
-    assert combo is None, "q/k/v already co-reside at the profile's own width"
     assert trial.refused is None
+    assert combo is not None, "q/k/v at 8/8/8 columns want 24 output channels of 16"
+    assert [s["num_aie_columns"] for s in combo] == [8, 4, 4]
 
 
 @pytest.mark.supported_devices("npu2")
