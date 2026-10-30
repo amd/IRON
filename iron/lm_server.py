@@ -1,7 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Serve language models to a length-prefixed binary client."""
+"""Serve language models to a length-prefixed binary client.
+
+``load_model`` offers ``protocol_version`` and a ``capabilities`` bitmask;
+the reply echoes the version and the intersection of supported bits. Bits
+are independent, never reassigned: 0 is logits + reset, 1 is embeddings.
+Only use an optional feature when its bit was negotiated. Unknown bits are
+ignored; incompatible payload or command changes require a new version.
+Keep the initial length-prefixed JSON exchange readable across versions.
+Missing fields mean version 1 and bits 0 + 1, the unversioned protocol.
+Keep these legacy defaults fixed when adding capabilities. FastFlowLM's
+``iron/worker.hpp`` declares the matching client bits.
+"""
 
 import inspect
 import json
@@ -15,6 +26,12 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 from iron.applications import model_class
+
+PROTOCOL_VERSION = 1
+CAUSAL_LM = 1 << 0
+EMBEDDINGS = 1 << 1
+CAPABILITIES = CAUSAL_LM | EMBEDDINGS
+LEGACY_CAPABILITIES = 0b11
 
 
 def read_exact(stream, size):
@@ -68,8 +85,20 @@ def serve(input_stream, output_stream):
         try:
             name = command["command"]
             if name == "load_model":
+                version = command.get("protocol_version", 1)
+                if version != PROTOCOL_VERSION:
+                    raise ValueError(f"unsupported IRON protocol version: {version}")
+                capabilities = command.get("capabilities", LEGACY_CAPABILITIES)
+                capabilities &= CAPABILITIES
                 model = load_model(command)
-                send(output_stream, {"ok": True})
+                send(
+                    output_stream,
+                    {
+                        "ok": True,
+                        "protocol_version": PROTOCOL_VERSION,
+                        "capabilities": capabilities,
+                    },
+                )
             elif name == "logits":
                 tokens = np.frombuffer(
                     read_exact(input_stream, command["count"] * 4), np.int32

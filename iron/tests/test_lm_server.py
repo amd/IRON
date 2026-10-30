@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 from ml_dtypes import bfloat16
 
 from iron import lm_server
@@ -119,7 +120,7 @@ def test_server_protocol(monkeypatch):
     output = io.BytesIO()
     lm_server.serve(io.BytesIO(commands), output)
     assert responses(output.getvalue(), [2, 4]) == [
-        {"ok": True},
+        {"ok": True, "protocol_version": 1, "capabilities": 3},
         {"ok": True, "count": 2},
         np.asarray([9, 3], dtype=bfloat16).tobytes(),
         {"ok": True},
@@ -148,6 +149,55 @@ def test_server_keeps_diagnostics_off_the_pipe():
         check=True,
         timeout=30,
     )
-    assert responses(result.stdout, []) == [{"ok": True}, {"ok": True}]
+    assert responses(result.stdout, []) == [
+        {"ok": True, "protocol_version": 1, "capabilities": 3},
+        {"ok": True},
+    ]
     assert b"loading" in result.stderr
     assert b"native output" in result.stderr
+
+
+@pytest.mark.parametrize("offered,agreed", [(0, 0), (1, 1), (2, 2), (3, 3), (7, 3)])
+def test_server_negotiates_capabilities(monkeypatch, offered, agreed):
+    monkeypatch.setattr(lm_server, "load_model", lambda command: object())
+    output = io.BytesIO()
+    lm_server.serve(
+        io.BytesIO(
+            request(
+                {
+                    "command": "load_model",
+                    "protocol_version": 1,
+                    "capabilities": offered,
+                }
+            )
+        ),
+        output,
+    )
+    assert responses(output.getvalue(), []) == [
+        {"ok": True, "protocol_version": 1, "capabilities": agreed}
+    ]
+
+
+def test_server_rejects_version_before_loading(monkeypatch):
+    monkeypatch.setattr(lm_server, "load_model", lambda command: pytest.fail("loaded"))
+    output = io.BytesIO()
+    lm_server.serve(
+        io.BytesIO(
+            request({"command": "load_model", "protocol_version": 2})
+            + request({"command": "close"})
+        ),
+        output,
+    )
+    error, closed = responses(output.getvalue(), [])
+    assert error == {"ok": False, "error": "unsupported IRON protocol version: 2"}
+    assert closed == {"ok": True}
+
+
+def test_future_server_preserves_legacy_capabilities(monkeypatch):
+    monkeypatch.setattr(lm_server, "CAPABILITIES", 7)
+    monkeypatch.setattr(lm_server, "load_model", lambda command: object())
+    output = io.BytesIO()
+    lm_server.serve(io.BytesIO(request({"command": "load_model"})), output)
+    assert responses(output.getvalue(), []) == [
+        {"ok": True, "protocol_version": 1, "capabilities": 3}
+    ]
