@@ -11,7 +11,7 @@ pair of standard input and output pipes. The server compiles the graph versions
 through the MLIR-AIE cache on first use, then loads the images and weights.
 
 The Makefile pins the FastFlowLM fork to
-[`00ed9206`](https://github.com/andrej/FastFlowLM/commit/00ed92066bb538b05ecf312d523e809be61ad12d),
+[`ea31ca5a`](https://github.com/andrej/FastFlowLM/commit/ea31ca5a6f8738e691e5f323a0c99f01e676f0d8),
 which contains the IRON backend and its BF16 Llama and EmbeddingGemma 2 model
 entries.
 
@@ -100,3 +100,18 @@ classes in the command's Python process. They do not use the FastFlowLM worker.
 The Makefile's server targets instead start `python -m iron.lm_server`; C++
 sends token histories or text through pipes, and the worker returns BF16
 logits or float32 embeddings.
+
+## Adding a model
+
+Add the model's lazy import to `MODELS` in `iron/applications/__init__.py`.
+The server uses the standard `load`, `logits` (whole token history), `forget`
+and `embed` methods; model computation stays in IRON.
+
+In FastFlowLM, a decoder registers `flm::iron::causal_factory("<registry-name>")`
+with `causal_traits()` for its frontend's family, following
+`common/models/llama3/iron/` and `common/AutoModel/builtin_backends.cpp`.
+An embedding model uses `flm::iron::Embedding` in
+`include/AutoEmbeddingModel/all_embedding_model.hpp`. Add its checkpoint files
+to `model_list.json` and `model_info.json`, using an `-iron` family suffix for
+a decoder. These adapters share the C++ pipe client; no Python model code is
+needed in FastFlowLM.

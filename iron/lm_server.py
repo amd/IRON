@@ -5,6 +5,7 @@
 
 import inspect
 import json
+import os
 import struct
 import sys
 
@@ -60,7 +61,10 @@ def reset(model):
 def serve(input_stream, output_stream):
     model = None
     while True:
-        command = receive(input_stream)
+        try:
+            command = receive(input_stream)
+        except EOFError:
+            return
         try:
             name = command["command"]
             if name == "load_model":
@@ -93,8 +97,11 @@ def serve(input_stream, output_stream):
 
 
 def main():
-    aie_utils.set_current_device(from_name("npu2", n_cols=8))
-    serve(sys.stdin.buffer, sys.stdout.buffer)
+    # Keep Python and native model diagnostics out of the protocol pipe.
+    with os.fdopen(os.dup(sys.stdout.fileno()), "wb") as output:
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+        aie_utils.set_current_device(from_name("npu2", n_cols=8))
+        serve(sys.stdin.buffer, output)
 
 
 if __name__ == "__main__":

@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 FLM_REPO   := https://github.com/andrej/FastFlowLM.git
-FLM_COMMIT := 00ed92066bb538b05ecf312d523e809be61ad12d
+FLM_COMMIT := ea31ca5a6f8738e691e5f323a0c99f01e676f0d8
 BUILD      := $(CURDIR)/build
 FLM_ROOT   := $(BUILD)/FastFlowLM
 FLM_SRC    := $(FLM_ROOT)/src
 FLM_BIN    := $(FLM_SRC)/build/flm
 CACHE      ?= $(BUILD)/cache
 MODELS     ?= $(CURDIR)/models
-EMBED      ?= $(MODELS)/embeddinggemma-2
 PORT       ?= 52625
 JOBS       ?= 2
 FLM_VERSION ?= 1.0.7
@@ -49,7 +48,7 @@ serve-llama: flm
 	FLM_MODEL_PATH=$(MODELS)/.. \
 	FLM_XCLBIN_PATH=$(FLM_SRC)/xclbins \
 	FLM_IRON_PYTHON=$(IRON_PYTHON) \
-	PYTHONPATH=$(FLM_ROOT)/python:$(CURDIR)/../../..:$${PYTHONPATH} \
+	PYTHONPATH=$(CURDIR)/../../..:$${PYTHONPATH} \
 	NPU_CACHE_HOME=$(CACHE) \
 	$(FLM_BIN) serve llama3.2-iron:1b --ctx-len 2048 --port $(PORT)
 
@@ -59,6 +58,6 @@ serve-embedding: flm
 	FLM_MODEL_PATH=$(MODELS)/.. \
 	FLM_XCLBIN_PATH=$(FLM_SRC)/xclbins \
 	FLM_IRON_PYTHON=$(IRON_PYTHON) \
-	PYTHONPATH=$(FLM_ROOT)/python:$(CURDIR)/../../..:$${PYTHONPATH} \
+	PYTHONPATH=$(CURDIR)/../../..:$${PYTHONPATH} \
 	NPU_CACHE_HOME=$(CACHE) \
 	$(FLM_BIN) serve embeddinggemma-2 --backend iron --port $(PORT)
