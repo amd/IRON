@@ -127,9 +127,11 @@ def vectors(
         if isinstance(value, np.ndarray):
             inputs[b.name] = value
             continue
-        shape = b.host_shape if value is None else tuple(value)
+        # A coded operand is drawn as the logical tensor its reference reads.
+        drawn = b.logical_shape if b.coded else b.host_shape
+        shape = drawn if value is None else tuple(value)
         # A dtype that follows tuning is None until tuned; the unpacked operand is bf16.
-        dtype = np.dtype(bfloat16 if b.dtype is None else b.host_dtype)
+        dtype = np.dtype(bfloat16 if b.dtype is None or b.coded else b.host_dtype)
         if dtype.kind not in "fc" and dtype != bfloat16:
             t = rng.integers(0, int(scale) + 1, shape).astype(dtype)
         else:
@@ -258,7 +260,7 @@ def run_test(
     args, produced, total_bytes = [], {}, 0
     for b in operator.buffers:
         if b.fills:
-            buf = tensor_class(inputs[b.name])
+            buf = tensor_class(b.device_form(inputs[b.name]))
         else:
             buf = tensor_class(b.host_shape, dtype=b.host_dtype)
         if b.drains:

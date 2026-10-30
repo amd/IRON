@@ -252,9 +252,16 @@ class Standalone:
         inputs: Mapping[str, np.ndarray],
         rng: np.random.Generator,
     ) -> np.ndarray:
+        if buf.name not in inputs and buf.coded:
+            # Random bytes are no coded row: an exception index past the row
+            # would write past the core's scratch.
+            drawn = rng.standard_normal(buf.logical_shape, dtype=np.float32)
+            return buf.device_form(drawn).reshape(-1).view(np.uint8)
         if buf.name not in inputs:
             return _sample(buf.dtype, buf.nbytes, rng)
-        content = np.ascontiguousarray(inputs[buf.name], dtype=buf.dtype)
+        content = np.ascontiguousarray(
+            buf.device_form(inputs[buf.name]), dtype=buf.dtype
+        )
         if content.nbytes != buf.nbytes:
             raise ValueError(
                 f"input {buf.name!r} is {content.nbytes} bytes, its buffer {buf.nbytes}"
@@ -293,7 +300,9 @@ class Standalone:
                 continue
             if buf.fills:
                 data = self._before.get(name, self._bytes(name)[: buf.nbytes])
-                out[buf.name] = data.view(buf.host_dtype).reshape(buf.host_shape)
+                out[buf.name] = buf.logical_form(
+                    data.view(buf.host_dtype).reshape(buf.host_shape)
+                )
         return out
 
     def written(self, k: int = 0) -> dict[str, np.ndarray]:

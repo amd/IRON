@@ -18,7 +18,8 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import DmaEndpoint, ObjectFifo
 from aie.iron.dataflow.objectfifo import ObjectFifoLink
 from aie.iron.device import AnyMemTile
-from aie.utils import bfp
+from aie.utils import bfp, coded
+from ml_dtypes import bfloat16
 
 from aie.utils.compile.jit.params import OperatorParam, PerCallMember, Select, resolve
 
@@ -85,6 +86,26 @@ class Operand:
     @property
     def host_dtype(self):
         return np.uint8 if bfp.is_bfp(self.dtype) else self.dtype
+
+    def device_form(self, value: np.ndarray) -> np.ndarray:
+        """``value``, this operand's logical tensor, as its host buffer holds
+        it: a coded operand's rows encoded, any other as it is.
+
+        Raises:
+            ValueError: A row holds more exceptions than the capacity.
+        """
+        if not self.coded:
+            return value
+        return coded.encode_rows(np.asarray(value, bfloat16), self.capacity)
+
+    def logical_form(self, data: np.ndarray) -> np.ndarray:
+        """``data``, this operand's host buffer, as the logical tensor a
+        reference reads: a coded operand's rows decoded, any other as it is.
+        """
+        if not self.coded:
+            return data
+        rows = np.asarray(data).reshape(self.shape)
+        return coded.decode_rows(rows, self.logical_shape[-1])
 
     @property
     def flat_type(self):
