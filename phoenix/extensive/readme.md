@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_10_29_17_51_13` at commit `169ae38`.
+Tested on `2026_10_30_01_25_12` at commit `ce440fa`.
 
 <details>
 <summary>iron/operators/flm/gemm</summary>
@@ -11,25 +11,25 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>Test</td><td>Checks</td><td>Latency (mean)</td><td>Bandwidth (mean)</td><td>Throughput (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_gemm[npu1-M_1024-K_2560-N_2560-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>6668.48</td><td>3.54</td><td>2012.72</td></tr>
-        <tr><td>test_gemm[npu1-M_16384-K_512-N_256-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>2192.69</td><td>11.60</td><td>1958.76</td></tr>
-        <tr><td>test_gemm[npu1-M_2048-K_2048-N_1024-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>4474.83</td><td>3.75</td><td>1919.61</td></tr>
-        <tr><td>test_gemm[npu1-M_256-K_512-N_128-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>85.26</td><td>5.38</td><td>393.55</td></tr>
-        <tr><td>test_gemm[npu1-M_256-K_512-N_256-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>86.89</td><td>7.54</td><td>772.32</td></tr>
-        <tr><td>test_gemm[npu1-M_256-K_512-N_320-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>140.29</td><td>5.37</td><td>597.95</td></tr>
-        <tr><td>test_gemm[npu1-M_256-K_512-N_512-epilogue_gelu-rounding_conv_even]</td><td>✅ 1/1</td><td>154.42</td><td>6.79</td><td>869.20</td></tr>
-        <tr><td>test_gemm[npu1-M_256-K_512-N_512-epilogue_none-rounding_floor]</td><td>✅ 1/1</td><td>129.48</td><td>8.10</td><td>1036.60</td></tr>
-        <tr><td>test_gemm[npu1-M_256-K_512-N_512-epilogue_sigmoid-rounding_conv_even]</td><td>✅ 1/1</td><td>146.65</td><td>7.15</td><td>915.25</td></tr>
-        <tr><td>test_gemm[npu1-M_256-K_512-N_512-epilogue_silu-rounding_conv_even]</td><td>✅ 1/1</td><td>191.65</td><td>5.47</td><td>700.32</td></tr>
-        <tr><td>test_gemm[npu1-M_256-K_512-N_64-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>79.42</td><td>4.54</td><td>211.23</td></tr>
-        <tr><td>test_gemm_b_col_maj[npu1-resident-high]</td><td>✅ 1/1</td><td>86.79</td><td>7.55</td><td>773.20</td></tr>
-        <tr><td>test_gemm_b_col_maj[npu1-slabs-high]</td><td>✅ 1/1</td><td>2585.83</td><td>9.83</td><td>1660.96</td></tr>
-        <tr><td>test_gemm_b_col_maj[npu1-streamed-high]</td><td>✅ 1/1</td><td>2679.40</td><td>3.62</td><td>601.11</td></tr>
-        <tr><td>test_gemm_b_col_maj[npu1-tables-linked-high]</td><td>✅ 1/1</td><td>94.35</td><td>6.95</td><td>711.29</td></tr>
-        <tr><td>test_gemm_b_col_maj[npu1-tn128-high]</td><td>✅ 1/1</td><td>155.65</td><td>6.74</td><td>862.32</td></tr>
-        <tr><td>test_gemm_b_col_maj[npu1-tn16-high]</td><td>✅ 1/1</td><td>62.66</td><td>5.75</td><td>267.74</td></tr>
-        <tr><td>test_gemm_b_col_maj[npu1-tn32-high]</td><td>✅ 1/1</td><td>67.11</td><td>6.84</td><td>500.02</td></tr>
-        <tr><td>test_gemm_b_col_maj[npu1-trailing-col-high]</td><td>✅ 1/1</td><td>122.69</td><td>6.14</td><td>683.72</td></tr>
+        <tr><td>test_gemm[npu1-M_1024-K_2560-N_2560-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>6419.21</td><td>3.68</td><td>2090.87</td></tr>
+        <tr><td>test_gemm[npu1-M_16384-K_512-N_256-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>3113.06</td><td>8.17</td><td>1379.66</td></tr>
+        <tr><td>test_gemm[npu1-M_2048-K_2048-N_1024-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>4551.99</td><td>3.69</td><td>1887.07</td></tr>
+        <tr><td>test_gemm[npu1-M_256-K_512-N_128-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>87.23</td><td>5.26</td><td>384.65</td></tr>
+        <tr><td>test_gemm[npu1-M_256-K_512-N_256-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>97.58</td><td>6.72</td><td>687.71</td></tr>
+        <tr><td>test_gemm[npu1-M_256-K_512-N_320-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>129.06</td><td>5.84</td><td>649.99</td></tr>
+        <tr><td>test_gemm[npu1-M_256-K_512-N_512-epilogue_gelu-rounding_conv_even]</td><td>✅ 1/1</td><td>144.92</td><td>7.24</td><td>926.13</td></tr>
+        <tr><td>test_gemm[npu1-M_256-K_512-N_512-epilogue_none-rounding_floor]</td><td>✅ 1/1</td><td>135.58</td><td>7.73</td><td>989.99</td></tr>
+        <tr><td>test_gemm[npu1-M_256-K_512-N_512-epilogue_sigmoid-rounding_conv_even]</td><td>✅ 1/1</td><td>133.61</td><td>7.85</td><td>1004.53</td></tr>
+        <tr><td>test_gemm[npu1-M_256-K_512-N_512-epilogue_silu-rounding_conv_even]</td><td>✅ 1/1</td><td>152.52</td><td>6.87</td><td>879.99</td></tr>
+        <tr><td>test_gemm[npu1-M_256-K_512-N_64-epilogue_none-rounding_conv_even]</td><td>✅ 1/1</td><td>79.26</td><td>4.55</td><td>211.67</td></tr>
+        <tr><td>test_gemm_b_col_maj[npu1-resident-high]</td><td>✅ 1/1</td><td>91.58</td><td>7.16</td><td>732.77</td></tr>
+        <tr><td>test_gemm_b_col_maj[npu1-slabs-high]</td><td>✅ 1/1</td><td>3138.65</td><td>8.10</td><td>1368.41</td></tr>
+        <tr><td>test_gemm_b_col_maj[npu1-streamed-high]</td><td>✅ 1/1</td><td>827.15</td><td>11.73</td><td>1947.19</td></tr>
+        <tr><td>test_gemm_b_col_maj[npu1-tables-linked-high]</td><td>✅ 1/1</td><td>88.57</td><td>7.40</td><td>757.68</td></tr>
+        <tr><td>test_gemm_b_col_maj[npu1-tn128-high]</td><td>✅ 1/1</td><td>152.88</td><td>6.86</td><td>877.94</td></tr>
+        <tr><td>test_gemm_b_col_maj[npu1-tn16-high]</td><td>✅ 1/1</td><td>77.04</td><td>4.68</td><td>217.76</td></tr>
+        <tr><td>test_gemm_b_col_maj[npu1-tn32-high]</td><td>✅ 1/1</td><td>67.41</td><td>6.81</td><td>497.79</td></tr>
+        <tr><td>test_gemm_b_col_maj[npu1-trailing-col-high]</td><td>✅ 1/1</td><td>115.56</td><td>6.52</td><td>725.93</td></tr>
         <tr><td>test_gemm_k_slices[npu1-ck128]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_gemm_k_slices[npu1-ck16]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_gemm_k_slices[npu1-ck32]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -58,8 +58,8 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_gemm_tile_options[npu1-tn64-default]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_gemm_tile_options[npu1-tn64-ma16]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_gemm_tile_options[npu1-tn64-ma32]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_gemm_without_activations[M_256-K_512-N_256]</td><td>✅ 1/1</td><td>91.19</td><td>7.19</td><td>735.95</td></tr>
-        <tr><td>test_gemm_without_activations[M_512-K_1024-N_512]</td><td>✅ 1/1</td><td>300.31</td><td>8.73</td><td>1787.75</td></tr>
+        <tr><td>test_gemm_without_activations[M_256-K_512-N_256]</td><td>✅ 1/1</td><td>85.91</td><td>7.63</td><td>781.18</td></tr>
+        <tr><td>test_gemm_without_activations[M_512-K_1024-N_512]</td><td>✅ 1/1</td><td>297.36</td><td>8.82</td><td>1805.49</td></tr>
         <tr><td>test_one_xclbin_serves_every_shape[test_one_xclbin_serves_every_shape]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
@@ -160,6 +160,7 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance[RowwiseAdd-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance[RowwiseMul-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance[Sample-small]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance[SelectiveScan-rows_5-heads_2-head_dim_16-state_size_16-columns_1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance[SiLU-size_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance[Sigmoid-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance[Softmax-rows_32-cols_1024-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -240,7 +241,6 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_a_per_call_length_counts_a_dimension_by_a_word[not_a_word]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_per_call_value_cannot_steer_the_record[test_a_per_call_value_cannot_steer_the_record]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_per_call_value_s_default_is_given_when_left_out[test_a_per_call_value_s_default_is_given_when_left_out]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_a_per_layer_slice_is_drawn_in_its_layer[test_a_per_layer_slice_is_drawn_in_its_layer]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one[test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_profile_fills_the_tunables_a_call_leaves_open[test_a_profile_fills_the_tunables_a_call_leaves_open]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_profile_is_checked_as_it_is_written_and_as_it_is_read[test_a_profile_is_checked_as_it_is_written_and_as_it_is_read]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -250,7 +250,6 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_a_prompt_chunk_past_the_last_position_is_refused[chunk_1-rows_44-inside_True]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_prompt_chunk_past_the_last_position_is_refused[chunk_1-rows_45-inside_False]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_prompt_chunk_past_the_last_position_is_refused[chunk_2-rows_1-inside_False]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_a_recorded_graph_names_every_step_and_every_edge[test_a_recorded_graph_names_every_step_and_every_edge]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_reference_only_operator_runs_its_reference_and_does_not_compile[test_a_reference_only_operator_runs_its_reference_and_does_not_compile]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_reference_only_operator_takes_no_image[test_a_reference_only_operator_takes_no_image]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_reference_takes_valid_rows_short_of_a_whole_line[n_128]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -288,8 +287,8 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_a_token_outside_the_vocabulary_is_refused_before_any_dispatch[outside_-1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_token_outside_the_vocabulary_is_refused_before_any_dispatch[outside_1024]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_tower_runs_its_front_end_s_rows[test_a_tower_runs_its_front_end_s_rows]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_a_towers_layers_are_found_under_its_prefix[test_a_towers_layers_are_found_under_its_prefix]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_tunable_free_operator_takes_the_widest_split_that_leaves_whole_lines[test_a_tunable_free_operator_takes_the_widest_split_that_leaves_whole_lines]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_a_tunable_given_as_none_is_left_to_the_profile[test_a_tunable_given_as_none_is_left_to_the_profile]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_turn_runs_from_its_first_new_token[test_a_turn_runs_from_its_first_new_token]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident[test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_value_only_a_core_reads_is_declared_on_a_full_elf[test_a_value_only_a_core_reads_is_declared_on_a_full_elf]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -354,6 +353,8 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_call_reference_pairs_buffers_by_name_not_by_order[test_call_reference_pairs_buffers_by_name_not_by_order]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_call_reference_refuses_a_reference_that_returns_nothing[test_call_reference_refuses_a_reference_that_returns_nothing]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_chat_messages_are_rendered_by_the_checkpoint_s_template[test_chat_messages_are_rendered_by_the_checkpoint_s_template]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_check_determinism_needs_two_rounds_before_any_load[rounds_0]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_check_determinism_needs_two_rounds_before_any_load[rounds_1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_check_takes_an_xclbin_per_step[test_check_takes_an_xclbin_per_step]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_compatible_runs_at_construction_once_every_tunable_is_known[test_compatible_runs_at_construction_once_every_tunable_is_known]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_concurrent_fetches_of_a_shipped_image_each_get_the_whole_file[test_concurrent_fetches_of_a_shipped_image_each_get_the_whole_file]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -362,7 +363,6 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_devices_are_named_for_their_design_not_their_step[test_devices_are_named_for_their_design_not_their_step]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_each_gelu_is_its_operator_s_form[act_gelu-approximate_none]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_each_gelu_is_its_operator_s_form[act_gelu_pytorch_tanh-approximate_tanh]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_each_layer_s_steps_are_drawn_in_its_cluster[test_each_layer_s_steps_are_drawn_in_its_cluster]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embedding_gemma2_from_checkpoint_is_the_default_instance[cls_<class 'iron.applications.embedding_gemma2.model.Config'>-instance_Config(eps=1e-06, precision=<Precision.HIGHEST: 'highest'>, vocab_size=262144, hidden_size=512, num_hidden_layers=24, num_attention_heads=4, intermediate_size=2048, num_key_value_heads=2, head_dim=256, rope_theta=10000.0, layer_types=('sliding_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'full_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'full_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'full_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'sliding_attention', 'full_attention'), global_kv_groups=1, global_head_dim=512, global_rope_theta=1000000.0, sliding_window=512, ple_dim=512, embedding_dim=768, hidden_act='gelu_pytorch_tanh', mrl_dims=(768, 512, 256, 128), image_token=258880, audio_token=258881, boi=255999, eoi=258882, boa=256000, eoa=258883, max_tokens=2048, block=64)]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embedding_gemma2_from_checkpoint_is_the_default_instance[cls_<class 'iron.applications.gemma4.audio.AudioConfig'>-instance_AudioConfig(eps=1e-06, precision=<Precision.HIGHEST: 'highest'>, hidden_size=1024, num_hidden_layers=12, num_attention_heads=8, intermediate_size=4096, mels=128, subsampling_conv_channels=(128, 32), window=12, band=32, attention_logit_cap=50.0, use_clipped_linears=True, conv_kernel_size=5, residual_weight=0.5, text_dim=512, output_proj_dims=1536, sample_rate=16000, frame=320, hop=160, max_samples=480000, max_tokens=768)]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embedding_gemma2_from_checkpoint_is_the_default_instance[cls_<class 'iron.applications.gemma4.vision.VisionConfig'>-instance_VisionConfig(eps=1e-06, precision=<Precision.HIGHEST: 'highest'>, hidden_size=768, num_hidden_layers=16, num_attention_heads=12, head_dim=64, intermediate_size=3072, patch_size=16, pooling_kernel_size=3, position_embedding_size=10240, rope_theta=100.0, hidden_act='gelu_pytorch_tanh', use_clipped_linears=False, text_dim=512, image_tokens=280, patches=2560, largest=(3072, 4096), rows=256, chunk=4096, patch_columns=8)]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -399,6 +399,7 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_exported_operator_is_declared[name_RowwiseAdd]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_exported_operator_is_declared[name_RowwiseMul]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_exported_operator_is_declared[name_Sample]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_exported_operator_is_declared[name_SelectiveScan]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_exported_operator_is_declared[name_SiLU]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_exported_operator_is_declared[name_Sigmoid]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_exported_operator_is_declared[name_Softmax]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -422,6 +423,7 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_from_checkpoint_reads_each_key_and_no_not_json_field[iron.applications.embedding_gemma2.model.Config]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_from_checkpoint_reads_each_key_and_no_not_json_field[iron.applications.gemma4.audio.AudioConfig]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_from_checkpoint_reads_each_key_and_no_not_json_field[iron.applications.gemma4.vision.VisionConfig]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_from_checkpoint_reads_each_key_and_no_not_json_field[iron.applications.granite.model.GraniteConfig]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_from_checkpoint_reads_each_key_and_no_not_json_field[iron.applications.llama.model.LlamaConfig]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_from_checkpoint_refuses_a_rope_scaling_it_builds_no_table_for[test_from_checkpoint_refuses_a_rope_scaling_it_builds_no_table_for]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_from_checkpoint_takes_either_the_file_or_its_directory[test_from_checkpoint_takes_either_the_file_or_its_directory]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -466,6 +468,7 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_no_npu_says_how_to_compile_without_one[test_no_npu_says_how_to_compile_without_one]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_no_sampler_is_greedy[test_no_sampler_is_greedy]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_npu1_forces_xclbin_and_reports_the_scratchpad_lowering[test_npu1_forces_xclbin_and_reports_the_scratchpad_lowering]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_npu1_runs_every_case_of_an_operator_it_runs[test_npu1_runs_every_case_of_an_operator_it_runs]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_on_an_xclbin_a_bounded_flm_gemm_repeats_a_by_the_dispatch_scalar[test_on_an_xclbin_a_bounded_flm_gemm_repeats_a_by_the_dispatch_scalar]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_on_an_xclbin_a_copy_bounded_on_its_innermost_axis_sizes_it[test_on_an_xclbin_a_copy_bounded_on_its_innermost_axis_sizes_it]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_on_an_xclbin_a_per_call_length_sizes_the_coalesced_descriptor[five_dimensions]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -596,6 +599,8 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_a_resident_has_one_offset_in_every_image[test_a_resident_has_one_offset_in_every_image]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_resident_needs_a_size[test_a_resident_needs_a_size]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_session_not_asked_for_a_csv_writes_none[test_a_session_not_asked_for_a_csv_writes_none]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_a_session_split_over_workers_writes_every_result[test_a_session_split_over_workers_writes_every_result]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_a_session_that_dies_keeps_its_results_and_names_the_test[test_a_session_that_dies_keeps_its_results_and_names_the_test]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_test_failing_in_setup_is_a_failed_check[test_a_test_failing_in_setup_is_a_failed_check]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_traced_build_carries_the_lowered_module[test_a_traced_build_carries_the_lowered_module]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state[test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -714,6 +719,12 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_the_compile_key_covers_the_library_a_design_calls[test_the_compile_key_covers_the_library_a_design_calls]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_the_compile_key_is_stable_across_identical_operators[test_the_compile_key_is_stable_across_identical_operators]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_the_device_keys_the_build_by_identity_not_address[test_the_device_keys_the_build_by_identity_not_address]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_the_hook_holds_python_to_black[source_x = {  "a":1 }
+-verdict_❌ Python formatting check failed][test_the_hook_holds_python_to_black[source_x = {  "a":1 }
+-verdict_❌ Python formatting check failed]]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_the_hook_holds_python_to_black[source_x = {"a": 1}
+-verdict_✅ Python formatting check passed][test_the_hook_holds_python_to_black[source_x = {"a": 1}
+-verdict_✅ Python formatting check passed]]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_the_lm_testing_helpers_import_without_pytest[test_the_lm_testing_helpers_import_without_pytest]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_the_prompt_text_repeats_past_its_end[test_the_prompt_text_repeats_past_its_end]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_the_stream_is_generated_per_call[test_the_stream_is_generated_per_call]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -756,6 +767,14 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_an_odd_vocabulary_pads_the_head_with_a_row_no_draw_takes[test_an_odd_vocabulary_pads_the_head_with_a_row_no_draw_takes]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_attention_refuses_a_norm_of_other_than_q_k_and_v[test_attention_refuses_a_norm_of_other_than_q_k_and_v]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_attention_turns_only_the_rotary_columns[test_attention_turns_only_the_rotary_columns]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_causal_conv_accepts_a_chunk_that_holds_its_history[chunk_1-kernel_2]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_causal_conv_accepts_a_chunk_that_holds_its_history[chunk_2-kernel_3]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_causal_conv_accepts_a_chunk_that_holds_its_history[chunk_4-kernel_4]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_causal_conv_accepts_a_chunk_that_holds_its_history[chunk_4-kernel_5]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_causal_conv_accepts_a_chunk_that_holds_its_history[chunk_8-kernel_4]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_causal_conv_refuses_a_chunk_shorter_than_its_history[chunk_1-kernel_3]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_causal_conv_refuses_a_chunk_shorter_than_its_history[chunk_2-kernel_4]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_causal_conv_refuses_a_chunk_shorter_than_its_history[chunk_2-kernel_5]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_conv2d[case_depthwise_13_rows-share_0.25]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_conv2d[case_depthwise_13_rows-share_1.0]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_each_generation_check_prefills_its_whole_prompt[test_each_generation_check_prefills_its_whole_prompt]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -768,8 +787,8 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_load_state_dict_refuses_a_change_of_kind[test_load_state_dict_refuses_a_change_of_kind]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_load_state_dict_refuses_a_param_in_a_frozen_dataclass[test_load_state_dict_refuses_a_param_in_a_frozen_dataclass]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_load_state_dict_refuses_a_param_in_a_tuple[test_load_state_dict_refuses_a_param_in_a_tuple]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_log_mel[frames_200]</td><td>✅ 1/1</td><td>20523.94</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_log_mel[frames_3072]</td><td>✅ 1/1</td><td>36160.94</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_log_mel[frames_200]</td><td>✅ 1/1</td><td>27808.39</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_log_mel[frames_3072]</td><td>✅ 1/1</td><td>33217.41</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_tensors_at_indices_are_a_list_of_tensors[test_tensors_at_indices_are_a_list_of_tensors]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
@@ -795,6 +814,7 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_a_given_raster_keeps_the_rows_past_the_image[test_a_given_raster_keeps_the_rows_past_the_image]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_line_of_part_of_a_vector_is_refused[limbs]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_line_of_part_of_a_vector_is_refused[magnitude]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_a_prompt_chunk_s_rows_are_gathered_each_call[test_a_prompt_chunk_s_rows_are_gathered_each_call]</td><td>✅ 1/1</td><td>4262.59</td><td>0.49</td><td>n/a</td></tr>
         <tr><td>test_a_short_m_takes_fewer_rows_of_cores[device_npu1-precision_high-M_16-rows_1-tile_m_16]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_short_m_takes_fewer_rows_of_cores[device_npu1-precision_high-M_32-rows_2-tile_m_16]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_a_short_m_takes_fewer_rows_of_cores[device_npu2-precision_high-M_16-rows_2-tile_m_8]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -941,187 +961,211 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_mha_whose_pv_split_does_not_route_is_refused[one_query_packed]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_mha_whose_pv_split_does_not_route_is_refused[six_pipelines_to_a_join]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_mha_whose_pv_split_does_not_route_is_refused[three_ways]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-AXPY-size_1024-num_aie_columns_4-tile_size_256-scalar_factor_3.0]</td><td>✅ 1/1</td><td>30.52</td><td>0.20</td><td>0.07</td></tr>
-        <tr><td>test_operator[npu1-AXPY-size_2048-num_aie_columns_1-tile_size_2048-scalar_factor_1.003]</td><td>✅ 1/1</td><td>23.16</td><td>0.53</td><td>0.18</td></tr>
-        <tr><td>test_operator[npu1-AXPY-size_2048-num_aie_columns_1-tile_size_2048-scalar_factor_3.0]</td><td>✅ 1/1</td><td>22.91</td><td>0.54</td><td>0.18</td></tr>
-        <tr><td>test_operator[npu1-AXPY-size_2048-num_aie_columns_4-tile_size_512-scalar_factor_3.0]</td><td>✅ 1/1</td><td>34.09</td><td>0.36</td><td>0.12</td></tr>
-        <tr><td>test_operator[npu1-AXPY-size_4096-num_aie_columns_1-tile_size_4096-scalar_factor_3.0]</td><td>✅ 1/1</td><td>27.11</td><td>0.91</td><td>0.30</td></tr>
-        <tr><td>test_operator[npu1-AXPY-size_8388608-num_aie_columns_4-tile_size_4096-scalar_factor_3.0]</td><td>✅ 1/1</td><td>3163.86</td><td>15.91</td><td>5.30</td></tr>
-        <tr><td>test_operator[npu1-Clamp-size_1024-num_aie_columns_4-num_channels_2-tile_size_128-low_-0.75-high_1.25]</td><td>✅ 1/1</td><td>49.74</td><td>0.08</td><td>0.02</td></tr>
-        <tr><td>test_operator[npu1-Clamp-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048-low_-0.75-high_1.25]</td><td>✅ 1/1</td><td>21.85</td><td>0.37</td><td>0.09</td></tr>
-        <tr><td>test_operator[npu1-Clamp-size_2048-num_aie_columns_1-tile_size_2048-low_0.5-high_1.5]</td><td>✅ 1/1</td><td>20.31</td><td>0.40</td><td>0.10</td></tr>
-        <tr><td>test_operator[npu1-Clamp-size_2048-num_aie_columns_2-tile_size_1024-low_-30000.0-high_30000.0]</td><td>✅ 1/1</td><td>23.18</td><td>0.35</td><td>0.09</td></tr>
-        <tr><td>test_operator[npu1-Clamp-size_2048-num_aie_columns_4-num_channels_2-tile_size_256-low_-0.75-high_1.25]</td><td>✅ 1/1</td><td>59.68</td><td>0.14</td><td>0.03</td></tr>
-        <tr><td>test_operator[npu1-Clamp-size_4096-num_aie_columns_1-num_channels_1-tile_size_4096-low_-0.75-high_1.25]</td><td>✅ 1/1</td><td>24.15</td><td>0.68</td><td>0.17</td></tr>
-        <tr><td>test_operator[npu1-Clamp-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096-low_-0.75-high_1.25]</td><td>✅ 1/1</td><td>2592.59</td><td>12.94</td><td>3.24</td></tr>
-        <tr><td>test_operator[npu1-Copy-bench_flat_4mi]</td><td>✅ 1/1</td><td>1071.78</td><td>15.65</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Copy-by_head_two_channels]</td><td>✅ 1/1</td><td>17.96</td><td>0.91</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Copy-chunked_transfer]</td><td>✅ 1/1</td><td>20.16</td><td>0.20</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Copy-contiguous]</td><td>✅ 1/1</td><td>29.92</td><td>0.14</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Copy-float32]</td><td>✅ 1/1</td><td>26.04</td><td>0.31</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Copy-past_one_memtile]</td><td>✅ 1/1</td><td>555.05</td><td>3.78</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Copy-slot5]</td><td>✅ 1/1</td><td>17.55</td><td>7.53</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Copy-slot5_two_channels]</td><td>✅ 1/1</td><td>18.33</td><td>7.21</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Copy-slot_last]</td><td>✅ 1/1</td><td>16.32</td><td>8.10</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Copy-two_channels]</td><td>✅ 1/1</td><td>21.21</td><td>0.19</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-DepthwiseConv1d-rows_64-channels_256-num_aie_columns_2]</td><td>✅ 1/1</td><td>44.14</td><td>1.54</td><td>3.71</td></tr>
-        <tr><td>test_operator[npu1-DepthwiseConv1d-rows_64-channels_64-num_aie_columns_1]</td><td>✅ 1/1</td><td>26.92</td><td>0.63</td><td>1.52</td></tr>
-        <tr><td>test_operator[npu1-ElementwiseAdd-size_1024-num_aie_columns_4-tile_size_256]</td><td>✅ 1/1</td><td>30.58</td><td>0.20</td><td>0.03</td></tr>
-        <tr><td>test_operator[npu1-ElementwiseAdd-size_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 1/1</td><td>29.26</td><td>0.42</td><td>0.07</td></tr>
-        <tr><td>test_operator[npu1-ElementwiseAdd-size_2048-num_aie_columns_4-tile_size_512]</td><td>✅ 1/1</td><td>36.95</td><td>0.33</td><td>0.06</td></tr>
-        <tr><td>test_operator[npu1-ElementwiseAdd-size_4096-num_aie_columns_1-tile_size_4096]</td><td>✅ 1/1</td><td>28.80</td><td>0.85</td><td>0.14</td></tr>
-        <tr><td>test_operator[npu1-ElementwiseAdd-size_8388608-num_aie_columns_4-tile_size_4096]</td><td>✅ 1/1</td><td>3178.35</td><td>15.84</td><td>2.64</td></tr>
-        <tr><td>test_operator[npu1-ElementwiseMul-size_1024-num_aie_columns_4-tile_size_256]</td><td>✅ 1/1</td><td>30.31</td><td>0.20</td><td>0.03</td></tr>
-        <tr><td>test_operator[npu1-ElementwiseMul-size_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 1/1</td><td>27.60</td><td>0.45</td><td>0.07</td></tr>
-        <tr><td>test_operator[npu1-ElementwiseMul-size_2048-num_aie_columns_4-tile_size_512]</td><td>✅ 1/1</td><td>33.07</td><td>0.37</td><td>0.06</td></tr>
-        <tr><td>test_operator[npu1-ElementwiseMul-size_4096-num_aie_columns_1-tile_size_4096]</td><td>✅ 1/1</td><td>23.14</td><td>1.06</td><td>0.18</td></tr>
-        <tr><td>test_operator[npu1-ElementwiseMul-size_8388608-num_aie_columns_4-tile_size_4096]</td><td>✅ 1/1</td><td>2896.78</td><td>17.38</td><td>2.90</td></tr>
-        <tr><td>test_operator[npu1-Emit-eight_carried]</td><td>✅ 1/1</td><td>15.64</td><td>0.13</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Emit-one_carried]</td><td>✅ 1/1</td><td>18.77</td><td>0.08</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-GELU-size_1024-num_aie_columns_4-num_channels_2-tile_size_128-approximate_none]</td><td>✅ 1/1</td><td>49.66</td><td>0.08</td><td>0.02</td></tr>
-        <tr><td>test_operator[npu1-GELU-size_1024-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>46.24</td><td>0.09</td><td>0.02</td></tr>
-        <tr><td>test_operator[npu1-GELU-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048-approximate_none]</td><td>✅ 1/1</td><td>47.79</td><td>0.17</td><td>0.04</td></tr>
-        <tr><td>test_operator[npu1-GELU-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>27.35</td><td>0.30</td><td>0.07</td></tr>
-        <tr><td>test_operator[npu1-GELU-size_2048-num_aie_columns_4-num_channels_2-tile_size_256-approximate_none]</td><td>✅ 1/1</td><td>44.58</td><td>0.18</td><td>0.05</td></tr>
-        <tr><td>test_operator[npu1-GELU-size_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>45.00</td><td>0.18</td><td>0.05</td></tr>
-        <tr><td>test_operator[npu1-GELU-size_8192-num_aie_columns_1-num_channels_1-tile_size_8192-approximate_none]</td><td>✅ 1/1</td><td>138.03</td><td>0.24</td><td>0.06</td></tr>
-        <tr><td>test_operator[npu1-GELU-size_8192-num_aie_columns_1-num_channels_1-tile_size_8192]</td><td>✅ 1/1</td><td>44.73</td><td>0.73</td><td>0.18</td></tr>
-        <tr><td>test_operator[npu1-GELU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>3260.85</td><td>10.29</td><td>2.57</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_192-K_384-N_64-num_aie_columns_4-tile_m_48-tile_k_96-tile_n_16-b_col_maj_True-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>47.79</td><td>4.63</td><td>197.47</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-b_col_maj_True]</td><td>✅ 1/1</td><td>8095.12</td><td>3.11</td><td>2122.25</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_1-tile_m_64-tile_k_64-tile_n_64-b_col_maj_False-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>79078.11</td><td>0.32</td><td>217.25</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_2-b_col_maj_True-precision_medium-placement_tiles]</td><td>✅ 1/1</td><td>17995.09</td><td>1.40</td><td>954.70</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_2-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>17943.08</td><td>1.40</td><td>957.46</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_8192-num_aie_columns_2-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>71721.31</td><td>1.05</td><td>958.15</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_2048-K_64-N_2048-num_aie_columns_2-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>1747.92</td><td>5.10</td><td>307.15</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_2048-K_64-N_8192-num_aie_columns_2-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>4256.20</td><td>8.19</td><td>504.55</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_2048-K_8192-N_2048-num_aie_columns_2-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>75546.91</td><td>1.00</td><td>909.63</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_32-K_1152-N_2048-num_aie_columns_4-tile_m_16-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>350.39</td><td>14.05</td><td>430.93</td></tr>
-        <tr><td>test_operator[npu1-GEMM-M_384-K_1536-N_1792-num_aie_columns_4-tile_m_32-tile_k_48-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>4096.89</td><td>1.97</td><td>515.98</td></tr>
-        <tr><td>test_operator[npu1-GEMM-f32_out]</td><td>✅ 1/1</td><td>175.93</td><td>8.94</td><td>762.90</td></tr>
-        <tr><td>test_operator[npu1-GEMV-M_1024-K_1024-num_aie_columns_1-tile_size_input_1-tile_size_output_64-num_batches_2]</td><td>✅ 1/1</td><td>1168.45</td><td>3.60</td><td>3.59</td></tr>
-        <tr><td>test_operator[npu1-GEMV-M_1024-K_1024-num_aie_columns_1-tile_size_input_1-tile_size_output_64-num_batches_4-repeat_2]</td><td>✅ 1/1</td><td>2096.95</td><td>2.01</td><td>4.00</td></tr>
-        <tr><td>test_operator[npu1-GEMV-M_1026-K_64-num_aie_columns_1-tile_size_input_1-tile_size_output_2-num_batches_2]</td><td>✅ 1/1</td><td>313.51</td><td>0.85</td><td>0.84</td></tr>
-        <tr><td>test_operator[npu1-GEMV-M_128-K_128-num_aie_columns_1-tile_size_input_32-tile_size_output_128]</td><td>✅ 1/1</td><td>33.11</td><td>1.01</td><td>0.99</td></tr>
-        <tr><td>test_operator[npu1-GEMV-M_2048-K_64-num_aie_columns_4-tile_size_input_4-tile_size_output_256-num_channels_2-num_batches_32-repeat_4]</td><td>✅ 1/1</td><td>561.13</td><td>3.98</td><td>14.95</td></tr>
-        <tr><td>test_operator[npu1-GEMV-M_256-K_128-num_aie_columns_1-tile_size_input_1-tile_size_output_256-num_batches_4]</td><td>✅ 1/1</td><td>148.78</td><td>1.78</td><td>1.76</td></tr>
-        <tr><td>test_operator[npu1-GEMV-M_256-K_128-num_aie_columns_2-tile_size_input_1-tile_size_output_32-num_channels_2-num_batches_8]</td><td>✅ 1/1</td><td>90.85</td><td>5.84</td><td>5.77</td></tr>
-        <tr><td>test_operator[npu1-GEMV-M_256-K_128-num_aie_columns_2-tile_size_input_1-tile_size_output_64-num_batches_4-repeat_4]</td><td>✅ 1/1</td><td>86.97</td><td>0.79</td><td>3.01</td></tr>
-        <tr><td>test_operator[npu1-GEMV-M_256-K_128-num_aie_columns_2-tile_size_input_1-tile_size_output_64-num_batches_8-repeat_4]</td><td>✅ 1/1</td><td>161.46</td><td>0.85</td><td>3.25</td></tr>
-        <tr><td>test_operator[npu1-GEMV-M_64-K_1536-num_aie_columns_1-tile_size_input_1-tile_size_output_64-num_batches_8]</td><td>✅ 1/1</td><td>425.69</td><td>3.76</td><td>3.69</td></tr>
-        <tr><td>test_operator[npu1-LayerNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048-weighted_True]</td><td>✅ 1/1</td><td>21.83</td><td>0.56</td><td>0.56</td></tr>
-        <tr><td>test_operator[npu1-LayerNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>19.16</td><td>0.43</td><td>0.64</td></tr>
-        <tr><td>test_operator[npu1-LayerNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_4096-weighted_True]</td><td>✅ 1/1</td><td>23.65</td><td>1.04</td><td>1.04</td></tr>
-        <tr><td>test_operator[npu1-LayerNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_8192]</td><td>✅ 1/1</td><td>31.02</td><td>1.06</td><td>1.58</td></tr>
-        <tr><td>test_operator[npu1-LayerNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True]</td><td>✅ 1/1</td><td>3336.62</td><td>10.06</td><td>15.08</td></tr>
-        <tr><td>test_operator[npu1-LayerNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>1125.30</td><td>29.82</td><td>44.73</td></tr>
-        <tr><td>test_operator[npu1-LayerNorm-rows_4-num_aie_columns_2-num_channels_2-tile_size_512-weighted_True]</td><td>✅ 1/1</td><td>34.89</td><td>0.26</td><td>0.35</td></tr>
-        <tr><td>test_operator[npu1-LayerNorm-rows_4-num_aie_columns_4-num_channels_1-tile_size_256-weighted_True]</td><td>✅ 1/1</td><td>28.28</td><td>0.16</td><td>0.22</td></tr>
-        <tr><td>test_operator[npu1-LayerNorm-rows_8-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>45.39</td><td>0.09</td><td>0.14</td></tr>
-        <tr><td>test_operator[npu1-LayerNorm-rows_8-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>44.84</td><td>0.18</td><td>0.27</td></tr>
-        <tr><td>test_operator[npu1-Limbs-rows_512-line_320-num_aie_columns_4]</td><td>✅ 1/1</td><td>164.72</td><td>15.91</td><td>0.99</td></tr>
-        <tr><td>test_operator[npu1-Limbs-rows_64-line_160-num_aie_columns_1]</td><td>✅ 1/1</td><td>47.44</td><td>3.45</td><td>0.22</td></tr>
-        <tr><td>test_operator[npu1-Log-size_1024-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>45.53</td><td>0.13</td><td>0.02</td></tr>
-        <tr><td>test_operator[npu1-Log-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>63.71</td><td>0.19</td><td>0.03</td></tr>
-        <tr><td>test_operator[npu1-Log-size_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>57.57</td><td>0.21</td><td>0.04</td></tr>
-        <tr><td>test_operator[npu1-Log-size_4096-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>96.78</td><td>0.25</td><td>0.04</td></tr>
-        <tr><td>test_operator[npu1-Log-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>22531.26</td><td>2.23</td><td>0.37</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_1-seq_len_16384-num_pipelines_4]</td><td>✅ 1/1</td><td>81497.58</td><td>0.10</td><td>421.63</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_24-num_KV_heads_8-d_128-seq_len_1-kv_len_2048-num_pipelines_2-heads_interleaved_True]</td><td>✅ 1/1</td><td>642.32</td><td>13.08</td><td>39.18</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_32-num_KV_heads_8-seq_len_1-kv_len_2048-num_pipelines_2-heads_interleaved_True]</td><td>✅ 1/1</td><td>357.65</td><td>11.75</td><td>46.91</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_4-num_KV_heads_1-d_256-seq_len_1-kv_len_2048-window_511-num_pipelines_1-heads_interleaved_True]</td><td>✅ 1/1</td><td>309.75</td><td>6.78</td><td>6.77</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_4-num_KV_heads_1-d_256-seq_len_512-kv_len_2048-window_511-num_pipelines_4-heads_interleaved_True]</td><td>✅ 1/1</td><td>11680.45</td><td>0.36</td><td>91.93</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_4-num_KV_heads_1-seq_len_2000-d_512-causal_False-num_pipelines_4]</td><td>✅ 1/1</td><td>65717.98</td><td>0.32</td><td>498.62</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_4-num_KV_heads_2-seq_len_2000-d_256-causal_False-window_512-num_pipelines_4]</td><td>✅ 1/1</td><td>49128.72</td><td>0.26</td><td>149.02</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_40-num_KV_heads_8-d_64-seq_len_1-kv_len_2048-num_pipelines_2-heads_interleaved_True]</td><td>✅ 1/1</td><td>362.85</td><td>11.59</td><td>57.80</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_8-num_KV_heads_2-seq_len_1-kv_len_512-num_pipelines_1]</td><td>✅ 1/1</td><td>83.32</td><td>3.17</td><td>12.58</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_8-num_KV_heads_2-seq_len_16384-num_pipelines_4]</td><td>✅ 1/1</td><td>640977.17</td><td>0.07</td><td>428.87</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_8-num_KV_heads_2-seq_len_2048-d_128-num_pipelines_4]</td><td>✅ 1/1</td><td>40579.16</td><td>0.26</td><td>211.79</td></tr>
-        <tr><td>test_operator[npu1-MHA-num_heads_8-num_KV_heads_2-seq_len_2048-kv_len_8192-num_pipelines_4]</td><td>✅ 1/1</td><td>57893.43</td><td>0.14</td><td>519.35</td></tr>
-        <tr><td>test_operator[npu1-Magnitude-rows_512-width_640-num_aie_columns_4]</td><td>✅ 1/1</td><td>449.73</td><td>4.37</td><td>0.36</td></tr>
-        <tr><td>test_operator[npu1-Magnitude-rows_64-width_640-num_aie_columns_1]</td><td>✅ 1/1</td><td>234.62</td><td>1.05</td><td>0.09</td></tr>
-        <tr><td>test_operator[npu1-Merge-rows_128-placeholders_((0, 0), (1, 40), (2, 20))-offset_True]</td><td>✅ 1/1</td><td>21.91</td><td>0.05</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Merge-rows_128-placeholders_((0, 0), (1, 40), (2, 20))]</td><td>✅ 1/1</td><td>22.76</td><td>0.04</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Merge-rows_192-block_32-placeholders_((258881, 2048), (258880, 2560))]</td><td>✅ 1/1</td><td>23.40</td><td>0.07</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Merge-rows_192-placeholders_((49190, 64),)]</td><td>✅ 1/1</td><td>23.72</td><td>0.06</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Merge-rows_2048-placeholders_((258881, 2048), (258880, 2560))-offset_True]</td><td>✅ 1/1</td><td>88.24</td><td>0.19</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Merge-rows_2048-placeholders_((258881, 2048), (258880, 2560))]</td><td>✅ 1/1</td><td>84.25</td><td>0.19</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-PatchPositions-rows_2048-out_height_480-out_width_1056-cores_8]</td><td>✅ 1/1</td><td>98.68</td><td>0.42</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-PatchPositions-rows_2304-out_height_768-out_width_768]</td><td>✅ 1/1</td><td>114.28</td><td>0.40</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-PatchPositions-rows_256-out_height_48-out_width_48]</td><td>✅ 1/1</td><td>24.76</td><td>0.21</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-PatchPositions-rows_2560-out_height_672-out_width_912]</td><td>✅ 1/1</td><td>120.70</td><td>0.42</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-RMSNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048-weighted_True]</td><td>✅ 1/1</td><td>21.27</td><td>0.58</td><td>0.39</td></tr>
-        <tr><td>test_operator[npu1-RMSNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>22.80</td><td>0.36</td><td>0.36</td></tr>
-        <tr><td>test_operator[npu1-RMSNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_4096-weighted_True]</td><td>✅ 1/1</td><td>32.03</td><td>0.77</td><td>0.51</td></tr>
-        <tr><td>test_operator[npu1-RMSNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_8192]</td><td>✅ 1/1</td><td>30.33</td><td>1.08</td><td>1.08</td></tr>
-        <tr><td>test_operator[npu1-RMSNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True]</td><td>✅ 1/1</td><td>1191.59</td><td>28.17</td><td>28.16</td></tr>
-        <tr><td>test_operator[npu1-RMSNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>3101.44</td><td>10.82</td><td>10.82</td></tr>
-        <tr><td>test_operator[npu1-RMSNorm-rows_4-num_aie_columns_2-num_channels_2-tile_size_512-weighted_True]</td><td>✅ 1/1</td><td>31.38</td><td>0.29</td><td>0.26</td></tr>
-        <tr><td>test_operator[npu1-RMSNorm-rows_4-num_aie_columns_4-num_channels_1-tile_size_256-weighted_True]</td><td>✅ 1/1</td><td>34.61</td><td>0.13</td><td>0.12</td></tr>
-        <tr><td>test_operator[npu1-RMSNorm-rows_8-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>44.78</td><td>0.09</td><td>0.09</td></tr>
-        <tr><td>test_operator[npu1-RMSNorm-rows_8-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>51.14</td><td>0.16</td><td>0.16</td></tr>
-        <tr><td>test_operator[npu1-ReLU-size_1024-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>48.59</td><td>0.08</td><td>0.02</td></tr>
-        <tr><td>test_operator[npu1-ReLU-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>25.89</td><td>0.32</td><td>0.08</td></tr>
-        <tr><td>test_operator[npu1-ReLU-size_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>44.93</td><td>0.18</td><td>0.05</td></tr>
-        <tr><td>test_operator[npu1-ReLU-size_4096-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>22.13</td><td>0.74</td><td>0.19</td></tr>
-        <tr><td>test_operator[npu1-ReLU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>3104.10</td><td>10.81</td><td>2.70</td></tr>
-        <tr><td>test_operator[npu1-Resample-height_3024-width_4032-out_height_672-out_width_912]</td><td>✅ 1/1</td><td>50983.06</td><td>0.81</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Resample-height_37-width_53-out_height_96-out_width_144]</td><td>✅ 1/1</td><td>318.85</td><td>1.08</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Resample-height_37-width_53-out_height_96-out_width_256]</td><td>✅ 1/1</td><td>363.47</td><td>1.15</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Resample-height_480-width_640-out_height_480-out_width_1008-num_aie_columns_4]</td><td>✅ 1/1</td><td>7922.94</td><td>0.64</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Resample-height_6000-width_500-out_height_672-out_width_432]</td><td>✅ 1/1</td><td>32653.03</td><td>0.82</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-ResampleTaps-in_size_1-out_size_48-num_aie_columns_2]</td><td>✅ 1/1</td><td>550.10</td><td>0.03</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-ResampleTaps-in_size_17-out_size_1008]</td><td>✅ 1/1</td><td>4407.33</td><td>0.01</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-ResampleTaps-in_size_3024-out_size_672-words_356-slots_16]</td><td>✅ 1/1</td><td>12492.36</td><td>0.01</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-ResampleTaps-in_size_4032-out_size_912]</td><td>✅ 1/1</td><td>15804.11</td><td>0.00</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-ResampleTaps-in_size_8000-out_size_672-num_aie_columns_1-num_channels_1]</td><td>✅ 1/1</td><td>214179.68</td><td>0.00</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-ResampleTaps-in_size_961-out_size_960]</td><td>✅ 1/1</td><td>4379.63</td><td>0.01</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-RoPE-rows_32-cols_128-num_aie_columns_1-angle_rows_8-two_halves_False]</td><td>✅ 1/1</td><td>27.42</td><td>0.67</td><td>0.45</td></tr>
-        <tr><td>test_operator[npu1-RoPE-rows_32-cols_512-num_aie_columns_1-angle_rows_8]</td><td>✅ 1/1</td><td>27.73</td><td>2.66</td><td>1.77</td></tr>
-        <tr><td>test_operator[npu1-RoPE-rows_32-cols_512-num_aie_columns_4-angle_rows_32]</td><td>✅ 1/1</td><td>34.52</td><td>2.85</td><td>1.42</td></tr>
-        <tr><td>test_operator[npu1-RoPE-rows_4096-cols_512-angle_rows_8]</td><td>✅ 1/1</td><td>322.64</td><td>26.03</td><td>19.50</td></tr>
-        <tr><td>test_operator[npu1-RoPE-rows_64-cols_128-num_aie_columns_4-angle_rows_16]</td><td>✅ 1/1</td><td>36.10</td><td>1.02</td><td>0.68</td></tr>
-        <tr><td>test_operator[npu1-RowwiseAdd-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>30.08</td><td>0.41</td><td>0.07</td></tr>
-        <tr><td>test_operator[npu1-RowwiseAdd-rows_1-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>28.02</td><td>0.88</td><td>0.15</td></tr>
-        <tr><td>test_operator[npu1-RowwiseAdd-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>1182.35</td><td>28.39</td><td>7.09</td></tr>
-        <tr><td>test_operator[npu1-RowwiseAdd-rows_4-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 1/1</td><td>28.73</td><td>0.32</td><td>0.07</td></tr>
-        <tr><td>test_operator[npu1-RowwiseAdd-rows_4-num_aie_columns_4-num_channels_1-tile_size_256]</td><td>✅ 1/1</td><td>34.62</td><td>0.13</td><td>0.03</td></tr>
-        <tr><td>test_operator[npu1-RowwiseAdd-wide_row]</td><td>✅ 1/1</td><td>88.76</td><td>14.88</td><td>3.69</td></tr>
-        <tr><td>test_operator[npu1-RowwiseAdd-wider_row]</td><td>✅ 1/1</td><td>47.41</td><td>8.81</td><td>2.07</td></tr>
-        <tr><td>test_operator[npu1-RowwiseMul-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>23.80</td><td>0.52</td><td>0.09</td></tr>
-        <tr><td>test_operator[npu1-RowwiseMul-rows_1-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>24.86</td><td>0.99</td><td>0.16</td></tr>
-        <tr><td>test_operator[npu1-RowwiseMul-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>1184.20</td><td>28.34</td><td>7.08</td></tr>
-        <tr><td>test_operator[npu1-RowwiseMul-rows_4-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 1/1</td><td>28.63</td><td>0.32</td><td>0.07</td></tr>
-        <tr><td>test_operator[npu1-RowwiseMul-rows_4-num_aie_columns_4-num_channels_1-tile_size_256]</td><td>✅ 1/1</td><td>32.13</td><td>0.14</td><td>0.03</td></tr>
-        <tr><td>test_operator[npu1-RowwiseMul-wide_row]</td><td>✅ 1/1</td><td>80.85</td><td>16.34</td><td>4.05</td></tr>
-        <tr><td>test_operator[npu1-RowwiseMul-wider_row]</td><td>✅ 1/1</td><td>47.48</td><td>8.80</td><td>2.07</td></tr>
-        <tr><td>test_operator[npu1-Sample-llama]</td><td>✅ 1/1</td><td>341.80</td><td>0.75</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Sample-padded]</td><td>✅ 1/1</td><td>344.95</td><td>0.88</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Sample-small]</td><td>✅ 1/1</td><td>150.58</td><td>0.05</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Sample-two_cores]</td><td>✅ 1/1</td><td>123.35</td><td>0.07</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-Sample-uneven]</td><td>✅ 1/1</td><td>182.56</td><td>0.57</td><td>n/a</td></tr>
-        <tr><td>test_operator[npu1-SiLU-size_1024-num_aie_columns_4-tile_size_256]</td><td>✅ 1/1</td><td>27.67</td><td>0.15</td><td>0.04</td></tr>
-        <tr><td>test_operator[npu1-SiLU-size_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 1/1</td><td>28.59</td><td>0.29</td><td>0.07</td></tr>
-        <tr><td>test_operator[npu1-SiLU-size_2048-num_aie_columns_4-tile_size_512]</td><td>✅ 1/1</td><td>28.73</td><td>0.29</td><td>0.07</td></tr>
-        <tr><td>test_operator[npu1-SiLU-size_4096-num_aie_columns_1-tile_size_4096]</td><td>✅ 1/1</td><td>25.24</td><td>0.65</td><td>0.16</td></tr>
-        <tr><td>test_operator[npu1-SiLU-size_8388608-num_aie_columns_4-tile_size_4096]</td><td>✅ 1/1</td><td>3503.00</td><td>9.58</td><td>2.39</td></tr>
-        <tr><td>test_operator[npu1-Sigmoid-size_1024-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>45.05</td><td>0.09</td><td>0.02</td></tr>
-        <tr><td>test_operator[npu1-Sigmoid-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>22.90</td><td>0.36</td><td>0.09</td></tr>
-        <tr><td>test_operator[npu1-Sigmoid-size_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>50.61</td><td>0.16</td><td>0.04</td></tr>
-        <tr><td>test_operator[npu1-Sigmoid-size_4096-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>23.23</td><td>0.71</td><td>0.18</td></tr>
-        <tr><td>test_operator[npu1-Sigmoid-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>1974.28</td><td>17.00</td><td>4.25</td></tr>
-        <tr><td>test_operator[npu1-Softmax-f32_soft_cap_banded_addend]</td><td>✅ 1/1</td><td>51.58</td><td>0.40</td><td>0.04</td></tr>
-        <tr><td>test_operator[npu1-Softmax-rows_16-cols_4096-block_1024-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>134.19</td><td>1.95</td><td>0.49</td></tr>
-        <tr><td>test_operator[npu1-Softmax-rows_16-cols_4608-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>155.77</td><td>1.89</td><td>0.47</td></tr>
-        <tr><td>test_operator[npu1-Softmax-rows_32-cols_1024-num_aie_columns_2-num_channels_2-input_dtype_<class 'numpy.float32'>]</td><td>✅ 1/1</td><td>124.26</td><td>1.58</td><td>0.26</td></tr>
-        <tr><td>test_operator[npu1-Softmax-rows_32-cols_1024-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>38.29</td><td>3.42</td><td>0.86</td></tr>
-        <tr><td>test_operator[npu1-Softmax-rows_32-cols_32768-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>2137.35</td><td>1.96</td><td>0.49</td></tr>
-        <tr><td>test_operator[npu1-Softmax-rows_4096-cols_512-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>3056.20</td><td>2.74</td><td>0.69</td></tr>
-        <tr><td>test_operator[npu1-Tanh-size_1024-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>45.03</td><td>0.09</td><td>0.02</td></tr>
-        <tr><td>test_operator[npu1-Tanh-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>35.96</td><td>0.23</td><td>0.06</td></tr>
-        <tr><td>test_operator[npu1-Tanh-size_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>47.44</td><td>0.17</td><td>0.04</td></tr>
-        <tr><td>test_operator[npu1-Tanh-size_4096-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>24.12</td><td>0.68</td><td>0.17</td></tr>
-        <tr><td>test_operator[npu1-Tanh-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>1139.44</td><td>29.45</td><td>7.36</td></tr>
+        <tr><td>test_operator[npu1-AXPY-size_1024-num_aie_columns_4-tile_size_256-scalar_factor_3.0]</td><td>✅ 1/1</td><td>33.68</td><td>0.18</td><td>0.06</td></tr>
+        <tr><td>test_operator[npu1-AXPY-size_2048-num_aie_columns_1-tile_size_2048-scalar_factor_1.003]</td><td>✅ 1/1</td><td>23.18</td><td>0.53</td><td>0.18</td></tr>
+        <tr><td>test_operator[npu1-AXPY-size_2048-num_aie_columns_1-tile_size_2048-scalar_factor_3.0]</td><td>✅ 1/1</td><td>22.05</td><td>0.56</td><td>0.19</td></tr>
+        <tr><td>test_operator[npu1-AXPY-size_2048-num_aie_columns_4-tile_size_512-scalar_factor_3.0]</td><td>✅ 1/1</td><td>29.52</td><td>0.42</td><td>0.14</td></tr>
+        <tr><td>test_operator[npu1-AXPY-size_4096-num_aie_columns_1-tile_size_4096-scalar_factor_3.0]</td><td>✅ 1/1</td><td>23.80</td><td>1.03</td><td>0.34</td></tr>
+        <tr><td>test_operator[npu1-AXPY-size_8388608-num_aie_columns_4-tile_size_4096-scalar_factor_3.0]</td><td>✅ 1/1</td><td>3305.17</td><td>15.23</td><td>5.08</td></tr>
+        <tr><td>test_operator[npu1-Clamp-size_1024-num_aie_columns_4-num_channels_2-tile_size_128-low_-0.75-high_1.25]</td><td>✅ 1/1</td><td>50.30</td><td>0.08</td><td>0.02</td></tr>
+        <tr><td>test_operator[npu1-Clamp-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048-low_-0.75-high_1.25]</td><td>✅ 1/1</td><td>24.90</td><td>0.33</td><td>0.08</td></tr>
+        <tr><td>test_operator[npu1-Clamp-size_2048-num_aie_columns_1-tile_size_2048-low_0.5-high_1.5]</td><td>✅ 1/1</td><td>24.98</td><td>0.33</td><td>0.08</td></tr>
+        <tr><td>test_operator[npu1-Clamp-size_2048-num_aie_columns_2-tile_size_1024-low_-30000.0-high_30000.0]</td><td>✅ 1/1</td><td>23.10</td><td>0.35</td><td>0.09</td></tr>
+        <tr><td>test_operator[npu1-Clamp-size_2048-num_aie_columns_4-num_channels_2-tile_size_256-low_-0.75-high_1.25]</td><td>✅ 1/1</td><td>58.81</td><td>0.14</td><td>0.03</td></tr>
+        <tr><td>test_operator[npu1-Clamp-size_4096-num_aie_columns_1-num_channels_1-tile_size_4096-low_-0.75-high_1.25]</td><td>✅ 1/1</td><td>27.01</td><td>0.61</td><td>0.15</td></tr>
+        <tr><td>test_operator[npu1-Clamp-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096-low_-0.75-high_1.25]</td><td>✅ 1/1</td><td>1119.15</td><td>29.98</td><td>7.50</td></tr>
+        <tr><td>test_operator[npu1-Copy-bench_flat_4mi]</td><td>✅ 1/1</td><td>3168.56</td><td>5.29</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Copy-by_head_two_channels]</td><td>✅ 1/1</td><td>18.65</td><td>0.88</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Copy-chunked_transfer]</td><td>✅ 1/1</td><td>20.61</td><td>0.20</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Copy-contiguous]</td><td>✅ 1/1</td><td>18.82</td><td>0.22</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Copy-float32]</td><td>✅ 1/1</td><td>23.27</td><td>0.35</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Copy-past_one_memtile]</td><td>✅ 1/1</td><td>547.96</td><td>3.83</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Copy-slot5]</td><td>✅ 1/1</td><td>17.67</td><td>7.47</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Copy-slot5_two_channels]</td><td>✅ 1/1</td><td>20.29</td><td>6.51</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Copy-slot_last]</td><td>✅ 1/1</td><td>15.90</td><td>8.31</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Copy-two_channels]</td><td>✅ 1/1</td><td>21.18</td><td>0.19</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-DepthwiseConv1d-rows_32-channels_96-num_aie_columns_4]</td><td>✅ 1/1</td><td>28.61</td><td>0.46</td><td>1.07</td></tr>
+        <tr><td>test_operator[npu1-DepthwiseConv1d-rows_64-channels_256-num_aie_columns_2]</td><td>✅ 1/1</td><td>25.30</td><td>2.69</td><td>6.48</td></tr>
+        <tr><td>test_operator[npu1-DepthwiseConv1d-rows_64-channels_64-num_aie_columns_1]</td><td>✅ 1/1</td><td>26.85</td><td>0.63</td><td>1.53</td></tr>
+        <tr><td>test_operator[npu1-DepthwiseConv1d-rows_768-channels_1024-num_aie_columns_4]</td><td>✅ 1/1</td><td>329.06</td><td>9.59</td><td>23.90</td></tr>
+        <tr><td>test_operator[npu1-ElementwiseAdd-size_1024-num_aie_columns_4-tile_size_256]</td><td>✅ 1/1</td><td>34.16</td><td>0.18</td><td>0.03</td></tr>
+        <tr><td>test_operator[npu1-ElementwiseAdd-size_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 1/1</td><td>23.98</td><td>0.51</td><td>0.09</td></tr>
+        <tr><td>test_operator[npu1-ElementwiseAdd-size_2048-num_aie_columns_4-tile_size_512]</td><td>✅ 1/1</td><td>31.06</td><td>0.40</td><td>0.07</td></tr>
+        <tr><td>test_operator[npu1-ElementwiseAdd-size_4096-num_aie_columns_1-tile_size_4096]</td><td>✅ 1/1</td><td>39.79</td><td>0.62</td><td>0.10</td></tr>
+        <tr><td>test_operator[npu1-ElementwiseAdd-size_8388608-num_aie_columns_4-tile_size_4096]</td><td>✅ 1/1</td><td>2457.79</td><td>20.48</td><td>3.41</td></tr>
+        <tr><td>test_operator[npu1-ElementwiseMul-size_1024-num_aie_columns_4-tile_size_256]</td><td>✅ 1/1</td><td>30.41</td><td>0.20</td><td>0.03</td></tr>
+        <tr><td>test_operator[npu1-ElementwiseMul-size_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 1/1</td><td>23.85</td><td>0.52</td><td>0.09</td></tr>
+        <tr><td>test_operator[npu1-ElementwiseMul-size_2048-num_aie_columns_4-tile_size_512]</td><td>✅ 1/1</td><td>31.37</td><td>0.39</td><td>0.07</td></tr>
+        <tr><td>test_operator[npu1-ElementwiseMul-size_4096-num_aie_columns_1-tile_size_4096]</td><td>✅ 1/1</td><td>25.07</td><td>0.98</td><td>0.16</td></tr>
+        <tr><td>test_operator[npu1-ElementwiseMul-size_8388608-num_aie_columns_4-tile_size_4096]</td><td>✅ 1/1</td><td>3153.62</td><td>15.96</td><td>2.66</td></tr>
+        <tr><td>test_operator[npu1-Emit-eight_carried]</td><td>✅ 1/1</td><td>27.37</td><td>0.07</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Emit-one_carried]</td><td>✅ 1/1</td><td>18.46</td><td>0.09</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-GELU-size_1024-num_aie_columns_4-num_channels_2-tile_size_128-approximate_none]</td><td>✅ 1/1</td><td>49.30</td><td>0.08</td><td>0.02</td></tr>
+        <tr><td>test_operator[npu1-GELU-size_1024-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>47.20</td><td>0.09</td><td>0.02</td></tr>
+        <tr><td>test_operator[npu1-GELU-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048-approximate_none]</td><td>✅ 1/1</td><td>52.14</td><td>0.16</td><td>0.04</td></tr>
+        <tr><td>test_operator[npu1-GELU-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>29.81</td><td>0.27</td><td>0.07</td></tr>
+        <tr><td>test_operator[npu1-GELU-size_2048-num_aie_columns_4-num_channels_2-tile_size_256-approximate_none]</td><td>✅ 1/1</td><td>43.30</td><td>0.19</td><td>0.05</td></tr>
+        <tr><td>test_operator[npu1-GELU-size_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>45.14</td><td>0.18</td><td>0.05</td></tr>
+        <tr><td>test_operator[npu1-GELU-size_8192-num_aie_columns_1-num_channels_1-tile_size_8192-approximate_none]</td><td>✅ 1/1</td><td>126.72</td><td>0.26</td><td>0.06</td></tr>
+        <tr><td>test_operator[npu1-GELU-size_8192-num_aie_columns_1-num_channels_1-tile_size_8192]</td><td>✅ 1/1</td><td>43.72</td><td>0.75</td><td>0.19</td></tr>
+        <tr><td>test_operator[npu1-GELU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>3091.22</td><td>10.85</td><td>2.71</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_1024-K_2560-N_10240-num_aie_columns_4-tile_m_64-tile_k_64-tile_n_64-b_col_maj_False-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>25877.41</td><td>3.04</td><td>2074.67</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_1792-K_896-N_1152-num_aie_columns_4-tile_m_64-tile_k_32-tile_n_48-b_col_maj_False-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>2454.13</td><td>3.83</td><td>1507.41</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_192-K_384-N_64-num_aie_columns_4-tile_m_48-tile_k_96-tile_n_16-b_col_maj_True-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>58.43</td><td>3.79</td><td>161.51</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-b_col_maj_True]</td><td>✅ 1/1</td><td>7817.10</td><td>3.22</td><td>2197.73</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_1-tile_m_64-tile_k_64-tile_n_64-b_col_maj_False-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>79280.23</td><td>0.32</td><td>216.70</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_2-b_col_maj_True-precision_medium-placement_tiles]</td><td>✅ 1/1</td><td>18061.39</td><td>1.39</td><td>951.19</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_2-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>17966.51</td><td>1.40</td><td>956.22</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_4-tile_m_128-tile_k_32-tile_n_32-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>12261.54</td><td>2.05</td><td>1401.12</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_4-tile_m_32-tile_k_32-tile_n_128-b_col_maj_False-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>12310.22</td><td>2.04</td><td>1395.58</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_4-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>8428.04</td><td>2.99</td><td>2038.42</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_2048-N_8192-num_aie_columns_2-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>71490.37</td><td>1.06</td><td>961.24</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_64-N_2048-num_aie_columns_2-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>1760.21</td><td>5.06</td><td>305.00</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_64-N_8192-num_aie_columns_2-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>5321.57</td><td>6.55</td><td>403.54</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_2048-K_8192-N_2048-num_aie_columns_2-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>75257.45</td><td>1.00</td><td>913.13</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_32-K_1152-N_2048-num_aie_columns_4-tile_m_16-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>348.25</td><td>14.14</td><td>433.59</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_384-K_1536-N_1792-num_aie_columns_4-tile_m_32-tile_k_48-tile_n_64-b_col_maj_True-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>3491.08</td><td>2.31</td><td>605.52</td></tr>
+        <tr><td>test_operator[npu1-GEMM-M_896-K_1792-N_640-num_aie_columns_4-tile_m_32-tile_k_64-tile_n_80-b_col_maj_False-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>2390.51</td><td>2.78</td><td>859.74</td></tr>
+        <tr><td>test_operator[npu1-GEMM-f32_out]</td><td>✅ 1/1</td><td>299.87</td><td>5.25</td><td>447.59</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_1024-K_1024-num_aie_columns_1-tile_size_input_1-tile_size_output_64-num_batches_2]</td><td>✅ 1/1</td><td>1074.59</td><td>3.91</td><td>3.90</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_1024-K_1024-num_aie_columns_1-tile_size_input_1-tile_size_output_64-num_batches_4-repeat_2]</td><td>✅ 1/1</td><td>2092.96</td><td>2.01</td><td>4.01</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_1026-K_64-num_aie_columns_1-tile_size_input_1-tile_size_output_2-num_batches_2]</td><td>✅ 1/1</td><td>329.27</td><td>0.81</td><td>0.80</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_128-K_128-num_aie_columns_1-tile_size_input_32-tile_size_output_128]</td><td>✅ 1/1</td><td>39.64</td><td>0.84</td><td>0.83</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_1536-K_12288-num_aie_columns_4-tile_size_input_1-tile_size_output_64]</td><td>✅ 1/1</td><td>3246.93</td><td>11.63</td><td>11.63</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_2048-K_64-num_aie_columns_4-tile_size_input_4-tile_size_output_256-num_batches_32-repeat_4]</td><td>✅ 1/1</td><td>645.74</td><td>3.46</td><td>12.99</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_2048-K_64-num_aie_columns_4-tile_size_input_4-tile_size_output_256-num_channels_2-num_batches_32-repeat_4]</td><td>✅ 1/1</td><td>580.59</td><td>3.84</td><td>14.45</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_2048-K_8192-num_aie_columns_4-tile_size_input_1-tile_size_output_256]</td><td>✅ 1/1</td><td>2686.03</td><td>12.50</td><td>12.49</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_256-K_128-num_aie_columns_1-tile_size_input_1-tile_size_output_256-num_batches_4]</td><td>✅ 1/1</td><td>150.62</td><td>1.76</td><td>1.74</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_256-K_128-num_aie_columns_2-tile_size_input_1-tile_size_output_32-num_channels_2-num_batches_8]</td><td>✅ 1/1</td><td>93.83</td><td>5.65</td><td>5.59</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_256-K_128-num_aie_columns_2-tile_size_input_1-tile_size_output_64-num_batches_4-repeat_4]</td><td>✅ 1/1</td><td>93.37</td><td>0.73</td><td>2.81</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_256-K_128-num_aie_columns_2-tile_size_input_1-tile_size_output_64-num_batches_8-repeat_4]</td><td>✅ 1/1</td><td>156.18</td><td>0.88</td><td>3.36</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_256-K_128-num_aie_columns_4-tile_size_input_1-tile_size_output_32-num_batches_100]</td><td>✅ 1/1</td><td>834.62</td><td>7.94</td><td>7.85</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_448-K_64-num_aie_columns_4-tile_size_input_1-tile_size_output_56-num_batches_192]</td><td>✅ 1/1</td><td>3016.80</td><td>3.71</td><td>3.65</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_512-K_64-num_aie_columns_4-tile_size_input_4-tile_size_output_64-num_batches_32]</td><td>✅ 1/1</td><td>275.16</td><td>7.76</td><td>7.62</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_64-K_1536-num_aie_columns_1-tile_size_input_1-tile_size_output_64-num_batches_8]</td><td>✅ 1/1</td><td>418.05</td><td>3.82</td><td>3.76</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_1024]</td><td>✅ 1/1</td><td>3005.03</td><td>11.17</td><td>11.17</td></tr>
+        <tr><td>test_operator[npu1-GEMV-M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_512-num_channels_2]</td><td>✅ 1/1</td><td>3228.16</td><td>10.40</td><td>10.39</td></tr>
+        <tr><td>test_operator[npu1-LayerNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048-weighted_True]</td><td>✅ 1/1</td><td>18.96</td><td>0.65</td><td>0.65</td></tr>
+        <tr><td>test_operator[npu1-LayerNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>24.55</td><td>0.33</td><td>0.50</td></tr>
+        <tr><td>test_operator[npu1-LayerNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_4096-weighted_True]</td><td>✅ 1/1</td><td>21.27</td><td>1.16</td><td>1.16</td></tr>
+        <tr><td>test_operator[npu1-LayerNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_8192]</td><td>✅ 1/1</td><td>29.88</td><td>1.10</td><td>1.64</td></tr>
+        <tr><td>test_operator[npu1-LayerNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True]</td><td>✅ 1/1</td><td>3227.82</td><td>10.40</td><td>15.59</td></tr>
+        <tr><td>test_operator[npu1-LayerNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>1136.98</td><td>29.51</td><td>44.27</td></tr>
+        <tr><td>test_operator[npu1-LayerNorm-rows_4-num_aie_columns_2-num_channels_2-tile_size_512-weighted_True]</td><td>✅ 1/1</td><td>30.26</td><td>0.30</td><td>0.41</td></tr>
+        <tr><td>test_operator[npu1-LayerNorm-rows_4-num_aie_columns_4-num_channels_1-tile_size_256-weighted_True]</td><td>✅ 1/1</td><td>33.22</td><td>0.14</td><td>0.18</td></tr>
+        <tr><td>test_operator[npu1-LayerNorm-rows_8-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>48.01</td><td>0.09</td><td>0.13</td></tr>
+        <tr><td>test_operator[npu1-LayerNorm-rows_8-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>32.35</td><td>0.25</td><td>0.38</td></tr>
+        <tr><td>test_operator[npu1-Limbs-rows_4096-line_320-num_aie_columns_4]</td><td>✅ 1/1</td><td>3110.18</td><td>6.74</td><td>0.42</td></tr>
+        <tr><td>test_operator[npu1-Limbs-rows_512-line_320-num_aie_columns_4]</td><td>✅ 1/1</td><td>161.54</td><td>16.23</td><td>1.01</td></tr>
+        <tr><td>test_operator[npu1-Limbs-rows_64-line_160-num_aie_columns_1]</td><td>✅ 1/1</td><td>59.89</td><td>2.74</td><td>0.17</td></tr>
+        <tr><td>test_operator[npu1-Log-size_1024-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>48.71</td><td>0.13</td><td>0.02</td></tr>
+        <tr><td>test_operator[npu1-Log-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>63.98</td><td>0.19</td><td>0.03</td></tr>
+        <tr><td>test_operator[npu1-Log-size_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>50.45</td><td>0.24</td><td>0.04</td></tr>
+        <tr><td>test_operator[npu1-Log-size_4096-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>96.01</td><td>0.26</td><td>0.04</td></tr>
+        <tr><td>test_operator[npu1-Log-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>22751.84</td><td>2.21</td><td>0.37</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_1-seq_len_16384-num_pipelines_4]</td><td>✅ 1/1</td><td>81348.76</td><td>0.10</td><td>422.40</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_24-num_KV_heads_8-d_128-seq_len_1-kv_len_2048-num_pipelines_2-heads_interleaved_True]</td><td>✅ 1/1</td><td>755.52</td><td>11.12</td><td>33.31</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_32-num_KV_heads_8-seq_len_1-kv_len_2048-num_pipelines_2-heads_interleaved_True]</td><td>✅ 1/1</td><td>355.38</td><td>11.83</td><td>47.21</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_4-num_KV_heads_1-d_256-seq_len_1-kv_len_2048-window_511-num_pipelines_1-heads_interleaved_True]</td><td>✅ 1/1</td><td>312.49</td><td>6.72</td><td>6.71</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_4-num_KV_heads_1-d_256-seq_len_512-kv_len_2048-window_511-num_pipelines_4-heads_interleaved_True]</td><td>✅ 1/1</td><td>11478.72</td><td>0.37</td><td>93.54</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_4-num_KV_heads_1-seq_len_2000-d_512-causal_False-num_pipelines_4]</td><td>✅ 1/1</td><td>65420.59</td><td>0.32</td><td>500.88</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_4-num_KV_heads_2-seq_len_2000-d_256-causal_False-window_512-num_pipelines_4]</td><td>✅ 1/1</td><td>49104.12</td><td>0.26</td><td>149.09</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_40-num_KV_heads_8-d_64-seq_len_1-kv_len_2048-num_pipelines_2-heads_interleaved_True]</td><td>✅ 1/1</td><td>360.39</td><td>11.67</td><td>58.19</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_8-num_KV_heads_2-seq_len_1-kv_len_512-num_pipelines_1]</td><td>✅ 1/1</td><td>83.51</td><td>3.16</td><td>12.56</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_8-num_KV_heads_2-seq_len_16384-num_pipelines_4]</td><td>✅ 1/1</td><td>640716.64</td><td>0.07</td><td>429.04</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_8-num_KV_heads_2-seq_len_2048-d_128-num_pipelines_4]</td><td>✅ 1/1</td><td>40589.80</td><td>0.26</td><td>211.73</td></tr>
+        <tr><td>test_operator[npu1-MHA-num_heads_8-num_KV_heads_2-seq_len_2048-kv_len_8192-num_pipelines_4]</td><td>✅ 1/1</td><td>57990.46</td><td>0.14</td><td>518.48</td></tr>
+        <tr><td>test_operator[npu1-Magnitude-rows_4096-width_640-num_aie_columns_4]</td><td>✅ 1/1</td><td>3417.31</td><td>4.60</td><td>0.38</td></tr>
+        <tr><td>test_operator[npu1-Magnitude-rows_512-width_640-num_aie_columns_4]</td><td>✅ 1/1</td><td>434.01</td><td>4.53</td><td>0.38</td></tr>
+        <tr><td>test_operator[npu1-Magnitude-rows_64-width_640-num_aie_columns_1]</td><td>✅ 1/1</td><td>231.84</td><td>1.06</td><td>0.09</td></tr>
+        <tr><td>test_operator[npu1-Merge-rows_128-placeholders_((0, 0), (1, 40), (2, 20))-offset_True]</td><td>✅ 1/1</td><td>24.39</td><td>0.04</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Merge-rows_128-placeholders_((0, 0), (1, 40), (2, 20))]</td><td>✅ 1/1</td><td>19.94</td><td>0.05</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Merge-rows_192-block_32-placeholders_((258881, 2048), (258880, 2560))]</td><td>✅ 1/1</td><td>29.29</td><td>0.05</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Merge-rows_192-placeholders_((49190, 64),)]</td><td>✅ 1/1</td><td>22.04</td><td>0.07</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Merge-rows_2048-placeholders_((258881, 2048), (258880, 2560))-offset_True]</td><td>✅ 1/1</td><td>96.43</td><td>0.17</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Merge-rows_2048-placeholders_((258881, 2048), (258880, 2560))]</td><td>✅ 1/1</td><td>79.52</td><td>0.21</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-PatchPositions-rows_2048-out_height_480-out_width_1056-cores_8]</td><td>✅ 1/1</td><td>104.77</td><td>0.39</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-PatchPositions-rows_2304-out_height_768-out_width_768]</td><td>✅ 1/1</td><td>123.41</td><td>0.37</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-PatchPositions-rows_256-out_height_48-out_width_48]</td><td>✅ 1/1</td><td>25.14</td><td>0.20</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-PatchPositions-rows_2560-out_height_672-out_width_912]</td><td>✅ 1/1</td><td>124.99</td><td>0.41</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-RMSNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048-weighted_True]</td><td>✅ 1/1</td><td>23.29</td><td>0.53</td><td>0.35</td></tr>
+        <tr><td>test_operator[npu1-RMSNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>18.51</td><td>0.44</td><td>0.44</td></tr>
+        <tr><td>test_operator[npu1-RMSNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_4096-weighted_True]</td><td>✅ 1/1</td><td>30.45</td><td>0.81</td><td>0.54</td></tr>
+        <tr><td>test_operator[npu1-RMSNorm-rows_1-num_aie_columns_1-num_channels_1-tile_size_8192]</td><td>✅ 1/1</td><td>29.78</td><td>1.10</td><td>1.10</td></tr>
+        <tr><td>test_operator[npu1-RMSNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True]</td><td>✅ 1/1</td><td>2596.17</td><td>12.93</td><td>12.92</td></tr>
+        <tr><td>test_operator[npu1-RMSNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>2987.44</td><td>11.23</td><td>11.23</td></tr>
+        <tr><td>test_operator[npu1-RMSNorm-rows_4-num_aie_columns_2-num_channels_2-tile_size_512-weighted_True]</td><td>✅ 1/1</td><td>38.62</td><td>0.24</td><td>0.21</td></tr>
+        <tr><td>test_operator[npu1-RMSNorm-rows_4-num_aie_columns_4-num_channels_1-tile_size_256-weighted_True]</td><td>✅ 1/1</td><td>31.21</td><td>0.15</td><td>0.13</td></tr>
+        <tr><td>test_operator[npu1-RMSNorm-rows_8-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>48.45</td><td>0.08</td><td>0.08</td></tr>
+        <tr><td>test_operator[npu1-RMSNorm-rows_8-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>50.03</td><td>0.16</td><td>0.16</td></tr>
+        <tr><td>test_operator[npu1-ReLU-size_1024-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>48.24</td><td>0.08</td><td>0.02</td></tr>
+        <tr><td>test_operator[npu1-ReLU-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>23.32</td><td>0.35</td><td>0.09</td></tr>
+        <tr><td>test_operator[npu1-ReLU-size_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>47.68</td><td>0.17</td><td>0.04</td></tr>
+        <tr><td>test_operator[npu1-ReLU-size_4096-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>25.93</td><td>0.63</td><td>0.16</td></tr>
+        <tr><td>test_operator[npu1-ReLU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>3139.77</td><td>10.69</td><td>2.67</td></tr>
+        <tr><td>test_operator[npu1-Resample-height_3024-width_4032-out_height_672-out_width_912]</td><td>✅ 1/1</td><td>50621.80</td><td>0.82</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Resample-height_37-width_53-out_height_96-out_width_144]</td><td>✅ 1/1</td><td>318.34</td><td>1.08</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Resample-height_37-width_53-out_height_96-out_width_256]</td><td>✅ 1/1</td><td>920.22</td><td>0.45</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Resample-height_480-width_640-out_height_480-out_width_1008-num_aie_columns_4]</td><td>✅ 1/1</td><td>8181.33</td><td>0.62</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Resample-height_6000-width_500-out_height_672-out_width_432]</td><td>✅ 1/1</td><td>32627.23</td><td>0.82</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-ResampleTaps-in_size_1-out_size_48-num_aie_columns_2]</td><td>✅ 1/1</td><td>1956.93</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-ResampleTaps-in_size_17-out_size_1008]</td><td>✅ 1/1</td><td>4965.28</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-ResampleTaps-in_size_3024-out_size_672-words_356-slots_16]</td><td>✅ 1/1</td><td>12288.95</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-ResampleTaps-in_size_4032-out_size_912]</td><td>✅ 1/1</td><td>15728.14</td><td>0.00</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-ResampleTaps-in_size_8000-out_size_672-num_aie_columns_1-num_channels_1]</td><td>✅ 1/1</td><td>214179.44</td><td>0.00</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-ResampleTaps-in_size_961-out_size_960]</td><td>✅ 1/1</td><td>4026.17</td><td>0.01</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-RoPE-rows_32-cols_128-num_aie_columns_1-angle_rows_8-two_halves_False]</td><td>✅ 1/1</td><td>23.76</td><td>0.78</td><td>0.52</td></tr>
+        <tr><td>test_operator[npu1-RoPE-rows_32-cols_512-num_aie_columns_1-angle_rows_8]</td><td>✅ 1/1</td><td>30.02</td><td>2.46</td><td>1.64</td></tr>
+        <tr><td>test_operator[npu1-RoPE-rows_32-cols_512-num_aie_columns_4-angle_rows_32]</td><td>✅ 1/1</td><td>30.32</td><td>3.24</td><td>1.62</td></tr>
+        <tr><td>test_operator[npu1-RoPE-rows_4096-cols_512-angle_rows_8]</td><td>✅ 1/1</td><td>322.42</td><td>26.04</td><td>19.51</td></tr>
+        <tr><td>test_operator[npu1-RoPE-rows_64-cols_128-num_aie_columns_4-angle_rows_16]</td><td>✅ 1/1</td><td>32.23</td><td>1.14</td><td>0.76</td></tr>
+        <tr><td>test_operator[npu1-RowwiseAdd-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>22.17</td><td>0.55</td><td>0.09</td></tr>
+        <tr><td>test_operator[npu1-RowwiseAdd-rows_1-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>28.42</td><td>0.86</td><td>0.14</td></tr>
+        <tr><td>test_operator[npu1-RowwiseAdd-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>1179.04</td><td>28.47</td><td>7.11</td></tr>
+        <tr><td>test_operator[npu1-RowwiseAdd-rows_4-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 1/1</td><td>52.42</td><td>0.18</td><td>0.04</td></tr>
+        <tr><td>test_operator[npu1-RowwiseAdd-rows_4-num_aie_columns_4-num_channels_1-tile_size_256]</td><td>✅ 1/1</td><td>33.95</td><td>0.14</td><td>0.03</td></tr>
+        <tr><td>test_operator[npu1-RowwiseAdd-wide_row]</td><td>✅ 1/1</td><td>74.22</td><td>17.80</td><td>4.41</td></tr>
+        <tr><td>test_operator[npu1-RowwiseAdd-wider_row]</td><td>✅ 1/1</td><td>52.09</td><td>8.02</td><td>1.89</td></tr>
+        <tr><td>test_operator[npu1-RowwiseMul-rows_1-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>26.25</td><td>0.47</td><td>0.08</td></tr>
+        <tr><td>test_operator[npu1-RowwiseMul-rows_1-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>20.70</td><td>1.19</td><td>0.20</td></tr>
+        <tr><td>test_operator[npu1-RowwiseMul-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>1175.70</td><td>28.55</td><td>7.13</td></tr>
+        <tr><td>test_operator[npu1-RowwiseMul-rows_4-num_aie_columns_2-num_channels_2-tile_size_512]</td><td>✅ 1/1</td><td>52.22</td><td>0.18</td><td>0.04</td></tr>
+        <tr><td>test_operator[npu1-RowwiseMul-rows_4-num_aie_columns_4-num_channels_1-tile_size_256]</td><td>✅ 1/1</td><td>29.46</td><td>0.16</td><td>0.03</td></tr>
+        <tr><td>test_operator[npu1-RowwiseMul-wide_row]</td><td>✅ 1/1</td><td>77.37</td><td>17.07</td><td>4.24</td></tr>
+        <tr><td>test_operator[npu1-RowwiseMul-wider_row]</td><td>✅ 1/1</td><td>44.42</td><td>9.40</td><td>2.21</td></tr>
+        <tr><td>test_operator[npu1-Sample-llama]</td><td>✅ 1/1</td><td>335.60</td><td>0.76</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Sample-padded]</td><td>✅ 1/1</td><td>359.15</td><td>0.84</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Sample-small]</td><td>✅ 1/1</td><td>161.55</td><td>0.05</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Sample-two_cores]</td><td>✅ 1/1</td><td>131.78</td><td>0.06</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-Sample-uneven]</td><td>✅ 1/1</td><td>189.35</td><td>0.55</td><td>n/a</td></tr>
+        <tr><td>test_operator[npu1-SelectiveScan-decode]</td><td>✅ 1/1</td><td>41.97</td><td>0.80</td><td>0.49</td></tr>
+        <tr><td>test_operator[npu1-SelectiveScan-odd_rows]</td><td>✅ 1/1</td><td>44.11</td><td>0.40</td><td>0.70</td></tr>
+        <tr><td>test_operator[npu1-SelectiveScan-reclaim]</td><td>✅ 1/1</td><td>91110.32</td><td>0.05</td><td>0.92</td></tr>
+        <tr><td>test_operator[npu1-SelectiveScan-rows_5-heads_2-head_dim_16-state_size_16-columns_1]</td><td>✅ 1/1</td><td>54.45</td><td>0.09</td><td>0.24</td></tr>
+        <tr><td>test_operator[npu1-SelectiveScan-rows_64-heads_16-head_dim_64-state_size_64-groups_2]</td><td>✅ 1/1</td><td>8930.61</td><td>0.09</td><td>2.35</td></tr>
+        <tr><td>test_operator[npu1-SelectiveScan-rows_8-heads_4-head_dim_32-state_size_32-groups_2]</td><td>✅ 1/1</td><td>105.81</td><td>0.37</td><td>1.55</td></tr>
+        <tr><td>test_operator[npu1-SiLU-size_1024-num_aie_columns_4-tile_size_256]</td><td>✅ 1/1</td><td>26.84</td><td>0.15</td><td>0.04</td></tr>
+        <tr><td>test_operator[npu1-SiLU-size_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 1/1</td><td>23.39</td><td>0.35</td><td>0.09</td></tr>
+        <tr><td>test_operator[npu1-SiLU-size_2048-num_aie_columns_4-tile_size_512]</td><td>✅ 1/1</td><td>42.45</td><td>0.19</td><td>0.05</td></tr>
+        <tr><td>test_operator[npu1-SiLU-size_4096-num_aie_columns_1-tile_size_4096]</td><td>✅ 1/1</td><td>29.02</td><td>0.56</td><td>0.14</td></tr>
+        <tr><td>test_operator[npu1-SiLU-size_8388608-num_aie_columns_4-tile_size_4096]</td><td>✅ 1/1</td><td>2641.57</td><td>12.70</td><td>3.18</td></tr>
+        <tr><td>test_operator[npu1-Sigmoid-size_1024-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>48.60</td><td>0.08</td><td>0.02</td></tr>
+        <tr><td>test_operator[npu1-Sigmoid-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>23.84</td><td>0.34</td><td>0.09</td></tr>
+        <tr><td>test_operator[npu1-Sigmoid-size_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>51.49</td><td>0.16</td><td>0.04</td></tr>
+        <tr><td>test_operator[npu1-Sigmoid-size_4096-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>23.25</td><td>0.70</td><td>0.18</td></tr>
+        <tr><td>test_operator[npu1-Sigmoid-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>2982.43</td><td>11.25</td><td>2.81</td></tr>
+        <tr><td>test_operator[npu1-Softmax-f32_soft_cap_banded_addend]</td><td>✅ 1/1</td><td>62.72</td><td>0.33</td><td>0.03</td></tr>
+        <tr><td>test_operator[npu1-Softmax-rows_16-cols_4096-block_1024-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>125.56</td><td>2.09</td><td>0.52</td></tr>
+        <tr><td>test_operator[npu1-Softmax-rows_16-cols_4608-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>143.01</td><td>2.06</td><td>0.52</td></tr>
+        <tr><td>test_operator[npu1-Softmax-rows_32-cols_1024-num_aie_columns_2-num_channels_2-input_dtype_<class 'numpy.float32'>]</td><td>✅ 1/1</td><td>116.99</td><td>1.68</td><td>0.28</td></tr>
+        <tr><td>test_operator[npu1-Softmax-rows_32-cols_1024-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>38.15</td><td>3.44</td><td>0.86</td></tr>
+        <tr><td>test_operator[npu1-Softmax-rows_32-cols_32768-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>3067.09</td><td>1.37</td><td>0.34</td></tr>
+        <tr><td>test_operator[npu1-Softmax-rows_4096-cols_512-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>1299.48</td><td>6.46</td><td>1.61</td></tr>
+        <tr><td>test_operator[npu1-Tanh-size_1024-num_aie_columns_4-num_channels_2-tile_size_128]</td><td>✅ 1/1</td><td>45.53</td><td>0.09</td><td>0.02</td></tr>
+        <tr><td>test_operator[npu1-Tanh-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>31.52</td><td>0.26</td><td>0.06</td></tr>
+        <tr><td>test_operator[npu1-Tanh-size_2048-num_aie_columns_4-num_channels_2-tile_size_256]</td><td>✅ 1/1</td><td>56.30</td><td>0.15</td><td>0.04</td></tr>
+        <tr><td>test_operator[npu1-Tanh-size_4096-num_aie_columns_1-num_channels_1-tile_size_4096]</td><td>✅ 1/1</td><td>32.59</td><td>0.50</td><td>0.13</td></tr>
+        <tr><td>test_operator[npu1-Tanh-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096]</td><td>✅ 1/1</td><td>3204.83</td><td>10.47</td><td>2.62</td></tr>
         <tr><td>test_patch_positions_that_do_not_tile_are_refused[more_patches_than_rows]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_patch_positions_that_do_not_tile_are_refused[not_whole_windows]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_patch_positions_that_do_not_tile_are_refused[rows_not_whole_blocks]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -1131,6 +1175,26 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_rows_are_masked_to_the_per_call_length[xclbin-vision]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_sample_over_an_odd_vocab_is_refused[test_sample_over_an_odd_vocab_is_refused]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_sample_with_more_cores_than_a_memtile_joins_is_refused[test_sample_with_more_cores_than_a_memtile_joins_is_refused]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_accepts_blocks_dividing_rows[rows_5-block_16]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_accepts_blocks_dividing_rows[rows_5-block_80]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_accepts_blocks_dividing_rows[rows_8-block_128]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_accepts_blocks_dividing_rows[rows_8-block_32]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_a_state_not_whole_slices[state_size_136]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_a_state_not_whole_slices[state_size_24]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_a_state_not_whole_slices[state_size_8]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_an_explicit_block_past_core_memory[test_selective_scan_rejects_an_explicit_block_past_core_memory]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_1-block_-16]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_1-block_0]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_1-block_17]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_1-block_1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_1-block_32]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_1-block_96]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_None-block_-16]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_None-block_0]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_None-block_17]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_None-block_1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_None-block_32]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_selective_scan_rejects_invalid_blocks[columns_None-block_96]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_softmax_with_no_column_count_that_tiles_is_refused[test_softmax_with_no_column_count_that_tiles_is_refused]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_the_bound_rows_are_what_moves[n_1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_the_bound_rows_are_what_moves[n_256]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -1216,10 +1280,13 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_operator_lowers_to_instructions[npu1-ElementwiseMul-size_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-Emit-one_carried]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-GELU-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_operator_lowers_to_instructions[npu1-GEMM-M_1792-K_896-N_1152-num_aie_columns_4-tile_m_64-tile_k_32-tile_n_48-b_col_maj_False-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-GEMM-M_192-K_384-N_64-num_aie_columns_4-tile_m_48-tile_k_96-tile_n_16-b_col_maj_True-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-GEMM-M_2048-K_2048-N_2048-b_col_maj_True]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_1-tile_m_64-tile_k_64-tile_n_64-b_col_maj_False-c_col_maj_False-precision_highest]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_operator_lowers_to_instructions[npu1-GEMM-M_2048-K_2048-N_2048-num_aie_columns_4-tile_m_64-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-GEMM-M_32-K_1152-N_2048-num_aie_columns_4-tile_m_16-tile_k_64-tile_n_64-b_col_maj_True-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_operator_lowers_to_instructions[npu1-GEMM-M_896-K_1792-N_640-num_aie_columns_4-tile_m_32-tile_k_64-tile_n_80-b_col_maj_False-c_col_maj_True-precision_highest]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-GEMM-f32_out]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-GEMV-M_128-K_128-num_aie_columns_1-tile_size_input_32-tile_size_output_128]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-GEMV-M_256-K_128-num_aie_columns_1-tile_size_input_1-tile_size_output_256-num_batches_4]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -1251,6 +1318,7 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_operator_lowers_to_instructions[npu1-Sample-padded]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-Sample-small]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-Sample-uneven]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_operator_lowers_to_instructions[npu1-SelectiveScan-rows_5-heads_2-head_dim_16-state_size_16-columns_1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-SiLU-size_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-Sigmoid-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu1-Softmax-rows_16-cols_4096-block_1024-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -1306,6 +1374,7 @@ Tested on `2026_10_29_17_51_13` at commit `169ae38`.
         <tr><td>test_operator_lowers_to_instructions[npu2-Sample-padded]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu2-Sample-small]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu2-Sample-uneven]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_operator_lowers_to_instructions[npu2-SelectiveScan-rows_5-heads_2-head_dim_16-state_size_16-columns_1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu2-SiLU-size_2048-num_aie_columns_1-tile_size_2048]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu2-Sigmoid-size_2048-num_aie_columns_1-num_channels_1-tile_size_2048]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_operator_lowers_to_instructions[npu2-Softmax-rows_16-cols_4096-block_1024-num_aie_columns_2-num_channels_2]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
