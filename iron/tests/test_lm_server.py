@@ -4,6 +4,7 @@
 import io
 import json
 import struct
+import subprocess
 import sys
 
 import numpy as np
@@ -27,7 +28,7 @@ def responses(data, word_sizes):
         found.append(json.loads(stream.read(size)))
         count = found[-1].get("count", 0)
         if count:
-            stream.read(count * next(sizes))
+            found.append(stream.read(count * next(sizes)))
     return found
 
 
@@ -120,7 +121,33 @@ def test_server_protocol(monkeypatch):
     assert responses(output.getvalue(), [2, 4]) == [
         {"ok": True},
         {"ok": True, "count": 2},
+        np.asarray([9, 3], dtype=bfloat16).tobytes(),
         {"ok": True},
         {"ok": True, "count": 2},
+        np.asarray([5, 128], dtype="<f4").tobytes(),
         {"ok": True},
     ]
+
+
+def test_server_disconnect():
+    lm_server.serve(io.BytesIO(), io.BytesIO())
+
+
+def test_server_keeps_diagnostics_off_the_pipe():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from iron import lm_server; import os; "
+            "lm_server.load_model = lambda command: "
+            "(print('loading', flush=True), os.write(1, b'native output\\n')); "
+            "lm_server.main()",
+        ],
+        input=request({"command": "load_model"}) + request({"command": "close"}),
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    assert responses(result.stdout, []) == [{"ok": True}, {"ok": True}]
+    assert b"loading" in result.stderr
+    assert b"native output" in result.stderr
