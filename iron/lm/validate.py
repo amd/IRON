@@ -194,17 +194,20 @@ def speed(
 
 def entry_applies(kind: str, entry, recording: Recording) -> bool:
     """Whether a candidate profile's ``entry`` (a fusion's own ``(FusionKind,
-    steps, edges)`` where ``kind`` is ``"fusion"``, else a packing's
-    ``members``) matches anything in ``recording``.
+    steps, edges)`` where ``kind`` is ``"fusion"``, else a ``PackingEntry``)
+    matches anything in ``recording``, a packing only where it applies in
+    the recording's version.
     """
     trial = Profile()
     if kind == "fusion":
         fusion_kind, steps, edges = entry
         trial.add_fusion(fusion_kind, steps, edges)
         return bool(graph_fusions(recording, trial))
-    trial.add_packing(entry)
+    trial.add_packing(entry.members, entry.versions)
+    version = recording.version
     return any(
-        trial.packing_of(step.op.resolved()) is not None for step in recording.steps
+        trial.packing_of(step.op.resolved(), version) is not None
+        for step in recording.steps
     )
 
 
@@ -240,7 +243,7 @@ def build_variant(stock_path: Path | None, tags) -> Profile:
         if kind == "fusion":
             profile.add_fusion(*entry)
         else:
-            profile.add_packing(entry)
+            profile.add_packing(entry.members, entry.versions)
     return profile
 
 

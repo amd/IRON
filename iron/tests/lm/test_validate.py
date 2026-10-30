@@ -68,6 +68,24 @@ def test_classify_entries_tags_by_matching_version():
     assert matches == {"decode"}
 
 
+def test_classify_entries_tags_a_packing_by_the_versions_it_names():
+    """Both versions run SiLU and a multiply; a packing naming the decode
+    step's version is tagged decode alone, one naming none both."""
+    model = small()
+    decode_shape, prompt_shape = model.shapes()
+    recordings = {
+        "decode": model.record(**decode_shape),
+        "prompt": model.record(**prompt_shape),
+    }
+    members = [(SiLU, {}), (ElementwiseMul, {})]
+    candidate = Profile()
+    candidate.add_packing(members, versions=[recordings["decode"].version])
+    candidate.add_packing(members)
+    scoped, everywhere = validate.classify_entries(candidate, recordings)
+    assert scoped[1] == {"decode"}
+    assert everywhere[1] == {"decode", "prompt"}
+
+
 def _raw_entry():
     return (
         FusionKind.STREAM,

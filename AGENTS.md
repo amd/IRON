@@ -243,12 +243,16 @@ values, weights, state and profiles are named. The rules:
   device configuration in a full ELF, wherever a version runs them, so its
   steps run without reconfiguring between them; a member gives the
   tunables every step of its shape takes there (narrower, so they
-  co-reside). A switch between configurations costs about 40 us plus 7 us
-  per column on npu2, the cost a packing removes
+  co-reside). An entry's `"versions"` (each a version's inputs by name,
+  `Recording.version`) limit it to those versions: a decode step and a
+  prompt chunk run the same arrays at other extents, so a grouping that
+  pays in one can cost in the other. A switch between configurations costs
+  about 40 us plus 7 us per column on npu2, the cost a packing removes
   (`iron.common.graph.packing`). `python -m iron.lm.tune <application>
   --packings-only` groups a graph's arrays and narrows their widths
   (`iron.tune.packings`), keeping a grouping only where its version is
-  bit-identical and faster end to end. Its estimate of what a grouping
+  bit-identical and faster end to end, and applying it in another version
+  only where that version is faster with it too. Its estimate of what a grouping
   costs beyond its steps' own times is a per-device model
   (`iron/tune/costs/<device>.json`) every end-to-end check refits and a
   tune writes back, so one device's tunes start from the last. With

@@ -17,6 +17,7 @@ from iron.common.graph.packing import apply as apply_packings
 from iron.lm.generation import Sampler
 from iron.lm.tune import calls
 from iron.tests.support.llama_model import small
+from iron.operators.copy import Copy
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
@@ -30,6 +31,7 @@ from iron.tune.packings import (
     _end_to_end,
     adjacent,
     price_packings,
+    widen_packings,
     width_tunables,
 )
 
@@ -80,6 +82,26 @@ class BoundedReLUs(iron.Graph):
 
     def body(self, x, *, n: Scratchpad[np.int32]):
         return ReLU.step(ReLU.step(x[:n]))
+
+
+ROUND = 2**22
+
+
+class Rounds(iron.Graph):
+    """ReLU, Tanh and Sigmoid in turn over a call's first ``n`` elements,
+    twice, at eight columns; given ``other``, a second version over the same
+    arrays (it copies ``other`` too). A short call is switch-bound and a long
+    one bound by the arrays' own time, as a decode step and a prompt chunk
+    are."""
+
+    def body(self, x, other=None, *, n: Scratchpad[np.int32]):
+        x = x[:n]
+        for _ in range(2):
+            for op in (ReLU, Tanh, Sigmoid):
+                x = op.step(x, num_aie_columns=8)
+        if other is None:
+            return x
+        return x, Copy.step(other)
 
 
 class Projections(iron.Graph):
@@ -267,6 +289,39 @@ def test_end_to_end_runs_a_call_at_each_of_its_points():
 
 
 @pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("rows, applies", [(2048, True), (ROUND, False)])
+def test_widen_packings_applies_an_entry_only_where_it_pays(rows, applies):
+    """An entry found in one version narrows its arrays to one column. In
+    the other version, at short calls it removes switches and applies
+    there too; at long calls the narrowed arrays cost more than the switches
+    it removes, so it keeps to the version it names rather than being
+    dropped."""
+    dev = aie_utils.ensure_current_device()
+    first = Rounds().record(x=(ROUND,))
+    second = Rounds().record(x=(ROUND,), other=(64,))
+    narrow = {"num_aie_columns": 1, "num_channels": 1}
+    profile = iron.Profile()
+    profile.add_packing(
+        [(op, {"size": ROUND}, narrow) for op in (ReLU, Tanh, Sigmoid)],
+        versions=[first.version],
+    )
+    logged = []
+    widened = widen_packings(
+        [Timed(first, values=dict(n=2048)), Timed(second, values=dict(n=rows))],
+        dev,
+        profile,
+        timing=Timing(rounds=2, calls=5),
+        log=logged.append,
+    )
+    print("\n".join(logged))
+    (entry,) = widened.packings()
+    want = {first.version, second.version} if applies else {first.version}
+    assert entry.versions == want, logged
+    _, _, packing = apply_profile(second, widened, dev)
+    assert bool(packing.groups) == applies
+
+
+@pytest.mark.supported_devices("npu2")
 def test_price_packings_narrows_what_does_not_co_reside(tmp_path):
     """Three arrays of 16 cores each take 48 of 32 at their own widths: the
     packer narrows the cheapest until they share one configuration, and the
@@ -288,8 +343,9 @@ def test_price_packings_narrows_what_does_not_co_reside(tmp_path):
         log=logged.append,
     )
     print("\n".join(logged))
-    (members,) = profile.packings()
-    assert any(tunables for _, _, tunables in members), "nothing was narrowed"
+    (entry,) = profile.packings()
+    assert entry.versions == {recording.version}
+    assert any(tunables for _, _, tunables in entry.members), "nothing was narrowed"
     packed_graph = Wide()
     packed_graph.profile = profile
     packed = packed_graph.compile(x=(WIDE,))

@@ -19,7 +19,7 @@ from aie.utils import bfp
 from ..declare import Operator, Value
 from ..declare.operand import param_names
 from ..declare.operator import graph_recorder
-from ..declare.profile import Profile
+from ..declare.profile import Profile, Version
 from ..image.packaging import Kind
 from ..image.step import BufferRef, SequenceStep
 from .handle import (
@@ -180,6 +180,16 @@ def _take_views(cls, operands, kwargs, values):
     return out
 
 
+def version_key(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Version:
+    """The key of a graph's version for ``inputs`` (each input's shape and
+    dtype, by name, in the order its body takes them).
+    """
+    return tuple(
+        (name, tuple(int(n) for n in shape), bfp.dtype_name(dtype))
+        for name, (shape, dtype) in inputs.items()
+    )
+
+
 @dataclasses.dataclass
 class Recording:
     """What recording a graph for given shapes produced. ``weights`` and
@@ -216,6 +226,11 @@ class Recording:
     limits: list[Limit] = dataclasses.field(default_factory=list)
     # Run between the steps, each ending a full ELF's command (``on_host``).
     host: list[HostStep] = dataclasses.field(default_factory=list)
+
+    @property
+    def version(self) -> Version:
+        """The key of the graph version this recording compiles to."""
+        return version_key({h.name: (h.shape, h.dtype) for h in self.inputs})
 
     @property
     def reads(self) -> set[str]:

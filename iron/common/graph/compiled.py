@@ -29,7 +29,7 @@ from aie.helpers.taplib import Affine, PerCall
 
 from ..declare.operator import device_fit, graph_recorder
 from ..declare.value import ExtentWord
-from ..declare.profile import Profile
+from ..declare.profile import Profile, Version
 from ..image.allocator import ALIGNMENT, ArenaPlan
 from ..image.artifacts import Parameter
 from ..image.compose import Packing
@@ -49,12 +49,9 @@ from .fusion import fusions as graph_fusions
 from .fusion_tunables import apply as apply_fusion_tunables
 from .packing import apply as apply_packings
 from .handle import Carry, Dense, Handle, State, Weight, is_operand
-from .record import HostStep, Recording, Recorder
+from .record import HostStep, Recording, Recorder, version_key
 
 logger = logging.getLogger(__name__)
-
-# One (parameter, shape, dtype name) per input: what picks a version.
-Signature = tuple[tuple[str, tuple[int, ...], str], ...]
 
 
 def _shape_and_dtype(spec):
@@ -278,11 +275,11 @@ class Graph:
         return type(self).__name__
 
     @functools.cached_property
-    def _versions(self) -> dict[Signature, CompiledGraph]:
+    def _versions(self) -> dict[Version, CompiledGraph]:
         return {}
 
     @functools.cached_property
-    def _references(self) -> dict[Signature, Recording]:
+    def _references(self) -> dict[Version, Recording]:
         return {}
 
     @functools.cached_property
@@ -296,19 +293,12 @@ class Graph:
         return State((2, len(self._parameters.carried)), np.int32, CARRY)
 
     @property
-    def versions(self) -> dict[Signature, CompiledGraph]:
+    def versions(self) -> dict[Version, CompiledGraph]:
         return dict(self._versions)
 
     @property
     def arena(self) -> ScratchArena:
         return self._arena
-
-    @staticmethod
-    def _signature(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Signature:
-        return tuple(
-            (name, shape, bfp.dtype_name(dtype))
-            for name, (shape, dtype) in inputs.items()
-        )
 
     def held(self) -> dict[int, tuple[str, Any]]:
         """Each ``param``, ``weight`` and state held, by ``id``, with its path.
@@ -569,9 +559,6 @@ class Graph:
                 fusions=fused,
             )
             logger.info("%s", chosen.report(self.name))
-            signature = self._signature(
-                {h.name: (h.shape, h.dtype) for h in recording.inputs}
-            )
             emit, sized = self._emit(recording, chosen, feeds)
             version = CompiledGraph(
                 recording,
@@ -590,7 +577,7 @@ class Graph:
                     f"through a derivation cannot be fed yet (sized for but not "
                     f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
                 )
-            self._versions[signature] = version
+            self._versions[recording.version] = version
             return version
 
     def _emit(
@@ -657,7 +644,7 @@ class Graph:
             name: (tuple(int(n) for n in t.shape), np.dtype(t.dtype).type)
             for name, t in given.items()
         }
-        signature = self._signature(shapes)
+        signature = version_key(shapes)
         version = self._versions.get(signature)
         if version is None:
             if any(v.is_loaded for v in self._versions.values()):
@@ -715,7 +702,7 @@ class Graph:
             else contextlib.nullcontext()
         ):
             require_device()
-            signature = self._signature(shapes)
+            signature = version_key(shapes)
             recording = self._references.get(signature)
             if recording is None:
                 token = device_fit.set(False)

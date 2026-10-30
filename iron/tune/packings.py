@@ -17,8 +17,9 @@ setting so the two share one, and units are then widened back while the
 group still fits; a unit left narrowed has its other tunables searched at
 its width (``Packer.retile``). A version's grouping is kept only where the
 version, built with it, is bit-identical and faster end to end
-(``compare_graphs``), each such check teaching the cost model, and no other
-version a packing matches gets slower.
+(``compare_graphs``), each such check teaching the cost model, and applies
+in that version alone; it applies in another version it matches only where
+that version, built with it, is faster too (``widen_packings``).
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from aie import ir
 from aie.utils.compile.jit.params import widths
 
 from iron.common.declare import Operator, Profile
+from iron.common.declare.profile import PackingEntry
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.image.packaging import plan
@@ -518,15 +520,15 @@ class Packer:
         return list(out.values())
 
 
-def _profile(base: Profile, packings: Sequence[list]) -> Profile:
+def _profile(base: Profile, packings: Sequence[PackingEntry]) -> Profile:
     """``base``'s entries and fusions with ``packings`` as its only packings."""
     out = Profile()
     for cls, dims, tunables in base:
         out.add(cls, **dims, **tunables)
     for kind, steps, edges in base.fusions():
         out.add_fusion(kind, steps, edges)
-    for members in packings:
-        out.add_packing(members)
+    for p in packings:
+        out.add_packing(p.members, p.versions)
     return out
 
 
@@ -551,9 +553,10 @@ def price_packings(
 ) -> Profile:
     """``profile`` with a packing entry for each group of arrays a version
     gains from sharing one device configuration (``Packer``), its members'
-    settings in it; a version whose grouping does not gain end to end,
-    beyond the noise, adds none, and an entry that slows another version it
-    matches is dropped. ``profile``'s own packings are replaced. A version
+    settings in it, applying in that version; a version whose grouping does
+    not gain end to end, beyond the noise, adds none. Each entry then applies
+    in another version it matches only where that version gains from it too
+    (``widen_packings``). ``profile``'s own packings are replaced. A version
     whose every switch, priced by ``model``, costs under
     ``MIN_SWITCH_SHARE`` of its steps' own time is not searched.
 
@@ -577,9 +580,10 @@ def price_packings(
     if not full_elf:
         log("packings: an xclbin per step configures every step; nothing to pack")
         return base
-    found: list[tuple[int, list]] = []
-    for index, call in enumerate(calls):
-        current = _profile(base, [m for _, m in found])
+    found: list[PackingEntry] = []
+    for call in calls:
+        version = call.recording.version
+        current = _profile(base, found)
         recording, _, _ = apply_profile(call.recording, current, dev)
         packer = Packer(
             dataclasses.replace(call, recording=recording),
@@ -611,8 +615,11 @@ def price_packings(
             if not packed:
                 log(f"{recording.name}: no packing gains")
                 break
-            entries = [packer.members(g) for g in packed]
-            trial = _profile(base, [*(m for _, m in found), *entries])
+            entries = [
+                PackingEntry(tuple(packer.members(g)), frozenset({version}))
+                for g in packed
+            ]
+            trial = _profile(base, [*found, *entries])
             try:
                 delta, noise = _end_to_end(
                     call, dev, current, trial, confirm_timing, log, lock
@@ -653,24 +660,58 @@ def price_packings(
                 + ", ".join(f"{f} {v:.1f}" for f, v in model.terms.items())
             )
             if noise is not None and delta < -CONFIDENCE * noise:
-                found.extend((index, members) for members in entries)
+                found.extend(entries)
             break
         if progress is not None:
-            progress(_profile(base, [m for _, m in found]), model)
+            progress(_profile(base, found), model)
+    return widen_packings(
+        calls, dev, _profile(base, found), timing=confirm_timing, log=log, lock=lock
+    )
 
-    # Each version against the packings found on the others.
-    for index, call in enumerate(calls):
-        foreign = [m for i, m in found if i != index]
-        matching = [m for m in foreign if _matches(m, call.recording, dev)]
-        if not matching:
+
+def widen_packings(
+    calls: Sequence[Timed],
+    dev,
+    profile: Profile,
+    *,
+    timing: Timing = Timing(rounds=3, calls=10),
+    log: Callable[[str], None] = print,
+    lock: bool = False,
+) -> Profile:
+    """``profile`` with each packing entry that names its versions applying
+    also in each version of ``calls`` it matches but does not name, where
+    that version, built with them, is faster end to end beyond the noise;
+    elsewhere it keeps to the versions it names. A version's arrays are
+    another's at other extents, so a grouping that pays where switches
+    dominate can slow a version whose arrays' own time does. One end-to-end
+    check per version the entries match.
+    """
+    entries = profile.packings()
+    for call in calls:
+        version = call.recording.version
+        foreign = {
+            i
+            for i, e in enumerate(entries)
+            if e.versions is not None
+            and version not in e.versions
+            and _matches(e.members, call.recording, dev)
+        }
+        if not foreign:
             continue
-        own = _profile(base, [m for i, m in found if i == index])
+        widened = [
+            (
+                PackingEntry(e.members, e.versions | {version})
+                if i in foreign and e.versions is not None
+                else e
+            )
+            for i, e in enumerate(entries)
+        ]
         delta, noise = _end_to_end(
             call,
             dev,
-            own,
-            _profile(base, [m for _, m in found]),
-            confirm_timing,
+            _profile(profile, entries),
+            _profile(profile, widened),
+            timing,
             log,
             lock,
         )
@@ -679,17 +720,22 @@ def price_packings(
             f"{call.recording.name}: the other versions' packings "
             f"{delta:+.1f} ± {noise_s} us end to end"
         )
-        if noise is not None and delta > CONFIDENCE * noise:
-            log(f"  dropping {len(matching)} packing(s) that slow it")
-            found = [(i, m) for i, m in found if not any(m is n for n in matching)]
-    return _profile(base, [m for _, m in found])
+        if noise is not None and delta < -CONFIDENCE * noise:
+            log(f"  applying {len(foreign)} packing(s) here too")
+            entries = widened
+        else:
+            log(f"  keeping {len(foreign)} packing(s) to the versions they name")
+    return _profile(profile, entries)
 
 
-def _matches(members: list, recording, dev) -> bool:
+def _matches(members: Sequence, recording, dev) -> bool:
     """Whether a packing entry of ``members`` names a step of ``recording``."""
-    probe = _profile(Profile(), [members])
+    probe = Profile()
+    probe.add_packing(members)
+    version = recording.version
     return any(
-        probe.packing_of(s.op.resolved(dev)) is not None for s in recording.steps
+        probe.packing_of(s.op.resolved(dev), version) is not None
+        for s in recording.steps
     )
 
 

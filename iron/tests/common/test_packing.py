@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A profile's packing entries, device-free: round trips, matching, and a
-recording's packed designs composed into one device configuration.
+"""A profile's packing entries, device-free: round trips, matching (in the
+graph versions an entry names), and a recording's packed designs composed
+into one device configuration.
 """
 
 import re
@@ -43,6 +44,18 @@ class Copied(iron.Graph):
         return Copy.step(x)
 
 
+class Gated(iron.Graph):
+    """``ElementwiseMul(SiLU(x), UP)``, and given ``extra`` a copy of it too:
+    two versions over the same SiLU and multiply arrays, as a decode step and
+    a prompt chunk share theirs."""
+
+    def body(self, x, extra=None):
+        y = ElementwiseMul.step(SiLU.step(x, tile_size=256), UP, tile_size=256)
+        if extra is None:
+            return y
+        return y, Copy.step(extra)
+
+
 def _packed(*members):
     profile = Profile()
     profile.add_packing(members)
@@ -59,6 +72,10 @@ def test_a_profile_round_trips_a_packing(tmp_path):
     p.add_packing(
         [(GEMV, {"M": 2048, "K": 2048}, {"num_aie_columns": 2}), (SiLU, {"size": 2048})]
     )
+    p.add_packing(
+        [(SiLU, {"size": 2048}), (ElementwiseMul, {})],
+        versions=[(), (("ids", (2048,), "int32"),)],
+    )
     path = tmp_path / "npu2.json"
     p.save(path)
     loaded = Profile.load(path)
@@ -73,16 +90,59 @@ def test_add_packing_checks_its_members():
         Profile().add_packing([(SiLU, {"rows": 1}), (GEMV, {})])
     with pytest.raises(TypeError, match="no tunable"):
         Profile().add_packing([(SiLU, {}, {"M": 2}), (GEMV, {})])
+    with pytest.raises(TypeError, match="at least one version"):
+        Profile().add_packing([(SiLU, {}), (GEMV, {})], versions=[])
+
+
+def test_load_refuses_a_packing_that_is_only_its_members(tmp_path):
+    path = tmp_path / "npu2.json"
+    path.write_text(
+        '{"entries": [], "packings": [[{"operator": "SiLU"}, {"operator": "GEMV"}]]}'
+    )
+    with pytest.raises(ValueError, match="a packing is"):
+        Profile.load(path)
 
 
 def test_packing_of_matches_by_class_and_dims(npu2):
     profile = _packed((GEMV, {"K": 2048}, {"num_aie_columns": 2}), (SiLU, {}))
-    assert profile.packing_of(GEMV(M=512, K=2048).resolved(npu2)) == (
+    assert profile.packing_of(GEMV(M=512, K=2048).resolved(npu2), ()) == (
         0,
         {"num_aie_columns": 2},
     )
-    assert profile.packing_of(GEMV(M=512, K=8192).resolved(npu2)) is None
-    assert profile.packing_of(SiLU(size=2048).resolved(npu2)) == (0, None)
+    assert profile.packing_of(GEMV(M=512, K=8192).resolved(npu2), ()) is None
+    assert profile.packing_of(SiLU(size=2048).resolved(npu2), ()) == (0, None)
+
+
+def test_a_recording_s_version_is_each_input_s_name_shape_and_dtype():
+    assert Gated().record(x=(2048,), extra=(64,)).version == (
+        ("x", (2048,), "bfloat16"),
+        ("extra", (64,), "bfloat16"),
+    )
+    assert Gated().record(x=(2048,)).version == (("x", (2048,), "bfloat16"),)
+
+
+def test_a_packing_applies_only_in_the_versions_it_names(npu2):
+    """One graph's two versions run the same SiLU and multiply arrays: an
+    entry naming one version groups them there and leaves the other's steps
+    as they were."""
+    alone = Gated().record(x=(2048,))
+    copying = Gated().record(x=(2048,), extra=(64,))
+    profile = Profile()
+    profile.add_packing(
+        [
+            (SiLU, {}, {"num_aie_columns": 1}),
+            (ElementwiseMul, {}, {"num_aie_columns": 1}),
+        ],
+        versions=[alone.version],
+    )
+    silu = alone.steps[0].op.resolved(npu2)
+    assert profile.packing_of(silu, alone.version) == (0, {"num_aie_columns": 1})
+    assert profile.packing_of(silu, copying.version) is None
+    packed, packing = apply_packings(alone, profile, (), npu2)
+    assert len(packing.groups) == 1 and len(packing.groups[0]) == 2
+    assert all(s.op.resolved(npu2).num_aie_columns == 1 for s in packed.steps)
+    packed, packing = apply_packings(copying, profile, (), npu2)
+    assert packed is copying and packing == Packing()
 
 
 def test_apply_narrows_the_members_and_groups_their_designs(npu2):

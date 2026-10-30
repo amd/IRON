@@ -10,12 +10,13 @@ another (MHA's ``seq_len``) is keyed by the one given (``seq_pad``).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import MISSING
 from enum import Enum
 from types import FunctionType
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping, Sequence, TypeVar
 
 from ..image.step import FusionKind
 
@@ -40,11 +41,21 @@ _FusionStep = (
     tuple[type, Mapping[str, Any] | None]
     | tuple[type, Mapping[str, Any] | None, Mapping[str, Any] | None]
 )
-# A packing entry: the shapes whose designs share one device configuration
-# wherever a version runs them, each ``(operator class, dims, tunables)``;
-# ``tunables`` what every step of that shape takes there so they co-reside,
-# None where it keeps its own.
-_PackingEntry = tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...]
+# A graph version's key (``Recording.version``, ``Graph.versions``): each
+# input's name, shape and dtype name, in the order its body takes them.
+Version = tuple[tuple[str, tuple[int, ...], str], ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class PackingEntry:
+    """The shapes whose designs share one device configuration, each
+    ``(operator class, dims, tunables)``, ``tunables`` what every step of
+    that shape takes there so they co-reside (None where it keeps its own),
+    in the graph versions ``versions`` names, or in every version where None.
+    """
+
+    members: tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...]
+    versions: frozenset[Version] | None = None
 
 
 def _normalized(value: Any) -> Any:
@@ -83,12 +94,15 @@ class Profile:
     ``packings`` names shapes whose designs share one device configuration
     in a full ELF, so a version runs them without reconfiguring between
     them; a member may give the tunables every step of its shape takes there.
+    An entry may name the graph versions it applies in: one version's arrays
+    are another's at other extents (a decode step's and a prompt chunk's), so
+    a grouping that pays in one can cost in the other.
     """
 
     def __init__(self) -> None:
         self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
         self._fusions: list[_FusionEntry] = []
-        self._packings: list[_PackingEntry] = []
+        self._packings: list[PackingEntry] = []
 
     def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
         """``cls(**kwargs)``, its open tunables filled from this profile's
@@ -172,21 +186,32 @@ class Profile:
                 raise TypeError(f"{c_cls.__name__} declares no input {input!r}")
         self._fusions.append((kind, resolved, tuple(edges)))
 
-    def add_packing(self, members: Sequence[_FusionStep]) -> None:
+    def add_packing(
+        self,
+        members: Sequence[_FusionStep],
+        versions: Iterable[Version] | None = None,
+    ) -> None:
         """Add a packing entry: the designs of ``members``' shapes (each
         ``(operator class, dims)`` or ``(operator class, dims, tunables)``,
         matched as a fusion's steps are) share one device configuration in
         a full ELF wherever a version runs them. ``tunables``, where a member
         gives them, are what every step of its shape takes in such a version.
 
+        Args:
+            versions: The graph versions (``Recording.version``) the entry
+                applies in; every version where None.
+
         Raises:
-            TypeError: Fewer than two members are given, a dim is not a
-                non-tunable ``param()`` of its class, or a name in
+            TypeError: Fewer than two members or no version are given, a dim
+                is not a non-tunable ``param()`` of its class, or a name in
                 ``tunables`` is not a ``tunable()`` of its class.
         """
         if len(members) < 2:
             raise TypeError("a packing entry needs at least two members")
-        self._packings.append(self._members(members))
+        scope = None if versions is None else frozenset(versions)
+        if scope is not None and not scope:
+            raise TypeError("a packing entry names at least one version, or None")
+        self._packings.append(PackingEntry(self._members(members), scope))
 
     @staticmethod
     def _members(
@@ -270,21 +295,25 @@ class Profile:
         ``(operator class, dims, tunables)``, in the order added."""
         return list(self._fusions)
 
-    def packing_of(self, op: Operator) -> tuple[int, dict[str, Any] | None] | None:
-        """The first packing entry with a member matching ``op`` (a resolved
-        operator, by class and dims), as its index in ``packings()`` and the
-        member's tunables; None where no entry names its shape.
+    def packing_of(
+        self, op: Operator, version: Version
+    ) -> tuple[int, dict[str, Any] | None] | None:
+        """The first packing entry applying in ``version`` with a member
+        matching ``op`` (a resolved operator, by class and dims), as its index
+        in ``packings()`` and the member's tunables; None where no such entry
+        names its shape.
         """
         dims = self.dims(type(op), vars(op))
-        for index, members in enumerate(self._packings):
-            for cls, matched, tunables in members:
+        for index, entry in enumerate(self._packings):
+            if entry.versions is not None and version not in entry.versions:
+                continue
+            for cls, matched, tunables in entry.members:
                 if isinstance(op, cls) and self.matches(matched, dims):
                     return index, tunables
         return None
 
-    def packings(self) -> list[_PackingEntry]:
-        """Each packing entry's members, ``(operator class, dims,
-        tunables)``, in the order added."""
+    def packings(self) -> list[PackingEntry]:
+        """Each packing entry, in the order added."""
         return list(self._packings)
 
     def tunables_for(self, cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
@@ -384,7 +413,29 @@ class Profile:
                 FusionKind(fusion["kind"]), members(fusion["steps"]), edges
             )
         for packing in data.get("packings", ()):
-            profile.add_packing(members(packing))
+            if not isinstance(packing, dict) or not {"members"} <= set(packing) <= {
+                "versions",
+                "members",
+            }:
+                raise ValueError(
+                    f"{path}: a packing is {{'members': [...]}}, with "
+                    f"'versions': [{{input: [shape, dtype]}}, ...] where it "
+                    f"applies in only some of a graph's versions"
+                )
+            versions = packing.get("versions")
+            profile.add_packing(
+                members(packing["members"]),
+                (
+                    None
+                    if versions is None
+                    else [
+                        tuple(
+                            (n, tuple(shape), dtype) for n, (shape, dtype) in v.items()
+                        )
+                        for v in versions
+                    ]
+                ),
+            )
         return profile
 
     def save(self, path: str | Path) -> None:
@@ -430,7 +481,24 @@ class Profile:
             )
             for kind, steps, edges in self._fusions
         ]
-        packing_lines = [json.dumps(members(p)) for p in self._packings]
+        packing_lines = [
+            json.dumps(
+                {
+                    **(
+                        {}
+                        if p.versions is None
+                        else {
+                            "versions": [
+                                {n: [list(shape), dtype] for n, shape, dtype in v}
+                                for v in sorted(p.versions)
+                            ]
+                        }
+                    ),
+                    "members": members(p.members),
+                }
+            )
+            for p in self._packings
+        ]
         body = '{"entries": [\n  ' + ",\n  ".join(lines) + "\n]"
         if fusion_lines:
             body += ',\n"fusions": [\n  ' + ",\n  ".join(fusion_lines) + "\n]"
