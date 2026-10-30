@@ -75,6 +75,8 @@ def get_params(device: str):
             ( 1024, 10240,  2560, NONE,     CONV_EVEN),  # E4B down
             ( 1024,  2560, 10240, NONE,     CONV_EVEN),  # E4B gateup
             ( 2048,  2560, 10240, NONE,     CONV_EVEN),  # E4B gateup, 2x
+            # README.md's comparison with the overlay and iron.operators.GEMM.
+            ( 1024,  1536,  6144, NONE,     CONV_EVEN),
             # 64 row-block units, past the 63 a lock can count, so B is armed
             # twice: two slabs, each resident.
             (16384,  512,  1024, NONE,     CONV_EVEN),
@@ -104,7 +106,7 @@ def get_params(device: str):
     # Shapes that run for milliseconds. The default suite's shapes finish near
     # the dispatch cost, where the measurement carries no trend.
     bench_shapes = (
-        {(1024, 2560, 10240), (2048, 2560, 10240)}
+        {(1024, 2560, 10240), (2048, 2560, 10240), (1024, 1536, 6144)}
         if dev.arch is AIEArch.AIE2p
         else {(1024, 2560, 2560), (2048, 2048, 1024)}
     )
@@ -542,6 +544,8 @@ BUDGET_FLOOR = 2e-2
         ),  # full sweep + remainder: 1 of 8 cols
         pytest.param(256, 512, 1024, SILU, marks=SHIPPED),
         pytest.param(256, 512, 1024, GELU, marks=SHIPPED),
+        # README.md's comparison with flm.ProjectionGEMM and iron.operators.GEMM.
+        pytest.param(1024, 1536, 6144, NONE, marks=[SHIPPED, pytest.mark.bench]),
     ],
 )
 def test_shipped_overlay(M, K, N, epilogue, record_property, eight_column_npu2):

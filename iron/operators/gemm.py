@@ -85,6 +85,11 @@ def _cases(cls, dev: Device):
     medium = dict(M=2048, K=2048, N=2048, b_col_maj=True, precision=Precision.MEDIUM)
     label = "M_2048-K_2048-N_2048-b_col_maj_True"
     out.append(Case(medium, id=label, bench=True, lower=True))
+    # flm/gemm's README compares flm.ProjectionGEMM and the shipped overlay
+    # with this, in the same emulated mode, on the eight-column NPU2.
+    if dev.arch is AIEArch.AIE2p and dev.cols == 8:
+        flm = dict(M=1024, K=1536, N=6144, precision=Precision.MEDIUM)
+        out.append(Case(flm, id="M_1024-K_1536-N_6144", bench=True, extensive=True))
     # An f32 C at the default 64-wide tiles overflows a core's memory.
     f32 = dict(M=512, K=256, N=512, output_dtype=np.float32, tile_m=32, tile_k=32)
     out.append(
