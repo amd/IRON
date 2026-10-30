@@ -387,11 +387,11 @@ def test_on_an_xclbin_a_per_call_length_sizes_the_coalesced_descriptor(
 def test_flm_gemm_keyword_construction_tunes_from_the_device():
     # Keyword construction leaves every tunable to resolution, which reads the
     # device alone; the operator's extent is checked against the resolved
-    # tunables by compatible(), not folded into its defaults.
+    # tunables by compatible(), not folded into its defaults. B's host shape
+    # follows the device and precision, never a tunable: it is known untuned.
     untuned = flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024, precision=Precision.MEDIUM)
     assert untuned.tile_n is None
-    with pytest.raises(ValueError):
-        [b.shape for b in untuned.buffers]  # B's layout follows the device
+    assert untuned.buffers[1].shape == (1024 * 1024 // 8,)
     op = flm_gemm.ProjectionGEMM(
         M=512, K=1024, N=1024, precision=Precision.MEDIUM
     ).resolved(from_name("npu2", n_cols=8))

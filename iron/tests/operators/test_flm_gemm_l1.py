@@ -7,7 +7,7 @@ buffers: its data, AIE2's activation LUT tables among it, and its stack.
 
 import pytest
 from aie.iron.device import from_name
-from aie.utils import bfp
+from aie.utils import bfp, set_current_device
 
 from iron import Precision
 from iron.operators.flm.gemm.design import (
@@ -82,7 +82,8 @@ def test_aie2_activations_bring_their_lut_tables_into_the_frame():
     shape.update(precision=Precision.MEDIUM)
     frames = {}
     for modes in ((Epilogue.NONE,), ACTIVATED):
-        op = ProjectionGEMM(**shape, epilogue_modes=modes).resolved(NPU1)
+        with set_current_device(NPU1):
+            op = ProjectionGEMM(**shape, epilogue_modes=modes).resolved(NPU1)
         frames[modes] = op.frame(NPU1, 64, 512, 64, 16, False, False)
     assert frames[ACTIVATED] - frames[(Epilogue.NONE,)] >= 5248
     plain = frames[(Epilogue.NONE,)]

@@ -90,8 +90,8 @@ def _buffer_adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
         if not _bounds_match(step.op, nxt.op):
             continue
         # Handle-level shapes, not the (possibly unresolved) Operand's: a
-        # Select()-shaped operand (GEMM's bfp16_b) needs its tunable
-        # resolved before its own elements/dtype read.
+        # Select()-shaped operand (ProjectionGEMM's B) needs its dtype
+        # tunable resolved before its own elements/dtype read.
         outs = [
             (buf, ref, h)
             for buf, ref, h in zip(step.op.buffers, step.refs(), step.slots)

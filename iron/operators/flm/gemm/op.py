@@ -182,10 +182,23 @@ class ProjectionGEMM(Operator):
     rows: int = tunable(repr=False, init=False)
     cols: int = tunable(repr=False, init=False)
     joins: int = tunable(repr=False, init=False)
-    bfp16_b: bool = tunable(repr=False, init=False)
+    # B is packed to bfp16ebs8 where the macs are bfp16 and B is not read as
+    # stored; B's host shape follows it, so a graph's step, which infers B's
+    # shape from the weight it is given, passes it.
+    bfp16_b: bool = param(
+        derive=lambda op: (
+            op.dev.arch == AIEArch.AIE2p
+            and op.precision == Precision.MEDIUM
+            and not op.b_col_maj
+        ),
+        array=True,
+        repr=False,
+    )
     # B's element type, on the array and in DDR alike; the host holds a
     # block-float B as bytes (Operand.host_dtype).
-    b_dtype: Any = tunable(repr=False, init=False)
+    b_dtype: Any = param(
+        derive=lambda op: v8bfp16ebs8 if op.bfp16_b else bfloat16, repr=False
+    )
     l1_b_depth: int = tunable(repr=False, init=False)
     a_l2: int = tunable(repr=False, init=False)
     b_l2: int = tunable(repr=False, init=False)
@@ -304,12 +317,9 @@ class ProjectionGEMM(Operator):
                 "flm.ProjectionGEMM is sized from the device's L1 and grid"
             )
         rows, cols = compute_rows(dev), dev.cols
-        # B is packed to bfp16ebs8 where the macs are bfp16 and B is not read
-        # as stored; otherwise it is bf16. AIE2 has no BFP types, so its mmul
-        # lowers onto four native bf16 macs.
-        aie2p = dev.arch == AIEArch.AIE2p
-        emulate = aie2p and self.precision == Precision.MEDIUM
-        bfp16_b = emulate and not self.b_col_maj
+        # AIE2 has no BFP types, so its mmul lowers onto four native bf16 macs.
+        emulate = dev.arch == AIEArch.AIE2p and self.precision == Precision.MEDIUM
+        bfp16_b = self.bfp16_b
         b_elem_bytes = bfp.BLOCK_BYTES / bfp.BLOCK if bfp16_b else 2
         b_group = bfp.BLOCK if bfp16_b else 1
         tile_n = self.tile_n or next(
@@ -334,7 +344,6 @@ class ProjectionGEMM(Operator):
             self.tile_ma,
             self.ct_k,
         )
-        b_dtype = v8bfp16ebs8 if bfp16_b else bfloat16
         return self.replace(
             tile_n=tile_n,
             k_tile=k_tile,
@@ -344,8 +353,6 @@ class ProjectionGEMM(Operator):
             cols=cols,
             joins=C_JOINS,
             emulate_bf16_mmul_with_bfp16=emulate,
-            bfp16_b=bfp16_b,
-            b_dtype=b_dtype,
             l1_b_depth=l1_b_depth,
             a_l2=m_chunk * M_TILE * k_tile,
             b_l2=k_tile * tile_n // b_group,
