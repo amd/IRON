@@ -56,7 +56,6 @@ from iron.tune.fusions import (
     narrowings,
     price_fusions,
     select_rewrites,
-    time_fusion_group,
 )
 from iron.tune import measure as tune_measure
 from iron.tune.measure import (
@@ -822,13 +821,14 @@ def test_gather_table_rows_names_an_input_roles_ids_handle(llama_recordings):
 def test_fixed_frame_agrees_with_decode_groups_priced_in_the_whole_step(
     llama_recordings, tmp_path
 ):
-    """Each of decode's own 2-step fusion groups (SiLU -> ElementwiseMul and
-    both residual adds, GEMV -> ElementwiseAdd), ``measure_fusion``'s
-    standalone price (``time_fusion_group``) against an independent figure
-    for the same shape: timed compiled into the whole decode step against
-    the same step unfused (``confirm_fusions``, whose own log line carries
-    it) and divided by its occurrences (2 per group, one per layer, down
-    Llama's small shape).
+    """Each of decode's own 2-step fusion groups (SiLU -> ElementwiseMul,
+    both residual adds' GEMV -> ElementwiseAdd, and RMSNorm -> GEMV, whose
+    vector input streams only with ``feed_b`` forced true), ``narrow_group``'s
+    standalone price against an independent figure for the same shape: timed
+    compiled into the whole decode step against the same step unfused
+    (``confirm_fusions``, whose own log line carries it, given the same
+    narrowing ``narrow_group`` found) and divided by its occurrences (2 per
+    group, one per layer, down Llama's small shape).
 
     The band is each side's own standard error, summed in quadrature (the
     two are independent interleaved timings of one shape) and multiplied by
@@ -858,8 +858,14 @@ def test_fixed_frame_agrees_with_decode_groups_priced_in_the_whole_step(
     dispatched = Timed(decode.recording, values=dict(position=0, token=0))
 
     for group in groups:
-        trial = time_fusion_group(
-            group, full_elf=True, timing=timing, cache=cache, log=lambda _: None
+        trial, combo = narrow_group(
+            group,
+            dev,
+            full_elf=True,
+            timing=timing,
+            cache=cache,
+            fit_cache=tmp_path / "fits",
+            log=lambda _: None,
         )
         assert trial.refused is None and trial.noise_us is not None
 
@@ -870,7 +876,7 @@ def test_fixed_frame_agrees_with_decode_groups_priced_in_the_whole_step(
             [group],
             {group: Trial({}, -1e6, 1.0)},  # the only candidate: its figure unread
             Profile(),
-            {group: None},  # no narrowing: its own (recorded) setting throughout
+            {group: combo},  # its own setting where it builds so, else narrow_group's
             full_elf=True,
             timing=timing,
             log=logged.append,
