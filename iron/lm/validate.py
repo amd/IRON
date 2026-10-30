@@ -98,14 +98,19 @@ def changed_versions(stock_live: dict, candidate_live: dict) -> list[str]:
     fusions, packings or tunables changed it.
 
     Raises:
-        AssertionError: A version holding a live fusion or a packed group
-            shares stock's compiled image.
+        AssertionError: A version shares stock's compiled image while its
+            live fusions or packed groups are not stock's.
     """
     changed = []
     for label, candidate_v in candidate_live.items():
-        shared = stock_live[label]["image_path"] == candidate_v["image_path"]
+        stock_v = stock_live[label]
+        shared = stock_v["image_path"] == candidate_v["image_path"]
         assert not (
-            shared and (candidate_v["n_fusions"] or candidate_v["packed_groups"])
+            shared
+            and any(
+                candidate_v[k] != stock_v[k]
+                for k in ("n_fusions", "kinds", "packed_groups")
+            )
         ), f"{label}: candidate and stock share one compiled image"
         if not shared:
             changed.append(label)

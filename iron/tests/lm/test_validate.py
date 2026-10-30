@@ -135,27 +135,38 @@ def test_verify_live_and_changed_versions_see_a_candidates_live_fusion():
     assert validate.changed_versions(stock_live, candidate_live) == ["decode"]
 
 
-def test_changed_versions_rejects_a_live_candidate_sharing_stocks_image():
-    stock_live = {"decode": {"image_path": "a"}}
-    candidate_live = {
-        "decode": {"image_path": "a", "n_fusions": 1, "packed_groups": []}
+def _live(image, n_fusions=0, packed_groups=()):
+    return {
+        "image_path": image,
+        "n_fusions": n_fusions,
+        "kinds": {"stream": n_fusions} if n_fusions else {},
+        "packed_groups": list(packed_groups),
     }
+
+
+def test_changed_versions_rejects_a_live_candidate_sharing_stocks_image():
+    stock_live = {"decode": _live("a")}
+    candidate_live = {"decode": _live("a", n_fusions=1)}
     with pytest.raises(AssertionError, match="share one compiled image"):
         validate.changed_versions(stock_live, candidate_live)
 
 
 def test_changed_versions_counts_a_candidate_changing_only_tunables():
-    stock_live = {"decode": {"image_path": "a"}, "prompt": {"image_path": "p"}}
-    candidate_live = {
-        "decode": {"image_path": "b", "n_fusions": 0, "packed_groups": []},
-        "prompt": {"image_path": "p", "n_fusions": 0, "packed_groups": []},
-    }
+    stock_live = {"decode": _live("a"), "prompt": _live("p")}
+    candidate_live = {"decode": _live("b"), "prompt": _live("p")}
     assert validate.changed_versions(stock_live, candidate_live) == ["decode"]
 
 
 def test_changed_versions_ignores_an_unchanged_candidate():
-    stock_live = {"decode": {"image_path": "a"}}
-    candidate_live = {
-        "decode": {"image_path": "a", "n_fusions": 0, "packed_groups": []}
-    }
+    stock_live = {"decode": _live("a")}
+    candidate_live = {"decode": _live("a")}
+    assert validate.changed_versions(stock_live, candidate_live) == []
+
+
+def test_changed_versions_ignores_a_version_packed_as_stock_packs_it():
+    """Stock's own profile packs a version and the candidate leaves it as it
+    was (one model's entries added beside another's): the shared image is
+    that version unchanged, not a candidate whose entries went unapplied."""
+    stock_live = {"decode": _live("a", packed_groups=[15])}
+    candidate_live = {"decode": _live("a", packed_groups=[15])}
     assert validate.changed_versions(stock_live, candidate_live) == []
