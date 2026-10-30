@@ -62,7 +62,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
-          pip install numpy ml_dtypes huggingface_hub tokenizers jinja2 \
+          pip install numpy ml_dtypes huggingface_hub tokenizers jinja2 pytest \
             "$(grep '^pyright==' requirements.txt)"
           # Only golden recording imports them; not IRON's requirements.
           pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0
