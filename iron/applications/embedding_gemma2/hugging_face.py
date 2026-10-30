@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hugging Face's own EmbeddingGemma 2, in float32, what the tests'
-goldens beside the checkpoint are recorded from: its processors, its model
-and each tower alone. It needs torch, torchvision and transformers, which
-are not IRON's requirements, only to record.
+"""Hugging Face's own EmbeddingGemma 2, in float32.
+
+What the tests' goldens beside the checkpoint are recorded from: its
+processors, its model and each tower alone. It needs torch, torchvision
+and transformers, which are not IRON's requirements, only to record.
 """
 
 from pathlib import Path
@@ -19,9 +20,9 @@ from iron.lm import Checkpoint
 
 
 class HuggingFace:
-    """Hugging Face's processors and model over the checkpoint in
-    `directory`, in float32, and each tower alone with its projection into
-    the text model's space.
+    """Hugging Face's processors and model over the checkpoint in `directory`, in float32.
+
+    And each tower alone with its projection into the text model's space.
 
     Args:
         directory: The checkpoint directory, as Hugging Face loads it.
@@ -64,8 +65,10 @@ class HuggingFace:
             )
 
     def encode(self, text: str, audio=None, image=None) -> np.ndarray:
-        """The model's unit-length mean-pooled embedding of `text`, with one
-        mono clip `audio` and one decoded image `image` at its placeholders.
+        """Return the model's unit-length mean-pooled embedding of `text`.
+
+        With one mono clip `audio` and one decoded image `image` at its
+        placeholders.
         """
         media = {}
         if audio is not None:
@@ -79,8 +82,9 @@ class HuggingFace:
         return embedding / np.linalg.norm(embedding)
 
     def patches(self, image: np.ndarray, max_tokens: int):
-        """The image processor's `pixel_values`, float32, and
-        `image_position_ids`, int64, for a decoded `image` at `max_tokens`.
+        """Return the image processor's `pixel_values`, float32, and `image_position_ids`, int64.
+
+        For a decoded `image` at `max_tokens`.
         """
         out = self.image_processor(
             torch.from_numpy(image).permute(2, 0, 1),
@@ -93,8 +97,9 @@ class HuggingFace:
         )
 
     def vision_tower(self, pixel_values, positions) -> np.ndarray:
-        """The vision tower's soft tokens in the text model's space, over the
-        processor's `pixel_values` and `positions`.
+        """Return the vision tower's soft tokens in the text model's space.
+
+        Over the processor's `pixel_values` and `positions`.
         """
         with torch.no_grad():
             hidden = self.vision(
@@ -105,14 +110,12 @@ class HuggingFace:
         return soft.reshape(-1, soft.shape[-1])
 
     def features(self, waveform) -> np.ndarray:
-        """The feature extractor's valid features of one mono clip."""
+        """Return the feature extractor's valid features of one mono clip."""
         out = self.extractor([waveform], return_tensors="np")
         return out["input_features"][0][out["input_features_mask"][0].astype(bool)]
 
     def audio_tower(self, waveform) -> np.ndarray:
-        """The audio tower's valid soft tokens of one mono clip in the text
-        model's space.
-        """
+        """Return the audio tower's valid soft tokens of one mono clip in the text model's space."""
         out = self.extractor([waveform], return_tensors="np")
         features, mask = out["input_features"][0], out["input_features_mask"][0]
         with torch.no_grad():

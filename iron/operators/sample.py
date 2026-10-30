@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sample: the next token, drawn on the device from a row of bf16 logits,
-bit for bit as ``aie.iron.kernels.sample.sample_ref``, from a four-word draw
-row the host writes ahead of time per position. Each column's core reduces
-its slice to a top-k summary; one combine core draws the token from them.
+"""Sample: the next token, drawn on the device from a row of bf16 logits.
+
+Bit for bit as ``aie.iron.kernels.sample.sample_ref``, from a
+four-word draw row the host writes ahead of time per position. Each
+column's core reduces its slice to a top-k summary; one combine core
+draws the token from them.
 """
 
 from functools import cache
@@ -27,7 +29,7 @@ _CHUNK_LIMIT = 8192
 
 
 def _largest_chunk(run: int, calls: int) -> int | None:
-    """The largest legal chunk of `run` logits that takes at most `calls` calls."""
+    """Return the largest legal chunk of `run` logits that takes at most `calls` calls."""
     for n in range(-(-run // _CHUNK_LIMIT), calls + 1):
         if run % n == 0 and run // n % 2 == 0:
             return run // n
@@ -63,7 +65,7 @@ def slices(vocab: int, cores: int, k_max: int) -> tuple[int, int]:
 
 
 def reference(logits, draw_row, k_max: int | None = None) -> int:
-    """The token the device draws for one draw row; an all-zero row is greedy."""
+    """Return the token the device draws for one draw row; an all-zero row is greedy."""
     words = np.asarray(draw_row, dtype=np.int32)
     row = words.view(np.uint32)
     temperature = row[0:1].view(np.float32)[0]
@@ -175,8 +177,9 @@ class Sample(Operator):
 
     @property
     def runs(self) -> list[tuple[int, int, int]]:
-        """Each select core's `(logits, chunk, drawable)`: the last reads what
-        is left, the padding with it.
+        """Return each select core's `(logits, chunk, drawable)`.
+
+        The last reads what is left, the padding with it.
         """
         size, last = slices(self.vocab, self.cores, self.k_max)
         tail = self.chunk if last == size else _largest_chunk(last, last // 2)

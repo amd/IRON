@@ -46,9 +46,10 @@ def suite_label(arch: str, suite: str) -> str:
 
 
 def split_test_path(test_path: str) -> Tuple[str, str]:
-    """Split a 'Test Path' value of the form 'dir/.../test.py::funcname'
-    into (directory, funcname). Returns ('', '') style fallbacks if parts
-    are missing.
+    """Split a 'Test Path' value of the form 'dir/.../test.py::funcname'.
+
+    Returns the pair (directory, funcname), with ('', '') style fallbacks if
+    parts are missing.
     """
     if "::" in test_path:
         file_part, func = test_path.split("::", 1)
@@ -68,8 +69,9 @@ def display_name(func: str, params: str, fallback: str = "?") -> str:
 
 
 def parse_checks(checks: str) -> Tuple[int, int]:
-    """Parse a 'p/n' checks string into (passed, total). Returns (0, 0) on
-    malformed input.
+    """Parse a 'p/n' checks string into (passed, total).
+
+    Returns (0, 0) on malformed input.
     """
     if not checks:
         return 0, 0

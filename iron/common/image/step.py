@@ -13,8 +13,10 @@ from ..declare import Operator
 
 @dataclass(frozen=True)
 class BufferRef:
-    """Where a step's buffer is: ``nbytes`` bytes of the image's buffer
-    ``root`` from byte ``start``, or all of it where ``nbytes`` is None.
+    """Where a step's buffer is.
+
+    ``nbytes`` bytes of the image's buffer ``root`` from byte ``start``, or
+    all of it where ``nbytes`` is None.
     """
 
     root: str
@@ -22,8 +24,9 @@ class BufferRef:
     nbytes: int | None = None
 
     def place(self, layout: Mapping[str, tuple[str, int, int]]) -> tuple[str, int, int]:
-        """Where this is, ``layout`` placing each buffer: its ``(argument
-        kind, byte offset, bytes)``.
+        """Return where this is, ``layout`` placing each buffer.
+
+        Its ``(argument kind, byte offset, bytes)``.
         """
         kind, offset, nbytes = layout[self.root]
         return kind, offset + self.start, nbytes if self.nbytes is None else self.nbytes

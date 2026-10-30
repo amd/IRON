@@ -39,8 +39,10 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
 def _copy(n, buffer_in, buffer_out, per_call_input=False):
-    """An int32 copy of ``n`` words; with ``per_call_input``, from a per-call
-    element offset into its ``buffer_in``-word input.
+    """Return an int32 copy of ``n`` words.
+
+    With ``per_call_input``, from a per-call element offset into its
+    ``buffer_in``-word input.
     """
     copy = Copy(
         input_buffer_size=buffer_in,
@@ -55,7 +57,8 @@ def _copy(n, buffer_in, buffer_out, per_call_input=False):
 
 
 def _chain_table(seed=0):
-    """Row r holds distinct words, with the offset of successor[r] at NEXT;
+    """Build a table whose row r holds distinct words, with the offset of successor[r] at NEXT.
+
     successor is one cycle through every row.
     """
     order = np.random.default_rng(seed).permutation(ROWS)
@@ -139,8 +142,10 @@ def test_feedback_into_plain_buffers():
 
 @pytest.mark.supported_devices("npu2")
 def test_feedback_ping_pong():
-    """Two runs feeding each other, dispatched one at a time: the host seeds
-    the first run once, and every later offset comes from the device.
+    """Check that two runs feeding each other, dispatched one at a time, chain correctly.
+
+    The host seeds the first run once, and every later offset comes from
+    the device.
     """
     table, successor = _chain_table(seed=1)
     seq, gather = _feedback_sequence("infra_feedback_ping_pong")
@@ -164,8 +169,10 @@ def test_feedback_ping_pong():
 
 @pytest.mark.supported_devices("npu2")
 def test_feedback_chain_queued():
-    """Every run started before any is waited on: each reads the offset the
-    one before it drained, with no host step between them.
+    """Check that every run started before any is waited on still reads the right offset.
+
+    Each reads the offset the one before it drained, with no host step
+    between them.
     """
     table, successor = _chain_table(seed=2)
     seq, gather = _feedback_sequence("infra_feedback_queued")

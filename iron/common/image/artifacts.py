@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What a build produced: which operators share a design, which step runs
-which, and where each buffer lands, over ``CompilableDesign``'s cache entries.
+"""What a build produced, over ``CompilableDesign``'s cache entries.
+
+Which operators share a design, which step runs which, and where each
+buffer lands.
 """
 
 from __future__ import annotations
@@ -54,8 +56,10 @@ class Parameter:
 
 @dataclass(frozen=True)
 class Artifacts:
-    """The record of one image: for an xclbin chain ``image`` is the last link, and
-    ``buffers`` maps each buffer to ``(argument kind, byte offset, bytes)``.
+    """The record of one image.
+
+    For an xclbin chain ``image`` is the last link, and ``buffers`` maps
+    each buffer to ``(argument kind, byte offset, bytes)``.
     """
 
     full_elf: bool

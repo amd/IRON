@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What the case table does not cover lowers too: graph-recorded operators
-with bound per-call values, flm/gemm's configuration and shapes, the
-shipped image's sequence, and the swiglu graph functions' operators.
-Same gate as ``lowering.py``: aiecc to an instruction stream.
+"""What the case table does not cover lowers too.
+
+Graph-recorded operators with bound per-call values, flm/gemm's
+configuration and shapes, the shipped image's sequence, and the swiglu
+graph functions' operators. Same gate as ``lowering.py``: aiecc to an
+instruction stream.
 """
 
 import aie.utils as aie_utils
@@ -44,10 +46,13 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
 
 @pytest.mark.parametrize("rows", ["decode", "prompt"])
 def test_attention_over_a_128k_cache_lowers(rows, tmp_path):
-    """The caches are (max_seq_len, num_key_value_heads, head_dim), a position's
-    heads together, so neither their per-call writes nor MHA's bounded
-    reads step by the context: at 131072 rows, where a (groups, positions)
-    cache's writes would step past a descriptor's reach, they still lower.
+    """Check that neither the caches' writes nor MHA's reads step by the context.
+
+    The caches are (max_seq_len, num_key_value_heads, head_dim), a
+    position's heads together, so neither their per-call writes nor
+    MHA's bounded reads step by the context: at 131072 rows, where a
+    (groups, positions) cache's writes would step past a descriptor's
+    reach, they still lower.
     """
     model = small(max_seq_len=131072)
     recording = model.record(**model.shapes()[0 if rows == "decode" else 1])
@@ -79,9 +84,10 @@ def test_shipped_external_sequence_lowers(tmp_path):
 
 
 def test_instructions_compile_alone_against_an_external_image():
-    """The instructions-only compile: the shipped image is downloaded,
-    so its link step lowers only the sequence. No kernel, no Peano, and the
-    second request is a cache hit.
+    """Run the instructions-only compile: the shipped image is downloaded.
+
+    So its link step lowers only the sequence. No kernel, no Peano, and
+    the second request is a cache hit.
     """
     op = shipped(M=256, K=1024, N=1152)
     artifacts = op.compile()
@@ -161,10 +167,12 @@ def _reorder(sizes, in_strides, out_strides, **kw):
     ],
 )
 def test_prefill_steps_lower_at_llama_size(make, tmp_path):
-    """The steps a prefill graph needs that a small case does not exercise: the
-    down projection's column-major weight (its column-block stride is past the
-    descriptor's 20-bit step, so B unrolls), the cache write's 2048-wide
-    reorder (one descriptor, D1 past its wrap split by the compiler), and MHA reading (seq, heads, d).
+    """Check the steps a prefill graph needs that a small case does not exercise.
+
+    The down projection's column-major weight (its column-block stride
+    is past the descriptor's 20-bit step, so B unrolls), the cache
+    write's 2048-wide reorder (one descriptor, D1 past its wrap split by
+    the compiler), and MHA reading (seq, heads, d).
     """
     op = make(PREFILL)
     op.resolved(aie_utils.get_current_device())

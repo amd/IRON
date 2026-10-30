@@ -116,10 +116,11 @@ def test_shipped_fetches_its_image(npu2):
 @pytest.mark.extensive
 @pytest.mark.parametrize("chunk,pipelines", [(True, 4), (False, 2)])
 def test_llama_builds_xclbins_at_its_size_on_npu1(npu1, chunk, pipelines):
-    """Every design of a prompt chunk and of a decode step at Llama 3.2
-    1B's shape and context, under NPU1's profile, builds into its xclbin
-    chain, MHA on four columns. One layer: the designs are the same for
-    sixteen.
+    """Check that Llama 3.2 1B's designs build into an xclbin chain on NPU1.
+
+    Every design of a prompt chunk and of a decode step at Llama 3.2 1B's
+    shape and context, under NPU1's profile, builds into its xclbin chain,
+    MHA on four columns. One layer: the designs are the same for sixteen.
     """
     model = llama_1b(num_hidden_layers=1)
     version = model.compile(full_elf=False, **model.shapes()[1 if chunk else 0])

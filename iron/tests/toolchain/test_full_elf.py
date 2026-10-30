@@ -46,8 +46,9 @@ pytestmark = [requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
 
 
 def build_elf(graph, **shapes):
-    """Build ``graph``'s full ELF at ``shapes``, as the application does;
-    return the version.
+    """Build ``graph``'s full ELF at ``shapes``, as the application does.
+
+    Return the version.
     """
     version = graph.compile(full_elf=True, **shapes)
     artifacts = version.artifacts
@@ -117,10 +118,11 @@ def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
 
 
 def test_a_scratch_arena_past_a_bank_links_as_its_banks():
-    """The scratch arena is passed as its banks, each an argument
-    (``ArgumentSizes``): one buffer object each, under the locked-memory
-    limit, and each buffer's addend under aiebu's 4 GiB. Llama 3.2 3B's
-    weights and caches are 10 GB; as one argument its link failed:
+    """The scratch arena is passed as its banks, each an argument (``ArgumentSizes``).
+
+    One buffer object each, under the locked-memory limit, and each
+    buffer's addend under aiebu's 4 GiB. Llama 3.2 3B's weights and caches
+    are 10 GB; as one argument its link failed:
     ``Invalid addend (0x266475800) > 32bit found``.
     """
     add = ElementwiseAdd(size=1024, tile_size=128)
@@ -144,8 +146,9 @@ def test_a_scratch_arena_past_a_bank_links_as_its_banks():
 
 
 def test_no_scratch_buffer_crosses_a_bank():
-    """A buffer that would end past its bank starts at the next: two 2 GiB
-    buffers are the first bank's start and the second's.
+    """A buffer that would end past its bank starts at the next.
+
+    Two 2 GiB buffers are the first bank's start and the second's.
     """
     add = ElementwiseAdd(size=1 << 30, tile_size=4096)
     recording = Recording.of_steps(
@@ -161,11 +164,12 @@ def test_no_scratch_buffer_crosses_a_bank():
 
 @pytest.mark.extensive
 def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
-    """Every prefill design at Llama 3.2 1B's shape (2048 tokens, 32 heads
-    over 8, the 8192-wide FFN) compiles and links into one image. One layer:
-    the designs are the same for sixteen, and aiecc's lowering of the composed
-    sequence grows with its DMA tasks (about 1,800 per layer against decode's
-    430), past this gate's memory at the full depth.
+    """Every prefill design at Llama 3.2 1B's shape compiles and links into one image.
+
+    2048 tokens, 32 heads over 8, the 8192-wide FFN. One layer: the designs
+    are the same for sixteen, and aiecc's lowering of the composed sequence
+    grows with its DMA tasks (about 1,800 per layer against decode's 430),
+    past this gate's memory at the full depth.
     """
     from iron.tests.support.llama_model import llama_1b
 

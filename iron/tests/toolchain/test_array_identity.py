@@ -64,7 +64,7 @@ PAIRS = [
 
 
 def _core_elfs(op) -> dict[str, bytes]:
-    """The per-core ELFs of an operator's build, by core.
+    """Return the per-core ELFs of an operator's build, by core.
 
     Built past the cache: a cached build shares each device's compiled cores
     across designs, and an entry that reused them holds no core ELF.

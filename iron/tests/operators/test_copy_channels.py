@@ -49,8 +49,9 @@ def test_a_transposing_copy_on_any_channel_count(channels):
 @pytest.mark.parametrize("channels", [1, 2, 4])
 @pytest.mark.parametrize("rows", [T * H * W, T * W], ids=["flat", "head_rows"])
 def test_a_transpose_into_wider_rows_on_any_channel_count(channels, rows):
-    """Each element's bits are its index in the source, so a misplaced one
-    names where it came from.
+    """Each element's bits are its index in the source.
+
+    So a misplaced one names where it came from.
     """
     op = Copy(
         src=TensorAccessPattern((T, H, W), 0, [H, T, W], [W, H * W, 1]),

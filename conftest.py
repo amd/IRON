@@ -21,9 +21,10 @@ from iron.tests.support.tools import DEVICES
 
 
 def _bound_device(name: str):
-    """A fixture binding the device ``DEVICES[name]`` builds as current, the
-    previous one restored after: what a test that resolves or compiles
-    device-free needs.
+    """Build a fixture binding the device ``DEVICES[name]`` builds as current.
+
+    The previous device is restored after: what a test that resolves or
+    compiles device-free needs.
     """
 
     def bound():
@@ -55,9 +56,10 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="module")
 def golden(request):
-    """``golden(name, reference, *inputs)``: the ``Golden`` file
-    ``goldens/<name>.npz`` beside the test, of what ``reference()`` (a
-    ``HuggingFace``) builds from ``inputs``.
+    """Return ``golden(name, reference, *inputs)``.
+
+    The ``Golden`` file ``goldens/<name>.npz`` beside the test, of what
+    ``reference()`` (a ``HuggingFace``) builds from ``inputs``.
     """
 
     def open_golden(name, reference, *inputs):
@@ -81,7 +83,7 @@ def get_git_commit():
 
 
 class CSVReporter:
-    """Capture metrics of test runs and write to a CSV file"""
+    """Capture metrics of test runs and write to a CSV file."""
 
     def __init__(self, csv_path):
         self.csv_path = Path(csv_path)
@@ -102,7 +104,7 @@ class CSVReporter:
             self.test_metrics[key].setdefault(metric_name, []).append(value)
 
     def finalize_results(self):
-        """Compute statistics for all collected metrics"""
+        """Compute statistics for all collected metrics."""
         # The commit alone does not say which toolchain and kernel sources
         # produced a number; mlir-aie's provenance line does. Only a run that
         # measured something has used the NPU, so only then is it described:
@@ -217,9 +219,10 @@ ATTACHED = pytest.StashKey[str]()
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    """Skip a device test the attached NPU is not among its
-    ``supported_devices``, before its fixtures build anything. The device is
-    opened here, at the first device test run, never at collection: it is
+    """Skip a device test the attached NPU is not among its ``supported_devices``.
+
+    The skip happens before its fixtures build anything. The device is opened
+    here, at the first device test run, never at collection: it is
     single-tenant, and a collect-only gate must not hold it.
     """
     marker = item.get_closest_marker("supported_devices")
@@ -268,9 +271,10 @@ def pytest_fixture_setup(fixturedef, request):
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_teardown(item, nextitem):
-    """Release the NPU runtime after a device test, or, in a module whose
-    class- or module-scoped fixtures may hold an image its tests share, after
-    its last.
+    """Release the NPU runtime after a device test.
+
+    Or, in a module whose class- or module-scoped fixtures may hold an image
+    its tests share, after its last.
     """
     try:
         return (yield)

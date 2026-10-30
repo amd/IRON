@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Functions for a graph's body, under ``torch.nn.functional``'s names: each
-records the operator steps that compute it and returns their handle.
+"""Functions for a graph's body, under ``torch.nn.functional``'s names.
 
+Each records the operator steps that compute it and returns their handle.
 Weights are a checkpoint's ``(out, in)``, as ``torch.nn.Linear`` stores
 them. A handle's own ``+ - * /`` are steps too, and ``@`` of one row.
 """
@@ -28,7 +28,8 @@ from iron.operators.silu import SiLU
 def linear(
     x: Handle | State, weight, bias=None, *, precision: Precision, **gemv
 ) -> Handle:
-    """Return ``x @ weight.T``, plus ``bias`` on every row if given;
+    """Return ``x @ weight.T``, plus ``bias`` on every row if given.
+
     ``weight`` is ``(out, in)``, as ``torch.nn.Linear`` stores it. One row
     runs on GEMV, which always rounds once in float32 regardless of
     ``precision``; several rows run on flm.ProjectionGEMM at ``precision``,
@@ -94,8 +95,9 @@ def rms_norm(
 def layer_norm(
     x: Handle, normalized_shape, weight=None, bias=None, eps: float = 1e-5
 ) -> Handle:
-    """Layer-normalize ``x`` over its last axis, as torch's ``layer_norm``:
-    subtract the mean, divide by the standard deviation (``eps`` under the
+    """Layer-normalize ``x`` over its last axis, as torch's ``layer_norm``.
+
+    Subtract the mean, divide by the standard deviation (``eps`` under the
     root), then multiply by ``weight`` and add ``bias`` when given.
 
     Raises:
@@ -111,8 +113,10 @@ def silu(x: Handle) -> Handle:
 
 
 def gelu(x: Handle, approximate: str = "none") -> Handle:
-    """GELU, exact by default as torch's, or by its tanh approximation
-    (``approximate="tanh"``, ``gelu_pytorch_tanh``).
+    """Apply GELU, exact by default as torch's.
+
+    Or by its tanh approximation (``approximate="tanh"``,
+    ``gelu_pytorch_tanh``).
     """
     return GELU.step(x, approximate=approximate)
 

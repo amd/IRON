@@ -15,8 +15,10 @@ from .sequence import Image
 
 
 class OperatorImage:
-    """What ``Operator.compile`` builds: the operator's one-step ``PerStep`` chain,
-    run outside a graph on its buffers as device tensors, in declaration order.
+    """What ``Operator.compile`` builds: the operator's one-step ``PerStep`` chain.
+
+    Run outside a graph on its buffers as device tensors, in declaration
+    order.
     """
 
     def __init__(self, op: Operator) -> None:
@@ -40,8 +42,9 @@ class OperatorImage:
         return self._sequence.artifacts
 
     def __call__(self, *args, **scalars):
-        """Run the image on ``args``, ``scalars`` its ``DispatchTime`` values by
-        device symbol; returns the handle ``aie.utils.benchmark`` times, and the result.
+        """Run the image on ``args``, ``scalars`` its ``DispatchTime`` values by device symbol.
+
+        Returns the handle ``aie.utils.benchmark`` times, and the result.
         """
         self.compile()
         (step,) = self._sequence.steps

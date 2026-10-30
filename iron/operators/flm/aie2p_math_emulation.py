@@ -4,9 +4,10 @@
 """AIE2P arithmetic in numpy, for references that match the device bit for bit.
 
 A "bf16" result is a float array whose values bf16 represents; every
-float-to-bf16/bfp16/integer conversion rounds toward minus infinity unless a
-kernel sets the rounding register (host-side constants round to nearest even).
-AIE2P has no fp32 multiplier, so `fmul` emulates its bf16-limb product.
+float-to-bf16/bfp16/integer conversion rounds toward minus infinity
+unless a kernel sets the rounding register (host-side constants round
+to nearest even). AIE2P has no fp32 multiplier, so `fmul` emulates its
+bf16-limb product.
 """
 
 import re
@@ -45,9 +46,11 @@ def rb(x, rounding="floor"):
 
 
 def fmul(a, b):
-    """An fp32 product as AIE2P computes it: each operand split into three
-    bf16 limbs, the nine limb products added in fp32; it differs from the
-    IEEE product in the last bit for a few inputs.
+    """Compute an fp32 product as AIE2P computes it.
+
+    Each operand is split into three bf16 limbs, the nine limb
+    products added in fp32; it differs from the IEEE product in the
+    last bit for a few inputs.
     """
     a, b = np.broadcast_arrays(np.asarray(a, np.float64), np.asarray(b, np.float64))
     A, B = ([l.astype(np.float32) for l in limbs_f32_split(v)] for v in (a, b))
@@ -69,8 +72,9 @@ def fmul(a, b):
 
 
 def tree_sum(x, lanes):
-    """fp32 sum over the last axis as an accumulator of `lanes` lanes computes
-    it: running sums per lane, then a pairwise halving of the lanes.
+    """Compute an fp32 sum over the last axis as an accumulator of `lanes` lanes computes it.
+
+    Running sums per lane, then a pairwise halving of the lanes.
     """
     x = np.asarray(x, np.float64)
     xs = x.reshape(x.shape[:-1] + (-1, lanes))
@@ -84,9 +88,10 @@ def tree_sum(x, lanes):
 
 
 def bfp16(x, axis):
-    """Convert `x` to bfp16ebs8 in blocks of 8 along `axis`, with floor
-    rounding, as AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16 converts a bf16
-    matmul's operands.
+    """Convert `x` to bfp16ebs8 in blocks of 8 along `axis`, with floor rounding.
+
+    As AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16 converts a bf16 matmul's
+    operands.
     """
     x = np.moveaxis(np.asarray(x, np.float32), axis, -1)
     return np.moveaxis(bfp.quantize(x, rounding="floor").astype(np.float64), -1, axis)
@@ -111,8 +116,9 @@ INV_MANTISSA = np.round(256 / (1 + np.arange(128) / 128)).astype(np.uint32) & 0x
 
 
 def inv_kernel(denom):
-    """getInvBf16: 1 / `denom` as bf16, from the exponent and INV_MANTISSA. The
-    relative error is up to 0.4%.
+    """getInvBf16: compute 1 / `denom` as bf16, from the exponent and INV_MANTISSA.
+
+    The relative error is up to 0.4%.
     """
     bits = f32(denom).view(np.uint32).astype(np.uint64) + 0x8000
     exponent = (bits & 0x7F800000) >> 23
@@ -124,9 +130,11 @@ def inv_kernel(denom):
 
 @cache
 def gelu_segments():
-    """getGeluBf16's table: 64 (slope, offset) segments of width 1/8 on [-4, 4),
-    read from aie_runtime_lib's `gelu_lut_ab` (no simple fit reproduces it).
-    The source holds each run of four segments twice, for the gather read.
+    """Return getGeluBf16's table: 64 (slope, offset) segments of width 1/8 on [-4, 4).
+
+    Read from aie_runtime_lib's `gelu_lut_ab` (no simple fit reproduces
+    it). The source holds each run of four segments twice, for the
+    gather read.
     """
     path = Path(config.aie_runtime_lib_dir()) / "AIE2P" / "lut_based_ops.cpp"
     table = re.search(r"gelu_lut_ab\[\d+\]\s*=\s*\{([^}]*)\}", path.read_text())
@@ -138,8 +146,10 @@ def gelu_segments():
 
 
 def gelu_kernel(x):
-    """getGeluBf16: GELU from gelu_segments. The device reads the slope as bf16
-    and the offset as fp32. Inputs outside [-4, 4) take the end segments.
+    """getGeluBf16: compute GELU from gelu_segments.
+
+    The device reads the slope as bf16 and the offset as fp32. Inputs
+    outside [-4, 4) take the end segments.
     """
     x = np.asarray(x, np.float64)
     k = np.clip(np.floor(x * 128).astype(np.int64), -512, 511) >> 4

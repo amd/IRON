@@ -14,9 +14,10 @@ from iron.operators.flm.gemm.op import ProjectionGEMM
 
 
 class FeedForward(iron.Graph):
-    """A gated feed-forward, ``(SiLU(x @ w_gate.T) * (x @ w_up.T)) @
-    w_down.T``, over the ``(out, in)`` weights it holds: a GEMV each for one
-    row, flm.ProjectionGEMM for more.
+    """A gated feed-forward, ``(SiLU(x @ w_gate.T) * (x @ w_up.T)) @ w_down.T``.
+
+    Over the ``(out, in)`` weights it holds: a GEMV each for one row,
+    flm.ProjectionGEMM for more.
     """
 
     def __init__(self, w_gate, w_up, w_down):
@@ -44,8 +45,9 @@ class Project(iron.Graph):
 
 
 class ProjectAsStored(iron.Graph):
-    """The first `n` rows of `x` projected by `w` as a checkpoint stores it,
-    on flm.ProjectionGEMM, as a prompt chunk's projections are.
+    """The first `n` rows of `x` projected by `w` as a checkpoint stores it.
+
+    On flm.ProjectionGEMM, as a prompt chunk's projections are.
     """
 
     def body(self, x, w, *, n: Scratchpad[np.int32]):
@@ -53,9 +55,10 @@ class ProjectAsStored(iron.Graph):
 
 
 class Walk(iron.Graph):
-    """Walks a linked list one node per call: the next node is gathered from
-    the successor table on the device, the step count is an expression of
-    the current one. It takes no tensor.
+    """Walks a linked list one node per call.
+
+    The next node is gathered from the successor table on the device, the
+    step count is an expression of the current one. It takes no tensor.
     """
 
     def __init__(self, successor):
@@ -67,9 +70,10 @@ class Walk(iron.Graph):
 
 
 class Trail(iron.Graph):
-    """Walks a linked list and records each node at the step count, in a
-    state of `steps` + 1 entries. The version with `jump` starts from a
-    table the host gives, at a plain per-call value; the one without
+    """Walks a linked list and records each node at the step count.
+
+    In a state of `steps` + 1 entries. The version with `jump` starts from
+    a table the host gives, at a plain per-call value; the one without
     follows the list from `node`.
     """
 
@@ -94,8 +98,9 @@ class Trail(iron.Graph):
 
 
 class Chain(iron.Graph):
-    """add, silu, mul, add, silu: three designs, two recurring, each on
-    `columns` columns, or as wide as it resolves to when None.
+    """add, silu, mul, add, silu: three designs, two recurring.
+
+    Each on `columns` columns, or as wide as it resolves to when None.
     """
 
     def __init__(self, size: int, tile: int, columns: int | None = None):

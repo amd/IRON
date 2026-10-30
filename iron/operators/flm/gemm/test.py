@@ -38,8 +38,9 @@ ACTIVATION_INPUT_SCALE = 0.5
 
 
 def get_params(device: str):
-    """``test_gemm``'s shapes on ``device``, run only there: declared for its
-    model in ``DEVICES``, so collecting opens no device.
+    """``test_gemm``'s shapes on ``device``, run only there.
+
+    Declared for its model in ``DEVICES``, so collecting opens no device.
     """
     dev = DEVICES[device]()
 
@@ -153,8 +154,9 @@ def accumulated_mass(K, A, B):
 
 
 def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
-    """Run ``operator`` against its drawn vectors and return run_test's result,
-    bounding error absolutely as a fraction of the accumulated mass
+    """Run ``operator`` against its drawn vectors and return run_test's result.
+
+    Bounds error absolutely as a fraction of the accumulated mass
     K * mean|a| * mean|b|: a relative tolerance can't work, since signed A's
     K-sum cancels by ~sqrt(K), leaving near-zero outputs uncheckable. The
     fraction is per-architecture and loosens under ``floor``'s truncation bias.
@@ -203,8 +205,11 @@ def test_gemm(M, K, N, epilogue, rounding, record_property):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("M,K,N", [(256, 512, 256), (512, 1024, 512)])
 def test_gemm_without_activations(M, K, N, record_property):
-    """Compiling no activation links no LUT tables, so on AIE2 the bytes they
-    held go to B and the tiles differ from every case above."""
+    """Compiling no activation links no LUT tables.
+
+    So on AIE2 the bytes they held go to B and the tiles differ from every
+    case above.
+    """
     operator = ProjectionGEMM(
         M=M, K=K, N=N, epilogue_modes=(NONE,), precision=Precision.MEDIUM
     )
@@ -215,9 +220,11 @@ def test_gemm_without_activations(M, K, N, record_property):
 
 
 def b_col_maj_params(device: str):
-    """Where B as stored reaches the kernel by another path than packed B: a
-    resident and streamed memtile pool, a trailing column, every tile width and
-    two slabs, on each mac kind ``device`` has (AIE2P's bfp16/bf16, AIE2's bf16).
+    """Where B as stored reaches the kernel by another path than packed B.
+
+    A resident and streamed memtile pool, a trailing column, every tile
+    width and two slabs, on each mac kind ``device`` has (AIE2P's
+    bfp16/bf16, AIE2's bf16).
     """
     dev = DEVICES[device]()
     cols = dev.cols
@@ -279,10 +286,13 @@ def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, precision, record_prope
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_gemm_split_leg_bounds_runs():
-    """N = 20480 overflows the shim BD's 20-bit step from one row-block to the
-    next, and m_chunk = 2 gives A's leg a fifth dimension, so the compiler cuts
-    both legs into pieces; overrunning either hangs or corrupts silently, and
-    no model shape cuts a leg at m_chunk = 1, so this is their only cover.
+    """Check that cutting both legs into pieces does not hang or corrupt silently.
+
+    N = 20480 overflows the shim BD's 20-bit step from one row-block to the
+    next, and m_chunk = 2 gives A's leg a fifth dimension, so the compiler
+    cuts both legs into pieces; overrunning either hangs or corrupts
+    silently, and no model shape cuts a leg at m_chunk = 1, so this is
+    their only cover.
     """
     M, K, N = 512, 512, 20480
     operator = ProjectionGEMM(M=M, K=K, N=N, m_chunk=2, precision=Precision.MEDIUM)
@@ -292,10 +302,12 @@ def test_gemm_split_leg_bounds_runs():
 
 
 def tile_option_params(device: str):
-    """Every (tile_n, tile_ma) to try on ``device``: the shapes above only
-    exercise the default geometry, and a mismatched override is silently
-    wrong output rather than a build error, so it must run on hardware. The
-    default stays in the regular suite; overrides are extensive.
+    """Every (tile_n, tile_ma) to try on ``device``.
+
+    The shapes above only exercise the default geometry, and a mismatched
+    override is silently wrong output rather than a build error, so it
+    must run on hardware. The default stays in the regular suite;
+    overrides are extensive.
     """
     dev = DEVICES[device]()
     params = []
@@ -328,8 +340,9 @@ def tile_option_params(device: str):
     [*tile_option_params("npu1"), *tile_option_params("npu2")],
 )
 def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
-    """The default (tile_n, tile_ma), and each other A height the design
-    accepts, computes the right answer on hardware.
+    """Check that each (tile_n, tile_ma) the design accepts computes the right answer.
+
+    The default, and each other A height the design accepts, on hardware.
     """
     shape = dict(M=M, K=K, N=N, tile_n=tile_n, precision=Precision.MEDIUM)
     default = ProjectionGEMM(**shape).resolved().tile_ma
@@ -346,9 +359,10 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
 
 
 def k_slice_params(device: str):
-    """Every k slice to try at the default tile_n on ``device``: like the
-    tiles above, a mismatch is silently wrong rather than a build error; the
-    default stays in the regular suite, the others are extensive.
+    """Every k slice to try at the default tile_n on ``device``.
+
+    Like the tiles above, a mismatch is silently wrong rather than a build
+    error; the default stays in the regular suite, the others are extensive.
     """
     return [
         pytest.param(
@@ -365,8 +379,9 @@ def k_slice_params(device: str):
 
 @pytest.mark.parametrize("ct_k", [*k_slice_params("npu1"), *k_slice_params("npu2")])
 def test_gemm_k_slices(ct_k):
-    """The default k slice, and each other the design accepts, computes the
-    right answer on hardware.
+    """Check that each k slice the design accepts computes the right answer.
+
+    The default, and each other, on hardware.
     """
     dev = aie_utils.get_current_device()
     assert dev is not None
@@ -387,9 +402,11 @@ def test_gemm_k_slices(ct_k):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("K", [256, 768])
 def test_gemm_k_tile(K):
-    """A k tile other than the default 512 computes the right answer: Gemma
-    4's per-layer-input projection has K=256 (512 doesn't divide it); K=768
-    takes three k steps, carrying the accumulator across smaller tiles too.
+    """Check that a k tile other than the default 512 computes the right answer.
+
+    Gemma 4's per-layer-input projection has K=256 (512 doesn't divide
+    it); K=768 takes three k steps, carrying the accumulator across
+    smaller tiles too.
     """
     dev = aie_utils.get_current_device()
     assert dev is not None
@@ -409,10 +426,11 @@ def test_gemm_k_tile(K):
     [(512, 64, 128, 128), (16, 16, 16, 16), (64, 32, 64, 32), (96, 32, 96, 32)],
 )
 def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, ct_k, precision):
-    """A k step of one B chunk (k_tile the compute tile's k slice), or of an
-    odd count of them, walks every chunk: small integers are exact in bfp16
-    and bf16, since check_on_device's bound is only fitted at K >= 256.
-    Covers both MEDIUM's bfp16 macs and HIGH's bf16 macs.
+    """Check that a k step of one or an odd count of B chunks walks every chunk.
+
+    ``k_tile`` is the compute tile's k slice. Small integers are exact in
+    bfp16 and bf16, since check_on_device's bound is only fitted at K >=
+    256. Covers both MEDIUM's bfp16 macs and HIGH's bf16 macs.
     """
     dev = aie_utils.get_current_device()
     assert dev is not None
@@ -441,9 +459,11 @@ def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, ct_k, precision):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_one_xclbin_serves_every_shape():
-    """Several shapes back to back on one loaded xclbin: the parametrised
-    tests can't cover this, since each gets a fresh context. Here the shapes
-    share one, disagree on every parameter, and none may rebuild the xclbin.
+    """Run several shapes back to back on one loaded xclbin.
+
+    The parametrised tests can't cover this, since each gets a fresh
+    context. Here the shapes share one, disagree on every parameter, and
+    none may rebuild the xclbin.
     """
     # Every shape must resolve to the same m_chunk, which shapes the core
     # program and so the xclbin. These are all even in m_row_blocks and exclude
@@ -494,8 +514,9 @@ SHIPPED = pytest.mark.extensive
 
 @pytest.fixture
 def eight_column_npu2():
-    """Skips unless the attached NPU is the eight-column NPU2 the shipped
-    binary was built for.
+    """Skip unless the attached NPU is the eight-column NPU2.
+
+    The shipped binary was built for it.
     """
     dev = aie_utils.get_current_device()
     if dev.arch is not AIEArch.AIE2p or dev.cols < 8:
@@ -563,17 +584,18 @@ def test_shipped_overlay(M, K, N, epilogue, record_property, eight_column_npu2):
     ],
 )
 def test_shipped_epilogue_matches_accumulator(epilogue, eight_column_npu2):
-    """The epilogue is the right function of the accumulator the device
-    produced. A bounded check against the idealized CPU reference can't
-    work: the overlay's floor-rounded accumulator error (~2% of the
-    accumulated mass) dwarfs sigmoid's (0,1) range, so a bound wide enough
-    to admit it also admits an all-zero result. Instead this compares
-    against the device's own no-epilogue accumulator, run through the same
-    activation on the host, so the accumulator error cancels and an
-    all-zero result still fails. gelu doesn't need this: its wider output
-    range lets test_shipped_overlay check it directly against the
-    accumulator-mass bound, and test_gemm_gelu_bf16_steps_matches_overlay
-    checks it bit for bit.
+    """Check that the epilogue is the right function of the device's accumulator.
+
+    A bounded check against the idealized CPU reference can't work: the
+    overlay's floor-rounded accumulator error (~2% of the accumulated
+    mass) dwarfs sigmoid's (0,1) range, so a bound wide enough to admit it
+    also admits an all-zero result. Instead this compares against the
+    device's own no-epilogue accumulator, run through the same activation
+    on the host, so the accumulator error cancels and an all-zero result
+    still fails. gelu doesn't need this: its wider output range lets
+    test_shipped_overlay check it directly against the accumulator-mass
+    bound, and test_gemm_gelu_bf16_steps_matches_overlay checks it bit for
+    bit.
     """
     M, K, N = 256, 512, 1024
     # A small input scale keeps the accumulator in the range where these curves
@@ -625,8 +647,9 @@ def test_shipped_epilogue_matches_accumulator(epilogue, eight_column_npu2):
     ],
 )
 def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N, eight_column_npu2):
-    """``gelu=bf16_steps`` with ``rounding=floor`` matches the shipped overlay's
-    gelu bit for bit, on identical inputs.
+    """Check that ``gelu=bf16_steps``/``rounding=floor`` matches the overlay's gelu.
+
+    Bit for bit, on identical inputs.
     """
     probe = Shipped(M=M, K=K, N=N)
     data = vectors(

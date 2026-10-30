@@ -21,9 +21,11 @@ LAYERED = re.compile(r"(?:^|\.)(?:layers|keys|values)\.(\d+)(?:\.|$)")
 
 
 def layers(recording: Recording) -> dict[int, int | None]:
-    """Each step's layer by index (``layers.3.q``, ``vision.layers.3.q``: 3); a step
-    reading no layer's buffer takes its source's layer, else its reader's, and none
-    before the first layer or, holding a weight or state (a head), after the last.
+    """Each step's layer by index (``layers.3.q``, ``vision.layers.3.q``: 3).
+
+    A step reading no layer's buffer takes its source's layer, else its
+    reader's, and none before the first layer or, holding a weight or
+    state (a head), after the last.
     """
     steps = recording.steps
     own = {}
@@ -59,9 +61,7 @@ def _shape(h: Handle | Buffer) -> str:
 
 
 def _box(recording: Recording, i: int, values: dict[int, list[str]]) -> str:
-    """Step ``i``'s label: its operator, its outputs' shapes and its
-    per-call values.
-    """
+    """Step ``i``'s label: its operator, its outputs' shapes and its per-call values."""
     s = recording.steps[i]
     op = s.op
     lines = [f"<b>{html.escape(type(op).__name__)}</b>"]
@@ -73,9 +73,11 @@ def _box(recording: Recording, i: int, values: dict[int, list[str]]) -> str:
 
 
 def dot(recording: Recording) -> str:
-    """``recording`` as Graphviz text: a box per step clustered by layer, an edge
-    per operand labelled with its shape (``bounded`` where a per-call value
-    bounds or indexes it), and a node per input, weight, state and output.
+    """Return ``recording`` as Graphviz text: a box per step clustered by layer.
+
+    An edge per operand labelled with its shape (``bounded`` where a
+    per-call value bounds or indexes it), and a node per input, weight,
+    state and output.
     """
     steps = recording.steps
     layer = layers(recording)

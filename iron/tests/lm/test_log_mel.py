@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""iron.lm.LogMel on a device: one compile at 3072 frames, called at two
-frame counts, every 8th frame against Hugging Face's Gemma 4 feature
-extractor's float64 features, recorded in ``goldens/``.
+"""iron.lm.LogMel on a device: one compile at 3072 frames, called at two frame counts.
+
+Every 8th frame against Hugging Face's Gemma 4 feature extractor's
+float64 features, recorded in ``goldens/``.
 """
 
 import time

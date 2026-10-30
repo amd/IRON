@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A full ELF names its kernels, its devices and itself by content, not
-by position, so one build reuses another's work. No toolchain and no NPU.
+"""A full ELF names its kernels, its devices and itself by content, not by position.
+
+So one build reuses another's work. No toolchain and no NPU.
 """
 
 import re
@@ -76,8 +77,9 @@ def _objects_by_step(shapes):
 
 
 def test_equal_kernel_recipes_share_one_object_across_designs():
-    """Two GEMVs that differ only in M compile mv.cc with the same flags,
-    so their designs link one object; a different K is a different recipe,
+    """Two GEMVs that differ only in M compile mv.cc with the same flags.
+
+    So their designs link one object; a different K is a different recipe,
     and a different object.
     """
     (_, a), (_, b), (_, c) = _objects_by_step(SHAPES)
@@ -101,8 +103,10 @@ def test_identity_is_what_the_text_is_a_function_of():
 
 
 def test_two_designs_whose_device_names_collide_are_refused():
-    """A device is named by eight hex digits of its design's identity, so two
-    designs can share one; the composition refuses rather than run one design for both.
+    """A device is named by eight hex digits of its design's identity.
+
+    So two designs can share one; the composition refuses rather than run
+    one design for both.
     """
     seen = {}
     for size in range(1024, 1024 * 200_000, 1024):

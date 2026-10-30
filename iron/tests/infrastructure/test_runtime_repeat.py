@@ -135,9 +135,9 @@ def test_npu1_xclbin_pushes_the_call_s_repeat_count(npu1):
 
 
 def test_a_full_elf_takes_the_repeat_count_from_the_scratchpad(npu2, tmp_path):
-    """The fill's start names the repeat word, which the scratchpad lowering
-    makes a repeat parameter bounded by the pattern's 16 runs; the drain's
-    length is a word of its own.
+    """The fill's start names the repeat word, which the scratchpad lowering makes a repeat parameter.
+
+    Bounded by the pattern's 16 runs; the drain's length is a word of its own.
     """
     op = _bound_op().resolved()
     module = OperatorDesign(op).module()

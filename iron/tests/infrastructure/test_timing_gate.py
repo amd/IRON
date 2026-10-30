@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The nightly's timing gate: ``pretty_trends.py --fail-on`` exits 1 when a
-named metric of a benched test got worse than in the run before it past the
-percentage gate, and 0 when it got better, moved less, or is not named.
+"""The nightly's timing gate.
+
+``pretty_trends.py --fail-on`` exits 1 when a named metric of a
+benched test got worse than in the run before it past the percentage
+gate, and 0 when it got better, moved less, or is not named.
 """
 
 import csv

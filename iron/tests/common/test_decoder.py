@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``DecoderConfig``'s partial rotary (``rotary_dim``) and RoPE amplitude
-scale (``rope_attention_scaling``), device-free, and a ``max_seq_len`` no
-prompt chunk divides.
+"""``DecoderConfig``'s partial rotary and RoPE amplitude scale, device-free.
+
+Partial rotary is ``rotary_dim``, amplitude scale
+``rope_attention_scaling``; also a ``max_seq_len`` no prompt chunk divides.
 """
 
 import dataclasses
@@ -102,9 +103,10 @@ def test_prompt_chunk_reads_the_rope_table_at_its_own_width():
 
 
 def test_a_context_no_chunk_divides_is_allocated_exactly():
-    """LFM2's 128000 positions in 2048-row chunks, small: the caches, the
-    angle table and the draws hold a row a position, and no call goes past
-    the last position.
+    """Check LFM2's 128000 positions in 2048-row chunks, small.
+
+    The caches, the angle table and the draws hold a row a position, and no
+    call goes past the last position.
     """
     model = small(max_seq_len=300)
     cfg = model.config
@@ -122,9 +124,10 @@ def test_a_context_no_chunk_divides_is_allocated_exactly():
     "chunk,rows,inside", [(1, 44, True), (1, 45, False), (0, 256, True), (2, 1, False)]
 )
 def test_a_prompt_chunk_past_the_last_position_is_refused(chunk, rows, inside):
-    """Every limit a prompt chunk's recording holds where its rows end
-    by position 300, and one fails where they pass it, so the call is
-    refused before it is dispatched.
+    """Check every limit a prompt chunk's recording holds at position 300.
+
+    Each holds where the chunk's rows end by position 300, and one fails
+    where they pass it, so the call is refused before it is dispatched.
     """
     model = small(max_seq_len=300)
     t = model.record(**model.shapes()[1])

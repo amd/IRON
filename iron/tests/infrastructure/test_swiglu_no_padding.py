@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A gated feed-forward does not pad: a row count its inner GEMM cannot tile is an error
-at record time, and an aligned one records with the extents it was given.
+"""A gated feed-forward does not pad.
+
+A row count its inner GEMM cannot tile is an error at record time, and
+an aligned one records with the extents it was given.
 """
 
 import numpy as np

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fused multi-head attention: ``num_pipelines`` three-stage pipelines (QK^T,
-partial softmax, P*V), one per column, Q split across them on a memtile, K
-and V forwarded to every one; P*V may split over two cores when d=512. The
-queries are the keys' last rows, padded to 64, except one (a decode step),
-which packs a KV group's heads into a block instead.
+"""Fused multi-head attention: ``num_pipelines`` three-stage pipelines (QK^T, partial softmax, P*V).
+
+One per column, Q split across them on a memtile, K and V forwarded to
+every one; P*V may split over two cores when d=512. The queries are the
+keys' last rows, padded to 64, except one (a decode step), which packs a
+KV group's heads into a block instead.
 """
 
 import dataclasses
@@ -38,8 +39,10 @@ from iron.common.testing import Case, Testing
 
 @dataclasses.dataclass(frozen=True)
 class SplitColumns:
-    """Where MHA's streams meet the array with P*V split over two cores; each
-    column carries every stream its links hold, so these are what the router finds.
+    """Where MHA's streams meet the array with P*V split over two cores.
+
+    Each column carries every stream its links hold, so these are what the
+    router finds.
 
     Attributes:
         q: Each Q shim's split.
@@ -57,9 +60,7 @@ class SplitColumns:
 
 # Whole in seq_pad's 64-row unit, up to the largest whose cores fit L1.
 def block_sizes(op, dev, start: int) -> tuple[int, ...]:
-    """Return the query blocks to try: whole in seq_pad's 64-row unit, up to
-    the largest whose cores fit L1.
-    """
+    """Return the query blocks to try, whole in seq_pad's 64-row unit, up to the largest whose cores fit L1."""
     cap = max(
         (
             b
@@ -187,8 +188,9 @@ def _cases(cls, dev: Device):
 
 
 class MHA(Operator):
-    """Fused attention over ``(B_q, d)`` Q, ``(d, B_kv)`` K and ``(B_kv, d)``
-    V blocks; more than six pipelines split Q and O over two shims.
+    """Fused attention over ``(B_q, d)`` Q, ``(d, B_kv)`` K and ``(B_kv, d)`` V blocks.
+
+    More than six pipelines split Q and O over two shims.
     """
 
     test = Testing(_cases)
@@ -502,9 +504,11 @@ class MHA(Operator):
         return ceildiv(seq_len, 64) * 64
 
     def key_block(self, B_q: int, dev: Device | None) -> int:
-        """``B_kv`` for ``B_q``: itself, which mha.cc's causal skip compares
-        by; packed, the widest divisor of ``kv_len`` whose cores fit ``dev``
-        (any, where None), since mha.cc's vectorized softmax reads 64-key rows."""
+        """``B_kv`` for ``B_q``: itself, which mha.cc's causal skip compares by.
+
+        Packed, the widest divisor of ``kv_len`` whose cores fit ``dev``
+        (any, where None), since mha.cc's vectorized softmax reads 64-key rows.
+        """
         if not self.packed:
             return B_q
         return next(
@@ -522,10 +526,14 @@ class MHA(Operator):
         )
 
     def core_bytes(self, dev, B_q: int, B_kv: int, pv_cores: int) -> int:
-        """The larger of a pipeline's QK^T and P*V cores' L1 bytes, kernels'
-        data and stack included, over the device's default stack.
+        """Return the larger of a pipeline's QK^T and P*V cores' L1 bytes.
+
+        Kernels' data and stack included, over the device's default stack.
 
         Args:
+            dev: The device the cores' memory is measured against.
+            B_q: The query block size.
+            B_kv: The key/value block size.
             pv_cores: The P*V cores the head is split over.
         """
         d, pv_width = self.d, self.d // pv_cores
@@ -728,9 +736,11 @@ class MHA(Operator):
         ]
 
         def each_q_block(heads, q_blocks, q_valid, first, bias, idx, q_block):
-            """``q_block(compute)`` over every head's Q blocks, those past
-            the bound not computed; ``idx`` restarts at the head's first,
-            ``first``'s block and row offset."""
+            """``q_block(compute)`` over every head's Q blocks, those past the bound not computed.
+
+            ``idx`` restarts at the head's first, ``first``'s block and row
+            offset.
+            """
             q_start, q_offset = first
             idx[2] = q_offset
             for _ in range_(heads):
@@ -1022,8 +1032,10 @@ class MHA(Operator):
         return 4 * self.num_heads * self.d * int((hi - lo + 1).sum())
 
     def reference(self, Q, K, V, s_q=None, s_kv=None):
-        """Attention per head, the queries the keys' last rows; query rows from
-        ``s_q`` on are zeros and keys from ``s_kv`` on are masked.
+        """Attention per head, the queries the keys' last rows.
+
+        Query rows from ``s_q`` on are zeros and keys from ``s_kv`` on are
+        masked.
         """
         if self.heads_interleaved:
             Q = np.swapaxes(Q, 0, 1)
@@ -1074,8 +1086,10 @@ class MHA(Operator):
         )
 
     def sequence(self, rt):
-        """One descriptor set per KV group: K and V re-read per (head, block)
-        from the iteration slot, not six descriptors per block.
+        """One descriptor set per KV group.
+
+        K and V re-read per (head, block) from the iteration slot, not six
+        descriptors per block.
         """
         kv_heads = self.num_KV_heads
         group = self.num_heads // kv_heads

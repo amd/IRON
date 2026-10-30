@@ -87,7 +87,7 @@ class DecodeLayer(Operator):
         )
 
     def reference(self, x, proj, rms, rope_rms, kv, context_len, max_l):
-        """x and kv as the dispatch leaves them; see reference.py."""
+        """X and kv as the dispatch leaves them; see reference.py."""
         return tuple(
             r.view(bfloat16)
             for r in reference.reference(

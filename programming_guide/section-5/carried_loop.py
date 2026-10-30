@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Section-5 example: carried values, called from the host and looped on
-the device.
+"""Section-5 example: carried values, called from the host and looped on the device.
 
 ``Walk`` walks a linked list one node per call: the next node is gathered
 from a successor table the graph holds, and recorded in ``trail`` at the
@@ -22,9 +21,11 @@ N = 64
 
 
 class Walk(iron.Graph):
-    """One step of a linked list walk: the next node gathered from
-    ``successor`` and recorded in ``trail`` at the step count, the step
-    count one more than the last."""
+    """One step of a linked list walk.
+
+    The next node gathered from ``successor`` and recorded in ``trail`` at
+    the step count, the step count one more than the last.
+    """
 
     def __init__(self, successor, steps: int):
         self.successor = iron.weight(successor)

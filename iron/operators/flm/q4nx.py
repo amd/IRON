@@ -23,11 +23,11 @@ def packed_bytes(n_weights: int) -> int:
 
 
 def unpack(grid):
-    """A weight's codes ``(rows, cols)`` uint8 and its scales/minima
-    ``(rows, cols // GROUP)`` float32, from blocks laid out as a
-    ``(rows // M_TILE, cols // K_TILE)`` grid: each block stores scales then
-    minima at ``[k // GROUP, m]`` and codes at ``[m // 16, k, m % 16]``, the
-    lower index in a byte's low nibble.
+    """Return a weight's codes ``(rows, cols)`` uint8 and its scales/minima ``(rows, cols // GROUP)`` float32.
+
+    From blocks laid out as a ``(rows // M_TILE, cols // K_TILE)`` grid:
+    each block stores scales then minima at ``[k // GROUP, m]`` and codes
+    at ``[m // 16, k, m % 16]``, the lower index in a byte's low nibble.
     """
     grid = np.asarray(grid, np.uint8)
     nb_r, nb_c = grid.shape[:2]
@@ -48,7 +48,7 @@ def unpack(grid):
 
 
 def dequantize(grid):
-    """The ``(rows, cols)`` float64 weights of a grid of blocks, as ``unpack``'s."""
+    """Return the ``(rows, cols)`` float64 weights of a grid of blocks, as ``unpack``'s."""
     codes, scales, mins = unpack(grid)
     group = np.arange(codes.shape[1]) // GROUP
     w = scales.astype(np.float64)[:, group]

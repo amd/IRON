@@ -70,8 +70,10 @@ def _prefill_inputs(op, max_l, seed):
 
 
 def cases():
-    """Each golden: its file stem, the operator, its inputs by buffer name
-    (a function of nothing, drawn only when recording) and its per-call values.
+    """Yield each golden: its file stem, the operator, its inputs by buffer name.
+
+    A function of nothing, drawn only when recording, and its per-call
+    values.
     """
     for name, geometry in (
         ("E2B", FLM_GEMMA4_E2B_DECODE),
@@ -114,8 +116,9 @@ def cases():
 
 
 def dispatch(op, initial, values):
-    """Run ``op`` once on buffers holding ``initial``'s bytes at their start;
-    each buffer's bytes after, by name.
+    """Run ``op`` once on buffers holding ``initial``'s bytes at their start.
+
+    Return each buffer's bytes after, by name.
     """
     tensors = []
     for b in op.buffers:
@@ -163,7 +166,7 @@ def record(root: Path) -> None:
 
 
 def check(root: Path) -> int:
-    """The number of goldens that differ, or are missing, on this build."""
+    """Return the number of goldens that differ, or are missing, on this build."""
     failed = 0
     for stem, op, _, values in cases():
         path = root / f"{stem}.npz"

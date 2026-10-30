@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""bf16 GEMM over a 4-row compute-tile grid, as wide as the device: same
-dataflow as ``iron.operators.gemm`` but with a fixed m tile, B optionally
-quantized to bfp16ebs8 and pre-packed, a fused activation, and asymmetric
-tile buffering. The array is ``ProjectionGEMM.build``/``.sequence`` in
-``op.py``; this module holds the geometry, budget helpers and buffer layout.
+"""bf16 GEMM over a 4-row compute-tile grid, as wide as the device.
+
+Same dataflow as ``iron.operators.gemm`` but with a fixed m tile, B
+optionally quantized to bfp16ebs8 and pre-packed, a fused activation, and
+asymmetric tile buffering. The array is ``ProjectionGEMM.build``/``.sequence``
+in ``op.py``; this module holds the geometry, budget helpers and buffer layout.
 """
 
 from collections.abc import Callable
@@ -59,8 +60,9 @@ B_MAX_SLOTS = 8
 
 
 class _Slab(NamedTuple):
-    """A run of row-block units the sequence arms B for at once; see
-    ProjectionGEMM.sequence().
+    """A run of row-block units the sequence arms B for at once.
+
+    See ProjectionGEMM.sequence().
     """
 
     first: int  # the first unit
@@ -71,9 +73,10 @@ class _Slab(NamedTuple):
 
 
 class Epilogue(StrEnum):
-    """Activation folded into the C drain; declaration order is the wire
-    format, both the kernel's epilogue mode argument and the shipped
-    overlay's ``output_mode``.
+    """Activation folded into the C drain.
+
+    Declaration order is the wire format, both the kernel's epilogue mode
+    argument and the shipped overlay's ``output_mode``.
     """
 
     NONE = "none"
@@ -87,10 +90,11 @@ class Epilogue(StrEnum):
         return list(Epilogue).index(self)
 
     def apply(self, C):
-        """This output stage alone, on an already-accumulated ``C``: ``gelu``
-        is the kernel's sigmoid approximation ``x * sigmoid(1.702x)``, not
-        torch's erf-exact gelu nor the standalone GELU operator's tanh
-        approximation.
+        """Run this output stage alone, on an already-accumulated ``C``.
+
+        ``gelu`` is the kernel's sigmoid approximation
+        ``x * sigmoid(1.702x)``, not torch's erf-exact gelu nor the
+        standalone GELU operator's tanh approximation.
         """
         match self:
             case Epilogue.GELU:
@@ -109,9 +113,11 @@ def _sigmoid(x):
 
 
 class Rounding(StrEnum):
-    """Rounding for every f32->bf16 conversion: conv_even by default, since
-    truncation biases every conversion the same way and the error
-    accumulates over the K reduction; floor matches the overlay.
+    """Rounding for every f32->bf16 conversion.
+
+    conv_even by default, since truncation biases every conversion the
+    same way and the error accumulates over the K reduction; floor
+    matches the overlay.
     """
 
     CONV_EVEN = "conv_even"
@@ -119,9 +125,11 @@ class Rounding(StrEnum):
 
 
 class Gelu(StrEnum):
-    """Arithmetic of the gelu epilogue, ``x * sigmoid(1.702x)``: ``fp32`` runs
-    it on the f32 accumulator and rounds once; ``bf16_steps`` rounds to bf16
-    each step, matching the shipped overlay bit for bit under ``Rounding.FLOOR``.
+    """Arithmetic of the gelu epilogue, ``x * sigmoid(1.702x)``.
+
+    ``fp32`` runs it on the f32 accumulator and rounds once; ``bf16_steps``
+    rounds to bf16 each step, matching the shipped overlay bit for bit
+    under ``Rounding.FLOOR``.
     """
 
     FP32 = "fp32"
@@ -129,8 +137,10 @@ class Gelu(StrEnum):
 
 
 def _b_bytes(elems: int, bfp16_b: bool) -> int:
-    """Bytes B occupies in L1/L2. bfp16ebs8 packs 8 values as 8 mantissa bytes
-    plus one shared exponent; bf16 is a plain 2 bytes each.
+    """Bytes B occupies in L1/L2.
+
+    bfp16ebs8 packs 8 values as 8 mantissa bytes plus one shared exponent;
+    bf16 is a plain 2 bytes each.
     """
     if not bfp16_b:
         return elems * 2
@@ -139,7 +149,8 @@ def _b_bytes(elems: int, bfp16_b: bool) -> int:
 
 
 def k_slices(k_tile: int) -> tuple[int, ...]:
-    """The k slices a compute tile can hold of a ``k_tile``, deepest first:
+    """Return the k slices a compute tile can hold of a ``k_tile``, deepest first.
+
     ``k_tile`` and its halvings down to the mmul's ``S``.
     """
     return divisors(k_tile, of=k_tile, step=S)
@@ -155,11 +166,12 @@ def l1_tiles(
     t_ma: int | None = None,
     ct_k: int | None = None,
 ) -> tuple[int, int, int]:
-    """The working set that fits L1: (k slice, A-tile height, L1 B depth).
+    """Return the working set that fits L1: (k slice, A-tile height, L1 B depth).
+
     Tries double-buffered B first, then the deepest k slice, then the
-    tallest A that fits; ``t_ma``/``ct_k`` fix the height/slice instead, and
-    ``ct_k`` also bounds the B ring depth. ``frame(height, ct_k)`` is the
-    kernel's own bytes beside its buffers at that band.
+    tallest A that fits; ``t_ma``/``ct_k`` fix the height/slice instead,
+    and ``ct_k`` also bounds the B ring depth. ``frame(height, ct_k)`` is
+    the kernel's own bytes beside its buffers at that band.
     """
     # m_chunk accumulators, since the core holds a B chunk across that many
     # row-blocks. The only term that scales with it.

@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Gemma 4 E2B's text decoder on the shared decoder (``iron.lm``), its
-shape read from its checkpoint's ``config.json``, and the whole model,
-the decoder with its vision and audio towers (``vision.py``, ``audio.py``)
-as one ``iron.lm.Multimodal`` (``Gemma4Multimodal``). Run the text decoder
-with ``python -m iron.applications.gemma4.model``.
+"""Gemma 4 E2B's text decoder on the shared decoder (``iron.lm``), and the whole model.
+
+The text decoder's shape is read from its checkpoint's ``config.json``;
+the whole model is the decoder with its vision and audio towers
+(``vision.py``, ``audio.py``) as one ``iron.lm.Multimodal``
+(``Gemma4Multimodal``). Run the text decoder with
+``python -m iron.applications.gemma4.model``.
 """
 
 import dataclasses
@@ -39,8 +41,10 @@ from iron.operators.tanh import Tanh
 
 @dataclasses.dataclass(frozen=True)
 class Gemma4Config(DecoderConfig):
-    """``DecoderConfig`` under ``text_config``, the global layers' heads and
-    RoPE, the shared caches, the per-layer inputs and the logits' cap.
+    """``DecoderConfig`` under ``text_config``.
+
+    The global layers' heads and RoPE, the shared caches, the per-layer
+    inputs and the logits' cap.
     """
 
     precision: Precision = lm.not_json(Precision.MEDIUM, kw_only=True)
@@ -125,8 +129,10 @@ class Gemma4Config(DecoderConfig):
         return self.layer_types[i] == "full_attention"
 
     def owner(self, i: int) -> int:
-        """The layer whose cache layer ``i`` attends over: its own, or for a
-        shared layer the last one before the shared of its kind.
+        """Return the layer whose cache layer ``i`` attends over.
+
+        Its own, or for a shared layer the last one before the shared of
+        its kind.
         """
         first = self.num_hidden_layers - self.num_kv_shared_layers
         if i < first:
@@ -140,9 +146,7 @@ class Gemma4Config(DecoderConfig):
 
 
 class Gemma4Decoder(Decoder):
-    """``Decoder`` and the per-layer inputs' token table, projection and
-    norm.
-    """
+    """``Decoder`` and the per-layer inputs' token table, projection and norm."""
 
     def __init__(self, c: Gemma4Config, layer):
         super().__init__(c, layer)
@@ -153,9 +157,11 @@ class Gemma4Decoder(Decoder):
 
 
 class Gemma4Layer(PleLayer):
-    """Layer ``i``: unscaled attention over normed q, k and v, its heads and
-    whole context a global layer's where it is one, else within the window,
-    and a double-wide MLP on a shared layer where ``use_double_wide_mlp``.
+    """Layer ``i``: unscaled attention over normed q, k and v, and a double-wide MLP.
+
+    Its heads and whole context are a global layer's where it is one,
+    else within the window, and the MLP is double-wide on a shared layer
+    where ``use_double_wide_mlp``.
     """
 
     def __init__(self, c: Gemma4Config, i: int):
@@ -172,8 +178,9 @@ class Gemma4Layer(PleLayer):
 
 
 class Gemma4(CausalLM):
-    """Gemma 4's text decoder on ``config``'s shape and a checkpoint's
-    ``weights``, the decoder's under ``model.language_model`` (the towers'
+    """Gemma 4's text decoder on ``config``'s shape and a checkpoint's ``weights``.
+
+    The decoder's weights are under ``model.language_model`` (the towers'
     are ``Gemma4Multimodal``'s), from its checkpoint and ``tokenizer.json``.
     """
 
@@ -223,9 +230,7 @@ class Gemma4(CausalLM):
         return super().lookup(ids) * float(bfloat16(np.sqrt(self.config.hidden_size)))
 
     def layer(self, call, i, w, x):
-        """Layer ``i`` on ``x``, its input from the call's embeddings and
-        ids.
-        """
+        """Layer ``i`` on ``x``, its input from the call's embeddings and ids."""
         c, m, P = self.config, self.model, self.config.ple_dim
         projection = m.per_layer_model_projection.weight[i * P : (i + 1) * P]
         ple = F.linear(call.embeddings, projection, precision=c.precision)
@@ -237,15 +242,17 @@ class Gemma4(CausalLM):
         return w(x, call, (ple + token.reshape(ple.shape)) * 2**-0.5)
 
     def head(self, x):
-        """The tied head's logits, soft-capped where the config says."""
+        """Return the tied head's logits, soft-capped where the config says."""
         logits, cap = super().head(x), self.config.final_logit_softcapping
         return logits if cap is None else Tanh.step(logits * (1 / cap)) * cap
 
 
 @dataclasses.dataclass(frozen=True)
 class Gemma4MultimodalConfig(Gemma4Config):
-    """``Gemma4Config``, its towers' shapes, ``vision`` and ``audio``, and
-    the markers either side of a run of an image's or a clip's placeholders.
+    """``Gemma4Config``, its towers' shapes, ``vision`` and ``audio``.
+
+    And the markers either side of a run of an image's or a clip's
+    placeholders.
     """
 
     boi_token_id: int = dataclasses.field(
@@ -273,8 +280,9 @@ class Gemma4MultimodalConfig(Gemma4Config):
         )
 
     def expand(self, tokens, raw: dict[int, tuple]) -> list[int]:
-        """``tokens`` with each placeholder of ``raw`` a run of its tower's
-        soft tokens between its markers, as ``Gemma4Processor`` lays it out.
+        """Return ``tokens``, each ``raw`` placeholder a run of its tower's soft tokens.
+
+        Between its markers, as ``Gemma4Processor`` lays it out.
         """
         vision, audio = self.vision, self.audio
         assert vision is not None and audio is not None
@@ -296,8 +304,9 @@ class Gemma4MultimodalConfig(Gemma4Config):
 
 
 class Gemma4Multimodal(Multimodal):
-    """Gemma 4 whole: its text decoder (``Gemma4``) with its vision and audio
-    towers' soft tokens at their placeholders. A call takes an image as
+    """Gemma 4 whole: its text decoder (``Gemma4``) with its vision and audio towers.
+
+    Soft tokens go at their placeholders. A call takes an image as
     ``(image, max_soft_tokens)`` and a clip as ``(waveform,)``, by placeholder.
     """
 
@@ -315,7 +324,7 @@ class Gemma4Multimodal(Multimodal):
 
     @property
     def hugging_face(self):
-        """transformers' Gemma 4, imported only where a golden is recorded."""
+        """Transformers' Gemma 4, imported only where a golden is recorded."""
         from .hugging_face import HuggingFaceGemma4
 
         return HuggingFaceGemma4

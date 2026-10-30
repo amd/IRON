@@ -47,7 +47,7 @@ device_fit: ContextVar[bool] = ContextVar("device_fit", default=True)
 
 
 def spelled(v: Any) -> str:
-    """A field's value as it may appear in a device symbol (``Operator.name``)."""
+    """Return a field's value as it appears in a device symbol (``Operator.name``)."""
     if isinstance(v, bool):
         return str(int(v))
     if isinstance(v, float):
@@ -68,9 +68,11 @@ def spelled(v: Any) -> str:
 
 @dataclasses.dataclass(frozen=True)
 class Built:
-    """What ``build()`` made: the ``objects`` the array declares (Workers,
-    Flows, PacketFlows, Locks, TileDmas, Buffers, pinned DmaEndpoints) and each
-    core's ``Rtp``. A ``sequence`` needing more reads a subclass via ``rt.built``.
+    """What ``build()`` made: the array's objects and each core's ``Rtp``.
+
+    The objects are what the array declares (Workers, Flows, PacketFlows,
+    Locks, TileDmas, Buffers, pinned DmaEndpoints). A ``sequence`` needing
+    more reads a subclass via ``rt.built``.
     """
 
     objects: list
@@ -78,8 +80,10 @@ class Built:
 
 
 class Operator(jit.Operator, library=True):
-    """An operator: a subclass's body is its declaration (mlir-aie's ``param()``,
-    ``tunable()``, ``per_call()``; aie.iron's ``In``/``Out``/``InOut``).
+    """An operator, whose subclass body is its declaration.
+
+    The declaration is mlir-aie's ``param()``, ``tunable()``, ``per_call()``;
+    aie.iron's ``In``/``Out``/``InOut``.
 
     Attributes:
         bound_values: The graph expression bound to each per-call value, by name.
@@ -147,8 +151,9 @@ class Operator(jit.Operator, library=True):
         self._check_complete()
 
     def _check_complete(self) -> None:
-        """Run ``compatible()`` once every tunable is known, where the
-        device fit is checked.
+        """Run ``compatible()`` once every tunable is known.
+
+        The device fit is checked there.
         """
         params = self.declaration.params
         if device_fit.get() and not any(
@@ -157,25 +162,28 @@ class Operator(jit.Operator, library=True):
             self.compatible()
 
     def build(self) -> Built:
-        """Build the array for the bound device on ``layout()``: bind every
-        operand's lanes to fifo ends and give each core reading ``Value``s an
-        ``Rtp``.
+        """Build the array for the bound device on ``layout()``.
+
+        Bind every operand's lanes to fifo ends and give each core reading
+        ``Value``s an ``Rtp``.
         """
         raise NotImplementedError(f"{type(self).__name__}.build() is not implemented")
 
     def tolerance(self) -> Tolerance | None:
-        """What each output of the resolved operator is judged by; None where
-        nothing bounds it, which check mode refuses.
+        """Return what each output of the resolved operator is judged by.
+
+        None where nothing bounds it, which check mode refuses.
         """
         return None
 
     def ops(self) -> int:
-        """The arithmetic operations one call performs, for its throughput."""
+        """Return the arithmetic operations one call performs, for its throughput."""
         return sum(b.elements for b in self.outputs)
 
     def array_device(self):
-        """The device the array's Program is built for: the bound device
-        unless the array takes a part of it.
+        """Return the device the array's Program is built for.
+
+        The bound device unless the array takes a part of it.
         """
         return self.dev
 
@@ -184,7 +192,7 @@ class Operator(jit.Operator, library=True):
         return type(self)._external
 
     def xclbin_operator(self) -> Self:
-        """The operator whose xclbin this one runs when it runs alone."""
+        """Return the operator whose xclbin this one runs when it runs alone."""
         return self
 
     def exported_design(self):
@@ -195,9 +203,10 @@ class Operator(jit.Operator, library=True):
     def shim_columns(
         cls, dev, num_channels: int = 1, flags: Mapping[str, Any] | None = None
     ) -> int:
-        """How many of ``dev``'s columns fit the class's streams in the shim DMA
-        budget: a ``replicate`` stream costs once per channel, one with no
-        ``per=`` once, and a ``when=`` flag ``flags`` leaves out is its default.
+        """How many of ``dev``'s columns fit its streams in the shim DMA budget.
+
+        A ``replicate`` stream costs once per channel, one with no ``per=``
+        once, and a ``when=`` flag ``flags`` leaves out is its default.
 
         Raises:
             Unresolvable: Not even one column's streams fit.
@@ -228,9 +237,11 @@ class Operator(jit.Operator, library=True):
 
     @classmethod
     def call_operands(cls, args, kwargs) -> tuple[dict[str, Any], list, dict[str, Any]]:
-        """Split a call into inputs by name (in declaration order), outputs and
-        other keywords, as ``(x, ..., [outputs...], *, weight=None, ...)``
-        would: an optional input is a keyword, so never taken for an output.
+        """Split a call into inputs by name, outputs and other keywords.
+
+        As ``(x, ..., [outputs...], *, weight=None, ...)`` would: inputs are
+        in declaration order, and an optional input is a keyword, so never
+        taken for an output.
         """
         ins = [m for m in cls.declaration.operands if m.fills]
         required = [m.name for m in ins if m.when is None]
@@ -282,9 +293,11 @@ class Operator(jit.Operator, library=True):
     def addressed_inputs(
         self, addresses: Mapping[str, int], rng: np.random.Generator
     ) -> dict[str, np.ndarray]:
-        """For a run alone, the content of each input that names device
-        ``addresses`` (every buffer's, by name), by buffer name: random bytes
-        there would steer the DMA anywhere. Other inputs are filled at random.
+        """Return the content of each input that names a device address.
+
+        For a run alone: ``addresses`` is every buffer's device address, by
+        buffer name; random bytes there would steer the DMA anywhere. Other
+        inputs are filled at random.
         """
         return {}
 
@@ -299,9 +312,10 @@ class Operator(jit.Operator, library=True):
         outputs: Mapping[str, np.ndarray] | None = None,
         values: Mapping[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
-        """Run ``reference`` on buffers by name, returning each written one's
-        result by name: inputs positional in declaration order, an output or
-        per-call value as a keyword where it names a parameter.
+        """Run ``reference`` on buffers by name, returning each written one's result.
+
+        Inputs are positional in declaration order, an output or per-call
+        value a keyword where it names a parameter.
 
         Raises:
             ValueError: The inputs or outputs are not this operator's, or the
@@ -340,9 +354,11 @@ class Operator(jit.Operator, library=True):
         tolerance: Tolerance,
         expected: Mapping[str, np.ndarray] | None = None,
     ) -> dict[str, Verdict]:
-        """Each written buffer's verdict against its reference result, every
-        mapping by buffer name. ``expected`` defaults to ``reference`` on
-        ``inputs``, which a bound tolerance is also evaluated on.
+        """Each written buffer's verdict against its reference result.
+
+        Every mapping is by buffer name. ``expected`` defaults to
+        ``reference`` on ``inputs``, which a bound tolerance is also
+        evaluated on.
 
         Raises:
             ValueError: ``written`` or ``expected`` name other buffers than it
@@ -383,8 +399,9 @@ class Operator(jit.Operator, library=True):
         return cls.sequence is not Operator.sequence
 
     def design_key(self):
-        """Identity for sharing a build: equal keys generate byte-identical
-        MLIR. A graph's bound per-call values add their names.
+        """Identity for sharing a build: equal keys generate byte-identical MLIR.
+
+        A graph's bound per-call values add their names.
         """
         cls, own = super().design_key()
         if self.bound_values:
@@ -399,9 +416,10 @@ class Operator(jit.Operator, library=True):
         return super().resolved(self.dev if dev is None else dev)
 
     def replace(self, **changes: Any) -> Self:
-        """A copy with ``changes``, which may name any parameter, the
-        ``bound_values`` or the ``pinned`` tunables; checked against the
-        device once complete.
+        """Return a copy with ``changes``, checked against the device once complete.
+
+        ``changes`` may name any parameter, the ``bound_values`` or the
+        ``pinned`` tunables.
         """
         bound_values = changes.pop("bound_values", self.bound_values)
         pinned = changes.pop("pinned", self.pinned)
@@ -419,9 +437,11 @@ class Operator(jit.Operator, library=True):
         return self.replace(**fixed, **tunables)
 
     def _domains(self, dev) -> dict[str, tuple[Any, ...]]:
-        """The values the tuner tries per searched tunable (not ``pinned``, nor
-        one whose domain is empty here), asked of the resolved operator. A tuple
-        gains the resolved value in front if missing; an ``Enum`` puts it first.
+        """Return the values the tuner tries per searched tunable.
+
+        Asked of the resolved operator; skips ``pinned`` tunables and one
+        whose domain is empty here. A tuple gains the resolved value in
+        front if missing; an ``Enum`` puts it first.
         """
         found = {}
         for name in self.declaration.tunables:
@@ -483,9 +503,11 @@ class Operator(jit.Operator, library=True):
 
     @functools.cached_property
     def _derived_under_bound(self) -> dict[str, int | None]:
-        """Each derived value that reads a bound extent: the number it is at
-        every bound (``n - n``, ``(4 * n) // n``), or None where it follows the
-        call. ``use_value`` forgets it; any other change makes a new instance.
+        """Each derived value that reads a bound extent.
+
+        The number it is at every bound (``n - n``, ``(4 * n) // n``), or
+        None where it follows the call. ``use_value`` forgets it; any other
+        change makes a new instance.
         """
         bound = self.bound_extents
         if not bound:
@@ -537,14 +559,17 @@ class Operator(jit.Operator, library=True):
         return at
 
     def extent_unit(self, buffer: str) -> int | None:
-        """The rows of ``buffer`` one lane takes at a time under a bound.
+        """Return the rows of ``buffer`` one lane takes at a time under a bound.
 
         ``None`` for the stream tile's rows; ``0`` when a bound does not shorten it.
         """
         return None
 
     def value(self, name: str) -> Value:
-        """The device word of value ``name`` (an extent attribute reads as an integer)."""
+        """Return the device word of value ``name``.
+
+        An extent attribute reads as an integer.
+        """
         try:
             return self._values[name]
         except KeyError:
@@ -563,8 +588,10 @@ class Operator(jit.Operator, library=True):
         vars(self).pop("_derived_under_bound", None)
 
     def compile(self) -> Artifacts:
-        """Build, once, the image this operator runs on outside a graph; returns
-        its artifacts (the xclbin, the instruction stream and their cache entry).
+        """Build, once, the image this operator runs on outside a graph.
+
+        Returns its artifacts (the xclbin, the instruction stream and their
+        cache entry).
         """
         if self._image is None:
             # The image layer builds on this one: imported here to break the cycle.
@@ -574,9 +601,11 @@ class Operator(jit.Operator, library=True):
         return self._image.compile().artifacts
 
     def __call__(self, *args, **kwargs):
-        """Run this operator's own image on device tensors, one per declared
-        buffer in order, ``kwargs`` its ``DispatchTime`` values by device symbol.
-        Inside a graph's body, record a step on handles, ``kwargs`` per-call values.
+        """Run this operator's own image on device tensors, one per declared buffer.
+
+        In order, ``kwargs`` its ``DispatchTime`` values by device symbol.
+        Inside a graph's body, record a step on handles instead, ``kwargs``
+        per-call values.
         """
         if (recorder := graph_recorder.get()) is not None:
             return recorder.call(self, args, kwargs)
@@ -591,8 +620,9 @@ class Operator(jit.Operator, library=True):
         return self._image(*args, **kwargs)
 
     def _bind(self) -> None:
-        """Bind each member: an operand an ``Operand``, a per-call value a
-        ``Value`` in ``_values``, which an extent reads as its number.
+        """Bind each member: an operand an ``Operand``, a per-call value a ``Value``.
+
+        Per-call values go in ``_values``, which an extent reads as its number.
         """
         vars(self).pop("_derived_under_bound", None)
         self._bound: dict[str, Any] = {}
@@ -621,9 +651,10 @@ class Operator(jit.Operator, library=True):
                         self._values[word.name] = word
 
     def layout(self) -> Self:
-        """This operator as its cores see it, each operand bound to the view and
-        its values this operator's; an extent reads as its number only where
-        the key holds its bound.
+        """Return this operator as its cores see it.
+
+        Each operand is bound to the view and its values this operator's; an
+        extent reads as its number only where the key holds its bound.
         """
         view = object.__new__(type(self))
         vars(view).update(

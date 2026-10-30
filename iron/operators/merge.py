@@ -48,9 +48,10 @@ extern "C" void merge_rows(int32_t *ids, int32_t *merge, int32_t b) {
 
 
 class Merge(Operator):
-    """The row each position of `ids` takes from the text's embeddings and
-    the towers' soft tokens: for each placeholder `(token, at)`, the j-th
-    `token` takes row `at + j`; any other id its own position.
+    """The row each position of `ids` takes from the text's embeddings and the towers' soft tokens.
+
+    For each placeholder `(token, at)`, the j-th `token` takes row
+    `at + j`; any other id its own position.
 
     Given `before`, the count of each placeholder before these ids (a
     prompt chunk after others), the j-th takes row `at + before + j`.

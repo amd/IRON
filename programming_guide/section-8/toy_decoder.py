@@ -42,8 +42,9 @@ TOY = LlamaConfig(
 
 
 def toy_shapes(config: LlamaConfig) -> dict[str, tuple[int, ...]]:
-    """Every tensor of a Hugging Face Llama checkpoint of ``config``'s
-    shape, by name: the model's own, then each layer's.
+    """Return every tensor of a Hugging Face Llama checkpoint of ``config``'s shape, by name.
+
+    The model's own, then each layer's.
     """
     E, F, V = config.hidden_size, config.intermediate_size, config.vocab_size
     Q = config.num_attention_heads * config.head_dim
@@ -66,8 +67,10 @@ def toy_shapes(config: LlamaConfig) -> dict[str, tuple[int, ...]]:
 
 
 def toy_checkpoint(config: LlamaConfig, directory) -> Checkpoint:
-    """A sparse ``.safetensors`` file of ``config``'s shape: its header and
-    a hole, which ``Checkpoint.tree("random", seed)`` never reads.
+    """Write a sparse ``.safetensors`` file of ``config``'s shape.
+
+    Its header and a hole, which ``Checkpoint.tree("random", seed)``
+    never reads.
     """
     named = toy_shapes(config)
     path = Path(directory) / "toy.safetensors"

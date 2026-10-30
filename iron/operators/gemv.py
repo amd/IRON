@@ -75,9 +75,10 @@ def _cases(cls, dev: Device):
 
 
 class GEMV(Operator):
-    """``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per
-    mv.cc call; B rides each lane's A stream ahead of its rows so every
-    input channel of a column can carry A.
+    """``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per mv.cc call.
+
+    B rides each lane's A stream ahead of its rows so every input channel
+    of a column can carry A.
     """
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A, op.B)))
@@ -168,8 +169,10 @@ class GEMV(Operator):
             )
 
     def _legal_kernel_vector_size(self) -> int:
-        """The vector width the matvec kernel is compiled at: mv.cc's
-        static_asserts, ``K % w == 0`` and ``K >= 2 * w``, checked here.
+        """Return the vector width the matvec kernel is compiled at.
+
+        mv.cc's static_asserts, ``K % w == 0`` and ``K >= 2 * w``,
+        checked here.
         """
         legal = [
             size
@@ -321,8 +324,9 @@ class GEMV(Operator):
         return Built(workers, rtps)
 
     def sequence(self, rt):
-        """Per batch and lane: B's head tile, then A's rows. C drains are
-        issued first: an undrained C would stop A.
+        """Sequence per batch and lane: B's head tile, then A's rows.
+
+        C drains are issued first: an undrained C would stop A.
         """
         if self.repeat > 1:
             for buf in (self.A, self.C):

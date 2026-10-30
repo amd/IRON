@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Gemma 4 E2B whole on the NPU, from the real checkpoint: its text decoder
-and its vision and audio towers as one ``iron.lm.Multimodal``
-(``Gemma4Multimodal``), against transformers' own Gemma 4 and processors in
-float32 (``hugging_face.py``), its logits recorded in ``golden.npz`` beside
-the checkpoint. Each case is a chat turn over COCO photos and LibriSpeech
-clips of several sizes, one compile serving them all: the prompt's
-next-token distribution and ``STEPS - 1`` teacher-forced decode steps'.
+"""Gemma 4 E2B whole on the NPU, from the real checkpoint.
+
+Its text decoder and its vision and audio towers as one
+``iron.lm.Multimodal`` (``Gemma4Multimodal``), against transformers'
+own Gemma 4 and processors in float32 (``hugging_face.py``), its
+logits recorded in ``golden.npz`` beside the checkpoint. Each case is
+a chat turn over COCO photos and LibriSpeech clips of several sizes,
+one compile serving them all: the prompt's next-token distribution
+and ``STEPS - 1`` teacher-forced decode steps'.
 """
 
 import numpy as np
@@ -51,9 +53,10 @@ CASES = {
 
 
 def inputs(config, tokenizer, case: str):
-    """The prompt of ``CASES[case]``, as the chat template and
-    ``Gemma4Processor`` lay it out, the model's ``raw`` by placeholder, and
-    the photo and the clip as the reference takes them (empty: none).
+    """Return the prompt of ``CASES[case]``, as the chat template and ``Gemma4Processor`` lay it out.
+
+    The model's ``raw`` by placeholder, and the photo and the clip as
+    the reference takes them (empty: none).
     """
     question, name, speech = CASES[case]
     content, raw = [], {}

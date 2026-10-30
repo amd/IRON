@@ -64,8 +64,9 @@ MIN_M = M_TILE * ROWS
 
 
 def _parameter_words(op) -> list[int]:
-    """The image's block of eight words: k_iters, M, N, bias, epilogue mode,
-    clamp on, clamp min, clamp max.
+    """Return the image's block of eight words.
+
+    k_iters, M, N, bias, epilogue mode, clamp on, clamp min, clamp max.
     """
     return [
         op.K // K_TILE,
@@ -153,10 +154,11 @@ class Shipped(
     parameters = Block(PARAMETER_WORDS, derive=_parameter_words)
 
     def build(self) -> Built:
-        """What the sequence reaches of the image: the shim channels each
-        operand's lanes stream on, each core's parameter block at the
-        address its program reads, and the lock it waits on, which the
-        sequence releases (``parameter_locks``).
+        """Return what the sequence reaches of the image.
+
+        The shim channels each operand's lanes stream on, each core's
+        parameter block at the address its program reads, and the lock it
+        waits on, which the sequence releases (``parameter_locks``).
         """
         mm2s, s2mm = DMAChannelDir.MM2S, DMAChannelDir.S2MM
         shims = [Tile(c, 0) for c in range(COLS)]
@@ -212,9 +214,10 @@ class Shipped(
         return f"FLM_MM_{FASTFLOWLM_COMMIT[:8]}_{dev.name}"
 
     def sequence(self, rt) -> None:
-        """The parameter blocks, then their release, then one transfer per
-        (column-block, row-block, leg), in the order the memtiles consume:
-        column-block outermost, then row-block, then column.
+        """Write the parameter blocks, then their release, then one transfer per leg.
+
+        One per (column-block, row-block, leg), in the order the memtiles
+        consume: column-block outermost, then row-block, then column.
         """
         # Every word precedes the first release, so no core reads a
         # half-written block.

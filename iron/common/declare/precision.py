@@ -7,9 +7,11 @@ from enum import StrEnum
 
 
 class Precision(StrEnum):
-    """The roundings a matmul may make beyond its reference's, as
-    ``torch.set_float32_matmul_precision`` names them; each level allows the one
-    above's and more, and a matmul takes the fastest kernel its level allows.
+    """The roundings a matmul may make beyond its reference's.
+
+    Named as ``torch.set_float32_matmul_precision`` names them; each level
+    allows the one above's and more, and a matmul takes the fastest kernel
+    its level allows.
 
     - ``HIGHEST``: f32 partial sums, rounded once to the output's type.
     - ``HIGH``: partial sums rounded to the output's type per K tile.

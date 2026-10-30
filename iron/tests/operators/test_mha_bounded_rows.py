@@ -167,8 +167,10 @@ def test_a_chunk_attends_over_the_cache_before_it(full_elf):
 
 @pytest.mark.parametrize("window", [None, 511], ids=["causal", "sliding"])
 def test_a_call_starts_its_queries_anywhere(window):
-    """Calls from positions no block divides, as a chat turn's: each query
-    attends over the keys before it, within Gemma 3's window if sliding.
+    """Run calls from positions no block divides, as a chat turn's.
+
+    Each query attends over the keys before it, within Gemma 3's window
+    if sliding.
     """
     chunk = Chunk(window)
     rng = np.random.default_rng(1)
@@ -198,11 +200,13 @@ def test_a_call_starts_its_queries_anywhere(window):
 
 
 def test_what_lies_past_the_bound_does_not_reach_the_output():
-    """Q past a chunk's rows holds whatever the step before left there, and
+    """Check that the valid rows are bit for bit the same whatever lies past the bound.
+
+    Q past a chunk's rows holds whatever the step before left there, and
     the cache past its last position whatever an earlier prompt did; the
-    last block's DMA reads both. The valid rows are bit for bit the same
-    whatever they hold, even NaN: P·V reads V's rows past the bound, and
-    through bfp16 a row shares its exponent with the seven beside it.
+    last block's DMA reads both. Even NaN: P·V reads V's rows past the
+    bound, and through bfp16 a row shares its exponent with the seven
+    beside it.
     """
     net = Chunk().compile(
         q=(CHUNK, HEADS, D), k=(KV_HEADS, CACHE, D), v=(KV_HEADS, CACHE, D)
@@ -225,9 +229,11 @@ def test_what_lies_past_the_bound_does_not_reach_the_output():
 
 
 def test_one_pipeline_fills_k_and_v_past_the_task_queue():
-    """Gemma 3's prompt chunk on one pipeline: K and V are re-read in eight
-    fills per KV group, past the shim's queue of four. A fill past it waits
-    for a free slot, which the cores free only while O drains.
+    """Run Gemma 3's prompt chunk on one pipeline.
+
+    K and V are re-read in eight fills per KV group, past the shim's
+    queue of four. A fill past it waits for a free slot, which the cores
+    free only while O drains.
     """
     heads, kv_heads, d, chunk, cache = 4, 1, 256, 2048, 4096
     rng = np.random.default_rng(2)

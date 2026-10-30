@@ -23,9 +23,11 @@ if TYPE_CHECKING:
 
 
 class Value(PerCallMember):
-    """A ``per_call()`` member bound to one operator (``op.value("count")``, or
-    ``op.count`` unless an extent): per call when a graph binds it, else written
-    once per build before the first DMA. A core reads it through its ``Rtp``.
+    """A ``per_call()`` member bound to one operator (``op.value("count")``).
+
+    Or ``op.count`` unless an extent. Per call when a graph binds it, else
+    written once per build before the first DMA. A core reads it through
+    its ``Rtp``.
 
     Attributes:
         derive: The once-per-build word, or ``words`` of them, from the
@@ -57,9 +59,9 @@ class Value(PerCallMember):
 
     @property
     def per_call(self) -> bool:
-        """A call gives this value: a graph binds it, or its ``derive``
-        reads an extent a graph bounds. A value with no ``derive`` and no
-        ``bounds`` always is.
+        """A graph binds this value, or ``derive`` reads a bound extent.
+
+        A value with no ``derive`` and no ``bounds`` is always per call.
         """
         op = self.op
         if self.bounds is not None:
@@ -70,9 +72,10 @@ class Value(PerCallMember):
 
     @property
     def dispatch(self) -> bool:
-        """The instruction stream is regenerated around this value every
-        call: one every call gives, on an operator with an exported design.
-        A full ELF cannot carry it.
+        """The instruction stream is regenerated around this value every call.
+
+        One every call gives, on an operator with an exported design. A
+        full ELF cannot carry it.
         """
         return (
             self.derive is None
@@ -82,8 +85,10 @@ class Value(PerCallMember):
 
     @property
     def symbol(self) -> str:
-        """The device symbol the host writes it through: an exported design's own
-        name, else ``<instance>_<value>[_<its graph value>]``; a derived value's
+        """The device symbol the host writes it through.
+
+        An exported design's own name, else
+        ``<instance>_<value>[_<its graph value>]``; a derived value's
         names all the instance's graph values, so differently bound ones differ.
         """
         if self.op.exported_design() is not None:
@@ -99,8 +104,9 @@ class Value(PerCallMember):
 
     @property
     def in_scratchpad(self) -> bool:
-        """The cores read this value from the parameter scratchpad: a build
-        gave it a ``ScratchpadParameter`` (a per-call value on a full ELF).
+        """The cores read this value from the parameter scratchpad.
+
+        A build gave it a ``ScratchpadParameter`` (a per-call value on a full ELF).
         """
         return isinstance(self.param, ScratchpadParameter)
 
@@ -109,8 +115,9 @@ class Value(PerCallMember):
 
 
 class ExtentWord(Value):
-    """The tiles per lane of one operand under a bound, rounded up to whole
-    tiles: a value the library adds per bound operand.
+    """The tiles per lane of one operand under a bound, rounded up to whole tiles.
+
+    A value the library adds per bound operand.
     """
 
     def __init__(self, op: Operator, extent: str, buffer: str, axis: int) -> None:
@@ -118,7 +125,7 @@ class ExtentWord(Value):
         self.extent, self.buffer, self.axis = extent, buffer, axis
 
     def tiles(self, op) -> int:
-        """The word on ``op``; reads the extent first, which makes it per call."""
+        """Return the word on ``op``; reads the extent first, which makes it per call."""
         extent = getattr(op, self.extent)
         return ceildiv(extent, self.divisor(op))
 

@@ -17,9 +17,11 @@ from aie.utils.npukernel import NPUKernel
 
 
 class Xclbin(NPUKernel):
-    """A downloaded xclbin pinned by ``sha256``, fetched over https into the JIT
-    cache's ``prebuilt/<filename>`` on first read of ``xclbin_path``. As an
-    ``image=`` it has no instructions; a build runs it ``with_instructions``.
+    """A downloaded xclbin pinned by ``sha256``.
+
+    Fetched over https into the JIT cache's ``prebuilt/<filename>`` on
+    first read of ``xclbin_path``. As an ``image=`` it has no
+    instructions; a build runs it ``with_instructions``.
 
     Args:
         **kernel: ``NPUKernel``'s other arguments, kept as ``settings``.
@@ -35,8 +37,10 @@ class Xclbin(NPUKernel):
         return self.fetch()
 
     def with_instructions(self, insts_path, **kernel) -> Xclbin:
-        """This image running ``insts_path``, with ``kernel`` (as `NPUKernel`
-        takes it) over the declared settings.
+        """Return this image running ``insts_path``.
+
+        With ``kernel`` (as `NPUKernel` takes it) over the declared
+        settings.
         """
         run = Xclbin(
             self.url,
@@ -54,8 +58,10 @@ class Xclbin(NPUKernel):
         return super().__call__(*args, **kwargs)
 
     def fetch(self, directory=None) -> Path:
-        """The downloaded file in ``directory`` (``NPU_CACHE_HOME``'s
-        ``prebuilt/`` by default), fetched unless the pinned content is there.
+        """Return the downloaded file in ``directory``.
+
+        ``NPU_CACHE_HOME``'s ``prebuilt/`` by default, fetched unless
+        the pinned content is there.
 
         Raises:
             ValueError: The URL is not https.

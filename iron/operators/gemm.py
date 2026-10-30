@@ -103,9 +103,11 @@ FIFO_DEPTH = 2
 
 
 class GEMMPlacement(StrEnum):
-    """The tiles GEMM's array pins; aiecc's placer takes the rest. The shim
-    ends stay pinned in both: unpinned, a large b_col_maj GEMM piles too many
-    active buffer descriptors onto one shim tile. The tuner tries both.
+    """The tiles GEMM's array pins; aiecc's placer takes the rest.
+
+    The shim ends stay pinned in both: unpinned, a large b_col_maj GEMM
+    piles too many active buffer descriptors onto one shim tile. The tuner
+    tries both.
     """
 
     SHIMS = "shims"
@@ -113,11 +115,12 @@ class GEMMPlacement(StrEnum):
 
 
 class GEMM(Operator):
-    """``C = A @ B``, tiled m x k x n: A broadcasts across columns and splits
-    across cores' rows, B splits across columns and broadcasts across rows, C
-    joins across rows and splits across columns. Used wherever
-    ``flm.ProjectionGEMM`` doesn't apply (a weight operand, MEDIUM/HIGH, two
-    or more rows).
+    """``C = A @ B``, tiled m x k x n.
+
+    A broadcasts across columns and splits across cores' rows, B splits
+    across columns and broadcasts across rows, C joins across rows and
+    splits across columns. Used wherever ``flm.ProjectionGEMM`` doesn't
+    apply (a weight operand, MEDIUM/HIGH, two or more rows).
     """
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A,)))
@@ -210,8 +213,9 @@ class GEMM(Operator):
         return self.tile_n * self.num_aie_columns
 
     def mac_block(self, dev) -> tuple[int, int, int]:
-        """What ``tile_m``, ``tile_k`` and ``tile_n`` must each be a multiple
-        of: mm.cc's r x s x t blocks, two in m and n (four in m on aie2).
+        """Return what ``tile_m``, ``tile_k`` and ``tile_n`` must each be a multiple of.
+
+        mm.cc's r x s x t blocks, two in m and n (four in m on aie2).
         ``dev=None`` assumes aie2p's geometry.
         """
         r, s, t = kernels.mm.mac_dims(
@@ -266,7 +270,7 @@ class GEMM(Operator):
             )
 
     def _auto_tiling(self, dev) -> tuple[int, int]:
-        """The rows of ``dev``'s cores C is split over, and ``tile_m``."""
+        """Return the rows of ``dev``'s cores C is split over, and ``tile_m``."""
         block, _, _ = self.mac_block(dev)
         rows = len(dev.core_rows)
         widths = [self.tile_m] if self.tile_m else [64, 32, 16, 8]
@@ -350,15 +354,16 @@ class GEMM(Operator):
 
     @property
     def wider_accumulator(self) -> bool:
-        """Whether ``build()`` and ``GEMM.held()`` build HIGHEST's f32
-        buffer for a bf16 C's partial sums, beside C's own.
+        """Check whether ``build()`` and ``GEMM.held()`` build HIGHEST's f32 buffer.
+
+        For a bf16 C's partial sums, beside C's own.
         """
         return self.precision == Precision.HIGHEST and (
             np.dtype(self.output_dtype) == np.dtype(bfloat16)
         )
 
     def matmul(self):
-        """The m x k x n kernel each core runs."""
+        """Return the m x k x n kernel each core runs."""
         return kernels.linalg.mm(
             self.tile_m,
             self.tile_k,
@@ -643,8 +648,9 @@ class GEMM(Operator):
         return 2 * self.M * self.K * self.N
 
     def matmul_calls(self, values: Mapping[str, int]) -> int:
-        """The fewest matmul kernel calls the busiest core makes in a step
-        at per-call ``values``: each output tile under the bound takes one
+        """Return the fewest matmul kernel calls the busiest core makes in a step.
+
+        At per-call ``values``: each output tile under the bound takes one
         call per K tile under it.
         """
         calls = (
@@ -655,7 +661,7 @@ class GEMM(Operator):
         return ceildiv(calls, self.n_aie_rows * self.num_aie_columns)
 
     def reference(self, A, B):
-        """``A @ B`` over the first ``valid_k`` of K, a bounded call's."""
+        """Compute ``A @ B`` over the first ``valid_k`` of K, a bounded call's."""
         # float32, not mm_ref's float64, which doubles the weight's host copy.
         a = A.astype(np.float32)[:, : self.valid_k]
         b = (B.T if self.b_col_maj else B).astype(np.float32)[: self.valid_k]
@@ -663,10 +669,11 @@ class GEMM(Operator):
         return C.astype(self.output_dtype)
 
     def tolerance(self) -> Tolerance:
-        """C's roundings, in units of 2^-8 of what each rounds: 2 of ``|A| @
-        |B|`` for C's own, 2 per K tile's partial sum but the last when C
-        accumulates in bf16, and 2 more for bfp16 inputs; measured at no more
-        than 0.83 of this over K = 256-8192 on npu2.
+        """Return C's roundings, in units of 2^-8 of what each rounds.
+
+        2 of ``|A| @ |B|`` for C's own, 2 per K tile's partial sum but the
+        last when C accumulates in bf16, and 2 more for bfp16 inputs;
+        measured at no more than 0.83 of this over K = 256-8192 on npu2.
         """
         if np.issubdtype(np.dtype(self.input_dtype), np.integer):
             return Tolerance.exact(note="integer matmul")

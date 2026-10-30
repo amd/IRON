@@ -8,9 +8,7 @@ from iron.common import WeightedRowwise
 
 
 class RMSNorm(WeightedRowwise):
-    """AIE-accelerated RMS Normalization of each row, optionally times a
-    learned weight row.
-    """
+    """AIE-accelerated RMS Normalization of each row, optionally times a learned weight row."""
 
     # The epsilon under the root: 1e-5 by default; a model states its own.
     epsilon: float = param(default=1e-5, array=True)

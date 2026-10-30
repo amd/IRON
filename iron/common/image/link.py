@@ -56,12 +56,13 @@ class FullELF:
 
     @staticmethod
     def in_arena(scratch: list[str], residents: Mapping[str, object]) -> list[str]:
-        """The scratch buffers an arena holds: all of them, one argument."""
+        """Return the scratch buffers an arena holds: all of them, one argument."""
         return scratch
 
     def link(self, seq) -> Path:
-        """Build the ELF once and return its path; keyed on
-        ``Composition.identity``, a cache hit composes nothing.
+        """Build the ELF once and return its path.
+
+        Keyed on ``Composition.identity``, a cache hit composes nothing.
         """
         design = self.design
         if design is None:
@@ -105,7 +106,7 @@ class FullELF:
         return Path(entry.elf)
 
     def record(self, designs: list[Operator], sharing: list[tuple[str, ...]]):
-        """The designs' records, the ELF's cache entry, and no one stream."""
+        """Return the designs' records, the ELF's cache entry, and no one stream."""
         assert self.design is not None, "link() built the image"
         records = tuple(
             Design(name=f"op{i}_{type(op).__name__}", operators=sharing[i])
@@ -119,8 +120,10 @@ class FullELF:
 
 @dataclass(frozen=True)
 class Link:
-    """Where one design of an xclbin chain runs: its own ``design``'s stream on
-    ``configuration``'s xclbin (None on a shipped image), as ``kernel``.
+    """Where one design of an xclbin chain runs.
+
+    Its own ``design``'s stream on ``configuration``'s xclbin (None on a
+    shipped image), as ``kernel``.
     """
 
     design: CompilableDesign
@@ -130,9 +133,11 @@ class Link:
 
 
 class PerStep:
-    """An xclbin and stream per design, each linked onto the previous
-    (``CompilableDesign.chain``), ``image`` the last link; a design on another
-    operator's ``configuration``, or a shipped image, runs that xclbin unlinked.
+    """An xclbin and stream per design, each linked onto the previous.
+
+    Via ``CompilableDesign.chain``, ``image`` the last link; a design on
+    another operator's ``configuration``, or a shipped image, runs that
+    xclbin unlinked.
     """
 
     def __init__(self, check: bool = False):
@@ -142,14 +147,16 @@ class PerStep:
 
     @staticmethod
     def in_arena(scratch: list[str], residents: Mapping[str, object]) -> list[str]:
-        """The scratch buffers the arena holds: only the residents, as the rest
-        live in this image's own pool (``PerStepCallable``).
+        """Return the scratch buffers the arena holds: only the residents.
+
+        The rest live in this image's own pool (``PerStepCallable``).
         """
         return [r for r in scratch if r in residents]
 
     def link(self, seq) -> Path:
-        """Build the chain once and return the last link, or the last design's
-        own image where none is linked.
+        """Build the chain once and return the last link.
+
+        Or the last design's own image where none is linked.
         """
         if self.image is not None:
             return self.image
@@ -209,8 +216,9 @@ class PerStep:
         return self.image
 
     def record(self, designs: list[Operator], sharing: list[tuple[str, ...]]):
-        """The designs' records, the first design's cache entry, and its
-        stream where it is the only one.
+        """Return the designs' records and the first design's cache entry.
+
+        Also its stream where it is the only one.
         """
         links = [self.links[id(op)] for op in designs]
         records = tuple(

@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A host step (``iron.on_host``) between a graph's steps: recorded, planned,
-run in the reference, and on the device between a full ELF's commands or an
+"""A host step (``iron.on_host``) between a graph's steps: recorded, planned.
+
+Run in the reference, and on the device between a full ELF's commands or an
 xclbin's steps.
 """
 
@@ -21,8 +22,10 @@ R, C = 16, 256
 
 
 class Reversed(iron.Graph):
-    """``x + x`` on the first ``rows`` rows; the host writes those rows of
-    it, reversed, into ``staged`` (zero below); then ``x + staged``.
+    """``x + x`` on the first ``rows`` rows.
+
+    The host writes those rows of it, reversed, into ``staged`` (zero
+    below); then ``x + staged``.
     """
 
     def __init__(self):
@@ -71,8 +74,9 @@ def test_a_full_elf_ends_a_command_at_a_host_step(npu2):
 
 
 def test_a_version_with_no_tensor_splits_at_a_host_step_too(npu2):
-    """A version taking no tensor stays one command so a loop can drain into
-    it; one with a host step has no loop, so it splits there.
+    """A version taking no tensor stays one command so a loop can drain into it.
+
+    One with a host step has no loop, so it splits there.
     """
     x = iron.state((R, C))
     out = iron.state((R, C))
@@ -136,8 +140,10 @@ def test_a_host_write_to_a_state_a_step_writes_is_refused(npu2):
     ids=["full_elf", "each_step"],
 )
 def test_a_host_step_runs_between_the_device_s_steps(full_elf):
-    """Each call reads what the first step wrote, cut to its rows, and the
-    second step reads what the host wrote: numpy's, exactly, call after call.
+    """Each call reads what the first step wrote, cut to its rows.
+
+    And the second step reads what the host wrote: numpy's, exactly, call
+    after call.
     """
     g = Reversed()
     version = g.compile(x=(R, C), full_elf=full_elf)

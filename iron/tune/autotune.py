@@ -52,8 +52,9 @@ KERNEL_CHECKS = "https://xilinx.github.io/mlir-aie/kernel-checks/{npu}/latest.js
 
 
 def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
-    """Each kernel's cycles per call as mlir-aie's nightly last timed it on
-    ``dev``'s NPU, by ``ExternalFunction.recipe_key``; empty where they
+    """Return each kernel's cycles per call as mlir-aie's nightly last timed it.
+
+    On ``dev``'s NPU, by ``ExternalFunction.recipe_key``; empty where they
     cannot be read or this mlir-aie names no builds.
     """
     if not hasattr(ExternalFunction, "recipe_key"):
@@ -79,9 +80,10 @@ def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
 def least_us(
     op: GEMM, values: Mapping[str, int], cycles, core_mhz: float
 ) -> float | None:
-    """A step time ``op`` cannot beat at per-call ``values``: its busiest
-    core's matmul calls at ``cycles`` per call, at ``core_mhz``. None where
-    ``cycles`` does not hold its matmul.
+    """Return a step time ``op`` cannot beat at per-call ``values``.
+
+    Its busiest core's matmul calls at ``cycles`` per call, at ``core_mhz``.
+    None where ``cycles`` does not hold its matmul.
     """
     per_call = cycles.get(op.layout().matmul().recipe_key)
     if per_call is None:
@@ -104,11 +106,12 @@ class Point:
 
 @dataclasses.dataclass(frozen=True)
 class Timed:
-    """One call of a recorded graph, as its operators are timed in: the
-    graph's per-call values, and what any buffer whose contents a step's
-    time follows holds, by graph buffer name. ``points`` are the values its
-    calls run at, where they differ from call to call: an operator whose
-    work they change is timed at each (``op_points``).
+    """One call of a recorded graph, as its operators are timed in.
+
+    The graph's per-call values, and what any buffer whose contents a
+    step's time follows holds, by graph buffer name. ``points`` are the
+    values its calls run at, where they differ from call to call: an
+    operator whose work they change is timed at each (``op_points``).
     """
 
     recording: Recording
@@ -119,8 +122,9 @@ class Timed:
     def op_values(
         self, op: Operator, values: Mapping[str, int] | None = None
     ) -> dict[str, int]:
-        """The per-call values ``op`` is written in this call, or at the
-        graph's ``values``, by member name.
+        """Return the per-call values ``op`` is written in this call.
+
+        Or at the graph's ``values``, by member name.
         """
         # A table's address the graph fills in; a word step alone reads none.
         values = {
@@ -152,7 +156,7 @@ class Timed:
         return [(1.0, self.op_values(op))]
 
     def op_inputs(self, op: Operator) -> dict[str, np.ndarray]:
-        """What ``op``'s buffers hold in this call, by ``op``'s buffer name."""
+        """Return what ``op``'s buffers hold in this call, by ``op``'s buffer name."""
         return {
             buf.name: self.contents[ref.root]
             for step in self.recording.steps
@@ -165,11 +169,14 @@ class Timed:
 def settings(
     op: Operator, dev, pinned: frozenset[str] = frozenset()
 ) -> list[dict[str, Any]]:
-    """``op``'s tunables as resolved for ``dev``, then every other
-    combination of their ``Operator.domains`` it resolves at and whose
-    derived transfers fit their descriptors, each design once.
+    """Return ``op``'s tunables as resolved for ``dev``, then every other combination.
+
+    Every other combination of their ``Operator.domains`` it resolves at
+    and whose derived transfers fit their descriptors, each design once.
 
     Args:
+        op: The operator whose tunables are searched.
+        dev: The device each combination is resolved for.
         pinned: Tunables another operator of its shape pins, held at the
             value ``op`` resolves them to.
     """
@@ -213,8 +220,9 @@ def _identity(op: Operator, dev) -> str:
 
 
 def refusal(op: Operator) -> str | None:
-    """Why the placer refuses ``op`` alone on a device, or None if it fits;
-    kept under ``FIT_CACHE``, keyed on its recipe and its build environment
+    """Return why the placer refuses ``op`` alone on a device, or None if it fits.
+
+    Kept under ``FIT_CACHE``, keyed on its recipe and its build environment
     (the device and the tools), so a placer fix is seen.
     """
     design = OperatorDesign(op.resolved())
@@ -231,11 +239,12 @@ def refusal(op: Operator) -> str | None:
 
 
 def line(found: Sequence[dict[str, Any]], through: dict[str, Any], name: str):
-    """The settings of ``found`` a coordinate descent tries for tunable
-    ``name`` from ``through``: at each of its values, the setting that
-    differs from ``through`` in the fewest other tunables, the first in
-    ``found`` on a tie. Where tunables are coupled, a value is reached by
-    moving the others with it.
+    """Return the settings of ``found`` a coordinate descent tries for tunable ``name``.
+
+    From ``through``: at each of its values, the setting that differs from
+    ``through`` in the fewest other tunables, the first in ``found`` on a
+    tie. Where tunables are coupled, a value is reached by moving the
+    others with it.
     """
     at: dict[Hashable, list[dict[str, Any]]] = {}
     for s in found:
@@ -273,8 +282,9 @@ class Trial:
 
 
 class Shape:
-    """The operators of the calls one profile entry covers: one class at one
-    set of dimensions (``Profile.dims``).
+    """The operators of the calls one profile entry covers.
+
+    One class at one set of dimensions (``Profile.dims``).
     """
 
     def __init__(self, op: Operator):
@@ -294,8 +304,10 @@ class Shape:
         return (self.cls, tuple(self.dims.items()))
 
     def named(self, covering: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        """The dimensions its entry names: those off their field's default,
-        and every one an entry ``covering`` it names, so it outranks them.
+        """Return the dimensions its entry names.
+
+        Those off their field's default, and every one an entry
+        ``covering`` it names, so it outranks them.
         """
         defaults = Profile.dims(self.cls, {})
         names = {n for matched in covering for n in matched}
@@ -311,8 +323,9 @@ class Shape:
 
 
 def shapes(calls: Sequence[Timed], dev) -> list[Shape]:
-    """The shapes of ``calls``' operators that have a tunable to search, in
-    the order the calls first run them, each operator design once.
+    """Return the shapes of ``calls``' operators that have a tunable to search.
+
+    In the order the calls first run them, each operator design once.
     """
     found: dict[Hashable, Shape] = {}
     seen: set[str] = set()
@@ -343,13 +356,14 @@ def time_shape(
     core_mhz: float | None = None,
     log: Callable[[str], None] = print,
 ) -> list[Trial]:
-    """Each setting of ``shape`` timed, the recorded one first: every setting
-    its operators share and the placer takes where there are at most
-    ``exhaustive``, else those a coordinate descent tries, each tunable's
-    ``line`` through the fastest setting taken so far, until a pass over the
-    tunables moves it no further. A setting whose ``least_us`` at
-    ``cycles`` and ``core_mhz`` is no faster than the fastest taken so far
-    is not timed.
+    """Each setting of ``shape`` timed, the recorded one first.
+
+    Every setting its operators share and the placer takes where there are
+    at most ``exhaustive``, else those a coordinate descent tries, each
+    tunable's ``line`` through the fastest setting taken so far, until a
+    pass over the tunables moves it no further. A setting whose
+    ``least_us`` at ``cycles`` and ``core_mhz`` is no faster than the
+    fastest taken so far is not timed.
     """
     found = settings(shape.members[0][0], dev, shape.pinned)
     for op, _, _ in shape.members[1:]:
@@ -416,8 +430,9 @@ def _frozen(tunables: Mapping[str, Any]) -> tuple:
 def _least(
     shape: Shape, s: dict[str, Any], cycles, core_mhz: float, dev
 ) -> float | None:
-    """``least_us`` of ``shape`` at setting ``s``, weighted as ``_time``
-    weighs its operators' steps; None where any is unknown.
+    """``least_us`` of ``shape`` at setting ``s``, weighted as ``_time`` weighs steps.
+
+    Over ``shape``'s operators; None where any is unknown.
     """
     total = 0.0
     for op, points, _ in shape.members:
@@ -440,9 +455,10 @@ def _time(
     remeasure: bool,
     log: Callable[[str], None],
 ) -> tuple[list[Trial], float]:
-    """``found``'s settings (the recorded one first) timed and judged at each
-    point of each of ``shape``'s operators, and the recorded one's weighted
-    step time; one that does not build is refused.
+    """``found``'s settings timed and judged, and the recorded one's weighted step time.
+
+    Timed and judged at each point of each of ``shape``'s operators, the
+    recorded one first; one that does not build is refused.
     """
     recorded_us = 0.0
     deltas = [0.0] * len(found)
@@ -516,19 +532,25 @@ def autotune(
     core_mhz: float | None = None,
     log: Callable[[str], None] = print,
 ) -> Profile:
-    """``profile`` with an entry for each shape of ``calls`` (``shapes``)
-    naming the fastest setting taken (``time_shape``), the recorded one where
-    none gains. Its entries covering any of those shapes are replaced; the
-    rest are kept.
+    """Return ``profile`` with an entry for each shape of ``calls`` (``shapes``).
+
+    Each entry names the fastest setting taken (``time_shape``), the
+    recorded one where none gains. ``profile``'s entries covering any of
+    those shapes are replaced; the rest are kept.
 
     Args:
         calls: The calls whose graphs were recorded under ``profile``.
+        dev: The device the calls' operators are timed on.
+        profile: The profile whose unreplaced entries are kept.
         full_elf: How the calls' graphs are packaged.
+        timing: How each setting's steps are timed.
+        repeats: How many times each setting's steps are timed.
         cache: Where each time is kept across runs (``Cache.here()``).
         remeasure: Time again what ``cache`` holds.
         cycles: Kernel cycles per call by recipe key (``kernel_cycles``).
         core_mhz: The cores' clock the runtime reads (``core_mhz``), which
             ``cycles`` are timed at; None times every setting.
+        log: Where progress and the gains found are logged.
     """
     found = shapes(calls, dev)
     covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}

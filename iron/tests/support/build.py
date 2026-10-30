@@ -13,9 +13,11 @@ from iron.common.design import BuiltArray, OperatorDesign, OperatorRuntime
 
 
 class Task(NamedTuple):
-    """One shim task of a generated sequence, as its text gives it. The fifos
-    are unnamed (mlir-aie's DeviceConfiguration names them), so a test finds
-    a task by the handle it was built from, or by its argument and offset.
+    """One shim task of a generated sequence, as its text gives it.
+
+    The fifos are unnamed (mlir-aie's DeviceConfiguration names them), so a
+    test finds a task by the handle it was built from, or by its argument
+    and offset.
     """
 
     ssa: int
@@ -53,7 +55,7 @@ def _tasks(module) -> tuple[str, list[Task]]:
 
 
 def generated_sequence(op, full_elf=True) -> tuple[str, list[Task]]:
-    """The runtime sequence ``op`` builds to, and its shim tasks in order.
+    """Return the runtime sequence ``op`` builds to, and its shim tasks in order.
 
     An xclbin's per-call values are its dispatch parameters, which only the
     design's generator declares, so it is generated as it would be compiled.
@@ -64,9 +66,10 @@ def generated_sequence(op, full_elf=True) -> tuple[str, list[Task]]:
 
 
 def built(op) -> tuple[str, list[Task], Operator]:
-    """``generated_sequence``'s full ELF build, alongside the resolved copy
-    of ``op`` whose operands' lanes were bound to build it, to match a
-    task's ``lane`` back to the handle that moved it.
+    """``generated_sequence``'s full ELF build, alongside the resolved copy of ``op``.
+
+    Whose operands' lanes were bound to build it, to match a task's
+    ``lane`` back to the handle that moved it.
     """
     array = BuiltArray(OperatorDesign(op))
     prog = Program(

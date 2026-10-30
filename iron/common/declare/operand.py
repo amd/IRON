@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""An operator's operands: the host buffers it is called with, each with an
-``obj_shape=`` its own stream into the array.
+"""An operator's operands: the host buffers it is called with.
+
+Each with an ``obj_shape=`` is its own stream into the array.
 """
 
 from __future__ import annotations
@@ -31,9 +32,11 @@ active_runtime: ContextVar[OperatorRuntime | None] = ContextVar(
 
 
 class Operand:
-    """An operand as one operator holds it (``op.x``): the resolved ``In``, ``Out``
-    or ``InOut``, read through on use (a shape may follow a tunable), and its
-    bound ``lane_handles``. An ``InOut`` keeps what its stream does not drain.
+    """An operand as one operator holds it (``op.x``).
+
+    The resolved ``In``, ``Out`` or ``InOut``, read through on use (a shape
+    may follow a tunable), and its bound ``lane_handles``. An ``InOut``
+    keeps what its stream does not drain.
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
@@ -72,8 +75,9 @@ class Operand:
 
     @property
     def flat_type(self):
-        """The runtime-sequence argument type: this buffer flattened to 1-D,
-        in its own element units (blocks, for block float).
+        """The runtime-sequence argument type: this buffer flattened to 1-D.
+
+        In its own element units (blocks, for block float).
         """
         return np.ndarray[(self.elements,), np.dtype[self.dtype]]
 
@@ -84,8 +88,9 @@ class Operand:
 
     @property
     def l1_depth(self) -> int:
-        """The depth a core-side fifo of this operand's tiles can have: two,
-        or one when a tile spans more than a hardware bank of the bound
+        """The depth a core-side fifo of this operand's tiles can have: two, or one.
+
+        One when a tile spans more than a hardware bank of the bound
         device's core memory.
         """
         dev = self.op.dev
@@ -95,8 +100,9 @@ class Operand:
         return 1 if obj_bytes > bank else 2
 
     def bind(self, handles) -> None:
-        """Bind each lane, in lane order, to the fifo end ``build()`` built for
-        it; a one-lane operand may take its handle bare.
+        """Bind each lane, in lane order, to the fifo end ``build()`` built for it.
+
+        A one-lane operand may take its handle bare.
 
         Raises:
             ValueError: Not one handle per lane, or the operand is bound already.
@@ -112,9 +118,11 @@ class Operand:
         self.lane_handles = handles
 
     def pin(self, endpoints: list[DmaEndpoint]) -> None:
-        """Pin each lane, in lane order, to a shim ``DmaEndpoint`` (MM2S for an
-        input, S2MM for an output) of routes built elsewhere, so its transfers
-        are shim DMA tasks; ``build()`` returns the endpoints among its objects.
+        """Pin each lane, in order, to a shim ``DmaEndpoint`` built elsewhere.
+
+        ``DmaEndpoint`` is MM2S for an input, S2MM for an output, so its
+        transfers are shim DMA tasks; ``build()`` returns the endpoints
+        among its objects.
 
         Raises:
             ValueError: An endpoint moves the other way or names no channel,
@@ -151,20 +159,25 @@ class Operand:
         repeat_parameter: Value | None = None,
         managed: bool = True,
     ):
-        """Fill ``lane`` of this operand's stream from the host in
-        ``sequence(rt)``; returns the ``Task``. A per-call ``Value`` is patched
-        into the descriptor on a full ELF; on an xclbin it regenerates the
+        """Fill ``lane`` of this operand's stream from the host in ``sequence(rt)``.
+
+        Returns the ``Task``. A per-call ``Value`` is patched into the
+        descriptor on a full ELF; on an xclbin it regenerates the
         instruction stream every call.
 
         Args:
             tap: The walk over ``source``; all of it where None.
             lane: Required unless the operand has one lane.
+            group: The ``TaskGroup`` this transfer's ``Task`` joins, or None
+                for its own wait; an unmanaged transfer joins no group.
             wait: End with an await rather than a free.
             source: Another input whose data rides this operand's lane.
             offset_parameter: A per-call element offset of ``tap``.
             length_parameter: A per-call count of ``length_unit`` elements
                 sizing ``tap``'s outermost dimension below the iteration, in
                 whole 16-byte units; ``tap`` must fit one descriptor.
+            length_unit: The element count one ``length_parameter`` unit
+                counts, matching a descriptor dimension's inner product.
             repeat_parameter: A per-call count of extra runs of ``tap``, at
                 most its outermost size less one.
             managed: False hands the queue slot and descriptors to the
@@ -198,9 +211,10 @@ class Operand:
         repeat_parameter: Value | None = None,
         managed: bool = True,
     ):
-        """Drain lane ``lane`` of this operand's stream to the host; the
-        arguments are ``fill``'s, and a drain the sequence must see finish
-        before it ends passes ``wait=True``.
+        """Drain lane ``lane`` of this operand's stream to the host.
+
+        The arguments are ``fill``'s, and a drain the sequence must see
+        finish before it ends passes ``wait=True``.
         """
         return self._runtime().transfer(
             "drain",
@@ -237,22 +251,25 @@ class Operand:
         return 0
 
     def extent_axis(self, extent: PerCallMember) -> int | None:
-        """The axis of the resolved shape the parameter ``extent`` bounds
-        sizes, or None.
+        """Return the axis of the resolved shape that ``extent`` bounds sizes.
+
+        None where no axis matches, or ``extent`` bounds no parameter.
         """
         return axis_of(self.dims, extent.bounds.name, self.op)
 
     def fits(self, tap: TensorAccessPattern) -> bool:
-        """Whether one buffer descriptor of a lane's shim tile holds
-        ``tap``, a pattern over this operand.
+        """Whether one buffer descriptor of a lane's shim tile holds ``tap``.
+
+        ``tap`` is a pattern over this operand.
         """
         # Every shim tile's descriptor is alike; column 0's stands for a lane's.
         return self.op.dev.dma_bd_fits(0, 0, tap, self.dtype)
 
     def split(self, elements: int) -> tuple[int, int] | None:
-        """A contiguous run of ``elements`` of this operand as ``(d1, d0)``:
-        the largest ``d0`` a lane's shim descriptor holds as its innermost
-        dimension with ``d1`` beside it, or None where no ``d0`` does.
+        """Return a contiguous run of ``elements`` of this operand as ``(d1, d0)``.
+
+        ``d0`` is the largest a lane's shim descriptor holds as its
+        innermost dimension with ``d1`` beside it, or None where no ``d0`` does.
         """
         for d0 in range(elements, 0, -1):
             if elements % d0:
@@ -270,8 +287,9 @@ class Operand:
         return None
 
     def extent_unit(self, axis: int) -> int:
-        """The rows along ``axis`` of one round-robin unit under a bound:
-        ``Operator.extent_unit``, else the stream tile's.
+        """Return the rows along ``axis`` of one round-robin unit under a bound.
+
+        ``Operator.extent_unit``'s, else the stream tile's.
         """
         unit = self.op.extent_unit(self.name)
         if unit is not None:
@@ -282,8 +300,9 @@ class Operand:
 
     @property
     def bounded(self) -> tuple[Value, int, Value] | None:
-        """``(extent, axis, word)`` when a bound extent sizes an axis, ``word``
-        the per-call tiles per lane.
+        """``(extent, axis, word)`` when a bound extent sizes an axis.
+
+        ``word`` is the per-call tiles per lane.
         """
         op = self.op
         for name in op.bound_extents:
@@ -296,8 +315,9 @@ class Operand:
     def transfers(
         self,
     ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]]:
-        """The derived ``(lane, tap, length_parameter, length_unit)`` transfers:
-        the whole buffer (one lane or replicated) or one block of the first
+        """Return the derived ``(lane, tap, length_parameter, length_unit)`` transfers.
+
+        The whole buffer (one lane or replicated) or one block of the first
         non-batch axis per lane; under a bound, round-robin by tile instead.
 
         Raises:
@@ -373,7 +393,10 @@ class Operand:
         return out
 
     def __getitem__(self, index) -> TensorAccessPattern:
-        """A basic slice of this operand, as the pattern ``fill``/``drain`` take."""
+        """Return a basic slice of this operand.
+
+        As the pattern ``fill``/``drain`` take.
+        """
         return TensorAccessPattern.full(self.shape)[index]
 
     def __repr__(self) -> str:
@@ -381,8 +404,9 @@ class Operand:
 
 
 def axis_of(dims: tuple, name: str, op) -> int | None:
-    """The axis of ``dims`` resolved on ``op`` that the parameter ``name``
-    sizes, or None. A ``T | None`` dimension that is None is left out, and a
+    """Return the axis of ``dims`` resolved on ``op`` that the parameter ``name`` sizes.
+
+    Or None. A ``T | None`` dimension that is None is left out, and a
     ``Select`` is the branch its flag picks.
     """
     axis = 0
@@ -404,7 +428,7 @@ def axis_of(dims: tuple, name: str, op) -> int | None:
 
 
 def param_names(dims: tuple) -> set[str]:
-    """The parameters ``dims`` name, through ``Select``."""
+    """Return the parameters ``dims`` name, through ``Select``."""
     out: set[str] = set()
     for d in dims:
         if isinstance(d, OperatorParam):

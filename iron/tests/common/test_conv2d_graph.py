@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""iron.lm.Conv2d device-free: its reference, its operators', is torch's
-convolution in each of its forms (recorded in ``goldens/conv2d.npz``), a
-caller's per-call rows bound it, and it refuses padding gathered patches do
-not hold.
+"""iron.lm.Conv2d device-free.
+
+Its reference, its operators', is torch's convolution in each of its
+forms (recorded in ``goldens/conv2d.npz``), a caller's per-call rows
+bound it, and it refuses padding gathered patches do not hold.
 """
 
 import numpy as np
@@ -43,9 +44,10 @@ def draw(case):
 
 
 class Convolution:
-    """torch's convolution of ``x`` by ``weight`` in float32, bordered, as
-    ``conv`` lays its output out, rounded once to bfloat16 as the graph
-    rounds it: ``logits``, as ``Golden`` reads it.
+    """torch's convolution of ``x`` by ``weight`` in float32, bordered.
+
+    As ``conv`` lays its output out, rounded once to bfloat16 as the
+    graph rounds it: ``logits``, as ``Golden`` reads it.
     """
 
     def __init__(self, conv: Conv2d, groups: int):

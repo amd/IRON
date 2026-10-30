@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What a model is judged by: Hugging Face transformers' own model in
-float32 (``HuggingFace``), its logits recorded once to a file (``Golden``)
-so a test or an accuracy run needs neither torch nor transformers, which
-are not IRON's requirements, only to record.
+"""What a model is judged by.
+
+Hugging Face transformers' own model in float32 (``HuggingFace``), its
+logits recorded once to a file (``Golden``) so a test or an accuracy
+run needs neither torch nor transformers, which are not IRON's
+requirements, only to record.
 """
 
 # torch and transformers: only recording imports them.
@@ -23,8 +25,9 @@ RECORD = "IRON_RECORD_GOLDENS"
 
 
 class Golden:
-    """Logits by token sequence and any arrays beside it (a clip, an
-    image), each the logits after a sequence's last token, read from
+    """Logits by token sequence and any arrays beside it (a clip, an image).
+
+    Each is the logits after a sequence's last token, read from
     ``path`` (an ``.npz``).
 
     Args:
@@ -49,7 +52,7 @@ class Golden:
         self.rows = self.read()
 
     def read(self) -> dict:
-        """The file's rows; none if it is stale and this records."""
+        """Return the file's rows; none if it is stale and this records."""
         if not self.path.exists():
             return {}
         with np.load(self.path) as f:
@@ -65,8 +68,9 @@ class Golden:
         )
 
     def logits(self, tokens, *arrays) -> np.ndarray:
-        """The logits after ``tokens`` given ``arrays``, which the
-        reference's ``logits`` takes after them.
+        """Return the logits after ``tokens`` given ``arrays``.
+
+        The reference's ``logits`` takes ``arrays`` after ``tokens``.
         """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         digest = hashlib.sha256(tokens.tobytes())
@@ -96,7 +100,7 @@ class Golden:
         return self.rows[key]
 
     def write(self):
-        """The rows to the file, replaced whole so no reader sees half."""
+        """Write the rows to the file, replaced whole so no reader sees half."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         held: dict[str, Any] = (
             {} if self.fingerprint is None else {"fingerprint": self.fingerprint}
@@ -107,8 +111,9 @@ class Golden:
 
 
 def fingerprint(*values) -> str:
-    """A digest of ``values``, a weights tree's leaves by name (``leaves``):
-    arrays by their bytes, shapes and types, anything else by ``repr``.
+    """Return a digest of ``values``, a weights tree's leaves by name (``leaves``).
+
+    Arrays by their bytes, shapes and types, anything else by ``repr``.
     """
     from .checkpoint import leaves
 
@@ -124,9 +129,10 @@ def fingerprint(*values) -> str:
 
 
 def _text(value) -> str:
-    """``repr(value)``, but a dataclass names only its fields off their
-    defaults, so adding a field with a default, or changing one, does not
-    change existing fingerprints.
+    """Return ``repr(value)``, but a dataclass names only its fields off their defaults.
+
+    So adding a field with a default, or changing one, does not change
+    existing fingerprints.
     """
     if not dataclasses.is_dataclass(value) or isinstance(value, type):
         return repr(value)
@@ -152,10 +158,10 @@ def _is_default(field: dataclasses.Field, value) -> bool:
 
 
 class HuggingFace:
-    """transformers' own model in float32, of the auto class
-    ``model_class`` names (a causal model's by default): a checkpoint
-    directory's (``load``) or one built from an IRON config and weights
-    (``build``).
+    """transformers' own model in float32, of the auto class ``model_class`` names.
+
+    A causal model's by default: a checkpoint directory's (``load``) or
+    one built from an IRON config and weights (``build``).
     """
 
     model_class = "AutoModelForCausalLM"
@@ -173,10 +179,11 @@ class HuggingFace:
 
     @classmethod
     def build(cls, model_type: str, config, weights, **json) -> "HuggingFace":
-        """``model_type``'s model on ``config``'s fields as its
-        ``config.json`` names them, ``json``'s merged in, over ``weights``
-        written to a checkpoint and loaded, so transformers renames (and
-        stacks) them as it loads one.
+        """Build ``model_type``'s model on ``config``'s fields as its ``config.json`` names them.
+
+        ``json``'s merged in, over ``weights`` written to a checkpoint
+        and loaded, so transformers renames (and stacks) them as it
+        loads one.
 
         Raises:
             ValueError: ``weights`` lacks a parameter the model holds, other
@@ -217,7 +224,7 @@ class HuggingFace:
 
 
 def _merged(a: dict, b: dict) -> dict:
-    """``a`` with ``b``'s keys, an object in both merged key by key."""
+    """Return ``a`` with ``b``'s keys, an object in both merged key by key."""
     return a | {
         k: _merged(a[k], v) if isinstance(v, dict) and isinstance(a.get(k), dict) else v
         for k, v in b.items()

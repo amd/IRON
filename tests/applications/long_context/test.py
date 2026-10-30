@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Every decoder application serves its whole context from one compile,
-a library guarantee: nothing a step runs grows with the context but the
-state it holds a row of per position, and on the NPU the deepest decode
-step (at ``max_seq_len - 1``) and the deepest prompt chunk (the one
-holding that position) agree with the graph's own reference, at 4096,
-16384, 32768, 65536 and the whole context the host fits (or
-``--max-seq-len``).
+"""Every decoder application serves its whole context from one compile, a library guarantee.
+
+Nothing a step runs grows with the context but the state it holds a row of
+per position, and on the NPU the deepest decode step (at
+``max_seq_len - 1``) and the deepest prompt chunk (the one holding that
+position) agree with the graph's own reference, at 4096, 16384, 32768,
+65536 and the whole context the host fits (or ``--max-seq-len``).
 ``--random-weights SEED`` runs on weights drawn in the checkpoint's shapes.
 """
 
@@ -40,10 +40,11 @@ DEEP_KL = 0.1
 
 @dataclasses.dataclass(frozen=True)
 class Application:
-    """A decoder application, a checkpoint its test runs and the forms it
-    is held to here: the full ELF on NPU2 where ``full_elf``, and an xclbin a
-    step on the ``each_step`` devices. CI holds every checkpoint, so one
-    missing there fails rather than skips.
+    """A decoder application, a checkpoint its test runs and the forms it is held to here.
+
+    The full ELF on NPU2 where ``full_elf``, and an xclbin a step on the
+    ``each_step`` devices. CI holds every checkpoint, so one missing there
+    fails rather than skips.
     """
 
     model: type[CausalLM]
@@ -87,9 +88,7 @@ APPLICATIONS = {
 
 
 def test_every_decoder_application_is_held_to_its_context():
-    """Each application whose package exports a ``CausalLM`` has a
-    checkpoint here.
-    """
+    """Each application whose package exports a ``CausalLM`` has a checkpoint here."""
     found = set()
     for package in pkgutil.iter_modules(iron.applications.__path__):
         module = importlib.import_module(f"iron.applications.{package.name}")
@@ -104,9 +103,10 @@ def test_every_decoder_application_is_held_to_its_context():
 @pytest.mark.parametrize("version", ["decode", "prompt"])
 @pytest.mark.parametrize("application", list(APPLICATIONS))
 def test_nothing_grows_with_the_context(application, version):
-    """At three contexts, every activation, every array and every input of
-    a step is the same, and each piece of held state that differs holds a
-    row per position: its size is affine in the context.
+    """At three contexts, every activation, every array and every input of a step is the same.
+
+    Each piece of held state that differs holds a row per position: its
+    size is affine in the context.
     """
     app = APPLICATIONS[application]
     require(app.path, app.path.with_name("config.json"))
@@ -171,9 +171,10 @@ SWEEP = [
 
 @pytest.fixture(scope="module", params=SWEEP)
 def loaded(request):
-    """An application's checkpoint and model, compiled and loaded once at
-    a context size: a full ELF, or with ``_each_step`` an xclbin a step, the
-    host starting each on the token the last one drew.
+    """Return an application's checkpoint and model, compiled and loaded once at a context size.
+
+    A full ELF, or with ``_each_step`` an xclbin a step, the host starting
+    each on the token the last one drew.
     """
     form, context = request.param
     app = APPLICATIONS[form.removesuffix("_each_step")]
@@ -201,9 +202,7 @@ def test_decode_deep_in_the_cache(loaded, record_property):
 
 @pytest.mark.extensive
 def test_prompt_deep_in_the_cache(loaded, record_property):
-    """The chunk holding ``max_seq_len - 1``, its rows: the longest
-    dispatch a prompt makes, over the whole context.
-    """
+    """The chunk holding ``max_seq_len - 1``, its rows: the longest dispatch a prompt makes, over the whole context."""
     app, model = loaded
     rows = model.config.prefill_chunk
     check_deep_prompt(model, rows, app.deep_kl, record=record_property)
@@ -212,9 +211,7 @@ def test_prompt_deep_in_the_cache(loaded, record_property):
 @pytest.mark.extensive
 @pytest.mark.bench
 def test_prompt_time_at_8k(loaded, record_property):
-    """Time to the first token after an 8192-token prompt, four whole
-    chunks, each timed run a fresh prompt.
-    """
+    """Time to the first token after an 8192-token prompt, four whole chunks, each timed run a fresh prompt."""
     app, model = loaded
     if model.config.max_seq_len < 8192:
         pytest.skip(f"the context served here is {model.config.max_seq_len}")
@@ -223,8 +220,6 @@ def test_prompt_time_at_8k(loaded, record_property):
 
 @pytest.mark.extensive
 def test_prompt_time_at_the_whole_context(loaded, record_property):
-    """Time to the first token after a prompt filling the whole context
-    served, once: the longest a prompt takes.
-    """
+    """Time to the first token after a prompt filling the whole context served, once: the longest a prompt takes."""
     app, model = loaded
     check_prompt_time(model, model.config.max_seq_len, 1, record=record_property)

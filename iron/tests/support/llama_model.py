@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3.2's shape at a size a host test runs in seconds, its weights
-drawn or unread from a checkpoint of that shape written here."""
+"""Llama 3.2's shape at a size a host test runs in seconds.
+
+Its weights drawn or unread from a checkpoint of that shape written here.
+"""
 
 import dataclasses
 import hashlib
@@ -72,8 +74,9 @@ CHECKPOINTS = tempfile.TemporaryDirectory(prefix="iron-llama-")
 
 
 def shapes(config: DecoderConfig) -> dict[str, tuple[int, ...]]:
-    """Each tensor of a Hugging Face Llama checkpoint of ``config``'s shape,
-    by name: the model's own, then each layer's.
+    """Return each tensor of a Hugging Face Llama checkpoint of ``config``'s shape, by name.
+
+    The model's own, then each layer's.
     """
     c = config
     E, F, V = c.hidden_size, c.intermediate_size, c.vocab_size
@@ -100,9 +103,10 @@ def checkpoint(
     named: dict[str, tuple[int, ...]] | None = None,
     dtype: str = "BF16",
 ) -> Checkpoint:
-    """A ``.safetensors`` checkpoint of ``config``'s shape, every tensor
-    zeros, written once a shape. The file is sparse: its header and a hole,
-    which neither a random nor an unread tree reads.
+    """Write a ``.safetensors`` checkpoint of ``config``'s shape, every tensor zeros.
+
+    Written once a shape. The file is sparse: its header and a hole, which
+    neither a random nor an unread tree reads.
 
     Args:
         config: The decoder's shape.
@@ -131,8 +135,9 @@ def checkpoint(
 
 
 def small(seed=0, **config) -> Llama:
-    """The model at ``SMALL``'s shape, as changed by ``config``, under
-    ``PROFILE``, its weights drawn at ``seed``.
+    """Return the model at ``SMALL``'s shape, as changed by ``config``, under ``PROFILE``.
+
+    Its weights drawn at ``seed``.
     """
     config = dataclasses.replace(SMALL, **config)
     model = Llama(config, checkpoint(config).tree("random", seed))

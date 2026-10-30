@@ -39,8 +39,10 @@ class _Built(Built):
 
 
 def _draw(op):
-    """A q4nx vocabulary and a token with its RMS weight: negative minima and
-    small scales keep the logits in the range a softcap of 30 bends.
+    """Draw a q4nx vocabulary and a token with its RMS weight.
+
+    Negative minima and small scales keep the logits in the range a
+    softcap of 30 bends.
     """
     rng = np.random.default_rng(1)
     groups = K_TILE // GROUP
@@ -60,9 +62,10 @@ def _draw(op):
 
 
 class LMHead(Operator):
-    """Softcapped logits from a q4nx vocabulary, with the RMS norm folded in:
-    ``x`` holds the token then its RMS weight, ``w`` the q4nx vocabulary,
-    ``y`` the logits. See README.md.
+    """Softcapped logits from a q4nx vocabulary, with the RMS norm folded in.
+
+    ``x`` holds the token then its RMS weight, ``w`` the q4nx
+    vocabulary, ``y`` the logits. See README.md.
     """
 
     test = Testing(
@@ -132,9 +135,11 @@ class LMHead(Operator):
         return 2 * self.vocab * self.dim
 
     def build(self) -> Built:
-        """Each core RMS-normalizes the token once. Each round, it
-        accumulates one weight block per K_TILE in-features into M_TILE
-        out-features and applies the tanh softcap to the sums.
+        """Each core RMS-normalizes the token once.
+
+        Each round, it accumulates one weight block per K_TILE
+        in-features into M_TILE out-features and applies the tanh
+        softcap to the sums.
         """
         cols, rows, dim = self.cols, self.rows, self.dim
         rounds = self.vocab // (cols * rows * M_TILE)
@@ -251,16 +256,15 @@ class LMHead(Operator):
         )
 
     def projection_error(self, w, x) -> float:
-        """The bound on the projection's error: a share of the largest logit
-        before the softcap.
+        """Return the bound on the projection's error.
+
+        A share of the largest logit before the softcap.
         """
         uncapped = type(self)(dim=self.dim, vocab=self.vocab, softcap=1e30)
         return PROJECTION_ERROR * float(np.abs(uncapped.reference(w, x)).max())
 
     def reference(self, w, x):
-        """The softcapped logits of X for W, computed in float64 and rounded
-        to Y's bf16.
-        """
+        """Return the softcapped logits of X for W, computed in float64 and rounded to Y's bf16."""
         weights = reference.dequantize(w, self.dim, self.vocab, self.resolved().rows)
         logits = reference.reference(weights, np.asarray(x, np.float64), self.softcap)
         return logits.astype(bfloat16)

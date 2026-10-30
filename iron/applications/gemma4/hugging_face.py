@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hugging Face's own Gemma 4 in float32 with its processors, what the
-goldens beside the checkpoint are recorded from. It needs torch,
-torchvision and transformers, which are not IRON's requirements, only to
-record.
+"""Hugging Face's own Gemma 4 in float32 with its processors.
+
+What the goldens beside the checkpoint are recorded from. It needs
+torch, torchvision and transformers, which are not IRON's
+requirements, only to record.
 """
 
 import numpy as np
@@ -15,10 +16,11 @@ from iron.lm.golden import HuggingFace
 
 
 class HuggingFaceGemma4(HuggingFace):
-    """transformers' ``Gemma4ForConditionalGeneration`` in float32 and the
-    checkpoint's image processor and feature extractor; the per-layer token
-    table stays bfloat16 (a lookup widens it exactly, and its ``sqrt(256)``
-    scale is a power of two).
+    """transformers' ``Gemma4ForConditionalGeneration`` in float32.
+
+    With the checkpoint's image processor and feature extractor; the
+    per-layer token table stays bfloat16 (a lookup widens it exactly,
+    and its ``sqrt(256)`` scale is a power of two).
     """
 
     model_class = "AutoModelForImageTextToText"
@@ -45,9 +47,10 @@ class HuggingFaceGemma4(HuggingFace):
         return cls(model, processor)
 
     def logits(self, tokens, image, audio) -> np.ndarray:
-        """The logits after ``tokens``, the decoded ``image``, ``(height,
-        width, 3)`` uint8, and the mono 16 kHz clip ``audio`` at their
-        placeholders; an empty array is none.
+        """Return the logits after ``tokens``, with ``image`` and ``audio`` at their placeholders.
+
+        ``image`` is ``(height, width, 3)`` uint8, decoded; ``audio``
+        is the mono 16 kHz clip; an empty array is none.
         """
         media = {}
         if image.size:

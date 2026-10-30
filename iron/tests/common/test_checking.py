@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Check mode's judging, device-free: each step of a recorded graph held to its
-reference on its own inputs by its ``tolerance()`` (``check_step``, what
-``Graph.compile(check=True)`` runs after every dispatch). The oracle's own
-step outputs pass; a step computed from a real wrong weight is caught at
-that step, and the steps before it pass.
+"""Check mode's judging, device-free.
+
+Each step of a recorded graph held to its reference on its own inputs by
+its ``tolerance()`` (``check_step``, what ``Graph.compile(check=True)``
+runs after every dispatch). The oracle's own step outputs pass; a step
+computed from a real wrong weight is caught at that step, and the steps
+before it pass.
 """
 
 import numpy as np
@@ -31,9 +33,11 @@ class Project(iron.Graph):
 
 
 def _run(recording, x, wrong: dict[int, np.ndarray]):
-    """Each step on the host as check mode sees it: its inputs as the buffers
-    hold them, what it wrote (its reference, or with ``wrong[i]`` in place of
-    step ``i``'s weight, what that weight computes) and its reference.
+    """Each step on the host as check mode sees it.
+
+    Its inputs as the buffers hold them, what it wrote (its reference, or
+    with ``wrong[i]`` in place of step ``i``'s weight, what that weight
+    computes) and its reference.
     """
     held = {BufferRef(recording.inputs[0].name): x}
     held |= {h.ref(): np.asarray(t) for t, h in recording.weights.values()}

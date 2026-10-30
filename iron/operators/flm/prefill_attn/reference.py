@@ -1,17 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU reference for ``iron.operators.flm.PrefillAttention`` and
-``PrefillSlidingAttention``, in float32.
+"""CPU reference for ``PrefillAttention`` and ``PrefillSlidingAttention``, in float32.
+
+Both in ``iron.operators.flm``.
 """
 
 import numpy as np
 
 
 def reference(q, kv, L_begin, L_end, max_l, num_heads, num_kv_heads, dh, window=None):
-    """Attention of query tokens L_begin to L_end - 1 over the keys up to
-    each, shape ``(L_end - L_begin, num_heads, dh)``; README.md has q and
-    kv's layout.
+    """Attend query tokens L_begin to L_end - 1 over the keys up to each.
+
+    Shape ``(L_end - L_begin, num_heads, dh)``; README.md has q and kv's
+    layout.
     """
     rows = L_end - L_begin
     q = np.asarray(q, dtype=np.float32)[: rows * num_heads * dh]

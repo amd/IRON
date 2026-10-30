@@ -39,8 +39,9 @@ class Case:
 
 
 def _greedy(model, tokens, logits, n):
-    """The logits of ``n`` greedy decode steps after ``tokens``, whose own
-    are ``logits``.
+    """Return the logits of ``n`` greedy decode steps after ``tokens``.
+
+    ``tokens``' own logits are ``logits``.
     """
     history, out = list(tokens), []
     for _ in range(n):
@@ -51,10 +52,12 @@ def _greedy(model, tokens, logits, n):
 
 
 def prompt(model, tokens, **values):
-    """Each prompt chunk's reference over ``tokens`` in turn, its states
-    carried to the next and ``values`` given to each: the last chunk's
-    logits and carry. A ``Multimodal`` model's chunk holding a placeholder
-    runs ``placed``, given the count of each placeholder before it.
+    """Run each prompt chunk's reference over ``tokens`` in turn.
+
+    Its states carried to the next and ``values`` given to each: the last
+    chunk's logits and carry. A ``Multimodal`` model's chunk holding a
+    placeholder runs ``placed``, given the count of each placeholder
+    before it.
     """
     text = getattr(model, "text", model)
     towers = list(getattr(model, "towers", {}))
@@ -79,11 +82,13 @@ def prompt(model, tokens, **values):
 
 
 class Decoder:
-    """What every decoder's graph does on the host as transformers' model
-    does over the same random weights. A subclass names the ``model``
-    class, its toy ``config``, transformers' ``model_type`` and the golden's
+    """What every decoder's graph does on the host, as transformers' model does.
+
+    Over the same random weights. A subclass names the ``model`` class,
+    its toy ``config``, transformers' ``model_type`` and the golden's
     ``name`` (``goldens/<name>.npz`` beside the subclass); and ``names``,
-    ``weights``, ``json`` or ``profile`` where they are not Llama's or none.
+    ``weights``, ``json`` or ``profile`` where they are not Llama's or
+    none.
     """
 
     pytestmark = pytest.mark.usefixtures("npu2")
@@ -107,13 +112,14 @@ class Decoder:
 
     @classmethod
     def weights(cls) -> SimpleNamespace:
-        """The toy's checkpoint tree, drawn (``Checkpoint.tree``)."""
+        """Return the toy's checkpoint tree, drawn (``Checkpoint.tree``)."""
         return checkpoint(cls.config, cls.names()).tree("random")
 
     @classmethod
     def case(cls, golden) -> Case:
-        """The config, its weights, its golden logits, a prompt, the golden
-        logits for it and six greedy tokens' logits.
+        """Return the config, its weights, its golden logits and a prompt.
+
+        The golden logits for it and six greedy tokens' logits.
         """
         config = cls.config
         weights = cls.weights()
@@ -143,9 +149,7 @@ class Decoder:
         return Case(config, weights, reference, prompt, first, expected)
 
     def host(self, config, weights):
-        """The model on ``config`` and ``weights`` with its images stood in
-        by its graph's reference.
-        """
+        """Return the model on ``config`` and ``weights``, its images stood in by its graph's reference."""
         return type("OnHost", (Host, self.model), {"profile": self.profile})(
             config, weights
         )
@@ -156,9 +160,11 @@ class Decoder:
         return cls.case(golden)
 
     def test_every_step_of_every_version_resolves(self, npu2):
-        """Built on its checkpoint's names through its own loading, every
-        version records and each step resolves on the device: no step hides
-        host compute or a shape the device refuses.
+        """Check that every step of every version resolves.
+
+        Built on its checkpoint's names through its own loading, every
+        version records and each step resolves on the device: no step
+        hides host compute or a shape the device refuses.
         """
         toy = type(self)
         recorded = type(toy.__name__, (toy,), {})
@@ -169,7 +175,9 @@ class Decoder:
                 step.op.resolved(npu2)
 
     def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(self, cpu):
-        """One token at a time only: the prompt fed a token at a time from an
+        """Check that decode from an empty cache matches the forward token by token.
+
+        One token at a time only: the prompt fed a token at a time from an
         empty cache, then the generated tokens.
         """
         model = self.host(cpu.config, cpu.weights)
@@ -182,8 +190,11 @@ class Decoder:
             assert_close(a, b, f"step {step}")
 
     def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(self, cpu):
-        """The prompt at its own rows: the padding rows are masked and past the
-        prompt in the caches, and decode continues from the caches it wrote.
+        """Check that the prompt matches the forward and leaves decode its caches.
+
+        The prompt at its own rows: the padding rows are masked and past
+        the prompt in the caches, and decode continues from the caches it
+        wrote.
         """
         model = self.host(cpu.config, cpu.weights)
         first = model.logits(cpu.prompt)
@@ -193,9 +204,12 @@ class Decoder:
             assert_close(a, b, f"step {step}")
 
     def test_a_prompt_longer_than_a_chunk_runs_in_chunks(self, cpu):
-        """A prompt of several chunks, each attending over the caches the ones
-        before it wrote, then a decode step, then a turn of several tokens,
-        which reruns only the chunk holding its first token onwards.
+        """Check that a prompt longer than a chunk runs in chunks.
+
+        A prompt of several chunks, each attending over the caches the
+        ones before it wrote, then a decode step, then a turn of several
+        tokens, which reruns only the chunk holding its first token
+        onwards.
         """
         C = cpu.config.prefill_chunk
         config = dataclasses.replace(cpu.config, max_seq_len=4 * C)
@@ -210,7 +224,9 @@ class Decoder:
         assert_close(model.logits(tokens), reference.logits(tokens))
 
     def test_the_accuracy_check_scores_the_model_against_the_reference(self, cpu):
-        """What ``--check-accuracy`` runs, the images stood in by the graph's
+        """Check that the accuracy check scores the model against the reference.
+
+        What ``--check-accuracy`` runs, the images stood in by the graph's
         reference: the model against its golden logits, teacher-forced.
         """
         model = self.host(cpu.config, cpu.weights)
@@ -223,7 +239,9 @@ class Decoder:
         assert any(kl > 0 for kl, _ in results), results
 
     def test_the_determinism_check_finds_the_reference_deterministic(self, cpu):
-        """What ``--check-determinism`` runs: two prompts, alternated, each
+        """Check that the determinism check finds the reference deterministic.
+
+        What ``--check-determinism`` runs: two prompts, alternated, each
         rerun from a prefill; no run differs from the first.
         """
         model = self.host(cpu.config, cpu.weights)

@@ -35,8 +35,10 @@ def reference(program, planes, slots: int):
 
 
 def _program(op: "Emit") -> dict:
-    """A program whose rows each pick a real value, most held to a range,
-    and some unused rows."""
+    """Return a program whose rows each pick a real value, most held to a range.
+
+    And some unused rows.
+    """
     rng = np.random.default_rng(7)
     lo = rng.integers(-(1 << 22), 1 << 22, op.rows)
     hi = lo + rng.integers(0, 1 << 23, op.rows)

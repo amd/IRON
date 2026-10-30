@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Language models on IRON's operators: what every model shares. The models
-themselves are applications over it, each a package of
+"""Language models on IRON's operators: what every model shares.
+
+The models themselves are applications over it, each a package of
 ``iron/applications/``; nothing in the library imports a model, and
 ``generation`` and ``testing`` need nothing of one but ``logits(tokens)``.
 """

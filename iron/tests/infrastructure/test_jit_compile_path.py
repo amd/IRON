@@ -87,8 +87,9 @@ def test_two_graphs_get_distinct_cache_keys():
 
 @requires("aiecc", "peano")
 def test_identical_sequences_reuse_the_compiled_elf():
-    """A fresh, independently-built sequence with the same recipe must not
-    pay a second aiecc compile: same entry, untouched.
+    """A fresh, independently-built sequence with the same recipe must not pay a second compile.
+
+    Same entry, untouched.
     """
     first = _captured("jitpath_cache_reuse").artifacts.image
     mtime = first.stat().st_mtime_ns
@@ -116,8 +117,9 @@ def test_identical_operators_reuse_the_compiled_xclbin():
 
 @requires("aiecc", "peano")
 def test_an_operator_builds_its_own_image_once():
-    """An operator called outside a graph keeps the image it built; an equal
-    operator builds its own, from the cache.
+    """An operator called outside a graph keeps the image it built.
+
+    An equal operator builds its own, from the cache.
     """
     op = ElementwiseAdd(size=1024, tile_size=128)
     assert op.compile() is op.compile()
@@ -126,9 +128,11 @@ def test_an_operator_builds_its_own_image_once():
 
 @requires("aiecc", "peano")
 def test_a_traced_build_carries_the_lowered_module():
-    """--get-input-with-addresses is what the trace parser reads; the flag
-    reaching aiecc is checked by that file being in the entry, not by the
-    ELF differing (both builds come out the same size).
+    """--get-input-with-addresses is what the trace parser reads.
+
+    The flag reaching aiecc is checked by that file being in the
+    entry, not by the ELF differing (both builds come out the same
+    size).
     """
     # One column: wider, the placer gives shim column 0 two outputs, and the
     # trace egresses there (aie-insert-trace-flows finds no free channel).
@@ -194,8 +198,9 @@ def test_the_compile_key_does_not_depend_on_a_device_being_bound_yet():
 
 
 def test_the_device_keys_the_build_by_identity_not_address():
-    """A device's str() carries its address, which would re-key every process;
-    two binds of one device share a key, another device has its own.
+    """A device's str() carries its address, which would re-key every process.
+
+    Two binds of one device share a key, another device has its own.
     """
     design = _add_key()
     aie_utils.set_current_device(from_name("npu2", n_cols=8))
@@ -236,8 +241,6 @@ class _Holding(Operator):
 
 
 def test_an_opaque_design_parameter_is_rejected():
-    """A field whose repr embeds an address is an operator bug, not a
-    silently-degraded cache.
-    """
+    """A field whose repr embeds an address is an operator bug, not a silently-degraded cache."""
     with pytest.raises(ValueError, match="object address"):
         _ = OperatorDesign(_Holding(n=64, thing=_Opaque())).identity

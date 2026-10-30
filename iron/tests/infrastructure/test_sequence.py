@@ -114,9 +114,9 @@ def _build_add_relu_sequence(name, packaging=None, inputs=("a", "b")):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("size", [_ADD_RELU_SIZE])
 def test_auto_dispatch_selects_platform_default(size):
-    """``packaging.plan`` must pick a full ELF on Strix and the xclbin
-    chain on Phoenix, and produce the correct result on whichever
-    platform the test runs on.
+    """Check that ``packaging.plan`` picks a full ELF on Strix and the xclbin chain on Phoenix.
+
+    And produces the correct result on whichever platform the test runs on.
     """
     rng = np.random.default_rng(0)
     a = _centered(rng, size)
@@ -146,8 +146,9 @@ def test_auto_dispatch_selects_platform_default(size):
 
 @pytest.mark.parametrize("sequence", ["add_relu"])
 def test_composed_mlir_contains_reconfiguration(sequence, npu2):
-    """The single-dispatch (composed) path emits one ``aie.device`` per operator
-    plus a top-level device whose runtime sequence reconfigures the array
+    """Check that the single-dispatch (composed) path emits one ``aie.device`` per operator.
+
+    Plus a top-level device whose runtime sequence reconfigures the array
     between operators via ``aiex.configure`` / ``aiex.run``.
 
     Only the *generated MLIR* is inspected here (no ELF backend is invoked),
@@ -180,9 +181,10 @@ def test_composed_mlir_contains_reconfiguration(sequence, npu2):
 
 
 def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
-    """A full ELF cut into commands runs each as a runtime sequence of
-    ``main`` over the uncut image's designs, byte for byte; only the cut
-    image's key moves.
+    """Check that a full ELF cut into commands runs each as a runtime sequence of ``main``.
+
+    Over the uncut image's designs, byte for byte; only the cut image's key
+    moves.
     """
     compositions = {}
     for commands in ((), (1,)):
@@ -224,9 +226,10 @@ def _run_add_relu(a, b, name, packaging):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dispatch", PACKAGINGS)
 def test_dispatch_modes_bit_identical(dispatch):
-    """Add -> relu must yield byte-for-byte identical output across every NPU
-    dispatch mode: the compiled kernels are the same, so only the dispatch
-    mechanism differs. The ``separate`` mode is the baseline (it runs on every
+    """Check that add -> relu yields byte-for-byte identical output across every NPU dispatch mode.
+
+    The compiled kernels are the same, so only the dispatch mechanism
+    differs. The ``separate`` mode is the baseline (it runs on every
     platform).
     """
     if (
@@ -261,9 +264,10 @@ def test_dispatch_modes_bit_identical(dispatch):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_check_mode_judges_each_step_by_its_tolerance():
-    """check=True runs the NPU pipeline and, per step, re-runs the
-    operator's ``reference()`` on the same NPU inputs. Under its kernel's
-    contract the step runs cleanly.
+    """Check that check=True runs the NPU pipeline and, per step, re-runs the operator's ``reference()``.
+
+    On the same NPU inputs. Under its kernel's contract the step runs
+    cleanly.
     """
     rows, width = 8, 640
     rng = np.random.default_rng(0)
@@ -285,11 +289,11 @@ def test_check_mode_judges_each_step_by_its_tolerance():
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_check_mode_judges_every_output_at_the_calls_values(caplog):
-    """Sample writes two buffers, its record in place and the token, at a row
-    and slot that are per-call values. Check mode runs its reference at
-    the values the step was dispatched with and judges both buffers, exactly
-    (Sample's tolerance()), so a draw from any row but ``position``'s, or a
-    record in any other slot, raises.
+    """Check that Sample writes two buffers, its record in place and the token, at per-call values.
+
+    Check mode runs its reference at the values the step was dispatched
+    with and judges both buffers, exactly (Sample's tolerance()), so a draw
+    from any row but ``position``'s, or a record in any other slot, raises.
     """
     steps, position = 4, 2
     op = Sample(vocab=4096, cores=4, steps=steps)
@@ -336,9 +340,10 @@ def test_check_mode_judges_every_output_at_the_calls_values(caplog):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dispatch", ["separate", "composed"])
 def test_non_input_buffers_sync_without_explicit_flush(dispatch):
-    """Host writes through get_buffer() to a non-input buffer reach the NPU at
-    the next dispatch, and reads of a non-output buffer after a dispatch see
-    what the NPU wrote there, with no explicit ``to()`` from the caller.
+    """Check that host writes through get_buffer() to a non-input buffer reach the NPU.
+
+    At the next dispatch, and reads of a non-output buffer after a dispatch
+    see what the NPU wrote there, with no explicit ``to()`` from the caller.
     """
     if (
         dispatch == "composed"
@@ -395,14 +400,16 @@ def _relu():
 
 
 def _expanded_pdis(seq):
-    """The PDIs only an expanded load builds: its empty ones."""
+    """Return the PDIs only an expanded load builds: its empty ones."""
     return [p.name for p in seq.artifacts.entry.pdis if p.stem.startswith("empty_")]
 
 
 @pytest.mark.parametrize("reconfigure", [False, True])
 def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
-    """One design's composition leaves its load unexpanded, unless the sequence
-    asks to reconfigure at every call, as a probe timing a design's entry does.
+    """Check that one design's composition leaves its load unexpanded.
+
+    Unless the sequence asks to reconfigure at every call, as a probe
+    timing a design's entry does.
     """
     seq = _build_one_design_sequence(
         _relu(), f"infra_full_elf_relu_reconfigure_{reconfigure}", reconfigure
@@ -416,8 +423,9 @@ def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_one_design_is_configured_once():
-    """A full-ELF sequence of one design builds no expanded load, and every
-    dispatch after the first still computes on its new inputs.
+    """Check that a full-ELF sequence of one design builds no expanded load.
+
+    And every dispatch after the first still computes on its new inputs.
     """
     if not aie_utils.get_current_device().can_dispatch_full_elf:
         pytest.skip("composed dispatch needs a full ELF, which this device lacks")
@@ -437,8 +445,9 @@ def test_one_design_is_configured_once():
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_one_design_reconfigures_after_another_image():
-    """Two one-design images dispatched in turn each configure the array
-    again after the other ran, so each still computes its own operator.
+    """Check that two one-design images dispatched in turn each configure the array again.
+
+    After the other ran, so each still computes its own operator.
     """
     if not aie_utils.get_current_device().can_dispatch_full_elf:
         pytest.skip("composed dispatch needs a full ELF, which this device lacks")

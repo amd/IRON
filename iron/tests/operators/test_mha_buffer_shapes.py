@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""MHA's declared buffers do not follow a tunable a device-free tuner
-chooses without rebuilding the array.
+"""MHA's declared buffers do not follow a device-free tuner's tunable.
+
+A tunable a device-free tuner chooses does not change them without
+rebuilding the array.
 """
 
 import pytest

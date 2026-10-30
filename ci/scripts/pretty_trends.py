@@ -153,9 +153,10 @@ def moves(
     sigma: float,
     date_fmt: str = DATE_FMT,
 ) -> List[Tuple[str, str, str, float, float, float]]:
-    """The benched metrics the newest run moved past both gates, against
-    each parametrization's run before it: (operator, parametrization,
-    metric, previous, current, percent change).
+    """Find the benched metrics the newest run moved past both gates.
+
+    Each is measured against each parametrization's run before it:
+    (operator, parametrization, metric, previous, current, percent change).
     """
     dates = [d for d in (parse_date(r, date_fmt) for r in all_rows) if d is not None]
     run_date = max(dates, default=None)

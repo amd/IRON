@@ -69,9 +69,10 @@ from iron.operators.flm.packing import pack_b
 
 
 class _BPool(NamedTuple):
-    """B's memtile path as ``build()`` builds it, for ``sequence()`` to
-    program: per column, the pool buffer, one prod/cons lock pair per slot,
-    and the shim-in/broadcast-out flows. Limits are the target model's.
+    """B's memtile path as ``build()`` builds it, for ``sequence()`` to program.
+
+    Per column, the pool buffer, one prod/cons lock pair per slot, and the
+    shim-in/broadcast-out flows. Limits are the target model's.
     """
 
     mt_tiles: list
@@ -113,7 +114,7 @@ class _Built(Built):
 
 
 def _units_valid(op) -> Any:
-    """The 256-row units a call's row bound reaches, at least one.
+    """Return the 256-row units a call's row bound reaches, at least one.
 
     Raises:
         ValueError: A call with no rows, which would end before the cores
@@ -126,9 +127,10 @@ def _units_valid(op) -> Any:
 
 
 class ProjectionGEMM(Operator):
-    """AIE-accelerated bf16 GEMM on a 4-row grid, as wide as the device, with
-    a fused epilogue. M, K, N and the activation are values written to the
-    cores, so every shape on one ``config_name`` shares an xclbin. Used
+    """AIE-accelerated bf16 GEMM on a 4-row grid, as wide as the device.
+
+    With a fused epilogue. M, K, N and the activation are values written to
+    the cores, so every shape on one ``config_name`` shares an xclbin. Used
     wherever ``iron.operators.GEMM`` doesn't apply (a weight operand,
     MEDIUM/HIGH, two or more rows).
     """
@@ -392,15 +394,17 @@ class ProjectionGEMM(Operator):
 
     @property
     def compiled_modes(self) -> tuple[Epilogue, ...]:
-        """The activations compiled into the epilogue: none and
-        ``epilogue_modes``.
+        """Return the activations compiled into the epilogue.
+
+        None and ``epilogue_modes``.
         """
         return _compiled_modes(self.epilogue_modes)
 
     @property
     def epilogue_mask(self) -> int:
-        """Bitmask of the modes compiled into the epilogue. Mode 0 is always
-        present; the kernel falls back to it.
+        """Return the bitmask of the modes compiled into the epilogue.
+
+        Mode 0 is always present; the kernel falls back to it.
         """
         mask = 1
         for m in self.compiled_modes:
@@ -432,8 +436,9 @@ class ProjectionGEMM(Operator):
 
     @property
     def name(self) -> str:
-        """The configuration's stem, then every runtime parameter: two
-        instruction streams never share a name.
+        """Return the configuration's stem, then every runtime parameter.
+
+        Two instruction streams never share a name.
         """
         base = f"{self.config_name}_M{self.M}_K{self.K}_N{self.N}"
         if self.epilogue is not Epilogue.NONE:
@@ -441,9 +446,10 @@ class ProjectionGEMM(Operator):
         return base
 
     def frame(self, dev, tile_n, k_tile, ct_k, band_m, bfp16_b, emulate) -> int:
-        """What a core of ``dev`` holds beside its buffers at these tiles: its
-        kernel's data and deepest call's stack, over the default stack. Kept
-        per kernel, as every resolve asks it of up to six.
+        """Return what a core of ``dev`` holds beside its buffers at these tiles.
+
+        Its kernel's data and deepest call's stack, over the default stack.
+        Kept per kernel, as every resolve asks it of up to six.
         """
         tiles = (tile_n, k_tile, ct_k, band_m, bfp16_b, emulate)
         key = (
@@ -466,7 +472,7 @@ class ProjectionGEMM(Operator):
         return _FRAMES[key]
 
     def kernel(self, tile_n, k_tile, ct_k, band_m, bfp16_b, emulate):
-        """The fused tile kernel each core runs at these tiles."""
+        """Return the fused tile kernel each core runs at these tiles."""
         modes = _compiled_modes(self.epilogue_modes)
         return fused_mm(
             dim_m=M_TILE,
@@ -731,8 +737,10 @@ class ProjectionGEMM(Operator):
             rtp,
             my_col,
         ):
-            """Core body. Every trip count and the activation come from the
-            runtime parameters, so one core program serves every shape.
+            """Core body.
+
+            Every trip count and the activation come from the runtime
+            parameters, so one core program serves every shape.
             """
             # Safe to re-arm before the work: the sequence cannot open the
             # barrier again until this dispatch's C drains.
@@ -863,9 +871,11 @@ class ProjectionGEMM(Operator):
 
     @property
     def _b_slots(self) -> int:
-        """B's memtile pool in k-tile slots: what A and C leave, at most
-        ``B_MAX_SLOTS``, budgeted as if every memtile held an A forward
-        (uniform across columns, though only every (cols // rows)-th does).
+        """Return B's memtile pool in k-tile slots: what A and C leave.
+
+        At most ``B_MAX_SLOTS``, budgeted as if every memtile held an A
+        forward (uniform across columns, though only every (cols //
+        rows)-th does).
         """
         free = (
             get_target_model(self.dev.resolve()).get_mem_tile_size()
@@ -884,9 +894,11 @@ class ProjectionGEMM(Operator):
 
     @property
     def _b_ring(self) -> int:
-        """The slots B's memtile ring uses under a bound: every k tile where B
-        is resident, else the most that one unit's k tiles fill whole, so that
-        a call's ring passes follow the units it reaches.
+        """Return the slots B's memtile ring uses under a bound.
+
+        Every k tile where B is resident, else the most that one unit's k
+        tiles fill whole, so that a call's ring passes follow the units it
+        reaches.
         """
         if self._b_resident:
             return self._k_iters
@@ -939,7 +951,10 @@ class ProjectionGEMM(Operator):
         # re-arms per slab since the previous one may have been a different
         # shape.
         def make_slab(first, units):
-            """The plan for ``units`` units from unit ``first``, armed at once."""
+            """Return the plan for ``units`` units from unit ``first``.
+
+            Armed at once.
+            """
             if k_iters <= B_SLOTS and units <= pool.lock_max:
                 resident, b_slots, b_uses = True, k_iters, units
             elif bounded:
@@ -1050,9 +1065,11 @@ class ProjectionGEMM(Operator):
             drains = slots
 
         def b_mt_task(c, direction, passes, slab):
-            """Program one of column ``c``'s memtile B channels: one BD per used slot,
-            walked ``passes`` times (re-pushed past one queue's carry); returned for
-            starting but never awaited -- C completing implies it.
+            """Program one of column ``c``'s memtile B channels.
+
+            One BD per used slot, walked ``passes`` times (re-pushed past
+            one queue's carry); returned for starting but never awaited --
+            C completing implies it.
             """
             fill = direction == DMAChannelDir.S2MM
             flow = (pool.shim_flows if fill else pool.bcast_flows)[c]
@@ -1100,10 +1117,12 @@ class ProjectionGEMM(Operator):
             b_mt_tasks = {}
 
             def push_b_mt(bi):
-                """Push B's memtile chains for the chunks starting at block ``bi``: a
-                push covers as many whole blocks as its passes carry, issued at the
-                first of them, so the compiler only waits on an earlier, already-issued
-                block's queue slot. Under a bound a streamed ring pushes one block a call.
+                """Push B's memtile chains for the chunks starting at block ``bi``.
+
+                A push covers as many whole blocks as its passes carry,
+                issued at the first of them, so the compiler only waits on
+                an earlier, already-issued block's queue slot. Under a bound
+                a streamed ring pushes one block a call.
                 """
                 per_call = bounded and not slab.b_resident
                 for c in range(COLS):
@@ -1223,14 +1242,17 @@ class ProjectionGEMM(Operator):
 
     @property
     def _reference_shape(self) -> tuple[int, int, int]:
-        """The shape the configuration-only module is emitted at: the smallest
-        valid one, so the shape-independence is explicit.
+        """Return the shape the configuration-only module is emitted at.
+
+        The smallest valid one, so the shape-independence is explicit.
         """
         return (M_TILE * self.rows * self.m_chunk, self.k_tile, self.tile_n * self.cols)
 
     def xclbin_operator(self):
-        """This configuration at its reference shape and activation: the
-        xclbin every shape sharing it runs, each with its own instruction stream.
+        """Return this configuration at its reference shape and activation.
+
+        The xclbin every shape sharing it runs, each with its own
+        instruction stream.
         """
         M, K, N = self._reference_shape
         # The tiles are named: the copy resolves again, at the reference shape.
@@ -1277,22 +1299,25 @@ class ProjectionGEMM(Operator):
         return 2 * self.M * self.K * self.N
 
     def reference(self, A, B):
-        """``C = epilogue(A @ B)``, in the kernel's order: the product
-        accumulates in float32 and rounds to the output dtype before the
-        epilogue, since ``mm_fused_epilogue_chunk`` converts the accumulator
-        to bf16 first. Not bit-exact -- the activation is a LUT on aie2,
-        native on aie2p, worth up to ~0.02 absolute, absorbed by the
-        tolerance. ``B`` is ``(N, K)`` under ``b_col_maj``.
+        """``C = epilogue(A @ B)``, in the kernel's order.
+
+        The product accumulates in float32 and rounds to the output dtype
+        before the epilogue, since ``mm_fused_epilogue_chunk`` converts the
+        accumulator to bf16 first. Not bit-exact -- the activation is a LUT
+        on aie2, native on aie2p, worth up to ~0.02 absolute, absorbed by
+        the tolerance. ``B`` is ``(N, K)`` under ``b_col_maj``.
         """
         b = B.T if self.b_col_maj else B
         C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
         return self.epilogue.apply(C)
 
     def tolerance(self) -> Tolerance | None:
-        """C's roundings, in units of 2^-8 of ``|A| @ |B|``: under 2 for C's
-        conversion to bf16, plus K * 2^-16 for the f32 accumulator; bfp16
-        macs add 2 more units (nearest) or 8 (truncating). An activated
-        GEMM has no tolerance, since the approximation isn't bounded here.
+        """Return C's roundings, in units of 2^-8 of ``|A| @ |B|``.
+
+        Under 2 for C's conversion to bf16, plus K * 2^-16 for the f32
+        accumulator; bfp16 macs add 2 more units (nearest) or 8
+        (truncating). An activated GEMM has no tolerance, since the
+        approximation isn't bounded here.
         """
         if self.epilogue is not Epilogue.NONE:
             return None

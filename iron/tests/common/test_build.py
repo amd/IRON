@@ -92,9 +92,10 @@ def test_split_takes_every_batch_and_broadcasts():
 
 
 def test_a_bounded_operand_goes_round_robin_over_the_lanes():
-    """Under a bound each lane reads every ``lanes``-th tile from a fixed
-    offset, so one patched count serves every lane; the pattern is built
-    for the full extent.
+    """Under a bound each lane reads every ``lanes``-th tile from a fixed offset.
+
+    So one patched count serves every lane; the pattern is built for the
+    full extent.
     """
     op = Rows(rows=64, cols=8)
     op.use_value("valid", N)
@@ -132,9 +133,10 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
 
 
 def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
-    """Under a bound RoPE's input goes round-robin a position at a time (the
-    rows one angle row serves), so the lane that rotates a position's heads
-    is the one that reads its angle row, and in the same order.
+    """Under a bound RoPE's input goes round-robin a position at a time.
+
+    The rows one angle row serves, so the lane that rotates a position's
+    heads is the one that reads its angle row, and in the same order.
     """
     heads, positions, cols = 4, 16, 64
     op = RoPE(
@@ -184,8 +186,9 @@ class Words(Operator):
 
 
 def rtp_writes(text: str) -> list[tuple[int, int | str]]:
-    """Each ``aiex.npu.rtp_write`` of a module's sequence: its slot, and the
-    constant it writes or the sequence argument.
+    """Each ``aiex.npu.rtp_write`` of a module's sequence.
+
+    Its slot, and the constant it writes or the sequence argument.
     """
     sequence = text[text.index("aie.runtime_sequence") :]
     constants = dict(re.findall(r"(%\w+) = arith.constant (-?\d+) : i32", sequence))
@@ -205,8 +208,9 @@ def test_a_value_only_a_core_reads_is_declared_on_a_full_elf(npu2):
 
 
 def test_the_slots_after_a_multi_word_value_follow_its_words(npu2):
-    """The block takes slots 1 to 3, so ``last`` is slot 4; on an xclbin the
-    per-call word is the dispatch argument, in slot 5.
+    """The block takes slots 1 to 3, so ``last`` is slot 4.
+
+    On an xclbin the per-call word is the dispatch argument, in slot 5.
     """
     text = str(OperatorDesign(Words(n=64)).module())
     assert "memref<5xi32>" in text
@@ -219,9 +223,11 @@ def test_the_slots_after_a_multi_word_value_follow_its_words(npu2):
 
 
 def test_mha_binds_p_times_v_at_its_own_shape():
-    """Away from B_kv = d, P*V's operands are not QK^T's: P is (B_q, B_kv), V
-    (B_kv, d) and O (B_q, d), each streamed as P*V takes it, O accumulated
-    in float32 and rounded once into the bf16 output.
+    """Away from B_kv = d, P*V's operands are not QK^T's.
+
+    P is (B_q, B_kv), V (B_kv, d) and O (B_q, d), each streamed as P*V
+    takes it, O accumulated in float32 and rounded once into the bf16
+    output.
     """
     op = MHA(num_heads=1, seq_len=1024, d=128, num_pipelines=8, B_q=32)
     text = str(OperatorDesign(op.resolved(from_name("npu2", n_cols=8))).module())
@@ -244,10 +250,11 @@ def _bounded_gemv():
 
 
 def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin():
-    """Under a bound on M, C's drains go first; then each lane's A stream
-    takes B, whole, as one input tile, and A in output tiles (four input
-    tiles each here) round-robin, C in the same tiles, both patched by the
-    tile count the core also reads.
+    """Under a bound on M, C's drains go first.
+
+    Then each lane's A stream takes B, whole, as one input tile, and A in
+    output tiles (four input tiles each here) round-robin, C in the same
+    tiles, both patched by the tile count the core also reads.
     """
     op = _bounded_gemv().resolved(from_name("npu2", n_cols=8))
     assert [v.name for v in op.values] == ["valid", "tiles", "valid_A", "valid_C"]
@@ -298,9 +305,10 @@ def test_on_an_xclbin_the_size_is_the_dispatch_scalar():
 
 
 def test_on_an_xclbin_a_copy_bounded_on_its_innermost_axis_sizes_it(npu2):
-    """A regenerated stream sizes any dimension per call, not only the
-    outermost below the iteration a patched descriptor's length ends at:
-    here the rows' length, the innermost.
+    """A regenerated stream sizes any dimension per call, not only the outermost.
+
+    Below the iteration a patched descriptor's length ends at: here the
+    rows' length, the innermost.
     """
     cache = iron.state((16, 4, 256), name="cache")
 
@@ -448,10 +456,11 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
 
 
 def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
-    """At N=256 a shape's sequence fills B through columns 0-3 alone; the
-    pool of every column is still declared, so the shape's build lays out
-    the same static design as the configuration image it runs on, and its
-    descriptors address the image's memtile buffers.
+    """At N=256 a shape's sequence fills B through columns 0-3 alone.
+
+    The pool of every column is still declared, so the shape's build lays
+    out the same static design as the configuration image it runs on, and
+    its descriptors address the image's memtile buffers.
     """
     name = re.compile(
         r'@[\w$.]+|%[\w$.]+|sym_name = "[^"]*"|\^bb\d+|fifoName = "[^"]*"'
@@ -470,8 +479,10 @@ def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
 
 
 def test_flm_gemm_image_keeps_the_tiles_a_narrow_shape_resolves_to():
-    """N=16 resolves to tile_n=16; the image, at its 128-wide reference shape,
-    keeps those tiles rather than resolving the default tile_n=64 there.
+    """N=16 resolves to tile_n=16.
+
+    The image, at its 128-wide reference shape, keeps those tiles rather
+    than resolving the default tile_n=64 there.
     """
     dev = from_name("npu2", n_cols=8)
     op = flm_gemm.ProjectionGEMM(
@@ -481,8 +492,9 @@ def test_flm_gemm_image_keeps_the_tiles_a_narrow_shape_resolves_to():
 
 
 def test_a_design_is_keyed_by_what_it_builds():
-    """A replaced copy of a resolved operator resolves afresh, here to another
-    tile_n than it holds; its design's key is the build's.
+    """A replaced copy of a resolved operator resolves afresh.
+
+    Here to another tile_n than it holds; its design's key is the build's.
     """
     dev = from_name("npu2", n_cols=8)
     wide = (
@@ -504,11 +516,12 @@ def test_flm_gemm_selects_its_activation_by_a_word():
 
 
 def _flm_gemm_moves(op, full_elf, rows):
-    """Bytes each operand of ``op``'s sequence moves in a call whose row bound
-    is ``rows``: each shim task's elements, a patched length its word's value
-    in its units, times its runs, a repeat parameter's word plus one. On an
-    xclbin the one per-call scalar a size takes is the units the bound
-    reaches, and a runtime outer size is the task's repeat.
+    """Bytes each operand of ``op``'s sequence moves in a call with row bound ``rows``.
+
+    Each shim task's elements, a patched length its word's value in its
+    units, times its runs, a repeat parameter's word plus one. On an xclbin
+    the one per-call scalar a size takes is the units the bound reaches,
+    and a runtime outer size is the task's repeat.
     """
     words = {
         v.symbol: op.derived_at(v.name, valid=rows)
@@ -549,8 +562,9 @@ def _flm_gemm_moves(op, full_elf, rows):
 def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
     device, image, K, width, request
 ):
-    """Llama's q projection on a 15-row prompt chunk moves A and C for one
-    unit, the 256 rows its four core rows compute, and at 2048 rows for all
+    """Llama's q projection on a 15-row prompt chunk moves A and C for one unit.
+
+    The 256 rows its four core rows compute, and at 2048 rows for all
     eight, as it does unbounded. B moves the same at any bound where the
     memtile holds it, and once per unit reached where it streams, as Qwen2.5
     1.5B's down projection's does; A once per column block, as unbounded.
@@ -598,9 +612,10 @@ def test_on_an_xclbin_a_bounded_flm_gemm_repeats_a_by_the_dispatch_scalar(npu1):
 
 
 def test_a_bounded_flm_gemm_refuses_a_call_with_no_rows(npu2):
-    """The cores drain the B replays past the bound before the units it
-    reaches, so the last C ends the call; with no units there is no C to
-    wait on, and the call is refused as it writes its words, before it is
+    """The cores drain the B replays past the bound before the units it reaches.
+
+    So the last C ends the call; with no units there is no C to wait on,
+    and the call is refused as it writes its words, before it is
     dispatched.
     """
     recording = ProjectAsStored().record(x=(512, 512), w=(512, 512))

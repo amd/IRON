@@ -30,8 +30,10 @@ class Scale(iron.Graph):
 
 
 class Accumulate(iron.Graph):
-    """A running total at row ``pos`` of a device-resident state: each call
-    adds ``x`` into ``total[pos]`` and returns the new value."""
+    """A running total at row ``pos`` of a device-resident state.
+
+    Each call adds ``x`` into ``total[pos]`` and returns the new value.
+    """
 
     def __init__(self, rows, width):
         self.total = iron.state((rows, width), name="total")

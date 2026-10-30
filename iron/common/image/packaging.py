@@ -38,8 +38,10 @@ class Plan:
     commands: tuple[int, ...] = ()
 
     def idle(self, steps, values) -> frozenset[int]:
-        """The commands a call with ``values`` leaves without work: each of
-        their ``steps`` bounded to nothing, so the call need not start them.
+        """Return the commands a call with ``values`` leaves without work.
+
+        Each of their ``steps`` bounded to nothing, so the call need not
+        start them.
         """
         edges = (0, *self.commands, len(steps))
         return frozenset(
@@ -66,7 +68,7 @@ class Plan:
 
 
 def require_device():
-    """The current device, bound if the runtime found one; ``RuntimeError`` if none."""
+    """Return the current device, bound if the runtime found one; ``RuntimeError`` if none."""
     dev = aie_utils.ensure_current_device()
     if dev is None:
         runtime = os.environ.get("NPU_RUNTIME")
@@ -86,9 +88,11 @@ def plan(
     check: bool = False,
     step_words: list[frozenset[str]] | None = None,
 ) -> Plan:
-    """Derive the packaging for ``recording`` on ``dev``, refusing a shipped image,
-    ``full_elf=True`` where the device or ``check`` forbids it, or a step reading
-    over ``SCRATCHPAD_WORDS`` (``step_words``, each step's by its shared symbol).
+    """Derive the packaging for ``recording`` on ``dev``, refusing a shipped image.
+
+    ``full_elf=True`` where the device or ``check`` forbids it, or a step
+    reading over ``SCRATCHPAD_WORDS`` (``step_words``, each step's by its
+    shared symbol).
     """
     shipped = [op for op in recording.operators if op.external is not None]
     if shipped:

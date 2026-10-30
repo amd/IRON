@@ -8,9 +8,7 @@ from iron.common import WeightedRowwise
 
 
 class LayerNorm(WeightedRowwise):
-    """AIE-accelerated Layer Normalization of each row (beta 0), optionally
-    times a learned weight row (gamma).
-    """
+    """AIE-accelerated Layer Normalization of each row (beta 0), optionally times a learned weight row (gamma)."""
 
     # The epsilon under the root: torch's 1e-5 by default; a model states its own.
     epsilon: float = param(default=1e-5, array=True)

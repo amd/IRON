@@ -41,9 +41,10 @@ FLAGS: tuple[tuple[tuple[str, ...], dict[str, Any]], ...] = (
 
 
 def exports(package: str, names):
-    """A model package's ``__getattr__``: each of ``names`` from its
-    ``model`` module, imported on first use, so ``python -m
-    <package>.model`` runs that module once.
+    """Build a model package's ``__getattr__``, each of ``names`` from its model module.
+
+    Imported on first use, so ``python -m <package>.model`` runs that
+    module once.
     """
 
     def __getattr__(name):
@@ -64,8 +65,9 @@ def sampling_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def parse_args(parser: argparse.ArgumentParser, args=None) -> argparse.Namespace:
-    """``parser``'s arguments with ``-v``, which logs iron's INFO lines, such
-    as each compile's.
+    """``parser``'s arguments with ``-v``, which logs iron's INFO lines.
+
+    Such as each compile's.
     """
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="log iron's INFO lines"
@@ -78,8 +80,9 @@ def parse_args(parser: argparse.ArgumentParser, args=None) -> argparse.Namespace
 
 
 def main(model_class: type[Model]):
-    """The command line of ``model_class``, loaded as ``Model.load`` loads
-    it: sample, or check it.
+    """Run the command line of ``model_class``, loaded as ``Model.load`` loads it.
+
+    Sample, or check it.
     """
     parser = argparse.ArgumentParser(description=f"{model_class.__name__} on the NPU")
     parser.add_argument(

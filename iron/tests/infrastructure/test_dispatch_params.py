@@ -79,8 +79,10 @@ def test_the_stream_is_generated_per_call():
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_one_image_serves_every_parameter():
-    """Each n must copy exactly n chunks: a stream generated for another n
-    leaves a different number of sentinels behind.
+    """Check that each n copies exactly n chunks.
+
+    A stream generated for another n leaves a different number of sentinels
+    behind.
     """
     op = ChunkCopy(max_chunks=MAX_CHUNKS)
     for n in (3, 1, MAX_CHUNKS, 3):

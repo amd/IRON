@@ -24,7 +24,7 @@ from iron.tests.support import sequences
 
 
 def steps_of(runlist):
-    """The (reads, writes) of each entry, which is all liveness needs."""
+    """Return the (reads, writes) of each entry, which is all liveness needs."""
     steps = []
     for op, *bufs in runlist:
         steps.append(
@@ -297,7 +297,7 @@ def test_a_resident_needs_a_size():
 
 
 def _random_image(rng, residents, prefix):
-    """A random DAG-shaped run over some residents and fresh transients."""
+    """Draw a random DAG-shaped run over some residents and fresh transients."""
     n_steps = rng.randint(1, 30)
     live = []
     steps, sizes, used = [], {}, {}
@@ -318,9 +318,11 @@ def _random_image(rng, residents, prefix):
 
 @pytest.mark.parametrize("seed", range(20))
 def test_random_images_keep_every_invariant(seed):
-    """Across several images: residents are disjoint from each other and from
-    every transient; co-live transients of one image are disjoint; nothing
-    placed ever moves; every offset is aligned; the arena covers it all.
+    """Check every invariant across several images.
+
+    Residents are disjoint from each other and from every transient;
+    co-live transients of one image are disjoint; nothing placed ever
+    moves; every offset is aligned; the arena covers it all.
     """
     rng = random.Random(seed)
     alignment = rng.choice([64, 128, 4096])
@@ -376,8 +378,9 @@ def _arena_sequence(name, runlist, arena, residents, pinned=None, full_elf=True)
 
 
 def test_a_parent_reached_only_through_slices_lives_from_first_to_last_slice():
-    """Its slices sit at fixed offsets inside it, so the parent is the thing
-    placed, and a slice written early and read late keeps all of it live.
+    """Check that the parent is the thing placed, since its slices sit at fixed offsets.
+
+    A slice written early and read late keeps all of it live.
     """
     add = _add()
     arena = ArenaPlan(alignment=64)

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Gemma 4's text decoder against Hugging Face's Gemma 4 in float32 over
-the same random weights at a toy shape, its logits recorded in
-``goldens/``, device-free: the shared decoder's tests (``Decoder``) with
-global layers of their own head size and proportional RoPE, two shared
-caches, double-wide MLPs, per-layer inputs and capped logits.
+"""Gemma 4's text decoder against Hugging Face's Gemma 4 in float32 over the same random weights.
+
+At a toy shape, its logits recorded in ``goldens/``, device-free: the
+shared decoder's tests (``Decoder``) with global layers of their own head
+size and proportional RoPE, two shared caches, double-wide MLPs, per-layer
+inputs and capped logits.
 """
 
 import dataclasses
@@ -103,9 +104,10 @@ class TestGemma4(Decoder):
 
     @classmethod
     def weights(cls):
-        """The drawn tree, q's and k's norms each scaled by ``head_dim **
-        -0.25``: attention is unscaled, so a trained model's norms carry
-        the ``head_dim ** -0.5`` that unit norms leave out, and without it
+        """Return the drawn tree, q's and k's norms each scaled by ``head_dim ** -0.25``.
+
+        Attention is unscaled, so a trained model's norms carry the
+        ``head_dim ** -0.5`` that unit norms leave out, and without it
         bf16's rounding of q and k moves the peaked scores by 10 to 30%.
         """
         tree = super().weights()
@@ -146,9 +148,11 @@ def test_a_shared_layer_with_no_earlier_layer_of_its_kind_is_refused():
 
 
 def test_a_placeholder_s_per_layer_inputs_are_the_padding_token_s(npu2):
-    """Each layer's per-layer table holds the padding token's row at the
-    image, audio and video placeholders, as transformers' ``Gemma4Model``
-    reads a placeholder as the padding token for the per-layer inputs.
+    """Check that each layer's per-layer table holds the padding token's row at the placeholders.
+
+    The image, audio and video placeholders, as transformers'
+    ``Gemma4Model`` reads a placeholder as the padding token for the
+    per-layer inputs.
     """
     placeholders = dict(image_token_id=1021, audio_token_id=1022, video_token_id=1023)
     config = dataclasses.replace(TOY, **placeholders)

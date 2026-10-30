@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The norms and GELU forms ``F`` refuses, a LayerNorm's eps and each GELU's operator,
-device-free, and EmbeddingGemma 2's text layer (``SandwichLayer`` and
+"""The norms and GELU forms ``F`` refuses, a LayerNorm's eps and each GELU's operator.
+
+Device-free, and EmbeddingGemma 2's text layer (``SandwichLayer`` and
 ``PleLayer``, the shared blocks at their fullest) through its operators'
 references against Hugging Face's own Gemma 4 layer.
 """
@@ -28,8 +29,9 @@ T, WIDTH, HEADS, GROUPS, HEAD, HIDDEN = 256, 512, 8, 2, 64, 1024
 
 
 def module(rng, shape, names, dtype) -> SimpleNamespace:
-    """A layer module of ``names`` at ``shape`` drawn from ``rng``, a
-    matrix's deviation ``1/sqrt(in)``.
+    """Build a layer module of ``names`` at ``shape`` drawn from ``rng``.
+
+    A matrix's deviation is ``1/sqrt(in)``.
     """
     root = SimpleNamespace()
     for name in names:
@@ -148,8 +150,9 @@ PER_LAYER = {
 
 
 class HuggingFaceGemma:
-    """transformers' Gemma 4 text layer in float32 over the module ``w``:
-    its output on ``x`` and the per-layer input ``ple``, every row
+    """transformers' Gemma 4 text layer in float32 over the module ``w``.
+
+    Its output on ``x`` and the per-layer input ``ple``, every row
     attending to every other, unrotated.
     """
 
@@ -219,7 +222,7 @@ class Text(iron.Graph):
 
 
 def gemma_layer(rng) -> SimpleNamespace:
-    """A Gemma text layer module drawn from ``rng``."""
+    """Build a Gemma text layer module drawn from ``rng``."""
     shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN) | PER_LAYER
     w = module(rng, shape, (*GEMMA, *PER_LAYER), bfloat16)
     w.layer_scalar = np.array([0.75], bfloat16)
@@ -229,9 +232,10 @@ def gemma_layer(rng) -> SimpleNamespace:
 def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
     golden,
 ):
-    """EmbeddingGemma 2's text layer: sandwich norms, q, k and v norms,
-    unscaled attention, its per-layer input and ``layer_scalar``, within
-    bf16's rounding of each of its steps of Hugging Face's own layer.
+    """Check EmbeddingGemma 2's text layer: sandwich norms, q, k and v norms, unscaled attention.
+
+    Its per-layer input and ``layer_scalar``, within bf16's rounding of
+    each of its steps of Hugging Face's own layer.
     """
     rng = np.random.default_rng(12)
     w = gemma_layer(rng)
@@ -256,10 +260,12 @@ def test_gemma_s_text_layer_projects_at_highest_precision():
 
 
 def test_embeddinggemma_2_loads_a_layer_s_per_layer_input_flat_or_nested():
-    """Its per-layer input's weights as IRON's checkpoint names them, or
-    under ``ple_block`` as transformers 5 saves them: the same encoder. Its
-    two layer kinds share a head size but not a RoPE base, so each reads
-    its own table.
+    """Check that EmbeddingGemma 2 loads a layer's per-layer input flat or nested.
+
+    Its per-layer input's weights as IRON's checkpoint names them, or
+    under ``ple_block`` as transformers 5 saves them: the same encoder.
+    Its two layer kinds share a head size but not a RoPE base, so each
+    reads its own table.
     """
     rng = np.random.default_rng(5)
     c = Config(

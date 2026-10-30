@@ -7,8 +7,9 @@ from iron.common.image.step import BufferRef, SequenceStep
 
 
 def steps(*entries) -> list[SequenceStep]:
-    """Each ``(op, *buffers)`` a step, a name the whole of its buffer and a
-    ``BufferRef`` a part.
+    """Return each ``(op, *buffers)`` as a step.
+
+    A name is the whole of its buffer and a ``BufferRef`` a part.
     """
     return [
         SequenceStep(

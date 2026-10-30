@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pictures of a graph, drawn device-free from its recording: every step is a
-node, and every buffer a step reads an edge into it from its producer.
+"""Pictures of a graph, drawn device-free from its recording.
+
+Every step is a node, and every buffer a step reads an edge into it from
+its producer.
 """
 
 import re
@@ -88,9 +90,10 @@ def test_a_towers_layers_are_found_under_its_prefix():
 
 
 def test_a_per_layer_slice_is_drawn_in_its_layer():
-    """Each layer's own slice of the per-layer projection, sliced once at
-    load into its own param rather than from the shared tensor at body
-    time, is read only by its own layer's steps.
+    """Each layer's own slice of the per-layer projection is read only by its own layer's steps.
+
+    Sliced once at load into its own param rather than from the shared
+    tensor at body time.
     """
     path = weights_dir("embeddinggemma-2") / "model.safetensors"
     require(path)

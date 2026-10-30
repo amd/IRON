@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""EmbeddingGemma 2 on the NPU, from the real checkpoint, against Hugging
-Face's own processors and model in float32 (hugging_face.py), their outputs
-recorded in ``golden.npz`` beside the checkpoint: the text encoder's
-embeddings (their cosine to Hugging Face's, their norm, a query ranking two
-documents, every call bit-identical to the first), each tower's soft tokens
-and, over text with a clip and an image, the whole model's, and the audio
-tower's features and the image processor's patches. On NPU1 each step is
-its own dispatch of an xclbin; on NPU2 that form is checked too.
+"""EmbeddingGemma 2 on the NPU, from the real checkpoint, against Hugging Face.
+
+Checked against Hugging Face's own processors and model in float32
+(hugging_face.py), their outputs recorded in ``golden.npz`` beside the
+checkpoint: the text encoder's embeddings (their cosine to Hugging
+Face's, their norm, a query ranking two documents, every call
+bit-identical to the first), each tower's soft tokens and, over text
+with a clip and an image, the whole model's, and the audio tower's
+features and the image processor's patches. On NPU1 each step is its
+own dispatch of an xclbin; on NPU2 that form is checked too.
 
 Each tower's graph is built for the class that tests it and dropped after
 it, before the text encoder's graphs are built for the module's last tests.
@@ -146,7 +148,7 @@ def cosine(a, b):
 
 
 def clip(name: str) -> np.ndarray:
-    """The utterance `CLIPS[name]`, at the extractor's sample rate."""
+    """Return the utterance `CLIPS[name]`, at the extractor's sample rate."""
     return utterance(CLIPS[name])
 
 
@@ -185,11 +187,12 @@ def tokenizer():
 
 @pytest.fixture(scope="module")
 def reference():
-    """``reference(key, compute)``: ``compute(model)`` on Hugging Face's own
+    """Return ``reference(key, compute)``: ``compute(model)`` on Hugging Face's own model.
+
     EmbeddingGemma 2 (hugging_face.py), an array kept under ``key`` in
     ``golden.npz`` beside the checkpoint, recorded under ``pytest
-    --record-goldens`` (torch, torchvision and transformers installed) and
-    refused once the checkpoint's ``config.json`` or tensors change.
+    --record-goldens`` (torch, torchvision and transformers installed)
+    and refused once the checkpoint's ``config.json`` or tensors change.
     """
     if not os.environ.get(RECORD):
         require(DIRECTORY / "golden.npz")
@@ -217,9 +220,10 @@ def reference():
 
 
 def embedding(reference, text, task, speech=None, name=None, dims=None):
-    """Hugging Face's embedding of ``text`` for ``task`` with the clip
-    ``speech`` and the photo ``name`` at its placeholders, its first
-    ``dims`` renormalized.
+    """Return Hugging Face's embedding of ``text`` for ``task``.
+
+    With the clip ``speech`` and the photo ``name`` at its
+    placeholders, its first ``dims`` renormalized.
     """
     e = reference(
         f"embedding {task} {speech} {name} {text}",
@@ -233,10 +237,11 @@ def embedding(reference, text, task, speech=None, name=None, dims=None):
 
 
 def windows(config, pixel_values, positions):
-    """The processor's patches as the NPU's ``iron.lm.ImagePatches`` gives
-    them in ``config.patches`` rows: each soft token's ``pool ** 2``
-    patches together, row-major within their window, the tokens row-major
-    over the image, then padding, ids past each table.
+    """Return the processor's patches as the NPU's ``iron.lm.ImagePatches`` gives them.
+
+    In ``config.patches`` rows: each soft token's ``pool ** 2`` patches
+    together, row-major within their window, the tokens row-major over
+    the image, then padding, ids past each table.
 
     Returns:
         ``pixels`` ``(rows, 3 * patch ** 2)`` bf16; ``xy`` ``(2 * rows,)``
@@ -273,7 +278,7 @@ def loaded(graph, full_elf=None):
 
 
 def check_mixed(graph, reference, case, record_property):
-    """The embedding of `MIXED[case]` against Hugging Face's."""
+    """Check the embedding of `MIXED[case]` against Hugging Face's."""
     text, speech, name = MIXED[case]
     audio = None if speech is None else clip(speech)
     image = None if name is None else photo(name)
@@ -288,8 +293,9 @@ def check_mixed(graph, reference, case, record_property):
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 class TestEachStep:
-    """The form NPU1 runs: each step its own dispatch of an xclbin, the
-    towers' included.
+    """The form NPU1 runs: each step its own dispatch of an xclbin.
+
+    The towers' included.
     """
 
     @pytest.fixture(scope="class")
@@ -383,8 +389,9 @@ class TestAudio:
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestVision:
-    """The vision tower alone, and its image processor alone: a graph the
-    tower calls in its body, compiled here on its own.
+    """The vision tower alone, and its image processor alone.
+
+    A graph the tower calls in its body, compiled here on its own.
     """
 
     @pytest.fixture(scope="class")
@@ -634,8 +641,10 @@ class WindowPositions(iron.Graph):
     "hk, wk", [(1, 1), (14, 19), (16, 16), (6, 42), (8, 35), (65, 4), (200, 1)]
 )
 def test_vision_window_positions_are_each_patch_rows(npu2, hk, wk):
-    """Each patch in window order gets its x and y position embeddings, each
-    add rounded as `ElementwiseAdd` rounds it, and its x and y angles.
+    """Check that each patch in window order gets its x and y position embeddings.
+
+    Each add rounded as `ElementwiseAdd` rounds it, and its x and y
+    angles.
     """
     require(DIRECTORY / "model.safetensors")
     weights = Checkpoint(DIRECTORY / "model.safetensors").tree()

@@ -76,8 +76,10 @@ def _store(
     release: Callable[[np.ndarray], None] | None = None,
     piece_bytes: int = UPLOAD_PIECE,
 ) -> None:
-    """Copy ``tensor`` into a buffer view, casting in place (``astype`` would
-    fault in a whole temporary); ``release`` gets each piece once copied.
+    """Copy ``tensor`` into a buffer view, casting in place.
+
+    ``astype`` would fault in a whole temporary; ``release`` gets each piece
+    once copied.
     """
     flat = np.asarray(tensor).reshape(-1)
     if release is None:
@@ -92,8 +94,10 @@ def _store(
 
 @dataclasses.dataclass(frozen=True)
 class _Parameters:
-    """A body's inputs, which of them may be left out, and its per-call
-    values and their defaults, read from its signature."""
+    """A body's inputs, which of them may be left out, and its per-call values.
+
+    Read from its signature, along with their defaults.
+    """
 
     inputs: list[str]
     values: dict[str, tuple[Kind, Any]]
@@ -174,9 +178,10 @@ class _Unbound(_Param):
 
 
 def param(*shape, dtype=bfloat16) -> np.ndarray:
-    """A weight a graph holds, declared by shape for ``Graph.load_state_dict``
-    to bind, or ``param(array)`` holding ``array``, as torch's
-    ``nn.Parameter``. A graph refuses to hold a bare array.
+    """Declare a weight a graph holds, as torch's ``nn.Parameter``.
+
+    Declared by shape for ``Graph.load_state_dict`` to bind, or
+    ``param(array)`` holding ``array``. A graph refuses to hold a bare array.
     """
     if len(shape) == 1 and isinstance(shape[0], np.ndarray):
         a = shape[0]
@@ -187,9 +192,11 @@ def param(*shape, dtype=bfloat16) -> np.ndarray:
 def walk(
     root, graphs: bool = True, shared: list[str] | None = None
 ) -> Iterator[tuple[str, Any, Any, Any]]:
-    """Yield ``(path, x, container, key)`` per state and tensor under ``root``,
-    through containers and graphs' public attributes, each container once (repeats'
-    paths to ``shared``); without ``graphs``, a nested graph is yielded whole.
+    """Yield ``(path, x, container, key)`` per state and tensor under ``root``.
+
+    Walks through containers and graphs' public attributes, each container
+    once (repeats' paths to ``shared``); without ``graphs``, a nested graph
+    is yielded whole.
     """
     seen: set[int] = set()
 
@@ -241,7 +248,8 @@ class Graph:
         raise NotImplementedError(f"{type(self).__name__} defines no body()")
 
     def signature(self) -> inspect.Signature:
-        """The inputs and per-call values ``body`` takes, ``self`` left out:
+        """Return the inputs and per-call values ``body`` takes, ``self`` left out.
+
         ``body``'s own parameters, unless a subclass names them here.
         """
         signature = inspect.signature(type(self).body, eval_str=True)
@@ -325,8 +333,9 @@ class Graph:
         return held
 
     def release(self) -> None:
-        """Free the device memory this graph's versions and arena hold; a call
-        after it loads them again.
+        """Free the device memory this graph's versions and arena hold.
+
+        A call after it loads them again.
         """
         for version in self._versions.values():
             version.release()
@@ -334,9 +343,11 @@ class Graph:
             self._arena.release()
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
-        """Bind each ``param`` held, at any depth, to the tensor at ``path``
-        (this graph's prefix, ``"model."``) plus its dotted path in ``tree``,
-        cast as torch's ``copy_``; a param held at several paths binds once.
+        """Bind each ``param`` held, at any depth, to its tensor in ``tree``.
+
+        The tensor is found at ``path`` (this graph's prefix, ``"model."``)
+        plus its dotted path in ``tree``, cast as torch's ``copy_``; a param
+        held at several paths binds once.
 
         Raises:
             ValueError: ``path`` lacks its trailing dot, the graph is already
@@ -413,8 +424,9 @@ class Graph:
         self._bound = True
 
     def record(self, **shapes) -> Recording:
-        """Run ``body`` on handles of the given shapes; an optional input
-        given none is None.
+        """Run ``body`` on handles of the given shapes.
+
+        An optional input given none is None.
         """
         shapes = {k: v for k, v in shapes.items() if v is not None}
         params = self._parameters
@@ -530,8 +542,10 @@ class Graph:
         feeds: CompiledGraph | None = None,
         **shapes,
     ) -> CompiledGraph:
-        """Compile and return the version for these input shapes; compile all
-        before the first call, as a later one grows (copies) the arena.
+        """Compile and return the version for these input shapes.
+
+        Compile all before the first call, as a later one grows (copies) the
+        arena.
 
         Args:
             dev: The device, for this compile alone; else the current one.
@@ -581,8 +595,9 @@ class Graph:
     def _emit(
         self, recording: Recording, chosen: Plan, feeds: CompiledGraph | None
     ) -> tuple[EmitSite | None, list[Word] | None]:
-        """Append the Emit step a looping full ELF with carried values ends in,
-        sized for ``feeds``' words or its own; return it and those own words.
+        """Append the Emit step a looping full ELF with carried values ends in.
+
+        Sized for ``feeds``' words or its own; returns it and those own words.
 
         Raises:
             ValueError: ``feeds`` is not a full-ELF version of this graph, or
@@ -660,8 +675,9 @@ class Graph:
         return version(*given.values(), **values)
 
     def inline(self, method: Callable, /, *args, **kwargs) -> Any:
-        """Record ``method``, one of this graph's, into the graph being
-        recorded, under this graph's profile; that graph names its values.
+        """Record ``method``, one of this graph's, into the graph being recorded.
+
+        Recorded under this graph's profile; that graph names its values.
 
         Raises:
             TypeError: No graph's body is being recorded.
@@ -679,9 +695,10 @@ class Graph:
             recorder.profile = previous
 
     def reference(self, *tensors, dev=None, **values) -> Any:
-        """Run the body on the host, each step through its operator's
-        ``reference()``, tiled for ``dev`` (else the current device) without
-        needing an NPU; outputs are numpy arrays of their shape, cut to bounds.
+        """Run the body on the host, each step through its operator's ``reference()``.
+
+        Tiled for ``dev`` (else the current device) without needing an NPU;
+        outputs are numpy arrays of their shape, cut to bounds.
 
         Raises:
             RuntimeError: No device is given or bound.
@@ -723,8 +740,10 @@ class Graph:
 
 
 class CompiledGraph:
-    """A recorded graph built into an image, ready to call with the per-call
-    values this version reads (``Recording.reads``); the graph's others go unused.
+    """A recorded graph built into an image, ready to call.
+
+    Called with the per-call values this version reads (``Recording.reads``);
+    the graph's others go unused.
     """
 
     def __init__(
@@ -988,8 +1007,9 @@ class CompiledGraph:
         self._write_values(values, run)
 
     def _address(self, name: str) -> int:
-        """The device address of buffer ``name``, put until the arena holding
-        it grows (a new view).
+        """Return the device address of buffer ``name``.
+
+        Put until the arena holding it grows (a new view).
         """
         view = self.callable.get_storage(name)
         if name not in self._addressed or self._addressed[name][0] is not view:
@@ -1061,8 +1081,9 @@ class Linear:
 
 @dataclasses.dataclass(frozen=True)
 class Word:
-    """A scratchpad word a call writes; words with one ``linear`` form, or one
-    clamped ``form``, share a word.
+    """A scratchpad word a call writes.
+
+    Words with one ``linear`` form, or one clamped ``form``, share a word.
     """
 
     symbol: str
@@ -1076,7 +1097,10 @@ class Word:
 
 
 def _derived_form(op, name: str, counts: Mapping[str, Affine]) -> Affine | None:
-    """The Emit form of ``op``'s derived value ``name``, or ``None`` where no form expresses it."""
+    """Return the Emit form of ``op``'s derived value ``name``.
+
+    ``None`` where no form expresses it.
+    """
     try:
         got = op.derived_at(name, **counts)
     except TypeError:
@@ -1091,8 +1115,9 @@ def _derived_form(op, name: str, counts: Mapping[str, Affine]) -> Affine | None:
 def _words(
     recording: Recording, *, share: bool = False, extents: bool = True
 ) -> tuple[list[Word], dict[str, str]]:
-    """The scratchpad words a call writes, and with ``share`` the symbols
-    sharing one: a full ELF has 32 words for its whole image.
+    """Return the scratchpad words a call writes, and with ``share`` the symbols sharing one.
+
+    A full ELF has 32 words for its whole image.
     """
     words: list[Word] = []
     for b in recording.bindings:
@@ -1165,8 +1190,9 @@ def _words(
 
 
 def _step_words(recording: Recording) -> list[frozenset[str]]:
-    """The scratchpad words each step's design reads on a full ELF, by the
-    symbol each shares.
+    """Return the scratchpad words each step's design reads on a full ELF.
+
+    Grouped by the symbol each shares.
     """
     shared = _words(recording, share=True)[1]
     return [
@@ -1180,8 +1206,9 @@ def _step_words(recording: Recording) -> list[frozenset[str]]:
 
 
 def _shared(words: list[Word]) -> dict[str, str]:
-    """The symbol each word shares with the words of its one form: a
-    ``Linear``, or the name of a clamped or wrapped expression or of a
+    """Group the symbol each word shares with the words of its one form.
+
+    A ``Linear``, or the name of a clamped or wrapped expression or of a
     floor scaled past one.
     """
     shared: dict[str, str] = {}

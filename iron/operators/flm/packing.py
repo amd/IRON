@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Weight packing for flm.ProjectionGEMM, which consumes B pre-packed into
-compute-tile read order so its transfers are plain linear descriptors. The
-reorder is deliberately the caller's job: an unpacked B's strided descriptor
-scatters each transfer into many small bursts of ``t`` bf16 values; packing
-once and reusing it across dispatches amortizes that cost.
+"""Weight packing for flm.ProjectionGEMM.
+
+It consumes B pre-packed into compute-tile read order so its transfers are
+plain linear descriptors. The reorder is deliberately the caller's job: an
+unpacked B's strided descriptor scatters each transfer into many small
+bursts of ``t`` bf16 values; packing once and reusing it across dispatches
+amortizes that cost.
 """
 
 import numpy as np

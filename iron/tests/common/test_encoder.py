@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``iron.lm``'s ``Encoder`` and ``Tower``, device-free: a call's inputs, the
-bounded gather a body records, each kind's reference, the operators' own,
-against numpy attention over the valid rows, and the default layer, an
-``EncoderLayer`` attending both ways.
+"""``iron.lm``'s ``Encoder`` and ``Tower``, device-free.
+
+A call's inputs, the bounded gather a body records, each kind's reference,
+the operators' own, against numpy attention over the valid rows, and the
+default layer, an ``EncoderLayer`` attending both ways.
 """
 
 import dataclasses
@@ -169,8 +170,7 @@ def test_the_default_layer_is_an_encoder_layer_attending_both_ways(table):
 
 
 class Positioned(SelfAttention):
-    """One layer of ``SelfAttention`` over rows placed by a held table of
-    absolute positions."""
+    """One layer of ``SelfAttention`` over rows placed by a held table of absolute positions."""
 
     def __init__(self, table, positions):
         super().__init__(table, 1)

@@ -81,10 +81,11 @@ UPGATE_RUN = 512
 
 
 def gemm(M, K, N, gelu):
-    """Every GEMM of the model: floor rounding, bf16_steps gelu and MEDIUM's
-    bfp16 macs reproduce the engine's arithmetic bit for bit. ``k_tile=256``
-    divides every K, so one configuration serves all shapes; B's k slice
-    comes from DequantBFP's.
+    """Build every GEMM of the model: floor rounding, bf16_steps gelu and MEDIUM's bfp16 macs.
+
+    Reproduce the engine's arithmetic bit for bit. ``k_tile=256`` divides
+    every K, so one configuration serves all shapes; B's k slice comes
+    from DequantBFP's.
     """
     return ProjectionGEMM(
         M=M,
@@ -101,7 +102,7 @@ def gemm(M, K, N, gelu):
 
 
 def write_generator(artifacts, path, namespace):
-    """Writes the C++ that generates `artifacts`' instruction sequence, for the engine to compile in."""
+    """Write the C++ that generates `artifacts`' instruction sequence, for the engine to compile in."""
     cpp = (artifacts.entry.directory / "dispatch_gen.cpp").read_text()
     # mlir-aie emits a dlopen shim after the generator. The engine links several
     # generators, so drop the shim and give each generator a namespace.
@@ -120,7 +121,7 @@ def compile_all(ops):
 
 
 def one_xclbin(built):
-    """The xclbin all of `built` share. The engine registers one xclbin per operator."""
+    """Return the xclbin all of `built` share. The engine registers one xclbin per operator."""
     xclbins = {artifacts.image for artifacts in built}
     assert len(xclbins) == 1, f"expected one configuration, got {sorted(xclbins)}"
     return xclbins.pop()

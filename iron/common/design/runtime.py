@@ -34,10 +34,12 @@ from ..declare.operand import Operand, active_runtime
 
 
 class OperatorRuntime(Runtime):
-    """The ``rt`` an operator's ``sequence(rt)`` receives: aie.iron's ``Runtime``
-    running the preamble, then that sequence or the one its declaration derives.
-    A managed transfer on a pinned lane keeps at most the operand's ``depth`` in
-    flight, all awaited at the sequence's end.
+    """The ``rt`` an operator's ``sequence(rt)`` receives.
+
+    aie.iron's ``Runtime`` running the preamble, then that sequence or the
+    one its declaration derives. A managed transfer on a pinned lane keeps
+    at most the operand's ``depth`` in flight, all awaited at the
+    sequence's end.
 
     Args:
         op: The resolved operator, its array built and its operands' lanes
@@ -95,8 +97,9 @@ class OperatorRuntime(Runtime):
                 )
 
     def body(self, *args) -> None:
-        """The sequence body, given the operator's runtime tensors, its lanes'
-        handles, then each per-call value not in the scratchpad as its scalar.
+        """Record the sequence body, given the operator's runtime tensors, its lanes' handles.
+
+        Then each per-call value not in the scratchpad as its scalar.
         """
         buffers = self.op.buffers
         self._tensors = {b.name: a for b, a in zip(buffers, args)}
@@ -119,9 +122,10 @@ class OperatorRuntime(Runtime):
         super().resolve(loc, ip, device=device, **options)
 
     def declare(self, device) -> None:
-        """Its pins and buffers, at ``device`` scope ahead of the sequence: aie.iron
-        names a shim channel by its route and places a buffer by the worker that
-        reads it, and these have neither.
+        """Its pins and buffers, at ``device`` scope ahead of the sequence.
+
+        aie.iron names a shim channel by its route and places a buffer by
+        the worker that reads it, and these have neither.
         """
         for symbol, end in self.pins.items():
             device.resolve_tile(end.tile)
@@ -168,9 +172,11 @@ class OperatorRuntime(Runtime):
         repeat_parameter: Value | None = None,
         managed: bool = True,
     ):
-        """``Operand.fill``/``drain`` (``verb``): ``source``'s (else ``operand``'s)
-        ``tap`` through ``lane`` of ``operand``'s stream, its per-call words a
-        scratchpad parameter on a full ELF, the pattern's sizes and offset on an xclbin.
+        """``Operand.fill``/``drain`` (``verb``): ``source``'s (else ``operand``'s) ``tap``.
+
+        Through ``lane`` of ``operand``'s stream, its per-call words a
+        scratchpad parameter on a full ELF, the pattern's sizes and offset
+        on an xclbin.
         """
         if lane is None:
             if operand.lanes != 1:
@@ -310,10 +316,12 @@ class OperatorRuntime(Runtime):
         return self._tensors[buffer.name]
 
     def preamble(self, **values) -> None:
-        """Each core's runtime parameters, the parameter sync, then each core's
-        barrier, before any DMA; a shipped image's parameter blocks (``buffers``)
-        get the residents' words in declaration order, for its sequence to release.
-        An ``own_preamble`` operator's sequence calls it, ``values`` overriding residents.
+        """Write each core's runtime parameters, the parameter sync, then each core's barrier, before any DMA.
+
+        A shipped image's parameter blocks (``buffers``) get the residents'
+        words in declaration order, for its sequence to release. An
+        ``own_preamble`` operator's sequence calls it, ``values`` overriding
+        residents.
 
         Raises:
             ValueError: ``values`` names no resident of the operator, or a
@@ -349,8 +357,9 @@ class OperatorRuntime(Runtime):
 
 
 class MergedRuntime(Runtime):
-    """Operator runtimes run back to back as one sequence
-    (``Runtime.merge``), declaring each array's pins and buffers once.
+    """Operator runtimes run back to back as one sequence (``Runtime.merge``).
+
+    Declaring each array's pins and buffers once.
     """
 
     runtimes: list[OperatorRuntime]

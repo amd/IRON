@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CI's pages script, run as publish-pages.yml runs it, draws one chart per
-runner for each operator's, or each shared-test decoder's, nightly results.
+"""CI's pages script, run as publish-pages.yml runs it.
+
+Draws one chart per runner for each operator's, or each shared-test
+decoder's, nightly results.
 """
 
 import csv

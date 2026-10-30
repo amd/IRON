@@ -66,8 +66,10 @@ def _require_xrt() -> None:
 
 
 class ScratchArena:
-    """An ``ArenaPlan``'s device buffers, a buffer object per bank; as the plan
-    grows they grow, keeping their contents, and ``generation`` says to rebind.
+    """An ``ArenaPlan``'s device buffers, a buffer object per bank.
+
+    As the plan grows they grow, keeping their contents, and
+    ``generation`` says to rebind.
     """
 
     def __init__(self, plan: ArenaPlan):
@@ -114,8 +116,10 @@ class ScratchArena:
 
 
 class FullELFRun:
-    """One run of a full ELF's commands, back to back, with its own ctrl
-    scratchpad of per-call values; it ends once the shared runtime evicts its image.
+    """One run of a full ELF's commands, back to back.
+
+    Its own ctrl scratchpad holds per-call values; it ends once the
+    shared runtime evicts its image.
     """
 
     def __init__(
@@ -158,7 +162,8 @@ class FullELFRun:
 
     @property
     def params(self) -> list[ParameterScratchpad] | None:
-        """Each command's parameter scratchpad, holding the words it reads;
+        """Each command's parameter scratchpad, holding the words it reads.
+
         ``None`` when ``params.txt`` counts none.
         """
         if self._params is not None:
@@ -195,8 +200,9 @@ class FullELFRun:
         return block.read(symbol)
 
     def scratchpad_alias(self) -> pyxrt.bo:
-        """This run's ctrl scratchpad, for another run to drain its feedback into;
-        refused where it has no per-call values, or is several commands.
+        """Return this run's ctrl scratchpad, for another run to drain its feedback into.
+
+        Refused where it has no per-call values, or is several commands.
         """
         params = self.params
         if params is None:
@@ -210,8 +216,9 @@ class FullELFRun:
         return params[0].alias()
 
     def start(self, idle: Collection[int] = (), commands: range | None = None) -> None:
-        """Start each command's run back to back, but the ``idle`` ones'; of
-        ``commands`` alone where given.
+        """Start each command's run back to back, but the ``idle`` ones'.
+
+        Runs only ``commands``, where given.
         """
         if aie_utils.DefaultNPURuntime.load(self._image).kernel is not self._kernel:
             raise RuntimeError(
@@ -231,16 +238,20 @@ class FullELFRun:
 
 
 def _line_view(parent: XRTTensor, offset: int, length: int, dtype) -> XRTTensor:
-    """``length`` bytes of ``parent`` at ``offset`` as ``dtype``, out to the end of
-    their coherence line (no other buffer's), as a view ending mid-line cannot sync.
+    """Return ``length`` bytes of ``parent`` at ``offset`` as ``dtype``.
+
+    Out to the end of their coherence line (no other buffer's), as a view
+    ending mid-line cannot sync.
     """
     stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
     return parent.subview(offset, ((stop - offset) // dtype.itemsize,), dtype)
 
 
 class ImageCallable:
-    """What a caller invokes once a sequence ``op`` has an image; residents placed
-    in an arena plan are views of ``arena``'s banks, remade as it grows.
+    """What a caller invokes once a sequence ``op`` has an image.
+
+    Residents placed in an arena plan are views of ``arena``'s banks,
+    remade as it grows.
     """
 
     def __init__(self, seq, arena: ScratchArena | None):
@@ -252,19 +263,21 @@ class ImageCallable:
         self._arena_generation: int | None = None
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
-        """The per-call values the next call reads."""
+        """Write the per-call values the next call reads."""
         raise NotImplementedError
 
     def get_buffer(self, ref: BufferRef) -> XRTTensor:
-        """The bytes ``ref`` names, as its dtype."""
+        """Return the bytes ``ref`` names, as its dtype."""
         raise NotImplementedError
 
     def get_storage(self, root: str) -> XRTTensor:
-        """The buffer ``root`` whole."""
+        """Return the buffer ``root`` whole."""
         raise NotImplementedError
 
     def __call__(self) -> tuple[XRTKernelHandle | None, XRTKernelResult]:
-        """Run the sequence once: the handle an empty dispatch is timed on
+        """Run the sequence once.
+
+        Returns the handle an empty dispatch is timed on
         (``aie.utils.benchmark``), or None, and the call's result.
         """
         raise NotImplementedError
@@ -278,8 +291,10 @@ class ImageCallable:
 
 
 class FullELFCallable(ImageCallable):
-    """The full ELF (NPU2); a call dispatches ``run``. Where the device heap (about
-    512 MiB of ctrlcode) is full, a new run frees the least recently called one's.
+    """The full ELF (NPU2); a call dispatches ``run``.
+
+    Where the device heap (about 512 MiB of ctrlcode) is full, a new run
+    frees the least recently called one's.
     """
 
     # The callables holding a run, least recently called first.
@@ -350,8 +365,9 @@ class FullELFCallable(ImageCallable):
 
     @property
     def handle(self) -> XRTKernelHandle:
-        """The ELF as the shared runtime holds it: loaded again, ending every
-        run, where the runtime evicted it.
+        """The ELF as the shared runtime holds it.
+
+        Loaded again, ending every run, where the runtime evicted it.
         """
         handle = aie_utils.DefaultNPURuntime.load(self.kernel)
         if handle.kernel is not self._xrt_kernel:
@@ -375,8 +391,10 @@ class FullELFCallable(ImageCallable):
         return self._make_run()
 
     def release(self, *, force: bool = False) -> bool:
-        """Free ``run`` and unload the image, returning True, unless a loop holds
-        the run, another run is out, or another callable runs the image.
+        """Free ``run`` and unload the image, returning True unless it is in use.
+
+        False means a loop holds the run, another run is out, or another
+        callable runs the image.
 
         ``force`` frees it anyway: the graph is being torn down, so a run
         still wired into its own loop (the loop is torn down with it) or
@@ -465,8 +483,9 @@ class FullELFCallable(ImageCallable):
         return path
 
     def get_buffer(self, ref: BufferRef):
-        """The bytes ``ref`` names, and the rest of their last coherence line
-        (``_line_view``).
+        """Return the bytes ``ref`` names, and the rest of their last coherence line.
+
+        See ``_line_view``.
         """
         self._follow_arena()
         if ref not in self._buffer_cache:
@@ -480,7 +499,7 @@ class FullELFCallable(ImageCallable):
         return self._buffer_cache[ref]
 
     def get_storage(self, root: str):
-        """The buffer and the rest of its last coherence line (``_line_view``)."""
+        """Return the buffer and the rest of its last coherence line (``_line_view``)."""
         self._follow_arena()
         if root not in self._storage_cache:
             kind, offset, length = self.op.layout[root]
@@ -512,16 +531,18 @@ class FullELFCallable(ImageCallable):
             self.trace_buffer.to("npu")
 
     def start(self, *runs: FullELFRun, idle: Collection[int] = ()) -> None:
-        """Push what the host wrote, and start ``runs`` without waiting, each
-        but its ``idle`` commands.
+        """Push what the host wrote, and start ``runs`` without waiting.
+
+        Each but its ``idle`` commands.
         """
         self._sync_inputs()
         for run in runs:
             run.start(idle)
 
     def wait(self, *runs: FullELFRun) -> None:
-        """Wait on ``runs``, refusing a host write made while they were out, which
-        no run read and the next push would lay over what they wrote.
+        """Wait on ``runs``, refusing a host write made while they were out.
+
+        No run read it, and the next push would lay over what they wrote.
         """
         for run in runs:
             run.wait()
@@ -539,8 +560,10 @@ class FullELFCallable(ImageCallable):
         idle: Collection[int] = (),
         between: Mapping[int, Callable[[], None]] | None = None,
     ) -> tuple[XRTKernelHandle, XRTKernelResult]:
-        """Dispatch ``run`` but its ``idle`` commands; ``between[k]()`` runs on the
-        host once the commands before ``k`` complete, and its writes are pushed.
+        """Dispatch ``run`` but its ``idle`` commands.
+
+        ``between[k]()`` runs on the host once the commands before ``k``
+        complete, and its writes are pushed.
         """
         self._sync_inputs()
         t0 = time.perf_counter()
@@ -560,8 +583,10 @@ class FullELFCallable(ImageCallable):
 
 
 class PerStepCallable(ImageCallable):
-    """Runs a ``PerStep`` a dispatch at a time, ``check`` holding each step to its
-    reference; residents are arena views, transients share one bank-split pool.
+    """Run a ``PerStep`` a dispatch at a time.
+
+    ``check`` holds each step to its reference; residents are arena views,
+    transients share one bank-split pool.
     """
 
     def __init__(self, seq, check: bool = False, arena: ScratchArena | None = None):
@@ -641,8 +666,9 @@ class PerStepCallable(ImageCallable):
         self._bind_steps()
 
     def get_buffer(self, ref: BufferRef):
-        """The bytes ``ref`` names, and the rest of their last coherence line
-        (``_line_view``).
+        """Return the bytes ``ref`` names, and the rest of their last coherence line.
+
+        See ``_line_view``.
         """
         self._follow_arena()
         if ref not in self._buffers:
@@ -656,8 +682,10 @@ class PerStepCallable(ImageCallable):
         return self._buffers[ref]
 
     def get_storage(self, root: str):
-        """The buffer, and for a resident in the arena the rest of its last
-        coherence line, which no other buffer holds.
+        """Return the buffer.
+
+        For a resident in the arena, returns the rest of its last
+        coherence line too, which no other buffer holds.
         """
         self._follow_arena()
         return self._storage[root]
@@ -668,8 +696,10 @@ class PerStepCallable(ImageCallable):
     def __call__(
         self, between: Mapping[int, Callable[[], None]] | None = None
     ) -> tuple[None, XRTKernelResult]:
-        """Dispatch each step, ``between[i]()`` running on the host before step
-        ``i``, never inside a pack's run; the handle is None, no one dispatch timed.
+        """Dispatch each step.
+
+        ``between[i]()`` runs on the host before step ``i``, never inside
+        a pack's run; the handle is None, no one dispatch timed.
         """
         between = dict(between or {})
         inside = set(between) - {*self._starts, len(self.op.steps)}
@@ -724,8 +754,9 @@ class PerStepCallable(ImageCallable):
     def _reference(
         self, step_op: Operator, args
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-        """``step_op``'s inputs as its buffers hold them, and its reference
-        on them, by buffer name.
+        """Return ``step_op``'s inputs and its reference on them, by buffer name.
+
+        Inputs are read as its buffers hold them.
         """
         held = {
             spec.name: buf.numpy()[: spec.elements].reshape(spec.shape).copy()
@@ -756,8 +787,10 @@ def check_step(
     written: Mapping[str, np.ndarray],
     expected: Mapping[str, np.ndarray],
 ) -> None:
-    """Hold what step ``index`` wrote, by declared name, to its reference within
-    its ``tolerance()``; raises where it declares none or an output falls outside.
+    """Hold what step ``index`` wrote, by declared name, to its reference.
+
+    Within its ``tolerance()``; raises where it declares none or an
+    output falls outside.
     """
     tol = step_op.resolved().tolerance()
     if tol is None:

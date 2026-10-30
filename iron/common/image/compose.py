@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Composition: a sequence's designs as one module, mlir-aie's
-``Program.compose``: a ``DeviceConfiguration`` per array, designs of one
-array sharing their device, and a main one whose runtime sequence
-configures and runs them in turn.
+"""Composition: a sequence's designs as one module, mlir-aie's ``Program.compose``.
+
+A ``DeviceConfiguration`` per array, designs of one array sharing their
+device, and a main one whose runtime sequence configures and runs them in
+turn.
 """
 
 from __future__ import annotations
@@ -60,8 +61,9 @@ class CoResidenceError(ValueError):
 
 @dataclasses.dataclass(frozen=True)
 class Packing:
-    """A partition of a sequence's designs into device configurations; a
-    design in no group (or a group of one) has its own.
+    """A partition of a sequence's designs into device configurations.
+
+    A design in no group (or a group of one) has its own.
     """
 
     groups: tuple[tuple[str, ...], ...] = ()
@@ -92,8 +94,9 @@ class Packing:
         return out
 
     def sharing(self, arrays: Mapping[str, Hashable]) -> Packing:
-        """This packing with one array's designs in one device, ``arrays`` mapping
-        each design in first-use order to it.
+        """Return this packing with one array's designs in one device.
+
+        ``arrays`` maps each design in first-use order to it.
         """
         order = list(arrays)
         by_array: dict[Hashable, set[str]] = {}
@@ -110,14 +113,16 @@ class Packing:
 
     @staticmethod
     def device_name(group: Sequence[str]) -> str:
-        """A pack's symbol, independent of its members' order."""
+        """Return a pack's symbol, independent of its members' order."""
         digest = hashlib.sha256("|".join(sorted(group)).encode()).hexdigest()[:8]
         return f"pack{len(group)}_{digest}"
 
 
 def unvalued(designs: Mapping[str, OperatorDesign]) -> None:
-    """Raise ``CoResidenceError`` where one of ``designs`` is built for an xclbin
-    and takes a per-call value, a dispatch parameter a pack's sequence cannot carry.
+    """Raise ``CoResidenceError`` where one of ``designs`` is built for an xclbin.
+
+    And takes a per-call value, a dispatch parameter a pack's sequence
+    cannot carry.
     """
     for name, design in designs.items():
         if not design.full_elf and design.op.values:
@@ -151,8 +156,9 @@ def places(module: ir.Module) -> str | None:
 def fits(
     designs: Mapping[str, OperatorDesign], words: Mapping[str, str] | None = None
 ) -> str | None:
-    """``None`` if ``designs``, by device name, place and allocate, else the
-    diagnostic; ``words`` maps a design symbol to the scratchpad word it shares.
+    """Return ``None`` if ``designs``, by device name, place and allocate, else the diagnostic.
+
+    ``words`` maps a design symbol to the scratchpad word it shares.
     """
     exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
     try:
@@ -172,8 +178,10 @@ def fits(
 
 
 class Composition:
-    """An operator sequence's designs in one module, each device named for its design
-    so aiecc's device cache hits in any graph; ``seq`` is laid out, on a ``FullELF``.
+    """An operator sequence's designs in one module, each device named for its design.
+
+    So aiecc's device cache hits in any graph; ``seq`` is laid out, on a
+    ``FullELF``.
     """
 
     def __init__(self, seq):
@@ -205,8 +213,9 @@ class Composition:
 
     @property
     def identity(self) -> str:
-        """What ``text()`` is a function of, so a cache hit costs a hash
-        rather than a composition.
+        """Return what ``text()`` is a function of.
+
+        So a cache hit costs a hash rather than a composition.
         """
         h = hashlib.sha256()
         for name, design in self.designs.items():
@@ -225,8 +234,10 @@ class Composition:
         return h.hexdigest()[:24]
 
     def text(self) -> str:
-        """The composed module: a device configuration per array or pack, and
-        ``main``, whose runtime sequence configures each in turn and runs its steps.
+        """Return the composed module: a device configuration per array or pack, and ``main``.
+
+        ``main``'s runtime sequence configures each in turn and runs its
+        steps.
         """
         words = self.shared_words
         arrays: dict[str, BuiltArray] = {}
@@ -335,14 +346,15 @@ class Composition:
 
     @staticmethod
     def sequence_name(command: int) -> str:
-        """The runtime sequence of the ``command``-th command in ``main``."""
+        """Return the runtime sequence of the ``command``-th command in ``main``."""
         return "sequence" if command == 0 else f"sequence_{command}"
 
     def _exported(
         self, symbol: str, name: str, text: str
     ) -> tuple[DeviceConfiguration, list]:
-        """Exported design ``name``'s device as configuration ``symbol``, and its
-        sequence's argument types; none of its parameters may be a shared word.
+        """Return exported design ``name``'s device as configuration ``symbol``, and its sequence's argument types.
+
+        None of its parameters may be a shared word.
         """
         with ir.Context(), ir.Location.unknown():
             configured = DeviceConfiguration.from_module(symbol, ir.Module.parse(text))
@@ -360,8 +372,10 @@ class Composition:
     def _views(
         self, name: str, buffers: tuple[BufferRef, ...], types
     ) -> list[tuple[str, int, type]]:
-        """Each of step ``name``'s buffers as ``(argument, byte offset, type)`` in
-        the full ELF's arguments; each must match its type's bytes, on a shim word.
+        """Return each of step ``name``'s buffers as ``(argument, byte offset, type)``.
+
+        In the full ELF's arguments; each must match its type's bytes, on a
+        shim word.
         """
         views = []
         for buffer, view_type in zip(buffers, types):
