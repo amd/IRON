@@ -115,14 +115,24 @@ def test_build_variant_with_no_stock_path_starts_empty():
 def test_verify_live_and_changed_versions_see_a_candidates_live_fusion():
     stock_model = small()
     entry = _silu_mul_entry(stock_model.record(**stock_model.shapes()[0]))
+
+    # A real candidate profile is stock's own tunables plus whatever changed
+    # (see test_validate_device.py): a profile holding the fusion alone would
+    # also lose SMALL's own tuned tile sizes, moving the prompt chunk, which
+    # the fusion never touches, off stock's build for that reason alone.
     candidate_profile = Profile()
+    for cls, dims, tunables in stock_model.profile:
+        candidate_profile.add(cls, **dims, **tunables)
     candidate_profile.add_fusion(*entry)
     candidate_model = small()
     candidate_model.profile = candidate_profile
 
-    decode_shape = stock_model.shapes()[0]
-    stock_model.compile(full_elf=True, check=False, **decode_shape)
-    candidate_model.compile(full_elf=True, check=False, **decode_shape)
+    # Every shape, not just decode's: verify_live's pairing is strict, so a
+    # version a caller left uncompiled fails loudly rather than vanishing
+    # from the comparison (changed_versions would otherwise never see it).
+    for shape in stock_model.shapes():
+        stock_model.compile(full_elf=True, check=False, **shape)
+        candidate_model.compile(full_elf=True, check=False, **shape)
 
     stock_live = validate.verify_live("stock", stock_model)
     candidate_live = validate.verify_live("candidate", candidate_model)
@@ -133,6 +143,13 @@ def test_verify_live_and_changed_versions_see_a_candidates_live_fusion():
     assert candidate_live["decode"]["kinds"] == {"stream": 2}
 
     assert validate.changed_versions(stock_live, candidate_live) == ["decode"]
+
+
+def test_verify_live_rejects_a_model_missing_a_compiled_version():
+    model = small()
+    model.compile(full_elf=True, check=False, **model.shapes()[0])
+    with pytest.raises(ValueError):
+        validate.verify_live("stock", model)
 
 
 def _live(image, n_fusions=0, packed_groups=()):

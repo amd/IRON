@@ -74,9 +74,13 @@ def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
 
     Raises:
         TypeError: A version is not packaged as one full ELF.
+        ValueError: ``model`` holds other than one compiled version per
+            ``shapes()``: a caller compiled only some, or two shapes
+            collided on one ``Recording.version``.
     """
     out = {}
-    for version_label, version in zip(version_labels(model), model.versions.values()):
+    labels, versions = version_labels(model), model.versions.values()
+    for version_label, version in zip(labels, versions, strict=True):
         fusions = version.sequence.fusions
         packaging = version.sequence.packaging
         if not isinstance(packaging, FullELF):
