@@ -13,6 +13,10 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Scratchpad
 from iron.common.graph.compiled import apply_profile
+from iron.common.graph.packing import apply as apply_packings
+from iron.lm.generation import Sampler
+from iron.lm.tune import calls
+from iron.tests.support.llama_model import small
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
@@ -138,6 +142,36 @@ def test_one_shapes_two_arrays_are_one_unit_a_change_aligns(npu2, tmp_path):
         if len(packer.arrays(k, s)) == 1
     ]
     assert min(aligned) * 2 == packer.cores({unit: {}})
+
+
+def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
+    """A host fits its own context, which sizes the decode step's KV cache
+    and so MHA and the cache copies: a packing found at one context names
+    none of those dimensions, so the model fitted to another packs the same
+    designs together."""
+    model, sibling = small(), small(max_seq_len=512)
+    decode, _ = calls(model, 0, 0, 256, 1, Sampler(0.7, 50), sibling)
+    assert any("kv_len" in v for v in decode.varying.values())
+    packer = Packer(
+        decode,
+        npu2,
+        timing=Timing(rounds=2, calls=5),
+        repeats=5,
+        cache=None,
+        fit_cache=tmp_path / "fit",
+        log=lambda _: None,
+        lock=False,
+        model=CostModel(),
+    )
+    members = packer.members({k: {} for k in packer.shapes})
+    assert not any("kv_len" in dims for cls, dims, _ in members if cls is MHA)
+    profile = iron.Profile()
+    profile.add_packing(members)
+    sizes = []
+    for m in (model, sibling):
+        _, packing = apply_packings(m.record(**m.shapes()[0]), profile, [], npu2)
+        sizes.append([len(g) for g in packing.groups])
+    assert sizes[0] == sizes[1] and sizes[0], sizes
 
 
 # ---------------------------------------------------------------------------

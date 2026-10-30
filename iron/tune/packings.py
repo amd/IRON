@@ -496,19 +496,25 @@ class Packer:
 
     def members(self, group: Group) -> list:
         """``group`` as a packing entry's members (``Profile.add_packing``):
-        each shape once, at its unit's setting.
+        each shape once, at its unit's setting, named without the dimensions
+        a host sizes (``Timed.varying``) wherever the shape is still the only
+        one of the recording's it names.
         """
+        resolved = [s.op.resolved(self.dev) for s in self.call.recording.steps]
         out: dict[Any, tuple] = {}
         for k, s in group.items():
             for (_, shape), (op, _) in self.shapes[k].items():
-                out.setdefault(
-                    shape,
-                    (
-                        type(op),
-                        _json_safe(Shape(op.resolved(self.dev)).named(())),
-                        s or None,
-                    ),
-                )
+                named = Shape(op.resolved(self.dev)).named(())
+                drop = self.call.varying.get(shape, frozenset())
+                kept = {n: v for n, v in named.items() if n not in drop}
+                if any(
+                    isinstance(r, type(op))
+                    and Shape(r).key != shape
+                    and Profile.matches(kept, Profile.dims(type(r), vars(r)))
+                    for r in resolved
+                ):
+                    kept = named
+                out.setdefault(shape, (type(op), _json_safe(kept), s or None))
         return list(out.values())
 
 

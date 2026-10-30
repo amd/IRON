@@ -15,7 +15,7 @@ from typing import Any
 
 from iron.operators.sample import Sample
 from iron.tune import cli as tune_cli
-from iron.tune.autotune import Point, Timed
+from iron.tune.autotune import Point, Shape, Timed
 
 from .causal import CausalLM
 from .cli import parse_args, sampling_arguments
@@ -85,10 +85,16 @@ def calls(
     context: int,
     points: int,
     sampler: Sampler,
+    sibling: CausalLM | None = None,
 ) -> list[Timed]:
     """The calls a decoder's designs are timed in: the decode step and the
     prompt chunk, each over ``contexts`` up to ``context``, ``points`` of
     them, and Sample on the draw rows ``sampler`` gives.
+
+    Args:
+        sibling: ``model`` at another ``max_seq_len``: a dimension whose
+            value differs between their recordings is one a host's fitted
+            context sizes (``Timed.varying``).
     """
     L, C = model.config.max_seq_len, model.config.prefill_chunk
     decode_shapes, prompt_shapes = model.shapes()
@@ -133,7 +139,15 @@ def calls(
         [k_max] = {s.op.k_max for s in recording.steps if isinstance(s.op, Sample)}
         _, draws = recording.states[id(model.draws)]
         rows = sampler.rows(L, k_max)
-        out.append(Timed(recording, values, {draws.name: rows}, timed))
+        varying: dict[Any, frozenset[str]] = {}
+        if sibling is not None:
+            other = sibling.record(**shapes)
+            assert len(other.steps) == len(recording.steps), "context sizes no step"
+            for step, twin in zip(recording.steps, other.steps):
+                here, there = Shape(step.op.resolved()), Shape(twin.op.resolved())
+                moved = {n for n, v in here.dims.items() if there.dims.get(n) != v}
+                varying[here.key] = varying.get(here.key, frozenset()) | moved
+        out.append(Timed(recording, values, {draws.name: rows}, timed, varying))
     return out
 
 

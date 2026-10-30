@@ -107,13 +107,16 @@ class Timed:
     graph's per-call values, and what any buffer whose contents a step's
     time follows holds, by graph buffer name. ``points`` are the values its
     calls run at, where they differ from call to call: an operator whose
-    work they change is timed at each (``op_points``).
+    work they change is timed at each (``op_points``). ``varying`` is, by
+    ``Shape.key`` of a resolved operator, the dimensions a host sizes (a
+    model's fitted context), which a profile naming the shape leaves out.
     """
 
     recording: Recording
     values: Mapping[str, int] = dataclasses.field(default_factory=dict)
     contents: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
     points: Sequence[Point] = ()
+    varying: Mapping[Hashable, frozenset[str]] = dataclasses.field(default_factory=dict)
 
     def op_values(
         self, op: Operator, values: Mapping[str, int] | None = None

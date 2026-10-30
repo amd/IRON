@@ -260,8 +260,20 @@ class CausalLM(Model):
                 f"max_seq_len {L}"
             )
         sampler = Sampler(args.temperature, args.top_k)
+        # Another context a host could fit, the shorter where one is whole chunks.
+        other = L // 2 if L // 2 >= C and not (L // 2) % C else 2 * L
+        sibling = cls(
+            dataclasses.replace(config, max_seq_len=other),
+            Checkpoint(weights).tree("unread"),
+        )
         return calls(
-            model, args.position, args.token, args.context, args.points, sampler
+            model,
+            args.position,
+            args.token,
+            args.context,
+            args.points,
+            sampler,
+            sibling,
         )
 
     def shapes(self) -> list[dict]:
