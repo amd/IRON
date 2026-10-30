@@ -95,7 +95,7 @@ class Config:
     precision: Precision = dataclasses.field(kw_only=True, metadata={"json": None})
 
     @classmethod
-    def from_checkpoint(cls, path) -> Self:
+    def from_checkpoint(cls, path: str | Path) -> Self:
         """``cls``'s fields read from ``path``'s own ``config.json``.
 
         Each at its ``metadata["json"]`` path (under ``json_prefix``),

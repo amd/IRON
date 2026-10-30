@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 import numpy as np
+from aie.iron.device import Device
 
 import iron
 from iron.common.image.packaging import require_device
@@ -307,7 +308,11 @@ class Model(iron.Graph):
 
     @classmethod
     def from_checkpoint(
-        cls, path, *, random_weights: int | None = None, max_seq_len: int | None = None
+        cls,
+        path: str | Path,
+        *,
+        random_weights: int | None = None,
+        max_seq_len: int | None = None,
     ) -> Self:
         """Return the model of a Hugging Face repository's files, not yet loaded.
 
@@ -488,7 +493,11 @@ class Model(iron.Graph):
         return self.tokenizer(prompt_text(chars, skip))
 
     def generate(
-        self, prompt, max_tokens: int, sampler: Sampler | None = None, **inputs
+        self,
+        prompt: str | list[dict] | list[int],
+        max_tokens: int,
+        sampler: Sampler | None = None,
+        **inputs: Any,
     ):
         """``stream``'s pieces joined.
 
@@ -499,7 +508,11 @@ class Model(iron.Graph):
         return "".join(pieces) if _is_text(prompt) else pieces
 
     def stream(
-        self, prompt, max_tokens: int, sampler: Sampler | None = None, **inputs
+        self,
+        prompt: str | list[dict] | list[int],
+        max_tokens: int,
+        sampler: Sampler | None = None,
+        **inputs: Any,
     ) -> Iterator:
         """Draw up to ``max_tokens`` after ``prompt``.
 
@@ -580,7 +593,7 @@ class Model(iron.Graph):
         *,
         release: Callable[[np.ndarray], None] | None = None,
         full_elf: bool | None = None,
-        dev=None,
+        dev: Device | None = None,
     ) -> Self:
         """Compile every version, then load each, in one arena, and hand them to ``loaded``.
 

@@ -68,7 +68,7 @@ class Sweep:
         rows: bool = False,
         bench: int | None = BENCH_ELEMENTS,
         lower: bool = False,
-        **extra,
+        **extra: Any,
     ):
         self.lengths = tuple(lengths)
         self.bench = bench

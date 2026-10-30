@@ -214,7 +214,9 @@ class ImagePatches(iron.Graph):
             position_ids.reshape(2 * T),
         )
 
-    def pack(self, image, out_height: int, out_width: int) -> tuple[np.ndarray, dict]:
+    def pack(
+        self, image: np.ndarray, out_height: int, out_width: int
+    ) -> tuple[np.ndarray, dict]:
         """Build a call's image buffer and per-call sizes for a decoded ``image``.
 
         Resized to ``out_height`` by ``out_width``.

@@ -13,6 +13,7 @@ import hashlib
 import os
 import time
 import urllib.request
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -234,7 +235,7 @@ def check_embedding(
     max_error: float,
     *,
     percentile: float = 1,
-    record,
+    record: Callable[[str, float], object],
 ):
     """``got``'s rows against ``want``'s embeddings.
 

@@ -10,6 +10,7 @@ import os
 import tempfile
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from aie.utils.compile import NPU_CACHE_HOME
 from aie.utils.npukernel import NPUKernel
@@ -26,7 +27,7 @@ class Xclbin(NPUKernel):
         **kernel: ``NPUKernel``'s other arguments, kept as ``settings``.
     """
 
-    def __init__(self, url: str, sha256: str, filename: str, **kernel) -> None:
+    def __init__(self, url: str, sha256: str, filename: str, **kernel: Any) -> None:
         super().__init__(**kernel)
         self.url, self.sha256, self.filename = url, sha256, filename
         self.settings = kernel

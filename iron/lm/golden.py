@@ -15,6 +15,7 @@ requirements, only to record.
 import dataclasses
 import hashlib
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,12 @@ class Golden:
         ValueError: ``path`` was recorded from other ``inputs``.
     """
 
-    def __init__(self, path, reference=None, inputs=()):
+    def __init__(
+        self,
+        path: str | Path,
+        reference: Callable[[], Any] | None = None,
+        inputs: tuple[Any, ...] = (),
+    ):
         self.path = Path(path)
         self.build = reference if os.environ.get(RECORD) else None
         self.reference = None

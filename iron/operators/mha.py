@@ -540,7 +540,7 @@ class MHA(Operator):
             B_q,
         )
 
-    def core_bytes(self, dev, B_q: int, B_kv: int, pv_cores: int) -> int:
+    def core_bytes(self, dev: Device, B_q: int, B_kv: int, pv_cores: int) -> int:
         """Return the larger of a pipeline's QK^T and P*V cores' L1 bytes.
 
         Kernels' data and stack included, over the device's default stack.

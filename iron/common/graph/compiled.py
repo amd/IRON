@@ -15,7 +15,7 @@ import dataclasses
 import functools
 import inspect
 import logging
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,8 +24,10 @@ from typing import Annotated, Any, get_args, get_origin
 import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import Affine, PerCall
+from aie.iron.device import Device
 from aie.utils import bfp
 from ml_dtypes import bfloat16
+from numpy.typing import DTypeLike
 
 from ..declare.operator import device_fit, graph_recorder
 from ..declare.profile import Profile
@@ -536,11 +538,11 @@ class Graph:
     def compile(
         self,
         *,
-        dev=None,
+        dev: Device | None = None,
         full_elf: bool | None = None,
         check: bool = False,
         feeds: CompiledGraph | None = None,
-        **shapes,
+        **shapes: Sequence[int] | tuple[Sequence[int], DTypeLike],
     ) -> CompiledGraph:
         """Compile and return the version for these input shapes.
 

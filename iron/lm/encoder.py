@@ -37,7 +37,7 @@ class Encoder(Model):
     # A graph class taking (config, i).
     layer_class: ClassVar[type[Any]] = EncoderLayer
 
-    def __init__(self, config, max_tokens: int):
+    def __init__(self, config: Any, max_tokens: int):
         self.config = config
         self.layers = [
             self.layer_class(config, i) for i in range(config.num_hidden_layers)

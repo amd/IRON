@@ -93,7 +93,7 @@ class Vectors:
 
 
 def vectors(
-    op,
+    op: Operator,
     *,
     seed: int = 42,
     scale: float = 4.0,
@@ -171,13 +171,13 @@ def _nbytes(buf) -> int:
 
 def time_call(
     fn: Callable,
-    *args,
+    *args: Any,
     bytes_moved: int = 0,
     ops: float = 0.0,
     warmup: int = 0,
     iters: int = 20,
     record: Callable[[str, float], object] | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> None:
     """Time any compiled callable (an ``Operator``, a graph version, a shipped binary).
 
@@ -223,8 +223,8 @@ def time_call(
 
 def run_test(
     operator: "Operator",
-    inputs,
-    outputs=None,
+    inputs: Vectors | Mapping[str, np.ndarray],
+    outputs: Mapping[str, np.ndarray] | None = None,
     *,
     tolerance: Tolerance,
     timed_iters: int = 20,

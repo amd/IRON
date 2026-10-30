@@ -8,7 +8,7 @@ placeholders takes its tower's j-th soft token.
 """
 
 import inspect
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 import numpy as np
 
@@ -162,7 +162,9 @@ class Multimodal(Model):
             values |= {f"{name}_{v}": x for v, x in tower.longest().items()}
         return values
 
-    def tower_calls(self, tokens, raw: dict[int, tuple]) -> list[tuple[tuple, dict]]:
+    def tower_calls(
+        self, tokens: Sequence[int] | np.ndarray, raw: dict[int, tuple]
+    ) -> list[tuple[tuple, dict]]:
         """Each tower version ``raw`` runs, in turn.
 
         Its inputs and every tower's per-call values, zero for a tower not

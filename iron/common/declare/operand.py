@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import DmaEndpoint
+from aie.iron import DmaEndpoint, TaskGroup
 from aie.utils import bfp
 from aie.utils.compile.jit.params import OperatorParam, PerCallMember, Select, resolve
 
@@ -151,7 +151,7 @@ class Operand:
         tap: TensorAccessPattern | None = None,
         *,
         lane: int | None = None,
-        group=None,
+        group: TaskGroup | None = None,
         wait: bool = False,
         source: Operand | None = None,
         offset_parameter: Value | None = None,
@@ -204,7 +204,7 @@ class Operand:
         tap: TensorAccessPattern | None = None,
         *,
         lane: int | None = None,
-        group=None,
+        group: TaskGroup | None = None,
         wait: bool = False,
         offset_parameter: Value | None = None,
         length_parameter: Value | None = None,

@@ -5,7 +5,7 @@
 
 import dataclasses
 import functools
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from math import gcd, isqrt, prod
 from typing import Any, ClassVar
 
@@ -326,7 +326,9 @@ class Gather(Operator):
         assert len(words) == self.words
         return np.array(words, dtype=np.uint32), np.array(slots)
 
-    def control_words(self, ids, address: int, valid: int | None = None) -> np.ndarray:
+    def control_words(
+        self, ids: Sequence[int] | np.ndarray, address: int, valid: int | None = None
+    ) -> np.ndarray:
         """Compute the control words gathering ``ids`` from a table at ``address``.
 
         Args:

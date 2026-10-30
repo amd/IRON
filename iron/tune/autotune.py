@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 from aie.iron import ExternalFunction
+from aie.iron.device import Device
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.declare import Operator, Profile
@@ -167,7 +168,7 @@ class Timed:
 
 
 def settings(
-    op: Operator, dev, pinned: frozenset[str] = frozenset()
+    op: Operator, dev: Device, pinned: frozenset[str] = frozenset()
 ) -> list[dict[str, Any]]:
     """Return ``op``'s tunables as resolved for ``dev``, then every other combination.
 
@@ -524,7 +525,7 @@ def _judged(
 
 def autotune(
     calls: Sequence[Timed],
-    dev,
+    dev: Device,
     profile: Profile | None = None,
     *,
     full_elf: bool,
