@@ -268,7 +268,7 @@ class EmbeddingGemma(Encoder):
 
     Args:
         weights: The checkpoint's; the text encoder's tree is read.
-        tokenizer: What ``embed`` encodes text with.
+        processor: What ``embed`` encodes text with.
     """
 
     config = Config()
@@ -288,10 +288,10 @@ class EmbeddingGemma(Encoder):
         self,
         config: Config,
         weights: SimpleNamespace,
-        tokenizer: TextProcessor | None = None,
+        processor: TextProcessor | None = None,
     ):
         c = config
-        self.tokenizer = tokenizer
+        self.processor = processor
         self.language_model = SimpleNamespace()
         super().__init__(config, c.max_tokens)
         self.final_norm = RMSNorm(c.hidden_size, c.eps)
@@ -383,12 +383,16 @@ class EmbeddingGemma(Encoder):
         if model.tokenizer is not None:
             assert model.checkpoint is not None, "from_checkpoint gives it one"
             directory = Path(model.checkpoint.path).parent
-            model.tokenizer = TextProcessor(directory / "tokenizer.json", model.config)
+            model.processor = TextProcessor(directory / "tokenizer.json", model.config)
         return model
 
     def embed(self, text: str, task: str, dims: int = 768) -> np.ndarray:
-        """The embedding of `text` for `task`, its first `dims` renormalized."""
-        return self.encode(self.tokenizer.encode(text, task), dims)
+        """Return the embedding of `text` for `task`, its first `dims` renormalized."""
+        if self.processor is None:
+            raise RuntimeError(
+                f"{type(self).__name__}: no tokenizer; give token ids to encode"
+            )
+        return self.encode(self.processor.encode(text, task), dims)
 
 
 class Multimodal(lm.Multimodal):
@@ -407,14 +411,14 @@ class Multimodal(lm.Multimodal):
         self,
         config: Config,
         weights: SimpleNamespace,
-        tokenizer: TextProcessor | None = None,
+        processor: TextProcessor | None = None,
         audio_config: AudioConfig = AudioConfig(),
         vision_config: VisionConfig = VisionConfig(),
     ):
         self.config = config
-        self.tokenizer = tokenizer
+        self.processor = processor
         super().__init__(
-            EmbeddingGemma(config, weights, tokenizer),
+            EmbeddingGemma(config, weights, processor),
             {
                 config.audio_token: AudioTower(audio_config, weights),
                 config.image_token: VisionTower(vision_config, weights),
@@ -451,7 +455,11 @@ class Multimodal(lm.Multimodal):
         image_tokens = (
             0 if image is None else v.tokens(*np.shape(image)[:2], v.image_tokens)
         )
-        tokens = self.tokenizer.encode(text, task, audio_tokens, image_tokens)
+        if self.processor is None:
+            raise RuntimeError(
+                f"{type(self).__name__}: no tokenizer; give token ids to encode"
+            )
+        tokens = self.processor.encode(text, task, audio_tokens, image_tokens)
         return self.encode(tokens, dims, audio, image)
 
     @classmethod

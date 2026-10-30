@@ -180,7 +180,7 @@ def weights():
 
 
 @pytest.fixture(scope="module")
-def tokenizer():
+def processor():
     require(DIRECTORY / "tokenizer.json")
     return TextProcessor(DIRECTORY / "tokenizer.json")
 
@@ -299,8 +299,8 @@ class TestEachStep:
     """
 
     @pytest.fixture(scope="class")
-    def each_step(self, weights, tokenizer):
-        yield from loaded(Multimodal(Config(), weights, tokenizer), False)
+    def each_step(self, weights, processor):
+        yield from loaded(Multimodal(Config(), weights, processor), False)
 
     @pytest.mark.parametrize(
         "text,task",
@@ -310,7 +310,7 @@ class TestEachStep:
     def test_embeddinggemma_2_each_step_accuracy(
         self, each_step, reference, text, task, record_property
     ):
-        tokens = each_step.tokenizer.encode(text, task)
+        tokens = each_step.processor.encode(text, task)
         got = each_step.encode(tokens)
         similarity = cosine(got, embedding(reference, text, task))
         record_property("Cosine", similarity)
@@ -500,13 +500,13 @@ class TestVision:
 
 
 @pytest.fixture(scope="module")
-def encoder(weights, tokenizer):
-    yield from loaded(EmbeddingGemma(Config(), weights, tokenizer))
+def encoder(weights, processor):
+    yield from loaded(EmbeddingGemma(Config(), weights, processor))
 
 
 @pytest.fixture(scope="module")
-def multimodal(weights, tokenizer):
-    yield from loaded(Multimodal(Config(), weights, tokenizer))
+def multimodal(weights, processor):
+    yield from loaded(Multimodal(Config(), weights, processor))
 
 
 @pytest.mark.bench
@@ -523,7 +523,7 @@ def multimodal(weights, tokenizer):
     ids=["query", "document", "long_document", "past_the_window", "near_the_limit"],
 )
 def test_embeddinggemma_2_accuracy(encoder, reference, text, task, record_property):
-    tokens = encoder.tokenizer.encode(text, task)
+    tokens = encoder.processor.encode(text, task)
     got = encoder.encode(tokens)
     similarity = cosine(got, embedding(reference, text, task))
     record_property("Cosine", similarity)
@@ -536,7 +536,7 @@ def test_embeddinggemma_2_accuracy(encoder, reference, text, task, record_proper
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dims", [512, 256, 128])
 def test_embeddinggemma_2_truncation(encoder, reference, dims, record_property):
-    tokens = encoder.tokenizer.encode(QUERY, "query")
+    tokens = encoder.processor.encode(QUERY, "query")
     got = encoder.encode(tokens, dims)
     record_property("Norm", float(np.linalg.norm(got)))
     np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
@@ -592,7 +592,7 @@ def test_embeddinggemma_2_determinism(multimodal):
     "text", [QUERY, LONG, LONGER], ids=["query", "long_document", "past_the_window"]
 )
 def test_embeddinggemma_2_latency(encoder, text, record_property):
-    tokens = encoder.tokenizer.encode(text, "document")
+    tokens = encoder.processor.encode(text, "document")
     latency = run_iters(encoder.encode, tokens, warmup=1, iters=10).e2e
     record_property("Latency", latency.median_us)
 

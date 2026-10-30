@@ -267,11 +267,17 @@ class Model(iron.Graph):
     config: Any
     weights: Any
 
-    if TYPE_CHECKING:  # a subclass's: the constructor and the draw
+    if TYPE_CHECKING:  # a subclass's
 
         def __init__(self, config: Any, weights: Any) -> None: ...
 
-        def _draw(self, *args, **kwargs) -> Iterator[int]: ...
+    def _draw(self, *args: Any, **kwargs: Any) -> Iterator[int]:
+        """Draw tokens after a prompt's; a model that generates overrides it.
+
+        Raises:
+            NotImplementedError: The model does not generate (an encoder).
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not generate tokens")
 
     @classmethod
     def load(
