@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Any
 
 import aie.utils as aie_utils
-from aie import ir
 from aie.iron.device import from_name
 
 from iron import Profile
@@ -373,9 +372,21 @@ def compare_versions(
     per-call points ``model_tune_points`` gives that version
     (``Recording.version`` matched to ``label_to_version``).
 
+    A build or dispatch failure, and a device timeout propagated from
+    ``compare_graphs``, are raised rather than recorded: only a real
+    bit-identity mismatch (``compare_graphs``'s own ``RuntimeError``) is
+    worth a report entry over a traceback, since that is validate's very
+    question; anything else is a bug worth seeing in full.
+
     Raises:
-        RuntimeError: A version's build failed, or a device timeout
-            propagated from ``compare_graphs``.
+        ValueError: ``label_to_version`` names a version
+            ``model_tune_points`` gives no call for: ``model_class``'s
+            ``tune_calls`` names shapes other than its own ``shapes()``'s,
+            which is always a bug (the two are meant to name one set), never
+            an expected state a report should paper over.
+        RuntimeError: A version's build or dispatch failed outright (not a
+            bit-identity mismatch), or a device timeout propagated from
+            ``compare_graphs``.
     """
     dev = require_device()
     probe = model_class.from_checkpoint(checkpoint, max_seq_len=max_seq_len)
@@ -387,9 +398,11 @@ def compare_versions(
         version = label_to_version[label]
         call_t, recording = calls.get(version), recordings.get(version)
         if call_t is None or recording is None:
-            out[label] = {"compared": False, "note": "no tune point for this version"}
-            log(f"[{label}] not compared: no tune point for this version")
-            continue
+            raise ValueError(
+                f"{label}: no tune point for this version; "
+                f"{model_class.__name__}.tune_calls names other shapes than "
+                f"{model_class.__name__}.shapes() does"
+            )
         call = dataclasses.replace(call_t, recording=recording)
         graphs = []
         for profile in (stock_profile, candidate_profile):
@@ -407,19 +420,14 @@ def compare_versions(
             )
         try:
             delta, noise = compare_graphs(call, *graphs, timing=timing, log=log)
-        except (ValueError, RuntimeError, ir.MLIRError) as e:
-            if _device_timeout(e):
+        except RuntimeError as e:
+            if _device_timeout(e) or "bit-identical" not in str(e):
                 raise
-            out[label] = {"compared": True, "bit_identical": False, "error": str(e)}
+            out[label] = {"bit_identical": False, "error": str(e)}
             log(f"[{label}] not bit-identical: {e}")
             continue
         noise_s = "?" if noise is None else f"{noise:.1f}"
-        out[label] = {
-            "compared": True,
-            "bit_identical": True,
-            "delta_us": delta,
-            "noise_us": noise,
-        }
+        out[label] = {"bit_identical": True, "delta_us": delta, "noise_us": noise}
         log(
             f"[{label}] bit-identical; candidate {delta:+.1f} ± {noise_s} us vs "
             f"stock end to end"
@@ -580,16 +588,15 @@ def main(argv: list[str] | None = None) -> None:
             report["changed_versions"],
             label_to_version,
         )
-        compared = [v for v in report["versions"].values() if v.get("compared")]
-        report["bit_identical"] = bool(compared) and all(
-            v["bit_identical"] for v in compared
+        report["bit_identical"] = all(
+            v["bit_identical"] for v in report["versions"].values()
         )
         verdict = "OK" if report["bit_identical"] else "MISMATCH"
         summary = ", ".join(
             (
                 f"{label}: {v['delta_us']:+.1f} us"
-                if v.get("bit_identical")
-                else f"{label}: {'not compared' if not v.get('compared') else 'MISMATCH'}"
+                if v["bit_identical"]
+                else f"{label}: MISMATCH"
             )
             for label, v in report["versions"].items()
         )

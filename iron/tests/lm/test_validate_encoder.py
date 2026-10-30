@@ -5,8 +5,8 @@
 2's shape, weights drawn (``iron.common.graph.fill.filled``'s own ``Clipped``
 bound, which a q, k and v projection sharing an input agrees on): an encoder
 is not a ``CausalLM``, its versions carry no duplicate label, every version
-has a tune point to compare it at, and a version ``compare_versions`` finds
-no tune point for is reported rather than raising.
+has a tune point to compare it at, and ``compare_versions`` raises plainly
+for one that does not, rather than papering over what is always a bug.
 """
 
 import pytest
@@ -62,18 +62,21 @@ def test_version_recordings_match_every_shapes_tune_point():
     assert set(recordings) == set(calls)
 
 
-def test_compare_versions_reports_a_version_with_no_tune_point():
+def test_compare_versions_raises_when_a_version_has_no_tune_point():
+    """A changed version ``label_to_version`` names that ``model_tune_points``
+    gives no call for is always a wiring bug (``tune_calls`` and ``shapes()``
+    are meant to name one set of versions), never an expected state a report
+    should paper over: it is raised, not recorded.
+    """
     _require_checkpoint()
     bogus = (("nowhere", (1,), "int32"),)
-    out = validate.compare_versions(
-        Multimodal,
-        CHECKPOINT,
-        None,
-        Profile(),
-        Profile(),
-        ["nowhere"],
-        {"nowhere": bogus},
-    )
-    assert out == {
-        "nowhere": {"compared": False, "note": "no tune point for this version"}
-    }
+    with pytest.raises(ValueError, match="nowhere"):
+        validate.compare_versions(
+            Multimodal,
+            CHECKPOINT,
+            None,
+            Profile(),
+            Profile(),
+            ["nowhere"],
+            {"nowhere": bogus},
+        )
