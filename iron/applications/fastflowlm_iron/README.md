@@ -5,14 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # IRON models in FastFlowLM
 
-This application serves Llama 3.2 1B and EmbeddingGemma 2 through FastFlowLM's
-HTTP API. FastFlowLM runs each model in IRON's persistent Python server over a
+This application serves Llama 3.2 1B Instruct and EmbeddingGemma 2 through FastFlowLM's
+HTTP API. FastFlowLM runs each model in the persistent IRON server over a
 pair of standard input and output pipes. The server compiles the graph versions
 through the MLIR-AIE cache on first use, then loads the images and weights.
-The Llama entry uses Meta's base checkpoint, intended for text continuation.
+The Llama entry uses Meta's Instruct weights with FastFlowLM's matching chat template.
 
 The Makefile pins the FastFlowLM fork to
-[`ea31ca5a`](https://github.com/andrej/FastFlowLM/commit/ea31ca5a6f8738e691e5f323a0c99f01e676f0d8),
+[`23e5ef95`](https://github.com/andrej/FastFlowLM/commit/23e5ef95d41422c7fdb531b8f50b5d9e5cc79122),
 which contains the IRON backend and its BF16 Llama and EmbeddingGemma 2 model
 entries.
 
@@ -28,9 +28,9 @@ and its `tokenizers-cpp` submodule. The Makefile initializes the submodule.
 The `pull` target downloads these IRON checkpoint directories:
 
 ```text
-<models>/llama3.2-1b/config.json
-<models>/llama3.2-1b/model*.safetensors*
-<models>/llama3.2-1b/tokenizer.json
+<models>/llama3.2-1b-instruct/config.json
+<models>/llama3.2-1b-instruct/model*.safetensors*
+<models>/llama3.2-1b-instruct/tokenizer.json
 <models>/embeddinggemma-2/config.json
 <models>/embeddinggemma-2/model*.safetensors*
 <models>/embeddinggemma-2/tokenizer.json
@@ -53,7 +53,7 @@ Run these steps from `iron/applications/fastflowlm_iron`.
    make flm IRON_PYTHON=$VIRTUAL_ENV/bin/python
    ```
 
-3. Accept the license for `meta-llama/Llama-3.2-1B`, then provide a Hugging Face
+3. Accept the license for `meta-llama/Llama-3.2-1B-Instruct`, then provide a Hugging Face
    token through `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` or `HF_TOKEN_PATH`. Pull
    the BF16 Llama and EmbeddingGemma 2 checkpoints used by IRON.
 
@@ -61,7 +61,7 @@ Run these steps from `iron/applications/fastflowlm_iron`.
    make pull MODELS=$MODELS
    ```
 
-4. Start Llama 3.2 1B. The first invocation compiles the graph versions, then
+4. Start Llama 3.2 1B Instruct. The first invocation compiles the graph versions, then
    loads the images and uploads the weights. Later invocations reuse the cache.
 
    ```bash
