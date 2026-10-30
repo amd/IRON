@@ -25,7 +25,6 @@ import iron.functional as F
 from iron import Precision, lm
 from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
-from iron.tune.autotune import Timed
 from iron.lm import (
     Attention,
     Checkpoint,
@@ -39,6 +38,7 @@ from iron.lm.checkpoint import renamed, weights_file
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
+from iron.tune.autotune import Timed
 
 PROFILES = Path(__file__).with_name("profiles")
 

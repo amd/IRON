@@ -24,8 +24,8 @@ import pytest
 from aie.iron import In, Out
 from aie.iron.device import from_name
 from aie.utils.compile.jit._hash import _python_identity
-from aie.utils.trace import TraceConfig
 from aie.utils.compile.jit.params import param
+from aie.utils.trace import TraceConfig
 
 from iron import Precision
 from iron.common import Operator

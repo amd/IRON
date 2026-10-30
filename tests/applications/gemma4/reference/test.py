@@ -73,7 +73,7 @@ class TestGemma4(Decoder):
         }
         for i in range(L):
             D = c.global_head_dim if c.full(i) else c.head_dim
-            I = c.intermediate_size * (2 if c.owner(i) != i else 1)
+            F = c.intermediate_size * (2 if c.owner(i) != i else 1)
             layer = f"{model}.layers.{i}"
             out |= {
                 f"{layer}.self_attn.q_proj.weight": (H * D, E),

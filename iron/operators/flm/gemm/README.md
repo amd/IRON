@@ -11,7 +11,7 @@ Ported from the `mm` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)
 from iron.operators.flm import ProjectionGEMM
 
 op = ProjectionGEMM(M=1024, K=1536, N=6144, epilogue="silu")
-op(A, op.pack_B(B), C_out)  # compiles once, then runs
+op(A, op.pack_b(B), C_out)  # compiles once, then runs
 ```
 
 The epilogue applies the activation that follows the product, a SiLU, a
@@ -21,7 +21,7 @@ bare strings `"gelu"` / `"conv_even"` / `"bf16_steps"` are accepted too.
 
 This is the GEMM `F.linear` runs for any input of more than one row. It reads
 the checkpoint's weight as stored, `(N, K)`, with `b_col_maj=True`; a
-dequantized weight comes as bfp16 B packed once by `pack_B`. It was ported from
+dequantized weight comes as bfp16 B packed once by `pack_b`. It was ported from
 FastFlowLM's `mm` overlay. [`iron.operators.GEMM`](../../gemm.py) is the GEMM of
 `F.linear(..., precision=Precision.HIGHEST)` and of integer types.
 
@@ -39,7 +39,7 @@ memtile — so those are *not* what distinguishes it. What does:
 |---|---|---|
 | tiling | parameterized tiles, 1–8 columns | m=64, r/s/t 8/8/8; `k_tile` and `tile_n` tunable |
 | after the product | nothing | fused f32→bf16 + activation |
-| B layout | `(K, N)`, or `(N, K)` with `b_col_maj` | `(N, K)` with `b_col_maj`, or packed by `pack_B` |
+| B layout | `(K, N)`, or `(N, K)` with `b_col_maj` | `(N, K)` with `b_col_maj`, or packed by `pack_b` |
 | A tile height | tied to the accumulator | decoupled (asymmetric tile buffering) |
 
 The shipped overlay itself is a test fixture, `iron/tests/support/shipped.py`
@@ -61,7 +61,7 @@ two lowering details differ.
 The mmul shape is **not** specific to the bfp16 path, despite needing
 `AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16` to get the fast lowering on NPU2:
 `aie::mmul<8,8,8>` decomposes onto AIE2's native 4x8x4 bf16 mac as exactly four
-macs with no wasted lanes, so `pack_B`, the stream-dimension lists and
+macs with no wasted lanes, so `pack_b`, the stream-dimension lists and
 `gather_dims` are shared verbatim. On AIE2 that flag is silently ignored, so it
 is only passed where it changes codegen.
 
@@ -171,16 +171,16 @@ multiple of the full stride.
 
 ```python
 op = ProjectionGEMM(M=M, K=K, N=N)
-op(A, op.pack_B(B), C_out)
+op(A, op.pack_b(B), C_out)
 ```
 
-`pack_B` reorders a row-major `(K, N)` matrix into the order the compute tiles
+`pack_b` reorders a row-major `(K, N)` matrix into the order the compute tiles
 read it, so each fill is one contiguous run. On NPU2 it also quantizes to
 bfp16ebs8 and returns a flat `uint8` tensor rather than bf16; on NPU1 it stays
 bf16. The layout itself lives in
 [`iron/operators/flm/packing.py`](../packing.py).
 
-Call it on the operator — `op.pack_B(B)` — not on the class: the layout depends
+Call it on the operator — `op.pack_b(B)` — not on the class: the layout depends
 on the resolved `tile_n` and on the device.
 
 This is deliberately the caller's job rather than something the fill descriptor
@@ -357,7 +357,7 @@ comes from `conv_even` rounding, which the overlay does not set (see above).
 
 Three choices account for most of the gap, and none of them helps alone:
 
-* **`pack_B` emits the final consumption order**, so both B hops are linear
+* **`pack_b` emits the final consumption order**, so both B hops are linear
   descriptors. Worth nothing by itself — it is what frees the descriptor
   dimensions the other two need.
 * **Asymmetric tile buffering**, which pays for a k slice deep enough to halve
@@ -591,7 +591,7 @@ ring passes in one queue push.
 from iron.tests.support.shipped import Shipped
 
 op = Shipped(M=1024, K=1536, N=6144, epilogue="silu")
-op(A, op.pack_B(B), C_out)
+op(A, op.pack_b(B), C_out)
 ```
 
 `Shipped` (`iron/tests/support/shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a
@@ -618,7 +618,7 @@ default `-m "not extensive"` run.
 
 The overlay ships as a binary, so every core program, memtile buffer and
 stream-switch route comes from the xclbin. The overlay supplies only the
-host-side half of a dispatch, and `ProjectionGEMM`'s own `pack_B`, `reference` and
+host-side half of a dispatch, and `ProjectionGEMM`'s own `pack_b`, `reference` and
 packaging serve it:
 
 * **The runtime parameters.** One overlay serves every projection in a model, so

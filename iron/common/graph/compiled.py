@@ -23,13 +23,13 @@ from typing import Annotated, Any, get_args, get_origin
 
 import aie.utils as aie_utils
 import numpy as np
+from aie.helpers.taplib import Affine, PerCall
 from aie.utils import bfp
 from ml_dtypes import bfloat16
-from aie.helpers.taplib import Affine, PerCall
 
 from ..declare.operator import device_fit, graph_recorder
-from ..declare.value import ExtentWord
 from ..declare.profile import Profile
+from ..declare.value import ExtentWord
 from ..image.allocator import ALIGNMENT, ArenaPlan
 from ..image.artifacts import Parameter
 from ..image.callable import (
@@ -38,8 +38,8 @@ from ..image.callable import (
     PerStepCallable,
     ScratchArena,
 )
-from ..image.packaging import Kind, Plan, plan, require_device
 from ..image.link import FullELF, PerStep
+from ..image.packaging import Kind, Plan, plan, require_device
 from ..image.sequence import Image
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose

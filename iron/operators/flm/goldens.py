@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Bitwise device goldens of the flm operators, for changes that move their MLIR.
+
 ``python -m iron.operators.flm.goldens record|check <dir>``. Record before a
 change that moves the MLIR, then check after; inputs are saved, not redrawn,
 so a later change to a test's draw doesn't move a golden. The .npz files

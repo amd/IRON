@@ -13,10 +13,9 @@ change that quietly aliased two live buffers shows up here and nowhere
 else, because it produces wrong values rather than an error.
 """
 
+import dataclasses
 import logging
 import re
-
-import dataclasses
 
 import numpy as np
 import pytest
@@ -26,8 +25,8 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.image.compose import Composition
 from iron.common.graph.record import Recording
+from iron.common.image.compose import Composition
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
@@ -42,8 +41,8 @@ from iron.operators import (
 )
 from iron.operators.magnitude import Magnitude
 from iron.operators.merge import GEMMA
-from iron.tests.support.graphs import Adds, Chain
 from iron.tests.support import sequences
+from iron.tests.support.graphs import Adds, Chain
 
 SIZE = 1024
 TILE = 128

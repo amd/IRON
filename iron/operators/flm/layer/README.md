@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 Ported from the `layer` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)'s Gemma 4 engine.
 
 > Note: This operator uses hand-written DMA programs, packet routes and kernel lock ids.
-> As a result it is less portable and less idiomatic than most of the other operators 
+> As a result it is less portable and less idiomatic than most of the other operators
 > in this repository. If your goal is to learn IRON operator programming,
 > other operators are likely better examples.
 

@@ -16,7 +16,6 @@ from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import DmaEndpoint
 from aie.utils import bfp
-
 from aie.utils.compile.jit.params import OperatorParam, PerCallMember, Select, resolve
 
 from .value import Value

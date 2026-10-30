@@ -6,8 +6,8 @@
 import numpy as np
 
 import iron
-from iron import Carried, Precision, Scratchpad
 import iron.functional as F
+from iron import Carried, Precision, Scratchpad
 from iron.operators import GEMM, ElementwiseAdd, ElementwiseMul, RoPE, SiLU
 from iron.operators.copy import Copy
 from iron.operators.flm.gemm.op import ProjectionGEMM

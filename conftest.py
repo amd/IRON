@@ -3,15 +3,15 @@
 
 import csv
 import numbers
-import re
 import os
+import re
+import statistics
 import subprocess
 from datetime import datetime
 from pathlib import Path
-import pytest
-import statistics
 
 import aie.utils as aie_utils
+import pytest
 from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
 

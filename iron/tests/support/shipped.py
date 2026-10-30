@@ -192,10 +192,11 @@ class Shipped(
             )
         return self.replace()
 
-    def pack_B(self, B):
-        """A row-major ``(K, N)`` B in the overlay's own order: bf16, a whole
-        k tile a slice, and within a block the ``s`` rows outer and the
-        ``K_TILE // s`` columns inner, the reverse of ``pack_b``'s.
+    def pack_b(self, B):
+        """Return a row-major ``(K, N)`` B in the overlay's own order: bf16, a whole k tile a slice.
+
+        And within a block the ``s`` rows outer and the ``K_TILE // s``
+        columns inner, the reverse of ``pack_b``'s.
         """
         K, N = B.shape
         blocked = B.reshape(K // K_TILE, K_TILE // S, S, N // N_TILE, N_TILE // T, T)
@@ -241,7 +242,7 @@ class Shipped(
                         self.A.fill(A[mega_row, r].permute((1, 0, 2)), lane=r)
                     if c >= active:
                         continue
-                    # One contiguous run: pack_B has already put this
+                    # One contiguous run: pack_b has already put this
                     # column's k-blocks in the order the memtile writes them.
                     self.B.fill(B[mega_col * COLS + c], lane=c)
                     self.C.drain(C[mega_row, :, mega_col * COLS + c], lane=c)

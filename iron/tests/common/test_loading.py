@@ -22,9 +22,9 @@ import pytest
 
 from iron.applications.llama.model import Llama
 from iron.lm import Checkpoint
-from iron.lm.model import TokenizerJson
 from iron.lm.cli import parse_args
 from iron.lm.golden import RECORD
+from iron.lm.model import TokenizerJson
 from iron.lm.testing import require, weights_dir
 from iron.tests.support.llama_model import SMALL, checkpoint
 

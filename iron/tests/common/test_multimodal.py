@@ -14,7 +14,6 @@ from ml_dtypes import bfloat16
 
 from iron.lm import Multimodal
 from iron.lm.testing import assert_close
-from iron.tests.support.llama_reference import prompt
 from iron.tests.support.encoder import (
     HEAD_DIM,
     HEADS,
@@ -23,6 +22,7 @@ from iron.tests.support.encoder import (
     SelfAttention,
     attention,
 )
+from iron.tests.support.llama_reference import prompt
 from iron.tests.support.multimodal import IMAGE, small_causal
 
 pytestmark = pytest.mark.usefixtures("npu2")

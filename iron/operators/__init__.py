@@ -30,7 +30,39 @@ from .silu import SiLU
 from .softmax import Softmax
 from .tanh import Tanh
 
-__all__ = sorted(name for name in dir() if name[0].isupper())
+__all__ = [
+    "AXPY",
+    "Clamp",
+    "Copy",
+    "DepthwiseConv1d",
+    "ElementwiseAdd",
+    "ElementwiseMul",
+    "Emit",
+    "GELU",
+    "GEMM",
+    "GEMV",
+    "Gather",
+    "GatherWords",
+    "LayerNorm",
+    "Limbs",
+    "Log",
+    "MHA",
+    "Magnitude",
+    "Merge",
+    "PatchPositions",
+    "RMSNorm",
+    "ReLU",
+    "Resample",
+    "ResampleTaps",
+    "RoPE",
+    "RowwiseAdd",
+    "RowwiseMul",
+    "Sample",
+    "SiLU",
+    "Sigmoid",
+    "Softmax",
+    "Tanh",
+]
 
 #: Every operator by the name a profile gives it, flm's as ``"flm.<name>"``.
 CATALOG = {name: globals()[name] for name in __all__} | {

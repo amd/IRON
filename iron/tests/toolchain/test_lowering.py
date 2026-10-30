@@ -23,8 +23,8 @@ import importlib
 
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
 from aie.helpers.taplib import PerCall
+from ml_dtypes import bfloat16
 
 import iron
 from iron import Precision

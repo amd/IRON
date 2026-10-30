@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """AIE2P arithmetic in numpy, for references that match the device bit for bit.
+
 A "bf16" result is a float array whose values bf16 represents; every
 float-to-bf16/bfp16/integer conversion rounds toward minus infinity unless a
 kernel sets the rounding register (host-side constants round to nearest even).

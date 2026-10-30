@@ -54,4 +54,4 @@ def write(model_dir, config, op, out_dir):
         with open(out_dir / f"pli_{stem}.weights", "wb") as out:
             for name, K, N in tensors:
                 B = unblock(read_bf16(q4nx, header, data_start, name), K, N)
-                out.write(op.pack_B(B.astype(bfloat16)).tobytes())
+                out.write(op.pack_b(B.astype(bfloat16)).tobytes())

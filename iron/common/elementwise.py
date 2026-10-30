@@ -19,11 +19,10 @@ from aie.iron import In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
-from aie.iron import kernels
 from aie.iron.kernels import eltwise
+from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
 from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance, Verdict
-from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
 from ml_dtypes import bfloat16
 
 from .declare import Built, Operand, Operator, Rtp, Unresolvable

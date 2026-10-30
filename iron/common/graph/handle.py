@@ -195,7 +195,7 @@ class Handle:
         )
 
     @property
-    def T(self) -> Handle:
+    def T(self) -> Handle:  # noqa: N802 -- numpy's name
         """``transpose(1, 0)``, as numpy's ``.T`` of a matrix."""
         return self.transpose(1, 0)
 
@@ -683,7 +683,7 @@ class _Viewed:
         return self._as_operand().transpose(*axes)
 
     @property
-    def T(self):
+    def T(self):  # noqa: N802 -- numpy's name
         return self._as_operand().T
 
     def at(self, tap, shape, *, bounds=None, repeat=None, length=None):

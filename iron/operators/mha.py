@@ -18,10 +18,8 @@ from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv, ke
 from aie.iron.controlflow import range_
 from aie.iron.device import AnyComputeTile, AnyMemTile, AnyShimTile, Device, Tile
 from aie.iron.kernels.linalg import mm_stream_dims
-from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.context import compile_context
 from aie.utils import set_current_device
-from aie.utils.compile.utils import resolve_target_arch
+from aie.utils.compile.jit.context import compile_context
 from aie.utils.compile.jit.params import (
     Select,
     divisors,
@@ -30,6 +28,8 @@ from aie.utils.compile.jit.params import (
     tunable,
     widths,
 )
+from aie.utils.compile.utils import resolve_target_arch
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp, Unresolvable
@@ -248,8 +248,12 @@ class MHA(Operator):
         obj_shape=(B_kv, pv_width),
         per=(kv_lanes, pv_cores),
     )
-    O = Out(
-        Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
+    O = Out(  # noqa: E741 -- an operand name: attention's Q, K, V, O
+        Select(
+            heads_interleaved,
+            (seq_pad, num_heads, d),
+            (num_heads, seq_pad, d),
+        ),
         obj_shape=(join_rows, pv_width),
         per=(q_shims, pv_cores),
     )

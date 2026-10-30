@@ -323,7 +323,7 @@ def test_flm_gemm_reads_b_as_stored_in_bf16(npu2):
         M=256, K=512, N=256, b_col_maj=True, precision=Precision.MEDIUM
     ).resolved(npu2)
     with pytest.raises(ValueError, match="reads B as stored"):
-        op.pack_B(None)
+        op.pack_b(None)
 
 
 @pytest.mark.parametrize(

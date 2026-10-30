@@ -16,6 +16,8 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, lm
+from iron.applications.gemma4.audio import AudioConfig, AudioTower
+from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.lm import (
     Attention,
     CausalLM,
@@ -31,8 +33,6 @@ from iron.lm import (
     Rope,
     subtree,
 )
-from iron.applications.gemma4.audio import AudioConfig, AudioTower
-from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.operators.copy import Copy
 from iron.operators.tanh import Tanh
 

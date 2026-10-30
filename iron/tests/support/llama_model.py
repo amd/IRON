@@ -16,8 +16,8 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron import Profile
-from iron.lm import Checkpoint, DecoderConfig
 from iron.applications.llama.model import Llama, Llama3RopeScaling, LlamaConfig
+from iron.lm import Checkpoint, DecoderConfig
 
 # The tunables the graph runs with at ``SMALL``'s shape on NPU2: decode
 # and the prompt at 256 rows. The application's own profiles are for Llama

@@ -38,8 +38,8 @@ from iron.applications.embedding_gemma2.model import (
 from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.lm import Checkpoint, rope_angles
-from iron.lm.model import prompt_text
 from iron.lm.golden import RECORD, Golden
+from iron.lm.model import prompt_text
 from iron.lm.testing import check_embedding, require, weights_dir
 from iron.operators.copy import Copy
 from iron.tests.support.coco import photo
@@ -109,14 +109,14 @@ CLIPS = {
 }
 
 # The processor's soft-token budgets for an image and for video.
-I, V = VisionConfig().image_tokens, 140
+IMG_TOKENS, V = VisionConfig().image_tokens, 140
 
 # The vision tower's photos and the soft-token budget each is resized to.
 IMAGES = {
     # 14 x 19 tokens, 2394 patches: an upscale to nearly the whole budget.
-    "cats": I,
+    "cats": IMG_TOKENS,
     # 19 x 14 tokens, the other way up.
-    "stop_sign": I,
+    "stop_sign": IMG_TOKENS,
     # 9 x 14 tokens, 1134 patches: a video frame's budget.
     "living_room": V,
 }
@@ -126,18 +126,18 @@ IMAGES = {
 # phone photo either way up, up- and downscales, extreme aspect ratios, one
 # side unchanged, and an image already at its size.
 RESIZES = [
-    ((3024, 4032), I, None),
-    ((4032, 3024), I, None),
-    ((480, 640), I, None),
+    ((3024, 4032), IMG_TOKENS, None),
+    ((4032, 3024), IMG_TOKENS, None),
+    ((480, 640), IMG_TOKENS, None),
     ((333, 517), V, None),
     ((1080, 1920), V, None),
     # 3648 pixels wide: more patch columns than 16 cores hold.
-    ((97, 2003), I, "patch columns"),
+    ((97, 2003), IMG_TOKENS, "patch columns"),
     ((2003, 97), V, None),
-    ((1, 5000), I, "patch columns"),
+    ((1, 5000), IMG_TOKENS, "patch columns"),
     ((17, 23), V, None),
-    ((672, 517), I, None),
-    ((672, 960), I, None),
+    ((672, 517), IMG_TOKENS, None),
+    ((672, 960), IMG_TOKENS, None),
 ]
 
 
@@ -206,10 +206,11 @@ def reference():
         return (DIRECTORY / "config.json").read_text(), checkpoint.fingerprint()
 
     def recorded(key, compute):
-        record = lambda: SimpleNamespace(
-            logits=lambda _: compute(model())
-        )  # noqa: E731
-        golden = Golden(DIRECTORY / "golden.npz", record, inputs())
+        golden = Golden(
+            DIRECTORY / "golden.npz",
+            lambda: SimpleNamespace(logits=lambda _: compute(model())),
+            inputs(),
+        )
         return golden.logits(np.frombuffer(key.encode(), np.uint8))
 
     return recorded
@@ -430,7 +431,7 @@ class TestVision:
             *((name, None, tokens) for name, tokens in IMAGES.items()),
             *(("cats", s, tokens) for s, tokens, refusal in RESIZES if not refusal),
             # The largest image a call takes, the other way up.
-            ("cats", VisionConfig().largest[::-1], I),
+            ("cats", VisionConfig().largest[::-1], IMG_TOKENS),
         ],
     )
     def test_image_processor(
@@ -456,7 +457,13 @@ class TestVision:
         # only 8 a core on npu2's sixteen, which Resample's default holds.
         image = tiled(photo("cats"), 97, 640)
         self.check_processor(
-            vision, processor, reference, "cats (97, 640)", image, I, record_property
+            vision,
+            processor,
+            reference,
+            "cats (97, 640)",
+            image,
+            IMG_TOKENS,
+            record_property,
         )
 
     @pytest.mark.parametrize("name", list(IMAGES))
@@ -588,7 +595,7 @@ def test_embeddinggemma_2_latency(encoder, text, record_property):
     [
         *((s, t, r) for s, t, r in RESIZES if r),
         # 20 MP: more than the largest image a call takes.
-        ((5000, 4000), I, "does not fit"),
+        ((5000, 4000), IMG_TOKENS, "does not fit"),
     ],
 )
 def test_image_processor_refuses(npu2, shape, tokens, refusal):
@@ -666,4 +673,4 @@ def test_image_processor_refuses_on_npu1(npu1):
         VisionConfig(), Checkpoint(DIRECTORY / "model.safetensors").tree("unread")
     )
     with pytest.raises(ValueError, match="patch columns"):
-        vision.inputs(np.zeros((97, 640, 3), np.uint8), I)
+        vision.inputs(np.zeros((97, 640, 3), np.uint8), IMG_TOKENS)

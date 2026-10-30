@@ -11,4 +11,11 @@ from .layer.op import DecodeLayer
 from .lm_head.op import LMHead
 from .prefill_attn.op import PrefillAttention, PrefillSlidingAttention
 
-__all__ = sorted(name for name in dir() if name[0].isupper())
+__all__ = [
+    "DecodeLayer",
+    "DequantBFP",
+    "LMHead",
+    "PrefillAttention",
+    "PrefillSlidingAttention",
+    "ProjectionGEMM",
+]

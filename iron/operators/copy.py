@@ -27,8 +27,8 @@ from aie.iron import (
 )
 from aie.iron.device import Tile
 from aie.iron.kernels import datamovement
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operand, Operator, Rtp, Unresolvable

@@ -22,8 +22,8 @@ from iron.lm.testing import assert_close, check_generation
 from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.operators.sample import Sample
-from iron.tests.support.llama_reference import OnHost
 from iron.tests.support.llama_model import SMALL, checkpoint, small
+from iron.tests.support.llama_reference import OnHost
 
 pytestmark = pytest.mark.usefixtures("npu2")
 

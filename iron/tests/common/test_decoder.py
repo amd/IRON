@@ -10,13 +10,13 @@ import dataclasses
 
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
 from aie.helpers.taplib import Affine
+from ml_dtypes import bfloat16
 
 import iron.functional as F
 from iron import Precision
-from iron.lm import rope_angles
 from iron.applications.llama.model import Llama
+from iron.lm import rope_angles
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.tests.support.llama_model import PROFILE, SMALL, checkpoint, small

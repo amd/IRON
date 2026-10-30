@@ -27,8 +27,8 @@ from iron.operators.sample import Sample
 from .blocks import DecoderLayer, Embedding, KVCache, Linear, RMSNorm, Rope
 from .checkpoint import Checkpoint, renamed, weights_file
 from .config import DecoderConfig
-from .model import Model
 from .generation import Sampler
+from .model import Model
 from .session import Session
 
 logger = logging.getLogger(__name__)

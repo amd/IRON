@@ -13,8 +13,8 @@ from aie.iron import In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp

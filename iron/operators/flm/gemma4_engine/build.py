@@ -22,17 +22,17 @@ from aie.iron.device import NPU2
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
 from iron import Precision
-from iron.operators.flm.gemma4_engine import pli_weights
 from iron.operators.flm import (
-    ProjectionGEMM,
     DecodeLayer,
     DequantBFP,
     LMHead,
     PrefillAttention,
     PrefillSlidingAttention,
+    ProjectionGEMM,
 )
 from iron.operators.flm.dequant.op import CT_K as DEQUANT_CT_K
 from iron.operators.flm.gemm.design import Epilogue
+from iron.operators.flm.gemma4_engine import pli_weights
 from iron.operators.flm.layer.design import LayerType
 
 MODEL = "Gemma4-E2B-IT-NPU2"

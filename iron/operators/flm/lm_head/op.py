@@ -11,8 +11,8 @@ from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernels import flm_gemma4
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, tunable, widths
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Unresolvable

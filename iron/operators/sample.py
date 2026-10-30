@@ -15,8 +15,8 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, In, InOut, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import sample
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Unresolvable

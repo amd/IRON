@@ -39,6 +39,8 @@ from aie.utils import set_current_device
 from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.compile.jit.context import compile_context
 from aie.utils.compile.jit.params import Select, divisors, param, per_call, tunable
+from aie.utils.compile.utils import resolve_target_arch
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Precision, Rtp, Unresolvable
@@ -51,13 +53,13 @@ from iron.operators.flm.gemm.design import (
     K_TILE,
     M_TILE,
     N_TILE_DEFAULT,
+    TILE_NS,
     Epilogue,
     Gelu,
     R,
     Rounding,
     S,
     T,
-    TILE_NS,
     _b_bytes,
     _Slab,
     compute_rows,
@@ -139,7 +141,7 @@ class ProjectionGEMM(Operator):
     epilogue: Epilogue | str = param(default=Epilogue.NONE)
     # B's packed block count on AIE2P: blocks, not bytes, since B's
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
-    # into the byte count pack_B returns.
+    # into the byte count pack_b returns.
     packed_blocks: int = param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # 64 halves the mmul's accumulator traffic per mac; 128 halves A fetches.
     tile_n: int = tunable()
@@ -1246,8 +1248,9 @@ class ProjectionGEMM(Operator):
             packed_blocks=None,
         )
 
-    def pack_B(self, B):
-        """Reorder a row-major ``(K, N)`` weight matrix into consumption order
+    def pack_b(self, B):
+        """Reorder a row-major ``(K, N)`` weight matrix into consumption order.
+
         (``iron.operators.flm.packing``): flat uint8 bfp16ebs8 blocks on
         NPU2, flat bf16 on NPU1, making both B hops linear descriptors.
 

@@ -4,8 +4,8 @@
 import numpy as np
 from aie.iron import ExternalFunction, In, ObjectFifo, Out, Worker
 from aie.iron.controlflow import range_
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, per_call
+from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing

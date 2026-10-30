@@ -21,7 +21,6 @@ from aie.iron.device import (
     NPU1Col2,
     Tile,
 )
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import (
     Select,
     divisors,
@@ -30,6 +29,7 @@ from aie.utils.compile.jit.params import (
     tunable,
     widths,
 )
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Precision, Rtp, Unresolvable

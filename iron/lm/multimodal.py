@@ -15,10 +15,10 @@ import iron
 from iron.operators.copy import Copy
 from iron.operators.merge import Merge
 
-from .model import Model
 from .causal import CausalLM
 from .encoder import Encoder, Tower
 from .generation import Sampler
+from .model import Model
 
 
 class Multimodal(Model):

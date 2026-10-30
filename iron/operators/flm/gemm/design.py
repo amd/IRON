@@ -27,7 +27,7 @@ N_TILE_DEFAULT = 64
 # The n widths a compute tile takes. n=256 is absent because its f32
 # accumulator alone (M_TILE*256*4) fills all of L1.
 TILE_NS = (16, 32, 64, 128)
-# Register tiling, shared by both architectures. pack_B, the stream-dimension
+# Register tiling, shared by both architectures. pack_b, the stream-dimension
 # lists and gather_dims all key off these; changing one alone is silently
 # wrong.
 R, S, T = 8, 8, 8

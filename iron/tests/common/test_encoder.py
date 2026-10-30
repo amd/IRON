@@ -21,13 +21,13 @@ from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.mha import MHA
 from iron.tests.support.encoder import (
-    HEADS,
     HEAD_DIM,
+    HEADS,
     ROWS,
+    VOCAB,
     Rows,
     SelfAttention,
     Shape,
-    VOCAB,
     attention,
 )
 from iron.tests.support.llama_model import checkpoint

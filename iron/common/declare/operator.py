@@ -21,10 +21,10 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Self
 import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.utils.hostruntime.tensor_class import NpuTensor
 from aie.utils.compile.jit import operator as jit
 from aie.utils.compile.jit.operator import Unresolvable
 from aie.utils.compile.jit.params import PerCallMember
+from aie.utils.hostruntime.tensor_class import NpuTensor
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 

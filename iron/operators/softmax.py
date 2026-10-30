@@ -12,8 +12,8 @@ from aie.helpers.util import np_dtype_to_mlir_type
 from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing

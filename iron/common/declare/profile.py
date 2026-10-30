@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 from dataclasses import MISSING
 from enum import Enum
-from types import FunctionType
 from pathlib import Path
+from types import FunctionType
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, TypeVar
 
 if TYPE_CHECKING:

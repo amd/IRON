@@ -27,17 +27,17 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+from iron.applications.llama import Llama
+from iron.applications.llama.model import Llama3RopeScaling
 from iron.lm import (
     Sampler,
     Session,
     Tokenizer,
     generate_on_host,
 )
-from iron.lm.model import TokenizerJson
 from iron.lm.checkpoint import leaves
+from iron.lm.model import TokenizerJson
 from iron.lm.testing import assert_close
-from iron.applications.llama import Llama
-from iron.applications.llama.model import Llama3RopeScaling
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE

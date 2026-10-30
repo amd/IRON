@@ -12,10 +12,8 @@ import math
 
 import ml_dtypes
 
-import iron
 from iron.common import Precision
 from iron.common.graph.handle import Handle, State
-
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gelu import GELU
@@ -81,6 +79,7 @@ def rms_norm(
     x: Handle, normalized_shape, weight=None, eps: float | None = None
 ) -> Handle:
     """``x`` over the RMS of its last axis, times ``weight`` if given.
+
     ``eps`` None is ``x``'s dtype's machine epsilon, as torch's.
 
     Raises:

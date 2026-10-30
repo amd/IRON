@@ -74,7 +74,7 @@ def suite_report(artifacts: str, history: str, directory: str, args) -> List[str
 
 def strip_title(lines: List[str]) -> str:
     """Drop the report's own heading, and report whether anything is left."""
-    body = "\n".join(l for l in lines if not l.startswith("# ")).strip()
+    body = "\n".join(line for line in lines if not line.startswith("# ")).strip()
     return "" if body.startswith("No benchmark moved") else body
 
 

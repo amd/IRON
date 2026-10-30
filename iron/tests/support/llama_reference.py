@@ -9,16 +9,18 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from iron.applications.llama import Llama
 from iron.lm import (
     DecoderConfig,
-    OnHost as Host,
     accuracy,
     determinism,
+)
+from iron.lm import (
+    OnHost as Host,
 )
 from iron.lm.generation import greedy
 from iron.lm.golden import Golden, HuggingFace
 from iron.lm.testing import assert_close
-from iron.applications.llama import Llama
 from iron.tests.support.llama_model import PROFILE, checkpoint, shapes
 
 

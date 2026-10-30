@@ -13,14 +13,14 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Carried, Scratchpad
 from iron.lm import LogMel
-from iron.tests.support.graphs import FeedForward
-from iron.tests.support.log_mel import EVERY, Extractor
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs
 from iron.operators.log import Log
 from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
+from iron.tests.support.graphs import FeedForward
+from iron.tests.support.log_mel import EVERY, Extractor
 
 pytestmark = pytest.mark.usefixtures("npu2")
 

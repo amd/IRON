@@ -17,19 +17,19 @@ from typing import Any
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.iron import ceildiv
 from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
+from aie.iron import ceildiv
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron import Carried, Precision, Profile, Scratchpad
 from iron.common.graph import Handle
 from iron.common.graph.handle import Dense
 from iron.common.graph.record import Recording
-from iron.common.image.step import BufferRef
 from iron.common.image.packaging import Kind
-import iron.functional as F
+from iron.common.image.step import BufferRef
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul

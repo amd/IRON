@@ -18,8 +18,8 @@ from iron.applications.gemma4.audio import AudioConfig
 from iron.applications.gemma4.vision import VisionConfig
 from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig
 from iron.lm import DecoderConfig
-from iron.tests.support.llama_model import REAL_1B
 from iron.lm.testing import require, weights_dir
+from iron.tests.support.llama_model import REAL_1B
 
 LLAMA_DIR = weights_dir("llama3.2-1b")
 EMBEDDING_GEMMA2_DIR = weights_dir("embeddinggemma-2")

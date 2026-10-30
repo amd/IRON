@@ -14,11 +14,11 @@ from. One image serves every `k`.
 import numpy as np
 import pytest
 from aie.helpers.taplib import PerCall, TensorAccessPattern
-from aie.passmanager import PassManager
 from aie.iron import In, ObjectFifo, Out, TaskGroup
+from aie.passmanager import PassManager
+from aie.utils.compile.jit.params import param, per_call
 from aie.utils.npukernel import NPUKernel
 from aie.utils.txn_trace import trace
-from aie.utils.compile.jit.params import param, per_call
 
 import iron
 from iron import Scratchpad

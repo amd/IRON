@@ -9,18 +9,17 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.tests.support.graphs import FeedForward
 from iron.operators.flm.gemm.op import ProjectionGEMM
+from iron.tests.support.graphs import FeedForward
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
 
 def _trace(rows, embedding_dim=2048, hidden_dim=2048):
-    z = lambda *s: np.zeros(s, dtype=bfloat16)
     ffn = FeedForward(
-        z(hidden_dim, embedding_dim),
-        z(hidden_dim, embedding_dim),
-        z(embedding_dim, hidden_dim),
+        np.zeros((hidden_dim, embedding_dim), dtype=bfloat16),
+        np.zeros((hidden_dim, embedding_dim), dtype=bfloat16),
+        np.zeros((embedding_dim, hidden_dim), dtype=bfloat16),
     )
     return ffn.record(x=(rows, embedding_dim))
 

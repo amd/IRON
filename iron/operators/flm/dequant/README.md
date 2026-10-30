@@ -18,7 +18,7 @@ op(q4nx_blob, packed_b)  # compiles once, then runs
 ```
 
 `K` is the in-feature count and `N` the out-feature count, so the result is B
-for a `(M, K) x (K, N)` GEMM. The output equals `ProjectionGEMM.pack_B` byte for byte
+for a `(M, K) x (K, N)` GEMM. The output equals `ProjectionGEMM.pack_b` byte for byte
 under `Rounding.FLOOR`, the mode the cores run in.
 
 ## Input layout
@@ -121,7 +121,7 @@ so the tests compare bytes.
 |---|---|
 | descriptors reproduce `pack_b`'s order | `iron/tests/operators/test_flm_dequant_layout.py` |
 | device output equals the CPU reference | `iron/tests/operators/test_catalog.py`, at `DequantBFP.test`'s cases |
-| device output equals `ProjectionGEMM.pack_B` | `test.py::test_output_feeds_gemm_unchanged` |
+| device output equals `ProjectionGEMM.pack_b` | `test.py::test_output_feeds_gemm_unchanged` |
 
 A wrong stride yields a buffer of the right size holding real weight values in
 the wrong order. The layout tests therefore compare index arithmetic.

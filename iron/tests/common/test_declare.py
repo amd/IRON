@@ -26,8 +26,8 @@ from iron import Profile, Scratchpad
 from iron.common import Built, Operator, Rtp, Unresolvable, Value, Xclbin
 from iron.common.declare.operand import active_runtime, axis_of
 from iron.common.design import OperatorDesign
-from iron.tests.support.declare import Rows
 from iron.operators.mha import MHA
+from iron.tests.support.declare import Rows
 
 NPU2 = from_name("npu2", n_cols=8)
 

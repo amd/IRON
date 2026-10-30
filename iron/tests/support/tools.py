@@ -51,10 +51,16 @@ DEVICES = {
 
 
 def swiglu():
-    """A gated feed-forward at Llama 3.2 1B's width, and that width."""
-    z = lambda *s: np.zeros(s, dtype=bfloat16)
+    """Return a gated feed-forward at Llama 3.2 1B's width, and that width."""
     E, H = 2048, 8192
-    return FeedForward(z(H, E), z(H, E), z(E, H)), E
+    return (
+        FeedForward(
+            np.zeros((H, E), dtype=bfloat16),
+            np.zeros((H, E), dtype=bfloat16),
+            np.zeros((E, H), dtype=bfloat16),
+        ),
+        E,
+    )
 
 
 def shipped(**kwargs):

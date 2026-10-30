@@ -14,11 +14,11 @@ from iron.common import Precision
 from iron.common.testing import run_test, vectors
 from iron.operators.flm.gemm.design import (
     M_TILE,
+    TILE_NS,
     Epilogue,
     Gelu,
     R,
     Rounding,
-    TILE_NS,
     k_slices,
 )
 from iron.operators.flm.gemm.op import ProjectionGEMM
@@ -134,9 +134,11 @@ def get_params(device: str):
 
 def flm_vectors(operator, scale=4.0):
     """Random A (signed) and B (non-negative) at ``scale``, and epilogue(A @ B).
-    A small ``scale`` keeps K=512 products away from +-200, where gelu/silu are
-    indistinguishable from the identity; B is row-major ``(K, N)``, packed by
-    ``ProjectionGEMM.pack_B``, or ``(N, K)`` as stored under ``b_col_maj``.
+
+    A small ``scale`` keeps K=512 products away from +-200, where gelu/silu
+    are indistinguishable from the identity; B is row-major ``(K, N)``,
+    packed by ``ProjectionGEMM.pack_b``, or ``(N, K)`` as stored under
+    ``b_col_maj``.
     """
     K, N = operator.K, operator.N
     B = (N, K) if operator.b_col_maj else (K, N)
@@ -169,7 +171,7 @@ def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
         operator,
         {
             "A": A.flatten(),
-            "B": B.flatten() if operator.b_col_maj else operator.pack_B(B),
+            "B": B.flatten() if operator.b_col_maj else operator.pack_b(B),
         },
         {"C": data["C"].flatten()},
         tolerance=Tolerance.relative(0.04, budget * mass),
@@ -430,7 +432,7 @@ def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, ct_k, precision):
     C = (A.astype(np.float32) @ B.astype(np.float32)).astype(bfloat16)
     errors = run_test(
         operator,
-        {"A": A.flatten(), "B": operator.pack_B(B)},
+        {"A": A.flatten(), "B": operator.pack_b(B)},
         {"C": C.flatten()},
         tolerance=Tolerance.exact(note="integers, exact in every sum"),
     )
@@ -462,7 +464,7 @@ def test_one_xclbin_serves_every_shape():
         mass = accumulated_mass(K, data["A"], data["B"])
         errors = run_test(
             operator,
-            {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])},
+            {"A": data["A"].flatten(), "B": operator.pack_b(data["B"])},
             {"C": data["C"].flatten()},
             tolerance=Tolerance.relative(0.04, 0.004 * mass),
         )
@@ -524,10 +526,10 @@ BUDGET_FLOOR = 2e-2
 def test_shipped_overlay(M, K, N, epilogue, record_property, eight_column_npu2):
     """The shipped binary through the same operator: the second reference."""
     operator = Shipped(M=M, K=K, N=N, epilogue=epilogue)
-    # B drawn row-major (K, N); the operator consumes it packed (pack_B).
+    # B drawn row-major (K, N); the operator consumes it packed (pack_b).
     data = vectors(operator, normal=(operator.A,), given={operator.B: (K, N)})
 
-    input_buffers = {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])}
+    input_buffers = {"A": data["A"].flatten(), "B": operator.pack_b(data["B"])}
     output_buffers = {"C": data["C"].flatten()}
 
     # The overlay's error is made in the ACCUMULATOR -- it runs in the core's
@@ -585,7 +587,7 @@ def test_shipped_epilogue_matches_accumulator(epilogue, eight_column_npu2):
         op = Shipped(M=M, K=K, N=N, epilogue=epi)
         tensor = aie_utils.DEFAULT_TENSOR_CLASS
         out = tensor((M, N), dtype=np.dtype("bfloat16"))
-        op(tensor(A.flatten()), tensor(op.pack_B(B)), out)
+        op(tensor(A.flatten()), tensor(op.pack_b(B)), out)
         return out.numpy().reshape(M, N).astype(np.float32)
 
     acc = run(NONE)
@@ -635,7 +637,7 @@ def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N, eight_column_npu2):
     def run(op):
         tensor = aie_utils.DEFAULT_TENSOR_CLASS
         out = tensor((M, N), dtype=np.dtype("bfloat16"))
-        op(tensor(A.flatten()), tensor(op.pack_B(B)), out)
+        op(tensor(A.flatten()), tensor(op.pack_b(B)), out)
         return out.numpy().reshape(M, N).copy()
 
     shipped = run(Shipped(M=M, K=K, N=N, epilogue=GELU))

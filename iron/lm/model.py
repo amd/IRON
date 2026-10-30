@@ -27,8 +27,8 @@ from iron.common.image.packaging import require_device
 
 from .checkpoint import Checkpoint, weights_file
 from .config import Config, DecoderConfig
-from .golden import Golden, HuggingFace
 from .generation import Sampler
+from .golden import Golden, HuggingFace
 
 logger = logging.getLogger(__name__)
 

@@ -416,6 +416,7 @@ class Rope(iron.Graph):
 
 class KVCache(iron.Graph):
     """A layer's keys and values and causal attention over them (``attend``).
+
     A prompt chunk writes a run of rows; a decode step attends with ``MHA``
     over one query, which costs the context, not the cache.
 

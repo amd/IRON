@@ -27,17 +27,17 @@ from typing import Any
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.helpers.taplib import PerCall
 from aie.iron.kernels.sample import draw_row
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
-from aie.helpers.taplib import PerCall
 
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Composition
 from iron.common.image.link import FullELF, PerStep
+from iron.common.image.packaging import Kind, plan
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
-from iron.common.image.packaging import Kind, plan
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU

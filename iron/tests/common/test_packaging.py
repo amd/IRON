@@ -5,8 +5,8 @@
 
 import numpy as np
 import pytest
-from aie.iron.device import NPU1, NPU2, NPU1Col1, from_name
 from aie.helpers.taplib import PerCall
+from aie.iron.device import NPU1, NPU2, NPU1Col1, from_name
 
 import iron
 from iron import Carried, Scratchpad

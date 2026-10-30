@@ -9,18 +9,18 @@ from aie.helpers.util import v8bfp16ebs8
 from aie.iron import In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.kernels import quant
 from aie.utils import bfp
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, tunable, widths
+from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator, Unresolvable
 from iron.common.testing import Case, Testing
 from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
+from iron.operators.flm.gemm.design import K_TILE as K_TILE_B
+from iron.operators.flm.gemm.design import N_TILE_DEFAULT as N_TILE
 
 # flm.ProjectionGEMM's B tiling, imported rather than restated: this design has to write
 # the buffer in the order that one reads it, and two copies would drift.
 from iron.operators.flm.gemm.design import S, T
-from iron.operators.flm.gemm.design import K_TILE as K_TILE_B
-from iron.operators.flm.gemm.design import N_TILE_DEFAULT as N_TILE
 from iron.operators.flm.q4nx import (
     BLOCK_BYTES,
     GROUP,

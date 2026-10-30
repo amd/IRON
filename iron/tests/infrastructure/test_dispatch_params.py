@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 from aie.iron import DispatchTime, In, ObjectFifo, Out, Program, Runtime, require
 from aie.iron.controlflow import range_
-from aie.utils.hostruntime.hostruntime import HostRuntimeError
 from aie.utils.compile.jit.params import param, per_call
+from aie.utils.hostruntime.hostruntime import HostRuntimeError
 
 from iron.common import Operator
 from iron.common.design import OperatorDesign

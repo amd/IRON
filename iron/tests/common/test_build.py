@@ -23,8 +23,8 @@ from aie.helpers.util import v8bfp16ebs8
 from aie.iron import DmaEndpoint, In, ObjectFifo, Out, Worker
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
-from aie.utils.trace import TraceConfig
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
+from aie.utils.trace import TraceConfig
 
 import iron
 import iron.operators.flm.gemm.op as flm_gemm
@@ -43,10 +43,10 @@ from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.softmax import Softmax
+from iron.tests.support.build import built, generated_sequence
 from iron.tests.support.declare import Rows
 from iron.tests.support.graphs import ProjectAsStored
 from iron.tests.support.shipped import Shipped
-from iron.tests.support.build import built, generated_sequence
 
 # A descriptor's fields are the current device's.
 pytestmark = pytest.mark.usefixtures("npu2")

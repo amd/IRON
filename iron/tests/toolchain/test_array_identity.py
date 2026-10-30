@@ -17,8 +17,8 @@ import importlib
 import re
 
 import pytest
-
 from aie.iron import Out
+
 from iron import Precision
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording

@@ -26,8 +26,8 @@ import numpy as np
 import pytest
 
 from iron.applications.gemma4 import Gemma4
-from iron.operators import flm
 from iron.lm.testing import require, weights_dir
+from iron.operators import flm
 
 APP = Path(flm.__file__).with_name("gemma4_engine")
 FLM = APP / "build" / "FastFlowLM" / "src"
