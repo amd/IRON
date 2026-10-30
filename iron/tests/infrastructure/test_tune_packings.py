@@ -11,16 +11,23 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+from iron import Scratchpad
 from iron.common.graph.compiled import apply_profile
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
-from iron.tune.autotune import Timed
+from iron.tune.autotune import Point, Timed
 from iron.tune.costmodel import CostModel
 from iron.tune.measure import Cache, Timing, platform
-from iron.tune.packings import Packer, adjacent, price_packings, width_tunables
+from iron.tune.packings import (
+    Packer,
+    _end_to_end,
+    adjacent,
+    price_packings,
+    width_tunables,
+)
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -62,6 +69,13 @@ class Runs(iron.Graph):
             for _ in range(4):
                 x = op.step(x, num_aie_columns=8)
         return x
+
+
+class BoundedReLUs(iron.Graph):
+    """Two ReLUs over a call's first ``n`` elements."""
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return ReLU.step(ReLU.step(x[:n]))
 
 
 class Projections(iron.Graph):
@@ -140,6 +154,7 @@ def test_price_packings_packs_alternating_arrays_bit_identically(tmp_path):
     report = platform()
     cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     recording = Alternating().record(x=(SIZE,))
+    kept = []
     profile = price_packings(
         [Timed(recording)],
         dev,
@@ -149,9 +164,11 @@ def test_price_packings_packs_alternating_arrays_bit_identically(tmp_path):
         repeats=5,
         cache=cache,
         fit_cache=tmp_path / "fit",
+        progress=lambda found, model: kept.append(found),
         log=print,
     )
     assert len(profile.packings()) == 1
+    assert [len(p.packings()) for p in kept] == [1], "the version's find, kept"
     _, _, packing = apply_profile(recording, profile, dev)
     assert len(packing.groups) == 1 and len(packing.groups[0]) == 2
 
@@ -192,6 +209,27 @@ def test_price_packings_skips_a_version_its_switches_cannot_pay(tmp_path):
     assert not profile.packings()
     assert any(line.endswith("not searched") for line in logged)
     assert not any("grouped" in line for line in logged)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_end_to_end_runs_a_call_at_each_of_its_points():
+    """A point bounding past the graph's input is a call it refuses: the
+    end-to-end check runs the call at each of its points, not only at its
+    own values."""
+    dev = aie_utils.ensure_current_device()
+    recording = BoundedReLUs().record(x=(SIZE,))
+    profile = iron.Profile()
+    timing = Timing(rounds=1, calls=2)
+    own = Timed(recording, values=dict(n=SIZE))
+    delta, _ = _end_to_end(own, dev, profile, profile, timing, print, False)
+    assert np.isfinite(delta)
+    past = Timed(
+        recording,
+        values=dict(n=SIZE),
+        points=[Point(0.5, dict(n=SIZE)), Point(0.5, dict(n=2 * SIZE))],
+    )
+    with pytest.raises(IndexError):
+        _end_to_end(past, dev, profile, profile, timing, print, False)
 
 
 @pytest.mark.supported_devices("npu2")

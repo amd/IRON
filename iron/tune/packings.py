@@ -539,6 +539,7 @@ def price_packings(
     ledger: Ledger | None = None,
     cycles: Mapping[str, int] | None = None,
     core_mhz: float | None = None,
+    progress: Callable[[Profile, CostModel], None] | None = None,
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Profile:
@@ -561,6 +562,9 @@ def price_packings(
             array's tile search the settings its kernel alone makes slower
             (``time_shape``).
         core_mhz: The cores' clock ``cycles`` are timed at.
+        progress: Called after each version's search with the profile found
+            so far and ``model``, so a caller keeps what earlier versions
+            found should a later one fail.
     """
     model = CostModel() if model is None else model
     base = _profile(profile, [])
@@ -645,6 +649,8 @@ def price_packings(
             if noise is not None and delta < -CONFIDENCE * noise:
                 found.extend((index, members) for members in entries)
             break
+        if progress is not None:
+            progress(_profile(base, [m for _, m in found]), model)
 
     # Each version against the packings found on the others.
     for index, call in enumerate(calls):

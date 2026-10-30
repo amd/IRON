@@ -25,7 +25,7 @@ import iron.functional as F
 from iron import Precision, lm
 from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
-from iron.tune.autotune import Timed
+from iron.tune.autotune import Point, Timed
 from iron.lm import (
     Attention,
     Checkpoint,
@@ -41,6 +41,8 @@ from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 
 PROFILES = Path(__file__).with_name("profiles")
+# A retrieval query's tokens, its task prefix included.
+QUERY_ROWS = 16
 
 
 @dataclasses.dataclass(frozen=True)
@@ -437,9 +439,7 @@ class Multimodal(lm.Multimodal):
 
     @classmethod
     def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
-        """The checkpoint whose header gives the weights' shapes; every
-        version is timed at its longest call.
-        """
+        """The checkpoint whose header gives the weights' shapes."""
         parser.add_argument(
             "--checkpoint",
             type=Path,
@@ -452,14 +452,22 @@ class Multimodal(lm.Multimodal):
     def tune_calls(
         cls, parser: argparse.ArgumentParser, args: argparse.Namespace
     ) -> list[Timed]:
-        """Every version (the text encoder, each tower and the merge) at its
-        longest call, on weights it never reads, since the one profile in
-        ``profiles/`` serves every version's designs.
+        """Every version (the text encoder, each tower and the merge) on
+        weights it never reads, since the one profile in ``profiles/`` serves
+        every version's designs: half its calls a query of ``QUERY_ROWS``
+        text rows, half its longest call. A call's configuration switches
+        cost the same at any length, so a short query is where they weigh.
         """
         weights = Checkpoint(weights_file(args.checkpoint)).tree("unread")
         graph = cls(Config(), weights)
+        longest = graph.longest()
+        points = [
+            Point(0.5, {**longest, "rows": QUERY_ROWS}),
+            Point(0.5, longest),
+        ]
         return [
-            Timed(graph.record(**shapes), graph.longest()) for shapes in graph.shapes()
+            Timed(graph.record(**shapes), longest, points=points)
+            for shapes in graph.shapes()
         ]
 
 

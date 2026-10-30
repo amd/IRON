@@ -750,12 +750,14 @@ def compare_graphs(
 ) -> tuple[float, float | None]:
     """How much longer ``after`` takes than ``before``, two builds of
     ``call``'s recording, run interleaved on the same seeded inputs and
-    states, and that difference's standard error; both are released after.
+    states at each of the call's points (its own values where it has none),
+    weighted, and that difference's standard error; both are released after.
 
     Raises:
         RuntimeError: ``after``'s outputs are not bit-identical to
-            ``before``'s at the call's values or at one of its bounds halved
-            (``_bound_points``); a device timeout propagates as it is raised.
+            ``before``'s at a point, the call's values or one of its bounds
+            halved (``_bound_points``); a device timeout propagates as it is
+            raised.
     """
     recording = call.recording
     rng = np.random.default_rng(seed)
@@ -769,15 +771,21 @@ def compare_graphs(
         for h in recording.inputs
     ]
     states = [(s, h, _random_tensor(h, rng)) for s, h in recording.states.values()]
-    # The call's own values last: timing below dispatches what was staged last.
-    checks = [*_bound_points(recording, call.values), dict(call.values)]
+    timed = [(p.weight, {**call.values, **p.values}) for p in call.points] or [
+        (1.0, dict(call.values))
+    ]
+    # A timed point right after it is staged: timing dispatches what was
+    # staged last.
+    staged = [(None, v) for v in _bound_points(recording, call.values)] + timed
+    delta = 0.0
+    variance: float | None = 0.0
     # Held from the first dispatch (each graph's context created lazily on
     # it) through the release below, not just around a dispatch: both
     # graphs' contexts stay loaded past their own call otherwise, past the
     # window another process holding this lock is kept out of.
     with npu_lock(lock):
         try:
-            for values in checks:
+            for weight, values in staged:
                 for state, _, content in states:
                     before.write(state, content)
                     after.write(state, content)
@@ -791,16 +799,25 @@ def compare_graphs(
                         f"{recording.name}: not bit-identical to it as before at "
                         f"{values}"
                     )
-            times = time_interleaved(
-                [before.callable, after.callable], timing, log=log, lock=lock
-            )
+                if weight is None:
+                    continue
+                times = time_interleaved(
+                    [before.callable, after.callable], timing, log=log, lock=lock
+                )
+                paired = [
+                    a - b for b, a in zip(times[0].samples_us, times[1].samples_us)
+                ]
+                delta += weight * statistics.median(paired)
+                noise = standard_error(paired)
+                variance = (
+                    None
+                    if variance is None or noise is None
+                    else variance + (weight * noise) ** 2
+                )
         finally:
             before.release()
             after.release()
-    paired = list(zip(times[0].samples_us, times[1].samples_us))
-    return statistics.median(a - b for b, a in paired), standard_error(
-        [a - b for b, a in paired]
-    )
+    return delta, None if variance is None else math.sqrt(variance)
 
 
 def confirm_fusions(

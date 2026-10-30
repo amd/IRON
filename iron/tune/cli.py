@@ -188,6 +188,13 @@ def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: boo
                 lock=args.lock_in_process,
             )
         )
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def progress(found: Profile, fitted: CostModel) -> None:
+        found.save(path)
+        fitted.save(dev.name)
+        print(f"wrote {path} and the cost model so far", flush=True)
+
     packed = price_packings(
         calls() if callable(calls) else calls,
         dev,
@@ -200,11 +207,11 @@ def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: boo
         ledger=Ledger() if args.record_failures else None,
         cycles=kernel_cycles(dev),
         core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
+        progress=progress,
         log=functools.partial(print, flush=True),
         lock=args.lock_in_process,
     )
     print(f"wrote {model.save(dev.name)}")
-    path.parent.mkdir(parents=True, exist_ok=True)
     packed.save(path)
     print(f"wrote {path}")
     return path

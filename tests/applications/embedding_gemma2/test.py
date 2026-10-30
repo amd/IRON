@@ -14,6 +14,7 @@ Each tower's graph is built for the class that tests it and dropped after
 it, before the text encoder's graphs are built for the module's last tests.
 """
 
+import argparse
 import functools
 import os
 import time
@@ -30,6 +31,7 @@ import iron
 from iron import Scratchpad
 from iron.applications.embedding_gemma2.model import (
     PROFILES,
+    QUERY_ROWS,
     Config,
     EmbeddingGemma,
     Multimodal,
@@ -598,6 +600,22 @@ def test_image_processor_refuses(npu2, shape, tokens, refusal):
     )
     with pytest.raises(ValueError, match=refusal):
         vision.inputs(np.zeros((*shape, 3), np.uint8), tokens)
+
+
+def test_tuning_times_a_query_and_the_longest_call(npu2):
+    """Switches cost a call the same at any length, so tuning weighs a
+    short query beside the longest call: a step bounded by the text's rows
+    is timed at both."""
+    require(DIRECTORY / "model.safetensors")
+    parser = argparse.ArgumentParser()
+    Multimodal.tune_arguments(parser)
+    args = parser.parse_args(["--checkpoint", str(DIRECTORY)])
+    text = Multimodal.tune_calls(parser, args)[0]
+    assert {p.values["rows"] for p in text.points} == {
+        QUERY_ROWS,
+        Config().max_tokens,
+    }
+    assert any(len(text.op_points(s.op)) == 2 for s in text.recording.steps)
 
 
 class WindowPositions(iron.Graph):
