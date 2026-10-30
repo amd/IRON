@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # FastFlowLM, which iron/operators/flm/gemma4_engine builds. Its tokenizers
     # need rustc 1.80 or newer; Ubuntu's default rustc is 1.75.
     cmake pkg-config cargo-1.85 rustc-1.85 libdrm-dev \
-    libcurl4-openssl-dev libfftw3-dev libreadline-dev libncurses-dev \
+    libcurl4-openssl-dev libfftw3-dev libreadline-dev libedit-dev libncurses-dev \
     libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
     # GitHub Actions runner requirements
     git jq curl tar \
