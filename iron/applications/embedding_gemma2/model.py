@@ -386,6 +386,7 @@ class Multimodal(lm.Multimodal):
         weights: The checkpoint's: the text encoder's tree and each tower's.
     """
 
+    config = Config()
     profile = PROFILES
 
     def __init__(

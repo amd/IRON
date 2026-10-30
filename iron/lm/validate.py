@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Validate a candidate profile against a model's stock one, on real
-weights: which fusions and packings are live in each compiled version,
-bit identity of greedy logits over a prompt that crosses a prefill chunk
-and ends in a partial one, KL against the model's golden, and TTFT /
-decode tokens per second, stock and candidate interleaved. ``--bisect``
-narrows a bit-identity mismatch to the candidate's profile entries at
-fault, one version at a time.
+weights: which fusions and packings are live in each compiled version, then
+a decoder's own battery (bit identity of greedy logits over a prompt that
+crosses a prefill chunk and ends in a partial one, KL against the model's
+golden, and TTFT / decode tokens per second, stock and candidate
+interleaved) or, for any other graph model (an encoder among them), each
+changed version compared on its own tune points (``compare_graphs``): bit
+identity within each output's bound, then latency, stock and candidate
+interleaved. ``--bisect`` narrows a decoder's bit-identity mismatch to the
+candidate's profile entries at fault, one version at a time.
 
 ``python -m iron.lm.validate <application> --checkpoint DIR --candidate
 PROFILE_DIR``: ``<application>`` is dotted under ``iron.applications``
@@ -16,20 +19,27 @@ way a model's own ``profile`` directory does.
 """
 
 import argparse
+import dataclasses
 import json
 import statistics
 from collections import Counter
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import aie.utils as aie_utils
+from aie import ir
 from aie.iron.device import from_name
 
 from iron import Profile
+from iron.common.declare.profile import Version
+from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.record import Recording
 from iron.common.image.link import FullELF
-from iron.common.image.packaging import require_device
+from iron.common.image.packaging import plan, require_device
+from iron.tune.autotune import Timed
+from iron.tune.fusions import _device_timeout, compare_graphs
+from iron.tune.measure import Timing
 
 from .causal import CausalLM
 from .generation import Sampler, accuracy, differing_steps, greedy_logits, kl_stats
@@ -118,15 +128,13 @@ def changed_versions(stock_live: dict, candidate_live: dict) -> list[str]:
 
 
 def load_model(
-    model_class: type[CausalLM], checkpoint: Path, max_seq_len: int | None, profile
-) -> CausalLM:
+    model_class: type[Model], checkpoint: Path, max_seq_len: int | None, profile
+) -> Model:
     """``model_class.from_checkpoint(checkpoint)``, under ``profile`` (a
     directory, or None for the model's own), every version compiled as one
     full ELF and loaded.
     """
-    model = cast(
-        CausalLM, model_class.from_checkpoint(checkpoint, max_seq_len=max_seq_len)
-    )
+    model = model_class.from_checkpoint(checkpoint, max_seq_len=max_seq_len)
     if profile is not None:
         model.profile = profile
     model.load_versions(full_elf=True)
@@ -319,6 +327,106 @@ def bisect(
     }
 
 
+def model_tune_points(model_class: type[Model], checkpoint: Path) -> list[Timed]:
+    """``model_class.tune_calls``'s own calls, over its own tune flags
+    (``tune_arguments``) at their defaults save ``--checkpoint``: a
+    model-general way to the per-call points and weights a version is tuned
+    at (a decoder's context ladder, an encoder's query and longest call),
+    not one battery written for a decoder alone.
+    """
+    tune_parser = argparse.ArgumentParser(add_help=False)
+    model_class.tune_arguments(tune_parser)
+    tune_args = tune_parser.parse_args(["--checkpoint", str(checkpoint)])
+    return model_class.tune_calls(tune_parser, tune_args)
+
+
+def version_recordings(model) -> dict[Version, Recording]:
+    """``model``'s own ``Recording`` of each of ``shapes()``, by
+    ``Recording.version``: the identity ``compare_versions`` matches
+    ``model_tune_points``'s calls against.
+    """
+    out = {}
+    for shape in model.shapes():
+        recording = model.record(**shape)
+        out[recording.version] = recording
+    return out
+
+
+def compare_versions(
+    model_class: type[Model],
+    checkpoint: Path,
+    max_seq_len: int | None,
+    stock_profile: Profile,
+    candidate_profile: Profile,
+    labels: list[str],
+    label_to_version: dict[str, Version],
+    *,
+    timing: Timing = Timing(rounds=3, calls=10),
+    log=print,
+) -> dict[str, dict[str, Any]]:
+    """``labels`` (``changed_versions``'s), each compared bit for bit and
+    timed, ``stock_profile`` against ``candidate_profile``
+    (``compare_graphs``): a fresh real-weight recording of the version
+    (``model_class.from_checkpoint``, not the already-loaded ``stock`` or
+    ``candidate``, whose states and weights a recording apart from their own
+    cannot address), built under each profile (``apply_profile``), at the
+    per-call points ``model_tune_points`` gives that version
+    (``Recording.version`` matched to ``label_to_version``).
+
+    Raises:
+        RuntimeError: A version's build failed, or a device timeout
+            propagated from ``compare_graphs``.
+    """
+    dev = require_device()
+    probe = model_class.from_checkpoint(checkpoint, max_seq_len=max_seq_len)
+    recordings = version_recordings(probe)
+    calls = {c.recording.version: c for c in model_tune_points(model_class, checkpoint)}
+
+    out: dict[str, dict[str, Any]] = {}
+    for label in labels:
+        version = label_to_version[label]
+        call_t, recording = calls.get(version), recordings.get(version)
+        if call_t is None or recording is None:
+            out[label] = {"compared": False, "note": "no tune point for this version"}
+            log(f"[{label}] not compared: no tune point for this version")
+            continue
+        call = dataclasses.replace(call_t, recording=recording)
+        graphs = []
+        for profile in (stock_profile, candidate_profile):
+            patched, fused, packing = apply_profile(call.recording, profile, dev)
+            chosen = plan(
+                dev,
+                patched,
+                True,
+                False,
+                step_words=_step_words(patched),
+                fusions=fused,
+            )
+            graphs.append(
+                CompiledGraph(patched, chosen, fusions=fused, packing=packing)
+            )
+        try:
+            delta, noise = compare_graphs(call, *graphs, timing=timing, log=log)
+        except (ValueError, RuntimeError, ir.MLIRError) as e:
+            if _device_timeout(e):
+                raise
+            out[label] = {"compared": True, "bit_identical": False, "error": str(e)}
+            log(f"[{label}] not bit-identical: {e}")
+            continue
+        noise_s = "?" if noise is None else f"{noise:.1f}"
+        out[label] = {
+            "compared": True,
+            "bit_identical": True,
+            "delta_us": delta,
+            "noise_us": noise,
+        }
+        log(
+            f"[{label}] bit-identical; candidate {delta:+.1f} ± {noise_s} us vs "
+            f"stock end to end"
+        )
+    return out
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -357,14 +465,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.device is not None:
         aie_utils.set_current_device(from_name(args.device, n_cols=None))
 
-    found = application_model(args.application)
-    if not issubclass(found, CausalLM):
-        raise TypeError(
-            f"{args.application}'s model, {found.__name__}, is not a "
-            f"CausalLM: this battery (greedy decode, TTFT, decode tok/s) "
-            f"is a decoder's"
+    model_class = application_model(args.application)
+    if args.bisect and not issubclass(model_class, CausalLM):
+        parser.error(
+            f"{args.application}'s model, {model_class.__name__}, is not a "
+            f"CausalLM: --bisect (narrowing a greedy-logits mismatch) is a "
+            f"decoder's"
         )
-    model_class = found
 
     report: dict[str, Any] = {
         "application": args.application,
@@ -386,69 +493,107 @@ def main(argv: list[str] | None = None) -> None:
     if not report["changed_versions"]:
         parser.error(f"{args.candidate}: the candidate profile changes no version")
 
-    tokens = stock.prompt(args.prompt_chars)
-    C = stock.config.prefill_chunk
-    report["prompt_tokens"], report["prefill_chunk"] = len(tokens), C
-    print(f"prompt: {len(tokens)} tokens (prefill_chunk {C})")
-    if len(tokens) <= C or not len(tokens) % C:
-        parser.error(
-            f"--prompt-chars gives {len(tokens)} tokens: the prompt must cross a "
-            f"{C}-token chunk and end in a partial one"
+    if issubclass(model_class, CausalLM):
+        tokens = stock.prompt(args.prompt_chars)
+        C = stock.config.prefill_chunk
+        report["prompt_tokens"], report["prefill_chunk"] = len(tokens), C
+        print(f"prompt: {len(tokens)} tokens (prefill_chunk {C})")
+        if len(tokens) <= C or not len(tokens) % C:
+            parser.error(
+                f"--prompt-chars gives {len(tokens)} tokens: the prompt must cross a "
+                f"{C}-token chunk and end in a partial one"
+            )
+
+        print(
+            f"bit identity over {len(tokens)}-token prompt + "
+            f"{args.decode_steps} decode steps..."
+        )
+        mismatch = bit_identity(stock, candidate, tokens, args.decode_steps)
+        report["bit_identical"] = not mismatch
+        report["mismatch_steps"] = mismatch
+        print(
+            f"bit identity: {'identical' if not mismatch else f'differs at {mismatch}'}"
         )
 
-    print(
-        f"bit identity over {len(tokens)}-token prompt + "
-        f"{args.decode_steps} decode steps..."
-    )
-    mismatch = bit_identity(stock, candidate, tokens, args.decode_steps)
-    report["bit_identical"] = not mismatch
-    report["mismatch_steps"] = mismatch
-    print(f"bit identity: {'identical' if not mismatch else f'differs at {mismatch}'}")
+        if mismatch and args.bisect:
+            print("bisecting...")
+            dev = require_device()
+            own_profile = model_class.profile
+            stock_path = (
+                Path(own_profile) / f"{dev.name}.json"
+                if isinstance(own_profile, (str, Path))
+                else None
+            )
+            report["bisection"] = bisect(
+                model_class,
+                args.checkpoint,
+                args.max_seq_len,
+                args.candidate,
+                stock_path,
+                args.out.parent,
+                stock,
+                tokens,
+                args.decode_steps,
+            )
 
-    if mismatch and args.bisect:
-        print("bisecting...")
+        print("accuracy against golden...")
+        stats, mismatches = run_accuracy(
+            candidate, stock.prompt(1024), args.accuracy_tokens
+        )
+        report["accuracy"] = {
+            **stats,
+            "top1_mismatches": mismatches,
+            "of": args.accuracy_tokens,
+        }
+        print(
+            f"accuracy: mean KL {stats['Mean']:.6f}  p90 {stats['P90']:.6f}  "
+            f"max {stats['Max']:.6f}  top-1 mismatches {mismatches}/{args.accuracy_tokens}"
+        )
+
+        print(f"speed: {args.speed_rounds} interleaved rounds...")
+        report["speed"] = speed(
+            stock, candidate, tokens, args.speed_tokens, args.speed_rounds
+        )
+        for label, s in report["speed"].items():
+            print(
+                f"[speed:{label}] TTFT min {s['ttft_min']:.4f}s median "
+                f"{s['ttft_median']:.4f}s | decode tok/s min {s['tps_min']:.2f} "
+                f"median {s['tps_median']:.2f}"
+            )
+    else:
         dev = require_device()
         own_profile = model_class.profile
-        stock_path = (
-            Path(own_profile) / f"{dev.name}.json"
+        stock_profile = (
+            Profile.load(Path(own_profile) / f"{dev.name}.json")
             if isinstance(own_profile, (str, Path))
-            else None
+            else Profile()
         )
-        report["bisection"] = bisect(
+        candidate_profile = Profile.load(Path(args.candidate) / f"{dev.name}.json")
+        label_to_version = dict(zip(version_labels(stock), stock.versions))
+        print(f"comparing {len(report['changed_versions'])} changed version(s)...")
+        report["versions"] = compare_versions(
             model_class,
             args.checkpoint,
             args.max_seq_len,
-            args.candidate,
-            stock_path,
-            args.out.parent,
-            stock,
-            tokens,
-            args.decode_steps,
+            stock_profile,
+            candidate_profile,
+            report["changed_versions"],
+            label_to_version,
         )
-
-    print("accuracy against golden...")
-    stats, mismatches = run_accuracy(
-        candidate, stock.prompt(1024), args.accuracy_tokens
-    )
-    report["accuracy"] = {
-        **stats,
-        "top1_mismatches": mismatches,
-        "of": args.accuracy_tokens,
-    }
-    print(
-        f"accuracy: mean KL {stats['Mean']:.6f}  p90 {stats['P90']:.6f}  "
-        f"max {stats['Max']:.6f}  top-1 mismatches {mismatches}/{args.accuracy_tokens}"
-    )
-
-    print(f"speed: {args.speed_rounds} interleaved rounds...")
-    report["speed"] = speed(
-        stock, candidate, tokens, args.speed_tokens, args.speed_rounds
-    )
-    for label, s in report["speed"].items():
-        print(
-            f"[speed:{label}] TTFT min {s['ttft_min']:.4f}s median {s['ttft_median']:.4f}s "
-            f"| decode tok/s min {s['tps_min']:.2f} median {s['tps_median']:.2f}"
+        compared = [v for v in report["versions"].values() if v.get("compared")]
+        report["bit_identical"] = bool(compared) and all(
+            v["bit_identical"] for v in compared
         )
+        verdict = "OK" if report["bit_identical"] else "MISMATCH"
+        summary = ", ".join(
+            (
+                f"{label}: {v['delta_us']:+.1f} us"
+                if v.get("bit_identical")
+                else f"{label}: {'not compared' if not v.get('compared') else 'MISMATCH'}"
+            )
+            for label, v in report["versions"].items()
+        )
+        print(f"[{verdict}] {args.application}: {summary}")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2))
