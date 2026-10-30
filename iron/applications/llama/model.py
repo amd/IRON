@@ -34,6 +34,7 @@ class Llama3RopeScaling:
     low_freq_factor: float
     high_freq_factor: float
     original_max_position_embeddings: int
+    rope_type: str = "llama3"
 
     def __call__(self, inv_freq: np.ndarray) -> np.ndarray:
         """``inv_freq`` (radians per position, per frequency), scaled."""
@@ -55,20 +56,16 @@ class Llama3RopeScaling:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Llama3RopeScaling":
-        """Build from ``data`` as the checkpoint's own ``rope_scaling``.
+        """Build from ``data``, the checkpoint's own ``rope_scaling``.
 
-        Its ``rope_type`` (every size's is ``"llama3"``) dropped.
+        Every size's ``rope_type`` is ``"llama3"``.
 
         Raises:
             ValueError: Its ``rope_type`` is another.
         """
         if data.get("rope_type") != "llama3":
             raise ValueError(f"rope_scaling {data}: no RoPE table here builds it")
-        return cls(**{k: v for k, v in data.items() if k != "rope_type"})
-
-    def to_json(self) -> dict:
-        """Return the checkpoint's own ``rope_scaling``: ``from_dict``'s inverse."""
-        return {"rope_type": "llama3", **dataclasses.asdict(self)}
+        return cls(**data)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,7 +84,7 @@ class LlamaConfig(DecoderConfig):
     def from_json(cls, data: dict, source="config.json") -> "LlamaConfig":
         """Build like ``DecoderConfig.from_json``, at ``Precision.HIGH`` from 3B's width up.
 
-        Its accuracy needs bf16 macs on its projections (decision 40).
+        Its accuracy needs bf16 macs on its projections.
         """
         config = super().from_json(data, source)
         if config.hidden_size < 3072:

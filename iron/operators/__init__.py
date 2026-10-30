@@ -25,6 +25,7 @@ from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm
 from .rope import RoPE
 from .sample import Sample
+from .selective_scan import SelectiveScan
 from .sigmoid import Sigmoid
 from .silu import SiLU
 from .softmax import Softmax
@@ -58,6 +59,7 @@ __all__ = [
     "RowwiseAdd",
     "RowwiseMul",
     "Sample",
+    "SelectiveScan",
     "SiLU",
     "Sigmoid",
     "Softmax",

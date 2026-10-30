@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, Any, get_args, get_origin
+from typing import Annotated, Any, cast, get_args, get_origin
 
 import aie.utils as aie_utils
 import numpy as np
@@ -370,8 +370,9 @@ class Graph:
         for n, p, parent, _ in walk(self, shared=shared):
             if not isinstance(p, _Unbound):
                 continue
-            if isinstance(parent, tuple) or getattr(
-                getattr(parent, "__dataclass_params__", None), "frozen", False
+            if isinstance(parent, tuple) or (
+                dataclasses.is_dataclass(parent)
+                and cast(Any, parent).__dataclass_params__.frozen
             ):
                 raise TypeError(
                     f"{self.name}: {path}{n} is in a tuple or a frozen "
@@ -1160,16 +1161,16 @@ def _words(
                 continue  # another instance of the design, bound alike
             derived.add(symbol)
             linear = None
-            spec = word
-            count = counts.get(getattr(spec, "extent", None))
-            if isinstance(spec, ExtentWord) and count is not None and count.linear:
-                divisor = spec.divisor(op)
-                linear = Linear(
-                    count.value.name,
-                    Fraction(count.scale, divisor),
-                    Fraction(count.bias, divisor),
-                    np.dtype(word.dtype).name,
-                )
+            if isinstance(word, ExtentWord):
+                count = counts.get(word.extent)
+                if count is not None and count.linear:
+                    divisor = word.divisor(op)
+                    linear = Linear(
+                        count.value.name,
+                        Fraction(count.scale, divisor),
+                        Fraction(count.bias, divisor),
+                        np.dtype(word.dtype).name,
+                    )
             words.append(
                 Word(
                     symbol,

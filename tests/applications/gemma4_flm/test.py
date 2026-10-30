@@ -85,13 +85,19 @@ def serve(engine, xclbins):
     )
     try:
         for _ in range(120):
+            if server.poll() is not None:
+                raise RuntimeError(f"flm serve exited ({server.returncode}) unready")
             with contextlib.suppress(OSError):
                 urllib.request.urlopen(URL + "/api/version")
                 break
             time.sleep(1)
+        else:
+            raise RuntimeError(f"flm serve did not answer {URL} within 120 s")
         yield
     finally:
-        os.killpg(server.pid, signal.SIGTERM)
+        # The group outlives a server that exited, while a child holds it.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(server.pid, signal.SIGTERM)
         server.wait()
 
 

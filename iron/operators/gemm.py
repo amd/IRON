@@ -71,6 +71,8 @@ def _cases(cls, dev: Device):
         for M, K, N, cols, b_col_maj, c_col_maj, m, k, n in rows:
             if m < min_tile_m:
                 continue
+            # A case of 8 columns takes all of a narrower device.
+            cols = min(cols, dev.cols)
             kwargs: dict[str, Any] = dict(
                 M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k
             )

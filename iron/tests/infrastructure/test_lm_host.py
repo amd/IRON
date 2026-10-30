@@ -32,7 +32,7 @@ from safetensors.numpy import load_file, save_file
 from iron.applications.llama.model import LlamaConfig
 from iron.lm import Checkpoint, Sampler
 from iron.lm.checkpoint import renamed
-from iron.lm.model import TokenizerJson, prompt_text
+from iron.lm.model import TokenizerJson, _cgroup_limit, prompt_text
 from iron.lm.testing import require, weights_dir
 from iron.operators import sample
 from iron.tests.support.llama_model import REAL_1B
@@ -808,11 +808,9 @@ def test_cgroup_limit_reads_the_lowest_ceiling(tmp_path, files, own, expect):
 
     On the way to the root, v1's ``memory.limit_in_bytes``, or none.
     """
-    from iron.lm import model
-
     root = tmp_path / "cgroup"
     for name, text in files.items():
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(text)
     (tmp_path / "self").write_text(own + "\n")
-    assert model._cgroup_limit(root, tmp_path / "self") == expect
+    assert _cgroup_limit(root, tmp_path / "self") == expect

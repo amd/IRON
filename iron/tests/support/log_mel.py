@@ -18,7 +18,7 @@ class Extractor:
     """
 
     def logits(self, tokens, wave):
-        import transformers
+        import transformers  # records a golden only: not a requirement
 
         # The extractor's first frame is centred on the wave's start, a half
         # frame of zeros before it, so its frame f + 1 is LogMel's f; the

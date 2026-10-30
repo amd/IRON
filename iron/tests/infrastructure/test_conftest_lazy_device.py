@@ -60,8 +60,7 @@ def test_unrestricted_tests_need_no_npu_runtime(tmp_path):
 
 
 @pytest.mark.parametrize("phase", ["setup", "call"])
-def test_device_heap_exhaustion_is_a_failure(tmp_path, monkeypatch, phase):
-    monkeypatch.setenv("IRON_XFAIL_DEVICE_HEAP", "1")
+def test_device_heap_exhaustion_is_a_failure(tmp_path, phase):
     source = (
         "import pytest\n"
         "def heap():\n"

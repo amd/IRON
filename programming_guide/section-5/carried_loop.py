@@ -46,16 +46,11 @@ def main(argv=None):
     successor = rng.permutation(N).astype(np.int32)
     start = int(rng.integers(N))
 
-    # `walk.reference(...)` walks this many calls as `main()` runs the host-
-    # driven path below (args.steps), plus one more: the device loop's
-    # `first` call is itself a transition, so `loop.run(args.steps, ...)`
-    # makes args.steps + 1 calls in total, each recorded in `trail`.
+    # The device loop's `first` call is itself a step, so it makes steps + 1.
     trail = [start]
     for _ in range(args.steps + 1):
         trail.append(int(successor[trail[-1]]))
 
-    # The host-driven path: one call at a time, `g(**values)` returning the
-    # next values as a plain mapping. Works on any device, no device loop.
     walk = Walk(successor, args.steps + 1)
     node, steps = start, 0
     for expected in trail[1 : args.steps + 1]:
@@ -64,17 +59,11 @@ def main(argv=None):
         assert node == expected, (node, expected)
     print(f"host-driven walk: {args.steps} steps match the numpy reference")
 
-    # The device loop: `first` seeds the carried values from the host once -
-    # itself one transition, since this `Walk` always looks the next node up
-    # - then `body` (no tensor) is looped `args.steps` more times.
     body = walk.compile()
     loop = iron.CarriedLoop(body, body, depth=2)
     got = list(loop.run(args.steps, node=start, steps=0))
     assert got == list(range(args.steps))
 
-    # `trail` is a public state (Section 4): every call, device or host,
-    # wrote one more of its entries, so it is read back and checked exactly
-    # against the whole numpy walk - a gather has nothing to round.
     recorded = body.read(walk.trail)
     expected = np.array(trail[1:], dtype=np.int32)
     assert np.array_equal(recorded, expected), (recorded, expected)

@@ -4,6 +4,7 @@
 """LibriSpeech's test-clean utterances, the speech the audio models' tests hear."""
 
 import tarfile
+from uuid import uuid4
 
 import numpy as np
 
@@ -34,12 +35,10 @@ def utterance(name: str) -> np.ndarray:
             data = archive.extractfile(member).read()
         path.parent.mkdir(parents=True, exist_ok=True)
         # Renamed into place, so an interrupted extraction leaves no clip.
-        from uuid import uuid4
-
         partial = path.with_suffix(f".{uuid4().hex}.part")
         partial.write_bytes(data)
         partial.replace(path)
-    import soundfile
+    import soundfile  # requirements_examples.txt's: optional
 
     samples, rate = soundfile.read(path, dtype="float32")
     if samples.ndim != 1 or rate != 16000:

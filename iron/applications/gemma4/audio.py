@@ -430,7 +430,7 @@ class AudioTower(Tower):
         self.keys = iron.state((H, K, D))
         self.values = iron.state((H, K, D))
         # f32: the scores' chain into Softmax keeps them off bf16's 0.25 ulp
-        # at |logit| >= 32 (eg2-audio-bug.md).
+        # at |logit| >= 32.
         self.scores = iron.state((H, T, K), dtype=np.float32)
         self.probs = iron.state((H, T, K))
         for layer in self.layers:

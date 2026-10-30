@@ -199,6 +199,7 @@ def reference():
 
     @functools.cache
     def model():
+        # torch's: it records a golden only.
         from iron.applications.embedding_gemma2.hugging_face import HuggingFace
 
         return HuggingFace(DIRECTORY)

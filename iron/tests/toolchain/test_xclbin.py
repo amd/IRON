@@ -25,12 +25,15 @@ import urllib.error
 from pathlib import Path
 
 import pytest
+from aie.utils.compile import NPU_CACHE_HOME
 
+import iron.operators.flm.gemm.op as flm
 from iron import Precision
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.tests.support.llama_model import llama_1b
-from iron.tests.support.tools import requires, shipped, swiglu
+from iron.tests.support.shipped import Shipped
+from iron.tests.support.tools import requires, swiglu
 
 pytestmark = requires("xclbinutil", "peano")
 
@@ -70,8 +73,6 @@ def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device):
 
 
 def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
-    import iron.operators.flm.gemm.op as flm
-
     op = flm.ProjectionGEMM(M=256, K=512, N=512, precision=Precision.MEDIUM)
     artifacts = op.compile()
     assert artifacts.image.stat().st_size > 0
@@ -92,20 +93,18 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
     # The configuration's entry is where the image and the kernels are.
     assert design.entry.xclbin == artifacts.image and design.entry.objects
     # Both entries are the cache's, which owns every path a build produces.
-    from aie.utils.compile import NPU_CACHE_HOME
-
     for entry in (own, design.entry):
         assert entry.directory.is_relative_to(NPU_CACHE_HOME)
 
 
 def test_shipped_builds_its_instructions_for_the_external_image(npu2):
-    op = shipped(M=256, K=1024, N=1152, epilogue="gelu")
+    op = Shipped(M=256, K=1024, N=1152, epilogue="gelu")
     insts = op.compile().insts
     assert insts is not None and insts.stat().st_size > 0
 
 
 def test_shipped_fetches_its_image(npu2):
-    op = shipped(M=256, K=1024, N=1152)
+    op = Shipped(M=256, K=1024, N=1152)
     try:
         image = Path(op.compile().image)
     except (urllib.error.URLError, OSError) as e:  # no network here

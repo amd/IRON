@@ -63,9 +63,3 @@ def swiglu():
         ),
         E,
     )
-
-
-def shipped(**kwargs):
-    from iron.tests.support.shipped import Shipped
-
-    return Shipped(**kwargs)

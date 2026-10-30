@@ -31,7 +31,7 @@ from .blocks import (
     activation,
     residual_add,
 )
-from .causal import Call, CausalLM, Decoder
+from .causal import Call, CausalConv1d, CausalLM, Checkpoints, Decoder
 from .checkpoint import Checkpoint, subtree
 from .cli import main
 from .config import Config, DecoderConfig, not_json, rope_angles
@@ -45,8 +45,10 @@ from .session import Session
 __all__ = [
     "Attention",
     "Call",
+    "CausalConv1d",
     "CausalLM",
     "Checkpoint",
+    "Checkpoints",
     "Config",
     "Conv2d",
     "Decoder",

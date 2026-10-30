@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from aie.iron import ExternalFunction
 from aie.iron.device import Device
 from aie.utils.compile import NPU_CACHE_HOME
 
@@ -56,10 +55,8 @@ def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
     """Return each kernel's cycles per call as mlir-aie's nightly last timed it.
 
     On ``dev``'s NPU, by ``ExternalFunction.recipe_key``; empty where they
-    cannot be read or this mlir-aie names no builds.
+    cannot be read.
     """
-    if not hasattr(ExternalFunction, "recipe_key"):
-        return {}
     url = KERNEL_CHECKS.format(npu=dev.name)
     try:
         with urllib.request.urlopen(url, timeout=30) as response:

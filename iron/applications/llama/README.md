@@ -33,9 +33,10 @@ or downloaded by the repository's id, `meta-llama/Llama-3.2-1B`:
 Llama 3.2 3B is the same model at another shape: its two shards, their
 `model.safetensors.index.json`, `config.json` and `tokenizer.json` from
 [`meta-llama/Llama-3.2-3B`](https://huggingface.co/meta-llama/Llama-3.2-3B),
-in its own directory. On NPU2 its projections take
-flm.ProjectionGEMM's bf16 macs rather than bfp16's (its profile), which its accuracy
-needs: about 13 times the prompt chunk's GEMM cost, a path to optimise.
+in its own directory. Its accuracy needs bf16 macs on its prompt chunk's
+projections rather than bfp16's: `LlamaConfig.from_json` sets
+`Precision.HIGH` from 3B's width up, on NPU1 and NPU2 alike. A decode step's
+projections are GEMVs, which sum in float32 at any precision.
 
 ## Running
 

@@ -61,7 +61,7 @@ class Placed(HuggingFace):
     """
 
     def logits(self, tokens, soft) -> np.ndarray:
-        import torch
+        import torch  # records a golden only: not a requirement
 
         tokens = torch.from_numpy(np.asarray(tokens))
         with torch.no_grad():

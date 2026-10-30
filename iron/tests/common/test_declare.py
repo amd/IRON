@@ -11,11 +11,9 @@ identity) is mlir-aie's and tested there. The design-generating half is
 ``iron/common/design/`` and needs the toolchain.
 """
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
-from aie.iron import In, Out, ScratchpadParameter
+from aie.iron import In, ObjectFifo, Out, ScratchpadParameter
 from aie.iron.device import from_name
 from aie.utils import bfp
 from aie.utils.compile.jit.params import Select, param, per_call, tunable, widths
@@ -25,7 +23,7 @@ import iron
 from iron import Profile, Scratchpad
 from iron.common import Built, Operator, Rtp, Unresolvable, Value, Xclbin
 from iron.common.declare.operand import active_runtime, axis_of
-from iron.common.design import OperatorDesign
+from iron.common.design import OperatorDesign, OperatorRuntime
 from iron.operators.mha import MHA
 from iron.tests.support.declare import Rows
 
@@ -149,12 +147,16 @@ def test_a_stream_binds_a_handle_per_lane():
         MV(M=1024, K=256, columns=2).A.bind("h")
 
 
-def test_an_operand_fills_only_inside_its_operators_sequence():
+def test_an_operand_fills_only_inside_its_operators_sequence(npu2):
     op = MV(M=1024, K=256, columns=2)
     with pytest.raises(ValueError, match="run in the operator's sequence"):
         op.A.fill(lane=0)
     # Nor inside another operator's.
-    token = active_runtime.set(SimpleNamespace(op=MV(M=1024, K=256, columns=2)))
+    other = Rows(rows=8, cols=16).resolved()
+    fifos = [ObjectFifo(np.ndarray[(16,), np.dtype[bfloat16]]) for _ in range(4)]
+    other.x.bind([fifos[0].prod(), fifos[1].prod()])
+    other.y.bind([fifos[2].cons(), fifos[3].cons()])
+    token = active_runtime.set(OperatorRuntime(other, other.build()))
     try:
         with pytest.raises(ValueError, match="run in the operator's sequence"):
             op.A.fill(lane=0)
@@ -359,6 +361,13 @@ def test_a_profile_fills_the_tunables_a_call_leaves_open():
     assert MV(M=1024, K=128).columns is None and MV(M=1024, K=128).tile_out == 64
     assert p.tunables_for(MV, dict(M=1024, K=256)) == {"columns": 4, "tile_out": 16}
     assert len(p) == 2
+
+
+def test_a_tunable_given_as_none_is_left_to_the_profile():
+    p = Profile()
+    p.add(MV, columns=4, tile_out=32)
+    op = p.make(MV, M=1024, K=128, columns=None, tile_out=None)
+    assert (op.columns, op.tile_out, op.pinned) == (4, 32, frozenset())
 
 
 def test_saving_an_operator_outside_the_catalog_names_it(tmp_path):

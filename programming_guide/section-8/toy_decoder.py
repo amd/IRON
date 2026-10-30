@@ -3,12 +3,10 @@
 
 """Section-8 example: a toy decoder, no checkpoint download.
 
-``TOY`` is Llama's shape, one layer, small enough to compile in seconds;
-its weights are drawn at a seed rather than read from a file. Everything
-else is the real ``Llama`` class Section 8's prose reads: the same
-``CausalLM.body``, the same two compiled versions, the same
-``graph.reference()`` and ``compile(check=True)`` Sections 2-6 already
-taught.
+``TOY`` is Llama's shape with one layer, and its weights are drawn at a
+seed rather than read from a file. The model is the real ``Llama`` class,
+compiled as a decode step and a prompt chunk, checked against its host
+reference and with ``compile(check=True)``.
 """
 
 import argparse
@@ -113,9 +111,7 @@ def main(argv=None):
             rope_start=0,
         )
 
-        # model.shapes() names the decode step's input shape first (none),
-        # then the prompt chunk's; feeds= sizes the decode step's Emit to
-        # start from the prompt chunk, on NPU2.
+        # feeds= lets the prompt chunk hand its carried values to the decode step.
         decode = model.compile(**model.shapes()[0])
         prompt = model.compile(feeds=decode, **model.shapes()[1])
 
@@ -126,9 +122,7 @@ def main(argv=None):
             device_tokens.append(int(carry["token"]))
         print(f"device drew: {device_tokens}")
 
-        # graph.reference(...): the same body, on the host, each operator's
-        # own reference() in turn - the greedy draw is deterministic, so a
-        # correct device run draws the identical tokens.
+        # The greedy draw is deterministic, so the device must match exactly.
         _, ref_carry = model.reference(ids, **values)
         host_tokens = [int(ref_carry["token"])]
         for _ in range(args.decode_steps):
@@ -137,10 +131,6 @@ def main(argv=None):
         print(f"host reference drew: {host_tokens}")
         assert device_tokens == host_tokens, (device_tokens, host_tokens)
 
-        # compile(check=True): every step checked against its own
-        # operator's reference() and tolerance(), on its own dispatch - the
-        # same mechanism Section 6 introduced, over a whole decoder rather
-        # than two operators.
         checked = Llama(TOY, checkpoint.tree("random", seed=0))
         checked_decode = checked.compile(**checked.shapes()[0], check=True)
         checked_prompt = checked.compile(**checked.shapes()[1], check=True)

@@ -157,8 +157,12 @@ def application_model(name: str) -> type[Model]:
         package = importlib.import_module(f"iron.applications.{name}")
     except ImportError as e:
         raise ValueError(f"no application {name!r}: {e}") from e
-    exported = [getattr(package, n) for n in getattr(package, "__all__", ())]
-    found = [m for m in exported if hasattr(m, "tune_calls")]
+    exported = [getattr(package, n) for n in vars(package).get("__all__", ())]
+    found = [
+        m
+        for m in exported
+        if isinstance(m, type) and any("tune_calls" in vars(k) for k in m.__mro__)
+    ]
     if len(found) != 1:
         raise ValueError(
             f"iron.applications.{name} exports {len(found)} models to tune, not one"

@@ -73,3 +73,14 @@ jobs:
 
       - name: Check types
         run: pyright
+
+  Docs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: pip install -r docs/requirements-mkdocs.txt
+      - name: Build docs
+        run: mkdocs build --strict

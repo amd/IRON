@@ -14,8 +14,11 @@ config.json is read.
 import argparse
 import dataclasses
 import logging
+import os
 import shutil
 import struct
+import subprocess
+import sys
 
 import aie.utils as aie_utils
 import numpy as np
@@ -57,6 +60,19 @@ def test_v_shows_iron_s_info_lines(caplog):
     finally:
         iron_logger.setLevel(level)
     assert "compiling for" in caplog.text
+
+
+@pytest.mark.parametrize("rounds", [0, 1])
+def test_check_determinism_needs_two_rounds_before_any_load(tmp_path, rounds):
+    result = subprocess.run(
+        [sys.executable, "-m", "iron.applications.llama.model", str(tmp_path)]
+        + ["--check-determinism", str(rounds)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "--check-determinism compares rounds: give 2 or more" in result.stderr
 
 
 def test_from_checkpoint_draws_its_weights_at_a_seed(tmp_path):
@@ -173,14 +189,13 @@ def _golden(path):
 
 
 @pytest.mark.parametrize("change", ["config", "first weight", "last weight"])
-def test_a_checkpoint_s_golden_is_refused_once_it_changes(
-    tmp_path, monkeypatch, change
-):
+def test_a_checkpoint_s_golden_is_refused_once_it_changes(tmp_path, change):
     """A fine-tune keeps every name and shape.
 
     The bytes at either end of a tensor tell it from its base.
     """
-    monkeypatch.delenv(RECORD, raising=False)
+    if os.environ.get(RECORD):
+        pytest.skip("recording rewrites a changed golden rather than refusing it")
     path = tmp_path / "model.safetensors"
     shutil.copy(checkpoint(SMALL).path, path)
     (tmp_path / "config.json").write_text('{"bos_token_id": 7}')

@@ -132,6 +132,8 @@ def main(model_class: type[Model]):
         "(default: a full ELF where the device runs one)",
     )
     args = parse_args(parser)
+    if args.check_determinism is not None and args.check_determinism < 2:
+        parser.error("--check-determinism compares rounds: give 2 or more")
     try:
         model = model_class.from_checkpoint(
             args.path, random_weights=args.random_weights, max_seq_len=args.max_seq_len
@@ -159,7 +161,7 @@ def main(model_class: type[Model]):
             where = f" (step {worst})" if stat == "Max" else ""
             print(f"[Accuracy] {stat} KL: {value:.6f}{where}")
         print(f"[Accuracy] Top-1 mismatches: {sum(not t for _, t in results)}")
-    elif args.check_determinism:
+    elif args.check_determinism is not None:
         # The second prompt is as much of the text as follows the first.
         prompts = [tokens, model.prompt(args.prompt_len, skip=args.prompt_len)]
         rounds = args.check_determinism

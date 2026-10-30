@@ -327,12 +327,6 @@ class Recording:
         found.update((h.name, key) for key, (_, h) in self.states.items())
         return found
 
-    def dot(self) -> str:
-        """Draw this graph as Graphviz text (``visualize.dot``)."""
-        from .visualize import dot
-
-        return dot(self)
-
     def check_limits(self, values: Mapping[str, int]) -> None:
         """Raise ``IndexError`` if ``values`` index or bound a view outside it."""
         for limit in self.limits:
@@ -678,7 +672,7 @@ class Recorder:
         array = x.array if isinstance(x, Weight) else x
         name = self._names.get(id(x)) or self._names.get(id(array))
         kind = "ndarray" if isinstance(x, np.ndarray) else type(x).__name__
-        return name or f"{kind} {list(getattr(x, 'shape', ()))}"
+        return name or f"{kind} {list(x.shape) if is_operand(x) else []}"
 
     def _call(self, target, args, kwargs):
         cls = target if isinstance(target, type) else type(target)
@@ -732,7 +726,7 @@ class Recorder:
         The host encodes an input's ids into control words each call, and
         a word source writes device-made ids into the template.
         """
-        from iron.operators.copy import Copy
+        from iron.operators.copy import Copy  # a cycle
         from iron.operators.copy import Gather as GatherRows
 
         view = operands[0]

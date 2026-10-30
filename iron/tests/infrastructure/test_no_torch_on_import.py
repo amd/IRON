@@ -3,10 +3,13 @@
 
 """Importing IRON never imports torch or transformers."""
 
+import pkgutil
 import subprocess
 import sys
 
 import pytest
+
+import iron.applications
 
 #: What IRON does not require: recording a golden's packages and the
 #: examples' tokenizers. Nothing a user imports may ask for them.
@@ -42,10 +45,6 @@ def _user_modules():
 
     But the transformers builders (``hugging_face``) only tests import.
     """
-    import pkgutil
-
-    import iron.applications
-
     apps = [
         m.name
         for m in pkgutil.walk_packages(iron.applications.__path__, "iron.applications.")

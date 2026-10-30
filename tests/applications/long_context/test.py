@@ -21,6 +21,8 @@ import pytest
 
 import iron.applications
 from iron.applications.gemma4 import Gemma4
+from iron.applications.granite import Granite
+from iron.applications.granite_hybrid import GraniteHybrid
 from iron.applications.llama import Llama
 from iron.lm import CausalLM, Checkpoint
 from iron.lm.testing import (
@@ -73,6 +75,13 @@ APPLICATIONS = {
     "llama_3.2_3b": Application(
         Llama, "llama3.2-3b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
     ),
+    # Granite's decode measured 0.0010 to 0.0022 on npu2, 4k to the whole
+    # context; npu1 still unmeasured. Each size fills the cache with its
+    # own content up to max_seq_len - 1, not a continuation of the last,
+    # so sizes aren't directly comparable.
+    "granite_4.2_3b": Application(
+        Granite, "granite-4.2-3b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
+    ),
     # Gemma 4 E2B's decode measured 0.0002 to 0.072 on npu2 and 0.0009 to
     # 0.0256 on npu1, each 4k to the whole context: each size fills the
     # cache with its own content up to max_seq_len - 1, not a continuation
@@ -80,6 +89,16 @@ APPLICATIONS = {
     "gemma4_e2b": Application(
         Gemma4,
         "gemma-4-e2b-it",
+        "model.safetensors",
+        "tokenizer.json",
+        each_step=("npu1", "npu2"),
+    ),
+    # Granite 4.0-H 1B's decode measured 0.0007 to 0.0069 on npu2, 4k to
+    # the whole context; its deepest prompt chunk 4.1e-5 to 0.0052; npu1
+    # still unmeasured.
+    "granite_4.0_h_1b": Application(
+        GraniteHybrid,
+        "granite-4.0-h-1b",
         "model.safetensors",
         "tokenizer.json",
         each_step=("npu1", "npu2"),
@@ -92,7 +111,7 @@ def test_every_decoder_application_is_held_to_its_context():
     found = set()
     for package in pkgutil.iter_modules(iron.applications.__path__):
         module = importlib.import_module(f"iron.applications.{package.name}")
-        for name in getattr(module, "__all__", ()):
+        for name in vars(module).get("__all__", ()):
             model = getattr(module, name)
             if issubclass(model, CausalLM):
                 found.add(package.name)

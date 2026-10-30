@@ -5,11 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Section 5 - Carried Values and Device Loops
 
-Section 3's per-call values came from the host, one call at a time. A
-**carried** value instead comes from the *previous call*: the host seeds it
-once, and after that the graph itself says what it is next. A decoder's
-token position and its last sampled token are carried this way — see
-[Section 8](../section-8/).
+Section 3's per-call values come from the host on every call. A
+**carried** value comes from the *previous call* instead: the host sets it
+for the first call, and from then on the graph computes its next value
+itself. A decoder carries its position and its last sampled token this
+way (see [Section 8](../section-8/)).
 
 ## Walkthrough of [carried_loop.py](./carried_loop.py)
 
@@ -29,21 +29,17 @@ class Walk(iron.Graph):
         return iron.carry(node=nxt, steps=steps + 1)
 ```
 
-A keyword-only parameter annotated `Carried[T]` (rather than `Scratchpad[T]`)
-is a carried value. `body` must then return `iron.carry(...)` last, naming
-the next value of every carried parameter: `node`'s is `nxt`, a handle the
-step computed; `steps`' is `steps + 1`, a plain expression of the current
-value. Either form is allowed — a carried value's next value is either an
-expression of the current per-call values, or one element the graph itself
-computed.
+A keyword-only parameter annotated `Carried[T]` (rather than
+`Scratchpad[T]`) is a carried value. The body returns `iron.carry(...)`
+last, giving the next value of each carried parameter. A next value can be
+a one-element handle the graph computed (`node=nxt`) or a linear
+expression of the current values (`steps=steps + 1`).
 
-`iron.weight(table)` wraps `successor` for per-call indexing
-(`self.successor[node]`, read differently each call), distinct from
-`iron.param` (Section 4): a weight is read through a per-call index, a
-param's whole tensor is an operand. `trail` is Section 4's `iron.state`
-again, indexed by the carried `steps` the same way `Accumulate` indexed by
-a scratchpad `pos` — a carried value and a per-call value reach a state the
-same way, each call writing one more of its rows.
+`iron.weight(table)` holds a table that the body indexes per call, as in
+`self.successor[node]`. Compare `iron.param` (Section 4), which a step
+reads whole. `trail` is a state, as in Section 4, and indexing it by the
+carried `steps` works just like indexing `total` by `pos`: each call writes
+one more entry.
 
 ## Calling it from the host, one step at a time
 
@@ -52,60 +48,53 @@ nxt = walk.reference(node=node, steps=steps)   # or walk(node=node, steps=steps)
 node, steps = int(nxt["node"]), int(nxt["steps"])
 ```
 
-Called like any other graph, a carried graph returns the *next* values as a
-`Carry` (a mapping, `dict(nxt)` if you want a plain one) instead of mutating
-anything in place — you feed them back into the next call yourself. This
-form works on any device and needs no special setup; it is also what
-`graph.reference(...)` gives you to check a carried design against numpy,
-one step reproducing what a device call would carry forward.
+Called like any other graph, a carried graph returns the next values as a
+`Carry`, a mapping by name. Nothing changes in place: you pass them into
+the next call yourself. This works on any device, and `graph.reference(...)`
+works the same way, so you can check a carried design against numpy one
+step at a time.
 
 ## Looping entirely on the device
 
-A full-ELF version (NPU2; Section 7 says more about full ELF vs. xclbin)
-with carried values compiles an extra step, an **Emit**, that writes its own
-next scratchpad from what it just carried — so a second call never needs
-the host to hand it anything. [`CarriedLoop`](../../iron/common/graph/carried.py)
-drives that: `first` seeds the carried values from the host once, and
-`body` (no tensor) is looped, `depth` runs kept in flight so the device
-never idles waiting for the host between them.
+On NPU2 a graph normally compiles to one full ELF (Section 2). A full-ELF version
+with carried values ends in an extra **Emit** step, which writes the next
+call's scratchpad from the values it just carried, so the next call needs
+nothing from the host. [`CarriedLoop`](../../iron/common/graph/carried.py)
+runs that loop: a `first` version is started once from the host, and then
+a `body` version that takes no tensor is run repeatedly, with `depth` runs
+queued so the device does not wait on the host between them.
 
 ```python
-walk = Walk(successor, steps + 1)
+walk = Walk(successor, args.steps + 1)
 body = walk.compile()
 loop = iron.CarriedLoop(body, body, depth=2)
-for index in loop.run(steps, node=start, steps=0):
-    ...  # index is 0, 1, 2, ... as each step on the device completes
+got = list(loop.run(args.steps, node=start, steps=0))
 ```
 
-`Walk` takes no tensor at all, so one compiled version serves both roles —
-`first` and `body` are the same `CompiledGraph`. A graph whose body also
-takes a tensor (a decoder's prompt chunk feeding its first decode step,
-for instance) compiles two versions and passes the tensor-taking one as
-`feeds=` so its Emit is sized to start the other
-(`iron/tests/infrastructure/test_carried_loop.py`'s `Trail` is that case).
+`loop.run` yields `0, 1, 2, ...` as each step completes on the device.
+`Walk` takes no tensor, so one compiled version serves as both `first`
+and `body`. A graph whose first call does take a tensor (a decoder's
+prompt chunk, which starts the decode loop) compiles that version with
+`feeds=body` and passes it as `first`.
 
-Because `first` here is this same `body` — it always looks the next node
-up, with no separate "just seed `node`" branch the way `Trail`'s own `jump`
-does — `loop.run(steps, node=start, ...)` performs `steps + 1` transitions
-in total, not `steps`: one from `first`, then `steps` more from `body`, so
-`trail` is sized `steps + 1` to hold every one of them.
-`carried_loop.py` reads `trail` back with `body.read(walk.trail)` — a
-public state, the way any other section's device run is checked — and
-compares it to the numpy walk, exactly: a gather has nothing to round.
+Because `first` is itself a full step here, `loop.run(args.steps, ...)`
+makes `args.steps + 1` transitions in total, which is why `trail` holds
+`args.steps + 1` entries. The example reads `trail` back with
+`body.read(walk.trail)` and compares it exactly to a numpy walk. A gather
+does no arithmetic, so the match is exact.
 
 ## <u>Exercises</u>
 
-1. Run `python3 carried_loop.py` on an attached NPU2; it checks the
-   host-driven path against a plain numpy walk, then runs the same walk as
-   a device loop and checks the device's own recorded `trail` against the
-   numpy walk.
-2. Read `Walk(successor, 1).compile().plan.full_elf` for an NPU1-bound
-   device (`aie_utils.set_current_device(from_name("npu1", n_cols=4))`) — a
-   carried value with no full ELF has no device loop; only the host-driven
-   path applies.
-3. `CarriedLoop(body, body, depth=1)` runs one step at a time, in lockstep
-   with the host; raise `depth` and compare how many steps land between two
-   calls to `next(iterator)` — this is the pipelining `depth` buys.
+1. Run `python3 carried_loop.py` on an attached NPU2. It checks the
+   host-driven path against a numpy walk, then runs the same walk as a
+   device loop and checks the device's `trail` against it.
+2. Bind an NPU1 device
+   (`aie_utils.set_current_device(from_name("npu1", n_cols=4))`) and read
+   `Walk(successor, 1).compile().plan.full_elf`. NPU1 has no full ELF, so
+   there is no device loop there; only the host-driven path applies.
+3. Run `CarriedLoop(body, body, depth=1)`, which keeps one step in flight
+   at a time, then raise `depth` and time `loop.run` again to see what
+   queuing steps on the device buys.
 
 -----
 [Prev](../section-4/) &middot; [Top](..) &middot; [Next](../section-6/)

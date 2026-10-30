@@ -12,6 +12,7 @@ import pytest
 from iron.applications.llama import Llama
 from iron.lm import (
     DecoderConfig,
+    Multimodal,
     accuracy,
     determinism,
 )
@@ -59,8 +60,9 @@ def prompt(model, tokens, **values):
     placeholder runs ``placed``, given the count of each placeholder
     before it.
     """
-    text = getattr(model, "text", model)
-    towers = list(getattr(model, "towers", {}))
+    multimodal = isinstance(model, Multimodal)
+    text = model.text if multimodal else model
+    towers = list(model.towers) if multimodal else []
     C = text.config.prefill_chunk
     for begin in range(0, tokens.size, C):
         chunk = tokens[begin : begin + C]

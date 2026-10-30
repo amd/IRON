@@ -83,39 +83,112 @@ def get_git_commit():
 
 
 class CSVReporter:
-    """Capture metrics of test runs and write to a CSV file."""
+    """Capture metrics of test runs and write to a CSV file.
+
+    The file is rewritten as each test starts, each running test counted a
+    failed check until it ends, so a session the process does not
+    survive (an abort, an OOM kill) leaves every result before it and names
+    the tests it died in. Under xdist only the controller writes it, from
+    the reports its workers send.
+    """
 
     def __init__(self, csv_path):
         self.csv_path = Path(csv_path)
-        self.results = []
         self.commit = get_git_commit()
         self.date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Without the device: describing it opens the single-tenant NPU.
+        self.source = provenance()
         self.test_metrics = {}  # test_name -> {metric_name -> [values]}
-        self.bench = {}  # test_name -> bool
+        self.bench = {}  # (test_path, test_name) -> bool
         self.unmeasured = set()  # (test_path, test_name) a pass recorded nothing
+        self.running = set()  # (test_path, test_name) of each test in progress
 
-    def add_result(self, test_path, test_name, passed, metrics, bench):
-        key = (test_path, test_name)
+    @staticmethod
+    def key(nodeid):
+        """``nodeid``'s (test path, test name).
+
+        A nodeid such as
+        ``iron/operators/flm/gemm/test.py::test_gemm[M_2048-K_2048-N_2048]``
+        splits at its parametrize id; one without an id is named by its last
+        component.
+        """
+        parametrized = re.match(r"^(.+?::[^\[]+)\[(.+?)\]$", nodeid)
+        if parametrized:
+            return parametrized.group(1), parametrized.group(2)
+        return nodeid, nodeid.rsplit("::", 1)[-1]
+
+    def pytest_collection_modifyitems(self, items):
+        for item in items:
+            bench = item.get_closest_marker("bench") is not None
+            self.bench[self.key(item.nodeid)] = bench
+
+    def pytest_runtest_logstart(self, nodeid):
+        """Count ``nodeid`` a failed check until it ends.
+
+        And write every result so far.
+        """
+        self.running.add(self.key(nodeid))
+        self.write_csv()
+
+    def pytest_runtest_logreport(self, report):
+        """Record a call's result and the figures it gave ``record_property``.
+
+        A test that fails in setup (a runner missing a model's files) is
+        recorded too, or the model would drop out of the results.
+        """
+        called = report.when == "call" and not report.skipped
+        if not (called or report.failed):
+            return
+        key = self.key(report.nodeid)
+        passed = report.outcome == "passed"
+        metrics = [
+            (name, float(value))
+            for name, value in report.user_properties
+            if isinstance(value, numbers.Real)
+        ]
         self.test_metrics.setdefault(key, {}).setdefault("passed", []).append(passed)
-        self.bench[key] = bench
+        self.bench[key] = "bench" in report.keywords
         if passed and not metrics:
             self.unmeasured.add(key)
         for metric_name, value in metrics:
             self.test_metrics[key].setdefault(metric_name, []).append(value)
 
-    def finalize_results(self):
-        """Compute statistics for all collected metrics."""
-        # The commit alone does not say which toolchain and kernel sources
-        # produced a number; mlir-aie's provenance line does. Only a run that
-        # measured something has used the NPU, so only then is it described:
-        # opening it otherwise would contend for the single-tenant device.
+    def pytest_runtest_logfinish(self, nodeid):
+        self.running.discard(self.key(nodeid))
+
+    def pytest_sessionfinish(self):
+        self.write_csv(self.device_source())
+        unmeasured = self.report_unmeasured()
+        if unmeasured:
+            self.csv_path.with_suffix(".unmatched").write_text(
+                "\n".join(unmeasured) + "\n"
+            )
+            print(
+                "\nBenched tests passed without recording a metric:\n  "
+                + "\n  ".join(unmeasured)
+            )
+
+    def device_source(self):
+        """Return the provenance line, describing the NPU when the run measured on it.
+
+        The commit alone does not say which toolchain and kernel sources
+        produced a number; mlir-aie's provenance line does. Only a run that
+        measured something has used the NPU, so only then is it described.
+        """
         measured = any(len(data) > 1 for data in self.test_metrics.values())
         if measured and aie_utils.DefaultNPURuntime is not None:
             npu = preflight()
-            source = provenance(device=npu.device, pmode=npu.pmode)
-        else:
-            source = provenance()
-        for (test_path, test_name), data in self.test_metrics.items():
+            return provenance(device=npu.device, pmode=npu.pmode)
+        return self.source
+
+    def rows(self, source):
+        """One row per test: its checks, and each metric's statistics."""
+        tests = dict(self.test_metrics)
+        for running in self.running:
+            data = tests.get(running, {"passed": []})
+            tests[running] = data | {"passed": data["passed"] + [False]}
+        rows = []
+        for (test_path, test_name), data in tests.items():
             row = {
                 "Commit": self.commit,
                 "Date": self.date,
@@ -136,7 +209,8 @@ class CSVReporter:
                     row[f"{metric_name} (stddev)"] = (
                         statistics.stdev(values) if len(values) > 1 else 0.0
                     )
-            self.results.append(row)
+            rows.append(row)
+        return rows
 
     def report_unmeasured(self):
         """Name the benched tests that passed without recording a metric.
@@ -150,68 +224,35 @@ class CSVReporter:
             if self.bench[path, name]
         )
 
-    def write_csv(self):
-        self.results.sort(key=lambda x: (x.get("Test Path", ""), x["Test"], x["Date"]))
+    def write_csv(self, source=None):
+        """Write every test's row, through a temporary file renamed over the CSV.
 
+        So a process killed mid-write leaves the last whole one.
+        """
+        rows = sorted(
+            self.rows(source or self.source),
+            key=lambda x: (x["Test Path"], x["Test"], x["Date"]),
+        )
         cols = {}
-        for row in self.results:
+        for row in rows:
             cols.update({k: None for k in row.keys()})
 
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.csv_path, "w", newline="") as f:
+        partial = self.csv_path.with_name(f".{self.csv_path.name}.{os.getpid()}.part")
+        with open(partial, "w", newline="") as f:
             writer = csv.DictWriter(f, cols.keys())
             writer.writeheader()
-            writer.writerows(self.results)
-
-
-# Hook into test completion to collect each test's metrics into the CSVReporter
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    outcome = yield
-    report = outcome.get_result()
-
-    # A test that fails in setup (a runner missing a model's files) is
-    # recorded too, or the model would drop out of the results.
-    if (report.when == "call" and not report.skipped) or report.failed:
-        csv_reporter = item.session.config._csv_reporter
-        if csv_reporter:
-            # The pytest nodeid looks like this:
-            # iron/operators/flm/gemm/test.py::test_gemm[M_2048-K_2048-N_2048]
-            # Split into:
-            #   test_path: iron/operators/flm/gemm/test.py::test_gemm
-            #   test_name: just the parametrize id
-            nodeid_components = re.match(r"^(.+?::[^\[]+)\[(.+?)\]$", item.nodeid)
-            if nodeid_components:
-                test_path = nodeid_components.group(1)
-                test_name = nodeid_components.group(2)
-            else:
-                # A test with no parameters carries no [...] suffix, so won't
-                # match the regex above.
-                test_path = item.nodeid
-                test_name = item.nodeid.rsplit("::", 1)[-1]
-
-            passed = report.outcome == "passed"
-            # The figures the test gave record_property (run_test's latency,
-            # its spread, bandwidth and throughput; a test's own, e.g. TTFT).
-            metrics = [
-                (name, float(value))
-                for name, value in item.user_properties
-                if isinstance(value, numbers.Real)
-            ]
-            csv_reporter.add_result(
-                test_path,
-                test_name,
-                passed,
-                metrics,
-                item.get_closest_marker("bench") is not None,
-            )
+            writer.writerows(rows)
+        partial.replace(self.csv_path)
 
 
 def pytest_configure(config):
     if config.getoption("--record-goldens"):
         os.environ[RECORD] = "1"
     csv_path = config.getoption("--csv-output")
-    config._csv_reporter = CSVReporter(csv_path) if csv_path else None
+    # An xdist worker reports to the controller, which writes the CSV.
+    if csv_path and "workerinput" not in vars(config):
+        config.pluginmanager.register(CSVReporter(csv_path), "csv_reporter")
 
 
 ATTACHED = pytest.StashKey[str]()
@@ -243,22 +284,6 @@ def pytest_runtest_setup(item):
         pytest.skip(f"No NPU runtime: {npu_unavailable_reason()}")
     if device not in marker.args:
         pytest.skip(f"Not supported on {device} (supported: {', '.join(marker.args)})")
-
-
-def pytest_sessionfinish(session, exitstatus):
-    reporter = getattr(session.config, "_csv_reporter", None)
-    if reporter:
-        reporter.finalize_results()
-        reporter.write_csv()
-        unmeasured = reporter.report_unmeasured()
-        if unmeasured:
-            reporter.csv_path.with_suffix(".unmatched").write_text(
-                "\n".join(unmeasured) + "\n"
-            )
-            print(
-                "\nBenched tests passed without recording a metric:\n  "
-                + "\n  ".join(unmeasured)
-            )
 
 
 SHARING_MODULES = pytest.StashKey[set]()
