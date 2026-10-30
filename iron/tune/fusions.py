@@ -709,17 +709,13 @@ def _gather_table_rows(recording) -> dict[str, int]:
 
 def _bound_points(recording, values: Mapping[str, int]) -> list[dict[str, int]]:
     """``values`` with each per-call value that bounds an extent halved, one
-    at a time, where the recording's limits allow it: a design reading a
-    bound wrongly agrees with the right one when every bound is at its
-    largest, as it is in a full prompt chunk.
+    at a time, where the recording's limits allow it and every bounded
+    operator derives its per-call words there: a design reading a bound
+    wrongly agrees with the right one when every bound is at its largest,
+    as it is in a full prompt chunk.
     """
-    bounding = sorted(
-        {
-            b.expression.value.name
-            for b in recording.bindings
-            if b.member.bounds is not None and b.expression.linear
-        }
-    )
+    bounded = [b for b in recording.bindings if b.member.bounds is not None]
+    bounding = sorted({b.expression.value.name for b in bounded if b.expression.linear})
     points = []
     for name in bounding:
         if values.get(name, 0) < 2:
@@ -727,7 +723,16 @@ def _bound_points(recording, values: Mapping[str, int]) -> list[dict[str, int]]:
         point = {**values, name: values[name] // 2}
         try:
             recording.check_limits(point)
-        except IndexError:
+            for op in {id(b.op): b.op for b in bounded}.values():
+                extents = {
+                    b.member.name: b.expression.evaluate(point)
+                    for b in bounded
+                    if b.op is op
+                }
+                resolved = op.resolved()
+                for word in resolved._per_call_derived() - resolved.bound_values.keys():
+                    resolved.derived_at(word, **extents)
+        except (IndexError, ValueError):
             continue
         points.append(point)
     return points

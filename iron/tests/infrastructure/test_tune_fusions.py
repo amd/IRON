@@ -781,12 +781,15 @@ def test_confirm_fusions_holds_a_narrowed_merge_bit_identical_at_partial_bounds(
 def test_bound_points_confirm_a_prompt_chunk_at_partial_rows(llama_recordings):
     """A full chunk runs every bound at its largest, where a design reading
     its rows wrongly still agrees: confirmation also runs each bound
-    halved, a partial chunk among them, each within the recording's limits.
+    halved, a partial chunk among them, each within the recording's limits
+    and each a call its operators take: a full chunk's rows ending at half
+    the position would be queries past their keys, which MHA refuses.
     """
     _, prompt = llama_recordings
     recording, values = prompt.recording, prompt.values
     points = _bound_points(recording, values)
     assert {**values, "rows": values["rows"] // 2} in points
+    assert {**values, "position": values["position"] // 2} not in points
     assert dict(values) not in points
     for point in points:
         recording.check_limits(point)
