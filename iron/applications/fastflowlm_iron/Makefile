@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 FLM_REPO   := https://github.com/andrej/FastFlowLM.git
-FLM_COMMIT := 23e5ef95d41422c7fdb531b8f50b5d9e5cc79122
+FLM_COMMIT := 33b96efc06fb177fa82e9ea56d469858cadb9039
 BUILD      := $(CURDIR)/build
 FLM_ROOT   := $(BUILD)/FastFlowLM
 
