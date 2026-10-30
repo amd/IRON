@@ -5,114 +5,32 @@ SPDX-License-Identifier: Apache-2.0
 
 # IRON models in FastFlowLM
 
-This application serves Llama 3.2 1B Instruct and EmbeddingGemma 2 through FastFlowLM's
-HTTP API. FastFlowLM runs each model in the persistent IRON server over a
-pair of standard input and output pipes. The server compiles the graph versions
-through the MLIR-AIE cache on first use, then loads the images and weights.
-The Llama entry uses Meta's Instruct weights with FastFlowLM's matching chat template.
+On an NPU2 machine, install [IRON](../../../README.md#installation-linux) and
+[the build dependencies](../../../ci/docker-based/Dockerfile)
+(the IRON CI container includes them). Run from this directory:
 
-The Makefile pins the FastFlowLM fork to
-[`23e5ef95`](https://github.com/andrej/FastFlowLM/commit/23e5ef95d41422c7fdb531b8f50b5d9e5cc79122),
-which contains the IRON backend and its BF16 Llama and EmbeddingGemma 2 model
-entries.
+```bash
+source /opt/xilinx/xrt/setup.sh
+source /path/to/ironenv/bin/activate
+make flm
+source build/install/flm_env.sh
 
-> [Changes to FastFlowLM to add the IRON backend and EmbeddingGemma 2 model](https://github.com/ROCm/FastFlowLM/compare/3b72cd0535ffa82389797491e15e117497cc9f88...andrej:FastFlowLM:iron-backend)
-
-## Prerequisites
-
-Use an NPU2 machine with XRT and the IRON environment installed as described in
-the [repository setup](../../../README.md#installation-linux). FastFlowLM also
-needs CMake, Ninja, a C++20 compiler, its documented Linux development packages,
-and its `tokenizers-cpp` submodule. The Makefile initializes the submodule.
-
-The `pull` target downloads these IRON checkpoint directories:
-
-```text
-<models>/llama3.2-1b-instruct/config.json
-<models>/llama3.2-1b-instruct/model*.safetensors*
-<models>/llama3.2-1b-instruct/tokenizer.json
-<models>/embeddinggemma-2/config.json
-<models>/embeddinggemma-2/model*.safetensors*
-<models>/embeddinggemma-2/tokenizer.json
+read -rsp 'Hugging Face token: ' HF_TOKEN; echo
+export HF_TOKEN
+flm serve llama3.2-iron:1b --ctx-len 2048
 ```
 
-Run these steps from `iron/applications/fastflowlm_iron`.
+For Llama, first accept the [model license](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct)
+and create a **Read** token in [Hugging Face settings](https://huggingface.co/settings/tokens).
+`flm serve` downloads missing weights automatically. IRON reuses compiled
+artifacts in `$NPU_CACHE_HOME` (default `~/.npu/cache`).
 
-1. Activate IRON and XRT, then select the model and compilation-cache paths.
+Replace the last command with another supported IRON model, for example
+`flm serve embeddinggemma-2 --backend iron`, or use `flm run` for interactive chat.
+Models must be registered in both [IRON](../__init__.py) and
+[FastFlowLM](https://github.com/andrej/FastFlowLM/blob/iron-backend/src/model_list.json).
 
-   ```bash
-   source /opt/xilinx/xrt/setup.sh
-   source ../../../.venv/bin/activate
-   export MODELS=/path/to/models
-   export CACHE=$PWD/build/cache
-   ```
-
-2. Clone and build the pinned FastFlowLM engine with `FLM_ENABLE_IRON=ON`.
-
-   ```bash
-   make flm IRON_PYTHON=$VIRTUAL_ENV/bin/python
-   ```
-
-3. Accept the license for `meta-llama/Llama-3.2-1B-Instruct`, then provide a Hugging Face
-   token through `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` or `HF_TOKEN_PATH`. Pull
-   the BF16 Llama and EmbeddingGemma 2 checkpoints used by IRON.
-
-   ```bash
-   make pull MODELS=$MODELS
-   ```
-
-4. Start Llama 3.2 1B Instruct. The first invocation compiles the graph versions, then
-   loads the images and uploads the weights. Later invocations reuse the cache.
-
-   ```bash
-   make serve-llama MODELS=$MODELS CACHE=$CACHE \
-       IRON_PYTHON=$VIRTUAL_ENV/bin/python PORT=52625
-   ```
-
-5. Send a chat request from another terminal.
-
-   ```bash
-   curl -sS http://127.0.0.1:52625/v1/chat/completions \
-       -H 'Content-Type: application/json' \
-          -d '{"model":"llama3.2-iron:1b","messages":[{"role":"user","content":"What is 347 + 589?"}],"max_tokens":32}' \
-       | python3 -m json.tool
-   ```
-
-6. Stop the Llama server with `Ctrl+C`, then start EmbeddingGemma 2.
-
-   ```bash
-   make serve-embedding MODELS=$MODELS CACHE=$CACHE \
-       IRON_PYTHON=$VIRTUAL_ENV/bin/python PORT=52625
-   ```
-
-7. Request a normalized 768-element embedding.
-
-   ```bash
-   curl -sS http://127.0.0.1:52625/v1/embeddings \
-       -H 'Content-Type: application/json' \
-       -d '{"model":"embeddinggemma-2","input":"What causes the northern lights?"}' \
-       | python3 -m json.tool
-   ```
-
-The direct model commands in the
-[Llama guide](../llama/README.md) and
-[EmbeddingGemma 2 guide](../embedding_gemma2/README.md) run the same graph
-classes in the command's Python process. They do not use the FastFlowLM worker.
-The Makefile's server targets instead start `python -m iron.lm_server`; C++
-sends token histories or text through pipes, and the worker returns BF16
-logits or float32 embeddings.
-
-## Adding a model
-
-Add the model's lazy import to `MODELS` in `iron/applications/__init__.py`.
-The server uses the standard `load`, `logits` (whole token history), `forget`
-and `embed` methods; model computation stays in IRON.
-
-In FastFlowLM, a decoder registers `flm::iron::causal_factory("<registry-name>")`
-with `causal_traits()` for its frontend's family, following
-`common/models/llama3/iron/` and `common/AutoModel/builtin_backends.cpp`.
-An embedding model uses `flm::iron::Embedding` in
-`include/AutoEmbeddingModel/all_embedding_model.hpp`. Add its checkpoint files
-to `model_list.json` and `model_info.json`, using an `-iron` family suffix for
-a decoder. These adapters share the C++ pipe client; no Python model code is
-needed in FastFlowLM.
+The [integration test](../../../tests/applications/fastflowlm_iron/test.py) makes
+one short Llama chat request. CI needs `config.json`, `model.safetensors`,
+`tokenizer.json` and `tokenizer_config.json`
+in `/srv/fastflowlm/models/llama3.2-1b-instruct/` (`FLM_MODEL_PATH=/srv/fastflowlm`).
