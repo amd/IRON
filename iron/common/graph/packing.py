@@ -25,21 +25,30 @@ def apply(
     recording: Recording, profile: Profile, fused: Sequence[Fusion], dev
 ) -> tuple[Recording, Packing]:
     """``recording`` with each step a packing entry applying in its version
-    names (``Profile.packing_of``), outside ``fused``, rebuilt at its
+    names (``Profile.packings_of``), outside ``fused``, rebuilt at its
     member's tunables, and the packing grouping their designs, one group per
-    entry that names two or more of them.
+    entry that names two or more of them. Where several entries name a
+    step's shape, the one naming most of the recording's shapes takes it,
+    the earlier on a tie: the grouping found for this graph, not another
+    model's that shares one of its shapes.
     """
     inside = {i for f in fused for i in f.steps}
+    version = recording.version
+    found = {
+        i: matches
+        for i, step in enumerate(recording.steps)
+        if i not in inside
+        and (matches := profile.packings_of(step.op.resolved(dev), version))
+    }
+    covered: dict[int, set[int]] = {}
+    for matches in found.values():
+        for index, member, _ in matches:
+            covered.setdefault(index, set()).add(member)
     members: dict[int, int] = {}
     tunables: dict[int, Mapping[str, Any]] = {}
-    version = recording.version
-    for i, step in enumerate(recording.steps):
-        if i in inside:
-            continue
-        found = profile.packing_of(step.op.resolved(dev), version)
-        if found is None:
-            continue
-        members[i], given = found
+    for i, matches in found.items():
+        index, _, given = max(matches, key=lambda m: (len(covered[m[0]]), -m[0]))
+        members[i] = index
         if given:
             tunables[i] = given
     recording = rebuild(recording, tunables, dev)

@@ -295,22 +295,25 @@ class Profile:
         ``(operator class, dims, tunables)``, in the order added."""
         return list(self._fusions)
 
-    def packing_of(
+    def packings_of(
         self, op: Operator, version: Version
-    ) -> tuple[int, dict[str, Any] | None] | None:
-        """The first packing entry applying in ``version`` with a member
-        matching ``op`` (a resolved operator, by class and dims), as its index
-        in ``packings()`` and the member's tunables; None where no such entry
-        names its shape.
+    ) -> list[tuple[int, int, dict[str, Any] | None]]:
+        """Each packing entry applying in ``version`` with a member matching
+        ``op`` (a resolved operator, by class and dims), in the order added,
+        as its index in ``packings()``, that member's index and its tunables.
+        Two models sharing a profile can name one shape in different entries
+        (the same MLP width); ``graph.packing.apply`` picks among them.
         """
         dims = self.dims(type(op), vars(op))
+        found = []
         for index, entry in enumerate(self._packings):
             if entry.versions is not None and version not in entry.versions:
                 continue
-            for cls, matched, tunables in entry.members:
+            for member, (cls, matched, tunables) in enumerate(entry.members):
                 if isinstance(op, cls) and self.matches(matched, dims):
-                    return index, tunables
-        return None
+                    found.append((index, member, tunables))
+                    break
+        return found
 
     def packings(self) -> list[PackingEntry]:
         """Each packing entry, in the order added."""

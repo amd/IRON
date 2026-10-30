@@ -206,8 +206,7 @@ def entry_applies(kind: str, entry, recording: Recording) -> bool:
     trial.add_packing(entry.members, entry.versions)
     version = recording.version
     return any(
-        trial.packing_of(step.op.resolved(), version) is not None
-        for step in recording.steps
+        trial.packings_of(step.op.resolved(), version) for step in recording.steps
     )
 
 

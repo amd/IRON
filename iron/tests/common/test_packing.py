@@ -103,14 +103,38 @@ def test_load_refuses_a_packing_that_is_only_its_members(tmp_path):
         Profile.load(path)
 
 
-def test_packing_of_matches_by_class_and_dims(npu2):
+def test_packings_of_matches_by_class_and_dims(npu2):
     profile = _packed((GEMV, {"K": 2048}, {"num_aie_columns": 2}), (SiLU, {}))
-    assert profile.packing_of(GEMV(M=512, K=2048).resolved(npu2), ()) == (
-        0,
-        {"num_aie_columns": 2},
+    assert profile.packings_of(GEMV(M=512, K=2048).resolved(npu2), ()) == [
+        (0, 0, {"num_aie_columns": 2})
+    ]
+    assert profile.packings_of(GEMV(M=512, K=8192).resolved(npu2), ()) == []
+    assert profile.packings_of(SiLU(size=2048).resolved(npu2), ()) == [(0, 1, None)]
+
+
+def test_a_shape_two_entries_name_goes_to_the_one_naming_more_of_the_graph(npu2):
+    """Two models sharing a profile can name one shape (the same MLP width) in
+    different entries: the step joins the entry naming most of the
+    recording's shapes, wherever it stands in the profile, so another
+    model's grouping does not split this one's."""
+    recording = Gated().record(x=(2048,))
+    profile = Profile()
+    # Another model's: names this graph's SiLU, and a GEMV it does not run.
+    profile.add_packing(
+        [(SiLU, {}, {"num_aie_columns": 2}), (GEMV, {"M": 512, "K": 8192})]
     )
-    assert profile.packing_of(GEMV(M=512, K=8192).resolved(npu2), ()) is None
-    assert profile.packing_of(SiLU(size=2048).resolved(npu2), ()) == (0, None)
+    profile.add_packing(
+        [
+            (SiLU, {}, {"num_aie_columns": 1}),
+            (ElementwiseMul, {}, {"num_aie_columns": 1}),
+        ]
+    )
+    silu = recording.steps[0].op.resolved(npu2)
+    assert [index for index, _, _ in profile.packings_of(silu, ())] == [0, 1]
+    packed, packing = apply_packings(recording, profile, (), npu2)
+    silu, mul = (s.op.resolved(npu2) for s in packed.steps)
+    assert silu.num_aie_columns == mul.num_aie_columns == 1
+    assert packing == Packing((tuple(OperatorDesign(op).name for op in (silu, mul)),))
 
 
 def test_a_recording_s_version_is_each_input_s_name_shape_and_dtype():
@@ -136,8 +160,8 @@ def test_a_packing_applies_only_in_the_versions_it_names(npu2):
         versions=[alone.version],
     )
     silu = alone.steps[0].op.resolved(npu2)
-    assert profile.packing_of(silu, alone.version) == (0, {"num_aie_columns": 1})
-    assert profile.packing_of(silu, copying.version) is None
+    assert profile.packings_of(silu, alone.version) == [(0, 0, {"num_aie_columns": 1})]
+    assert profile.packings_of(silu, copying.version) == []
     packed, packing = apply_packings(alone, profile, (), npu2)
     assert len(packing.groups) == 1 and len(packing.groups[0]) == 2
     assert all(s.op.resolved(npu2).num_aie_columns == 1 for s in packed.steps)

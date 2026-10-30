@@ -733,10 +733,7 @@ def _matches(members: Sequence, recording, dev) -> bool:
     probe = Profile()
     probe.add_packing(members)
     version = recording.version
-    return any(
-        probe.packing_of(s.op.resolved(dev), version) is not None
-        for s in recording.steps
-    )
+    return any(probe.packings_of(s.op.resolved(dev), version) for s in recording.steps)
 
 
 def _end_to_end(
