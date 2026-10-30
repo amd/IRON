@@ -754,7 +754,8 @@ def compare_graphs(
     weighted, and that difference's standard error; both are released after.
 
     Raises:
-        RuntimeError: ``after``'s outputs are not bit-identical to
+        RuntimeError: ``after``'s outputs, each within its bound (past it an
+            operator may write whole tiles), are not bit-identical to
             ``before``'s at a point, the call's values or one of its bounds
             halved (``_bound_points``); a device timeout propagates as it is
             raised.
@@ -792,7 +793,10 @@ def compare_graphs(
                 before(*inputs, **values)
                 after(*inputs, **values)
                 if not all(
-                    np.array_equal(before.read(h), after.read(h))
+                    np.array_equal(
+                        before.read(h)[h.valid_index(values)],
+                        after.read(h)[h.valid_index(values)],
+                    )
                     for h in recording.returned
                 ):
                     raise RuntimeError(

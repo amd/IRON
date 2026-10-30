@@ -932,11 +932,8 @@ class CompiledGraph:
         for s in steps:
             reads = []
             for h in s.reads:
-                key = [slice(None)] * len(h.shape)
-                for axis, count in h.valid.items():
-                    key[axis] = slice(count.evaluate(values))
                 whole = self._storage(h).numpy()[: h.elements].reshape(h.shape)
-                reads.append(whole[tuple(key)])
+                reads.append(whole[h.valid_index(values)])
             with contextlib.ExitStack() as borrowed:
                 writes = [
                     borrowed.enter_context(self._storage(h).overwrite())[

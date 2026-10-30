@@ -361,12 +361,6 @@ class Recording:
             raw = buffers[ref.root][ref.start : ref.start + h.nbytes]
             return raw if bfp.is_bfp(h.dtype) else raw.view(h.dtype).reshape(h.shape)
 
-        def valid(h: Handle) -> tuple:
-            key = [slice(None)] * len(h.shape)
-            for axis, count in h.valid.items():
-                key[axis] = slice(count.evaluate(values))
-            return tuple(key)
-
         bound: dict[int, list[Binding]] = {}
         for b in self.bindings:
             bound.setdefault(id(b.op), []).append(b)
@@ -396,14 +390,16 @@ class Recording:
                 buffers.pop(root, None)
             for s in host.get(i, ()):
                 s.fn(
-                    *(view(h)[valid(h)] for h in s.reads),
+                    *(view(h)[h.valid_index(values)] for h in s.reads),
                     *(view(h) for h in s.writes),
                 )
             if step is None:
                 break
             if step.gather is not None:
                 if step.inputs[0] is not step.gather:
-                    _gather_reference(step, view(step.gather)[valid(step.gather)], view)
+                    _gather_reference(
+                        step, view(step.gather)[step.gather.valid_index(values)], view
+                    )
                 continue
             op = step.op
             given = {
@@ -423,10 +419,10 @@ class Recording:
                     continue
                 target = outputs[b.name] if b.name in outputs else inputs[b.name]
                 if results[b.name] is not target:
-                    rows = valid(h)
+                    rows = h.valid_index(values)
                     result = np.asarray(results[b.name]).reshape(target.shape)
                     target[rows] = result[rows]
-        returned = [view(h)[valid(h)] for h in self.returned]
+        returned = [view(h)[h.valid_index(values)] for h in self.returned]
         carry = {
             name: (
                 nxt.evaluate(values)

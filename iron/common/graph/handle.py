@@ -114,6 +114,15 @@ class Handle:
         shape = tuple(int(s) for s in shape)
         return cls(Buffer(name, role, shape, dtype), shape, dtype)
 
+    def valid_index(self, values: Mapping[str, int]) -> tuple[slice, ...]:
+        """The index of the entries valid in a call with per-call ``values``:
+        each bounded axis cut to its count, the others whole.
+        """
+        key = [slice(None)] * len(self.shape)
+        for axis, count in self.valid.items():
+            key[axis] = slice(count.evaluate(values))
+        return tuple(key)
+
     @property
     def name(self) -> str:
         return self.buffer.name
