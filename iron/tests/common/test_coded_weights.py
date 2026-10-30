@@ -82,3 +82,18 @@ def test_a_coded_read_of_an_activation_is_refused():
 
     with pytest.raises(TypeError, match="is not a whole weight"):
         Activation().record(a=(E, E), x=(E,))
+
+
+def test_a_weight_past_its_capacity_is_read_plain_with_a_warning(caplog):
+    w, other = _weights()
+    # Row 5 spans 120 binades: far more exceptions than 15 slots hold.
+    w[5, :120] = np.exp2(np.arange(-60.0, 60.0)).astype(bfloat16)
+    t = Chain(w, other).record(x=(E,))
+    with caplog.at_level("WARNING"):
+        t.code_weights()
+    (message,) = [r.getMessage() for r in caplog.records]
+    assert message.startswith("Chain: w is read plain:") and "row 5 holds" in message
+    assert sorted(h.name for _, h in t.weights.values()) == ["other", "w"]
+    assert [s.inputs[0].name for s in t.steps] == ["w", "w", "other"]
+    assert not any(s.op.coded_a for s in t.steps)
+    assert all(b.op in [s.op for s in t.steps] for b in t.bindings)

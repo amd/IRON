@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import logging
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping
 from typing import Any
@@ -15,6 +16,7 @@ import numpy as np
 from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.iron import In, InOut, Out
 from aie.utils import bfp
+from aie.utils.compile.jit.params import OperatorParam
 
 from ..declare import Operator, Value
 from ..declare.operand import param_names
@@ -34,6 +36,8 @@ from .handle import (
     _rescale_bounds,
     is_operand,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -462,16 +466,22 @@ class Recording:
         """Encode every coded weight, a thread each, and give a weight that a
         coded read no longer leaves any step reading uncoded no buffer of its
         own: what a compile runs, and a reference, which reads the weights
-        themselves, does not.
+        themselves, does not. A weight with a row past its capacity is read
+        plain instead, with a warning: a profile keyed by shape may meet a
+        checkpoint whose weights its capacity does not hold.
 
         Raises:
-            ValueError: A weight's row holds more exceptions than its capacity.
+            ValueError: A refused weight's reader has no coded flag to clear.
         """
         refused = encode_all(
             w for w, _ in self.weights.values() if isinstance(w, CodedWeight)
         )
-        for weight, why in refused.items():
-            raise ValueError(f"{self.name}: {weight.name} cannot be coded: {why}")
+        for key, (weight, h) in list(self.weights.items()):
+            if isinstance(weight, CodedWeight) and weight in refused:
+                logger.warning(
+                    "%s: %s is read plain: %s", self.name, weight.name, refused[weight]
+                )
+                self._read_plain(key)
         read = {
             h.ref().root
             for step in self.steps
@@ -487,6 +497,47 @@ class Recording:
         for key, name in unread.items():
             del self.weights[key]
             del self.pinned[name]
+
+    def _read_plain(self, key) -> None:
+        """Point every reader of the coded weight ``key`` back at the weight
+        it codes, each reader rebuilt with its operand's coded flag cleared.
+        """
+        derived = self.weights.pop(key)[1]
+        self.pinned.pop(derived.name, None)
+        plain = self.weights[key[0]][1]
+        rebuilt: dict[int, Operator] = {}
+        for step in self.steps:
+            if not any(h is derived for h in step.slots):
+                continue
+            op = step.op
+            if id(op) not in rebuilt:
+                flags = {
+                    b.declared_coded
+                    for b, h in zip(op.buffers, step.slots)
+                    if h is derived
+                }
+                names = {f.name for f in flags if isinstance(f, OperatorParam)}
+                if len(names) != len(flags):
+                    raise ValueError(
+                        f"{self.name}: {type(op).__name__} reads {plain.name} "
+                        f"coded by declaration, with no flag to read it plain"
+                    )
+                rebuilt[id(op)] = op.replace(**dict.fromkeys(names, False))
+            step.op = rebuilt[id(op)]
+            step.slots = [plain if h is derived else h for h in step.slots]
+            step.inputs = [plain if h is derived else h for h in step.inputs]
+        self.bindings = [
+            (
+                dataclasses.replace(
+                    b,
+                    op=rebuilt[id(b.op)],
+                    member=rebuilt[id(b.op)].value(b.member.name),
+                )
+                if id(b.op) in rebuilt
+                else b
+            )
+            for b in self.bindings
+        ]
 
     @property
     def operators(self) -> list:
