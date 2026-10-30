@@ -12,6 +12,8 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+from aie.iron.device import NPU2, from_name
+
 import iron
 from iron import Precision
 from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
@@ -20,6 +22,7 @@ from iron.lm.causal import CausalConv1d
 from iron.lm.checkpoint import nest, leaves
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close, check_generation
+from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.operators.sample import Sample
@@ -326,6 +329,31 @@ def test_an_odd_vocabulary_pads_the_head_with_a_row_no_draw_takes():
     assert (sample.vocab, sample.drawable) == (V + 1, V)
     tokens = np.random.default_rng(1).integers(0, V, 20)
     assert model.logits(tokens).shape == (V,)
+
+
+def test_an_odd_factored_vocabulary_pads_to_a_tileable_width():
+    """A vocabulary a bare pad to even still leaves with no factor an
+    elementwise op over the whole row tiles (Whisper-small's 51865, 2 x
+    25933 past that pad, 25933 prime, past the 4096-element cap any
+    tile size under it would need): ``sample_vocab_size``'s 1024-quantum
+    resolves an elementwise op over it on npu1 and npu2 alike (bound
+    directly, not as the current device: the rest of this test's own
+    model reads ``SMALL``'s npu2 profile), and the head and ``Sample``
+    still resolve at that width, logits still the vocabulary's.
+    """
+    config = dataclasses.replace(SMALL, vocab_size=51865)
+    V = config.sample_vocab_size
+    assert V == 52224
+    for dev in (from_name("npu1", n_cols=4), NPU2()):
+        ElementwiseAdd(size=V, num_aie_columns=1, num_channels=1).resolved(dev)
+    model = OnHost(config, checkpoint(config).tree("random", 3))
+    head = np.asarray(model.lm_head.weight)
+    assert head.shape == (V, config.hidden_size) and not head[config.vocab_size :].any()
+    t = model.record(**model.shapes()[1])
+    (sample,) = [s.op for s in t.steps if type(s.op) is Sample]
+    assert (sample.vocab, sample.drawable) == (V, config.vocab_size)
+    tokens = np.random.default_rng(1).integers(0, config.vocab_size, 20)
+    assert model.logits(tokens).shape == (config.vocab_size,)
 
 
 def test_each_generation_check_prefills_its_whole_prompt():

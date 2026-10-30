@@ -650,6 +650,12 @@ class Copy(Operator):
                 f"Copy: a copy moves the same element count both ways: src has {src} "
                 f"elements, dst {dst}"
             )
+        itemsize = np.dtype(self.dtype).itemsize
+        if (src * itemsize) % 4:
+            raise ValueError(
+                f"Copy: {src} {np.dtype(self.dtype).name} elements are "
+                f"{src * itemsize} bytes, not whole 4-byte words a dma_bd moves"
+            )
         for side, tap, bound in (
             ("src", self.src, self.src_bound),
             ("dst", self.dst, self.dst_bound),

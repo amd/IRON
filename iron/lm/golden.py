@@ -106,6 +106,60 @@ class Golden:
         os.replace(partial, self.path)
 
 
+class Tokens:
+    """Generated token ids by a key (a clip's own name), read from ``path``
+    (an ``.npz`` of named int32 arrays): the same recorded-once, read-
+    without-torch shape as ``Golden``, for a variable-length sequence of
+    ids rather than one row of logits, so there is no input to
+    fingerprint beyond the key itself.
+
+    Args:
+        path: The file; it need not exist yet.
+        reference: Builds the ids a key lacks (``HuggingFaceWhisper.generate``
+            or similar), called once a key, and only while ``RECORD`` is
+            set; otherwise such a key raises ``LookupError``, or
+            ``FileNotFoundError`` naming ``path`` where there is no file.
+    """
+
+    def __init__(self, path, reference=None):
+        self.path = Path(path)
+        self.build = reference if os.environ.get(RECORD) else None
+        self.rows = self._read()
+
+    def _read(self) -> dict:
+        if not self.path.exists():
+            return {}
+        with np.load(self.path) as f:
+            return {k: v.tolist() for k, v in f.items()}
+
+    def __call__(self, key: str, *args) -> list[int]:
+        """``key``'s generated ids, ``self.build(*args)``'s where ``path``
+        lacks them.
+        """
+        if key not in self.rows:
+            if self.build is None and not self.path.exists():
+                raise FileNotFoundError(
+                    f"{self.path} is missing: record it where torch and "
+                    "transformers are installed (pytest --record-goldens) "
+                    "and install it at that path"
+                )
+            if self.build is None:
+                raise LookupError(
+                    f"{self.path} holds no ids for {key!r}: record them "
+                    "where transformers is installed (pytest --record-goldens)"
+                )
+            self.rows[key] = list(self.build(*args))
+            self._write()
+        return self.rows[key]
+
+    def _write(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        partial = self.path.with_name(f".{self.path.stem}.{os.getpid()}.npz")
+        ids: dict[str, Any] = {k: np.array(v, np.int32) for k, v in self.rows.items()}
+        np.savez_compressed(partial, **ids)
+        os.replace(partial, self.path)
+
+
 def fingerprint(*values) -> str:
     """A digest of ``values``, a weights tree's leaves by name (``leaves``):
     arrays by their bytes, shapes and types, anything else by ``repr``.

@@ -4,6 +4,7 @@
 """LibriSpeech's test-clean utterances, the speech the audio models' tests hear."""
 
 import tarfile
+from pathlib import Path
 
 import numpy as np
 
@@ -17,16 +18,10 @@ LIBRISPEECH = Download(
 )
 
 
-def utterance(name: str) -> np.ndarray:
-    """The utterance `name` (`speaker-chapter-index`), its FLAC member taken
-    from the archive in IRON's cache the first time, decoded: float32
-    samples in [-1, 1) at 16 kHz, mono.
-
-    Raises:
-        ValueError: The member is not 16 kHz mono.
+def _cached_member(member: str) -> Path:
+    """``member``, a path inside the archive, taken from it into IRON's
+    cache the first time; the cached file either way.
     """
-    speaker, chapter, _ = name.split("-")
-    member = f"LibriSpeech/test-clean/{speaker}/{chapter}/{name}.flac"
     path = cache_dir() / member
     if not path.exists():
         with tarfile.open(LIBRISPEECH.fetch()) as archive:
@@ -38,9 +33,41 @@ def utterance(name: str) -> np.ndarray:
         partial = path.with_suffix(f".{uuid4().hex}.part")
         partial.write_bytes(data)
         partial.replace(path)
+    return path
+
+
+def utterance(name: str) -> np.ndarray:
+    """The utterance `name` (`speaker-chapter-index`), its FLAC member taken
+    from the archive in IRON's cache the first time, decoded: float32
+    samples in [-1, 1) at 16 kHz, mono.
+
+    Raises:
+        ValueError: The member is not 16 kHz mono.
+    """
+    speaker, chapter, _ = name.split("-")
+    path = _cached_member(f"LibriSpeech/test-clean/{speaker}/{chapter}/{name}.flac")
     import soundfile
 
     samples, rate = soundfile.read(path, dtype="float32")
     if samples.ndim != 1 or rate != 16000:
         raise ValueError(f"{name}: not 16 kHz mono")
     return samples
+
+
+def transcript(name: str) -> str:
+    """``name``'s reference line from its chapter's ``.trans.txt``, the
+    archive's own normalized-caps transcript, taken from the archive into
+    IRON's cache the first time.
+
+    Raises:
+        ValueError: The chapter's transcript holds no such utterance.
+    """
+    speaker, chapter, _ = name.split("-")
+    path = _cached_member(
+        f"LibriSpeech/test-clean/{speaker}/{chapter}/{speaker}-{chapter}.trans.txt"
+    )
+    prefix = f"{name} "
+    for line in path.read_text().splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    raise ValueError(f"{name}: not in {path.name}")

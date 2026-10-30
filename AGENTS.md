@@ -343,9 +343,10 @@ tunables and profiles already do that job.
   own names.
 - `blocks.py`: the leaf modules that declare their weights with
   `iron.param` (`Linear`, `Embedding`, `RMSNorm`, `LayerNorm`), the blocks
-  a layer is made of (`Attention`, `GatedMLP`, `MLP`, `DecoderLayer`,
-  `EncoderLayer`, `SandwichLayer`, `PleLayer`), the memory a layer owns
-  (`KVCache`, `NoCache`) and the model's `Rope`; and the front-end graphs.
+  a layer is made of (`Attention`, `CrossAttention`, `GatedMLP`, `MLP`,
+  `DecoderLayer`, `EncoderLayer`, `CrossDecoderLayer`, `SandwichLayer`,
+  `PleLayer`), the memory a layer owns (`KVCache`, `NoCache`,
+  `CrossCache`) and the model's `Rope`; and the front-end graphs.
 - `model.py`: `Model`, which loads from a checkpoint's directory or
   repository id (`Model.load`, its context fitted to the host by
   `Model.fit`) and generates (`generate(prompt, max_tokens, sampler=None)`,
@@ -361,8 +362,8 @@ tunables and profiles already do that job.
   versions (the tokens its caches hold, `logits` and the draws); a model's
   `session` is the one `logits` and `generate` run in, and several share
   one model.
-- `encoder.py`, `multimodal.py`: `Encoder` and `Tower`, and
-  `Multimodal`.
+- `encoder.py`, `encoder_decoder.py`, `multimodal.py`: `Encoder` and
+  `Tower`, `EncoderDecoder`, and `Multimodal`.
 - `cli.py`: `main`, the command line every model shares (`--help` lists
   its options, `-v` logs iron's INFO lines), and `exports`, a model
   package's lazy `__getattr__`.

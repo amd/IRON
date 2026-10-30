@@ -54,6 +54,8 @@ class Call:
     position: Any
     # The row a prompt chunk's first position reads of a stacked RoPE table.
     rope_start: Any = None
+    # The encoder's rows a cross attention reads (``EncoderDecoder``).
+    source: Any = None
     # By each Rope a layer holds, its rows of the call (Rope.rows).
     ropes: dict = dataclasses.field(default_factory=dict)
     # The token ids the call embeds, a prompt chunk's rows or the decode
@@ -205,11 +207,13 @@ class CausalLM(Model):
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.load_state_dict(renamed(weights, self.renames))
-        if config.vocab_size % 2:
-            # An odd vocabulary's logits end mid-word; a zero row makes them
-            # whole words, and Sample draws none from it.
+        pad = config.sample_vocab_size - config.vocab_size
+        if pad:
+            # Zero rows past vocab_size: Sample draws none from them
+            # (drawable=vocab_size), and a GEMV or GEMM over whole words
+            # needs the row count sample_vocab_size pads to.
             head = np.asarray(self.lm_head.weight)
-            self.lm_head.weight = iron.param(np.pad(head, ((0, 1), (0, 0))))
+            self.lm_head.weight = iron.param(np.pad(head, ((0, pad), (0, 0))))
         self.layers = self.model.layers
         # The scratch every causal conv of a shape stages its calls in.
         scratch = {}
@@ -318,12 +322,17 @@ class CausalLM(Model):
         return self.draw(self.head(x), call)
 
     def draw(self, logits, call: Call):
-        """What a call returns: ``logits``, ``head``'s output, and the
-        token drawn from them on the device, carried with the next position.
+        """What a call returns: ``logits``, ``head``'s own row, padded past
+        ``vocab_size`` to ``sample_vocab_size``'s tileable width (a view a
+        caller past ``Session``, which already narrows it, slices on the
+        host: a device-side copy of an odd ``vocab_size`` span of this
+        padding is itself not whole 4-byte words), and the token ``Sample``
+        draws from ``sampled(logits, call)``, carried with the next
+        position.
         """
         c = self.config
         _, drawn = Sample.step(
-            logits.reshape(c.vocab_size + c.vocab_size % 2),
+            self.sampled(logits, call).reshape(c.sample_vocab_size),
             self.draws,
             self.drawn,
             row=call.position * ROW_WORDS,
@@ -331,6 +340,13 @@ class CausalLM(Model):
             drawable=c.vocab_size,
         )
         return logits, iron.carry(token=drawn, position=call.position + 1)
+
+    def sampled(self, logits, call: Call):
+        """``logits``, as ``draw`` samples from: unchanged by default. A
+        subclass biases or masks them here (Whisper's suppressed tokens)
+        while ``logits`` itself, what a call returns, stays ``head``'s own.
+        """
+        return logits
 
     def rotary(self, config: DecoderConfig) -> Rope:
         """``rotary_emb``, the RoPE table every layer holds: ``Rope``'s."""
@@ -369,6 +385,13 @@ class CausalLM(Model):
         return calls(
             model, args.position, args.token, args.context, args.points, sampler
         )
+
+    def tune_values(self) -> dict:
+        """The per-call values every one of ``tune_calls``' timed points
+        needs besides position, token and the prompt chunk's own; none of a
+        plain decoder's own.
+        """
+        return {}
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the decode step's (none), then

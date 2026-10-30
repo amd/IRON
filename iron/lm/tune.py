@@ -91,13 +91,19 @@ def calls(
     them, and Sample on the draw rows ``sampler`` gives.
     """
     L, C = model.config.max_seq_len, model.config.prefill_chunk
-    decode_shapes, prompt_shapes = model.shapes()
+    # The decoder's own two, first: an EncoderDecoder's shapes() also holds
+    # its encoder's, which this tunes nothing for (not a decoder's call).
+    decode_shapes, prompt_shapes, *_ = model.shapes()
+    # Every Point's values stand alone (Timed.op_values takes no other), so
+    # whatever a subclass's own calls need besides position and token goes
+    # into every one of them.
+    extra = model.tune_values()
     versions = [
         (
             decode_shapes,
-            dict(position=position, token=token),
+            dict(position=position, token=token, **extra),
             [
-                Point(w, dict(position=c - 1, token=token))
+                Point(w, dict(position=c - 1, token=token, **extra))
                 for w, c in contexts(context, points, 1)
             ],
         ),
@@ -109,6 +115,7 @@ def calls(
                 start=0,
                 rows=C,
                 rope_start=model.rope_row(C, 0),
+                **extra,
             ),
             [
                 Point(
@@ -119,6 +126,7 @@ def calls(
                         start=c - C,
                         rows=C,
                         rope_start=model.rope_row(c, c - C),
+                        **extra,
                     ),
                 )
                 for w, c in contexts(context, points, C)

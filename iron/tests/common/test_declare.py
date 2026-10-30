@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import In, Out, ScratchpadParameter
 from aie.iron.device import from_name
 from aie.utils import bfp
@@ -22,11 +23,14 @@ from aie.utils.compile.jit.params import Select, param, per_call, tunable, width
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Profile, Scratchpad
+from iron import Precision, Profile, Scratchpad
 from iron.common import Built, Operator, Rtp, Unresolvable, Value, Xclbin
 from iron.common.declare.operand import active_runtime, axis_of
 from iron.common.design import OperatorDesign
 from iron.tests.support.declare import Rows
+from iron.operators.copy import Copy
+from iron.operators.flm.gemm.design import Epilogue
+from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.mha import MHA
 
 NPU2 = from_name("npu2", n_cols=8)
@@ -366,6 +370,50 @@ def test_saving_an_operator_outside_the_catalog_names_it(tmp_path):
     p.add(MV, columns=4)
     with pytest.raises(ValueError, match="MV is not in iron.operators.CATALOG"):
         p.save(tmp_path / "profile.json")
+
+
+def test_a_profile_restores_a_tuple_dim_a_call_still_matches(tmp_path):
+    """JSON holds no tuples: a dim a tuple (ProjectionGEMM's
+    epilogue_modes), saved and reloaded, still matches the call it named,
+    not a list no tuple ever equals.
+    """
+    dims = dict(
+        M=256,
+        K=1280,
+        N=1280,
+        packed_blocks=204800,
+        epilogue_modes=(Epilogue.NONE,),
+        b_col_maj=True,
+        precision=Precision.MEDIUM,
+    )
+    tunables = dict(tile_n=64, k_tile=256, ct_k=128, tile_ma=16, m_chunk=1)
+    p = Profile()
+    p.add(ProjectionGEMM, **dims, **tunables)
+    path = tmp_path / "profile.json"
+    p.save(path)
+    assert Profile.load(path).tunables_for(ProjectionGEMM, dims) == tunables
+
+
+def test_a_profile_round_trips_an_access_pattern_and_matches_only_it(tmp_path):
+    """A dim an exact access pattern (Copy's src), saved and reloaded,
+    still matches the call it was recorded at, and not a different
+    pattern of the same buffer sizes: a profile entry matches on what an
+    operator is constructed with, not merely a round-trippable guess at it.
+    """
+    dims = dict(
+        input_buffer_size=1024,
+        output_buffer_size=1024,
+        src=TensorAccessPattern.full((2, 512)),
+    )
+    tunables = dict(tile_size=512, num_channels=1)
+    p = Profile()
+    p.add(Copy, **dims, **tunables)
+    path = tmp_path / "profile.json"
+    p.save(path)
+    loaded = Profile.load(path)
+    assert loaded.tunables_for(Copy, dims) == tunables
+    other = dict(dims, src=TensorAccessPattern.full((4, 256)))
+    assert loaded.tunables_for(Copy, other) == {}
 
 
 def test_a_profile_is_checked_as_it_is_written_and_as_it_is_read():

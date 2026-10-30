@@ -15,6 +15,10 @@ from .blocks import (
     MLP,
     Attention,
     BatchNorm2d,
+    Conv1d,
+    CrossAttention,
+    CrossCache,
+    CrossDecoderLayer,
     DecoderLayer,
     Embedding,
     EncoderLayer,
@@ -36,6 +40,7 @@ from .blocks import (
 from iron.common.feature_map import ConcatChannels, Conv2d, MaxPool2d
 from .causal import Call, CausalConv1d, CausalLM, Checkpoints, Decoder
 from .encoder import Encoder, Tower
+from .encoder_decoder import EncoderDecoder
 from .golden import Golden, HuggingFace
 from .generation import Sampler, accuracy, determinism, generate_on_host
 from .multimodal import Multimodal
@@ -51,12 +56,17 @@ __all__ = [
     "Checkpoints",
     "ConcatChannels",
     "Config",
+    "Conv1d",
     "Conv2d",
+    "CrossAttention",
+    "CrossCache",
+    "CrossDecoderLayer",
     "Decoder",
     "DecoderConfig",
     "DecoderLayer",
     "Embedding",
     "Encoder",
+    "EncoderDecoder",
     "EncoderLayer",
     "GatedMLP",
     "Golden",

@@ -137,6 +137,13 @@ class Tokenizer:
     def decode(self, tokens) -> str:
         return self.encoding.decode(list(tokens))
 
+    def token_to_id(self, token: str) -> int | None:
+        """The id of an added or vocabulary token spelled ``token``, or
+        None: a checkpoint's own special tokens, read by name
+        (``<|startoftranscript|>``) rather than a hardcoded id.
+        """
+        return self.encoding.token_to_id(token)
+
     def chat(self, messages: list[dict]) -> list[int]:
         """The ids of ``messages``, each ``{"role": ..., "content": ...}``, as
         ``chat_template`` renders them (jinja2, the ``models`` extra), the
@@ -220,6 +227,10 @@ class TokenizerJson:
     def token(self, id: int) -> str | None:
         """The text of token ``id``."""
         return self._tokenizer.id_to_token(id)
+
+    def token_to_id(self, token: str) -> int | None:
+        """The id of an added or vocabulary token spelled ``token``, or None."""
+        return self._tokenizer.token_to_id(token)
 
 
 @dataclasses.dataclass(frozen=True)

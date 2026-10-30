@@ -80,6 +80,16 @@ def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():
         )  # every tunable given
 
 
+def test_an_odd_count_of_two_byte_elements_is_rejected():
+    """A dma_bd's transfer length is whole 4-byte words: an odd count of
+    bf16 elements, 51865 (Whisper-small's vocabulary before it is padded
+    to a tileable width), is 2 bytes short of one and aiecc fails deep in
+    its own lowering, not at construction, with no caller-visible context.
+    """
+    with pytest.raises(ValueError, match="not whole 4-byte words"):
+        Copy(input_buffer_size=51865)
+
+
 def test_transfer_size_not_dividing_a_bounded_row_is_rejected(npu2):
     """A bounded copy moves any whole number of rows, so its object divides
     one row: a prompt's 513 rows of (8, 64) keys into a cache are 256.5

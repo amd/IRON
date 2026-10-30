@@ -17,10 +17,53 @@ from types import FunctionType
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, TypeVar
 
+from aie.helpers.taplib import TensorAccessPattern
+
 if TYPE_CHECKING:
     from .operator import Operator
 
 _Op = TypeVar("_Op", bound="Operator")
+#: A TensorAccessPattern's own fields, JSON's dict holds it as: its public
+#: constructor's and, where padded, pad()'s.
+_TAP_FIELDS = ("tensor_dims", "offset", "sizes", "strides", "padding")
+
+
+def _encode(value: Any) -> Any:
+    """``value`` as ``json.dumps`` can hold it: a ``TensorAccessPattern``
+    (Copy's ``src``/``dst``) as its own fields, round-tripped exactly by
+    ``_decode``; anything else unchanged.
+    """
+    if isinstance(value, TensorAccessPattern):
+        return dict(
+            zip(
+                _TAP_FIELDS,
+                (
+                    value.tensor_dims,
+                    value.offset,
+                    value.sizes,
+                    value.strides,
+                    value.padding,
+                ),
+            )
+        )
+    return value
+
+
+def _decode(value: Any) -> Any:
+    """The inverse of ``_encode``: every JSON list restored to a tuple (no
+    operator field is ever genuinely a list), and a dict naming exactly
+    ``_TAP_FIELDS`` restored to the ``TensorAccessPattern`` it was.
+    """
+    if isinstance(value, dict):
+        if set(value) == set(_TAP_FIELDS):
+            tap = TensorAccessPattern(
+                value["tensor_dims"], value["offset"], value["sizes"], value["strides"]
+            )
+            return tap if value["padding"] is None else tap.pad(value["padding"])
+        return value
+    if isinstance(value, list):
+        return tuple(value)
+    return value
 
 
 class Profile:
@@ -128,7 +171,7 @@ class Profile:
             raise ValueError(f"{path}: a profile is {{'entries': [...]}}")
         profile = cls()
         for entry in data["entries"]:
-            fields = dict(entry)
+            fields = {k: _decode(v) for k, v in entry.items()}
             name = fields.pop("operator")
             if name not in CATALOG:
                 raise ValueError(f"{path}: no operator {name!r} in iron.operators")
@@ -160,7 +203,8 @@ class Profile:
             if cls not in names:
                 raise ValueError(f"{cls.__qualname__} is not in iron.operators.CATALOG")
             name = names[cls]
-            lines.append(json.dumps({"operator": name, **dims, **tunables}))
+            fields = {k: _encode(v) for k, v in {**dims, **tunables}.items()}
+            lines.append(json.dumps({"operator": name, **fields}))
         with open(path, "w") as f:
             f.write('{"entries": [\n  ' + ",\n  ".join(lines) + "\n]}\n")
 
