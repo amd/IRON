@@ -22,6 +22,7 @@ from ..declare.operator import graph_recorder
 from ..declare.profile import Profile, Version
 from ..image.packaging import Kind
 from ..image.step import BufferRef, SequenceStep
+from .coded import CodedWeight, encode_all
 from .handle import (
     Dense,
     Gather,
@@ -362,8 +363,13 @@ class Recording:
 
         for h in self.inputs:
             store(h.name, tensors[h.name])
+        # A coded weight's readers read the weight it codes, as their reference does.
+        logical: dict[str, np.ndarray] = {}
         for array, h in self.weights.values():
-            store(h.name, array)
+            if isinstance(array, CodedWeight):
+                logical[h.name] = np.asarray(array.array)
+            else:
+                store(h.name, array)
         for state, h in self.states.values():
             if state.host is None:
                 state.host = np.zeros(state.shape, state.dtype)
@@ -426,7 +432,11 @@ class Recording:
                 # Each extent reads as this call's in the reference.
                 op = op._at_extents(**extents)
             declared = list(zip(op.buffers, step.slots))
-            inputs = {b.name: view(h) for b, h in declared if b.fills}
+            inputs = {
+                b.name: logical[h.name] if h.name in logical else view(h)
+                for b, h in declared
+                if b.fills
+            }
             outputs = {b.name: view(h) for b, h in declared if not b.fills}
             results = op._call_reference(inputs, outputs, given)
             for b, h in declared:
@@ -447,6 +457,36 @@ class Recording:
             for name, nxt in self.carry.items()
         }
         return returned, carry
+
+    def code_weights(self) -> None:
+        """Encode every coded weight, a thread each, and give a weight that a
+        coded read no longer leaves any step reading uncoded no buffer of its
+        own: what a compile runs, and a reference, which reads the weights
+        themselves, does not.
+
+        Raises:
+            ValueError: A weight's row holds more exceptions than its capacity.
+        """
+        refused = encode_all(
+            w for w, _ in self.weights.values() if isinstance(w, CodedWeight)
+        )
+        for weight, why in refused.items():
+            raise ValueError(f"{self.name}: {weight.name} cannot be coded: {why}")
+        read = {
+            h.ref().root
+            for step in self.steps
+            for h in (*step.slots, *step.inputs, *step.outputs)
+        }
+        read |= {h.ref().root for s in self.host for h in (*s.reads, *s.writes)}
+        coded_from = {k[0] for k in self.weights if isinstance(k, tuple)}
+        unread = {
+            key: h.name
+            for key, (_, h) in self.weights.items()
+            if key in coded_from and h.name not in read
+        }
+        for key, name in unread.items():
+            del self.weights[key]
+            del self.pinned[name]
 
     @property
     def operators(self) -> list:
@@ -485,9 +525,13 @@ class Recorder:
         profile: Profile | None = None,
         held: Mapping[int, tuple[str, object]] | None = None,
         inputs: Iterable[str] = (),
+        coded: dict[Hashable, CodedWeight] | None = None,
     ) -> None:
         self.name = name
         self.profile = profile
+        # The graph's coded weights, shared by its versions, so each is
+        # encoded once.
+        self.coded = {} if coded is None else coded
         held = held or {}
         self._held_arrays = [
             x.array if isinstance(x, Weight) else x
@@ -870,6 +914,10 @@ class Recorder:
         buffers = shaped.buffers
         ins = [b for b in buffers if b.fills]
         outs = [b for b in buffers if b.role is Out]
+        operands = [
+            self._coded_weight(op, b, h) if b.coded else h
+            for h, b in zip(operands, ins)
+        ] + list(operands[len(ins) :])
         given_outs = operands[len(ins) :]
         for h, b in zip(operands, ins + outs):
             shape = tuple(b.shape)
@@ -931,6 +979,39 @@ class Recorder:
         if not outputs:
             return None
         return outputs[0] if len(outputs) == 1 else tuple(outputs)
+
+    def _coded_weight(self, op, b, h: Handle) -> Handle:
+        """The derived weight a coded input ``b`` of ``op`` reads in place of
+        ``h``: the weight's coded rows, one buffer for every coded read of
+        it at one capacity.
+
+        Raises:
+            TypeError: ``h`` is not a whole weight of ``b``'s logical shape.
+        """
+        source = next(
+            ((key, array) for key, (array, w) in self.weights.items() if w is h),
+            None,
+        )
+        if (
+            source is None
+            or h.layout != Dense()
+            or tuple(h.shape) != tuple(b.logical_shape)
+        ):
+            raise TypeError(
+                f"{type(op).__name__}.{b.name} streams a weight as coded rows; "
+                f"{h!r} is not a whole weight of shape {b.logical_shape}"
+            )
+        key, array = source
+        derived = (key, "coded", b.capacity)
+        if derived not in self.weights:
+            weight = self.coded.setdefault(
+                derived, CodedWeight(array, h.name, b.capacity)
+            )
+            self.weights[derived] = (
+                weight,
+                Handle.whole(weight.shape, np.uint8, f"{h.name}.coded", "weight"),
+            )
+        return self.weights[derived][1]
 
     def finish(
         self,

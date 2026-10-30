@@ -44,6 +44,7 @@ from ..image.link import FullELF, PerStep
 from ..image.sequence import Image
 from ..image.step import BufferRef, Fusion
 from .carried import CARRY, EmitSite, attach_emit, compose
+from .coded import CodedWeight
 from .fold import apply_folds, chosen_folds
 from .fusion import fusions as graph_fusions
 from .fusion_tunables import apply as apply_fusion_tunables
@@ -283,6 +284,11 @@ class Graph:
         return {}
 
     @functools.cached_property
+    def _coded(self) -> dict:
+        """The coded rows derived from the weights, shared by every version."""
+        return {}
+
+    @functools.cached_property
     def _arena(self) -> ScratchArena:
         return ScratchArena(ArenaPlan(ALIGNMENT))
 
@@ -433,7 +439,7 @@ class Graph:
             args.append(inputs[-1])
         values = [PerCall(n, kind, dtype) for n, (kind, dtype) in params.values.items()]
         with Recorder(
-            self.name, self._profile(), self.held(), params.inputs
+            self.name, self._profile(), self.held(), params.inputs, self._coded
         ) as recorder:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
@@ -543,6 +549,7 @@ class Graph:
             else contextlib.nullcontext()
         ):
             recording = self.record(**shapes)
+            recording.code_weights()
             profile = self._profile()
             fused: tuple[Fusion, ...] = ()
             packing = Packing()
@@ -871,6 +878,8 @@ class CompiledGraph:
         """Copy every closed-over weight into its buffer, once per storage."""
         for key, (tensor, handle) in self.recording.weights.items():
             if key not in self._loaded:
+                if isinstance(tensor, CodedWeight):
+                    tensor = tensor.encode()
                 self._copy_in(handle.name, tensor, release, piece_bytes)
                 self._loaded.add(key)
 
