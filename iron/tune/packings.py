@@ -46,6 +46,7 @@ from .costmodel import FEATURES, CostModel
 from .failures import Kind, Ledger, first_error
 from .fold import fold_profile
 from .fusions import (
+    NotBitIdentical,
     _device_timeout,
     _json_safe,
     compare_graphs,
@@ -630,7 +631,7 @@ def price_packings(
                 kind = (
                     Kind.HANG
                     if _device_timeout(e)
-                    else Kind.MISMATCH if "bit-identical" in str(e) else Kind.BUILD
+                    else Kind.MISMATCH if isinstance(e, NotBitIdentical) else Kind.BUILD
                 )
                 log(f"{recording.name}: refused, {kind.value}: {first_error(str(e))}")
                 if ledger is not None:
