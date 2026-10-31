@@ -185,13 +185,13 @@ class FinishStep:
             for n in ("num_aie_columns", "num_channels")
             if n in params and params[n].init
         }
-        op = self.consumer(
-            size=line if elements is None else elements,
-            tile_size=line,
+        fields: dict[str, Any] = {
+            "size": line if elements is None else elements,
+            "tile_size": line,
             **one,
             **dict(self.dims),
-        )
-        return op.resolved(dev)
+        }
+        return self.consumer(**fields).resolved(dev)
 
 
 def finish_reference(
@@ -279,7 +279,10 @@ class Elementwise(Operator):
             return None
         used = sum(b.streamed for b in self.inputs)
         rides = False
-        if binary and used + 1 > self.dev.core_dma_channels_in:
+        dev = self.dev
+        if dev is None:
+            return None
+        if binary and used + 1 > dev.core_dma_channels_in:
             if self.rides or not self._can_ride():
                 return None
             rides = True
@@ -370,11 +373,11 @@ class Elementwise(Operator):
         config = self.layout()
         own = tuple(b for b in self.inputs if b.name != "finish0")
         calls = [KernelCall(config.kernel(), config.scalars(), own)]
+        finish0 = next((b for b in self.inputs if b.name == "finish0"), None)
         for step in self.finish:
             consumer = step.consumer_at(self.tile_size, self.dev)
             operands = tuple(
-                None if i == step.at else self.finish0
-                for i in range(len(consumer.inputs))
+                None if i == step.at else finish0 for i in range(len(consumer.inputs))
             )
             calls.append(
                 KernelCall(
@@ -751,12 +754,12 @@ class Elementwise(Operator):
                             else (scratch_b if tile is scratch_a else scratch_a)
                         )
                         extra = None
+                        source = (
+                            fifos[ride_index] if ride_index is not None else finish_fifo
+                        )
                         if binary:
-                            extra = (
-                                fifos[ride_index].acquire(1)
-                                if ride_index is not None
-                                else finish_fifo.acquire(1)
-                            )
+                            assert source is not None, "the ridden fifo or its own"
+                            extra = source.acquire(1)
                         c_inputs = [
                             tile if i == at else extra
                             for i in range(len(c_positions) - 1)
@@ -769,10 +772,8 @@ class Elementwise(Operator):
                             )
                         )
                         if binary:
-                            if ride_index is not None:
-                                fifos[ride_index].release(1)
-                            else:
-                                finish_fifo.release(1)
+                            assert source is not None, "the ridden fifo or its own"
+                            source.release(1)
                         tile = dst
                     for j, f in enumerate(fifos):
                         if not held[j] and j != ride_index:
@@ -897,7 +898,7 @@ class BinaryElementwise(Elementwise):
                 buf.fill(
                     tap, lane=lane, group=tg, length_parameter=word, length_unit=unit
                 )
-            if buf is ridden and riding_finish0 is not None:
+            if ridden is not None and buf is ridden and riding_finish0 is not None:
                 # finish0 isn't streamed while riding, so its own .lanes/
                 # .batch_axes aren't available; it shares ridden's shape and
                 # placement, so partition by those instead.

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ..declare import Operator
+from ..declare import Operator, Unresolvable
 from ..declare.profile import Profile
 from ..design import BuiltArray, OperatorDesign
 from ..image.step import Edge, Fusion, FusionKind
@@ -174,6 +174,8 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
     # A stream's steps all run at once, each on cores of its own: no window
     # holds more steps than the array has cores.
     dev = resolved[0].dev
+    if dev is None:
+        raise Unresolvable("a stream window's length needs a bound device")
     cores = dev.cols * len(dev.core_rows)
     for lo in range(n):
         for hi in range(lo + 1, min(lo + cores, n)):

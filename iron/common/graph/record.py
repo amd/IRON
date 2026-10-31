@@ -216,7 +216,7 @@ class Recording:
     # buffer name -> nbytes, for weights, states and slice parents
     pinned: dict[str, int] = dataclasses.field(default_factory=dict)
     values: list[PerCall] = dataclasses.field(default_factory=list)
-    weights: dict[int, tuple[object, Handle]] = dataclasses.field(
+    weights: dict[Hashable, tuple[object, Handle]] = dataclasses.field(
         default_factory=dict, repr=False
     )
     states: dict[int, tuple[State, Handle]] = dataclasses.field(default_factory=dict)
@@ -615,7 +615,7 @@ class Recorder:
             if isinstance(x, (Weight, np.ndarray))
         ]
         self.steps: list[Step] = []
-        self.weights: dict[int, tuple[object, Handle]] = {}
+        self.weights: dict[Hashable, tuple[object, Handle]] = {}
         self.states: dict[int, tuple[State, Handle]] = {}
         self.bindings: list[Binding] = []
         self.limits: list[Limit] = []
@@ -1006,10 +1006,8 @@ class Recorder:
                     f"{type(op).__name__}.{b.name} is {bfp.dtype_name(b.dtype)}; "
                     f"operand {h!r} is {bfp.dtype_name(h.dtype)}"
                 )
-            bounds = (
-                h.valid if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
-            )
-            for axis, count in bounds.items():
+            given = h.valid if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
+            for axis, count in given.items():
                 extent = next(
                     (
                         m
@@ -1084,6 +1082,7 @@ class Recorder:
                 f"{h!r} is not a whole weight of shape {b.logical_shape}"
             )
         key, array = source
+        assert isinstance(array, np.ndarray), "a weight holds its array"
         derived = (key, "coded", b.capacity)
         if derived not in self.weights:
             read_from = array.source if isinstance(array, _Param) else None

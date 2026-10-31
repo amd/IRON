@@ -34,6 +34,7 @@ from pathlib import Path
 
 import numpy as np
 from aie.iron import Out
+from aie.iron.device import Device
 from aie.utils import bfp
 from aie.utils.benchmark import Stats, run_interleaved
 from aie.utils.compile import NPU_CACHE_HOME
@@ -928,6 +929,7 @@ def measure(
                     () if i == 0 else steps[0],
                 )
                 if cache is not None:
+                    assert keys is not None, "built above whenever cache is not None"
                     cache.put(keys[i], out[i])
             fastest = min(fastest, *(times[n + j].median_us for j in range(n)))
             # A probe holds its context while it lives; the next batch needs them.
@@ -1011,13 +1013,12 @@ def measure_rewrite(
     calls this the same way, each building its own designs over one dataflow.
 
     Args:
-        as_recorded: The steps as recorded.
-        rewritten: The same steps rewritten.
+        as_recorded: Takes a run's name and its repeat count, and returns the
+            steps as recorded, a loaded (``load=False``) ``Standalone``.
+        rewritten: The same for the steps rewritten.
         timing: How the two are timed.
         repeats: Steps in each long run a step's time is taken from.
         log: Where progress is logged.
-        as_recorded, rewritten: Each takes a run's name and its repeat
-            count, and returns a loaded (``load=False``) ``Standalone``.
         output: What a run wrote, by name, to compare the two designs by.
         mode: The NPU's power mode, read now if not given.
         lock: Take ``NPU_LOCK_PATH`` from the first dispatch through
@@ -1238,7 +1239,7 @@ def measure_fusion(
         lock=lock,
     )
     result = FusionMeasurement(fused_m, apart_m, refused)
-    if cache is not None:
+    if cache is not None and key is not None:
         cache.put_fusion(key, result)
     return result
 
@@ -1255,7 +1256,7 @@ def _switch_cost_probes(dev) -> tuple[ElementwiseAdd, ElementwiseAdd, Elementwis
 
 
 def switch_cost(
-    dev,
+    dev: Device,
     timing: Timing = Timing(),
     short: int = 4,
     long: int = 20,
@@ -1332,6 +1333,6 @@ def switch_cost(
     per_core_us = (excess[dev.cols] - excess[1]) / (dev.cols - 1)
     fixed_us = excess[1] - per_core_us
     result = (fixed_us, per_core_us)
-    if cache is not None:
+    if cache is not None and key is not None:
         cache.put_switch_cost(key, result)
     return result

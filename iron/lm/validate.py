@@ -101,21 +101,14 @@ def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
             identity, images = composition.identity, [str(version.image)]
         elif isinstance(packaging, PerStep):
             fused = {f.steps[0] for f in fusions}
-            links = sorted(packaging.step_links.items())
-            n_designs = len(
-                {
-                    (link.kernel.xclbin_path, link.design.get_cache_entry().insts)
-                    for i, link in links
-                    if i not in fused
-                }
-            )
+            built: dict[int, tuple[Any, Any]] = {}
+            for i, link in sorted(packaging.step_links.items()):
+                entry = link.design.get_cache_entry()
+                assert entry is not None, "a linked design is in the cache"
+                built[i] = (link.kernel.xclbin_path, entry.insts)
+            n_designs = len({d for i, d in built.items() if i not in fused})
             n_fusion_devices, packed, identity = len(fusions), [], None
-            images = list(
-                dict.fromkeys(
-                    f"{link.kernel.xclbin_path} {link.design.get_cache_entry().insts}"
-                    for _, link in links
-                )
-            )
+            images = list(dict.fromkeys(f"{x} {insts}" for x, insts in built.values()))
         else:
             raise TypeError(f"{version_label}: packaged as {type(packaging).__name__}")
         out[version_label] = {
@@ -331,6 +324,7 @@ def bisect(
         profile_dir.mkdir(parents=True, exist_ok=True)
         build_variant(stock_profile, tags).save(profile_dir / f"{dev.name}.json")
         variant = load_model(model_class, checkpoint, max_seq_len, profile_dir, config)
+        assert isinstance(variant, CausalLM), "model_class is a CausalLM"
         mismatch = bit_identity(stock, variant, tokens, decode_steps)
         variant.release()
         if not mismatch:
@@ -348,6 +342,7 @@ def bisect(
             variant = load_model(
                 model_class, checkpoint, max_seq_len, profile_dir, config
             )
+            assert isinstance(variant, CausalLM), "model_class is a CausalLM"
             mismatch = bit_identity(stock, variant, tokens, decode_steps)
             variant.release()
             if mismatch:

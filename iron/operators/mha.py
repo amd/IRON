@@ -34,7 +34,9 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp, Unresolvable
+from iron.common.declare import Operand
 from iron.common.declare.operand import concrete
+from iron.common.declare.operator import LaneTransfers
 from iron.common.testing import Case, Testing
 
 
@@ -683,14 +685,14 @@ class MHA(Operator):
         inQ = self.Q.fifos(
             of_depth,
             tiles=[
-                Tile(layout.q[s], 0) if split else AnyShimTile
+                Tile(layout.q[s], 0) if layout is not None else AnyShimTile
                 for s in range(self.q_shims)
             ],
         )
         memO = self.O.fifos(
             of_depth,
             tiles=[
-                Tile(layout.o[s][h], 0) if split else AnyShimTile
+                Tile(layout.o[s][h], 0) if layout is not None else AnyShimTile
                 for s in range(self.q_shims)
                 for h in range(pv_cores)
             ],
@@ -707,7 +709,7 @@ class MHA(Operator):
                     obj_types=[q_ty] * n_join,
                     to_stream=None if qk.A is None else [qk.A] * n_join,
                     depths=[q_depth] * n_join,
-                    tile=Tile(layout.q[shim], 1) if split else AnyMemTile,
+                    tile=Tile(layout.q[shim], 1) if layout is not None else AnyMemTile,
                 )
             )
             for h in range(pv_cores):
@@ -719,19 +721,24 @@ class MHA(Operator):
                         obj_types=[o_ty] * n_join,
                         # One O block: the PV core's L1 also holds its float32 O.
                         depths=[1] * n_join,
-                        tile=Tile(layout.o[shim][h], 1) if split else AnyMemTile,
+                        tile=(
+                            Tile(layout.o[shim][h], 1)
+                            if layout is not None
+                            else AnyMemTile
+                        ),
                     )
                 )
 
         kv_lanes = self.kv_lanes
         inK = self.K.fifos(
             of_depth,
-            tiles=[Tile(layout.k_shim, 0) if split else AnyShimTile] * kv_lanes,
+            tiles=[Tile(layout.k_shim, 0) if layout is not None else AnyShimTile]
+            * kv_lanes,
         )
         inV = self.V.fifos(
             of_depth,
             tiles=[
-                Tile(layout.v[h], 0) if split else AnyShimTile
+                Tile(layout.v[h], 0) if layout is not None else AnyShimTile
                 for _ in range(kv_lanes)
                 for h in range(pv_cores)
             ],
@@ -1231,7 +1238,7 @@ class MHA(Operator):
                     )
             rt.finish(tg)
 
-    def lane_transfers(self, operand):
+    def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
         """Q and O stream every row whatever ``kv_valid`` bounds (the rationale in AGENTS.md: a bound limits compute, not their DMA).
 
         So their order follows only the static shape; K and V move only the blocks a
@@ -1263,7 +1270,7 @@ class MHA(Operator):
                 if width == group:
                     tap = insert_repeat(by_step_p, 2, self.B_q // group)
                 else:
-                    s = by_step_p.strides[2]
+                    (s,) = concrete((by_step_p.strides[2],), by_step_p)
                     both = TensorAccessPattern(
                         by_step_p.tensor_dims,
                         by_step_p.offset,

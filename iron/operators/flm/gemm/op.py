@@ -43,6 +43,8 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Precision, Rtp, Unresolvable
+from iron.common.declare import Operand
+from iron.common.declare.operator import LaneTransfers
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
     B_MAX_SLOTS,
@@ -1290,7 +1292,10 @@ class ProjectionGEMM(Operator):
         The same accept test ``cut()`` runs for ``n_slabs=1``, without a build to read
         ``rt.built`` from (the hardware limits ``_BPool`` carries are the device's own).
         """
-        tm = get_target_model(self.dev.resolve())
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("flm.ProjectionGEMM: the slab test needs a bound device")
+        tm = get_target_model(dev.resolve())
         queue, passes_cap = tm.get_dma_task_queue_depth(), tm.get_max_repeat_count() + 1
         k_iters, n_units, b_slots = self._k_iters, self._n_units, self._b_slots
         if self._b_resident:
@@ -1304,7 +1309,7 @@ class ProjectionGEMM(Operator):
             return False
         return all(p <= queue * passes_cap for p in passes)
 
-    def lane_transfers(self, operand):
+    def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
         """Return a and C's order, one slab, ``m_chunk=1`` and unbounded.
 
         Past that a second slab, or a row bound's dynamic start (the second half of the

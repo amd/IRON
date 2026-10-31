@@ -33,6 +33,8 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Precision, Rtp, Unresolvable
+from iron.common.declare import Operand
+from iron.common.declare.operator import LaneTransfers
 from iron.common.testing import Case, Testing
 
 # fmt: off
@@ -659,7 +661,7 @@ class GEMM(Operator):
                     tg = rt.task_group()
         rt.finish(tg)
 
-    def lane_transfers(self, operand):
+    def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
         """Return each lane's whole-buffer walk, the one ``sequence`` emits.
 
         A, B and C's host order never shortens under a bound: ``sequence`` moves every

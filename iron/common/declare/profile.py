@@ -359,7 +359,7 @@ class Profile:
         return list(self._fusions)
 
     def packings_of(
-        self, op: Operator, version: Version
+        self, op: Operator, version: Version | None
     ) -> list[tuple[int, int, dict[str, Any] | None]]:
         """Each packing entry applying in ``version`` with a member matching ``op`` (a resolved operator, by class and dims).
 

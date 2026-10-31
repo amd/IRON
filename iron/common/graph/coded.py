@@ -107,9 +107,9 @@ class CodedWeight:
         cached = self.cached
         refusal = None if cached is None else cached.with_suffix(".refused")
         if cached is not None and cached.exists():
-            self.rows = np.load(cached, mmap_mode="r")
-            self.from_cache = True
-            return self.rows
+            loaded = np.load(cached, mmap_mode="r")
+            self.rows, self.from_cache = loaded, True
+            return loaded
         if refusal is not None and refusal.exists():
             raise ValueError(refusal.read_text())
         try:

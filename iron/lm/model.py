@@ -8,6 +8,7 @@ Built from a checkpoint's files (``load``), which generates from a prompt;
 to its ids.
 """
 
+import argparse
 import dataclasses
 import datetime
 import functools
@@ -26,6 +27,7 @@ from aie.iron.device import Device
 
 import iron
 from iron.common.image.packaging import require_device
+from iron.tune.autotune import Timed
 
 from .checkpoint import Checkpoint, weights_file
 from .config import Config, DecoderConfig
@@ -600,6 +602,18 @@ class Model(iron.Graph):
         later = count - 1
         rate = later / (last - first) if later else math.nan
         self.stats = Stats(first - began, rate, count)
+
+    @classmethod
+    def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
+        """Add the flags the model's ``tune_calls`` follow from (``iron.lm.tune``)."""
+        raise NotImplementedError(f"{cls.__name__} is not tuned")
+
+    @classmethod
+    def tune_calls(
+        cls, parser: argparse.ArgumentParser, args: argparse.Namespace
+    ) -> list[Timed]:
+        """Return the calls its designs are timed in (``iron.lm.tune``)."""
+        raise NotImplementedError(f"{cls.__name__} is not tuned")
 
     def shapes(self) -> list[dict]:
         """Return the input shapes of each version, the decode step (no input) first.

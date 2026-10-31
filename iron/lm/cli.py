@@ -237,7 +237,9 @@ def application_model(name: str) -> type[Model]:
     found = [
         m
         for m in exported
-        if isinstance(m, type) and any("tune_calls" in vars(k) for k in m.__mro__)
+        if isinstance(m, type)
+        and issubclass(m, Model)
+        and any("tune_calls" in vars(k) for k in m.__mro__ if k is not Model)
     ]
     if len(found) != 1:
         raise ValueError(

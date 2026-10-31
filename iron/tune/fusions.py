@@ -365,9 +365,10 @@ def group_fit_verdict(
         outcome, diagnostic = place(text)
         if outcome == "crash":
             if ledger is not None:
+                dev = ops[0].dev
                 ledger.record(
                     Kind.CRASH,
-                    ops[0].dev.name,
+                    "?" if dev is None else dev.name,
                     diagnostic or "",
                     "placing "
                     + ", ".join(type(op).__name__ for op in ops)

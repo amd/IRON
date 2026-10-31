@@ -87,6 +87,11 @@ class Built:
     rtps: list[Rtp] = dataclasses.field(default_factory=list)
 
 
+# Each lane's ``(lane, tap, length_parameter, length_unit)``: what
+# ``Operand.transfers`` derives, or an operator writing its own sequence gives.
+LaneTransfers = list[tuple[int, TensorAccessPattern, Value | None, int | None]]
+
+
 class Operator(jit.Operator, library=True):
     """An operator, whose subclass body is its declaration.
 
@@ -243,7 +248,7 @@ class Operator(jit.Operator, library=True):
                     else d.when_false
                 )
                 is None
-                for d in m.obj_dims
+                for d in m.obj_dims or ()
             )
         ]
         cols = dev.cols
@@ -436,9 +441,7 @@ class Operator(jit.Operator, library=True):
     def has_sequence_override(cls) -> bool:
         return cls.sequence is not Operator.sequence
 
-    def lane_transfers(
-        self, operand: Operand
-    ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]] | None:
+    def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
         """``operand``'s per-lane host access order, where ``sequence(rt)`` is hand-written and the derived order does not hold.
 
         ``Operand.transfers()``'s own ``(lane, tap, length_parameter, length_unit)``

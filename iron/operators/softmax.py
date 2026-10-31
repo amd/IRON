@@ -16,6 +16,8 @@ from aie.utils.compile.jit.params import divisors, param, per_call, tunable, wid
 from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator, Rtp
+from iron.common.declare import Operand
+from iron.common.declare.operator import LaneTransfers
 from iron.common.testing import Case, Testing
 
 # softmax_bf16's vector step: its loops cover only whole steps.
@@ -492,7 +494,7 @@ class Softmax(Operator):
             )
         rt.finish(tg)
 
-    def lane_transfers(self, operand):
+    def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
         """``x``'s rows are read thrice (streamed) or once, over blocks a bound may shorten; ``addend`` and ``y`` read or write that span once."""
         if operand not in (self.x, self.y) and not (
             self.has_addend and operand is self.addend

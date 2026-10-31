@@ -623,7 +623,7 @@ def merged(
 
 def autotune(
     calls: Sequence[Timed],
-    dev,
+    dev: Device,
     profile: Profile | None = None,
     *,
     full_elf: bool,

@@ -20,10 +20,11 @@ from aie.iron import DmaEndpoint, ObjectFifo, TaskGroup
 from aie.iron.dataflow.objectfifo import ObjectFifoLink
 from aie.iron.device import AnyMemTile
 from aie.utils import bfp, coded
+from aie.utils.compile.jit.operator import Unresolvable
 from aie.utils.compile.jit.params import OperatorParam, PerCallMember, Select, resolve
 from ml_dtypes import bfloat16
 
-from .value import Value
+from .value import ExtentWord, Value
 
 if TYPE_CHECKING:
     from ..design import OperatorRuntime
@@ -699,7 +700,7 @@ class Staging:
         # Per side, under a bound: the graph expression its extent follows,
         # the extent every lane together moves a tile at a time and those
         # elements, and a lane's tile.
-        bounds: list[tuple[Any, int, int, int] | None] = []
+        bounds: list[tuple[Any, int, int, int | None] | None] = []
         for side in (source, sink):
             transfers = side.transfers()
             bounded = side.bounded
@@ -714,6 +715,7 @@ class Staging:
                 bounds.append(None)
             else:
                 extent, axis, word = bounded
+                assert isinstance(word, ExtentWord), "a bound's per-call word"
                 (unit,) = {u for _, _, _, u in transfers}
                 rows = word.divisor(side.op)
                 bounds.append(
@@ -747,8 +749,11 @@ class Staging:
                 f"{edge}: one side is bounded per call and the other moves its "
                 f"whole buffer"
             )
-        if bounds[0] is not None:
-            (graph_p, rows_p, round_p, _), (graph_c, rows_c, round_c, _) = bounds
+        produced_bound, consumed_bound = bounds
+        if produced_bound is not None:
+            assert consumed_bound is not None, "both sides bounded, checked above"
+            graph_p, rows_p, round_p, _ = produced_bound
+            graph_c, rows_c, round_c, _ = consumed_bound
             # A call moves ceil(extent / rows) rounds a side: one count for
             # every value where the two extents are one linear expression
             # of it, a round of each side's rows apart.
@@ -768,9 +773,16 @@ class Staging:
                     f"{None if graph_c is None else graph_c.name} in rounds of "
                     f"{round_c}: not one graph value moving whole rounds alike"
                 )
-        units = (None, None) if bounds[0] is None else (bounds[0][3], bounds[1][3])
+        units = (
+            (None, None)
+            if bounds[0] is None or bounds[1] is None
+            else (bounds[0][3], bounds[1][3])
+        )
 
-        tm = get_target_model(sink.op.dev.resolve())
+        dev = sink.op.dev
+        if dev is None:
+            raise Unresolvable("Staging needs a bound device")
+        tm = get_target_model(dev.resolve())
         row = next(r for r in range(tm.rows()) if tm.is_mem_tile(0, r))
         self.fan_in = tm.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
         channels_out = tm.get_num_source_switchbox_connections(0, row, WireBundle.DMA)

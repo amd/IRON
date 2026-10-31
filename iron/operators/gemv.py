@@ -385,7 +385,10 @@ class GEMV(Operator):
         binary = bool(others)
         used = sum(b.streamed for b in self.inputs)
         rides = False
-        if binary and used + 1 > self.dev.core_dma_channels_in:
+        dev = self.dev
+        if dev is None:
+            return None
+        if binary and used + 1 > dev.core_dma_channels_in:
             if self.rides or not self._can_ride():
                 return None
             rides = True
@@ -434,6 +437,8 @@ class GEMV(Operator):
         except TypeError:  # a tunable not yet resolved: not decidable here
             return False
         dev = self.dev
+        if dev is None:
+            return False
         if carried // line > (1 << dev.get_dma_bd_iter_bits(0, 0)):
             return False
         shims = sum(
@@ -645,6 +650,7 @@ class GEMV(Operator):
                                     [1],
                                 )
                             elif binary:
+                                assert finish_fifo is not None, "a finish's own fifo"
                                 extra = finish_fifo.acquire(1)
                             c_inputs = [
                                 tile if i == at else extra
@@ -664,6 +670,7 @@ class GEMV(Operator):
                             if binary and ride_view is not None:
                                 A_fifo.release(1)
                             elif binary:
+                                assert finish_fifo is not None, "a finish's own fifo"
                                 finish_fifo.release(1)
                             tile = dst
                         C_fifo.release(1)
@@ -689,7 +696,7 @@ class GEMV(Operator):
         # this gives every core its own reader end of the source's fifo.
         (B_ends,) = self.B.fifos(1, readers=lanes)
 
-        def core_body(A_fifo, B_fifo, C_fifo, matvec, rtp, *decoded):
+        def core_body_fed(A_fifo, B_fifo, C_fifo, matvec, rtp, *decoded):
             words = rtp.read()
             n = words[self.tiles]
             batches = words[self.batches]
@@ -708,7 +715,7 @@ class GEMV(Operator):
 
         workers = [
             Worker(
-                core_body,
+                core_body_fed,
                 [A_ends[i], B_ends[i], C_ends[i], matvec, rtps[i]] + decoded[i],
             )
             for i in range(lanes)

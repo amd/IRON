@@ -40,7 +40,9 @@ def _folded_producer(recording: Recording, fusion: Fusion) -> Operator:
     for edge in fusion.edges:
         nxt = recording.steps[edge.consumer].op
         at = next(k for k, b in enumerate(nxt.inputs) if b.name == edge.input)
-        current = current.fold(nxt, at)
+        folded = current.fold(nxt, at)
+        assert folded is not None, "fold_candidates admitted this edge"
+        current = folded
     return current.resolved()
 
 
