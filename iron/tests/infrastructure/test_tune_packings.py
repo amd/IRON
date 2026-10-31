@@ -20,6 +20,7 @@ from iron.lm.tune import calls
 from iron.tests.support.llama_model import small
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
@@ -34,6 +35,7 @@ from iron.tune.packings import (
     _decide_fold,
     _end_to_end,
     _narrow_for_rejected,
+    _rejoin,
     _with_fusions,
     adjacent,
     price_packings,
@@ -286,6 +288,29 @@ def test_narrow_for_rejected_leaves_other_kinds_and_other_versions_alone():
     stream = (FusionKind.STREAM, (), (), frozenset({decode_v}))
     fusions = [unscoped_fold, prompt_only_fold, stream]
     assert _narrow_for_rejected(fusions, decode_v) == fusions
+
+
+def test_a_version_that_rejects_its_folds_takes_the_packings_searched_without_them():
+    decode_v, prompt_v = _version("decode"), _version("prompt")
+    folded_group = ((GEMV, {"M": 2048, "K": 2048}), (ElementwiseAdd, {"size": 2048}))
+    plain_group = ((GEMV, {"M": 2048, "K": 2048}), (ElementwiseMul, {"size": 2048}))
+    unscoped = ((ReLU, {"size": SIZE}), (Tanh, {"size": SIZE}))
+    folded = Profile()
+    folded.add_packing(folded_group, [decode_v, prompt_v])
+    folded.add_packing(unscoped)
+    unfolded = Profile()
+    unfolded.add_packing(plain_group, [decode_v])
+    unfolded.add_packing(folded_group, [prompt_v])
+    joined = _rejoin(folded, unfolded, {decode_v})
+    got = {
+        (tuple(c.__name__ for c, *_ in e.members), e.versions)
+        for e in joined.packings()
+    }
+    assert got == {
+        (("GEMV", "ElementwiseAdd"), frozenset({prompt_v})),
+        (("ReLU", "Tanh"), None),
+        (("GEMV", "ElementwiseMul"), frozenset({decode_v})),
+    }
 
 
 def test_with_fusions_replaces_only_the_fusions():

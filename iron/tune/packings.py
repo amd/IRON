@@ -693,12 +693,9 @@ def _narrow_for_rejected(fusions: Sequence, version: Version) -> list:
     version ``price_folds_before_packing`` rejects keeps the profile as it
     stood for the shapes a fold scoped to it (and no other version) alone
     named. A fusion of another kind, or a fold unscoped or scoped to a
-    version other than this one, is untouched: packing entries never
-    narrow here, a packed group a fold shape joins matching by dims alone
-    (``finish`` never one, ``_json_safe`` drops it before a packing entry
-    is ever saved), so it groups a shape whether this version folds it or
-    not, and stays priced by its own, already version-scoped, end to end
-    check (``price_packings``'s own).
+    version other than this one, is untouched. Its packings are the
+    caller's to replace (``_rejoin``): they were searched on the folded
+    steps.
     """
     out = []
     for kind, steps, edges, versions in fusions:
@@ -776,9 +773,11 @@ def price_folds_before_packing(
     and packed, beats ``profile`` as it stands (its own packings, or none)
     end to end (``compare_graphs``); one that does not gain keeps the
     profile as it stood instead, its own fold entries narrowed back out
-    rather than the whole packed result discarded (``_narrow_for_rejected``).
-    The plain ``price_packings`` search on ``profile`` runs, and its result
-    is returned, only where folding admits nothing at all. The fold entries
+    rather than the whole packed result discarded (``_narrow_for_rejected``),
+    and its packings searched again without them (``_rejoin``): the ones
+    found on its folded steps were never priced unfolded. The plain
+    ``price_packings`` search on ``profile`` alone runs, and its result is
+    returned, where folding admits nothing at all. The fold entries
     this adds are the tuner's own proposal, not Erika's (``chosen_folds``
     still takes any a hand-written profile names, unscoped).
     """
@@ -829,13 +828,62 @@ def price_folds_before_packing(
         lock=lock,
     )
     fusions = packed_and_folded.fusions()
+    rejected = []
     for call in calls:
         candidate = _with_fusions(packed_and_folded, fusions)
         delta, noise = _end_to_end(
             call, dev, profile, candidate, confirm_timing, log, lock
         )
-        fusions = _decide_fold(fusions, call, call.recording.version, delta, noise, log)
-    return _with_fusions(packed_and_folded, fusions)
+        kept = _decide_fold(fusions, call, call.recording.version, delta, noise, log)
+        if kept != fusions:
+            rejected.append(call)
+        fusions = kept
+    folded = _with_fusions(packed_and_folded, fusions)
+    if not rejected:
+        return folded
+    # A rejected version's packings were searched on its folded steps; it
+    # takes the plain search's instead.
+    log(
+        "price_folds_before_packing: searching the packings of "
+        f"{len(rejected)} version(s) without their folds"
+    )
+    unfolded = price_packings(
+        rejected,
+        dev,
+        folded,
+        full_elf=full_elf,
+        timing=timing,
+        confirm_timing=confirm_timing,
+        repeats=repeats,
+        cache=cache,
+        fit_cache=fit_cache,
+        model=model,
+        ledger=ledger,
+        cycles=cycles,
+        core_mhz=core_mhz,
+        progress=progress,
+        log=log,
+        lock=lock,
+    )
+    return _rejoin(folded, unfolded, {c.recording.version for c in rejected})
+
+
+def _rejoin(folded: Profile, unfolded: Profile, versions: set[Version]) -> Profile:
+    """``folded``'s packings outside ``versions`` and ``unfolded``'s inside
+    them: the versions that rejected their folds take the packings searched
+    without them, every other version keeps its folded ones. An unscoped
+    entry is every version's and stays as ``folded`` has it.
+    """
+    entries = []
+    for entry in folded.packings():
+        if entry.versions is None:
+            entries.append(entry)
+        elif rest := entry.versions - versions:
+            entries.append(PackingEntry(entry.members, frozenset(rest)))
+    for entry in unfolded.packings():
+        if entry.versions is not None and (own := entry.versions & versions):
+            entries.append(PackingEntry(entry.members, frozenset(own)))
+    return _profile(folded, entries)
 
 
 def widen_packings(
