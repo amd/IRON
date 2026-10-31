@@ -214,3 +214,18 @@ def test_a_tune_records_the_checkpoint_s_own_weights(tmp_path, npu2):
     assert any(
         w.shape == gate.shape and np.array_equal(w.view(np.uint16), gate) for w in held
     )
+
+
+def test_a_shallow_config_loads_a_deeper_checkpoint_s_first_layers(tmp_path, npu2):
+    """``--config num_hidden_layers=1`` over a two-layer checkpoint: the model
+    reads layer 0 and leaves layer 1, which a whole-checkpoint load refuses."""
+    _directory(tmp_path)
+    shallow = Small.from_checkpoint(
+        tmp_path, random_weights=7, config={"num_hidden_layers": 1}
+    )
+    assert shallow.config.num_hidden_layers == 1 and len(shallow.layers) == 1
+    with pytest.raises(ValueError, match="extra model.layers.1"):
+        Small(
+            dataclasses.replace(SMALL, num_hidden_layers=1),
+            Checkpoint(tmp_path / "model.safetensors").tree(),
+        )

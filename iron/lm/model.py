@@ -326,10 +326,12 @@ class Model(iron.Graph):
                 )
             shape = dataclasses.replace(shape, max_seq_len=max_seq_len)
         checkpoint = Checkpoint(weights)
+        # A shallower config than the checkpoint's reads its first layers.
+        layers = (config or {}).get("num_hidden_layers")
         tree = (
-            checkpoint.tree()
+            checkpoint.tree(layers=layers)
             if random_weights is None
-            else checkpoint.tree("random", random_weights)
+            else checkpoint.tree("random", random_weights, layers=layers)
         )
         model = cls(shape, tree)
         model.checkpoint, model.random_weights = checkpoint, random_weights

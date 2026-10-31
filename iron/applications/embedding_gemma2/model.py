@@ -461,8 +461,11 @@ class Multimodal(lm.Multimodal):
         text rows, half its longest call. A call's configuration switches
         cost the same at any length, so a short query is where they weigh.
         """
-        weights = Checkpoint(weights_file(args.checkpoint)).tree()
-        graph = cls(dataclasses.replace(Config(), **dict(args.config)), weights)
+        config = dataclasses.replace(Config(), **dict(args.config))
+        weights = Checkpoint(weights_file(args.checkpoint)).tree(
+            layers=config.num_hidden_layers
+        )
+        graph = cls(config, weights)
         longest = graph.longest()
         points = [
             Point(0.5, {**longest, "rows": QUERY_ROWS}),

@@ -254,7 +254,8 @@ class CausalLM(Model):
         weights = weights_file(args.checkpoint)
         config = dataclasses.replace(cls.default_config(weights), **dict(args.config))
         assert isinstance(config, DecoderConfig), "a decoder's"
-        model = cls(config, Checkpoint(weights).tree())
+        layers = config.num_hidden_layers
+        model = cls(config, Checkpoint(weights).tree(layers=layers))
         L, C = config.max_seq_len, config.prefill_chunk
         if not C <= args.context <= L or args.context % C:
             parser.error(
@@ -266,7 +267,7 @@ class CausalLM(Model):
         other = L // 2 if L // 2 >= C and not (L // 2) % C else 2 * L
         sibling = cls(
             dataclasses.replace(config, max_seq_len=other),
-            Checkpoint(weights).tree(),
+            Checkpoint(weights).tree(layers=layers),
         )
         return calls(
             model,

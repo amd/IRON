@@ -8,6 +8,7 @@ names: ``model.layers.3.self_attn.q_proj.weight`` is
 
 import io
 import json
+import re
 import math
 import mmap
 import os
@@ -275,7 +276,10 @@ class Checkpoint:
         return fingerprint(ends)
 
     def tree(
-        self, fill: Literal["read", "random", "unread"] = "read", seed: int = 0
+        self,
+        fill: Literal["read", "random", "unread"] = "read",
+        seed: int = 0,
+        layers: int | None = None,
     ) -> SimpleNamespace:
         """Return the checkpoint's tensors as a tree of ``param``, split at
         the dots (``model.layers.3.weight`` becomes
@@ -286,18 +290,28 @@ class Checkpoint:
                 ``"random"`` or ``"unread"`` ``filled``'s, which reads
                 nothing past the header.
             seed: The seed ``"random"`` draws at.
+            layers: Keep the text stack's first ``layers`` layers alone
+                (``[model.]layers.<i>``): a shallow model's view of a deeper
+                checkpoint, whose other layers it would refuse as extra.
 
         Raises:
             ValueError: ``fill`` is none of these.
         """
         if fill not in ("read", "random", "unread"):
             raise ValueError(f"fill is read, random or unread, not {fill!r}")
+        kept = {
+            n: t
+            for n, t in self.tensors.items()
+            if layers is None
+            or not (m := re.match(r"(model\.)?layers\.(\d+)\.", n))
+            or int(m.group(2)) < layers
+        }
         if fill != "read":
-            named = {n: (t.shape, t.dtype) for n, t in self.tensors.items()}
+            named = {n: (t.shape, t.dtype) for n, t in kept.items()}
             tensors = filled(fill, named, seed)
             return nest({n: param(t) for n, t in tensors.items()}, file=self.path)
         return nest(
-            {n: param(t, source=self.source(t)) for n, t in self.tensors.items()},
+            {n: param(t, source=self.source(t)) for n, t in kept.items()},
             file=self.path,
         )
 
