@@ -51,6 +51,18 @@ SUITE_NAMES = {
 # A metric whose figure is another's spread is drawn with it, not on its own.
 SPREADS = {"Latency": "Latency MAD"}
 
+# Where a benchmark still run is documented, relative to the Benchmarks page:
+# a model on the Models page, an operator in the API reference. A catalog
+# benchmark is named for its class; these are named for their test's
+# directory.
+CATALOG = "iron/tests/operators/test_catalog.py"
+OPERATOR_PAGES = {
+    "copy_gather": "Gather",
+    "flm/gemm": "flm.ProjectionGEMM",
+    "flm/layer": "flm.DecodeLayer",
+    "flm/prefill_attn": "flm.PrefillAttention",
+}
+
 
 def read_all_csvs(results_root):
     """Map (arch, suite) to the rows of its results CSV, for each CSV under the root."""
@@ -246,16 +258,25 @@ def build_data(results_root, repository):
             }
         if not any(suite["metrics"] for suite in suites.values()):
             continue
-        out[name] = {
-            "group": SUITE_NAMES[next(iter(suites))][0],
-            "current": any(
-                d["current"]
-                for suite in suites.values()
-                for s in suite["series"]
-                for d in s["devices"].values()
-            ),
-            "suites": suites,
-        }
+        group = SUITE_NAMES[next(iter(suites))][0]
+        current = any(
+            d["current"]
+            for suite in suites.values()
+            for s in suite["series"]
+            for d in s["devices"].values()
+        )
+        catalogued = any(
+            s["test"].startswith(f"{CATALOG}::")
+            for suite in suites.values()
+            for s in suite["series"]
+        )
+        anchor = name if catalogued else OPERATOR_PAGES.get(name)
+        docs = None
+        if current and group == "Models":
+            docs = "../models/"
+        elif current and anchor:
+            docs = f"../api/operators/#iron.operators.{anchor}"
+        out[name] = {"group": group, "current": current, "docs": docs, "suites": suites}
 
     return {
         "generated": datetime.now(timezone.utc).strftime(DATE_FMT),

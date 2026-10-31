@@ -89,6 +89,7 @@ def test_each_runner_s_nightly_results_are_series_of_their_own(tmp_path):
     for *_, name in TESTS:
         benchmark = data["benchmarks"][name]
         assert benchmark["group"] == "Models" and benchmark["current"]
+        assert benchmark["docs"] == "../models/"
         (series,) = benchmark["suites"]["nightly"]["series"]
         for arch, value in (("krackan", 1.0), ("phoenix", 2.0)):
             run = series["devices"][arch]
@@ -103,9 +104,11 @@ def test_a_catalog_parametrization_is_one_series_over_its_devices(tmp_path):
             [_row(NIGHTS[1], GEMV, f"{npu}-GEMV-M_2048-K_8192", Latency=10.0)],
         )
 
-    (series,) = _page_data(tmp_path)["benchmarks"]["GEMV"]["suites"]["small"]["series"]
+    gemv = _page_data(tmp_path)["benchmarks"]["GEMV"]
+    (series,) = gemv["suites"]["small"]["series"]
     assert series["label"] == "GEMV-M_2048-K_8192"
     assert set(series["devices"]) == {"krackan", "phoenix"}
+    assert gemv["docs"] == "../api/operators/#iron.operators.GEMV"
 
 
 def test_the_latest_run_says_what_ran_failed_and_moved(tmp_path):
@@ -147,8 +150,24 @@ def test_a_benchmark_no_longer_run_anywhere_is_not_current(tmp_path):
         ],
     )
     benchmarks = _page_data(tmp_path)["benchmarks"]
-    assert not benchmarks["gemv"]["current"]
+    assert not benchmarks["gemv"]["current"] and benchmarks["gemv"]["docs"] is None
     assert benchmarks["GEMV"]["current"]
+
+
+def test_an_operator_named_for_its_test_s_directory_links_its_class(tmp_path):
+    _write(
+        tmp_path / "krackan" / "extensive" / "all.csv",
+        [
+            _row(
+                NIGHTS[1],
+                "iron/operators/flm/gemm/test.py::test_gemm",
+                "M_1",
+                Latency=1,
+            )
+        ],
+    )
+    docs = _page_data(tmp_path)["benchmarks"]["flm/gemm"]["docs"]
+    assert docs == "../api/operators/#iron.operators.flm.ProjectionGEMM"
 
 
 def test_the_comment_links_each_move_to_its_history_on_the_page(tmp_path):

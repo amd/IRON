@@ -204,9 +204,13 @@
     const unit = unitOf(metric);
     const sense = direction(metric);
     const info = DATA.suites[suite];
-    about.textContent = `${metric}${unit ? ` in ${unit}` : ""}${sense ? `, ${sense}` : ""}. ` +
+    const docs = DATA.benchmarks[name].docs;
+    about.replaceChildren(
+      `${metric}${unit ? ` in ${unit}` : ""}${sense ? `, ${sense}` : ""}. ` +
       `${series.length} parametrization${series.length === 1 ? "" : "s"} in the ` +
-      `${info.name.toLowerCase()} suite; up to ${PALETTE.light.length} are drawn at once.`;
+      `${info.name.toLowerCase()} suite; up to ${PALETTE.light.length} are drawn at once.`,
+      ...(docs ? [" ", el("a", { href: docs, textContent:
+        DATA.benchmarks[name].group === "Models" ? "About the models" : `About ${name}` })] : []));
 
     drawCharts(series, metric);
     drawTable(series, metric, suite);

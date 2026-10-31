@@ -28,6 +28,8 @@ A move between a benchmark's last two runs is called *better* or *worse* only
 past the same two gates as the pull request comment: at least 5%, and more than
 twice the spread the runs measured. Times are UTC. A run whose checks failed is
 drawn with a ✕; its figure is what the test measured, not a result to trust.
+Each benchmark links to its operator in the
+[operator reference](api/operators.md) or to [Models](models.md).
 The history keeps every run of the last 90 days and, before that, the newest
 run of each week, at most 400 runs.
 
