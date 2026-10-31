@@ -771,27 +771,30 @@ class GEMV(Operator):
                     managed=False,
                 )
             elif self.coded_a:
-                # B, then B's head re-read to fill the rest of the coded tile.
-                pad = tsi * width // 2 - K
-                run = math.gcd(pad, K)
-                heads = [TensorAccessPattern(self.B.shape, b * K, [1, K], [0, 1])]
+                # B, then the rest of the coded tile, unread: A's first bytes,
+                # one linear run.
+                pad = tsi * width - K * np.dtype(bfloat16).itemsize
+                heads = [
+                    (TensorAccessPattern(self.B.shape, b * K, [1, K], [0, 1]), self.B)
+                ]
                 if pad:
                     heads.append(
-                        TensorAccessPattern(
-                            self.B.shape, b * K, [pad // run, run], [0, 1]
-                        )
+                        (TensorAccessPattern(self.A.shape, 0, [1, pad], [0, 1]), None)
                     )
             else:
                 # B's row repeated over an A tile in the iteration dim (stride 0).
                 heads = [
-                    TensorAccessPattern(
-                        self.B.shape, b * K, [tsi, 1, 1, K], [0, 0, 0, 1]
+                    (
+                        TensorAccessPattern(
+                            self.B.shape, b * K, [tsi, 1, 1, K], [0, 0, 0, 1]
+                        ),
+                        self.B,
                     )
                 ]
             for k, tap, word, unit in rows:
                 if not self.feed_b:
-                    for head in heads:
-                        self.A.fill(head, lane=k, source=self.B, managed=False)
+                    for head, source in heads:
+                        self.A.fill(head, lane=k, source=source, managed=False)
                 matrix = TensorAccessPattern(
                     tap.tensor_dims,
                     tap.offset + b // self.repeat * M * width,
