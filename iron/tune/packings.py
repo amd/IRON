@@ -671,31 +671,6 @@ def price_packings(
     )
 
 
-def _keep_folded(gains: Sequence[tuple[Timed, float, float | None]]) -> bool:
-    """Whether ``gains`` (each a call, and its ``_end_to_end`` delta and
-    noise against the profile as it stands) backs keeping the folded,
-    packed profile: every one of them gains beyond the noise
-    (``CONFIDENCE``), as every other packing decision here already asks;
-    none where ``gains`` is empty, since there is then no call to have
-    gained anything. ``price_folds_before_packing`` calls this with one
-    call at a time, its own version's decision alone.
-    """
-    return bool(gains) and all(
-        noise is not None and delta < -CONFIDENCE * noise for _, delta, noise in gains
-    )
-
-
-def _gains_report(gains: Sequence[tuple[Timed, float, float | None]]) -> str:
-    """``gains`` as one log line's worth: each call's name and its delta,
-    the noise where there is one.
-    """
-    return ", ".join(
-        f"{call.recording.name} {delta:+.1f} ± "
-        f"{'?' if noise is None else f'{noise:.1f}'} us"
-        for call, delta, noise in gains
-    )
-
-
 def _with_fusions(base: Profile, fusions: Sequence) -> Profile:
     """``base``'s entries and packings with ``fusions`` as its only
     fusions: the fold-narrowing counterpart of ``_profile``, which does the
@@ -733,6 +708,42 @@ def _narrow_for_rejected(fusions: Sequence, version: Version) -> list:
             versions = remaining
         out.append((kind, steps, edges, versions))
     return out
+
+
+def _decide_fold(
+    fusions: Sequence,
+    call: Timed,
+    version: Version,
+    delta: float,
+    noise: float | None,
+    log: Callable[[str], None],
+) -> list:
+    """``call``'s own version's share of ``price_folds_before_packing``'s
+    decision: ``fusions`` kept as given where ``delta``/``noise`` (``call``'s
+    ``_end_to_end`` against the profile as it stands) gain beyond the noise
+    (``CONFIDENCE``, as every other packing decision here already asks), an
+    unmeasurable noise counting as no gain; narrowed back out otherwise
+    (``_narrow_for_rejected``), so this version keeps the profile as it
+    stood rather than the whole packed-and-folded result discarded. Logs
+    which, by name, with the gain found.
+
+    Device-free on its own: the device time is in ``delta``/``noise``
+    (``_end_to_end``, the one part of this decision that needs it), not here.
+    """
+    report = (
+        f"{call.recording.name} {delta:+.1f} ± "
+        f"{'?' if noise is None else f'{noise:.1f}'} us"
+    )
+    if noise is not None and delta < -CONFIDENCE * noise:
+        log(
+            f"price_folds_before_packing: {call.recording.name} keeps its folds, {report}"
+        )
+        return list(fusions)
+    log(
+        f"price_folds_before_packing: {call.recording.name} keeps the profile "
+        f"as it stood, its folds do not gain beyond the noise, {report}"
+    )
+    return _narrow_for_rejected(fusions, version)
 
 
 def price_folds_before_packing(
@@ -818,25 +829,11 @@ def price_folds_before_packing(
     )
     fusions = packed_and_folded.fusions()
     for call in calls:
-        version = call.recording.version
         candidate = _with_fusions(packed_and_folded, fusions)
-        gains = [
-            (
-                call,
-                *_end_to_end(call, dev, profile, candidate, confirm_timing, log, lock),
-            )
-        ]
-        report = _gains_report(gains)
-        if _keep_folded(gains):
-            log(
-                f"price_folds_before_packing: {call.recording.name} keeps its folds, {report}"
-            )
-        else:
-            log(
-                f"price_folds_before_packing: {call.recording.name} keeps the "
-                f"profile as it stood, its folds do not gain beyond the noise, {report}"
-            )
-            fusions = _narrow_for_rejected(fusions, version)
+        delta, noise = _end_to_end(
+            call, dev, profile, candidate, confirm_timing, log, lock
+        )
+        fusions = _decide_fold(fusions, call, call.recording.version, delta, noise, log)
     return _with_fusions(packed_and_folded, fusions)
 
 

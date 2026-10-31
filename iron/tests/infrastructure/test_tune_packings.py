@@ -31,9 +31,8 @@ from iron.tune.fold import fold_profile
 from iron.tune.measure import Cache, Timing, platform
 from iron.tune.packings import (
     Packer,
+    _decide_fold,
     _end_to_end,
-    _gains_report,
-    _keep_folded,
     _narrow_for_rejected,
     _with_fusions,
     adjacent,
@@ -212,26 +211,47 @@ class Single(iron.Graph):
         return ReLU.step(x)
 
 
-def test_keep_folded_requires_every_call_to_gain_beyond_noise():
-    """``_keep_folded`` of real ``_end_to_end``-shaped results (a call, its
-    delta and its noise): kept only where every one is beyond ``CONFIDENCE``
-    standard errors ahead; a regression, an unmeasurable noise, or no call
-    to have gained anything at all each refuse it.
+def _version(name: str) -> tuple:
+    return ((name, (1,), "bf16"),)
+
+
+def test_decide_fold_keeps_the_fusions_where_the_call_gains_beyond_noise():
+    decode = Timed(Alternating().record(x=(SIZE,)))
+    v = _version("decode")
+    fusions = [(FusionKind.FOLD, (), (), frozenset({v}))]
+    logged = []
+    kept = _decide_fold(fusions, decode, v, -50.0, 5.0, logged.append)
+    assert kept == fusions
+    assert "keeps its folds" in logged[0] and decode.recording.name in logged[0]
+
+
+def test_decide_fold_narrows_the_version_out_where_it_does_not_gain_beyond_noise():
+    """A regression, or a gain too small next to ``CONFIDENCE`` standard
+    errors of noise, both refuse to keep it: the version's own entry (the
+    only one naming it) is narrowed away entirely, not just logged against.
     """
     decode = Timed(Alternating().record(x=(SIZE,)))
-    prompt = Timed(Single().record(x=(SIZE,)))
-    assert _keep_folded([(decode, -50.0, 5.0), (prompt, -80.0, 10.0)])
-    assert not _keep_folded([(decode, -50.0, 5.0), (prompt, 5.0, 10.0)])
-    assert not _keep_folded([(decode, -50.0, 5.0), (prompt, -1.0, 10.0)])
-    assert not _keep_folded([(decode, -50.0, None)])
-    assert not _keep_folded([])
+    v = _version("decode")
+    fusions = [(FusionKind.FOLD, (), (), frozenset({v}))]
+    logged = []
+    kept = _decide_fold(fusions, decode, v, -1.0, 10.0, logged.append)
+    assert kept == []
+    assert "keeps the profile as it stood" in logged[0]
+
+    logged.clear()
+    kept = _decide_fold(fusions, decode, v, 5.0, 10.0, logged.append)  # a regression
+    assert kept == []
+    assert "keeps the profile as it stood" in logged[0]
 
 
-def test_gains_report_names_each_calls_own_delta_and_noise():
+def test_decide_fold_treats_an_unmeasurable_noise_as_no_gain():
     decode = Timed(Alternating().record(x=(SIZE,)))
-    report = _gains_report([(decode, -12.5, 3.5), (decode, 4.0, None)])
-    name = decode.recording.name
-    assert report == f"{name} -12.5 ± 3.5 us, {name} +4.0 ± ? us"
+    v = _version("decode")
+    fusions = [(FusionKind.FOLD, (), (), frozenset({v}))]
+    logged = []
+    kept = _decide_fold(fusions, decode, v, -50.0, None, logged.append)
+    assert kept == []
+    assert "do not gain beyond the noise" in logged[0]
 
 
 def test_fold_profile_leaves_a_profile_with_nothing_to_fold_unchanged():
@@ -243,10 +263,6 @@ def test_fold_profile_leaves_a_profile_with_nothing_to_fold_unchanged():
     base = iron.Profile()
     with_folds = fold_profile(base, [Timed(Single().record(x=(SIZE,)))])
     assert with_folds.fusions() == base.fusions() == []
-
-
-def _version(name: str) -> tuple:
-    return ((name, (1,), "bf16"),)
 
 
 def test_narrow_for_rejected_drops_a_fold_entry_naming_only_that_version():
