@@ -92,9 +92,10 @@ def run(
     compiled: CompilableDesign,
     args: argparse.Namespace,
 ) -> None:
-    """Dispatch the fused design on ``valid`` elements and hold ``y`` to
-    ``silu(gate) * up``, the operators' references chained, and to the two
-    operators run unfused on the device; prints each call's minimum time.
+    """Dispatch the fused design on ``valid`` elements and hold ``y`` to ``silu(gate) * up``.
+
+    The operators' references chained, and to the two operators run unfused on the
+    device; prints each call's minimum time.
 
     Raises:
         RuntimeError: ``y`` falls outside the tolerance, a bounded call wrote
@@ -191,7 +192,7 @@ def run(
     print(
         f"fused: dispatch min {fused.dispatch.min_us:.1f} us"
         + (f", npu median {fused.npu.median_us:.1f} us" if fused.npu else "")
-        + f"; unfused SiLU + Mul dispatch min "
+        + "; unfused SiLU + Mul dispatch min "
         + " + ".join(f"{s.dispatch.min_us:.1f}" for s in steps if s.dispatch)
         + " us"
     )

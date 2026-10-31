@@ -618,9 +618,10 @@ def test_image_processor_refuses(npu2, shape, tokens, refusal):
 
 
 def test_tuning_times_a_query_and_the_longest_call(npu2):
-    """Switches cost a call the same at any length, so tuning weighs a
-    short query beside the longest call: a step bounded by the text's rows
-    is timed at both."""
+    """Switches cost a call the same at any length, so tuning weighs a short query beside the longest call.
+
+    A step bounded by the text's rows is timed at both.
+    """
     require(DIRECTORY / "model.safetensors")
     parser = argparse.ArgumentParser()
     Multimodal.tune_arguments(parser)
