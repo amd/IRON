@@ -173,6 +173,41 @@ _CASES = [
         dict(num_heads=8, num_KV_heads=2, seq_len=2048, d=128, num_pipelines=8),
         extensive=True,
     ),
+    # Llama 3.2 1B's and 3B's prompt chunk, and a full-attention layer at
+    # d=256: 2048 queries, the last rows of 2K, 8K and 32K keys.
+    *(
+        Case(
+            dict(
+                num_heads=heads,
+                num_KV_heads=kv_heads,
+                d=d,
+                seq_len=2048,
+                kv_len=kv_len,
+                num_pipelines=8,
+                heads_interleaved=True,
+                kv_interleaved=True,
+            ),
+            id=f"chunk-d{d}-{kv_len // 1024}k",
+            extensive=kv_len > 8192,
+            bench=True,
+        )
+        for heads, kv_heads, d in ((32, 8, 64), (24, 8, 128), (8, 2, 256))
+        for kv_len in (2048, 8192, 32768)
+    ),
+    # Llama 3.2 1B's decode step over 32K keys.
+    Case(
+        dict(
+            num_heads=32,
+            num_KV_heads=8,
+            seq_len=1,
+            kv_len=32768,
+            num_pipelines=4,
+            heads_interleaved=True,
+            kv_interleaved=True,
+        ),
+        id="decode-d64-32k",
+        bench=True,
+    ),
 ]
 
 
