@@ -626,16 +626,9 @@ def test_a_validate_or_compatible_branch_refuses(make, match, npu2):
     [
         (dict(M=256, K=96), "multiple of 64"),
         (dict(M=256, K=128, num_batches=8, repeat=4), "re-reads an activation A"),
-        (
-            dict(M=2048, K=8192, tile_size_input=1, tile_size_output=256),
-            "does not fit A's 12352-byte head tile",
-        ),
     ],
 )
 def test_a_coded_gemv_refuses_what_its_rows_cannot_carry(shape, match):
-    """Coded rows are whole 64-weight units, of a weight A read once, and
-    without feed_b, B rides A's first tile: K=8192 at one row a tile is a
-    12352-byte coded tile, short of B's 16384 bytes.
-    """
+    """Coded rows are whole 64-weight units, of a weight A read once."""
     with pytest.raises(ValueError, match=match):
         GEMV(**shape, coded_a=True).resolved()

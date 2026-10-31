@@ -27,7 +27,7 @@ pytestmark = pytest.mark.supported_devices("npu2")
 LLAMA = weights_dir("llama3.2-1b") / "model.safetensors"
 
 # (weight, rows, tunables): Llama 3.2 1B's decode GEMVs at its npu2 profile's
-# tunables, B on its own stream where a coded tile is too short to carry it.
+# tunables; down's coded row is shorter than B, which takes two head tiles.
 SHAPES = {
     "gate_proj": (
         "model.layers.0.mlp.gate_proj.weight",
@@ -37,7 +37,7 @@ SHAPES = {
     "down_proj": (
         "model.layers.0.mlp.down_proj.weight",
         None,
-        dict(tile_size_input=1, tile_size_output=256, feed_b=True),
+        dict(tile_size_input=1, tile_size_output=256),
     ),
     "lm_head": (
         "model.embed_tokens.weight",
@@ -112,3 +112,43 @@ def test_a_graph_reading_a_weight_coded_returns_the_plain_bits(overflow):
         assert names == (["w.coded"] if coded_a and not overflow else ["w"])
         out[coded_a] = np.asarray(graph(x).numpy()).copy()
     np.testing.assert_array_equal(out[True].view(np.uint16), out[False].view(np.uint16))
+
+
+@pytest.mark.parametrize(
+    "M, K, tunables",
+    [
+        (2048, 2048, dict(tile_size_input=4, tile_size_output=256)),
+        (2048, 8192, dict(tile_size_input=1, tile_size_output=256)),
+    ],
+    ids=["one-head-tile", "two-head-tiles"],
+)
+def test_every_call_of_one_loaded_coded_gemv_returns_the_plain_bits(M, K, tunables):
+    """An acquire or release a head tile leaves unmatched shows from the
+    second call on: 50 calls of one loaded image, a new B each, every one
+    checked against the plain GEMV's.
+    """
+    shape = dict(M=M, K=K, num_aie_columns=8, **tunables)
+    plain, coded = GEMV(**shape), GEMV(**shape, coded_a=True)
+    w = _drawn(M, K)
+    tensor = aie_utils.DEFAULT_TENSOR_CLASS
+    loaded = {}
+    for op in (plain, coded):
+        a, b, c = op.buffers
+        loaded[op] = [
+            tensor(a.device_form(w)),
+            tensor(np.zeros(K, bfloat16)),
+            tensor(c.host_shape, dtype=c.host_dtype),
+        ]
+    rng = np.random.default_rng(5)
+    for call in range(50):
+        x = rng.standard_normal(K).astype(bfloat16)
+        out = []
+        for op in (plain, coded):
+            a, b, c = loaded[op]
+            b.numpy_view()[:] = x
+            c.numpy_view()[:] = np.full(M, np.nan, bfloat16)
+            op(a, b, c)
+            out.append(c.numpy().copy())
+        np.testing.assert_array_equal(
+            out[1].view(np.uint16), out[0].view(np.uint16), err_msg=f"call {call}"
+        )

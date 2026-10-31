@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-from pathlib import Path
 from typing import Any, ClassVar
 
 import aie.dialects.index as index
@@ -16,7 +15,6 @@ from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import eltwise, linalg
 from aie.utils import coded
-from aie.utils.config import aie_kernels_dir
 from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import (
     Select,
@@ -36,6 +34,19 @@ from iron.common.elementwise import (
     finish_reference,
 )
 from iron.common.testing import Case, Testing
+
+# Bytes [at, at + n) of B from one head tile of a coded A stream: whole
+# 64-byte vectors, as a coded tile and B are.
+CODED_HEAD_COPY = """
+#include <aie_api/aie.hpp>
+#include <stdint.h>
+
+extern "C" void coded_head_copy(const uint8_t *__restrict head,
+                                uint8_t *__restrict b, int32_t at, int32_t n) {
+  for (int32_t i = 0; i < n; i += 64)
+    aie::store_v(b + at + i, aie::load_v<64>(head + i));
+}
+"""
 
 
 def _cases(cls, dev: Device):
@@ -92,11 +103,12 @@ def _cases(cls, dev: Device):
         # ... and B a real stream of its own, broadcast to every lane.
         + [case(2048, 2048, 8, 4, 256, feed_b=True)]
         # ... and A as coded rows: Llama 3.2 1B's decode shapes, B in A's
-        # head tile, and on its own stream where a coded tile is too short
-        # to carry it (2048x8192 at one row a tile).
+        # head tile, in two where one coded row is shorter than B (2048x8192
+        # at one row a tile), and on its own stream.
         + [
             case(8192, 2048, 8, 4, 1024, coded_a=True, bench=True, lower=True),
             case(2048, 2048, 8, 4, 256, coded_a=True),
+            case(2048, 8192, 8, 1, 256, coded_a=True, lower=True),
             case(2048, 8192, 8, 1, 256, coded_a=True, feed_b=True),
             case(8192, 2048, 8, 4, 512, coded_a=True, num_channels=2),
             case(128, 128, 1, 32, 128, coded_a=True),
@@ -262,15 +274,14 @@ class GEMV(Operator):
                 "GEMV: coded_a's tiles are coded rows, which a finish input "
                 "cannot ride"
             )
-        tsi = self.tile_size_input
-        if tsi is not None and not self.feed_b:
-            head = tsi * coded.row_bytes(self.K, self.a_capacity)
-            if head < self.K * np.dtype(bfloat16).itemsize:
-                raise ValueError(
-                    f"GEMV: coded_a at K ({self.K}), tile_size_input ({tsi}): "
-                    f"B ({2 * self.K} bytes) does not fit A's {head}-byte head "
-                    f"tile; take feed_b=True or more rows a tile"
-                )
+
+    def _head_tiles(self) -> int:
+        """The tiles of A's stream that carry B to a lane each batch: one,
+        or for a coded tile shorter than B's 2K bytes, as many as hold it.
+        """
+        if not self.coded_a:
+            return 1
+        return -(-2 * self.K // math.prod(self.A.obj_shape))
 
     def _legal_kernel_vector_size(self) -> int:
         """The vector width the matvec kernel is compiled at: mv.cc's
@@ -474,21 +485,22 @@ class GEMV(Operator):
                 copy = eltwise.passthrough(K, np.int16).object_file.bind(
                     "passThroughLine", [self.A.obj_type, vector, np.int32]
                 )
-                copied = K
+                # Per head tile, the copy's arguments past the tile and b.
+                head_copies = [(K,)]
             else:
-                # B is a coded tile's first 2K bytes. The symbol is the tile
-                # type's own: a plain GEMV of the same K, packed beside, binds
-                # passThroughLine to its bf16 tile.
+                # B's 2K bytes, from as many coded tiles as hold them. The
+                # symbol is the tile type's own, beside a plain GEMV's.
                 copy = ExternalFunction(
-                    "passThroughLine",
-                    source_file=str(
-                        Path(aie_kernels_dir()) / "eltwise" / "passThrough.cc"
-                    ),
-                    arg_types=[self.A.obj_type, vector, np.int32],
-                    compile_flags=["-DBIT_WIDTH=8", f"-DPASSTHROUGH_ELEMS={2 * K}"],
+                    "coded_head_copy",
+                    source_string=CODED_HEAD_COPY,
+                    arg_types=[self.A.obj_type, vector, np.int32, np.int32],
                     symbol_prefix="coded_head_" + "x".join(map(str, self.A.obj_shape)),
                 )
-                copied = 2 * K
+                tile, total = math.prod(self.A.obj_shape), 2 * K
+                head_copies = [
+                    (h * tile, min(tile, total - h * tile))
+                    for h in range(self._head_tiles())
+                ]
             vectors = [Buffer(vector) for _ in range(lanes)]
 
             if not self.finish:
@@ -498,10 +510,11 @@ class GEMV(Operator):
                     n = words[self.tiles]
                     batches = words[self.batches]
                     for _ in range_(batches):
-                        # The batch's head tile carries B.
-                        head = A_fifo.acquire(1)
-                        copy(head, b, copied)
-                        A_fifo.release(1)
+                        # The batch's head tiles carry B.
+                        for args in head_copies:
+                            head = A_fifo.acquire(1)
+                            copy(head, b, *args)
+                            A_fifo.release(1)
                         for _ in range_(n):
                             c = C_fifo.acquire(1)
                             for j_idx in range_(tile_size_output // tile_size_input):
@@ -588,9 +601,10 @@ class GEMV(Operator):
                 n = words[self.tiles]
                 batches = words[self.batches]
                 for _ in range_(batches):
-                    head = A_fifo.acquire(1)
-                    copy(head, b, copied)
-                    A_fifo.release(1)
+                    for args in head_copies:
+                        head = A_fifo.acquire(1)
+                        copy(head, b, *args)
+                        A_fifo.release(1)
                     for _ in range_(n):
                         c = C_fifo.acquire(1)
                         for j_idx in range_(tile_size_output // tile_size_input):
@@ -771,9 +785,9 @@ class GEMV(Operator):
                     managed=False,
                 )
             elif self.coded_a:
-                # B, then the rest of the coded tile, unread: A's first bytes,
-                # one linear run.
-                pad = tsi * width - K * np.dtype(bfloat16).itemsize
+                # B, then the rest of its last head tile, unread: A's first
+                # bytes, one linear run.
+                pad = self._head_tiles() * tsi * width - 2 * K
                 heads = [
                     (TensorAccessPattern(self.B.shape, b * K, [1, K], [0, 1]), self.B)
                 ]

@@ -7,7 +7,10 @@ graph's reference still reads the weight itself.
 """
 
 import os
+import re
+from collections import Counter
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.utils import coded
@@ -15,6 +18,7 @@ from ml_dtypes import bfloat16
 from safetensors.numpy import save_file
 
 import iron
+from iron.common.design.design import OperatorDesign
 from iron.common.graph.coded import CodedWeight
 from iron.lm import Checkpoint
 from iron.operators.gemv import GEMV
@@ -221,3 +225,42 @@ def test_a_weight_of_one_matrix_reads_coded_as_a_batch_of_one():
         E,
         coded.row_bytes(E),
     )
+
+
+def _channels(op) -> list:
+    """The DMA channels ``op``'s module asks for: per logical tile, its
+    kind and the fifos it produces and consumes, and per fifo, the kinds
+    of its ends.
+    """
+    text = str(OperatorDesign(op.resolved()).module())
+    kinds = dict(re.findall(r"(%\w+) = aie\.logical_tile<(\w+)>", text))
+    tiles, fifos = Counter(), Counter()
+    for producer, consumers in re.findall(
+        r"aie\.objectfifo @\w+\((%\w+), \{([^}]*)\}", text
+    ):
+        ends = [c.strip() for c in consumers.split(",")]
+        tiles[producer, "out"] += 1
+        for c in ends:
+            tiles[c, "in"] += 1
+        fifos[kinds[producer], tuple(sorted(kinds[c] for c in ends))] += 1
+    per_tile = Counter(
+        (kinds[t], tiles[t, "out"], tiles[t, "in"]) for t in {t for t, _ in tiles}
+    )
+    return sorted(per_tile.items()) + sorted(fifos.items())
+
+
+def test_coding_a_gemv_s_weight_takes_no_channel_more():
+    """A packing priced for plain GEMVs must fit coded ones: for each
+    catalog shape coding can take, the same fifos between the same kinds
+    of tile, and the same count at every tile.
+    """
+    compared = 0
+    for case in GEMV.test.resolve(GEMV, aie_utils.get_current_device()):
+        shape = {k: v for k, v in case.kwargs.items() if k != "coded_a"}
+        try:
+            coded_op = GEMV(**shape, coded_a=True).resolved()
+        except ValueError:
+            continue  # what coding refuses: K % 64, a re-read, a core's L1
+        assert _channels(coded_op) == _channels(GEMV(**shape)), case.label
+        compared += 1
+    assert compared >= 10
