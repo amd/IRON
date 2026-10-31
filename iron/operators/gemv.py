@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from pathlib import Path
 from typing import Any, ClassVar
 
 import aie.dialects.index as index
@@ -10,11 +11,12 @@ import numpy as np
 from aie.dialects.aie import AIEArch, AIETileType, T
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import np_ndarray_type_to_memref_type
-from aie.iron import Buffer, In, Out, Worker, ceildiv
+from aie.iron import Buffer, ExternalFunction, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import eltwise, linalg
 from aie.utils import coded
+from aie.utils.config import aie_kernels_dir
 from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import (
     Select,
@@ -467,10 +469,26 @@ class GEMV(Operator):
                     "rides each lane's A stream, which a fed input cannot take"
                 )
             vector = np.ndarray[(K,), np.dtype[bfloat16]]
-            # A lossless copy of the head tile's first row, B, as 16-bit words.
-            copy = eltwise.passthrough(K, np.int16).object_file.bind(
-                "passThroughLine", [self.A.obj_type, vector, np.int32]
-            )
+            if not self.coded_a:
+                # A lossless copy of the head tile's first row, B, as 16-bit words.
+                copy = eltwise.passthrough(K, np.int16).object_file.bind(
+                    "passThroughLine", [self.A.obj_type, vector, np.int32]
+                )
+                copied = K
+            else:
+                # B is a coded tile's first 2K bytes. The symbol is the tile
+                # type's own: a plain GEMV of the same K, packed beside, binds
+                # passThroughLine to its bf16 tile.
+                copy = ExternalFunction(
+                    "passThroughLine",
+                    source_file=str(
+                        Path(aie_kernels_dir()) / "eltwise" / "passThrough.cc"
+                    ),
+                    arg_types=[self.A.obj_type, vector, np.int32],
+                    compile_flags=["-DBIT_WIDTH=8", f"-DPASSTHROUGH_ELEMS={2 * K}"],
+                    symbol_prefix="coded_head_" + "x".join(map(str, self.A.obj_shape)),
+                )
+                copied = 2 * K
             vectors = [Buffer(vector) for _ in range(lanes)]
 
             if not self.finish:
@@ -482,7 +500,7 @@ class GEMV(Operator):
                     for _ in range_(batches):
                         # The batch's head tile carries B.
                         head = A_fifo.acquire(1)
-                        copy(head, b, K)
+                        copy(head, b, copied)
                         A_fifo.release(1)
                         for _ in range_(n):
                             c = C_fifo.acquire(1)
@@ -571,7 +589,7 @@ class GEMV(Operator):
                 batches = words[self.batches]
                 for _ in range_(batches):
                     head = A_fifo.acquire(1)
-                    copy(head, b, K)
+                    copy(head, b, copied)
                     A_fifo.release(1)
                     for _ in range_(n):
                         c = C_fifo.acquire(1)
