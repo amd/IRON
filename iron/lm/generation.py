@@ -22,9 +22,10 @@ SEED = 1608560892
 
 
 class Sampler:
-    """Temperature, then top-k, then a draw from the softmax, exactly as the
-    device draws (``aie.iron.kernels.sample.sample_ref``), so the host and
-    device pick the same token from the same logits and uniform.
+    """Temperature, then top-k, then a draw from the softmax, exactly as the device draws.
+
+    ``aie.iron.kernels.sample.sample_ref``, so the host and device pick the
+    same token from the same logits and uniform.
 
     Args:
         top_k: None keeps the whole row; only valid on the host, since the
@@ -57,7 +58,7 @@ class Sampler:
         return int(self.rng.random() * 2.0**53)
 
     def probabilities(self, logits: np.ndarray) -> np.ndarray:
-        """The distribution a token is drawn from, float64, over ``logits`` (1-D)."""
+        """Return the distribution a token is drawn from, float64, over ``logits`` (1-D)."""
         size = np.asarray(logits).size
         probs = np.zeros(size, dtype=np.float64)
         if self.temperature == 0:
@@ -75,9 +76,9 @@ class Sampler:
         return sample_ref(logits, self.temperature, top_k, self._n53())
 
     def rows(self, count: int, k_max: int) -> np.ndarray:
-        """``count`` draws for the device, ``(count, ROW_WORDS)`` int32, one
-        per position, taking the uniforms ``count`` host draws would, in
-        order.
+        """``count`` draws for the device, ``(count, ROW_WORDS)`` int32, one per position.
+
+        Taking the uniforms ``count`` host draws would, in order.
 
         Raises:
             ValueError: ``top_k`` is None or past ``k_max``, the device's
@@ -98,7 +99,7 @@ def greedy(logits: np.ndarray) -> int:
 
 
 def generate_on_host(model, tokens, num_tokens, sample) -> list[int]:
-    """The ``num_tokens`` drawn after ``tokens``, each from ``model``'s logits."""
+    """Return the ``num_tokens`` drawn after ``tokens``, each from ``model``'s logits."""
     history = [int(t) for t in tokens]
     for _ in range(num_tokens):
         history.append(sample(model.logits(history)))
@@ -112,19 +113,17 @@ def _log_softmax(logits):
 
 
 def divergence(reference, logits) -> tuple[float, bool]:
-    """KL(reference || model) of two rows of logits, and whether both rank
-    the same token first.
-    """
+    """KL(reference || model) of two rows of logits, and whether both rank the same token first."""
     ref, got = _log_softmax(reference), _log_softmax(logits)
     kl = float(np.sum(np.exp(ref) * (ref - got)))
     return kl, int(got.argmax()) == int(ref.argmax())
 
 
 def accuracy(model, reference, tokens, num_tokens) -> list[tuple[float, bool]]:
-    """``model``'s next-token distributions against ``reference``'s, over
-    ``num_tokens`` steps from ``tokens``, teacher-forced on the reference's
-    greedy token so a divergence is the model's own error, not an earlier
-    different choice's consequence.
+    """``model``'s next-token distributions against ``reference``'s, over ``num_tokens`` steps from ``tokens``.
+
+    Teacher-forced on the reference's greedy token so a divergence is the
+    model's own error, not an earlier different choice's consequence.
     """
     history, results = [int(t) for t in tokens], []
     for step in range(num_tokens):
@@ -137,17 +136,19 @@ def accuracy(model, reference, tokens, num_tokens) -> list[tuple[float, bool]]:
 
 
 def kl_stats(results) -> dict[str, float]:
-    """The mean, p90 and max KL of ``accuracy``'s results, over every step,
-    prefill and decode alike: one step's KL depends as much on how
-    confident the reference is there as on the model.
+    """Return the mean, p90 and max KL of ``accuracy``'s results, over every step, prefill and decode alike.
+
+    One step's KL depends as much on how confident the reference is there
+    as on the model.
     """
     kl = np.array([k for k, _ in results])
     return {"Mean": kl.mean(), "P90": np.percentile(kl, 90), "Max": kl.max()}
 
 
 def greedy_logits(model, tokens, num_tokens) -> np.ndarray:
-    """The logits of ``num_tokens`` greedy steps from ``tokens``, one row
-    each, the first the prompt's.
+    """Return the logits of ``num_tokens`` greedy steps from ``tokens``, one row each.
+
+    The first the prompt's.
     """
     history, rows = [int(t) for t in tokens], []
     for _ in range(num_tokens):
@@ -157,18 +158,16 @@ def greedy_logits(model, tokens, num_tokens) -> np.ndarray:
 
 
 def differing_steps(run, first) -> list[int]:
-    """The steps at which two ``greedy_logits`` runs differ bitwise,
-    NaNs and signed zeros included.
-    """
+    """Return the steps at which two ``greedy_logits`` runs differ bitwise, NaNs and signed zeros included."""
     run, first = (np.ascontiguousarray(r).view(np.uint8) for r in (run, first))
     return np.flatnonzero((run != first).any(axis=1)).tolist()
 
 
 def determinism(model, prompts, num_tokens, rounds) -> int:
-    """How many runs' logits differ bitwise from the first of their prompt,
-    over ``rounds`` repeats of each prompt, alternating so a host write
-    that never reaches the device reads the other prompt's data, not a
-    leftover copy of its own.
+    """How many runs' logits differ bitwise from the first of their prompt, over ``rounds`` repeats of each prompt.
+
+    Alternating so a host write that never reaches the device reads the
+    other prompt's data, not a leftover copy of its own.
     """
     first: list = [None] * len(prompts)
     differ = 0

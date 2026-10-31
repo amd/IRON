@@ -62,8 +62,9 @@ def _f32(a):
 
 
 def _run_both(f, w, w2):
-    """Store through the one-line version, read through the two-line one, and
-    check that each weight went up once, whichever version touched it first.
+    """Store through the one-line version, read through the two-line one.
+
+    Check that each weight went up once, whichever version touched it first.
     """
     one, two = f.versions.values()
     # The state is one resident: the same bytes in both images.
@@ -106,9 +107,10 @@ def test_a_version_reads_as_its_inputs_plan_and_build_directory():
 
 
 def test_load_hands_each_piece_of_each_weight_to_release_once_it_is_uploaded():
-    """``release`` sees every weight once over every version, in order, in
-    pieces of at most ``piece_bytes``; after that the host copy is not read:
-    overwriting it changes nothing on the device.
+    """``release`` sees every weight once over every version, in order.
+
+    In pieces of at most ``piece_bytes``; after that the host copy is not
+    read: overwriting it changes nothing on the device.
     """
     f, w, w2, s = _function()
     f.compile(x=(E,))
@@ -138,9 +140,10 @@ def test_load_hands_each_piece_of_each_weight_to_release_once_it_is_uploaded():
 
 
 def test_load_loads_a_version_whose_weights_are_already_uploaded():
-    """Loading the one-line version uploads ``w``, which is every weight the
-    two-line version reads; loading that one must still put its image on the
-    device, or its first call does.
+    """Loading the one-line version uploads ``w``, every weight the two-line one reads.
+
+    Loading that one must still put its image on the device, or its first
+    call does.
     """
     w = _numbers(E, 1)
 
@@ -166,9 +169,10 @@ def test_load_loads_a_version_whose_weights_are_already_uploaded():
 
 
 def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state():
-    """Once a version is loaded, a call at a new shape compiles nothing and
-    raises; compiling it then grows the arena under the version that
-    already ran, which keeps working.
+    """Once a version is loaded, a call at a new shape compiles nothing and raises.
+
+    Compiling it then grows the arena under the version that already ran,
+    which keeps working.
     """
     f, w, w2, s = _function()
     x1, x2 = _numbers(E, 5), _numbers(2 * E, 6)
@@ -199,8 +203,9 @@ def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state
 
 
 def test_each_step_versions_share_weights_and_state_through_one_arena():
-    """Each step's other operands are buffer objects of their own; the
-    weights and the state are views of the arena's, and nothing else is.
+    """Each step's other operands are buffer objects of their own.
+
+    The weights and the state are views of the arena's, and nothing else is.
     """
     f, w, w2, s = _function()
     one = f.compile(x=(E,), full_elf=False)
@@ -223,9 +228,10 @@ def test_an_each_step_version_and_a_full_elf_share_one_arena():
 
 @pytest.mark.supported_devices("npu2")
 def test_a_read_leaves_nothing_for_the_next_call_to_push():
-    """Reading an output or a state pulls it without claiming it, so after
-    each call every argument is the device's, read or not; a host write
-    while a run is out is refused at its wait.
+    """Reading an output or a state pulls it without claiming it.
+
+    So after each call every argument is the device's, read or not; a
+    host write while a run is out is refused at its wait.
     """
     f, w, w2, s = _function()
     one = f.compile(x=(E,))
@@ -244,10 +250,11 @@ def test_a_read_leaves_nothing_for_the_next_call_to_push():
 
 @pytest.mark.supported_devices("npu2")
 def test_a_released_run_is_made_again_on_the_next_call():
-    """What a full device heap does to the version least recently called (the
-    EmbeddingGemma 2 determinism test fills it): its run is freed and its
-    image unloaded, and its next call loads it and makes a run over the same
-    arena and state.
+    """What a full device heap does to the version least recently called.
+
+    The EmbeddingGemma 2 determinism test fills it: its run is freed and
+    its image unloaded, and its next call loads it and makes a run over
+    the same arena and state.
     """
     f, w, w2, s = _function()
     one = f.compile(x=(E,))
@@ -272,8 +279,9 @@ def test_a_released_run_is_made_again_on_the_next_call():
 
 
 def test_release_frees_the_buffers_and_the_next_call_loads_them_again():
-    """A model's test fixture releases it, so its buffers are gone before the
-    next model loads rather than when the garbage collector reaches them.
+    """A model's test fixture releases it, so its buffers are gone before the next load.
+
+    Rather than when the garbage collector reaches them.
     """
     f, w, *_ = _function()
     x = _numbers(E, 5)

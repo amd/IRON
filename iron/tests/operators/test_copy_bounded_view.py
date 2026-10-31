@@ -81,7 +81,10 @@ class Walk(iron.Graph):
 
 
 def walked(table, band_stride: int, hk: int, wk: int) -> np.ndarray:
-    """The rows `hk` bands of `wk` blocks walk, band `b` from block `b * band_stride`."""
+    """Return the rows `hk` bands of `wk` blocks walk.
+
+    Band `b` from block `b * band_stride`.
+    """
     starts = [b * band_stride * K2 for b in range(hk)]
     return np.concatenate([table[s : s + wk * K2] for s in starts])
 
@@ -136,14 +139,17 @@ class Walks(iron.Graph):
 
 
 def walks_values(hk: int, wk: int) -> dict:
-    """A call's values: each group's repeat, at least one, and the rows moved."""
+    """Return a call's values: each group's repeat, at least one, and the rows moved."""
     repeats = [min(max(hk - first, 1), bands) for first, bands in GROUPS]
     n = sum(repeats) * wk * K2
     return dict(zip(("r0", "r1", "r2"), repeats), wk=wk, n=n)
 
 
 def walks_walked(table, band_stride: int, hk: int, wk: int) -> np.ndarray:
-    """The rows `Walks` moves: each group's bands, past the image a group's first."""
+    """Return the rows `Walks` moves.
+
+    Each group's bands, past the image a group's first.
+    """
     values = walks_values(hk, wk)
     return np.concatenate(
         [

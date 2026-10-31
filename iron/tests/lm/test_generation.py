@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generation's EOS exits and token counts over a real device loop: a small
-Llama on drawn weights, loaded from a repository directory whose
+"""Generation's EOS exits and token counts over a real device loop.
+
+A small Llama on drawn weights, loaded from a repository directory whose
 ``generation_config.json`` names the eos.
 """
 
@@ -48,7 +49,7 @@ def release():
 
 @pytest.fixture(scope="module")
 def draws(tmp_path_factory):
-    """The greedy draws after ``PROMPT``, with no eos to stop at."""
+    """Return the greedy draws after ``PROMPT``, with no eos to stop at."""
     model = _load(tmp_path_factory.mktemp("draws") / "repo")
     try:
         drawn = model.generate(PROMPT, MAX_TOKENS)
@@ -60,9 +61,9 @@ def draws(tmp_path_factory):
 
 
 def test_generate_counts_the_draws_past_eos(draws, tmp_path, release):
-    """The device loop draws all ``MAX_TOKENS`` before generate reads them,
-    so its count holds every one; stream reads each as it is drawn and
-    stops at eos.
+    """The device loop draws all ``MAX_TOKENS`` before generate reads them, so its count holds every one.
+
+    Stream reads each as it is drawn and stops at eos.
     """
     k = next((i for i in range(1, MAX_TOKENS) if draws[i] not in draws[:i]), 0)
     assert 0 < k < MAX_TOKENS - 1, f"no later first-seen draw in {draws}"
@@ -76,8 +77,10 @@ def test_generate_counts_the_draws_past_eos(draws, tmp_path, release):
 
 
 def test_a_first_token_eos_runs_no_decode_step(draws, tmp_path, release):
-    """The prompt chunk draws eos: no decode step runs, so the device's
-    ``drawn`` rows past the prompt are still the zeros they started as.
+    """The prompt chunk draws eos.
+
+    No decode step runs, so the device's ``drawn`` rows past the prompt are
+    still the zeros they started as.
     """
     assert any(draws[1:]), "a decode step would leave no trace"
     model = _load(tmp_path / "repo", eos=draws[0])

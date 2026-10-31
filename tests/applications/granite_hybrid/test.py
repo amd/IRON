@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Granite 4.0-H 1B on the NPU, from the real checkpoint: speed, accuracy
-against the float32 reference, determinism, and past one chunk: a prompt of
-two and a chat turn, which restarts the Mamba2 states from a chunk
-boundary's checkpoint. The model is compiled and loaded once for the
-module and every test calls it in-process.
+"""Granite 4.0-H 1B on the NPU, from the real checkpoint.
+
+Speed, accuracy against the float32 reference, determinism, and past one
+chunk: a prompt of two and a chat turn, which restarts the Mamba2 states
+from a chunk boundary's checkpoint. The model is compiled and loaded once
+for the module and every test calls it in-process.
 
 ``--random-weights SEED`` runs it on drawn weights and random prompts, on
 a host without the checkpoint, and ``--max-seq-len`` at another context.
@@ -72,10 +73,10 @@ GENERATION = pytest.mark.parametrize(
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestEachStep:
-    """Every step its own xclbin dispatch, the host starting each on the
-    token the last one drew. Its model is built and dropped with the class,
-    first: after any other test it would be held beside the module's
-    full-ELF one.
+    """Every step its own xclbin dispatch, the host starting each on the token the last one drew.
+
+    Its model is built and dropped with the class, first: after any other
+    test it would be held beside the module's full-ELF one.
     """
 
     @pytest.fixture(scope="class")
@@ -108,10 +109,11 @@ def test_granite_4_0_h_1b(model, prompt_len, num_tokens, record_property):
 @pytest.mark.extensive
 @pytest.mark.bench
 def test_granite_4_0_h_1b_rate_counts_the_draws_past_eos(model, record_property):
-    """After 13 characters the model draws eos 8th. generate's device loop
-    draws all 40 tokens before reading them, so its rate counts all 40;
-    stream reads each as it is drawn and counts those through eos. The two
-    rates agree.
+    """After 13 characters the model draws eos 8th.
+
+    generate's device loop draws all 40 tokens before reading them, so its
+    rate counts all 40; stream reads each as it is drawn and counts those
+    through eos. The two rates agree.
     """
     if model.random_weights is not None:
         pytest.skip("Early EOS is specific to the trained checkpoint")
@@ -146,16 +148,12 @@ LONG = 12000
 
 @pytest.mark.extensive
 def test_granite_4_0_h_1b_accuracy_across_chunks(model, record_property):
-    """The prompt's two chunks and two decode steps after them, against the
-    float32 reference over the whole prompt.
-    """
+    """The prompt's two chunks and two decode steps after them, against the float32 reference over the whole prompt."""
     assert len(model.prompt(LONG)) > model.config.prefill_chunk
     check_accuracy(model, MAX_KL, 3, LONG, record=record_property)
 
 
 @pytest.mark.extensive
 def test_granite_4_0_h_1b_chat_turn(model, record_property):
-    """A turn of 1000 tokens reruns the second chunk alone, from the states
-    the first left at its boundary.
-    """
+    """A turn of 1000 tokens reruns the second chunk alone, from the states the first left at its boundary."""
     check_chat_turn(model, LONG, 1000, record=record_property)

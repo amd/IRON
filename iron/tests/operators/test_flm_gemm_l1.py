@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""FLM's tile selection must leave room for what its kernel holds beside its
-buffers: its data, AIE2's activation LUT tables among it, and its stack.
+"""FLM's tile selection must leave room for what its kernel holds beside its buffers.
+
+Its data, AIE2's activation LUT tables among it, and its stack.
 """
 
 import pytest
@@ -75,8 +76,9 @@ def test_default_k_slice_is_the_deepest_that_fits_double_buffered(device, tile_n
 
 @requires("peano")  # frame_bytes reads 0 without it
 def test_aie2_activations_bring_their_lut_tables_into_the_frame():
-    """Measured, an activated core's frame holds lut_based_ops' tables; an
-    unactivated one's bytes go to a deeper k slice.
+    """Measured, an activated core's frame holds lut_based_ops' tables.
+
+    An unactivated one's bytes go to a deeper k slice.
     """
     shape = dict(M=512, K=1024, N=1024, tile_n=64, k_tile=512)
     shape.update(precision=Precision.MEDIUM)

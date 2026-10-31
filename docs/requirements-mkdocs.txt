@@ -5,3 +5,5 @@
 # Install with: pip install -r docs/requirements-mkdocs.txt
 mkdocs>=1.6.1,<2.0
 mkdocs-material>=9.7.7,<10.0
+mkdocstrings[python]>=1.0.7
+griffe>=2.3.2

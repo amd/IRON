@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Granite 4.0-H on the shared decoder (``iron.lm``), its shape read from
-its checkpoint's ``config.json``. This package ships the dense sizes
-only; a checkpoint with experts is refused (``num_local_experts``).
+"""Granite 4.0-H on the shared decoder (``iron.lm``), its shape read from its checkpoint's ``config.json``.
+
+This package ships the dense sizes only; a checkpoint with experts is
+refused (``num_local_experts``).
 
 Granite 4.0-H is Granite's layer (its four scalars, ``GraniteConfig``)
 with most layers' attention replaced by a Mamba2 mixer (``Mamba``) and
@@ -35,10 +36,10 @@ from iron.operators.selective_scan import SelectiveScan
 
 @dataclasses.dataclass(frozen=True)
 class GraniteHybridConfig(GraniteConfig):
-    """``GraniteConfig``, which layers are attention, the Mamba2 mixer's
-    shape and the shared MLP's width. A checkpoint with experts
-    (``num_local_experts``) is refused; this package ships the dense
-    sizes only.
+    """``GraniteConfig``, which layers are attention, the Mamba2 mixer's shape and the shared MLP's width.
+
+    A checkpoint with experts (``num_local_experts``) is refused; this
+    package ships the dense sizes only.
     """
 
     # transformers' default; __post_init__ sets None but under "rope".
@@ -79,29 +80,30 @@ class GraniteHybridConfig(GraniteConfig):
         )
 
     def attends(self, i: int) -> bool:
-        """Whether layer ``i`` is attention (``"attention"``, or transformers'
-        newer ``"full_attention"``), not Mamba2.
-        """
+        """Whether layer ``i`` is attention (``"attention"``, or transformers' newer ``"full_attention"``), not Mamba2."""
         return self.layer_types[i] in ("attention", "full_attention")
 
 
 class Mamba(iron.Graph):
-    """A Mamba2 mixer on ``c``'s shape: ``in_proj`` to the gate, ``x``,
-    ``B``, ``C`` and ``dt``; ``conv1d`` over ``x``, ``B`` and ``C``, then
-    silu; the scan; ``norm`` of its output times silu of the gate; and
-    ``out_proj``.
+    """A Mamba2 mixer on ``c``'s shape.
+
+    ``in_proj`` to the gate, ``x``, ``B``, ``C`` and ``dt``; ``conv1d``
+    over ``x``, ``B`` and ``C``, then silu; the scan; ``norm`` of its
+    output times silu of the gate; and ``out_proj``.
     """
 
     def __init__(self, c: GraniteHybridConfig):
         E, H, K = c.hidden_size, c.mamba_n_heads, c.mamba_d_conv
-        self.inner = I = H * c.mamba_d_head
+        self.inner = d_inner = H * c.mamba_d_head
         self.channels = c.conv_channels
         self.groups = c.mamba_n_groups
-        self.in_proj = Linear(E, I + self.channels + H, False, precision=c.precision)
+        self.in_proj = Linear(
+            E, d_inner + self.channels + H, False, precision=c.precision
+        )
         self.conv1d = CausalConv1d(c, self.channels, K, bias=True)
         self.dt_bias, self.A_log, self.D = (iron.param(H) for _ in range(3))
-        self.norm = RMSNorm(I, c.eps)
-        self.out_proj = Linear(I, E, False, precision=c.precision)
+        self.norm = RMSNorm(d_inner, c.eps)
+        self.out_proj = Linear(d_inner, E, False, precision=c.precision)
         state = (H, c.mamba_d_head, c.mamba_d_state)
         self.ssm_state = Checkpoints.of(
             state, c.max_seq_len, c.prefill_chunk, np.float32
@@ -116,10 +118,11 @@ class Mamba(iron.Graph):
         )
 
     def body(self, x, call):
-        I, C = self.inner, self.channels
+        d_inner, C = self.inner, self.channels
         w, p = self.in_proj.weight, self.in_proj.precision
         gate, xbc, dt = (
-            F.linear(x, part, precision=p) for part in (w[:I], w[I : I + C], w[I + C :])
+            F.linear(x, part, precision=p)
+            for part in (w[:d_inner], w[d_inner : d_inner + C], w[d_inner + C :])
         )
         xbc = F.silu(self.conv1d(xbc, call))
         read, write = self.ssm_state.at(call)
@@ -135,8 +138,9 @@ class Mamba(iron.Graph):
 
 
 class SharedMLP(iron.Graph):
-    """The gated MLP every layer runs: ``input_linear``, the gate's rows
-    over the up's, then ``output_linear``.
+    """The gated MLP every layer runs.
+
+    ``input_linear``, the gate's rows over the up's, then ``output_linear``.
     """
 
     def __init__(self, c: GraniteHybridConfig):
@@ -153,9 +157,7 @@ class SharedMLP(iron.Graph):
 
 
 class GraniteHybridLayer(GraniteLayer):
-    """Granite's layer, ``mamba`` in attention's place where the layer is
-    Mamba2, its feed-forward ``shared_mlp``.
-    """
+    """Granite's layer, ``mamba`` in attention's place where the layer is Mamba2, its feed-forward ``shared_mlp``."""
 
     def __init__(self, c: GraniteHybridConfig, i: int):
         super().__init__(c, i)
@@ -179,9 +181,7 @@ class GraniteHybridLayer(GraniteLayer):
 
 
 class GraniteHybrid(Granite):
-    """Granite 4.0-H on ``config``'s shape and a checkpoint's ``weights``,
-    from its checkpoint and ``tokenizer.json``.
-    """
+    """Granite 4.0-H on ``config``'s shape and a checkpoint's ``weights``, from its checkpoint and ``tokenizer.json``."""
 
     config = GraniteHybridConfig
     profile = Path(__file__).with_name("profiles")

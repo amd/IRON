@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A small Llama with a tower on its image placeholder, and Hugging Face's
-logits for it.
+"""A small Llama with a tower on its image placeholder.
+
+And Hugging Face's logits for it.
 """
 
 import dataclasses
@@ -54,8 +55,9 @@ IMAGE = SMALL.vocab_size - 1
 
 
 class Placed(HuggingFace):
-    """Hugging Face's Llama with ``soft`` at its image placeholders: the
-    logits after a sequence's tokens.
+    """Hugging Face's Llama with ``soft`` at its image placeholders.
+
+    The logits after a sequence's tokens.
     """
 
     def logits(self, tokens, soft) -> np.ndarray:
@@ -70,10 +72,11 @@ class Placed(HuggingFace):
 
 
 def small_causal(golden):
-    """A small Llama over chunks of 256 of 1024 positions, a tower on its
-    image placeholder, Hugging Face's logits for it (``reference(tokens,
-    soft)``, from ``goldens/multimodal.npz``), and a prompt whose run of 16
-    soft tokens crosses its first chunk's end.
+    """Build a small Llama over chunks of 256 of 1024 positions, a tower on its image placeholder.
+
+    Hugging Face's logits for it (``reference(tokens, soft)``, from
+    ``goldens/multimodal.npz``), and a prompt whose run of 16 soft tokens
+    crosses its first chunk's end.
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
     weights = checkpoint(config).tree("random")

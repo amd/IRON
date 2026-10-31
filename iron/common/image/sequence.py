@@ -13,7 +13,7 @@ import aie.utils as aie_utils
 import numpy as np
 from aie.utils import bfp
 
-from ..declare import Operator
+from ..declare import Operand, Operator
 from .allocator import Allocation, ArenaPlan, lay_out
 from .artifacts import Artifacts, Step
 from .callable import BF16, FullELFCallable, PerStepCallable, ScratchArena
@@ -27,15 +27,17 @@ logger = logging.getLogger(__name__)
 
 
 def _signature(op):
-    """The runtime arguments an operator takes: direction, shape and dtype each."""
+    """Return the runtime arguments an operator takes: direction, shape and dtype each."""
     return [
         (b.role.__name__, tuple(b.shape), bfp.dtype_name(b.dtype)) for b in op.buffers
     ]
 
 
 class Image:
-    """A recorded graph's steps, built and dispatched as one image; ``residents``,
-    by storage key, keep one place in the shared ``arena`` across images.
+    """A recorded graph's steps, built and dispatched as one image.
+
+    ``residents``, by storage key, keep one place in the shared ``arena``
+    across images.
     """
 
     def __init__(
@@ -74,8 +76,10 @@ class Image:
         return list(seen.values())
 
     def unique_designs(self):
-        """The designs to build, and which each operator uses: operators reporting
-        one ``design_key`` share a design, built and configured once.
+        """Return the designs to build, and which each operator uses.
+
+        Operators reporting one ``design_key`` share a design, built and
+        configured once.
         """
         designs = []
         design_of = {}
@@ -97,8 +101,9 @@ class Image:
         return designs, design_of
 
     def _uses(self, roots) -> list[tuple[list[str], list[str]]]:
-        """Each step's reads and writes among ``roots``, a part of a buffer
-        its use.
+        """Return each step's reads and writes among ``roots``.
+
+        A part of a buffer is its use.
         """
         uses = []
         for s in self.steps:
@@ -114,8 +119,9 @@ class Image:
         return uses
 
     def _place_in_arena(self, uses, sizes: Mapping[str, int]) -> dict[str, Allocation]:
-        """This sequence's scratch buffers placed in the shared arena, once; a
-        part's use is a use of its buffer.
+        """Place this sequence's scratch buffers in the shared arena, once.
+
+        A part's use is a use of its buffer.
         """
         if self._arena_layout is not None:
             return self._arena_layout
@@ -129,11 +135,13 @@ class Image:
         return self._arena_layout
 
     def _layout(self):
-        """Each buffer's ``(argument kind, byte offset, bytes)`` and each argument's
-        bytes; ``pinned`` sizes a buffer over what the steps naming it whole declare.
+        """Return each buffer's ``(argument kind, byte offset, bytes)`` and each argument's bytes.
+
+        ``pinned`` sizes a buffer over what the steps naming it whole
+        declare.
         """
         sizes: dict[str, int] = {}
-        declared: dict[str, object] = {}
+        declared: dict[str, Operand] = {}
         parts = []
         for s in self.steps:
             if len(s.buffers) != len(s.op.buffers):
@@ -180,8 +188,10 @@ class Image:
         return lay_out(sizes, uses, host, self.pinned, arena)
 
     def buffer_dtype(self, ref: BufferRef) -> np.dtype:
-        """The host dtype ``ref`` is viewed as: what the first step naming it
-        declares, else a whole buffer's parts' if they agree (bytes if not), or bf16.
+        """Return the host dtype ``ref`` is viewed as.
+
+        What the first step naming it declares, else a whole buffer's
+        parts' if they agree (bytes if not), or bf16.
         """
         parts = set()
         for s in self.steps:
@@ -226,7 +236,8 @@ class Image:
         return self._artifacts
 
     def _record(self):
-        """What this image consists of: its designs, its steps, its buffers."""
+        """Record what this image consists of: its designs, its steps, its buffers."""
+        assert self.layout is not None, "_prepare() ran before _link()"
         designs, design_of = self.unique_designs()
         operators = list(self.unique_operators())
         sharing = [
@@ -253,8 +264,10 @@ class Image:
     def get_callable(
         self, arena: ScratchArena | None = None
     ) -> FullELFCallable | PerStepCallable:
-        """The callable of this sequence's image, compiling first if needed, running
-        in ``arena`` what it placed in an arena plan (a new arena if not given).
+        """Return the callable of this sequence's image, compiling first if needed.
+
+        Runs in ``arena`` what it placed in an arena plan (a new arena if
+        not given).
         """
         if self.layout is None:
             self._prepare()

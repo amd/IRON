@@ -10,8 +10,10 @@ Ported from the `mm` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)
 ```python
 from iron.operators.flm import ProjectionGEMM
 
-op = ProjectionGEMM(M=1024, K=1536, N=6144, epilogue="silu")
-op(A, op.pack_B(B), C_out)  # compiles once, then runs
+op = ProjectionGEMM(
+    M=1024, K=1536, N=6144, epilogue="silu", precision="medium", bfp16_b=True
+)  # NPU2's bfp16 B; leave bfp16_b out on NPU1
+op(A, op.pack_b(B), C_out)  # compiles once, then runs
 ```
 
 The epilogue applies the activation that follows the product, a SiLU, a
@@ -21,7 +23,7 @@ bare strings `"gelu"` / `"conv_even"` / `"bf16_steps"` are accepted too.
 
 This is the GEMM `F.linear` runs for any input of more than one row. It reads
 the checkpoint's weight as stored, `(N, K)`, with `b_col_maj=True`; a
-dequantized weight comes as bfp16 B packed once by `pack_B`. It was ported from
+dequantized weight comes as bfp16 B packed once by `pack_b`. It was ported from
 FastFlowLM's `mm` overlay. [`iron.operators.GEMM`](../../gemm.py) is the GEMM of
 `F.linear(..., precision=Precision.HIGHEST)` and of integer types.
 
@@ -39,7 +41,7 @@ memtile — so those are *not* what distinguishes it. What does:
 |---|---|---|
 | tiling | parameterized tiles, 1–8 columns | m=64, r/s/t 8/8/8; `k_tile` and `tile_n` tunable |
 | after the product | nothing | fused f32→bf16 + activation |
-| B layout | `(K, N)`, or `(N, K)` with `b_col_maj` | `(N, K)` with `b_col_maj`, or packed by `pack_B` |
+| B layout | `(K, N)`, or `(N, K)` with `b_col_maj` | `(N, K)` with `b_col_maj`, or packed by `pack_b` |
 | A tile height | tied to the accumulator | decoupled (asymmetric tile buffering) |
 
 The shipped overlay itself is a test fixture, `iron/tests/support/shipped.py`
@@ -61,7 +63,7 @@ two lowering details differ.
 The mmul shape is **not** specific to the bfp16 path, despite needing
 `AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16` to get the fast lowering on NPU2:
 `aie::mmul<8,8,8>` decomposes onto AIE2's native 4x8x4 bf16 mac as exactly four
-macs with no wasted lanes, so `pack_B`, the stream-dimension lists and
+macs with no wasted lanes, so `pack_b`, the stream-dimension lists and
 `gather_dims` are shared verbatim. On AIE2 that flag is silently ignored, so it
 is only passed where it changes codegen.
 
@@ -89,8 +91,9 @@ read by the core once its barrier opens:
 
 A word is not free: each costs ~66 ns per core and the sequence writes
 `ROWS * COLS` = 32 of them, so **every word is ~2 us of dispatch latency**
-(measured by padding the buffer at a fixed core count). Against a ~107 us
-floor that is most of a short-prefill dispatch, so `build()` lists only the
+(measured by padding the buffer at a fixed core count, in #200, 2026-09-16).
+Against this operator's smallest dispatch as #200 timed it, ~107 us, that is
+most of a short-prefill call, so `build()` lists only the
 words a configuration's cores read (`Rtp(...)`), and the buffer is sized
 to them. Two groups are therefore conditional or gone:
 
@@ -121,7 +124,8 @@ external call rather than folding to a register move.
   names, and baking it into code would make them differ in instructions,
   foreclosing a future one-program xclbin.
 
-Measured on the 30-shape suite at **four** words: **-3.5% median at M=256**
+Measured on the 30-shape suite at **four** words in #200 (2026-09-16):
+**-3.5% median at M=256**
 (best -11.3%, E2B/kv), and within noise at M >= 1024 -- the saving is a
 constant ~12 us, so it is a short-prefill and decode lever, not a prefill one.
 Making the clamp bounds unconditional put two words back, which the ~2 us per
@@ -170,17 +174,20 @@ multiple of the full stride.
 ## B must be pre-packed
 
 ```python
-op = ProjectionGEMM(M=M, K=K, N=N)
-op(A, op.pack_B(B), C_out)
+op = ProjectionGEMM(M=M, K=K, N=N, precision="medium", bfp16_b=True)  # NPU2
+op(A, op.pack_b(B), C_out)
 ```
 
-`pack_B` reorders a row-major `(K, N)` matrix into the order the compute tiles
-read it, so each fill is one contiguous run. On NPU2 it also quantizes to
-bfp16ebs8 and returns a flat `uint8` tensor rather than bf16; on NPU1 it stays
-bf16. The layout itself lives in
+`pack_b` reorders a row-major `(K, N)` matrix into the order the compute tiles
+read it, so each fill is one contiguous run. With `bfp16_b=True`, which NPU2
+takes at `precision="medium"`, it also quantizes to bfp16ebs8 and returns a
+flat `uint8` tensor rather than bf16; otherwise, and always on NPU1, it stays
+bf16. The caller names the layout because B's host shape depends on it and an
+operator is built before it meets a device; one that does not match the
+device is refused when it resolves. The layout itself lives in
 [`iron/operators/flm/packing.py`](../packing.py).
 
-Call it on the operator — `op.pack_B(B)` — not on the class: the layout depends
+Call it on the operator — `op.pack_b(B)` — not on the class: the layout depends
 on the resolved `tile_n` and on the device.
 
 This is deliberately the caller's job rather than something the fill descriptor
@@ -188,7 +195,7 @@ does. The same reorder *is* expressible as a strided descriptor over an unpacked
 B, but its innermost run is then `t` bf16 values = 16 bytes, so each 128 KB
 transfer becomes thousands of scattered bursts. B is ~70% of the bytes a
 dispatch moves, so the operator ran at ~10 GB/s instead of ~47 — a 5.4x
-end-to-end penalty. Weights are packed once and reused across dispatches, so the
+end-to-end penalty (#195, 2026-09-11). Weights are packed once and reused across dispatches, so the
 cost belongs at the caller.
 
 ### Or read as stored
@@ -209,8 +216,9 @@ arithmetic is the packed path's; `"high"` multiplies in bf16. `precision`
 has no default: every caller names it.
 
 At Llama 3.2 1B's prompt projections (M = 2048, `epilogue_modes=("none",)`)
-on Strix, the times below are the fastest of 8 interleaved rounds, each the
-median of 10 runs, and the error is the mean |C − C_f32| over the mean |C_f32|:
+on Strix, measured for #222 (2026-10-28), the times below are the fastest of
+8 interleaved rounds, each the median of 10 runs, and the error is the mean
+|C − C_f32| over the mean |C_f32|:
 
 | K × N | packed | `b_col_maj` | `b_col_maj`, bf16 macs | `iron.operators.GEMM` |
 |---|---|---|---|---|
@@ -223,8 +231,9 @@ median of 10 runs, and the error is the mean |C − C_f32| over the mean |C_f32|
 `b_col_maj` moves 1.78x the B bytes of the packed path. Where B is resident
 (K ≤ 2048 here) that costs 5-14%; at K = 8192 both stream B, and it costs 32%.
 
-On Phoenix, where B is bf16 either way, the times below are the range over 8
-interleaved rounds, each the median of 10 runs:
+On Phoenix, where B is bf16 either way, measured for #222 (2026-10-28), the
+times below are the range over 8 interleaved rounds, each the median of 10
+runs:
 
 | K × N | packed | `b_col_maj` | `iron.operators.GEMM` |
 |---|---|---|---|
@@ -258,7 +267,7 @@ lets the activation's slope amplify the first rounding, so the overlay's order
 is the less accurate one and is not worth reproducing. The cost of diverging is
 visible — at M=256 K=512 N=1024, 117582/262144 silu elements differ from the
 overlay — and so is the benefit: against an exact f64 evaluation, mean |err|
-improves and gelu's worst case drops 5.5%. Measured perf-neutral (0.993-1.006x,
+improves and gelu's worst case drops 5.5%. Measured perf-neutral in #195 (0.993-1.006x,
 inside the run-to-run spread).
 
 **gelu can match the overlay on request.** A port of a whole model must
@@ -332,32 +341,37 @@ to reduce over -- with a single k iteration there is not enough compute to
 hide the extra A traffic.
 
 On NPU2, `tile_n=128` wins only at `k_iters=1`, and by ~3%; at `k_iters>=2` it
-was 1.2-1.7x slower, measured while its k slice (`ct_k`) was fixed at 32: the
-compute cost of the shorter k slice swamps the A traffic it saves.
+was 1.2-1.7x slower, measured in #195 (2026-09-11) while its k slice (`ct_k`)
+was fixed at 32: the compute cost of the shorter k slice swamps the A traffic
+it saves.
 
 NPU1 never reaches that crossover. It has half the columns *and* a quarter of
 the per-tile bf16 mac throughput, so it stays compute-bound at every K, and
-`n=128` also costs it a much larger f32 accumulator. `n=64` wins at every
-`k_iters`, by 1.2-1.8x.
+`n=128` also costs it a much larger f32 accumulator. `n=64` won at every
+`k_iters`, by 1.2-1.8x, in #195.
 
 ## Performance
 
 ### NPU2
 
-M=1024 K=1536 N=6144, min of per-run medians:
+At M=1024 K=1536 N=6144, CI's extensive suite times the port, the shipped
+overlay and `iron.operators.GEMM` on the eight-column NPU2 each night; their
+latencies are on the Benchmarks page, the first two under
+[`flm/gemm`](https://amd.github.io/IRON/benchmarks/#bench=flm/gemm&suite=extensive&metric=Latency) and the
+third under [`GEMM`](https://amd.github.io/IRON/benchmarks/#bench=GEMM&suite=extensive&metric=Latency):
 
-| | bytes moved | latency | err/mass |
-|---|---|---|---|
-| `flm.ProjectionGEMM` (`tile_n=64`) | 47 MB | **1143 us** | 2.39e-04 |
-| `Shipped(...)` (the shipped overlay) | 107 MB | 2175 us | 9.87e-03 |
-| `iron.operators.GEMM` (same emulated mode) | 126 MB | 3353 us | 2.41e-04 |
+| | bytes moved | err/mass |
+|---|---|---|
+| `flm.ProjectionGEMM` (`tile_n=64`) | 47 MB | 2.39e-04 |
+| `Shipped(...)` (the shipped overlay) | 107 MB | 9.87e-03 |
+| `iron.operators.GEMM` (same emulated mode) | 126 MB | 2.41e-04 |
 
-**1.90x the shipped overlay, and 41x more accurate than it** — the accuracy
-comes from `conv_even` rounding, which the overlay does not set (see above).
+The port is **41x more accurate than the overlay** — the accuracy comes from
+`conv_even` rounding, which the overlay does not set (see above).
 
 Three choices account for most of the gap, and none of them helps alone:
 
-* **`pack_B` emits the final consumption order**, so both B hops are linear
+* **`pack_b` emits the final consumption order**, so both B hops are linear
   descriptors. Worth nothing by itself — it is what frees the descriptor
   dimensions the other two need.
 * **Asymmetric tile buffering**, which pays for a k slice deep enough to halve
@@ -386,7 +400,8 @@ tallest A tile: the default `tile_n=64` configuration takes `ct_k=64` and
 `tile_ma=64`, `tile_n=32` takes `ct_k=128`, and `tile_n=128` takes `ct_k=32`.
 Each k slice reloads and stores the f32 accumulator, and a B chunk the core
 waits on stalls it, so both matter; the A height measured no effect. On
-xcoradaie205 (Phoenix), median of 20 dispatches, every output checked:
+xcoradaie205 (Phoenix) for #222 (2026-10-28), median of 20 dispatches, every
+output checked:
 
 | M / K / N | tiles | before (ct_k fixed) | L1-derived ct_k |
 |---|---|---|---|
@@ -394,27 +409,14 @@ xcoradaie205 (Phoenix), median of 20 dispatches, every output checked:
 | 1024 / 2048 / 1024 | `tile_n=64` | 2870 us (ct_k 128, single B) | **2337 us** (ct_k 64) |
 | 512 / 2048 / 2048 | `tile_n=32` | 3232 us (ct_k 32) | **2344 us** (ct_k 128) |
 
-The table below predates the LUT reservation and the L1-derived k slice.
+CI's extensive suite times the port on Phoenix at the E4B o-projection
+(1024/2560/2560) and at 2048/2048/1024; see
+[`flm/gemm`](https://amd.github.io/IRON/benchmarks/#bench=flm/gemm&suite=extensive&metric=Latency) on the
+Benchmarks page. `K=1536` is a weak shape here: `k_iters=3` leaves the L1 k
+slice partly unused.
 
-Against `iron.operators.GEMM` at its own defaults (64/64/64 over all 4
-columns), min of 5 interleaved rounds of 20 dispatches each:
-
-| M / K / N | `flm.ProjectionGEMM` | `iron.operators.GEMM` | speedup | GFLOP/s |
-|---|---|---|---|---|
-| 256 / 512 / 512 | **218 us** | 227 us | 1.04x | 615 |
-| 512 / 512 / 1024 | **390 us** | 466 us | 1.19x | 1377 |
-| 512 / 1024 / 1024 | **639 us** | 798 us | 1.25x | 1680 |
-| 1024 / 1024 / 1024 | **1071 us** | 1418 us | 1.32x | 2005 |
-| 1024 / 2048 / 1024 | **2134 us** | 2738 us | 1.28x | 2013 |
-| 512 / 1536 / 1536 | **1498 us** | 1699 us | 1.13x | 1613 |
-| 1024 / 2560 / 2560 | **6364 us** | 8232 us | 1.29x | 2109 |
-
-`K=1536` is the weak shape, at 1.13x against 1.25-1.32x for its neighbours.
-It is the one place the L1 configuration below does not suit NPU1: `k_iters=3`
-leaves the k slice partly unused. Worth a look if NPU1 throughput matters.
-
-The margin is smaller than NPU2's ~1.9x, and that is expected rather than a
-port problem: much of the NPU2 win comes from the bfp16 fast path (two macs per
+The margin over `iron.operators.GEMM` is smaller than on NPU2, and that is
+expected rather than a port problem: much of the NPU2 win comes from the bfp16 fast path (two macs per
 8x8x8 shape against four) and from spreading A across eight columns. On NPU1
 both operators lower to the same native 4x8x4 mac, so what remains is the
 cheaper transfers below — pre-packed B and one transfer per column-block —
@@ -490,7 +492,7 @@ Constraints, all enforced in op.py:
 * **Arm B after the first block's fills, not before** (the class sets
   `own_preamble`, so `sequence()` places `rt.preamble()` itself). `set_lock` is cheap
   (~0.2 µs each), but putting it and the RTP writes ahead of the first A and B
-  fills cost up to +9% at M=256. Issued between the first block's fills and its
+  fills cost up to +9% at M=256 (#219, 2026-10-03). Issued between the first block's fills and its
   C, the setup hides under the fill latency. That reordering is independent of
   residency and is part of the M=256 gain below.
 * **NPU1 fits exactly**: bf16 B at `tile_n=64` leaves room for 5 slots, which
@@ -504,8 +506,9 @@ counts past one push. The instruction stream is built with
 BD ids. Every hardware limit the design uses but `B_MAX_SLOTS` comes from the
 target model.
 
-Measured on NPU2 (Strix, power mode `default`) against the fifo version over
-the 30 benchmark shapes, 4 interleaved rounds on mlir_aie 1.4.4.dev73, errors
+Measured for #219 (2026-10-03) on NPU2 (Strix, power mode `default`) against
+the fifo version over the 30 benchmark shapes, 4 interleaved rounds on mlir_aie
+1.4.4.dev73, errors
 bit-identical on all: median **-23.9%**, best -37.7% (E4B gateup M2048).
 
 | shapes | change |
@@ -541,7 +544,7 @@ slot, and when a tile runs out of BD ids it takes one back from a transfer a
 status poll proves finished. Both waits are per transfer, so the channel stays
 full. Awaiting in windows instead — issue four, await all four — drains the
 channel at every boundary and measured up to 12.4% slower on the shapes that
-cut a leg (E4B/gateup M1024).
+cut a leg (E4B/gateup M1024) in #219.
 
 The sequence's only share is order and one token. Only each column's last C of
 a slab carries a token: C drains in order, so it finishing means the slab is
@@ -591,7 +594,7 @@ ring passes in one queue push.
 from iron.tests.support.shipped import Shipped
 
 op = Shipped(M=1024, K=1536, N=6144, epilogue="silu")
-op(A, op.pack_B(B), C_out)
+op(A, op.pack_b(B), C_out)
 ```
 
 `Shipped` (`iron/tests/support/shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a
@@ -618,7 +621,7 @@ default `-m "not extensive"` run.
 
 The overlay ships as a binary, so every core program, memtile buffer and
 stream-switch route comes from the xclbin. The overlay supplies only the
-host-side half of a dispatch, and `ProjectionGEMM`'s own `pack_B`, `reference` and
+host-side half of a dispatch, and `ProjectionGEMM`'s own `pack_b`, `reference` and
 packaging serve it:
 
 * **The runtime parameters.** One overlay serves every projection in a model, so

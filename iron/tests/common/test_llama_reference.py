@@ -27,17 +27,17 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+from iron.applications.llama import Llama
+from iron.applications.llama.model import Llama3RopeScaling
 from iron.lm import (
     Sampler,
     Session,
     Tokenizer,
     generate_on_host,
 )
-from iron.lm.model import TokenizerJson
 from iron.lm.checkpoint import leaves
+from iron.lm.model import TokenizerJson
 from iron.lm.testing import assert_close
-from iron.applications.llama import Llama
-from iron.applications.llama.model import Llama3RopeScaling
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE
@@ -71,8 +71,9 @@ def cpu(golden):
 
 
 def _decoded(model, tokens, steps):
-    """The logits after ``tokens``, its last ``steps`` tokens decoded one at
-    a time over the caches the prompt before them left.
+    """Return the logits after ``tokens``, its last ``steps`` tokens decoded one at a time.
+
+    Over the caches the prompt before them left.
     """
     model.logits(tokens[:-steps])
     for n in range(len(tokens) - steps + 1, len(tokens) + 1):
@@ -82,7 +83,9 @@ def _decoded(model, tokens, steps):
 
 @pytest.mark.parametrize("outside", [-1, SMALL.vocab_size])
 def test_a_token_outside_the_vocabulary_is_refused_before_any_dispatch(cpu, outside):
-    """A prompt that differs from the history in its first chunk and holds
+    """Check that a token outside the vocabulary is refused before any dispatch.
+
+    A prompt that differs from the history in its first chunk and holds
     an id no row embeds in its second: refused whole, the caches and the
     history as the last call left them.
     """
@@ -103,8 +106,11 @@ def test_a_token_outside_the_vocabulary_is_refused_before_any_dispatch(cpu, outs
 
 
 def test_a_model_runs_only_the_versions_it_loaded(cpu):
-    """Before ``load_versions()`` a call compiles nothing on its own: that would build
-    an untuned version past the tuner and packaging ``load_versions`` is given.
+    """Check that a model runs only the versions it loaded.
+
+    Before ``load_versions()`` a call compiles nothing on its own: that
+    would build an untuned version past the tuner and packaging
+    ``load_versions`` is given.
     """
     model = Llama(cpu.config, cpu.weights)
     with pytest.raises(RuntimeError, match=r"load_versions\(\) first"):
@@ -116,9 +122,11 @@ def test_a_model_runs_only_the_versions_it_loaded(cpu):
 
 @pytest.mark.parametrize("temperature", [0.0, 0.7])
 def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
-    """What ``generate_on_host`` loops on the device, each call started from
-    the last one's carry: from the same seed, the host loop's tokens. Every
-    draw is the graph's own, from the rows the sampler gives it.
+    """Check that the carried draws are the host loop's tokens.
+
+    What ``generate_on_host`` loops on the device, each call started from
+    the last one's carry: from the same seed, the host loop's tokens.
+    Every draw is the graph's own, from the rows the sampler gives it.
     """
     config, n, count = cpu.config, len(cpu.prompt), 6
     host = OnHost(config, cpu.weights)
@@ -140,8 +148,9 @@ def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
 
 
 class Placed(OnHost):
-    """``OnHost`` with no RoPE, its positions a held table's rows added to
-    the embedding's.
+    """``OnHost`` with no RoPE.
+
+    Its positions are a held table's rows added to the embedding's.
     """
 
     def __init__(self, config, weights, table):
@@ -159,12 +168,14 @@ class Placed(OnHost):
 
 
 def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
-    """No ``rope_theta``: no table is held and nothing turns q and k; a
-    model's ``positions`` adds its own rows instead, in each prompt chunk at
-    the chunk's positions and in a decode step at its one: a prompt over
-    chunks and the same tokens' last ones decoded give the same logits, and
-    not those of RoPE. No Hugging Face model places a table so, so no
-    golden judges it.
+    """Check that a decoder without RoPE places its positions through the hook.
+
+    No ``rope_theta``: no table is held and nothing turns q and k; a
+    model's ``positions`` adds its own rows instead, in each prompt chunk
+    at the chunk's positions and in a decode step at its one: a prompt
+    over chunks and the same tokens' last ones decoded give the same
+    logits, and not those of RoPE. No Hugging Face model places a table
+    so, so no golden judges it.
     """
     config = dataclasses.replace(
         cpu.config, rope_theta=None, max_seq_len=2 * cpu.config.prefill_chunk
@@ -188,7 +199,9 @@ def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
 
 
 def test_a_turn_runs_from_its_first_new_token(cpu):
-    """Decision 50: a turn changing the history at 270, past the boundary at
+    """Check that a turn runs from its first new token.
+
+    Decision 50: a turn changing the history at 270, past the boundary at
     256, calls from 270 alone; the caches' rows before it are the first
     prompt's, and its logits the golden ones.
     """
@@ -212,7 +225,9 @@ def test_a_turn_runs_from_its_first_new_token(cpu):
 
 
 def test_two_sessions_share_one_model(cpu):
-    """Two conversations over one model's versions, a ``Session`` each: the
+    """Check that two sessions share one model.
+
+    Two conversations over one model's versions, a ``Session`` each: the
     caches hold one session's tokens at a time, so the first, its tokens
     replaced by the second's, runs its history again, and each gives the
     logits a model of its own would.
@@ -230,7 +245,9 @@ def test_two_sessions_share_one_model(cpu):
 
 
 def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):
-    """300 positions in 256-row chunks: a prompt whose second chunk is 43
+    """Check that a context no chunk divides runs to its last position.
+
+    300 positions in 256-row chunks: a prompt whose second chunk is 43
     rows, then the decode step at the last position, 299, each the golden
     logits; the caches are 300 rows, exactly.
     """
@@ -242,10 +259,12 @@ def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):
 
 
 def _repository(directory, weights):
-    """A Hugging Face Llama repository's files at ``SCALED``'s shape: its
-    ``config.json``, of a context of two prompt chunks so that loading fits
-    it, ``weights``, and a tokenizer of every byte and enough two-byte
-    pieces to fill the vocabulary, its last id the BOS it puts first.
+    """Write a Hugging Face Llama repository's files at ``SCALED``'s shape.
+
+    Its ``config.json``, of a context of two prompt chunks so that loading
+    fits it, ``weights``, and a tokenizer of every byte and enough
+    two-byte pieces to fill the vocabulary, its last id the BOS it puts
+    first.
     """
     V = SMALL.vocab_size
     config = SCALED.to_json() | {"max_position_embeddings": 4096}
@@ -265,9 +284,11 @@ def _repository(directory, weights):
 
 
 def _tokenizer_json(path, size=256, specials=(), bos=None):
-    """A byte-level ``tokenizer.json`` at ``path``: every byte, two-letter
-    pieces up to ``size`` ids, then ``specials``, its post-processor putting
-    id ``bos`` before a text if given; its encoding.
+    """Write a byte-level ``tokenizer.json`` at ``path``.
+
+    Every byte, two-letter pieces up to ``size`` ids, then ``specials``,
+    its post-processor putting id ``bos`` before a text if given; its
+    encoding.
     """
     tokenizers = pytest.importorskip("tokenizers")
     alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
@@ -298,7 +319,9 @@ CHATML = (
 
 
 def test_the_quick_start_script_runs_on_a_toy_repository(cpu, tmp_path):
-    """The quick start's calls on a toy repository, the host standing in for
+    """Check that the quick start script runs on a toy repository.
+
+    The quick start's calls on a toy repository, the host standing in for
     the NPU: the BOS and the text's ids, and from seed 0 the text of the
     tokens the host loop draws from the model on the same weights.
     """
@@ -315,8 +338,9 @@ def test_the_quick_start_script_runs_on_a_toy_repository(cpu, tmp_path):
 
 @pytest.fixture(scope="module")
 def toy(cpu, tmp_path_factory):
-    """The model of a toy repository whose ``tokenizer_config.json`` holds
-    ``CHATML``, loaded, the host standing in for the NPU.
+    """Load the model of a toy repository whose ``tokenizer_config.json`` holds ``CHATML``.
+
+    The host stands in for the NPU.
     """
     directory = tmp_path_factory.mktemp("repository")
     _repository(directory, cpu.weights)
@@ -344,7 +368,9 @@ def test_no_sampler_is_greedy(toy):
 
 
 def test_generation_stops_at_an_eos_and_includes_it(cpu, tmp_path):
-    """As Hugging Face's ``generate``: the first of the checkpoint's eos ids
+    """Check that generation stops at an eos and includes it.
+
+    As Hugging Face's ``generate``: the first of the checkpoint's eos ids
     drawn is the last token, ``generation_config.json``'s list over
     ``config.json``'s.
     """
@@ -416,7 +442,9 @@ def test_a_chat_template_jinja_file_is_read_over_tokenizer_config_s(cpu, tmp_pat
 
 
 def test_a_generation_block_renders_its_body(cpu, tmp_path):
-    """SmolLM3's template marks the assistant's turns ``{% generation %}``,
+    """Check that a generation block renders its body.
+
+    SmolLM3's template marks the assistant's turns ``{% generation %}``,
     which transformers renders as its body.
     """
     pytest.importorskip("jinja2")
@@ -469,9 +497,10 @@ TURNS = (
 def test_a_chat_s_added_tokens_are_their_ids_and_its_bos_is_the_template_s(
     tmp_path, bos
 ):
-    """Each added token the template writes is its id in the
-    ``tokenizer.json``, not split into bytes, and the BOS is there only
-    where the template writes it.
+    """Check that each added token the template writes is its id in the tokenizer.
+
+    Not split into bytes, and the BOS is there only where the template
+    writes it.
     """
     pytest.importorskip("jinja2")
     path = tmp_path / "tokenizer.json"
@@ -495,7 +524,9 @@ def test_a_chat_s_added_tokens_are_their_ids_and_its_bos_is_the_template_s(
 
 
 def test_the_reference_holds_one_layer_s_intermediates_at_a_time():
-    """A prompt chunk's reference peak grows with the layers by their caches
+    """Check that the reference holds one layer's intermediates at a time.
+
+    A prompt chunk's reference peak grows with the layers by their caches
     alone: each intermediate is dropped after the last step that reads it.
     """
     peaks = {}

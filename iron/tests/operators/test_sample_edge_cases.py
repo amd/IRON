@@ -83,7 +83,7 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
 def _boundaries(vocab: int, slice_size: int, chunk: int, last: int) -> np.ndarray:
-    """Indices either side of 32-element words, chunks, columns and the end."""
+    """Return indices either side of 32-element words, chunks, columns and the end."""
     edges = [32, 64, chunk, 2 * chunk, slice_size, slice_size + chunk, vocab - last]
     edges += [vocab - 32]
     near = [e + d for e in edges for d in (-1, 0, 1)] + [0, vocab - 1]

@@ -94,10 +94,11 @@ def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():
 
 
 def test_transfer_size_not_dividing_a_bounded_row_is_rejected(npu2):
-    """A bounded copy moves any whole number of rows, so its object divides
-    one row: a prompt's 513 rows of (8, 64) keys into a cache are 256.5
-    objects of 1024 elements, and the last half-object hangs the device.
-    Left to itself the copy takes one row's 512.
+    """A bounded copy moves any whole number of rows, so its object divides one row.
+
+    A prompt's 513 rows of (8, 64) keys into a cache are 256.5 objects of
+    1024 elements, and the last half-object hangs the device. Left to
+    itself the copy takes one row's 512.
     """
     rows, G, D = 2048, 8, 64
     copy = functools.partial(
@@ -114,9 +115,10 @@ def test_transfer_size_not_dividing_a_bounded_row_is_rejected(npu2):
 
 
 def test_channels_not_dividing_the_shared_run_are_rejected():
-    """The channels split the run both sides' innermost axes hold a whole
-    number of: 6-wide rows into a flat output share runs of 6, which 4
-    channels cannot split alike.
+    """The channels split the run both sides' innermost axes hold a whole number of.
+
+    6-wide rows into a flat output share runs of 6, which 4 channels
+    cannot split alike.
     """
     with pytest.raises(ValueError, match="common run of 6"):
         Copy(
@@ -142,8 +144,10 @@ def test_a_gather_feeding_from_more_shim_pairs_than_the_device_has_is_refused(
 
 
 def test_a_gather_whose_feeds_outnumber_its_batch_pairs_is_refused(npu2):
-    """A feed streams whole pairs of batches, so 33 rows (five batches of
-    eight, three pairs) keep three feeds busy and leave a fourth idle.
+    """A feed streams whole pairs of batches.
+
+    So 33 rows (five batches of eight, three pairs) keep three feeds busy
+    and leave a fourth idle.
     """
     with pytest.raises(ValueError, match="leave 1 idle"):
         Gather(rows=33, table_rows=4096, row=512, feeds=4)
@@ -160,8 +164,10 @@ class _BoundedGather(iron.Graph):
 
 
 def test_a_bounded_gather_of_rows_not_whole_16_byte_units_is_refused(npu2):
-    """A bounded feed drains a per-call length in 16-byte units, so a row of
-    six bf16 (12 bytes) cannot be bounded, though it gathers whole.
+    """A bounded feed drains a per-call length in 16-byte units.
+
+    So a row of six bf16 (12 bytes) cannot be bounded, though it gathers
+    whole.
     """
     table = np.zeros((64, 6), dtype=bfloat16)
     recording = _BoundedGather(table).record(ids=((16,), np.int32))
@@ -172,8 +178,9 @@ def test_a_bounded_gather_of_rows_not_whole_16_byte_units_is_refused(npu2):
 
 
 def test_a_tile_past_what_one_core_holds_is_refused_not_split(npu2):
-    """A row an elementwise kernel cannot hold is an error at resolution; the
-    library never halves it, since a norm's reference is the whole row.
+    """A row an elementwise kernel cannot hold is an error at resolution.
+
+    The library never halves it, since a norm's reference is the whole row.
     """
     with pytest.raises(Unresolvable, match="tile_size=16384 exceeds the 8192"):
         RMSNorm(rows=1, tile_size=16384).resolved(npu2)
@@ -181,9 +188,10 @@ def test_a_tile_past_what_one_core_holds_is_refused_not_split(npu2):
 
 
 def test_softmax_with_no_column_count_that_tiles_is_refused(npu2):
-    """A tunable-free operator resolves to the widest column count its shape
-    divides over; where even one column does not fit, compatible() names the
-    rule rather than falling back to the whole shim budget.
+    """A tunable-free operator resolves to the widest column count dividing its shape.
+
+    Where even one column does not fit, compatible() names the rule rather
+    than falling back to the whole shim budget.
     """
     with pytest.raises(ValueError, match=r"rows \(16\)"):
         Softmax(rows=16, cols=16, num_channels=3).resolved(npu2)
@@ -201,16 +209,18 @@ def test_softmax_with_no_column_count_that_tiles_is_refused(npu2):
     ],
 )
 def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why, npu2):
-    """The queries are the keys' last rows, whole blocks of them, so the
-    cache must hold them.
+    """The queries are the keys' last rows, whole blocks of them.
+
+    So the cache must hold them.
     """
     with pytest.raises(ValueError, match=why):
         MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(npu2)
 
 
 def test_mha_whose_pipelines_do_not_fill_the_rows_is_refused(npu2):
-    """Q is split in rounds of 64 rows a pipeline, and 128 rows are a
-    quarter of a round of eight.
+    """Q is split in rounds of 64 rows a pipeline.
+
+    And 128 rows are a quarter of a round of eight.
     """
     with pytest.raises(ValueError, match="whole rounds"):
         MHA(num_heads=2, seq_len=100, num_pipelines=8).resolved(npu2)
@@ -232,8 +242,9 @@ def test_mha_whose_pipelines_do_not_fill_the_rows_is_refused(npu2):
     ],
 )
 def test_mha_band_and_head_that_do_not_tile_are_refused(kwargs, why, npu2):
-    """A head is whole 64-column tiles, a window at least one key, the scale
-    not negative, and a query block within the 64-row padding.
+    """A head is whole 64-column tiles, a window at least one key.
+
+    The scale not negative, and a query block within the 64-row padding.
     """
     with pytest.raises(ValueError, match=why):
         MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(npu2)
@@ -246,11 +257,13 @@ def test_mha_whose_head_fits_no_block_is_refused(npu2):
 
 
 def test_mha_one_query_packed_takes_the_narrowest_block_and_64_keys(npu2):
-    """Every row of a packed block is computed, so one query takes the
-    narrowest block that holds its group, over 64-key blocks: mha.cc's
-    vectorized softmax reads 64-key rows. (num_heads=32, num_KV_heads=8 is
-    the llama_1b shape test_catalog.py already dispatches; group_of_32,
-    kv_heads=1, is not, so that is the one worth a construction-time check.)
+    """Every row of a packed block is computed.
+
+    So one query takes the narrowest block that holds its group, over
+    64-key blocks: mha.cc's vectorized softmax reads 64-key rows.
+    (num_heads=32, num_KV_heads=8 is the llama_1b shape test_catalog.py
+    already dispatches; group_of_32, kv_heads=1, is not, so that is the one
+    worth a construction-time check.)
     """
     op = MHA(
         num_heads=32,
@@ -277,10 +290,11 @@ def test_mha_one_query_packed_takes_the_narrowest_block_and_64_keys(npu2):
     ids=["three_ways", "six_pipelines_to_a_join", "one_query_packed"],
 )
 def test_mha_whose_pv_split_does_not_route_is_refused(kwargs, why, npu2):
-    """Split, P*V's halves sit on the rows either side of the softmax core,
-    and each memtile then forwards its pipeline's scores and P as well as
-    its share of the O joins; one query packed has a shim's two channels
-    for its K and V.
+    """Split, P*V's halves sit on the rows either side of the softmax core.
+
+    Each memtile then forwards its pipeline's scores and P as well as its
+    share of the O joins; one query packed has a shim's two channels for
+    its K and V.
     """
     with pytest.raises(ValueError, match=why):
         MHA(**{"num_heads": 8, "num_pipelines": 8, **kwargs}).resolved(npu2)
@@ -300,16 +314,19 @@ def test_mha_whose_pv_split_does_not_route_is_refused(kwargs, why, npu2):
     ],
 )
 def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why, npu2):
-    """One query packs each KV group's heads into a block's rows, and each
-    pipeline reads its own groups' K and V through its own column's memtile.
+    """One query packs each KV group's heads into a block's rows.
+
+    And each pipeline reads its own groups' K and V through its own
+    column's memtile.
     """
     with pytest.raises(ValueError, match=why):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(npu2)
 
 
 def test_sample_with_more_cores_than_a_memtile_joins_is_refused(npu2):
-    """Each select core's summary is one input stream of the memtile they
-    join in, which has six: eight cores fit NPU2's shim and fail to place.
+    """Each select core's summary is one input stream of the memtile they join in.
+
+    Which has six: eight cores fit NPU2's shim and fail to place.
     """
     with pytest.raises(Unresolvable, match="join in one memtile"):
         Sample(vocab=4096, cores=8).resolved(npu2)
@@ -323,8 +340,9 @@ def test_sample_over_an_odd_vocab_is_refused():
 
 
 def test_a_streamed_softmax_core_with_more_rows_than_it_unrolls_is_refused(npu2):
-    """A streamed core unrolls its rows, each with its own state: past 48
-    its program overflows the core's memory.
+    """A streamed core unrolls its rows, each with its own state.
+
+    Past 48 its program overflows the core's memory.
     """
     with pytest.raises(ValueError, match="at most 48 rows"):
         Softmax(rows=1024, cols=8192, num_aie_columns=1).resolved(npu2)
@@ -332,8 +350,10 @@ def test_a_streamed_softmax_core_with_more_rows_than_it_unrolls_is_refused(npu2)
 
 
 def test_a_float32_softmax_under_a_per_call_bound_is_refused(npu2):
-    """The float32 kernel takes its row length at build time, so a bound
-    row would come out as the softmax of every element, stale ones too.
+    """The float32 kernel takes its row length at build time.
+
+    So a bound row would come out as the softmax of every element, stale
+    ones too.
     """
 
     class Attend(iron.Graph):
@@ -346,16 +366,17 @@ def test_a_float32_softmax_under_a_per_call_bound_is_refused(npu2):
 
 
 def test_flm_gemm_reads_b_as_stored_in_bf16(npu2):
-    """Packing is for a row-major B; ``b_col_maj`` reads B as the array
-    already holds it, so packing it again is refused rather than silently
-    reordered wrong. (The read-as-stored path itself is the device check in
+    """Packing is for a row-major B; ``b_col_maj`` reads B as the array already has it.
+
+    So packing it again is refused rather than silently reordered wrong.
+    (The read-as-stored path itself is the device check in
     flm/gemm/test.py's test_gemm_b_col_maj.)
     """
     op = ProjectionGEMM(
         M=256, K=512, N=256, b_col_maj=True, precision=Precision.MEDIUM
     ).resolved(npu2)
     with pytest.raises(ValueError, match="reads B as stored"):
-        op.pack_B(None)
+        op.pack_b(None)
 
 
 @pytest.mark.parametrize(
@@ -367,9 +388,10 @@ def test_flm_gemm_reads_b_as_stored_in_bf16(npu2):
     ids=["limbs", "magnitude"],
 )
 def test_a_line_of_part_of_a_vector_is_refused(make, npu2):
-    """Limbs and Magnitude load and store whole 32-lane vectors, so a line
-    (or each half of a complex row) of part of one would read past it: their
-    kernels' factories refuse it.
+    """Limbs and Magnitude load and store whole 32-lane vectors.
+
+    So a line (or each half of a complex row) of part of one would read
+    past it: their kernels' factories refuse it.
     """
     with pytest.raises(ValueError, match="32-element vector step"):
         make().resolved().tolerance()
@@ -385,16 +407,18 @@ def test_a_line_of_part_of_a_vector_is_refused(make, npu2):
     ids=["not_whole_windows", "more_patches_than_rows", "rows_not_whole_blocks"],
 )
 def test_patch_positions_that_do_not_tile_are_refused(kwargs, why, npu2):
-    """The tower pools whole windows of patches, and the core writes whole
-    blocks of rows: a short block would leave the last rows unwritten.
+    """The tower pools whole windows of patches, and the core writes whole blocks.
+
+    Of rows, so a short last block would leave rows unwritten.
     """
     with pytest.raises(ValueError, match=why):
         PatchPositions(**kwargs).resolved(npu2)
 
 
 def test_merge_of_part_of_a_block_is_refused(npu2):
-    """The core reads whole blocks of ids: a short one would leave the last
-    rows unwritten.
+    """The core reads whole blocks of ids.
+
+    A short one would leave the last rows unwritten.
     """
     with pytest.raises(ValueError, match="64-row blocks"):
         Merge(rows=100, placeholders=((0, 0), (1, 0))).resolved(npu2)
@@ -409,10 +433,11 @@ def test_merge_of_no_or_repeated_placeholders_is_refused(placeholders):
 
 @pytest.mark.parametrize("device", ["npu1", "npu2"])
 def test_gemm_on_columns_that_do_not_divide_its_rows_is_refused(device, request):
-    """Each of a GEMM's first shims carries A to as many rows of cores as
-    the others: three columns leave a fourth row without its A. Left open,
-    the columns resolve to a count that divides the rows or covers them:
-    two on npu1, six on npu2.
+    """Each of a GEMM's first shims carries A to as many rows of cores as the others.
+
+    Three columns leave a fourth row without its A. Left open, the columns
+    resolve to a count that divides the rows or covers them: two on npu1,
+    six on npu2.
     """
     dev = request.getfixturevalue(device)
     shape = dict(M=256, K=128, N=384, b_col_maj=True, precision=Precision.MEDIUM)
@@ -494,9 +519,11 @@ def test_gemm_tile_the_kernel_cannot_build_is_rejected(
 def test_an_open_tile_m_is_the_widest_that_splits_m(
     device, precision, M, tile_m, request
 ):
-    """Four rows of cores each take tile_m of M's rows, so a short M takes a
-    short tile rather than padding to 256 rows: down to the kernel's m block,
-    16 under emulation (2 r, r=8) and on aie2 (4 r, r=4), else 8.
+    """Four rows of cores each take tile_m of M's rows.
+
+    So a short M takes a short tile rather than padding to 256 rows: down
+    to the kernel's m block, 16 under emulation (2 r, r=8) and on aie2 (4
+    r, r=4), else 8.
     """
     dev = request.getfixturevalue(device)
     op = GEMM(M=M, K=64, N=512, precision=precision)
@@ -515,8 +542,9 @@ def test_an_open_tile_m_is_the_widest_that_splits_m(
 def test_a_short_m_takes_fewer_rows_of_cores(
     device, precision, M, rows, tile_m, request
 ):
-    """An M shorter than every row of cores at the kernel's m block is split
-    over half as many, down to one.
+    """An M shorter than every row of cores at the kernel's m block is split.
+
+    Over half as many, down to one.
     """
     op = GEMM(M=M, K=64, N=512, precision=precision)
     resolved = op.resolved(request.getfixturevalue(device))

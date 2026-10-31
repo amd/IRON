@@ -71,7 +71,7 @@ class DecodeLayer(Operator):
     @property
     def dims(self) -> LayerDims:
         """This layer type's dimensions and weight blob."""
-        return LayerDims(self.geometry, self.layer_type)
+        return LayerDims(self.geometry, LayerType(self.layer_type))
 
     def xclbin_operator(self):
         # The four layer types share one array; they differ in their sequences.
@@ -87,7 +87,7 @@ class DecodeLayer(Operator):
         )
 
     def reference(self, x, proj, rms, rope_rms, kv, context_len, max_l):
-        """x and kv as the dispatch leaves them; see reference.py."""
+        """X and kv as the dispatch leaves them; see reference.py."""
         return tuple(
             r.view(bfloat16)
             for r in reference.reference(

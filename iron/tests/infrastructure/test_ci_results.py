@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The root conftest.py's results CSV, run as a real pytest session: a test
-whose fixture fails in setup, as one does for a CI runner's missing files, is
-a failed check, not missing from the CSV; a session whose process dies
-keeps every result before it and the test it died in, a failed check; and
-a session not given ``--csv-output`` writes none.
+"""The root conftest.py's results CSV, run as a real pytest session.
+
+A test whose fixture fails in setup, as one does for a CI runner's missing
+files, is a failed check, not missing from the CSV; a session whose
+process dies keeps every result before it and the test it died in, a
+failed check; a session not given ``--csv-output`` writes none; and the
+sessions of one run, given one ``--csv-date``, read as that one run.
 """
 
 import csv
@@ -17,6 +19,7 @@ import sys
 from pathlib import Path
 
 _ROOT_CONFTEST = Path(__file__).resolve().parents[3] / "conftest.py"
+_SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
 
 _TESTS = """\
 from pathlib import Path
@@ -135,3 +138,56 @@ def test_a_session_that_dies_keeps_its_results_and_names_the_test(tmp_path):
 def test_a_session_not_asked_for_a_csv_writes_none(tmp_path):
     _pytest(tmp_path)
     assert not list(tmp_path.glob("*.csv"))
+
+
+def test_a_run_of_several_sessions_reads_as_one_run(tmp_path):
+    """Each application runs in its own session, as the CI test action runs them.
+
+    Merged into one run's CSV, every one of its benchmarks is compared with
+    the run before, not only the last session's.
+    """
+    date = "2026-10-30 10:00:00"
+    parts = []
+    for model, latency in (("first", 2.0), ("second", 4.0)):
+        directory = tmp_path / model
+        directory.mkdir()
+        tests = (
+            "import pytest\n\n@pytest.mark.bench\n"
+            f"def test_{model}(record_property):\n"
+            f"    record_property('Latency', {latency})\n"
+        )
+        part = tmp_path / f"{model}.csv"
+        _pytest(
+            directory,
+            f"--csv-output={part}",
+            f"--csv-date={date}",
+            tests=tests,
+            returncode=0,
+        )
+        parts.append(part)
+
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "readme.md").write_text("")
+    for part in parts:
+        subprocess.run(
+            [sys.executable, _SCRIPTS / "merge_all.py", "--all", run / "latest.csv"]
+            + ["--latest", part],
+            check=True,
+        )
+    with open(run / "latest.csv") as f:
+        rows = list(csv.DictReader(f))
+    assert {row["Date"] for row in rows} == {date}
+
+    suite = tmp_path / "krackan" / "nightly"
+    suite.mkdir(parents=True)
+    with open(suite / "all.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, list(rows[0]))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row | {"Date": "2026-10-29 10:00:00", "Latency (mean)": 1})
+    subprocess.run([_SCRIPTS / "merge_results.sh", run, suite], check=True)
+
+    trends = (suite / "trends.md").read_text()
+    assert "`test_first`" in trends and "`test_second`" in trends, trends
+    assert "added" not in trends and "dropped" not in trends, trends

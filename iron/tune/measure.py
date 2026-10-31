@@ -58,17 +58,16 @@ class Timing:
 
 
 def standard_error(samples: Sequence[float]) -> float | None:
-    """``Stats``' standard error of the median of ``samples``; None from
-    fewer than two.
-    """
+    """``Stats``' standard error of the median of ``samples``; None from fewer than two."""
     if len(samples) < 2:
         return None
     return Stats.from_samples(list(samples)).median_se_us
 
 
 def platform() -> dict[str, str]:
-    """The NPU's platform report from ``xrt-smi``: its ``Name``, its
-    ``Power Mode``, ...
+    """Return the NPU's platform report from ``xrt-smi``.
+
+    Its ``Name``, its ``Power Mode``, ...
     """
     out = subprocess.run(
         ["xrt-smi", "examine", "-r", "platform"],
@@ -87,7 +86,7 @@ def platform() -> dict[str, str]:
 
 
 def pmode() -> str:
-    """The NPU's power mode, as ``xrt-smi`` reports it."""
+    """Return the NPU's power mode, as ``xrt-smi`` reports it."""
     return platform()["Power Mode"]
 
 
@@ -100,8 +99,9 @@ def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
 
 
 class Standalone:
-    """A runlist of operators built alone into a loaded image, its inputs
-    seeded random data.
+    """A runlist of operators built alone into a loaded image.
+
+    Its inputs seeded random data.
 
     Args:
         full_elf: How the runlist is packaged: one full ELF, else an xclbin
@@ -185,8 +185,9 @@ class Standalone:
             self.load()
 
     def load(self) -> None:
-        """Write the per-call values, which loads a full ELF that holds any;
-        any other image is loaded by its first run.
+        """Write the per-call values, which loads a full ELF that holds any.
+
+        Any other image is loaded by its first run.
         """
         if self._symbols:
             self.callable.write_values(self._symbols)
@@ -225,9 +226,11 @@ class Standalone:
         return self.callable.get_storage(name).numpy_view().view(np.uint8)
 
     def address(self, name: str) -> int:
-        """The device address of buffer ``name``."""
+        """Return the device address of buffer ``name``."""
         view = self.callable.get_storage(name)
         root = view.storage.binding_handle(0, view.storage.nbytes)
+        if root is None:
+            raise ValueError(f"{name} has no device binding to address")
         return root.address() + view.storage_offset
 
     def digest(self) -> str:
@@ -240,8 +243,9 @@ class Standalone:
         ).hexdigest()
 
     def inputs(self, k: int = 0) -> dict[str, np.ndarray]:
-        """What step ``k`` was given, by buffer name: views of the device
-        buffers, an in-out one as it was before any run.
+        """Return what step ``k`` was given, by buffer name.
+
+        Views of the device buffers, an in-out one as it was before any run.
         """
         op = self.steps[k]
         out = {}
@@ -252,8 +256,9 @@ class Standalone:
         return out
 
     def written(self, k: int = 0) -> dict[str, np.ndarray]:
-        """What step ``k`` wrote in the last run, by buffer name: along a
-        bounded axis only the rows under the call's bound.
+        """Return what step ``k`` wrote in the last run, by buffer name.
+
+        Along a bounded axis only the rows under the call's bound.
         """
         op = self.steps[k]
         out = {}
@@ -280,9 +285,10 @@ def judge(
     written: Mapping[str, np.ndarray],
     values: Mapping[str, int] | None = None,
 ) -> str | None:
-    """Why ``op``'s output ``written`` on ``inputs`` may not replace that of
-    ``default``, the setting it would replace: it must be within the
-    default's gate and its own. None where it may.
+    """Why ``op``'s output ``written`` on ``inputs`` may not replace that of ``default``.
+
+    The setting it would replace: it must be within the default's gate and
+    its own. None where it may.
 
     Only a bit-identical setting is admitted where a gate is missing or
     exact, or ``values`` bound an extent short of its length.
@@ -295,10 +301,13 @@ def judge(
         return "only a bit-identical output is admitted"
     values = values or {}
     for extent in op.bound_extents:
-        if values.get(extent) != vars(op)[op.value(extent).bounds.name]:
+        bounds = op.value(extent).bounds
+        assert bounds is not None, "bound_extents holds only extents that bound one"
+        if values.get(extent) != vars(op)[bounds.name]:
             return "only a bit-identical output is admitted under a bound"
     want = op._call_reference(inputs, values=values)
     for which, gate in gates.items():
+        assert gate is not None, "a None gate already returned above"
         for name, verdict in op.judge(inputs, written, gate, want).items():
             if not verdict:
                 return f"{name} under {which} gate: {verdict.detail}"
@@ -312,8 +321,9 @@ def time_interleaved(
     fastest: float = math.inf,
     log: Callable[[str], None] = print,
 ) -> list[Stats]:
-    """Each loaded image's per-round medians, microseconds (``samples_us``),
-    each call's figure the time the image itself took, which its
+    """Each loaded image's per-round medians, microseconds (``samples_us``).
+
+    Each call's figure the time the image itself took, which its
     ``KernelResult`` carries: mlir-aie's ``run_interleaved``, whose arguments
     and errors these are.
     """
@@ -378,24 +388,26 @@ class Measurement:
         )
 
     def difference(self, other: Measurement) -> tuple[float, float | None]:
-        """How much longer a step of this one takes than one of ``other``,
-        and that difference's standard error: round by round where the two
-        were timed in one run, else from each one's own.
+        """How much longer a step of this one takes than one of ``other``, and that difference's standard error.
+
+        Round by round where the two were timed in one run, else from each
+        one's own.
         """
         delta = self.t_step_us - other.t_step_us
         if self.run == other.run:
             return delta, standard_error(
                 [a - b for a, b in zip(self.round_us, other.round_us)]
             )
-        noises = [standard_error(m.round_us) for m in (self, other)]
-        if None in noises:
+        own_noise, other_noise = (standard_error(m.round_us) for m in (self, other))
+        if own_noise is None or other_noise is None:
             return delta, None
-        return delta, math.hypot(*noises)
+        return delta, math.hypot(own_noise, other_noise)
 
 
 class Cache:
-    """Every design measured on one NPU platform at one power mode, one
-    JSON file each under ``root/<platform>/<power mode>/``.
+    """Every design measured on one NPU platform at one power mode.
+
+    One JSON file each under ``root/<platform>/<power mode>/``.
 
     An entry is keyed on what its time follows: the design's build (its
     recipe and the sources, tools and device it is compiled with, as
@@ -416,7 +428,7 @@ class Cache:
 
     @classmethod
     def here(cls) -> Cache:
-        """The cache of this NPU at its present power mode."""
+        """Return the cache of this NPU at its present power mode."""
         report = platform()
         return cls(report["Name"], report["Power Mode"])
 
@@ -427,8 +439,9 @@ class Cache:
         inputs: Mapping[str, np.ndarray] | None = None,
         full_elf: bool = True,
     ) -> str:
-        """The entry ``op``, resolved for the current device, is kept in as
-        run at ``values`` on ``inputs`` (random where not given), packaged
+        """Return the entry ``op``, resolved for the current device, is kept in.
+
+        As run at ``values`` on ``inputs`` (random where not given), packaged
         as one full ELF or not.
         """
         design = OperatorDesign(op.resolved()).compilable()
@@ -446,8 +459,9 @@ class Cache:
         return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
 
     def get(self, key: str) -> Measurement | None:
-        """The measurement at ``key``; None if there is none, or it was
-        written with other fields than ``Measurement`` has.
+        """Return the measurement at ``key``; None if there is none.
+
+        Also None if it was written with other fields than ``Measurement`` has.
         """
         path = self.directory / f"{key}.json"
         if not path.exists():
@@ -487,16 +501,24 @@ def measure(
     remeasure: bool = False,
     log: Callable[[str], None] = print,
 ) -> dict[int, Measurement]:
-    """Time each of ``ops``, settings of one design with the default first,
-    as many at once as the device's contexts hold. Every batch times the
+    """Time each of ``ops``, settings of one design with the default first.
+
+    As many at once as the device's contexts hold. Every batch times the
     default too, so each other setting pairs with it round by round.
 
     Args:
+        ops: The settings to time, the default (index 0) first.
+        full_elf: How each is packaged: one full ELF, else an xclbin per
+            design dispatched step by step.
+        timing: How long to measure each.
+        repeats: How many back-to-back runs a step's time is the excess over.
         values: The per-call values each is run at.
         inputs: What its input buffers hold, by name, where random bytes
             would not be representative.
         cache: Settings it holds are taken from it rather than run, unless
             `remeasure`; those run are written to it.
+        remeasure: Run every setting even where ``cache`` already holds it.
+        log: Where progress and a setting that fails to build are reported.
 
     Returns:
         Each one timed, by its index in ``ops``. One other than the default
@@ -508,11 +530,14 @@ def measure(
     mode = pmode()
     if cache is not None and cache.mode != mode:
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
-    keys = [
-        None if cache is None else cache.key(op, values, inputs, full_elf) for op in ops
-    ]
+    keys = (
+        None
+        if cache is None
+        else [cache.key(op, values, inputs, full_elf) for op in ops]
+    )
     out: dict[int, Measurement] = {}
     if cache is not None and not remeasure:
+        assert keys is not None, "built above whenever cache is not None"
         for i, key in enumerate(keys):
             if (m := cache.get(key)) is not None:
                 out[i] = m
@@ -532,6 +557,9 @@ def measure(
         built, short, long = [], [], []
         for i in batch:
             try:
+                # Operator is hashable by identity at runtime (object.__hash__);
+                # pyright infers __hash__ = None from jit.Operator's
+                # dataclass_transform defaults.
                 one = Standalone(
                     f"probe1_{i}",
                     [ops[i]],
@@ -587,6 +615,7 @@ def measure(
                 () if i == 0 else steps[0],
             )
             if cache is not None:
+                assert keys is not None, "built above whenever cache is not None"
                 cache.put(keys[i], out[i])
         fastest = min(fastest, *(times[n + j].median_us for j in range(n)))
         # A probe holds its context while it lives; the next batch needs them.

@@ -22,9 +22,12 @@ import re
 import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 
 from pretty_common import (
     MEAN_SUFFIX,
+    METRICS,
+    UNKNOWN_METRIC,
     UNKNOWN_OPERATOR,
     operator_name,
     row_key,
@@ -33,10 +36,12 @@ from pretty_common import (
     try_parse_float,
 )
 
-# Metrics that measure work per unit time; every other metric measures time.
-HIGHER_IS_BETTER = ("Bandwidth", "Throughput", "TPS")
-
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
+
+# The two gates a move must clear to be reported, in percent and in multiples
+# of the spread the runs measured.
+THRESHOLD = 5.0
+SIGMA = 2.0
 
 # Test names reach a pull request comment. A pull request from a fork chooses
 # them, so they are cut to length and stripped of the characters that would end
@@ -61,16 +66,16 @@ def parse_args():
     p.add_argument(
         "--threshold",
         type=float,
-        default=5.0,
-        help="Report a metric once it moves this many percent (default: 5.0)",
+        default=THRESHOLD,
+        help=f"Report a metric once it moves this many percent (default: {THRESHOLD})",
     )
     p.add_argument(
         "--sigma",
         type=float,
-        default=2.0,
+        default=SIGMA,
         help="Also require the move to exceed this many standard deviations of "
         "the spread a run measured. Pass 0 to report on the percentage alone. "
-        "(default: 2.0)",
+        f"(default: {SIGMA})",
     )
     p.add_argument(
         "--round",
@@ -104,12 +109,16 @@ def delta_pct(curr: Optional[float], prev: Optional[float]) -> Optional[float]:
     return (curr - prev) / prev * 100.0
 
 
-def improved(metric: str, pct: float) -> bool:
-    return pct > 0 if metric.startswith(HIGHER_IS_BETTER) else pct < 0
+def worse(metric: str, pct: float) -> bool:
+    higher_is_better = METRICS.get(metric, UNKNOWN_METRIC).higher_is_better
+    return higher_is_better is not None and (pct < 0) == higher_is_better
 
 
 def verdict(metric: str, pct: float) -> str:
-    return "🟢" if improved(metric, pct) else "🔴"
+    """Mark a move better, worse, or neither for a metric with no direction."""
+    if METRICS.get(metric, UNKNOWN_METRIC).higher_is_better is None:
+        return "⚪"
+    return "🔴" if worse(metric, pct) else "🟢"
 
 
 def within_spread(curr, prev, metric, sigma):
@@ -153,9 +162,10 @@ def moves(
     sigma: float,
     date_fmt: str = DATE_FMT,
 ) -> List[Tuple[str, str, str, float, float, float]]:
-    """The benched metrics the newest run moved past both gates, against
-    each parametrization's run before it: (operator, parametrization,
-    metric, previous, current, percent change).
+    """Find the benched metrics the newest run moved past both gates.
+
+    Each is measured against each parametrization's run before it:
+    (operator, parametrization, metric, previous, current, percent change).
     """
     dates = [d for d in (parse_date(r, date_fmt) for r in all_rows) if d is not None]
     run_date = max(dates, default=None)
@@ -193,15 +203,19 @@ def moves(
 def build_report(
     all_rows: List[Dict[str, str]],
     field_order: List[str],
-    threshold: float = 5.0,
-    sigma: float = 2.0,
+    threshold: float = THRESHOLD,
+    sigma: float = SIGMA,
     ndigits: int = 2,
     date_fmt: str = DATE_FMT,
+    history: str = "",
+    suite: str = "",
 ) -> List[str]:
     """Render the markdown lines for one suite's results.
 
     `all_rows` holds the last two runs of each test. Their values reach a pull
-    request comment, so every cell passes through `cell`.
+    request comment, so every cell passes through `cell`. Given `history`, the
+    website's Benchmarks page, each moved benchmark links to its history in
+    `suite` there.
     """
     dates = sorted(
         {d for d in (parse_date(r, date_fmt) for r in all_rows) if d is not None}
@@ -250,9 +264,15 @@ def build_report(
             "|---|---|---|---|---|---|",
         ]
         for operator, params, metric, prev_v, curr_v, pct in sorted(changes):
+            name = cell(operator)
+            if history:
+                query = urlencode({"bench": operator, "suite": suite, "metric": metric})
+                name = f"[{name}]({history}#{query})"
+            unit = METRICS.get(metric, UNKNOWN_METRIC).unit
+            unit = f" {unit}" if unit else ""
             out.append(
-                f"| {cell(operator)} | {cell(params)} | {cell(metric)} "
-                f"| {fmt.format(prev_v)} | {fmt.format(curr_v)} "
+                f"| {name} | {cell(params)} | {cell(metric)} "
+                f"| {fmt.format(prev_v)}{unit} | {fmt.format(curr_v)}{unit} "
                 f"| {verdict(metric, pct)} {pct:+.{ndigits}f}% |"
             )
         out.append("")
@@ -282,18 +302,18 @@ def main():
         ),
     )
 
-    worse = [
+    failing = [
         change
         for change in moves(
             all_rows, field_order, args.threshold, args.sigma, args.date_fmt
         )
-        if change[2] in args.fail_on and not improved(change[2], change[5])
+        if change[2] in args.fail_on and worse(change[2], change[5])
     ]
-    if worse:
+    if failing:
         print(f"Worse than the run before by {args.threshold:g}%{gate(args.sigma)}:")
-    for operator, params, metric, prev_v, curr_v, pct in worse:
+    for operator, params, metric, prev_v, curr_v, pct in failing:
         print(f"{operator} [{params}]: {metric} {prev_v:g} -> {curr_v:g} ({pct:+.1f}%)")
-    if worse:
+    if failing:
         sys.exit(1)
 
 

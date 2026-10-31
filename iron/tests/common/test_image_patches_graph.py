@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""iron.lm.ImagePatches device-free: called in a graph, its steps record into
-the caller's, bound by the caller's sizes; its reference is the resize, the
-patch order and the gather each computed on their own; and it refuses an
-image a call does not hold.
+"""iron.lm.ImagePatches device-free.
+
+Called in a graph, its steps record into the caller's, bound by the
+caller's sizes; its reference is the resize, the patch order and the
+gather each computed on their own; and it refuses an image a call does not
+hold.
 """
 
 import numpy as np

@@ -132,9 +132,10 @@ class FromState(iron.Graph):
 
 
 class ManyTables(iron.Graph):
-    """The first ``n`` rows a call's ids name, of each of three tables of
-    their own widths, as Gemma 4's prompt chunk gathers its embedding and
-    every layer's own table.
+    """Gather the first ``n`` rows a call's ids name, of each of three tables of their own widths.
+
+    As Gemma 4's prompt chunk gathers its embedding and every layer's own
+    table.
     """
 
     def __init__(self, *tables):
@@ -197,7 +198,9 @@ def test_rows_of_a_weight_are_gathered(table):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("full_elf", [True, False])
 def test_one_input_s_ids_gather_from_each_of_three_tables(table, full_elf):
-    """Each table's words follow the last's in the input's buffer, each
+    """Check that one input's ids gather from each of three tables.
+
+    Each table's words follow the last's in the input's buffer, each
     encoded per call from the same ids, bounded alike.
     """
     tables = many_tables(table)
@@ -289,7 +292,9 @@ def test_rows_ids_the_device_made_name_are_gathered(table, feeds, n_ids):
 def test_the_rows_a_call_bounds_by_ids_the_device_made_are_gathered(
     table, feeds, n_ids
 ):
-    """The word step writes each row's length too: a whole row for the
+    """Check that the rows a call bounds by ids the device made are gathered.
+
+    The word step writes each row's length too: a whole row for the
     first ``n``, a unit for each other, as the bounded drains take them.
     """
     graph = BoundedDeviceIds(table, feeds)
@@ -359,8 +364,9 @@ def test_ids_past_the_table_are_refused(table, outside):
 @pytest.mark.bench
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_prompt_chunk_s_rows_are_gathered_each_call(table, record_property):
-    """A prompt chunk's 2048 ids from EmbeddingGemma 2's table, checked each
-    call, then timed end to end: the gather CI tracks.
+    """A prompt chunk's 2048 ids from EmbeddingGemma 2's table, checked each call, then timed end to end.
+
+    The gather CI tracks.
     """
     n_ids = 2048
     graph = PerCall(table)
@@ -377,9 +383,11 @@ def test_a_prompt_chunk_s_rows_are_gathered_each_call(table, record_property):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_each_step_gathers_the_rows_an_input_names(table):
-    """Each step its own xclbin, as NPU1 runs: the host encodes the ids
-    against the table's address as a full ELF's do, and the step after reads
-    the rows.
+    """Check that each step gathers the rows an input names.
+
+    Each step its own xclbin, as NPU1 runs: the host encodes the ids
+    against the table's address as a full ELF's do, and the step after
+    reads the rows.
     """
     graph = Embedded(table)
     net = graph.compile(ids=((256,), np.int32), x=(256, WIDTH), full_elf=False)
@@ -398,7 +406,9 @@ def test_each_step_gathers_the_rows_an_input_names(table):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("n_ids", [15, 256])
 def test_each_step_gathers_the_rows_a_call_bounds(table, n_ids):
-    """Each step its own xclbin, as NPU1 runs a prompt chunk's embedding
+    """Check that each step gathers the rows a call bounds.
+
+    Each step its own xclbin, as NPU1 runs a prompt chunk's embedding
     rows: the first ``n`` rows a call's ids name, the drains' lengths
     generated per call.
     """
@@ -418,7 +428,9 @@ def test_each_step_gathers_the_rows_a_call_bounds(table, n_ids):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("n_ids", [15, 512])
 def test_each_step_gathers_by_ids_the_device_made(table, n_ids):
-    """An xclbin's word step reads the table's address from its runtime
+    """Check that each step gathers by ids the device made.
+
+    An xclbin's word step reads the table's address from its runtime
     parameters, which the sequence writes each call.
     """
     other = np.random.default_rng(4).standard_normal((3000, 256)).astype(bfloat16)
@@ -436,7 +448,9 @@ def test_each_step_gathers_by_ids_the_device_made(table, n_ids):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("n_ids", [15, 256])
 def test_each_step_gathers_the_rows_a_call_bounds_by_ids_the_device_made(table, n_ids):
-    """An xclbin's word step reads the bound from its runtime parameters,
+    """Check that each step gathers the rows a call bounds by ids the device made.
+
+    An xclbin's word step reads the bound from its runtime parameters,
     which the sequence writes each call.
     """
     graph = BoundedDeviceIds(table)
@@ -452,8 +466,9 @@ def test_each_step_gathers_the_rows_a_call_bounds_by_ids_the_device_made(table, 
 
 
 def _moved(gather: Gather, valid: int) -> np.ndarray:
-    """The bytes each row's descriptor moves, read from the control words a
-    call with ``valid`` rows writes.
+    """Return the bytes each row's descriptor moves.
+
+    Read from the control words a call with ``valid`` rows writes.
     """
     words = gather.control_words(np.arange(gather.rows), 0, valid)
     return words[gather.template[1] - 1].astype(np.int64) * 4

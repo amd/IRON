@@ -10,10 +10,12 @@ from iron.operators.flm.q4nx import BLOCK_BYTES, K_TILE, M_TILE
 
 
 def dequantize(w, dim, vocab, rows):
-    """The whole q4nx vocabulary buffer to its (vocab, dim) weights.
-    Out-feature ``n`` is ``(slice * rows + row) * M_TILE + m``, where slice
-    ``round * cols + col`` is one core column's share of a round, and its
-    k-th block has block index ``(slice * k_blocks + k) * rows + row``.
+    """Convert the whole q4nx vocabulary buffer to its (vocab, dim) weights.
+
+    Out-feature ``n`` is ``(slice * rows + row) * M_TILE + m``, where
+    slice ``round * cols + col`` is one core column's share of a
+    round, and its k-th block has block index
+    ``(slice * k_blocks + k) * rows + row``.
     """
     k_blocks = dim // K_TILE
     blocks = np.asarray(w).view(np.uint8)[
@@ -24,8 +26,10 @@ def dequantize(w, dim, vocab, rows):
 
 
 def reference(weights, x, softcap, eps=1e-6):
-    """Softcapped logits of the RMS-normalized token: ``weights`` is the
-    (vocab, dim) matrix from ``dequantize``; ``x`` has LMHead's X layout.
+    """Compute softcapped logits of the RMS-normalized token.
+
+    ``weights`` is the (vocab, dim) matrix from ``dequantize``; ``x``
+    has LMHead's X layout.
     """
     x = np.asarray(x, np.float64)
     dim = weights.shape[1]

@@ -22,17 +22,17 @@ from aie.iron.device import NPU2
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
 from iron import Precision
-from iron.operators.flm.gemma4_engine import pli_weights
 from iron.operators.flm import (
-    ProjectionGEMM,
     DecodeLayer,
     DequantBFP,
     LMHead,
     PrefillAttention,
     PrefillSlidingAttention,
+    ProjectionGEMM,
 )
 from iron.operators.flm.dequant.op import CT_K as DEQUANT_CT_K
 from iron.operators.flm.gemm.design import Epilogue
+from iron.operators.flm.gemma4_engine import pli_weights
 from iron.operators.flm.layer.design import LayerType
 
 MODEL = "Gemma4-E2B-IT-NPU2"
@@ -81,10 +81,11 @@ UPGATE_RUN = 512
 
 
 def gemm(M, K, N, gelu):
-    """Every GEMM of the model: floor rounding, bf16_steps gelu and MEDIUM's
-    bfp16 macs reproduce the engine's arithmetic bit for bit. ``k_tile=256``
-    divides every K, so one configuration serves all shapes; B's k slice
-    comes from DequantBFP's.
+    """Build every GEMM of the model: floor rounding, bf16_steps gelu and MEDIUM's bfp16 macs.
+
+    Reproduce the engine's arithmetic bit for bit. ``k_tile=256`` divides
+    every K, so one configuration serves all shapes; B's k slice comes
+    from DequantBFP's.
     """
     return ProjectionGEMM(
         M=M,
@@ -97,11 +98,12 @@ def gemm(M, K, N, gelu):
         rounding="floor",
         gelu="bf16_steps",
         precision=Precision.MEDIUM,
+        bfp16_b=True,
     )
 
 
 def write_generator(artifacts, path, namespace):
-    """Writes the C++ that generates `artifacts`' instruction sequence, for the engine to compile in."""
+    """Write the C++ that generates `artifacts`' instruction sequence, for the engine to compile in."""
     cpp = (artifacts.entry.directory / "dispatch_gen.cpp").read_text()
     # mlir-aie emits a dlopen shim after the generator. The engine links several
     # generators, so drop the shim and give each generator a namespace.
@@ -120,7 +122,7 @@ def compile_all(ops):
 
 
 def one_xclbin(built):
-    """The xclbin all of `built` share. The engine registers one xclbin per operator."""
+    """Return the xclbin all of `built` share. The engine registers one xclbin per operator."""
     xclbins = {artifacts.image for artifacts in built}
     assert len(xclbins) == 1, f"expected one configuration, got {sorted(xclbins)}"
     return xclbins.pop()
@@ -133,13 +135,19 @@ def main(engine_xclbins, out):
         layers = [
             DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type=t) for t in LayerType
         ]
-        heads = dict(
-            max_context=32768,  # bounds the KV cache rows; the stride is a dispatch parameter
-            num_heads=config["num_attention_heads"],
-            num_kv_heads=config["num_key_value_heads"],
+        # Bounds the KV cache rows; the stride is a dispatch parameter.
+        max_context = 32768
+        num_heads = config["num_attention_heads"]
+        num_kv_heads = config["num_key_value_heads"]
+        attn = PrefillAttention(
+            max_context=max_context, num_heads=num_heads, num_kv_heads=num_kv_heads
         )
-        attn = PrefillAttention(**heads)
-        swa = PrefillSlidingAttention(window=config["sliding_window"], **heads)
+        swa = PrefillSlidingAttention(
+            window=config["sliding_window"],
+            max_context=max_context,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+        )
         lm_head = LMHead(
             dim=config["hidden_size"],
             vocab=config["vocab_size"],

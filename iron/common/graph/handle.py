@@ -16,6 +16,7 @@ from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
+from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
 from ..declare.precision import Precision
 from ..image.packaging import Kind
@@ -37,9 +38,11 @@ one-element handle (a sampled token); the host seeds only the first call.
 
 @dataclasses.dataclass(eq=False)
 class Buffer:
-    """A graph buffer every handle on it shares, so renaming it (a returned
-    intermediate becoming ``out``) renames them all. ``role`` is input, output,
-    weight, state or intermediate; ``shape`` and ``dtype`` are as made.
+    """A graph buffer every handle on it shares, so renaming it renames them all.
+
+    A returned intermediate becoming ``out`` is one such rename. ``role`` is
+    input, output, weight, state or intermediate; ``shape`` and ``dtype`` are
+    as made.
     """
 
     name: str
@@ -54,8 +57,9 @@ class Buffer:
 
 @dataclasses.dataclass(frozen=True)
 class Dense:
-    """A contiguous run of the buffer from element ``offset``, which any
-    operator takes; None is the whole buffer, in any shape.
+    """A contiguous run of the buffer from element ``offset``, which any operator takes.
+
+    None is the whole buffer, in any shape.
     """
 
     offset: int | None = None
@@ -63,9 +67,11 @@ class Dense:
 
 @dataclasses.dataclass(frozen=True)
 class Strided:
-    """What ``tap`` walks of the buffer, which only a copy takes; per call, ``offset``
-    moves it, ``repeat`` and ``length`` size its first two dimensions, and ``window``
-    holds ``x[s : s + W]``'s axis, ``s``, ``W`` and axis length.
+    """What ``tap`` walks of the buffer, which only a copy takes.
+
+    Per call, ``offset`` moves it, ``repeat`` and ``length`` size its first
+    two dimensions, and ``window`` holds ``x[s : s + W]``'s axis, ``s``,
+    ``W`` and axis length.
     """
 
     tap: TensorAccessPattern | tuple[TensorAccessPattern, ...]
@@ -77,8 +83,9 @@ class Strided:
 
 @dataclasses.dataclass(frozen=True)
 class Gather:
-    """The rows of a whole table the 1-D integer handle ``rows`` names each
-    call (``table[ids]``), which only ``Copy`` of it alone takes.
+    """The rows of a whole table the 1-D integer handle ``rows`` names each call.
+
+    As ``table[ids]``, which only ``Copy`` of it alone takes.
     """
 
     rows: Handle
@@ -86,8 +93,10 @@ class Gather:
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class Handle:
-    """A recorded tensor: where it is in a graph buffer (``layout``), its shape,
-    dtype, and per axis the leading entries valid this call (``valid``, ``x[:n]``).
+    """A recorded tensor: its place in a graph buffer, shape, dtype, and per-axis bound.
+
+    ``layout`` is where it is in the buffer; ``valid`` holds, per axis, the
+    leading entries valid this call (``x[:n]``).
 
     ``h[key]`` takes numpy's basic indexing, a per-call value on one axis
     (``keys[:, pos]``), and leading-axis rows, fixed (``table[ids]``) or a 1-D
@@ -110,7 +119,7 @@ class Handle:
 
     @classmethod
     def whole(cls, shape, dtype, name: str, role: str) -> Handle:
-        """A new buffer ``name`` of ``shape``, whole."""
+        """Make a new buffer ``name`` of ``shape``, whole."""
         shape = tuple(int(s) for s in shape)
         return cls(Buffer(name, role, shape, dtype), shape, dtype)
 
@@ -131,8 +140,9 @@ class Handle:
         return self.elements * bfp.itemsize(self.dtype)
 
     def ref(self) -> BufferRef:
-        """Where a step finds this handle: a part of its buffer for a
-        contiguous run, else all of it.
+        """Return where a step finds this handle.
+
+        A part of its buffer for a contiguous run, else all of it.
         """
         match self.layout:
             case Dense(offset=int(offset)):
@@ -142,14 +152,15 @@ class Handle:
         return BufferRef(self.name)
 
     def _start(self) -> int:
-        """The element this contiguous handle starts at in its buffer."""
+        """Return the element this contiguous handle starts at in its buffer."""
         assert isinstance(self.layout, Dense), "a contiguous handle"
         return self.layout.offset or 0
 
     def _over_buffer(self, tap):
-        """``tap`` (or each of several) over this handle, as over its
-        buffer: unchanged on the whole buffer, else moved by where this part
-        starts in it, over the buffer's shape as made (flat in another dtype).
+        """Return ``tap`` (or each of several) over this handle, as over its buffer.
+
+        Unchanged on the whole buffer, else moved by where this part starts
+        in it, over the buffer's shape as made (flat in another dtype).
         """
         if self.layout == Dense():
             return tap
@@ -164,7 +175,7 @@ class Handle:
         return tuple(map(moved, tap)) if isinstance(tap, tuple) else moved(tap)
 
     def reshape(self, *shape) -> Handle:
-        """The same buffer seen with another shape (no data moves)."""
+        """Return the same buffer seen with another shape (no data moves)."""
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
         if prod(shape) != self.elements:
@@ -176,7 +187,7 @@ class Handle:
         )
 
     def transpose(self, *axes) -> Handle:
-        """The same buffer walked with its axes permuted (no data moves)."""
+        """Return the same buffer walked with its axes permuted (no data moves)."""
         if len(axes) == 1 and isinstance(axes[0], (tuple, list)):
             axes = tuple(axes[0])
         if not isinstance(self.layout, Dense):
@@ -195,13 +206,14 @@ class Handle:
         )
 
     @property
-    def T(self) -> Handle:
+    def T(self) -> Handle:  # noqa: N802 -- numpy's name
         """``transpose(1, 0)``, as numpy's ``.T`` of a matrix."""
         return self.transpose(1, 0)
 
     def _bounded_run(self, key) -> Handle:
-        """A run from a per-call start bounded per call, ``x[s : s + W][:n]``:
-        every call keeps ``s + n`` inside the axis, checked before it.
+        """Return a run from a per-call start bounded per call, ``x[s : s + W][:n]``.
+
+        Every call keeps ``s + n`` inside the axis, checked before it.
         """
         assert isinstance(self.layout, Strided) and self.layout.window is not None
         axis, start, width, n = self.layout.window
@@ -380,8 +392,10 @@ class Handle:
         _write(self[key], value)
 
     def _within(self, part: Handle) -> Handle:
-        """This handle of ``part`` seen as a buffer of its own, placed in
-        ``part``'s buffer; a per-call gather, which reads a whole table, raises.
+        """Return this handle of ``part`` seen as a buffer of its own.
+
+        Placed in ``part``'s buffer; a per-call gather, which reads a whole
+        table, raises.
         """
         match self.layout:
             case Gather():
@@ -403,7 +417,7 @@ class Handle:
         repeat=None,
         length=None,
     ):
-        """What ``tap`` walks, as ``shape``: a slice if contiguous, else a view.
+        """Return what ``tap`` walks, as ``shape``: a slice if contiguous, else a view.
 
         Per call, ``repeat`` runs each pattern's first dimension (a tuple, one
         per pattern of a tuple ``tap``) and ``length`` takes entries of its
@@ -450,16 +464,18 @@ class Handle:
         recorder = graph_recorder.get()
         if recorder is not None:
             for walk, r in zip(walks, repeats or ()):
-                recorder.limit(r, 1, walk.sizes[0] + 1, self)
+                (size0,) = concrete(walk.sizes[:1], walk)
+                recorder.limit(r, 1, size0 + 1, self)
             if length is not None:
-                hi = min(walk.sizes[1] for walk in walks)
-                recorder.limit(length, 1, hi + 1, self)
+                sizes1 = concrete([walk.sizes[1] for walk in walks], walks)
+                recorder.limit(length, 1, min(sizes1) + 1, self)
         layout = Strided(self._over(tap), repeat=repeats, length=length)
         return Handle(self.buffer, shape, self.dtype, bounds, layout)
 
     def _over(self, tap):
-        """``tap`` over this handle as over its buffer: given over the whole
-        buffer in another shape, over this one's.
+        """Return ``tap`` over this handle as over its buffer.
+
+        Given over the whole buffer in another shape, over this one's.
         """
         if self.layout != Dense():
             return self._over_buffer(tap)
@@ -472,8 +488,9 @@ class Handle:
         return tuple(map(shaped, tap)) if isinstance(tap, tuple) else shaped(tap)
 
     def _view(self, tap, shape, index_by, valid, window=None) -> Handle:
-        """What ``tap`` walks from the per-call element offset ``index_by``:
-        a slice if contiguous and not offset per call, else a view.
+        """Return what ``tap`` walks from the per-call element offset ``index_by``.
+
+        A slice if contiguous and not offset per call, else a view.
         """
         dense = tap.coalesce()
         offset = tap.offset
@@ -489,8 +506,9 @@ class Handle:
         return Handle(self.buffer, shape, self.dtype, valid, layout)
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        """A held array on the left of an operator defers to the handle;
-        any other numpy function on a handle is refused.
+        """Defer to the handle for a held array on the left of an operator.
+
+        Refuse any other numpy function on a handle.
         """
         name = _OPERATORS.get(ufunc)
         if method == "__call__" and name and len(inputs) == 2 and not kwargs:
@@ -507,16 +525,20 @@ class Handle:
         )
 
     def __add__(self, other) -> "Handle":
-        """``self + other``, elementwise, or ``other`` a row added to every
-        row, or a number added to every element.
+        """Return ``self + other``, elementwise.
+
+        Or ``other`` a row added to every row, or a number added to every
+        element.
         """
         from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd  # a cycle
 
         return _broadcast(ElementwiseAdd, RowwiseAdd, self, other)
 
     def __mul__(self, other) -> "Handle":
-        """``self * other``, elementwise, or every row times the row
-        ``other``, or every element times a number.
+        """Return ``self * other``, elementwise.
+
+        Or every row times the row ``other``, or every element times a
+        number.
         """
         from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul  # a cycle
 
@@ -548,8 +570,9 @@ class Handle:
         return self * (1 / other)
 
     def __matmul__(self, other) -> "Handle":
-        """``self @ W.T`` for one row ``self`` and ``W`` stored ``(out, in)`` as
-        ``torch.nn.Linear`` does: GEMV at ``Precision.HIGHEST``.
+        """Return ``self @ W.T`` for one row ``self``, GEMV at ``Precision.HIGHEST``.
+
+        ``W`` is stored ``(out, in)`` as ``torch.nn.Linear`` does.
 
         Raises:
             TypeError: ``self`` is several rows, whose precision the caller
@@ -627,9 +650,11 @@ def _untransposed(x: Handle, w) -> Handle | np.ndarray:
 
 
 def _broadcast(whole, rowwise, x: Handle, y) -> Handle:
-    """``whole`` of ``x`` and ``y`` of its shape, else ``rowwise`` of ``x`` (two
-    axes or more) and a row ``y``; a number ``y`` is a constant row, and both
-    being commutative, a row times a matrix is the matrix's ``rowwise``.
+    """``whole`` of ``x`` and ``y`` of its shape, else ``rowwise`` of ``x`` and a row ``y``.
+
+    ``rowwise`` applies where ``x`` has two axes or more; a number ``y`` is a
+    constant row, and both being commutative, a row times a matrix is the
+    matrix's ``rowwise``.
     """
     if _is_number(y):
         recorder = graph_recorder.get()
@@ -684,7 +709,7 @@ class _Viewed:
         return self._as_operand().transpose(*axes)
 
     @property
-    def T(self):
+    def T(self):  # noqa: N802 -- numpy's name
         return self._as_operand().T
 
     def at(self, tap, shape, *, bounds=None, repeat=None, length=None):
@@ -695,9 +720,10 @@ class _Viewed:
 
 
 class State(_Viewed):
-    """A tensor that persists on the device across calls (a KV cache), zero
-    when first uploaded; read and written through ``CompiledGraph.read`` and
-    ``write``, and held in ``host`` across ``Graph.reference`` calls.
+    """A tensor that persists on the device across calls (a KV cache), zero when first uploaded.
+
+    Read and written through ``CompiledGraph.read`` and ``write``, and held
+    in ``host`` across ``Graph.reference`` calls.
     """
 
     __slots__ = ("shape", "dtype", "name", "host")
@@ -718,8 +744,9 @@ def state(shape, dtype=bfloat16, name=None) -> State:
 
 
 class Weight(_Viewed):
-    """A tensor the body indexes per call (``iron.weight(table)[ids]``),
-    one buffer with the array it wraps.
+    """A tensor the body indexes per call (``iron.weight(table)[ids]``).
+
+    One buffer with the array it wraps.
     """
 
     __slots__ = ("array",)
@@ -743,13 +770,14 @@ class Weight(_Viewed):
 
 
 def weight(array) -> Weight:
-    """A tensor a graph's body indexes per call (``iron.weight(table)[ids]``)."""
+    """Return a tensor a graph's body indexes per call (``iron.weight(table)[ids]``)."""
     return Weight(array)
 
 
 def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
-    """The bounds of ``h`` reshaped to ``shape``: a leading-axis bound,
-    rescaled as that axis merges or splits.
+    """Return the bounds of ``h`` reshaped to ``shape``.
+
+    A leading-axis bound, rescaled as that axis merges or splits.
     """
     if not h.valid:
         return {}
@@ -772,8 +800,10 @@ def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
 
 
 class Carry(Mapping[str, "Handle | Affine | int"]):
-    """The next values of a graph's carried values, by name: recorded, an
-    ``Affine`` or a one-element ``Handle``; returned from a call, a number.
+    """The next values of a graph's carried values, by name.
+
+    Recorded, an ``Affine`` or a one-element ``Handle``; returned from a
+    call, a number.
     """
 
     __slots__ = ("_next",)
@@ -800,7 +830,7 @@ class Carry(Mapping[str, "Handle | Affine | int"]):
 
 
 def _count(n: PerCall | Affine) -> Affine:
-    """A per-call count of rows, which may be clamped (``min(p + 1, W)``)."""
+    """Return a per-call count of rows, which may be clamped (``min(p + 1, W)``)."""
     if isinstance(n, PerCall):
         return n.affine()
     if n.mod is not None or n.down:
@@ -811,21 +841,25 @@ def _count(n: PerCall | Affine) -> Affine:
 def clamp(
     x: PerCall | Affine, lo: int | None = None, hi: int | None = None
 ) -> Affine | int:
-    """A per-call value's expression ``x`` held to ``[lo, hi]``, a bound of
-    None none; the nearer bound itself where ``x`` never reaches the range."""
+    """Return a per-call value's expression ``x`` held to ``[lo, hi]``, a bound of None none.
+
+    The nearer bound itself where ``x`` never reaches the range.
+    """
     return (x if isinstance(x, Affine) else x.affine()).clamp(lo, hi)
 
 
 def carry(**next_values: Handle | Affine | PerCall | int) -> Carry:
-    """Return with a graph's outputs the next value of each carried value:
+    """Return with a graph's outputs the next value of each carried value.
+
     ``return logits, iron.carry(token=sampled, position=position + 1)``.
     """
     return Carry(**next_values)
 
 
 def on_host(fn: Callable[..., None], *reads, writes=()) -> None:
-    """Run ``fn(*reads, *writes)`` on the host between the steps around it; a
-    full ELF ends a command there, so the graph has no device loop. Each is
+    """Run ``fn(*reads, *writes)`` on the host between the steps around it.
+
+    A full ELF ends a command there, so the graph has no device loop. Each is
     contiguous: reads cut to their bounds, writes parts of states no step writes.
 
     Raises:
@@ -838,5 +872,5 @@ def on_host(fn: Callable[..., None], *reads, writes=()) -> None:
 
 
 def is_operand(x) -> bool:
-    """A graph handle, a state or weight (or a view of one), or a host tensor."""
+    """Check that ``x`` is a graph handle, a state or weight (or a view of one), or a host tensor."""
     return isinstance(x, (Handle, State, Weight, np.ndarray, np.generic))

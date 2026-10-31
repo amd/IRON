@@ -3,297 +3,298 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build the benchmark history site from the CSVs on the results branch.
+"""Write the data the website's Benchmarks page draws, from the results branch.
 
-Reads every ``{arch}/{suite}/all.csv`` under a results root and writes a single
-self-contained ``index.html``. Each operator gets one chart per architecture
-and suite, one line per parametrization, with a metric selector. Only
+Reads every ``{arch}/{suite}/all.csv`` under a results root and writes one JSON
+file: each suite's latest run on each device, and each benchmark's history,
+one series per benched parametrization, one list of runs per device. Only
 parametrizations carrying the 'bench' marker appear.
+
+A move between a series' last two runs is judged with the pull request
+comment's own gates (``pretty_trends``), so the page and the comment agree on
+what moved.
 """
 
 import argparse
 import csv
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 from pretty_common import (
     ARCHS,
+    MEAN_SUFFIX,
+    METRICS,
     SUITES,
+    UNKNOWN_METRIC,
     metric_label,
     operator_name,
+    parse_checks,
     results_dir,
     row_key,
     select_bench_rows,
     split_test_path,
     try_parse_float,
 )
+from pretty_trends import DATE_FMT, SIGMA, THRESHOLD, delta_pct, within_spread, worse
+
+# How the page names each device and suite.
+DEVICES = {"krackan": "Krackan (NPU2)", "phoenix": "Phoenix (NPU1)"}
+SUITE_NAMES = {
+    "small": ("Operators", "Pull requests"),
+    "extensive": ("Operators", "Extensive"),
+    "examples": ("Models", "Pull requests"),
+    "nightly": ("Models", "Nightly"),
+}
+
+# A metric whose figure is another's spread is drawn with it, not on its own.
+SPREADS = {"Latency": "Latency MAD"}
+
+# Where a benchmark still run is documented, relative to the Benchmarks page:
+# a model on the Models page, an operator in the API reference. A catalog
+# benchmark is named for its class; these are named for their test's
+# directory.
+CATALOG = "iron/tests/operators/test_catalog.py"
+OPERATOR_PAGES = {
+    "copy_gather": "Gather",
+    "flm/gemm": "flm.ProjectionGEMM",
+    "flm/layer": "flm.DecodeLayer",
+    "flm/prefill_attn": "flm.PrefillAttention",
+}
 
 
 def read_all_csvs(results_root):
-    """Yield (arch, suite, row) for every row of every results CSV under the root."""
+    """Map (arch, suite) to the rows of its results CSV, for each CSV under the root."""
+    tables = {}
     for arch in ARCHS:
         for suite in SUITES:
             path = os.path.join(results_root, results_dir(arch, suite), "all.csv")
-            if not os.path.exists(path):
-                continue
-            with open(path, newline="") as f:
-                for row in csv.DictReader(f):
-                    yield arch, suite, row
+            if os.path.exists(path):
+                with open(path, newline="") as f:
+                    tables[arch, suite] = list(csv.DictReader(f))
+    return tables
+
+
+def natural_key(text):
+    """Sort 'tokens_13' before 'tokens_1024'."""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", text)]
 
 
 def shorten_labels(series):
-    """Drop the parameter components every series of an operator shares.
+    """Label each series by the parameter components its benchmark's ids do not share.
 
-    A parametrization id names every parameter, so the ids of one operator agree
-    on most of their length. Only what differs identifies a line.
+    A parametrization id names every parameter, so the ids of one benchmark
+    agree on most of their length. Only what differs identifies a line. Where
+    that leaves two parametrizations one label, each keeps its whole id. A
+    parametrization in two suites is one series in each, with one label.
     """
-    components = [set(s["params"].split("-")) for s in series]
+    ids = {(s["test"], s["func"], s["params"]) for s in series}
+    components = [set(params.split("-")) for _, _, params in ids]
     shared = set.intersection(*components) if components else set()
-    funcs = {s["func"] for s in series}
+    funcs = {func for _, func, _ in ids}
+    labels = {}
+    for test, func, params in ids:
+        kept = [c for c in params.split("-") if c not in shared]
+        parts = [func] if len(funcs) > 1 else []
+        parts.append("-".join(kept) if kept else params or "default")
+        labels[test, func, params] = " · ".join(parts)
+    taken = list(labels.values())
+    for key, label in labels.items():
+        if taken.count(label) > 1:
+            labels[key] = " · ".join(p for p in key[1:] if p)
     for s in series:
-        kept = [c for c in s["params"].split("-") if c not in shared]
-        parts = [s["func"]] if len(funcs) > 1 else []
-        parts.append("-".join(kept) if kept else s["params"] or "default")
-        s["label"] = " · ".join(parts)
+        s["label"] = labels[s["test"], s["func"], s["params"]]
 
 
-def build_data(results_root):
-    """Group the benched rows into {operator: {metrics, groups}}.
+def passed(row):
+    """Whether a row's checks all passed, or None for a row that names none."""
+    p, n = parse_checks(row.get("Checks") or "")
+    return p == n if n else None
+
+
+def change(curr, prev, metric):
+    """Measure a metric's move from `prev` to `curr`: its percentage and verdict.
+
+    The verdict is 'better' or 'worse' only past both of the pull request
+    comment's gates, 'neutral' for a metric with no direction, and None for a
+    move inside the gates.
+    """
+    pct = delta_pct(
+        try_parse_float(curr.get(metric + MEAN_SUFFIX)),
+        try_parse_float(prev.get(metric + MEAN_SUFFIX)),
+    )
+    if pct is None:
+        return None
+    if abs(pct) < THRESHOLD or within_spread(curr, prev, metric, SIGMA):
+        return [pct, None]
+    if METRICS.get(metric, UNKNOWN_METRIC).higher_is_better is None:
+        return [pct, "neutral"]
+    return [pct, "worse" if worse(metric, pct) else "better"]
+
+
+def build_data(results_root, repository):
+    """Gather the page's data: the suites' latest runs, and every benchmark's history.
 
     The extensive suite runs the default suite's tests too, so one commit
     carries two measurements of the same parametrization. Each suite therefore
-    gets its own chart, with its own runs along the x axis.
+    keeps its own history, with its own runs.
     """
-    rows = [(arch, suite, row) for arch, suite, row in read_all_csvs(results_root)]
-    benched = {row_key(row) for row in select_bench_rows(row for _, _, row in rows)}
+    tables = read_all_csvs(results_root)
+    benched = {
+        row_key(row)
+        for row in select_bench_rows(r for rows in tables.values() for r in rows)
+    }
 
-    operators = {}
-    for arch, suite, row in rows:
-        key = row_key(row)
-        if key not in benched:
+    runs = []
+    benchmarks = {}
+    for (arch, suite), rows in tables.items():
+        dated = [r for r in rows if (r.get("Date") or "").strip()]
+        if not dated:
             continue
-        test_path, params = key
-        date = (row.get("Date") or "").strip()
-        if not date:
-            continue
+        latest = max(r["Date"] for r in dated)
+        in_run = [r for r in dated if r["Date"] == latest]
+        verdicts = [passed(r) for r in in_run]
+        run = {
+            "device": arch,
+            "suite": suite,
+            "date": latest,
+            "commit": (in_run[0].get("Commit") or "")[:10],
+            "tests": len(in_run),
+            "failed": verdicts.count(False),
+            "moved": [],
+        }
+        runs.append(run)
 
-        groups = operators.setdefault(operator_name(test_path, params), {})
-        bucket = groups.setdefault((arch, suite), {"commits": {}, "series": {}})
-        bucket["commits"][date] = (row.get("Commit") or "").strip()[:7] or "unknown"
+        by_series = {}
+        for row in dated:
+            if row_key(row) in benched:
+                by_series.setdefault(row_key(row), []).append(row)
 
-        _, func = split_test_path(test_path)
-        series = bucket["series"].setdefault(
-            (test_path, params), {"func": func, "params": params, "points": {}}
-        )
-        for column, raw in row.items():
-            metric = metric_label(column)
-            value = try_parse_float(raw) if metric else None
-            if value is None:
-                continue
-            series["points"].setdefault(metric, {})[date] = value
-
-    out = {}
-    for name, groups in sorted(operators.items()):
-        every_series = [s for b in groups.values() for s in b["series"].values()]
-        shorten_labels(every_series)
-        metrics = sorted({m for s in every_series for m in s["points"]})
-        if not metrics:
-            continue
-        # One colour per parametrization, so the charts agree.
-        colours = sorted({s["label"] for s in every_series})
-
-        charts = []
-        for arch in ARCHS:
-            for suite in SUITES:
-                bucket = groups.get((arch, suite))
-                if not bucket:
-                    continue
-                dates = sorted(bucket["commits"])
-                charts.append(
-                    {
-                        "name": f"{arch} \u2014 {suite}",
-                        "dates": dates,
-                        "commits": [bucket["commits"][d] for d in dates],
-                        "series": [
-                            {
-                                "label": s["label"],
-                                "colour": colours.index(s["label"]),
-                                "points": {
-                                    metric: [
-                                        s["points"].get(metric, {}).get(d)
-                                        for d in dates
-                                    ]
-                                    for metric in metrics
-                                },
-                            }
-                            for s in sorted(
-                                bucket["series"].values(), key=lambda s: s["label"]
-                            )
-                        ],
-                    }
+        for (test_path, params), series_rows in by_series.items():
+            series_rows.sort(key=lambda r: r["Date"])
+            name = operator_name(test_path, params)
+            _, func = split_test_path(test_path)
+            # The catalog prefixes each id with its device; without it, one
+            # parametrization's runs on each device are one series.
+            params = re.sub(r"^npu\d+-", "", params)
+            benchmark = benchmarks.setdefault(name, {"suites": {}})
+            history = benchmark["suites"].setdefault(suite, {})
+            series = history.setdefault(
+                (test_path, params),
+                {"func": func, "params": params, "test": test_path, "devices": {}},
+            )
+            points = []
+            for row in series_rows:
+                values = {}
+                for column, raw in row.items():
+                    metric = metric_label(column or "")
+                    value = try_parse_float(raw) if metric else None
+                    if value is not None:
+                        values[metric] = value
+                points.append(
+                    [row["Date"], (row.get("Commit") or "")[:10], passed(row), values]
                 )
-        out[name] = {"metrics": metrics, "charts": charts}
-    return out
+            changes = {}
+            if len(series_rows) > 1:
+                prev, curr = series_rows[-2], series_rows[-1]
+                for metric in points[-1][3].keys() - SPREADS.values():
+                    moved = change(curr, prev, metric)
+                    if moved is not None:
+                        changes[metric] = moved
+            current = series_rows[-1]["Date"] == latest
+            series["devices"][arch] = {
+                "points": points,
+                "current": current,
+                "changes": changes,
+            }
+            if current:
+                run["moved"] += [
+                    (name, series, metric, pct, verdict)
+                    for metric, (pct, verdict) in changes.items()
+                    if verdict in ("better", "worse")
+                ]
 
+    for benchmark in benchmarks.values():
+        shorten_labels([s for h in benchmark["suites"].values() for s in h.values()])
+    for run in runs:
+        run["moved"] = sorted(
+            [name, series["label"], metric, pct, verdict]
+            for name, series, metric, pct, verdict in run["moved"]
+        )
 
-PAGE = """<!DOCTYPE html>
-<!--
-SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>IRON benchmark history</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<style>
-  :root { color-scheme: light dark; }
-  body { font-family: system-ui, sans-serif; margin: 0; display: flex; min-height: 100vh; }
-  nav { width: 15rem; flex: none; border-right: 1px solid #8884; padding: 1rem; overflow-y: auto; }
-  nav h1 { font-size: 1rem; margin: 0 0 .75rem; }
-  nav a { display: block; padding: .3rem .5rem; border-radius: .25rem; color: inherit;
-          text-decoration: none; font-size: .9rem; }
-  nav a:hover { background: #8882; }
-  nav a.active { background: #2563eb; color: #fff; }
-  main { flex: 1; padding: 1.5rem 2rem; min-width: 0; }
-  header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
-  h2 { margin: 0; }
-  h3 { margin: 1.25rem 0 0; font-size: 1rem; }
-  select { padding: .3rem; }
-  .meta { color: #888; font-size: .85rem; margin-top: .5rem; }
-  .chart { position: relative; height: 38vh; min-height: 17rem; }
-  .empty { color: #888; font-size: .9rem; margin: .5rem 0 0; }
-</style>
-</head>
-<body>
-<nav><h1>Operators</h1><div id="operators"></div></nav>
-<main>
-  <header>
-    <h2 id="title"></h2>
-    <label>Metric <select id="metric"></select></label>
-  </header>
-  <div id="charts"></div>
-  <p class="meta" id="meta"></p>
-</main>
-<script id="data" type="application/json">__DATA__</script>
-<script>
-const DATA = JSON.parse(document.getElementById('data').textContent);
-const GENERATED = "__GENERATED__";
-// The CSV carries no units, so name them here.
-const UNITS = {Latency: 'us', Bandwidth: 'GB/s', Throughput: 'GFLOP/s',
-               TTFT: 's', TPS: 'tokens/s'};
-const names = Object.keys(DATA);
-let charts = [];
+    metric_order = list(METRICS)
+    out = {}
+    for name, benchmark in benchmarks.items():
+        suites = {}
+        for suite in SUITES:
+            history = benchmark["suites"].get(suite)
+            if not history:
+                continue
+            series = sorted(history.values(), key=lambda s: natural_key(s["label"]))
+            metrics = {
+                m
+                for s in series
+                for d in s["devices"].values()
+                for _, _, _, values in d["points"]
+                for m in values
+            } - set(SPREADS.values())
+            suites[suite] = {
+                "metrics": sorted(
+                    metrics,
+                    key=lambda m: (
+                        metric_order.index(m) if m in METRICS else len(metric_order),
+                        m,
+                    ),
+                ),
+                "series": [
+                    {
+                        "label": s["label"],
+                        "test": f"{s['test']}[{s['params']}]",
+                        "devices": s["devices"],
+                    }
+                    for s in series
+                ],
+            }
+        if not any(suite["metrics"] for suite in suites.values()):
+            continue
+        group = SUITE_NAMES[next(iter(suites))][0]
+        current = any(
+            d["current"]
+            for suite in suites.values()
+            for s in suite["series"]
+            for d in s["devices"].values()
+        )
+        catalogued = any(
+            s["test"].startswith(f"{CATALOG}::")
+            for suite in suites.values()
+            for s in suite["series"]
+        )
+        anchor = name if catalogued else OPERATOR_PAGES.get(name)
+        docs = None
+        if current and group == "Models":
+            docs = "../models/"
+        elif current and anchor:
+            docs = f"../api/operators/#iron.operators.{anchor}"
+        out[name] = {"group": group, "current": current, "docs": docs, "suites": suites}
 
-function colour(i) { return `hsl(${(i * 137.508) % 360} 65% 50%)`; }
-
-function chartFor(spec, metric, host) {
-  const series = spec.series.filter(s => s.points[metric].some(v => v !== null));
-  const heading = document.createElement('h3');
-  heading.textContent = spec.name;
-  host.appendChild(heading);
-  if (!series.length) {
-    const note = document.createElement('p');
-    note.className = 'empty';
-    note.textContent = `No ${metric} measurements.`;
-    host.appendChild(note);
-    return 0;
-  }
-  const box = document.createElement('div');
-  box.className = 'chart';
-  const canvas = document.createElement('canvas');
-  box.appendChild(canvas);
-  host.appendChild(box);
-
-  const unit = UNITS[metric];
-  charts.push(new Chart(canvas, {
-    type: 'line',
-    data: {
-      labels: spec.commits,
-      datasets: series.map(s => ({
-        label: s.label,
-        data: s.points[metric],
-        borderColor: colour(s.colour),
-        backgroundColor: colour(s.colour),
-        spanGaps: true,
-        tension: 0.1,
-        pointRadius: 2,
-      })),
-    },
-    options: {
-      maintainAspectRatio: false,
-      interaction: { mode: 'nearest', intersect: false },
-      scales: {
-        x: { ticks: { maxRotation: 60, autoSkipPadding: 20 } },
-        y: { title: { display: true, text: unit ? `${metric} (${unit})` : metric },
-             beginAtZero: true },
-      },
-      plugins: {
-        legend: { position: 'bottom' },
-        tooltip: { callbacks: { title: (items) =>
-          `${spec.commits[items[0].dataIndex]} — ${spec.dates[items[0].dataIndex]}` } },
-      },
-    },
-  }));
-  return series.length;
-}
-
-function draw(name, metric) {
-  const op = DATA[name];
-  charts.forEach(c => c.destroy());
-  charts = [];
-  const host = document.getElementById('charts');
-  host.textContent = '';
-
-  const counts = op.charts.map(spec =>
-    `${spec.name}: ${chartFor(spec, metric, host)} parametrization(s),` +
-    ` ${spec.commits.length} run(s)`);
-  document.getElementById('meta').textContent =
-    `${counts.join('. ')}. Page built ${GENERATED}.`;
-}
-
-function select(name) {
-  const op = DATA[name];
-  location.hash = name;
-  document.getElementById('title').textContent = name;
-  document.querySelectorAll('#operators a').forEach(
-    a => a.classList.toggle('active', a.dataset.name === name));
-
-  const picker = document.getElementById('metric');
-  const keep = op.metrics.includes(picker.value) ? picker.value : op.metrics[0];
-  picker.innerHTML = '';
-  for (const m of op.metrics) {
-    const option = document.createElement('option');
-    option.value = option.textContent = m;
-    picker.appendChild(option);
-  }
-  picker.value = keep;
-  draw(name, keep);
-}
-
-for (const name of names) {
-  const a = document.createElement('a');
-  a.href = '#' + name;
-  a.textContent = name;
-  a.dataset.name = name;
-  a.onclick = e => { e.preventDefault(); select(name); };
-  document.getElementById('operators').appendChild(a);
-}
-document.getElementById('metric').onchange =
-  e => draw(document.getElementById('title').textContent, e.target.value);
-
-if (names.length) {
-  select(names.includes(decodeURIComponent(location.hash.slice(1)))
-    ? decodeURIComponent(location.hash.slice(1)) : names[0]);
-} else {
-  document.getElementById('title').textContent = 'No benchmark results yet';
-}
-</script>
-</body>
-</html>
-"""
+    return {
+        "generated": datetime.now(timezone.utc).strftime(DATE_FMT),
+        "repository": repository,
+        "gates": {"threshold": THRESHOLD, "sigma": SIGMA},
+        "devices": DEVICES,
+        "suites": {
+            suite: {"group": group, "name": name}
+            for suite, (group, name) in SUITE_NAMES.items()
+        },
+        "metrics": {
+            name: {"unit": m.unit, "higher_is_better": m.higher_is_better}
+            for name, m in METRICS.items()
+        },
+        "spreads": SPREADS,
+        "runs": runs,
+        "benchmarks": dict(sorted(out.items(), key=lambda kv: natural_key(kv[0]))),
+    }
 
 
 def main():
@@ -304,25 +305,24 @@ def main():
         help="Root of the results branch worktree (default: current directory)",
     )
     parser.add_argument(
+        "--repository",
+        default="https://github.com/amd/IRON",
+        help="The repository the results' commits link to",
+    )
+    parser.add_argument(
         "-o",
-        "--output-dir",
-        default="site",
-        help="Directory to write the site into (default: site)",
+        "--output",
+        default="docs/benchmarks/data.json",
+        help="The JSON file to write (default: docs/benchmarks/data.json, "
+        "beside the Benchmarks page)",
     )
     args = parser.parse_args()
 
-    data = build_data(args.results_root)
-    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    # Escaping '<' keeps a test name that happens to spell a closing tag from
-    # ending the script element early.
-    payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")
-    page = PAGE.replace("__GENERATED__", generated).replace("__DATA__", payload)
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    out_path = os.path.join(args.output_dir, "index.html")
-    with open(out_path, "w") as f:
-        f.write(page)
-    print(f"Written: {out_path} ({len(data)} operators)")
+    data = build_data(args.results_root, args.repository)
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    with open(args.output, "w") as f:
+        json.dump(data, f, separators=(",", ":"))
+    print(f"Written: {args.output} ({len(data['benchmarks'])} benchmarks)")
 
 
 if __name__ == "__main__":

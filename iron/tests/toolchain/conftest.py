@@ -10,7 +10,8 @@ from iron.tests.support.tools import DEVICES
 
 @pytest.fixture(params=sorted(DEVICES))
 def device(request):
-    """Each device width the gate builds for, made current by the root
-    conftest's fixture of that name.
+    """Return each device width the gate builds for.
+
+    Made current by the root conftest's fixture of that name.
     """
     return request.getfixturevalue(request.param)

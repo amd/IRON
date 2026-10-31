@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Gemma 4's fused decode layer on the whole array, one token through one
-layer: reproduces FastFlowLM's xclbin and runtime sequence. One core runs
-each stage (RMS norm and residual, RoPE, 16 q4nx projection cores, GLU, the
+"""Gemma 4's fused decode layer on the whole array, one token through one layer.
+
+Reproduces FastFlowLM's xclbin and runtime sequence. One core runs each
+stage (RMS norm and residual, RoPE, 16 q4nx projection cores, GLU, the
 per-layer-input path, one attention pair per kind); the sequence writes the
 layer type into RTPs, then streams the weights, KV cache and hidden state.
 """
@@ -53,8 +54,10 @@ from iron.operators.flm.dataflow import ping_pong
 
 
 class LayerType(StrEnum):
-    """Global or sliding-window (swa) attention, and whether the layer reads
-    an earlier layer's KV cache (skip) instead of writing its own.
+    """Global or sliding-window (swa) attention.
+
+    And whether the layer reads an earlier layer's KV cache (skip) instead
+    of writing its own.
     """
 
     GLOBAL = "global"
@@ -236,8 +239,9 @@ _KV_PKT_SWA = 13
 
 
 def layer_kernels(geometry):
-    """The flm_gemma4_decode_* kernels this design's cores link, by kernel
-    name; the global attention kernels also depend on the geometry's KV head
+    """Return the flm_gemma4_decode_* kernels this design's cores link, by kernel name.
+
+    The global attention kernels also depend on the geometry's KV head
     count.
     """
     two_kv = geometry.num_kv_heads == 2
@@ -285,9 +289,10 @@ def layer_kernels(geometry):
 
 
 class BlobWeight(NamedTuple):
-    """One weight matrix in the engine's weight blob: ``offset``/``size``
-    count bf16 elements, ``dout``/``din`` the matrix shape, ``packed`` q4nx
-    versus bf16.
+    """One weight matrix in the engine's weight blob.
+
+    ``offset``/``size`` count bf16 elements, ``dout``/``din`` the matrix
+    shape, ``packed`` q4nx versus bf16.
     """
 
     offset: int
@@ -299,8 +304,9 @@ class BlobWeight(NamedTuple):
 
 @dataclass(frozen=True)
 class LayerDims:
-    """One layer type's dimensions, in elements, and its weight blob; a skip
-    layer with ``double_wide_mlp`` has twice the intermediate size.
+    """One layer type's dimensions, in elements, and its weight blob.
+
+    A skip layer with ``double_wide_mlp`` has twice the intermediate size.
     """
 
     geometry: FlmGemma4DecodeGeometry
@@ -333,9 +339,10 @@ class LayerDims:
 
     @property
     def weights(self) -> dict[str, BlobWeight]:
-        """The weights in the blob the sequence reads from proj, in blob
-        order: qkv (q alone on a skip layer), o, up_gate and down in q4nx,
-        then the per-layer-input down, gate and up projections in bf16.
+        """Return the weights in the blob the sequence reads from proj, in blob order.
+
+        qkv (q alone on a skip layer), o, up_gate and down in q4nx, then the
+        per-layer-input down, gate and up projections in bf16.
         """
         D, P, dq, dk = self.geometry.model_dim, self.geometry.pli_d, self.dq, self.dk
         inter = self.intermediate_size
@@ -360,14 +367,15 @@ class LayerDims:
         return SLIDING_WINDOW if self.swa else max_l
 
     def kv_row(self, context_len: int) -> int:
-        """The cache row of the token at position context_len."""
+        """Return the cache row of the token at position context_len."""
         return context_len % SLIDING_WINDOW if self.swa else context_len
 
 
 def arg_sizes(geometry):
-    """Upper bounds on the sequence's buffer element counts, by name; proj
-    holds the largest of the four layer types' blobs, since they share one
-    xclbin.
+    """Return upper bounds on the sequence's buffer element counts, by name.
+
+    proj holds the largest of the four layer types' blobs, since they
+    share one xclbin.
     """
     D, pli = geometry.model_dim, geometry.pli_d
     dk = geometry.num_kv_heads * geometry.dh
@@ -386,7 +394,7 @@ def arg_sizes(geometry):
 
 
 def _single_bd(direction, channel, buf, acq, rel, **bd_args):
-    """A DMA channel of one BD that repeats behind one lock pair."""
+    """Return a DMA channel of one BD that repeats behind one lock pair."""
     return DmaChannel(
         direction,
         channel,
@@ -395,12 +403,12 @@ def _single_bd(direction, channel, buf, acq, rel, **bd_args):
 
 
 def _ping_pong(direction, channel, b0, b1, acq, rel, **bd_args):
-    """A DMA channel of two BDs that alternate between b0 and b1."""
+    """Return a DMA channel of two BDs that alternate between b0 and b1."""
     return DmaChannel(direction, channel, ping_pong(b0, b1, acq, rel, **bd_args))
 
 
 def _call_kernel(*args):
-    """A core body that calls the kernel, its last argument, on the others."""
+    """Call the kernel, its last argument, on the others."""
     args[-1](*args[:-1])
 
 
@@ -421,12 +429,13 @@ def _connect(rt, src, src_ch, dst, dst_ch, pkt_id, keep_pkt_header=False, name=N
 
 @dataclass
 class _Array:
-    """The decode layer's array as its stages build it, each stage adding its
-    cores, locks and DMA channels to ``rt``/``workers``, keyed by stage in
-    ``t``, ``flows``, ``rtps`` and ``sync_locks``. RMS, GLU, attention-kv and
-    projection cores acquire their sync lock before reading RTPs (the
-    sequence sets it after writing); RoPE and attention-qk cores instead
-    wait for the projection cores.
+    """The decode layer's array as its stages build it.
+
+    Each stage adds its cores, locks and DMA channels to ``rt``/``workers``,
+    keyed by stage in ``t``, ``flows``, ``rtps`` and ``sync_locks``. RMS,
+    GLU, attention-kv and projection cores acquire their sync lock before
+    reading RTPs (the sequence sets it after writing); RoPE and
+    attention-qk cores instead wait for the projection cores.
     """
 
     rt: Runtime
@@ -475,12 +484,13 @@ class _Array:
         return next(stage for stage, at in self.t.items() if at is tile)
 
     def end(self, flow: str, tile: Tile):
-        """The end of the circuit ``flow`` on ``tile``, for its DMA channel."""
+        """Return the end of the circuit ``flow`` on ``tile``, for its DMA channel."""
         return self.flows[flow].endpoint(tile)
 
     def build(self) -> dict[str, Flow | PacketFlow]:
-        """Every stage, then every flow between them: the flows the runtime
-        sequence fills and drains, by name.
+        """Build every stage, then every flow between them.
+
+        Returns the flows the runtime sequence fills and drains, by name.
         """
         g, t = self.g, self.t
         G_DQ = g.num_attn_heads * g.dh
@@ -528,11 +538,11 @@ class _Array:
         return self.route(proj_send_tiles)
 
     def entry(self, name: str, symbol: str):
-        """The entry point ``symbol`` of the kernel ``name``, typed by its factory."""
+        """Return the entry point ``symbol`` of the kernel ``name``, typed by its factory."""
         return getattr(self.kernels[name], symbol)
 
     def rtp_buffer(self, tile: Tile, key: str) -> Buffer:
-        """The RTP buffer ``key`` of ``tile``, which the sequence writes."""
+        """Return the RTP buffer ``key`` of ``tile``, which the sequence writes."""
         buf = Buffer(
             type=_RTP_TY,
             name=f"rtp_{key}_{self.label(tile)}",
@@ -543,8 +553,10 @@ class _Array:
         return buf
 
     def add_locks(self, tile: Tile, ids_inits) -> list[Lock]:
-        """The tile's locks, one per (lock id, init) pair: a kernel takes
-        them by id. A lock id of None is the compiler's to assign.
+        """Return the tile's locks, one per (lock id, init) pair.
+
+        A kernel takes them by id. A lock id of None is the compiler's to
+        assign.
         """
         out = [Lock(tile=tile, lock_id=i, init=init) for i, init in ids_inits]
         for lock in out:
@@ -556,7 +568,7 @@ class _Array:
         return self.add_locks(tile, [(None, init) for init in inits])
 
     def locks(self, tile: Tile, table: dict, **inits: int) -> dict[str, Lock]:
-        """The tile's locks in ``table``, by name; ``inits`` sets those it leaves."""
+        """Return the tile's locks in ``table``, by name; ``inits`` sets those it leaves."""
         held = {n: v for n, v in table.items() if not isinstance(v, int)}
         ids_inits = [(i, inits.get(n, init)) for n, (i, init) in held.items()]
         return dict(zip(held, self.add_locks(tile, ids_inits)))
@@ -568,7 +580,7 @@ class _Array:
         args: list,
         channels: list[DmaChannel],
     ) -> None:
-        """A core running ``body`` on ``args``, and its tile's DMA channels."""
+        """Run a core on ``body`` and ``args``, with its tile's DMA channels."""
         self.workers.append(Worker(body, args, tile=tile))
         self.rt.add_tile_dma(TileDma(tile, channels))
 
@@ -780,8 +792,10 @@ class _Array:
         )
 
     def pl_merge(self, plm_tile: Tile) -> None:
-        """Per-layer-input merge: no kernel runs here, its DMA gathers the
-        embedding and gate outputs into one buffer for the up projection.
+        """Per-layer-input merge.
+
+        No kernel runs here, its DMA gathers the embedding and gate outputs
+        into one buffer for the up projection.
         """
         D, PLI_D = self.g.model_dim, self.g.pli_d
         plm_dual_y_ty = np.ndarray[(2 * (PLI_D + D) + 32,), _BF16]
@@ -907,7 +921,8 @@ class _Array:
         main_y0: Buffer | None = None,
         main_y1: Buffer | None = None,
     ) -> tuple[Buffer, Buffer]:
-        """Core ``j`` of projection group ``group``, returning its y buffers
+        """Build core ``j`` of projection group ``group``, returning its y buffers.
+
         (y0, y1); a core that doesn't send y fills the second slot of
         ``main_y0``/``main_y1`` instead, the sending core's own buffers.
         """
@@ -924,6 +939,11 @@ class _Array:
             y0 = Buffer(type=y_ty, name=f"y_0_{n}", tile=pt)
             y1 = Buffer(type=y_ty, name=f"y_1_{n}", tile=pt)
         else:
+            if main_y0 is None or main_y1 is None:
+                raise TypeError(
+                    "proj_core: main_y0 and main_y1 are required when send_x_out "
+                    "is False"
+                )
             y0, y1 = main_y0, main_y1
         pk = self.locks(pt, PROJ_LOCKS)
         self.sync_locks[n] = pk["rtp_available_lock"]
@@ -975,9 +995,10 @@ class _Array:
         return y0, y1
 
     def proj_cores(self) -> list[list[Tile]]:
-        """The q4nx projection engine: 16 cores, four per group; cores 0 and
-        2 of each group send y. Returns each gather memtile's two groups'
-        sending cores.
+        """Build the q4nx projection engine: 16 cores, four per group.
+
+        Cores 0 and 2 of each group send y. Returns each gather memtile's
+        two groups' sending cores.
         """
         proj_k = self.entry("proj_main", "proj_main")
 
@@ -996,7 +1017,7 @@ class _Array:
         return proj_send_tiles
 
     def weight_channels(self, mt: Tile, w0: Buffer, w1: Buffer) -> dict:
-        """The weight channels of the projection memtile ``mt``."""
+        """Return the weight channels of the projection memtile ``mt``."""
         group = PROJ_MEMS.index(self.label(mt))
         return _proj_weight_channels(
             w0,
@@ -1007,7 +1028,7 @@ class _Array:
         )
 
     def proj_gather_mem(self, mt: Tile) -> None:
-        """A projection memtile that also gathers y from its group's sending cores."""
+        """Build a memtile that also gathers y from its group's sending cores."""
         m = q4nx.M_TILE
         n = self.label(mt)
         m_col_ty = np.ndarray[(8 * m + 2,), _BF16]
@@ -1046,13 +1067,13 @@ class _Array:
         )
 
     def proj_weight_mem(self, mt: Tile) -> None:
-        """A projection memtile that carries weights only."""
+        """Build a projection memtile that carries weights only."""
         w0, w1 = _proj_weight_buffers(mt, self.label(mt))
         wc = self.weight_channels(mt, w0, w1)
         self.rt.add_tile_dma(TileDma(mt, [wc["in0"], *wc["out"], wc["in1"]]))
 
     def proj_x_mem(self, mt: Tile) -> None:
-        """The projection memtile that gathers both groups' y and broadcasts x."""
+        """Build the projection memtile that gathers both groups' y and broadcasts x."""
         m = q4nx.M_TILE
         n = self.label(mt)
         x_chunk_ty = np.ndarray[(X_SLICE * 2,), _BF16]
@@ -1088,8 +1109,9 @@ class _Array:
         )
 
     def scores_ty(self, name: str) -> type[np.ndarray]:
-        """The type of the scores the qk core sends kv kernel ``name``: the
-        first argument of its ``round``, or ``s_begin`` for two KV heads.
+        """Return the type of the scores the qk core sends kv kernel ``name``.
+
+        The first argument of its ``round``, or ``s_begin`` for two KV heads.
         """
         kv = self.kernels[name]
         entries = vars(kv)
@@ -1105,8 +1127,10 @@ class _Array:
         of_s: ObjectFifo,
         two_kv_heads: bool,
     ) -> None:
-        """An attention kv core. A round of the two-KV-head kernels covers one KV
-        head; a round of the other kernels covers every KV head.
+        """Build an attention kv core.
+
+        A round of the two-KV-head kernels covers one KV head; a round of
+        the other kernels covers every KV head.
         """
         g = self.g
         n = self.label(kv_tile)
@@ -1176,7 +1200,7 @@ class _Array:
         q_fifo: ObjectFifo,
         two_kv_heads: bool,
     ) -> None:
-        """An attention qk core."""
+        """Build an attention qk core."""
         n = self.label(qk_tile)
         # Every qk kernel names its entry points attn_qk_*.
         steps = ("half", "store_c") if two_kv_heads else ("round",)
@@ -1237,7 +1261,7 @@ class _Array:
         )
 
     def attn_mem(self, amt: Tile) -> None:
-        """The attention memtile."""
+        """Build the attention memtile."""
         g = self.g
         NUM_KV, two_kv = g.num_kv_heads, g.num_kv_heads == 2
         amt_name = self.label(amt)
@@ -1282,9 +1306,10 @@ class _Array:
         self.rt.add_tile_dma(TileDma(amt, amt_chans))
 
     def route(self, proj_send_tiles: list[list[Tile]]) -> dict[str, Flow | PacketFlow]:
-        """Add every flow between the stages, long ones first since the
-        router places them in the order the design adds them; returns the
-        flows the runtime sequence fills and drains, by name.
+        """Add every flow between the stages, long ones first.
+
+        The router places them in the order the design adds them; returns
+        the flows the runtime sequence fills and drains, by name.
         """
         rt, t = self.rt, self.t
         x_shim, kv_shim = t["x_shim"], t["kv_shim"]
@@ -1391,9 +1416,11 @@ def _sequence(
     len_arg,
     max_l_arg,
 ):
-    """The runtime sequence of one ``layer_type`` dispatch: writes the RTPs,
-    then starts the shim DMA legs in ``gen_layer_seq``'s order. Offsets and
-    lengths count bf16 elements; L counts tokens up to and including this one.
+    """Build the runtime sequence of one ``layer_type`` dispatch.
+
+    Writes the RTPs, then starts the shim DMA legs in ``gen_layer_seq``'s
+    order. Offsets and lengths count bf16 elements; L counts tokens up to
+    and including this one.
     """
     dims = LayerDims(g, LayerType(layer_type))
     D = g.model_dim
@@ -1402,8 +1429,14 @@ def _sequence(
     SW = SLIDING_WINDOW
     weights = dims.weights
 
-    require(_as_i32(len_arg) >= 0, "context_len must be >= 0")
-    require(MAX_L_v <= MAX_CONTEXT, f"max_l exceeds {MAX_CONTEXT}")
+    require(
+        _as_i32(len_arg) >= 0,
+        "context_len must be >= 0",
+    )
+    require(
+        MAX_L_v <= MAX_CONTEXT,
+        f"max_l exceeds {MAX_CONTEXT}",
+    )
     if not dims.swa:
         require(L <= MAX_L_v, "context_len must be below max_l")
 
@@ -1451,7 +1484,7 @@ def _sequence(
         flush()
 
     def leg(flow, mem, off, length, token=True):
-        """A (task, token) pair: ``mem[off : off + length]`` into ``shim[flow]``."""
+        """Return a (task, token) pair: ``mem[off : off + length]`` into ``shim[flow]``."""
         task = shim[flow].fill(
             mem, tap=mem[off : off + length], wait=token, managed=False
         )
@@ -1469,7 +1502,7 @@ def _sequence(
     recv_y = shim["recv_y"].drain(x_arg, tap=x_arg[:D], wait=True, managed=False)
 
     def move_weights(w):
-        """The engine's _move_weights: a round is 2 legs to each proj group."""
+        """Emit the engine's _move_weights legs: a round is 2 legs to each proj group."""
         bpr = w.din // q4nx.K_TILE
         # One core's M_TILE output rows, in bf16 elements.
         stripe = bpr * W_BLOCK
@@ -1491,7 +1524,9 @@ def _sequence(
     if not dims.skip:
         # recv_k carries the global layers' k and v, recv_v the sliding-window
         # layers'.
-        L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if dims.swa else (L - 1)) * dims.dk
+        L_off = (
+            arith.andi(L - 1, _as_i32(SW - 1)) if dims.swa else (L - 1)
+        ) * dims.dk  # pyright: ignore[reportOperatorIssue]
         recv = "recv_v" if dims.swa else "recv_k"
         for off in (L_off, L_off + v_cache_off):
             task = shim[recv].drain(
@@ -1524,14 +1559,29 @@ def _sequence(
         start = arith.andi(_m, _lb)
         # All ones if start is 0, else 0.
         _z = arith.xori(_mask_ge(start, 1), _as_i32(-1))
-        p1_off = start * dims.dk
-        p1_len = (rows - start) * dims.dk - arith.andi(_z, _as_i32(dims.dk))
+        p1_off = start * dims.dk  # pyright: ignore[reportOperatorIssue]
+        p1_len = (
+            rows - start
+        ) * dims.dk - arith.andi(  # pyright: ignore[reportOperatorIssue]
+            _z, _as_i32(dims.dk)
+        )
         p2_off = arith.andi(_z, p1_len)
-        p2_len = arith.ori(start * dims.dk, arith.andi(_z, _as_i32(dims.dk)))
+        p2_len = arith.ori(
+            start * dims.dk,  # pyright: ignore[reportOperatorIssue]
+            arith.andi(_z, _as_i32(dims.dk)),
+        )
         emit(leg(move_k, kv_arg, p1_off, p1_len))
         emit(leg(move_v, kv_arg, p1_off + v_cache_off, p1_len))
         emit(leg(move_k, kv_arg, p2_off, p2_len, token=False))
-        emit(leg(move_v, kv_arg, p2_off + v_cache_off, p2_len, token=False))
+        emit(
+            leg(
+                move_v,
+                kv_arg,
+                p2_off + v_cache_off,  # pyright: ignore[reportOperatorIssue]
+                p2_len,
+                token=False,
+            )
+        )
     for name in ("o", "up_gate", "down"):
         move_weights(weights[name])
     emit(pli_leg("pli_gate"))
@@ -1547,9 +1597,10 @@ _PROJ_MEM_W_INITS = (2, 0, 0, 2, 0, 0)
 
 
 def _proj_weight_channels(w0, w1, in_ends, out_ends, *locks):
-    """A projection memtile's weight channels on flow ends ``in_ends``/
-    ``out_ends``: each half of a weight object comes in on its own channel,
-    then goes out a W_BLOCK at a time on two, behind a chain of three locks.
+    """Return a memtile's weight channels on flow ends ``in_ends``/``out_ends``.
+
+    Each half of a weight object comes in on its own channel, then goes out
+    a W_BLOCK at a time on two, behind a chain of three locks.
     """
     w = TensorAccessPattern.full(w0.shape)
     ins, outs = [], []
@@ -1583,7 +1634,7 @@ def _proj_weight_channels(w0, w1, in_ends, out_ends, *locks):
 
 
 def _proj_weight_buffers(mt, name):
-    """A projection memtile's weight ping and pong buffers."""
+    """Return a projection memtile's weight ping and pong buffers."""
     w0 = Buffer(type=_LINEAR_4W_TY, name=f"w_buffer_0_{name}", tile=mt)
     w1 = Buffer(type=_LINEAR_4W_TY, name=f"w_buffer_1_{name}", tile=mt)
     return w0, w1
@@ -1598,9 +1649,11 @@ def decode_layer(
     context_len: DispatchTime[np.int32],
     max_l: DispatchTime[np.int32],
 ):
-    """The MLIR module of one decode layer of ``layer_type`` for ``geometry``;
+    """Return the MLIR module of one decode layer of ``layer_type`` for ``geometry``.
+
     ``layer_type`` sets only the runtime sequence, ``kernels`` holds
-    ``layer_kernels(geometry)``. README.md explains ``context_len`` and ``max_l``.
+    ``layer_kernels(geometry)``. README.md explains ``context_len`` and
+    ``max_l``.
     """
     g = geometry
     sizes = arg_sizes(g)

@@ -12,11 +12,12 @@ from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import eltwise, linalg
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp
+from iron.common.declare.operand import concrete
 from iron.common.testing import Case, Testing
 
 
@@ -76,9 +77,10 @@ def _cases(cls, dev: Device):
 
 
 class GEMV(Operator):
-    """``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per
-    mv.cc call; B rides each lane's A stream ahead of its rows so every
-    input channel of a column can carry A.
+    """``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per mv.cc call.
+
+    B rides each lane's A stream ahead of its rows so every input channel
+    of a column can carry A.
     """
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A, op.B)))
@@ -169,8 +171,10 @@ class GEMV(Operator):
             )
 
     def _legal_kernel_vector_size(self) -> int:
-        """The vector width the matvec kernel is compiled at: mv.cc's
-        static_asserts, ``K % w == 0`` and ``K >= 2 * w``, checked here.
+        """Return the vector width the matvec kernel is compiled at.
+
+        mv.cc's static_asserts, ``K % w == 0`` and ``K >= 2 * w``,
+        checked here.
         """
         legal = [
             size
@@ -322,8 +326,9 @@ class GEMV(Operator):
         return Built(workers, rtps)
 
     def sequence(self, rt):
-        """Per batch and lane: B's head tile, then A's rows. C drains are
-        issued first: an undrained C would stop A.
+        """Sequence per batch and lane: B's head tile, then A's rows.
+
+        C drains are issued first: an undrained C would stop A.
         """
         if self.repeat > 1:
             for buf in (self.A, self.C):
@@ -380,9 +385,10 @@ class GEMV(Operator):
             )
             for k, tap, word, unit in rows:
                 self.A.fill(head, lane=k, source=self.B, managed=False)
+                (offset,) = concrete((tap.offset,), tap)
                 matrix = TensorAccessPattern(
                     tap.tensor_dims,
-                    tap.offset + b // self.repeat * M * K,
+                    offset + b // self.repeat * M * K,
                     tap.sizes,
                     tap.strides,
                 )

@@ -13,9 +13,11 @@ import numpy as np
 def filled(
     fill: str, named: Mapping[str, tuple[tuple[int, ...], Any]], seed: int = 0
 ) -> dict[str, np.ndarray]:
-    """An array for each of ``named``'s ``(shape, dtype)``, by name: ``"random"``
-    draws matrices normal at deviation ``1/sqrt(in)`` and the rest about one (a bias
-    zero) at 0.1, so swapping two changes the output; ``"unread"`` is lazy zeros.
+    """Return an array for each of ``named``'s ``(shape, dtype)``, by name.
+
+    ``"random"`` draws matrices normal at deviation ``1/sqrt(in)`` and the
+    rest about one (a bias zero) at 0.1, so swapping two changes the
+    output; ``"unread"`` is lazy zeros.
     """
     if fill == "unread":
         return {n: np.zeros(shape, dtype) for n, (shape, dtype) in named.items()}

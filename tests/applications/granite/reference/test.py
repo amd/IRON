@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Granite's graph against Hugging Face's Granite in float32 over the same
-random weights at a toy shape, its logits recorded in ``goldens/``,
-device-free: the shared decoder's tests (``Decoder``) with Granite's four
-scalars, none at its default, and an untied head.
+"""Granite's graph against Hugging Face's Granite in float32 over the same random weights at a toy shape.
+
+Its logits recorded in ``goldens/``, device-free: the shared decoder's
+tests (``Decoder``) with Granite's four scalars, none at its default, and
+an untied head.
 """
 
 from iron.applications.granite.model import Granite, GraniteConfig

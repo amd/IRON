@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Granite 4.0-H 1B's graph against Hugging Face's GraniteMoeHybrid in
-float32 over the same random weights at a toy shape, its logits recorded
-in ``goldens/``, device-free: the shared decoder's tests (``Decoder``),
-whose prompts span several of the toy's 64-row chunks, so the Mamba2
-layers' states carry across chunk boundaries and into decode steps. This
-package ships the dense sizes only, so the toy has no experts.
+"""Granite 4.0-H 1B's graph against Hugging Face's GraniteMoeHybrid in float32 over the same random weights at a toy shape.
+
+Its logits recorded in ``goldens/``, device-free: the shared decoder's
+tests (``Decoder``), whose prompts span several of the toy's 64-row
+chunks, so the Mamba2 layers' states carry across chunk boundaries and
+into decode steps. This package ships the dense sizes only, so the toy
+has no experts.
 """
 
 import dataclasses
@@ -52,10 +53,11 @@ TOY = GraniteHybridConfig(
 
 @pytest.fixture(scope="module")
 def golden(golden):
-    """The toy's golden, its weights first redrawn in place where the
-    shared draw would leave a layer inert: the time steps and decays as
-    Mamba2 initializes them, so a state lasts many positions; and the
-    convolution's bias ten times the draw's, at its taps' scale.
+    """Return the toy's golden, its weights first redrawn in place where the shared draw would leave a layer inert.
+
+    The time steps and decays as Mamba2 initializes them, so a state lasts
+    many positions; and the convolution's bias ten times the draw's, at its
+    taps' scale.
     """
 
     def recorded(name, build, config, weights):
@@ -87,8 +89,8 @@ class TestGraniteHybridDense(Decoder):
         E, D = c.hidden_size, c.head_dim
         S = c.shared_intermediate_size
         H, N = c.mamba_n_heads, c.mamba_d_state
-        I = H * c.mamba_d_head
-        channels = I + 2 * c.mamba_n_groups * N
+        d_inner = H * c.mamba_d_head
+        channels = d_inner + 2 * c.mamba_n_groups * N
         out = {
             "model.embed_tokens.weight": (c.vocab_size, E),
             "model.norm.weight": (E,),
@@ -113,14 +115,14 @@ class TestGraniteHybridDense(Decoder):
             else:
                 m = f"{p}.mamba"
                 out |= {
-                    f"{m}.in_proj.weight": (I + channels + H, E),
+                    f"{m}.in_proj.weight": (d_inner + channels + H, E),
                     f"{m}.conv1d.weight": (channels, 1, c.mamba_d_conv),
                     f"{m}.conv1d.bias": (channels,),
                     f"{m}.dt_bias": (H,),
                     f"{m}.A_log": (H,),
                     f"{m}.D": (H,),
-                    f"{m}.norm.weight": (I,),
-                    f"{m}.out_proj.weight": (E, I),
+                    f"{m}.norm.weight": (d_inner,),
+                    f"{m}.out_proj.weight": (E, d_inner),
                 }
         return out
 

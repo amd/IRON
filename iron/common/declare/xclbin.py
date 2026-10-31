@@ -5,38 +5,44 @@
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import os
 import tempfile
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from aie.utils.compile import NPU_CACHE_HOME
 from aie.utils.npukernel import NPUKernel
 
 
 class Xclbin(NPUKernel):
-    """A downloaded xclbin pinned by ``sha256``, fetched over https into the JIT
-    cache's ``prebuilt/<filename>`` on first read of ``xclbin_path``. As an
-    ``image=`` it has no instructions; a build runs it ``with_instructions``.
+    """A downloaded xclbin pinned by ``sha256``.
+
+    Fetched over https into the JIT cache's ``prebuilt/<filename>`` on
+    first read of ``xclbin_path``. As an ``image=`` it has no
+    instructions; a build runs it ``with_instructions``.
 
     Args:
         **kernel: ``NPUKernel``'s other arguments, kept as ``settings``.
     """
 
-    def __init__(self, url: str, sha256: str, filename: str, **kernel) -> None:
+    def __init__(self, url: str, sha256: str, filename: str, **kernel: Any) -> None:
         super().__init__(**kernel)
         self.url, self.sha256, self.filename = url, sha256, filename
         self.settings = kernel
 
-    @functools.cached_property
+    @property
     def xclbin_path(self) -> Path:
-        return self.fetch()
+        if self._xclbin_path is None:
+            self._xclbin_path = self.fetch()
+        return Path(self._xclbin_path)
 
     def with_instructions(self, insts_path, **kernel) -> Xclbin:
-        """This image running ``insts_path``, with ``kernel`` (as `NPUKernel`
-        takes it) over the declared settings.
+        """Return this image running ``insts_path``.
+
+        With ``kernel`` (as `NPUKernel` takes it) over the declared
+        settings.
         """
         run = Xclbin(
             self.url,
@@ -44,8 +50,7 @@ class Xclbin(NPUKernel):
             self.filename,
             **{**self.settings, **kernel, "insts_path": insts_path},
         )
-        if "xclbin_path" in vars(self):
-            vars(run)["xclbin_path"] = self.xclbin_path
+        run._xclbin_path = self._xclbin_path
         return run
 
     def __call__(self, *args, **kwargs):
@@ -54,8 +59,10 @@ class Xclbin(NPUKernel):
         return super().__call__(*args, **kwargs)
 
     def fetch(self, directory=None) -> Path:
-        """The downloaded file in ``directory`` (``NPU_CACHE_HOME``'s
-        ``prebuilt/`` by default), fetched unless the pinned content is there.
+        """Return the downloaded file in ``directory``.
+
+        ``NPU_CACHE_HOME``'s ``prebuilt/`` by default, fetched unless
+        the pinned content is there.
 
         Raises:
             ValueError: The URL is not https.

@@ -12,8 +12,10 @@ from iron.common.testing import Testing
 
 
 class GELU(UnaryElementwise):
-    """AIE-accelerated GELU: by its tanh approximation, or exact
-    (``approximate="none"``, ``x * Phi(x)``), as torch's ``approximate``.
+    """AIE-accelerated GELU.
+
+    By its tanh approximation, or exact (``approximate="none"``,
+    ``x * Phi(x)``), as torch's ``approximate``.
     """
 
     test = Testing(

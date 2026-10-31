@@ -90,7 +90,8 @@ Run the steps below from this directory, `iron/operators/flm/gemma4_engine`.
 
 The test serves a word problem and a 1259-token prompt on both engines. It
 checks that the token ids match, and reports the IRON engine's time to first
-token and decode rate for each prompt. Run it from the repository root:
+token and decode rate for each prompt, which CI records
+([benchmarks](https://amd.github.io/IRON/benchmarks/#bench=gemma4_flm&suite=nightly&metric=TTFT)). Run it from the repository root:
 
 ```bash
 pytest tests/applications/gemma4_flm

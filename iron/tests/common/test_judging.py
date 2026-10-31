@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Each catalog operator's judgement, device-free: its first default case's
-oracle output passes its ``tolerance()``, and an output past it, a NaN or its
-halves swapped fail, as a device test, check mode and the tuner judge them."""
+"""Each catalog operator's judgement, device-free.
+
+Its first default case's oracle output passes its ``tolerance()``, and an
+output past it, a NaN or its halves swapped fail, as a device test, check
+mode and the tuner judge them.
+"""
 
 import aie.utils as aie_utils
 import ml_dtypes
@@ -20,17 +23,17 @@ from iron.tests.support.judging import interval
 
 
 def test_every_declared_case_resolves_on_npu2():
-    """A sizing change that leaves a case unresolvable would otherwise only
-    skip its device test.
-    """
+    """A sizing change that leaves a case unresolvable would otherwise only skip its device test."""
     dev = from_name("npu2", n_cols=8)
     reasons = [(n, c.label, unresolvable(cls, c, dev)) for n, cls, c in declared(dev)]
     assert not [r for r in reasons if r[2]]
 
 
 def test_npu1_runs_every_case_of_an_operator_it_runs():
-    """A case wider than npu1 would only skip there; an operator npu1 cannot
-    run at all (an AIE2P-only kernel) refuses every case.
+    """A case wider than npu1 would only skip there.
+
+    An operator npu1 cannot run at all (an AIE2P-only kernel) refuses every
+    case.
     """
     dev = from_name("npu1", n_cols=4)
     reasons: dict[str, list] = {}
@@ -154,8 +157,9 @@ def _bound(x):
     ],
 )
 def test_an_interval_is_what_compare_admits(tol):
-    """The outputs a tolerance admits, as an interval: its edges pass
-    ``compare``, and the next value past either fails.
+    """The outputs a tolerance admits, as an interval.
+
+    Its edges pass ``compare``, and the next value past either fails.
     """
     rng = np.random.default_rng(0)
     x = rng.standard_normal(4096) * np.exp(rng.uniform(-8, 8, 4096))

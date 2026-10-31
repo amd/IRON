@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``iron.lm.Multimodal``, device-free: its signature from its text model's
-and towers', the versions a mixed call runs, and their references in turn,
-a tower's soft tokens at their placeholders, against numpy over an encoder
-and against Hugging Face's Llama (``goldens/``) over a causal model's chunks.
+"""``iron.lm.Multimodal``, device-free: its signature from its text model's and towers'.
+
+The versions a mixed call runs, and their references in turn, a tower's
+soft tokens at their placeholders, against numpy over an encoder and
+against Hugging Face's Llama (``goldens/``) over a causal model's chunks.
 """
 
 import numpy as np
@@ -14,7 +15,6 @@ from ml_dtypes import bfloat16
 
 from iron.lm import Multimodal
 from iron.lm.testing import assert_close
-from iron.tests.support.llama_reference import prompt
 from iron.tests.support.encoder import (
     HEAD_DIM,
     HEADS,
@@ -23,6 +23,7 @@ from iron.tests.support.encoder import (
     SelfAttention,
     attention,
 )
+from iron.tests.support.llama_reference import prompt
 from iron.tests.support.multimodal import IMAGE, small_causal
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -122,8 +123,9 @@ def test_a_causal_model_s_versions_and_signature(golden):
 
 
 def test_a_run_of_soft_tokens_crossing_a_chunk_is_placed_on_both_sides(golden):
-    """Each version's reference in turn, its states carried from one to the
-    next: the tower, then each chunk, one holding a placeholder through
+    """Each version's reference in turn, its states carried from one to the next.
+
+    The tower, then each chunk, one holding a placeholder through
     ``placed`` with the count before it, then a decode step.
     """
     model, reference, tokens, soft = small_causal(golden)

@@ -24,8 +24,8 @@ from iron import Profile, Scratchpad
 from iron.common import Built, Operator, Rtp, Unresolvable, Value, Xclbin
 from iron.common.declare.operand import active_runtime, axis_of
 from iron.common.design import OperatorDesign, OperatorRuntime
-from iron.tests.support.declare import Rows
 from iron.operators.mha import MHA
+from iron.tests.support.declare import Rows
 
 NPU2 = from_name("npu2", n_cols=8)
 
@@ -180,7 +180,7 @@ def test_per_call_values_bind_on_the_operator():
     assert not op.off.dispatch and Copy(n=512).off.dispatch
 
 
-def test_an_exported_design_replaces_the_derived_one():
+def test_an_exported_design_replaces_the_derived_one(npu2):
     # The design is another tool's text; the operands are declared as any
     # operator's are.
     class Exported(Operator):

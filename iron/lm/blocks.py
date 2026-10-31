@@ -35,9 +35,10 @@ from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleT
 
 
 def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarray:
-    """The ``(fft // 2 + 1, mels)`` unnormalized mel triangles over the
-    rfft's bins on HTK's mel scale, from 0 Hz to ``max_hz``, float64, as
-    transformers' ``mel_filter_bank``.
+    """Compute the ``(fft // 2 + 1, mels)`` unnormalized mel triangles, HTK scale.
+
+    Over the rfft's bins, from 0 Hz to ``max_hz``, float64, as transformers'
+    ``mel_filter_bank``.
     """
     mel = np.linspace(0, 2595 * math.log10(1 + max_hz / 700), mels + 2)
     edges = 700 * (10 ** (mel / 2595) - 1)
@@ -50,8 +51,9 @@ def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarr
 
 
 class LogMel(iron.Graph):
-    """The log-mel spectrogram of float32 samples, as Hugging Face's Gemma 4
-    feature extractor computes it, via bf16-limb GEMMs (``Limbs``) for exact
+    """The log-mel spectrogram of float32 samples, as Hugging Face computes it.
+
+    Gemma 4's feature extractor, via bf16-limb GEMMs (``Limbs``) for exact
     float32 rfft and filterbank products.
     """
 
@@ -119,8 +121,9 @@ class LogMel(iron.Graph):
 
 
 class ImagePatches(iron.Graph):
-    """A decoded image resized as torchvision's antialiased bicubic resize
-    does it, rescaled to ``[0, 1]`` and cut row-major into a vision tower's
+    """A decoded image resized as torchvision's antialiased bicubic resize does it.
+
+    Rescaled to ``[0, 1]`` and cut row-major into a vision tower's
     ``patches`` rows of 16x16-pixel patches.
     """
 
@@ -211,12 +214,17 @@ class ImagePatches(iron.Graph):
             position_ids.reshape(2 * T),
         )
 
-    def pack(self, image, out_height: int, out_width: int) -> tuple[np.ndarray, dict]:
-        """A call's image buffer and per-call sizes for a decoded ``image``
-        resized to ``out_height`` by ``out_width``.
+    def pack(
+        self, image: np.ndarray, out_height: int, out_width: int
+    ) -> tuple[np.ndarray, dict]:
+        """Build a call's image buffer and per-call sizes for a decoded ``image``.
+
+        Resized to ``out_height`` by ``out_width``.
 
         Args:
             image: ``(height, width, 3)`` uint8.
+            out_height: The height to resize to.
+            out_width: The width to resize to.
 
         Raises:
             ValueError: The image or its patches do not fit a call, or
@@ -248,8 +256,9 @@ class ImagePatches(iron.Graph):
 
 
 class Weights(iron.Graph):
-    """Weights of these shapes, by name, read where the checkpoint holds
-    them and computed with elsewhere.
+    """Weights of these shapes, by name.
+
+    Read where the checkpoint holds them and computed with elsewhere.
     """
 
     def __init__(self, **shapes: tuple[int, ...]):
@@ -258,8 +267,9 @@ class Weights(iron.Graph):
 
 
 class Linear(iron.Graph):
-    """``torch.nn.Linear``: ``x @ weight.T``, plus ``bias`` where it holds one,
-    at ``precision`` (``F.linear``'s, the caller's choice).
+    """``torch.nn.Linear``: ``x @ weight.T``, plus ``bias`` where it holds one.
+
+    At ``precision`` (``F.linear``'s, the caller's choice).
     """
 
     def __init__(
@@ -279,8 +289,9 @@ class Linear(iron.Graph):
         return F.linear(x, self.weight, self.bias, precision=self.precision)
 
     def split(self, x, *rows: int, **gemv) -> list:
-        """Project ``x`` through each run of ``rows`` of the weight in turn,
-        each a fused projection's output; splitting the output columns
+        """Project ``x`` through each run of ``rows`` of the weight in turn.
+
+        Each a fused projection's output; splitting the output columns
         instead would need a strided view no bounded-row descriptor fits.
         """
         ends = np.cumsum(rows)
@@ -308,8 +319,9 @@ class Embedding(iron.Graph):
 
 
 class RMSNorm(iron.Graph):
-    """``torch.nn.RMSNorm`` over the last axis, times ``weight``; ``eps``
-    None is the input dtype's machine epsilon.
+    """``torch.nn.RMSNorm`` over the last axis, times ``weight``.
+
+    ``eps`` None is the input dtype's machine epsilon.
     """
 
     def __init__(self, normalized_shape: int | tuple[int], eps: float | None = None):
@@ -323,9 +335,10 @@ class RMSNorm(iron.Graph):
 
     @staticmethod
     def plus_one(module) -> None:
-        """Every ``RMSNorm`` of ``module``, loaded, scaling by ``1 + weight``
-        (Gemma's, Qwen3.5's), the sum in float32 rounded to bf16 (Hugging
-        Face keeps it float32).
+        """Make every ``RMSNorm`` of ``module``, loaded, scale by ``1 + weight``.
+
+        As Gemma's and Qwen3.5's do, the sum in float32 rounded to bf16
+        (Hugging Face keeps it float32).
         """
         for _, weight, norm, _ in list(walk(module)):
             if isinstance(norm, RMSNorm):
@@ -335,8 +348,9 @@ class RMSNorm(iron.Graph):
 
 
 class LayerNorm(iron.Graph):
-    """``torch.nn.LayerNorm`` over the last axis, times ``weight`` plus
-    ``bias`` (``F.layer_norm``).
+    """``torch.nn.LayerNorm`` over the last axis, times ``weight`` plus ``bias``.
+
+    Computed by ``F.layer_norm``.
     """
 
     def __init__(self, normalized_shape: int | tuple[int], eps: float = 1e-5):
@@ -351,7 +365,7 @@ class LayerNorm(iron.Graph):
 
 
 def activation(name: str):
-    """The function ``hidden_act`` ``name`` is.
+    """Return the function ``hidden_act`` ``name`` is.
 
     Raises:
         ValueError: No operator computes it: only ``"silu"``, ``"gelu"``
@@ -378,7 +392,8 @@ def residual_add(x, y, residual: float):
 
 
 class Rope(iron.Graph):
-    """A decoder's RoPE table, one row per position (``DecoderConfig.angles``);
+    """A decoder's RoPE table, one row per position (``DecoderConfig.angles``).
+
     q and k share it unless ``q_scale`` gives q a scaled table of its own. A
     model copies each call's rows once (``rows``) for every layer to read.
     """
@@ -393,9 +408,10 @@ class Rope(iron.Graph):
         self.chunk, self.width = c.prefill_chunk, c.rope_width
 
     def rows(self, call) -> tuple:
-        """``call``'s rows of q's table and of k's, the same rows where they
-        share one: a prompt chunk's from its ``start``, else the decode
-        step's at its ``position``.
+        """Return ``call``'s rows of q's table and of k's.
+
+        The same rows where they share one: a prompt chunk's from its
+        ``start``, else the decode step's at its ``position``.
         """
 
         def read(table):
@@ -408,14 +424,16 @@ class Rope(iron.Graph):
         return (k if self.q_table is None else read(self.q_table)), k
 
     def table_start(self, n: int) -> int:
-        """The row of the table a prompt of ``n`` tokens reads its first
-        position from: 0, the table's first.
+        """Return the row of the table a prompt of ``n`` tokens starts reading from.
+
+        0, the table's first.
         """
         return 0
 
 
 class KVCache(iron.Graph):
     """A layer's keys and values and causal attention over them (``attend``).
+
     A prompt chunk writes a run of rows; a decode step attends with ``MHA``
     over one query, which costs the context, not the cache.
 
@@ -442,19 +460,20 @@ class KVCache(iron.Graph):
         self.keys, self.values = iron.state((rows, G, D)), iron.state((rows, G, D))
 
     def restart(self, held: int, ran: int) -> int:
-        """Where a call may start to change the positions from ``held`` on,
-        after ``ran`` ran: the chunk boundary before it while the ring still
-        holds the window before that, else the first.
+        """Return where a call may start to change the positions from ``held`` on.
+
+        After ``ran`` ran: the chunk boundary before it while the ring
+        still holds the window before that, else the first.
         """
         assert self.ring is not None and self.window is not None, "restart needs a ring"
         start = held // self.chunk * self.chunk
         return start if ran - (start - self.window) <= self.ring else 0
 
     def attend(self, call, q, k, v, scale: float | None = None):
-        """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` at the call's
-        positions (None for a layer reading another's cache) and attend
-        ``q`` ``(rows, heads, head_dim)`` over them; ``(rows, heads *
-        head_dim)``.
+        """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` at the call's positions.
+
+        None for a layer reading another's cache. Attends ``q`` ``(rows,
+        heads, head_dim)`` over them; ``(rows, heads * head_dim)``.
         """
         C, (_, G, D), (n, H, _) = self.chunk, self.keys.shape, q.shape
         if self.ring is None:
@@ -483,8 +502,9 @@ class KVCache(iron.Graph):
         return o.reshape(n, H * D)
 
     def _ring(self, call, R: int, W: int, q, k, v):
-        """``attend``'s keys, values and queries within the window ``W``,
-        staged from the ``R``-position ring for the call's chunk or decode
+        """Return ``attend``'s keys, values and queries within the window ``W``.
+
+        Staged from the ``R``-position ring for the call's chunk or decode
         step.
         """
         C = self.chunk
@@ -510,18 +530,21 @@ class KVCache(iron.Graph):
 
 
 class NoCache(iron.Graph):
-    """No memory: attention over the call's own rows, both ways or, if
-    ``causal``, back only, within ``window`` positions either side (None:
-    all), what an encoder's layer holds in a ``KVCache``'s place.
+    """No memory: attention over the call's own rows, both ways, or back if ``causal``.
+
+    Within ``window`` positions either side (None: all), what an encoder's
+    layer holds in a ``KVCache``'s place.
     """
 
     def __init__(self, window: int | None = None, causal: bool = False):
         self.window, self.causal = window, causal
 
     def attend(self, call, q, k, v, scale: float | None = None):
-        """``q`` ``(rows, heads, head_dim)`` over ``k`` and ``v`` ``(rows,
-        groups, head_dim)``, the logits scaled by ``scale`` (MHA's ``1 /
-        sqrt(head_dim)`` if None); ``(rows, heads * head_dim)``.
+        """Attend ``q`` ``(rows, heads, head_dim)`` over ``k`` and ``v``.
+
+        ``k`` and ``v`` are ``(rows, groups, head_dim)``, the logits scaled
+        by ``scale`` (MHA's ``1 / sqrt(head_dim)`` if None); ``(rows, heads
+        * head_dim)``.
         """
         n, H, D = q.shape
         o = MHA.step(
@@ -538,9 +561,10 @@ class NoCache(iron.Graph):
 
 
 class Attention(iron.Graph):
-    """Self-attention for layer ``i`` of a decoder with config ``c``: q, k
-    and v project, RoPE rotates the first ``rotary`` columns when set, and
-    attention runs over the layer's ``KVCache``.
+    """Self-attention for layer ``i`` of a decoder with config ``c``.
+
+    q, k and v project, RoPE rotates the first ``rotary`` columns when set,
+    and attention runs over the layer's ``KVCache``.
 
     Args:
         norms: Which of q, k and v each head of is RMS-normed before RoPE
@@ -565,7 +589,7 @@ class Attention(iron.Graph):
         self.q_norm = RMSNorm(D, c.eps) if "q" in norms else None
         self.k_norm = RMSNorm(D, c.eps) if "k" in norms else None
         self.v_norm, self.eps = "v" in norms, c.eps
-        self.scaling = None
+        self.scaling: float | None = None
         self.rotary = c.rotary_dim
 
     def projections(self, c) -> None:
@@ -577,7 +601,8 @@ class Attention(iron.Graph):
         self.v_proj = linear(E, self.groups * D)
 
     def project(self, x, **gemv) -> list:
-        """q, k and v of ``x``, each projection given the GEMV's ``gemv``;
+        """Project q, k and v of ``x``, each given the GEMV's ``gemv``.
+
         None for a projection the layer does not hold.
         """
         return [
@@ -590,8 +615,9 @@ class Attention(iron.Graph):
         ]
 
     def rotate(self, x, angles):
-        """``x`` ``(rows, head_dim)`` turned by RoPE, only its first
-        ``rotary`` columns where given.
+        """Turn ``x`` ``(rows, head_dim)`` by RoPE.
+
+        Only its first ``rotary`` columns where given.
         """
         if self.rotary is None:
             return F.rope(x, angles)
@@ -622,16 +648,18 @@ class Attention(iron.Graph):
         return self.output(o, x)
 
     def output(self, o: Handle, x: Handle) -> Handle:
-        """The block's output from the heads ``o`` ``(rows, heads *
-        head_dim)`` of the input ``x``.
+        """Return the block's output from the heads ``o`` ``(rows, heads * head_dim)``.
+
+        Of the input ``x``.
         """
         return self.o_proj(o)
 
 
 class MLP(iron.Graph):
-    """A feed-forward on ``c``'s shape: ``fc2(act(fc1(x)))``, ``act`` its
-    ``hidden_act``, each projection with a bias where the config's
-    ``mlp_bias`` says, at its ``precision``.
+    """A feed-forward on ``c``'s shape: ``fc2(act(fc1(x)))``, ``act`` is ``hidden_act``.
+
+    Each projection has a bias where the config's ``mlp_bias`` says, at
+    ``precision``.
     """
 
     def __init__(self, c):
@@ -646,7 +674,8 @@ class MLP(iron.Graph):
 
 
 class GatedMLP(iron.Graph):
-    """A gated feed-forward, ``down_proj(act(gate_proj(x)) * up_proj(x))``,
+    """A gated feed-forward, ``down_proj(act(gate_proj(x)) * up_proj(x))``.
+
     ``act`` the config's ``hidden_act``; each projection has a bias when
     ``mlp_bias`` is set.
     """
@@ -671,9 +700,11 @@ class GatedMLP(iron.Graph):
 
 
 class DecoderLayer(iron.Graph):
-    """Layer ``i`` of a pre-norm decoder with config ``c``: ``input_layernorm``
-    then ``self_attn`` over the layer's ``cache``, ``post_attention_layernorm``
-    then ``mlp``, each scaled by ``residual_multiplier`` before its residual.
+    """Layer ``i`` of a pre-norm decoder with config ``c``.
+
+    ``input_layernorm`` then ``self_attn`` over the layer's ``cache``,
+    ``post_attention_layernorm`` then ``mlp``, each scaled by
+    ``residual_multiplier`` before its residual.
     """
 
     norm = RMSNorm
@@ -697,13 +728,14 @@ class DecoderLayer(iron.Graph):
         return residual_add(x, h, self.residual_multiplier)
 
     def mix(self, h: Handle, call) -> Handle:
-        """The normed rows ``h`` attending over the layer's ``cache``."""
+        """Attend the normed rows ``h`` over the layer's ``cache``."""
         angles = None if self.rope is None else call.ropes[self.rope]
         return self.self_attn(h, self.cache, call, angles)
 
 
 class EncoderLayer(DecoderLayer):
-    """Layer ``i`` of a pre-norm encoder, as in SigLIP and Whisper:
+    """Layer ``i`` of a pre-norm encoder, as in SigLIP and Whisper.
+
     ``DecoderLayer``'s two blocks after a ``LayerNorm``, bidirectional
     attention with no cache (``NoCache``) and a plain (ungated) ``MLP``.
     """
@@ -715,9 +747,10 @@ class EncoderLayer(DecoderLayer):
 
 
 class SandwichLayer(DecoderLayer):
-    """``DecoderLayer`` with each block's output normed again before its
-    residual (``post_attention_layernorm``, ``post_feedforward_layernorm``)
-    and ``mlp``'s input normed by ``pre_feedforward_layernorm`` (Gemma's).
+    """``DecoderLayer`` with each block's output normed again before its residual.
+
+    (``post_attention_layernorm``, ``post_feedforward_layernorm``) and
+    ``mlp``'s input normed by ``pre_feedforward_layernorm`` (Gemma's).
     """
 
     def __init__(self, c, i: int, self_attn=None, mlp=None, cache=None):
@@ -735,8 +768,9 @@ class SandwichLayer(DecoderLayer):
 
 
 class PleLayer(SandwichLayer):
-    """``SandwichLayer``, then its per-layer input ``ple`` ``(rows, ple_dim)``
-    gated in (``per_layer_input_gate``, ``per_layer_projection``,
+    """``SandwichLayer``, then its per-layer input ``ple`` ``(rows, ple_dim)`` gated in.
+
+    (``per_layer_input_gate``, ``per_layer_projection``,
     ``post_per_layer_input_norm``) and scaled by ``layer_scalar`` (Gemma 4's).
     """
 

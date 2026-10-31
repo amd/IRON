@@ -17,19 +17,19 @@ from typing import Any
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.iron import ceildiv
 from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
+from aie.iron import ceildiv
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron import Carried, Precision, Profile, Scratchpad
 from iron.common.graph import Handle
 from iron.common.graph.handle import Dense
 from iron.common.graph.record import Recording
-from iron.common.image.step import BufferRef
 from iron.common.image.packaging import Kind
-import iron.functional as F
+from iron.common.image.step import BufferRef
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -200,8 +200,9 @@ def test_slices_are_views_into_the_parent_in_bytes():
 
 
 def test_alike_instances_bound_to_different_values_are_different_designs():
-    """Two copies alike in every field, one indexed by ``a`` and one by ``b``,
-    write through two symbols and build twice; two bound to one value share.
+    """Two copies alike in every field, one indexed by ``a`` and one by ``b``, write through two symbols and build twice.
+
+    Two bound to one value share.
     """
     c1, c2, c3 = (iron.state((4, 64, 16)) for _ in range(3))
 
@@ -244,8 +245,9 @@ def test_binding_two_handles_to_one_instance_is_an_error():
 
 
 def test_a_graph_carries_its_profile():
-    """A graph's profile reaches every run of the body: the
-    record and the host reference alike, with a call's own keyword kept.
+    """A graph's profile reaches every run of the body.
+
+    The record and the host reference alike, with a call's own keyword kept.
     """
     profile = Profile()
     profile.add(GEMV, tile_size_input=4, tile_size_output=16)
@@ -387,8 +389,9 @@ def test_returning_an_input_or_a_slice_is_refused():
 
 
 def test_a_matvec_whose_columns_are_given_resolves_with_no_device():
-    """What ``resolved()`` asks on a host with none bound: no memory to
-    hold the cores to, so none is checked.
+    """What ``resolved()`` asks on a host with none bound.
+
+    No memory to hold the cores to, so none is checked.
     """
     op = GEMV(M=256, K=64, num_aie_columns=1, num_channels=1, tile_size_output=32)
     assert op.resolve(None).tile_size_input == 2
@@ -551,8 +554,9 @@ def test_a_bound_travels_through_reshape_and_transpose():
 
 
 def test_an_index_may_floor_and_a_bound_may_only_clamp():
-    """A bound patches a length, so it is linear or clamped (a window's
-    ``min(p + 1, 8)``); an index may floor.
+    """A bound patches a length, so it is linear or clamped (a window's ``min(p + 1, 8)``).
+
+    An index may floor.
     """
     p = PerCall("p", Kind.SCRATCHPAD, np.int32)
     cache = Handle.whole((8, 4), bfloat16, "cache", "state")
@@ -565,8 +569,9 @@ def test_an_index_may_floor_and_a_bound_may_only_clamp():
 
 
 def test_a_per_call_value_cannot_steer_the_record():
-    """A body is recorded once for every call, so a branch on a per-call value
-    would take one side for all of them: a comparison or a truth test raises.
+    """A body is recorded once for every call, so a branch on a per-call value would take one side for all of them.
+
+    A comparison or a truth test raises.
     """
 
     class Branches(iron.Graph):
@@ -584,9 +589,9 @@ def test_a_per_call_value_cannot_steer_the_record():
 
 
 def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
-    """``cache.reshape(G, L // C, C, D)[:, chunk, :rows]`` drops the chunk
-    axis: the bound is on axis 1 of the view, and the index an offset of
-    whole chunks.
+    """``cache.reshape(G, L // C, C, D)[:, chunk, :rows]`` drops the chunk axis.
+
+    The bound is on axis 1 of the view, and the index an offset of whole chunks.
     """
     chunk = PerCall("chunk", Kind.SCRATCHPAD, np.int32)
     rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
@@ -598,8 +603,9 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
 
 
 def test_a_run_from_a_per_call_start_is_its_whole_chunk_s_view():
-    """``x[c * 16 : c * 16 + 16][:rows]`` is the view of block ``c`` of
-    ``x.reshape(4, 16, ...)[c, :rows]``: the same offset, pattern and bound.
+    """``x[c * 16 : c * 16 + 16][:rows]`` is the view of block ``c`` of ``x.reshape(4, 16, ...)[c, :rows]``.
+
+    The same offset, pattern and bound.
     """
     chunk = PerCall("chunk", Kind.SCRATCHPAD, np.int32)
     rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
@@ -620,9 +626,9 @@ def test_a_run_from_a_per_call_start_is_its_whole_chunk_s_view():
 
 
 def test_a_run_from_a_per_call_start_takes_any_start_on_any_axis():
-    """A start that is no block's (``pos``), floored (``pos // 64 * 64``), on
-    a leading or an inner axis: a view offset by the start's rows, its width
-    fixed, bounded on the same axis.
+    """A start that is no block's (``pos``), floored (``pos // 64 * 64``), on a leading or an inner axis.
+
+    A view offset by the start's rows, its width fixed, bounded on the same axis.
     """
     pos = PerCall("pos", Kind.SCRATCHPAD, np.int32)
     rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
@@ -639,9 +645,7 @@ def test_a_run_from_a_per_call_start_takes_any_start_on_any_axis():
 
 
 def test_a_run_as_wide_as_its_axis_keeps_its_start_under_a_bound():
-    """``x[:n][:, s : s + W]`` with ``W`` the whole axis is still offset by
-    ``s`` each call, and still bounded by ``n``.
-    """
+    """``x[:n][:, s : s + W]`` with ``W`` the whole axis is still offset by ``s`` each call, and still bounded by ``n``."""
     s = PerCall("s", Kind.SCRATCHPAD, np.int32)
     n = PerCall("n", Kind.SCRATCHPAD, np.int32)
     v = Handle.whole((8, 256), bfloat16, "x", "state")[:n][:, s : s + 256]
@@ -676,8 +680,10 @@ def test_a_run_is_bounded_from_its_start_on_its_own_axis():
 
 
 def test_a_run_past_the_buffer_s_end_is_kept_inside_by_each_call():
-    """100 rows, runs of 16: a call's start plus its bound, or with no bound
-    the run's width, is checked to end within the buffer; so is the start.
+    """100 rows, runs of 16.
+
+    A call's start plus its bound, or with no bound the run's width, is
+    checked to end within the buffer; so is the start.
     """
 
     class Bounded(iron.Graph):
@@ -700,9 +706,10 @@ def test_a_run_past_the_buffer_s_end_is_kept_inside_by_each_call():
 
 
 def test_a_run_from_a_per_call_start_is_written_and_read_as_numpy_does():
-    """The reference of a write of ``rows`` rows from ``start`` and a read of
-    them back, at starts no chunk's, one with its run past the end; and a
-    bound past the end refused.
+    """The reference of a write of ``rows`` rows from ``start`` and a read of them back.
+
+    At starts no chunk's, one with its run past the end; and a bound past
+    the end refused.
     """
     L, C, W = 100, 16, 8
     cache = iron.state((L, W), name="cache")
@@ -726,9 +733,7 @@ def test_a_run_from_a_per_call_start_is_written_and_read_as_numpy_does():
 
 
 def test_the_trace_records_the_range_each_per_call_index_and_bound_holds():
-    """A call checks these before it reaches the device, where an index past
-    its view moves a transfer onto another buffer.
-    """
+    """A call checks these before it reaches the device, where an index past its view moves a transfer onto another buffer."""
     G, L, C, D = 2, 64, 16, 8
     keys = iron.state((G, L, D), name="keys")
     table = iron.state((L, D), name="table")
@@ -756,8 +761,9 @@ def test_the_trace_records_the_range_each_per_call_index_and_bound_holds():
 
 
 def test_the_reference_writes_a_given_output_of_an_operator_that_returns_one(npu2):
-    """GEMM's reference takes its inputs and returns its result; given an
-    output, the graph's reference writes that result into it.
+    """GEMM's reference takes its inputs and returns its result.
+
+    Given an output, the graph's reference writes that result into it.
     """
 
     class Into(iron.Graph):
@@ -778,9 +784,10 @@ def test_the_reference_writes_a_given_output_of_an_operator_that_returns_one(npu
 
 @pytest.mark.parametrize("view", [False, True])
 def test_a_weight_given_where_an_optional_input_was_meant_is_refused(view):
-    """``RMSNorm(x, w)`` gives the weight as RMSNorm's output: a recording and
-    the reference refuse it, naming the keyword, whatever view of it, and
-    the reference leaves the weight as it was.
+    """``RMSNorm(x, w)`` gives the weight as RMSNorm's output.
+
+    A recording and the reference refuse it, naming the keyword, whatever
+    view of it, and the reference leaves the weight as it was.
     """
     w = np.arange(E).astype(bfloat16)
 
@@ -815,8 +822,9 @@ def test_an_input_given_as_an_output_is_refused():
 
 
 def test_a_given_output_of_another_rank_is_refused_unless_declared_flat():
-    """A class call infers from the ranks and refuses; a built operator's
-    call is checked as it records.
+    """A class call infers from the ranks and refuses.
+
+    A built operator's call is checked as it records.
     """
     gemm = GEMM(M=256, K=256, N=256, precision=Precision.MEDIUM)
 
@@ -831,9 +839,7 @@ def test_a_given_output_of_another_rank_is_refused_unless_declared_flat():
 
 
 def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
-    """A ``c_col_maj`` GEMM's C is ``(N, M)`` as stored, which an elementwise
-    operator's reference takes as lines of its own length.
-    """
+    """A ``c_col_maj`` GEMM's C is ``(N, M)`` as stored, which an elementwise operator's reference takes as lines of its own length."""
 
     class Transposed(iron.Graph):
         def body(self, a, b):
@@ -869,8 +875,9 @@ def test_a_float32_product_is_not_rounded_to_its_inputs_dtype(npu2):
 
 
 def test_the_reference_computes_the_expressions(npu2):
-    """The reference runs the body on numbers: ``p + 1`` is the row the
-    copy writes, as the device's offset word is.
+    """The reference runs the body on numbers.
+
+    ``p + 1`` is the row the copy writes, as the device's offset word is.
     """
     keys = iron.state((2, 8, 4), name="keys")
 
@@ -889,9 +896,10 @@ def test_the_reference_computes_the_expressions(npu2):
 
 
 def test_integer_arithmetic_on_an_expression_is_an_expression():
-    """Sums, products, floor divisions and remainders by powers of two (so
-    ``ceildiv``) of an expression are expressions that compute the same, and
-    so are sums of two linear ones in its value; anything else is refused.
+    """Sums, products, floor divisions and remainders by powers of two (so ``ceildiv``) of an expression are expressions.
+
+    They compute the same, and so do sums of two linear ones in its value;
+    anything else is refused.
     """
     x = Affine(PerCall("x", Kind.SCRATCHPAD, np.int32), 3, -5)
     y = Affine(PerCall("y", Kind.SCRATCHPAD, np.int32))
@@ -938,10 +946,10 @@ def test_integer_arithmetic_on_an_expression_is_an_expression():
 
 
 def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
-    """Into a given view of the bounded side's shape, a copy bounds that view
-    on the same axis; a given view of another shape cannot follow the bound
-    (a side moving every row would wait on rows the other never moves), and
-    is refused.
+    """Into a given view of the bounded side's shape, a copy bounds that view on the same axis.
+
+    A given view of another shape cannot follow the bound (a side moving
+    every row would wait on rows the other never moves), and is refused.
     """
     G, D, L = 4, 8, 32
     keys = iron.state((G, L, D), name="keys")
@@ -955,9 +963,10 @@ def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
 
 
 def test_the_reference_copies_a_bounded_call_into_the_rows_it_covers(npu2):
-    """The recording bounds a given view alike (above); the reference, which runs
-    a bounded call on the rows it covers, writes those of the view and
-    leaves the rest.
+    """The recording bounds a given view alike (above).
+
+    The reference, which runs a bounded call on the rows it covers, writes
+    those of the view and leaves the rest.
     """
     R, L, C = 16, 4, 256
     cache = iron.state((R, L, C), name="cache")
@@ -984,11 +993,11 @@ def test_the_reference_copies_a_bounded_call_into_the_rows_it_covers(npu2):
 
 
 def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
-    """A bound reaches GEMM through A's rows and MHA through Q's padded
-    length and K's and V's (select shapes): GEMM derives the counts its
-    cores compute per call and keeps every descriptor; MHA derives its
-    counts and the first query block, and patches its K and V descriptors'
-    block count.
+    """A bound reaches GEMM through A's rows and MHA through Q's padded length and K's and V's (select shapes).
+
+    GEMM derives the counts its cores compute per call and keeps every
+    descriptor; MHA derives its counts and the first query block, and
+    patches its K and V descriptors' block count.
     """
 
     class G(iron.Graph):
@@ -1234,8 +1243,7 @@ def test_every_carried_value_is_carried_and_nothing_else():
 
 
 class _HeldStack(iron.Graph):
-    """A checkpoint-held stack of two tables gathered as one, by the ids an
-    input names."""
+    """A checkpoint-held stack of two tables gathered as one, by the ids an input names."""
 
     def __init__(self, tables):
         self.weights = SimpleNamespace(embed=SimpleNamespace(weight=tables))
@@ -1417,9 +1425,7 @@ def test_walks_take_a_repeat_each(taps, repeats):
 
 
 def test_a_handle_adds_and_multiplies_by_elementwise_and_rowwise_steps():
-    """A row times a matrix is rowwise either way round, the row a held
-    vector, a handle or a row of one, the matrix a handle or held.
-    """
+    """A row times a matrix is rowwise either way round, the row a held vector, a handle or a row of one, the matrix a handle or held."""
     w, m = z(E), z(4, E)
 
     class Arithmetic(iron.Graph):
@@ -1489,9 +1495,11 @@ def test_linear_takes_one_row_or_several():
 
 
 def test_the_reference_runs_the_trace_so_held_state_takes_arithmetic():
-    """The reference interprets the recorded steps: a view of a state times a
-    row, plus an input, is what its operators' references compute, and a
-    state the body writes keeps that write for the next call.
+    """The reference interprets the recorded steps.
+
+    A view of a state times a row, plus an input, is what its operators'
+    references compute, and a state the body writes keeps that write for
+    the next call.
     """
     held = iron.state((8, 64), name="held")
     row = np.full(64, 2, bfloat16)
@@ -1512,8 +1520,9 @@ def _steps(t) -> list[str]:
 
 
 def test_a_number_on_either_side_is_a_row_of_it():
-    """``x * c``, ``c * x``, ``x + c``, ``-x``, ``x / c``: a rowwise step on
-    one constant row per number, the same in the reference.
+    """``x * c``, ``c * x``, ``x + c``, ``-x``, ``x / c``.
+
+    A rowwise step on one constant row per number, the same in the reference.
     """
 
     class Scalars(iron.Graph):
@@ -1531,8 +1540,10 @@ def test_a_number_on_either_side_is_a_row_of_it():
 
 
 def test_one_row_times_a_number_is_elementwise():
-    """A single row's row is the whole operand: streamed, not held in one
-    core, as Gemma 4's 262144-wide soft-capped logits need.
+    """A single row's row is the whole operand.
+
+    Streamed, not held in one core, as Gemma 4's 262144-wide soft-capped
+    logits need.
     """
 
     class Capped(iron.Graph):
@@ -1548,8 +1559,9 @@ def test_one_row_times_a_number_is_elementwise():
 
 
 def test_one_row_a_core_holds_is_still_rowwise():
-    """ResNet's classifier bias: one row of ten, which no elementwise line
-    divides, is a row a core holds.
+    """ResNet's classifier bias.
+
+    One row of ten, which no elementwise line divides, is a row a core holds.
     """
 
     class Biased(iron.Graph):
@@ -1601,9 +1613,9 @@ def test_a_state_is_subtracted_as_it_is_added():
     ids=["param", "weight", "state"],
 )
 def test_matmul_of_a_row_by_a_weight_s_transpose_is_linear(held):
-    """``x @ W.T`` of a bare array, a weight or a state, ``x`` one row; a
-    handle's ``.T`` is its transpose. Rows take a precision, so ``@`` of
-    rows is refused.
+    """``x @ W.T`` of a bare array, a weight or a state, ``x`` one row; a handle's ``.T`` is its transpose.
+
+    Rows take a precision, so ``@`` of rows is refused.
     """
 
     class Project(iron.Graph):
@@ -1651,8 +1663,9 @@ def test_a_numpy_function_on_a_handle_says_what_to_call():
 
 
 def test_an_assignment_into_a_view_is_the_copy_into_it():
-    """``cache[pos] = x`` records the step ``Copy.step(x, cache[pos])`` does,
-    recorded and in the reference; a handle's slice takes one too.
+    """``cache[pos] = x`` records the step ``Copy.step(x, cache[pos])`` does, recorded and in the reference.
+
+    A handle's slice takes one too.
     """
     cache = iron.state((8, 64), name="cache")
 

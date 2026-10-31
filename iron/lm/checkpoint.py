@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A model's weights: ``Checkpoint.tree()``, the tensors by their own
-names: ``model.layers.3.self_attn.q_proj.weight`` is
+"""A model's weights: ``Checkpoint.tree()``, the tensors by their own names.
+
+``model.layers.3.self_attn.q_proj.weight`` is
 ``weights.model.layers[3].self_attn.q_proj.weight``.
 """
 
@@ -28,8 +29,9 @@ from .golden import fingerprint
 
 
 class _Shard:
-    """One ``.safetensors`` file, or a PyTorch checkpoint (a ``.pth`` zip),
-    mapped so ``tensors`` are lazy read-only views, parsed here since
+    """One ``.safetensors`` file, or a PyTorch checkpoint (a ``.pth`` zip).
+
+    Mapped so ``tensors`` are lazy read-only views, parsed here since
     safetensors' numpy loader has no bfloat16 and IRON reads PyTorch
     without torch.
     """
@@ -71,8 +73,9 @@ class _Shard:
             self.tensors[name] = view.reshape(t["shape"])
 
     def _torch(self, data: np.ndarray) -> dict[str, np.ndarray]:
-        """A PyTorch checkpoint's tensors, each a view of its storage's
-        bytes, which PyTorch stores uncompressed.
+        """Return a PyTorch checkpoint's tensors, each a view of its storage's bytes.
+
+        PyTorch stores them uncompressed.
         """
         archive = zipfile.ZipFile(self.path)
         if not archive.namelist():
@@ -102,9 +105,10 @@ class _Shard:
         return tensors
 
     def release(self, array: np.ndarray) -> bool:
-        """Drop the process's pages of ``array`` if it is a view of this
-        file, and report whether it was; it stays readable, a later read
-        faulting the bytes back in.
+        """Drop the process's pages of ``array`` if it is a view of this file.
+
+        Reports whether it was; it stays readable, a later read faulting
+        the bytes back in.
         """
         begin = array.ctypes.data - self._address
         if not (array.flags.c_contiguous and 0 <= begin < len(self._map)):
@@ -115,10 +119,11 @@ class _Shard:
 
 
 class _TorchUnpickler(pickle.Unpickler):
-    """A PyTorch checkpoint's pickle, read as data: each tensor a numpy view
-    of its storage, checked to lie inside it. ``GLOBALS`` names every
-    global a state dict's pickle may use, so loading one runs no code of
-    its own.
+    """A PyTorch checkpoint's pickle, read as data.
+
+    Each tensor is a numpy view of its storage, checked to lie inside it.
+    ``GLOBALS`` names every global a state dict's pickle may use, so
+    loading one runs no code of its own.
     """
 
     GLOBALS = {
@@ -143,8 +148,9 @@ class _TorchUnpickler(pickle.Unpickler):
         return self.GLOBALS[module, name]
 
     def persistent_load(self, pid):
-        """A storage, by its key, as its dtype: ``("storage", dtype, key,
-        location, numel)``.
+        """Return a storage, by its key, as its dtype.
+
+        ``("storage", dtype, key, location, numel)``.
 
         Raises:
             pickle.UnpicklingError: Any other id, or a storage shorter
@@ -172,8 +178,9 @@ class _TorchUnpickler(pickle.Unpickler):
 
     @staticmethod
     def rebuild(storage, offset, size, stride, *_):
-        """``torch._utils._rebuild_tensor_v2``'s tensor, a read-only view of
-        ``storage``.
+        """Return ``torch._utils._rebuild_tensor_v2``'s tensor, a read-only view.
+
+        A view of ``storage``.
 
         Raises:
             pickle.UnpicklingError: It is not one, or reaches outside
@@ -201,17 +208,21 @@ class _TorchUnpickler(pickle.Unpickler):
 
 
 def weights_file(directory) -> Path:
-    """A checkpoint directory's weights: a sharded checkpoint's
-    ``model.safetensors.index.json``, else ``model.safetensors``.
+    """Return a checkpoint directory's weights file.
+
+    A sharded checkpoint's ``model.safetensors.index.json``, else
+    ``model.safetensors``.
     """
     index = Path(directory) / "model.safetensors.index.json"
     return index if index.exists() else index.with_name("model.safetensors")
 
 
 class Checkpoint:
-    """A ``.safetensors`` file or a PyTorch checkpoint, or, given its
-    ``.safetensors.index.json``, every shard a sharded checkpoint splits
-    across, its tensors merged into one mapping, ``tensors``.
+    """A ``.safetensors`` file or a PyTorch checkpoint.
+
+    Or, given its ``.safetensors.index.json``, every shard a sharded
+    checkpoint splits across, its tensors merged into one mapping,
+    ``tensors``.
     """
 
     def __init__(self, path):
@@ -239,17 +250,18 @@ class Checkpoint:
             self.tensors.update(shard.tensors)
 
     def release(self, array: np.ndarray) -> None:
-        """Drop the process's pages of ``array`` if it is a view of one of
-        the checkpoint's files; anything else is left alone.
+        """Drop the process's pages of ``array`` if it is a view of one of the files.
+
+        Anything else is left alone.
         """
         for shard in self._shards:
             if shard.release(array):
                 return
 
     def fingerprint(self) -> str:
-        """A digest of each tensor's name, type and shape and of the first
-        and last 4 KiB of its bytes: what tells a fine-tune from its base
-        without reading either whole.
+        """Return a digest of each tensor's name, type, shape and first/last 4 KiB.
+
+        What tells a fine-tune from its base without reading either whole.
         """
         ends = []
         for name, t in self.tensors.items():
@@ -260,9 +272,9 @@ class Checkpoint:
     def tree(
         self, fill: Literal["read", "random", "unread"] = "read", seed: int = 0
     ) -> SimpleNamespace:
-        """Return the checkpoint's tensors as a tree of ``param``, split at
-        the dots (``model.layers.3.weight`` becomes
-        ``tree.model.layers[3].weight``).
+        """Return the checkpoint's tensors as a tree of ``param``, split at the dots.
+
+        ``model.layers.3.weight`` becomes ``tree.model.layers[3].weight``.
 
         Args:
             fill: What the arrays hold: ``"read"`` the tensors (lazy views);
@@ -283,8 +295,9 @@ class Checkpoint:
 
 
 def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:
-    """Each leaf of ``tree``, a ``Checkpoint.tree()``'s namespaces and
-    lists, by its dotted name: ``nest``'s inverse.
+    """Return each leaf of ``tree``, a ``Checkpoint.tree()``'s namespaces and lists.
+
+    By its dotted name: ``nest``'s inverse.
     """
     if isinstance(tree, (list, SimpleNamespace)):
         items = enumerate(tree) if isinstance(tree, list) else vars(tree).items()
@@ -301,8 +314,9 @@ _FILE = "the checkpoint"
 def nest(
     named: Mapping[str, Any], path: str = "", file: str | Path = _FILE
 ) -> SimpleNamespace:
-    """Values by dotted name, nested as ``Checkpoint.tree()`` nests them,
-    under ``path`` (a dotted prefix) of ``file``, which a missing name
+    """Nest values by dotted name, as ``Checkpoint.tree()`` nests them.
+
+    Under ``path`` (a dotted prefix) of ``file``, which a missing name
     names.
     """
     nested: dict = {}
@@ -316,8 +330,9 @@ def nest(
 
 
 def _tree(node, path: str, file) -> Any:
-    """Nested dicts as ``_Module``s, those keyed by indices as ``_Layers``,
-    an empty ``_Module`` at a skipped index.
+    """Turn nested dicts into ``_Module``s, those keyed by indices into ``_Layers``.
+
+    An empty ``_Module`` fills a skipped index.
     """
     if not isinstance(node, dict):
         return node
@@ -341,9 +356,10 @@ def _tree(node, path: str, file) -> Any:
 
 
 class _Module(SimpleNamespace):
-    """A module of a ``Checkpoint.tree()``, its tensors and submodules by
-    name; a name it lacks raises an ``AttributeError`` naming its dotted
-    path, the file and the names it has.
+    """A module of a ``Checkpoint.tree()``, its tensors and submodules by name.
+
+    A name it lacks raises an ``AttributeError`` naming its dotted path,
+    the file and the names it has.
     """
 
     __slots__ = ("_path", "_file")
@@ -358,9 +374,10 @@ class _Module(SimpleNamespace):
 
 
 class _Layers(list):
-    """A run of a ``Checkpoint.tree()``'s modules by index; an index past
-    the end raises an ``IndexError`` naming its dotted path, the file and
-    how many there are.
+    """A run of a ``Checkpoint.tree()``'s modules by index.
+
+    An index past the end raises an ``IndexError`` naming its dotted path,
+    the file and how many there are.
     """
 
     __slots__ = ("_path", "_file")
@@ -375,8 +392,9 @@ class _Layers(list):
 
 
 def subtree(tree, **modules):
-    """A tree of ``modules``, each a module of ``tree``, at their names: a
-    checkpoint's part as a model loads it (a text decoder of a
+    """Build a tree of ``modules``, each a module of ``tree``, at their names.
+
+    A checkpoint's part as a model loads it (a text decoder of a
     vision-language checkpoint), a missing name naming ``tree``'s file.
     """
     file = tree._file if isinstance(tree, (_Module, _Layers)) else _FILE
@@ -384,10 +402,11 @@ def subtree(tree, **modules):
 
 
 def renamed(tree, renames: Mapping[str, str]):
-    """A copy of ``tree`` with each leaf under a run of whole dotted names
-    among ``renames``' keys moved to the run its value names, the rest
-    where they are; its namespaces are new, so a caller may change them
-    and leave ``tree`` as it was.
+    """Copy ``tree`` with each leaf under a run of whole dotted names moved.
+
+    A leaf among ``renames``' keys moves to the run its value names, the
+    rest stay where they are; its namespaces are new, so a caller may
+    change them and leave ``tree`` as it was.
     """
 
     def moved(path):

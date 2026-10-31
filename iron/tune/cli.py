@@ -31,12 +31,13 @@ import aie.utils as aie_utils
 from iron import operators
 from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
+
 from .autotune import Shape, Timed, autotune, kernel_cycles, time_shape
 from .measure import Cache, Timing, pmode
 
 
 def parser(description: str) -> argparse.ArgumentParser:
-    """The arguments every tuning takes: how each setting is timed."""
+    """Build the arguments every tuning takes: how each setting is timed."""
     p = argparse.ArgumentParser(description=description)
     p.add_argument("--rounds", type=int, default=Timing.rounds)
     p.add_argument("--calls", type=int, default=Timing.calls)
@@ -76,8 +77,10 @@ def _timing(args: argparse.Namespace) -> dict:
 
 
 def tune(args: argparse.Namespace, calls: Sequence[Timed], profiles: Path) -> Path:
-    """Rewrite ``profiles/<device>.json`` with the settings ``calls`` time
-    fastest at (``autotune``), timed as ``args`` says; return its path.
+    """Rewrite ``profiles/<device>.json`` and return its path.
+
+    It holds the settings ``calls`` time fastest at (``autotune``), timed as
+    ``args`` says.
     """
     print(f"power mode: {pmode()}", flush=True)
     dev = require_device()

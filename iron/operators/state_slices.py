@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""How a recurrent state operator lays out its cores: a head's state taken
-``SLICE`` at a time, a block of rows a kernel call, and the cores resolved
-over whole heads.
+"""How a recurrent state operator lays out its cores.
+
+A head's state taken ``SLICE`` at a time, a block of rows a kernel call,
+and the cores resolved over whole heads.
 """
 
 from iron.common import Unresolvable
@@ -13,15 +14,16 @@ SLICE = 16
 
 
 def block_rows(op) -> int:
-    """The rows a kernel call takes: the most up to 32 that divide
-    ``op.rows``, a bound on the block buffer's share of a core's memory.
+    """Return the rows a kernel call takes.
+
+    The most up to 32 that divide ``op.rows``, a bound on the block
+    buffer's share of a core's memory.
     """
     return max(d for d in range(1, 33) if op.rows % d == 0)
 
 
 def fits(op, dev, rows: int) -> bool:
-    """Whether a core of ``dev`` holds ``op.held`` at ``rows`` rows per call
-    plus one slice's state and final state."""
+    """Whether a core of ``dev`` holds ``op.held`` at ``rows`` rows per call plus one slice's state and final state."""
     state, final = op.slice_bytes()
     return op.held(dev, rows) + state + final <= dev.core_memory_bytes
 
@@ -54,8 +56,10 @@ def resolve_rows(op, dev):
 
 
 def depths(op) -> tuple[int, int]:
-    """How many slices' states and finals ``op``'s core holds at once: two
-    of each, the next streaming during the kernel, where its memory fits.
+    """How many slices' states and finals ``op``'s core holds at once.
+
+    Two of each, the next streaming during the kernel, where its memory
+    fits.
     """
     held = op.held(op.dev, op.block // SLICE)
     state, final = op.slice_bytes()
@@ -66,8 +70,7 @@ def depths(op) -> tuple[int, int]:
 
 
 def resolve_heads(op, dev, heads: int):
-    """``op`` on as many cores as divide its ``heads`` and the shim's input
-    channels feed.
+    """``op`` on as many cores as divide its ``heads`` and the shim's input channels feed.
 
     Raises:
         Unresolvable: No count divides the heads.

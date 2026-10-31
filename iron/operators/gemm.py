@@ -21,7 +21,6 @@ from aie.iron.device import (
     NPU1Col2,
     Tile,
 )
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import (
     Select,
     divisors,
@@ -30,6 +29,7 @@ from aie.utils.compile.jit.params import (
     tunable,
     widths,
 )
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Precision, Rtp, Unresolvable
@@ -73,7 +73,9 @@ def _cases(cls, dev: Device):
                 continue
             # A case of 8 columns takes all of a narrower device.
             cols = min(cols, dev.cols)
-            kwargs = dict(M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k)
+            kwargs: dict[str, Any] = dict(
+                M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k
+            )
             kwargs.update(tile_n=n, b_col_maj=b_col_maj, c_col_maj=c_col_maj)
             kwargs.update(precision=Precision.HIGHEST)
             lower = c_col_maj and not extensive
@@ -83,13 +85,20 @@ def _cases(cls, dev: Device):
     medium = dict(M=2048, K=2048, N=2048, b_col_maj=True, precision=Precision.MEDIUM)
     label = "M_2048-K_2048-N_2048-b_col_maj_True"
     out.append(Case(medium, id=label, bench=True, lower=True))
+    # flm/gemm's README compares flm.ProjectionGEMM and the shipped overlay
+    # with this, in the same emulated mode, on the eight-column NPU2.
+    if dev.arch is AIEArch.AIE2p and dev.cols == 8:
+        flm = dict(M=1024, K=1536, N=6144, precision=Precision.MEDIUM)
+        out.append(Case(flm, id="M_1024-K_1536-N_6144", bench=True, extensive=True))
     # An f32 C at the default 64-wide tiles overflows a core's memory.
     f32 = dict(M=512, K=256, N=512, output_dtype=np.float32, tile_m=32, tile_k=32)
     out.append(
         Case(dict(f32, tile_n=32, precision=Precision.MEDIUM), id="f32_out", lower=True)
     )
     # The placement the tuner tries beside the default.
-    kwargs = dict(M=2048, K=2048, N=2048, num_aie_columns=2, b_col_maj=True)
+    kwargs: dict[str, Any] = dict(
+        M=2048, K=2048, N=2048, num_aie_columns=2, b_col_maj=True
+    )
     kwargs.update(precision=Precision.MEDIUM)
     out.append(Case(dict(kwargs, placement=GEMMPlacement.TILES), extensive=True))
     return out
@@ -105,9 +114,11 @@ FIFO_DEPTH = 2
 
 
 class GEMMPlacement(StrEnum):
-    """The tiles GEMM's array pins; aiecc's placer takes the rest. The shim
-    ends stay pinned in both: unpinned, a large b_col_maj GEMM piles too many
-    active buffer descriptors onto one shim tile. The tuner tries both.
+    """The tiles GEMM's array pins; aiecc's placer takes the rest.
+
+    The shim ends stay pinned in both: unpinned, a large b_col_maj GEMM
+    piles too many active buffer descriptors onto one shim tile. The tuner
+    tries both.
     """
 
     SHIMS = "shims"
@@ -115,11 +126,12 @@ class GEMMPlacement(StrEnum):
 
 
 class GEMM(Operator):
-    """``C = A @ B``, tiled m x k x n: A broadcasts across columns and splits
-    across cores' rows, B splits across columns and broadcasts across rows, C
-    joins across rows and splits across columns. Used wherever
-    ``flm.ProjectionGEMM`` doesn't apply (a weight operand, MEDIUM/HIGH, two
-    or more rows).
+    """``C = A @ B``, tiled m x k x n.
+
+    A broadcasts across columns and splits across cores' rows, B splits
+    across columns and broadcasts across rows, C joins across rows and
+    splits across columns. Used wherever ``flm.ProjectionGEMM`` doesn't
+    apply (a weight operand, MEDIUM/HIGH, two or more rows).
     """
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A,)))
@@ -212,11 +224,12 @@ class GEMM(Operator):
         return self.tile_n * self.num_aie_columns
 
     def mac_block(self, dev) -> tuple[int, int, int]:
-        """What ``tile_m``, ``tile_k`` and ``tile_n`` must each be a multiple
-        of: mm.cc's r x s x t blocks, two in m and n (four in m on aie2).
+        """Return what ``tile_m``, ``tile_k`` and ``tile_n`` must each be a multiple of.
+
+        mm.cc's r x s x t blocks, two in m and n (four in m on aie2).
         ``dev=None`` assumes aie2p's geometry.
         """
-        r, s, t = kernels.mm.mac_dims(
+        r, s, t = kernels.mm.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
             self.input_dtype,
             self.output_dtype,
             device=dev,
@@ -268,7 +281,7 @@ class GEMM(Operator):
             )
 
     def _auto_tiling(self, dev) -> tuple[int, int]:
-        """The rows of ``dev``'s cores C is split over, and ``tile_m``."""
+        """Return the rows of ``dev``'s cores C is split over, and ``tile_m``."""
         block, _, _ = self.mac_block(dev)
         rows = len(dev.core_rows)
         widths = [self.tile_m] if self.tile_m else [64, 32, 16, 8]
@@ -346,21 +359,25 @@ class GEMM(Operator):
             )
 
     def array_device(self):
-        if self.dev.arch is AIEArch.AIE2:
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("GEMM: array_device() needs a bound device")
+        if dev.arch is AIEArch.AIE2:
             return {1: NPU1Col1, 2: NPU1Col2, 4: NPU1}[self.num_aie_columns]()
         return NPU2()
 
     @property
     def wider_accumulator(self) -> bool:
-        """Whether ``build()`` and ``GEMM.held()`` build HIGHEST's f32
-        buffer for a bf16 C's partial sums, beside C's own.
+        """Check whether ``build()`` and ``GEMM.held()`` build HIGHEST's f32 buffer.
+
+        For a bf16 C's partial sums, beside C's own.
         """
         return self.precision == Precision.HIGHEST and (
             np.dtype(self.output_dtype) == np.dtype(bfloat16)
         )
 
     def matmul(self):
-        """The m x k x n kernel each core runs."""
+        """Return the m x k x n kernel each core runs."""
         return kernels.linalg.mm(
             self.tile_m,
             self.tile_k,
@@ -481,6 +498,7 @@ class GEMM(Operator):
             words = rtp.read()
             rtp_K_div_k = words[self.k_div_k]
             rtp_n_tiles_per_core = words[self.n_tiles]
+            row_blocks = col_tiles = 0
             if bounded:
                 row_blocks = words[self.row_blocks_valid]
                 col_tiles = words[self.col_tiles]
@@ -645,8 +663,9 @@ class GEMM(Operator):
         return 2 * self.M * self.K * self.N
 
     def matmul_calls(self, values: Mapping[str, int]) -> int:
-        """The fewest matmul kernel calls the busiest core makes in a step
-        at per-call ``values``: each output tile under the bound takes one
+        """Return the fewest matmul kernel calls the busiest core makes in a step.
+
+        At per-call ``values``: each output tile under the bound takes one
         call per K tile under it.
         """
         calls = (
@@ -657,7 +676,7 @@ class GEMM(Operator):
         return ceildiv(calls, self.n_aie_rows * self.num_aie_columns)
 
     def reference(self, A, B):
-        """``A @ B`` over the first ``valid_k`` of K, a bounded call's."""
+        """Compute ``A @ B`` over the first ``valid_k`` of K, a bounded call's."""
         # float32, not mm_ref's float64, which doubles the weight's host copy.
         a = A.astype(np.float32)[:, : self.valid_k]
         b = (B.T if self.b_col_maj else B).astype(np.float32)[: self.valid_k]
@@ -665,10 +684,11 @@ class GEMM(Operator):
         return C.astype(self.output_dtype)
 
     def tolerance(self) -> Tolerance:
-        """C's roundings, in units of 2^-8 of what each rounds: 2 of ``|A| @
-        |B|`` for C's own, 2 per K tile's partial sum but the last when C
-        accumulates in bf16, and 2 more for bfp16 inputs; measured at no more
-        than 0.83 of this over K = 256-8192 on npu2.
+        """Return C's roundings, in units of 2^-8 of what each rounds.
+
+        2 of ``|A| @ |B|`` for C's own, 2 per K tile's partial sum but the
+        last when C accumulates in bf16, and 2 more for bfp16 inputs;
+        measured at no more than 0.83 of this over K = 256-8192 on npu2.
         """
         if np.issubdtype(np.dtype(self.input_dtype), np.integer):
             return Tolerance.exact(note="integer matmul")

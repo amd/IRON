@@ -54,8 +54,10 @@ CONTEXT_LENS = {
 
 
 def _layer(geometry, layer_type):
-    """layer_type's layer, compiled. It runs on the global layer's xclbin, as
-    the engine does: one xclbin serves all four layer types.
+    """Compile layer_type's layer.
+
+    It runs on the global layer's xclbin, as the engine does: one xclbin
+    serves all four layer types.
     """
     op = DecodeLayer(geometry=geometry, layer_type=layer_type)
     op.compile()
@@ -63,9 +65,10 @@ def _layer(geometry, layer_type):
 
 
 def _record_metrics(record, op, bufs, context_len, max_l):
-    """Time one more dispatch and record its latency, bandwidth and
-    throughput; bytes count the weights and K/V rows read, FLOPs the
-    projections and attention.
+    """Time one more dispatch and record its latency, bandwidth and throughput.
+
+    Bytes count the weights and K/V rows read, FLOPs the projections and
+    attention.
     """
     g = op.dims
     blob = g.weights.values()
@@ -105,8 +108,9 @@ def _rel_l2(got, want):
 
 
 def check_outputs(op, context_len, max_l, inputs, x_out, kv_out):
-    """Compare x_out and kv_out (bf16) with op's reference on inputs,
-    asserting RTOL_X/RTOL_KV relative L2 error and bit-exact agreement
+    """Compare x_out and kv_out (bf16) with op's reference on inputs.
+
+    Asserts RTOL_X/RTOL_KV relative L2 error and bit-exact agreement
     elsewhere; returns the relative L2 errors.
     """
     ref_x, ref_kv = op.reference(*inputs, context_len, max_l)
@@ -168,8 +172,9 @@ def test_matches_reference(geometry, layer_type, context_len, record_property):
 
 @pytest.mark.supported_devices("npu2")
 def test_layer_types_take_turns():
-    """Global and sliding-window layers past the window, one after another on
-    one loaded array, as the engine's runlist runs them.
+    """Check global and sliding-window layers past the window, one after another.
+
+    On one loaded array, as the engine's runlist runs them.
     """
     context_len = 700
     for layer_type in ("global", "swa", "global"):
@@ -215,8 +220,9 @@ def _captured_cases():
     "case", _captured_cases(), ids=lambda p: p and f"{p.parent.name}/{p.name}"
 )
 def test_captured_case(case, record_property):
-    """A dispatch captured from the engine by an FLM_PLUGIN that hooks
-    decode.layer. The output must also equal the engine's bit for bit.
+    """Check a dispatch captured from the engine by an FLM_PLUGIN hooking decode.layer.
+
+    The output must also equal the engine's bit for bit.
     """
     man = json.loads((case / "manifest.json").read_text())
     geometry = {"E2B": FLM_GEMMA4_E2B_DECODE, "E4B": FLM_GEMMA4_E4B_DECODE}[
@@ -268,8 +274,10 @@ def _proj_reads(module):
 @pytest.mark.parametrize("layer_type", LayerType)
 @pytest.mark.parametrize("geometry", GEOMETRIES, ids=str)
 def test_weight_reads_fit_proj(geometry, layer_type, npu2):
-    """Each layer type's sequence reads its whole blob and nothing past proj,
-    checked from the generated runtime sequence's BDs; the build needs no NPU.
+    """Check each layer type's sequence reads its whole blob and nothing past proj.
+
+    Checked from the generated runtime sequence's BDs; the build needs no
+    NPU.
     """
     g = geometry
     op = DecodeLayer(geometry=g, layer_type=layer_type).resolved()

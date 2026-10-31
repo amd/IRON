@@ -72,8 +72,10 @@ def test_an_operator_written_by_inheritance_inherits_the_sweep():
 
 
 def test_a_bounded_operand_makes_the_trip_count_per_call():
-    """``x[:n]`` bounds the template's extent: the count each core reads
-    and the tiles each lane moves become words the host writes per call.
+    """``x[:n]`` bounds the template's extent.
+
+    The count each core reads and the tiles each lane moves become words
+    the host writes per call.
     """
 
     class G(iron.Graph):

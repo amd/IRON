@@ -28,9 +28,7 @@ exclude_docs: |
   requirements-mkdocs.txt
 
 # Links to source files (*.py, profiles/*.json, ...) are intentional "go read
-# the source" links that work on GitHub but don't resolve as doc pages, and
-# the benchmark charts page links to a sibling static build (charts/) that
-# only exists after ci/scripts/build_pages.py runs, not during `mkdocs build`.
+# the source" links that work on GitHub but don't resolve as doc pages.
 # Suppress that noise; keep absolute_links warnings for real broken links.
 validation:
   links:
@@ -86,6 +84,41 @@ extra:
 
 plugins:
   - search
+  # The Python API pages (docs/api/), as mlir-aie renders its own: griffe
+  # reads the source statically, so the build needs neither mlir-aie nor XRT.
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [.]
+          inventories:
+            - https://docs.python.org/3/objects.inv
+            - https://numpy.org/doc/stable/objects.inv
+            # mlir-aie main's docs, which IRON's nightly pin is built from.
+            - url: https://xilinx.github.io/mlir-aie/dev/objects.inv
+              base_url: https://xilinx.github.io/mlir-aie/dev/
+          options:
+            # An operator's signature and fields are its param()/tunable()
+            # declarations, which griffe does not read as a dataclass's.
+            extensions:
+              - docs/hooks/operator_fields.py
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            members_order: source
+            show_signature: true
+            show_signature_annotations: true
+            separate_signature: true
+            signature_crossrefs: true
+            docstring_style: google
+            docstring_section_style: table
+            merge_init_into_class: true
+            show_if_no_docstring: false
+            show_source: true
+            show_bases: true
+            filters:
+              - "!^_"
 
 # Drops the Programming Guide nav section when its tree isn't symlinked in.
 hooks:
@@ -129,6 +162,15 @@ nav:
   - Programming Guide:
     - programming_guide/README.md
   - Models: models.md
+  - API:
+    - api/index.md
+    - Graphs: api/graph.md
+    - Functional: api/functional.md
+    - Operators: api/operators.md
+    - Writing an operator: api/operator.md
+    - Testing and tracing: api/testing.md
+    - Language models: api/lm.md
+    - Tuning: api/tune.md
   - Benchmarks: benchmarks.md
   - Contributing:
     - Contributing: contributing.md

@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""iron.lm.Conv2d on a device, depthwise, its 13 output rows not whole GEMM
-row blocks: one compile, called at two row counts, every output row the
-call computes held to its reference (the convolution, as
-``iron/tests/common/test_conv2d_graph.py`` judges it against torch's) within its
-GEMM's bound, 2 units of 2^-8 of the convolution of |x| by |weight|. The
-audio subsampling shapes run in the audio tower's model tests.
+"""iron.lm.Conv2d on a device, depthwise, its 13 output rows not whole GEMM row blocks.
+
+One compile, called at two row counts, every output row the call
+computes held to its reference (the convolution, as
+``iron/tests/common/test_conv2d_graph.py`` judges it against torch's)
+within its GEMM's bound, 2 units of 2^-8 of the convolution of |x| by
+|weight|. The audio subsampling shapes run in the audio tower's model
+tests.
 """
 
 import numpy as np

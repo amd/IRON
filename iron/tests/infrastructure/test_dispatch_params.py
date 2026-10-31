@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 from aie.iron import DispatchTime, In, ObjectFifo, Out, Program, Runtime, require
 from aie.iron.controlflow import range_
-from aie.utils.hostruntime.hostruntime import HostRuntimeError
 from aie.utils.compile.jit.params import param, per_call
+from aie.utils.hostruntime.hostruntime import HostRuntimeError
 
 from iron.common import Operator
 from iron.common.design import OperatorDesign
@@ -79,8 +79,10 @@ def test_the_stream_is_generated_per_call():
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_one_image_serves_every_parameter():
-    """Each n must copy exactly n chunks: a stream generated for another n
-    leaves a different number of sentinels behind.
+    """Check that each n copies exactly n chunks.
+
+    A stream generated for another n leaves a different number of sentinels
+    behind.
     """
     op = ChunkCopy(max_chunks=MAX_CHUNKS)
     for n in (3, 1, MAX_CHUNKS, 3):
@@ -113,6 +115,6 @@ def test_a_call_takes_exactly_the_declared_scalars(scalars, error, match):
         op(*_buffers(), **scalars)
 
 
-def test_a_full_elf_refuses_a_dispatch_value():
+def test_a_full_elf_refuses_a_dispatch_value(npu2):
     with pytest.raises(ValueError, match="compile with full_elf=False"):
         OperatorDesign(ChunkCopy(max_chunks=MAX_CHUNKS)).module()

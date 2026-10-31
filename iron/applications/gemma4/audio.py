@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Gemma 4's audio tower and its projection into the text model's space on
-the NPU, as one graph: Hugging Face's ``Gemma4AudioModel`` and
-``embed_audio``, its shape ``AudioConfig``.
+"""Gemma 4's audio tower and its projection into the text model's space on the NPU.
+
+As one graph: Hugging Face's ``Gemma4AudioModel`` and ``embed_audio``, its
+shape ``AudioConfig``.
 """
 
 import dataclasses
@@ -18,6 +19,7 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, Scratchpad, lm
+from iron.common.graph.handle import State
 from iron.lm import Conv2d, Linear, RMSNorm, Tower, blocks
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
@@ -72,22 +74,25 @@ class AudioConfig(lm.Config):
         return self.hidden_size // self.num_attention_heads
 
     def tokens(self, frames: int) -> int:
-        """The soft tokens `frames` valid feature frames give: each
-        subsampling convolution keeps every other row.
+        """Return the soft tokens `frames` valid feature frames give.
+
+        Each subsampling convolution keeps every other row.
         """
         rows = -(-frames // 2)
         return -(-rows // 2)
 
     def frames(self, samples: int) -> int:
-        """The valid feature frames of a clip of `samples`: those whose last
-        sample is audio, after `frame // 2` zeros in front.
+        """Return the valid feature frames of a clip of `samples`.
+
+        Those whose last sample is audio, after `frame // 2` zeros in front.
         """
         audio = min(samples, self.max_samples) - (self.frame - self.frame // 2)
         return max(0, -(-audio // self.hop))
 
     def timing(self) -> np.ndarray:
-        """The `(window, hidden_size)` float32 timing signal of each distance a
-        query reaches back: sines, then cosines.
+        """Return the `(window, hidden_size)` float32 timing signal of each distance.
+
+        Each distance a query reaches back: sines, then cosines.
         """
         n = self.hidden_size // 2
         rates = np.exp(np.arange(n) * -(math.log(1e4) / (n - 1))).astype(np.float32)
@@ -96,8 +101,10 @@ class AudioConfig(lm.Config):
 
 
 class Clipped(iron.Graph):
-    """A checkpoint's clippable linear: clamp, project by ``linear`` at
-    ``c.precision``, clamp, each clamp only where ``c.use_clipped_linears``.
+    """A checkpoint's clippable linear: clamp, project by ``linear``, clamp.
+
+    Projects at ``c.precision``; each clamp only where
+    ``c.use_clipped_linears``.
     """
 
     def __init__(self, c, in_features: int, out_features: int):
@@ -109,26 +116,36 @@ class Clipped(iron.Graph):
             self.output_min, self.output_max = bound(), bound()
 
     def clamp(self, x):
-        if self.input_min is None:
+        lo, hi = self.input_min, self.input_max
+        if lo is None:
             return x
-        return Clamp.step(x, low=float(self.input_min), high=float(self.input_max))
+        assert hi is not None, "input_min and input_max are bound together"
+        return Clamp.step(x, low=float(lo), high=float(hi))
 
     def output(self, y):
-        if self.output_min is None:
+        lo, hi = self.output_min, self.output_max
+        if lo is None:
             return y
-        return Clamp.step(y, low=float(self.output_min), high=float(self.output_max))
+        assert hi is not None, "output_min and output_max are bound together"
+        return Clamp.step(y, low=float(lo), high=float(hi))
 
     @staticmethod
     def same_input(*linears: "Clipped") -> None:
-        """Check that ``linears``, which share an input, clamp it alike, so
-        the first's ``clamp`` serves them all.
+        """Check that ``linears``, which share an input, clamp it alike.
+
+        So the first's ``clamp`` serves them all.
 
         Raises:
             ValueError: They clamp it to different bounds.
         """
         if linears[0].input_min is None:
             return
-        bounds = {(float(p.input_min), float(p.input_max)) for p in linears}
+        bounds = set()
+        for p in linears:
+            assert (
+                p.input_min is not None and p.input_max is not None
+            ), "input_min and input_max are bound together"
+            bounds.add((float(p.input_min), float(p.input_max)))
         if len(bounds) > 1:
             raise ValueError(f"linears sharing an input clamp it to {sorted(bounds)}")
 
@@ -141,8 +158,9 @@ class Clipped(iron.Graph):
 
 
 class FeedForward(iron.Graph):
-    """A conformer's half step: ``x`` plus its clipped SiLU feed-forward
-    between RMS norms, the post norm's weight times ``residual_weight``.
+    """A conformer's half step: ``x`` plus its clipped SiLU feed-forward between RMS norms.
+
+    The post norm's weight times ``residual_weight``.
     """
 
     def __init__(self, c: AudioConfig):
@@ -164,8 +182,9 @@ class FeedForward(iron.Graph):
 
 
 class ConformerAttention(iron.Graph):
-    """A conformer's attention, and what it computes from its weights as
-    they load: the query scale and the relative-position keys.
+    """A conformer's attention, and what it computes from its weights as they load.
+
+    The query scale and the relative-position keys.
     """
 
     def __init__(self, c: AudioConfig):
@@ -182,7 +201,7 @@ class ConformerAttention(iron.Graph):
         self.logit_cap = c.attention_logit_cap
         self.precision = c.precision
         # The tower's keys, values, scores and probabilities, every layer's.
-        self._buffers = None
+        self._buffers: tuple[State, State, State, State] | None = None
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         """``Graph.load_state_dict``, then the derived tensors.
@@ -210,11 +229,13 @@ class ConformerAttention(iron.Graph):
         self.relative = iron.param(band.astype(bfloat16))
 
     def body(self, h, tokens):
-        """Attention over ``h``, its first ``tokens`` rows valid: one GEMM
-        a head over every key, of which each query's band is gathered, its
-        relative-position terms keys of the same GEMM.
+        """Attention over ``h``, its first ``tokens`` rows valid.
+
+        One GEMM a head over every key, of which each query's band is
+        gathered, its relative-position terms keys of the same GEMM.
         """
         T, (H, D, W, B) = h.shape[0], self.dims
+        assert self._buffers is not None, "AudioTower sets every layer's buffers"
         keys, values, scores, probs = self._buffers
         K = keys.shape[1]
         h = self.q_proj.clamp(h)
@@ -259,9 +280,9 @@ class ConformerAttention(iron.Graph):
 
 
 class LightConv(iron.Graph):
-    """A conformer's light convolution: ``x`` plus a GLU of its clipped
-    projection, a depthwise convolution, an RMS norm, SiLU and a clipped
-    projection.
+    """A conformer's light convolution: ``x`` plus a GLU of its clipped projection.
+
+    A depthwise convolution, an RMS norm, SiLU and a clipped projection.
     """
 
     def __init__(self, c: AudioConfig):
@@ -290,8 +311,9 @@ class LightConv(iron.Graph):
 
 
 class AudioLayer(iron.Graph):
-    """Conformer layer ``i``: a feed-forward half step, attention, the light
-    convolution and a second half step.
+    """Conformer layer ``i``: a feed-forward half step, attention, the light convolution.
+
+    And a second half step.
     """
 
     def __init__(self, c: AudioConfig, i: int):
@@ -312,9 +334,11 @@ class AudioLayer(iron.Graph):
 
 
 class SubsampleConvProjection(iron.Graph):
-    """The two subsampling convolutions, each an `iron.lm.Conv2d` built from
-    its own kernel centred over its output channels (so its layer norm is
-    an RMS norm), derived once this loads, and the projection after them.
+    """The two subsampling convolutions, and the projection after them.
+
+    Each convolution is an `iron.lm.Conv2d` built from its own kernel
+    centred over its output channels (so its layer norm is an RMS norm),
+    derived once this loads.
     """
 
     def __init__(self, c: AudioConfig):
@@ -360,9 +384,10 @@ class EmbedAudio(iron.Graph):
 
 
 class AudioTower(Tower):
-    """The audio tower and `embed_audio` over at most `max_tokens` soft
-    tokens, one compile for every clip; called in another graph's body, its
-    steps are that graph's.
+    """The audio tower and `embed_audio` over at most `max_tokens` soft tokens.
+
+    One compile for every clip; called in another graph's body, its steps
+    are that graph's.
 
     Args:
         weights: The checkpoint's; the audio tower's tree is read.
@@ -412,12 +437,14 @@ class AudioTower(Tower):
             layer.self_attn._buffers = self.keys, self.values, self.scores, self.probs
 
     def logmel(self, wave, frames):
-        """Write the log-mel features of `wave`'s valid frames to
-        `features[1 : frames + 1]`, and zero the row after them.
+        """Write the log-mel features of `wave`'s valid frames to `features[1 : frames + 1]`.
+
+        Zeros the row after them.
 
         Args:
             wave: `((F + 1) * hop,)` float32 samples: the `frame // 2` zeros
                 in front of the clip, then the clip, zero past it.
+            frames: The per-call count of valid feature frames.
         """
         F = wave.shape[0] // self.config.hop - 1
         self.log_mel(wave, self.features[1 : F + 1], frames=frames)
@@ -431,7 +458,7 @@ class AudioTower(Tower):
         projection = self.embed_audio.embedding_projection.weight
         return F.linear(x, projection, precision=c.precision)
 
-    def body(
+    def body(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         wave,
         *,
@@ -439,13 +466,15 @@ class AudioTower(Tower):
         frames: Scratchpad[np.int32],
         tokens: Scratchpad[np.int32],
     ):
-        """The soft tokens of `wave`, `(max_tokens, text_dim)` bfloat16, the
-        first `tokens` of them valid.
+        """Return the soft tokens of `wave`, `(max_tokens, text_dim)` bfloat16.
+
+        The first `tokens` of them valid.
 
         Args:
             wave: `((4 * max_tokens + 1) * hop,)` float32 samples, as
                 `logmel` takes them.
             n: The per-call `ceil(frames / 2)`.
+            frames: The per-call count of valid feature frames.
             tokens: The per-call `config.tokens(frames)`.
         """
         c = self.config
@@ -479,18 +508,19 @@ class AudioTower(Tower):
         return values["tokens"]
 
     def shapes(self) -> list[dict]:
-        """The input shapes of each version: one, `max_tokens` soft tokens."""
+        """Return the input shapes of each version: one, `max_tokens` soft tokens."""
         c = self.config
         return [dict(wave=(((4 * c.max_tokens + 1) * c.hop,), np.float32))]
 
     def longest(self) -> dict:
-        """The per-call values of the longest clip: every frame valid."""
+        """Return the per-call values of the longest clip: every frame valid."""
         T = self.config.max_tokens
         return dict(n=2 * T, frames=4 * T, tokens=T)
 
     def inputs(self, waveform) -> tuple[np.ndarray, dict]:
-        """A call's `wave` and per-call sizes, `n`, `frames` and `tokens`,
-        for a mono `waveform` at `sample_rate`, truncated to `max_samples`
+        """Return a call's `wave` and per-call sizes, `n`, `frames` and `tokens`.
+
+        For a mono `waveform` at `sample_rate`, truncated to `max_samples`
         and padded with zeros.
 
         Raises:

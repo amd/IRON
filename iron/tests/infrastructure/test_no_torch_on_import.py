@@ -17,8 +17,9 @@ _RECORDING_ONLY = ("torch", "torchvision", "transformers", "tokenizers")
 
 
 def _heavy_imports_asked_for(modules):
-    """The `_RECORDING_ONLY` packages a fresh interpreter is asked to import
-    while it imports `modules`, whether or not they are installed.
+    """Return the `_RECORDING_ONLY` packages a fresh interpreter is asked to import.
+
+    While it imports `modules`, whether or not they are installed.
     """
     program = (
         "import importlib, sys\n"
@@ -40,8 +41,9 @@ def _heavy_imports_asked_for(modules):
 
 
 def _user_modules():
-    """iron, its functions and model library, and every application module
-    but the transformers builders (``hugging_face``) only tests import.
+    """Return iron, its functions and model library, and every application module.
+
+    But the transformers builders (``hugging_face``) only tests import.
     """
     apps = [
         m.name

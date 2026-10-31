@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Every model that is not a decoder records, device-free, whole, and
-every step of every version resolves on the device: none of a model's call
-path hides host compute or a shape the device refuses. The decoders'
+"""Every model that is not a decoder records, device-free, whole.
+
+And every step of every version resolves on the device: none of a model's
+call path hides host compute or a shape the device refuses. The decoders'
 reference tests check the same (``Decoder``'s
 ``test_every_step_of_every_version_resolves``).
 
@@ -28,8 +29,9 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 
 def steps(model, calls: list[dict] | None = None) -> list[Operator]:
-    """Every step's operator, over every version ``calls`` lists, or
-    ``model.shapes()``'s for a ``Model`` with no single shape of its own.
+    """Return every step's operator, over every version ``calls`` lists.
+
+    Or ``model.shapes()``'s for a ``Model`` with no single shape of its own.
     """
     out = []
     for call in calls if calls is not None else model.shapes():

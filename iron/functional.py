@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Functions for a graph's body, under ``torch.nn.functional``'s names: each
-records the operator steps that compute it and returns their handle.
+"""Functions for a graph's body, under ``torch.nn.functional``'s names.
 
+Each records the operator steps that compute it and returns their handle.
 Weights are a checkpoint's ``(out, in)``, as ``torch.nn.Linear`` stores
 them. A handle's own ``+ - * /`` are steps too, and ``@`` of one row.
 """
@@ -13,10 +13,8 @@ import math
 
 import ml_dtypes
 
-import iron
 from iron.common import Precision
 from iron.common.graph.handle import Handle, State
-
 from iron.operators.copy import Copy
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import ProjectionGEMM
@@ -32,7 +30,8 @@ from iron.operators.silu import SiLU
 def linear(
     x: Handle | State, weight, bias=None, *, precision: Precision, **gemv
 ) -> Handle:
-    """Return ``x @ weight.T``, plus ``bias`` on every row if given;
+    """Return ``x @ weight.T``, plus ``bias`` on every row if given.
+
     ``weight`` is ``(out, in)``, as ``torch.nn.Linear`` stores it. One row
     runs on GEMV, which always rounds once in float32 regardless of
     ``precision``; several rows run on flm.ProjectionGEMM at ``precision``,
@@ -83,6 +82,7 @@ def rms_norm(
     x: Handle, normalized_shape, weight=None, eps: float | None = None
 ) -> Handle:
     """``x`` over the RMS of its last axis, times ``weight`` if given.
+
     ``eps`` None is ``x``'s dtype's machine epsilon, as torch's.
 
     Raises:
@@ -97,8 +97,9 @@ def rms_norm(
 def layer_norm(
     x: Handle, normalized_shape, weight=None, bias=None, eps: float = 1e-5
 ) -> Handle:
-    """Layer-normalize ``x`` over its last axis, as torch's ``layer_norm``:
-    subtract the mean, divide by the standard deviation (``eps`` under the
+    """Layer-normalize ``x`` over its last axis, as torch's ``layer_norm``.
+
+    Subtract the mean, divide by the standard deviation (``eps`` under the
     root), then multiply by ``weight`` and add ``bias`` when given.
 
     Raises:
@@ -114,8 +115,10 @@ def silu(x: Handle) -> Handle:
 
 
 def gelu(x: Handle, approximate: str = "none") -> Handle:
-    """GELU, exact by default as torch's, or by its tanh approximation
-    (``approximate="tanh"``, ``gelu_pytorch_tanh``).
+    """Apply GELU, exact by default as torch's.
+
+    Or by its tanh approximation (``approximate="tanh"``,
+    ``gelu_pytorch_tanh``).
     """
     return GELU.step(x, approximate=approximate)
 
@@ -127,10 +130,11 @@ def rope(x: Handle, angles: Handle) -> Handle:
 
 @dataclasses.dataclass(frozen=True)
 class ConvState:
-    """What a short causal conv carries between calls: ``read``, the
-    ``K - 1`` rows before a call's first, and ``write``, where the ``K - 1``
-    ending it go; and the scratch states a call stages them in, ``window``
-    ``(2, chunk, channels)`` and ``tail`` ``(K - 1, channels)``.
+    """What a short causal conv carries between calls.
+
+    ``read``, the ``K - 1`` rows before a call's first, and ``write``, where
+    the ``K - 1`` ending it go; and the scratch states a call stages them
+    in, ``window`` ``(2, chunk, channels)`` and ``tail`` ``(K - 1, channels)``.
     """
 
     read: Handle
@@ -140,9 +144,10 @@ class ConvState:
 
 
 def causal_conv1d(x: Handle, taps, state: ConvState) -> Handle:
-    """``x`` ``(rows, channels)`` through a depth-wise causal filter of
-    ``K`` taps, each channel its own column of ``taps`` ``(K, channels)``:
-    output row ``t`` is ``sum_k taps[k] * x[t - K + 1 + k]``. The ``K - 1``
+    """Return ``x`` ``(rows, channels)`` through a depth-wise causal filter of ``K`` taps.
+
+    Each channel its own column of ``taps`` ``(K, channels)``: output row
+    ``t`` is ``sum_k taps[k] * x[t - K + 1 + k]``. The ``K - 1``
     rows before ``x``'s first row are read from ``state.read``, and the
     ``K - 1`` rows ending this call (counting those read) are written to
     ``state.write`` for the next call. When ``x``'s rows are bounded per

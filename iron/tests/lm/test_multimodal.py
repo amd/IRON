@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``iron.lm.Multimodal`` over a causal model on the device: a small Llama
-whose prompt holds a run of soft tokens crossing a chunk's end, run through
-its own host loop (``CausalLM.use``) on the multimodal graph's versions,
-against Hugging Face's Llama with the soft tokens at their placeholders
-(``goldens/multimodal.npz``).
+"""``iron.lm.Multimodal`` over a causal model on the device.
+
+A small Llama whose prompt holds a run of soft tokens crossing a chunk's
+end, run through its own host loop (``CausalLM.use``) on the multimodal
+graph's versions, against Hugging Face's Llama with the soft tokens at
+their placeholders (``goldens/multimodal.npz``).
 """
 
 import numpy as np
@@ -18,8 +19,9 @@ from iron.tests.support.multimodal import IMAGE, small_causal
 
 
 def gapped(logits: np.ndarray) -> np.ndarray:
-    """``logits``, checked to hold a top-2 gap past ``LOGITS``, so that the
-    argmax a greedy draw takes is unambiguous.
+    """Return ``logits``, checked to hold a top-2 gap past ``LOGITS``.
+
+    So that the argmax a greedy draw takes is unambiguous.
     """
     top = np.sort(logits)[-2:]
     assert (top[1] - top[0]) / np.abs(logits).max() > LOGITS, "a top-2 tie"

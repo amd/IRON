@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Granite 4.2 3B over the shared decoder and layer (``iron.lm``): its
-embedding and head on the NPU (``Granite``) and its shape, read from its
-checkpoint's ``config.json``. Run with ``python -m
+"""Granite 4.2 3B over the shared decoder and layer (``iron.lm``).
+
+Its embedding and head on the NPU (``Granite``) and its shape, read from
+its checkpoint's ``config.json``. Run with ``python -m
 iron.applications.granite.model``.
 
 Granite is Llama's layer with four scalars from its config: attention
@@ -29,9 +30,7 @@ from iron.lm import CausalLM, DecoderConfig, DecoderLayer
 
 @dataclasses.dataclass(frozen=True)
 class GraniteConfig(DecoderConfig):
-    """``DecoderConfig``, Granite's own four scalars, and every
-    projection's ``precision``.
-    """
+    """``DecoderConfig``, Granite's own four scalars, and every projection's ``precision``."""
 
     attention_multiplier: float = dataclasses.field(kw_only=True)
     residual_multiplier: float = dataclasses.field(default=1.0, kw_only=True)
@@ -43,10 +42,7 @@ class GraniteConfig(DecoderConfig):
 
 
 class GraniteLayer(DecoderLayer):
-    """Llama's layer, its attention logits scaled by
-    ``attention_multiplier`` and each block's output by
-    ``residual_multiplier``.
-    """
+    """Llama's layer, its attention logits scaled by ``attention_multiplier`` and each block's output by ``residual_multiplier``."""
 
     def __init__(self, c: GraniteConfig, i: int):
         super().__init__(c, i)
@@ -55,9 +51,10 @@ class GraniteLayer(DecoderLayer):
 
 
 class Granite(CausalLM):
-    """Granite on ``config``'s shape and a checkpoint's ``weights``: the
-    untied output head is ``lm_head``, every matrix read ``(out, in)`` as
-    the checkpoint ships it. From its sharded checkpoint and
+    """Granite on ``config``'s shape and a checkpoint's ``weights``.
+
+    The untied output head is ``lm_head``, every matrix read ``(out, in)``
+    as the checkpoint ships it. From its sharded checkpoint and
     ``tokenizer.json``.
     """
 

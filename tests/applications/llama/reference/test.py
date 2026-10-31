@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama's graph with ``attention_bias`` against Hugging Face's Llama in
-float32 over the same random weights at a toy shape, its logits recorded in
-``goldens/``, device-free: the shared decoder's tests (``Decoder``) with a
-bias on each of q, k, v and o, as transformers' Llama biases them.
+"""Llama's graph with ``attention_bias`` against Hugging Face's Llama in float32.
+
+Over the same random weights at a toy shape, its logits recorded in
+``goldens/``, device-free: the shared decoder's tests (``Decoder``)
+with a bias on each of q, k, v and o, as transformers' Llama biases
+them.
 """
 
 import dataclasses
@@ -40,8 +42,10 @@ class TestBiasedLlama(Decoder):
 
 
 def test_a_recorded_row_holds_its_own_logits_alone(tmp_path):
-    """A recorded row owns its bytes: no view keeps its forward's every
-    position's logits alive, so recording many rows holds one row each.
+    """A recorded row owns its bytes.
+
+    No view keeps its forward's every position's logits alive, so
+    recording many rows holds one row each.
     """
     pytest.importorskip("transformers")  # optional: only recording needs it
     config, weights = TestBiasedLlama.config, TestBiasedLlama.weights()

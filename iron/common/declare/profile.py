@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 from dataclasses import MISSING
 from enum import Enum
-from types import FunctionType
 from pathlib import Path
+from types import FunctionType
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, TypeVar
 
 if TYPE_CHECKING:
@@ -24,26 +24,31 @@ _Op = TypeVar("_Op", bound="Operator")
 
 
 class Profile:
-    """Tunable values by operator shape, as ``(cls, dims, tunables)`` entries. An
-    open tunable comes from the most specific match (a dimension left out matches
-    any, a subclass its base's); equally specific ones that disagree raise.
+    """Tunable values by operator shape, as ``(cls, dims, tunables)`` entries.
+
+    An open tunable comes from the most specific match (a dimension left out
+    matches any, a subclass its base's); equally specific ones that disagree
+    raise.
     """
 
     def __init__(self) -> None:
         self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
 
     def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
-        """``cls(**kwargs)``, its open tunables filled from this profile's
-        entries: standalone use of what a graph's recorder applies implicitly
-        to every step it constructs.
+        """Build ``cls(**kwargs)`` with its open tunables filled from this profile.
+
+        Standalone use of what a graph's recorder applies implicitly to every
+        step it constructs.
         """
         given = {name: value for name, value in kwargs.items() if value is not None}
         pinned = frozenset(given.keys() & set(cls.declaration.tunables))
         return cls(**{**self.tunables_for(cls, given), **given}, pinned=pinned)
 
     def add(self, cls: type, **fields: Any) -> None:
-        """Add an entry for ``cls``: ``param()`` values to match (one left out
-        matches any value) and ``tunable()`` values to give.
+        """Add an entry for ``cls``.
+
+        ``param()`` values to match (one left out matches any value) and
+        ``tunable()`` values to give.
         """
         dims, tunables, unknown, fixed = {}, {}, [], []
         for name, value in fields.items():
@@ -68,8 +73,9 @@ class Profile:
         self._entries.append((cls, dims, tunables))
 
     def tunables_for(self, cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
-        """The tunables for the ``cls`` a call with ``given`` keywords makes,
-        each from the most specific entry naming it.
+        """Resolve the tunables for the ``cls`` a call with ``given`` keywords makes.
+
+        Each comes from the most specific entry naming it.
         """
         dims = self.dims(cls, given)
         chosen: dict[str, tuple[int, Any]] = {}
@@ -89,13 +95,14 @@ class Profile:
         return {name: value for name, (_, value) in chosen.items()}
 
     @staticmethod
-    def dims(cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
-        """Every dimension (``param()``) of the ``cls`` a call with
-        ``given`` keywords makes, as an entry is matched against: one it
-        leaves out is its default, None where a function computes it.
+    def dims(kind: type, given: Mapping[str, Any]) -> dict[str, Any]:
+        """Collect every dimension (``param()``) a ``kind`` call with ``given`` makes.
+
+        This is what an entry is matched against: one it leaves out is its
+        default, ``None`` where a function computes it.
         """
         dims = {}
-        for name, p in cls.declaration.params.items():
+        for name, p in kind.declaration.params.items():
             if p.tunable:
                 continue
             if name in given:
@@ -115,7 +122,7 @@ class Profile:
 
     @classmethod
     def load(cls, path: str | Path) -> Profile:
-        """The profile ``save`` wrote to ``path``."""
+        """Load the profile ``save`` wrote to ``path``."""
         from ...operators import CATALOG  # the operators import this module
 
         with open(path) as f:

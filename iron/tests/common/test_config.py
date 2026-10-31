@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``Config.from_checkpoint``: the dotted-path lookup and ``convert`` hooks
-against a real checkpoint's own ``config.json`` (device-free; skipped
+"""``Config.from_checkpoint``: the dotted-path lookup and ``convert`` hooks.
+
+Against a real checkpoint's own ``config.json`` (device-free; skipped
 outside CI where the checkpoint is not there, failed in CI).
 """
 
@@ -19,8 +20,8 @@ from iron.applications.gemma4.vision import VisionConfig
 from iron.applications.granite.model import GraniteConfig
 from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig
 from iron.lm import DecoderConfig
-from iron.tests.support.llama_model import REAL_1B
 from iron.lm.testing import require, weights_dir
+from iron.tests.support.llama_model import REAL_1B
 
 LLAMA_DIR = weights_dir("llama3.2-1b")
 EMBEDDING_GEMMA2_DIR = weights_dir("embeddinggemma-2")
@@ -61,11 +62,11 @@ def test_from_checkpoint_takes_either_the_file_or_its_directory():
     ids=lambda cls: f"{cls.__module__}.{cls.__name__}",
 )
 def test_from_checkpoint_reads_each_key_and_no_not_json_field(tmp_path, cls):
-    """Every field is read at its key (``json_key``), its own name or the
-    path it names, under ``json_prefix`` unless the path starts at the
-    root; one the file leaves null
-    (each converted one here) keeps its default; a ``not_json`` field is
-    neither read nor written, even where the file names it.
+    """Check that every field is read at its key (``json_key``), its own name or the path it names.
+
+    Under ``json_prefix`` unless the path starts at the root; one the file
+    leaves null (each converted one here) keeps its default; a ``not_json``
+    field is neither read nor written, even where the file names it.
     """
     fields = dataclasses.fields(cls)
     keys = {cls.json_key(f) for f in fields}
@@ -100,8 +101,9 @@ def test_from_checkpoint_refuses_a_rope_scaling_it_builds_no_table_for(tmp_path)
 
 
 def test_a_sliding_window_some_layers_take_is_refused():
-    """``use_sliding_window`` (Qwen's, SmolLM3's) windows a per-model choice
-    of layers; set, with a window under the context, it is refused.
+    """Check that ``use_sliding_window`` (Qwen's, SmolLM3's) windows a per-model choice of layers.
+
+    Set, with a window under the context, it is refused.
     """
     with pytest.raises(ValueError, match="use_sliding_window"):
         dataclasses.replace(REAL_1B, sliding_window=64, use_sliding_window=True)
@@ -111,8 +113,9 @@ def test_a_sliding_window_some_layers_take_is_refused():
 
 
 def test_head_dim_falls_back_and_max_seq_len_is_the_native_context(tmp_path):
-    """No ``head_dim`` (Qwen 2.5, Granite, LFM2, Phi-4-mini-instruct) is
-    ``hidden_size // num_attention_heads``; one given is kept.
+    """Check that no ``head_dim`` (Qwen 2.5, Granite, LFM2, Phi-4-mini-instruct) falls back.
+
+    To ``hidden_size // num_attention_heads``; one given is kept.
     """
     fields = dict(
         vocab_size=32,
@@ -140,9 +143,7 @@ def test_llama_projects_at_high_from_3b_s_width_unless_given():
 
 
 def test_a_config_whose_application_states_no_precision_is_refused():
-    """``precision`` is no file's and has no default: each application
-    states its own.
-    """
+    """Check that ``precision`` is no file's and has no default: each application states its own."""
     data = REAL_1B.to_json() | {"rope_scaling": None}
     with pytest.raises(ValueError, match="DecoderConfig states no precision"):
         DecoderConfig.from_json(data)
@@ -164,8 +165,9 @@ def test_from_checkpoint_names_the_keys_a_config_json_lacks(tmp_path):
     ],
 )
 def test_embedding_gemma2_from_checkpoint_is_the_default_instance(cls, instance):
-    """Every field ``config.json`` names (a dotted path, a nested sub-config
-    or a top-level token id) gives today's hand-written default; a field it
+    """Check that every field ``config.json`` names gives today's hand-written default.
+
+    A dotted path, a nested sub-config or a top-level token id; a field it
     does not name (an audio or vision front end's own choice) keeps it too.
     """
     require(EMBEDDING_GEMMA2_DIR / "config.json")
@@ -178,8 +180,9 @@ def test_embedding_gemma2_from_checkpoint_is_the_default_instance(cls, instance)
     ids=["llama", "embedding_gemma2"],
 )
 def test_to_json_is_from_checkpoint_s_inverse(tmp_path, config):
-    """A converted field (a ``rope_scaling``) is written as the checkpoint
-    writes it, so the file reads back the same config.
+    """Check that a converted field (a ``rope_scaling``) is written as the checkpoint writes it.
+
+    So the file reads back the same config.
     """
     (tmp_path / "config.json").write_text(json.dumps(config.to_json()))
     assert type(config).from_checkpoint(tmp_path) == config

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Numpy reference of one Gemma 4 decode layer, as the flm_gemma4_decode
-kernels compute it: takes ``DecodeLayer``'s five buffers and returns x and
-the kv cache as the device leaves them, reproducing the kernels' rounding,
-accumulation order and lookup tables via ``aie2p_math_emulation`` (a product
-or inverse square root may still differ by one bf16 ulp near a boundary).
+"""Numpy reference of one Gemma 4 decode layer, as the flm_gemma4_decode kernels compute it.
+
+Takes ``DecodeLayer``'s five buffers and returns x and the kv cache as
+the device leaves them, reproducing the kernels' rounding, accumulation
+order and lookup tables via ``aie2p_math_emulation`` (a product or
+inverse square root may still differ by one bf16 ulp near a boundary).
 """
 
 import numpy as np
@@ -45,9 +46,10 @@ BF16_M, BF16_K = 32, 256
 
 
 def proj_layout(g: LayerDims) -> dict[str, tuple[int, str, int, int]]:
-    """Weight name -> (byte offset, format, rows, cols) in proj: the design's
-    weights, with its qkv split into q, k and v (absent on a skip layer).
-    rows are output features.
+    """Weight name -> (byte offset, format, rows, cols) in proj.
+
+    The design's weights, with its qkv split into q, k and v (absent on
+    a skip layer). rows are output features.
     """
     out = {}
     for name, w in g.weights.items():
@@ -69,9 +71,11 @@ def _size(fmt: str, rows: int, cols: int) -> int:
 
 
 def rope_rms_layout(g: LayerDims) -> dict[str, int]:
-    """Element offsets in rope_rms: cos and sin of this token's position, the q
-    and k norm weights, the per-layer embedding of this token, the per-layer
-    norm weight, the post-per-layer-input norm weight and the layer scale.
+    """Element offsets in rope_rms.
+
+    Cos and sin of this token's position, the q and k norm weights, the
+    per-layer embedding of this token, the per-layer norm weight, the
+    post-per-layer-input norm weight and the layer scale.
     """
     dh, P, D = g.dh, g.geometry.pli_d, g.geometry.model_dim
     lay = dict(cos=0, sin=dh // 2, q_norm=dh, k_norm=2 * dh, pli_embed=3 * dh)
@@ -83,9 +87,10 @@ def rope_rms_layout(g: LayerDims) -> dict[str, int]:
 
 
 def _attention_rows(g: LayerDims, context_len: int) -> tuple[np.ndarray, int]:
-    """Cache rows in the order the attention core reads them, and how many
-    hold keys: whole rounds, masking rows past the keys; a sliding-window
-    ring of L >= 512 tokens holds them in time order from row L % 512.
+    """Return cache rows in the order the attention core reads them, and how many hold keys.
+
+    Whole rounds, masking rows past the keys; a sliding-window ring of
+    L >= 512 tokens holds them in time order from row L % 512.
     """
     L = context_len + 1
     if g.swa and L >= SLIDING_WINDOW:
@@ -98,8 +103,9 @@ def _attention_rows(g: LayerDims, context_len: int) -> tuple[np.ndarray, int]:
 
 
 def rms_norm(x, w):
-    """rms_norm.h: bf16(x * w * rsqrt(mean(x^2) + eps)). w is None for the v
-    norm.
+    """rms_norm.h: bf16(x * w * rsqrt(mean(x^2) + eps)).
+
+    w is None for the v norm.
     """
     x = np.asarray(x, np.float64)
     s = f32(
@@ -114,9 +120,11 @@ _SM_BYTES = 2 * 2 * M_TILE * K_TILE // GROUP
 
 
 def parse_q4nx(proj_u8, offset, rows, cols):
-    """A q4nx weight in natural order: (codes [rows, cols], scales and mins
-    [rows, cols / 32]) (``q4nx.unpack``). Blocks go by pairs of 32-row bands:
-    column block c of band 2p, then of band 2p + 1.
+    """Return a q4nx weight in natural order.
+
+    (codes [rows, cols], scales and mins [rows, cols / 32])
+    (``q4nx.unpack``). Blocks go by pairs of 32-row bands: column block
+    c of band 2p, then of band 2p + 1.
     """
     nb_r, nb_c = rows // M_TILE, cols // K_TILE
     blk = proj_u8[offset : offset + nb_r * nb_c * BLOCK_BYTES]
@@ -128,8 +136,9 @@ def parse_q4nx(proj_u8, offset, rows, cols):
 
 
 def parse_bf16_blocked(proj_u8, offset, rows, cols):
-    """A bf16 weight in 32 x 256 blocks, row-block major. Element k * 32 + m of
-    block (i, j) is W[32 i + m, 256 j + k].
+    """Return a bf16 weight in 32 x 256 blocks, row-block major.
+
+    Element k * 32 + m of block (i, j) is W[32 i + m, 256 j + k].
     """
     w = proj_u8[offset : offset + 2 * rows * cols].view(bfloat16).astype(np.float32)
     w = w.reshape(rows // BF16_M, cols // BF16_K, BF16_K, BF16_M).transpose(0, 3, 1, 2)
@@ -137,9 +146,11 @@ def parse_bf16_blocked(proj_u8, offset, rows, cols):
 
 
 def q4_matvec(x, codes, scales, mins, chunk=2048):
-    """W x for a q4nx weight, in the kernel's exact order: per row and group of
-    32 inputs, sums ``code * x`` in fp32 and rounds to bf16 (t), bf16-rounds
-    each group's x sum (s_x) once, then accumulates t*scale and min*s_x in fp32.
+    """Compute W x for a q4nx weight, in the kernel's exact order.
+
+    Per row and group of 32 inputs, sums ``code * x`` in fp32 and
+    rounds to bf16 (t), bf16-rounds each group's x sum (s_x) once, then
+    accumulates t*scale and min*s_x in fp32.
     """
     x = np.asarray(x, np.float64)
     rows, cols = codes.shape
@@ -171,8 +182,10 @@ def bf16_matvec(x, w):
 
 
 def rope_head(x, w_norm, cos, sin):
-    """Per-head RMS norm, then rotate-half RoPE. A global layer rotates the first
-    64 pairs only: the engine passes cos 1 and sin 0 for the others.
+    """Apply per-head RMS norm, then rotate-half RoPE.
+
+    A global layer rotates the first 64 pairs only: the engine passes
+    cos 1 and sin 0 for the others.
     """
     xn = rms_norm(x, w_norm)
     h = xn.shape[-1] // 2
@@ -183,9 +196,11 @@ def rope_head(x, w_norm, cos, sin):
 
 
 def attention(q, K, V, valid, n_kv):
-    """One query against cache rows K, V [rows, n_kv, dh], in read order: an
-    online softmax over 16-key rounds, bit-exact with the kernel (scale
-    folded into q/k's RMS norm); q . k and p . V run on bfp16 operands.
+    """Run one query against cache rows K, V [rows, n_kv, dh], in read order.
+
+    An online softmax over 16-key rounds, bit-exact with the kernel
+    (scale folded into q/k's RMS norm); q . k and p . V run on bfp16
+    operands.
     """
     H, dh = q.shape
     n_rows = K.shape[0]
@@ -224,8 +239,10 @@ def attention(q, K, V, valid, n_kv):
 
 
 def glu(up_gate, glu_slice):
-    """bf16(gelu(gate) * up). Each glu_slice-row slice of the up/gate output
-    holds glu_slice / 2 up values, then glu_slice / 2 gate values.
+    """bf16(gelu(gate) * up).
+
+    Each glu_slice-row slice of the up/gate output holds glu_slice / 2
+    up values, then glu_slice / 2 gate values.
     """
     u = up_gate.reshape(-1, 2, glu_slice // 2)
     return rb(gelu_kernel(u[:, 1]) * u[:, 0]).reshape(-1)
@@ -238,9 +255,10 @@ def _u8(buf):
 def reference(
     g: LayerDims, x, proj, rms, rope_rms, kv, context_len: int, max_l: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    """One decode-layer dispatch on ``DecodeLayer``'s five buffers. Returns
-    copies of x and kv as uint16 bf16 bit patterns: the layer output in
-    x[:D], and on a non-skip layer this token's K/V rows in kv.
+    """Run one decode-layer dispatch on ``DecodeLayer``'s five buffers.
+
+    Returns copies of x and kv as uint16 bf16 bit patterns: the layer
+    output in x[:D], and on a non-skip layer this token's K/V rows in kv.
     """
     D, dh, H, n_kv, P, dk = (
         g.geometry.model_dim,
@@ -314,7 +332,7 @@ def reference(
 
 
 def pack_q4nx(codes, scales, mins):
-    """The proj bytes of a q4nx weight; the inverse of parse_q4nx."""
+    """Return the proj bytes of a q4nx weight; the inverse of parse_q4nx."""
     rows, cols = codes.shape
     nb_r, nb_c = rows // M_TILE, cols // K_TILE
     sm = np.stack([scales, mins]).reshape(2, nb_r, M_TILE, nb_c, K_TILE // GROUP)
@@ -331,17 +349,18 @@ def pack_q4nx(codes, scales, mins):
 
 
 def pack_bf16_blocked(w):
-    """The proj bytes of a bf16 weight; the inverse of parse_bf16_blocked."""
+    """Return the proj bytes of a bf16 weight; the inverse of parse_bf16_blocked."""
     rows, cols = w.shape
     b = w.reshape(rows // BF16_M, BF16_M, cols // BF16_K, BF16_K).transpose(0, 2, 3, 1)
     return to_bf16(b.reshape(-1), "rne").view(np.uint8)
 
 
 def generate_inputs(g: LayerDims, context_len: int, max_l: int, seed: int = 0):
-    """Random buffers (x, proj, rms, rope_rms, kv) for one dispatch (uint16
-    bf16 bit patterns, proj uint8), E2B-checkpoint magnitudes. Keys are
-    scaled so a 1-ulp score change moves the output by 5e-3, and
-    ``_plant_needles`` makes it depend on which cache rows are read.
+    """Draw random buffers (x, proj, rms, rope_rms, kv) for one dispatch.
+
+    uint16 bf16 bit patterns, proj uint8, E2B-checkpoint magnitudes.
+    Keys are scaled so a 1-ulp score change moves the output by 5e-3,
+    and ``_plant_needles`` makes it depend on which cache rows are read.
     """
     rng = np.random.default_rng(seed)
     D, P, dh, dk = g.geometry.model_dim, g.geometry.pli_d, g.dh, g.dk
@@ -395,7 +414,7 @@ def generate_inputs(g: LayerDims, context_len: int, max_l: int, seed: int = 0):
 
 
 def _query(g, W, x, proj, rms, rope_rms, lay):
-    """The rotated query heads [heads, dh] of the layer."""
+    """Return the rotated query heads [heads, dh] of the layer."""
     D, dh = g.geometry.model_dim, g.dh
     off, _, rows, cols = W["q"]
     xn = rms_norm(
@@ -416,10 +435,11 @@ NEEDLE_SCORE = 8.0
 
 
 def _plant_needles(g, context_len, kv, q, rng):
-    """Write needle rows into kv [K|V, rows, dk] that each score
-    ``NEEDLE_SCORE`` with their kv head's queries (other keys near 0): the
-    oldest/newest cached key, row 0, the overwritten row, and the first row
-    past the keys, so a wrong read changes the output sharply.
+    """Write needle rows into kv [K|V, rows, dk] that each score ``NEEDLE_SCORE``.
+
+    With their kv head's queries (other keys near 0): the oldest/newest
+    cached key, row 0, the overwritten row, and the first row past the
+    keys, so a wrong read changes the output sharply.
     """
     order, valid = _attention_rows(g, context_len)
     # A non-skip layer writes its own key at the newest position.

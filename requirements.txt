@@ -6,10 +6,12 @@
 --find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
 --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 
-mlir_aie==1.4.5.dev64+g843e9c3
-llvm-aie==22.0.0.2026101901+4f5df13d
+mlir_aie==1.4.5.dev119+g064a172
+llvm-aie==22.0.0.2026102001+4f5df13d
 
-black
+black==26.10.1
+pre-commit
+pyright==1.1.414
 reuse
 pytest
 pytest-xdist

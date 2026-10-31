@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A text model whose placeholder tokens take its towers' soft tokens, as
-Hugging Face's ``masked_scatter`` places them: the j-th of a token's
+"""A text model whose placeholder tokens take its towers' soft tokens.
+
+As Hugging Face's ``masked_scatter`` places them: the j-th of a token's
 placeholders takes its tower's j-th soft token.
 """
 
 import inspect
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 import numpy as np
 
@@ -15,15 +16,16 @@ import iron
 from iron.operators.copy import Copy
 from iron.operators.merge import Merge
 
-from .model import Model
 from .causal import CausalLM
 from .encoder import Encoder, Tower
 from .generation import Sampler
+from .model import Model
 
 
 class Multimodal(Model):
-    """A text model and its towers, keyed by placeholder token, as one graph:
-    a tower writes its soft tokens into ``merged``, and ``placed`` scatters
+    """A text model and its towers, keyed by placeholder token, as one graph.
+
+    A tower writes its soft tokens into ``merged``, and ``placed`` scatters
     them into the text model's rows by placeholder position.
 
     Args:
@@ -123,9 +125,11 @@ class Multimodal(Model):
         return self.text.inline(self.text.from_rows, rows, ids, **text)
 
     def shapes(self) -> list[dict]:
-        """The input shapes of each version: the text model's, first so its
-        decode step leads (``Model.shapes``), each tower's, and the ids with
-        their placeholders (and a causal model's counts).
+        """Return the input shapes of each version.
+
+        The text model's, first so its decode step leads (``Model.shapes``),
+        each tower's, and the ids with their placeholders (and a causal
+        model's counts).
         """
         text = self.text.shapes()
         (ids,) = [s["ids"] for s in text if "ids" in s]
@@ -147,8 +151,9 @@ class Multimodal(Model):
             self.text.use(decode_step, prompt_chunk, placed, tuple(self.at))
 
     def longest(self) -> dict:
-        """The per-call values of the longest call: the text model's and each
-        tower's.
+        """Return the per-call values of the longest call.
+
+        The text model's and each tower's.
         """
         assert isinstance(self.text, Encoder), "an encoder text model's"
         values = dict(self.text.longest())
@@ -157,9 +162,13 @@ class Multimodal(Model):
             values |= {f"{name}_{v}": x for v, x in tower.longest().items()}
         return values
 
-    def tower_calls(self, tokens, raw: dict[int, tuple]) -> list[tuple[tuple, dict]]:
-        """Each tower version ``raw`` runs, in turn: its inputs and every
-        tower's per-call values, zero for a tower not running.
+    def tower_calls(
+        self, tokens: Sequence[int] | np.ndarray, raw: dict[int, tuple]
+    ) -> list[tuple[tuple, dict]]:
+        """Each tower version ``raw`` runs, in turn.
+
+        Its inputs and every tower's per-call values, zero for a tower not
+        running.
 
         Args:
             tokens: The token ids, each placeholder run as long as its
@@ -189,8 +198,9 @@ class Multimodal(Model):
         return calls
 
     def calls(self, tokens, raw: dict[int, tuple]) -> list[tuple[tuple, dict]]:
-        """An encoder text model's call: each version it runs, in turn, its
-        inputs and per-call values (``tower_calls``).
+        """Build an encoder text model's call: each version it runs, in turn.
+
+        Its inputs and per-call values (``tower_calls``).
 
         Raises:
             TypeError: The text model is causal: ``logits``, ``generate``.
@@ -209,18 +219,21 @@ class Multimodal(Model):
         ]
 
     def run(self, tokens, raw: dict[int, tuple]):
-        """An encoder text model's output for ``tokens`` with ``raw`` at their
-        placeholders (as ``calls`` takes them), each version run in turn.
+        """Return an encoder text model's output for ``tokens``.
+
+        ``raw`` at their placeholders (as ``calls`` takes them), each
+        version run in turn.
         """
         for inputs, values in self.calls(tokens, raw):
             out = self(*inputs, **values)
         return out
 
     def place(self, tokens, raw: dict[int, tuple]) -> None:
-        """Run each tower ``raw`` names, so a causal text model's prompt
-        chunks find its soft tokens in ``merged``, unless each ran on the
-        same last time, else forgetting its caches from the first stale
-        placeholder.
+        """Run each tower ``raw`` names.
+
+        So a causal text model's prompt chunks find its soft tokens in
+        ``merged``, unless each ran on the same last time, else forgetting
+        its caches from the first stale placeholder.
         """
         tokens = np.asarray(tokens)
         calls = self.tower_calls(tokens, raw)
@@ -240,8 +253,9 @@ class Multimodal(Model):
         self.text.forget(int(places[0]) if places.size else tokens.size)
 
     def logits(self, tokens, raw: dict[int, tuple]) -> np.ndarray:
-        """A causal text model's logits after ``tokens``, ``raw`` at their
-        placeholders (``CausalLM.logits``).
+        """Return a causal text model's logits after ``tokens``.
+
+        ``raw`` at their placeholders (``CausalLM.logits``).
         """
         self.place(tokens, raw)
         assert isinstance(self.text, CausalLM), "a causal text model's"
@@ -259,9 +273,10 @@ class Multimodal(Model):
         each: bool = True,
         raw: dict[int, tuple] | None = None,
     ) -> Iterator[int]:
-        """A causal text model's draws after ``tokens``, ``raw`` at their
-        placeholders (none by default): ``generate(..., raw=)`` and
-        ``stream(..., raw=)``.
+        """Yield a causal text model's draws after ``tokens``.
+
+        ``raw`` at their placeholders (none by default): ``generate(...,
+        raw=)`` and ``stream(..., raw=)``.
         """
         self.place(tokens, raw or {})
         assert isinstance(self.text, CausalLM), "a causal text model's"

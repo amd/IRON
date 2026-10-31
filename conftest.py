@@ -3,15 +3,15 @@
 
 import csv
 import numbers
-import re
 import os
-import subprocess
-from datetime import datetime
-from pathlib import Path
-import pytest
+import re
 import statistics
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
 
 import aie.utils as aie_utils
+import pytest
 from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
 
@@ -21,9 +21,10 @@ from iron.tests.support.tools import DEVICES
 
 
 def _bound_device(name: str):
-    """A fixture binding the device ``DEVICES[name]`` builds as current, the
-    previous one restored after: what a test that resolves or compiles
-    device-free needs.
+    """Build a fixture binding the device ``DEVICES[name]`` builds as current.
+
+    The previous device is restored after: what a test that resolves or
+    compiles device-free needs.
     """
 
     def bound():
@@ -37,11 +38,18 @@ def _bound_device(name: str):
 npu2 = _bound_device("npu2")
 npu1 = _bound_device("npu1")
 
+CSV_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 
 def pytest_addoption(parser):
     parser.addoption(
         "--csv-output",
         help="Write each test's metrics to this CSV file",
+    )
+    parser.addoption(
+        "--csv-date",
+        help=f"The run's date in the CSV, as '{CSV_DATE_FORMAT}' UTC "
+        "(default: now); a run of several sessions gives each the same one",
     )
     parser.addoption(
         "--record-goldens",
@@ -55,9 +63,10 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="module")
 def golden(request):
-    """``golden(name, reference, *inputs)``: the ``Golden`` file
-    ``goldens/<name>.npz`` beside the test, of what ``reference()`` (a
-    ``HuggingFace``) builds from ``inputs``.
+    """Return ``golden(name, reference, *inputs)``.
+
+    The ``Golden`` file ``goldens/<name>.npz`` beside the test, of what
+    ``reference()`` (a ``HuggingFace``) builds from ``inputs``.
     """
 
     def open_golden(name, reference, *inputs):
@@ -90,10 +99,13 @@ class CSVReporter:
     the reports its workers send.
     """
 
-    def __init__(self, csv_path):
+    def __init__(self, csv_path, date=None):
         self.csv_path = Path(csv_path)
         self.commit = get_git_commit()
-        self.date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if date is None:
+            date = datetime.now(timezone.utc).strftime(CSV_DATE_FORMAT)
+        datetime.strptime(date, CSV_DATE_FORMAT)
+        self.date = date
         # Without the device: describing it opens the single-tenant NPU.
         self.source = provenance()
         self.test_metrics = {}  # test_name -> {metric_name -> [values]}
@@ -121,14 +133,17 @@ class CSVReporter:
             self.bench[self.key(item.nodeid)] = bench
 
     def pytest_runtest_logstart(self, nodeid):
-        """Count ``nodeid`` a failed check until it ends, and write every
-        result so far."""
+        """Count ``nodeid`` a failed check until it ends.
+
+        And write every result so far.
+        """
         self.running.add(self.key(nodeid))
         self.write_csv()
 
     def pytest_runtest_logreport(self, report):
-        """Record a call's result and the figures it gave ``record_property``;
-        a test that fails in setup (a runner missing a model's files) is
+        """Record a call's result and the figures it gave ``record_property``.
+
+        A test that fails in setup (a runner missing a model's files) is
         recorded too, or the model would drop out of the results.
         """
         called = report.when == "call" and not report.skipped
@@ -164,7 +179,7 @@ class CSVReporter:
             )
 
     def device_source(self):
-        """The provenance line, describing the NPU when the run measured on it.
+        """Return the provenance line, describing the NPU when the run measured on it.
 
         The commit alone does not say which toolchain and kernel sources
         produced a number; mlir-aie's provenance line does. Only a run that
@@ -220,8 +235,10 @@ class CSVReporter:
         )
 
     def write_csv(self, source=None):
-        """Write every test's row, through a temporary file renamed over the
-        CSV, so a process killed mid-write leaves the last whole one."""
+        """Write every test's row, through a temporary file renamed over the CSV.
+
+        So a process killed mid-write leaves the last whole one.
+        """
         rows = sorted(
             self.rows(source or self.source),
             key=lambda x: (x["Test Path"], x["Test"], x["Date"]),
@@ -245,7 +262,8 @@ def pytest_configure(config):
     csv_path = config.getoption("--csv-output")
     # An xdist worker reports to the controller, which writes the CSV.
     if csv_path and "workerinput" not in vars(config):
-        config.pluginmanager.register(CSVReporter(csv_path), "csv_reporter")
+        reporter = CSVReporter(csv_path, config.getoption("--csv-date"))
+        config.pluginmanager.register(reporter, "csv_reporter")
 
 
 ATTACHED = pytest.StashKey[str]()
@@ -253,9 +271,10 @@ ATTACHED = pytest.StashKey[str]()
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    """Skip a device test the attached NPU is not among its
-    ``supported_devices``, before its fixtures build anything. The device is
-    opened here, at the first device test run, never at collection: it is
+    """Skip a device test the attached NPU is not among its ``supported_devices``.
+
+    The skip happens before its fixtures build anything. The device is opened
+    here, at the first device test run, never at collection: it is
     single-tenant, and a collect-only gate must not hold it.
     """
     marker = item.get_closest_marker("supported_devices")
@@ -288,9 +307,10 @@ def pytest_fixture_setup(fixturedef, request):
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_teardown(item, nextitem):
-    """Release the NPU runtime after a device test, or, in a module whose
-    class- or module-scoped fixtures may hold an image its tests share, after
-    its last.
+    """Release the NPU runtime after a device test.
+
+    Or, in a module whose class- or module-scoped fixtures may hold an image
+    its tests share, after its last.
     """
     try:
         return (yield)

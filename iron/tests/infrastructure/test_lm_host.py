@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A language model's host side: the checkpoint, its tree by its own names
-and sampling (``iron.lm``'s ``Checkpoint``, ``Checkpoint.tree`` and
-``Sampler``), on a checkpoint of Llama's names.
+"""A language model's host side: the checkpoint, its tree by its own names and sampling.
+
+``iron.lm``'s ``Checkpoint``, ``Checkpoint.tree`` and ``Sampler``, on a
+checkpoint of Llama's names.
 
 The oracle is the safetensors library itself: tier 1 writes small
 checkpoints with ``safetensors.numpy`` to ``tmp_path`` and compares every
@@ -28,11 +29,10 @@ import pytest
 from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
-from iron.lm import Checkpoint, Sampler
-from iron.lm.model import TokenizerJson, _cgroup_limit, prompt_text
 from iron.applications.llama.model import LlamaConfig
-from iron.lm import testing
+from iron.lm import Checkpoint, Sampler
 from iron.lm.checkpoint import renamed
+from iron.lm.model import TokenizerJson, _cgroup_limit, prompt_text
 from iron.lm.testing import require, weights_dir
 from iron.operators import sample
 from iron.tests.support.llama_model import REAL_1B
@@ -83,7 +83,7 @@ def layer_shapes(cfg) -> dict[str, tuple[int, ...]]:
 
 
 def toy_checkpoint(cfg=TOY):
-    """A Hugging Face state_dict for ``cfg``, every tensor distinct, bf16."""
+    """Build a Hugging Face state_dict for ``cfg``, every tensor distinct, bf16."""
     rng = np.random.default_rng(0)
     ckpt = {
         "model.embed_tokens.weight": rng.normal(size=(cfg.vocab_size, cfg.hidden_size)),
@@ -103,7 +103,7 @@ def toy_path(tmp_path):
 
 
 def at(tree, name: str):
-    """The node of ``tree`` at the dotted checkpoint ``name``."""
+    """Return the node of ``tree`` at the dotted checkpoint ``name``."""
     for key in name.split("."):
         tree = tree[int(key)] if isinstance(tree, list) else vars(tree)[key]
     return tree
@@ -141,7 +141,7 @@ def test_checkpoint_views_the_mapping_without_copying(toy_path):
 
 
 def _resident_bytes(path: Path) -> int:
-    """This process's resident bytes of its mappings of ``path``, per the kernel."""
+    """Return this process's resident bytes of its mappings of ``path``, per the kernel."""
     total, inside = 0, False
     for line in Path("/proc/self/smaps").read_text().splitlines():
         fields = line.split()
@@ -192,8 +192,9 @@ def test_checkpoint_rejects_a_malformed_file(tmp_path, offsets, data):
 
 
 def test_a_batchnorm_s_int64_counter_loads_beside_its_float_weights(tmp_path):
-    """A released ResNet's safetensors holds each BatchNorm's
-    num_batches_tracked as I64, among its F32 tensors.
+    """Check that a released ResNet's safetensors holds each BatchNorm's counter as I64.
+
+    ``num_batches_tracked`` sits among its F32 tensors.
     """
     header = {
         "bn.weight": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
@@ -255,9 +256,10 @@ def test_checkpoint_rejects_an_unsupported_dtype(tmp_path):
 
 
 def shard(tensors: dict, tmp_path: Path, split: int) -> Path:
-    """``tensors`` written as two ``.safetensors`` shards and the index
-    naming each tensor's shard, as Hugging Face's ``save_pretrained``
-    splits a checkpoint past its size cap. Returns the index's path.
+    """Write ``tensors`` as two ``.safetensors`` shards and the index naming each tensor's shard.
+
+    As Hugging Face's ``save_pretrained`` splits a checkpoint past its size
+    cap. Returns the index's path.
     """
     names = list(tensors)
     shards = {
@@ -290,8 +292,9 @@ def test_checkpoint_reads_a_sharded_index(sharded_toy_path):
 
 
 def test_checkpoint_rejects_a_shard_that_disagrees_with_the_index(tmp_path):
-    """The index's own partition and a shard's real header disagree, with no
-    tensor duplicated across shards: a stale or hand-edited index.
+    """Check that a disagreement between the index's partition and a shard's header is caught.
+
+    With no tensor duplicated across shards: a stale or hand-edited index.
     """
     tensors = toy_checkpoint()
     names = list(tensors)
@@ -331,8 +334,10 @@ def test_checkpoint_release_drops_the_right_shard(sharded_toy_path):
 
 
 def test_each_checkpoint_tensor_lands_on_its_name_bitwise(toy_path):
-    """Every tensor is distinct, so a mapping that crosses two same-shaped
-    weights over (k and v, gate and up) is caught.
+    """Check that every tensor is distinct, so a crossed mapping is caught.
+
+    A mapping that crosses two same-shaped weights over (k and v, gate and
+    up) is caught.
     """
     tree = Checkpoint(toy_path).tree()
     ckpt = load_file(toy_path)
@@ -343,7 +348,9 @@ def test_each_checkpoint_tensor_lands_on_its_name_bitwise(toy_path):
 
 
 def test_tree_names_a_tensor_of_a_skipped_layer(tmp_path):
-    """Layer 0 gone and layer 1 whole: layer 1 stays layer 1, and layer 0's
+    """Check that a skipped layer's tensors go missing by path, not renumbered.
+
+    Layer 0 gone and layer 1 whole: layer 1 stays layer 1, and layer 0's
     tensors are missing by their paths, not one layer renumbered.
     """
     ckpt = {
@@ -387,9 +394,10 @@ def _int(n: int) -> bytes:
 
 
 def _tensor(storage: str, numel: int, offset: int, size, stride, pid=None) -> bytes:
-    """The pickle opcodes ``torch.save`` writes for a float32 tensor of
-    storage ``0``: its rebuild called on its storage's persistent id, its
-    offset, size, stride, requires_grad and backward hooks.
+    """Return the pickle opcodes ``torch.save`` writes for a float32 tensor of storage ``0``.
+
+    Its rebuild called on its storage's persistent id, its offset, size,
+    stride, requires_grad and backward hooks.
     """
     if pid is None:
         pid = (
@@ -419,9 +427,7 @@ def _tensor(storage: str, numel: int, offset: int, size, stride, pid=None) -> by
 
 
 def _pytorch_checkpoint(path, pickled: bytes, data: bytes = b"") -> Path:
-    """A PyTorch zip checkpoint whose pickle is ``pickled`` and whose
-    storage ``0`` is ``data``.
-    """
+    """Build a PyTorch zip checkpoint whose pickle is ``pickled`` and whose storage ``0`` is ``data``."""
     with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
         archive.writestr("archive/data.pkl", b"\x80\x02" + pickled + b".")
         archive.writestr("archive/data/0", data)
@@ -434,8 +440,9 @@ def _state(tensor: bytes) -> bytes:
 
 
 def test_a_written_pytorch_tensor_reads_as_its_storage(tmp_path):
-    """The opcodes the hostile cases below vary, well formed: a transposed
-    view of six elements from the second on.
+    """Check a well-formed read: a transposed view of six elements from the second on.
+
+    The opcodes the hostile cases below vary.
     """
     data = np.arange(8, dtype=np.float32)
     path = _pytorch_checkpoint(
@@ -457,9 +464,10 @@ def test_a_written_pytorch_tensor_reads_as_its_storage(tmp_path):
     ],
 )
 def test_a_pytorch_checkpoint_naming_another_global_is_refused(tmp_path, module, name):
-    """Its pickle may name a tensor's rebuild, a state dict's storage
-    types and ``OrderedDict``, nothing else: loading one runs no code of
-    its own.
+    """Check that a pickle naming another global is refused.
+
+    A pickle may name a tensor's rebuild, a state dict's storage types and
+    ``OrderedDict``, nothing else: loading one runs no code of its own.
     """
     path = _pytorch_checkpoint(tmp_path / "hostile.pth", _global(module, name))
     with pytest.raises(pickle.UnpicklingError, match=f"may not load {module}.{name}"):
@@ -574,11 +582,13 @@ def test_top_k_keeps_ties_with_the_kth():
 
 
 def test_device_rows_are_the_host_draws():
-    """rows() takes the uniforms the host draws would, so the device's
-    tokens are the host's for the same seed, at the greedy step the device's
-    batched draw and the host's argmax must still agree on (the temperature
-    0.7 path is checked end to end, device against host, in
-    ``tests/applications/llama/test.py``'s ``check_device_sampling``).
+    """Check that rows() takes the uniforms the host draws would.
+
+    So the device's tokens are the host's for the same seed, at the greedy
+    step the device's batched draw and the host's argmax must still agree
+    on (the temperature 0.7 path is checked end to end, device against
+    host, in ``tests/applications/llama/test.py``'s
+    ``check_device_sampling``).
     """
     logits = random_logits(4096, seed=6)
     host = Sampler(0.0, 50, seed=9)
@@ -623,7 +633,9 @@ requires_checkpoint = pytest.mark.skipif(
 
 @requires_checkpoint
 def test_real_tokenizer_s_added_tokens_are_their_ids():
-    """Each added token in the checkpoint's ``tokenizer.json`` (the BOS, the
+    """Check that each added token encodes to its own id, read from the tokenizer file.
+
+    Each added token in the checkpoint's ``tokenizer.json`` (the BOS, the
     chat turns' markers) encodes to its own id, read from that file.
     """
     path = real_checkpoint.with_name("tokenizer.json")
@@ -646,8 +658,9 @@ def test_real_checkpoint_every_tensor_bitwise():
 
 @requires_checkpoint
 def test_real_checkpoint_is_llama_3_2_1b():
-    """The real key spelling and shapes are the checkpoint's own config.json
-    (``LlamaConfig.from_checkpoint``), and nothing is left over.
+    """Check that the real key spelling and shapes match the checkpoint's own config.json.
+
+    Via ``LlamaConfig.from_checkpoint``, and nothing is left over.
     """
     require(real_checkpoint.parent / "config.json")
     c = LlamaConfig.from_checkpoint(real_checkpoint)
@@ -673,8 +686,9 @@ requires_sharded_checkpoint = pytest.mark.skipif(
 
 @requires_sharded_checkpoint
 def test_real_sharded_checkpoint_every_tensor_bitwise():
-    """Every tensor the index names, read from whichever of its two shard
-    files holds it, bitwise the shard's own.
+    """Check that every tensor the index names is bitwise the shard's own.
+
+    Read from whichever of its two shard files holds it.
     """
     tensors = Checkpoint(real_index).tensors
     index = json.loads(real_index.read_text())
@@ -698,7 +712,8 @@ PINNED_SHA256 = "03ba204e50d126e4674c005e04d82e84c21366780af1f43bd54a37816b6ab34
 
 
 def fetch_in(cache_home: Path, weights_home: Path, url: str, sha256: str):
-    """``Download(url, sha256).fetch()``, in a subprocess with
+    """Run ``Download(url, sha256).fetch()`` in a subprocess with the cache env set.
+
     ``NPU_CACHE_HOME`` and ``IRON_EXAMPLE_WEIGHTS_DIR`` set to `cache_home`
     and `weights_home`: both constants are read once at import, which an
     in-process ``os.environ`` write would not reach.
@@ -717,9 +732,10 @@ def fetch_in(cache_home: Path, weights_home: Path, url: str, sha256: str):
 
 
 def test_download_fetches_into_the_cache_not_the_read_only_weights_dir(tmp_path):
-    """A `Download` never touches the weights directory (CI mounts it
-    read-only), and a repeat of the same pin is served from the cache
-    without a second trip over the network.
+    """Check that a `Download` never touches the weights directory (CI mounts it read-only).
+
+    And a repeat of the same pin is served from the cache without a
+    second trip over the network.
     """
     cache_home, weights = tmp_path / "cache", tmp_path / "weights"
     weights.mkdir()
@@ -745,8 +761,9 @@ def test_download_fetches_into_the_cache_not_the_read_only_weights_dir(tmp_path)
 
 
 def test_download_shares_no_partial_file_with_a_concurrent_fetch(tmp_path):
-    """Another worker fetching the same file holds its own partial file,
-    here one it never finished at the old shared name.
+    """Check that another worker fetching the same file holds its own partial file.
+
+    Here one it never finished at the old shared name.
     """
     cache_home = tmp_path / "cache"
     (cache_home / "data" / "README.part").mkdir(parents=True)
@@ -787,8 +804,9 @@ def test_the_lm_testing_helpers_import_without_pytest():
     ids=["v2-nested", "v1", "unbounded"],
 )
 def test_cgroup_limit_reads_the_lowest_ceiling(tmp_path, files, own, expect):
-    """``host_budget``'s ceiling: the lowest cgroup v2 ``memory.max`` on the
-    way to the root, v1's ``memory.limit_in_bytes``, or none.
+    """Check that ``host_budget``'s ceiling reads the lowest cgroup v2 ``memory.max``.
+
+    On the way to the root, v1's ``memory.limit_in_bytes``, or none.
     """
     root = tmp_path / "cgroup"
     for name, text in files.items():

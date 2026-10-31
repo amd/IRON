@@ -3,8 +3,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3 on the shared decoder (``iron.lm``): Llama 3's RoPE scaling and
-Llama 3.2 1B's shape. Run with ``python -m iron.applications.llama.model``.
+"""Llama 3 on the shared decoder (``iron.lm``).
+
+Llama 3's RoPE scaling and Llama 3.2 1B's shape. Run with
+``python -m iron.applications.llama.model``.
 
 Tunables are keyed by operator shape in ``profiles/<device>.json``, at
 Llama 3.2 1B's: a decode step's and a 2048-row prompt chunk's.
@@ -21,9 +23,11 @@ from iron.lm import CausalLM, DecoderConfig
 
 @dataclasses.dataclass(frozen=True)
 class Llama3RopeScaling:
-    """Llama 3's RoPE frequency scaling (``"rope_type": "llama3"``): Llama 3.1
-    and later stretch a model trained at ``original_max_position_embeddings``
-    to a longer context by frequency, per the checkpoint's ``rope_scaling``.
+    """Llama 3's RoPE frequency scaling (``"rope_type": "llama3"``).
+
+    Llama 3.1 and later stretch a model trained at
+    ``original_max_position_embeddings`` to a longer context by
+    frequency, per the checkpoint's ``rope_scaling``.
     """
 
     factor: float
@@ -52,8 +56,9 @@ class Llama3RopeScaling:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Llama3RopeScaling":
-        """``data``, the checkpoint's own ``rope_scaling``; every size's
-        ``rope_type`` is ``"llama3"``.
+        """Build from ``data``, the checkpoint's own ``rope_scaling``.
+
+        Every size's ``rope_type`` is ``"llama3"``.
 
         Raises:
             ValueError: Its ``rope_type`` is another.
@@ -65,8 +70,9 @@ class Llama3RopeScaling:
 
 @dataclasses.dataclass(frozen=True)
 class LlamaConfig(DecoderConfig):
-    """``DecoderConfig``, Llama 3's own ``rope_scaling``, and every
-    projection's ``precision``.
+    """``DecoderConfig``, with Llama 3's own ``rope_scaling``.
+
+    And every projection's ``precision``.
     """
 
     rope_scaling: Llama3RopeScaling | None = dataclasses.field(
@@ -76,8 +82,9 @@ class LlamaConfig(DecoderConfig):
 
     @classmethod
     def from_json(cls, data: dict, source="config.json") -> "LlamaConfig":
-        """``DecoderConfig.from_json``, at ``Precision.HIGH`` from 3B's width
-        up: its accuracy needs bf16 macs on its projections.
+        """Build like ``DecoderConfig.from_json``, at ``Precision.HIGH`` from 3B's width up.
+
+        Its accuracy needs bf16 macs on its projections.
         """
         config = super().from_json(data, source)
         if config.hidden_size < 3072:

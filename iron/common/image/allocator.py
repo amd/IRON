@@ -38,8 +38,10 @@ class LiveRange:
 
     @classmethod
     def scan(cls, steps: Steps, pinned=()) -> dict[str, "LiveRange"]:
-        """Every poolable buffer's range, from its first write to its last read: not
-        ``pinned``, nor read before written (an input), nor never read (an output).
+        """Return every poolable buffer's range, from its first write to its last read.
+
+        Not ``pinned``, nor read before written (an input), nor never
+        read (an output).
         """
         first_write, last_read, first_read = {}, {}, {}
         for step, (reads, writes) in enumerate(steps):
@@ -62,8 +64,9 @@ class LiveRange:
 
     @classmethod
     def touching(cls, steps: Steps, names: Iterable[str]) -> dict[str, "LiveRange"]:
-        """Each of ``names`` live from the first step that touches it to the last,
-        or the whole run if none does; for an arena, so none is pinned.
+        """Return each of ``names`` live from the first step that touches it to the last.
+
+        Or the whole run if none does; for an arena, so none is pinned.
         """
         wanted = set(names)
         first, last = {}, {}
@@ -110,8 +113,10 @@ class Allocation:
 
 
 class Pool:
-    """Byte offsets in one pool, each a multiple of ``alignment``, each
-    buffer within one bank of ``bank`` bytes (with ``None``, one bank).
+    """Byte offsets in one pool, each a multiple of ``alignment``.
+
+    Each buffer is within one bank of ``bank`` bytes (with ``None``,
+    one bank).
     """
 
     def __init__(self, alignment: int = 64, bank: int | None = BANK):
@@ -122,8 +127,9 @@ class Pool:
         return -(-x // self.alignment) * self.alignment
 
     def fit(self, offset: int, size: int) -> int:
-        """The first aligned offset from ``offset`` at which ``size`` bytes stay in
-        one bank; a ``size`` over a bank raises ``ValueError``.
+        """Return the first aligned offset from ``offset`` at which ``size`` bytes stay in one bank.
+
+        A ``size`` over a bank raises ``ValueError``.
         """
         offset = self.align(offset)
         if self.bank is None:
@@ -135,8 +141,10 @@ class Pool:
         return offset
 
     def place(self, ranges, sizes, fixed: Iterable[Allocation] = ()):
-        """Place each of ``ranges`` largest first, in the tightest gap clear of
-        ``fixed`` and the buffers it is live with; returns them and the top byte.
+        """Place each of ``ranges`` largest first, in the tightest gap clear of ``fixed``.
+
+        Clear too of the buffers it is live with; returns them and the
+        top byte.
         """
         fixed = list(fixed)
         placed: list[tuple[Allocation, LiveRange]] = []
@@ -165,8 +173,10 @@ class Pool:
 
 
 class ArenaPlan(Pool):
-    """One scratch arena shared by images: a resident keeps one offset in all of
-    them, a transient may reuse other images' transients, and nothing placed moves.
+    """One scratch arena shared by images.
+
+    A resident keeps one offset in all of them, a transient may reuse
+    other images' transients, and nothing placed moves.
     """
 
     def __init__(self, alignment: int = 64):
@@ -188,8 +198,9 @@ class ArenaPlan(Pool):
         sizes: Mapping[str, int],
         residents: Mapping[str, Hashable],
     ) -> dict[str, Allocation]:
-        """Place one image's arena buffers, ``sizes``; ``residents`` maps those that
-        are residents to their storage key.
+        """Place one image's arena buffers, ``sizes``.
+
+        ``residents`` maps those that are residents to their storage key.
         """
         unknown = set(residents) - set(sizes)
         if unknown:
@@ -217,8 +228,10 @@ class ArenaPlan(Pool):
 
 
 class ArgumentSizes(NamedTuple):
-    """Bytes of each runtime-sequence argument of a full ELF, ``feedback`` None
-    where there is none; the scratch arena is passed as one argument per bank.
+    """Bytes of each runtime-sequence argument of a full ELF.
+
+    ``feedback`` is None where there is none; the scratch arena is
+    passed as one argument per bank.
     """
 
     input: int
@@ -228,8 +241,9 @@ class ArgumentSizes(NamedTuple):
 
     @property
     def bank_kinds(self) -> list[str]:
-        """The scratch arena's arguments, a bank each: ``scratch``, then
-        ``scratch_1`` on.
+        """Return the scratch arena's arguments, a bank each.
+
+        ``scratch``, then ``scratch_1`` on.
         """
         banks = max(1, -(-self.scratch // BANK))
         return ["scratch", *(f"scratch_{k}" for k in range(1, banks))]
@@ -245,8 +259,9 @@ class ArgumentSizes(NamedTuple):
         return sizes
 
     def scratch_argument(self, offset: int, length: int) -> tuple[str, int]:
-        """The bank argument a scratch buffer of ``length`` bytes at ``offset`` is
-        in, and its offset there; one crossing banks raises ``ValueError``.
+        """Return the bank argument a scratch buffer of ``length`` bytes at ``offset`` is in.
+
+        And its offset there; one crossing banks raises ``ValueError``.
         """
         k = offset // BANK
         if length and (offset + length - 1) // BANK != k:
@@ -264,8 +279,9 @@ def lay_out(
     pinned: Iterable[str],
     arena: Mapping[str, Allocation],
 ) -> tuple[dict[str, tuple[str, int, int]], ArgumentSizes]:
-    """Each buffer's ``(argument kind, byte offset, bytes)`` and each argument's
-    bytes; intermediates share bytes, ``host`` and ``pinned`` buffers never do.
+    """Return each buffer's ``(argument kind, byte offset, bytes)`` and each argument's bytes.
+
+    Intermediates share bytes, ``host`` and ``pinned`` buffers never do.
     """
     inputs, outputs, feedback = host
     held = {*inputs, *outputs, *feedback, *pinned}

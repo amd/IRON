@@ -16,7 +16,8 @@ from .value import Value
 
 
 class Block(PerCallMember):
-    """A block of ``words`` words a core reads, written once per build:
+    """A block of ``words`` words a core reads, written once per build.
+
     ``derive`` computes them from the operator. A shipped image's parameters
     are one.
     """
@@ -27,9 +28,11 @@ class Block(PerCallMember):
 
 
 class Rtp(tuple):
-    """The words one core reads per call: a buffer the sequence writes, then
-    opens ``barrier`` on, and scratchpad words. A tuple, so a Worker takes it as
-    one argument whose leaves mlir-aie registers; the core calls ``read``.
+    """The words one core reads per call: a buffer and scratchpad words.
+
+    The sequence writes the buffer, then opens ``barrier`` on it. A tuple,
+    so a Worker takes it as one argument whose leaves mlir-aie registers;
+    the core calls ``read``.
 
     Attributes:
         slots: Each value the buffer holds and its first word there.
@@ -71,8 +74,9 @@ class Rtp(tuple):
         return rtp
 
     def read(self) -> dict[Value, Any]:
-        """Each value's word (a list of them for a block), keyed by the
-        value, in a core: wait for the sequence, read, re-arm.
+        """Read each value's word (a list of them for a block), keyed by the value.
+
+        In a core: wait for the sequence, read, re-arm.
         """
         self.barrier.wait_for_value(1)
         words: dict[Value, Any] = {}
@@ -81,14 +85,19 @@ class Rtp(tuple):
                 words[value] = value.param.read()
                 continue
             at = self.slots[value]
+            assert (
+                self.buffer is not None
+            ), "a slot exists, so some value is not scratchpad"
             block = [self.buffer[at + i] for i in range(value.words)]
             words[value] = block if value.words > 1 else block[0]
         self.barrier.release_with_value(1)
         return words
 
     def write(self, words: Mapping[str, Any]) -> None:
-        """In the preamble, write the words of each value the buffer holds, by
-        value name: a resident's number, or an xclbin's per-call scalar.
+        """Write the words of each value the buffer holds, by value name.
+
+        Called in the preamble: a resident's number, or an xclbin's per-call
+        scalar.
 
         Raises:
             ValueError: A value is given another number of words than it declares.
@@ -101,5 +110,8 @@ class Rtp(tuple):
                     f"{value.name} holds {value.words} words; it was given "
                     f"{len(block)}"
                 )
+            assert (
+                self.buffer is not None
+            ), "a slot exists, so some value is not scratchpad"
             for i, w in enumerate(block):
                 self.buffer[at + i] = w

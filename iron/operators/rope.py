@@ -13,8 +13,8 @@ from aie.iron import In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp
@@ -47,7 +47,7 @@ def _cases(cls, dev: Device):
 
 
 def _angles(op):
-    """A random angle table, cos and sin interleaved, a row per position."""
+    """Draw a random angle table, cos and sin interleaved, a row per position."""
     rng = np.random.default_rng(0)
     theta = rng.uniform(-np.pi, np.pi, (op.angle_rows, op.cols // 2))
     table = np.empty((op.angle_rows, op.cols), dtype=np.float32)
@@ -56,8 +56,9 @@ def _angles(op):
 
 
 class RoPE(Operator):
-    """AIE-accelerated RoPE: one core per column, each rotating rows of
-    ``cols``; each angle row serves ``rows / angle_rows`` consecutive rows.
+    """AIE-accelerated RoPE: one core per column, each rotating rows of ``cols``.
+
+    Each angle row serves ``rows / angle_rows`` consecutive rows.
     """
 
     test = Testing(_cases, draw=_angles)
@@ -108,8 +109,9 @@ class RoPE(Operator):
             )
 
     def extent_unit(self, buffer: str) -> int | None:
-        """A position's rows at a time, so each core gets its angle row; one
-        core takes the rows a call bounds one at a time.
+        """Return a position's rows at a time, so each core gets its angle row.
+
+        One core takes the rows a call bounds one at a time.
         """
         if buffer not in ("x", "y"):
             return None
@@ -163,8 +165,10 @@ class RoPE(Operator):
         return self.layout().kernel().contract.ops_per_call * self.rows
 
     def reference(self, x, angles):
-        """``datamovement.rope_ref`` on the packed ``angles`` buffer, each angle row
-        serving ``rows / angles.shape[0]`` consecutive rows of ``x``.
+        """``datamovement.rope_ref`` on the packed ``angles`` buffer.
+
+        Each angle row serving ``rows / angles.shape[0]`` consecutive rows
+        of ``x``.
         """
         rows, cols, lut_rows = x.shape[0], x.shape[-1], angles.shape[0]
         if rows % lut_rows != 0:

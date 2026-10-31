@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""EmbeddingGemma 2 on the NPU, from the real checkpoint, against Hugging
-Face's own processors and model in float32 (hugging_face.py), their outputs
-recorded in ``golden.npz`` beside the checkpoint: the text encoder's
-embeddings (their cosine to Hugging Face's, their norm, a query ranking two
-documents, every call bit-identical to the first), each tower's soft tokens
-and, over text with a clip and an image, the whole model's, and the audio
-tower's features and the image processor's patches. On NPU1 each step is
-its own dispatch of an xclbin; on NPU2 that form is checked too.
+"""EmbeddingGemma 2 on the NPU, from the real checkpoint, against Hugging Face.
+
+Checked against Hugging Face's own processors and model in float32
+(hugging_face.py), their outputs recorded in ``golden.npz`` beside the
+checkpoint: the text encoder's embeddings (their cosine to Hugging
+Face's, their norm, a query ranking two documents, every call
+bit-identical to the first), each tower's soft tokens and, over text
+with a clip and an image, the whole model's, and the audio tower's
+features and the image processor's patches. On NPU1 each step is its
+own dispatch of an xclbin; on NPU2 that form is checked too.
 
 Each tower's graph is built for the class that tests it and dropped after
 it, before the text encoder's graphs are built for the module's last tests.
@@ -38,8 +40,8 @@ from iron.applications.embedding_gemma2.model import (
 from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.lm import Checkpoint, rope_angles
-from iron.lm.model import prompt_text
 from iron.lm.golden import RECORD, Golden
+from iron.lm.model import prompt_text
 from iron.lm.testing import check_embedding, require, weights_dir
 from iron.operators.copy import Copy
 from iron.tests.support.coco import photo
@@ -109,14 +111,14 @@ CLIPS = {
 }
 
 # The processor's soft-token budgets for an image and for video.
-I, V = VisionConfig().image_tokens, 140
+IMG_TOKENS, V = VisionConfig().image_tokens, 140
 
 # The vision tower's photos and the soft-token budget each is resized to.
 IMAGES = {
     # 14 x 19 tokens, 2394 patches: an upscale to nearly the whole budget.
-    "cats": I,
+    "cats": IMG_TOKENS,
     # 19 x 14 tokens, the other way up.
-    "stop_sign": I,
+    "stop_sign": IMG_TOKENS,
     # 9 x 14 tokens, 1134 patches: a video frame's budget.
     "living_room": V,
 }
@@ -126,18 +128,18 @@ IMAGES = {
 # phone photo either way up, up- and downscales, extreme aspect ratios, one
 # side unchanged, and an image already at its size.
 RESIZES = [
-    ((3024, 4032), I, None),
-    ((4032, 3024), I, None),
-    ((480, 640), I, None),
+    ((3024, 4032), IMG_TOKENS, None),
+    ((4032, 3024), IMG_TOKENS, None),
+    ((480, 640), IMG_TOKENS, None),
     ((333, 517), V, None),
     ((1080, 1920), V, None),
     # 3648 pixels wide: more patch columns than 16 cores hold.
-    ((97, 2003), I, "patch columns"),
+    ((97, 2003), IMG_TOKENS, "patch columns"),
     ((2003, 97), V, None),
-    ((1, 5000), I, "patch columns"),
+    ((1, 5000), IMG_TOKENS, "patch columns"),
     ((17, 23), V, None),
-    ((672, 517), I, None),
-    ((672, 960), I, None),
+    ((672, 517), IMG_TOKENS, None),
+    ((672, 960), IMG_TOKENS, None),
 ]
 
 
@@ -146,7 +148,7 @@ def cosine(a, b):
 
 
 def clip(name: str) -> np.ndarray:
-    """The utterance `CLIPS[name]`, at the extractor's sample rate."""
+    """Return the utterance `CLIPS[name]`, at the extractor's sample rate."""
     return utterance(CLIPS[name])
 
 
@@ -178,18 +180,19 @@ def weights():
 
 
 @pytest.fixture(scope="module")
-def tokenizer():
+def processor():
     require(DIRECTORY / "tokenizer.json")
     return TextProcessor(DIRECTORY / "tokenizer.json")
 
 
 @pytest.fixture(scope="module")
 def reference():
-    """``reference(key, compute)``: ``compute(model)`` on Hugging Face's own
+    """Return ``reference(key, compute)``: ``compute(model)`` on Hugging Face's own model.
+
     EmbeddingGemma 2 (hugging_face.py), an array kept under ``key`` in
     ``golden.npz`` beside the checkpoint, recorded under ``pytest
-    --record-goldens`` (torch, torchvision and transformers installed) and
-    refused once the checkpoint's ``config.json`` or tensors change.
+    --record-goldens`` (torch, torchvision and transformers installed)
+    and refused once the checkpoint's ``config.json`` or tensors change.
     """
     if not os.environ.get(RECORD):
         require(DIRECTORY / "golden.npz")
@@ -207,19 +210,21 @@ def reference():
         return (DIRECTORY / "config.json").read_text(), checkpoint.fingerprint()
 
     def recorded(key, compute):
-        record = lambda: SimpleNamespace(
-            logits=lambda _: compute(model())
-        )  # noqa: E731
-        golden = Golden(DIRECTORY / "golden.npz", record, inputs())
+        golden = Golden(
+            DIRECTORY / "golden.npz",
+            lambda: SimpleNamespace(logits=lambda _: compute(model())),
+            inputs(),
+        )
         return golden.logits(np.frombuffer(key.encode(), np.uint8))
 
     return recorded
 
 
 def embedding(reference, text, task, speech=None, name=None, dims=None):
-    """Hugging Face's embedding of ``text`` for ``task`` with the clip
-    ``speech`` and the photo ``name`` at its placeholders, its first
-    ``dims`` renormalized.
+    """Return Hugging Face's embedding of ``text`` for ``task``.
+
+    With the clip ``speech`` and the photo ``name`` at its
+    placeholders, its first ``dims`` renormalized.
     """
     e = reference(
         f"embedding {task} {speech} {name} {text}",
@@ -233,10 +238,11 @@ def embedding(reference, text, task, speech=None, name=None, dims=None):
 
 
 def windows(config, pixel_values, positions):
-    """The processor's patches as the NPU's ``iron.lm.ImagePatches`` gives
-    them in ``config.patches`` rows: each soft token's ``pool ** 2``
-    patches together, row-major within their window, the tokens row-major
-    over the image, then padding, ids past each table.
+    """Return the processor's patches as the NPU's ``iron.lm.ImagePatches`` gives them.
+
+    In ``config.patches`` rows: each soft token's ``pool ** 2`` patches
+    together, row-major within their window, the tokens row-major over
+    the image, then padding, ids past each table.
 
     Returns:
         ``pixels`` ``(rows, 3 * patch ** 2)`` bf16; ``xy`` ``(2 * rows,)``
@@ -273,7 +279,7 @@ def loaded(graph, full_elf=None):
 
 
 def check_mixed(graph, reference, case, record_property):
-    """The embedding of `MIXED[case]` against Hugging Face's."""
+    """Check the embedding of `MIXED[case]` against Hugging Face's."""
     text, speech, name = MIXED[case]
     audio = None if speech is None else clip(speech)
     image = None if name is None else photo(name)
@@ -288,13 +294,14 @@ def check_mixed(graph, reference, case, record_property):
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 class TestEachStep:
-    """The form NPU1 runs: each step its own dispatch of an xclbin, the
-    towers' included.
+    """The form NPU1 runs: each step its own dispatch of an xclbin.
+
+    The towers' included.
     """
 
     @pytest.fixture(scope="class")
-    def each_step(self, weights, tokenizer):
-        yield from loaded(Multimodal(Config(), weights, tokenizer), False)
+    def each_step(self, weights, processor):
+        yield from loaded(Multimodal(Config(), weights, processor), False)
 
     @pytest.mark.parametrize(
         "text,task",
@@ -304,7 +311,7 @@ class TestEachStep:
     def test_embeddinggemma_2_each_step_accuracy(
         self, each_step, reference, text, task, record_property
     ):
-        tokens = each_step.tokenizer.encode(text, task)
+        tokens = each_step.processor.encode(text, task)
         got = each_step.encode(tokens)
         similarity = cosine(got, embedding(reference, text, task))
         record_property("Cosine", similarity)
@@ -383,8 +390,9 @@ class TestAudio:
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestVision:
-    """The vision tower alone, and its image processor alone: a graph the
-    tower calls in its body, compiled here on its own.
+    """The vision tower alone, and its image processor alone.
+
+    A graph the tower calls in its body, compiled here on its own.
     """
 
     @pytest.fixture(scope="class")
@@ -431,7 +439,7 @@ class TestVision:
             *((name, None, tokens) for name, tokens in IMAGES.items()),
             *(("cats", s, tokens) for s, tokens, refusal in RESIZES if not refusal),
             # The largest image a call takes, the other way up.
-            ("cats", VisionConfig().largest[::-1], I),
+            ("cats", VisionConfig().largest[::-1], IMG_TOKENS),
         ],
     )
     def test_image_processor(
@@ -457,7 +465,13 @@ class TestVision:
         # only 8 a core on npu2's sixteen, which Resample's default holds.
         image = tiled(photo("cats"), 97, 640)
         self.check_processor(
-            vision, processor, reference, "cats (97, 640)", image, I, record_property
+            vision,
+            processor,
+            reference,
+            "cats (97, 640)",
+            image,
+            IMG_TOKENS,
+            record_property,
         )
 
     @pytest.mark.parametrize("name", list(IMAGES))
@@ -487,13 +501,13 @@ class TestVision:
 
 
 @pytest.fixture(scope="module")
-def encoder(weights, tokenizer):
-    yield from loaded(EmbeddingGemma(Config(), weights, tokenizer))
+def encoder(weights, processor):
+    yield from loaded(EmbeddingGemma(Config(), weights, processor))
 
 
 @pytest.fixture(scope="module")
-def multimodal(weights, tokenizer):
-    yield from loaded(Multimodal(Config(), weights, tokenizer))
+def multimodal(weights, processor):
+    yield from loaded(Multimodal(Config(), weights, processor))
 
 
 @pytest.mark.bench
@@ -510,7 +524,7 @@ def multimodal(weights, tokenizer):
     ids=["query", "document", "long_document", "past_the_window", "near_the_limit"],
 )
 def test_embeddinggemma_2_accuracy(encoder, reference, text, task, record_property):
-    tokens = encoder.tokenizer.encode(text, task)
+    tokens = encoder.processor.encode(text, task)
     got = encoder.encode(tokens)
     similarity = cosine(got, embedding(reference, text, task))
     record_property("Cosine", similarity)
@@ -523,7 +537,7 @@ def test_embeddinggemma_2_accuracy(encoder, reference, text, task, record_proper
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dims", [512, 256, 128])
 def test_embeddinggemma_2_truncation(encoder, reference, dims, record_property):
-    tokens = encoder.tokenizer.encode(QUERY, "query")
+    tokens = encoder.processor.encode(QUERY, "query")
     got = encoder.encode(tokens, dims)
     record_property("Norm", float(np.linalg.norm(got)))
     np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
@@ -579,7 +593,7 @@ def test_embeddinggemma_2_determinism(multimodal):
     "text", [QUERY, LONG, LONGER], ids=["query", "long_document", "past_the_window"]
 )
 def test_embeddinggemma_2_latency(encoder, text, record_property):
-    tokens = encoder.tokenizer.encode(text, "document")
+    tokens = encoder.processor.encode(text, "document")
     latency = run_iters(encoder.encode, tokens, warmup=1, iters=10).e2e
     record_property("Latency", latency.median_us)
 
@@ -589,7 +603,7 @@ def test_embeddinggemma_2_latency(encoder, text, record_property):
     [
         *((s, t, r) for s, t, r in RESIZES if r),
         # 20 MP: more than the largest image a call takes.
-        ((5000, 4000), I, "does not fit"),
+        ((5000, 4000), IMG_TOKENS, "does not fit"),
     ],
 )
 def test_image_processor_refuses(npu2, shape, tokens, refusal):
@@ -628,8 +642,10 @@ class WindowPositions(iron.Graph):
     "hk, wk", [(1, 1), (14, 19), (16, 16), (6, 42), (8, 35), (65, 4), (200, 1)]
 )
 def test_vision_window_positions_are_each_patch_rows(npu2, hk, wk):
-    """Each patch in window order gets its x and y position embeddings, each
-    add rounded as `ElementwiseAdd` rounds it, and its x and y angles.
+    """Check that each patch in window order gets its x and y position embeddings.
+
+    Each add rounded as `ElementwiseAdd` rounds it, and its x and y
+    angles.
     """
     require(DIRECTORY / "model.safetensors")
     weights = Checkpoint(DIRECTORY / "model.safetensors").tree()
@@ -667,4 +683,4 @@ def test_image_processor_refuses_on_npu1(npu1):
         VisionConfig(), Checkpoint(DIRECTORY / "model.safetensors").tree("unread")
     )
     with pytest.raises(ValueError, match="patch columns"):
-        vision.inputs(np.zeros((97, 640, 3), np.uint8), I)
+        vision.inputs(np.zeros((97, 640, 3), np.uint8), IMG_TOKENS)

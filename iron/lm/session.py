@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""One conversation over a ``CausalLM``'s loaded versions: the tokens its
-caches hold, and the calls that run a history's new tokens and draw after
-it. Several sessions share one compiled model; its caches hold one
-session's tokens at a time, so a session whose tokens another's calls
-replaced runs its history again from the first token.
+"""One conversation over a ``CausalLM``'s loaded versions.
+
+The tokens its caches hold, and the calls that run a history's new tokens
+and draw after it. Several sessions share one compiled model; its caches
+hold one session's tokens at a time, so a session whose tokens another's
+calls replaced runs its history again from the first token.
 """
 
 from collections.abc import Iterator
@@ -22,18 +23,17 @@ NOTHING = np.empty(0, dtype=np.int64)
 
 
 class Session:
-    """A conversation over the versions of ``lm``, a ``CausalLM``
-    (``CausalLM.use``).
-    """
+    """A conversation over the versions of ``lm``, a ``CausalLM`` (``CausalLM.use``)."""
 
     def __init__(self, lm):
         self.lm = lm
         self._seen = NOTHING  # the tokens in the caches
 
     def logits(self, tokens) -> np.ndarray:
-        """The logits after the last of ``tokens``, the whole history: one
-        more token than the last call's is a decode step, anything else runs
-        from the first token the caches do not hold (``resume``).
+        """Return the logits after the last of ``tokens``, the whole history.
+
+        One more token than the last call's is a decode step, anything else
+        runs from the first token the caches do not hold (``resume``).
 
         Raises:
             ValueError: ``tokens`` is empty or longer than ``max_seq_len``.
@@ -61,10 +61,10 @@ class Session:
     def draw(
         self, tokens, max_tokens: int, sampler: Sampler, each: bool = True
     ) -> Iterator[int]:
-        """Draw ``max_tokens`` after ``tokens`` on the device, each yielded
-        as it is drawn (``Model.stream``): looped there where the decode
-        step is a full ELF (``device_loop``), else each step started from
-        the host.
+        """Draw ``max_tokens`` after ``tokens`` on the device, each yielded as it is drawn.
+
+        As ``Model.stream`` does: looped there where the decode step is a
+        full ELF (``device_loop``), else each step started from the host.
 
         Raises:
             ValueError: The tokens and those to draw do not fit the caches.
@@ -107,15 +107,18 @@ class Session:
         self._seen = np.concatenate([tokens, drawn[:-1]]).astype(np.int64)
 
     def forget(self, position: int) -> None:
-        """Hold nothing the caches have from ``position`` on: the next call
-        runs from there or an earlier restart boundary, as a change before
-        it (a placeholder's soft tokens) would leave them stale.
+        """Hold nothing the caches have from ``position`` on.
+
+        The next call runs from there or an earlier restart boundary, as a
+        change before it (a placeholder's soft tokens) would leave them
+        stale.
         """
         held = self._seen[:position].size
         self._seen = self._seen[: self.resume(held)]
 
     def resume(self, held: int) -> int:
-        """The position calls start from to run the tokens from ``held`` on:
+        """Return the position calls start from to run the tokens from ``held`` on.
+
         ``held`` itself, or for a state that cannot restart there
         (``KVCache.restart``), the earliest one of them can.
         """
@@ -123,9 +126,9 @@ class Session:
         return min([held, *(c.restart(held, ran) for c in self.lm.recurrent)])
 
     def prompt_ids(self, tokens) -> np.ndarray:
-        """A prompt call's ``ids`` for a chunk of ``tokens``, padded to
-        ``prefill_chunk`` with row 0, which the bound by ``rows`` leaves
-        unread.
+        """Return a prompt call's ``ids`` for a chunk of ``tokens``, padded to ``prefill_chunk``.
+
+        Padded with row 0, which the bound by ``rows`` leaves unread.
         """
         tokens = np.asarray(tokens)
         ids = np.zeros(self.lm.config.prefill_chunk, dtype=np.int32)
@@ -133,8 +136,9 @@ class Session:
         return ids
 
     def _take(self) -> None:
-        """Hold the caches: what another session left there is none of this
-        one's tokens.
+        """Hold the caches.
+
+        What another session left there is none of this one's tokens.
         """
         if self.lm.holder is not self:
             self.lm.holder, self._seen = self, NOTHING
@@ -155,9 +159,10 @@ class Session:
         return int(np.argmin(same))
 
     def _chunks(self, tokens: np.ndarray, start: int) -> Iterator[tuple]:
-        """Each prompt call from ``start``: its inputs, ``ids`` and for a call
-        holding a placeholder ``before``, and its per-call values. With
-        recurrent state a call ends at the next chunk boundary.
+        """Yield each prompt call from ``start``: its inputs, ``ids`` and per-call values.
+
+        For a call holding a placeholder, also ``before``. With recurrent
+        state a call ends at the next chunk boundary.
         """
         model = self.lm
         n, C = tokens.size, model.config.prefill_chunk
@@ -188,9 +193,10 @@ class Session:
 
 
 def host_draws(model, chunks, max_tokens: int) -> Iterator[int]:
-    """``max_tokens`` drawn after the prompt ``chunks``, the
-    host starting each decode step on the token the last one drew, which it
-    reads alone.
+    """Yield ``max_tokens`` drawn after the prompt ``chunks``.
+
+    The host starts each decode step on the token the last one drew, which
+    it reads alone.
     """
     for inputs, values in chunks:
         _, carry = model(*inputs, **values)
@@ -201,8 +207,9 @@ def host_draws(model, chunks, max_tokens: int) -> Iterator[int]:
 
 
 def device_draws(model, chunks, n: int, max_tokens: int, each: bool) -> Iterator[int]:
-    """``max_tokens`` drawn after the prompt ``chunks`` of ``n`` tokens, the
-    last chunk starting a device loop of decode steps (``CausalLM.loop``);
+    """Yield ``max_tokens`` drawn after the prompt ``chunks`` of ``n`` tokens.
+
+    The last chunk starts a device loop of decode steps (``CausalLM.loop``);
     with ``each``, each token is read once its step completes.
     """
     for inputs, values in chunks:

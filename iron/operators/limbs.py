@@ -22,8 +22,9 @@ def stacked(w):
 
 
 class Limbs(Rowwise):
-    """Each row of float32 as six planes of its bf16 limbs, `[hi, mid, hi,
-    lo, mid, hi]`, for a float32 product by GEMM.
+    """Each row of float32 as six planes of its bf16 limbs, for a float32 product by GEMM.
+
+    `[hi, mid, hi, lo, mid, hi]`.
     """
 
     test = Testing(

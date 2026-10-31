@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""IRON's side of tracing: the full-ELF sequence callable binds, fills and syncs
-the trace buffer mlir-aie's lowering asks for, and dump_traces writes it out.
+"""IRON's side of tracing.
 
-Trace insertion, the buffer layout and event decoding are mlir-aie's, and tested
-there.
+The full-ELF sequence callable binds, fills and syncs the trace buffer
+mlir-aie's lowering asks for, and dump_traces writes it out.
+
+Trace insertion, the buffer layout and event decoding are mlir-aie's,
+and tested there.
 """
 
 import dataclasses
@@ -27,7 +29,7 @@ SIZE = 2048
 
 
 def _layer_norm_run(name, trace):
-    """A dispatched one-step full-ELF sequence, and its output."""
+    """Dispatch a one-step full-ELF sequence, and return it with its output."""
     layer_norm = LayerNorm(
         rows=1,
         num_aie_columns=1,

@@ -12,13 +12,13 @@ from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, kernels
 from aie.iron.controlflow import range_
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.context import compile_context
-from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
+from aie.utils.compile.utils import resolve_target_arch
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Built, Operator, Rtp
+from iron.common import Built, Operator, Rtp, Unresolvable
 from iron.common.testing import Case, Testing
 from iron.operators.state_slices import (
     SLICE,
@@ -44,9 +44,10 @@ def _trained(op: "SelectiveScan") -> dict:
 
 
 class SelectiveScan(Operator):
-    """Each row ``t`` of ``xbc``, split into ``x`` ``(heads, head_dim)``
-    and ``groups`` rows each of ``B`` and ``C`` ``(state_size,)``, updates
-    each head's state ``(head_dim, state_size)`` and reads it out:
+    """Each row ``t`` of ``xbc`` updates each head's state ``(head_dim, state_size)`` and reads it out.
+
+    The row splits into ``x`` ``(heads, head_dim)`` and ``groups`` rows
+    each of ``B`` and ``C`` ``(state_size,)``:
 
         dt = softplus(dt[t] + dt_bias)
         state = exp(dt * A) * state + dt * outer(x, B)
@@ -164,10 +165,13 @@ class SelectiveScan(Operator):
                 f"SelectiveScan: block ({self.block}) must hold a row count "
                 f"dividing rows ({self.rows})"
             )
-        if not fits(self, self.dev, self.block // SLICE):
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("SelectiveScan: compatible() needs a bound device")
+        if not fits(self, dev, self.block // SLICE):
             raise ValueError(
                 f"SelectiveScan: block ({self.block}) does not fit a core's "
-                f"{self.dev.core_memory_bytes} bytes with one slice's state"
+                f"{dev.core_memory_bytes} bytes with one slice's state"
             )
 
     @property
@@ -204,7 +208,7 @@ class SelectiveScan(Operator):
         )
 
     def build(self) -> Built:
-        H, P, N, I = self.heads, self.head_dim, self.state_size, self.inner
+        H, P, N, d_inner = self.heads, self.head_dim, self.state_size, self.inner
         T, per_group, heads = self.block // SLICE, H // self.groups, H // self.columns
         kernel = self.kernel(T)
         deep_in, deep_out = depths(self)
@@ -251,7 +255,7 @@ class SelectiveScan(Operator):
                     # bitreverse Peano's mid-end folds that div/mod into).
                     h = r + first
                     p = q * SLICE + h * P
-                    g = (h // per_group) * N + I
+                    g = (h // per_group) * N + d_inner
                     start, final = of_slice.acquire(1), of_final.acquire(1)
                     for j in range_(self.rows // T):
                         # Gather the block: x, then B and C, then dt, a
@@ -278,7 +282,7 @@ class SelectiveScan(Operator):
                                 )
                             of_row.release(1)
                         b = arith.index_cast(j, to=i32)
-                        left = valid - b * size
+                        left = valid - b * size  # pyright: ignore[reportOperatorIssue]
                         live = arith.minsi(arith.maxsi(left, zero), size)
                         y = of_y.acquire(1)
                         scan(block, start, final, y, live, b)
@@ -305,11 +309,12 @@ class SelectiveScan(Operator):
         return Built(workers, rtps)
 
     def sequence(self, rt):
-        """Every row of ``xbc`` and ``dt`` once a slice, for every core; per
-        core, its heads' parameters and states, and its slices of ``y`` and
-        ``final``.
+        """Every row of ``xbc`` and ``dt`` once a slice, for every core.
+
+        Per core, its heads' parameters and states, and its slices of ``y``
+        and ``final``.
         """
-        R, H, W, I = self.rows, self.heads, self.width, self.inner
+        R, H, W, d_inner = self.rows, self.heads, self.width, self.inner
         P, SN = self.head_dim, SLICE * self.state_size
         S, heads = self.core_slices, H // self.columns
         per, states, run = S // heads, H * P * self.state_size, S * SN
@@ -333,7 +338,10 @@ class SelectiveScan(Operator):
         for k in range(self.columns):
             self.y.drain(
                 TensorAccessPattern(
-                    (R, I), k * heads * P, [per, heads, R, SLICE], [SLICE, P, I, 1]
+                    (R, d_inner),
+                    k * heads * P,
+                    [per, heads, R, SLICE],
+                    [SLICE, P, d_inner, 1],
                 ),
                 lane=k,
                 group=tg,
@@ -348,9 +356,11 @@ class SelectiveScan(Operator):
         )
 
     def ops(self) -> int:
-        """Per row, per head: the state update (two multiplies and an add
-        over its ``head_dim * state_size`` elements) and the C readout (a
-        ``state_size``-deep dot product per ``head_dim`` row).
+        """Count per row, per head, the state update and the C readout.
+
+        The update is two multiplies and an add over its
+        ``head_dim * state_size`` elements; the readout a
+        ``state_size``-deep dot product per ``head_dim`` row.
         """
         return 5 * self.rows * self.heads * self.head_dim * self.state_size
 

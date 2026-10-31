@@ -28,9 +28,10 @@ from iron.tests.support.tools import DEVICES
 
 
 def _declared():
-    """Every operator in the catalog that declares its cases, with those
-    cases, on each device: declared for its model of the device, run only
-    on that device and resolved against the one attached.
+    """Return every catalog operator that declares cases, with them, per device.
+
+    Each is declared for its model of the device, run only on that device
+    and resolved against the one attached.
     """
     return [
         pytest.param(
@@ -73,7 +74,9 @@ def test_operator(
 
 
 def test_every_operator_is_in_the_catalog():
-    """Every class at the top of a module under ``iron/operators``, named
+    """Check that every public ``Operator`` under ``iron/operators`` is catalogued.
+
+    Every class at the top of a module under ``iron/operators``, named
     without a leading underscore, that subclasses ``Operator`` is a catalog
     entry, so a profile can name it; ``test_operator`` builds the entries
     that declare a ``Testing``.

@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""RoPE on one core under a row bound, one angle row turning every row (as
-Qwen3.5's multimodal RoPE turns an image's walked rows by its first
-position's angles): the transfers move the rows the call bounds, which the
-core turns, not the angle row's every row, which it never takes.
+"""RoPE on one core under a row bound, one angle row turning every row.
+
+As Qwen3.5's multimodal RoPE turns an image's walked rows by its first
+position's angles: the transfers move the rows the call bounds, which
+the core turns, not the angle row's every row, which it never takes.
 """
 
 import numpy as np

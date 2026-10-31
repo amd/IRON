@@ -12,8 +12,8 @@ from aie.helpers.util import np_dtype_to_mlir_type
 from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
@@ -31,8 +31,9 @@ _STREAMED_ROWS = 48
 
 
 def _kernel(op, n: int):
-    """The softmax factory over rows of ``n``, with Softmax ``op``'s float32
-    options: banded, or with a pre-cap addend.
+    """Return the softmax factory over rows of ``n``, with Softmax ``op``'s float32 options.
+
+    Banded, or with a pre-cap addend.
     """
     options = dict(input_dtype=op.input_dtype, soft_cap=op.soft_cap)
     if op.window is not None:
@@ -41,8 +42,9 @@ def _kernel(op, n: int):
 
 
 def _draw(op) -> dict:
-    """``vectors()``'s keywords: the float32 path's logits and addend
-    centred. The bf16 path draws its default, ``[0, 1)``.
+    """Return ``vectors()``'s keywords: the float32 path's logits and addend centred.
+
+    The bf16 path draws its default, ``[0, 1)``.
     """
     if np.dtype(op.input_dtype) != np.dtype(np.float32):
         return {}
@@ -50,8 +52,9 @@ def _draw(op) -> dict:
 
 
 def _banded_case(cls, dev) -> list:
-    """EG2 audio's own combination: a soft cap, its own window and period,
-    and a pre-cap addend.
+    """Return EG2 audio's own combination.
+
+    A soft cap, its own window and period, and a pre-cap addend.
     """
     return [
         Case(
@@ -72,10 +75,11 @@ def _banded_case(cls, dev) -> list:
 
 
 class Softmax(Operator):
-    """Softmax over each row, one core per (column, channel), each taking a
-    contiguous run of rows. ``streamed``, a core reads a row in ``block``-sized
-    chunks three times (maximum, sums, output); a per-call bound zeroes
-    elements past it and only its blocks move.
+    """Softmax over each row, one core per (column, channel), each taking a contiguous run of rows.
+
+    ``streamed``, a core reads a row in ``block``-sized chunks three times
+    (maximum, sums, output); a per-call bound zeroes elements past it and
+    only its blocks move.
     """
 
     # Four cores, two columns of two: the fewest that exercise both splits.
@@ -131,7 +135,8 @@ class Softmax(Operator):
     window: int | None = param(default=None, array=True)
     period: int | None = param(default=None, array=True)
 
-    length = per_call(bounds=cols)  # cols, or fewer per call
+    # cols, or fewer per call
+    length = per_call(bounds=cols)
 
     x = In(
         rows,
@@ -291,17 +296,30 @@ class Softmax(Operator):
                 for b in range_(blocks):
                     b32 = arith.index_cast(b, to=i32)
                     in_block = arith.minsi(
-                        valid - b32 * block, arith.constant(block, i32)
+                        valid - b32 * block,  # pyright: ignore[reportOperatorIssue]
+                        arith.constant(block, i32),
                     )
                     span = arith.minsi(
-                        (in_block + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
+                        (
+                            in_block + (_VECTOR_STEP - 1)
+                        )  # pyright: ignore[reportOperatorIssue]
+                        & -_VECTOR_STEP,
                         arith.constant(block, i32),
                     )
                     for state in states:
                         elem_in = of_in.acquire(1)
                         mask(elem_in, in_block, span)
                         if step == 0:
-                            row_max(elem_in, state, arith.extui(i32, b32 == 0), span)
+                            # ArithValue.__eq__ can fall back to a plain bool
+                            # when `other` isn't coercible; it always is here.
+                            row_max(
+                                elem_in,
+                                state,
+                                arith.extui(
+                                    i32, b32 == 0  # pyright: ignore[reportArgumentType]
+                                ),
+                                span,
+                            )
                         elif step == 1:
                             row_sum(elem_in, state, span)
                         else:
@@ -346,8 +364,10 @@ class Softmax(Operator):
         return Built(workers, rtps)
 
     def _build_f32(self, n_cores: int, rows_per_core: int, block: int) -> Built:
-        """The float32 input path: a row held whole, one call to
-        ``softmax_f32_bf16`` a row, its ``n`` bound to ``block`` at build time.
+        """Build the float32 input path: a row held whole.
+
+        One call to ``softmax_f32_bf16`` a row, its ``n`` bound to
+        ``block`` at build time.
         """
         softmax_k = _kernel(self, block)
         of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
@@ -387,10 +407,12 @@ class Softmax(Operator):
         return Built(workers)
 
     def _build_f32_banded(self, n_cores: int, rows_per_core: int, block: int) -> Built:
-        """The float32 banded path: one row a call, a real device loop (unlike
-        resident per-row ``Buffer`` masks, this doesn't grow the core's code),
-        to ``softmax_rows_banded_f32_bf16``; the band comes from ``window``,
-        ``period`` and the row's own position, computed in the kernel.
+        """Build the float32 banded path: one row a call, a real device loop.
+
+        Unlike resident per-row ``Buffer`` masks, this doesn't grow the
+        core's code, to ``softmax_rows_banded_f32_bf16``; the band comes
+        from ``window``, ``period`` and the row's own position, computed
+        in the kernel.
         """
         banded_k = _kernel(self, block)
         of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
@@ -499,10 +521,11 @@ class Softmax(Operator):
         return base
 
     def reference(self, x, *rest):
-        """The softmax kernel's contract reference, a row at a time. ``rest``
-        is ``addend`` where ``has_addend``, positional; the band, where
-        given, comes from the factory's own banded contract, ``row_offset``
-        each row's index.
+        """Return the softmax kernel's contract reference, a row at a time.
+
+        ``rest`` is ``addend`` where ``has_addend``, positional; the
+        band, where given, comes from the factory's own banded contract,
+        ``row_offset`` each row's index.
         """
         addend = rest[0] if self.has_addend else None
         # A bounded call's first ``length`` columns, the rest left zero.

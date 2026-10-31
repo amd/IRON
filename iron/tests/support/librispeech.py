@@ -19,9 +19,10 @@ LIBRISPEECH = Download(
 
 
 def utterance(name: str) -> np.ndarray:
-    """The utterance `name` (`speaker-chapter-index`), its FLAC member taken
-    from the archive in IRON's cache the first time, decoded: float32
-    samples in [-1, 1) at 16 kHz, mono.
+    """Return the utterance `name` (`speaker-chapter-index`), decoded.
+
+    Its FLAC member is taken from the archive in IRON's cache the first
+    time: float32 samples in [-1, 1) at 16 kHz, mono.
 
     Raises:
         ValueError: The member is not 16 kHz mono.

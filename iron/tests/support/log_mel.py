@@ -11,9 +11,10 @@ EVERY = 8
 
 
 class Extractor:
-    """transformers' ``Gemma4AudioFeatureExtractor``, what records a
-    golden: every ``EVERY``th frame's features of a float32 wave, rounded
-    once to bf16.
+    """transformers' ``Gemma4AudioFeatureExtractor``, what records a golden.
+
+    Every ``EVERY``th frame's features of a float32 wave, rounded once to
+    bf16.
     """
 
     def logits(self, tokens, wave):

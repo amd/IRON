@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A model's shape: ``Config``, read from a checkpoint's own
-``config.json``, and a decoder's, ``DecoderConfig``, with its RoPE table
-(``rope_angles``).
+"""A model's shape.
+
+``Config``, read from a checkpoint's own ``config.json``, and a decoder's,
+``DecoderConfig``, with its RoPE table (``rope_angles``).
 """
 
 import dataclasses
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import numpy as np
 
@@ -25,7 +26,7 @@ def rope_angles(
     rope_theta: float = 500000.0,
     scaling: RopeScaling | None = None,
 ) -> np.ndarray:
-    """The RoPE table, ``(context_length, head_dim)`` float32, cos and sin interleaved.
+    """Return the RoPE table, ``(context_length, head_dim)`` float32, cos and sin interleaved.
 
     Each transcendental is evaluated in float64 and rounded once.
     """
@@ -54,7 +55,7 @@ def _dotted(data: dict, path: str):
 
 
 def unscaled(rope_scaling: dict) -> None:
-    """A checkpoint's ``rope_scaling`` that leaves RoPE as it is: None.
+    """Return None for a checkpoint's ``rope_scaling`` that leaves RoPE as it is.
 
     Raises:
         ValueError: It scales RoPE, which this config builds no table for.
@@ -65,17 +66,19 @@ def unscaled(rope_scaling: dict) -> None:
 
 
 def not_json(default, **kwargs) -> Any:
-    """A field ``config.json`` does not set, an IRON choice: kept at
-    ``default`` by ``from_checkpoint`` and left out by ``to_json``.
+    """Declare a field ``config.json`` does not set, an IRON choice.
+
+    Kept at ``default`` by ``from_checkpoint`` and left out by ``to_json``.
     """
     return dataclasses.field(default=default, metadata={"json": None}, **kwargs)
 
 
 @dataclasses.dataclass(frozen=True)
 class Config:
-    """A model's shape, built from a checkpoint's ``config.json``
-    (``from_checkpoint``); ``precision`` is every projection's, chosen per
-    application on its measured accuracy, with no default here.
+    """A model's shape, built from a checkpoint's ``config.json`` (``from_checkpoint``).
+
+    ``precision`` is every projection's, chosen per application on its
+    measured accuracy, with no default here.
     """
 
     # Unbiased projections, RoPE over whole heads, unless a model says.
@@ -92,10 +95,11 @@ class Config:
     precision: Precision = dataclasses.field(kw_only=True, metadata={"json": None})
 
     @classmethod
-    def from_checkpoint(cls, path) -> "Config":
-        """``cls``'s fields read from ``path``'s own ``config.json``, each
-        at its ``metadata["json"]`` path (under ``json_prefix``), converted
-        by ``metadata["convert"]`` if it names one.
+    def from_checkpoint(cls, path: str | Path) -> Self:
+        """``cls``'s fields read from ``path``'s own ``config.json``.
+
+        Each at its ``metadata["json"]`` path (under ``json_prefix``),
+        converted by ``metadata["convert"]`` if it names one.
 
         Args:
             path: A ``config.json``, or a checkpoint's directory or file
@@ -111,9 +115,10 @@ class Config:
         return cls.from_json(json.loads(path.read_text()), path)
 
     @classmethod
-    def from_json(cls, data: dict, source: str | Path = "config.json") -> "Config":
-        """``from_checkpoint`` on ``data``, a ``config.json`` already
-        parsed; ``source`` names it in an error.
+    def from_json(cls, data: dict, source: str | Path = "config.json") -> Self:
+        """``from_checkpoint`` on ``data``, a ``config.json`` already parsed.
+
+        ``source`` names it in an error.
 
         Raises:
             ValueError: ``data`` lacks a field that has no default, or
@@ -150,10 +155,11 @@ class Config:
         return cls.json_prefix + key
 
     def to_json(self) -> dict:
-        """The fields as ``config.json`` names them, ``from_checkpoint``'s
-        inverse: a nested ``Config`` gives its own ``to_json()``, another
-        dataclass its fields. A ``not_json`` field, or one that is None or
-        not JSON, is left out.
+        """Return the fields as ``config.json`` names them, ``from_checkpoint``'s inverse.
+
+        A nested ``Config`` gives its own ``to_json()``, another dataclass
+        its fields. A ``not_json`` field, or one that is None or not JSON,
+        is left out.
         """
         out = {}
         for f in dataclasses.fields(self):
@@ -177,9 +183,10 @@ class Config:
 
 @dataclasses.dataclass(frozen=True)
 class DecoderConfig(Config):
-    """A decoder's shape, named as a Hugging Face checkpoint's own
-    ``config.json`` does where it has one; ``max_seq_len`` is the
-    checkpoint's native context unless a caller lowers it.
+    """A decoder's shape, named as a Hugging Face checkpoint's own ``config.json`` does where it has one.
+
+    ``max_seq_len`` is the checkpoint's native context unless a caller
+    lowers it.
     """
 
     vocab_size: int
@@ -232,8 +239,9 @@ class DecoderConfig(Config):
 
     @property
     def window(self) -> int | None:
-        """The positions before a query each layer attends to (``KVCache``'s
-        ``window``), ``sliding_window`` less the query's own; None is all.
+        """The positions before a query each layer attends to (``KVCache``'s ``window``), ``sliding_window`` less the query's own.
+
+        None is all.
         """
         if self.use_sliding_window is False or self.sliding_window is None:
             return None
@@ -243,14 +251,12 @@ class DecoderConfig(Config):
 
     @property
     def rope_width(self) -> int:
-        """The angle table's own width: ``head_dim``, or ``rotary_dim`` under
-        partial rotary.
-        """
+        """The angle table's own width: ``head_dim``, or ``rotary_dim`` under partial rotary."""
         assert self.head_dim is not None, "__post_init__ sets it"
         return self.rotary_dim or self.head_dim
 
     def angles(self) -> np.ndarray | None:
-        """The RoPE table, a row per position; None with no ``rope_theta``."""
+        """Return the RoPE table, a row per position; None with no ``rope_theta``."""
         if self.rope_theta is None:
             return None
         angles = rope_angles(

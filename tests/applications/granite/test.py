@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Granite 4.2 3B on the NPU, from the real checkpoint: speed, accuracy
-against the float32 reference, determinism, the device loop, and past one
-chunk: a prompt of two and a chat turn (the end of the caches is
-``long_context``'s). The model is compiled and loaded once for the module
-and every test calls it in-process.
+"""Granite 4.2 3B on the NPU, from the real checkpoint.
+
+Speed, accuracy against the float32 reference, determinism, the device
+loop, and past one chunk: a prompt of two and a chat turn (the end of the
+caches is ``long_context``'s). The model is compiled and loaded once for
+the module and every test calls it in-process.
 
 ``--random-weights SEED`` runs it on drawn weights and random prompts, on
 a host without the checkpoint, and ``--max-seq-len`` at another context.
@@ -37,9 +38,10 @@ def load(request):
 
 @pytest.fixture(scope="module")
 def model(load):
-    """The model, compiled and loaded once as a full ELF: the arena's banks
-    keep its ~10 GB of weights and caches within aiebu's 32-bit relocation
-    addend.
+    """Return the model, compiled and loaded once as a full ELF.
+
+    The arena's banks keep its ~10 GB of weights and caches within aiebu's
+    32-bit relocation addend.
     """
     loaded = load()
     assert loaded.device_loop
@@ -72,10 +74,10 @@ GENERATION = pytest.mark.parametrize(
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestEachStep:
-    """Every step its own xclbin dispatch, the host starting each on the
-    token the last one drew. Its model is built and dropped with the class,
-    first: after any other test it would be held beside the module's
-    full-ELF one.
+    """Every step its own xclbin dispatch, the host starting each on the token the last one drew.
+
+    Its model is built and dropped with the class, first: after any other
+    test it would be held beside the module's full-ELF one.
     """
 
     @pytest.fixture(scope="class")
@@ -131,9 +133,9 @@ LONG = 12000
 
 @pytest.mark.extensive
 def test_granite_4_2_3b_accuracy_across_chunks(model, record_property):
-    """The prompt's two chunks and two decode steps after them, against the
-    float32 reference over the whole prompt (each step a forward over the
-    chunks on the host, so only a few).
+    """The prompt's two chunks and two decode steps after them, against the float32 reference over the whole prompt.
+
+    Each step a forward over the chunks on the host, so only a few.
     """
     assert len(model.prompt(LONG)) > model.config.prefill_chunk
     check_accuracy(model, MAX_KL, 3, LONG, record=record_property)
