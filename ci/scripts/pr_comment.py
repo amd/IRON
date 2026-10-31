@@ -21,7 +21,7 @@ from typing import Dict, List, Tuple
 
 from merge_all import limit_rows_by_date
 from pretty_common import ARCHS, PR_SUITES, results_dir, suite_label
-from pretty_trends import build_report
+from pretty_trends import SIGMA, THRESHOLD, build_report
 
 # The posting step matches this to update its own comment.
 MARKER = "<!-- iron-ci-aggregate -->"
@@ -58,7 +58,9 @@ def read_status(path: str) -> Dict[str, str]:
     )
 
 
-def suite_report(artifacts: str, history: str, directory: str, args) -> List[str]:
+def suite_report(
+    artifacts: str, history: str, directory: str, suite: str, args
+) -> List[str]:
     """Render one suite, comparing its run against the results branch."""
     latest, latest_columns = read_csv(os.path.join(artifacts, directory, "latest.csv"))
     if not latest:
@@ -68,13 +70,19 @@ def suite_report(artifacts: str, history: str, directory: str, args) -> List[str
     columns = list(dict.fromkeys(previous_columns + latest_columns))
     rows = limit_rows_by_date(previous + latest, 2)
     return build_report(
-        rows, columns, threshold=args.threshold, sigma=args.sigma, ndigits=args.ndigits
+        rows,
+        columns,
+        threshold=args.threshold,
+        sigma=args.sigma,
+        ndigits=args.ndigits,
+        history=args.benchmarks_page,
+        suite=suite,
     )
 
 
 def strip_title(lines: List[str]) -> str:
     """Drop the report's own heading, and report whether anything is left."""
-    body = "\n".join(l for l in lines if not l.startswith("# ")).strip()
+    body = "\n".join(line for line in lines if not line.startswith("# ")).strip()
     return "" if body.startswith("No benchmark moved") else body
 
 
@@ -92,9 +100,14 @@ def main():
     parser.add_argument("--commit", default="")
     parser.add_argument("--date", default="")
     parser.add_argument("--commit-url", default="")
-    parser.add_argument("--threshold", type=float, default=5.0)
-    parser.add_argument("--sigma", type=float, default=2.0)
+    parser.add_argument("--threshold", type=float, default=THRESHOLD)
+    parser.add_argument("--sigma", type=float, default=SIGMA)
     parser.add_argument("--round", type=int, default=2, dest="ndigits")
+    parser.add_argument(
+        "--benchmarks-page",
+        default="",
+        help="The website's Benchmarks page, which each moved benchmark links to",
+    )
     parser.add_argument("-o", "--output", default="comment.md")
     args = parser.parse_args()
 
@@ -115,7 +128,7 @@ def main():
             directory = results_dir(arch, suite)
             label = suite_label(arch, suite)
             body = strip_title(
-                suite_report(args.artifacts, args.history, directory, args)
+                suite_report(args.artifacts, args.history, directory, suite, args)
             )
             conclusion = status.get(directory, "missing")
             if conclusion != "success" or not os.path.exists(
@@ -144,6 +157,12 @@ def main():
         lines += [
             f"⚠️ No results from: {', '.join(missing)}. "
             "This comment covers the remaining suites only.",
+            "",
+        ]
+
+    if args.benchmarks_page:
+        lines += [
+            f"Every benchmark's history: [Benchmarks]({args.benchmarks_page}).",
             "",
         ]
 

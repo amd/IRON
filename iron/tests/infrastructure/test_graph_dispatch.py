@@ -13,10 +13,9 @@ change that quietly aliased two live buffers shows up here and nowhere
 else, because it produces wrong values rather than an error.
 """
 
+import dataclasses
 import logging
 import re
-
-import dataclasses
 
 import numpy as np
 import pytest
@@ -26,8 +25,8 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.image.compose import Composition
 from iron.common.graph.record import Recording
+from iron.common.image.compose import Composition
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
@@ -42,8 +41,8 @@ from iron.operators import (
 )
 from iron.operators.magnitude import Magnitude
 from iron.operators.merge import GEMMA
-from iron.tests.support.graphs import Adds, Chain
 from iron.tests.support import sequences
+from iron.tests.support.graphs import Adds, Chain
 
 SIZE = 1024
 TILE = 128
@@ -68,7 +67,7 @@ def _graph(name, packaging="composed"):
 
 
 def _hand_written(name, packaging="composed"):
-    """The same computation, with the buffer names written out."""
+    """Build the same computation, with the buffer names written out."""
     add = _operator()
     runlist = [
         (add, "x", "w", "t0"),
@@ -132,10 +131,13 @@ def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispat
 
 @pytest.mark.supported_devices("npu2")
 def test_check_mode_holds_each_step_to_its_reference(caplog):
-    """compile(check=True) dispatches each step on its own and holds what it
+    """Check that check mode holds each step to its reference.
+
+    compile(check=True) dispatches each step on its own and holds what it
     wrote to its reference on the NPU's inputs: a graph within its steps'
-    tolerances runs, judges every step, and computes what the full ELF does.
-    A step outside its tolerance raises (iron/tests/common/test_checking.py).
+    tolerances runs, judges every step, and computes what the full ELF
+    does. A step outside its tolerance raises
+    (iron/tests/common/test_checking.py).
     """
     rng = np.random.default_rng(0)
     a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
@@ -152,8 +154,9 @@ def test_check_mode_holds_each_step_to_its_reference(caplog):
 
 
 class RoundedMagnitude(Magnitude):
-    """Magnitude declared to round correctly, which its kernel does not: it
-    comes within 2e-7 of hypot, about a float32 ulp.
+    """Magnitude declared to round correctly, which its kernel does not.
+
+    It comes within 2e-7 of hypot, about a float32 ulp.
     """
 
     def tolerance(self) -> Tolerance:
@@ -171,14 +174,16 @@ class Magnitudes(iron.Graph):
 
 @pytest.mark.supported_devices("npu2")
 def test_check_mode_catches_a_step_outside_its_tolerance_at_that_step():
-    """A step whose kernel misses its declared bound on the device is caught
-    at that step, after the step before it passed.
+    """Check that check mode catches a step outside its tolerance at that step.
 
-    A wrong weight cannot stand in here: check mode judges each step against
-    its reference on the inputs the NPU gave it, so a wrong weight in a
-    device buffer is what both read. What a step catches is a kernel outside
-    its operator's tolerance(), as iron/tests/common/test_checking.py induces on
-    the host.
+    A step whose kernel misses its declared bound on the device is
+    caught at that step, after the step before it passed.
+
+    A wrong weight cannot stand in here: check mode judges each step
+    against its reference on the inputs the NPU gave it, so a wrong
+    weight in a device buffer is what both read. What a step catches is
+    a kernel outside its operator's tolerance(), as
+    iron/tests/common/test_checking.py induces on the host.
     """
     rows, width = 8, 640
     rng = np.random.default_rng(0)
@@ -403,7 +408,9 @@ def test_each_resize_of_one_array_runs_on_its_own_sizes():
 
 @pytest.mark.supported_devices("npu2")
 def test_a_chain_of_more_designs_than_a_context_configures_runs():
-    """Past the kernels one hardware context configures, the steps' designs
+    """Check that a chain of more designs than a context configures runs.
+
+    Past the kernels one hardware context configures, the steps' designs
     go into a second xclbin, and every step still runs.
     """
     n = CompilableDesign.XCLBIN_KERNELS + 2

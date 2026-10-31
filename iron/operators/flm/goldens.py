@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Bitwise device goldens of the flm operators, for changes that move their MLIR.
+
 ``python -m iron.operators.flm.goldens record|check <dir>``. Record before a
 change that moves the MLIR, then check after; inputs are saved, not redrawn,
 so a later change to a test's draw doesn't move a golden. The .npz files
@@ -69,8 +70,10 @@ def _prefill_inputs(op, max_l, seed):
 
 
 def cases():
-    """Each golden: its file stem, the operator, its inputs by buffer name
-    (a function of nothing, drawn only when recording) and its per-call values.
+    """Yield each golden: its file stem, the operator, its inputs by buffer name.
+
+    A function of nothing, drawn only when recording, and its per-call
+    values.
     """
     for name, geometry in (
         ("E2B", FLM_GEMMA4_E2B_DECODE),
@@ -100,21 +103,28 @@ def cases():
                     lambda op=op, m=max_l, s=L_end: _prefill_inputs(op, m, s),
                     dict(L_begin=L_begin, L_end=L_end, max_l=max_l),
                 )
+    dev = aie_utils.get_current_device()
+    # main() already required an AIE2P device before cases() is ever called.
+    assert dev is not None
     for cls in (LMHead, DequantBFP):
-        for case in cls.test.cases:
+        assert cls.test is not None
+        draw = cls.test.draw
+        assert draw is not None
+        for case in cls.test.resolve(cls, dev):
             if not case.extensive:
                 op = cls(**case.kwargs)
                 yield (
                     f"{cls.__name__}-{case.label}",
                     op,
-                    lambda op=op: vectors(op, **op.test.draw(op)).inputs,
+                    lambda op=op, draw=draw: vectors(op, **draw(op)).inputs,
                     {},
                 )
 
 
 def dispatch(op, initial, values):
-    """Run ``op`` once on buffers holding ``initial``'s bytes at their start;
-    each buffer's bytes after, by name.
+    """Run ``op`` once on buffers holding ``initial``'s bytes at their start.
+
+    Return each buffer's bytes after, by name.
     """
     tensors = []
     for b in op.buffers:
@@ -162,7 +172,7 @@ def record(root: Path) -> None:
 
 
 def check(root: Path) -> int:
-    """The number of goldens that differ, or are missing, on this build."""
+    """Return the number of goldens that differ, or are missing, on this build."""
     failed = 0
     for stem, op, _, values in cases():
         path = root / f"{stem}.npz"
@@ -184,7 +194,7 @@ def check(root: Path) -> int:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     p.add_argument("action", choices=("record", "check"))
     p.add_argument("dir", type=Path)
     args = p.parse_args(argv)

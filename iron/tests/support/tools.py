@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What the toolchain gates share: which tools are installed, the devices
-they build for, and the graph they all build. ``aiecc`` is the one a build
-runs, as mlir-aie's JIT resolves it.
+"""What the toolchain gates share.
+
+Which tools are installed, the devices they build for, and the graph
+they all build. ``aiecc`` is the one a build runs, as mlir-aie's JIT
+resolves it.
 """
 
 import shutil
@@ -39,7 +41,7 @@ _MISSING = {
 
 
 def requires(*tools):
-    """A skip mark for a test or a module that needs these tools."""
+    """Return a skip mark for a test or a module that needs these tools."""
     missing = [_MISSING[t][1] for t in tools if _MISSING[t][0]]
     return pytest.mark.skipif(bool(missing), reason="; ".join(missing))
 
@@ -51,13 +53,13 @@ DEVICES = {
 
 
 def swiglu():
-    """A gated feed-forward at Llama 3.2 1B's width, and that width."""
-    z = lambda *s: np.zeros(s, dtype=bfloat16)
+    """Return a gated feed-forward at Llama 3.2 1B's width, and that width."""
     E, H = 2048, 8192
-    return FeedForward(z(H, E), z(H, E), z(E, H)), E
-
-
-def shipped(**kwargs):
-    from iron.tests.support.shipped import Shipped
-
-    return Shipped(**kwargs)
+    return (
+        FeedForward(
+            np.zeros((H, E), dtype=bfloat16),
+            np.zeros((H, E), dtype=bfloat16),
+            np.zeros((E, H), dtype=bfloat16),
+        ),
+        E,
+    )

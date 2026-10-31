@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A graph called in another graph's body, device-free: its steps record into
-the caller's, its weights take the caller's path to it, the caller's per-call
-values bound its steps, and the caller's reference runs it.
+"""A graph called in another graph's body, device-free.
+
+Its steps record into the caller's, its weights take the caller's path to
+it, the caller's per-call values bound its steps, and the caller's
+reference runs it.
 """
 
 import numpy as np
@@ -13,14 +15,14 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Carried, Scratchpad
 from iron.lm import LogMel
-from iron.tests.support.graphs import FeedForward
-from iron.tests.support.log_mel import EVERY, Extractor
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs
 from iron.operators.log import Log
 from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
+from iron.tests.support.graphs import FeedForward
+from iron.tests.support.log_mel import EVERY, Extractor
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -146,9 +148,11 @@ def test_a_called_graph_takes_every_value_and_carries_none():
 
 
 def test_log_mel_holds_to_the_extractor(golden):
-    """The operators' exact products against Hugging Face's Gemma 4
-    extractor's float64, every 8th frame: each feature its bf16 rounding
-    or the next, bar a log near 0 within 4e-6.
+    """Check the operators' exact products against Gemma 4's float64 extractor.
+
+    Against Hugging Face's Gemma 4 extractor's float64, every 8th frame:
+    each feature its bf16 rounding or the next, bar a log near 0 within
+    4e-6.
     """
     log_mel = LogMel()
     frames = 256

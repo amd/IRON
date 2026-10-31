@@ -13,6 +13,7 @@ import dataclasses
 from collections.abc import Callable, Hashable, Sequence
 
 from iron.common.declare import Profile
+
 from .autotune import Shape, Timed, coding_tunables, replacing
 from .packings import MIN_SWITCH_SHARE
 from .survey import Survey

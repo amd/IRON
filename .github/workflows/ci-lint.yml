@@ -12,63 +12,75 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   Linting:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-format
-          pip install reuse black
+        run: pip install pre-commit reuse
+      - name: Cache pre-commit environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Check Licenses
         if: success() || failure()
-        shell: bash
         run: |
           reuse download --all
           reuse lint
 
-      - name: Format Python
+      # Every hook but pyright, which the Types job runs per Python version.
+      - name: Run pre-commit
         if: success() || failure()
-        run: |
-          black --diff . 
-          black --check .
-
-      - name: Format C++
-        if: success() || failure()
-        run: |
-          python scripts/clang-format-wrapper.py --diff 
-          python scripts/clang-format-wrapper.py --check
+        env:
+          SKIP: pyright
+        run: pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure --color never
 
   Types:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The versions the pinned mlir_aie wheel is built for.
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          pip install numpy ml_dtypes huggingface_hub tokenizers jinja2 pytest \
+            "$(grep '^pyright==' requirements.txt)"
+          # Only golden recording imports them; not IRON's requirements.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0
+          pip install transformers==5.22.0
+          pip install --no-deps \
+            --find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4 \
+            "$(grep '^mlir_aie==' requirements.txt)"
+
+      - name: Check types
+        run: pyright
+
+  Docs:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
-      # mlir-aie's Python sources, pinned: reading types needs none of the
-      # wheel's native modules.
-      - name: Checkout mlir-aie
-        uses: actions/checkout@v4
-        with:
-          repository: Xilinx/mlir-aie
-          ref: 843e9c3ec99981032066027bf7c6f4d3769ec5f5
-          path: mlir-aie
-          sparse-checkout: python
       - name: Install dependencies
-        run: |
-          python -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install pyright==1.1.414 numpy ml_dtypes \
-            pytest huggingface_hub tokenizers safetensors jinja2
-          mkdir "$RUNNER_TEMP/aie"
-          ln -s "$PWD/mlir-aie/python" "$RUNNER_TEMP/aie/aie"
-          site=$("$RUNNER_TEMP/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
-          echo "$RUNNER_TEMP/aie" > "$site/aie-src.pth"
-
-      - name: Check types
-        run: |
-          "$RUNNER_TEMP/venv/bin/pyright" --pythonpath "$RUNNER_TEMP/venv/bin/python"
+        run: pip install -r docs/requirements-mkdocs.txt
+      - name: Build docs
+        run: mkdocs build --strict

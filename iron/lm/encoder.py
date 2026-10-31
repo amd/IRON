@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""An encoder on the NPU as one graph: a sequence of at most ``max_tokens``
-rows in, attended bidirectionally, compiled once for every length.
+"""An encoder on the NPU as one graph: a sequence of at most ``max_tokens`` rows in.
+
+Attended bidirectionally, compiled once for every length.
 
 ``Encoder`` looks up token ids and runs ``forward`` over them; a ``Tower``
 is an encoder whose rows come from a front end and whose output is soft
@@ -23,9 +24,10 @@ from .model import Model
 
 
 class Encoder(Model):
-    """An encoder over ``max_tokens`` rows at most, one compile for every
-    length: ``layers``, a ``layer_class(config, i)`` each, which a subclass
-    loads from its checkpoint; it gives ``lookup`` and ``head``.
+    """An encoder over ``max_tokens`` rows at most, one compile for every length.
+
+    ``layers``, a ``layer_class(config, i)`` each, which a subclass loads
+    from its checkpoint; it gives ``lookup`` and ``head``.
 
     Args:
         config: The model's shape: ``num_hidden_layers`` layers, and
@@ -35,7 +37,7 @@ class Encoder(Model):
     # A graph class taking (config, i).
     layer_class: ClassVar[type[Any]] = EncoderLayer
 
-    def __init__(self, config, max_tokens: int):
+    def __init__(self, config: Any, max_tokens: int):
         self.config = config
         self.layers = [
             self.layer_class(config, i) for i in range(config.num_hidden_layers)
@@ -47,8 +49,9 @@ class Encoder(Model):
         self.final_norm = None
 
     def load_layers(self, tree, layers: str, norm: str = "") -> None:
-        """Layer ``i`` from ``tree``, renamed by ``renames``, at
-        ``{layers}{i}.``, then ``final_norm``, where there is one, at ``norm``.
+        """Load layer ``i`` from ``tree``, renamed by ``renames``, at ``{layers}{i}.``.
+
+        Then loads ``final_norm``, where there is one, at ``norm``.
         """
         tree = renamed(tree, self.renames)
         for i, layer in enumerate(self.layers):
@@ -57,28 +60,31 @@ class Encoder(Model):
             self.final_norm.load_state_dict(tree, path=norm)
 
     def lookup(self, ids):
-        """The embedding rows of ``ids``, bounded as ``ids`` is."""
+        """Return the embedding rows of ``ids``, bounded as ``ids`` is."""
         raise NotImplementedError(f"{type(self).__name__} defines no lookup()")
 
-    def angles(self, rows):
-        """The RoPE angles of the first ``rows`` positions, by the ``rope``
-        each layer names (``Call.ropes``); None: no RoPE.
+    def angles(self, rows, /) -> dict | None:
+        """Return the RoPE angles of the first ``rows`` positions, by the ``rope`` each layer names.
+
+        ``Call.ropes``; None: no RoPE.
         """
         return None
 
     def positions(self, x, call: Call):
-        """``x``, the rows ``call`` runs, with the model's absolute positions
-        placed; unchanged by default.
+        """Return ``x``, the rows ``call`` runs, with the model's absolute positions placed.
+
+        Unchanged by default.
         """
         return x
 
-    def layer(self, call: Call, i: int, weights, x):
+    def layer(self, call: Call, i: int, weights, x, /):
         """Layer ``i``, the module ``weights``, on ``x``."""
         return weights(x, call)
 
-    def pool(self, x, rows):
-        """The rows ``head`` reads from the ``rows`` valid rows of ``x``; all
-        of them by default.
+    def pool(self, x, rows, /):
+        """Return the rows ``head`` reads from the ``rows`` valid rows of ``x``.
+
+        All of them by default.
         """
         return x
 
@@ -86,9 +92,10 @@ class Encoder(Model):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
 
     def forward(self, x: Handle, rows, ropes, ids=None):
-        """The layers, the final norm, ``pool`` and ``head`` over the rows
-        ``x`` of ``ids`` (None for a tower's), bounded to their first
-        ``rows``, rotated by ``ropes`` (``Call.ropes``).
+        """Run the layers, the final norm, ``pool`` and ``head`` over the rows ``x``.
+
+        Of ``ids`` (None for a tower's), bounded to their first ``rows``,
+        rotated by ``ropes`` (``Call.ropes``).
         """
         call = Call(
             prompt=True,
@@ -107,8 +114,9 @@ class Encoder(Model):
         return self.head(self.pool(x, rows))
 
     def from_rows(self, x, ids, *, rows):
-        """A call on its embedding rows ``x``, bounded to ``rows``, in place
-        of the lookup of its ``ids``.
+        """Run a call on its embedding rows ``x``, bounded to ``rows``.
+
+        In place of the lookup of its ``ids``.
         """
         return self.forward(x, rows, self.angles(rows), ids)
 
@@ -117,22 +125,22 @@ class Encoder(Model):
         return self.from_rows(self.lookup(ids), ids, rows=rows)
 
     def shapes(self) -> list[dict]:
-        """The input shapes of each version: one, ``max_tokens`` rows."""
+        """Return the input shapes of each version: one, ``max_tokens`` rows."""
         return [dict(ids=((self.max_tokens,), np.int32))]
 
     def longest(self) -> dict:
-        """The per-call values of the longest call: every row real."""
+        """Return the per-call values of the longest call: every row real."""
         return dict(rows=self.max_tokens)
 
     def soft(self, values: dict) -> int:
-        """The valid rows a call with per-call ``values`` gives: its
-        ``rows`` by default.
+        """Return the valid rows a call with per-call ``values`` gives.
+
+        Its ``rows`` by default.
         """
         return values["rows"]
 
     def inputs(self, tokens) -> tuple[np.ndarray, dict]:
-        """A call's ``ids``, ``tokens`` padded to ``max_tokens``, and its
-        per-call values.
+        """Return a call's ``ids``, ``tokens`` padded to ``max_tokens``, and its per-call values.
 
         Raises:
             ValueError: ``tokens`` is empty or longer than ``max_tokens``.
@@ -151,9 +159,10 @@ class Encoder(Model):
 
 
 class Tower(Encoder):
-    """An encoder whose rows come from a front end rather than token ids,
-    and whose output is soft tokens in a text model's space, ``text_dim``
-    wide, which take a placeholder's places.
+    """An encoder whose rows come from a front end rather than token ids.
+
+    Its output is soft tokens in a text model's space, ``text_dim`` wide,
+    which take a placeholder's places.
 
     Args:
         soft_rows: The rows of soft tokens a call returns, the first
@@ -164,23 +173,20 @@ class Tower(Encoder):
         super().__init__(config, max_tokens)
         self.soft_rows = soft_rows
 
-    def inputs(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self, *raw
-    ) -> tuple[np.ndarray, dict]:
-        """A call's input buffer and per-call values for ``raw``."""
+    def inputs(self, *raw: Any, **kwargs: Any) -> tuple[np.ndarray, dict]:
+        """Return a call's input buffer and per-call values for ``raw``."""
         raise NotImplementedError(f"{type(self).__name__} defines no inputs()")
 
     def calls(self, *raw) -> list[tuple[np.ndarray, dict]]:
-        """Each call ``raw`` takes, in turn, its input buffer and per-call
-        values, each call's soft tokens after the last's: one, ``inputs``'s,
-        by default.
+        """Return each call ``raw`` takes, in turn, its input buffer and per-call values.
+
+        Each call's soft tokens after the last's: one, ``inputs``'s, by
+        default.
         """
         return [self.inputs(*raw)]
 
     def soft_tokens(self, *raw) -> np.ndarray:
-        """The soft tokens of ``raw``, as ``calls`` takes it,
-        ``(soft, text_dim)`` float32.
-        """
+        """Return the soft tokens of ``raw``, as ``calls`` takes it, ``(soft, text_dim)`` float32."""
         calls = self.calls(*raw)
         for buffer, values in calls:
             out = self(buffer, **values)

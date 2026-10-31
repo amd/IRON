@@ -14,8 +14,6 @@ from aie.iron import Buffer, ExternalFunction, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import eltwise, linalg
-from aie.utils import coded
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import (
     Select,
     divisors,
@@ -24,9 +22,11 @@ from aie.utils.compile.jit.params import (
     tunable,
     widths,
 )
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp
+from iron.common.declare.operand import concrete
 from iron.common.elementwise import (
     Elementwise,
     FinishStep,
@@ -78,15 +78,16 @@ def _cases(cls, dev: Device):
     # ... and two lanes a column.
     laned = [(8192, 2048, 8, 4, 512)]
 
+    widest = dev.cols
+
+    # A case of 8 columns takes all of a narrower device.
     def case(M, K, cols, tsi, tso, *, bench=False, lower=False, **extra):
-        kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)
+        kwargs = dict(M=M, K=K, num_aie_columns=min(cols, widest), tile_size_input=tsi)
         kwargs.update(tile_size_output=tso, **extra)
         return Case(kwargs, bench=bench, lower=lower)
 
-    widest = dev.cols
-
     def bench(M, K, cols, *_):
-        return cols == widest and M * K >= 2048 * 8192
+        return min(cols, widest) == widest and M * K >= 2048 * 8192
 
     return (
         [case(*p, bench=bench(*p)) for p in plain]
@@ -284,8 +285,10 @@ class GEMV(Operator):
         return -(-2 * self.K // math.prod(self.A.obj_shape))
 
     def _legal_kernel_vector_size(self) -> int:
-        """The vector width the matvec kernel is compiled at: mv.cc's
-        static_asserts, ``K % w == 0`` and ``K >= 2 * w``, checked here.
+        """Return the vector width the matvec kernel is compiled at.
+
+        mv.cc's static_asserts, ``K % w == 0`` and ``K >= 2 * w``,
+        checked here.
         """
         legal = [
             size
@@ -807,9 +810,10 @@ class GEMV(Operator):
                 if not self.feed_b:
                     for head, source in heads:
                         self.A.fill(head, lane=k, source=source, managed=False)
+                (offset,) = concrete((tap.offset,), tap)
                 matrix = TensorAccessPattern(
                     tap.tensor_dims,
-                    tap.offset + b // self.repeat * M * width,
+                    offset + b // self.repeat * M * width,
                     tap.sizes,
                     tap.strides,
                 )

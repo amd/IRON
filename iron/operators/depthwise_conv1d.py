@@ -17,18 +17,24 @@ TAPS = 5
 
 
 class DepthwiseConv1d(Operator):
-    """A causal depthwise convolution over time, five taps, channels last: one
-    core per column takes a run of rows, its input fifo the sliding window;
-    every run but the first is filled from four rows before it.
+    """A causal depthwise convolution over time, five taps, channels last.
+
+    One core per column takes a run of rows, its input fifo the sliding
+    window; every run but the first is filled from four rows before it.
     """
 
     test = Testing(
         [
             Case(dict(rows=64, channels=64, num_aie_columns=1)),
             Case(dict(rows=64, channels=256, num_aie_columns=2)),
-            Case(dict(rows=32, channels=96, num_aie_columns=8)),
-            # Benched: the audio tower's light conv at its longest bucket.
-            Case(dict(rows=768, channels=1024, num_aie_columns=8), bench=True),
+            # Every column of the device; benched: the audio tower's light
+            # conv at its longest bucket.
+            lambda cls, dev: [
+                Case(dict(rows=32, channels=96, num_aie_columns=dev.cols)),
+                Case(
+                    dict(rows=768, channels=1024, num_aie_columns=dev.cols), bench=True
+                ),
+            ],
         ],
         draw=lambda op: dict(centered=(op.x, op.weight)),
     )
@@ -136,11 +142,13 @@ class DepthwiseConv1d(Operator):
             [np.zeros((TAPS - 1, self.channels), np.float32), x.astype(np.float32)]
         )
         w = weight.astype(np.float32)
-        y = sum(w[j] * padded[j : j + self.rows] for j in range(TAPS))
+        y = np.zeros((self.rows, self.channels), np.float32)
+        for j in range(TAPS):
+            y += w[j] * padded[j : j + self.rows]
         return y.astype(bfloat16)
 
     def sequence(self, rt):
-        """The weights to every core, then each run with the four rows before it."""
+        """Write the weights to every core, then each run with the four rows before it."""
         run = self.rows // self.num_aie_columns
         weights = rt.task_group()
         self.weight.fill(group=weights)

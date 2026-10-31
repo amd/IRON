@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``vectors()`` and an operator's ``call_reference``/``judge``: the device
-test's halves, host-side."""
+"""``vectors()`` and an operator's ``call_reference``/``judge``: the device test's halves, host-side."""
 
 import numpy as np
 import pytest

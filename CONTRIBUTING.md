@@ -116,8 +116,8 @@ class ReLU(UnaryElementwise):
    `KernelContract`, the export, and a case in
    `test/python/npu/kernel_cases.py`. The contract carries the reference
    and tolerance, so the IRON operator needs neither (see `relu` in
-   `eltwise.py`). In IRON, bump `ci-lint.yml`'s mlir-aie `ref:` to the
-   commit that has it (AGENTS.md, "Environment").
+   `eltwise.py`). In IRON, bump `requirements.txt`'s mlir-aie pin to a
+   wheel that has it (AGENTS.md, "Environment").
 2. **Operator.** Subclass the closest family (`UnaryElementwise`,
    `BinaryElementwise`, ... in `iron/common/elementwise.py`) and return the
    factory from `kernel()`. A new data layout needs its own
@@ -137,37 +137,52 @@ operator may override) are "Adding an operator" in [AGENTS.md](AGENTS.md).
 
 ## Style Guide
 
-### Python Code Style
-We use **Black** for Python code formatting with default settings:
-- Line length: 88 characters (Black default)
-- String quotes: Double quotes preferred
-- Trailing commas: Added automatically by Black
-
-**Formatting Commands:**
+### Formatting and hooks
+Formatting and linting are enforced by [pre-commit](https://pre-commit.com/),
+configured as in mlir-aie (`.pre-commit-config.yaml`).
+`requirements.txt` installs it; register the hooks once per clone:
 ```bash
-# Check formatting
-black --check .
-
-# Auto-format all Python files
-black .
+pre-commit install
 ```
-
-**Best Practices:**
-- Use type annotations for function parameters and return values
-- Follow PEP 8 naming conventions
-- Write descriptive docstrings for public functions and classes
-- Use meaningful variable and function names
-
-### Git hook
-`scripts/hooks/pre-push` runs CI's lint checks (reuse, black, clang-format) before a push:
+Lightweight validators (YAML/TOML/JSON syntax, merge-conflict markers) run
+on every commit; the formatters and linters run on `git push`, so CI should
+never be the first place a lint issue shows up. To run them by hand:
 ```bash
-cp scripts/hooks/pre-push .git/hooks/pre-push
-chmod +x .git/hooks/pre-push
+pre-commit run --all-files --hook-stage pre-push
 ```
-`git push --no-verify` skips it.
+The hooks cover:
+- **Python format**: [black](https://github.com/psf/black), default settings (88 columns).
+- **Python lint**: [`ruff check`](https://docs.astral.sh/ruff/) (see below).
+- **Python types**: [pyright](https://github.com/microsoft/pyright) (see below).
+- **C++ format**: clang-format, following `.clang-format`.
+- **Licences**: `reuse lint-file` on the pushed files (see "Licensing").
+- **Workflows**: actionlint on `.github/workflows/`.
+- **Hygiene**: trailing whitespace, final newlines, LF line endings, large files.
 
-### C++ Code Style
-The few C++ files here follow `.clang-format`; `python scripts/clang-format-wrapper.py --fix` applies it.
+`git push --no-verify` skips them. CI runs every hook over the whole
+repository (`ci-lint.yml`).
+
+### Linting Python
+Every Python file in the repository is linted with ruff, configured in
+`pyproject.toml`'s `[tool.ruff]` with mlir-aie's rule set: pyflakes and
+pycodestyle errors (`E`, `F`), import sorting (`I`), two pep8-naming checks
+(`N802`, `N816`), and pydocstyle (`D`) in the Google convention, plus `D401`.
+Docstrings are Google style (`Args:`, `Returns:`, `Raises:`): a one-line
+summary in the imperative mood ("Return the ...", not "The ..."), a blank
+line, then the detail. Ruff checks the style of a docstring you write, not
+that one exists (`D100`-`D107` are off). `ruff check --fix` applies the
+fixable findings. A justified exception is an inline `# noqa: <code> -- why`.
+
+### Type checking Python
+`iron/`, except `iron/tests/`, is type-checked with pyright in `standard`
+mode (`pyproject.toml`'s `[tool.pyright]`), against the mlir_aie wheel
+`requirements.txt` pins. In the environment the README sets up:
+```bash
+pyright
+```
+CI runs it on every Python version the pinned wheel is built for (3.11 to
+3.14). Fix a type issue at its source; keep `# pyright: ignore[<rule>]`
+for a gap in mlir-aie's typing, with the rule named.
 
 ## Licensing
 

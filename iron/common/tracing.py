@@ -32,15 +32,22 @@ def dump_traces(
     mlir: str | Path | None = None,
     summary: bool = True,
 ) -> list[Path]:
-    """Write a completed run's trace buffer as text to ``trace_file`` and Perfetto
-    JSON beside it, one per traced design; returns the JSON paths, empty on an
-    untraced build, so a test can call it unconditionally.
+    """Write a completed run's trace buffer as text and Perfetto JSON.
+
+    The text goes to ``trace_file`` and the JSON beside it, one per traced
+    design. An untraced build writes nothing, so a test can call it
+    unconditionally.
 
     Args:
+        run: The completed run whose trace buffer is read.
+        trace_file: The text trace's path; the JSON paths are derived from it.
         colshift: None lets the parser align the columns, as a design may load
             into another column; override it when that picks the wrong ones.
         mlir: The lowered module the parser reads, else the build's own.
         summary: Also print mlir-aie's per-tile cycles summary for each.
+
+    Returns:
+        The JSON paths, empty on an untraced build.
     """
     if not isinstance(run, FullELFCallable):
         if run.op.traced:

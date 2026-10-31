@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Modules that own their weights, device-free: ``Graph.load_state_dict`` binding each
-``param`` or naming every tensor it cannot, and the leaf modules'
-references against numpy.
+"""Modules that own their weights, device-free.
+
+``Graph.load_state_dict`` binding each ``param`` or naming every tensor it
+cannot, and the leaf modules' references against numpy.
 """
 
 import dataclasses
@@ -16,17 +17,33 @@ import iron
 from iron import Precision
 from iron.lm import Attention, Embedding, LayerNorm, Linear, RMSNorm
 from iron.lm.blocks import KVCache, Rope
-from iron.lm.checkpoint import nest, leaves
+from iron.lm.causal import CausalConv1d
+from iron.lm.checkpoint import leaves, nest
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close, check_generation
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.operators.sample import Sample
-from iron.tests.support.llama_reference import OnHost
 from iron.tests.support.llama_model import SMALL, checkpoint, llama_1b, small
+from iron.tests.support.llama_reference import OnHost
 
 pytestmark = pytest.mark.usefixtures("npu2")
+
+
+@pytest.mark.parametrize("chunk,kernel", [(1, 3), (2, 4), (2, 5)])
+def test_causal_conv_refuses_a_chunk_shorter_than_its_history(chunk, kernel):
+    config = dataclasses.replace(SMALL, prefill_chunk=chunk)
+    with pytest.raises(ValueError, match="prefill_chunk .* kernel - 1"):
+        CausalConv1d(config, channels=64, kernel=kernel)
+
+
+@pytest.mark.parametrize("chunk,kernel", [(1, 2), (2, 3), (4, 4), (4, 5), (8, 4)])
+def test_causal_conv_accepts_a_chunk_that_holds_its_history(chunk, kernel):
+    config = dataclasses.replace(SMALL, prefill_chunk=chunk)
+    conv = CausalConv1d(config, channels=64, kernel=kernel)
+    assert conv.state.chunk == chunk
+    assert conv.state.slots.shape[1:] == (kernel - 1, 64)
 
 
 class Block(iron.Graph):
@@ -78,8 +95,9 @@ def test_an_index_a_checkpoint_skips_is_empty_and_no_leaf():
 
 
 def test_tensors_at_indices_are_a_list_of_tensors():
-    """``nn.ParameterList``'s tensors at ``0`` and ``1``, one a single zero:
-    each kept as it is, none taken for an empty module.
+    """``nn.ParameterList``'s tensors at ``0`` and ``1``, one a single zero.
+
+    Each kept as it is, none taken for an empty module.
     """
     zero, row = np.zeros(1, bfloat16), np.ones(4, bfloat16)
     tree = nest({"scales.0": zero, "scales.1": row})
@@ -202,9 +220,9 @@ def test_attention_refuses_a_norm_of_other_than_q_k_and_v():
 
 
 def test_a_cache_attends_within_its_window():
-    """Each layer's cache attends within the config's ``sliding_window``, the
-    query's own position not counted; one built with no window attends to
-    every position before the query.
+    """Each layer's cache attends within the config's ``sliding_window``, the query's own position not counted.
+
+    One built with no window attends to every position before the query.
     """
     model = small(sliding_window=65)
     model.model.layers[1].cache = KVCache(model.config)
@@ -213,9 +231,10 @@ def test_a_cache_attends_within_its_window():
 
 
 def test_a_ring_restarts_at_the_chunk_while_it_holds_the_window_before():
-    """A ring of 128 positions, a window of 7 and a chunk of 64: positions
-    from 70 change after 70 or 185 ran restart at 64, whose window from 57
-    the ring still holds, and after 186 at the first.
+    """A ring of 128 positions, a window of 7 and a chunk of 64.
+
+    Positions from 70 change after 70 or 185 ran restart at 64, whose
+    window from 57 the ring still holds, and after 186 at the first.
     """
     cache = KVCache(dataclasses.replace(SMALL, prefill_chunk=64, max_seq_len=512), 7)
     assert cache.ring == 128
@@ -223,9 +242,10 @@ def test_a_ring_restarts_at_the_chunk_while_it_holds_the_window_before():
 
 
 def test_a_turn_over_a_ring_is_the_run_from_scratch_bit_for_bit():
-    """A turn of 150 tokens after 550 ran, over a ring of 512 positions and
-    chunks of 256, reruns its chunk from 512: its logits are those of the
-    whole run from scratch, which from 550 they were not.
+    """A turn of 150 tokens after 550 ran, over a ring of 512 positions and chunks of 256, reruns its chunk from 512.
+
+    Its logits are those of the whole run from scratch, which from 550 they
+    were not.
     """
     model = small(sliding_window=65, max_seq_len=4096)
     host = OnHost(model.config, model.weights)
@@ -239,9 +259,10 @@ def test_a_turn_over_a_ring_is_the_run_from_scratch_bit_for_bit():
 
 
 def test_a_window_keeps_every_position_where_a_ring_takes_as_many_rows():
-    """A ring and its staging take three rings' rows: at a context of three
-    rings or fewer the cache keeps every position, at any chunk, a short
-    context's whole one among them.
+    """A ring and its staging take three rings' rows.
+
+    At a context of three rings or fewer the cache keeps every position, at
+    any chunk, a short context's whole one among them.
     """
     for L, C in ((384, 64), (200, 200)):
         config = dataclasses.replace(SMALL, prefill_chunk=C, max_seq_len=L)
@@ -250,9 +271,9 @@ def test_a_window_keeps_every_position_where_a_ring_takes_as_many_rows():
 
 
 def test_a_ring_s_chunk_attends_from_its_valid_rows_alone():
-    """A chunk's queries over a ring are its whole chunk, the rows past
-    ``rows`` masked; the output is bounded to ``rows`` again, so ``o_proj``
-    runs on them alone.
+    """A chunk's queries over a ring are its whole chunk, the rows past ``rows`` masked.
+
+    The output is bounded to ``rows`` again, so ``o_proj`` runs on them alone.
     """
     model = small(sliding_window=8, max_seq_len=4096)
     assert model.model.layers[0].cache.ring == 512
@@ -263,9 +284,9 @@ def test_a_ring_s_chunk_attends_from_its_valid_rows_alone():
 
 
 def test_each_layer_reads_the_rows_of_its_own_rope():
-    """A layer holding another ``Rope`` turns q and k by its table's rows,
-    copied once a call however many layers hold it; one holding none turns
-    nothing.
+    """A layer holding another ``Rope`` turns q and k by its table's rows, copied once a call however many layers hold it.
+
+    One holding none turns nothing.
     """
     model = small(num_hidden_layers=3)
     layers = model.model.layers
@@ -281,8 +302,9 @@ def test_each_layer_reads_the_rows_of_its_own_rope():
 
 
 def test_a_q_table_scaled_by_two_doubles_the_logits_scale():
-    """q's own table, twice k's, gives exactly the logits of attention
-    scaled twice as much: every factor is a power of two.
+    """Q's own table, twice k's, gives exactly the logits of attention scaled twice as much.
+
+    Every factor is a power of two.
     """
     config = dataclasses.replace(SMALL, max_seq_len=256)
     weights = checkpoint(config).tree("random", 3)
@@ -297,9 +319,10 @@ def test_a_q_table_scaled_by_two_doubles_the_logits_scale():
 
 
 def test_an_odd_vocabulary_pads_the_head_with_a_row_no_draw_takes():
-    """An odd vocabulary's logits end mid-word: the head gains a zero row,
-    Sample draws from the vocabulary's logits alone, and a session's logits
-    are the vocabulary's.
+    """An odd vocabulary's logits end mid-word.
+
+    The head gains a zero row, Sample draws from the vocabulary's logits
+    alone, and a session's logits are the vocabulary's.
     """
     config = dataclasses.replace(SMALL, vocab_size=SMALL.vocab_size - 1)
     V = config.vocab_size
@@ -314,8 +337,9 @@ def test_an_odd_vocabulary_pads_the_head_with_a_row_no_draw_takes():
 
 
 def test_each_generation_check_prefills_its_whole_prompt():
-    """A module's model holds the last check's tokens; a check that
-    resumed from them would time part of its prompt as the whole.
+    """A module's model holds the last check's tokens.
+
+    A check that resumed from them would time part of its prompt as the whole.
     """
 
     class Starts(OnHost):
@@ -332,9 +356,7 @@ def test_each_generation_check_prefills_its_whole_prompt():
 
 
 def test_attention_turns_only_the_rotary_columns():
-    """Under partial rotary, as Phi-4's, RoPE turns the first ``rotary_dim``
-    columns of each head of q and k alone.
-    """
+    """Under partial rotary, as Phi-4's, RoPE turns the first ``rotary_dim`` columns of each head of q and k alone."""
     model = small(rotary_dim=32)
     t = model.record(**model.shapes()[1])
     turned = [s.op.cols for s in t.steps if type(s.op) is RoPE]
@@ -342,14 +364,15 @@ def test_attention_turns_only_the_rotary_columns():
 
 
 class SharedKeys(HuggingFace):
-    """transformers' Llama, its layer 1 attending over layer 0's keys and
-    values: layer 1's k and v projections return layer 0's, which RoPE
-    turns at the same positions.
+    """transformers' Llama, its layer 1 attending over layer 0's keys and values.
+
+    Layer 1's k and v projections return layer 0's, which RoPE turns at
+    the same positions.
     """
 
     @classmethod
     def build(cls, config, weights) -> "SharedKeys":
-        import torch
+        import torch  # records a golden only: not a requirement
 
         model = super().build("llama", config, weights).model
         first, second = (layer.self_attn for layer in model.model.layers)
@@ -367,9 +390,9 @@ class SharedKeys(HuggingFace):
 
 
 def test_a_layer_reading_another_s_cache_projects_and_writes_no_keys(golden):
-    """A layer holding layer 0's ``KVCache``, without k and v projections,
-    attends over the keys layer 0 wrote and writes none: within bf16's
-    tolerance of transformers' Llama sharing them the same way.
+    """A layer holding layer 0's ``KVCache``, without k and v projections, attends over the keys layer 0 wrote and writes none.
+
+    Within bf16's tolerance of transformers' Llama sharing them the same way.
     """
     model = small()
     first, second = model.model.layers
@@ -397,8 +420,9 @@ def test_a_layer_reading_another_s_cache_projects_and_writes_no_keys(golden):
 
 
 def test_a_random_tree_draws_a_scalar_as_an_array():
-    """A 0-d tensor drawn at random is a 0-d array, as ``iron.param`` takes
-    it (a clipped linear's clamp bound), not a bare numpy scalar.
+    """A 0-d tensor drawn at random is a 0-d array, as ``iron.param`` takes it (a clipped linear's clamp bound).
+
+    Not a bare numpy scalar.
     """
     tree = checkpoint(SMALL, {"linear.input_min": (), "norm.weight": (8,)})
     bound = tree.tree("random").linear.input_min

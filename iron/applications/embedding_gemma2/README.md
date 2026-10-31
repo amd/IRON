@@ -48,7 +48,9 @@ pytest tests/applications/embedding_gemma2/
 The text encoder's embeddings against Hugging Face's, the truncations, a
 query ranking two documents, text with a clip and an image, each tower's
 soft tokens, the audio features and image patches against Hugging Face's
-processors', determinism and latency, on NPU1 and NPU2; `TestEachStep`
+processors', determinism and latency (recorded to CI:
+[benchmarks](https://amd.github.io/IRON/benchmarks/#bench=embedding_gemma2&suite=nightly&metric=Latency)),
+on NPU1 and NPU2; `TestEachStep`
 checks NPU1's form, an xclbin per step, on NPU2. The vision tests fetch
 four COCO val2017 photos and the audio tests five LibriSpeech test-clean
 utterances (CC BY 4.0) into IRON's cache, each pinned by its sha256.
@@ -56,9 +58,10 @@ Hugging Face's outputs are recorded once in `golden.npz` beside the
 checkpoint by `pytest <test> --record-goldens -p no:xdist`; a test whose golden is missing
 fails.
 
-On NPU1, `TestAudio::test_audio_accuracy[name_passage]` scores 0.9901 at its
-judged 1st-percentile token, under `AUDIO_MIN_COSINE` (0.992, measured on
-NPU2): through 11 layers the tower stays within 0.9996 of its operators'
-references at every token, and the last layer turns passage's tokens 161 to
-163 into 0.876, 0.706 and 0.989. That is the last layer's own
-ill-conditioning (`AUDIO_MIN_COSINE`'s comment), not an operator's error.
+On NPU1 an image wider than Resample's per-core budget is refused
+(`test_image_processor_refuses_on_npu1`), and
+`TestAudio::test_audio_accuracy[passage]` is known to land just under
+`AUDIO_MIN_COSINE`, a bound set from NPU2. The tower tracks its operators'
+references through its first 11 layers; the last layer is ill-conditioned
+at a few of passage's tokens (`AUDIO_MIN_COSINE`'s comment), which NPU1's
+rounding tips under the bound.

@@ -1,15 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Checks the IRON engine against FastFlowLM's own engine, greedy over the same prompts: the
-same tokens up to their first difference, and there IRON's token at least as likely as the stock
-engine's under Gemma 4 in float32 (Hugging Face's, its logits recorded in the checkpoint's
-golden.npz), the reference every model is judged by. After it the two continue from different
-tokens and are not compared.
+"""Check the IRON engine against FastFlowLM's own engine, greedy over the same prompts.
+
+The same tokens up to their first difference, and there IRON's token at
+least as likely as the stock engine's under Gemma 4 in float32 (Hugging
+Face's, its logits recorded in the checkpoint's golden.npz), the
+reference every model is judged by. After it the two continue from
+different tokens and are not compared.
 
     FLM_MODEL_PATH=<dir> pytest tests/applications/gemma4_flm
 
-The tests run `make engine` first, which builds everything. Each prompt reports
-the IRON engine's time to first token and decode rate.
+The tests run `make engine` first, which builds everything. Each prompt
+reports the IRON engine's time to first token and decode rate.
 """
 
 import contextlib
@@ -26,8 +28,8 @@ import numpy as np
 import pytest
 
 from iron.applications.gemma4 import Gemma4
-from iron.operators import flm
 from iron.lm.testing import require, weights_dir
+from iron.operators import flm
 
 APP = Path(flm.__file__).with_name("gemma4_engine")
 FLM = APP / "build" / "FastFlowLM" / "src"
@@ -61,7 +63,7 @@ def post(path, body):
 
 @contextlib.contextmanager
 def serve(engine, xclbins):
-    """Runs `flm serve` with the engine library in `engine` and the xclbins under `xclbins`."""
+    """Run `flm serve` with the engine library in `engine` and the xclbins under `xclbins`."""
     env = dict(
         os.environ, LD_LIBRARY_PATH=f"{engine}:{os.environ.get('LD_LIBRARY_PATH', '')}"
     )
@@ -83,13 +85,19 @@ def serve(engine, xclbins):
     )
     try:
         for _ in range(120):
+            if server.poll() is not None:
+                raise RuntimeError(f"flm serve exited ({server.returncode}) unready")
             with contextlib.suppress(OSError):
                 urllib.request.urlopen(URL + "/api/version")
                 break
             time.sleep(1)
+        else:
+            raise RuntimeError(f"flm serve did not answer {URL} within 120 s")
         yield
     finally:
-        os.killpg(server.pid, signal.SIGTERM)
+        # The group outlives a server that exited, while a child holds it.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(server.pid, signal.SIGTERM)
         server.wait()
 
 
@@ -126,7 +134,7 @@ def generate(prompt, *, backend=None, max_tokens=128):
 
 
 def replies(engine, xclbins, prompts):
-    """The /api/generate responses to prompts, greedy."""
+    """Return the /api/generate responses to prompts, greedy."""
     with serve(engine, xclbins):
         configure_greedy()
         return [generate(prompt) for prompt in prompts]
@@ -134,7 +142,7 @@ def replies(engine, xclbins, prompts):
 
 @pytest.fixture(scope="module")
 def build_engines():
-    """Builds the stock engine and the IRON engine."""
+    """Build the stock engine and the IRON engine."""
     require(MODEL / "model.q4nx")
     subprocess.run(
         ["make", "engine", f"PYTHON={sys.executable}"],
@@ -146,10 +154,10 @@ def build_engines():
 
 @pytest.fixture(scope="module")
 def stock_tokens(build_engines):
-    """The stock engine's token ids per prompt.
+    """Return the stock engine's token ids per prompt.
 
-    The stock engine is deterministic, so every iteration compares with this
-    one run.
+    The stock engine is deterministic, so every iteration compares with
+    this one run.
     """
     stock = replies(APP / "build" / "stock" / "engines", FLM, PROMPTS.values())
     return {name: r["context"] for name, r in zip(PROMPTS, stock)}

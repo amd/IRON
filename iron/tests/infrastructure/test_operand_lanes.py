@@ -6,15 +6,14 @@
 held (``replicate``) input.
 """
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
-
-import aie.utils as aie_utils
 from aie.iron import Program
 from aie.iron.kernels import sample as sample_kernel
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.npukernel import NPUKernel
+from ml_dtypes import bfloat16
 
 from iron.common.design.design import BuiltArray, OperatorDesign
 from iron.common.design.runtime import MergedRuntime, OperatorRuntime

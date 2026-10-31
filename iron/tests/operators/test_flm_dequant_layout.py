@@ -42,9 +42,7 @@ def _apply(stream_idx, sizes, strides):
 
 
 def _model(K, N):
-    """Composed block index for every (k, n): kernel emission, then the join,
-    then the drain.
-    """
+    """Composed block index for every (k, n): kernel emission, then the join, then the drain."""
     n = np.arange(N)[:, None]
     k = np.arange(K)[None, :]
 
@@ -91,9 +89,10 @@ def test_bytes_match_pack_b(K, N):
 
 
 def test_descriptors_are_dma_expressible():
-    """A bfp16 block is 9 bytes and the DMA steps in 4, so only groups of
-    blocks are addressable. The drain is written in blocks; this checks the
-    grouping survives translation to bytes and the field widths.
+    """A bfp16 block is 9 bytes and the DMA steps in 4, so only groups of blocks are addressable.
+
+    The drain is written in blocks; this checks the grouping survives
+    translation to bytes and the field widths.
     """
     block_bytes = T + 1
     dims = DRAIN.transformation_dims

@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Gemma 4's vision tower on the NPU: the image processor's resize into
-patches, the tower and its projection into the text model's space, as one
-graph: Hugging Face's ``Gemma4VisionModel`` and ``embed_vision``, its shape
-``VisionConfig``.
+"""Gemma 4's vision tower on the NPU: resize into patches, the tower and its projection.
+
+Into the text model's space, as one graph: Hugging Face's
+``Gemma4VisionModel`` and ``embed_vision``, its shape ``VisionConfig``.
 """
 
 import dataclasses
@@ -79,9 +79,10 @@ class VisionConfig(lm.Config):
         return self.num_attention_heads
 
     def size(self, height: int, width: int, max_tokens: int) -> tuple[int, int]:
-        """The `(height, width)` the processor resizes an image to: the
-        largest whole `pool * patch` blocks within `max_tokens` soft tokens
-        at the image's aspect ratio.
+        """Return the `(height, width)` the processor resizes an image to.
+
+        The largest whole `pool * patch` blocks within `max_tokens` soft
+        tokens at the image's aspect ratio.
 
         Raises:
             ValueError: Both sides round to no block, or the size exceeds
@@ -112,8 +113,9 @@ class VisionConfig(lm.Config):
         return out_height, out_width
 
     def tokens(self, height: int, width: int, max_tokens: int) -> int:
-        """The soft tokens an image of `height` by `width` pixels gives at
-        the processor's `max_tokens`.
+        """Return the soft tokens an image of `height` by `width` pixels gives.
+
+        At the processor's `max_tokens`.
         """
         out_height, out_width = self.size(height, width, max_tokens)
         return (
@@ -122,8 +124,9 @@ class VisionConfig(lm.Config):
 
 
 class VisionAttention(Attention):
-    """Unscaled attention over RMS-normed q, k and v, every projection
-    ``Clipped``, q, k and v clamping their input alike.
+    """Unscaled attention over RMS-normed q, k and v, every projection ``Clipped``.
+
+    q, k and v clamp their input alike.
     """
 
     def __init__(self, c: VisionConfig, i: int):
@@ -147,8 +150,9 @@ class VisionAttention(Attention):
 
 
 class VisionMLP(GatedMLP):
-    """``GatedMLP``, every projection ``Clipped``, gate and up clamping
-    their input alike.
+    """``GatedMLP``, every projection ``Clipped``.
+
+    Gate and up clamp their input alike.
     """
 
     def __init__(self, c: VisionConfig):
@@ -170,9 +174,10 @@ class VisionMLP(GatedMLP):
 
 
 class VisionLayer(SandwichLayer):
-    """Layer ``i``: ``VisionAttention`` and ``VisionMLP``, each head's
-    channels of q and k reordered as they load, so that the axial RoPE
-    turns halves rather than each half of a head.
+    """Layer ``i``: ``VisionAttention`` and ``VisionMLP``.
+
+    Each head's channels of q and k are reordered as they load, so that the
+    axial RoPE turns halves rather than each half of a head.
     """
 
     def __init__(self, c: VisionConfig, i: int):
@@ -182,6 +187,7 @@ class VisionLayer(SandwichLayer):
     def load_state_dict(self, tree, *, path: str = "") -> None:
         super().load_state_dict(tree, path=path)
         a = self.self_attn
+        assert isinstance(a, VisionAttention), "VisionLayer's own self_attn"
         half, E = a.head_dim // 2, a.q_proj.linear.in_features
         quarter = np.arange(half // 2)
         # The x half's first and second quarters, then the y half's.
@@ -192,13 +198,15 @@ class VisionLayer(SandwichLayer):
             w = p.weight.reshape(a.heads, a.head_dim, E)[:, order]
             p.weight = iron.param(w.reshape(E, E))
         for norm in (a.q_norm, a.k_norm):
+            assert norm is not None, "VisionAttention's own q_norm and k_norm"
             norm.weight = iron.param(norm.weight[order])
 
 
 class PatchEmbedder(iron.Graph):
-    """A patch's projection into the tower's space, and the table its x and
-    y position embeddings are rows of: ``x_windows`` and ``y_windows``,
-    ``x_ids`` and ``y_ids`` of its rows in window order, derived once it loads.
+    """A patch's projection into the tower's space, and the table its x and y position embeddings are rows of.
+
+    ``x_windows`` and ``y_windows``, ``x_ids`` and ``y_ids`` of its rows in
+    window order, derived once it loads.
     """
 
     def __init__(self, c: VisionConfig, x_ids: list[int], y_ids: list[int]):
@@ -225,8 +233,9 @@ class EmbedVision(iron.Graph):
 
 
 class VisionTower(Tower):
-    """The vision tower and `embed_vision` over at most `patches` patches,
-    one compile for every image; called in another graph's body, its steps
+    """The vision tower and `embed_vision` over at most `patches` patches.
+
+    One compile for every image; called in another graph's body, its steps
     are that graph's.
 
     Args:
@@ -305,9 +314,10 @@ class VisionTower(Tower):
         self.pooling = iron.weight(pool)
 
     def window_positions(self, h, *, n, hk, wk, walked):
-        """``h`` plus each patch's x and y position embeddings, and its
-        angles by head size (``Call.ropes``), for an image of ``hk`` by
-        ``wk`` windows, ``n`` patches.
+        """Return ``h`` plus each patch's x and y position embeddings, and its angles by head size.
+
+        ``Call.ropes``, for an image of ``hk`` by ``wk`` windows, ``n``
+        patches.
         """
         c = self.config
         T = c.patches
@@ -334,8 +344,9 @@ class VisionTower(Tower):
         return h, {c.head_dim: (angles, angles)}
 
     def walk(self, table, x_side: bool, *, repeat, wk, walked):
-        """The window blocks of ``table``, x's by window column or y's by
-        window row, each group's ``repeat`` window rows of ``wk`` in turn.
+        """Return the window blocks of ``table``, x's by window column or y's by window row.
+
+        Each group's ``repeat`` window rows of ``wk`` in turn.
         """
         k, across = self.config.pooling_kernel_size, self.processor.across
         width = table.shape[1]
@@ -368,7 +379,7 @@ class VisionTower(Tower):
         projection = self.embed_vision.embedding_projection.weight
         return F.linear(x, projection, precision=c.precision)
 
-    def body(
+    def body(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         rgb,
         *,
@@ -381,9 +392,10 @@ class VisionTower(Tower):
         wk: Scratchpad[np.int32],
         walked: Scratchpad[np.int32],
     ):
-        """The `(tokens, text_dim)` soft tokens of the image `rgb`, `n`
-        patches in `hk` by `wk` windows; the first `n // pool ** 2` are the
-        image's, the rest zero.
+        """Return the `(tokens, text_dim)` soft tokens of the image `rgb`, `n` patches.
+
+        In `hk` by `wk` windows; the first `n // pool ** 2` are the image's,
+        the rest zero.
         """
         pixels, _, _ = self.processor(
             rgb,
@@ -402,12 +414,12 @@ class VisionTower(Tower):
         return values["n"] // self.config.pooling_kernel_size**2
 
     def shapes(self) -> list[dict]:
-        """The input shapes of each version: one, the largest image's."""
+        """Return the input shapes of each version: one, the largest image's."""
         chunks = self.processor.resample.image_chunks
         return [dict(rgb=((chunks, self.config.chunk), np.uint8))]
 
     def longest(self) -> dict:
-        """The per-call values of the largest image, its patches filled."""
+        """Return the per-call values of the largest image, its patches filled."""
         c = self.config
         _, values = self.inputs(
             np.zeros((*c.largest, 3), np.uint8), c.patches // c.pooling_kernel_size**2
@@ -415,8 +427,9 @@ class VisionTower(Tower):
         return values
 
     def inputs(self, image, max_tokens: int) -> tuple[np.ndarray, dict]:
-        """A call's image buffer and per-call sizes, `n` (its patches) among
-        them, for a decoded `image` at the processor's `max_tokens`.
+        """Return a call's image buffer and per-call sizes, `n` (its patches) among them.
+
+        For a decoded `image` at the processor's `max_tokens`.
 
         Raises:
             ValueError: The image or its patches do not fit a call, or
@@ -436,8 +449,9 @@ class VisionTower(Tower):
         )
 
     def walked(self, hk: int, wk: int) -> int:
-        """The rows the window walks move for an image of `hk` by `wk`
-        windows: each group's window rows of it, or past it one.
+        """Return the rows the window walks move for an image of `hk` by `wk` windows.
+
+        Each group's window rows of it, or past it one.
         """
         rows = sum(max(1, min(hk - first, r)) for first, r, *_ in self.groups)
         return self.config.pooling_kernel_size**2 * wk * rows

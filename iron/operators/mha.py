@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fused multi-head attention: ``num_pipelines`` three-stage pipelines (QK^T,
-partial softmax, P*V), one per column, Q split across them on a memtile, K
-and V forwarded to every one; P*V may split over two cores when d=512. The
-queries are the keys' last rows, padded to 64, except one (a decode step),
-which packs a KV group's heads into a block instead.
+"""Fused multi-head attention: ``num_pipelines`` three-stage pipelines (QK^T, partial softmax, P*V).
+
+One per column, Q split across them on a memtile, K and V forwarded to
+every one; P*V may split over two cores when d=512. The queries are the
+keys' last rows, padded to 64, except one (a decode step), which packs a
+KV group's heads into a block instead.
 """
 
 import dataclasses
@@ -18,10 +19,8 @@ from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import AnyComputeTile, AnyMemTile, AnyShimTile, Device, Tile
 from aie.iron.kernels.linalg import mm_stream_dims
-from aie.utils.verify import Tolerance
-from aie.utils.compile.jit.context import compile_context
 from aie.utils import set_current_device
-from aie.utils.compile.utils import resolve_target_arch
+from aie.utils.compile.jit.context import compile_context
 from aie.utils.compile.jit.params import (
     Select,
     divisors,
@@ -30,16 +29,21 @@ from aie.utils.compile.jit.params import (
     tunable,
     widths,
 )
+from aie.utils.compile.utils import resolve_target_arch
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp, Unresolvable
+from iron.common.declare.operand import concrete
 from iron.common.testing import Case, Testing
 
 
 @dataclasses.dataclass(frozen=True)
 class SplitColumns:
-    """Where MHA's streams meet the array with P*V split over two cores; each
-    column carries every stream its links hold, so these are what the router finds.
+    """Where MHA's streams meet the array with P*V split over two cores.
+
+    Each column carries every stream its links hold, so these are what the
+    router finds.
 
     Attributes:
         q: Each Q shim's split.
@@ -57,9 +61,7 @@ class SplitColumns:
 
 # Whole in seq_pad's 64-row unit, up to the largest whose cores fit L1.
 def block_sizes(op, dev, start: int) -> tuple[int, ...]:
-    """Return the query blocks to try: whole in seq_pad's 64-row unit, up to
-    the largest whose cores fit L1.
-    """
+    """Return the query blocks to try, whole in seq_pad's 64-row unit, up to the largest whose cores fit L1."""
     cap = max(
         (
             b
@@ -187,8 +189,9 @@ def _cases(cls, dev: Device):
 
 
 class MHA(Operator):
-    """Fused attention over ``(B_q, d)`` Q, ``(d, B_kv)`` K and ``(B_kv, d)``
-    V blocks; more than six pipelines split Q and O over two shims.
+    """Fused attention over ``(B_q, d)`` Q, ``(d, B_kv)`` K and ``(B_kv, d)`` V blocks.
+
+    More than six pipelines split Q and O over two shims.
     """
 
     test = Testing(_cases)
@@ -234,22 +237,38 @@ class MHA(Operator):
     }
 
     Q = In(
-        Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
+        Select(
+            heads_interleaved,
+            (seq_pad, num_heads, d),
+            (num_heads, seq_pad, d),
+        ),
         obj_shape=(join_rows, d),
         per=(q_shims,),
     )
     K = In(
-        Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
+        Select(
+            kv_interleaved,
+            (kv_len, num_KV_heads, d),
+            (num_KV_heads, kv_len, d),
+        ),
         obj_shape=(d, B_kv),
         per=(kv_lanes,),
     )
     V = In(
-        Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
+        Select(
+            kv_interleaved,
+            (kv_len, num_KV_heads, d),
+            (num_KV_heads, kv_len, d),
+        ),
         obj_shape=(B_kv, pv_width),
         per=(kv_lanes, pv_cores),
     )
-    O = Out(
-        Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
+    O = Out(  # noqa: E741 -- an operand name: attention's Q, K, V, O
+        Select(
+            heads_interleaved,
+            (seq_pad, num_heads, d),
+            (num_heads, seq_pad, d),
+        ),
         obj_shape=(join_rows, pv_width),
         per=(q_shims, pv_cores),
     )
@@ -378,7 +397,9 @@ class MHA(Operator):
             (False, ("B_q", "d", "B_kv")),
             (True, ("B_q", "B_kv", "pv_width")),
         ):
-            mac = kernels.linalg.mha.mac_dims(pv=pv, device=self.dev)
+            mac = kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
+                pv=pv, device=self.dev
+            )
             for name, m in zip(dims, mac):
                 if vars(self)[name] % m:
                     raise ValueError(
@@ -443,13 +464,13 @@ class MHA(Operator):
                 f"{dev.name} ({dev.arch}) with {dev.cols}"
             )
         B_q, pv_cores = self.B_q, self.pv_cores
-        mem = None if dev is None else dev.core_memory_bytes
         if B_q is None or pv_cores is None:
             if dev is None:
                 raise Unresolvable(
                     "MHA's block size and P*V cores follow the cores' memory; "
                     "none is bound and not both were given"
                 )
+            mem = dev.core_memory_bytes
             group = self.num_heads // self.num_KV_heads
             # Every row of a packed block is computed: the narrowest holding the group.
             blocks = (8, 16, 32, 64) if self.packed else (64, 32, 16)
@@ -498,9 +519,11 @@ class MHA(Operator):
         return ceildiv(seq_len, 64) * 64
 
     def key_block(self, B_q: int, dev: Device | None) -> int:
-        """``B_kv`` for ``B_q``: itself, which mha.cc's causal skip compares
-        by; packed, the widest divisor of ``kv_len`` whose cores fit ``dev``
-        (any, where None), since mha.cc's vectorized softmax reads 64-key rows."""
+        """``B_kv`` for ``B_q``: itself, which mha.cc's causal skip compares by.
+
+        Packed, the widest divisor of ``kv_len`` whose cores fit ``dev``
+        (any, where None), since mha.cc's vectorized softmax reads 64-key rows.
+        """
         if not self.packed:
             return B_q
         return next(
@@ -517,11 +540,15 @@ class MHA(Operator):
             B_q,
         )
 
-    def core_bytes(self, dev, B_q: int, B_kv: int, pv_cores: int) -> int:
-        """The larger of a pipeline's QK^T and P*V cores' L1 bytes, kernels'
-        data and stack included, over the device's default stack.
+    def core_bytes(self, dev: Device, B_q: int, B_kv: int, pv_cores: int) -> int:
+        """Return the larger of a pipeline's QK^T and P*V cores' L1 bytes.
+
+        Kernels' data and stack included, over the device's default stack.
 
         Args:
+            dev: The device the cores' memory is measured against.
+            B_q: The query block size.
+            B_kv: The key/value block size.
             pv_cores: The P*V cores the head is split over.
         """
         d, pv_width = self.d, self.d // pv_cores
@@ -571,8 +598,11 @@ class MHA(Operator):
 
         # partial_softmax takes exp2, so the scale is in the log2 domain.
         inv_scale = float(bfloat16(self.scale * np.log2(np.e)))
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("MHA: build() needs a bound device")
         # AIE2P's exp2 instruction is up to 6% high; AIE2 has none to replace.
-        accurate_exp2 = self.dev.arch is AIEArch.AIE2p
+        accurate_exp2 = dev.arch is AIEArch.AIE2p
 
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
         v_ty = np.ndarray[(B_kv, pv_width), np.dtype[dtype]]
@@ -635,7 +665,14 @@ class MHA(Operator):
 
         # Each stream is blocked as the product that reads or writes it takes it.
         qk = matmul_QK.stream_dims
-        pv = mm_stream_dims(B_q, B_kv, pv_width, kernels.linalg.mha.mac_dims(pv=True))
+        pv = mm_stream_dims(
+            B_q,
+            B_kv,
+            pv_width,
+            kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
+                pv=True
+            ),
+        )
 
         # Split, Q is one block deep: the QK core's L1 holds one d=512 block.
         q_depth = 1 if split else of_depth
@@ -706,7 +743,7 @@ class MHA(Operator):
                 .cons()
                 .forward(
                     to_stream=qk.B,
-                    tile=Tile(layout.k, 1) if split else AnyMemTile,
+                    tile=Tile(layout.k, 1) if layout is not None else AnyMemTile,
                     depth=of_depth,
                 )
             )
@@ -716,7 +753,7 @@ class MHA(Operator):
                     .cons()
                     .forward(
                         to_stream=pv.B,
-                        tile=Tile(layout.v[h], 1) if split else AnyMemTile,
+                        tile=Tile(layout.v[h], 1) if layout is not None else AnyMemTile,
                         depth=of_depth,
                     )
                 )
@@ -755,9 +792,11 @@ class MHA(Operator):
         ]
 
         def each_q_block(heads, q_blocks, q_valid, first, bias, idx, q_block):
-            """``q_block(compute)`` over every head's Q blocks, those past
-            the bound not computed; ``idx`` restarts at the head's first,
-            ``first``'s block and row offset."""
+            """``q_block(compute)`` over every head's Q blocks, those past the bound not computed.
+
+            ``idx`` restarts at the head's first, ``first``'s block and row
+            offset.
+            """
             q_start, q_offset = first
             idx[2] = q_offset
             for _ in range_(heads):
@@ -1025,8 +1064,10 @@ class MHA(Operator):
         return 4 * self.num_heads * self.d * int((hi - lo + 1).sum())
 
     def reference(self, Q, K, V, s_q=None, s_kv=None):
-        """Attention per head, the queries the keys' last rows; query rows from
-        ``s_q`` on are zeros and keys from ``s_kv`` on are masked.
+        """Attention per head, the queries the keys' last rows.
+
+        Query rows from ``s_q`` on are zeros and keys from ``s_kv`` on are
+        masked.
         """
         if self.heads_interleaved:
             Q = np.swapaxes(Q, 0, 1)
@@ -1054,7 +1095,8 @@ class MHA(Operator):
             position = offset + np.arange(block.start, block.stop)[:, None]
             masked = np.zeros((len(position), k.shape[1]), dtype=bool)
             if self.causal or self.window:
-                masked |= key > position + (0 if self.causal else self.window)
+                # The enclosing "if" means self.window is set whenever not causal.
+                masked |= key > position + (0 if self.causal else (self.window or 0))
             if self.window:
                 masked |= key < position - self.window
             mask = np.where(masked, -np.inf, 0).astype(np.float32)
@@ -1077,8 +1119,10 @@ class MHA(Operator):
         )
 
     def sequence(self, rt):
-        """One descriptor set per KV group: K and V re-read per (head, block)
-        from the iteration slot, not six descriptors per block.
+        """One descriptor set per KV group.
+
+        K and V re-read per (head, block) from the iteration slot, not six
+        descriptors per block.
         """
         kv_heads = self.num_KV_heads
         group = self.num_heads // kv_heads
@@ -1112,11 +1156,12 @@ class MHA(Operator):
                     heads = heads[kv_head * group : (kv_head + 1) * group, 0]
                     return heads.coalesce().repeat(self.B_q // group)
                 first = heads[kv_head * group : kv_head * group + width, 0]
+                (stride0,) = concrete(first.strides[:1], first)
                 both = TensorAccessPattern(
                     first.tensor_dims,
                     first.offset,
                     (2, *first.sizes),
-                    ((group - width) * first.strides[0], *first.strides),
+                    ((group - width) * stride0, *first.strides),
                 )
                 return both.coalesce().repeat(self.B_q // (2 * width))
 
@@ -1142,8 +1187,11 @@ class MHA(Operator):
             return
 
         cores, pv_width = self.pv_cores, self.pv_width
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("MHA: sequence() needs a bound device")
         # A shim descriptor's iteration count.
-        iterations = 1 << self.dev.get_dma_bd_iter_bits(0, 0)
+        iterations = 1 << dev.get_dma_bd_iter_bits(0, 0)
         for kv_head in range(kv_heads):
             head0 = kv_head * group
             tg = rt.task_group()

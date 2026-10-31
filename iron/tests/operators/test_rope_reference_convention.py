@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""RoPE.reference must match the device's angle convention: rope.py's array
-acquires one angle row and applies it to `rows // angle_rows` consecutive input
-rows before moving to the next, so row r uses angle row
-`r // (rows // angle_rows)`.
+"""RoPE.reference must match the device's angle convention.
+
+rope.py's array acquires one angle row and applies it to
+`rows // angle_rows` consecutive input rows before moving to the next, so
+row r uses angle row `r // (rows // angle_rows)`.
 
 That convention and the interleaved one (`r % angle_rows`) agree whenever
 angle_rows is 1 or rows, so only 1 < angle_rows < rows tells them apart --
@@ -19,9 +20,7 @@ from iron.operators.rope import RoPE
 
 
 def _block_major_expected(x, angles, rows, angle_rows):
-    """The device convention written out row by row: row r uses angle row
-    r // (rows // angle_rows).
-    """
+    """Return the device convention written out row by row: row r uses angle row r // (rows // angle_rows)."""
     cols = x.shape[-1]
     half = cols // 2
     tensor_rows_per_angle_row = rows // angle_rows
@@ -47,8 +46,9 @@ def _make_inputs(rows, angle_rows, cols=32, seed=0):
 
 
 def test_reference_matches_device_convention_across_shapes():
-    """(8, 2) and (12, 4) are 1 < angle_rows < rows, the only regime that
-    separates the two conventions; the rest confirm they agree elsewhere.
+    """(8, 2) and (12, 4) are 1 < angle_rows < rows, the only regime that separates the two conventions.
+
+    The rest confirm they agree elsewhere.
     """
     for rows, angle_rows in [(8, 2), (1024, 1), (4, 4), (13, 13), (12, 4)]:
         x, angles = _make_inputs(rows, angle_rows)

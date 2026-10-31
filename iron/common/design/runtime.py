@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import functools
+from collections.abc import Callable, Sequence
 from math import prod
-from typing import Any
+from typing import Any, cast
 
 from aie.dialects.aie import shim_dma_allocation
 from aie.dialects.aiex import shim_dims
@@ -30,14 +31,16 @@ from aie.iron import (
 from aie.iron.runtime.dmatask import emit_shim_transfer
 
 from ..declare import Built, Operator, Value
-from ..declare.operand import Operand, active_runtime
+from ..declare.operand import Operand, active_runtime, concrete
 
 
 class OperatorRuntime(Runtime):
-    """The ``rt`` an operator's ``sequence(rt)`` receives: aie.iron's ``Runtime``
-    running the preamble, then that sequence or the one its declaration derives.
-    A managed transfer on a pinned lane keeps at most the operand's ``depth`` in
-    flight, all awaited at the sequence's end.
+    """The ``rt`` an operator's ``sequence(rt)`` receives.
+
+    aie.iron's ``Runtime`` running the preamble, then that sequence or the
+    one its declaration derives. A managed transfer on a pinned lane keeps
+    at most the operand's ``depth`` in flight, all awaited at the
+    sequence's end.
 
     Args:
         op: The resolved operator, its array built and its operands' lanes
@@ -105,8 +108,9 @@ class OperatorRuntime(Runtime):
         return [b for b in self.op.buffers if not b.on_chip]
 
     def body(self, *args) -> None:
-        """The sequence body, given the operator's runtime tensors, its lanes'
-        handles, then each per-call value not in the scratchpad as its scalar.
+        """Record the sequence body, given the operator's runtime tensors, its lanes' handles.
+
+        Then each per-call value not in the scratchpad as its scalar.
         """
         self.take(*args)
         token = active_runtime.set(self)
@@ -137,9 +141,10 @@ class OperatorRuntime(Runtime):
         super().resolve(loc, ip, device=device, **options)
 
     def declare(self, device) -> None:
-        """Its pins and buffers, at ``device`` scope ahead of the sequence: aie.iron
-        names a shim channel by its route and places a buffer by the worker that
-        reads it, and these have neither.
+        """Its pins and buffers, at ``device`` scope ahead of the sequence.
+
+        aie.iron names a shim channel by its route and places a buffer by
+        the worker that reads it, and these have neither.
         """
         for symbol, end in self.pins.items():
             device.resolve_tile(end.tile)
@@ -205,9 +210,11 @@ class OperatorRuntime(Runtime):
         repeat_parameter: Value | None = None,
         managed: bool = True,
     ):
-        """``Operand.fill``/``drain`` (``verb``): ``source``'s (else ``operand``'s)
-        ``tap`` through ``lane`` of ``operand``'s stream, its per-call words a
-        scratchpad parameter on a full ELF, the pattern's sizes and offset on an xclbin.
+        """``Operand.fill``/``drain`` (``verb``): ``source``'s (else ``operand``'s) ``tap``.
+
+        Through ``lane`` of ``operand``'s stream, its per-call words a
+        scratchpad parameter on a full ELF, the pattern's sizes and offset
+        on an xclbin.
         """
         if lane is None:
             if operand.lanes != 1:
@@ -242,8 +249,11 @@ class OperatorRuntime(Runtime):
                 f"length is a scratchpad word patched into the descriptor"
             )
         _, sizes, strides = shim_dims(tap)
+        # Read before a per-call size or repeat is patched in below, so still concrete.
+        static_sizes, static_strides = concrete(sizes, tap), concrete(strides, tap)
         dim = scale = None
         if length_parameter is not None:
+            assert length_unit is not None, "length_unit accompanies length_parameter"
             # A patched descriptor's length ends at its outermost dimension
             # below the iteration; an xclbin's stream, regenerated per call,
             # sizes any dimension of length_unit-element units.
@@ -252,12 +262,16 @@ class OperatorRuntime(Runtime):
                 (
                     d
                     for d in range(1, 4)
-                    if (prod(sizes[1:d]) == 1 or not patched)
-                    and prod(sizes[d + 1 :]) == length_unit
+                    if (prod(static_sizes[1:d]) == 1 or not patched)
+                    and prod(static_sizes[d + 1 :]) == length_unit
                 ),
                 None,
             )
-            if dim is None and prod(sizes[1:3]) == 1 and sizes[3] % length_unit == 0:
+            if (
+                dim is None
+                and prod(static_sizes[1:3]) == 1
+                and static_sizes[3] % length_unit == 0
+            ):
                 # One linear run, whose length counts its elements: units of them.
                 dim, scale = 3, length_unit
             if dim is None:
@@ -267,6 +281,7 @@ class OperatorRuntime(Runtime):
                     + (" below the iteration, outermost" if patched else "")
                 )
         data = self._tensors[buffer.name]
+        common: dict[str, Any]
         if pinned and managed:
             # The image's memtiles hold depth objects: past that, wait for the oldest.
             queue = self._queues.setdefault(symbol, [])
@@ -311,11 +326,15 @@ class OperatorRuntime(Runtime):
                 queue.append(task)
             return task
         if dim is not None:
+            # dim is set only inside the length_parameter is not None branch above.
+            assert length_parameter is not None
             # A unit dimension's stride is normalised to 0, which a dynamic
             # size may not have; its count never passes 1, so the stride the
             # next block would have moves the same bytes.
             if sizes[dim] == 1 and strides[dim] == 0:
-                inner = zip(sizes[dim + 1 :], strides[dim + 1 :])
+                # dim's own size and stride are patched below, but nothing past
+                # it, which stays concrete.
+                inner = zip(static_sizes[dim + 1 :], static_strides[dim + 1 :])
                 strides[dim] = max(n * stride for n, stride in inner)
             sizes[dim] = length_parameter.ssa
             if scale is not None:
@@ -332,7 +351,7 @@ class OperatorRuntime(Runtime):
             offset = offset_parameter.ssa
             if tap.offset:
                 offset = offset + arith.constant(
-                    int(tap.offset), IntegerType.get_signless(32)
+                    concrete((tap.offset,), tap)[0], IntegerType.get_signless(32)
                 )
         task = fn(
             data,
@@ -347,10 +366,12 @@ class OperatorRuntime(Runtime):
         return self._tensors[buffer.name]
 
     def preamble(self, **values) -> None:
-        """Each core's runtime parameters, the parameter sync, then each core's
-        barrier, before any DMA; a shipped image's parameter blocks (``buffers``)
-        get the residents' words in declaration order, for its sequence to release.
-        An ``own_preamble`` operator's sequence calls it, ``values`` overriding residents.
+        """Write each core's runtime parameters, the parameter sync, then each core's barrier, before any DMA.
+
+        A shipped image's parameter blocks (``buffers``) get the residents'
+        words in declaration order, for its sequence to release. An
+        ``own_preamble`` operator's sequence calls it, ``values`` overriding
+        residents.
 
         Raises:
             ValueError: ``values`` names no resident of the operator, or a
@@ -386,16 +407,30 @@ class OperatorRuntime(Runtime):
 
 
 class MergedRuntime(Runtime):
-    """Operator runtimes run back to back as one sequence
-    (``Runtime.merge``), declaring each array's pins and buffers once.
+    """Operator runtimes run back to back as one sequence (``Runtime.merge``).
+
+    Declaring each array's pins and buffers once.
     """
 
     runtimes: list[OperatorRuntime]
 
     @classmethod
-    def merge(cls, runtimes, name=None, run=None) -> MergedRuntime:
-        merged = super().merge(runtimes, name, run)
-        merged.runtimes = list(runtimes)
+    def merge(
+        cls,
+        runtimes: Sequence[Runtime],
+        name: str | None = None,
+        run: Callable[[Sequence[tuple[Runtime, tuple]]], None] | None = None,
+    ) -> MergedRuntime:
+        # Runtime.merge() builds cls(...), so this is really a MergedRuntime;
+        # its own declared return type is the non-generic base.
+        merged = cast(MergedRuntime, super().merge(runtimes, name, run))
+        checked: list[OperatorRuntime] = []
+        for runtime in runtimes:
+            assert isinstance(
+                runtime, OperatorRuntime
+            ), "MergedRuntime merges OperatorRuntime steps"
+            checked.append(runtime)
+        merged.runtimes = checked
         return merged
 
     @classmethod

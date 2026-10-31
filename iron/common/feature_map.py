@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``Conv2d``, a convolution over the rows of a channels-last feature map,
-``(rows, width * channels)``.
+"""``Conv2d``, a convolution over the rows of a channels-last feature map.
+
+The map is ``(rows, width * channels)``.
 """
 
 import numpy as np
@@ -21,10 +22,12 @@ GEMM_COLUMNS = GEMM.declaration.params["tile_n"].default
 
 
 class Conv2d(iron.Graph):
-    """A bias-free 2-D convolution of channels-last rows ``(rows, width * channels)``,
-    any row padding held in the input, computing the per-call ``rows`` of
-    ``(out_rows, (out_width + 2 * border) * out_channels)`` summed in float32. Its
-    output is written to a given ``y`` only when it fills whole GEMM blocks.
+    """A bias-free 2-D convolution of channels-last rows ``(rows, width * channels)``.
+
+    Any row padding is held in the input. It computes the per-call ``rows``
+    of ``(out_rows, (out_width + 2 * border) * out_channels)`` summed in
+    float32. Its output is written to a given ``y`` only when it fills whole
+    GEMM blocks.
 
     Args:
         weight: ``(out_channels, in_channels // groups, kernel, kernel)``.

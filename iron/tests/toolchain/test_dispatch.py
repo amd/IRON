@@ -32,8 +32,9 @@ pytestmark = requires("xclbinutil", "peano")
 
 
 def _graph():
-    """A softmax with a per-call row length, then a copy into a cache at a
-    per-call offset: one core-read value and one offset value.
+    """Build a softmax at a per-call row length, then a copy into a cache at an offset.
+
+    The offset is per call too: one core-read value and one offset value.
     """
     R, C, L = 16, 256, 4
     cache = iron.state((R, L, C), name="cache")
@@ -80,8 +81,9 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
 
 @pytest.mark.supported_devices("npu2")
 def test_each_call_softmaxes_its_columns_and_copies_them_into_its_slot():
-    """The xclbin form run: each call's row length sizes both steps' streams,
-    the copy's down to its innermost dimension, and its slot moves the copy.
+    """Run the xclbin form: each call's row length sizes both steps' streams.
+
+    The copy's down to its innermost dimension, and its slot moves the copy.
     """
     g, cache, shape = _graph()
     net = g.compile(full_elf=False, x=shape)
@@ -110,9 +112,10 @@ def test_each_call_softmaxes_its_columns_and_copies_them_into_its_slot():
 
 
 def test_a_per_call_size_over_one_block_builds_at_each_step(npu2):
-    """One query over a cache of one key block: K and V's block count is
-    per call, over a dimension of one block, whose stride the pattern holds
-    as 0.
+    """Run one query over a cache of one key block.
+
+    K and V's block count is per call, over a dimension of one block,
+    whose stride the pattern holds as 0.
     """
     heads, kv_heads, d, cache = 8, 2, 64, 64
 
@@ -138,8 +141,9 @@ def test_a_per_call_size_over_one_block_builds_at_each_step(npu2):
 
 
 def test_npu1_compiles_each_step_unasked():
-    """NPU1 has no full-ELF dispatch, so a plain ``compile()`` there takes
-    the xclbin form that is built, one dispatch per step.
+    """Check that ``compile()`` on NPU1 builds the xclbin form, one dispatch per step.
+
+    NPU1 has no full-ELF dispatch.
     """
     g, _, shape = _graph()
     previous = aie_utils.get_current_device(probe_runtime=False)

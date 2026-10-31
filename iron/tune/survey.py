@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
-from collections.abc import Callable, Hashable, Mapping, Sequence, Set
+from collections.abc import Callable, Hashable, Mapping, Set
 
 from aie.utils import coded
 from aie.utils.compile.jit.params import OperatorParam
@@ -20,6 +20,7 @@ from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
 from iron.operators.gemm import GEMM
+
 from .autotune import Shape, Timed, least_us
 from .costmodel import CostModel
 from .fold import array_scoped_fold_candidates

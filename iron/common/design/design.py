@@ -34,9 +34,10 @@ from .runtime import MergedRuntime, OperatorRuntime
 
 
 class OperatorDesign:
-    """One operator's design (``module``, or ``Operator.exported_design``) as
-    ``CompilableDesign`` compiles and caches it; ``identity`` adds to the cache
-    key the fields the operator's repr leaves out.
+    """One operator's design (``module``, or ``Operator.exported_design``).
+
+    ``CompilableDesign`` compiles and caches it; ``identity`` adds to the
+    cache key the fields the operator's repr leaves out.
     """
 
     # An object address in the key would re-key the cache every process.
@@ -81,12 +82,17 @@ class OperatorDesign:
         self.generator = generator
 
     def module(self, **dispatch):
-        """The operator's MLIR module on the bound device; on an xclbin, which has no
-        parameter scratchpad, ``dispatch`` is each per-call value's scalar by symbol.
+        """Return the operator's MLIR module on the bound device.
+
+        On an xclbin, which has no parameter scratchpad, ``dispatch`` is each
+        per-call value's scalar by symbol.
         """
         array = BuiltArray(self, dispatch=dispatch)
         prog = array.program()
         if array.traced:
+            assert (
+                array.op.trace is not None
+            ), "traced is non-empty only when op.trace is set"
             prog.enable_trace(array.op.trace.trace_size, workers=array.traced)
         return prog.resolve_program()
 
@@ -110,8 +116,9 @@ class OperatorDesign:
         return f"{type(self.op).__name__}_{self.identity[:8]}"
 
     def compilable(self, **options) -> CompilableDesign:
-        """The ``CompilableDesign``, given ``options``, the operator's
-        ``aiecc_flags`` added to theirs.
+        """Return the ``CompilableDesign`` given ``options``.
+
+        The operator's ``aiecc_flags`` are added to theirs.
         """
         flags = [*options.pop("aiecc_flags", ()), *self.op.aiecc_flags]
         return CompilableDesign(
@@ -124,9 +131,11 @@ class OperatorDesign:
     def compile(
         self, image: CompilableDesign | None = None, **options
     ) -> CompilableDesign:
-        """Compile the design, or find it in the cache. ``image``, for an insts_only
-        stream, is the design it runs on: the compile fails, naming each resource
-        laid out otherwise than there, rather than run against it.
+        """Compile the design, or find it in the cache.
+
+        ``image``, for an insts_only stream, is the design it runs on: the
+        compile fails, naming each resource laid out otherwise than there,
+        rather than run against it.
         """
         # The key reads the current device: bound first, keys before and after agree.
         aie_utils.ensure_current_device()
@@ -136,9 +145,10 @@ class OperatorDesign:
 
 
 class BuiltArray:
-    """One design's array, built on a resolved copy of its operator (``op``), its
-    operands' lanes bound. Designs of one array (``identities``) build it once,
-    each running its own sequence over it (``runtime``).
+    """One design's array, built on a resolved copy of its operator (``op``).
+
+    Its operands' lanes are bound. Designs of one array (``identities``)
+    build it once, each running its own sequence over it (``runtime``).
 
     Args:
         words: On a full ELF, design symbol -> the scratchpad word it shares
@@ -172,7 +182,8 @@ class BuiltArray:
         for value in op.values:
             if design.full_elf and not value.dispatch:
                 value.param = ScratchpadParameter(
-                    words.get(value.symbol, value.symbol), value.dtype
+                    words.get(value.symbol, value.symbol),
+                    value.dtype,
                 )
             elif design.full_elf:
                 raise ValueError(
@@ -213,7 +224,7 @@ class BuiltArray:
             self.traced = self.traced or self.workers[:1]
 
     def program(self) -> Program:
-        """This array alone with its operator's own sequence."""
+        """Return this array alone with its operator's own sequence."""
         return Program(
             self.op.array_device(),
             OperatorRuntime(self.op, self.built),
@@ -234,7 +245,11 @@ class BuiltArray:
         module = alone.program().resolve_program()
         words: set[str] = set()
 
-        def read(op: ir.Operation) -> ir.WalkResult:
+        # aie.ir re-exports MLIR's compiled bindings with a wildcard import,
+        # which pyright's stub does not see through.
+        def read(
+            op: ir.Operation,
+        ) -> ir.WalkResult:
             if op.name == "aiex.read_scratchpad_parameter":
                 words.add(ir.FlatSymbolRefAttr(op.attributes["parameter"]).value)
             return ir.WalkResult.ADVANCE
@@ -278,8 +293,10 @@ class BuiltArray:
 
 
 def identities(arrays: Mapping[str, BuiltArray]) -> dict[str, Hashable]:
-    """What each of ``arrays`` is, equal where two are one array: its ``array_key``,
-    and where another shares that, the words its cores read (``BuiltArray.reads``).
+    """Return what each of ``arrays`` is, equal where two are one array.
+
+    Its ``array_key``, and where another shares that, the words its cores
+    read (``BuiltArray.reads``).
     """
     keys = [a.op.array_key() for a in arrays.values()]
     return {
@@ -321,7 +338,12 @@ def configuration(
     if len(kinds) != 1:
         raise ValueError(f"{list(arrays)} are built for different devices {kinds}")
     traced = [owner for owner in owners.values() if owner.traced]
-    sizes = {owner.op.trace.trace_size for owner in traced}
+    sizes = set()
+    for owner in traced:
+        assert (
+            owner.op.trace is not None
+        ), "traced is non-empty only when op.trace is set"
+        sizes.add(owner.op.trace.trace_size)
     if len(sizes) > 1:
         raise ValueError(
             f"{name}: its traced arrays ask for trace sizes {sorted(sizes)}; one "

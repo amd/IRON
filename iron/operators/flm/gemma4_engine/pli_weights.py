@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Repacks the per-layer-input (PLI) projection weights for flm's
-ProjectionGEMM: ``model.q4nx`` stores them in vision_mm.xclbin's block
-order, bf16, while ProjectionGEMM reads B in another order, as bfp16. The
-weights are static, so the build repacks them once.
+"""Repack the per-layer-input (PLI) projection weights for flm's ProjectionGEMM.
+
+``model.q4nx`` stores them in vision_mm.xclbin's block order, bf16, while
+ProjectionGEMM reads B in another order, as bfp16. The weights are
+static, so the build repacks them once.
 """
 
 import json
@@ -33,7 +34,7 @@ def read_bf16(q4nx, header, data_start, name):
 
 
 def write(model_dir, config, op, out_dir):
-    """Writes pli_{down,gate,up}.weights, packed for GEMM `op`; gate and up hold one layer after another."""
+    """Write pli_{down,gate,up}.weights, packed for GEMM `op`; gate and up hold one layer after another."""
     d, pli_d = config["hidden_size"], config["hidden_size_per_layer_input"]
     layers = range(config["num_hidden_layers"])
     files = {
@@ -54,4 +55,4 @@ def write(model_dir, config, op, out_dir):
         with open(out_dir / f"pli_{stem}.weights", "wb") as out:
             for name, K, N in tensors:
                 B = unblock(read_bf16(q4nx, header, data_start, name), K, N)
-                out.write(op.pack_B(B.astype(bfloat16)).tobytes())
+                out.write(op.pack_b(B.astype(bfloat16)).tobytes())

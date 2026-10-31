@@ -13,13 +13,11 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # MLIR-AIE build requirements  
+    # MLIR-AIE build requirements
     build-essential ninja-build python3 python3-dev python3.12-venv unzip \
     libssl-dev libboost-dev libboost-filesystem-dev libboost-program-options-dev uuid-dev \
     # Required by MHA kernel
     llvm-18 \
-    # graphviz provides the `dot` binary iron.common.graph.visualize renders with.
-    graphviz \
     # FastFlowLM, which iron/operators/flm/gemma4_engine builds. Its tokenizers
     # need rustc 1.80 or newer; Ubuntu's default rustc is 1.75.
     cmake pkg-config cargo-1.85 rustc-1.85 libdrm-dev \
@@ -39,10 +37,10 @@ WORKDIR /workspace
 
 COPY ./requirements.txt /workspace/requirements.txt
 
-# Environment setup 
+# Environment setup
 # ---
 
-ENV HOME=/workspace 
+ENV HOME=/workspace
 
 # Ensure XRT is mounted by the host
 # This errors if it does not exist.

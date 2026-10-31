@@ -14,7 +14,6 @@ never a hand-picked number.
 import importlib.util
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -137,34 +136,28 @@ def test_section4_weights_and_state_matches_numpy():
         assert verdict, verdict.detail
 
 
-def test_section4_subtraction_exercise_selects_arithmetic(monkeypatch, capsys):
+def test_section4_subtraction_exercise_selects_arithmetic():
     mod = _example("section-4", "weights_and_state")
 
-    def subtract(self, x, *, pos: mod.Scratchpad[np.int32]):
-        old = mod.Copy.step(self.total[pos])
-        new = old - x
-        mod.Copy.step(new, self.total[pos])
-        return new
+    class Drain(mod.Accumulate):
+        def body(self, x, *, pos: mod.Scratchpad[np.int32]):
+            old = mod.Copy.step(self.total[pos])
+            new = old - x
+            mod.Copy.step(new, self.total[pos])
+            return new
 
-    monkeypatch.setattr(mod.Accumulate, "body", subtract)
-    # Exercise main's recording and tolerance selection without a device.
-    reference = iron.Graph.reference
-    results = {}
-
-    def remember_reference(self, *args, **kwargs):
-        results[self] = reference(self, *args, **kwargs)
-        return results[self]
-
-    monkeypatch.setattr(iron.Graph, "reference", remember_reference)
-    monkeypatch.setattr(
-        iron.Graph,
-        "compile",
-        lambda self, **shapes: SimpleNamespace(recording=self.record(**shapes)),
-    )
-    monkeypatch.setattr(iron.Graph, "__call__", lambda self, *args, **kw: results[self])
-
-    mod.main(["--width", "64"])
-    assert "PASS!" in capsys.readouterr().out
+    drain = Drain(4, 64)
+    recording = drain.record(x=(64,))
+    (arithmetic,) = (s.op for s in recording.steps if not isinstance(s.op, mod.Copy))
+    tolerance = arithmetic.resolved().tolerance()
+    rng = np.random.default_rng(0)
+    expected = np.zeros((4, 64), dtype=np.float32)
+    for pos in (0, 1, 0, 2):
+        x = rng.standard_normal(64).astype(bfloat16)
+        expected[pos] = (expected[pos] - x.astype(np.float32)).astype(bfloat16)
+        got = drain.reference(x, pos=pos)
+        verdict = compare(got, expected[pos].astype(bfloat16), tolerance)
+        assert verdict, verdict.detail
 
 
 @pytest.mark.supported_devices("npu2")

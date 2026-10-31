@@ -64,8 +64,9 @@ MIN_M = M_TILE * ROWS
 
 
 def _parameter_words(op) -> list[int]:
-    """The image's block of eight words: k_iters, M, N, bias, epilogue mode,
-    clamp on, clamp min, clamp max.
+    """Return the image's block of eight words.
+
+    k_iters, M, N, bias, epilogue mode, clamp on, clamp min, clamp max.
     """
     return [
         op.K // K_TILE,
@@ -111,7 +112,7 @@ class Shipped(
         default=Precision.MEDIUM, array=True, repr=False, init=False
     )
     emulate_bf16_mmul_with_bfp16: bool = tunable(default=True, repr=False, init=False)
-    bfp16_b: bool = param(default=False, repr=False, init=False)
+    bfp16_b: bool = param(default=False, array=True, repr=False, init=False)
     b_dtype: object = param(default=bfloat16, repr=False, init=False)
     l1_b_depth: int = tunable(default=QUEUE_DEPTH, repr=False, init=False)
     a_l2: int = tunable(default=M_TILE * K_TILE, repr=False, init=False)
@@ -153,10 +154,11 @@ class Shipped(
     parameters = Block(PARAMETER_WORDS, derive=_parameter_words)
 
     def build(self) -> Built:
-        """What the sequence reaches of the image: the shim channels each
-        operand's lanes stream on, each core's parameter block at the
-        address its program reads, and the lock it waits on, which the
-        sequence releases (``parameter_locks``).
+        """Return what the sequence reaches of the image.
+
+        The shim channels each operand's lanes stream on, each core's
+        parameter block at the address its program reads, and the lock it
+        waits on, which the sequence releases (``parameter_locks``).
         """
         mm2s, s2mm = DMAChannelDir.MM2S, DMAChannelDir.S2MM
         shims = [Tile(c, 0) for c in range(COLS)]
@@ -192,10 +194,11 @@ class Shipped(
             )
         return self.replace()
 
-    def pack_B(self, B):
-        """A row-major ``(K, N)`` B in the overlay's own order: bf16, a whole
-        k tile a slice, and within a block the ``s`` rows outer and the
-        ``K_TILE // s`` columns inner, the reverse of ``pack_b``'s.
+    def pack_b(self, B):
+        """Return a row-major ``(K, N)`` B in the overlay's own order: bf16, a whole k tile a slice.
+
+        And within a block the ``s`` rows outer and the ``K_TILE // s``
+        columns inner, the reverse of ``pack_b``'s.
         """
         K, N = B.shape
         blocked = B.reshape(K // K_TILE, K_TILE // S, S, N // N_TILE, N_TILE // T, T)
@@ -211,9 +214,10 @@ class Shipped(
         return f"FLM_MM_{FASTFLOWLM_COMMIT[:8]}_{dev.name}"
 
     def sequence(self, rt) -> None:
-        """The parameter blocks, then their release, then one transfer per
-        (column-block, row-block, leg), in the order the memtiles consume:
-        column-block outermost, then row-block, then column.
+        """Write the parameter blocks, then their release, then one transfer per leg.
+
+        One per (column-block, row-block, leg), in the order the memtiles
+        consume: column-block outermost, then row-block, then column.
         """
         # Every word precedes the first release, so no core reads a
         # half-written block.
@@ -241,7 +245,7 @@ class Shipped(
                         self.A.fill(A[mega_row, r].permute((1, 0, 2)), lane=r)
                     if c >= active:
                         continue
-                    # One contiguous run: pack_B has already put this
+                    # One contiguous run: pack_b has already put this
                     # column's k-blocks in the order the memtile writes them.
                     self.B.fill(B[mega_col * COLS + c], lane=c)
                     self.C.drain(C[mega_row, :, mega_col * COLS + c], lane=c)

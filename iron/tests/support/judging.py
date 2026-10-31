@@ -9,8 +9,9 @@ from ml_dtypes import bfloat16
 
 
 def rounded(t: np.ndarray, dtype, toward: float, strict: bool) -> np.ndarray:
-    """The ``dtype`` value nearest ``t`` on the side of ``toward`` (an
-    infinity), past ``t`` where ``strict``, as float64.
+    """Return the ``dtype`` value nearest ``t`` on the side of ``toward`` (an infinity).
+
+    Past ``t`` where ``strict``, as float64.
     """
     r = t.astype(dtype)
     w = r.astype(np.float64)
@@ -23,8 +24,7 @@ def rounded(t: np.ndarray, dtype, toward: float, strict: bool) -> np.ndarray:
 def interval(
     tol: Tolerance, values: list[np.ndarray], args: list[tuple], dtype
 ) -> tuple[np.ndarray, np.ndarray]:
-    """The outputs of ``dtype`` ``tol`` admits for any of ``values``, as
-    ``compare`` decides it.
+    """Return the outputs of ``dtype`` ``tol`` admits for any of ``values``, as ``compare`` decides it.
 
     Args:
         tol: The tolerance an output is held to.

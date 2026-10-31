@@ -8,11 +8,11 @@ toolchain. Device-free: placing runs aie-opt alone."""
 import pytest
 
 from iron.common.design import OperatorDesign
-from iron.tune.failures import Kind, Ledger, place, signature
-from iron.tune.fusions import _composed_module
 from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
+from iron.tune.failures import Kind, Ledger, place, signature
+from iron.tune.fusions import _composed_module
 
 pytestmark = pytest.mark.usefixtures("npu2")
 

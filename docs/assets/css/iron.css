@@ -73,5 +73,68 @@
 .iron-card-title { font-weight: 600; font-size: 0.9rem; display: block; margin-bottom: 0.3rem; color: var(--md-typeset-a-color); }
 .iron-card-desc  { font-size: 0.78rem; opacity: 0.72; line-height: 1.4; }
 
+/* ── Benchmarks page ─────────────────────────────────────────────────────── */
+.iron-bench-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  align-items: center;
+  margin: 1rem 0 0.25rem;
+}
+.iron-bench-filters label {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.iron-bench-filters select {
+  font: inherit;
+  font-weight: 400;
+  max-width: 24rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--md-default-fg-color--lighter);
+  border-radius: 4px;
+  background: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+}
+.iron-bench-about,
+.iron-bench-note {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.7rem;
+}
+.iron-bench-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(22rem, 100%), 1fr));
+  gap: 1rem;
+}
+.md-typeset .iron-bench-chart {
+  display: block;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 8px;
+}
+.md-typeset .iron-bench-chart figcaption {
+  max-width: none;
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  font-style: normal;
+  text-align: left;
+}
+.iron-bench-canvas { position: relative; height: 18rem; }
+.iron-bench-table input { margin: 0; vertical-align: middle; }
+.iron-draw { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+.iron-key { display: inline-block; width: 1rem; height: 2px; }
+.iron-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.iron-muted { color: var(--md-default-fg-color--light); }
+/* Status steps, each beside a word or a mark that says the same. */
+.iron-mark.iron-worse { color: #d03b3b; }
+.iron-mark.iron-better { color: #006300; }
+[data-md-color-scheme="slate"] .iron-mark.iron-better { color: #0ca30c; }
+
 /* ── Footer ──────────────────────────────────────────────────────────────── */
 .md-footer { font-size: 0.8rem; }

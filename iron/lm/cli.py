@@ -42,9 +42,10 @@ FLAGS: tuple[tuple[tuple[str, ...], dict[str, Any]], ...] = (
 
 
 def exports(package: str, names):
-    """A model package's ``__getattr__``: each of ``names`` from its
-    ``model`` module, imported on first use, so ``python -m
-    <package>.model`` runs that module once.
+    """Build a model package's ``__getattr__``, each of ``names`` from its model module.
+
+    Imported on first use, so ``python -m <package>.model`` runs that
+    module once.
     """
 
     def __getattr__(name):
@@ -92,8 +93,9 @@ def config_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def parse_args(parser: argparse.ArgumentParser, args=None) -> argparse.Namespace:
-    """``parser``'s arguments with ``-v``, which logs iron's INFO lines, such
-    as each compile's.
+    """``parser``'s arguments with ``-v``, which logs iron's INFO lines.
+
+    Such as each compile's.
     """
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="log iron's INFO lines"
@@ -106,8 +108,9 @@ def parse_args(parser: argparse.ArgumentParser, args=None) -> argparse.Namespace
 
 
 def main(model_class: type[Model]):
-    """The command line of ``model_class``, loaded as ``Model.load`` loads
-    it: sample, or check it.
+    """Run the command line of ``model_class``, loaded as ``Model.load`` loads it.
+
+    Sample, or check it.
     """
     parser = argparse.ArgumentParser(description=f"{model_class.__name__} on the NPU")
     parser.add_argument(
@@ -157,6 +160,8 @@ def main(model_class: type[Model]):
         "(default: a full ELF where the device runs one)",
     )
     args = parse_args(parser)
+    if args.check_determinism is not None and args.check_determinism < 2:
+        parser.error("--check-determinism compares rounds: give 2 or more")
     try:
         model = model_class.from_checkpoint(
             args.path, random_weights=args.random_weights, max_seq_len=args.max_seq_len
@@ -184,7 +189,7 @@ def main(model_class: type[Model]):
             where = f" (step {worst})" if stat == "Max" else ""
             print(f"[Accuracy] {stat} KL: {value:.6f}{where}")
         print(f"[Accuracy] Top-1 mismatches: {sum(not t for _, t in results)}")
-    elif args.check_determinism:
+    elif args.check_determinism is not None:
         # The second prompt is as much of the text as follows the first.
         prompts = [tokens, model.prompt(args.prompt_len, skip=args.prompt_len)]
         rounds = args.check_determinism
@@ -225,8 +230,12 @@ def application_model(name: str) -> type[Model]:
         package = importlib.import_module(f"iron.applications.{name}")
     except ImportError as e:
         raise ValueError(f"no application {name!r}: {e}") from e
-    exported = [getattr(package, n) for n in getattr(package, "__all__", ())]
-    found = [m for m in exported if hasattr(m, "tune_calls")]
+    exported = [getattr(package, n) for n in vars(package).get("__all__", ())]
+    found = [
+        m
+        for m in exported
+        if isinstance(m, type) and any("tune_calls" in vars(k) for k in m.__mro__)
+    ]
     if len(found) != 1:
         raise ValueError(
             f"iron.applications.{name} exports {len(found)} models to tune, not one"

@@ -33,7 +33,7 @@ SIZE = 1024
 
 
 def _linked_objects(operator):
-    """What the operator's own MLIR tells the linker to bring in.
+    """Return what the operator's own MLIR tells the linker to bring in.
 
     Calls the generator directly rather than compiling and reading a file
     back: a standalone build no longer writes its MLIR to disk either (see

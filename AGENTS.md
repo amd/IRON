@@ -26,10 +26,9 @@ Install as the README says. XRT must be sourced
 `requirements.txt` pins the mlir-aie wheel IRON is tested with, a release
 or a nightly (`latest-wheels-4`), which brings the kernel library, and the
 llvm-aie (Peano) nightly that mlir-aie commit validated
-(`utils/peano-requirements.txt`). `.github/workflows/ci-lint.yml`'s `ref:`
-is the same commit, the Python pyright types against. A pull request that
-needs a newer mlir-aie bumps all three in the same pull request
-(`update-mlir-aie.yml` does it for a release or a nightly).
+(`utils/peano-requirements.txt`); pyright types against that wheel too. A
+pull request that needs a newer mlir-aie bumps both in the same pull
+request (`update-mlir-aie.yml` does it for a release or a nightly).
 
 - Compiled artifacts live in mlir-aie's content-keyed cache,
   `~/.npu/cache/<hash>/` or `$NPU_CACHE_HOME`; nothing is written to the
@@ -38,6 +37,8 @@ needs a newer mlir-aie bumps all three in the same pull request
   checkpoints (`iron.lm.testing.weights_dir`).
 - `MLIR_AIE_KERNEL_SOURCES=/path/to/mlir-aie` builds kernels from another
   tree; the path is part of the compile key.
+- `NPU_RUNTIME` selects the host NPU runtime backend; the programming
+  guide's "Getting Set Up" (`programming_guide/section-0`) says more.
 - No build context: an operator compiles for the current device and
   nothing else. On a host without an NPU, bind one with
   `aie_utils.set_current_device(from_name("npu2", n_cols=8))`
@@ -54,12 +55,15 @@ pytest iron/tests/operators/test_catalog.py -k AXPY     # one declared operator
 pytest tests/applications/                              # model tests
 pytest ... -n auto                                      # in parallel
 pytest ... --csv-output=tests_latest.csv                # write benchmark figures
+pre-commit run --all-files --hook-stage pre-push        # black, ruff, pyright, ..., as CI's lint
 pyright                                                 # types, as CI's Types job
 ```
 
 Without an NPU, the device-free suite is
 `pytest iron/tests/common iron/tests/lm tests/applications iron/tests/operators iron/tests/infrastructure -m "not extensive"`.
-Formatting and licence checks are in CONTRIBUTING.md.
+Formatting, lint, type and licence checks are in CONTRIBUTING.md
+("Formatting and hooks"); docstrings pass ruff's Google-convention
+pydocstyle rules, `D205` and `D401` included.
 
 ## Where things live
 
@@ -171,8 +175,8 @@ CONTRIBUTING.md walks through the common case. The rules:
 6. `test = Testing(cases, draw=...)` on the class. A tolerance that is not
    exact says where its number comes from in `note=`. Every operator
    without a `test.py` of its own has at least one `bench=True` case in
-   the default suite, large enough that
-   dispatch overhead (about 160 us) does not dominate, and a `lower=True`
+   the default suite, large enough that one dispatch's fixed cost (about
+   160 us, whatever the operator) does not dominate, and a `lower=True`
    case for each layout or dtype its first default case does not reach.
    `iron/tests/operators/test_catalog.py` runs every declaration; a test with a
    body of its own goes beside the operator as `test.py`.
@@ -309,8 +313,8 @@ Check the code before relying on a line here; it is the authority.
   and a prompt chunk; `max_seq_len` sizes only the caches and the RoPE
   table. Caches are `(max_seq_len, num_key_value_heads, head_dim)` so a
   call's write is contiguous and no descriptor strides by the context.
-  `test_llama_does_not_grow_with_the_context` and
-  `tests/applications/long_context/` hold every decoder to this.
+  `tests/applications/long_context/`'s
+  `test_nothing_grows_with_the_context` holds every decoder to this.
 - **DMA descriptors.** A pattern past one buffer descriptor's limits is
   split by the compiler; one whose size a call bounds must fit a single
   descriptor (`operand.fits`, `operand.split`).
@@ -380,16 +384,30 @@ Each hardware workflow runs one job per runner, Phoenix (NPU1) and Krackan
   each-step form, long_context's deep checks); a benched
   TTFT, TPS or Latency 10% worse than the night before's fails it
   (`pretty_trends.py --fail-on`).
-- `ci-lint.yml`: black, clang-format and reuse, and pyright
-  over `[tool.pyright]`'s paths in `pyproject.toml`.
-- `pr-comment.yml` and `publish-pages.yml`: the performance trends of a PR
-  and the benchmark history site.
+- `ci-lint.yml`: `reuse lint` and every pre-commit hook (black, ruff,
+  clang-format, actionlint, hygiene) over the repository, and pyright over
+  `[tool.pyright]`'s paths in `pyproject.toml` on Python 3.11 to 3.14.
+- `pr-comment.yml` and `publish-pages.yml`: the performance trends of a PR,
+  each linked to its history, and the website, whose Benchmarks page draws
+  that history.
 
 On `main` and `devel`, `publish-results.yml`, the only job that can push,
 merges each run's `tests_latest.csv` into `{arch}/{suite}/all.csv` on the
-`ci` branch (`ci/scripts/merge_results.sh`); `ci/scripts/` turns those into
-the PR comment and the charts. Only cases marked `@pytest.mark.bench` (a
-`Case(bench=True)`) are tracked.
+`ci` branch (`ci/scripts/merge_results.sh`), which keeps a benched test's runs
+of the last 90 days and its newest of each week before that, as mlir-aie
+keeps its kernel checks', and every other test's last two. `ci/scripts/`
+turns those into the PR comment and the Benchmarks page's data
+(`build_pages.py`), each judging a move by the same gates. Only cases marked
+`@pytest.mark.bench` (a `Case(bench=True)`) are tracked, and a metric's unit
+and direction are named in `ci/scripts/pretty_common.py`'s `METRICS`.
+
+A run publishes what it got through. `examples.yml` and `nightly.yml` run
+each `tests/applications/<name>/` in its own pytest process, so a crash
+ends only that model's tests, and conftest.py rewrites the CSV as each test
+starts, counting the running test a failed check until it ends: a process
+that dies keeps every result before it and names the test it died in. Every
+process of one run stamps the run's one date (`--csv-date`), which is how the
+reports tell one run from the next.
 
 ## Language models
 

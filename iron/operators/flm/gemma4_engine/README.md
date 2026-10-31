@@ -7,9 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 
 This example application demonstrates how to use IRON operators inside the
 [FastFlowLM inference engine](https://github.com/ROCm/FastFlowLM) to build the
-Gemma 4 model from open source code. The FastFlowLM infrastructure loads the
-model, tokenizes the prompt and serves the API; this repository provides the
-operators that run on the NPU on the text path of Gemma 4 E2B.
+Gemma 4 model from open source code. FastFlowLM's runtime loads the model,
+tokenizes the prompt, samples each token, serves the API, and runs the vision
+and audio towers on its own stock xclbins. This repository provides the
+operators of Gemma 4 E2B's text path: the prefill projections, the weights'
+dequantization, prefill attention, the decode layers and the LM head.
 
 ## Quick start
 
@@ -88,7 +90,8 @@ Run the steps below from this directory, `iron/operators/flm/gemma4_engine`.
 
 The test serves a word problem and a 1259-token prompt on both engines. It
 checks that the token ids match, and reports the IRON engine's time to first
-token and decode rate for each prompt. Run it from the repository root:
+token and decode rate for each prompt, which CI records
+([benchmarks](https://amd.github.io/IRON/benchmarks/#bench=gemma4_flm&suite=nightly&metric=TTFT)). Run it from the repository root:
 
 ```bash
 pytest tests/applications/gemma4_flm
@@ -168,10 +171,11 @@ runs the IRON operator on the engine's buffers:
 ```
 
 Further arguments after the expression give a hook the values its operator
-needs, such as the layer type or the chunk's token range. Three hooks run no
-operator. `engine_init` registers the xclbins, `head_weights_loaded` loads
-the PLI weights, and `prefill_layer_begin` records the MLP shape of the
-layer.
+needs, such as the layer type or the chunk's token range. Three hooks run
+IRON code but no operator: `engine_init` registers the xclbins,
+`head_weights_loaded` loads the PLI weights, and `prefill_layer_begin`
+records the MLP shape of the layer. `layer_weights_loaded`, `layer_pre_load`
+and every vision and audio hook pass through to the engine's own dispatch.
 
 `build.py` writes four things:
 

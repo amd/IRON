@@ -21,7 +21,7 @@ from aie.utils.verify import compare
 from iron import Profile
 from iron.common.graph.fusion import candidates
 from iron.common.graph.record import Recording
-from iron.common.image.compose import CoResidenceError, Composition, places
+from iron.common.image.compose import Composition, CoResidenceError, places
 from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind

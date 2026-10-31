@@ -18,7 +18,6 @@ from iron.common.graph.packing import apply as apply_packings
 from iron.common.image.step import FusionKind
 from iron.lm.generation import Sampler
 from iron.lm.tune import calls
-from iron.tests.support.llama_model import small
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -27,6 +26,7 @@ from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
+from iron.tests.support.llama_model import small
 from iron.tune import cli as tune_cli
 from iron.tune.autotune import Point, Timed
 from iron.tune.costmodel import CostModel

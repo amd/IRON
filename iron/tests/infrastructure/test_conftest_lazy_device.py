@@ -59,6 +59,26 @@ def test_unrestricted_tests_need_no_npu_runtime(tmp_path):
     assert "1 passed" in result.stdout
 
 
+@pytest.mark.parametrize("phase", ["setup", "call"])
+def test_device_heap_exhaustion_is_a_failure(tmp_path, phase):
+    source = (
+        "import pytest\n"
+        "def heap():\n"
+        "    raise RuntimeError('DRM_IOCTL_AMDXDNA_CREATE_BO failed: err=-28')\n"
+    )
+    source += (
+        "@pytest.fixture\n"
+        "def allocate():\n    heap()\n"
+        "def test_heap(allocate):\n    pass\n"
+        if phase == "setup"
+        else "def test_heap():\n    heap()\n"
+    )
+    result = _pytest(tmp_path, source, hide_xrt=True)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert ("1 error" if phase == "setup" else "1 failed") in result.stdout
+    assert "xfailed" not in result.stdout
+
+
 def test_restricted_test_without_npu_runtime_skips_with_the_reason(tmp_path):
     result = _pytest(
         tmp_path,

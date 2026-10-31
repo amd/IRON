@@ -10,12 +10,12 @@ subsets a bisection trial builds, and ``changed_versions``' assertion.
 import pytest
 
 from iron import Profile
+from iron.common.graph.coded import CodedWeight
 from iron.common.graph.fusion import candidates
 from iron.common.image.step import FusionKind
-from iron.common.graph.coded import CodedWeight
 from iron.lm import validate
-from iron.operators.gemv import GEMV
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.silu import SiLU
 from iron.tests.support.llama_model import small

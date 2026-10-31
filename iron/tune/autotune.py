@@ -24,7 +24,7 @@ from types import FunctionType
 from typing import Any
 
 import numpy as np
-from aie.iron import ExternalFunction
+from aie.iron.device import Device
 from aie.utils.compile import NPU_CACHE_HOME
 from aie.utils.compile.jit.params import OperatorParam
 
@@ -33,6 +33,7 @@ from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.compose import fits
 from iron.operators.gemm import GEMM
+
 from .measure import Cache, Standalone, Timing, judge, measure, write
 
 logger = logging.getLogger(__name__)
@@ -56,12 +57,11 @@ KERNEL_CHECKS = "https://xilinx.github.io/mlir-aie/kernel-checks/{npu}/latest.js
 
 
 def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
-    """Each kernel's cycles per call as mlir-aie's nightly last timed it on
-    ``dev``'s NPU, by ``ExternalFunction.recipe_key``; empty where they
-    cannot be read or this mlir-aie names no builds.
+    """Return each kernel's cycles per call as mlir-aie's nightly last timed it.
+
+    On ``dev``'s NPU, by ``ExternalFunction.recipe_key``; empty where they
+    cannot be read.
     """
-    if not hasattr(ExternalFunction, "recipe_key"):
-        return {}
     url = KERNEL_CHECKS.format(npu=dev.name)
     try:
         with urllib.request.urlopen(url, timeout=30) as response:
@@ -83,9 +83,10 @@ def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
 def least_us(
     op: GEMM, values: Mapping[str, int], cycles, core_mhz: float
 ) -> float | None:
-    """A step time ``op`` cannot beat at per-call ``values``: its busiest
-    core's matmul calls at ``cycles`` per call, at ``core_mhz``. None where
-    ``cycles`` does not hold its matmul.
+    """Return a step time ``op`` cannot beat at per-call ``values``.
+
+    Its busiest core's matmul calls at ``cycles`` per call, at ``core_mhz``.
+    None where ``cycles`` does not hold its matmul.
     """
     per_call = cycles.get(op.layout().matmul().recipe_key)
     if per_call is None:
@@ -162,7 +163,7 @@ class Timed:
         return [(1.0, self.op_values(op))]
 
     def op_inputs(self, op: Operator) -> dict[str, np.ndarray]:
-        """What ``op``'s buffers hold in this call, by ``op``'s buffer name."""
+        """Return what ``op``'s buffers hold in this call, by ``op``'s buffer name."""
         return {
             buf.name: self.contents[ref.root]
             for step in self.recording.steps
@@ -183,13 +184,16 @@ def coding_tunables(op: Operator) -> set[str]:
 
 
 def settings(
-    op: Operator, dev, pinned: frozenset[str] = frozenset()
+    op: Operator, dev: Device, pinned: frozenset[str] = frozenset()
 ) -> list[dict[str, Any]]:
-    """``op``'s tunables as resolved for ``dev``, then every other
-    combination of their ``Operator.domains`` it resolves at and whose
-    derived transfers fit their descriptors, each design once.
+    """Return ``op``'s tunables as resolved for ``dev``, then every other combination.
+
+    Every other combination of their ``Operator.domains`` it resolves at
+    and whose derived transfers fit their descriptors, each design once.
 
     Args:
+        op: The operator whose tunables are searched.
+        dev: The device each combination is resolved for.
         pinned: Tunables another operator of its shape pins, held at the
             value ``op`` resolves them to.
     """
@@ -233,8 +237,9 @@ def _identity(op: Operator, dev) -> str:
 
 
 def refusal(op: Operator) -> str | None:
-    """Why the placer refuses ``op`` alone on a device, or None if it fits;
-    kept under ``FIT_CACHE``, keyed on its recipe and its build environment
+    """Return why the placer refuses ``op`` alone on a device, or None if it fits.
+
+    Kept under ``FIT_CACHE``, keyed on its recipe and its build environment
     (the device and the tools), so a placer fix is seen.
     """
     design = OperatorDesign(op.resolved())
@@ -251,11 +256,12 @@ def refusal(op: Operator) -> str | None:
 
 
 def line(found: Sequence[dict[str, Any]], through: dict[str, Any], name: str):
-    """The settings of ``found`` a coordinate descent tries for tunable
-    ``name`` from ``through``: at each of its values, the setting that
-    differs from ``through`` in the fewest other tunables, the first in
-    ``found`` on a tie. Where tunables are coupled, a value is reached by
-    moving the others with it.
+    """Return the settings of ``found`` a coordinate descent tries for tunable ``name``.
+
+    From ``through``: at each of its values, the setting that differs from
+    ``through`` in the fewest other tunables, the first in ``found`` on a
+    tie. Where tunables are coupled, a value is reached by moving the
+    others with it.
     """
     at: dict[Hashable, list[dict[str, Any]]] = {}
     for s in found:
@@ -293,8 +299,9 @@ class Trial:
 
 
 class Shape:
-    """The operators of the calls one profile entry covers: one class at one
-    set of dimensions (``Profile.dims``).
+    """The operators of the calls one profile entry covers.
+
+    One class at one set of dimensions (``Profile.dims``).
     """
 
     def __init__(self, op: Operator):
@@ -366,8 +373,9 @@ class Shape:
 
 
 def shapes(calls: Sequence[Timed], dev) -> list[Shape]:
-    """The shapes of ``calls``' operators that have a tunable to search, in
-    the order the calls first run them, each operator design once.
+    """Return the shapes of ``calls``' operators that have a tunable to search.
+
+    In the order the calls first run them, each operator design once.
     """
     found: dict[Hashable, Shape] = {}
     seen: set[str] = set()
@@ -399,13 +407,14 @@ def time_shape(
     core_mhz: float | None = None,
     log: Callable[[str], None] = print,
 ) -> list[Trial]:
-    """Each setting of ``shape`` timed, the recorded one first: every setting
-    its operators share and the placer takes where there are at most
-    ``exhaustive``, else those a coordinate descent tries, each tunable's
-    ``line`` through the fastest setting taken so far, until a pass over the
-    tunables moves it no further. A setting whose ``least_us`` at
-    ``cycles`` and ``core_mhz`` is no faster than the fastest taken so far
-    is not timed.
+    """Each setting of ``shape`` timed, the recorded one first.
+
+    Every setting its operators share and the placer takes where there are
+    at most ``exhaustive``, else those a coordinate descent tries, each
+    tunable's ``line`` through the fastest setting taken so far, until a
+    pass over the tunables moves it no further. A setting whose
+    ``least_us`` at ``cycles`` and ``core_mhz`` is no faster than the
+    fastest taken so far is not timed.
     """
     found = settings(shape.members[0][0], dev, shape.pinned)
     for op, _, _ in shape.members[1:]:
@@ -472,12 +481,14 @@ def _frozen(tunables: Mapping[str, Any]) -> tuple:
 def _least(
     shape: Shape, s: dict[str, Any], cycles, core_mhz: float, dev
 ) -> float | None:
-    """``least_us`` of ``shape`` at setting ``s``, weighted as ``_time``
-    weighs its operators' steps; None where any is unknown.
+    """``least_us`` of ``shape`` at setting ``s``, weighted as ``_time`` weighs steps.
+
+    Over ``shape``'s operators; None where any is unknown.
     """
     total = 0.0
     for op, points, _ in shape.members:
         moved = op._with_tunables(**s).resolved(dev)
+        assert isinstance(moved, GEMM), "called only where shape.cls is a GEMM"
         for weight, values in points:
             bound = least_us(moved, values, cycles, core_mhz)
             if bound is None:
@@ -496,9 +507,10 @@ def _time(
     remeasure: bool,
     log: Callable[[str], None],
 ) -> tuple[list[Trial], float]:
-    """``found``'s settings (the recorded one first) timed and judged at each
-    point of each of ``shape``'s operators, and the recorded one's weighted
-    step time; one that does not build is refused.
+    """``found``'s settings timed and judged, and the recorded one's weighted step time.
+
+    Timed and judged at each point of each of ``shape``'s operators, the
+    recorded one first; one that does not build is refused.
     """
     recorded_us = 0.0
     deltas = [0.0] * len(found)
@@ -526,10 +538,11 @@ def _time(
                     continue
                 delta, noise = ran[i].difference(default)
                 deltas[i] += weight * delta
+                variance = variances[i]
                 variances[i] = (
                     None
-                    if variances[i] is None or noise is None
-                    else variances[i] + (weight * noise) ** 2
+                    if variance is None or noise is None
+                    else variance + (weight * noise) ** 2
                 )
                 if refused[i] is None and ran[i].output != default.output:
                     refused[i] = _judged(ops[0], ops[i], values, inputs, full_elf)
@@ -550,6 +563,8 @@ def _judged(
     run = Standalone(
         f"judge_{_identity(op, op.dev)}",
         [op],
+        # Operator is hashable by identity at runtime (object.__hash__); pyright
+        # infers __hash__ = None from jit.Operator's dataclass_transform defaults.
         values={op: values},
         inputs={op: inputs},
         full_elf=full_elf,

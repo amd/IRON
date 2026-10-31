@@ -32,19 +32,20 @@ import aie.utils as aie_utils
 from iron import operators
 from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
+
 from .autotune import Shape, Timed, autotune, coding_tunables, kernel_cycles, time_shape
-from .fusions import price_fusions
 from .costmodel import CostModel
 from .failures import Ledger
-from .packings import price_folds_before_packing, price_packings
+from .fusions import price_fusions
 from .measure import Cache, Timing, pmode, switch_cost
+from .packings import price_folds_before_packing, price_packings
 from .plan import coded_seed, searches
 from .survey import step_times, survey
 from .verify import entries, verify, write_report
 
 
 def parser(description: str) -> argparse.ArgumentParser:
-    """The arguments every tuning takes: how each setting is timed."""
+    """Build the arguments every tuning takes: how each setting is timed."""
     p = argparse.ArgumentParser(description=description)
     p.add_argument("--rounds", type=int, default=Timing.rounds)
     p.add_argument("--calls", type=int, default=Timing.calls)

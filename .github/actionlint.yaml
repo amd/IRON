@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# actionlint cannot see this repository's self-hosted runners; a label
+# missing from this list is a typo.
+self-hosted-runner:
+  labels:
+    - phoenix   # NPU1
+    - krackan   # NPU2
+    - docker

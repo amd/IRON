@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Emit: the words the next call's scratchpad and carried state start from.
+
 Each row computes ``v = clamp(((planes[plane, index] * scale + bias) >> down)
 * mul + add, lo, hi)`` then ``out[r] = (v & mask) << shift``, from a program
 the host writes once. ``planes`` is ``(2, carried)``: this call's starting
@@ -12,8 +13,8 @@ import numpy as np
 from aie.extras.dialects import arith
 from aie.iron import In, Out, Worker
 from aie.iron.controlflow import range_
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param
+from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator
 from iron.common.testing import Case, Testing
@@ -34,8 +35,10 @@ def reference(program, planes, slots: int):
 
 
 def _program(op: "Emit") -> dict:
-    """A program whose rows each pick a real value, most held to a range,
-    and some unused rows."""
+    """Return a program whose rows each pick a real value, most held to a range.
+
+    And some unused rows.
+    """
     rng = np.random.default_rng(7)
     lo = rng.integers(-(1 << 22), 1 << 22, op.rows)
     hi = lo + rng.integers(0, 1 << 23, op.rows)

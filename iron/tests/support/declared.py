@@ -34,8 +34,9 @@ def declared(dev):
 
 
 def unresolvable(cls, case, dev) -> str | None:
-    """Why `dev` cannot resolve `case` of `cls` (more columns than it has,
-    say), else None.
+    """Return why `dev` cannot resolve `case` of `cls`, else None.
+
+    For example, the case asks for more columns than `dev` has.
     """
     with aie_utils.set_current_device(dev):
         try:

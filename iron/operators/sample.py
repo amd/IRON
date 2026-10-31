@@ -1,22 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sample: the next token, drawn on the device from a row of bf16 logits,
-bit for bit as ``aie.iron.kernels.sample.sample_ref``, from a four-word draw
-row the host writes ahead of time per position. Each column's core reduces
-its slice to a top-k summary; one combine core draws the token from them.
+"""Sample: the next token, drawn on the device from a row of bf16 logits.
+
+Bit for bit as ``aie.iron.kernels.sample.sample_ref``, from a
+four-word draw row the host writes ahead of time per position. Each
+column's core reduces its slice to a top-k summary; one combine core
+draws the token from them.
 """
 
 from functools import cache
 
 import numpy as np
-from aie.dialects.aie import WireBundle, get_target_model
+from aie.dialects.aie import (
+    WireBundle,
+    get_target_model,
+)
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, In, InOut, ObjectFifo, Out, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import sample
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Unresolvable
@@ -27,7 +32,7 @@ _CHUNK_LIMIT = 8192
 
 
 def _largest_chunk(run: int, calls: int) -> int | None:
-    """The largest legal chunk of `run` logits that takes at most `calls` calls."""
+    """Return the largest legal chunk of `run` logits that takes at most `calls` calls."""
     for n in range(-(-run // _CHUNK_LIMIT), calls + 1):
         if run % n == 0 and run // n % 2 == 0:
             return run // n
@@ -51,6 +56,8 @@ def slices(vocab: int, cores: int, k_max: int) -> tuple[int, int]:
         chunk = _largest_chunk(size, calls)
         tail = chunk and _largest_chunk(last, calls)
         if tail:
+            # tail = chunk and ...: tail truthy means chunk is too.
+            assert chunk is not None
             best = (max(size // chunk, last // tail), size, last)
             if best[0] == fewest:
                 break
@@ -63,7 +70,7 @@ def slices(vocab: int, cores: int, k_max: int) -> tuple[int, int]:
 
 
 def reference(logits, draw_row, k_max: int | None = None) -> int:
-    """The token the device draws for one draw row; an all-zero row is greedy."""
+    """Return the token the device draws for one draw row; an all-zero row is greedy."""
     words = np.asarray(draw_row, dtype=np.int32)
     row = words.view(np.uint32)
     temperature = row[0:1].view(np.float32)[0]
@@ -75,7 +82,7 @@ def reference(logits, draw_row, k_max: int | None = None) -> int:
 def _logits(op: "Sample") -> dict:
     """Logits with a few ties at the top, and one draw row per position."""
     rng = np.random.default_rng(11)
-    logits = rng.normal(0, 3, op.vocab).astype(bfloat16)
+    logits: np.ndarray = rng.normal(0, 3, op.vocab).astype(bfloat16)
     logits[rng.choice(op.vocab, 8, replace=False)] = logits.max()
     # Padding above every token's logit, which no draw may take.
     logits[op.drawable :] = logits.max() + 1
@@ -175,11 +182,17 @@ class Sample(Operator):
 
     @property
     def runs(self) -> list[tuple[int, int, int]]:
-        """Each select core's `(logits, chunk, drawable)`: the last reads what
-        is left, the padding with it.
+        """Return each select core's `(logits, chunk, drawable)`.
+
+        The last reads what is left, the padding with it.
         """
         size, last = slices(self.vocab, self.cores, self.k_max)
         tail = self.chunk if last == size else _largest_chunk(last, last // 2)
+        if tail is None:
+            raise ValueError(
+                f"Sample: the last slice of {last} logits does not split into even "
+                f"chunks (4-byte DMA)"
+            )
         padding = self.vocab - self.drawable
         return [(size, self.chunk, size)] * (self.cores - 1) + [
             (last, tail, last - padding)

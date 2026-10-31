@@ -44,8 +44,9 @@ class EmitSite:
 def attach_emit(
     recording: Recording, carried: list[str], carry: State, slots: int
 ) -> EmitSite:
-    """Append an Emit step to ``recording`` for a target of ``slots`` values,
-    each computed carried element moved into plane 1 of ``carry``.
+    """Append an Emit step to ``recording`` for a target of ``slots`` values.
+
+    Each computed carried element is moved into plane 1 of ``carry``.
     """
     if slots < 1:
         raise ValueError(
@@ -75,7 +76,7 @@ def attach_emit(
     inputs = [_resident(recording, program), planes]
     recording.steps.append(
         Step(
-            Emit(slots=slots, carried=n),  # pyright: ignore[reportCallIssue]
+            Emit(slots=slots, carried=n),
             inputs + [image, current],
             inputs,
             [image, current],
@@ -94,8 +95,9 @@ def _resident(recording: Recording, state: State) -> Handle:
 
 
 def _move(recording: Recording, handle: Handle, planes: Handle, start: int) -> None:
-    """Put ``handle``'s buffer, a carried element, at element ``start`` of
-    ``planes``'s, in every step and in the carry.
+    """Put ``handle``'s buffer, a carried element, at element ``start`` of ``planes``'s.
+
+    In every step and in the carry.
     """
     old = handle.buffer
 
@@ -122,8 +124,9 @@ def compose(
     words: list[Word],
     parameters: list[Parameter],
 ) -> np.ndarray:
-    """The Emit program that starts a call of the image with ``words`` and
-    ``parameters``; every word of it must follow from a carried value.
+    """Return the Emit program that starts a call of the image with ``words`` and ``parameters``.
+
+    Every word of it must follow from a carried value.
     """
     plane_of = {name: j for j, name in enumerate(site.carried)}
     if len(parameters) != site.slots:
@@ -184,9 +187,11 @@ def compose(
 
 
 class CarriedLoop:
-    """A graph's carried values looped on the device: ``first`` runs once from the
-    host, then ``body`` (no tensor) with ``depth`` runs in flight, each run's Emit
-    writing the next's scratchpad, so the host only waits and restarts.
+    """A graph's carried values looped on the device.
+
+    ``first`` runs once from the host, then ``body`` (no tensor) with
+    ``depth`` runs in flight, each run's Emit writing the next's
+    scratchpad, so the host only waits and restarts.
     """
 
     def __init__(self, first: CompiledGraph, body: CompiledGraph, depth: int = 2):
@@ -249,8 +254,9 @@ class CarriedLoop:
             self._runs = runs
 
     def steps(self, steps: int) -> Iterator[int]:
-        """Run ``steps`` steps of ``body``, yielding each index once complete;
-        closing early waits out the steps in flight.
+        """Run ``steps`` steps of ``body``, yielding each index once complete.
+
+        Closing early waits out the steps in flight.
         """
         assert self._runs is not None, "start() builds body's runs first"
         in_flight: deque[int] = deque()

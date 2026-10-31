@@ -34,11 +34,11 @@ from iron.tests.support import sequences
 from iron.tests.support.graphs import Chain as ChainGraph
 from iron.tests.support.graphs import Rotate
 from iron.tests.support.llama_model import small
+from iron.tune import measure as tune_measure
 from iron.tune.autotune import Point, Timed, Trial
 from iron.tune.fusions import (
     PRICED_KINDS,
     FusionGroup,
-    NARROWING_EXHAUSTIVE,
     _bound_points,
     _checkpoint,
     _device_timeout,
@@ -57,7 +57,6 @@ from iron.tune.fusions import (
     price_fusions,
     select_rewrites,
 )
-from iron.tune import measure as tune_measure
 from iron.tune.measure import (
     Cache,
     Standalone,

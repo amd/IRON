@@ -20,7 +20,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Scratchpad
 from iron.common.declare.profile import Profile
-from iron.common.design import OperatorDesign, BuiltArray
+from iron.common.design import BuiltArray, OperatorDesign
 from iron.common.graph.fold import apply_folds, chosen_folds, fold_candidates
 from iron.common.graph.record import Recording
 from iron.common.image.link import FullELF

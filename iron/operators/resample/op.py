@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""torchvision's antialiased bicubic resize of a uint8 image into a vision
-tower's bf16 patches, on the device bit for bit as torch computes it on the
-CPU.
+"""torchvision's antialiased bicubic resize of a uint8 image into a vision tower's bf16 patches.
+
+On the device bit for bit as torch computes it on the CPU.
 
 `ResampleTaps` computes one axis's filter table, `chunks` objects of `words`
 int32 as `vision.resample_quantize` writes them, of which a call writes the
@@ -14,14 +14,16 @@ with two such tables into 16x16 patches of u8 / 255 (`vision.resize`), and
 """
 
 import math
+from typing import Any
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ExternalFunction, In, ObjectFifo, Out, Worker
 from aie.iron.controlflow import range_
+from aie.iron.kernel import ArgType
 from aie.iron.kernels import datamovement, vision
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, per_call, tunable, widths
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp
@@ -185,13 +187,13 @@ extern "C" void resample_quantize(int32_t *peak, int32_t *chunk, int32_t in,
 
 
 def window(in_size: int, out_size: int) -> int:
-    """The most input samples one output of a bicubic axis reads."""
+    """Return the most input samples one output of a bicubic axis reads."""
     scale = in_size / out_size
     return math.ceil(2.0 * scale if scale >= 1.0 else 2.0) * 2 + 1
 
 
 def per_chunk(in_size: int, out_size: int, words: int, slots: int | None = None) -> int:
-    """The outputs one chunk of a `words`-word table holds.
+    """Return the outputs one chunk of a `words`-word table holds.
 
     Args:
         in_size: The input samples on the axis.
@@ -210,7 +212,8 @@ def per_chunk(in_size: int, out_size: int, words: int, slots: int | None = None)
 
 
 class ResampleTaps(Operator):
-    """The int16 filter table and precision torch resamples one axis with,
+    """The int16 filter table and precision torch resamples one axis with.
+
     `in_samples` samples to `out_samples`.
 
     Each core takes chunks `k, k + cores, ...` and computes their weights in
@@ -268,11 +271,11 @@ class ResampleTaps(Operator):
         return self.num_aie_columns * self.num_channels
 
     def per_chunk(self, n_in: int, n_out: int) -> int:
-        """The outputs a chunk holds of `n_in` samples to `n_out` (`per_chunk`)."""
+        """Return the outputs a chunk holds of `n_in` samples to `n_out` (`per_chunk`)."""
         return per_chunk(n_in, n_out, self.words, self.slots)
 
     def filled(self, n_in: int, n_out: int) -> int:
-        """The chunks a table of `n_in` samples to `n_out` is written in.
+        """Return the chunks a table of `n_in` samples to `n_out` is written in.
 
         Args:
             n_in: The input samples on the axis.
@@ -329,7 +332,7 @@ class ResampleTaps(Operator):
         # The kernels' references as one core writing every chunk: the table
         # does not depend on how the cores deal its chunks.
         filled = self.filled(n_in, n_out)
-        kw = dict(words=self.words, cores=1, slots=self.slots)
+        kw: dict[str, Any] = dict(words=self.words, cores=1, slots=self.slots)
         peak = vision.resample_peak_ref(n_in, n_out, 0, filled, **kw)
         table = np.zeros((self.chunks, self.words), np.int32)
         table[:filled] = vision.resample_quantize_ref(
@@ -377,7 +380,8 @@ class ResampleTaps(Operator):
             ],
             symbol_prefix=f"resample_{self.words}_{cores}_{self.slots or 0}",
         )
-        join_k = peak_k.object_file.bind("resample_join", [peak_ty] * 3)
+        join_args: list[ArgType] = [peak_ty] * 3
+        join_k = peak_k.object_file.bind("resample_join", join_args)
         quantize_k = peak_k.object_file.bind(
             "resample_quantize", [peak_ty, self.table.obj_type] + [np.int32] * 5
         )
@@ -433,7 +437,7 @@ class ResampleTaps(Operator):
         for k in range(cores):
             final = k == cores - 1
             shared = None
-            if of_peak is not None:
+            if of_peak is not None and of_all is not None:
                 shared = of_peak.prod() if final else of_all.cons()
             workers.append(
                 Worker(
@@ -456,9 +460,10 @@ class ResampleTaps(Operator):
 
 
 class Resample(Operator):
-    """An image resized as torchvision's antialiased bicubic resize does it
-    on the CPU, written as the vision tower's 16x16 patches of u8 / 255 in
-    bf16 (`vision.resize`).
+    """An image resized as torchvision's antialiased bicubic resize does it on the CPU.
+
+    Written as the vision tower's 16x16 patches of u8 / 255 in bf16
+    (`vision.resize`).
 
     Every core receives the image in `chunk`-byte chunks; core `k` owns
     patch columns `k, k + cores, ...`, resamples each row across them, then
@@ -568,8 +573,9 @@ class Resample(Operator):
         return self.num_aie_columns * self.num_channels
 
     def default_patch_columns(self) -> int:
-        """Patch columns a core holds: `out_width`'s split over the cores and
-        a zero one past them.
+        """Return patch columns a core holds: `out_width`'s split over the cores.
+
+        And a zero one past them.
         """
         dev = self.dev
         cols = self.num_aie_columns or (dev.cols if dev is not None else 8)
@@ -686,8 +692,10 @@ class Resample(Operator):
         out_columns=None,
         patches=None,
     ):
-        """The kernel's patches (`vision.resize_ref`); given `patches`,
-        written over its leading rows, the ones a call writes, the rest kept.
+        """Return the kernel's patches (`vision.resize_ref`).
+
+        Given `patches`, written over its leading rows, the ones a call
+        writes, the rest kept.
         """
         written = vision.resize_ref(
             np.asarray(image),
@@ -711,7 +719,7 @@ class Resample(Operator):
         return Tolerance.exact()
 
     def sequence(self, rt):
-        """The image, then both tables down one stream, and each core's patches."""
+        """Run the image, then both tables down one stream, and each core's patches."""
         tg = rt.task_group()
         moves = [
             (self.image, None, self.image, "image_count", 0, 1),
@@ -826,8 +834,9 @@ class Resample(Operator):
 
 
 class PatchPositions(Operator):
-    """Where each of `rows` patch rows of the vision tower comes from, for
-    an image resized to `out_rows` by `out_columns` pixels.
+    """Where each of `rows` patch rows of the vision tower comes from.
+
+    For an image resized to `out_rows` by `out_columns` pixels.
 
     The patches are in pooling-window order; `order` is each one's row of
     `Resample`'s raster. Rows past the image hold `positions`,
@@ -911,8 +920,10 @@ class PatchPositions(Operator):
         return Tolerance.exact()
 
     def sequence(self, rt):
-        """`xy` and `order` as the core writes them; `position_ids` a block's
-        x into the first half and its y into the second.
+        """Write `xy` and `order` as the core computes them.
+
+        Writes `position_ids` with a block's x into the first half and its
+        y into the second.
         """
         T, B = self.rows, self.block
         tg = rt.task_group()

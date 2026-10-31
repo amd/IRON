@@ -5,7 +5,7 @@
 
 import dataclasses
 import functools
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from math import gcd, isqrt, prod
 from typing import Any, ClassVar
 
@@ -25,11 +25,12 @@ from aie.iron import (
 )
 from aie.iron.device import Tile
 from aie.iron.kernels import datamovement
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operand, Operator, Rtp, Unresolvable
+from iron.common.declare.operand import concrete
 from iron.common.testing import Case, Testing
 
 # kDDRAIEAddrOffset (TxnEncoding.h)
@@ -46,23 +47,30 @@ extern "C" void gather_lengths(uint32_t *lengths, int32_t valid) {
 
 
 def _control_header(beats: int, address: int) -> int:
-    """A control packet writing ``beats + 1`` words from ``address``, odd parity."""
+    """Build a control packet that writes ``beats + 1`` words from ``address``.
+
+    Odd parity.
+    """
     header = (beats << 20) | address
     return header | ((1 ^ (bin(header).count("1") & 1)) << 31)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class _GatherBuilt(Built):
-    """Gather's build, with the control routes ``sequence()`` fills and the
-    feed endpoints it waits on."""
+    """Gather's build.
+
+    With the control routes ``sequence()`` fills and the feed endpoints it
+    waits on.
+    """
 
     controls: list[PacketFlow]
     pushes: list[FlowEndpoint]
 
 
 class Gather(Operator):
-    """``Copy(table[ids])`` with ``ids`` per call: the rows a call names,
-    moved through ``feeds`` pairs of shims; a row past a bound moves
+    """``Copy(table[ids])`` with ``ids`` per call: the rows a call names.
+
+    Moved through ``feeds`` pairs of shims; a row past a bound moves
     ``pad_bytes`` instead, a descriptor's minimum 16-byte unit.
     """
 
@@ -117,7 +125,10 @@ class Gather(Operator):
         return [range(a, min(b, n)) for a, b in zip(bounds, bounds[1:])]
 
     def drained(self, feed: int) -> int:
-        """The 16-byte units feed ``feed`` drains with ``valid_rows`` rows valid."""
+        """Return the 16-byte units feed ``feed`` drains.
+
+        With ``valid_rows`` rows valid.
+        """
         valid = self.valid_rows
         if feed >= self.feeds:
             return 0
@@ -287,7 +298,10 @@ class Gather(Operator):
         return out
 
     def word_source(self) -> "GatherWords":
-        """The step writing row addresses into the template, for ids the device made."""
+        """Return the step writing row addresses into the template.
+
+        For ids the device made.
+        """
         return GatherWords(
             rows=self.rows,
             table_rows=self.table_rows,
@@ -298,8 +312,10 @@ class Gather(Operator):
 
     @functools.cached_property
     def template(self) -> tuple[np.ndarray, np.ndarray]:
-        """The control words with every row's address zero, and where each
-        row's address-low word is (its length one before, its high word two after).
+        """Return the control words with every row's address zero.
+
+        And where each row's address-low word is (its length one before,
+        its high word two after).
         """
         chain, words, slots = self.chain, [], []
         row_words = self.row * np.dtype(self.dtype).itemsize // 4
@@ -328,10 +344,14 @@ class Gather(Operator):
         assert len(words) == self.words
         return np.array(words, dtype=np.uint32), np.array(slots)
 
-    def control_words(self, ids, address: int, valid: int | None = None) -> np.ndarray:
-        """The control words gathering ``ids`` from a table at ``address``.
+    def control_words(
+        self, ids: Sequence[int] | np.ndarray, address: int, valid: int | None = None
+    ) -> np.ndarray:
+        """Compute the control words gathering ``ids`` from a table at ``address``.
 
         Args:
+            ids: Each row to gather, by table row index.
+            address: The table's device address.
             valid: Rows past it move ``pad_bytes`` of the table's first row
                 instead of their own; ``None`` moves every row.
 
@@ -383,8 +403,9 @@ class Gather(Operator):
 
 
 class GatherWords(Operator):
-    """A ``Gather``'s control words for ids the device made, in a graph: each
-    id, clipped to the table, becomes its row's address words, split at
+    """A ``Gather``'s control words for ids the device made, in a graph.
+
+    Each id, clipped to the table, becomes its row's address words, split at
     ``low_bits``. Where ``bounded``, it also writes each row's length, capped
     past ``valid_rows``.
     """
@@ -492,8 +513,9 @@ class GatherWords(Operator):
         rt.finish(tg)
 
     def taps(self) -> list[TensorAccessPattern]:
-        """Where the rows' address words go in ``control``, in row order,
-        then if ``bounded`` their lengths, the word before each address.
+        """Return where the rows' address words go in ``control``, in row order.
+
+        Then if ``bounded`` their lengths, the word before each address.
         """
         chain, at = Gather.chain, 20 * Gather.chain + 2
         full, short = divmod(self.rows, chain)
@@ -545,10 +567,11 @@ def _by_head(num_channels: int) -> dict[str, Any]:
 
 
 class Copy(Operator):
-    """A copy between two views, gathered by ``src`` and scattered by ``dst``
-    through ``num_channels`` memtile pass-throughs, split on the innermost run
-    every pattern holds whole. A ``tile_size`` short of a descriptor never
-    completes it, and the drain hangs (ERT_CMD_STATE_TIMEOUT).
+    """A copy between two views, gathered by ``src`` and scattered by ``dst``.
+
+    Through ``num_channels`` memtile pass-throughs, split on the innermost
+    run every pattern holds whole. A ``tile_size`` short of a descriptor
+    never completes it, and the drain hangs (ERT_CMD_STATE_TIMEOUT).
     """
 
     accept_views = (("src", "in_offset"), ("dst", "out_offset"))
@@ -651,7 +674,7 @@ class Copy(Operator):
     src_repeats7 = per_call(derive=lambda op: 0)
 
     def walks(self) -> list[tuple[TensorAccessPattern, ...]]:
-        """The patterns each side walks in turn, ``[src, dst]``."""
+        """Return the patterns each side walks in turn, ``[src, dst]``."""
         return [t if isinstance(t, tuple) else (t,) for t in (self.src, self.dst)]
 
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
@@ -667,7 +690,7 @@ class Copy(Operator):
                 f"Copy: a repeated source walks at most {self.max_walks} patterns, a "
                 f"descriptor each, on one channel into one pattern; got {walks}"
             )
-        src, dst = (sum(prod(p.sizes) for p in w) for w in self.walks())
+        src, dst = (sum(prod(concrete(p.sizes, p)) for p in w) for w in self.walks())
         if src != dst and not self.src_repeat:
             raise ValueError(
                 f"Copy: a copy moves the same element count both ways: src has {src} "
@@ -698,7 +721,11 @@ class Copy(Operator):
     @property
     def channel_share(self) -> int:
         """What each channel's transfers split into."""
-        pieces = [prod(p.sizes) // self.num_channels for w in self.walks() for p in w]
+        pieces = [
+            prod(concrete(p.sizes, p)) // self.num_channels
+            for w in self.walks()
+            for p in w
+        ]
         return gcd(*pieces, *self._row_shares())
 
     def build(self) -> Built:
@@ -711,7 +738,9 @@ class Copy(Operator):
 
     def compatible(self) -> None:
         channels = self.num_channels
-        step = gcd(*(tap.sizes[-1] for walk in self.walks() for tap in walk))
+        step = gcd(
+            *(concrete(tap.sizes, tap)[-1] for walk in self.walks() for tap in walk)
+        )
         if step % channels:
             raise ValueError(
                 f"Copy: the innermost axes of {self.src} and {self.dst} have a common "
@@ -719,11 +748,12 @@ class Copy(Operator):
             )
         for walk in self.walks():
             for tap in walk:
-                per_channel = prod(tap.sizes) // channels
+                sizes = concrete(tap.sizes, tap)
+                per_channel = prod(sizes) // channels
                 if per_channel % self.tile_size:
                     raise ValueError(
                         f"Copy: tile_size ({self.tile_size}) must divide the per-channel "
-                        f"transfer {per_channel} (= {prod(tap.sizes)} / {channels} "
+                        f"transfer {per_channel} (= {prod(sizes)} / {channels} "
                         f"channels)"
                     )
         for row in self._row_shares():
@@ -737,24 +767,26 @@ class Copy(Operator):
     def _row_shares(self) -> list[int]:
         """Per bounded pattern, the elements per channel one bounded row moves."""
         src, dst = self.walks()
-        return [
-            int(
-                prod(tap.sizes[bound + 1 :])
-                if repeated
-                else prod(tap.sizes) // tap.sizes[bound]
-            )
-            // self.num_channels
-            for walk, bound, repeated in (
-                (src, self.src_bound, self.src_repeat),
-                (dst, self.dst_bound, False),
-            )
-            if bound is not None
-            for tap in walk
-        ]
+        shares = []
+        for walk, bound, repeated in (
+            (src, self.src_bound, self.src_repeat),
+            (dst, self.dst_bound, False),
+        ):
+            if bound is None:
+                continue
+            for tap in walk:
+                sizes = concrete(tap.sizes, tap)
+                row = (
+                    prod(sizes[bound + 1 :])
+                    if repeated
+                    else prod(sizes) // sizes[bound]
+                )
+                shares.append(row // self.num_channels)
+        return shares
 
     def _shares(self, tap: TensorAccessPattern) -> list[TensorAccessPattern]:
         """``tap``'s share per channel, in order."""
-        step = gcd(*(p.sizes[-1] for walk in self.walks() for p in walk))
+        step = gcd(*(concrete(p.sizes, p)[-1] for walk in self.walks() for p in walk))
         if tap.sizes[-1] != step:
             tap = tap.split(tap.rank - 1, step)
         share = step // self.num_channels
@@ -763,9 +795,10 @@ class Copy(Operator):
     def _taps(
         self, tap: TensorAccessPattern, bound: int | None, operand: Operand
     ) -> list[tuple[TensorAccessPattern, int | None]]:
-        """Per channel, its share of ``tap`` and the elements of one unit of
-        the dimension a bound patches. A bounded share is one descriptor, its
-        bounded axis on D2 where it fits: D2 has no wrap.
+        """Return per channel, its share of ``tap`` and the elements of one unit.
+
+        Of the dimension a bound patches. A bounded share is one descriptor,
+        its bounded axis on D2 where it fits: D2 has no wrap.
         """
         shares = self._shares(tap)
         if bound is None:
@@ -780,7 +813,10 @@ class Copy(Operator):
         on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
         out = []
         for share in shares:
-            dims = list(share.transformation_dims)
+            ns, ss = zip(*share.transformation_dims)
+            dims: list[tuple[int, int]] = list(
+                zip(concrete(ns, share), concrete(ss, share))
+            )
             if on_d2:
                 lead, inner = dims[:bound], dims[bound + 1 :]
                 dims = (
@@ -812,7 +848,8 @@ class Copy(Operator):
                     f"Copy: {tap} does not fit one descriptor per channel, which a "
                     f"bounded axis needs (its size is patched in place)"
                 )
-            _, sizes, _ = shim_dims(placed)
+            _, raw_sizes, _ = shim_dims(placed)
+            sizes = concrete(raw_sizes, placed)
             out.append((placed, prod(sizes[(1 if on_d2 else dim) + 1 :])))
         return out
 
@@ -861,7 +898,9 @@ class Copy(Operator):
         src = tuple(at(tap, self.src_bound, src_valid) for tap in src)
         dst = tuple(at(tap, self.dst_bound, dst_valid) for tap in dst)
         gather, scatter = (
-            np.concatenate([p.gather(np.arange(prod(p.tensor_dims))) for p in tap])
+            np.concatenate(
+                [p.gather(np.arange(prod(concrete(p.tensor_dims, p)))) for p in tap]
+            )
             + int(offset)
             for tap, offset in ((src, in_offset), (dst, out_offset))
         )
@@ -889,19 +928,21 @@ class Copy(Operator):
     def _stacked(
         pieces: list[TensorAccessPattern], operand: Operand
     ) -> list[TensorAccessPattern]:
-        """``pieces`` with each evenly stepped run made one pattern: twice, so
-        rows make runs and runs make a grid.
+        """Return ``pieces`` with each evenly stepped run made one pattern.
+
+        Twice, so rows make runs and runs make a grid.
         """
         for _ in range(2):
             runs: list[tuple[TensorAccessPattern, int, int]] = []  # first, count, step
             for p in pieces:
                 if runs:
                     first, n, step = runs[-1]
-                    step = p.offset - first.offset if n == 1 else step
+                    offset, first_offset = concrete((p.offset, first.offset), p)
+                    step = offset - first_offset if n == 1 else step
                     if (
                         (p.sizes, p.strides) == (first.sizes, first.strides)
                         and step >= 0
-                        and p.offset == first.offset + n * step
+                        and offset == first_offset + n * step
                         and operand.fits(
                             TensorAccessPattern(
                                 first.tensor_dims,
@@ -935,6 +976,8 @@ class Copy(Operator):
         if self.src_repeat:
             # The drain first, so the walks' fills queue behind a consumer.
             tg = rt.task_group()
+            # validate() refuses src_repeat with a tuple dst.
+            assert not isinstance(self.dst, tuple)
             ((tap, unit),) = self._taps(self.dst, self.dst_bound, self.y)
             self.y.drain(
                 tap,
@@ -966,7 +1009,7 @@ class Copy(Operator):
                     shares = [self._shares(p)[c] for p in walk]
                     for tap in self._stacked(shares, operand):
                         issued.append((at, c, side == 0, tap))
-                        at += prod(tap.sizes)
+                        at += prod(concrete(tap.sizes, tap))
             issued.sort(key=lambda t: t[:3])
             # A channel's drains finish in order, so its last one is the copy's.
             last = {c: i for i, (_, c, fill, _) in enumerate(issued) if not fill}

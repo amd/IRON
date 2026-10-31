@@ -28,8 +28,10 @@ class Shape:
 
 
 class SelfAttend(iron.Graph):
-    """A layer of the rows attending to themselves per head, within the
-    config's ``window``, the logits scaled by its ``scale``."""
+    """A layer of the rows attending to themselves per head, within the config's ``window``.
+
+    The logits scaled by its ``scale``.
+    """
 
     def __init__(self, c, i: int):
         self.heads, self.scale = c.num_attention_heads, c.scale
@@ -42,8 +44,7 @@ class SelfAttend(iron.Graph):
 
 
 class SelfAttention(Encoder):
-    """Each layer the rows attending to themselves, unscaled, within
-    ``window`` positions."""
+    """Each layer the rows attending to themselves, unscaled, within ``window`` positions."""
 
     layer_class = SelfAttend
 

@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Each decoder below on the NPU, from its real checkpoint: speed, accuracy
-against the float32 reference, determinism, and past one chunk: a prompt
-of two and a chat turn (the end of the caches is ``long_context``'s). Each
-model is compiled and loaded once, and every test of it calls it
-in-process.
+"""Each decoder below on the NPU, from its real checkpoint: speed, accuracy against the float32 reference, determinism, and past one chunk.
+
+A prompt of two and a chat turn (the end of the caches is
+``long_context``'s). Each model is compiled and loaded once, and every
+test of it calls it in-process.
 
 ``--random-weights SEED`` runs them on weights drawn in each checkpoint's
 shapes and random prompts, on a host without the tokenizer, and
@@ -36,8 +36,9 @@ pytestmark = pytest.mark.supported_devices("npu2")
 
 @pytest.fixture(scope="module", params=DECODERS)
 def decoder(request):
-    """A decoder, compiled and loaded once, and its prompts' lengths. Its
-    runtime is released before the next decoder loads.
+    """Return a decoder, compiled and loaded once, and its prompts' lengths.
+
+    Its runtime is released before the next decoder loads.
     """
     cls, weights, prompts = request.param
     load = load_from_flags(request, cls, weights_dir(weights))
@@ -83,9 +84,7 @@ LONG = 12000
 
 @pytest.mark.extensive
 def test_accuracy_across_chunks(decoder, record_property):
-    """The prompt's chunks and two decode steps after them, against the
-    float32 reference over the whole prompt.
-    """
+    """The prompt's chunks and two decode steps after them, against the float32 reference over the whole prompt."""
     model = decoder[0]
     assert len(model.prompt(LONG)) > model.config.prefill_chunk
     check_accuracy(model, MAX_KL, 3, LONG, record=record_property)

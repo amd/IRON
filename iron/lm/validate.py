@@ -34,7 +34,6 @@ from iron import Profile
 from iron.common.declare.profile import Version
 from iron.common.graph.coded import CodedWeight
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
-from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.record import Recording
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.packaging import plan, require_device
@@ -44,9 +43,9 @@ from iron.tune.measure import Timing
 from iron.tune.verify import touches
 
 from .causal import CausalLM
+from .cli import application_model, config_argument
 from .generation import Sampler, accuracy, differing_steps, greedy_logits, kl_stats
 from .model import Model
-from .cli import application_model, config_argument
 
 
 def version_labels(model: Model) -> list[str]:

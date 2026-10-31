@@ -47,7 +47,7 @@ class Clamp(UnaryElementwise):
             )
 
     def bits(self) -> tuple:
-        """The bounds as the kernel takes them: each bf16's bits."""
+        """Return the bounds as the kernel takes them: each bf16's bits."""
         return tuple(
             int(np.array(b, bfloat16).view(np.uint16)) for b in (self.low, self.high)
         )

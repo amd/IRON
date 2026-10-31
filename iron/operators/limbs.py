@@ -22,15 +22,18 @@ def stacked(w):
 
 
 class Limbs(Rowwise):
-    """Each row of float32 as six planes of its bf16 limbs, `[hi, mid, hi,
-    lo, mid, hi]`, for a float32 product by GEMM.
+    """Each row of float32 as six planes of its bf16 limbs, for a float32 product by GEMM.
+
+    `[hi, mid, hi, lo, mid, hi]`.
     """
 
     test = Testing(
         [
             Case(dict(rows=64, line=160, num_aie_columns=1)),
             Case(dict(rows=512, line=320, num_aie_columns=4)),
-            Case(dict(rows=4096, line=320, num_aie_columns=8), bench=True),
+            lambda cls, dev: [
+                Case(dict(rows=4096, line=320, num_aie_columns=dev.cols), bench=True)
+            ],
         ],
         draw=lambda op: dict(normal=(op.x,)),
     )

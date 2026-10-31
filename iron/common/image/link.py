@@ -64,12 +64,13 @@ class FullELF:
 
     @staticmethod
     def in_arena(scratch: list[str], residents: Mapping[str, object]) -> list[str]:
-        """The scratch buffers an arena holds: all of them, one argument."""
+        """Return the scratch buffers an arena holds: all of them, one argument."""
         return scratch
 
     def link(self, seq) -> Path:
-        """Build the ELF once and return its path; keyed on
-        ``Composition.identity``, a cache hit composes nothing.
+        """Build the ELF once and return its path.
+
+        Keyed on ``Composition.identity``, a cache hit composes nothing.
         """
         design = self.design
         if design is None:
@@ -85,8 +86,12 @@ class FullELF:
             ]
 
             # The cache follows the modules a generator reaches, not the state
-            # of what it closes over, so the identity is one.
-            def generator(key: CompileTime[str]) -> ir.Module:
+            # of what it closes over, so the identity is one. (aie.ir re-exports
+            # MLIR's compiled bindings with a wildcard import, which pyright's
+            # stub does not see through.)
+            def generator(
+                key: CompileTime[str],
+            ) -> ir.Module:
                 return ir.Module.parse(composition.text())
 
             design = CompilableDesign(
@@ -113,7 +118,7 @@ class FullELF:
         return Path(entry.elf)
 
     def record(self, designs: list[Operator], sharing: list[tuple[str, ...]]):
-        """The designs' records, the ELF's cache entry, and no one stream."""
+        """Return the designs' records, the ELF's cache entry, and no one stream."""
         assert self.design is not None, "link() built the image"
         records = tuple(
             Design(name=f"op{i}_{type(op).__name__}", operators=sharing[i])
@@ -127,8 +132,10 @@ class FullELF:
 
 @dataclass(frozen=True)
 class Link:
-    """Where one design of an xclbin chain runs: its own ``design``'s stream on
-    ``configuration``'s xclbin (None on a shipped image), as ``kernel``.
+    """Where one design of an xclbin chain runs.
+
+    Its own ``design``'s stream on ``configuration``'s xclbin (None on a
+    shipped image), as ``kernel``.
     """
 
     design: CompilableDesign
@@ -266,8 +273,9 @@ class PerStep:
 
     @staticmethod
     def in_arena(scratch: list[str], residents: Mapping[str, object]) -> list[str]:
-        """The scratch buffers the arena holds: only the residents, as the rest
-        live in this image's own pool (``PerStepCallable``).
+        """Return the scratch buffers the arena holds: only the residents.
+
+        The rest live in this image's own pool (``PerStepCallable``).
         """
         return [r for r in scratch if r in residents]
 
@@ -323,9 +331,11 @@ class PerStep:
         named = len(built) > 1
 
         def kernel(xclbin, design, name="MLIR_AIE") -> NPUKernel:
+            entry = design.get_cache_entry()
+            assert entry is not None, "link() compiled it"
             return NPUKernel(
                 xclbin,
-                design.get_cache_entry().insts,
+                entry.insts,
                 kernel_name=name,
                 dispatch_params=design.dispatch_params,
                 dispatch_lib_path=design.get_dispatch_lib_path(),
@@ -341,7 +351,9 @@ class PerStep:
         for i, (op, config) in enumerate(zip(designs, configs)):
             if config is None:
                 own = OperatorDesign(op, full_elf=False).compile(insts_only=True)
-                shipped = op.external.with_instructions(own.get_cache_entry().insts)
+                own_entry = own.get_cache_entry()
+                assert own_entry is not None, "compile() built it"
+                shipped = op.external.with_instructions(own_entry.insts)
                 links[i] = Link(own, None, op.name, shipped)
             elif config is op:
                 if i not in plain_idx:
@@ -354,7 +366,9 @@ class PerStep:
                 own = OperatorDesign(op, full_elf=False).compile(
                     image=None if op.values else image, insts_only=not op.values
                 )
-                xclbin = image.get_cache_entry().xclbin
+                image_entry = image.get_cache_entry()
+                assert image_entry is not None, "compile() built it"
+                xclbin = image_entry.xclbin
                 links[i] = Link(own, image, config.name, kernel(xclbin, own))
         for op in seq.unique_operators():
             i = design_of[id(op)]
@@ -384,28 +398,37 @@ class PerStep:
         last = (
             built[-1][1] if built else list(self.links.values())[-1].kernel.xclbin_path
         )
+        assert last is not None, "every link's kernel has an xclbin by now"
         self.image = Path(last)
         return self.image
 
     def record(self, designs: list[Operator], sharing: list[tuple[str, ...]]):
-        """The designs' records, the first design's cache entry, and its
-        stream where it is the only one.
+        """Return the designs' records and the first design's cache entry.
+
+        Also its stream where it is the only one.
         """
         links = [self.links[id(op)] for op in designs]
-        records = tuple(
-            Design(
-                name=link.name,
-                operators=sharing[i],
-                entry=(
-                    link.design if link.configuration is None else link.configuration
-                ).get_cache_entry(),
-                image=Path(link.kernel.xclbin_path),
-                insts=link.design.get_cache_entry().insts,
+        records = []
+        for i, link in enumerate(links):
+            owner = link.design if link.configuration is None else link.configuration
+            owner_entry = owner.get_cache_entry()
+            design_entry = link.design.get_cache_entry()
+            assert owner_entry is not None, "link() compiled it"
+            assert design_entry is not None, "link() compiled it"
+            xclbin_path = link.kernel.xclbin_path
+            assert xclbin_path is not None, "every link's kernel has an xclbin by now"
+            records.append(
+                Design(
+                    name=link.name,
+                    operators=sharing[i],
+                    entry=owner_entry,
+                    image=Path(xclbin_path),
+                    insts=design_entry.insts,
+                )
             )
-            for i, link in enumerate(links)
-        )
         entry = links[0].design.get_cache_entry()
-        return records, entry, entry.insts if len(links) == 1 else None
+        assert entry is not None, "link() compiled it"
+        return tuple(records), entry, entry.insts if len(links) == 1 else None
 
     def callable(self, seq, arena) -> PerStepCallable:
         return PerStepCallable(seq, check=self.check, arena=arena)

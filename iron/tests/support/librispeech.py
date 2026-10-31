@@ -4,6 +4,7 @@
 """LibriSpeech's test-clean utterances, the speech the audio models' tests hear."""
 
 import tarfile
+from uuid import uuid4
 
 import numpy as np
 
@@ -18,9 +19,10 @@ LIBRISPEECH = Download(
 
 
 def utterance(name: str) -> np.ndarray:
-    """The utterance `name` (`speaker-chapter-index`), its FLAC member taken
-    from the archive in IRON's cache the first time, decoded: float32
-    samples in [-1, 1) at 16 kHz, mono.
+    """Return the utterance `name` (`speaker-chapter-index`), decoded.
+
+    Its FLAC member is taken from the archive in IRON's cache the first
+    time: float32 samples in [-1, 1) at 16 kHz, mono.
 
     Raises:
         ValueError: The member is not 16 kHz mono.
@@ -33,12 +35,10 @@ def utterance(name: str) -> np.ndarray:
             data = archive.extractfile(member).read()
         path.parent.mkdir(parents=True, exist_ok=True)
         # Renamed into place, so an interrupted extraction leaves no clip.
-        from uuid import uuid4
-
         partial = path.with_suffix(f".{uuid4().hex}.part")
         partial.write_bytes(data)
         partial.replace(path)
-    import soundfile
+    import soundfile  # requirements_examples.txt's: optional
 
     samples, rate = soundfile.read(path, dtype="float32")
     if samples.ndim != 1 or rate != 16000:

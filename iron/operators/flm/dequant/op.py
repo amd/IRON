@@ -9,18 +9,18 @@ from aie.helpers.util import v8bfp16ebs8
 from aie.iron import In, Out, TaskGroup, Worker
 from aie.iron.kernels import quant
 from aie.utils import bfp
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, tunable, widths
+from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator, Unresolvable
 from iron.common.testing import Case, Testing
 from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
+from iron.operators.flm.gemm.design import K_TILE as K_TILE_B
+from iron.operators.flm.gemm.design import N_TILE_DEFAULT as N_TILE
 
 # flm.ProjectionGEMM's B tiling, imported rather than restated: this design has to write
 # the buffer in the order that one reads it, and two copies would drift.
 from iron.operators.flm.gemm.design import S, T
-from iron.operators.flm.gemm.design import K_TILE as K_TILE_B
-from iron.operators.flm.gemm.design import N_TILE_DEFAULT as N_TILE
 from iron.operators.flm.q4nx import (
     BLOCK_BYTES,
     GROUP,
@@ -53,9 +53,11 @@ HALVES = 2
 
 
 def drain_halves(out_blocks):
-    """The output's drain, per half slab: the walk over the output's half
-    slabs, indexed by half, each one's n-half, k slice, then the core's run,
-    split so the innermost size stays inside the BD's field.
+    """Return the output's drain, per half slab.
+
+    The walk over the output's half slabs, indexed by half, each one's
+    n-half, k slice, then the core's run, split so the innermost size
+    stays inside the BD's field.
     """
     halves = TensorAccessPattern.full(
         (out_blocks // HALF_BLOCKS, K_TILE // CT_K, N_TILE // M_TILE, RUN)
@@ -85,9 +87,10 @@ def run_geometry(run_out_features, run_period_out_features, n_blocks):
 
 
 def _draw(op):
-    """A random q4nx blob for ``op``, with noise in any interleave gap, so an
-    operator that reads one fails. Scales and mins are bf16 in the file, so
-    they are drawn there.
+    """Draw a random q4nx blob for ``op``, with noise in any interleave gap.
+
+    So an operator that reads one fails. Scales and mins are bf16 in the
+    file, so they are drawn there.
     """
     rng = np.random.default_rng(0)
     n_blocks = op.K * op.N // (M_TILE * K_TILE)
@@ -104,11 +107,13 @@ def _draw(op):
 
 
 class DequantBFP(Operator):
-    """q4nx weights to bfp16, packed the way ``flm.ProjectionGEMM`` reads B: a
-    4-row grid, as wide as the device, for one q4nx tiling. Nothing depends
-    on K or N, since every core loops forever over identical per-block work,
-    so one xclbin serves every shape; K, N and the interleave move only the
-    instruction stream's offsets. See README.md for the layout and constraints.
+    """q4nx weights to bfp16, packed the way ``flm.ProjectionGEMM`` reads B.
+
+    A 4-row grid, as wide as the device, for one q4nx tiling. Nothing
+    depends on K or N, since every core loops forever over identical
+    per-block work, so one xclbin serves every shape; K, N and the
+    interleave move only the instruction stream's offsets. See README.md
+    for the layout and constraints.
     """
 
     test = Testing(
@@ -218,8 +223,9 @@ class DequantBFP(Operator):
 
     @property
     def name(self) -> str:
-        """The configuration's stem, then the shape: two instruction streams
-        never share a name.
+        """The configuration's stem, then the shape.
+
+        Two instruction streams never share a name.
         """
         base = f"{self.config_name}_K{self.K}_N{self.N}"
         if self.run_out_features is not None:
@@ -272,9 +278,9 @@ class DequantBFP(Operator):
 
     @property
     def column_blocks(self) -> list[int]:
-        """Where each of the weight's column blocks sits in the blob, counted
-        in column blocks: ``run_out_features`` of every
-        ``run_period_out_features``.
+        """Where each of the weight's column blocks sits in the blob, in column blocks.
+
+        ``run_out_features`` of every ``run_period_out_features``.
         """
         n_blocks = self.N // N_TILE
         run, period = run_geometry(
@@ -327,15 +333,18 @@ class DequantBFP(Operator):
 
     @property
     def _reference_shape(self) -> tuple[int, int]:
-        """The shape the configuration-only module is emitted at. Its runtime
-        sequence is discarded; only its device body reaches the xclbin.
+        """The shape the configuration-only module is emitted at.
+
+        Its runtime sequence is discarded; only its device body reaches
+        the xclbin.
         """
         return 2 * K_TILE_B, N_TILE * self.cols
 
     def xclbin_operator(self):
-        """This configuration at its reference shape: its xclbin serves every
-        shape sharing the configuration, and only the instruction stream is
-        per shape, as flm.ProjectionGEMM's.
+        """Return this configuration at its reference shape.
+
+        Its xclbin serves every shape sharing the configuration, and only
+        the instruction stream is per shape, as flm.ProjectionGEMM's.
         """
         K, N = self._reference_shape
         return self.replace(
@@ -353,8 +362,9 @@ class DequantBFP(Operator):
         return Tolerance.exact()
 
     def grid(self, qw):
-        """The weight's q4nx blocks in the blob ``qw``, as ``q4nx.unpack``'s
-        grid: a column block is its k-tiles in order, each k-tile its two
+        """Return the weight's q4nx blocks in ``qw``, as ``q4nx.unpack``'s grid.
+
+        A column block is its k-tiles in order, each k-tile its two
         k-halves, each of those its two n-halves (README.md layers 6-9).
         """
         cb_bytes = packed_bytes(N_TILE * self.K)
@@ -365,9 +375,11 @@ class DequantBFP(Operator):
         )
 
     def reference(self, qw):
-        """The bytes the operator must produce from the blob ``qw``, as a flat
-        uint8 array: bit-exact against the device, since the cores round to
-        bf16 toward negative infinity (README.md has the layout and rounding).
+        """Return the bytes the operator must produce from the blob ``qw``.
+
+        A flat uint8 array, bit-exact against the device, since the cores
+        round to bf16 toward negative infinity (README.md has the layout
+        and rounding).
         """
         K, N = self.K, self.N
         grid = self.grid(qw)

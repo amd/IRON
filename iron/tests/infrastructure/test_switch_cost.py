@@ -8,7 +8,7 @@ dispatches nothing.
 import pytest
 
 from iron.common.image.packaging import require_device
-from iron.tune.measure import Cache, Timing, pmode, platform, switch_cost
+from iron.tune.measure import Cache, Timing, platform, pmode, switch_cost
 
 pytestmark = pytest.mark.supported_devices("npu2")
 

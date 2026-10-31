@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""RoPE's angle table (``rope_angles``) and Llama 3's frequency scaling
-(``REAL_1B.rope_scaling``) against their formulas. No NPU.
+"""RoPE's angle table (``rope_angles``) and Llama 3's frequency scaling against their formulas.
+
+``REAL_1B.rope_scaling``. No NPU.
 """
 
 import numpy as np
@@ -14,9 +15,9 @@ LLAMA_3_2_ROPE_SCALING = REAL_1B.rope_scaling
 
 
 def test_rope_is_the_formula_rounded_once():
-    """Each entry is cos or sin, in float64, of the float32 frequency times
-    the float32 position, rounded once; and within float32 rounding of the
-    formula evaluated in float64 throughout.
+    """Each entry is cos or sin, in float64, of the float32 frequency times the float32 position, rounded once.
+
+    And within float32 rounding of the formula evaluated in float64 throughout.
     """
     D, L, base = 64, 2048, 500000.0
     angles = rope_angles(D, L, base)
@@ -51,19 +52,21 @@ def test_rope_is_correctly_rounded_at_position_zero_and_one():
 
 
 def _llama3_scaling(freqs, factor, low, high, original):
-    """The ``llama3`` rope type's scaling as Hugging Face transformers
-    documents it: a frequency's interpolation weight between ``freq /
-    factor`` and ``freq`` is ``original / wavelength`` taken from ``low``
-    to ``high``, clipped to [0, 1]; in float64.
+    """Return the ``llama3`` rope type's scaling as Hugging Face transformers documents it.
+
+    A frequency's interpolation weight between ``freq / factor`` and
+    ``freq`` is ``original / wavelength`` taken from ``low`` to ``high``,
+    clipped to [0, 1]; in float64.
     """
     smooth = np.clip((original * freqs / (2 * np.pi) - low) / (high - low), 0, 1)
     return (1 - smooth) * freqs / factor + smooth * freqs
 
 
 def test_llama3_scaling_matches_the_formula_in_every_band():
-    """Every frequency of Llama 3.2 1B's (head_dim 64, base 500000) matches
-    the formula, and all three bands are exercised: the fastest fifteen
-    kept, three interpolated, the slowest fourteen divided by 32.
+    """Every frequency of Llama 3.2 1B's (head_dim 64, base 500000) matches the formula.
+
+    All three bands are exercised: the fastest fifteen kept, three
+    interpolated, the slowest fourteen divided by 32.
     """
     D, base = 64, 500000.0
     inv_freq = 1.0 / base ** (np.arange(0, D, 2) / D)
@@ -84,8 +87,9 @@ def test_llama3_scaling_matches_the_formula_in_every_band():
 
 
 def test_scaled_rope_table_rotates_by_the_scaled_frequencies():
-    """The scaled table is the unscaled table's formula over the scaled
-    frequencies, rounded once; the kept band is the unscaled table's.
+    """The scaled table is the unscaled table's formula over the scaled frequencies, rounded once.
+
+    The kept band is the unscaled table's.
     """
     D, L, base = 64, 2048, 500000.0
     exponents = np.arange(0, D, 2, dtype=np.float32) / np.float32(D)

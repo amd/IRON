@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3.2 on the NPU, 1B and 3B, from the real checkpoints: speed,
-accuracy against the float32 reference, determinism, and past one chunk: a
-prompt of two and a chat turn (the end of the caches is ``long_context``'s).
-Every test runs on each checkpoint, which its id names; each one's model is
-compiled and loaded once and every test calls it in-process.
+"""Llama 3.2 on the NPU, 1B and 3B, from the real checkpoints.
+
+Speed, accuracy against the float32 reference, determinism, and past
+one chunk: a prompt of two and a chat turn (the end of the caches is
+``long_context``'s). Every test runs on each checkpoint, which its id
+names; each one's model is compiled and loaded once and every test
+calls it in-process.
 
 ``--random-weights SEED`` runs it on weights drawn in the checkpoint's
 shapes (only its header is read) and random prompts, on a host without the
@@ -47,8 +49,9 @@ def load(request):
 
 @pytest.fixture(scope="module")
 def model(load):
-    """The model, compiled and loaded once; the runtime is released after its
-    checkpoint's last test.
+    """Build the model, compiled and loaded once.
+
+    The runtime is released after its checkpoint's last test.
     """
     model = load()
     yield model
@@ -82,9 +85,10 @@ GENERATION = pytest.mark.parametrize(
 
 @pytest.mark.extensive
 def test_the_readme_quick_start(record_property):
-    """The README's quick start, word for word but for the checkpoint's
-    directory in place of the repository's id: ``Llama.load`` compiling
-    from scratch. First, so no other model is held beside it.
+    """Check the README's quick start, word for word but for the checkpoint's directory.
+
+    In place of the repository's id: ``Llama.load`` compiling from
+    scratch. First, so no other model is held beside it.
     """
     directory = weights_dir("llama3.2-1b")
     require(
@@ -107,10 +111,11 @@ def test_the_readme_quick_start(record_property):
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestEachStep:
-    """The form NPU1 runs: each step its own dispatch of one xclbin, the host
-    starting each on the token the last one drew. Its model is built and dropped with the class,
-    first: after any other test it would be held beside the module's
-    full-ELF one.
+    """The form NPU1 runs: each step its own dispatch of one xclbin.
+
+    The host starts each on the token the last one drew. Its model is
+    built and dropped with the class, first: after any other test it
+    would be held beside the module's full-ELF one.
     """
 
     @pytest.fixture(scope="class")
@@ -167,7 +172,9 @@ LONG = 12000
 
 @pytest.mark.extensive
 def test_llama_3_2_accuracy_across_chunks(model, record_property):
-    """The prompt's two chunks and two decode steps after them, against the
+    """Check Llama 3.2 accuracy across chunks.
+
+    The prompt's two chunks and two decode steps after them, against the
     float32 reference over the whole prompt (each step a forward over 3k
     tokens on the host, so only a few).
     """

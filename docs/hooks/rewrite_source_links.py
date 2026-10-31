@@ -32,6 +32,7 @@ from mkdocs.plugins import log
 from mkdocs.utils import get_relative_url
 
 GITHUB_REPO = "amd/IRON"
+# publish-pages.yml does not set this, so a deployed site always links to devel.
 GITHUB_BRANCH = os.environ.get("DOCS_GITHUB_REF", "devel")
 
 _BLOB_BASE = f"https://github.com/{GITHUB_REPO}/blob/{GITHUB_BRANCH}"

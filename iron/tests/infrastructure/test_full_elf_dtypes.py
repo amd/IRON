@@ -53,8 +53,9 @@ def _symbols(op):
 
 
 def _check_gathers(run, gather, table):
-    """Gather rows of ``table`` (what the device holds) into slots, one call
-    at a time, checking every slot each time.
+    """Gather rows of ``table`` (what the device holds) into slots, one call at a time.
+
+    Checking every slot each time.
     """
     symbols = _symbols(gather)
     rows = run.get_buffer(BufferRef("rows"))
@@ -115,8 +116,9 @@ def test_int32_step_at_nonzero_offsets():
 
 @pytest.mark.supported_devices("npu2")
 def test_int32_slice_at_word_offset():
-    """A slice starting 36 bytes into its parent: a whole number of int32
-    words, and not on the 64-byte granule an arena buffer is placed at.
+    """A slice starting 36 bytes into its parent: a whole number of int32 words.
+
+    Not on the 64-byte granule an arena buffer is placed at.
     """
     start = 36
     gather = _gather()
@@ -139,8 +141,9 @@ def test_int32_slice_at_word_offset():
 
 
 def test_misaligned_buffer_is_rejected():
-    """A buffer the shim DMA cannot start on fails at composition, not silently on
-    the device (whose descriptor would drop the low address bits).
+    """A buffer the shim DMA cannot start on fails at composition, not silently on the device.
+
+    The device's descriptor would drop the low address bits.
     """
     gather = _gather()
     recording = Recording.of_steps(

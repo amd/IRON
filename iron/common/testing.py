@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""How an operator declares the shapes it is tested at on a device, and the device
-test harness: draw vectors, run it, judge and time it.
+"""How an operator declares the shapes it is tested at on a device, and the device test harness.
+
+Draw vectors, run it, judge and time it.
 ``iron/tests/operators/test_catalog.py`` runs every declaration against the
-operator's ``reference()``. Nothing here imports pytest, so an operator module
-stays importable without it.
+operator's ``reference()``. Nothing here imports pytest, so an operator
+module stays importable without it.
 """
 
 from __future__ import annotations
@@ -73,9 +74,7 @@ class Testing:
     draw: Callable[[Any], dict[str, Any]] | None = None
 
     def resolve(self, cls: type, dev: Device) -> list[Case]:
-        """The cases for ``cls`` on ``dev``, so an inherited sweep reads the
-        subclass's caps.
-        """
+        """Return the cases for ``cls`` on ``dev``, so an inherited sweep reads the subclass's caps."""
         out = []
         for c in [self.cases] if callable(self.cases) else self.cases:
             out += list(c(cls, dev)) if callable(c) else [c]
@@ -94,7 +93,7 @@ class Vectors:
 
 
 def vectors(
-    op,
+    op: Operator,
     *,
     seed: int = 42,
     scale: float = 4.0,
@@ -105,6 +104,8 @@ def vectors(
     """Random inputs for ``op``'s declared buffers, and ``op.reference()``'s outputs.
 
     Args:
+        op: The operator whose declared buffers are drawn for.
+        seed: Seeds the draw, for reproducible vectors.
         scale: A uniform draw's scale; an integer buffer draws on ``[0, scale]``.
         normal: Inputs drawn normal instead (``op.A``).
         centered: Inputs shifted to centre on zero.
@@ -114,16 +115,18 @@ def vectors(
     Raises:
         ValueError: An operand named is not one of ``op``'s inputs.
     """
-    given = {o.name: v for o, v in (given or {}).items()}
-    normal = {o.name for o in normal}
-    centered = {o.name for o in centered}
-    unknown = (given.keys() | normal | centered) - {b.name for b in op.inputs}
+    given_names = {o.name: v for o, v in (given or {}).items()}
+    normal_names = {o.name for o in normal}
+    centered_names = {o.name for o in centered}
+    unknown = (given_names.keys() | normal_names | centered_names) - {
+        b.name for b in op.inputs
+    }
     if unknown:
         raise ValueError(f"{type(op).__name__} has no input {sorted(unknown)}")
     rng = np.random.default_rng(seed)
     inputs = {}
     for b in op.inputs:
-        value = given.get(b.name)
+        value = given_names.get(b.name)
         if isinstance(value, np.ndarray):
             inputs[b.name] = value
             continue
@@ -135,9 +138,9 @@ def vectors(
         if dtype.kind not in "fc" and dtype != bfloat16:
             t = rng.integers(0, int(scale) + 1, shape).astype(dtype)
         else:
-            draw = rng.standard_normal if b.name in normal else rng.random
+            draw = rng.standard_normal if b.name in normal_names else rng.random
             t = (draw(shape) * scale).astype(dtype)
-            if b.name in centered:
+            if b.name in centered_names:
                 t = (t.astype(np.float32) - scale / 2).astype(dtype)
         inputs[b.name] = t
     return Vectors(inputs, op._call_reference(inputs))
@@ -160,32 +163,39 @@ def _report(buf_name: str, verdict: Verdict, tolerance: Tolerance) -> None:
 
 
 def _nbytes(buf) -> int:
-    """Bytes of tensor data moved, off the numpy view: the payload, not the
-    page-rounded allocation, and ``buffer_object()`` has no ``.size()`` under HRX.
+    """Bytes of tensor data moved, off the numpy view.
+
+    The payload, not the page-rounded allocation, and ``buffer_object()``
+    has no ``.size()`` under HRX.
     """
     return buf.data.nbytes
 
 
 def time_call(
     fn: Callable,
-    *args,
+    *args: Any,
     bytes_moved: int = 0,
     ops: float = 0.0,
     warmup: int = 0,
     iters: int = 20,
     record: Callable[[str, float], object] | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> None:
-    """Time any compiled callable (an ``Operator``, a graph version, a shipped
-    binary): the median NPU latency of ``iters`` runs of ``fn(*args, **kwargs)``.
+    """Time any compiled callable (an ``Operator``, a graph version, a shipped binary).
+
+    The median NPU latency of ``iters`` runs of ``fn(*args, **kwargs)``.
     ``run_test`` is this plus the checked run and its judgement.
 
     Args:
+        fn: The compiled callable timed.
+        *args: Passed to ``fn`` on every run.
         bytes_moved: Bytes moved a call, for the bandwidth figure; 0 records none.
         ops: Per call, for the throughput figure; 0 records none.
         warmup: Untimed runs before the ``iters`` timed ones.
+        iters: The timed runs the median latency is taken over.
         record: A test's ``record_property``: latency, its median absolute
             deviation over the timed runs, bandwidth and throughput.
+        **kwargs: Passed to ``fn`` on every run.
 
     Raises:
         RuntimeError: ``fn`` did not report NPU execution time.
@@ -215,21 +225,26 @@ def time_call(
 
 def run_test(
     operator: "Operator",
-    inputs,
-    outputs=None,
+    inputs: Vectors | Mapping[str, np.ndarray],
+    outputs: Mapping[str, np.ndarray] | None = None,
     *,
     tolerance: Tolerance,
     timed_iters: int = 20,
     record: Callable[[str, float], object] | None = None,
 ) -> dict[str, Verdict]:
-    """Compile ``operator``, run it on the device, check its outputs, time it. The
-    first run is the one checked, before a timed run rewrites an ``inout`` buffer.
+    """Compile ``operator``, run it on the device, check its outputs, time it.
+
+    The first run is the one checked, before a timed run rewrites an
+    ``inout`` buffer.
 
     Args:
+        operator: The declared operator compiled and run.
         inputs: A ``Vectors``, or every input by buffer name (an ``inout``
             buffer among them).
         outputs: Each buffer the operator writes, its expected result by
-            name; ``operator.call_reference`` on ``inputs`` where None.
+            name; ``operator.reference`` on ``inputs`` where None.
+        tolerance: What a checked output is judged by.
+        timed_iters: The timed runs the latency is taken over.
         record: ``time_call``'s.
 
     Returns:
@@ -239,7 +254,7 @@ def run_test(
         ValueError: ``inputs`` or ``outputs`` do not name the operator's
             buffers, or an expected result is None.
     """
-    from .declare import Operator
+    from .declare import Operator  # which imports this module
 
     if isinstance(inputs, Vectors):
         inputs, outputs = inputs.inputs, inputs.outputs
@@ -252,10 +267,7 @@ def run_test(
             f"not {sorted(inputs)}"
         )
     operator.compile()
-    # The device tensor type of whichever host runtime is selected (IRON_RUNTIME):
-    # XRTTensor under XRT, HRXTensor under HRX. Both implement the Tensor interface
-    # this function uses, and the operator dispatches through DefaultNPURuntime, which
-    # is the matching runtime.
+    # The tensor type of the host runtime NPU_RUNTIME selects, which the operator dispatches on.
     tensor_class = aie_utils.DEFAULT_TENSOR_CLASS
     args, produced, total_bytes = [], {}, 0
     for b in operator.buffers:

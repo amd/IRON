@@ -4,8 +4,8 @@
 import numpy as np
 from aie.iron import ExternalFunction, In, Out, Worker
 from aie.iron.controlflow import range_
-from aie.utils.verify import Tolerance
 from aie.utils.compile.jit.params import param, per_call
+from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
@@ -48,9 +48,10 @@ extern "C" void merge_rows(int32_t *ids, int32_t *merge, int32_t b) {
 
 
 class Merge(Operator):
-    """The row each position of `ids` takes from the text's embeddings and
-    the towers' soft tokens: for each placeholder `(token, at)`, the j-th
-    `token` takes row `at + j`; any other id its own position.
+    """The row each position of `ids` takes from the text's embeddings and the towers' soft tokens.
+
+    For each placeholder `(token, at)`, the j-th `token` takes row
+    `at + j`; any other id its own position.
 
     Given `before`, the count of each placeholder before these ids (a
     prompt chunk after others), the j-th takes row `at + before + j`.
@@ -100,7 +101,13 @@ class Merge(Operator):
     kinds: int = param(derive=lambda op: len(op.placeholders), repr=False)
 
     ids = In(rows, dtype=np.int32, obj_shape=(block,))
-    before = In(kinds, dtype=np.int32, obj_shape=(kinds,), depth=1, when=offset)
+    before = In(
+        kinds,
+        dtype=np.int32,
+        obj_shape=(kinds,),
+        depth=1,
+        when=offset,
+    )
     merge = Out(rows, dtype=np.int32, obj_shape=(block,))
 
     count = per_call(derive=lambda op: op.rows // op.block)

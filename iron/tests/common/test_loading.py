@@ -1,20 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``Model.load`` up to the device: the command line's ``-v``, the model
-``from_checkpoint`` builds with drawn weights or a real tokenizer (skipped
-without the real checkpoint's), the context ``fit`` chooses, and the golden
-beside a checkpoint. No NPU (the fit tests record under a bound npu2, as
-Llama's profile is per device); the checkpoint is synthetic, of
-``SMALL``'s shape, a concrete ``Config`` instance so no config.json is
-read.
+"""``Model.load`` up to the device: the command line's ``-v``.
+
+The model ``from_checkpoint`` builds with drawn weights or a real
+tokenizer (skipped without the real checkpoint's), the context ``fit``
+chooses, and the golden beside a checkpoint. No NPU (the fit tests record
+under a bound npu2, as Llama's profile is per device); the checkpoint is
+synthetic, of ``SMALL``'s shape, a concrete ``Config`` instance so no
+config.json is read.
 """
 
 import argparse
 import dataclasses
 import logging
+import os
 import shutil
 import struct
+import subprocess
+import sys
 
 import aie.utils as aie_utils
 import numpy as np
@@ -24,9 +28,9 @@ from safetensors.numpy import save_file
 
 from iron.applications.llama.model import Llama
 from iron.lm import Checkpoint
-from iron.lm.model import TokenizerJson
 from iron.lm.cli import parse_args
 from iron.lm.golden import RECORD
+from iron.lm.model import TokenizerJson
 from iron.lm.testing import require, weights_dir
 from iron.tests.support.llama_model import SMALL, checkpoint, shapes
 
@@ -34,8 +38,9 @@ TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.json"
 
 
 class Small(Llama):
-    """Llama at ``SMALL``'s shape: a concrete ``Config``, not a class, so
-    ``default_config`` returns it unchanged and reads no checkpoint.
+    """Llama at ``SMALL``'s shape: a concrete ``Config``, not a class.
+
+    So ``default_config`` returns it unchanged and reads no checkpoint.
     """
 
     config = SMALL
@@ -57,6 +62,19 @@ def test_v_shows_iron_s_info_lines(caplog):
     finally:
         iron_logger.setLevel(level)
     assert "compiling for" in caplog.text
+
+
+@pytest.mark.parametrize("rounds", [0, 1])
+def test_check_determinism_needs_two_rounds_before_any_load(tmp_path, rounds):
+    result = subprocess.run(
+        [sys.executable, "-m", "iron.applications.llama.model", str(tmp_path)]
+        + ["--check-determinism", str(rounds)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "--check-determinism compares rounds: give 2 or more" in result.stderr
 
 
 def test_from_checkpoint_draws_its_weights_at_a_seed(tmp_path):
@@ -96,8 +114,10 @@ LEADS = [
 
 @pytest.mark.parametrize("name, lead, tail", LEADS, ids=[n for n, *_ in LEADS])
 def test_a_prompt_begins_as_the_tokenizer_begins_a_text(name, lead, tail):
-    """Only the special tokens before the text: a BOS where the tokenizer
-    puts one, none where it puts none, nothing it puts after.
+    """Only the special tokens before the text.
+
+    A BOS where the tokenizer puts one, none where it puts none, nothing
+    it puts after.
     """
     path = weights_dir(name) / "tokenizer.json"
     require(path, staged=False)
@@ -117,7 +137,7 @@ def test_from_checkpoint_lowers_the_context_and_refuses_to_raise_it(tmp_path):
 
 
 def _held(config, length: int) -> int:
-    """What the model holds at ``length`` positions: its arena, recorded."""
+    """Return what the model holds at ``length`` positions: its arena, recorded."""
     config = dataclasses.replace(config, max_seq_len=length)
     model = Llama(config, checkpoint(config).tree("unread"))
     model.profile = None
@@ -125,9 +145,10 @@ def _held(config, length: int) -> int:
 
 
 def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2, caplog):
-    """1024 native positions in 256-row chunks: a budget one byte short of
-    a context takes the next shorter whole chunks, logging what it chose and,
-    short, how to ask for more.
+    """1024 native positions in 256-row chunks.
+
+    A budget one byte short of a context takes the next shorter whole
+    chunks, logging what it chose and, short, how to ask for more.
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
     path = checkpoint(config).path
@@ -147,8 +168,9 @@ def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2, capl
 
 
 def test_a_model_fits_its_context_with_no_device_bound(tmp_path):
-    """``fit`` records the model, whose profile is per device; it measures
-    what the model holds, which needs none.
+    """``fit`` records the model, whose profile is per device.
+
+    It measures what the model holds, which needs none.
     """
 
     class Native(Small):
@@ -162,20 +184,20 @@ def test_a_model_fits_its_context_with_no_device_bound(tmp_path):
 
 
 def _golden(path):
-    """The golden beside the checkpoint at ``path`` (``cpu_reference``)."""
+    """Return the golden beside the checkpoint at ``path`` (``cpu_reference``)."""
     model = Small(SMALL, Checkpoint(path).tree("unread"))
     model.checkpoint = Checkpoint(path)
     return model.cpu_reference()
 
 
 @pytest.mark.parametrize("change", ["config", "first weight", "last weight"])
-def test_a_checkpoint_s_golden_is_refused_once_it_changes(
-    tmp_path, monkeypatch, change
-):
-    """A fine-tune keeps every name and shape: the bytes at either end of a
-    tensor tell it from its base.
+def test_a_checkpoint_s_golden_is_refused_once_it_changes(tmp_path, change):
+    """A fine-tune keeps every name and shape.
+
+    The bytes at either end of a tensor tell it from its base.
     """
-    monkeypatch.delenv(RECORD, raising=False)
+    if os.environ.get(RECORD):
+        pytest.skip("recording rewrites a changed golden rather than refusing it")
     path = tmp_path / "model.safetensors"
     shutil.copy(checkpoint(SMALL).path, path)
     (tmp_path / "config.json").write_text('{"bos_token_id": 7}')

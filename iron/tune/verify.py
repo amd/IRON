@@ -24,6 +24,7 @@ from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.record import Recording
 from iron.common.image.packaging import plan
 from iron.common.image.step import FusionKind
+
 from .autotune import CONFIDENCE, Timed, _identity
 from .fusions import compare_graphs
 from .measure import Timing

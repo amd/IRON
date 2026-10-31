@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The norms and GELU forms ``F`` refuses, a LayerNorm's eps and each GELU's operator,
-device-free, and EmbeddingGemma 2's text layer (``SandwichLayer`` and
+"""The norms and GELU forms ``F`` refuses, a LayerNorm's eps and each GELU's operator.
+
+Device-free, and EmbeddingGemma 2's text layer (``SandwichLayer`` and
 ``PleLayer``, the shared blocks at their fullest) through its operators'
 references against Hugging Face's own Gemma 4 layer.
 """
@@ -19,6 +20,7 @@ from iron import Precision
 from iron.applications.embedding_gemma2.model import Config, EmbeddingGemma, TextLayer
 from iron.lm import Call, blocks
 from iron.lm.checkpoint import nest
+from iron.lm.golden import flat
 from iron.tests.support.layer import shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -28,8 +30,9 @@ T, WIDTH, HEADS, GROUPS, HEAD, HIDDEN = 256, 512, 8, 2, 64, 1024
 
 
 def module(rng, shape, names, dtype) -> SimpleNamespace:
-    """A layer module of ``names`` at ``shape`` drawn from ``rng``, a
-    matrix's deviation ``1/sqrt(in)``.
+    """Build a layer module of ``names`` at ``shape`` drawn from ``rng``.
+
+    A matrix's deviation is ``1/sqrt(in)``.
     """
     root = SimpleNamespace()
     for name in names:
@@ -66,9 +69,12 @@ def test_a_norm_over_another_axis_than_the_last_is_refused(norm):
     # Unrefused, normalized_shape is checked against the last axis but
     # otherwise unused: the kernel would silently normalize the last axis
     # regardless of what the caller asked for.
-    x = SimpleNamespace(shape=(4, WIDTH))
+    class Normed(iron.Graph):
+        def body(self, x):
+            return norm(x, 4)
+
     with pytest.raises(ValueError, match="not the last axis"):
-        norm(x, 4)
+        Normed().record(x=(4, WIDTH))
 
 
 @pytest.mark.parametrize(
@@ -92,7 +98,7 @@ def test_a_norm_is_its_kernel_weighted_if_given_then_any_bias(norm, steps):
 
     recorded = Normed().record(x=(T, WIDTH)).steps
     assert [
-        (type(s.op).__name__, getattr(s.op, "weighted", None)) for s in recorded
+        (type(s.op).__name__, vars(s.op).get("weighted")) for s in recorded
     ] == steps
 
 
@@ -148,16 +154,16 @@ PER_LAYER = {
 
 
 class HuggingFaceGemma:
-    """transformers' Gemma 4 text layer in float32 over the module ``w``:
-    its output on ``x`` and the per-layer input ``ple``, every row
+    """transformers' Gemma 4 text layer in float32 over the module ``w``.
+
+    Its output on ``x`` and the per-layer input ``ple``, every row
     attending to every other, unrotated.
     """
 
     def __init__(self, w, x, ple):
+        # Record a golden only: not requirements.
         import torch
         from transformers.models.gemma4 import modeling_gemma4 as gemma4
-
-        from iron.lm.golden import flat
 
         config = gemma4.Gemma4TextConfig(
             hidden_size=WIDTH,
@@ -180,7 +186,7 @@ class HuggingFaceGemma:
         self.layer, self.x, self.ple = layer, x, ple
 
     def logits(self, _):
-        import torch
+        import torch  # records a golden only: not a requirement
 
         x = torch.from_numpy(np.asarray(self.x, np.float32))[None]
         ple = torch.from_numpy(np.asarray(self.ple, np.float32))[None]
@@ -219,7 +225,7 @@ class Text(iron.Graph):
 
 
 def gemma_layer(rng) -> SimpleNamespace:
-    """A Gemma text layer module drawn from ``rng``."""
+    """Build a Gemma text layer module drawn from ``rng``."""
     shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN) | PER_LAYER
     w = module(rng, shape, (*GEMMA, *PER_LAYER), bfloat16)
     w.layer_scalar = np.array([0.75], bfloat16)
@@ -229,9 +235,10 @@ def gemma_layer(rng) -> SimpleNamespace:
 def test_gemma_s_text_layer_through_its_operators_references_is_hugging_face_s(
     golden,
 ):
-    """EmbeddingGemma 2's text layer: sandwich norms, q, k and v norms,
-    unscaled attention, its per-layer input and ``layer_scalar``, within
-    bf16's rounding of each of its steps of Hugging Face's own layer.
+    """Check EmbeddingGemma 2's text layer: sandwich norms, q, k and v norms, unscaled attention.
+
+    Its per-layer input and ``layer_scalar``, within bf16's rounding of
+    each of its steps of Hugging Face's own layer.
     """
     rng = np.random.default_rng(12)
     w = gemma_layer(rng)
@@ -251,15 +258,17 @@ def test_gemma_s_text_layer_projects_at_highest_precision():
         .record(x=(ROWS, WIDTH), ple=(ROWS, PLE))
         .steps
     )
-    gemms = [s.op for s in steps if hasattr(s.op, "precision")]
+    gemms = [s.op for s in steps if "precision" in vars(s.op)]
     assert gemms and {op.precision for op in gemms} == {Precision.HIGHEST}
 
 
 def test_embeddinggemma_2_loads_a_layer_s_per_layer_input_flat_or_nested():
-    """Its per-layer input's weights as IRON's checkpoint names them, or
-    under ``ple_block`` as transformers 5 saves them: the same encoder. Its
-    two layer kinds share a head size but not a RoPE base, so each reads
-    its own table.
+    """Check that EmbeddingGemma 2 loads a layer's per-layer input flat or nested.
+
+    Its per-layer input's weights as IRON's checkpoint names them, or
+    under ``ple_block`` as transformers 5 saves them: the same encoder.
+    Its two layer kinds share a head size but not a RoPE base, so each
+    reads its own table.
     """
     rng = np.random.default_rng(5)
     c = Config(

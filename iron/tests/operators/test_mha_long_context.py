@@ -62,8 +62,9 @@ def test_one_query_is_as_accurate_deep_in_the_cache_as_near_its_start():
 
 
 def test_the_reference_scores_a_long_cache_a_few_rows_at_a_time():
-    """A chunk's reference over 128K keys holds 64 MiB of scores at a time,
-    not the chunk's every row's, which are GiBs a head at a model's chunk.
+    """A chunk's reference over 128K keys holds 64 MiB of scores at a time.
+
+    Not the chunk's every row's, which are GiBs a head at a model's chunk.
     """
     rows, keys = 512, 131072
     mha = MHA(num_heads=1, seq_len=rows, kv_len=keys, d=D)

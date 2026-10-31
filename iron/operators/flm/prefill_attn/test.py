@@ -69,9 +69,10 @@ def _inputs(op, max_l, seed):
 
 
 def _record(op, bufs, L_begin, L_end, max_l, record):
-    """Time one more dispatch and record its latency, bandwidth and
-    throughput: bytes count the query/output rows and the K/V rows its
-    queries read; FLOPs count the scores and the weighted sum of V.
+    """Time one more dispatch and record its latency, bandwidth and throughput.
+
+    Bytes count the query/output rows and the K/V rows its queries read;
+    FLOPs count the scores and the weighted sum of V.
     """
     dh = op.head_dim
     keys = np.arange(L_begin, L_end) + 1
@@ -144,9 +145,11 @@ def test_matches_reference(kind, L_begin, L_end, max_l, num_kv_heads, record_pro
 
 @pytest.mark.parametrize("kind", OPERATORS)
 def test_one_image_serves_every_range(kind):
-    """Check that each dispatch runs its own token range: ranges run back to
-    back on one loaded xclbin (growing, shrinking, repeated); a stale range
-    appears only from the second dispatch after a load.
+    """Check that each dispatch runs its own token range.
+
+    Ranges run back to back on one loaded xclbin (growing, shrinking,
+    repeated); a stale range appears only from the second dispatch after a
+    load.
     """
     op = _build(kind, num_kv_heads=1)
     ranges = OPERATORS[kind][2]

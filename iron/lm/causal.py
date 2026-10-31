@@ -16,19 +16,22 @@ from typing import Any, ClassVar
 
 import numpy as np
 from aie.iron.kernels.sample import ROW_WORDS
+from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.compiled import walk
+from iron.common.graph.handle import State
 from iron.operators.copy import Copy
 from iron.operators.sample import Sample
 
 from .blocks import DecoderLayer, Embedding, KVCache, Linear, RMSNorm, Rope
 from .checkpoint import Checkpoint, renamed, weights_file
 from .config import DecoderConfig
-from .model import Model
 from .generation import Sampler
+from .model import Model
 from .session import Session
 
 logger = logging.getLogger(__name__)
@@ -36,9 +39,11 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass(kw_only=True)
 class Call:
-    """One call's values, built once in ``body`` and read by every module that
-    keeps memory from call to call (``KVCache``, ``Rope``): a prompt chunk's
-    ``rows`` from ``start``, or the decode step's one at ``position``.
+    """One call's values, built once in ``body`` and read by every memory module.
+
+    A memory module is one keeping state from call to call (``KVCache``,
+    ``Checkpoints``, ``Rope``): a prompt chunk's ``rows`` from ``start``, or
+    the decode step's one at ``position``.
     """
 
     prompt: bool
@@ -63,10 +68,106 @@ class Call:
     embeddings: Any = None
 
 
+@dataclasses.dataclass(frozen=True)
+class Checkpoints:
+    """A state a decoder carries from position to position, a slot per prompt-chunk boundary.
+
+    Slot ``k`` holds it after the positions up to ``k * chunk`` run so far,
+    slot 0 (never written) before the sequence.
+    """
+
+    slots: State
+    chunk: int
+
+    @classmethod
+    def of(
+        cls, shape: tuple[int, ...], max_seq_len: int, chunk: int, dtype=bfloat16
+    ) -> "Checkpoints":
+        """Return a state of ``shape``.
+
+        A slot for every boundary of ``chunk``-position prompt chunks up to
+        ``max_seq_len`` positions.
+
+        Raises:
+            ValueError: ``chunk`` is not a power of two, which a decode step's
+                slot (``position // chunk``) needs.
+        """
+        if chunk < 1 or chunk & (chunk - 1):
+            raise ValueError(
+                f"Checkpoints: a {chunk}-position chunk is no power of two"
+            )
+        slots = (max_seq_len - 1) // chunk + 2
+        return cls(iron.state((slots, *shape), dtype), chunk)
+
+    def at(self, call: Call) -> tuple[Handle, Handle]:
+        """Return the slot ``call`` reads and the slot it writes, in a graph's body.
+
+        The one read holds the state before its first position, the one
+        written the state after its last. A call ends within the chunk it
+        starts in (``CausalLM`` splits them).
+        """
+        C = self.chunk
+        return self.slots[(call.start - 1) // C + 1], self.slots[call.position // C + 1]
+
+    def restart(self, held: int, ran: int) -> int:
+        """Where a call may start to change the positions from ``held`` on, after ``ran`` positions ran.
+
+        There where the last call ended, else at the boundary before it.
+        """
+        return held if held == ran else held // self.chunk * self.chunk
+
+    def slot(self, position: int) -> int:
+        """Return the slot holding the state after the first ``position`` positions."""
+        return 0 if position == 0 else (position - 1) // self.chunk + 1
+
+
+class CausalConv1d(iron.Graph):
+    """A depth-wise causal convolution of ``kernel`` taps over a call's rows.
+
+    Each of ``channels`` its own taps (``weight``, torch's
+    ``(channels, 1, kernel)``), plus ``bias`` where it holds one. The
+    ``kernel - 1`` rows before a call are its ``state``, a slot per
+    prompt-chunk boundary; ``CausalLM`` gives every one of a model the
+    scratch ``F.causal_conv1d`` stages a call in (``window``, ``tail``).
+
+    Raises:
+        ValueError: ``prefill_chunk`` is smaller than ``kernel - 1``, the
+            history the staging window must hold.
+    """
+
+    window: State
+    tail: State
+
+    def __init__(self, c, channels: int, kernel: int, bias: bool = False):
+        if c.prefill_chunk < kernel - 1:
+            raise ValueError(
+                f"CausalConv1d: prefill_chunk {c.prefill_chunk} is smaller than "
+                f"kernel - 1 ({kernel - 1})"
+            )
+        self.weight = iron.param(channels, 1, kernel)
+        self.bias = iron.param(channels) if bias else None
+        self.state = Checkpoints.of(
+            (kernel - 1, channels), c.max_seq_len, c.prefill_chunk
+        )
+
+    def load_state_dict(self, tree, *, path: str = "") -> None:
+        super().load_state_dict(tree, path=path)
+        # A row per tap, each the row RowwiseMul takes.
+        C, _, K = self.weight.shape
+        self.taps = iron.param(np.ascontiguousarray(self.weight.reshape(C, K).T))
+
+    def body(self, x, call):
+        read, write = self.state.at(call)
+        state = F.ConvState(read, write, self.window, self.tail)
+        y = F.causal_conv1d(x, self.taps, state)
+        return y if self.bias is None else y + self.bias
+
+
 class Decoder(iron.Graph):
-    """A decoder's modules on ``c``'s shape, as a checkpoint's ``model``
-    names them: ``embed_tokens``, ``layers``, layer ``i`` a ``layer(c, i)``,
-    and the final ``norm``.
+    """A decoder's modules on ``c``'s shape, as a checkpoint's ``model`` names them.
+
+    ``embed_tokens``, ``layers``, layer ``i`` a ``layer(c, i)``, and the
+    final ``norm``.
     """
 
     def __init__(self, c: DecoderConfig, layer: type[DecoderLayer]):
@@ -76,9 +177,11 @@ class Decoder(iron.Graph):
 
 
 class CausalLM(Model):
-    """A decoder on ``config``'s shape: ``model``, a ``decoder_class`` of
-    ``layer_class`` layers each holding its own ``KVCache``; ``lm_head``; and
-    ``rotary_emb``, the RoPE table, None with no ``rope_theta``.
+    """A decoder on ``config``'s shape: ``model``, ``lm_head`` and ``rotary_emb``.
+
+    ``model`` is a ``decoder_class`` of ``layer_class`` layers each holding
+    its own ``KVCache``; ``rotary_emb`` is the RoPE table, None with no
+    ``rope_theta``.
     """
 
     decoder_class: ClassVar[type[Decoder]] = Decoder
@@ -118,15 +221,28 @@ class CausalLM(Model):
             head = np.asarray(self.lm_head.weight)
             self.lm_head.weight = iron.param(np.pad(head, ((0, 1), (0, 0))))
         self.layers = self.model.layers
+        # The scratch every causal conv of a shape stages its calls in.
+        scratch = {}
+        for conv in {id(p): p for _, _, p, _ in walk(self)}.values():
+            if isinstance(conv, CausalConv1d):
+                (K, C), chunk = conv.taps.shape, config.prefill_chunk
+                if (K, C) not in scratch:
+                    scratch[K, C] = iron.state((2, chunk, C)), iron.state((K - 1, C))
+                conv.window, conv.tail = scratch[K, C]
 
     @property
-    def recurrent(self) -> list[KVCache]:
-        """Each ``KVCache`` keeping a ring, which restarts only at some
-        positions (``restart``).
+    def recurrent(self) -> list[Checkpoints | KVCache]:
+        """Each state a layer carries from position to position, which restarts only at some (``restart``).
+
+        ``Checkpoints``, and a ``KVCache`` keeping a ring.
         """
         found = {}
         for _, _, p, _ in walk(self):
-            if isinstance(p, KVCache) and p.ring is not None:
+            if (
+                isinstance(p, Checkpoints)
+                or isinstance(p, KVCache)
+                and p.ring is not None
+            ):
                 found.setdefault(id(p), p)
         return list(found.values())
 
@@ -135,18 +251,20 @@ class CausalLM(Model):
         return w(x, call)
 
     def head(self, x):
-        """The final norm, then the output head (the embedding, if tied)."""
+        """Run the final norm, then the output head (the embedding, if tied)."""
         return self.lm_head(self.model.norm(x))
 
     def positions(self, x, call: Call):
-        """``x``, the rows ``call`` runs, with the model's absolute positions
-        placed; unchanged by default.
+        """``x``, the rows ``call`` runs, with the model's absolute positions placed.
+
+        Unchanged by default.
         """
         return x
 
     def lookup(self, ids):
-        """The embedding rows of ``ids``, bounded as ``ids`` is, or of the
-        decode step's token.
+        """Return the embedding rows of ``ids``.
+
+        Bounded as ``ids`` is, or of the decode step's token.
         """
         return self.model.embed_tokens(ids)
 
@@ -177,9 +295,10 @@ class CausalLM(Model):
         )
 
     def from_rows(self, x, ids, *, token, position, start, rows, rope_start):
-        """A prompt chunk's call on its embedding rows ``x``, bounded to
-        ``rows``, in place of the lookup of its ``ids``; ``token`` is the
-        decode step's, unread here.
+        """Run a prompt chunk's call on its embedding rows ``x``, bounded to ``rows``.
+
+        In place of the lookup of its ``ids``; ``token`` is the decode
+        step's, unread here.
         """
         return self.forward(
             x,
@@ -194,8 +313,9 @@ class CausalLM(Model):
         )
 
     def forward(self, x: Handle, call: Call):
-        """The layers, the head and the draw over ``x``, the rows ``call``
-        runs, each memory module reading ``call``.
+        """Run the layers, the head and the draw over ``x``, the rows ``call`` runs.
+
+        Each memory module reads ``call``.
         """
         c = self.config
         call.embeddings = x
@@ -212,8 +332,10 @@ class CausalLM(Model):
         return self.draw(self.head(x), call)
 
     def draw(self, logits, call: Call):
-        """What a call returns: ``logits``, ``head``'s output, and the
-        token drawn from them on the device, carried with the next position.
+        """Return what a call returns: ``logits`` and the token drawn from them.
+
+        ``logits`` is ``head``'s output; the token is drawn from it on the
+        device, carried with the next position.
         """
         c = self.config
         _, drawn = Sample.step(
@@ -231,16 +353,17 @@ class CausalLM(Model):
         return Rope(config)
 
     def rope_row(self, n: int, begin: int) -> int:
-        """The RoPE table row a chunk from ``begin`` of an ``n``-token prompt
-        reads first (``Rope.table_start``).
+        """Return the RoPE table row a chunk from ``begin`` reads first.
+
+        Of an ``n``-token prompt (``Rope.table_start``).
         """
         rope = self.rotary_emb
         return begin + (0 if rope is None else rope.table_start(n))
 
     @classmethod
     def tune_arguments(cls, parser) -> None:
-        """The flags ``tune_calls`` follows from (``tune.arguments``)."""
-        from .tune import arguments
+        """Add the flags ``tune_calls`` follows from (``tune.arguments``)."""
+        from .tune import arguments  # which imports this module
 
         arguments(parser)
 
@@ -249,7 +372,7 @@ class CausalLM(Model):
         """``tune.calls`` on ``args``, built on the checkpoint's weights (read
         lazily): what a coded weight's capacity and a build's timing follow.
         """
-        from .tune import calls
+        from .tune import calls  # which imports this module
 
         weights = weights_file(args.checkpoint)
         config = dataclasses.replace(cls.default_config(weights), **dict(args.config))
@@ -281,14 +404,16 @@ class CausalLM(Model):
         )
 
     def shapes(self) -> list[dict]:
-        """The input shapes of each version: the decode step's (none), then
-        the prompt chunk's token ids.
+        """Return the input shapes of each version.
+
+        The decode step's (none), then the prompt chunk's token ids.
         """
         return [{}, dict(ids=((self.config.prefill_chunk,), np.int32))]
 
     def loaded(self, versions: list) -> None:
-        """Run ``logits`` and ``generate`` on the decode step and the
-        prompt chunk (``use``).
+        """Run ``logits`` and ``generate`` on the decode step and the prompt chunk.
+
+        See ``use``.
         """
         self.use(*versions)
 
@@ -299,9 +424,11 @@ class CausalLM(Model):
         placed: CompiledGraph | None = None,
         placeholders: tuple[int, ...] = (),
     ) -> None:
-        """Run ``logits`` and ``generate`` on these versions: this model's
-        own, or those of a graph recording it in their bodies (a multimodal
-        model's), in one arena, each prompt version feeding ``decode``.
+        """Run ``logits`` and ``generate`` on these versions, in one arena.
+
+        The versions are this model's own, or those of a graph recording it
+        in their bodies (a multimodal model's); each prompt version feeds
+        ``decode``.
 
         Args:
             decode: The decode step.
@@ -318,16 +445,19 @@ class CausalLM(Model):
             logger.info("%s", decode.plan.report("decode"))
 
     def call_values(self) -> dict:
-        """The per-call values every call gives beyond the token, position,
-        start, rows and rope_start: none by default.
+        """Return the per-call values every call gives beyond the standard ones.
+
+        The standard ones are the token, position, start, rows and
+        rope_start; none beyond them by default.
         """
         return {}
 
     def __call__(self, ids=None, before=None, **values) -> Any:
-        """One call of the prompt version on ``ids`` (``Session.prompt_ids``),
-        the placed one on ``ids`` and ``before`` (``use``), or else the
-        decode step, with ``call_values`` where ``values`` give none of
-        their own.
+        """One call of the prompt version, the placed one, or else the decode step.
+
+        The prompt version runs on ``ids`` (``Session.prompt_ids``), the
+        placed one on ``ids`` and ``before`` (``use``); either way,
+        ``call_values`` fills in where ``values`` give none of their own.
 
         Raises:
             RuntimeError: Neither version is loaded: ``load_versions()``
@@ -351,14 +481,20 @@ class CausalLM(Model):
             raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         return self.decode_step.emit is not None
 
+    @property
+    def draws_at_once(self) -> bool:
+        """A device loop's: ``generate`` reads its draws once the last is drawn."""
+        return self.device_loop
+
     def release(self) -> None:
         """Free the device loops' runs, then the graph's memory."""
         self._loops.clear()
         super().release()
 
     def loop(self, version: CompiledGraph) -> CarriedLoop:
-        """The device loop of decode steps ``version`` starts, made once: its
-        runs are bound to the versions, which every session shares.
+        """Return the device loop of decode steps ``version`` starts, made once.
+
+        Its runs are bound to the versions, which every session shares.
         """
         if id(version) not in self._loops:
             assert self.decode_step is not None, "loaded with the version it starts"
@@ -366,8 +502,9 @@ class CausalLM(Model):
         return self._loops[id(version)]
 
     def logits(self, tokens) -> np.ndarray:
-        """The logits after the last of ``tokens``, the whole history, in
-        ``session`` (``Session.logits``).
+        """Return the logits after the last of ``tokens``, the whole history.
+
+        Run in ``session`` (``Session.logits``).
         """
         return self.session.logits(tokens)
 
@@ -378,8 +515,9 @@ class CausalLM(Model):
         return self.session.draw(tokens, max_tokens, sampler, each)
 
     def forget(self, position: int) -> None:
-        """Hold nothing the caches have from ``position`` on, whichever
-        session's tokens they hold (``Session.forget``).
+        """Hold nothing the caches have from ``position`` on.
+
+        Whichever session's tokens they hold (``Session.forget``).
         """
         if self.holder is not None:
             self.holder.forget(position)

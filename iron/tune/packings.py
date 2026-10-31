@@ -40,6 +40,7 @@ from iron.common.declare.profile import PackingEntry, Version
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
 from iron.common.image.step import FusionKind
+
 from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, _json_safe, time_shape
 from .costmodel import FEATURES, CostModel
 from .failures import Kind, Ledger, first_error

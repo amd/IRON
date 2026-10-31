@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Ports of FastFlowLM's Gemma 4 NPU overlays to IRON
-(https://github.com/ROCm/FastFlowLM, MIT).
+"""Ports of FastFlowLM's Gemma 4 NPU overlays to IRON.
+
+https://github.com/ROCm/FastFlowLM, MIT.
 """
 
 from .dequant.op import DequantBFP
@@ -11,4 +12,11 @@ from .layer.op import DecodeLayer
 from .lm_head.op import LMHead
 from .prefill_attn.op import PrefillAttention, PrefillSlidingAttention
 
-__all__ = sorted(name for name in dir() if name[0].isupper())
+__all__ = [
+    "DecodeLayer",
+    "DequantBFP",
+    "LMHead",
+    "PrefillAttention",
+    "PrefillSlidingAttention",
+    "ProjectionGEMM",
+]

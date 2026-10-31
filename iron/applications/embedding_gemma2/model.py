@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""EmbeddingGemma 2 on the NPU: the text encoder as one graph
-(``EmbeddingGemma``), and over text, audio and an image (``Multimodal``),
-Gemma 4's towers' soft tokens in their placeholders' places. Run with
+"""EmbeddingGemma 2 on the NPU.
+
+The text encoder as one graph (``EmbeddingGemma``), and over text, audio
+and an image (``Multimodal``), Gemma 4's towers' soft tokens in their
+placeholders' places. Run with
 ``python -m iron.applications.embedding_gemma2.model <checkpoint>
 --query ... --document ...``.
 """
@@ -25,7 +27,6 @@ import iron.functional as F
 from iron import Precision, lm
 from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
-from iron.tune.autotune import Point, Timed
 from iron.lm import (
     Attention,
     Checkpoint,
@@ -40,6 +41,7 @@ from iron.lm.cli import config_argument
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
+from iron.tune.autotune import Point, Timed
 
 PROFILES = Path(__file__).with_name("profiles")
 # A retrieval query's tokens, its task prefix included.
@@ -110,8 +112,9 @@ class Config(lm.Config):
     block: int = lm.not_json(64)
 
     def truncated(self, out, dims: int) -> np.ndarray:
-        """The ``dims`` truncation, one of ``mrl_dims``, of a call's
-        embeddings ``out``, float32.
+        """Return the ``dims`` truncation of a call's embeddings ``out``, float32.
+
+        ``dims`` is one of ``mrl_dims``.
         """
         rows = np.asarray(out).reshape(len(self.mrl_dims), -1)
         return np.asarray(rows[self.mrl_dims.index(dims), :dims], np.float32)
@@ -124,9 +127,10 @@ class Config(lm.Config):
 
 
 class TextProcessor:
-    """EmbeddingGemma 2's text processor: tokenizes a text behind its task's
-    prefix, and expands the placeholders for a clip's and an image's soft
-    tokens as Hugging Face's processor does.
+    """EmbeddingGemma 2's text processor.
+
+    Tokenizes a text behind its task's prefix, and expands the placeholders
+    for a clip's and an image's soft tokens as Hugging Face's processor does.
 
     Args:
         path: The checkpoint's `tokenizer.json`; its `encode` adds BOS and EOS.
@@ -158,7 +162,7 @@ class TextProcessor:
     }
 
     def __init__(self, path, config: Config = Config()):
-        import tokenizers
+        import tokenizers  # the models extra's: optional
 
         self.tokenizer = tokenizers.Tokenizer.from_file(str(path))
         self.config = config
@@ -166,9 +170,10 @@ class TextProcessor:
     def encode(
         self, text: str, task: str, audio_tokens: int = 0, image_tokens: int = 0
     ) -> list[int]:
-        """`text` behind `task`'s prefix (`TASKS`), with BOS and EOS, each
-        `<|audio|>` and `<|image|>` in it a run of that many placeholders
-        between its markers.
+        """Encode `text` behind `task`'s prefix (`TASKS`), with BOS and EOS.
+
+        Each `<|audio|>` and `<|image|>` in it is a run of that many
+        placeholders between its markers.
         """
         c, out = self.config, []
         runs = {
@@ -181,9 +186,11 @@ class TextProcessor:
 
 
 class TextLayer(PleLayer):
-    """Layer ``i``: unscaled attention over RMS-normed q, k and v, its own
-    KV groups and head size (``Config.heads``), turned by its head size's
-    RoPE table, a sliding layer's within ``sliding_window`` positions.
+    """Layer ``i``: unscaled attention over RMS-normed q, k and v.
+
+    Its own KV groups and head size come from ``Config.heads``, turned by
+    its head size's RoPE table; a sliding layer is bound within
+    ``sliding_window`` positions.
     """
 
     def __init__(self, c: Config, i: int):
@@ -197,8 +204,10 @@ class TextLayer(PleLayer):
 
 
 class EmbedTokens(iron.Graph):
-    """The vocabulary's rows, scaled by ``sqrt(hidden_size)`` once this
-    loads (Gemma's input embedding scale), gathered on the device.
+    """The vocabulary's rows, gathered on the device.
+
+    Scaled by ``sqrt(hidden_size)`` once this loads (Gemma's input
+    embedding scale).
     """
 
     def __init__(self, c: Config):
@@ -212,8 +221,9 @@ class EmbedTokens(iron.Graph):
 
 
 class EmbeddingProjection(iron.Graph):
-    """The projection's Matryoshka truncations, each padded to a power of
-    four and stacked a power of four apart, derived once this loads.
+    """The projection's Matryoshka truncations, derived once this loads.
+
+    Each is padded to a power of four and stacked a power of four apart.
     """
 
     def __init__(self, c: Config):
@@ -232,8 +242,9 @@ class EmbeddingProjection(iron.Graph):
 
 
 class LanguageModelPle(iron.Graph):
-    """Every layer's own slice of the per-layer input projection, and the
-    norm every layer's slice shares, sliced once this loads.
+    """Every layer's slice of the per-layer input projection, and its norm.
+
+    Sliced once this loads; the norm is shared across every layer's slice.
     """
 
     def __init__(self, c: Config):
@@ -253,13 +264,14 @@ class LanguageModelPle(iron.Graph):
 
 
 class EmbeddingGemma(Encoder):
-    """The text encoder over ``max_tokens`` rows at most, one compile for
-    every length: it returns one unit-length embedding per ``mrl_dims``
-    truncation, zero past its length, attention bidirectional and unscaled.
+    """The text encoder over ``max_tokens`` rows at most, one compile per length.
+
+    Returns one unit-length embedding per ``mrl_dims`` truncation, zero
+    past its length, attention bidirectional and unscaled.
 
     Args:
         weights: The checkpoint's; the text encoder's tree is read.
-        tokenizer: What ``embed`` encodes text with.
+        processor: What ``embed`` encodes text with.
     """
 
     config = Config()
@@ -279,10 +291,10 @@ class EmbeddingGemma(Encoder):
         self,
         config: Config,
         weights: SimpleNamespace,
-        tokenizer: TextProcessor | None = None,
+        processor: TextProcessor | None = None,
     ):
         c = config
-        self.tokenizer = tokenizer
+        self.processor = processor
         self.language_model = SimpleNamespace()
         super().__init__(config, c.max_tokens)
         self.final_norm = RMSNorm(c.hidden_size, c.eps)
@@ -320,8 +332,9 @@ class EmbeddingGemma(Encoder):
         return {key: (table[:n],) * 2 for key, table in self.rope.items()}
 
     def layer(self, call, i, layer, x):
-        """Layer ``i`` on ``x``, its per-layer input projected from the
-        call's embeddings.
+        """Run layer ``i`` on ``x``.
+
+        Its per-layer input is projected from the call's embeddings.
         """
         c = self.config
         # The projection's E ** -0.5 scale folded into the norm's epsilon:
@@ -333,9 +346,10 @@ class EmbeddingGemma(Encoder):
         return layer(x, call, ple)
 
     def pool(self, x, n):
-        """The mean of the ``n`` rows of ``x``: one zero query at scale 0
-        weighs each key ``1 / n``, and masks the rows past ``n`` rather than
-        multiplying them by 0.
+        """Return the mean of the ``n`` rows of ``x``.
+
+        One zero query at scale 0 weighs each key ``1 / n``, and masks the
+        rows past ``n`` rather than multiplying them by 0.
         """
         c = self.config
         h = x.reshape(x.shape[0], 1, c.hidden_size)
@@ -358,30 +372,37 @@ class EmbeddingGemma(Encoder):
         return F.rms_norm(y, y.shape[-1:], self.unit, 0.0)
 
     def encode(self, tokens, dims: int = 768) -> np.ndarray:
-        """The unit-length embedding of ``tokens`` truncated to ``dims``, one
-        of ``mrl_dims``.
+        """Return the unit-length embedding of ``tokens`` truncated to ``dims``.
+
+        ``dims`` is one of ``mrl_dims``.
         """
         ids, values = self.inputs(tokens)
         return self.config.truncated(self(ids, **values).numpy(), dims)
 
     @classmethod
     def from_checkpoint(cls, path, **kwargs):
-        """``Model.from_checkpoint``, its tokenizer the text processor."""
+        """``Model.from_checkpoint``, with the text processor over its tokenizer."""
         model = super().from_checkpoint(path, **kwargs)
         if model.tokenizer is not None:
             assert model.checkpoint is not None, "from_checkpoint gives it one"
             directory = Path(model.checkpoint.path).parent
-            model.tokenizer = TextProcessor(directory / "tokenizer.json", model.config)
+            model.processor = TextProcessor(directory / "tokenizer.json", model.config)
         return model
 
     def embed(self, text: str, task: str, dims: int = 768) -> np.ndarray:
-        """The embedding of `text` for `task`, its first `dims` renormalized."""
-        return self.encode(self.tokenizer.encode(text, task), dims)
+        """Return the embedding of `text` for `task`, its first `dims` renormalized."""
+        if self.processor is None:
+            raise RuntimeError(
+                f"{type(self).__name__}: no tokenizer; give token ids to encode"
+            )
+        return self.encode(self.processor.encode(text, task), dims)
 
 
 class Multimodal(lm.Multimodal):
-    """The text encoder with one clip's and one image's soft tokens in their
-    placeholders' places (``iron.lm.Multimodal``), unscaled.
+    """The text encoder with soft tokens at their placeholders' places.
+
+    One clip's and one image's soft tokens (``iron.lm.Multimodal``),
+    unscaled.
 
     Args:
         weights: The checkpoint's: the text encoder's tree and each tower's.
@@ -394,14 +415,14 @@ class Multimodal(lm.Multimodal):
         self,
         config: Config,
         weights: SimpleNamespace,
-        tokenizer: TextProcessor | None = None,
+        processor: TextProcessor | None = None,
         audio_config: AudioConfig = AudioConfig(),
         vision_config: VisionConfig = VisionConfig(),
     ):
         self.config = config
-        self.tokenizer = tokenizer
+        self.processor = processor
         super().__init__(
-            EmbeddingGemma(config, weights, tokenizer),
+            EmbeddingGemma(config, weights, processor),
             {
                 config.audio_token: AudioTower(audio_config, weights),
                 config.image_token: VisionTower(vision_config, weights),
@@ -409,9 +430,10 @@ class Multimodal(lm.Multimodal):
         )
 
     def encode(self, tokens, dims: int = 768, audio=None, image=None) -> np.ndarray:
-        """The unit-length embedding of ``tokens`` with one mono clip
-        ``audio`` and one decoded image ``image`` at their placeholders,
-        truncated to ``dims``.
+        """Return the unit-length embedding of ``tokens`` truncated to ``dims``.
+
+        One mono clip ``audio`` and one decoded image ``image`` sit at
+        their placeholders.
         """
         c = self.config
         raw = {}
@@ -425,9 +447,10 @@ class Multimodal(lm.Multimodal):
     def embed(
         self, text: str, task: str, dims: int = 768, audio=None, image=None
     ) -> np.ndarray:
-        """The embedding of `text` for `task`, its first `dims` renormalized,
-        with one mono clip `audio` at 16 kHz and one decoded image `image`,
-        `(height, width, 3)` uint8, at their placeholders.
+        """Return the embedding of `text` for `task`, its first `dims` renormalized.
+
+        One mono clip `audio` at 16 kHz and one decoded image `image`,
+        `(height, width, 3)` uint8, sit at their placeholders.
         """
         c = self.config
         a = self.towers[c.audio_token].config
@@ -436,7 +459,11 @@ class Multimodal(lm.Multimodal):
         image_tokens = (
             0 if image is None else v.tokens(*np.shape(image)[:2], v.image_tokens)
         )
-        tokens = self.tokenizer.encode(text, task, audio_tokens, image_tokens)
+        if self.processor is None:
+            raise RuntimeError(
+                f"{type(self).__name__}: no tokenizer; give token ids to encode"
+            )
+        tokens = self.processor.encode(text, task, audio_tokens, image_tokens)
         return self.encode(tokens, dims, audio, image)
 
     @classmethod

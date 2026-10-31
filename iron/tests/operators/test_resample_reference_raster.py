@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Resample.reference given a raster larger than one image fills, as a graph
-gives it a state: it writes the image's rows over its leading ones, as the
-device does, and keeps the rest. Host-only.
+"""Resample.reference given a raster larger than one image fills, as a graph gives it a state.
+
+It writes the image's rows over its leading ones, as the device does,
+and keeps the rest. Host-only.
 """
 
 import numpy as np

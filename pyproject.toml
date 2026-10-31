@@ -40,6 +40,31 @@ exclude = ["iron.tests*"]
 ]
 
 [tool.pyright]
-include = ["iron/common/graph", "iron/functional.py", "iron/lm"]
+include = ["iron"]
+exclude = ["iron/tests", "iron/operators/**/test.py", "**/__pycache__"]
+typeCheckingMode = "standard"
+reportMissingModuleSource = false
 # A loop over chunks or calls, never empty, binds what follows it.
 reportPossiblyUnboundVariable = false
+
+# Output that parses on the oldest Python IRON supports; inferred from
+# requires-python, black targets every later version too, whose grammar a
+# black running on an older Python cannot check.
+[tool.black]
+target-version = ["py311"]
+
+# mlir-aie's ruff.toml rule set, over every Python file in the repository.
+[tool.ruff]
+# Black wraps code at 88; what ruff still sees past that is a long string,
+# comment or URL black leaves alone.
+line-length = 160
+extend-exclude = ["ironenv*", "my_install*", "build"]
+
+[tool.ruff.lint]
+# D100-D107 (a docstring must exist) are off: this enforces the style of the
+# docstrings that exist. D401 is not in the google convention, so it is named.
+select = ["E", "F", "I", "N802", "N816", "D", "D401"]
+ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

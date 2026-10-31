@@ -48,7 +48,7 @@ from iron.common.graph.fusion_tunables import apply as fusion_tunables_apply
 from iron.common.image.compose import fused_configuration, unvalued
 from iron.common.image.packaging import plan
 from iron.common.image.step import Edge, Fusion, FusionKind
-from .failures import Kind, Ledger, first_error, place
+
 from .autotune import (
     CONFIDENCE,
     FIT_CACHE,
@@ -59,6 +59,7 @@ from .autotune import (
     line,
     settings,
 )
+from .failures import Kind, Ledger, first_error, place
 from .measure import (
     Cache,
     Timing,

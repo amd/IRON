@@ -23,12 +23,11 @@ import importlib
 
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
 from aie.helpers.taplib import PerCall
+from ml_dtypes import bfloat16
 
 import iron
-from iron import Precision
-from iron import Scratchpad
+from iron import Precision, Scratchpad
 from iron.common import Unresolvable
 from iron.common.image.packaging import Kind
 from iron.lm import Conv2d, ImagePatches, LogMel
@@ -41,9 +40,7 @@ pytestmark = requires("aiecc", "peano")
 
 
 def _cases():
-    """Each device's first default case of every operator and the cases
-    declared to lower.
-    """
+    """Each device's first default case of every operator and the cases declared to lower."""
     params = []
     for device in sorted(DEVICES):
         firsts = set()
@@ -113,9 +110,10 @@ def test_operator_lowers_to_instructions(device, cls, case, tmp_path):
     ids=lambda v: v if isinstance(v, str) and "." not in v else "",
 )
 def test_a_bounded_operator_lowers(device, module, cls_name, kwargs, bound, tmp_path):
-    """An operator with a bounded extent builds its array against the
-    per-call words (each core reads its count from the scratchpad) and
-    asks the toolchain to patch its descriptors' lengths.
+    """An operator with a bounded extent builds its array against the per-call words.
+
+    Each core reads its count from the scratchpad, and the operator asks
+    the toolchain to patch its descriptors' lengths.
     """
     cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
     op = cls(**kwargs).resolved(device)
@@ -125,9 +123,7 @@ def test_a_bounded_operator_lowers(device, module, cls_name, kwargs, bound, tmp_
 
 
 class _Features(iron.Graph):
-    """Log-mel features, a graph called in this one's body, into a state's
-    rows after a zero one.
-    """
+    """Log-mel features, a graph called in this one's body, into a state's rows after a zero one."""
 
     def __init__(self, frames: int):
         self.log_mel = LogMel()
@@ -139,16 +135,15 @@ class _Features(iron.Graph):
 
 
 def test_a_graph_called_in_a_graph_lowers(device, tmp_path):
-    """Its operators, recorded into the caller's and bound by the caller's
-    per-call value, lower with the values they read.
-    """
+    """Its operators, recorded into the caller's and bound by the caller's per-call value, lower with the values they read."""
     recording = _Features(3072).record(wave=((3073 * 160,), np.float32))
     lower_all(recording, tmp_path, device)
 
 
 class _Subsample(iron.Graph):
-    """Two convolutions, graphs called in this one's body, as an audio front
-    end subsamples: one channel to 64 as a band, then 64 to 64 by patches.
+    """Two convolutions, graphs called in this one's body, as an audio front end subsamples.
+
+    One channel to 64 as a band, then 64 to 64 by patches.
     """
 
     def __init__(self, mels: int):

@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Copy's device-free edges: a reference write into a strided view of an
-intermediate, and a pattern a shim descriptor does not fit.
+"""Copy's device-free edges.
+
+A reference write into a strided view of an intermediate, and a pattern
+a shim descriptor does not fit.
 
 The descriptors Copy issues run on a device, against numpy: slot writes as
 the catalog's Copy cases, channel splits in
@@ -47,8 +49,9 @@ def test_a_gather_refuses_what_it_cannot_lower(index, match):
 
 
 class _IntoColumns(iron.Graph):
-    """A weight copied into the leading columns of an intermediate, a
-    strided view of it, the rest of its rows kept.
+    """A weight copied into the leading columns of an intermediate.
+
+    A strided view of it, the rest of its rows kept.
     """
 
     def __init__(self, columns):

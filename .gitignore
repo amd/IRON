@@ -5,6 +5,7 @@
 /ironenv*
 .vscode
 __pycache__
+.ruff_cache
 .DS_Store
 *.bin
 build/*
@@ -28,3 +29,5 @@ id_ed25519.pub
 # creates at build time (not committed: not every branch has that tree yet).
 /site/
 /docs/programming_guide
+# The Benchmarks page's data, written from the ci branch by ci/scripts/build_pages.py.
+/docs/benchmarks/data.json

@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What a model's device test checks: speed, accuracy against the
-CPU reference, and determinism, each over a model ``Model.load`` loaded,
-its figures through the test's ``record_property``; and where it finds the
-model's files.
+"""What a model's device test checks: speed, accuracy against the CPU reference, and determinism.
+
+Each over a model ``Model.load`` loaded, its figures through the test's
+``record_property``; and where it finds the model's files.
 """
 
 import dataclasses
@@ -13,6 +13,7 @@ import hashlib
 import os
 import time
 import urllib.request
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 from iron.common.graph.compiled import walk
 
 from .blocks import KVCache
+from .causal import Checkpoints
 from .generation import (
     SEED,
     Sampler,
@@ -42,25 +44,25 @@ def weights_dir(name: str) -> Path:
 
 
 def cache_dir() -> Path:
-    """Where a ``Download`` is cached: IRON's own writable cache
-    (``NPU_CACHE_HOME``), not the weights directory, which CI mounts
-    read-only.
+    """Where a ``Download`` is cached.
+
+    IRON's own writable cache (``NPU_CACHE_HOME``), not the weights
+    directory, which CI mounts read-only.
     """
     return Path(NPU_CACHE_HOME) / "data"
 
 
 @dataclasses.dataclass(frozen=True)
 class Download:
-    """A file a test reads that the repository does not hold, fetched from
-    ``url`` and pinned by its ``sha256``.
-    """
+    """A file a test reads that the repository does not hold, fetched from ``url`` and pinned by its ``sha256``."""
 
     url: str
     sha256: str
 
     def fetch(self) -> Path:
-        """The file in ``cache_dir()``, by digest: fetched unless a file of
-        the pinned content is already there.
+        """Return the file in ``cache_dir()``, by digest.
+
+        Fetched unless a file of the pinned content is already there.
 
         Raises:
             ValueError: ``url`` is not https.
@@ -87,14 +89,14 @@ class Download:
 
 
 def require(*files: Path, staged: bool = True) -> None:
-    """Skip the test unless every one of ``files`` exists, except in CI where
-    they are ``staged``: there a missing file fails it, naming what the
-    runner must hold.
+    """Skip the test unless every one of ``files`` exists, except in CI where they are ``staged``.
+
+    There a missing file fails it, naming what the runner must hold.
     """
     missing = [str(f) for f in files if not f.exists()]
     if not missing:
         return
-    import pytest
+    import pytest  # a test's: a model imports this module for weights_dir
 
     if staged and os.environ.get("CI"):
         pytest.fail(
@@ -108,8 +110,9 @@ def require(*files: Path, staged: bool = True) -> None:
 def load_from_flags(
     request, model, weights: Path, tokenizer="tokenizer.json", staged=True
 ):
-    """``model.load`` of ``weights``' directory, to call with any further
-    options, as the CLI loads it at pytest's ``--random-weights`` and
+    """``model.load`` of ``weights``' directory, to call with any further options.
+
+    As the CLI loads it at pytest's ``--random-weights`` and
     ``--max-seq-len``; ``require``s the files it needs.
     """
     seed = request.config.getoption("--random-weights")
@@ -130,9 +133,10 @@ def prompt(model, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
 
 
 def check_generation(model, prompt_len: int, num_tokens: int, *, record):
-    """Sample ``num_tokens`` on the device after a prompt of ``prompt_len``
-    characters (``CausalLM.generate``), the whole prompt prefilled; record
-    the time to the first token and the tokens per second after it.
+    """Sample ``num_tokens`` on the device after a prompt of ``prompt_len`` characters.
+
+    ``CausalLM.generate``, the whole prompt prefilled; record the time to
+    the first token and the tokens per second after it.
     """
     tokens = prompt(model, prompt_len, num_tokens)
     # A module's model holds the last test's tokens: its time is the prompt's.
@@ -146,9 +150,10 @@ def check_generation(model, prompt_len: int, num_tokens: int, *, record):
 
 
 def check_prompt_time(model, length: int, runs: int = 3, *, record):
-    """Record the median seconds to the first token after a prompt of
-    ``length`` tokens over ``runs`` timed runs, each a fresh prompt (random
-    ids, since a prompt's time does not follow its ids).
+    """Record the median seconds to the first token after a prompt of ``length`` tokens.
+
+    Over ``runs`` timed runs, each a fresh prompt (random ids, since a
+    prompt's time does not follow its ids).
     """
     rng = np.random.default_rng(SEED)
     seconds = []
@@ -161,9 +166,10 @@ def check_prompt_time(model, length: int, runs: int = 3, *, record):
 
 
 def check_device_sampling(model, prompt_len: int, num_tokens: int, *, record):
-    """Sample ``num_tokens`` on the device (``CausalLM.generate``) after a
-    prompt of ``prompt_len`` characters, then sample again on the host from
-    each step's logits at the same seed: the text must match, token for token.
+    """Sample ``num_tokens`` on the device (``CausalLM.generate``) after a prompt of ``prompt_len`` characters.
+
+    Then sample again on the host from each step's logits at the same seed:
+    the text must match, token for token.
     """
     tokens, drawn = check_generation(model, prompt_len, num_tokens, record=record)
     host = generate_on_host(model, tokens, num_tokens, Sampler())
@@ -183,9 +189,10 @@ LOGITS = 0.05
 def assert_close(
     got, want: np.ndarray, what: str = "the logits", *, share: float = LOGITS
 ) -> None:
-    """``got`` within ``share`` of ``want``, the reference's logits, at
-    their largest magnitude; and, where the reference's top two differ by
-    more than that bound, the same argmax.
+    """``got`` within ``share`` of ``want``, the reference's logits, at their largest magnitude.
+
+    And, where the reference's top two differ by more than that bound, the
+    same argmax.
     """
     got = np.asarray(got, np.float32).reshape(want.shape)
     scale = np.abs(want).max()
@@ -206,9 +213,10 @@ def check_accuracy(
     *,
     record,
 ):
-    """KL(reference || model) of the next-token distribution, teacher-forced
-    over ``num_tokens`` steps from a ``chars``-character prompt, within
-    ``bounds`` (``{"Mean": .., "P90": .., "Max": ..}``).
+    """KL(reference || model) of the next-token distribution, teacher-forced over ``num_tokens`` steps.
+
+    From a ``chars``-character prompt, within ``bounds``
+    (``{"Mean": .., "P90": .., "Max": ..}``).
     """
     tokens = prompt(model, chars, num_tokens)
     model.forget(0)
@@ -228,13 +236,16 @@ def check_embedding(
     max_error: float,
     *,
     percentile: float = 1,
-    record,
+    record: Callable[[str, float], object],
 ):
-    """``got``'s rows against ``want``'s embeddings: the token cosines' low
-    percentile (one bad token should not fail every other) and the
-    relative error of the whole array.
+    """``got``'s rows against ``want``'s embeddings.
+
+    The token cosines' low percentile (one bad token should not fail every
+    other) and the relative error of the whole array.
 
     Args:
+        got: The array judged.
+        want: The reference array ``got`` is judged against.
         min_cosine: The percentile cosine must reach.
         max_error: ``||got - want|| / ||want||`` must not exceed.
         percentile: Which percentile of the per-row cosines is judged (1:
@@ -262,9 +273,10 @@ def check_determinism(
     *,
     record,
 ):
-    """Repeated runs produce bit-identical logits, over two prompts of
-    ``chars`` characters alternated so a host write that never reaches the
-    device reads the other prompt's data, failing every run rather than some.
+    """Repeated runs produce bit-identical logits, over two prompts of ``chars`` characters.
+
+    Alternated so a host write that never reaches the device reads the
+    other prompt's data, failing every run rather than some.
     """
     prompts = [
         prompt(model, chars, num_tokens),
@@ -277,9 +289,10 @@ def check_determinism(
 
 
 def check_chat_turn(model, chars: int, turn: int, num_tokens: int = 2, *, record):
-    """A prompt extended by a turn, as a chat's next message extends it: the
-    model runs from the turn's first token (``CausalLM.resume``), and its
-    logits match bit for bit a fresh run of the whole prompt from scratch.
+    """Extend a prompt by a turn, as a chat's next message extends it.
+
+    The model runs from the turn's first token (``CausalLM.resume``), and
+    its logits match bit for bit a fresh run of the whole prompt from scratch.
     """
     whole = prompt(model, chars, num_tokens)
     C = model.config.prefill_chunk
@@ -298,9 +311,10 @@ def check_chat_turn(model, chars: int, turn: int, num_tokens: int = 2, *, record
 
 
 def check_deep_decode(model, position: int, bound: float, chars: int = 1024, *, record):
-    """A decode step at ``position``, deep in the caches, against the
-    graph's own reference (``Graph.reference``), for a context transformers
-    would take too long over, within ``bound`` of its KL.
+    """Check a decode step at ``position``, deep in the caches, against the graph's own reference.
+
+    ``Graph.reference``, for a context transformers would take too long
+    over, within ``bound`` of its KL.
     """
     tokens = prompt(model, chars, 1)
     token = greedy(model.logits(tokens))
@@ -317,9 +331,9 @@ def check_deep_decode(model, position: int, bound: float, chars: int = 1024, *, 
 
 
 def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, record):
-    """The deepest prompt chunk (holding position ``max_seq_len - 1``), at
-    most ``rows`` rows of it, against the graph's own reference within
-    ``bound`` of its KL, every earlier position filled as
+    """Check the deepest prompt chunk (holding position ``max_seq_len - 1``), at most ``rows`` rows of it, against the graph's own reference.
+
+    Within ``bound`` of its KL, every earlier position filled as
     ``check_deep_decode`` fills them.
     """
     tokens = prompt(model, chars, 1)
@@ -351,9 +365,14 @@ def check_deep_prompt(model, rows: int, bound: float, chars: int = 1024, *, reco
 
 @contextmanager
 def _fill_caches(model, n: int, position: int):
-    """The caches' first ``n`` rows, a prompt's, repeated up to ``position``
-    on the device and as the graph reference's state, for the body of the
-    ``with``; the prompt's own rows stay as it wrote them.
+    """Repeat the caches' first ``n`` rows, a prompt's, up to ``position``, for the body of the ``with``.
+
+    On the device and as the graph reference's state; the prompt's own
+    rows stay as it wrote them. A ring holds the ``ring`` positions before
+    ``position`` so filled; past ``ring``, a prompt's positions in it are
+    as it left them. A state checkpointed at each chunk boundary
+    (``Checkpoints``) holds, in the slot a call at ``position`` reads, the
+    state the prompt left; the reference reads a copy of its slots.
     """
     version = next(iter(model.versions.values()))
     caches = [(x, p) for _, x, p, _ in walk(model) if isinstance(p, KVCache)]
@@ -370,9 +389,17 @@ def _fill_caches(model, n: int, position: int):
                 rows[q % p.ring] = rows[p.ring + q % p.ring] = held[q % n]
         version.push(cache)
         cache.host = rows
+    checkpoints = [c for c in model.recurrent if isinstance(c, Checkpoints)]
+    for c in checkpoints:
+        slots = version.read(c.slots)
+        slots[c.slot(position)] = slots[c.slot(n)]
+        version.push(c.slots)
+        # A step may read and write one slot: the reference, run after the
+        # device's step, reads it as it was, not as the device left it.
+        c.slots.host = slots.copy()
     try:
         yield
     finally:
-        for state in (x for x, _ in caches):
+        for state in [*(x for x, _ in caches), *(c.slots for c in checkpoints)]:
             version.push(state)
             state.host = None

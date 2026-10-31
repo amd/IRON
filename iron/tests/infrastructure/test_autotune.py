@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Autotuning on the NPU, end to end: an operator timed from the command
-line, and a tuned profile a graph then runs bit-identically with.
+"""Autotuning on the NPU, end to end.
+
+An operator timed from the command line, and a tuned profile a graph
+then runs bit-identically with.
 """
 
 import os

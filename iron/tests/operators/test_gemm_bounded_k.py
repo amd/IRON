@@ -38,10 +38,12 @@ pytestmark = [
 @pytest.mark.parametrize("full_elf", [None, False], ids=["full_elf", "xclbin"])
 @pytest.mark.parametrize("mode", MODES)
 def test_the_reduction_stops_at_the_per_call_length(mode, full_elf):
-    """A and B are NaN past ``n``: a column or row past the bound that were
-    multiplied, in the last K tile or past it, would bring a NaN into every
-    element. Each micro-tile layout the cores zero it in is covered: A's
-    and B's by rows and by columns.
+    """Check that the reduction stops at the per-call length.
+
+    A and B are NaN past ``n``: a column or row past the bound that were
+    multiplied, in the last K tile or past it, would bring a NaN into
+    every element. Each micro-tile layout the cores zero it in is
+    covered: A's and B's by rows and by columns.
     """
     b_col_maj = MODES[mode].get("b_col_maj", False)
 
@@ -76,11 +78,13 @@ def test_the_reduction_stops_at_the_per_call_length(mode, full_elf):
 
 
 def test_attention_reduces_over_the_valid_keys():
-    """The Softmax writes only the blocks ``n`` covers, so the calls run
-    long before short: a block a longer call wrote holds its weights, and a
-    GEMM that reduced over it would add them in. ``v`` is NaN past ``n``,
-    as stale rows of a cache may be anything. The product is checked
-    against the weights the device computed.
+    """Check that attention reduces over the valid keys.
+
+    The Softmax writes only the blocks ``n`` covers, so the calls run
+    long before short: a block a longer call wrote holds its weights, and
+    a GEMM that reduced over it would add them in. ``v`` is NaN past
+    ``n``, as stale rows of a cache may be anything. The product is
+    checked against the weights the device computed.
     """
 
     class Attend(iron.Graph):

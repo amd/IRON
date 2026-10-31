@@ -36,7 +36,8 @@ COCO = {
 
 
 def photo(name: str) -> np.ndarray:
-    """`COCO[name]`, fetched into IRON's cache and decoded:
+    """`COCO[name]`, fetched into IRON's cache and decoded.
+
     `(height, width, 3)` uint8.
     """
     # Pillow is a test requirement (requirements_examples.txt), not IRON's.

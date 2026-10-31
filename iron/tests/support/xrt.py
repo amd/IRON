@@ -10,8 +10,10 @@ import pytest
 
 
 def without_xrt() -> dict[str, str]:
-    """``os.environ`` with pyxrt's directory off ``PYTHONPATH``; skips the
-    calling test where pyxrt is installed rather than on ``PYTHONPATH``.
+    """Return ``os.environ`` with pyxrt's directory off ``PYTHONPATH``.
+
+    Skips the calling test where pyxrt is installed rather than on
+    ``PYTHONPATH``.
     """
     env = dict(os.environ)
     pyxrt = importlib.util.find_spec("pyxrt")

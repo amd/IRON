@@ -5,8 +5,8 @@
 
 import numpy as np
 import pytest
-from aie.iron.device import NPU1, NPU2, NPU1Col1, from_name
 from aie.helpers.taplib import PerCall
+from aie.iron.device import NPU1, NPU2, NPU1Col1, from_name
 
 import iron
 from iron import Carried, Scratchpad
@@ -109,8 +109,9 @@ class Bounded(iron.Graph):
 
 
 class Encoding(iron.Graph):
-    """Two layers' attention over a call's own rows, as a tower's are,
-    bounded by a scratchpad value.
+    """Two layers' attention over a call's own rows, as a tower's are.
+
+    Bounded by a scratchpad value.
     """
 
     def body(self, x, *, n: Scratchpad[np.int32]):
@@ -125,9 +126,11 @@ class Encoding(iron.Graph):
 
 
 def test_a_bounded_step_ends_no_command(npu2):
-    """However a call bounds a step, carried or scratchpad, attention or
-    not, a full ELF stays one command: a prompt chunk, a decode step and an
-    encoder call alike.
+    """Check that a bounded step ends no command.
+
+    However a call bounds a step, carried or scratchpad, attention or
+    not, a full ELF stays one command: a prompt chunk, a decode step and
+    an encoder call alike.
     """
     model = small()
     for recording in (
@@ -147,8 +150,10 @@ class ManyWords(iron.Graph):
 
 
 def test_a_command_reads_at_most_a_scratchpads_words(npu2):
-    """Forty steps, each bounded by its own word, are commands of at most
-    32 words each, the state table a command's scratchpad has.
+    """Check that a command reads at most a scratchpad's words.
+
+    Forty steps, each bounded by its own word, are commands of at most 32
+    words each, the state table a command's scratchpad has.
     """
     recording = ManyWords().record(x=(4096,))
     words = _step_words(recording)
