@@ -110,6 +110,11 @@ class FusionGroup:
         # (recording id, first step's index): every occurrence of this
         # fusion, so a group sharing a step with one taken first is seen to.
         self.occurrences: list[tuple[int, int]] = []
+        # By member shape key, the dimensions a host sizes (``Timed.varying``),
+        # and every step its calls run, resolved: what ``dims`` leaves out of
+        # an entry and checks the rest still name only that member's shape by.
+        self.varying: dict[Hashable, frozenset[str]] = {}
+        self.ran: list[Operator] = []
 
     @property
     def key(self) -> Hashable:
@@ -136,16 +141,25 @@ class FusionGroup:
         (``Profile.add_fusion``), each with the tunables ``combo`` (a joint
         narrowing search's chosen setting, ``narrow_group``'s) gives it;
         None throughout where ``combo`` is, a group that needed no
-        narrowing.
+        narrowing. A member is named without the dimensions a host sizes
+        wherever that still names only its own shape.
         """
-        return [
-            (
-                type(op),
-                _json_safe(shape.named((), derived=True)),
-                None if combo is None else combo[i],
+        out = []
+        for i, (op, shape) in enumerate(zip(self.steps, self.shapes)):
+            named = shape.named((), derived=True)
+            drop = self.varying.get(shape.key, frozenset())
+            kept = {n: v for n, v in named.items() if n not in drop}
+            if any(
+                isinstance(r, type(op))
+                and Shape(r).key != shape.key
+                and Profile.matches(kept, Profile.dims(type(r), vars(r)))
+                for r in self.ran
+            ):
+                kept = named
+            out.append(
+                (type(op), _json_safe(kept), None if combo is None else combo[i])
             )
-            for i, (op, shape) in enumerate(zip(self.steps, self.shapes))
-        ]
+        return out
 
     def __str__(self) -> str:
         return " -> ".join(str(s) for s in self.shapes)
@@ -165,6 +179,7 @@ def fusion_groups(
     """
     found: dict[Hashable, FusionGroup] = {}
     seen: set[tuple[str, ...]] = set()
+    ran = [s.op.resolved(dev) for call in calls for s in call.recording.steps]
     for call in calls:
         rid = id(call.recording)
         points = (
@@ -185,6 +200,12 @@ def fusion_groups(
             group = FusionGroup(fusion.kind, resolved, edges)
             group = found.setdefault(group.key, group)
             group.occurrences.append((rid, fusion.steps[0]))
+            group.ran = ran
+            for shape in group.shapes:
+                moved = call.varying.get(shape.key, frozenset())
+                group.varying[shape.key] = (
+                    group.varying.get(shape.key, frozenset()) | moved
+                )
             identity = tuple(OperatorDesign(op).identity for op in resolved)
             if identity in seen:
                 continue

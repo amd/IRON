@@ -24,9 +24,12 @@ from iron.common.design import OperatorDesign
 from iron.common.graph.fusion import candidates
 from iron.common.graph.record import Recording
 from iron.common.image.step import Edge, Fusion, FusionKind
+from iron.lm.generation import Sampler
+from iron.lm.tune import calls
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
+from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
@@ -508,6 +511,25 @@ def test_narrowings_narrows_only_the_member_that_needs_it(tmp_path):
     cols = [s.get("num_aie_columns") for s in combos[0]]
     assert cols[1] == vars(gemv)["num_aie_columns"]  # GEMV never narrows
     assert cols[2] < vars(add)["num_aie_columns"]  # ElementwiseAdd does
+
+
+def test_a_fusion_entry_names_no_dimension_a_host_sizes():
+    """A host fits its own context, which sizes the decode step's KV cache
+    and so MHA and the cache copies: a fusion entry found at one context
+    names none of those dimensions, so the model fitted to another fuses
+    the same steps."""
+    dev = aie_utils.ensure_current_device()
+    model, sibling = small(), small(max_seq_len=512)
+    [decode] = calls(
+        model, 0, 0, 256, 1, Sampler(0.7, 50), sibling, versions=["decode"]
+    )
+    named = [
+        dims
+        for g in fusion_groups([decode], dev)
+        for cls, dims, _ in g.dims()
+        if cls is MHA
+    ]
+    assert named and not any("kv_len" in dims for dims in named)
 
 
 def test_group_dims_carries_the_narrowed_combos_tunables():
