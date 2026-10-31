@@ -11,7 +11,9 @@ import pytest
 from iron import Profile
 from iron.common.graph.fusion import candidates
 from iron.common.image.step import FusionKind
+from iron.common.graph.coded import CodedWeight
 from iron.lm import validate
+from iron.operators.gemv import GEMV
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.silu import SiLU
 from iron.tests.support.llama_model import small
@@ -152,6 +154,25 @@ def test_verify_live_rejects_a_model_missing_a_compiled_version():
     model.compile(full_elf=True, check=False, **model.shapes()[0])
     with pytest.raises(ValueError):
         validate.verify_live("stock", model)
+
+
+def test_verify_live_names_the_weights_a_version_reads_coded():
+    model = small()
+    profile = Profile()
+    profile.add(GEMV, coded_a=True)
+    model.profile = profile
+    decode, *rest = model.shapes()
+    version = model.compile(full_elf=True, check=False, **decode)
+    for shape in rest:
+        model.compile(full_elf=True, check=False, **shape)
+    coded = sorted(
+        w.name
+        for w, _ in version.recording.weights.values()
+        if isinstance(w, CodedWeight)
+    )
+    live = validate.verify_live("coded", model)["decode"]
+    assert coded and live["coded_weights"] == coded
+    assert live["read_plain"] == {}
 
 
 def _live(image, n_fusions=0, packed_groups=()):
