@@ -13,8 +13,11 @@ timed once per NPU and power mode.
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
+import contextvars
 import dataclasses
+import functools
 import datetime
 import fcntl
 import hashlib
@@ -26,7 +29,7 @@ import statistics
 import subprocess
 import time
 import uuid
-from collections.abc import Callable, Hashable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -122,6 +125,8 @@ class Standalone:
             would not be representative (a draw row's temperature and top-k).
         load: Write the per-call values now; with `False` the image is built
             and seeded, and `load()` writes them.
+        build_only: Compile the image and stop: no buffers on the device, so
+            a thread may build ahead of the dispatches (``prebuild``).
         fusions: Edges to feed a consumer step's input from a producer
             step's output on-chip, each a `Fusion` whose `steps` are indices
             into `runlist`: a fed consumer's named buffer shares its
@@ -145,6 +150,7 @@ class Standalone:
         fusions: Sequence[Fusion] = (),
         fuse: bool = True,
         packing: Packing = Packing(),
+        build_only: bool = False,
     ):
         if any(f.edges for f in fusions) and not distinct:
             # An edge's buffer is named from its repeat-local producer and
@@ -193,6 +199,8 @@ class Standalone:
             packaging,
             fusions=fusions if fuse else (),
         ).compile()
+        if build_only:
+            return
         self.callable = self.sequence.get_callable()
         rng = np.random.default_rng(seed)
         self._before: dict[str, np.ndarray] = {}
@@ -435,6 +443,23 @@ def npu_lock(lock: bool = False):
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def prebuild(
+    builds: Iterable[Callable[..., Standalone]],
+) -> dict[Callable[..., Standalone], concurrent.futures.Future]:
+    """Each of ``builds``' images compiled on a pool of ``BUILD_JOBS``
+    threads, in order, so the device times one batch while the next builds;
+    building one again then reads the compile cache. A build's error is its
+    future's, raised where the caller builds it for real.
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=BUILD_JOBS)
+    out = {
+        build: pool.submit(contextvars.copy_context().run, build, build_only=True)
+        for build in builds
+    }
+    pool.shutdown(wait=False)
+    return out
+
+
 def sized(timing: Timing, runs: Sequence[Callable[[], object]]) -> Timing:
     """``timing`` with a round of ``runs`` about ``ROUND_US`` long, each at
     least ``MIN_CALLS`` calls: a round of long steps (a prompt chunk's,
@@ -485,6 +510,10 @@ CONTEXTS = 16
 
 # Past this nothing stays in a cache, and the repeats' copies would not fit.
 DISTINCT_BYTES = 256 * 2**20
+
+# Images compiled at once ahead of the dispatches: each compile runs its
+# cores' kernels in parallel itself.
+BUILD_JOBS = 4
 
 # A batch's round of runs takes about this long, each run at least
 # MIN_CALLS times: a prompt chunk's step is hundreds of ms.
@@ -804,29 +833,31 @@ def measure(
     size = CONTEXTS // 2 - 1
     fastest = math.inf
     others = todo[1:]
+    probes = {
+        (i, n): functools.partial(
+            Standalone,
+            f"probe{n}_{i}",
+            [ops[i]] * n,
+            values={ops[i]: values or {}},
+            distinct=distinct,
+            inputs={ops[i]: inputs or {}},
+            full_elf=full_elf,
+            load=False,
+        )
+        for i in todo
+        for n in (1, repeats)
+    }
+    prebuilt = prebuild(probes.values())
     for begin in range(0, max(len(others), 1), size):
         batch = [todo[0]] + others[begin : begin + size]
         log(f"    timing {len(batch)} settings, {len(others) - begin} to go")
         built, short, long = [], [], []
+        begun = time.perf_counter()
         for i in batch:
             try:
-                one = Standalone(
-                    f"probe1_{i}",
-                    [ops[i]],
-                    values={ops[i]: values or {}},
-                    inputs={ops[i]: inputs or {}},
-                    full_elf=full_elf,
-                    load=False,
-                )
-                many = Standalone(
-                    f"probe{repeats}_{i}",
-                    [ops[i]] * repeats,
-                    values={ops[i]: values or {}},
-                    distinct=distinct,
-                    inputs={ops[i]: inputs or {}},
-                    full_elf=full_elf,
-                    load=False,
-                )
+                for n in (1, repeats):
+                    prebuilt[probes[i, n]].result()
+                one, many = probes[i, 1](), probes[i, repeats]()
             except RuntimeError as e:
                 # The placer passed it, but the build did not.
                 if i == 0:
@@ -842,6 +873,7 @@ def measure(
         # Held for this whole batch, build through release: a context lives
         # from a probe's first dispatch until ``del`` below, not just the
         # dispatch itself (``npu_lock``).
+        building = time.perf_counter() - begun
         with npu_lock(lock):
             outputs = [run.digest() for run in short]
             batch_timing = sized(timing, [r.callable for r in short + long])
@@ -879,6 +911,10 @@ def measure(
             fastest = min(fastest, *(times[n + j].median_us for j in range(n)))
             # A probe holds its context while it lives; the next batch needs them.
             del short, long
+        log(
+            f"    waited {building:.0f} s on builds, timed in "
+            f"{time.perf_counter() - begun - building:.0f} s"
+        )
     return out
 
 
