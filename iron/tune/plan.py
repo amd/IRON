@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Hashable, Sequence
 
 from iron.common.declare import Profile
-from .autotune import Shape, Timed, _json_safe, coding_tunables, replacing
+from .autotune import Shape, Timed, coding_tunables, replacing
 
 
 def coded_seed(
@@ -28,6 +28,7 @@ def coded_seed(
     would split it into a coded and a plain one, more cores than it fits.
     """
     calls = record(profile)
+    resolved = [s.op.resolved(dev) for c in calls for s in c.recording.steps]
     shapes: dict[Hashable, Shape] = {}
     flags: dict[Hashable, set[str]] = {}
     arrays: dict[Hashable, set[Hashable]] = {}
@@ -45,7 +46,8 @@ def coded_seed(
         out, covering, held = replacing(profile, [shapes[k] for k in keys])
         for k in keys:
             given = {**held[k], **dict.fromkeys(flags[k], True)}
-            out.add(shapes[k].cls, **_json_safe(shapes[k].named(covering[k])), **given)
+            dims = shapes[k].entry(covering[k], frozenset(), resolved)
+            out.add(shapes[k].cls, **dims, **given)
         for fusion in profile.fusions():
             out.add_fusion(*fusion)
         for packing in profile.packings():

@@ -508,7 +508,7 @@ class Packer:
         out: dict[Any, tuple] = {}
         for k, s in group.items():
             for (_, shape), (op, _) in self.shapes[k].items():
-                named = Shape(op.resolved(self.dev)).named(())
+                named = Shape(op.resolved(self.dev)).named((), derived=True)
                 drop = self.call.varying.get(shape, frozenset())
                 kept = {n: v for n, v in named.items() if n not in drop}
                 if any(

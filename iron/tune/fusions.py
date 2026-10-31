@@ -137,7 +137,11 @@ class FusionGroup:
         narrowing.
         """
         return [
-            (type(op), _json_safe(shape.named(())), None if combo is None else combo[i])
+            (
+                type(op),
+                _json_safe(shape.named((), derived=True)),
+                None if combo is None else combo[i],
+            )
             for i, (op, shape) in enumerate(zip(self.steps, self.shapes))
         ]
 

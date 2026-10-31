@@ -33,11 +33,15 @@ class Projections(iron.Graph):
         self.narrow = iron.param(narrow)
         self.act = iron.param(act)
 
-    def body(self, x):
-        y = GEMV.step(self.wide, x, tile_size_input=4)
-        z = GEMV.step(self.square, y[:E], tile_size_input=4)
-        n = GEMV.step(self.narrow, z[: E // 2], tile_size_input=4)
-        return GEMV.step(SiLU.step(self.act), n[: E // 4], tile_size_input=4)
+    def body(self, x, half, quarter):
+        # A batch of one, as a decoder's calls give it: num_matrices is left
+        # to GEMV, so an entry naming it would never match these calls.
+        return (
+            GEMV.step(self.wide, x, tile_size_input=4, num_batches=1),
+            GEMV.step(self.square, x, tile_size_input=4, num_batches=1),
+            GEMV.step(self.narrow, half, tile_size_input=4, num_batches=1),
+            GEMV.step(SiLU.step(self.act), quarter, tile_size_input=4, num_batches=1),
+        )
 
 
 def weights(spread: str) -> tuple[np.ndarray, ...]:
@@ -58,7 +62,7 @@ def recorder(spread: str):
 
     def record(profile: Profile) -> list[Timed]:
         graph.profile = profile
-        return [Timed(graph.record(x=(E,)))]
+        return [Timed(graph.record(x=(1, E), half=(1, E // 2), quarter=(1, E // 4)))]
 
     return record
 
@@ -87,3 +91,23 @@ def test_the_search_holds_a_coding_tunable_where_the_seed_set_it():
     for shape in shapes(record(seed), dev):
         if shape.cls is GEMV:
             assert "coded_a" in shape.pinned
+
+
+def test_a_seeded_shape_records_coded():
+    """The seed's entries match the calls that made them: a GEMV call
+    leaves ``num_matrices`` to its operator, so an entry naming it would
+    never apply."""
+    record = recorder("none")
+    seed = coded_seed(record, aie_utils.ensure_current_device(), Profile())
+    [call] = record(seed)
+    flags = {
+        (s.op.M, s.op.K): s.op.coded_a
+        for s in call.recording.steps
+        if isinstance(s.op, GEMV)
+    }
+    assert flags == {
+        (2 * E, E): True,
+        (E, E): True,
+        (E, E // 2): True,
+        (E // 4, E // 4): False,
+    }

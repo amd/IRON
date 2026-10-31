@@ -20,6 +20,7 @@ import math
 import urllib.request
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
+from types import FunctionType
 from typing import Any
 
 import numpy as np
@@ -309,17 +310,52 @@ class Shape:
     def key(self) -> Hashable:
         return (self.cls, tuple(self.dims.items()))
 
-    def named(self, covering: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    def named(
+        self, covering: Sequence[Mapping[str, Any]], derived: bool = False
+    ) -> dict[str, Any]:
         """The dimensions its entry names: those off their field's default,
         and every one an entry ``covering`` it names, so it outranks them.
+
+        Args:
+            derived: Name the dimensions its operators derive too; a call
+                leaving one to its operator gives it no value an entry
+                naming it matches (``Profile.dims``).
         """
         defaults = Profile.dims(self.cls, {})
         names = {n for matched in covering for n in matched}
+        params = self.cls.declaration.params
         return {
             k: v
             for k, v in self.dims.items()
-            if k in names or k not in defaults or v != defaults[k]
+            if k in names
+            or (k not in defaults or v != defaults[k])
+            and (
+                derived
+                or params[k].derive is None
+                and not isinstance(params[k].default, FunctionType)
+            )
         }
+
+    def entry(
+        self,
+        covering: Sequence[Mapping[str, Any]],
+        drop: frozenset[str],
+        resolved: Sequence[Operator],
+    ) -> dict[str, Any]:
+        """The dimensions a tunable entry for it names: ``named``'s less
+        ``drop`` (those a host sizes), unless leaving those, or the ones its
+        operators derive, out would name another shape of ``resolved``;
+        each JSON can hold (``_json_safe``).
+        """
+        kept = {n: v for n, v in self.named(covering).items() if n not in drop}
+        if any(
+            isinstance(r, self.cls)
+            and Shape(r).key != self.key
+            and Profile.matches(kept, Profile.dims(type(r), vars(r)))
+            for r in resolved
+        ):
+            kept = self.named(covering, derived=True)
+        return _json_safe(kept)
 
     def __str__(self) -> str:
         dims = " ".join(f"{k}={v}" for k, v in self.named(()).items())
@@ -620,20 +656,8 @@ def autotune(
         best = min(gains, key=lambda t: t.delta_us, default=tried[0])
         if gains:
             log(f"    {best.tunables}: {best.delta_us:+.1f} ± {best.noise_us:.1f} us")
-        named = shape.named(covering[shape.key])
-        drop = varying.get(shape.key, frozenset())
-        kept = {n: v for n, v in named.items() if n not in drop}
-        # Left out, a host-sized dimension must not let the entry name another shape.
-        if any(
-            isinstance(r, shape.cls)
-            and Shape(r).key != shape.key
-            and Profile.matches(kept, Profile.dims(type(r), vars(r)))
-            for r in resolved
-        ):
-            kept = named
-        out.add(
-            shape.cls,
-            **_json_safe(kept),
-            **{**held[shape.key], **best.tunables},
+        kept = shape.entry(
+            covering[shape.key], varying.get(shape.key, frozenset()), resolved
         )
+        out.add(shape.cls, **kept, **{**held[shape.key], **best.tunables})
     return out

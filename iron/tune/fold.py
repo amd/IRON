@@ -96,7 +96,7 @@ def _entry(
     edges = tuple(
         (local[e.producer], e.output, local[e.consumer], e.input) for e in fusion.edges
     )
-    named = [(type(s), _json_safe(Shape(s).named(()))) for s in steps]
+    named = [(type(s), _json_safe(Shape(s).named((), derived=True))) for s in steps]
     key = (fusion.kind, tuple((c, tuple(sorted(d.items()))) for c, d in named), edges)
     return key, named, edges
 
