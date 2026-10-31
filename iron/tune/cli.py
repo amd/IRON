@@ -31,13 +31,14 @@ import aie.utils as aie_utils
 from iron import operators
 from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
-from .autotune import Shape, Timed, autotune, kernel_cycles, time_shape
+from .autotune import Shape, Timed, autotune, coding_tunables, kernel_cycles, time_shape
 from .fusions import price_fusions
 from .costmodel import CostModel
 from .failures import Ledger
 from .packings import price_folds_before_packing
 from .measure import Cache, Timing, pmode, switch_cost
 from .plan import coded_seed
+from .survey import step_times, survey
 from .verify import entries, verify, write_report
 
 
@@ -153,7 +154,41 @@ def tune(
     path.parent.mkdir(parents=True, exist_ok=True)
     full_elf = dev.can_dispatch_full_elf
     log = functools.partial(print, flush=True)
+    cycles = kernel_cycles(dev)
+    core_mhz = aie_utils.DefaultNPURuntime.core_mhz
+    model = _cost_model(args, dev) if full_elf else None
     seed = coded_seed(record, dev, start, log=log)
+    coded_shapes = {
+        Shape(s.op).key
+        for c in record(seed)
+        for s in c.recording.steps
+        if any(vars(s.op)[n] for n in coding_tunables(s.op))
+    }
+    surveys = []
+    for call in record(start):
+        times = step_times(
+            call,
+            start,
+            dev,
+            full_elf=full_elf,
+            timing=_timing(args)["timing"],
+            repeats=args.repeats,
+            cache=Cache.here(),
+            log=log,
+            lock=args.lock_in_process,
+        )
+        found = survey(
+            call,
+            start,
+            dev,
+            times,
+            model or CostModel(),
+            coded_shapes,
+            cycles,
+            core_mhz,
+        )
+        surveys.append(found.lines())
+        log("\n".join(found.lines()))
     if entries(seed) != entries(start):
         seed, _ = verify(record, dev, start, seed, log=log, lock=args.lock_in_process)
         seed.save(found_path)
@@ -166,8 +201,8 @@ def tune(
                 dev,
                 profile,
                 full_elf=full_elf,
-                cycles=kernel_cycles(dev),
-                core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
+                cycles=cycles,
+                core_mhz=core_mhz,
                 **_timing(args),
             )
             profile.save(found_path)
@@ -188,7 +223,9 @@ def tune(
         profile = priced
         profile.save(found_path)
         print(f"wrote {found_path}")
-    profile = _save_packings(args, record(profile), dev, profile, found_path, full_elf)
+    profile = _save_packings(
+        args, record(profile), dev, profile, found_path, full_elf, model
+    )
     if entries(seed) != entries(start):
         log("checking the search against its seed")
         profile, _ = verify(
@@ -197,24 +234,19 @@ def tune(
     kept, checks = verify(
         record, dev, start, profile, log=log, lock=args.lock_in_process
     )
-    found = (
+    battery = (
         {} if validate is None or not checks else {"validate": validate(start, kept)}
     )
     kept.save(path)
-    write_report(path, start, kept, checks, **found)
+    write_report(path, start, kept, checks, survey=surveys, **battery)
     print(f"wrote {path} and its report")
     return path
 
 
-def _save_packings(
-    args, calls: Sequence[Timed], dev, profile: Profile, path: Path, full_elf: bool
-) -> Profile:
-    """``profile`` with the folds and packings ``price_folds_before_packing``
-    finds, written to ``path``. On an xclbin per step nothing packs, so no
-    switch is timed to calibrate a cost model, nor one written.
-    """
-    model = CostModel.load(dev.name) if full_elf else None
-    if full_elf and model is None:
+def _cost_model(args, dev) -> CostModel:
+    """``dev``'s cost model, calibrated on a timed switch where none is kept."""
+    model = CostModel.load(dev.name)
+    if model is None:
         model = CostModel.calibrated(
             *switch_cost(
                 dev,
@@ -223,6 +255,22 @@ def _save_packings(
                 lock=args.lock_in_process,
             )
         )
+    return model
+
+
+def _save_packings(
+    args,
+    calls: Sequence[Timed],
+    dev,
+    profile: Profile,
+    path: Path,
+    full_elf: bool,
+    model: CostModel | None,
+) -> Profile:
+    """``profile`` with the folds and packings ``price_folds_before_packing``
+    finds, written to ``path`` with ``model`` as it refits it; None on an
+    xclbin per step, where nothing packs.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
 
     def progress(found: Profile, fitted: CostModel) -> None:

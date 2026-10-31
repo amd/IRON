@@ -72,6 +72,11 @@ def width_tunables(op: Operator) -> list[str]:
     return [n for n in declaration.tunables if declaration.params[n].domain is widths]
 
 
+def design_cores(op: Operator) -> int:
+    """The cores ``op``'s design places."""
+    return len(re.findall(r"aie\.core\(", str(OperatorDesign(op).module())))
+
+
 def adjacent(order: Sequence[Any], group_of: Mapping[Any, int]) -> collections.Counter:
     """How often a step of one group follows a step of another, by the pair
     of groups (lower first): the switches merging the pair removes. A None
@@ -187,8 +192,7 @@ class Packer:
         total = 0
         for array, op in self._distinct(group).items():
             if array not in self._cores:
-                text = str(OperatorDesign(op).module())
-                self._cores[array] = len(re.findall(r"aie\.core\(", text))
+                self._cores[array] = design_cores(op)
             total += self._cores[array]
         return total
 
