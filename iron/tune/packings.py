@@ -41,14 +41,13 @@ from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.image.packaging import plan
 from iron.common.image.step import FusionKind
-from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, time_shape
+from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, _json_safe, time_shape
 from .costmodel import FEATURES, CostModel
 from .failures import Kind, Ledger, first_error
 from .fold import fold_profile
 from .fusions import (
     NotBitIdentical,
     _device_timeout,
-    _json_safe,
     compare_graphs,
     group_fit_verdict,
     refuse_group,

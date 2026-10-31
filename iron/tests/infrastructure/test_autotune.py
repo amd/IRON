@@ -14,7 +14,10 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+import iron
+from iron import Profile
 from iron.operators import ElementwiseAdd
+from iron.operators.copy import Copy
 from iron.tests.support.graphs import Chain
 from iron.tune.autotune import Shape, Timed, autotune, time_shape
 from iron.tune.measure import Cache, Timing, platform
@@ -47,6 +50,30 @@ def test_a_tuned_profile_runs_bit_identically(tmp_path):
     want = np.array(plain(a, b).numpy()[:SIZE])
     got = np.array(tuned(a, b).numpy()[:SIZE])
     assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_tuned_copy_of_a_slice_is_saved(tmp_path):
+    """A Copy reading part of a buffer names an access pattern among its
+    dimensions, which a profile cannot write: its entry names the rest."""
+
+    class Rows(iron.Graph):
+        def body(self, x):
+            return Copy.step(Copy.step(x)[:2])
+
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    profile = autotune(
+        [Timed(Rows().record(x=(64, 2048)))],
+        dev,
+        full_elf=dev.can_dispatch_full_elf,
+        timing=Timing(rounds=2, calls=5),
+        cache=Cache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+        log=lambda _: None,
+    )
+    path = tmp_path / f"{dev.name}.json"
+    profile.save(path)
+    assert len(Profile.load(path)) == len(profile) > 0
 
 
 def test_one_operator_is_timed_from_the_command_line(tmp_path):

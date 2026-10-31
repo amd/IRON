@@ -49,7 +49,16 @@ from iron.common.image.compose import fused_configuration, unvalued
 from iron.common.image.packaging import plan
 from iron.common.image.step import Edge, Fusion, FusionKind
 from .failures import Kind, Ledger, first_error, place
-from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, Trial, line, settings
+from .autotune import (
+    CONFIDENCE,
+    FIT_CACHE,
+    Shape,
+    Timed,
+    Trial,
+    _json_safe,
+    line,
+    settings,
+)
 from .measure import (
     Cache,
     Timing,
@@ -72,24 +81,6 @@ PRICED_KINDS = tuple(k for k in FusionKind if k is not FusionKind.MERGE)
 # narrower than at the width ``autotune`` already found it alone, only
 # sometimes narrower is what lets it co-reside.
 NARROWING_EXHAUSTIVE = 32
-
-
-def _json_safe(dims: Mapping[str, Any]) -> dict[str, Any]:
-    """``dims`` (a ``Shape.named`` result) with any value JSON cannot
-    round-trip to an equal one (an access pattern, which it cannot
-    serialize at all; a tuple, which it gives back a list) left out: a
-    profile entry still names what it can of a step whose shape is not
-    wholly representable.
-    """
-    out = {}
-    for k, v in dims.items():
-        try:
-            same = json.loads(json.dumps(v)) == v
-        except TypeError:
-            continue
-        if same:
-            out[k] = v
-    return out
 
 
 class FusionGroup:

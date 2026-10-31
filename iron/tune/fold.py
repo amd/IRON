@@ -24,8 +24,7 @@ from iron.common.declare.profile import Version
 from iron.common.graph.fold import chosen_folds, fold_candidates
 from iron.common.graph.record import Recording
 from iron.common.image.step import Fusion, FusionKind
-from .autotune import Shape, Timed
-from .fusions import _json_safe
+from .autotune import Shape, Timed, _json_safe
 
 
 def _folded_producer(recording: Recording, fusion: Fusion) -> Operator:

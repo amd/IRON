@@ -507,6 +507,24 @@ def _judged(
     return judge(default, op, run.inputs(), run.written(), values)
 
 
+def _json_safe(dims: Mapping[str, Any]) -> dict[str, Any]:
+    """``dims`` (a ``Shape.named`` result) with any value JSON cannot
+    round-trip to an equal one (an access pattern, which it cannot
+    serialize at all; a tuple, which it gives back a list) left out: a
+    profile entry still names what it can of a step whose shape is not
+    wholly representable.
+    """
+    out = {}
+    for k, v in dims.items():
+        try:
+            same = json.loads(json.dumps(v)) == v
+        except TypeError:
+            continue
+        if same:
+            out[k] = v
+    return out
+
+
 def replacing(
     profile: Profile | None, found: Sequence[Shape]
 ) -> tuple[
@@ -586,7 +604,7 @@ def autotune(
             log(f"    {best.tunables}: {best.delta_us:+.1f} ± {best.noise_us:.1f} us")
         out.add(
             shape.cls,
-            **shape.named(covering[shape.key]),
+            **_json_safe(shape.named(covering[shape.key])),
             **{**held[shape.key], **best.tunables},
         )
     return out
