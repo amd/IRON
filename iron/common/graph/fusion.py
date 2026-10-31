@@ -54,10 +54,6 @@ def _admits(
     return _built[key]
 
 
-# Bounds a stream window's length: each start tries every window up to it.
-_STREAM_MAX_RUN = 8
-
-
 def _hand_offs(
     recording: Recording, ops: list[Operator]
 ) -> dict[str, tuple[int, str, dict[int, str]]]:
@@ -153,7 +149,7 @@ def _hand_offs(
 
 
 def _stream_runs(recording: Recording) -> list[Fusion]:
-    """Every window of 2 to ``_STREAM_MAX_RUN`` consecutive steps, no host step crossing it, that runs as one stream or staged fusion.
+    """Every window of 2 or more consecutive steps, no host step crossing it, that runs as one stream or staged fusion.
 
     Each root two of its steps share, one writing, is a hand-off (``_hand_offs``) whose
     writer and every reader are in it, an edge each; every step is on an edge. The
@@ -173,8 +169,14 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
         uses.append((reads, writes))
     found: list[Fusion] = []
     n = len(recording.steps)
+    if not n:
+        return found
+    # A stream's steps all run at once, each on cores of its own: no window
+    # holds more steps than the array has cores.
+    dev = resolved[0].dev
+    cores = dev.cols * len(dev.core_rows)
     for lo in range(n):
-        for hi in range(lo + 1, min(lo + _STREAM_MAX_RUN, n)):
+        for hi in range(lo + 1, min(lo + cores, n)):
             if _crosses_host(recording, lo, hi):
                 break
             window = range(lo, hi + 1)

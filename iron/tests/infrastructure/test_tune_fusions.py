@@ -35,6 +35,7 @@ from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
+from iron.operators.tanh import Tanh
 from iron.tests.support import sequences
 from iron.tests.support.graphs import Chain as ChainGraph
 from iron.tests.support.graphs import Rotate
@@ -1104,3 +1105,23 @@ def test_price_fusions_takes_the_cheaper_of_two_overlapping_fusions(tmp_path):
     )
     assert not profile.fused(FusionKind.MERGE, [rms, gemv], ())
     assert not profile.fused(FusionKind.STREAM, [gemv, add], [(0, "C", 1, "b")])
+
+
+class LongChain(iron.Graph):
+    """Ten elementwise steps, each reading the last: one stream if it fits."""
+
+    def body(self, x):
+        for _ in range(5):
+            x = Tanh.step(ReLU.step(x, num_aie_columns=1), num_aie_columns=1)
+        return x
+
+
+def test_a_stream_window_is_bounded_by_the_array_not_a_count():
+    """A stream window may hold as many steps as the array has cores.
+
+    Every step of a stream runs at once on cores of its own: the whole ten-step chain
+    is a candidate, where a fixed cap of eight left it out.
+    """
+    recording = LongChain().record(x=(2048,))
+    found = candidates(recording, (FusionKind.STREAM,))
+    assert max(len(f.steps) for f in found) == len(recording.steps) == 10
