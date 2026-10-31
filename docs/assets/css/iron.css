@@ -105,12 +105,13 @@
 }
 .iron-bench-charts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(22rem, 100%), 1fr));
   gap: 1rem;
 }
 .md-typeset .iron-bench-chart {
   display: block;
   width: auto;
+  min-width: 0;
   max-width: none;
   margin: 0;
   padding: 0.75rem;
