@@ -1,6 +1,4 @@
 # Performance trends
 
-**Operators added:** `long_context`
-
-**Operators dropped:** `llama/reference`
+**Operators added:** `embedding_gemma2`, `gemma4/reference`, `granite/reference`, `granite_hybrid/reference`, `llama/reference`
 

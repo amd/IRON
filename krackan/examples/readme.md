@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_10_30_01_45_36` at commit `ce440fa`.
+Tested on `2026_10_31_21_53_02` at commit `42b7547`.
 
 <details>
 <summary>tests/applications/decoders</summary>
@@ -83,7 +83,7 @@ Tested on `2026_10_30_01_45_36` at commit `ce440fa`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_granite_4_2_3b[granite_4_2_3b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>1.41</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_granite_4_2_3b[granite_4_2_3b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>1.42</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -116,7 +116,7 @@ Tested on `2026_10_30_01_45_36` at commit `ce440fa`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_granite_4_0_h_1b[granite_4_0_h_1b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>3.19</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_granite_4_0_h_1b[granite_4_0_h_1b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>3.20</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -159,7 +159,7 @@ Tested on `2026_10_30_01_45_36` at commit `ce440fa`.
     </thead>
     <tbody>
         <tr><td>test_llama_3_2[llama_3.2_1b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.45</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.96</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.95</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
