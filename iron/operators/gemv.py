@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 import aie.dialects.index as index
 import aie.dialects.memref as memref
 import numpy as np
-from aie.dialects.aie import AIEArch, AIETileType, T
+from aie.dialects.aie import AIETileType, T
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import Buffer, ExternalFunction, In, Out, Worker, ceildiv
@@ -26,7 +26,7 @@ from aie.utils.compile.jit.params import (
 )
 from ml_dtypes import bfloat16
 
-from iron.common import Built, Operator, Rtp, Unresolvable
+from iron.common import Built, Operator, Rtp
 from iron.common.elementwise import (
     Elementwise,
     FinishStep,
@@ -107,7 +107,7 @@ def _cases(cls, dev: Device):
         # at one row a tile), and on its own stream.
         + [
             case(8192, 2048, 8, 4, 1024, coded_a=True, bench=True, lower=True),
-            case(2048, 2048, 8, 4, 256, coded_a=True),
+            case(2048, 2048, 4, 4, 256, coded_a=True, lower=True),
             case(2048, 8192, 8, 1, 256, coded_a=True, lower=True),
             case(2048, 8192, 8, 1, 256, coded_a=True, feed_b=True),
             case(8192, 2048, 8, 4, 512, coded_a=True, num_channels=2),
@@ -315,8 +315,6 @@ class GEMV(Operator):
         return self.kernel_vector_size
 
     def resolve(self, dev):
-        if self.coded_a and dev is not None and dev.arch != AIEArch.AIE2p:
-            raise Unresolvable("GEMV: coded_a decodes on aie2p cores only")
         # With no device bound, two rows, unchecked.
         two_rows = 2 * self.K * np.dtype(bfloat16).itemsize
         fits = dev is None or two_rows <= dev.core_memory_bank_bytes

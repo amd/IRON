@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.dialects.aie import AIEArch
 from aie.iron import In, Out, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import datamovement
@@ -10,7 +9,7 @@ from aie.utils.compile.jit.params import divisors, param, per_call, tunable, wid
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Built, Operator, Rtp, Unresolvable
+from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
 
 
@@ -56,8 +55,6 @@ class Decode(Operator):
             )
 
     def resolve(self, dev):
-        if dev is not None and dev.arch != AIEArch.AIE2p:
-            raise Unresolvable("Decode: coded rows decode on aie2p cores only")
         rows = self.rows or 1
         cols = self.resolve_columns(
             dev, self.num_aie_columns, fits=lambda c: self.M % (c * rows) == 0
