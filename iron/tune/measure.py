@@ -1272,7 +1272,8 @@ def switch_cost(
     columns (each its own ``y``), each pair against itself repeated ``short`` and
     ``long`` times, so a repeat's own configure cancels (``per_step``) and only the
     alternation's excess switch remains (``excess``); the two columns' excess then fit
-    to a line in the column count.
+    to a line in the column count. Packaged as ``dev`` dispatches: on an xclbin per
+    step every probe step is a dispatch, so the dispatch cancels too.
 
     Args:
         dev: The device whose switch is timed.
@@ -1312,7 +1313,10 @@ def switch_cost(
             }
             for kind, steps in kinds.items():
                 runs[(cols, kind, n)] = Standalone(
-                    f"sw_{cols}_{kind}{n}", steps, full_elf=True, load=False
+                    f"sw_{cols}_{kind}{n}",
+                    steps,
+                    full_elf=dev.can_dispatch_full_elf,
+                    load=False,
                 )
     keys = list(runs)
     with npu_lock(lock):

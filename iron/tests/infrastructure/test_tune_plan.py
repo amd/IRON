@@ -134,23 +134,18 @@ def surveyed(
 
 
 def test_each_search_runs_where_what_it_could_remove_weighs():
-    plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1)], True)}
+    plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1)])}
     assert plan == {"packing": True, "folds": False, "fusions": False}
-    plan = {s.name: s.runs for s in searches([surveyed(1000, 10, 20)], True)}
+    plan = {s.name: s.runs for s in searches([surveyed(1000, 10, 20)])}
     assert plan == {"packing": False, "folds": True, "fusions": False}
-    plan = {s.name: s.runs for s in searches([surveyed(10**7, 10, 2000)], True)}
+    plan = {s.name: s.runs for s in searches([surveyed(10**7, 10, 2000)])}
     assert plan == {"packing": False, "folds": True, "fusions": False}
 
 
-def test_a_full_elf_prices_fusions_that_could_pay():
-    """A full ELF is no reason to skip fusions: they are judged packed."""
-    plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1, 50)], True)}
+def test_packing_is_no_reason_to_skip_fusions():
+    """Fusions are judged on the packed version, so both run where both could pay."""
+    plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1, 50)])}
     assert plan == {"packing": True, "folds": False, "fusions": True}
-
-
-def test_an_xclbin_per_step_packs_nothing():
-    plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1, 100)], False)}
-    assert plan == {"packing": False, "folds": False, "fusions": True}
 
 
 def test_a_decoder_is_timed_small_medium_and_large_up_to_its_context():

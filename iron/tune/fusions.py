@@ -12,7 +12,7 @@ would share a step with a fusion already taken (``select_rewrites``, kept
 kind-agnostic: a fold or a pack prices and selects the same way, over its
 own ``Candidate``).
 
-A ``PACK`` or ``MERGE`` group often co-resides only at narrower tunables
+A ``PACK`` group often co-resides only at narrower tunables
 than its members' own standalone best (fewer columns, say): ``narrow_group``
 searches the members' settings for the fused form (``narrowings``) and
 prices the fastest that co-resides against the members run apart at their
@@ -71,11 +71,6 @@ from .measure import (
 )
 
 logger = logging.getLogger(__name__)
-
-# What ``price_fusions`` prices in a full ELF: not ``MERGE``, consecutive
-# steps in one configuration, which a profile's packings do for a whole
-# version. On an xclbin per step nothing packs, so it prices every kind.
-PRICED_KINDS = tuple(k for k in FusionKind if k is not FusionKind.MERGE)
 
 
 class FusionGroup:
@@ -477,7 +472,7 @@ def narrowings(
     Args:
         group: The fusion whose members are narrowed.
         dev: The device they run on.
-        feasible: Whether a combination co-resides (a pack's or merge's fit) or
+        feasible: Whether a combination co-resides (a pack's fit) or
             builds (an edge's, which a fit check does not model).
     """
     fed = {e[2] for e in group.edges if e[3] == "B"}
@@ -1042,7 +1037,7 @@ def price_fusions(
     fit_cache: Path = FIT_CACHE,
     checkpoint: Path | None = None,
     max_price: int | None = None,
-    kinds: Sequence[FusionKind] | None = None,
+    kinds: Sequence[FusionKind] = tuple(FusionKind),
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Profile | None:
@@ -1075,9 +1070,7 @@ def price_fusions(
         confirm_timing: How each version is timed end to end.
         fit_cache: Where each group's fit verdict is kept.
         log: Where each group's price is logged.
-        kinds: The kinds priced: ``PRICED_KINDS`` in a full ELF, else every
-            kind, a merge being an xclbin's only way to run consecutive
-            steps as one dispatch.
+        kinds: The kinds priced, every kind the graphs admit by default.
         checkpoint: Where to write the decisions so far (``_checkpoint``)
             after every group is priced, so a run that dies partway still
             leaves something behind beyond the cache alone. A group a device
@@ -1106,8 +1099,6 @@ def price_fusions(
     )
     refused = {} if refused_path is None else _load_refused(refused_path)
 
-    if kinds is None:
-        kinds = PRICED_KINDS if full_elf else tuple(FusionKind)
     all_found = fusion_groups(calls, dev, kinds)
     found = []
     for group in all_found:

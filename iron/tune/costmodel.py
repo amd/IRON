@@ -3,8 +3,9 @@
 
 """What a version pays beyond its steps' own standalone times, per device.
 
-A configuration switch's fixed cost, its cost per core of the group switched into, and
-what a step pays running inside a packed configuration rather than alone.
+A configuration switch's fixed cost, its cost per core of the group switched into,
+what a step pays running inside a packed configuration rather than alone, and on an
+xclbin per step each dispatch's (a packing's steps in a row run as one).
 
 Every end-to-end check of a packing adds a sample (how its features and its
 time beyond its steps moved), and the terms are refitted, pulled toward
@@ -22,10 +23,16 @@ from pathlib import Path
 
 import numpy as np
 
-FEATURES = ("switches", "switch_cores", "packed_steps")
+FEATURES = ("switches", "switch_cores", "packed_steps", "dispatches")
 # npu2 (Strix Halo, turbo): a 1-core design alternated with designs of 1 to
-# 8 cores cost 40 to 68 us a switch more than each run alone.
-PRIOR = {"switches": 37.0, "switch_cores": 7.0, "packed_steps": 0.0}
+# 8 cores cost 40 to 68 us a switch more than each run alone; an xclbin
+# chain's dispatch cost 123 us (Strix Halo).
+PRIOR = {
+    "switches": 37.0,
+    "switch_cores": 7.0,
+    "packed_steps": 0.0,
+    "dispatches": 123.0,
+}
 PRIOR_WEIGHT = 3.0
 COSTS = Path(__file__).with_name("costs")
 

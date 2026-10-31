@@ -38,7 +38,7 @@ Version = tuple[tuple[str, tuple[int, ...], str], ...]
 # None where a step moves none from its own. ``versions``, as a packing
 # entry's own, is the graph versions (``Recording.version``) it applies in,
 # or every version where None: a kind no code scopes today (``STREAM``,
-# ``STAGED``, ``PACK``, ``MERGE``) carries it as None throughout, one list
+# ``STAGED``, ``PACK``) carries it as None throughout, one list
 # serving every fusion kind rather than a parallel, ``FOLD``-only one.
 _FusionEntry = tuple[
     FusionKind,
@@ -209,13 +209,19 @@ class Profile:
                 None.
 
         Raises:
-            TypeError: Fewer than two steps are given, no version is given
+            TypeError: ``kind`` is ``MERGE`` (a packing's form on an xclbin,
+                ``add_packing``), fewer than two steps are given, no version is given
                 (an empty ``versions``, not None), a dim is not a
                 non-tunable ``param()`` of its class, a name in ``tunables``
                 is not a ``tunable()`` of its class, an edge names a step
                 out of range or itself, or either side of an edge declares
                 no such operand.
         """
+        if kind is FusionKind.MERGE:
+            raise TypeError(
+                "a merge is what a packing runs as on an xclbin: name its steps' "
+                "shapes in add_packing"
+            )
         if len(steps) < 2:
             raise TypeError("a fusion entry needs at least two steps")
         resolved = self._members(steps)
@@ -248,7 +254,9 @@ class Profile:
 
         The designs of ``members``' shapes (each ``(operator class, dims)`` or
         ``(operator class, dims, tunables)``, matched as a fusion's steps are) share one
-        device configuration in a full ELF wherever a version runs them. ``tunables``,
+        device configuration wherever a version runs them: a full ELF configures it
+        once for their steps in a row, an xclbin per step dispatches them once
+        (``graph.packing.merges``). ``tunables``,
         where a member gives them, are what every step of its shape takes in such a
         version.
 

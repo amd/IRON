@@ -20,7 +20,9 @@ from aie import ir
 from aie.utils.verify import compare
 
 from iron import Profile
+from iron.common.graph.compiled import apply_profile
 from iron.common.graph.fusion import candidates
+from iron.common.graph.packing import merges
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Composition, CoResidenceError, places
 from iron.common.image.link import FullELF
@@ -251,7 +253,7 @@ def test_merge_of_a_short_decode_run_is_one_device_configuration():
 
 
 # ---------------------------------------------------------------------------
-# candidates(): a recording's admissible packs and merges.
+# candidates(): a recording's admissible packs; a packing's merges on an xclbin.
 # ---------------------------------------------------------------------------
 
 
@@ -284,18 +286,32 @@ def test_pack_candidates_on_small_llama(llama_recordings):
         assert len(triples) == 2
 
 
-def test_merge_candidates_on_small_llama(llama_recordings):
-    """Consecutive steps whose designs co-fit, dependent or not.
+def test_a_packing_runs_as_merges_on_an_xclbin(llama_recordings):
+    """On an xclbin a packing's steps in a row are one merged dispatch (``merges``).
 
-    RoPE's own pair merges. Exact counts, and which longer runs co-fit, are not
-    asserted: ``fits()`` resolves every design's own tunables, which the GEMV and
-    elementwise column-width logic this ports alongside is still settling.
+    Every pair of consecutive steps whose designs it groups is joined, but across a host
+    step or into a fusion's step.
     """
-    decode, prompt = llama_recordings
-    decode_merges = candidates(decode, (FusionKind.MERGE,))
-    prompt_merges = candidates(prompt, (FusionKind.MERGE,))
-    assert decode_merges and prompt_merges
-    assert any(_kinds(decode, f) == ("RoPE", "RoPE") for f in decode_merges)
+    decode, _ = llama_recordings
+    dev = aie_utils.ensure_current_device()
+    profile = Profile()
+    profile.add_packing([(RMSNorm, None), (GEMV, None)])
+    recording, fused, packing = apply_profile(decode, profile, dev)
+    grouped = [isinstance(s.op, (RMSNorm, GEMV)) for s in recording.steps]
+    hosted = {h.at for h in recording.host}
+    pairs = {
+        (i, i + 1)
+        for i in range(len(grouped) - 1)
+        if grouped[i] and grouped[i + 1] and i + 1 not in hosted
+    }
+    runs = merges(recording, fused, packing, dev)
+    assert all(f.kind is FusionKind.MERGE for f in runs)
+    assert pairs and {(i, i + 1) for f in runs for i in f.steps[:-1]} == pairs
+    taken = runs[0].steps[:2]
+    rest = merges(recording, (Fusion(FusionKind.PACK, taken),), packing, dev)
+    assert {(i, i + 1) for f in rest for i in f.steps[:-1]} == {
+        (a, b) for a, b in pairs if a not in taken and b not in taken
+    }
 
 
 def test_pack_candidates_on_llama_1b_header():
@@ -314,21 +330,6 @@ def test_pack_candidates_on_llama_1b_header():
             len(f.steps) == 3 and _kinds(recording, f) == (projection,) * 3
             for f in packs
         )
-
-
-def test_merge_candidates_on_llama_1b_header():
-    """The real 1B header's decode step and prompt chunk.
-
-    RoPE's own pair merges. Exact counts, and which other runs co-fit, are not asserted
-    (``test_merge_candidates_on_small_llama``'s reasoning).
-    """
-    model = llama_1b(num_hidden_layers=1)
-    decode_shapes, prompt_shapes = model.shapes()
-    decode, prompt = model.record(**decode_shapes), model.record(**prompt_shapes)
-    decode_merges = candidates(decode, (FusionKind.MERGE,))
-    prompt_merges = candidates(prompt, (FusionKind.MERGE,))
-    assert decode_merges and prompt_merges
-    assert any(_kinds(decode, f) == ("RoPE", "RoPE") for f in decode_merges)
 
 
 # ---------------------------------------------------------------------------

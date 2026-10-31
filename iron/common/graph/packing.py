@@ -5,7 +5,8 @@
 
 The steps of each packing's shapes, where it applies in the recording's version, rebuilt
 at the tunables it gives them, and their designs grouped into one device configuration,
-which a full ELF then configures once for every step of them in a row.
+which a full ELF then configures once for every step of them in a row, and an xclbin
+dispatches once (``merges``).
 """
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ from typing import Any
 from ..declare import Profile
 from ..design import OperatorDesign
 from ..image.compose import Packing
-from ..image.step import Fusion
+from ..image.step import Fusion, FusionKind
+from .fusion import _crosses_host
 from .fusion_tunables import rebuild
 from .record import Recording
 
@@ -57,3 +59,39 @@ def apply(
         name = OperatorDesign(recording.steps[i].op.resolved(dev)).name
         groups.setdefault(entry, {})[name] = None
     return recording, Packing(tuple(tuple(g) for g in groups.values() if len(g) > 1))
+
+
+def merges(
+    recording: Recording, fused: Sequence[Fusion], packing: Packing, dev
+) -> tuple[Fusion, ...]:
+    """Return each run of two or more consecutive steps outside ``fused`` whose designs ``packing`` groups together, as one ``MERGE``.
+
+    An xclbin's form of a packing: the group configured once and its steps in a row
+    dispatched once, back to back. A host step between two ends a run.
+    """
+    if not packing.groups:
+        return ()
+    inside = {i for f in fused for i in f.steps}
+    groups: list[tuple[str, ...] | None] = []
+    for i, step in enumerate(recording.steps):
+        op = step.op.resolved(dev)
+        group = (
+            None
+            if i in inside or op.reference_only
+            else packing.group_of(OperatorDesign(op).name)
+        )
+        groups.append(group if group is not None and len(group) > 1 else None)
+    found: list[Fusion] = []
+    lo = 0
+    for hi in range(1, len(groups) + 1):
+        if (
+            hi < len(groups)
+            and groups[hi] is not None
+            and groups[hi] == groups[lo]
+            and not _crosses_host(recording, hi - 1, hi)
+        ):
+            continue
+        if groups[lo] is not None and hi - lo > 1:
+            found.append(Fusion(FusionKind.MERGE, tuple(range(lo, hi))))
+        lo = hi
+    return tuple(found)

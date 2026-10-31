@@ -21,7 +21,7 @@ from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.fusion import candidates
-from iron.common.image.step import FusionKind
+from iron.common.image.step import Fusion, FusionKind
 from iron.operators.gemm import GEMM
 
 from .autotune import Shape, Timed, least_us
@@ -203,11 +203,21 @@ def survey(
         for unit, held in members.items()
     }
     entered = [b for a, b in zip(config, config[1:]) if a != b]
+    # On an xclbin a step is a dispatch of its own but in a fusion or a packing's
+    # run (``packing.merges``).
+    joined = sum(
+        1
+        for a, b in zip(config, config[1:])
+        if a == b and (isinstance(a, Fusion) or (isinstance(a, tuple) and len(a) > 1))
+    )
     switch_us = model.predict(
         {
             "switches": len(entered),
             "switch_cores": sum(cores[u] for u in entered),
             "packed_steps": sum(1 for u in config if len(members[u]) > 1),
+            "dispatches": (
+                0 if dev.can_dispatch_full_elf else len(config) - 1 - joined
+            ),
         }
     )
     folded = [
@@ -217,9 +227,8 @@ def survey(
     ]
     fold_us = sum(times[n] / counts[n] for n in folded if n in counts)
     # What fusions could remove: each streamed edge's intermediate, written to
-    # DDR and read back, at the version's fastest read rate; each run of
-    # independent steps' shorter members, run beside its longest; and on an
-    # xclbin per step, where only a merge joins dispatches, every switch.
+    # DDR and read back, at the version's fastest read rate, and each run of
+    # independent steps' shorter members, run beside its longest.
     per_step = {
         i: times[n] / counts[n]
         for i, step in enumerate(call.recording.steps)
@@ -240,20 +249,20 @@ def survey(
         sum(per_step.get(i, 0.0) for i in p) - max(per_step.get(i, 0.0) for i in p)
         for p in widest
     )
-    merge_us = 0.0 if dev.can_dispatch_full_elf else switch_us
     estimates = {
         "coded": Estimate(
             coded_us, "read-bound GEMVs' time times the bytes coding saves"
         ),
         "packing": Estimate(
-            switch_us, f"the cost model's price of {len(entered)} switches"
+            switch_us,
+            f"the cost model's price of {len(entered)} switches"
+            + ("" if dev.can_dispatch_full_elf else " and every dispatch"),
         ),
         "folds": Estimate(fold_us, f"the {len(folded)} steps a fold removes"),
         "fusions": Estimate(
-            stream_us + pack_us + merge_us,
+            stream_us + pack_us,
             f"{len(streamed)} streamed edges' DDR round trips, {len(widest)} "
-            f"independent runs side by side"
-            + ("" if dev.can_dispatch_full_elf else ", every dispatch joined"),
+            f"independent runs side by side",
         ),
     }
     inputs = ", ".join(f"{n}{list(s)}" for n, s, _ in recording.version)

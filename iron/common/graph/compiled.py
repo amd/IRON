@@ -52,6 +52,7 @@ from .fusion import fusions as graph_fusions
 from .fusion_tunables import apply as apply_fusion_tunables
 from .handle import Carry, Dense, Handle, State, Weight, _Param, is_operand
 from .packing import apply as apply_packings
+from .packing import merges
 from .record import HostStep, Recorder, Recording, version_key
 
 logger = logging.getLogger(__name__)
@@ -798,6 +799,9 @@ class CompiledGraph:
         self.words, self.shared = _words(
             recording, share=plan.full_elf, extents=not plan.full_elf
         )
+        if not plan.full_elf:
+            merged = merges(recording, fusions, packing, require_device())
+            fusions = sorted((*fusions, *merged), key=lambda f: f.steps[0])
         packaging = (
             FullELF(commands=plan.commands, shared_words=self.shared, packing=packing)
             if plan.full_elf

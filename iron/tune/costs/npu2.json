@@ -2,19 +2,22 @@
  "terms": {
   "switches": 41.57121355303601,
   "switch_cores": 4.550801721267712,
-  "packed_steps": -4.348461094313065
+  "packed_steps": -4.348461094313065,
+  "dispatches": 123.0
  },
  "prior": {
   "switches": 35.4475078125,
   "switch_cores": 3.5437187500000005,
-  "packed_steps": 0.0
+  "packed_steps": 0.0,
+  "dispatches": 123.0
  },
  "samples": [
   {
    "change": {
     "switches": -211.0,
     "switch_cores": -1306.0,
-    "packed_steps": 292.0
+    "packed_steps": 292.0,
+    "dispatches": 0.0
    },
    "extra_us": -15063.509124999997
   },
@@ -22,7 +25,8 @@
    "change": {
     "switches": -367.0,
     "switch_cores": -2270.0,
-    "packed_steps": 509.0
+    "packed_steps": 509.0,
+    "dispatches": 0.0
    },
    "extra_us": -30260.3765625
   },
@@ -30,7 +34,8 @@
    "change": {
     "switches": -179.0,
     "switch_cores": -1050.0,
-    "packed_steps": 260.0
+    "packed_steps": 260.0,
+    "dispatches": 0.0
    },
    "extra_us": -13806.161281249997
   },
@@ -38,7 +43,8 @@
    "change": {
     "switches": -179.0,
     "switch_cores": -1050.0,
-    "packed_steps": 260.0
+    "packed_steps": 260.0,
+    "dispatches": 0.0
    },
    "extra_us": -13819.053125000008
   },
@@ -46,7 +52,8 @@
    "change": {
     "switches": -179.0,
     "switch_cores": -1050.0,
-    "packed_steps": 260.0
+    "packed_steps": 260.0,
+    "dispatches": 0.0
    },
    "extra_us": -13805.95178125
   },
@@ -54,7 +61,8 @@
    "change": {
     "switches": -211.0,
     "switch_cores": -1306.0,
-    "packed_steps": 292.0
+    "packed_steps": 292.0,
+    "dispatches": 0.0
    },
    "extra_us": -16097.1059375
   }

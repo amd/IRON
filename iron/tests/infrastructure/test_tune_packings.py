@@ -29,7 +29,6 @@ from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
 from iron.tests.support.llama_model import small
-from iron.tune import cli as tune_cli
 from iron.tune.autotune import Point, Timed
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import fold_profile
@@ -133,10 +132,11 @@ class Projections(iron.Graph):
         return GEMV.step(w, y, tile_size_output=256)
 
 
-def _packer(recording, dev, tmp_path):
+def _packer(recording, dev, tmp_path, full_elf=True):
     return Packer(
         Timed(recording),
         dev,
+        full_elf=full_elf,
         timing=Timing(rounds=2, calls=5),
         repeats=5,
         cache=None,
@@ -196,6 +196,7 @@ def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
     packer = Packer(
         decode,
         npu2,
+        full_elf=True,
         timing=Timing(rounds=2, calls=5),
         repeats=5,
         cache=None,
@@ -391,16 +392,20 @@ def test_calls_time_only_the_versions_asked_for():
     assert decode.recording.version == model.record(**model.shapes()[0]).version
 
 
-def test_a_tune_on_an_xclbin_per_step_times_no_switch(npu1, tmp_path):
-    """npu1 packs nothing, so its tune neither times the switches a cost model is calibrated on (a dispatch) nor writes one; its folds are still priced.
+def test_on_an_xclbin_a_packing_joins_its_steps_dispatches(npu2, tmp_path):
+    """An xclbin per step dispatches each step but a packed group's steps in a row once.
 
-    And its profile written.
+    As ``graph.packing.merges`` joins them; a full ELF's dispatches do not follow the
+    grouping.
     """
-    args = tune_cli.parser("npu1").parse_args([])
-    path = tmp_path / "npu1.json"
-    found = tune_cli._save_packings(args, [], npu1, iron.Profile(), path, False, None)
-    assert path.exists() and not found.packings()
-    assert CostModel.load(npu1.name) is None
+    recording = Alternating().record(x=(SIZE,))
+    full, xclbin = (_packer(recording, npu2, tmp_path, f) for f in (True, False))
+    alone = [{k: {}} for k in full.shapes]
+    together = [{k: {} for k in full.shapes}]
+    assert full.features(alone)["dispatches"] == 0
+    assert full.features(together)["dispatches"] == 0
+    assert xclbin.features(alone)["dispatches"] == len(xclbin.order) - 1
+    assert xclbin.features(together)["dispatches"] == 0
 
 
 # ---------------------------------------------------------------------------

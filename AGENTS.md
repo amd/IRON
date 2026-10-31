@@ -240,19 +240,20 @@ values, weights, state and profiles are named. The rules:
   - `staged`: as `stream`, an edge whose lanes differ in count, tile or
     order joined or split through memtiles (`Staging`).
   - `pack`: independent steps issued concurrently.
-  - `merge`: consecutive steps in one configuration, run back to back.
   - `fold`: a consumer's kernel run in its producer's cores
     (`Operator.fold`).
 - A profile's `"packings"` entries name shapes whose designs share one
-  device configuration in a full ELF, wherever a version runs them, so its
-  steps run without reconfiguring between them; a member gives the
+  device configuration wherever a version runs them, so its steps run
+  without reconfiguring between them: in a full ELF one configuration, and
+  per step its steps in a row one xclbin dispatched once (a merge,
+  `iron.common.graph.packing.merges`); a member gives the
   tunables every step of its shape takes there (narrower, so they
   co-reside). An entry's `"versions"` (each a version's inputs by name,
   `Recording.version`) limit it to those versions: a decode step and a
   prompt chunk run the same arrays at other extents, so a grouping that
   pays in one can cost in the other. A switch between configurations costs
-  about 40 us plus 7 us per column on npu2, the cost a packing removes
-  (`iron.common.graph.packing`). `python -m iron.lm.tune <application>
+  about 40 us plus 7 us per column on npu2, and a dispatch per step about
+  120 us, the costs a packing removes (`iron.common.graph.packing`). `python -m iron.lm.tune <application>
   --packings-only` groups a graph's arrays and narrows their widths
   (`iron.tune.packings`), keeping a grouping only where its version is
   bit-identical and faster end to end, and applying it in another version

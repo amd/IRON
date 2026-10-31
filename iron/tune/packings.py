@@ -3,7 +3,9 @@
 
 """Choosing which arrays share one device configuration (a profile's packings).
 
-A full ELF configures a device each time a version switches to it.
+A full ELF configures a device each time a version switches to it; an xclbin per step
+also dispatches each step on its own, but a packing's steps in a row as one
+(``iron.common.graph.packing.merges``).
 ``Packer`` groups a version's units (the arrays a shape runs on) to minimize
 one estimate of the version's time (``Packer.objective``): every step's
 measured time at its unit's setting, plus what the device's cost model
@@ -104,6 +106,7 @@ class Packer:
         call: Timed,
         dev,
         *,
+        full_elf: bool,
         timing: Timing,
         repeats: int,
         cache: Cache | None,
@@ -115,7 +118,7 @@ class Packer:
         cycles: Mapping[str, int] | None = None,
         core_mhz: float | None = None,
     ):
-        self.call, self.dev = call, dev
+        self.call, self.dev, self.full_elf = call, dev, full_elf
         self.timing, self.repeats, self.cache = timing, repeats, cache
         self.fit_cache, self.log, self.lock = fit_cache, log, lock
         self.model, self.ledger = model, ledger
@@ -282,7 +285,7 @@ class Packer:
             for weight, values in self.call.op_points(op):
                 m = measure(
                     variants,
-                    full_elf=True,
+                    full_elf=self.full_elf,
                     timing=self.timing,
                     repeats=self.repeats,
                     values=values,
@@ -306,16 +309,24 @@ class Packer:
     def features(self, groups: Sequence[Group]) -> dict[str, float]:
         """Return what ``groups`` cost beyond their steps' own times depends on (``costmodel.FEATURES``).
 
-        The switches into a group, the cores of the groups switched into, and the steps
-        run in a group of several units.
+        The switches into a group, the cores of the groups switched into, the steps run
+        in a group of several units and, on an xclbin per step, the dispatches: each
+        step's own but where it follows a step of its group, one of several shapes (a
+        packing entry's).
         """
         group_of = {k: i for i, g in enumerate(groups) for k in g}
         cores = [self.cores(g) for g in groups]
-        switches = switch_cores = 0
+        packs = [sum(len(self.shapes[k]) for k in g) > 1 for g in groups]
+        switches = switch_cores = dispatches = 0
         for a, b in zip(self.order, self.order[1:]):
-            if b is not None and (a is None or group_of[a] != group_of[b]):
+            if b is None:
+                continue
+            if a is None or group_of[a] != group_of[b]:
                 switches += 1
                 switch_cores += cores[group_of[b]]
+                dispatches += 1
+            elif not packs[group_of[b]]:
+                dispatches += 1
         packed = sum(
             1 for k in self.order if k is not None and len(groups[group_of[k]]) > 1
         )
@@ -323,6 +334,7 @@ class Packer:
             "switches": switches,
             "switch_cores": switch_cores,
             "packed_steps": packed,
+            "dispatches": 0 if self.full_elf else dispatches,
         }
 
     def objective(self, groups: Sequence[Group]) -> float:
@@ -419,7 +431,7 @@ class Packer:
             tried = time_shape(
                 shape,
                 self.dev,
-                full_elf=True,
+                full_elf=self.full_elf,
                 timing=self.timing,
                 repeats=self.repeats,
                 cache=self.cache,
@@ -573,7 +585,7 @@ def price_packings(
         calls: The calls whose versions are packed.
         dev: The device they run on.
         profile: The profile they were recorded under.
-        full_elf: How the versions are packaged; nothing packs on an xclbin per step.
+        full_elf: How the versions are packaged.
         timing: How each unit's steps are timed.
         confirm_timing: How each version is timed end to end.
         repeats: Steps in each long run a step's time is taken from.
@@ -594,9 +606,6 @@ def price_packings(
     """
     model = CostModel() if model is None else model
     base = _profile(profile, [e for e in profile.packings() if _foreign(e, calls, dev)])
-    if not full_elf:
-        log("packings: an xclbin per step configures every step; nothing to pack")
-        return base
     found: list[PackingEntry] = []
     for call in calls:
         version = call.recording.version
@@ -605,6 +614,7 @@ def price_packings(
         packer = Packer(
             dataclasses.replace(call, recording=recording),
             dev,
+            full_elf=full_elf,
             timing=timing,
             repeats=repeats,
             cache=cache,

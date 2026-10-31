@@ -170,7 +170,7 @@ def tune(
     log = functools.partial(print, flush=True)
     cycles = kernel_cycles(dev)
     core_mhz = aie_utils.DefaultNPURuntime.core_mhz
-    model = _cost_model(args, dev) if full_elf else None
+    model = _cost_model(args, dev)
     seed = coded_seed(record, dev, start, log=log)
     memo: dict = {}
     coded_shapes = {
@@ -182,7 +182,7 @@ def tune(
     surveys = _surveys(
         args, record, start, dev, model, coded_shapes, cycles, core_mhz, log
     )
-    plan = {s.name: s for s in searches(surveys, full_elf)}
+    plan = {s.name: s for s in searches(surveys)}
     for planned in plan.values():
         log(
             f"{planned.name}: {'searched' if planned.runs else 'skipped'}, {planned.why}"
@@ -313,7 +313,7 @@ def _surveys(
             profile,
             dev,
             times,
-            model or CostModel(),
+            model,
             coded_shapes,
             cycles,
             core_mhz,
@@ -345,14 +345,13 @@ def _save_packings(
     profile: Profile,
     path: Path,
     full_elf: bool,
-    model: CostModel | None,
+    model: CostModel,
     folds: bool = True,
 ) -> Profile:
     """``profile`` with the packings ``price_packings`` finds.
 
     And with ``folds`` the folds ``price_folds_before_packing`` keeps, written to
-    ``path`` with ``model`` as it refits it; None on an xclbin per step, where nothing
-    packs.
+    ``path`` with ``model`` as it refits it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -378,8 +377,7 @@ def _save_packings(
         log=functools.partial(print, flush=True),
         lock=args.lock_in_process,
     )
-    if model is not None:
-        print(f"wrote {model.save(dev.name)}")
+    print(f"wrote {model.save(dev.name)}")
     packed.save(path)
     print(f"wrote {path}")
     return packed

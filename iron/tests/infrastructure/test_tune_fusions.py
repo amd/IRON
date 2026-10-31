@@ -23,15 +23,16 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Profile, Scratchpad
 from iron.common.design import OperatorDesign
+from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.graph.fusion import candidates
 from iron.common.graph.record import Recording
+from iron.common.image.packaging import plan
 from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.lm.generation import Sampler
 from iron.lm.tune import calls
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
-from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
@@ -43,7 +44,6 @@ from iron.tests.support.llama_model import small
 from iron.tune import measure as tune_measure
 from iron.tune.autotune import Point, Timed, Trial
 from iron.tune.fusions import (
-    PRICED_KINDS,
     FusionGroup,
     _bound_points,
     _checkpoint,
@@ -55,6 +55,7 @@ from iron.tune.fusions import (
     _refused_key,
     _save_refused,
     _widths,
+    compare_graphs,
     confirm_fusions,
     fusion_groups,
     group_fit_verdict,
@@ -551,12 +552,12 @@ def test_a_fusion_entry_names_no_dimension_a_host_sizes():
         model, 0, 0, 256, 1, Sampler(0.7, 50), sibling, versions=["decode"]
     )
     named = [
-        dims
+        (decode.varying[shape.key], dims)
         for g in fusion_groups([decode], dev)
-        for cls, dims, _ in g.dims()
-        if cls is MHA
+        for (_, dims, _), shape in zip(g.dims(), g.shapes)
+        if decode.varying.get(shape.key)
     ]
-    assert named and not any("kv_len" in dims for dims in named)
+    assert named and not any(sized & dims.keys() for sized, dims in named)
 
 
 def test_group_dims_carries_the_narrowed_combos_tunables():
@@ -605,20 +606,6 @@ def test_price_fusions_keeps_the_packings_its_fusions_are_judged_with():
     profile.add_packing([(SiLU, dict(size=4096)), (ElementwiseMul, dict(size=4096))])
     out = price_fusions([], dev, profile, full_elf=True, log=lambda _: None)
     assert out.packings() == profile.packings()
-
-
-@pytest.mark.parametrize("full_elf", [True, False])
-def test_price_fusions_prices_merges_only_on_an_xclbin_per_step(npu1, full_elf):
-    """On an xclbin per step nothing packs, so a merge, consecutive steps as one dispatch, is priced there; a full ELF leaves it to packings."""
-    recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
-    calls = [Timed(recording)]
-    every = len(fusion_groups(calls, npu1, tuple(FusionKind)))
-    assert every > len(fusion_groups(calls, npu1, PRICED_KINDS))
-    expected = every if not full_elf else len(fusion_groups(calls, npu1, PRICED_KINDS))
-    logs: list[str] = []
-    out = price_fusions(calls, npu1, full_elf=full_elf, max_price=0, log=logs.append)
-    assert out is None
-    assert f"{expected} group(s) left unpriced this batch" in logs[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -692,7 +679,7 @@ def test_price_fusions_skips_a_group_already_refused_as_hung(tmp_path):
     dev = aie_utils.ensure_current_device()
     recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
     calls = [Timed(recording)]
-    groups = fusion_groups(calls, dev, PRICED_KINDS)
+    groups = fusion_groups(calls, dev)
     assert groups
 
     checkpoint = tmp_path / "profile.progress.json"
@@ -806,25 +793,29 @@ def test_pricing_a_gaining_fusion_writes_an_entry_that_runs_bit_identically(tmp_
 _END_TO_END = re.compile(r"([-+]\d+\.\d+) ± (\?|\d+\.\d+) us end to end")
 
 
-def test_confirm_fusions_drops_the_worst_group_on_a_build_failure(llama_recordings):
+class Beside(iron.Graph):
+    """Two independent ReLUs, each on every column at two channels: packed, twice a shim's channels."""
+
+    def body(self, x, y):
+        return (
+            ReLU.step(x, num_aie_columns=8, num_channels=2),
+            ReLU.step(y, num_aie_columns=8, num_channels=2),
+        )
+
+
+def test_confirm_fusions_drops_the_worst_group_on_a_build_failure():
     """A version (this particular combination of active groups' fusions) that fails to BUILD is a real aiecc compile error, device-free to hit.
 
-    Decode's GEMV -> ElementwiseAdd -> RMSNorm merge, every member at its own
-    (unnarrowed) width, does not place (confirmed by this same failure in the real sweep
-    that crashed it). This must drop the one candidate and return no fusion taken, not
-    crash the whole sweep.
+    Two ReLUs packed at their own width ask every shim for twice the channels it has.
+    This must drop the one candidate and return no fusion taken, not crash the whole
+    sweep.
     """
-    decode, _ = llama_recordings
     dev = aie_utils.ensure_current_device()
-    group = next(
-        g
-        for g in fusion_groups([decode], dev)
-        if g.kind is FusionKind.MERGE
-        and [type(s).__name__ for s in g.steps] == ["GEMV", "ElementwiseAdd", "RMSNorm"]
-    )
+    call = Timed(Beside().record(x=(2**16,), y=(2**16,)))
+    [group] = fusion_groups([call], dev, kinds=(FusionKind.PACK,))
     logged = []
     taken = confirm_fusions(
-        [decode],
+        [call],
         dev,
         [group],
         {group: Trial({}, -1e6, 1.0)},
@@ -837,35 +828,42 @@ def test_confirm_fusions_drops_the_worst_group_on_a_build_failure(llama_recordin
     assert any("does not build fused" in line for line in logged)
 
 
-class BoundedReLUs(iron.Graph):
+class BoundedChain(iron.Graph):
     def body(self, x, *, n: Scratchpad[np.int32]):
-        return ReLU.step(ReLU.step(x[:n], num_aie_columns=4), num_aie_columns=4)
+        return Tanh.step(ReLU.step(x[:n], num_aie_columns=4), num_aie_columns=4)
 
 
 @pytest.mark.supported_devices("npu2")
-def test_confirm_fusions_holds_a_narrowed_merge_bit_identical_at_partial_bounds():
-    """A merge narrowing two bounded ReLUs, confirmed against them unfused at the full bound and at half of it.
+@pytest.mark.parametrize("full_elf", [True, False])
+def test_a_narrowed_packing_holds_bit_identical_at_partial_bounds(full_elf):
+    """A packing narrowing two bounded steps, against them unpacked at the full bound and at half of it.
 
-    A narrowed design whose per-call values went unwritten agrees at the full bound but
-    not at half.
+    One configuration in a full ELF, one merged dispatch on an xclbin per step. A
+    narrowed design whose per-call values went unwritten agrees at the full bound but
+    not at half (``compare_graphs`` raises).
     """
     dev = aie_utils.ensure_current_device()
-    call = Timed(BoundedReLUs().record(x=(4096,)), values=dict(n=4096))
+    call = Timed(BoundedChain().record(x=(4096,)), values=dict(n=4096))
     assert _bound_points(call.recording, call.values) == [dict(n=2048)]
-    [group] = fusion_groups([call], dev, kinds=(FusionKind.MERGE,))
-    logged = []
-    confirm_fusions(
-        [call],
-        dev,
-        [group],
-        {group: Trial({}, -1e6, 1.0)},
-        Profile(),
-        {group: ({"num_aie_columns": 2}, {"num_aie_columns": 2})},
-        full_elf=True,
-        timing=Timing(rounds=1, calls=2),
-        log=logged.append,
+    packed = Profile()
+    packed.add_packing(
+        [
+            (ReLU, dict(size=4096), {"num_aie_columns": 2}),
+            (Tanh, dict(size=4096), {"num_aie_columns": 2}),
+        ]
     )
-    assert any("end to end" in line for line in logged)
+    versions = []
+    for profile in (Profile(), packed):
+        recording, fused, packing = apply_profile(call.recording, profile, dev)
+        chosen = plan(
+            dev, recording, full_elf, step_words=_step_words(recording), fusions=fused
+        )
+        versions.append(
+            CompiledGraph(recording, chosen, fusions=fused, packing=packing)
+        )
+    merged = () if full_elf else (Fusion(FusionKind.MERGE, (0, 1)),)
+    assert versions[1].sequence.fusions == merged
+    compare_graphs(call, *versions, timing=Timing(rounds=1, calls=2))
 
 
 def test_bound_points_confirm_a_prompt_chunk_at_partial_rows(llama_recordings):
@@ -1102,14 +1100,14 @@ def test_narrow_group_prices_the_merge_that_only_fits_narrowed(tmp_path):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 def test_price_fusions_takes_the_cheaper_of_two_overlapping_fusions(tmp_path):
-    """RMSNorm -> GEMV -> ElementwiseAdd admits a GEMV -> ElementwiseAdd stream, an RMSNorm -> GEMV merge.
+    """RMSNorm -> GEMV -> ElementwiseAdd admits a GEMV -> ElementwiseAdd stream.
 
     And, since ``candidates`` also proposes an edge into an input that streams only with
     a reader's bool tunable flipped (``iron.common.graph.fusion``, GEMV's ``B`` under
     ``feed_b``), the whole chain as one RMSNorm -> GEMV -> ElementwiseAdd stream too,
     all three overlapping at GEMV. The whole-chain stream prices cheapest (one
-    reconfigure instead of two), so ``select_rewrites`` takes it and skips both the
-    plain stream and the merge, each only a part of what it already claims
+    reconfigure instead of two), so ``select_rewrites`` takes it and skips the plain
+    stream, only a part of what it already claims
     (``confirm_fusions`` would raise were it not bit-identical to the same steps
     unfused).
     """
@@ -1131,7 +1129,6 @@ def test_price_fusions_takes_the_cheaper_of_two_overlapping_fusions(tmp_path):
     assert profile.fused(
         FusionKind.STREAM, [rms, gemv, add], [(0, "y", 1, "B"), (1, "C", 2, "b")]
     )
-    assert not profile.fused(FusionKind.MERGE, [rms, gemv], ())
     assert not profile.fused(FusionKind.STREAM, [gemv, add], [(0, "C", 1, "b")])
 
 

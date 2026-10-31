@@ -115,7 +115,7 @@ class Search:
     why: str
 
 
-def searches(surveys: Sequence[Survey], full_elf: bool) -> list[Search]:
+def searches(surveys: Sequence[Survey]) -> list[Search]:
     """Return which searches pay for their device time, from each version's survey.
 
     Packing where a version's switches cost ``MIN_SWITCH_SHARE`` of its steps; folds
@@ -142,13 +142,9 @@ def searches(surveys: Sequence[Survey], full_elf: bool) -> list[Search]:
     return [
         Search(
             "packing",
-            full_elf and bool(packing),
-            (
-                "an xclbin per step packs nothing"
-                if not full_elf
-                else f"switches cost at least {MIN_SWITCH_SHARE:.0%} of the steps "
-                f"in {packing or 'no version'}"
-            ),
+            bool(packing),
+            f"switches cost at least {MIN_SWITCH_SHARE:.0%} of the steps "
+            f"in {packing or 'no version'}",
         ),
         Search(
             "folds",

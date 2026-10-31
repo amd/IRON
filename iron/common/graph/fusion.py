@@ -277,54 +277,22 @@ def _pack_runs(recording: Recording) -> list[Fusion]:
     return found
 
 
-# Bounds merge's window enumeration: the reconfigure a merge saves is one
-# regardless of how many steps share it, so a handful is where the search
-# stops paying for itself.
-_MERGE_MAX_RUN = 4
-
-
-def _merge_runs(recording: Recording) -> list[Fusion]:
-    """Every consecutive run of 2 to ``_MERGE_MAX_RUN`` steps, no host step crossing it (``_crosses_host``).
-
-    Overlapping ones included, whose steps each build an array of their own here: not
-    reference-only, shipped or exported by another tool. Whether a run fits is left to
-    the widths its members run at fused, which a tuner chooses.
-    """
-    n = len(recording.steps)
-    found: list[Fusion] = []
-    for lo in range(n):
-        for hi in range(lo, min(lo + _MERGE_MAX_RUN, n)):
-            if _crosses_host(recording, lo, hi):
-                break
-            op = recording.steps[hi].op.resolved()
-            if (
-                op.reference_only
-                or op.external is not None
-                or op.exported_design() is not None
-            ):
-                break
-            if hi > lo:
-                found.append(Fusion(FusionKind.MERGE, tuple(range(lo, hi + 1))))
-    return found
-
-
 def candidates(
     recording: Recording,
     kinds: Sequence[FusionKind] = (FusionKind.STREAM, FusionKind.STAGED),
 ) -> tuple[Fusion, ...]:
     """Every admissible fusion of ``kinds`` (default the on-chip edge kinds, stream and staged, what every caller but ``fusions`` asks for).
 
-    Stream and staged runs (``_stream_runs``), pack runs (``_pack_runs``) and merge runs
-    (``_merge_runs``), each ordered by first step, then by length. The tuner prices each
-    and ``fusions`` picks among them.
+    Stream and staged runs (``_stream_runs``) and pack runs (``_pack_runs``), each
+    ordered by first step, then by length. The tuner prices each and ``fusions`` picks
+    among them. A merge is not one: it is what a packing runs as on an xclbin
+    (``packing.merges``).
     """
     found: list[Fusion] = []
     if FusionKind.STREAM in kinds or FusionKind.STAGED in kinds:
         found.extend(f for f in _stream_runs(recording) if f.kind in kinds)
     if FusionKind.PACK in kinds:
         found.extend(_pack_runs(recording))
-    if FusionKind.MERGE in kinds:
-        found.extend(_merge_runs(recording))
     return tuple(found)
 
 
@@ -332,7 +300,6 @@ _EVERY_KIND = (
     FusionKind.STREAM,
     FusionKind.STAGED,
     FusionKind.PACK,
-    FusionKind.MERGE,
 )
 
 
