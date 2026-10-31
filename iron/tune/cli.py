@@ -49,7 +49,7 @@ from .measure import Cache, Timing, pmode, switch_cost
 from .packings import price_folds_before_packing, price_packings
 from .plan import coded_seed, searches
 from .survey import Survey, step_times, survey
-from .verify import entries, verify, write_report
+from .verify import Phases, entries, verify, write_report
 
 
 def parser(description: str) -> argparse.ArgumentParser:
@@ -147,8 +147,9 @@ def tune(
     ``--packings-only`` the first two. What the search finds goes to
     ``<device>.found.json`` as it goes; what is saved is what ``verify`` keeps of it
     against the seed and then the starting profile, once it passes ``validate`` where
-    given, reported beside it (``write_report``). Timed as ``args`` says; return its
-    path.
+    given, reported beside it (``write_report``) with each phase's seconds and each
+    version's gain on the phase before (``Phases``). Timed as ``args`` says; return
+    its path.
 
     Args:
         args: The command line: how settings are timed, and which searches it skips.
@@ -168,34 +169,36 @@ def tune(
     path.parent.mkdir(parents=True, exist_ok=True)
     full_elf = dev.can_dispatch_full_elf
     log = functools.partial(print, flush=True)
+    lock = args.lock_in_process
     cycles = kernel_cycles(dev)
     core_mhz = aie_utils.DefaultNPURuntime.core_mhz
     model = _cost_model(args, dev)
-    seed = coded_seed(record, dev, start, log=log)
     memo: dict = {}
-    coded_shapes = {
-        Shape(s.op).key
-        for c in record(seed)
-        for s in c.recording.steps
-        if any(vars(s.op)[n] for n in coding_tunables(s.op))
-    }
-    surveys = _surveys(
-        args, record, start, dev, model, coded_shapes, cycles, core_mhz, log
-    )
-    plan = {s.name: s for s in searches(surveys)}
-    for planned in plan.values():
-        log(
-            f"{planned.name}: {'searched' if planned.runs else 'skipped'}, {planned.why}"
+    with Phases(record, dev, start, log=log, lock=lock, memo=memo) as phases:
+        seed = coded_seed(record, dev, start, log=log)
+        if entries(seed) != entries(start):
+            seed, _ = verify(record, dev, start, seed, log=log, lock=lock, memo=memo)
+            seed.save(found_path)
+            print(f"wrote {found_path}, the seed")
+        phases.end("seed", seed)
+        coded_shapes = {
+            Shape(s.op).key
+            for c in record(seed)
+            for s in c.recording.steps
+            if any(vars(s.op)[n] for n in coding_tunables(s.op))
+        }
+        surveys = _surveys(
+            args, record, start, dev, model, coded_shapes, cycles, core_mhz, log
         )
-    if entries(seed) != entries(start):
-        seed, _ = verify(
-            record, dev, start, seed, log=log, lock=args.lock_in_process, memo=memo
-        )
-        seed.save(found_path)
-        print(f"wrote {found_path}, the seed")
-    profile = seed
-    if not args.packings_only:
-        if not args.fusions_only:
+        plan = {s.name: s for s in searches(surveys)}
+        for planned in plan.values():
+            log(
+                f"{planned.name}: {'searched' if planned.runs else 'skipped'}, "
+                f"{planned.why}"
+            )
+        phases.end("survey", seed)
+        profile = seed
+        if not args.packings_only and not args.fusions_only:
             # A shape's share is of the version as it stands: once the costliest
             # are tuned, the rest weigh more, so survey again until none newly
             # reaches SHAPE_SHARE.
@@ -236,53 +239,63 @@ def tune(
                     core_mhz,
                     log,
                 )
-    if plan["packing"].runs or plan["folds"].runs:
-        profile = _save_packings(
-            args,
-            record(profile),
-            dev,
-            profile,
-            found_path,
-            full_elf,
-            model,
-            folds=plan["folds"].runs,
+                phases.end(f"autotune of {len(fresh)} shape(s)", profile)
+        if plan["packing"].runs or plan["folds"].runs:
+            profile = _save_packings(
+                args,
+                record(profile),
+                dev,
+                profile,
+                found_path,
+                full_elf,
+                model,
+                folds=plan["folds"].runs,
+            )
+            phases.end(
+                "folds and packing" if plan["folds"].runs else "packing", profile
+            )
+        # Fusions are priced on the packed versions: one that splits what a
+        # packing groups is dropped where the packed version does not gain.
+        if not args.packings_only and plan["fusions"].runs:
+            priced = price_fusions(
+                record(profile),
+                dev,
+                profile,
+                full_elf=full_elf,
+                checkpoint=path.with_suffix(".progress.json"),
+                max_price=args.max_price,
+                lock=lock,
+                **_timing(args),
+            )
+            if priced is None:
+                print(f"{path}: priced a batch; some groups still unpriced, call again")
+                return path
+            profile = priced
+            profile.save(found_path)
+            print(f"wrote {found_path}")
+            phases.end("fusions", profile)
+        if entries(seed) != entries(start):
+            log("checking the search against its seed")
+            profile, _ = verify(
+                record, dev, seed, profile, log=log, lock=lock, memo=memo
+            )
+        kept, checks = verify(
+            record, dev, start, profile, log=log, lock=lock, memo=memo
         )
-    # Fusions are priced on the packed versions: one that splits what a
-    # packing groups is dropped where the packed version does not gain.
-    if not args.packings_only and plan["fusions"].runs:
-        priced = price_fusions(
-            record(profile),
-            dev,
-            profile,
-            full_elf=full_elf,
-            checkpoint=path.with_suffix(".progress.json"),
-            max_price=args.max_price,
-            lock=args.lock_in_process,
-            **_timing(args),
+        phases.end("verify", kept)
+        battery = (
+            {}
+            if validate is None or not checks
+            else {"validate": validate(start, kept)}
         )
-        if priced is None:
-            print(f"{path}: priced a batch; some groups still unpriced, call again")
-            return path
-        profile = priced
-        profile.save(found_path)
-        print(f"wrote {found_path}")
-    if entries(seed) != entries(start):
-        log("checking the search against its seed")
-        profile, _ = verify(
-            record, dev, seed, profile, log=log, lock=args.lock_in_process, memo=memo
-        )
-    kept, checks = verify(
-        record, dev, start, profile, log=log, lock=args.lock_in_process, memo=memo
-    )
-    battery = (
-        {} if validate is None or not checks else {"validate": validate(start, kept)}
-    )
+        phases.end("validate", kept)
     kept.save(path)
     write_report(
         path,
         start,
         kept,
         checks,
+        phases=phases.done,
         survey=[s.lines() for s in surveys],
         plan=[dataclasses.asdict(s) for s in plan.values()],
         **battery,

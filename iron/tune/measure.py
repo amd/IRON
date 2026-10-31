@@ -67,6 +67,31 @@ class Timing:
     cutoff: float = 1.5
 
 
+@dataclasses.dataclass
+class Spent:
+    """Seconds a tune waited on builds and spent timing on the device, while it is ``SPENT``.
+
+    Attributes:
+        build_s: Waiting on compiles: a probe's or a version's.
+        timing_s: Loading, checking and timing what was built.
+    """
+
+    build_s: float = 0.0
+    timing_s: float = 0.0
+
+    @staticmethod
+    def charge(build_s: float = 0.0, timing_s: float = 0.0) -> None:
+        """Add to the current ``SPENT``, if any."""
+        if (spent := SPENT.get()) is not None:
+            spent.build_s += build_s
+            spent.timing_s += timing_s
+
+
+SPENT: contextvars.ContextVar[Spent | None] = contextvars.ContextVar(
+    "SPENT", default=None
+)
+
+
 def standard_error(samples: Sequence[float]) -> float | None:
     """``Stats``' standard error of the median of ``samples``; None from fewer than two."""
     if len(samples) < 2:
@@ -940,10 +965,9 @@ def measure(
             fastest = min(fastest, *(times[n + j].median_us for j in range(n)))
             # A probe holds its context while it lives; the next batch needs them.
             del short, long
-        log(
-            f"    waited {building:.0f} s on builds, timed in "
-            f"{time.perf_counter() - begun - building:.0f} s"
-        )
+        timed = time.perf_counter() - begun - building
+        Spent.charge(build_s=building, timing_s=timed)
+        log(f"    waited {building:.0f} s on builds, timed in {timed:.0f} s")
     return out
 
 
@@ -1034,10 +1058,12 @@ def measure_rewrite(
         The recorded steps' measurement, the rewrite's, and why the rewrite
         may not replace the recorded steps (None where it may).
     """
+    begun = time.perf_counter()
     one_recorded = as_recorded("recorded1", 1)
     one_rewritten = rewritten("rewritten1", 1)
     many_recorded = as_recorded(f"recorded{repeats}", repeats)
     many_rewritten = rewritten(f"rewritten{repeats}", repeats)
+    building = time.perf_counter() - begun
     for run in (one_recorded, one_rewritten, many_recorded, many_rewritten):
         run.load()
 
@@ -1064,6 +1090,7 @@ def measure_rewrite(
             lock=lock,
         )
         del one_recorded, one_rewritten, many_recorded, many_rewritten
+    Spent.charge(build_s=building, timing_s=time.perf_counter() - begun - building)
     run_id = uuid.uuid4().hex
     mode = pmode() if mode is None else mode
 
@@ -1309,6 +1336,7 @@ def switch_cost(
             if cached is not None:
                 return cached
     x, narrow, wide = (op.resolved(dev) for op in _switch_cost_probes(dev))
+    begun = time.perf_counter()
     runs = {}
     for y, cols in ((narrow, 1), (wide, dev.cols)):
         for n in (short, long):
@@ -1325,6 +1353,7 @@ def switch_cost(
                     load=False,
                 )
     keys = list(runs)
+    building = time.perf_counter() - begun
     with npu_lock(lock):
         for run in runs.values():
             run.load()
@@ -1332,6 +1361,7 @@ def switch_cost(
             [runs[k].callable for k in keys], timing, log=log, lock=lock
         )
         del runs
+    Spent.charge(build_s=building, timing_s=time.perf_counter() - begun - building)
     med = {k: statistics.median(s.samples_us) for k, s in zip(keys, stats)}
     excess = {}
     for cols in (1, dev.cols):

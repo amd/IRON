@@ -20,8 +20,11 @@ from iron.operators.silu import SiLU
 from iron.operators.tanh import Tanh
 from iron.tests.support.llama_model import small
 from iron.tune.autotune import Timed
-from iron.tune.measure import Timing
+from iron.tune.measure import SPENT, Timing, measure
 from iron.tune.verify import (
+    Check,
+    Phase,
+    Phases,
     entries,
     fingerprint,
     narrowed,
@@ -126,6 +129,24 @@ def test_a_report_names_what_the_saved_profile_adds_and_drops(tmp_path):
     assert (tmp_path / "npu2.report.json").exists() and "seen" in text
 
 
+def test_a_report_adds_each_phase_and_each_version_s_gain_so_far(tmp_path):
+    decode = Check("Llama (no inputs)", -300.0, 10.0)
+    phases = [
+        Phase("seed", 1800.0, 600.0, 900.0, 200.0, (decode,)),
+        Phase("survey", 600.0, 100.0, 400.0, 0.0, ()),
+        Phase(
+            "packing", 1200.0, 300.0, 800.0, 200.0, (Check(decode.name, -50.0, None),)
+        ),
+    ]
+    write_report(tmp_path / "npu2.json", Profile(), Profile(), {}, phases=phases)
+    text = (tmp_path / "npu2.report.txt").read_text()
+    assert (
+        "survey: 600 s (build 100, timing 400), check 0 s; no version changed" in text
+    )
+    assert "Llama (no inputs) -50.0 ± ? us" in text
+    assert "1.11 h after packing: Llama (no inputs) -350.0" in text
+
+
 # ---------------------------------------------------------------------------
 # On the device
 # ---------------------------------------------------------------------------
@@ -155,3 +176,28 @@ def test_verify_keeps_the_version_that_gains_and_reverts_the_one_that_loses():
     [(version, check)] = checks.items()
     assert version == recorded(Profile())[0].recording.version
     assert check.gains, check
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_phase_charges_its_own_timing_and_checks_its_profile_against_the_last():
+    """A phase's timing is its own, its check's apart; one that leaves the profile as it was checks nothing."""
+    dev = aie_utils.ensure_current_device()
+    base = Profile()
+    base.add(ReLU, size=LARGE, num_aie_columns=1)
+    wider = Profile()
+    wider.add(ReLU, size=LARGE, num_aie_columns=8)
+
+    with Phases(recorded, dev, base) as phases:
+        measure(
+            [ReLU(size=SMALL, num_aie_columns=1).resolved()],
+            full_elf=dev.can_dispatch_full_elf,
+            timing=Timing(rounds=2, calls=5),
+        )
+        searched = phases.end("search", wider)
+        unchanged = phases.end("nothing", wider)
+
+    assert SPENT.get() is None
+    assert searched.timing_s > 0 and searched.check_s > 0
+    [check] = searched.checks
+    assert check.gains, check
+    assert unchanged.checks == () and (unchanged.build_s, unchanged.timing_s) == (0, 0)
