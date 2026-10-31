@@ -1062,10 +1062,12 @@ class Recorder:
             ((key, array) for key, (array, w) in self.weights.items() if w is h),
             None,
         )
+        # A leading unit dimension (one matrix, one batch) is the weight's alone.
         if (
             source is None
             or h.layout != Dense()
-            or tuple(h.shape) != tuple(b.logical_shape)
+            or h.elements != math.prod(b.logical_shape)
+            or h.shape[-1] != b.logical_shape[-1]
         ):
             raise TypeError(
                 f"{type(op).__name__}.{b.name} streams a weight as coded rows; "

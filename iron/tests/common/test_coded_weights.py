@@ -200,3 +200,24 @@ def test_a_profile_turns_coding_on_by_gemv_shape(tmp_path):
     t = graph.record(x=(E,))
     assert [s.op.coded_a for s in t.steps] == [True, False]
     assert [s.inputs[0].name for s in t.steps] == ["w.coded", "other"]
+
+
+def test_a_weight_of_one_matrix_reads_coded_as_a_batch_of_one():
+    """Llama's packed decode steps give GEMV num_batches=1: A is (1, M, K)
+    of a weight held (M, K).
+    """
+    w, _ = _weights()
+
+    class OneBatch(iron.Graph):
+        def __init__(self):
+            self.w = iron.param(w)
+
+        def body(self, x):
+            return GEMV.step(self.w, x, coded_a=True, tile_size_input=4, num_batches=1)
+
+    (step,) = OneBatch().record(x=(1, E)).steps
+    assert step.inputs[0].name == "w.coded" and step.op.A.shape == (
+        1,
+        E,
+        coded.row_bytes(E),
+    )
