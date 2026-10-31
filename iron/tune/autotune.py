@@ -41,9 +41,6 @@ logger = logging.getLogger(__name__)
 # Standard errors a setting's step must beat the recorded one's by to be taken.
 CONFIDENCE = 2.0
 
-# Past this many settings, a shape's tunables are searched one at a time.
-EXHAUSTIVE = 32
-
 # A shape is searched where its steps take this share of a version.
 SHAPE_SHARE = 0.02
 
@@ -406,19 +403,16 @@ def time_shape(
     repeats: int = 9,
     cache: Cache | None = None,
     remeasure: bool = False,
-    exhaustive: int = EXHAUSTIVE,
     cycles: Mapping[str, int] | None = None,
     core_mhz: float | None = None,
     log: Callable[[str], None] = print,
 ) -> list[Trial]:
     """Each setting of ``shape`` timed, the recorded one first.
 
-    Every setting its operators share and the placer takes where there are
-    at most ``exhaustive``, else those a coordinate descent tries, each
-    tunable's ``line`` through the fastest setting taken so far, until a
-    pass over the tunables moves it no further. A setting whose
-    ``least_us`` at ``cycles`` and ``core_mhz`` is no faster than the
-    fastest taken so far is not timed.
+    Every setting its operators share and the placer takes: tunables couple
+    (MHA's pipelines with its query block), so one at a time would stop at a
+    local best. A setting whose ``least_us`` at ``cycles`` and ``core_mhz``
+    is no faster than the fastest taken so far is not timed.
     """
     found = settings(shape.members[0][0], dev, shape.pinned)
     for op, _, _ in shape.members[1:]:
@@ -461,20 +455,9 @@ def time_shape(
         for s, t in zip(todo, trials):
             tried[_frozen(s)] = t
 
-    if len(found) <= exhaustive:
-        if any(b is not None for b in least.values()):
-            run([])  # the recorded setting's own time, which a bound is held to
-        run(found)
-    else:
-        best, moved = found[0], True
-        while moved:
-            moved = False
-            for name in found[0]:
-                run(line(found, best, name))
-                taken = [t for t in tried.values() if t.gains or t.tunables == found[0]]
-                fastest = min(taken, key=lambda t: t.delta_us)
-                if fastest.tunables != best:
-                    best, moved = fastest.tunables, True
+    if any(b is not None for b in least.values()):
+        run([])  # the recorded setting's own time, which a bound is held to
+    run(found)
     return [tried[_frozen(s)] for s in found if _frozen(s) in tried]
 
 
