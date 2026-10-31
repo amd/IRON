@@ -447,6 +447,10 @@ def axis_of(dims: tuple, name: str, op) -> int | None:
     for d in dims:
         if isinstance(d, Select):
             branch = d.branch(op)
+            if branch is None:
+                raise TypeError(
+                    "a Select() with a None branch picks no stream, not a dimension"
+                )
             inner = axis_of(branch, name, op)
             if inner is not None:
                 return axis + inner

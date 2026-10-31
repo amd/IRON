@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import functools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from math import prod
 from typing import Any, cast
 
@@ -379,11 +379,14 @@ class MergedRuntime(Runtime):
 
     @classmethod
     def merge(
-        cls, runtimes: Sequence[Runtime], name: str | None = None
+        cls,
+        runtimes: Sequence[Runtime],
+        name: str | None = None,
+        run: Callable[[Sequence[tuple[Runtime, tuple]]], None] | None = None,
     ) -> MergedRuntime:
         # Runtime.merge() builds cls(...), so this is really a MergedRuntime;
         # its own declared return type is the non-generic base.
-        merged = cast(MergedRuntime, super().merge(runtimes, name))
+        merged = cast(MergedRuntime, super().merge(runtimes, name, run))
         checked: list[OperatorRuntime] = []
         for runtime in runtimes:
             assert isinstance(
