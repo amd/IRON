@@ -27,6 +27,7 @@ from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
+from iron.tune import cli as tune_cli
 from iron.tune.autotune import Point, Timed
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import fold_profile
@@ -371,6 +372,18 @@ def test_fold_profile_scopes_each_entry_to_the_version_it_was_found_in():
     assert len(narrowed) == len(fusions) - 1
     assert frozenset({decode.version}) in {v for _, _, _, v in narrowed}
     assert frozenset({prompt.version}) not in {v for _, _, _, v in narrowed}
+
+
+@pytest.mark.supported_devices("npu1")
+def test_a_tune_on_an_xclbin_per_step_times_no_switch(npu1, tmp_path):
+    """npu1 packs nothing, so its tune neither times the switches a cost
+    model is calibrated on (a dispatch) nor writes one; its folds are
+    still priced, and its profile written."""
+    args = tune_cli.parser("npu1").parse_args([])
+    path = tmp_path / "npu1.json"
+    found = tune_cli._save_packings(args, [], npu1, iron.Profile(), path, False)
+    assert found == path and path.exists()
+    assert CostModel.load(npu1.name) is None
 
 
 # ---------------------------------------------------------------------------

@@ -177,10 +177,11 @@ def tune(
 
 def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: bool):
     """``profile`` with the folds and packings ``price_folds_before_packing``
-    finds, written to ``path``; return it.
+    finds, written to ``path``; return it. On an xclbin per step nothing
+    packs, so no switch is timed to calibrate a cost model, nor one written.
     """
-    model = CostModel.load(dev.name)
-    if model is None:
+    model = CostModel.load(dev.name) if full_elf else None
+    if full_elf and model is None:
         model = CostModel.calibrated(
             *switch_cost(
                 dev,
@@ -212,7 +213,8 @@ def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: boo
         log=functools.partial(print, flush=True),
         lock=args.lock_in_process,
     )
-    print(f"wrote {model.save(dev.name)}")
+    if model is not None:
+        print(f"wrote {model.save(dev.name)}")
     packed.save(path)
     print(f"wrote {path}")
     return path
