@@ -487,13 +487,12 @@ def test_group_fit_verdict_caches_a_different_record_for_a_different_kind(tmp_pa
     assert len(list(tmp_path.iterdir())) == 2
 
 
-def test_narrowings_tries_every_combination_for_a_fan_out_not_just_the_widest():
-    """A fan-out's all-widest combination dominates every other (``_dominates``) but.
+def test_narrowings_searches_down_from_the_widest_to_what_is_feasible():
+    """A fan-out's combinations are searched from every member at its widest down.
 
-    With no feasibility check behind it (``group_fit_verdict`` does not model a feed's
-    shared buffer), that gives dominance nothing to prune on: pruning it anyway would
-    collapse the search to that one combination alone, which rarely co-resides, and
-    never discover a narrower one (q/k/v at (8,4,2) columns, say) that does.
+    Each member one width narrower at a time, stopping below the first feasible
+    combination: here q/k/v fit together within 14 columns, and the widest that do
+    are all returned, none narrower than another, whatever the group's size.
     """
     dev = aie_utils.ensure_current_device()
     rms = LLAMA_NPU2_PROFILE.make(RMSNorm, rows=1, tile_size=2048, weighted=True)
@@ -505,18 +504,35 @@ def test_narrowings_tries_every_combination_for_a_fan_out_not_just_the_widest():
         [rms.resolved(dev), q.resolved(dev), k.resolved(dev), v.resolved(dev)],
         [(0, "y", 1, "B"), (0, "y", 2, "B"), (0, "y", 3, "B")],
     )
-    combos = narrowings(group, dev)
+    tried: list[tuple] = []
+
+    def within(combo) -> bool:
+        cols = tuple(s.get("num_aie_columns") for s in combo)
+        tried.append(cols)
+        return sum(cols[1:]) <= 14
+
+    combos = narrowings(group, dev, within)
     found = [tuple(s.get("num_aie_columns") for s in c) for c in combos]
-    assert len(found) > 1
-    assert (1, 8, 4, 2) in found
+    assert (1, 8, 4, 2) in found and all(sum(c[1:]) <= 14 for c in found)
+    assert not any(
+        a != b and all(x >= y for x, y in zip(a, b)) for a in found for b in found
+    )
     assert all(s["feed_b"] for c in combos for s in c[1:])
+    assert tried[0] == found[0] or sum(tried[0][1:]) > 14  # the widest is tried first
 
 
 def test_narrowings_narrows_only_the_member_that_needs_it(tmp_path):
     dev = aie_utils.ensure_current_device()
     rms, gemv, add = _merge_members(dev)
     group = FusionGroup(FusionKind.MERGE, [rms, gemv, add], [])
-    combos = narrowings(group, dev, fit_cache=tmp_path)
+
+    def fits(combo) -> bool:
+        ops = [
+            op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, combo)
+        ]
+        return group_fit_verdict(ops, tmp_path, kind=group.kind) is None
+
+    combos = narrowings(group, dev, fits)
     assert combos, "expected at least one combination that co-resides"
     cols = [s.get("num_aie_columns") for s in combos[0]]
     assert cols[1] == vars(gemv)["num_aie_columns"]  # GEMV never narrows

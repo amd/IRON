@@ -25,7 +25,7 @@ unfused, or fused differently, elsewhere is untouched.
 from __future__ import annotations
 
 import hashlib
-import itertools
+import heapq
 import json
 import logging
 import math
@@ -76,12 +76,6 @@ logger = logging.getLogger(__name__)
 # steps in one configuration, which a profile's packings do for a whole
 # version. On an xclbin per step nothing packs, so it prices every kind.
 PRICED_KINDS = tuple(k for k in FusionKind if k is not FusionKind.MERGE)
-
-# Past this many combinations of the members' widths, only the ones using
-# the most columns overall are checked for fit: a member is never faster
-# narrower than at the width ``autotune`` already found it alone, only
-# sometimes narrower is what lets it co-reside.
-NARROWING_EXHAUSTIVE = 32
 
 
 class FusionGroup:
@@ -286,10 +280,8 @@ def _fed_widths(op: Operator, dev) -> list[dict[str, Any]]:
     """``op``'s settings with ``feed_b`` held true, only.
 
     An edge into its ``B`` can only be fed there (an unfed ``B`` is not a streamed input
-    at all, so ``feed_b=False`` never builds for this member), and a large group's
-    exhaustive cap sorts combinations by column count alone, so keeping the
-    never-buildable ``feed_b=False`` ones here would crowd the only combinations that
-    can actually work out of it.
+    at all, so ``feed_b=False`` never builds for this member): searching those would
+    only build what never can.
     """
     if "feed_b" not in op.declaration.tunables:
         return _widths(op, dev)
@@ -468,69 +460,52 @@ def _dominates(a: Sequence[Mapping[str, Any]], b: Sequence[Mapping[str, Any]]) -
 def narrowings(
     group: FusionGroup,
     dev,
-    fit_cache: Path = FIT_CACHE,
-    exhaustive: int = NARROWING_EXHAUSTIVE,
+    feasible: Callable[[tuple[dict[str, Any], ...]], bool],
 ) -> list[tuple[dict[str, Any], ...]]:
-    """Every combination of the group's members' widths (``_widths``), most columns overall first.
+    """Return every widest combination of the group's members' widths that is ``feasible``.
 
-    A member is never faster narrower than ``autotune`` already found it alone, so the
-    fastest fitting combination is among these.
-
-    A pack's or a merge's co-resides where ``group_fit_verdict`` says so,
-    which lets dominance prune one combination no feasible one can ever beat
-    (``_dominates``): among combinations that already co-reside, a member
-    is never faster narrower, so one no feasible combination dominates in
-    every member is never worse than the one dominating it, and the search
-    need not try it.
-
-    An edge's own feed (a stream, a staged one, a fan-out) shares its buffer
-    rather than needing one of its own per member, which
-    ``group_fit_verdict``'s generic placement check does not model (nor
-    whether a feed's lanes meet, broadcast or not), so every combination is
-    a candidate, left to ``narrow_group``'s own build to refuse one that
-    does not: with no feasibility check to back it, dominance does not
-    prune here (every width list's own-widest entry co-occurs in the
-    all-widest combination, which would always dominate every other one,
-    collapsing the search to that single, usually non-co-resident
-    combination alone) — every one of these (up to ``exhaustive``) is tried.
-
-    Past ``exhaustive`` combinations, only the ones using the most columns
-    overall are checked for fit, since those are the likeliest to dominate
-    (a pack or a merge) or fastest if they do build (an edge).
+    Searched from every member at its widest (``_widths``) down, one member one step
+    narrower at a time, widest total first: a member is never faster narrower than
+    ``autotune`` already found it alone, so nothing below a feasible combination needs
+    trying, and none it dominates (``_dominates``) is returned. The search stops where
+    feasibility does, whatever the number of members.
 
     A member an edge feeds into its ``B`` searches ``feed_b`` true too
-    (``_fed_widths``): the edge may only be admissible there, a setting its
-    own (unfused) width never takes.
+    (``_fed_widths``): the edge may only be admissible there, a setting its own
+    (unfused) width never takes.
+
+    Args:
+        group: The fusion whose members are narrowed.
+        dev: The device they run on.
+        feasible: Whether a combination co-resides (a pack's or merge's fit) or
+            builds (an edge's, which a fit check does not model).
     """
     fed = {e[2] for e in group.edges if e[3] == "B"}
     per_member = [
         _fed_widths(op, dev) if i in fed else _widths(op, dev)
         for i, op in enumerate(group.steps)
     ]
-    combos = list(itertools.product(*per_member))
-    if len(combos) > exhaustive:
-        combos = sorted(
-            combos, key=lambda c: -sum(s.get("num_aie_columns", 0) for s in c)
-        )[:exhaustive]
-    if group.edges:
-        return sorted(
-            combos, key=lambda c: -sum(s.get("num_aie_columns", 0) for s in c)
-        )
-    feasible = [
-        c
-        for c in combos
-        if group_fit_verdict(
-            [op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, c)],
-            fit_cache,
-            kind=group.kind,
-            edges=group.edges,
-        )
-        is None
-    ]
-    maximal = [
-        c for c in feasible if not any(_dominates(o, c) for o in feasible if o is not c)
-    ]
-    return sorted(maximal, key=lambda c: -sum(s.get("num_aie_columns", 0) for s in c))
+    # A state is each member's index into its widths, widest (0) first.
+    columns = [[w.get("num_aie_columns", 0) for w in widths] for widths in per_member]
+    start: tuple[int, ...] = (0,) * len(per_member)
+    frontier: list[tuple[int, tuple[int, ...]]] = [(-sum(c[0] for c in columns), start)]
+    seen: set[tuple[int, ...]] = {start}
+    found: list[tuple[int, ...]] = []
+    while frontier:
+        _, state = heapq.heappop(frontier)
+        if any(all(a <= b for a, b in zip(f, state)) for f in found):
+            continue
+        if feasible(tuple(w[k] for w, k in zip(per_member, state))):
+            found.append(state)
+            continue
+        for m, widths in enumerate(per_member):
+            if state[m] + 1 < len(widths):
+                below = (*state[:m], state[m] + 1, *state[m + 1 :])
+                if below not in seen:
+                    seen.add(below)
+                    total = sum(c[k] for c, k in zip(columns, below))
+                    heapq.heappush(frontier, (-total, below))
+    return [tuple(w[k] for w, k in zip(per_member, state)) for state in found]
 
 
 def narrow_group(
@@ -543,7 +518,6 @@ def narrow_group(
     cache: Cache | None = None,
     remeasure: bool = False,
     fit_cache: Path = FIT_CACHE,
-    exhaustive: int = NARROWING_EXHAUSTIVE,
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> tuple[Trial, tuple[dict[str, Any], ...] | None]:
@@ -620,15 +594,11 @@ def narrow_group(
             if _device_timeout(e):
                 return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
             log(f"  {group}: does not build at its own (fitting) width: {e}")
-    combos = narrowings(group, dev, fit_cache, exhaustive)
-    if not combos:
-        return (
-            Trial({}, 0.0, None, refused="no setting of its members co-resides"),
-            None,
-        )
-    best: Trial | None = None
-    best_combo: tuple[dict[str, Any], ...] | None = None
-    for combo in combos:
+    # By each member's settings: an edge's combinations are timed as they are found.
+    trials: dict[tuple, Trial | None] = {}
+
+    def timed(combo: tuple[dict[str, Any], ...]) -> Trial | None:
+        """Time ``group`` at ``combo``, or None where it does not build or is refused."""
         fused = tuple(
             op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, combo)
         )
@@ -647,18 +617,51 @@ def narrow_group(
             )
         except (ValueError, RuntimeError, ir.MLIRError) as e:
             if _device_timeout(e):
-                return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
+                raise
             # fits() places each design alone; narrowed together they may
             # still not build (a feed's lanes, say).
             log(f"  {group} narrowed to {cols}: does not build: {e}")
-            continue
-        noise = "?" if trial.noise_us is None else f"{trial.noise_us:.1f}"
+            return None
         if trial.refused is not None:
             log(f"  {group} narrowed to {cols}: refused: {trial.refused}")
-            continue
+            return None
+        noise = "?" if trial.noise_us is None else f"{trial.noise_us:.1f}"
         log(f"  {group} narrowed to {cols}: {trial.delta_us:+.1f} ± {noise} us")
-        if best is None or trial.delta_us < best.delta_us:
-            best, best_combo = trial, combo
+        return trial
+
+    def feasible(combo: tuple[dict[str, Any], ...]) -> bool:
+        if not group.edges:
+            fused = [
+                op._with_tunables(**s).resolved(dev)
+                for op, s in zip(group.steps, combo)
+            ]
+            return (
+                group_fit_verdict(fused, fit_cache, kind=group.kind, edges=group.edges)
+                is None
+            )
+        # An edge's fit is its build: time it here, once.
+        key = tuple(tuple(sorted(c.items())) for c in combo)
+        trials[key] = timed(combo)
+        return trials[key] is not None
+
+    try:
+        combos = narrowings(group, dev, feasible)
+        if not combos:
+            return (
+                Trial({}, 0.0, None, refused="no setting of its members co-resides"),
+                None,
+            )
+        best: Trial | None = None
+        best_combo: tuple[dict[str, Any], ...] | None = None
+        for combo in combos:
+            key = tuple(tuple(sorted(c.items())) for c in combo)
+            trial = trials[key] if key in trials else timed(combo)
+            if trial is not None and (best is None or trial.delta_us < best.delta_us):
+                best, best_combo = trial, combo
+    except (RuntimeError, ir.MLIRError) as e:
+        if not _device_timeout(e):
+            raise
+        return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
     if best is None:
         return (
             Trial(
@@ -1037,7 +1040,6 @@ def price_fusions(
     confirm: bool = True,
     confirm_timing: Timing = Timing(rounds=3, calls=10),
     fit_cache: Path = FIT_CACHE,
-    exhaustive: int = NARROWING_EXHAUSTIVE,
     checkpoint: Path | None = None,
     max_price: int | None = None,
     kinds: Sequence[FusionKind] | None = None,
@@ -1072,7 +1074,6 @@ def price_fusions(
         confirm: Confirm the taken groups end to end (``confirm_fusions``).
         confirm_timing: How each version is timed end to end.
         fit_cache: Where each group's fit verdict is kept.
-        exhaustive: The narrowings searched exhaustively before one member at a time.
         log: Where each group's price is logged.
         kinds: The kinds priced: ``PRICED_KINDS`` in a full ELF, else every
             kind, a merge being an xclbin's only way to run consecutive
@@ -1132,7 +1133,6 @@ def price_fusions(
             cache=cache,
             remeasure=remeasure,
             fit_cache=fit_cache,
-            exhaustive=exhaustive,
             log=log,
             lock=lock,
         )
