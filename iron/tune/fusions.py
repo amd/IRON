@@ -72,8 +72,9 @@ from .measure import (
 
 logger = logging.getLogger(__name__)
 
-# What ``price_fusions`` prices: not ``MERGE``, consecutive steps in one
-# configuration, which a profile's packings do for a whole version.
+# What ``price_fusions`` prices in a full ELF: not ``MERGE``, consecutive
+# steps in one configuration, which a profile's packings do for a whole
+# version. On an xclbin per step nothing packs, so it prices every kind.
 PRICED_KINDS = tuple(k for k in FusionKind if k is not FusionKind.MERGE)
 
 # Past this many combinations of the members' widths, only the ones using
@@ -995,7 +996,7 @@ def price_fusions(
     exhaustive: int = NARROWING_EXHAUSTIVE,
     checkpoint: Path | None = None,
     max_price: int | None = None,
-    kinds: Sequence[FusionKind] = PRICED_KINDS,
+    kinds: Sequence[FusionKind] | None = None,
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Profile | None:
@@ -1016,7 +1017,9 @@ def price_fusions(
     has it.
 
     Args:
-        kinds: The kinds priced (``PRICED_KINDS``).
+        kinds: The kinds priced: ``PRICED_KINDS`` in a full ELF, else every
+            kind, a merge being an xclbin's only way to run consecutive
+            steps as one dispatch.
         checkpoint: Where to write the decisions so far (``_checkpoint``)
             after every group is priced, so a run that dies partway still
             leaves something behind beyond the cache alone. A group a device
@@ -1045,6 +1048,8 @@ def price_fusions(
     )
     refused = {} if refused_path is None else _load_refused(refused_path)
 
+    if kinds is None:
+        kinds = PRICED_KINDS if full_elf else tuple(FusionKind)
     all_found = fusion_groups(calls, dev, kinds)
     found = []
     for group in all_found:

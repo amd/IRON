@@ -546,6 +546,21 @@ def test_price_fusions_with_no_candidates_keeps_tunables_and_fusion_entries():
     assert out.fused(FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")])
 
 
+@pytest.mark.parametrize("full_elf", [True, False])
+def test_price_fusions_prices_merges_only_on_an_xclbin_per_step(npu1, full_elf):
+    """On an xclbin per step nothing packs, so a merge, consecutive steps as
+    one dispatch, is priced there; a full ELF leaves it to packings."""
+    recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
+    calls = [Timed(recording)]
+    every = len(fusion_groups(calls, npu1, tuple(FusionKind)))
+    assert every > len(fusion_groups(calls, npu1, PRICED_KINDS))
+    expected = every if not full_elf else len(fusion_groups(calls, npu1, PRICED_KINDS))
+    logs: list[str] = []
+    out = price_fusions(calls, npu1, full_elf=full_elf, max_price=0, log=logs.append)
+    assert out is None
+    assert f"{expected} group(s) left unpriced this batch" in logs[-1]
+
+
 # ---------------------------------------------------------------------------
 # A device command timeout refuses a group outright, never retried; and
 # price_fusions checkpoints its decisions so far as it goes
