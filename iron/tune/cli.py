@@ -33,14 +33,22 @@ from iron import operators
 from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
 
-from .autotune import Shape, Timed, autotune, coding_tunables, kernel_cycles, time_shape
+from .autotune import (
+    SHAPE_SHARE,
+    Shape,
+    Timed,
+    autotune,
+    coding_tunables,
+    kernel_cycles,
+    time_shape,
+)
 from .costmodel import CostModel
 from .failures import Ledger
 from .fusions import price_fusions
 from .measure import Cache, Timing, pmode, switch_cost
 from .packings import price_folds_before_packing, price_packings
 from .plan import coded_seed, searches
-from .survey import step_times, survey
+from .survey import Survey, step_times, survey
 from .verify import entries, verify, write_report
 
 
@@ -171,31 +179,9 @@ def tune(
         for s in c.recording.steps
         if any(vars(s.op)[n] for n in coding_tunables(s.op))
     }
-    surveys = []
-    for call in record(start):
-        times = step_times(
-            call,
-            start,
-            dev,
-            full_elf=full_elf,
-            timing=_timing(args)["timing"],
-            repeats=args.repeats,
-            cache=Cache.here(),
-            log=log,
-            lock=args.lock_in_process,
-        )
-        found = survey(
-            call,
-            start,
-            dev,
-            times,
-            model or CostModel(),
-            coded_shapes,
-            cycles,
-            core_mhz,
-        )
-        surveys.append(found)
-        log("\n".join(found.lines()))
+    surveys = _surveys(
+        args, record, start, dev, model, coded_shapes, cycles, core_mhz, log
+    )
     plan = {s.name: s for s in searches(surveys, full_elf)}
     for planned in plan.values():
         log(
@@ -210,22 +196,46 @@ def tune(
     profile = seed
     if not args.packings_only:
         if not args.fusions_only:
-            shares: dict[Hashable, float] = {}
-            for surveyed in surveys:
-                for key, share in surveyed.shares().items():
-                    shares[key] = max(shares.get(key, 0.0), share)
-            profile = autotune(
-                record(profile),
-                dev,
-                profile,
-                full_elf=full_elf,
-                cycles=cycles,
-                core_mhz=core_mhz,
-                shares=shares,
-                **_timing(args),
-            )
-            profile.save(found_path)
-            print(f"wrote {found_path}")
+            # A shape's share is of the version as it stands: once the costliest
+            # are tuned, the rest weigh more, so survey again until none newly
+            # reaches SHAPE_SHARE.
+            searched: set[Hashable] = set()
+            while True:
+                shares: dict[Hashable, float] = {}
+                for surveyed in surveys:
+                    for key, share in surveyed.shares().items():
+                        shares[key] = max(shares.get(key, 0.0), share)
+                fresh = {
+                    k: v
+                    for k, v in shares.items()
+                    if v >= SHAPE_SHARE and k not in searched
+                }
+                if not fresh:
+                    break
+                profile = autotune(
+                    record(profile),
+                    dev,
+                    profile,
+                    full_elf=full_elf,
+                    cycles=cycles,
+                    core_mhz=core_mhz,
+                    shares=fresh,
+                    **_timing(args),
+                )
+                searched |= fresh.keys()
+                profile.save(found_path)
+                print(f"wrote {found_path}")
+                surveys = _surveys(
+                    args,
+                    record,
+                    profile,
+                    dev,
+                    model,
+                    coded_shapes,
+                    cycles,
+                    core_mhz,
+                    log,
+                )
     if not args.packings_only and plan["fusions"].runs:
         priced = price_fusions(
             record(profile),
@@ -277,6 +287,38 @@ def tune(
     )
     print(f"wrote {path} and its report")
     return path
+
+
+def _surveys(
+    args, record, profile: Profile, dev, model, coded_shapes, cycles, core_mhz, log
+) -> list[Survey]:
+    """Survey each version of the calls as ``profile`` builds it (``survey``), logged."""
+    out = []
+    for call in record(profile):
+        times = step_times(
+            call,
+            profile,
+            dev,
+            full_elf=dev.can_dispatch_full_elf,
+            timing=_timing(args)["timing"],
+            repeats=args.repeats,
+            cache=Cache.here(),
+            log=log,
+            lock=args.lock_in_process,
+        )
+        found = survey(
+            call,
+            profile,
+            dev,
+            times,
+            model or CostModel(),
+            coded_shapes,
+            cycles,
+            core_mhz,
+        )
+        out.append(found)
+        log("\n".join(found.lines()))
+    return out
 
 
 def _cost_model(args, dev) -> CostModel:
