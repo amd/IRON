@@ -724,9 +724,10 @@ class PerStepCallable(ImageCallable):
     def __call__(
         self, between: Mapping[int, Callable[[], None]] | None = None
     ) -> tuple[None, XRTKernelResult]:
-        """Dispatch each step, ``between[i]()`` running on the host before step
-        ``i``, never inside a pack's or a fusion's run; the handle is None, no
-        one dispatch timed.
+        """Dispatch each step, ``between[i]()`` running on the host before step ``i``.
+
+        Never inside a pack's or a fusion's run; the handle is None, no one dispatch
+        timed.
         """
         between = dict(between or {})
         inside = set(between) - {*self._starts, len(self.op.steps)}

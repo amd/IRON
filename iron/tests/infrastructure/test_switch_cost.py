@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``switch_cost`` on a real device: a sane fit, and a cached call that
-dispatches nothing.
+"""``switch_cost`` on a real device.
+
+A sane fit, and a cached call that dispatches nothing.
 """
 
 import pytest

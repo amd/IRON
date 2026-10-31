@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What a tune saves, checked against the profile it started from
-(``iron.tune.verify``). No NPU above ``# On the device``.
+"""What a tune saves, checked against the profile it started from (``iron.tune.verify``).
+
+No NPU above ``# On the device``.
 """
 
 import aie.utils as aie_utils
@@ -48,9 +49,12 @@ def recorded(profile: Profile) -> list[Timed]:
 
 
 def test_a_reverted_version_takes_the_base_entries_that_touch_it():
-    """Only the small version loses: its own entry and the one both versions
-    match come from the base, a packing scoped to both keeps the large one,
-    and an unscoped packing touching the small one is dropped."""
+    """Only the small version loses.
+
+    Its own entry and the one both versions match come from the base, a packing scoped
+    to both keeps the large one, and an unscoped packing touching the small one is
+    dropped.
+    """
     large, small_ = (c.recording for c in recorded(Profile()))
     base = Profile()
     base.add(ReLU, size=LARGE, tile_size=1024)
@@ -75,8 +79,7 @@ def test_a_reverted_version_takes_the_base_entries_that_touch_it():
 
 
 def test_a_fold_touches_only_the_version_whose_steps_it_names():
-    """``touches`` finds a fold by the fold candidates, not the fusion
-    kinds a profile's other entries take."""
+    """``touches`` finds a fold by the fold candidates, not the fusion kinds a profile's other entries take."""
     model = small()
     decode, prompt = (model.record(**s) for s in model.shapes())
     fold = next(
@@ -130,10 +133,11 @@ def test_a_report_names_what_the_saved_profile_adds_and_drops(tmp_path):
 
 @pytest.mark.supported_devices("npu2")
 def test_verify_keeps_the_version_that_gains_and_reverts_the_one_that_loses():
-    """The large version's candidate widens the one column the base gives
-    its ReLU; the small version's candidate narrows its ReLU to one, slower
-    at this length. What is kept is the first alone, and the small version,
-    back at the base, is not reported."""
+    """The large version's candidate widens the one column the base gives its ReLU; the small version's candidate narrows its ReLU to one.
+
+    Slower at this length. What is kept is the first alone, and the small version, back
+    at the base, is not reported.
+    """
     dev = aie_utils.ensure_current_device()
     base = Profile()
     base.add(ReLU, size=LARGE, num_aie_columns=1)

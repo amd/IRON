@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate a candidate profile against a model's stock one, on real
-weights: which fusions and packings are live in each compiled version, then
-a decoder's own battery (bit identity of greedy logits over a prompt that
-crosses a prefill chunk and ends in a partial one, KL against the model's
-golden, and TTFT / decode tokens per second, stock and candidate
-interleaved) or, for any other graph model (an encoder among them), each
-changed version compared on its own tune points (``compare_graphs``): bit
-identity within each output's bound, then latency, stock and candidate
-interleaved. ``--bisect`` narrows a decoder's bit-identity mismatch to the
-candidate's profile entries at fault, one version at a time.
+"""Validate a candidate profile against a model's stock one, on real weights.
+
+Which fusions and packings are live in each compiled version, then a decoder's own
+battery (bit identity of greedy logits over a prompt that crosses a prefill chunk and
+ends in a partial one, KL against the model's golden, and TTFT / decode tokens per
+second, stock and candidate interleaved) or, for any other graph model (an encoder among
+them), each changed version compared on its own tune points (``compare_graphs``): bit
+identity within each output's bound, then latency, stock and candidate interleaved.
+``--bisect`` narrows a decoder's bit-identity mismatch to the candidate's profile
+entries at fault, one version at a time.
 
 ``python -m iron.lm.validate <application> --checkpoint DIR --candidate
 PROFILE_DIR``: ``<application>`` is dotted under ``iron.applications``
@@ -49,9 +49,10 @@ from .model import Model
 
 
 def version_labels(model: Model) -> list[str]:
-    """A label per ``model.shapes()``'s version, in compile order: ``decode``
-    for no input, ``prompt`` for a chunk of ``ids``, ``placed`` for a
-    tower's merged ids, else ``version<i>``.
+    """Return a label per ``model.shapes()``'s version, in compile order.
+
+    ``decode`` for no input, ``prompt`` for a chunk of ``ids``, ``placed`` for a tower's
+    merged ids, else ``version<i>``.
     """
     labels = []
     for i, shape in enumerate(model.shapes()):
@@ -67,13 +68,13 @@ def version_labels(model: Model) -> list[str]:
 
 
 def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
-    """For each of ``model``'s compiled versions (``version_labels``): how
-    many of its ``sequence.fusions`` are live, by kind, its design and
-    fusion-device counts, packed groups and composition identity (a full
-    ELF's), and ``images``, what it runs: the full ELF, or each distinct
-    xclbin and instruction stream its steps dispatch in turn -- proof a
-    profile's fusions and packings matched the live recording, not just
-    that the profile file has entries.
+    """For each of ``model``'s compiled versions (``version_labels``).
+
+    How many of its ``sequence.fusions`` are live, by kind, its design and fusion-device
+    counts, packed groups and composition identity (a full ELF's), and ``images``, what
+    it runs: the full ELF, or each distinct xclbin and instruction stream its steps
+    dispatch in turn -- proof a profile's fusions and packings matched the live
+    recording, not just that the profile file has entries.
 
     Raises:
         TypeError: A version is packaged neither as a full ELF nor as an
@@ -103,16 +104,16 @@ def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
             links = sorted(packaging.step_links.items())
             n_designs = len(
                 {
-                    (l.kernel.xclbin_path, l.design.get_cache_entry().insts)
-                    for i, l in links
+                    (link.kernel.xclbin_path, link.design.get_cache_entry().insts)
+                    for i, link in links
                     if i not in fused
                 }
             )
             n_fusion_devices, packed, identity = len(fusions), [], None
             images = list(
                 dict.fromkeys(
-                    f"{l.kernel.xclbin_path} {l.design.get_cache_entry().insts}"
-                    for _, l in links
+                    f"{link.kernel.xclbin_path} {link.design.get_cache_entry().insts}"
+                    for _, link in links
                 )
             )
         else:
@@ -145,8 +146,9 @@ def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
 
 
 def changed_versions(stock_live: dict, candidate_live: dict) -> list[str]:
-    """``version_labels`` whose candidate compile is not stock's image: its
-    fusions, packings or tunables changed it.
+    """``version_labels`` whose candidate compile is not stock's image.
+
+    Its fusions, packings or tunables changed it.
 
     Raises:
         AssertionError: A version shares stock's compiled image while its
@@ -175,9 +177,10 @@ def load_model(
     profile,
     config: Mapping[str, Any] | None = None,
 ) -> Model:
-    """``model_class.from_checkpoint(checkpoint)`` with ``config``'s fields,
-    under ``profile`` (a directory, or None for the model's own), every
-    version compiled as the device packages it (``Graph.compile``) and loaded.
+    """``model_class.from_checkpoint(checkpoint)`` with ``config``'s fields.
+
+    Under ``profile`` (a directory, or None for the model's own), every version compiled
+    as the device packages it (``Graph.compile``) and loaded.
     """
     model = model_class.from_checkpoint(
         checkpoint, max_seq_len=max_seq_len, config=config
@@ -191,9 +194,9 @@ def load_model(
 def bit_identity(
     stock: CausalLM, candidate: CausalLM, tokens, num_tokens: int
 ) -> list[int]:
-    """The steps (prompt and decode alike) at which ``candidate``'s greedy
-    logits differ bitwise from ``stock``'s, over ``tokens`` and
-    ``num_tokens`` decode steps after them.
+    """Return the steps (prompt and decode alike) at which ``candidate``'s greedy logits differ bitwise from ``stock``'s.
+
+    Over ``tokens`` and ``num_tokens`` decode steps after them.
     """
     stock.session.forget(0)
     candidate.session.forget(0)
@@ -203,9 +206,10 @@ def bit_identity(
 
 
 def run_accuracy(model: CausalLM, tokens, num_tokens: int) -> tuple[dict, int]:
-    """``model``'s KL against its own golden (``Model.cpu_reference``),
-    teacher-forced over ``num_tokens`` steps from ``tokens``, and its
-    top-1 mismatch count.
+    """``model``'s KL against its own golden (``Model.cpu_reference``).
+
+    Teacher-forced over ``num_tokens`` steps from ``tokens``, and its top-1 mismatch
+    count.
     """
     model.session.forget(0)
     results = accuracy(model, model.cpu_reference(), tokens, num_tokens)
@@ -224,9 +228,10 @@ def timed_round(model: CausalLM, tokens, num_tokens: int) -> tuple[float, float]
 def speed(
     stock: CausalLM, candidate: CausalLM, tokens, num_tokens: int, rounds: int
 ) -> dict[str, dict[str, float]]:
-    """TTFT and decode tokens per second, ``stock`` and ``candidate``
-    interleaved over ``rounds`` rounds (so a drifting clock or a warming
-    cache costs both alike), each the min and the median.
+    """TTFT and decode tokens per second.
+
+    ``stock`` and ``candidate`` interleaved over ``rounds`` rounds (so a drifting clock
+    or a warming cache costs both alike), each the min and the median.
     """
     stock_ttft, stock_tps, candidate_ttft, candidate_tps = [], [], [], []
     for _ in range(rounds):
@@ -255,24 +260,25 @@ def speed(
 def classify_entries(
     candidate: Profile, recordings: dict[str, Recording]
 ) -> list[tuple[tuple[str, Any], set[str]]]:
-    """Each of ``candidate``'s fusion and packing entries, tagged
-    ``("fusion"|"packing", entry)``, with the labels of ``recordings``'
-    versions it matches (``touches``), in the order ``candidate`` holds
-    them, fusions first.
+    """Each of ``candidate``'s fusion and packing entries, tagged ``("fusion"|"packing", entry)``.
+
+    With the labels of ``recordings``' versions it matches (``touches``), in the order
+    ``candidate`` holds them, fusions first.
     """
     classified = []
     for entry in candidate.fusions():
-        matches = {l for l, r in recordings.items() if touches("fusion", entry, r)}
+        matches = {k for k, r in recordings.items() if touches("fusion", entry, r)}
         classified.append((("fusion", entry), matches))
     for entry in candidate.packings():
-        matches = {l for l, r in recordings.items() if touches("packing", entry, r)}
+        matches = {k for k, r in recordings.items() if touches("packing", entry, r)}
         classified.append((("packing", entry), matches))
     return classified
 
 
 def build_variant(stock: Profile, tags) -> Profile:
-    """``stock`` plus ``tags`` (``classify_entries``'s tagged entries): a
-    profile ``save`` can write for a bisection trial.
+    """``stock`` plus ``tags`` (``classify_entries``'s tagged entries).
+
+    A profile ``save`` can write for a bisection trial.
     """
     profile = Profile()
     for cls, dims, tunables in stock:
@@ -301,19 +307,19 @@ def bisect(
     decode_steps: int,
     config: Mapping[str, Any] | None = None,
 ) -> dict:
-    """Narrow a bit-identity mismatch to one version's entries, then to a
-    prefix of them: classify ``candidate``'s fusion and packing entries
-    by which version of a fresh recording each matches
-    (``classify_entries``), build a profile of the stock plus one version's
-    entries at a time, and keep halving a version whose variant still
-    mismatches. Saves the smallest failing profile under ``out_dir`` and
-    returns a summary; the first version to reproduce the mismatch wins.
+    """Narrow a bit-identity mismatch to one version's entries, then to a prefix of them.
+
+    Classify ``candidate``'s fusion and packing entries by which version of a fresh
+    recording each matches (``classify_entries``), build a profile of the stock plus one
+    version's entries at a time, and keep halving a version whose variant still
+    mismatches. Saves the smallest failing profile under ``out_dir`` and returns a
+    summary; the first version to reproduce the mismatch wins.
     """
     probe = model_class.from_checkpoint(
         checkpoint, max_seq_len=max_seq_len, config=config
     )
     labels = version_labels(probe)
-    recordings = {l: probe.record(**s) for l, s in zip(labels, probe.shapes())}
+    recordings = {k: probe.record(**s) for k, s in zip(labels, probe.shapes())}
     dev = require_device()
     classified = classify_entries(candidate, recordings)
 
@@ -368,11 +374,11 @@ def model_tune_points(
     checkpoint: Path,
     config: Mapping[str, Any] | None = None,
 ) -> list[Timed]:
-    """``model_class.tune_calls``'s own calls, over its own tune flags
-    (``tune_arguments``) at their defaults save ``--checkpoint``: a
-    model-general way to the per-call points and weights a version is tuned
-    at (a decoder's context ladder, an encoder's query and longest call),
-    not one battery written for a decoder alone.
+    """``model_class.tune_calls``'s own calls, over its own tune flags (``tune_arguments``) at their defaults save ``--checkpoint``.
+
+    A model-general way to the per-call points and weights a version is tuned at (a
+    decoder's context ladder, an encoder's query and longest call), not one battery
+    written for a decoder alone.
     """
     tune_parser = argparse.ArgumentParser(add_help=False)
     model_class.tune_arguments(tune_parser)
@@ -385,9 +391,9 @@ def model_tune_points(
 
 
 def version_recordings(model) -> dict[Version, Recording]:
-    """``model``'s own ``Recording`` of each of ``shapes()``, by
-    ``Recording.version``: the identity ``compare_versions`` matches
-    ``model_tune_points``'s calls against.
+    """``model``'s own ``Recording`` of each of ``shapes()``, by ``Recording.version``.
+
+    The identity ``compare_versions`` matches ``model_tune_points``'s calls against.
     """
     out = {}
     for shape in model.shapes():
@@ -409,13 +415,13 @@ def compare_versions(
     timing: Timing = Timing(rounds=3, calls=10),
     log=print,
 ) -> dict[str, dict[str, Any]]:
-    """``labels`` (``changed_versions``'s), each compared bit for bit and
-    timed, ``stock_profile`` against ``candidate_profile``
-    (``compare_graphs``): a fresh real-weight recording of the version
-    (``model_class.from_checkpoint``, not the already-loaded ``stock`` or
-    ``candidate``, whose states and weights a recording apart from their own
-    cannot address), built under each profile (``apply_profile``), at the
-    per-call points ``model_tune_points`` gives that version
+    """``labels`` (``changed_versions``'s), each compared bit for bit and timed.
+
+    ``stock_profile`` against ``candidate_profile`` (``compare_graphs``): a fresh
+    real-weight recording of the version (``model_class.from_checkpoint``, not the
+    already-loaded ``stock`` or ``candidate``, whose states and weights a recording
+    apart from their own cannot address), built under each profile (``apply_profile``),
+    at the per-call points ``model_tune_points`` gives that version
     (``Recording.version`` matched to ``label_to_version``).
 
     A build or dispatch failure, and a device timeout propagated from
@@ -499,10 +505,21 @@ def validate(
     bisect_into: Path | None = None,
     config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The battery, ``candidate`` against ``stock`` (a profile, or a directory
-    holding one per device; the model's own where None), as a report.
+    """Return the battery, ``candidate`` against ``stock`` (a profile, or a directory holding one per device; the model's own where None), as a report.
 
     Args:
+        model_class: The model validated.
+        checkpoint: Its checkpoint directory, real weights.
+        candidate: The profile validated, or a directory holding one per device.
+        stock: The profile it is validated against, or such a directory; the model's own
+            where None.
+        max_seq_len: The longest context the two models serve; fitted to the host where
+            None.
+        prompt_chars: Characters of the prompt a decoder is run on.
+        decode_steps: Decode steps compared for bit identity.
+        accuracy_tokens: Tokens judged against the golden.
+        speed_tokens: Tokens generated in each timed round.
+        speed_rounds: Timed rounds, stock and candidate interleaved.
         bisect_into: Where a decoder's bit-identity mismatch is narrowed to
             the candidate's entries at fault (``bisect``); not narrowed where None.
         config: Fields of the model's config given other values (a shallow

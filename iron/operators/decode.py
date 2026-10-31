@@ -14,10 +14,11 @@ from iron.common.testing import Case, Testing
 
 
 class Decode(Operator):
-    """Coded rows (``aie.utils.coded``) in, the bf16 weights they code out:
-    ``rows`` rows a kernel call, each column's core a block of them. Its A is
-    coded by declaration, so in a graph it reads a weight's coded rows, as a
-    coded GEMV does, and its output is the weight bit for bit.
+    """Coded rows (``aie.utils.coded``) in, the bf16 weights they code out.
+
+    ``rows`` rows a kernel call, each column's core a block of them. Its A is coded by
+    declaration, so in a graph it reads a weight's coded rows, as a coded GEMV does, and
+    its output is the weight bit for bit.
     """
 
     test = Testing(

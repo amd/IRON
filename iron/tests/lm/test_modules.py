@@ -430,8 +430,9 @@ def test_a_random_tree_draws_a_scalar_as_an_array():
 
 
 def test_a_decode_steps_q_and_o_share_one_array(npu2):
-    """Where heads * head_dim is the width, o takes q's one-row tiles, so a
-    decode step runs the two on one array, and a full ELF switches to it once.
+    """Where heads * head_dim is the width, o takes q's one-row tiles.
+
+    So a decode step runs the two on one array, and a full ELF switches to it once.
     """
     model = llama_1b(num_hidden_layers=1)
     decode_shapes, _ = model.shapes()

@@ -650,8 +650,9 @@ class Attention(iron.Graph):
         return self.output(o, x, **(tiles if shared else {}))
 
     def output(self, o: Handle, x: Handle, **gemv) -> Handle:
-        """The block's output from the heads ``o`` ``(rows, heads *
-        head_dim)`` of the input ``x``; ``gemv``, where given, its one-row
+        """Return the block's output from the heads ``o`` of the input ``x``.
+
+        ``o`` is ``(rows, heads * head_dim)``; ``gemv``, where given, is its one-row
         GEMV's tunables.
         """
         if not gemv:

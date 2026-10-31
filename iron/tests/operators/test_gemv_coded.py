@@ -125,9 +125,10 @@ def test_a_graph_reading_a_weight_coded_returns_the_plain_bits(overflow):
     ids=["one-head-tile", "two-head-tiles"],
 )
 def test_every_call_of_one_loaded_coded_gemv_returns_the_plain_bits(M, K, tunables):
-    """An acquire or release a head tile leaves unmatched shows from the
-    second call on: 50 calls of one loaded image, a new B each, every one
-    checked against the plain GEMV's.
+    """An acquire or release a head tile leaves unmatched shows from the second call on.
+
+    50 calls of one loaded image, a new B each, every one checked against the plain
+    GEMV's.
     """
     shape = dict(
         M=M, K=K, num_aie_columns=aie_utils.ensure_current_device().cols, **tunables

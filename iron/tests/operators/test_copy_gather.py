@@ -500,15 +500,14 @@ def test_a_bounded_prompt_chunk_moves_13_rows_not_2048():
 
 
 def test_a_standalone_probes_control_words_as_a_real_call_would():
-    """``iron.tune.measure.Standalone`` builds one call alone by writing
-    ``Operator.addressed_inputs``'s content into the device buffers it
-    names, then binds the same call's own per-call values (``values``) as
-    its symbols. ``Gather.addressed_inputs`` must build its ``control``
-    descriptor chain at the same ``valid_rows`` ``values`` gives those
-    symbols, not always the unbounded one: otherwise the chain it writes
-    (every row) and the drain the call's own bound stops early (``valid_rows``
-    of them) disagree, which hangs real hardware rather than erroring (the
-    hang itself needs a device; this stays device-free).
+    """``iron.tune.measure.Standalone`` builds one call alone by writing ``Operator.addressed_inputs``'s content into the device buffers it names.
+
+    Then binds the same call's own per-call values (``values``) as its symbols.
+    ``Gather.addressed_inputs`` must build its ``control`` descriptor chain at the same
+    ``valid_rows`` ``values`` gives those symbols, not always the unbounded one:
+    otherwise the chain it writes (every row) and the drain the call's own bound stops
+    early (``valid_rows`` of them) disagree, which hangs real hardware rather than
+    erroring (the hang itself needs a device; this stays device-free).
 
     ``iron.common.graph.record``'s own call path, for ids known when the
     graph is recorded (the common case: a prompt chunk's token ids, a

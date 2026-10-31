@@ -39,13 +39,13 @@ class BufferRef:
 
 
 class FusionKind(Enum):
-    """How a fusion's steps run as one device configuration: ``STREAM``
-    (consecutive steps, each edge a fifo its lanes meet directly),
-    ``STAGED`` (as a stream, an edge whose lanes do not meet restaged
-    through memtiles), ``PACK`` (independent steps co-resident, issued
-    concurrently), ``MERGE`` (consecutive steps sharing a configuration,
-    run back to back with no edge), or ``FOLD`` (a consumer's kernel run in
-    its producer's cores, applied to the recording before planning).
+    """How a fusion's steps run as one device configuration.
+
+    ``STREAM`` (consecutive steps, each edge a fifo its lanes meet directly), ``STAGED``
+    (as a stream, an edge whose lanes do not meet restaged through memtiles), ``PACK``
+    (independent steps co-resident, issued concurrently), ``MERGE`` (consecutive steps
+    sharing a configuration, run back to back with no edge), or ``FOLD`` (a consumer's
+    kernel run in its producer's cores, applied to the recording before planning).
     """
 
     STREAM = "stream"
@@ -57,10 +57,10 @@ class FusionKind(Enum):
 
 @dataclass(frozen=True)
 class Edge:
-    """Step ``producer``'s output ``output`` streamed on-chip into step
-    ``consumer``'s input ``input``, both indices into one ``Fusion``'s
-    ``steps``; several edges may share one ``(producer, output)``, fanning
-    out to more than one consumer.
+    """Step ``producer``'s output ``output`` streamed on-chip into step ``consumer``'s input ``input``.
+
+    Both indices into one ``Fusion``'s ``steps``; several edges may share one
+    ``(producer, output)``, fanning out to more than one consumer.
     """
 
     producer: int
@@ -71,10 +71,10 @@ class Edge:
 
 @dataclass(frozen=True)
 class Fusion:
-    """A set of steps that build and dispatch as one device configuration,
-    with no host transfer between: ``kind`` how, ``steps`` its members
-    (increasing, distinct indices into a sequence) and ``edges`` each
-    on-chip hand-off among them.
+    """A set of steps that build and dispatch as one device configuration, with no host transfer between.
+
+    ``kind`` how, ``steps`` its members (increasing, distinct indices into a sequence)
+    and ``edges`` each on-chip hand-off among them.
 
     An edge between two steps that are not adjacent in ``steps`` is only
     valid where every step between them (by index) is also a member; a

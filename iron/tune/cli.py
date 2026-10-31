@@ -129,19 +129,23 @@ def tune(
     profiles: Path,
     validate: Callable[[Profile, Profile], dict] | None = None,
 ) -> Path:
-    """Rewrite ``profiles/<device>.json``: from the planner's seed
-    (``coded_seed``, kept per version where it gains on the starting
-    profile), time the settings the calls run fastest at (``autotune``),
-    price the fusions their graphs admit (``price_fusions``), then fold what
-    their arrays admit and group the result into shared device
-    configurations (``price_folds_before_packing``); ``--fusions-only``
-    skips the first search and ``--packings-only`` the first two. What the
-    search finds goes to ``<device>.found.json`` as it goes; what is saved
-    is what ``verify`` keeps of it against the seed and then the starting
-    profile, once it passes ``validate`` where given, reported beside it
-    (``write_report``). Timed as ``args`` says; return its path.
+    """Rewrite ``profiles/<device>.json``.
+
+    From the planner's seed (``coded_seed``, kept per version where it gains on the
+    starting profile), time the settings the calls run fastest at (``autotune``), price
+    the fusions their graphs admit (``price_fusions``), then fold what their arrays
+    admit and group the result into shared device configurations
+    (``price_folds_before_packing``); ``--fusions-only`` skips the first search and
+    ``--packings-only`` the first two. What the search finds goes to
+    ``<device>.found.json`` as it goes; what is saved is what ``verify`` keeps of it
+    against the seed and then the starting profile, once it passes ``validate`` where
+    given, reported beside it (``write_report``). Timed as ``args`` says; return its
+    path.
 
     Args:
+        args: The command line: how settings are timed, and which searches it skips.
+        profiles: The directory whose ``<device>.json`` the tune starts from and
+            rewrites.
         record: The calls, recorded under a profile: each stage records
             them under the profile the last one found.
         validate: The model's own battery, the starting profile against the
@@ -300,10 +304,11 @@ def _save_packings(
     model: CostModel | None,
     folds: bool = True,
 ) -> Profile:
-    """``profile`` with the packings ``price_packings`` finds, and with
-    ``folds`` the folds ``price_folds_before_packing`` keeps, written to
-    ``path`` with ``model`` as it refits it; None on an xclbin per step,
-    where nothing packs.
+    """``profile`` with the packings ``price_packings`` finds.
+
+    And with ``folds`` the folds ``price_folds_before_packing`` keeps, written to
+    ``path`` with ``model`` as it refits it; None on an xclbin per step, where nothing
+    packs.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 

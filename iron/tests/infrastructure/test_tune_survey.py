@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """What bounds each version before a tune plans (``iron.tune.survey``).
+
 No NPU above ``# On the device``.
 """
 
@@ -35,8 +36,11 @@ def decode_call() -> Timed:
 
 
 def given_times(call: Timed, dev) -> dict[str, float]:
-    """Each design's time: a GEMV's weights at ``READ``, else 10 us a step
-    (a GEMV of attention reads a cache, no weight)."""
+    """Each design's time.
+
+    A GEMV's weights at ``READ``, else 10 us a step (a GEMV of attention reads a cache,
+    no weight).
+    """
     recording, _, _ = apply_profile(call.recording, Profile(), dev)
     times: dict[str, float] = {}
     for step in recording.steps:
@@ -62,8 +66,7 @@ def test_a_gemv_reading_its_weights_at_the_rate_is_read_bound_and_codable():
 
 
 def test_the_switch_and_fold_estimates_follow_the_step_list():
-    """Unpacked, every change of design is a switch the cost model prices;
-    each scoped fold removes its consumer's step."""
+    """Unpacked, every change of design is a switch the cost model prices; each scoped fold removes its consumer's step."""
     dev = aie_utils.ensure_current_device()
     call = decode_call()
     times = given_times(call, dev)
@@ -112,8 +115,10 @@ def test_a_survey_times_each_design_of_a_version(tmp_path):
 
 @pytest.mark.supported_devices("npu2")
 def test_a_long_step_is_timed_in_fewer_calls_a_round():
-    """A survey times a prompt chunk's steps, hundreds of ms each: a round
-    of one is sized by its duration, not a fixed call count."""
+    """A survey times a prompt chunk's steps, hundreds of ms each.
+
+    A round of one is sized by its duration, not a fixed call count.
+    """
     timing = Timing(rounds=2)
     [long_step] = measure([ReLU(size=2**27)], full_elf=True, timing=timing).values()
     [short_step] = measure([ReLU(size=2**12)], full_elf=True, timing=timing).values()

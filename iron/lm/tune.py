@@ -104,11 +104,18 @@ def calls(
     sibling: CausalLM | None = None,
     versions: Sequence[str] = VERSIONS,
 ) -> list[Timed]:
-    """The calls a decoder's designs are timed in: the decode step and the
-    prompt chunk, each over ``contexts`` up to ``context``, ``points`` of
-    them, and Sample on the draw rows ``sampler`` gives.
+    """Return the calls a decoder's designs are timed in.
+
+    The decode step and the prompt chunk, each over ``contexts`` up to ``context``,
+    ``points`` of them, and Sample on the draw rows ``sampler`` gives.
 
     Args:
+        model: The decoder whose versions are timed.
+        position: The decode position its designs are timed at.
+        token: The token the step embeds.
+        context: The longest context a design whose work follows it is timed at.
+        points: How many contexts up to ``context`` it is timed at.
+        sampler: The sampling Sample is timed at.
         sibling: ``model`` at another ``max_seq_len``: a dimension whose
             value differs between their recordings is one a host's fitted
             context sizes (``Timed.varying``).
@@ -174,11 +181,12 @@ def calls(
 
 
 def main(name: str, model: Any, argv: Sequence[str] | None = None) -> None:
-    """The command line that tunes ``name``'s profile: the calls ``model``
-    plans (``tune_calls``, on the flags ``tune_arguments`` adds), into its
-    profiles directory or ``--profiles``, recorded under each profile a
-    stage hands on; what is saved passes the model's battery (``validate``)
-    against the starting profile, bit-identical.
+    """Run the command line that tunes ``name``'s profile.
+
+    The calls ``model`` plans (``tune_calls``, on the flags ``tune_arguments`` adds),
+    into its profiles directory or ``--profiles``, recorded under each profile a stage
+    hands on; what is saved passes the model's battery (``validate``) against the
+    starting profile, bit-identical.
     """
     parser = tune_cli.parser(f"Tune {name}'s profile")
     if model.profile is None:

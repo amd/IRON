@@ -1285,9 +1285,10 @@ class ProjectionGEMM(Operator):
             emit_slab(slab)
 
     def _single_slab(self) -> bool:
-        """Whether ``sequence`` arms M in one slab: the same accept test
-        ``cut()`` runs for ``n_slabs=1``, without a build to read ``rt.built``
-        from (the hardware limits ``_BPool`` carries are the device's own).
+        """Whether ``sequence`` arms M in one slab.
+
+        The same accept test ``cut()`` runs for ``n_slabs=1``, without a build to read
+        ``rt.built`` from (the hardware limits ``_BPool`` carries are the device's own).
         """
         tm = get_target_model(self.dev.resolve())
         queue, passes_cap = tm.get_dma_task_queue_depth(), tm.get_max_repeat_count() + 1
@@ -1304,10 +1305,11 @@ class ProjectionGEMM(Operator):
         return all(p <= queue * passes_cap for p in passes)
 
     def lane_transfers(self, operand):
-        """A and C's order, one slab, ``m_chunk=1`` and unbounded: past that
-        a second slab, or a row bound's dynamic start (the second half of the
-        core rows, ``a_half``/``c_half``) and its ``n_units`` axis
-        truncation, are not one of ``Operand.transfers()``'s tuples.
+        """Return a and C's order, one slab, ``m_chunk=1`` and unbounded.
+
+        Past that a second slab, or a row bound's dynamic start (the second half of the
+        core rows, ``a_half``/``c_half``) and its ``n_units`` axis truncation, are not
+        one of ``Operand.transfers()``'s tuples.
         """
         if operand is not self.A and operand is not self.C:
             return None

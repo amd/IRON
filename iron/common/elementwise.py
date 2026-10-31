@@ -158,11 +158,12 @@ class KernelCall:
 
 @dataclasses.dataclass(frozen=True)
 class FinishStep:
-    """A step folded into its producer's cores: ``consumer`` runs on the
-    producer's output tile, held at its input ``at``; ``dims`` are its
-    other constructor keywords (its shape and grid always match the tile).
-    ``binary`` is whether an input besides the tile streams in beside it,
-    the one a producer's free input channel may carry.
+    """A step folded into its producer's cores.
+
+    ``consumer`` runs on the producer's output tile, held at its input ``at``; ``dims``
+    are its other constructor keywords (its shape and grid always match the tile).
+    ``binary`` is whether an input besides the tile streams in beside it, the one a
+    producer's free input channel may carry.
     """
 
     consumer: type[Elementwise]
@@ -171,12 +172,12 @@ class FinishStep:
     binary: bool
 
     def consumer_at(self, line: int, dev, elements: int | None = None) -> Elementwise:
-        """``consumer`` whose cores run a ``line``-element tile, the
-        producer's own (so its kernel matches), resolved for ``dev``: sized
-        to run on ``elements`` total, or one tile alone where None (a
-        build's own kernel, which never reads more than one). A one-core
-        grid, where ``consumer`` takes it as a constructor argument; some
-        (``SiLU``'s ``num_channels``) fix it instead.
+        """``consumer`` whose cores run a ``line``-element tile, the producer's own (so its kernel matches), resolved for ``dev``.
+
+        Sized to run on ``elements`` total, or one tile alone where None (a build's own
+        kernel, which never reads more than one). A one-core grid, where ``consumer``
+        takes it as a constructor argument; some (``SiLU``'s ``num_channels``) fix it
+        instead.
         """
         params = self.consumer.declaration.params
         one = {
@@ -196,10 +197,11 @@ class FinishStep:
 def finish_reference(
     finish: tuple[FinishStep, ...], y: np.ndarray, extra: tuple, dev, line: int
 ) -> np.ndarray:
-    """``y``, a producer's own output, through its finish chain on the host:
-    each step's reference over the tile, taking the next of ``extra`` where
-    it reads another input, as ``Finish.apply`` runs on the device. ``line``
-    is the producer's own tile, which its finish's kernel matches.
+    """``y``, a producer's own output, through its finish chain on the host.
+
+    Each step's reference over the tile, taking the next of ``extra`` where it reads
+    another input, as ``Finish.apply`` runs on the device. ``line`` is the producer's
+    own tile, which its finish's kernel matches.
     """
     given = iter(extra)
     tile = np.ravel(y)
@@ -252,10 +254,11 @@ class Elementwise(Operator):
             )
 
     def _can_ride(self) -> bool:
-        """Whether this producer's first input could carry a finish's other
-        input beside its own: no per-call bound to chunk around, and exactly
-        one tile a lane, so a single extra transfer a lane suffices (the
-        general multi-tile case needs its own re-read chunking, not this).
+        """Whether this producer's first input could carry a finish's other input beside its own.
+
+        No per-call bound to chunk around, and exactly one tile a lane, so a single
+        extra transfer a lane suffices (the general multi-tile case needs its own
+        re-read chunking, not this).
         """
         if self.bound_extents or not self.inputs:
             return False
@@ -356,9 +359,10 @@ class Elementwise(Operator):
         return out.elements
 
     def chain(self) -> tuple[KernelCall, ...]:
-        """The kernel calls a core makes over one line, in order, which ``reference``
-        and ``judge`` follow; more than ``kernel()`` with an array of its own, or a
-        step folded into this one's cores.
+        """Return the kernel calls a core makes over one line, in order.
+
+        Which ``reference`` and ``judge`` follow; more than ``kernel()`` with an array
+        of its own, or a step folded into this one's cores.
         """
         config = self.layout()
         own = tuple(b for b in self.inputs if b.name != "finish0")
@@ -448,9 +452,7 @@ class Elementwise(Operator):
         )
 
     def _own_reference(self, own: tuple) -> np.ndarray:
-        """This operator's own kernel's reference, line by line, its finish
-        chain left out.
-        """
+        """Return this operator's own kernel's reference, line by line, its finish chain left out."""
         op, lines, scalars = self._kernel_arguments(own)
         (out,) = op.outputs
         y = (
@@ -875,9 +877,10 @@ class BinaryElementwise(Elementwise):
     over = UnaryElementwise.over
 
     def sequence(self, rt) -> None:
-        """The derived sequence, every input filled and every output
-        drained; riding, ``a``'s lane also carries a finish's other input,
-        its own transfer right after ``a``'s own.
+        """Fill every input and drain every output: the derived sequence.
+
+        Riding, ``a``'s lane also carries a finish's other input, its own transfer right
+        after ``a``'s own.
         """
         tg = rt.task_group()
         ridden = self.a if self.rides else None
@@ -986,11 +989,11 @@ def finish_bound(
     dev,
     line: int,
 ) -> Any:
-    """A bound function (``Tolerance.bounded``) over ``n_own`` own inputs
-    then each finish step's other input in turn: ``own``'s tolerance around
-    ``own_reference``'s exact result, then each step's own, propagated as
-    ``WeightedRowwise.tolerance`` composes one weight multiply, generalized
-    to any number of elementwise steps. ``line`` is the producer's own tile,
+    """Return a bound function (``Tolerance.bounded``) over ``n_own`` own inputs then each finish step's other input in turn.
+
+    ``own``'s tolerance around ``own_reference``'s exact result, then each step's own,
+    propagated as ``WeightedRowwise.tolerance`` composes one weight multiply,
+    generalized to any number of elementwise steps. ``line`` is the producer's own tile,
     which its finish's kernel matches.
     """
     tiny = float(np.finfo(np.float32).tiny)

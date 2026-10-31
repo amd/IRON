@@ -72,9 +72,10 @@ class Image:
         self._artifacts: Artifacts | None = None
 
     def _validate_fusions(self) -> None:
-        """Each ``Fusion``'s steps are real steps, no step in two fusions, and
-        each of its edges names a real hand-off: the producer's drained
-        output and the consumer's filled input, both the whole of one buffer.
+        """Each ``Fusion``'s steps are real steps, no step in two fusions, and each of its edges names a real hand-off.
+
+        The producer's drained output and the consumer's filled input, both the whole of
+        one buffer.
 
         Raises:
             ValueError: Any of the above does not hold.

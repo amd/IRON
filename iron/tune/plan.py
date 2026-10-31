@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What a tune decides before it searches: the planner's seed, the
-transforms whose legality is a fact of the graph and its weights rather
-than a timing, checked end to end before the search starts from them; and
-which searches the survey says pay.
+"""What a tune decides before it searches.
+
+The planner's seed, the transforms whose legality is a fact of the graph and its weights
+rather than a timing, checked end to end before the search starts from them; and which
+searches the survey says pay.
 """
 
 from __future__ import annotations
@@ -30,12 +31,13 @@ def coded_seed(
     profile: Profile,
     log: Callable[[str], None] = print,
 ) -> Profile:
-    """``profile`` with every input a tunable can code coded wherever its
-    array codes whole: a shape is coded only where every array its steps
-    share with other shapes (``array_key`` as ``profile`` runs them) holds
-    shapes that all record coded and whose coded weights all fit their
-    rows' capacity (``Recording.code_weights``). Coding part of an array
-    would split it into a coded and a plain one, more cores than it fits.
+    """``profile`` with every input a tunable can code coded wherever its array codes whole.
+
+    A shape is coded only where every array its steps share with other shapes
+    (``array_key`` as ``profile`` runs them) holds shapes that all record coded and
+    whose coded weights all fit their rows' capacity (``Recording.code_weights``).
+    Coding part of an array would split it into a coded and a plain one, more cores than
+    it fits.
     """
     calls = record(profile)
     resolved = [s.op.resolved(dev) for c in calls for s in c.recording.steps]
@@ -114,13 +116,13 @@ class Search:
 
 
 def searches(surveys: Sequence[Survey], full_elf: bool) -> list[Search]:
-    """Which searches pay for their device time, from each version's
-    survey: packing where a version's switches cost ``MIN_SWITCH_SHARE`` of
-    its steps; folds where the steps they remove are ``FOLD_SHARE`` of one,
-    or ``FOLD_US``;
-    fusions only on an xclbin per step, where a merge is the one way to run
-    two steps as one dispatch (a full ELF's packing removes the switches
-    they would, and a fusion splits the arrays a packing groups).
+    """Which searches pay for their device time, from each version's survey.
+
+    Packing where a version's switches cost ``MIN_SWITCH_SHARE`` of its steps; folds
+    where the steps they remove are ``FOLD_SHARE`` of one, or ``FOLD_US``; fusions only
+    on an xclbin per step, where a merge is the one way to run two steps as one dispatch
+    (a full ELF's packing removes the switches they would, and a fusion splits the
+    arrays a packing groups).
     """
     packing = [
         s.name

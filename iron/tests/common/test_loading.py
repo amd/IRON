@@ -217,8 +217,10 @@ def test_a_checkpoint_s_golden_is_refused_once_it_changes(tmp_path, change):
 
 
 def test_a_tune_records_the_checkpoint_s_own_weights(tmp_path, npu2):
-    """A tune's calls hold the weights a coded seed audits and a build
-    times: the checkpoint's, not zeros in their shape."""
+    """A tune's calls hold the weights a coded seed audits and a build times.
+
+    The checkpoint's, not zeros in their shape.
+    """
     rng = np.random.default_rng(0)
     tensors = {
         name: (rng.standard_normal(shape) * 0.05).astype(bfloat16)
@@ -239,8 +241,10 @@ def test_a_tune_records_the_checkpoint_s_own_weights(tmp_path, npu2):
 
 
 def test_a_shallow_config_loads_a_deeper_checkpoint_s_first_layers(tmp_path, npu2):
-    """``--config num_hidden_layers=1`` over a two-layer checkpoint: the model
-    reads layer 0 and leaves layer 1, which a whole-checkpoint load refuses."""
+    """``--config num_hidden_layers=1`` over a two-layer checkpoint.
+
+    The model reads layer 0 and leaves layer 1, which a whole-checkpoint load refuses.
+    """
     _directory(tmp_path)
     shallow = Small.from_checkpoint(
         tmp_path, random_weights=7, config={"num_hidden_layers": 1}

@@ -369,8 +369,9 @@ class CausalLM(Model):
 
     @classmethod
     def tune_calls(cls, parser, args) -> list:
-        """``tune.calls`` on ``args``, built on the checkpoint's weights (read
-        lazily): what a coded weight's capacity and a build's timing follow.
+        """``tune.calls`` on ``args``, built on the checkpoint's weights (read lazily).
+
+        What a coded weight's capacity and a build's timing follow.
         """
         from .tune import calls  # which imports this module
 

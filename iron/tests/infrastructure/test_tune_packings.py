@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pricing packings: a version's arrays grouped into shared device
-configurations (``iron.tune.packings``). No NPU above ``# On the device``.
+"""Pricing packings.
+
+A version's arrays grouped into shared device configurations (``iron.tune.packings``).
+No NPU above ``# On the device``.
 """
 
 import aie.utils as aie_utils
@@ -64,8 +66,10 @@ WIDE = 8192
 
 
 class Wide(iron.Graph):
-    """ReLU, Tanh and Sigmoid in turn at eight columns and two channels,
-    twice: 16 cores each, 48 together, so packed only narrowed."""
+    """ReLU, Tanh and Sigmoid in turn at eight columns and two channels, twice.
+
+    16 cores each, 48 together, so packed only narrowed.
+    """
 
     def body(self, x):
         for _ in range(2):
@@ -78,8 +82,10 @@ LONG = 2**24
 
 
 class Runs(iron.Graph):
-    """Four ReLUs then four Tanhs over a long vector: one switch among eight
-    long steps."""
+    """Four ReLUs then four Tanhs over a long vector.
+
+    One switch among eight long steps.
+    """
 
     def body(self, x):
         for op in (ReLU, Tanh):
@@ -99,11 +105,12 @@ ROUND = 2**22
 
 
 class Rounds(iron.Graph):
-    """ReLU, Tanh and Sigmoid in turn over a call's first ``n`` elements,
-    twice, at eight columns; given ``other``, a second version over the same
-    arrays (it copies ``other`` too). A short call is switch-bound and a long
-    one bound by the arrays' own time, as a decode step and a prompt chunk
-    are."""
+    """ReLU, Tanh and Sigmoid in turn over a call's first ``n`` elements, twice.
+
+    At eight columns; given ``other``, a second version over the same arrays (it copies
+    ``other`` too). A short call is switch-bound and a long one bound by the arrays' own
+    time, as a decode step and a prompt chunk are.
+    """
 
     def body(self, x, other=None, *, n: Scratchpad[np.int32]):
         x = x[:n]
@@ -116,8 +123,10 @@ class Rounds(iron.Graph):
 
 
 class Projections(iron.Graph):
-    """One shape's GEMV twice, at two output tiles: two arrays, as q and o
-    were with only q given half a head's tiles."""
+    """One shape's GEMV twice, at two output tiles.
+
+    Two arrays, as q and o were with only q given half a head's tiles.
+    """
 
     def body(self, w, x):
         y = GEMV.step(w, x, tile_size_output=32)
@@ -163,9 +172,7 @@ def test_a_packer_finds_each_array_and_its_narrower_widths(npu2, tmp_path):
 
 
 def test_one_shapes_two_arrays_are_one_unit_a_change_aligns(npu2, tmp_path):
-    """A profile names shapes, so the two GEMVs of one shape are one unit,
-    set as one; aligning it to one of its arrays' settings puts both on it.
-    """
+    """A profile names shapes, so the two GEMVs of one shape are one unit, set as one; aligning it to one of its arrays' settings puts both on it."""
     packer = _packer(Projections().record(w=(2048, 2048), x=(2048,)), npu2, tmp_path)
     (unit,) = set(packer.order)
     assert len(packer.arrays(unit, {})) == 2
@@ -178,10 +185,11 @@ def test_one_shapes_two_arrays_are_one_unit_a_change_aligns(npu2, tmp_path):
 
 
 def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
-    """A host fits its own context, which sizes the decode step's KV cache
-    and so MHA and the cache copies: a packing found at one context names
-    none of those dimensions, so the model fitted to another packs the same
-    designs together."""
+    """A host fits its own context, which sizes the decode step's KV cache and so MHA and the cache copies.
+
+    A packing found at one context names none of those dimensions, so the model fitted
+    to another packs the same designs together.
+    """
     model, sibling = small(), small(max_seq_len=512)
     decode, _ = calls(model, 0, 0, 256, 1, Sampler(0.7, 50), sibling)
     assert any("kv_len" in v for v in decode.varying.values())
@@ -208,8 +216,10 @@ def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
 
 
 class Single(iron.Graph):
-    """One step: ``fold_candidates`` needs a pair, so this recording,
-    unlike ``Alternating``'s own chain of unary ones, never admits one.
+    """One step.
+
+    ``fold_candidates`` needs a pair, so this recording, unlike ``Alternating``'s own
+    chain of unary ones, never admits one.
     """
 
     def body(self, x):
@@ -231,9 +241,10 @@ def test_decide_fold_keeps_the_fusions_where_the_call_gains_beyond_noise():
 
 
 def test_decide_fold_narrows_the_version_out_where_it_does_not_gain_beyond_noise():
-    """A regression, or a gain too small next to ``CONFIDENCE`` standard
-    errors of noise, both refuse to keep it: the version's own entry (the
-    only one naming it) is narrowed away entirely, not just logged against.
+    """A regression, or a gain too small next to ``CONFIDENCE`` standard errors of noise, both refuse to keep it.
+
+    The version's own entry (the only one naming it) is narrowed away entirely, not just
+    logged against.
     """
     decode = Timed(Alternating().record(x=(SIZE,)))
     v = _version("decode")
@@ -260,9 +271,9 @@ def test_decide_fold_treats_an_unmeasurable_noise_as_no_gain():
 
 
 def test_fold_profile_leaves_a_profile_with_nothing_to_fold_unchanged():
-    """``price_folds_before_packing``'s own early branch (no fold the
-    scoping admits) follows from this alone, device-free: a recording with
-    no pair to fold (``Single``) adds nothing ``fold_profile`` did not
+    """``price_folds_before_packing``'s own early branch (no fold the scoping admits) follows from this alone, device-free.
+
+    A recording with no pair to fold (``Single``) adds nothing ``fold_profile`` did not
     already carry.
     """
     base = iron.Profile()
@@ -343,14 +354,13 @@ def test_with_fusions_replaces_only_the_fusions():
 
 
 def test_fold_profile_scopes_each_entry_to_the_version_it_was_found_in():
-    """``small()``'s decode step and its prompt chunk run SwiGLU at
-    different widths (a prompt chunk's rows fold into the one shape), so
-    ``fold_profile`` scopes each its own ``SiLU -> ElementwiseMul`` entry to
-    its own version alone, not both: the per-version decision ``price_
-    folds_before_packing`` makes needs exactly this to tell one version's
-    folds from the other's. Only decode's own projections are ``GEMV``
-    (the prompt chunk's are ``ProjectionGEMM``, which declares no
-    ``fold()``), so its residual-add entries name decode's version only.
+    """``small()``'s decode step and its prompt chunk run SwiGLU at different widths (a prompt chunk's rows fold into the one shape).
+
+    So ``fold_profile`` scopes each its own ``SiLU -> ElementwiseMul`` entry to its own
+    version alone, not both: the per-version decision ``price_ folds_before_packing``
+    makes needs exactly this to tell one version's folds from the other's. Only decode's
+    own projections are ``GEMV`` (the prompt chunk's are ``ProjectionGEMM``, which
+    declares no ``fold()``), so its residual-add entries name decode's version only.
     """
     model = small()
     decode_shapes, prompt_shapes = model.shapes()
@@ -382,9 +392,10 @@ def test_calls_time_only_the_versions_asked_for():
 
 
 def test_a_tune_on_an_xclbin_per_step_times_no_switch(npu1, tmp_path):
-    """npu1 packs nothing, so its tune neither times the switches a cost
-    model is calibrated on (a dispatch) nor writes one; its folds are
-    still priced, and its profile written."""
+    """npu1 packs nothing, so its tune neither times the switches a cost model is calibrated on (a dispatch) nor writes one; its folds are still priced.
+
+    And its profile written.
+    """
     args = tune_cli.parser("npu1").parse_args([])
     path = tmp_path / "npu1.json"
     found = tune_cli._save_packings(args, [], npu1, iron.Profile(), path, False, None)
@@ -399,9 +410,11 @@ def test_a_tune_on_an_xclbin_per_step_times_no_switch(npu1, tmp_path):
 
 @pytest.mark.supported_devices("npu2")
 def test_price_packings_packs_alternating_arrays_bit_identically(tmp_path):
-    """Eight steps of two 8-column arrays, each step a switch: the packer
-    narrows them to share one configuration and keeps it end to end; the
-    packed graph computes what the unpacked one does."""
+    """Eight steps of two 8-column arrays, each step a switch.
+
+    The packer narrows them to share one configuration and keeps it end to end; the
+    packed graph computes what the unpacked one does.
+    """
     dev = aie_utils.ensure_current_device()
     report = platform()
     cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
@@ -440,8 +453,11 @@ def test_price_packings_packs_alternating_arrays_bit_identically(tmp_path):
 
 @pytest.mark.supported_devices("npu2")
 def test_price_packings_skips_a_version_its_switches_cannot_pay(tmp_path):
-    """One switch beside eight long steps: no grouping could gain the
-    share packing is worth searching for, so the version is not searched."""
+    """One switch beside eight long steps.
+
+    No grouping could gain the share packing is worth searching for, so the version is
+    not searched.
+    """
     dev = aie_utils.ensure_current_device()
     report = platform()
     cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
@@ -465,9 +481,11 @@ def test_price_packings_skips_a_version_its_switches_cannot_pay(tmp_path):
 
 @pytest.mark.supported_devices("npu2")
 def test_end_to_end_runs_a_call_at_each_of_its_points():
-    """A point bounding past the graph's input is a call it refuses: the
-    end-to-end check runs the call at each of its points, not only at its
-    own values."""
+    """A point bounding past the graph's input is a call it refuses.
+
+    The end-to-end check runs the call at each of its points, not only at its own
+    values.
+    """
     dev = aie_utils.ensure_current_device()
     recording = BoundedReLUs().record(x=(SIZE,))
     profile = iron.Profile()
@@ -486,8 +504,11 @@ def test_end_to_end_runs_a_call_at_each_of_its_points():
 
 @pytest.mark.supported_devices("npu1")
 def test_end_to_end_builds_an_xclbin_per_step_on_npu1(npu1):
-    """npu1 has no full ELF: the end-to-end check a fold is judged by builds
-    each version as an xclbin per step (it asked for a full ELF, and raised)."""
+    """npu1 has no full ELF.
+
+    The end-to-end check a fold is judged by builds each version as an xclbin per step
+    (it asked for a full ELF, and raised).
+    """
     recording = BoundedReLUs().record(x=(SIZE,))
     profile = iron.Profile()
     own = Timed(recording, values=dict(n=SIZE))
@@ -500,11 +521,12 @@ def test_end_to_end_builds_an_xclbin_per_step_on_npu1(npu1):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("rows, applies", [(2048, True), (ROUND, False)])
 def test_widen_packings_applies_an_entry_only_where_it_pays(rows, applies):
-    """An entry found in one version narrows its arrays to one column. In
-    the other version, at short calls it removes switches and applies
-    there too; at long calls the narrowed arrays cost more than the switches
-    it removes, so it keeps to the version it names rather than being
-    dropped."""
+    """An entry found in one version narrows its arrays to one column.
+
+    In the other version, at short calls it removes switches and applies there too; at
+    long calls the narrowed arrays cost more than the switches it removes, so it keeps
+    to the version it names rather than being dropped.
+    """
     dev = aie_utils.ensure_current_device()
     first = Rounds().record(x=(ROUND,))
     second = Rounds().record(x=(ROUND,), other=(64,))
@@ -532,9 +554,11 @@ def test_widen_packings_applies_an_entry_only_where_it_pays(rows, applies):
 
 @pytest.mark.supported_devices("npu2")
 def test_price_packings_narrows_what_does_not_co_reside(tmp_path):
-    """Three arrays of 16 cores each take 48 of 32 at their own widths: the
-    packer narrows the cheapest until they share one configuration, and the
-    packed graph computes what the unpacked one does."""
+    """Three arrays of 16 cores each take 48 of 32 at their own widths.
+
+    The packer narrows the cheapest until they share one configuration, and the packed
+    graph computes what the unpacked one does.
+    """
     dev = aie_utils.ensure_current_device()
     report = platform()
     cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")

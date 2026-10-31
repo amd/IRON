@@ -36,6 +36,7 @@ __all__ = [
     "AXPY",
     "Clamp",
     "Copy",
+    "Decode",
     "DepthwiseConv1d",
     "ElementwiseAdd",
     "ElementwiseMul",

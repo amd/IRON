@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A profile's fusion entries, and a recording's admissible on-chip
-fusions, device-free: round trips, ``candidates``, ``fusions`` and the
-compile wiring.
+"""A profile's fusion entries, and a recording's admissible on-chip fusions, device-free.
+
+Round trips, ``candidates``, ``fusions`` and the compile wiring.
 """
 
 import json
@@ -46,7 +46,7 @@ def _fuse(producer: int, output: str, input: str) -> Fusion:
 
 
 def _fused_graph(profile=None):
-    """A graph recording ``ElementwiseMul(SiLU(x), W)``, fusable at size=2048."""
+    """Return a graph recording ``ElementwiseMul(SiLU(x), W)``, fusable at size=2048."""
 
     class Fused(iron.Graph):
         def body(self, x):
@@ -87,9 +87,9 @@ def test_a_profile_round_trips_a_fusion(tmp_path):
 
 
 def test_a_fusion_steps_own_tunables_round_trip(tmp_path):
-    """A step may give the tunables it takes running inside this fusion
-    (narrower than the same shape unfused), kept apart from its own
-    ``add`` entry.
+    """A step may give the tunables it takes running inside this fusion (narrower than the same shape unfused).
+
+    Kept apart from its own ``add`` entry.
     """
     p = Profile()
     p.add_fusion(
@@ -139,10 +139,10 @@ def test_add_fusion_checks_a_steps_tunables():
 
 
 def test_a_fusion_over_tuple_valued_params_matches_after_save_and_load(tmp_path):
-    """A derived dim a step's build reads but a call never gives (GEMV's,
-    SiLU's, ... own ``finish``) is a tuple live, a list once JSON gives it
-    back; ``matches`` must still count them equal, or a fusion over any
-    such step goes inert the moment its profile is loaded from a file.
+    """A derived dim a step's build reads but a call never gives (GEMV's, SiLU's, ... own ``finish``) is a tuple live.
+
+    A list once JSON gives it back; ``matches`` must still count them equal, or a fusion
+    over any such step goes inert the moment its profile is loaded from a file.
     """
     gate = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved()
     up = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved()
@@ -188,9 +188,7 @@ def test_a_loaded_profiles_fusion_is_live_in_a_compiled_graph(tmp_path):
 
 
 def test_a_profile_with_a_copy_fusion_round_trips():
-    """Copy's ``src``/``dst`` (``TensorAccessPattern``) are not JSON
-    representable; a fusion entry still names it by its other dims.
-    """
+    """Copy's ``src``/``dst`` (``TensorAccessPattern``) are not JSON representable; a fusion entry still names it by its other dims."""
     p = Profile()
     p.add_fusion(
         FusionKind.STREAM,
@@ -339,12 +337,12 @@ def test_add_fusion_checks_its_versions():
 
 
 def test_a_fusion_entrys_versions_round_trip_through_json(tmp_path):
-    """A version is a dict key in a running profile (``frozenset[Version]``);
-    JSON gives every tuple in it back as a list, the same bug a dim's own
-    tuple-valued field hit before ``matches`` normalized it (``test_a_fusion_
-    over_tuple_valued_params_matches_after_save_and_load``) -- a version
-    must round-trip to the exact tuple it was, not merely an equal-looking
-    one, or ``version in entry_versions`` never finds it again.
+    """A version is a dict key in a running profile (``frozenset[Version]``); JSON gives every tuple in it back as a list.
+
+    The same bug a dim's own tuple-valued field hit before ``matches`` normalized it
+    (``test_a_fusion_ over_tuple_valued_params_matches_after_save_and_load``) -- a
+    version must round-trip to the exact tuple it was, not merely an equal-looking one,
+    or ``version in entry_versions`` never finds it again.
     """
     version = (("x", (2048,), "bfloat16"),)
     p = Profile()
@@ -385,11 +383,13 @@ def llama_recordings():
 
 
 def test_candidates_finds_silu_mul_and_decodes_gemv_add_residuals(llama_recordings):
-    """Decode finds SiLU -> ElementwiseMul (one per layer) and GEMV.C ->
-    ElementwiseAdd.b (the attention and MLP residual adds, two per layer); the
-    prompt chunk, whose projections are GEMM, finds none of the latter (and,
-    not Elementwise-restricted any more, also its final Copy.y -> RMSNorm.x).
-    Two-step sub-fusions of these pairs are what this counts.
+    """Decode finds SiLU -> ElementwiseMul and GEMV.C -> ElementwiseAdd.b; the prompt chunk not the latter.
+
+    SiLU -> ElementwiseMul one per layer, GEMV.C -> ElementwiseAdd.b the attention and
+    MLP residual adds, two per layer. The prompt chunk, whose projections are GEMM,
+    finds none of the latter (and, not
+    Elementwise-restricted any more, also its final Copy.y -> RMSNorm.x). Two-step
+    sub-fusions of these pairs are what this counts.
     """
     decode, prompt = llama_recordings
     for recording, gemv_add_edges in ((decode, 4), (prompt, 0)):
@@ -425,9 +425,7 @@ def test_candidates_finds_silu_mul_and_decodes_gemv_add_residuals(llama_recordin
 
 
 def test_mismatched_tile_sizes_stage_the_edge():
-    """A stream edge refuses SiLU's 1024-element tiles into ElementwiseMul's
-    512; a staged one forwards them through a memtile.
-    """
+    """A stream edge refuses SiLU's 1024-element tiles into ElementwiseMul's 512; a staged one forwards them through a memtile."""
 
     class Mismatched(iron.Graph):
         def body(self, x):
@@ -521,8 +519,9 @@ def test_fusions_falls_back_to_the_second_edge_when_only_it_is_named():
 
 
 def _silu_edges(recording):
-    """``recording``'s SiLU -> ElementwiseMul candidates: decode's also has
-    GEMV -> ElementwiseAdd ones, which ``size`` means nothing to.
+    """Return ``recording``'s SiLU -> ElementwiseMul candidates.
+
+    Decode's also has GEMV -> ElementwiseAdd ones, which ``size`` means nothing to.
     """
     return tuple(
         f
@@ -577,10 +576,11 @@ def test_compile_passes_full_elf_fusions_to_the_image():
 
 
 def test_compile_applies_a_fusions_own_tunables_to_its_steps():
-    """A step inside a taken fusion is rebuilt at the tunables its entry
-    gives it (``iron.common.graph.fusion_tunables``), narrower than how the
-    graph itself recorded it; a stream edge's producer and consumer must
-    still meet at the same lane count, so both give the same narrower width.
+    """A step inside a taken fusion is rebuilt at the tunables its entry gives it (``iron.common.graph.fusion_tunables``).
+
+    Narrower than how the graph itself recorded it; a stream edge's producer and
+    consumer must still meet at the same lane count, so both give the same narrower
+    width.
     """
     size = 8192
     w = np.zeros(size, bfloat16)
@@ -612,9 +612,10 @@ class BoundedPair(iron.Graph):
 
 
 def test_a_narrowed_step_keeps_its_per_call_values(npu2):
-    """A step narrowed inside a fusion is a design of its own, reading its own
-    value symbols: each value bound to the recorded step is written to the
-    narrowed one's, or its rows stay whatever the scratchpad last held.
+    """A step narrowed inside a fusion is a design of its own, reading its own value symbols.
+
+    Each value bound to the recorded step is written to the narrowed one's, or its rows
+    stay whatever the scratchpad last held.
     """
     recording = BoundedPair().record(x=(4096,))
     p = Profile()

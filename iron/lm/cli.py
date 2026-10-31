@@ -66,10 +66,12 @@ def sampling_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def config_argument(parser: argparse.ArgumentParser) -> None:
-    """``--config NAME=VALUE``, repeated: fields of the model's config given
-    other values (JSON, else a bare string), as ``Model.from_checkpoint``'s
-    ``config`` takes them; ``num_hidden_layers=2`` is a model a tuner's own
-    changes run against in minutes, every design still the full model's.
+    """``--config NAME=VALUE``, repeated.
+
+    Fields of the model's config given other values (JSON, else a bare string), as
+    ``Model.from_checkpoint``'s ``config`` takes them; ``num_hidden_layers=2`` is a
+    model a tuner's own changes run against in minutes, every design still the full
+    model's.
     """
 
     def field(text: str) -> tuple[str, Any]:
@@ -218,9 +220,10 @@ def main(model_class: type[Model]):
 
 
 def application_model(name: str) -> type[Model]:
-    """``name``'s model class: of those its package exports, the one that
-    names its calls (``tune_calls``), ``name`` dotted under
-    ``iron.applications``.
+    """``name``'s model class.
+
+    Of those its package exports, the one that names its calls (``tune_calls``),
+    ``name`` dotted under ``iron.applications``.
 
     Raises:
         ValueError: ``name`` names no such application, or its package

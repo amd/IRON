@@ -119,9 +119,10 @@ class Packing:
 
 
 def independent(seq, fusion: Fusion) -> None:
-    """Raise ``CoResidenceError`` where ``fusion`` (a pack) joins two steps
-    of ``seq`` that are not independent: one drains a buffer root another
-    fills or drains too, a hazard were they issued concurrently.
+    """Raise ``CoResidenceError`` where ``fusion`` (a pack) joins two steps of ``seq`` that are not independent.
+
+    One drains a buffer root another fills or drains too, a hazard were they issued
+    concurrently.
     """
     reads: dict[int, set[str]] = {}
     writes: dict[int, set[str]] = {}
@@ -192,11 +193,11 @@ def fused_configuration(
     words: Mapping[str, str] | None = None,
     dispatch: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[DeviceConfiguration, list[BuiltArray]]:
-    """``fusion``'s members, ``designs`` in its step order, as one device
-    configuration ``name`` and their arrays: each array fed where an edge
-    feeds it (staged through memtiles in a staged fusion), and one sequence
-    running every member, in one task group, or back to back in a merge.
-    On an xclbin, ``dispatch`` is each member's dispatch-time scalars.
+    """``fusion``'s members, ``designs`` in its step order, as one device configuration ``name`` and their arrays.
+
+    Each array fed where an edge feeds it (staged through memtiles in a staged fusion),
+    and one sequence running every member, in one task group, or back to back in a
+    merge. On an xclbin, ``dispatch`` is each member's dispatch-time scalars.
     """
     incoming: dict[int, list[Edge]] = {}
     for e in fusion.edges:
@@ -227,9 +228,10 @@ def fits(
     words: Mapping[str, str] | None = None,
     fusion: Fusion | None = None,
 ) -> str | None:
-    """``None`` if ``designs``, by device name, place and allocate, else the
-    diagnostic; ``words`` maps a design symbol to the scratchpad word it shares.
-    Given ``fusion``, ``designs`` are its members in step order, built fused
+    """``None`` if ``designs``, by device name, place and allocate.
+
+    Else the diagnostic; ``words`` maps a design symbol to the scratchpad word it
+    shares. Given ``fusion``, ``designs`` are its members in step order, built fused
     (``fused_configuration``).
     """
     exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
@@ -343,10 +345,11 @@ class Composition:
 
     @staticmethod
     def fusion_name(fusion: Fusion, designs: Sequence[str]) -> str:
-        """A fusion's device symbol: content-named, so one hits the cache
-        across processes, and distinct from any member's own. Wiring is
-        spelled by each member's place in the fusion, not in the sequence,
-        so one recurring down a model shares a symbol.
+        """Return a fusion's device symbol.
+
+        Content-named, so one hits the cache across processes, and distinct from any
+        member's own. Wiring is spelled by each member's place in the fusion, not in the
+        sequence, so one recurring down a model shares a symbol.
         """
         local = {step: i for i, step in enumerate(fusion.steps)}
         wiring = ",".join(

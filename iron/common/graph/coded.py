@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A weight a graph streams as coded rows (``aie.utils.coded``): the buffer
-derived from it, which every coded operand reading the weight shares, and
-the cache that keeps it from being encoded on every load.
+"""A weight a graph streams as coded rows (``aie.utils.coded``).
+
+The buffer derived from it, which every coded operand reading the weight shares, and the
+cache that keeps it from being encoded on every load.
 """
 
 from __future__ import annotations
@@ -26,8 +27,10 @@ CACHE = Path(NPU_CACHE_HOME) / "iron" / "coded"
 
 @dataclasses.dataclass(frozen=True)
 class Source:
-    """Where a weight's bytes are in a file: the file as it was when read
-    (its path, size and modification time) and the tensor's byte offset.
+    """Where a weight's bytes are in a file.
+
+    The file as it was when read (its path, size and modification time) and the tensor's
+    byte offset.
     """
 
     path: str
@@ -37,11 +40,12 @@ class Source:
 
 
 class CodedWeight:
-    """``array``'s coded rows at ``capacity``: the weight a coded operand
-    reads in place of ``array``, encoded once for every version of a graph.
-    A weight read from a file (``source``) is cached under ``cache``, keyed
-    by the file, the tensor, the format and the capacity; one that is not
-    is encoded every time.
+    """``array``'s coded rows at ``capacity``.
+
+    The weight a coded operand reads in place of ``array``, encoded once for every
+    version of a graph. A weight read from a file (``source``) is cached under
+    ``cache``, keyed by the file, the tensor, the format and the capacity; one that is
+    not is encoded every time.
 
     Attributes:
         array: The bf16 weight.
@@ -90,8 +94,10 @@ class CodedWeight:
         return self.cache / f"{hashlib.sha256(key.encode()).hexdigest()}.npy"
 
     def encode(self) -> np.ndarray:
-        """The coded rows: on the first call read from the cache, else
-        encoded and, with a source, written to it. A refusal is cached too.
+        """Return the coded rows.
+
+        On the first call read from the cache, else encoded and, with a source, written
+        to it. A refusal is cached too.
 
         Raises:
             ValueError: A row holds more exceptions than ``capacity``.
@@ -109,8 +115,9 @@ class CodedWeight:
         try:
             rows = coded.encode_rows(np.asarray(self.array, bfloat16), self.capacity)
         except ValueError as refused:
+            why = str(refused).encode()
             if refusal is not None:
-                _publish(refusal, lambda f: f.write(str(refused).encode()))
+                _publish(refusal, lambda f: f.write(why))
             raise
         if cached is not None:
             _publish(cached, lambda f: np.save(f, rows))
@@ -119,8 +126,9 @@ class CodedWeight:
 
 
 def _publish(path: Path, write: Callable[[BinaryIO], object]) -> None:
-    """Write ``path`` whole or not at all: a reader racing the writer finds
-    either no file or every byte of it.
+    """Write ``path`` whole or not at all.
+
+    A reader racing the writer finds either no file or every byte of it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(f"{path.name}.{os.getpid()}.partial")
@@ -130,9 +138,7 @@ def _publish(path: Path, write: Callable[[BinaryIO], object]) -> None:
 
 
 def encode_all(weights: Iterable[CodedWeight]) -> dict[CodedWeight, ValueError]:
-    """Encode ``weights``, a thread a weight; return each one that a row's
-    exceptions refuse, with why.
-    """
+    """Encode ``weights``, a thread a weight; return each one that a row's exceptions refuse, with why."""
     pending = [w for w in weights if w.rows is None]
 
     def attempt(w: CodedWeight) -> ValueError | None:

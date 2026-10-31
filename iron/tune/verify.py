@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What a tune saves, checked end to end against the profile it started
-from: each version it changes is built under both and compared
-(``compare_graphs``); a version that does not gain takes the starting
-profile's entries back, and the result is checked again, so every gain a
-tune reports is one of a profile it built.
+"""What a tune saves, checked end to end against the profile it started from.
+
+Each version it changes is built under both and compared (``compare_graphs``); a version
+that does not gain takes the starting profile's entries back, and the result is checked
+again, so every gain a tune reports is one of a profile it built.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class Check:
 
 
 def built(call: Timed, profile: Profile, dev) -> CompiledGraph:
-    """``call``'s version under ``profile``, packaged as ``dev`` does."""
+    """Return ``call``'s version under ``profile``, packaged as ``dev`` does."""
     recording, fused, packing = apply_profile(call.recording, profile, dev)
     chosen = plan(
         dev, recording, None, False, step_words=_step_words(recording), fusions=fused
@@ -60,17 +60,20 @@ def built(call: Timed, profile: Profile, dev) -> CompiledGraph:
 
 
 def fingerprint(call: Timed, profile: Profile, dev) -> Hashable:
-    """What ``call``'s version builds under ``profile``: its steps' designs,
-    fusions and packing; two profiles giving one fingerprint build one image.
+    """Return what ``call``'s version builds under ``profile``.
+
+    Its steps' designs, fusions and packing; two profiles giving one fingerprint build
+    one image.
     """
     recording, fused, packing = apply_profile(call.recording, profile, dev)
     return tuple(_identity(s.op, dev) for s in recording.steps), fused, packing
 
 
 def touches(kind: str, entry: Any, recording: Recording) -> bool:
-    """Whether a profile entry applies to a step of ``recording``: ``kind``
-    ``"tunable"`` (``(cls, dims, tunables)``), ``"fusion"`` (``Profile.fusions``'s)
-    or ``"packing"`` (a ``PackingEntry``).
+    """Whether a profile entry applies to a step of ``recording``.
+
+    ``kind`` ``"tunable"`` (``(cls, dims, tunables)``), ``"fusion"``
+    (``Profile.fusions``'s) or ``"packing"`` (a ``PackingEntry``).
     """
     version = recording.version
     if kind == "tunable":
@@ -104,9 +107,10 @@ def narrowed(
     losers: set[Version],
     recordings: Sequence[Recording],
 ) -> Profile:
-    """``candidate`` with ``base``'s entries wherever they touch a version
-    in ``losers``: a scoped fusion or packing loses those versions, an
-    unscoped one or a tunable entry is ``base``'s as a whole.
+    """``candidate`` with ``base``'s entries wherever they touch a version in ``losers``.
+
+    A scoped fusion or packing loses those versions, an unscoped one or a tunable entry
+    is ``base``'s as a whole.
     """
     lost = [r for r in recordings if r.version in losers]
     out = Profile()
@@ -159,11 +163,17 @@ def verify(
     lock: bool = False,
     memo: dict[tuple[Hashable, Hashable], Check] | None = None,
 ) -> tuple[Profile, dict[Version, Check]]:
-    """``candidate`` where each version it builds differently from ``base``
-    gains on it end to end beyond the noise, ``base``'s entries elsewhere
-    (``narrowed``), and each changed version's last check.
+    """``candidate`` where each version it builds differently from ``base`` gains on it end to end beyond the noise.
+
+    ``base``'s entries elsewhere (``narrowed``), and each changed version's last check.
 
     Args:
+        dev: The device the versions run on.
+        base: The profile each version is checked against.
+        candidate: The profile checked.
+        timing: How each version is timed end to end.
+        log: Where each version's verdict is logged.
+        lock: Take the device lock per check, not under ``coord/npu``.
         record: The calls, recorded under a profile.
         memo: Checks by the two builds' fingerprints, read and added to: a
             tune's checks against its seed and then its start share it, so
@@ -257,9 +267,10 @@ def write_report(
     checks: dict[Version, Check],
     **found: Any,
 ) -> None:
-    """The tune's report beside ``path`` (``.report.json`` and ``.report.txt``):
-    what ``saved`` adds to and drops from ``start``, each changed version's
-    check against ``start``, and ``found``, anything else a caller measured.
+    """Write the tune's report beside ``path`` (``.report.json`` and ``.report.txt``).
+
+    What ``saved`` adds to and drops from ``start``, each changed version's check
+    against ``start``, and ``found``, anything else a caller measured.
     """
     before, after = entries(start), entries(saved)
     report = {

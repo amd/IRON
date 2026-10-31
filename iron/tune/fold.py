@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Which folds the tuner proposes, device-free: every fold
-(``iron.common.graph.fold``) a recording admits, scoped to the ones that
-will not split a device array a call site sharing it does not also take.
+"""Which folds the tuner proposes, device-free.
+
+Every fold (``iron.common.graph.fold``) a recording admits, scoped to the ones that will
+not split a device array a call site sharing it does not also take.
 
 A hand-written profile entry still takes any fold ``fold_candidates`` finds
 (``chosen_folds``, at build time): the profile stays the authority, so this
@@ -29,10 +30,11 @@ from .autotune import Shape, Timed, _json_safe
 
 
 def _folded_producer(recording: Recording, fusion: Fusion) -> Operator:
-    """The operator ``fusion``'s producer folds into, resolved: each hop's
-    ``producer.fold(consumer, at)`` in turn (``apply_folds``'s own loop,
-    without touching any step's slots: only the resulting identity, its
-    ``array_key()``, is wanted here).
+    """Return the operator ``fusion``'s producer folds into, resolved.
+
+    Each hop's ``producer.fold(consumer, at)`` in turn (``apply_folds``'s own loop,
+    without touching any step's slots: only the resulting identity, its ``array_key()``,
+    is wanted here).
     """
     current = recording.steps[fusion.steps[0]].op
     for edge in fusion.edges:
@@ -43,13 +45,14 @@ def _folded_producer(recording: Recording, fusion: Fusion) -> Operator:
 
 
 def array_scoped_fold_candidates(recording: Recording) -> tuple[Fusion, ...]:
-    """``fold_candidates(recording)``, keeping a candidate only where every
-    recording step whose (pre-fold, resolved) operator shares its
-    producer's ``array_key()`` folds too, to the same resulting
-    ``array_key()``: a reference-only step, or one with no kernel of its
-    own (``exported_design()``), never shares an array, so it never blocks
-    one. A step sharing the array that has no fold at all, or one shaped
-    differently, drops every candidate naming that array.
+    """``fold_candidates(recording)``.
+
+    Keeping a candidate only where every recording step whose (pre-fold, resolved)
+    operator shares its producer's ``array_key()`` folds too, to the same resulting
+    ``array_key()``: a reference-only step, or one with no kernel of its own
+    (``exported_design()``), never shares an array, so it never blocks one. A step
+    sharing the array that has no fold at all, or one shaped differently, drops every
+    candidate naming that array.
     """
     found = fold_candidates(recording)
     array_of: dict[int, Hashable] = {}
@@ -86,11 +89,11 @@ def array_scoped_fold_candidates(recording: Recording) -> tuple[Fusion, ...]:
 def _entry(
     recording: Recording, fusion: Fusion
 ) -> tuple[Hashable, list[tuple[type, dict]], tuple[tuple[int, str, int, str], ...]]:
-    """``fusion``'s steps (resolved) and local edges, and the key its shape
-    (class and dims, not every instance of its class) is deduplicated and
-    matched by: two layers of one shape share an entry, a different shape
-    of the same classes (``q_proj``'s ``K`` against ``down_proj``'s) does
-    not.
+    """``fusion``'s steps (resolved) and local edges.
+
+    And the key its shape (class and dims, not every instance of its class) is
+    deduplicated and matched by: two layers of one shape share an entry, a different
+    shape of the same classes (``q_proj``'s ``K`` against ``down_proj``'s) does not.
     """
     steps = [recording.steps[i].op.resolved() for i in fusion.steps]
     local = {step: i for i, step in enumerate(fusion.steps)}
@@ -103,13 +106,13 @@ def _entry(
 
 
 def propose_folds(recording: Recording) -> tuple[Fusion, ...]:
-    """``array_scoped_fold_candidates(recording)``, overlap among them
-    resolved the way a profile's own folds are (``chosen_folds``, first in
-    step order wins), matched by each shape's own dims (``_entry``): two
-    different shapes sharing a class pair (``q_proj``'s ``GEMV M=2048
-    K=2048`` and ``down_proj``'s ``M=2048 K=8192``) must not blur into one
-    permissive entry that would let ``chosen_folds`` re-admit the one
-    scoping dropped.
+    """``array_scoped_fold_candidates(recording)``.
+
+    Overlap among them resolved the way a profile's own folds are (``chosen_folds``,
+    first in step order wins), matched by each shape's own dims (``_entry``): two
+    different shapes sharing a class pair (``q_proj``'s ``GEMV M=2048 K=2048`` and
+    ``down_proj``'s ``M=2048 K=8192``) must not blur into one permissive entry that
+    would let ``chosen_folds`` re-admit the one scoping dropped.
     """
     permissive = Profile()
     seen = set()
@@ -123,20 +126,19 @@ def propose_folds(recording: Recording) -> tuple[Fusion, ...]:
 
 
 def fold_profile(base: Profile, calls: Sequence[Timed]) -> Profile:
-    """``base``'s entries, fusions and packings, with a fold entry added for
-    each distinct shape (class, dims and wiring) ``propose_folds`` finds in
-    ``calls``' recordings that ``base`` does not already carry, scoped to
-    the graph versions (``Recording.version``) it was found in (one shape
-    found in more than one call's recording, as a prompt chunk's own
-    SwiGLU gate and a decode step's alike can be, is scoped to all of
-    them): what ``price_folds_before_packing`` prices packed, against
-    ``base`` packed without them, and decides to keep per version
-    (``widen_packings`` decides a packing entry's own widening the same
-    way). Each step names its own dims (``Shape.named``, as a packing
-    entry's members do), not every instance of its class, so a model that
-    later grows a same-class pair this never checked does not inherit an
-    unscoped fold by matching too broadly; calling this again on its own
-    output adds nothing new.
+    """``base``'s entries, fusions and packings.
+
+    With a fold entry added for each distinct shape (class, dims and wiring)
+    ``propose_folds`` finds in ``calls``' recordings that ``base`` does not already
+    carry, scoped to the graph versions (``Recording.version``) it was found in (one
+    shape found in more than one call's recording, as a prompt chunk's own SwiGLU gate
+    and a decode step's alike can be, is scoped to all of them): what
+    ``price_folds_before_packing`` prices packed, against ``base`` packed without them,
+    and decides to keep per version (``widen_packings`` decides a packing entry's own
+    widening the same way). Each step names its own dims (``Shape.named``, as a packing
+    entry's members do), not every instance of its class, so a model that later grows a
+    same-class pair this never checked does not inherit an unscoped fold by matching too
+    broadly; calling this again on its own output adds nothing new.
     """
     out = Profile()
     for cls, dims, tunables in base:

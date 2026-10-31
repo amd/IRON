@@ -92,11 +92,11 @@ def plan(
     step_words: list[frozenset[str]] | None = None,
     fusions: Sequence[Fusion] = (),
 ) -> Plan:
-    """Derive the packaging for ``recording`` on ``dev``, refusing a shipped image,
-    ``full_elf=True`` where the device or ``check`` forbids it, or a step reading
-    over ``SCRATCHPAD_WORDS`` (``step_words``, each step's by its shared symbol).
-    A command never starts within the span of one of ``fusions``: its members
-    are one call.
+    """Derive the packaging for ``recording`` on ``dev``, refusing a shipped image.
+
+    ``full_elf=True`` where the device or ``check`` forbids it, or a step reading over
+    ``SCRATCHPAD_WORDS`` (``step_words``, each step's by its shared symbol). A command
+    never starts within the span of one of ``fusions``: its members are one call.
     """
     shipped = [op for op in recording.operators if op.external is not None]
     if shipped:

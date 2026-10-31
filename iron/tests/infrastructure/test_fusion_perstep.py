@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A stream fusion in ``PerStep`` packaging: its steps link as one
-``FusedDesign`` (``iron.common.image.link``), one xclbin dispatched once with
-every member's buffers and per-call values. No toolchain and no NPU below
-the "On the device" and "npu1: device-free" section markers.
+"""A stream fusion in ``PerStep`` packaging.
+
+Its steps link as one ``FusedDesign`` (``iron.common.image.link``), one xclbin
+dispatched once with every member's buffers and per-call values. No toolchain and no NPU
+below the "On the device" and "npu1: device-free" section markers.
 
 To run this module's real npu1 dispatch tests on a Phoenix host
 (xcoradaie203 or xcoradaie205), once mlir-aie and IRON are built there and
 XRT is sourced::
 
-    pytest iron/tests/infrastructure/test_fusion_perstep.py -v
+pytest iron/tests/infrastructure/test_fusion_perstep.py -v
 
 They carry no device fixture, so the current device is whatever the attached
 runtime reports (``aie_utils.get_current_device()``'s probe, as
@@ -18,7 +19,7 @@ runtime reports (``aie_utils.get_current_device()``'s probe, as
 gates them to run only where the attached NPU matches. The device-free npu1
 tests (bound in software, no chip needed) run anywhere::
 
-    pytest iron/tests/infrastructure/test_fusion_perstep.py -k npu1 -v
+pytest iron/tests/infrastructure/test_fusion_perstep.py -k npu1 -v
 
 The rest of this module (npu2-forced dispatch, device-free compiles, Llama
 candidates) runs on any host with aiecc and Peano installed; only the tests
@@ -155,9 +156,10 @@ def test_silu_mul_fused_matches_reference_and_unfused(size, cols):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_silu_mul_fused_per_call_bound_value():
-    """Both operators' ``valid`` is a dispatch-time scalar (no scratchpad on
-    an xclbin): the host writes each design's own symbol, the fused kernel
-    declaring both members' as its own ``dispatch_params``.
+    """Both operators' ``valid`` is a dispatch-time scalar (no scratchpad on an xclbin).
+
+    The host writes each design's own symbol, the fused kernel declaring both members'
+    as its own ``dispatch_params``.
     """
     size, cols, tile = 2048, 1, 1024
     silu, mul = _silu_mul(size, cols, tile, bound_values={"valid": None})
@@ -202,9 +204,10 @@ def test_silu_mul_fused_per_call_bound_value():
 
 @pytest.mark.supported_devices("npu2")
 def test_gemv_to_elementwiseadd_fused_matches_reference_and_unfused(npu2):
-    """Llama decode's GEMV(M=2048, K=2048) -> ElementwiseAdd residual add,
-    fused on one xclbin, holds to the operators' references fused and is
-    bit-equal to the same two steps run unfused.
+    """Llama decode's GEMV(M=2048, K=2048) -> ElementwiseAdd residual add, fused on one xclbin.
+
+    Holds to the operators' references fused and is bit-equal to the same two steps run
+    unfused.
     """
 
     def build(name, fusions):
@@ -237,9 +240,10 @@ def test_gemv_to_elementwiseadd_fused_matches_reference_and_unfused(npu2):
 
 @pytest.mark.supported_devices("npu2")
 def test_three_step_fusion_matches_reference_and_unfused(npu2):
-    """GEMV -> SiLU -> ElementwiseMul, all three fused into one xclbin,
-    holds to the operators' references fused and is bit-equal to the same
-    three steps run unfused.
+    """GEMV -> SiLU -> ElementwiseMul, all three fused into one xclbin.
+
+    Holds to the operators' references fused and is bit-equal to the same three steps
+    run unfused.
     """
 
     def build(name, fusions):
@@ -301,8 +305,9 @@ def _cache_writes_recording(name, k, v):
 
 
 def test_packed_members_of_one_design_take_their_own_dispatch_parameters(npu2):
-    """Two Copies of one design share their per-call symbol, as one graph
-    value drives both; a fused xclbin binds a dispatch parameter in one
+    """Two Copies of one design share their per-call symbol.
+
+    As one graph value drives both; a fused xclbin binds a dispatch parameter in one
     runtime, so each member takes its own, written from that symbol.
     """
     k, v = _cache_write().resolved(), _cache_write().resolved()
@@ -313,9 +318,9 @@ def test_packed_members_of_one_design_take_their_own_dispatch_parameters(npu2):
 
 
 def test_a_pack_of_projections_on_a_shared_xclbin_builds_per_step(npu2):
-    """Llama 1B's prompt q/k/v projections (flm.ProjectionGEMM) each run
-    their configuration's xclbin alone; packed, the fused design builds each
-    one's own array, as a full ELF does.
+    """Llama 1B's prompt q/k/v projections (flm.ProjectionGEMM) each run their configuration's xclbin alone; packed.
+
+    The fused design builds each one's own array, as a full ELF does.
     """
     model = llama_1b(num_hidden_layers=1)
     prompt = model.record(**model.shapes()[1])
@@ -333,8 +338,7 @@ def test_a_pack_of_projections_on_a_shared_xclbin_builds_per_step(npu2):
 
 @pytest.mark.supported_devices("npu2")
 def test_packed_cache_writes_match_reference_and_unfused(npu2):
-    """The pack of two cache writes, one per-step dispatch, lands each row in
-    its own buffer's slot at every offset, bit-equal to the writes apart."""
+    """The pack of two cache writes, one per-step dispatch, lands each row in its own buffer's slot at every offset, bit-equal to the writes apart."""
 
     def build(fusions):
         k, v = _cache_write(), _cache_write()
@@ -390,10 +394,11 @@ def test_packed_cache_writes_match_reference_and_unfused(npu2):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_small_graph_compiled_per_step_with_a_named_fusion_is_bit_equal():
-    """``Chain`` (add, silu, mul, add, silu) compiled ``full_elf=False``, a
-    profile naming its silu -> mul fusion (steps 1, 2), is bit-equal to the
-    same graph compiled without one: a profile reaches a per-step image too.
-    ``columns=1`` fits npu1's 4 columns as well as npu2's 8.
+    """``Chain`` (add, silu, mul, add, silu) compiled ``full_elf=False``.
+
+    A profile naming its silu -> mul fusion (steps 1, 2), is bit-equal to the same graph
+    compiled without one: a profile reaches a per-step image too. ``columns=1`` fits
+    npu1's 4 columns as well as npu2's 8.
     """
     size, tile, cols = 2048, 2048, 1
     rng = np.random.default_rng(0)
@@ -460,12 +465,12 @@ def test_gemv_fusions_build_an_xclbin_per_fused_step_on_npu1(npu1):
 
 
 def test_llama_1b_finds_its_fusion_candidates_on_npu1(npu1, record_property):
-    """Llama 3.2 1B, random weights drawn in the real checkpoint's shapes
-    (only its header is read), records on npu1 with its own npu1 profile
-    and finds the on-chip fusions ``candidates()`` admits: one SiLU -> Mul
-    per layer in both the decode step and the prompt chunk (16 each,
-    Llama 3.2 1B's layer count), the prompt chunk's also a Copy -> RMSNorm;
-    GEMV -> ElementwiseAdd residual adds are recorded but not asserted, as
+    """Llama 3.2 1B, random weights drawn in the real checkpoint's shapes (only its header is read).
+
+    Records on npu1 with its own npu1 profile and finds the on-chip fusions
+    ``candidates()`` admits: one SiLU -> Mul per layer in both the decode step and the
+    prompt chunk (16 each, Llama 3.2 1B's layer count), the prompt chunk's also a Copy
+    -> RMSNorm; GEMV -> ElementwiseAdd residual adds are recorded but not asserted, as
     GEMV is being edited concurrently.
     """
     require(

@@ -54,10 +54,11 @@ _FusionStep = (
 
 @dataclasses.dataclass(frozen=True)
 class PackingEntry:
-    """The shapes whose designs share one device configuration, each
-    ``(operator class, dims, tunables)``, ``tunables`` what every step of
-    that shape takes there so they co-reside (None where it keeps its own),
-    in the graph versions ``versions`` names, or in every version where None.
+    """The shapes whose designs share one device configuration, each ``(operator class, dims, tunables)``.
+
+    ``tunables`` what every step of that shape takes there so they co-reside (None where
+    it keeps its own), in the graph versions ``versions`` names, or in every version
+    where None.
     """
 
     members: tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...]
@@ -65,9 +66,9 @@ class PackingEntry:
 
 
 def _normalized(value: Any) -> Any:
-    """``value``, a list (what JSON gives back a tuple-valued field as, a
-    ``finish=()``, say) turned into a tuple, recursively: a dim or a
-    tunable loaded from a file must still match the same value a live
+    """``value``, a list (what JSON gives back a tuple-valued field as, a ``finish=()``, say) turned into a tuple, recursively.
+
+    A dim or a tunable loaded from a file must still match the same value a live
     operator holds.
     """
     if isinstance(value, (list, tuple)):
@@ -76,11 +77,11 @@ def _normalized(value: Any) -> Any:
 
 
 def _load_versions(versions: list | None) -> list[Version] | None:
-    """``versions``, a fusion or packing entry's own JSON field, as the live
-    ``Version`` tuples ``add_fusion``/``add_packing`` take: None kept as is,
-    each one's shape turned back from JSON's list into the tuple a live
-    ``Recording.version`` holds (the same round-trip ``_normalized`` spares
-    a dim or a tunable; a version is a dict key, so it must be exact).
+    """``versions``, a fusion or packing entry's own JSON field, as the live ``Version`` tuples ``add_fusion``/``add_packing`` take.
+
+    None kept as is, each one's shape turned back from JSON's list into the tuple a live
+    ``Recording.version`` holds (the same round-trip ``_normalized`` spares a dim or a
+    tunable; a version is a dict key, so it must be exact).
     """
     if versions is None:
         return None
@@ -91,10 +92,11 @@ def _load_versions(versions: list | None) -> list[Version] | None:
 
 
 def _dump_versions(versions: frozenset[Version] | None) -> dict[str, Any]:
-    """``{"versions": [...]}`` for a fusion or packing entry's own
-    ``versions``, JSON-safe (a tuple has none, so each version's shape is a
-    list); empty where ``versions`` is None, so a caller splats it into an
-    entry's own dict unconditionally.
+    """``{"versions": [...]}`` for a fusion or packing entry's own ``versions``.
+
+    JSON-safe (a tuple has none, so each version's shape is a list); empty where
+    ``versions`` is None, so a caller splats it into an entry's own dict
+    unconditionally.
     """
     if versions is None:
         return {}
@@ -106,9 +108,7 @@ def _dump_versions(versions: frozenset[Version] | None) -> dict[str, Any]:
 
 
 def _with_enum_fields(cls: type, fields: dict[str, Any]) -> dict[str, Any]:
-    """``fields`` with an Enum-domain one, JSON's string, its member (should
-    `1`: a `Pinned` member's own value, not its ordinal).
-    """
+    """``fields`` with an Enum-domain one, JSON's string, its member (should `1`: a `Pinned` member's own value, not its ordinal)."""
     for key, param in cls.declaration.params.items():
         domain = param.domain
         if key in fields and isinstance(domain, type) and issubclass(domain, Enum):
@@ -117,8 +117,9 @@ def _with_enum_fields(cls: type, fields: dict[str, Any]) -> dict[str, Any]:
 
 
 class Profile:
-    """Tunable values by operator shape, as ``(cls, dims, tunables)`` entries. An
-    open tunable comes from the most specific match (a dimension left out matches
+    """Tunable values by operator shape, as ``(cls, dims, tunables)`` entries.
+
+    An open tunable comes from the most specific match (a dimension left out matches
     any, a subclass its base's); equally specific ones that disagree raise.
 
     ``fusions`` names steps to run fused as one device configuration, each
@@ -187,17 +188,22 @@ class Profile:
         edges: Sequence[tuple[int, str, int, str]],
         versions: Iterable[Version] | None = None,
     ) -> None:
-        """Add a fusion entry: ``kind`` steps (each ``(operator class, dims)``
-        or ``(operator class, dims, tunables)``, in order) run as one device
-        configuration, wired by ``edges`` (local indices into ``steps``,
-        ``producer``'s drained ``output`` into ``consumer``'s filled
-        ``input``); each step matches by class and dims (a dim left out
-        matches any, a subclass its base's, as a tunable entry does).
-        ``tunables``, where a step gives them, are what it takes running
-        inside this fusion (``fusion_tunables``); a step giving none keeps
-        what it takes unfused.
+        """Add a fusion entry.
+
+        ``kind`` steps (each ``(operator class, dims)`` or ``(operator class, dims,
+        tunables)``, in order) run as one device configuration, wired by ``edges``
+        (local indices into ``steps``, ``producer``'s drained ``output`` into
+        ``consumer``'s filled ``input``); each step matches by class and dims (a dim
+        left out matches any, a subclass its base's, as a tunable entry does).
+        ``tunables``, where a step gives them, are what it takes running inside this
+        fusion (``fusion_tunables``); a step giving none keeps what it takes unfused.
 
         Args:
+            kind: How the steps run as one configuration.
+            steps: Each step as ``(operator class, dims)`` or ``(operator class, dims,
+                tunables)``, in order.
+            edges: Each on-chip hand-off as ``(producer, output, consumer, input)``,
+                local indices into ``steps``.
             versions: The graph versions (``Recording.version``) the entry
                 applies in, as a packing entry's own; every version where
                 None.
@@ -238,13 +244,17 @@ class Profile:
         members: Sequence[_FusionStep],
         versions: Iterable[Version] | None = None,
     ) -> None:
-        """Add a packing entry: the designs of ``members``' shapes (each
-        ``(operator class, dims)`` or ``(operator class, dims, tunables)``,
-        matched as a fusion's steps are) share one device configuration in
-        a full ELF wherever a version runs them. ``tunables``, where a member
-        gives them, are what every step of its shape takes in such a version.
+        """Add a packing entry.
+
+        The designs of ``members``' shapes (each ``(operator class, dims)`` or
+        ``(operator class, dims, tunables)``, matched as a fusion's steps are) share one
+        device configuration in a full ELF wherever a version runs them. ``tunables``,
+        where a member gives them, are what every step of its shape takes in such a
+        version.
 
         Args:
+            members: Each shape as ``(operator class, dims)`` or ``(operator class,
+                dims, tunables)``.
             versions: The graph versions (``Recording.version``) the entry
                 applies in; every version where None.
 
@@ -264,9 +274,7 @@ class Profile:
     def _members(
         steps: Sequence[_FusionStep],
     ) -> tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...]:
-        """``steps`` as ``(class, dims, tunables)``, each name checked
-        against its class's declaration.
-        """
+        """Return ``steps`` as ``(class, dims, tunables)``, each name checked against its class's declaration."""
         resolved: list[tuple[type, dict[str, Any], dict[str, Any] | None]] = []
         for cls, dims, *rest in steps:
             dims = dict(dims or {})
@@ -294,14 +302,14 @@ class Profile:
         edges: Sequence[tuple[int, str, int, str]],
         version: Version | None = None,
     ) -> bool:
-        """Whether this profile fuses ``steps`` (resolved operators, in
-        order) of ``kind``, wired by ``edges`` (local indices), in
-        ``version`` (``Recording.version``): a fusion entry of the same
-        kind, length and wiring whose steps' classes and dims
-        (``Profile.dims``, ``Profile.matches``) match them, in order, and
-        whose own ``versions`` names ``version`` or names none. ``version``
-        left out matches any entry regardless of its own scope: only a
-        caller that tracks one (``chosen_folds``) need give it.
+        """Whether this profile fuses ``steps`` (resolved operators, in order) of ``kind``.
+
+        Wired by ``edges`` (local indices), in ``version`` (``Recording.version``): a
+        fusion entry of the same kind, length and wiring whose steps' classes and dims
+        (``Profile.dims``, ``Profile.matches``) match them, in order, and whose own
+        ``versions`` names ``version`` or names none. ``version`` left out matches any
+        entry regardless of its own scope: only a caller that tracks one
+        (``chosen_folds``) need give it.
         """
         return self._matching(kind, steps, edges, version) is not None
 
@@ -312,10 +320,11 @@ class Profile:
         edges: Sequence[tuple[int, str, int, str]],
         version: Version | None = None,
     ) -> list[dict[str, Any] | None] | None:
-        """The matching fusion entry's per-step tunables (``add_fusion``'s
-        ``tunables``), in order; None where no entry matches ``kind``,
-        ``steps``, ``edges`` and ``version`` (``fused``). A step's own entry
-        is None where it keeps what it takes unfused.
+        """Return the matching fusion entry's per-step tunables (``add_fusion``'s ``tunables``).
+
+        In order; None where no entry matches ``kind``, ``steps``, ``edges`` and
+        ``version`` (``fused``). A step's own entry is None where it keeps what it takes
+        unfused.
         """
         entry = self._matching(kind, steps, edges, version)
         return None if entry is None else [t for _, _, t in entry]
@@ -346,17 +355,16 @@ class Profile:
         )
 
     def fusions(self) -> list[_FusionEntry]:
-        """Each fusion entry as ``(kind, steps, edges, versions)``, ``steps``
-        each ``(operator class, dims, tunables)``, in the order added."""
+        """Each fusion entry as ``(kind, steps, edges, versions)``, ``steps`` each ``(operator class, dims, tunables)``, in the order added."""
         return list(self._fusions)
 
     def packings_of(
         self, op: Operator, version: Version
     ) -> list[tuple[int, int, dict[str, Any] | None]]:
-        """Each packing entry applying in ``version`` with a member matching
-        ``op`` (a resolved operator, by class and dims), in the order added,
-        as its index in ``packings()``, that member's index and its tunables.
-        Two models sharing a profile can name one shape in different entries
+        """Each packing entry applying in ``version`` with a member matching ``op`` (a resolved operator, by class and dims).
+
+        In the order added, as its index in ``packings()``, that member's index and its
+        tunables. Two models sharing a profile can name one shape in different entries
         (the same MLP width); ``graph.packing.apply`` picks among them.
         """
         dims = self.dims(type(op), vars(op))
@@ -419,9 +427,10 @@ class Profile:
 
     @staticmethod
     def matches(matched: Mapping[str, Any], dims: Mapping[str, Any]) -> bool:
-        """Whether an entry's ``matched`` dimensions cover ``dims``: equal,
-        a value JSON round-tripped to a list (``_normalized``) where a live
-        one is still the tuple it held, counted equal too.
+        """Whether an entry's ``matched`` dimensions cover ``dims``.
+
+        Equal, a value JSON round-tripped to a list (``_normalized``) where a live one
+        is still the tuple it held, counted equal too.
         """
         return all(
             name in dims and _normalized(dims[name]) == _normalized(v)
@@ -502,8 +511,7 @@ class Profile:
         return profile
 
     def save(self, path: str | Path) -> None:
-        """Write the profile as JSON, one entry to a line, then its fusions
-        where there are any.
+        """Write the profile as JSON, one entry to a line, then its fusions where there are any.
 
         Raises:
             ValueError: An entry's or a fusion step's operator is not in

@@ -193,9 +193,7 @@ def _take_views(cls, operands, kwargs, values):
 
 
 def version_key(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Version:
-    """The key of a graph's version for ``inputs`` (each input's shape and
-    dtype, by name, in the order its body takes them).
-    """
+    """Return the key of a graph's version for ``inputs`` (each input's shape and dtype, by name, in the order its body takes them)."""
     return tuple(
         (name, tuple(int(n) for n in shape), bfp.dtype_name(dtype))
         for name, (shape, dtype) in inputs.items()
@@ -476,12 +474,12 @@ class Recording:
         return returned, carry
 
     def code_weights(self) -> None:
-        """Encode every coded weight, a thread each, and give a weight that a
-        coded read no longer leaves any step reading uncoded no buffer of its
-        own: what a compile runs, and a reference, which reads the weights
-        themselves, does not. A weight with a row past its capacity is read
-        plain instead, with a warning: a profile keyed by shape may meet a
-        checkpoint whose weights its capacity does not hold.
+        """Encode every coded weight, a thread each, and give a weight that a coded read no longer leaves any step reading uncoded no buffer of its own.
+
+        What a compile runs, and a reference, which reads the weights themselves, does
+        not. A weight with a row past its capacity is read plain instead, with a
+        warning: a profile keyed by shape may meet a checkpoint whose weights its
+        capacity does not hold.
 
         Raises:
             ValueError: A refused weight's reader has no coded flag to clear.
@@ -513,9 +511,7 @@ class Recording:
             del self.pinned[name]
 
     def coded_report(self) -> list[str]:
-        """A line per weight read as coded rows, and per weight a coded read
-        was given but which is read plain, with why.
-        """
+        """Return a line per weight read as coded rows, and per weight a coded read was given but which is read plain, with why."""
         lines = []
         for weight, h in self.weights.values():
             if isinstance(weight, CodedWeight):
@@ -528,9 +524,7 @@ class Recording:
         return lines
 
     def _read_plain(self, key) -> None:
-        """Point every reader of the coded weight ``key`` back at the weight
-        it codes, each reader rebuilt with its operand's coded flag cleared.
-        """
+        """Point every reader of the coded weight ``key`` back at the weight it codes, each reader rebuilt with its operand's coded flag cleared."""
         derived = self.weights.pop(key)[1]
         self.pinned.pop(derived.name, None)
         plain = self.weights[key[0]][1]
@@ -1067,9 +1061,9 @@ class Recorder:
         return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
     def _coded_weight(self, op, b, h: Handle) -> Handle:
-        """The derived weight a coded input ``b`` of ``op`` reads in place of
-        ``h``: the weight's coded rows, one buffer for every coded read of
-        it at one capacity.
+        """Return the derived weight a coded input ``b`` of ``op`` reads in place of ``h``.
+
+        The weight's coded rows, one buffer for every coded read of it at one capacity.
 
         Raises:
             TypeError: ``h`` is not a whole weight of ``b``'s logical shape.

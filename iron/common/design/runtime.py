@@ -154,15 +154,14 @@ class OperatorRuntime(Runtime):
             buffer.resolve()
 
     def task_group(self) -> TaskGroup:
-        """The group a sequence issues transfers in: a fused sequence's own
-        while it runs, else a new one.
+        """Return the group a sequence issues transfers in.
+
+        A fused sequence's own while it runs, else a new one.
         """
         return TaskGroup() if self.group is None else self.group
 
     def finish(self, tg: TaskGroup) -> None:
-        """Finish ``tg``, unless it is a fused sequence's, finished once every
-        operator in it has issued.
-        """
+        """Finish ``tg``, unless it is a fused sequence's, finished once every operator in it has issued."""
         if tg is not self.group:
             tg.finish()
 
@@ -175,9 +174,11 @@ class OperatorRuntime(Runtime):
         self.finish(tg)
 
     def issue(self, tg: TaskGroup) -> None:
-        """Fill every host input and drain every host output in ``tg``, the
-        drains awaited when ``tg`` finishes; an on-chip operand's fill/drain
-        emit nothing."""
+        """Fill every host input and drain every host output in ``tg``.
+
+        The drains awaited when ``tg`` finishes; an on-chip operand's fill/drain emit
+        nothing.
+        """
         for buf in self.op.inputs:
             for lane, tap, word, unit in buf.transfers():
                 buf.fill(
@@ -435,10 +436,11 @@ class MergedRuntime(Runtime):
 
     @classmethod
     def fuse(cls, runtimes, name=None) -> MergedRuntime:
-        """Operator runtimes whose streams meet on-chip, as one sequence: each
-        runs its preamble, then all their transfers go in one task group that
-        finishes once (``task_group``), since an operator's input completes only
-        once a later operator drains.
+        """Operator runtimes whose streams meet on-chip, as one sequence.
+
+        Each runs its preamble, then all their transfers go in one task group that
+        finishes once (``task_group``), since an operator's input completes only once a
+        later operator drains.
         """
 
         def run(calls) -> None:

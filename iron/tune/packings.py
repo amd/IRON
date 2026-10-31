@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Choosing which arrays share one device configuration (a profile's
-packings).
+"""Choosing which arrays share one device configuration (a profile's packings).
 
 A full ELF configures a device each time a version switches to it.
 ``Packer`` groups a version's units (the arrays a shape runs on) to minimize
@@ -74,14 +73,14 @@ def width_tunables(op: Operator) -> list[str]:
 
 
 def design_cores(op: Operator) -> int:
-    """The cores ``op``'s design places."""
+    """Return the cores ``op``'s design places."""
     return len(re.findall(r"aie\.core\(", str(OperatorDesign(op).module())))
 
 
 def adjacent(order: Sequence[Any], group_of: Mapping[Any, int]) -> collections.Counter:
-    """How often a step of one group follows a step of another, by the pair
-    of groups (lower first): the switches merging the pair removes. A None
-    in ``order`` is a step no group holds.
+    """How often a step of one group follows a step of another, by the pair of groups (lower first).
+
+    The switches merging the pair removes. A None in ``order`` is a step no group holds.
     """
     pairs: collections.Counter = collections.Counter()
     for a, b in zip(order, order[1:]):
@@ -93,10 +92,10 @@ def adjacent(order: Sequence[Any], group_of: Mapping[Any, int]) -> collections.C
 
 
 class Packer:
-    """One version's units, and what grouping them costs: each unit's
-    operator for each shape in it and that shape's step count, the
-    version's step order by unit, and a unit's time at a setting (``cost``,
-    timed by ``measure``).
+    """One version's units, and what grouping them costs.
+
+    Each unit's operator for each shape in it and that shape's step count, the version's
+    step order by unit, and a unit's time at a setting (``cost``, timed by ``measure``).
 
     A unit is the arrays, as recorded, that share a shape (``Shape.key``),
     with the shapes they run: a profile's packing names shapes, so every
@@ -166,22 +165,20 @@ class Packer:
         self._options: dict[Any, list[Setting]] = {}
 
     def recorded(self, key) -> Operator:
-        """Unit ``key``'s first shape's operator, as recorded."""
+        """Return the unit ``key``'s first shape's operator, as recorded."""
         first, _ = next(iter(self.shapes[key].values()))
         return first
 
     def op(self, key, setting: Mapping[str, Any]) -> Operator:
-        """Unit ``key``'s first shape's operator at ``setting``, resolved."""
+        """Return the unit ``key``'s first shape's operator at ``setting``, resolved."""
         return self.recorded(key)._with_tunables(**setting).resolved(self.dev)
 
     def array(self, key, setting: Mapping[str, Any]):
-        """The array unit ``key``'s first shape runs on at ``setting``."""
+        """Return the array unit ``key``'s first shape runs on at ``setting``."""
         return self.op(key, setting).array_key()
 
     def arrays(self, key, setting: Mapping[str, Any]) -> dict[Any, Operator]:
-        """The arrays unit ``key``'s shapes run on at ``setting``, each with
-        an operator running on it.
-        """
+        """Return the arrays unit ``key``'s shapes run on at ``setting``, each with an operator running on it."""
         out: dict[Any, Operator] = {}
         for op, _ in self.shapes[key].values():
             at = op._with_tunables(**setting).resolved(self.dev)
@@ -189,7 +186,7 @@ class Packer:
         return out
 
     def cores(self, group: Group) -> int:
-        """The cores ``group``'s distinct arrays take."""
+        """Return the cores ``group``'s distinct arrays take."""
         total = 0
         for array, op in self._distinct(group).items():
             if array not in self._cores:
@@ -198,7 +195,7 @@ class Packer:
         return total
 
     def _distinct(self, group: Group) -> dict[Any, Operator]:
-        """``group``'s distinct arrays, each with an operator running on it."""
+        """Return ``group``'s distinct arrays, each with an operator running on it."""
         out: dict[Any, Operator] = {}
         for key, setting in group.items():
             for array, op in self.arrays(key, setting).items():
@@ -215,8 +212,9 @@ class Packer:
         )
 
     def options(self, key) -> list[Setting]:
-        """Array ``key``'s width settings, its own first (empty): each width
-        combination its domains give, its other tunables held where they
+        """Array ``key``'s width settings, its own first (empty).
+
+        Each width combination its domains give, its other tunables held where they
         still resolve there, else left to resolve afresh.
         """
         if key in self._options:
@@ -251,10 +249,11 @@ class Packer:
         return found
 
     def cost(self, key, setting: Mapping[str, Any]) -> float:
-        """Unit ``key``'s steps' time at ``setting``, summed, each shape
-        weighted over its points (``Timed.op_points``); infinite where it
-        does not build there. Timing one setting times every width option of
-        the unit not yet timed beside it, in one ``measure`` batch.
+        """Return the unit ``key``'s steps' time at ``setting``, summed.
+
+        Each shape weighted over its points (``Timed.op_points``); infinite where it
+        does not build there. Timing one setting times every width option of the unit
+        not yet timed beside it, in one ``measure`` batch.
         """
         frozen = (key, tuple(sorted(setting.items())))
         if frozen not in self._costs:
@@ -267,9 +266,7 @@ class Packer:
         return self._costs[frozen]
 
     def _price(self, key, pending: Sequence[Setting]) -> None:
-        """Time unit ``key`` at each of ``pending``, one ``measure`` batch per
-        shape and point, into ``_costs``.
-        """
+        """Time unit ``key`` at each of ``pending``, one ``measure`` batch per shape and point, into ``_costs``."""
         if not pending:
             return
         totals = [0.0] * len(pending)
@@ -311,9 +308,10 @@ class Packer:
         return sum(self.cost(k, s) for g in groups for k, s in g.items())
 
     def features(self, groups: Sequence[Group]) -> dict[str, float]:
-        """What ``groups`` cost beyond their steps' own times depends on
-        (``costmodel.FEATURES``): the switches into a group, the cores of the
-        groups switched into, and the steps run in a group of several units.
+        """Return what ``groups`` cost beyond their steps' own times depends on (``costmodel.FEATURES``).
+
+        The switches into a group, the cores of the groups switched into, and the steps
+        run in a group of several units.
         """
         group_of = {k: i for i, g in enumerate(groups) for k in g}
         cores = [self.cores(g) for g in groups]
@@ -332,15 +330,17 @@ class Packer:
         }
 
     def objective(self, groups: Sequence[Group]) -> float:
-        """The version's estimated time under ``groups``: its steps' own
-        times and what the cost model adds for their features.
+        """Return the version's estimated time under ``groups``.
+
+        Its steps' own times and what the cost model adds for their features.
         """
         return self.steps(groups) + self.model.predict(self.features(groups))
 
     def changes(self, group: Group) -> list[tuple[Any, Setting]]:
-        """Every one-unit change of ``group``: a unit at another width option,
-        or at the whole setting of an array in the group (its own or
-        another unit's) where that puts two of the group's arrays on one.
+        """Every one-unit change of ``group``.
+
+        A unit at another width option, or at the whole setting of an array in the group
+        (its own or another unit's) where that puts two of the group's arrays on one.
         """
         changes = [(k, o) for k in group for o in self.options(k) if o != group[k]]
         arrays = {
@@ -369,9 +369,9 @@ class Packer:
         return changes
 
     def fit(self, group: Group) -> Group | None:
-        """``group`` changed until it co-resides, the change costing least per
-        core it frees first, then widened back while it still fits; None
-        where no change of it fits.
+        """``group`` changed until it co-resides, the change costing least per core it frees first.
+
+        Then widened back while it still fits; None where no change of it fits.
         """
         current = dict(group)
         while not self.fits(current):
@@ -401,9 +401,10 @@ class Packer:
             current = best[1]
 
     def retile(self, group: Group) -> Group:
-        """``group`` with each member off its own setting at the fastest of
-        its other tunables there that still fits, searched as an operator's
-        own tuning searches them (``time_shape``), its widths held.
+        """``group`` with each member off its own setting at the fastest of its other tunables there that still fits.
+
+        Searched as an operator's own tuning searches them (``time_shape``), its widths
+        held.
         """
         current = dict(group)
         for key, setting in group.items():
@@ -438,10 +439,11 @@ class Packer:
         return current
 
     def group(self) -> list[Group]:
-        """The arrays grouped to minimize ``objective``: the merge that most
-        improves it each round (of the ``MERGE_CANDIDATES`` most adjacent
-        pairs of groups), then single arrays moved between groups while
-        that improves it, then each group retiled.
+        """Return the arrays grouped to minimize ``objective``.
+
+        The merge that most improves it each round (of the ``MERGE_CANDIDATES`` most
+        adjacent pairs of groups), then single arrays moved between groups while that
+        improves it, then each group retiled.
         """
         groups: list[Group] = [{k: {}} for k in self.shapes]
         score = self.objective(groups)
@@ -468,9 +470,7 @@ class Packer:
         return groups
 
     def _improve(self, groups: list[Group], score: float) -> tuple[list[Group], float]:
-        """``groups`` after moving single arrays between groups (or into one
-        of their own) while that improves ``objective``.
-        """
+        """Return ``groups`` after moving single arrays between groups (or into one of their own) while that improves ``objective``."""
         while True:
             best = None
             for gi, g in enumerate(groups):
@@ -504,10 +504,11 @@ class Packer:
             self.log(f"  moved an array: ~{score:.0f} us estimated")
 
     def members(self, group: Group) -> list:
-        """``group`` as a packing entry's members (``Profile.add_packing``):
-        each shape once, at its unit's setting, named without the dimensions
-        a host sizes (``Timed.varying``) wherever the shape is still the only
-        one of the recording's it names.
+        """``group`` as a packing entry's members (``Profile.add_packing``).
+
+        Each shape once, at its unit's setting, named without the dimensions a host
+        sizes (``Timed.varying``) wherever the shape is still the only one of the
+        recording's it names.
         """
         resolved = [s.op.resolved(self.dev) for s in self.call.recording.steps]
         out: dict[Any, tuple] = {}
@@ -558,15 +559,14 @@ def price_packings(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Profile:
-    """``profile`` with a packing entry for each group of arrays a version
-    gains from sharing one device configuration (``Packer``), its members'
-    settings in it, applying in that version; a version whose grouping does
-    not gain end to end, beyond the noise, adds none. Each entry then applies
-    in another version it matches only where that version gains from it too
-    (``widen_packings``). ``profile``'s own packings are replaced, but for
-    another graph's (``_foreign``), which a search of these calls leaves as
-    they are, so one profile can hold several models' packings. A version
-    whose every switch, priced by ``model``, costs under
+    """``profile`` with a packing entry for each group of arrays a version gains from sharing one device configuration (``Packer``).
+
+    Its members' settings in it, applying in that version; a version whose grouping does
+    not gain end to end, beyond the noise, adds none. Each entry then applies in another
+    version it matches only where that version gains from it too (``widen_packings``).
+    ``profile``'s own packings are replaced, but for another graph's (``_foreign``),
+    which a search of these calls leaves as they are, so one profile can hold several
+    models' packings. A version whose every switch, priced by ``model``, costs under
     ``MIN_SWITCH_SHARE`` of its steps' own time is not searched.
 
     A grouping whose version does not build, hangs or is not bit-identical
@@ -574,6 +574,18 @@ def price_packings(
     ``ATTEMPTS`` times, recorded in ``ledger`` where one is given.
 
     Args:
+        calls: The calls whose versions are packed.
+        dev: The device they run on.
+        profile: The profile they were recorded under.
+        full_elf: How the versions are packaged; nothing packs on an xclbin per step.
+        timing: How each unit's steps are timed.
+        confirm_timing: How each version is timed end to end.
+        repeats: Steps in each long run a step's time is taken from.
+        cache: Where each figure is kept across runs.
+        fit_cache: Where each group's fit verdict is kept.
+        ledger: Where each failure is recorded, or None.
+        log: Where progress is logged.
+        lock: Take the device lock per measurement, not under ``coord/npu``.
         model: What a version pays beyond its steps' times; each end-to-end
             check adds it a sample. The prior where None.
         cycles: Kernel cycles per call by recipe key, which spare a narrowed
@@ -679,9 +691,10 @@ def price_packings(
 
 
 def _with_fusions(base: Profile, fusions: Sequence) -> Profile:
-    """``base``'s entries and packings with ``fusions`` as its only
-    fusions: the fold-narrowing counterpart of ``_profile``, which does the
-    same for a profile's packings.
+    """``base``'s entries and packings with ``fusions`` as its only fusions.
+
+    The fold-narrowing counterpart of ``_profile``, which does the same for a profile's
+    packings.
     """
     out = Profile()
     for cls, dims, tunables in base:
@@ -694,14 +707,13 @@ def _with_fusions(base: Profile, fusions: Sequence) -> Profile:
 
 
 def _narrow_for_rejected(fusions: Sequence, version: Version) -> list:
-    """``fusions`` with a ``FOLD`` entry's own ``versions`` narrowed past
-    ``version``, dropped entirely where that would leave it naming none: a
-    version ``price_folds_before_packing`` rejects keeps the profile as it
-    stood for the shapes a fold scoped to it (and no other version) alone
-    named. A fusion of another kind, or a fold unscoped or scoped to a
-    version other than this one, is untouched. Its packings are the
-    caller's to replace (``_rejoin``): they were searched on the folded
-    steps.
+    """``fusions`` with a ``FOLD`` entry's own ``versions`` narrowed past ``version``, dropped entirely where that would leave it naming none.
+
+    A version ``price_folds_before_packing`` rejects keeps the profile as it stood for
+    the shapes a fold scoped to it (and no other version) alone named. A fusion of
+    another kind, or a fold unscoped or scoped to a version other than this one, is
+    untouched. Its packings are the caller's to replace (``_rejoin``): they were
+    searched on the folded steps.
     """
     out = []
     for kind, steps, edges, versions in fusions:
@@ -722,14 +734,14 @@ def _decide_fold(
     noise: float | None,
     log: Callable[[str], None],
 ) -> list:
-    """``call``'s own version's share of ``price_folds_before_packing``'s
-    decision: ``fusions`` kept as given where ``delta``/``noise`` (``call``'s
-    ``_end_to_end`` against the profile as it stands) gain beyond the noise
-    (``CONFIDENCE``, as every other packing decision here already asks), an
-    unmeasurable noise counting as no gain; narrowed back out otherwise
-    (``_narrow_for_rejected``), so this version keeps the profile as it
-    stood rather than the whole packed-and-folded result discarded. Logs
-    which, by name, with the gain found.
+    """Return ``call``'s own version's share of ``price_folds_before_packing``'s decision.
+
+    ``fusions`` kept as given where ``delta``/``noise`` (``call``'s ``_end_to_end``
+    against the profile as it stands) gain beyond the noise (``CONFIDENCE``, as every
+    other packing decision here already asks), an unmeasurable noise counting as no
+    gain; narrowed back out otherwise (``_narrow_for_rejected``), so this version keeps
+    the profile as it stood rather than the whole packed-and-folded result discarded.
+    Logs which, by name, with the gain found.
 
     Device-free on its own: the device time is in ``delta``/``noise``
     (``_end_to_end``, the one part of this decision that needs it), not here.
@@ -769,22 +781,21 @@ def price_folds_before_packing(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Profile:
-    """``profile`` with the folds its arrays admit (``iron.tune.fold.
-    fold_profile``, scoped so a fold never splits a device array a call
-    site that does not take it still shares, and scoped to the graph
-    versions it was found in) packed (``price_packings``, so the search
-    groups the same folded step list ``apply_profile`` builds from at build
-    time). Kept per version, the way ``widen_packings`` decides a packing
-    entry's own widening: a version keeps its folds only where it, folded
-    and packed, beats ``profile`` as it stands (its own packings, or none)
-    end to end (``compare_graphs``); one that does not gain keeps the
-    profile as it stood instead, its own fold entries narrowed back out
-    rather than the whole packed result discarded (``_narrow_for_rejected``),
-    and its packings searched again without them (``_rejoin``): the ones
-    found on its folded steps were never priced unfolded. The plain
-    ``price_packings`` search on ``profile`` alone runs, and its result is
-    returned, where folding admits nothing at all. The fold entries
-    this adds are the tuner's own proposal, not Erika's (``chosen_folds``
+    """Return ``profile`` with the folds its arrays admit, packed.
+
+    The folds are ``iron.tune.fold.fold_profile``'s, scoped so a fold never splits a
+    device array a call site that does not take it still shares, and to the graph
+    versions it was found in; packed by ``price_packings``, so the search groups the
+    same folded step list ``apply_profile`` builds from at build time. Kept per
+    version, the way ``widen_packings`` decides a packing entry's own widening:
+    a version keeps its folds only where it, folded and packed, beats ``profile`` as it
+    stands (its own packings, or none) end to end (``compare_graphs``); one that does
+    not gain keeps the profile as it stood instead, its own fold entries narrowed back
+    out rather than the whole packed result discarded (``_narrow_for_rejected``), and
+    its packings searched again without them (``_rejoin``): the ones found on its folded
+    steps were never priced unfolded. The plain ``price_packings`` search on ``profile``
+    alone runs, and its result is returned, where folding admits nothing at all. The
+    fold entries this adds are the tuner's own proposal, not Erika's (``chosen_folds``
     still takes any a hand-written profile names, unscoped).
     """
     with_folds = fold_profile(profile, calls)
@@ -875,10 +886,11 @@ def price_folds_before_packing(
 
 
 def _rejoin(folded: Profile, unfolded: Profile, versions: set[Version]) -> Profile:
-    """``folded``'s packings outside ``versions`` and ``unfolded``'s inside
-    them: the versions that rejected their folds take the packings searched
-    without them, every other version keeps its folded ones. An unscoped
-    entry is every version's and stays as ``folded`` has it.
+    """``folded``'s packings outside ``versions`` and ``unfolded``'s inside them.
+
+    The versions that rejected their folds take the packings searched without them,
+    every other version keeps its folded ones. An unscoped entry is every version's and
+    stays as ``folded`` has it.
     """
     entries = []
     for entry in folded.packings():
@@ -901,13 +913,12 @@ def widen_packings(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Profile:
-    """``profile`` with each packing entry that names its versions applying
-    also in each version of ``calls`` it matches but does not name, where
-    that version, built with them, is faster end to end beyond the noise;
-    elsewhere it keeps to the versions it names. A version's arrays are
-    another's at other extents, so a grouping that pays where switches
-    dominate can slow a version whose arrays' own time does. One end-to-end
-    check per version the entries match.
+    """``profile`` with each packing entry that names its versions applying also in each version of ``calls`` it matches but does not name.
+
+    Where that version, built with them, is faster end to end beyond the noise;
+    elsewhere it keeps to the versions it names. A version's arrays are another's at
+    other extents, so a grouping that pays where switches dominate can slow a version
+    whose arrays' own time does. One end-to-end check per version the entries match.
     """
     entries = profile.packings()
     for call in calls:
@@ -952,9 +963,10 @@ def widen_packings(
 
 
 def _foreign(entry: PackingEntry, calls: Sequence[Timed], dev) -> bool:
-    """Whether a member of ``entry`` names no step of any of ``calls``: an
-    entry another graph's search made (a shape these graphs never run), not
-    one of theirs to replace.
+    """Whether a member of ``entry`` names no step of any of ``calls``.
+
+    An entry another graph's search made (a shape these graphs never run), not one of
+    theirs to replace.
     """
     probe = Profile()
     probe.add_packing(entry.members)
@@ -984,9 +996,9 @@ def _end_to_end(
     log: Callable[[str], None],
     lock: bool,
 ) -> tuple[float, float | None]:
-    """``call``'s version built under ``after`` against it under ``before``
-    (``compare_graphs``), each packaged as ``dev`` does: a full ELF where it
-    dispatches one, else an xclbin per step.
+    """Return ``call``'s version built under ``after`` against it under ``before`` (``compare_graphs``), each packaged as ``dev`` does.
+
+    A full ELF where it dispatches one, else an xclbin per step.
     """
     return compare_graphs(
         call,

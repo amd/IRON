@@ -179,11 +179,11 @@ class _Unbound(_Param):
 
 
 def param(*shape, dtype=bfloat16, source: Source | None = None) -> np.ndarray:
-    """A weight a graph holds, declared by shape for ``Graph.load_state_dict``
-    to bind, or ``param(array)`` holding ``array``, as torch's
-    ``nn.Parameter``; ``source`` says where in a file ``array`` was read
-    from, which keys a cache of what is derived from it. A graph refuses to
-    hold a bare array.
+    """Return a weight a graph holds, declared by shape for ``Graph.load_state_dict`` to bind.
+
+    Or ``param(array)`` holding ``array``, as torch's ``nn.Parameter``; ``source`` says
+    where in a file ``array`` was read from, which keys a cache of what is derived from
+    it. A graph refuses to hold a bare array.
     """
     if len(shape) == 1 and isinstance(shape[0], np.ndarray):
         a = shape[0]
@@ -760,8 +760,9 @@ class Graph:
 def apply_profile(
     recording: Recording, profile: Profile, dev
 ) -> tuple[Recording, tuple[Fusion, ...], Packing]:
-    """``recording`` as ``profile`` compiles it on ``dev``: its folds applied,
-    its fusions and their steps' tunables, and its packings.
+    """Return ``recording`` as ``profile`` compiles it on ``dev``.
+
+    Its folds applied, its fusions and their steps' tunables, and its packings.
     """
     folds = chosen_folds(recording, profile)
     if folds:

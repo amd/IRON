@@ -468,7 +468,7 @@ class Multimodal(lm.Multimodal):
 
     @classmethod
     def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
-        """The checkpoint whose header gives the weights' shapes."""
+        """Add ``--checkpoint``, whose weights the calls are recorded on, and ``--config``."""
         parser.add_argument(
             "--checkpoint",
             type=Path,
@@ -482,11 +482,12 @@ class Multimodal(lm.Multimodal):
     def tune_calls(
         cls, parser: argparse.ArgumentParser, args: argparse.Namespace
     ) -> list[Timed]:
-        """Every version (the text encoder, each tower and the merge) on the
-        checkpoint's weights (read lazily), the one profile in ``profiles/``
-        serving every version's designs: half its calls a query of ``QUERY_ROWS``
-        text rows, half its longest call. A call's configuration switches
-        cost the same at any length, so a short query is where they weigh.
+        """Every version (the text encoder, each tower and the merge) on the checkpoint's weights (read lazily).
+
+        The one profile in ``profiles/`` serving every version's designs: half its calls
+        a query of ``QUERY_ROWS`` text rows, half its longest call. A call's
+        configuration switches cost the same at any length, so a short query is where
+        they weigh.
         """
         config = dataclasses.replace(Config(), **dict(args.config))
         weights = Checkpoint(weights_file(args.checkpoint)).tree(

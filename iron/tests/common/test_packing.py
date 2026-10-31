@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A profile's packing entries, device-free: round trips, matching (in the
-graph versions an entry names), and a recording's packed designs composed
-into one device configuration.
+"""A profile's packing entries, device-free.
+
+Round trips, matching (in the graph versions an entry names), and a recording's packed
+designs composed into one device configuration.
 """
 
 import re
@@ -45,9 +46,11 @@ class Copied(iron.Graph):
 
 
 class Gated(iron.Graph):
-    """``ElementwiseMul(SiLU(x), UP)``, and given ``extra`` a copy of it too:
-    two versions over the same SiLU and multiply arrays, as a decode step and
-    a prompt chunk share theirs."""
+    """``ElementwiseMul(SiLU(x), UP)``, and given ``extra`` a copy of it too.
+
+    Two versions over the same SiLU and multiply arrays, as a decode step and a prompt
+    chunk share theirs.
+    """
 
     def body(self, x, extra=None):
         y = ElementwiseMul.step(SiLU.step(x, tile_size=256), UP, tile_size=256)
@@ -113,10 +116,11 @@ def test_packings_of_matches_by_class_and_dims(npu2):
 
 
 def test_a_shape_two_entries_name_goes_to_the_one_naming_more_of_the_graph(npu2):
-    """Two models sharing a profile can name one shape (the same MLP width) in
-    different entries: the step joins the entry naming most of the
-    recording's shapes, wherever it stands in the profile, so another
-    model's grouping does not split this one's."""
+    """Two models sharing a profile can name one shape (the same MLP width) in different entries.
+
+    The step joins the entry naming most of the recording's shapes, wherever it stands
+    in the profile, so another model's grouping does not split this one's.
+    """
     recording = Gated().record(x=(2048,))
     profile = Profile()
     # Another model's: names this graph's SiLU, and a GEMV it does not run.
@@ -146,9 +150,11 @@ def test_a_recording_s_version_is_each_input_s_name_shape_and_dtype():
 
 
 def test_a_packing_applies_only_in_the_versions_it_names(npu2):
-    """One graph's two versions run the same SiLU and multiply arrays: an
-    entry naming one version groups them there and leaves the other's steps
-    as they were."""
+    """One graph's two versions run the same SiLU and multiply arrays.
+
+    An entry naming one version groups them there and leaves the other's steps as they
+    were.
+    """
     alone = Gated().record(x=(2048,))
     copying = Gated().record(x=(2048,), extra=(64,))
     profile = Profile()
@@ -188,8 +194,11 @@ def test_apply_narrows_the_members_and_groups_their_designs(npu2):
 
 
 def test_apply_resolves_a_member_afresh_at_its_tunables(npu2):
-    """A Copy's tile_size follows its channels: given two, a 64-element copy
-    resolves 32-element tiles, not the 64 it resolved at one."""
+    """A Copy's tile_size follows its channels.
+
+    Given two, a 64-element copy resolves 32-element tiles, not the 64 it resolved at
+    one.
+    """
     recording = Copied().record(x=(64,))
     assert recording.steps[0].op.resolved(npu2).tile_size == 64
     profile = _packed(

@@ -36,12 +36,13 @@ active_runtime: ContextVar[OperatorRuntime | None] = ContextVar(
 
 
 class Operand:
-    """An operand as one operator holds it (``op.x``): the resolved ``In``, ``Out``
-    or ``InOut``, read through on use (a shape may follow a tunable), and its
-    bound ``lane_handles``. An ``InOut`` keeps what its stream does not drain.
-    ``lane_fifos`` is the ``ObjectFifo`` ``fifos()`` made each lane from, kept
-    past binding so a fed consumer with several readers, or ``fifos()`` asked
-    for several, can add more ends to the one already bound.
+    """An operand as one operator holds it (``op.x``).
+
+    The resolved ``In``, ``Out`` or ``InOut``, read through on use (a shape may follow a
+    tunable), and its bound ``lane_handles``. An ``InOut`` keeps what its stream does
+    not drain. ``lane_fifos`` is the ``ObjectFifo`` ``fifos()`` made each lane from,
+    kept past binding so a fed consumer with several readers, or ``fifos()`` asked for
+    several, can add more ends to the one already bound.
 
     A fed input reads ``fed_from``'s lanes, or, ``staged``, the fifo a
     ``Staging`` restaged them into for each of its lanes; an output lists
@@ -89,8 +90,9 @@ class Operand:
         return np.uint8 if bfp.is_bfp(self.dtype) else self.dtype
 
     def device_form(self, value: np.ndarray) -> np.ndarray:
-        """``value``, this operand's logical tensor, as its host buffer holds
-        it: a coded operand's rows encoded, any other as it is.
+        """``value``, this operand's logical tensor, as its host buffer holds it.
+
+        A coded operand's rows encoded, any other as it is.
 
         Raises:
             ValueError: A row holds more exceptions than the capacity.
@@ -100,8 +102,9 @@ class Operand:
         return coded.encode_rows(np.asarray(value, bfloat16), self.capacity)
 
     def logical_form(self, data: np.ndarray) -> np.ndarray:
-        """``data``, this operand's host buffer, as the logical tensor a
-        reference reads: a coded operand's rows decoded, any other as it is.
+        """Return ``data``, this operand's host buffer, as the logical tensor a reference reads.
+
+        A coded operand's rows decoded, any other as it is.
         """
         if not self.coded:
             return data
@@ -168,10 +171,10 @@ class Operand:
         obj_type: Any = None,
         **objectfifo_kwargs: Any,
     ) -> list[Any]:
-        """A fifo per lane, ``depth`` deep (else ``l1_depth``), of ``obj_type``
-        (else this operand's own), bound as this operand's lanes. Plain
-        (``readers=None``, ``tiles=None``), returns the build's end of each:
-        an input's consumer end, an output's producer end.
+        """Return a fifo per lane, ``depth`` deep (else ``l1_depth``), of ``obj_type`` (else this operand's own), bound as this operand's lanes.
+
+        Plain (``readers=None``, ``tiles=None``), returns the build's end of each: an
+        input's consumer end, an output's producer end.
 
         ``readers`` several consumer ends a lane instead of one -- a lane
         several cores read -- each lane then its own list of them (even at
@@ -243,9 +246,10 @@ class Operand:
         return [[f.cons() for _ in range(readers)] for f in made]
 
     def feed(self, source: Operand, staged: bool = False) -> None:
-        """Take this input's stream on-chip from ``source``, another operator's
-        output: its cores read the fifos ``source``'s cores write, so neither
-        is a host transfer. Several inputs may each be fed one source.
+        """Take this input's stream on-chip from ``source``, another operator's output.
+
+        Its cores read the fifos ``source``'s cores write, so neither is a host
+        transfer. Several inputs may each be fed one source.
 
         Args:
             source: The output, its lanes bound, whose stream this input reads.
@@ -306,10 +310,11 @@ class Operand:
         source.feeds.append(self)
 
     def reader(self, lane: int, depth: int | None = None) -> Any:
-        """A consumer end of output lane ``lane`` for an on-chip reader: the end
-        bound for its drain, which no host transfer takes once fed, then a new
-        one of the lane's fifo for each reader after, ``depth`` deep (else the
-        fifo's own).
+        """Return a consumer end of output lane ``lane`` for an on-chip reader.
+
+        The end bound for its drain, which no host transfer takes once fed, then a new
+        one of the lane's fifo for each reader after, ``depth`` deep (else the fifo's
+        own).
 
         Raises:
             ValueError: The lane has a reader already and its build bound the
@@ -327,8 +332,7 @@ class Operand:
 
     @property
     def on_chip(self) -> bool:
-        """Whether this operand's stream stays on-chip, fed to or from another
-        operator, with no host transfer."""
+        """Whether this operand's stream stays on-chip, fed to or from another operator, with no host transfer."""
         return self.fed_from is not None or bool(self.feeds)
 
     def pin(self, endpoints: list[DmaEndpoint]) -> None:
@@ -373,11 +377,11 @@ class Operand:
         repeat_parameter: Value | None = None,
         managed: bool = True,
     ):
-        """Fill ``lane`` of this operand's stream from the host in
-        ``sequence(rt)``; returns the ``Task``, or None and emits nothing for
-        an on-chip operand, fed on-chip from another operator's output. A
-        per-call ``Value`` is patched into the descriptor on a full ELF; on an
-        xclbin it regenerates the instruction stream every call.
+        """Fill ``lane`` of this operand's stream from the host in ``sequence(rt)``; returns the ``Task``.
+
+        Or None and emits nothing for an on-chip operand, fed on-chip from another
+        operator's output. A per-call ``Value`` is patched into the descriptor on a full
+        ELF; on an xclbin it regenerates the instruction stream every call.
 
         Args:
             tap: The walk over ``source``; all of it where None.
@@ -427,10 +431,11 @@ class Operand:
         repeat_parameter: Value | None = None,
         managed: bool = True,
     ):
-        """Drain lane ``lane`` of this operand's stream to the host, or emit
-        nothing and return None for an on-chip operand, fed to another
-        operator's input; the arguments are ``fill``'s, and a drain the
-        sequence must see finish before it ends passes ``wait=True``.
+        """Drain lane ``lane`` of this operand's stream to the host.
+
+        Or emit nothing and return None for an on-chip operand, fed to another
+        operator's input; the arguments are ``fill``'s, and a drain the sequence must
+        see finish before it ends passes ``wait=True``.
         """
         if self.on_chip:
             return None
@@ -551,11 +556,11 @@ class Operand:
     def transfers(
         self,
     ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]]:
-        """The ``(lane, tap, length_parameter, length_unit)`` transfers: what
-        an operator writing its own sequence describes (``lane_transfers``),
-        else derived: the whole buffer (one lane or replicated) or one block
-        of the first non-batch axis per lane; under a bound, round-robin by
-        tile instead.
+        """Return the ``(lane, tap, length_parameter, length_unit)`` transfers.
+
+        What an operator writing its own sequence describes (``lane_transfers``), else
+        derived: the whole buffer (one lane or replicated) or one block of the first
+        non-batch axis per lane; under a bound, round-robin by tile instead.
 
         Raises:
             ValueError: No ``obj_shape=``, or the split does not divide, cannot
@@ -653,13 +658,13 @@ class Operand:
 
 
 class Staging:
-    """``source``'s lanes restaged through memtiles into ``sink``'s, where they
-    do not meet directly: each of ``sink``'s lanes joined from whole lanes of
-    ``source`` (each a slot of a memtile object, filled a round at a time),
-    or each lane of ``source`` split among ``sink``'s (a round per object of
-    it). Derived from both operands' ``transfers()`` and checked element for
-    element against them, so every lane of ``sink`` reads, round by round,
-    what the host round trip gives it.
+    """``source``'s lanes restaged through memtiles into ``sink``'s, where they do not meet directly.
+
+    Each of ``sink``'s lanes joined from whole lanes of ``source`` (each a slot of a
+    memtile object, filled a round at a time), or each lane of ``source`` split among
+    ``sink``'s (a round per object of it). Derived from both operands' ``transfers()``
+    and checked element for element against them, so every lane of ``sink`` reads, round
+    by round, what the host round trip gives it.
 
     ``joins`` holds, per lane of ``sink``, the lanes of ``source`` joined into
     it and each one's slot of a round, in elements; ``splits``, per lane of
@@ -867,9 +872,10 @@ class Staging:
             )
 
     def build(self) -> list[ObjectFifo]:
-        """Wire the plan at memtiles over ends of ``source``'s lanes
-        (``Operand.reader``); returns, per lane of ``sink``, the fifo it reads,
-        of ``sink``'s ``obj_type`` at its consumers.
+        """Wire the plan at memtiles over ends of ``source``'s lanes (``Operand.reader``); returns.
+
+        Per lane of ``sink``, the fifo it reads, of ``sink``'s ``obj_type`` at its
+        consumers.
         """
         source, sink = self.source, self.sink
         fifos: list[Any] = [None] * sink.lanes
@@ -897,9 +903,10 @@ class Staging:
         return fifos
 
     def joined(self, ends: list, slots: list[int], read_as: Any) -> ObjectFifo:
-        """A memtile fifo whose objects join ``ends``' objects, each its slot
-        (``slots``, in elements); its consumers read objects of ``read_as``
-        where given.
+        """Return a memtile fifo whose objects join ``ends``' objects.
+
+        Each its slot (``slots``, in elements); its consumers read objects of
+        ``read_as`` where given.
         """
         obj = np.ndarray[(sum(slots),), np.dtype[self.sink.dtype]]
         fifo = ObjectFifo(

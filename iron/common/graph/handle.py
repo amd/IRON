@@ -125,8 +125,9 @@ class Handle:
         return cls(Buffer(name, role, shape, dtype), shape, dtype)
 
     def valid_index(self, values: Mapping[str, int]) -> tuple[slice, ...]:
-        """The index of the entries valid in a call with per-call ``values``:
-        each bounded axis cut to its count, the others whole.
+        """Return the index of the entries valid in a call with per-call ``values``.
+
+        Each bounded axis cut to its count, the others whole.
         """
         key = [slice(None)] * len(self.shape)
         for axis, count in self.valid.items():
@@ -754,8 +755,10 @@ def state(shape, dtype=bfloat16, name=None) -> State:
 
 
 class _Param(np.ndarray):
-    """A ``param``: an array a graph holds as a weight, and where in a file
-    it was read from, if it was (``source``).
+    """A ``param``.
+
+    An array a graph holds as a weight, and where in a file it was read from, if it was
+    (``source``).
     """
 
     source: Source | None = None

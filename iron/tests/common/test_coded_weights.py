@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A weight a coded operand reads, recorded device-free: the recorder binds
-the coded rows derived from it, one buffer for every such read, and the
-graph's reference still reads the weight itself.
+"""A weight a coded operand reads, recorded device-free.
+
+The recorder binds the coded rows derived from it, one buffer for every such read, and
+the graph's reference still reads the weight itself.
 """
 
 import os
@@ -109,7 +110,7 @@ def test_a_weight_past_its_capacity_is_read_plain_with_a_warning(caplog):
 
 
 def _checkpoint(tmp_path, overflow=False):
-    """A one-tensor checkpoint, its tensor (a param, as a graph holds it)."""
+    """Return a one-tensor checkpoint, its tensor (a param, as a graph holds it)."""
     w, _ = _weights()
     w = w[:64, :256].copy()
     if overflow:
@@ -182,9 +183,7 @@ def test_a_report_names_each_coded_weight_and_each_read_plain(caplog):
 
 
 def test_a_profile_turns_coding_on_by_gemv_shape(tmp_path):
-    """The opt-in is a profile entry, ``"coded_a": true`` for a GEMV shape,
-    which round-trips through the profile's JSON like any tunable.
-    """
+    """The opt-in is a profile entry, ``"coded_a": true`` for a GEMV shape, which round-trips through the profile's JSON like any tunable."""
     profile = iron.Profile()
     profile.add(GEMV, M=E, K=E, coded_a=True)
     profile.save(tmp_path / "npu2.json")
@@ -207,8 +206,9 @@ def test_a_profile_turns_coding_on_by_gemv_shape(tmp_path):
 
 
 def test_a_weight_of_one_matrix_reads_coded_as_a_batch_of_one():
-    """Llama's packed decode steps give GEMV num_batches=1: A is (1, M, K)
-    of a weight held (M, K).
+    """Llama's packed decode steps give GEMV num_batches=1.
+
+    A is (1, M, K) of a weight held (M, K).
     """
     w, _ = _weights()
 
@@ -228,9 +228,10 @@ def test_a_weight_of_one_matrix_reads_coded_as_a_batch_of_one():
 
 
 def _channels(op) -> list:
-    """The DMA channels ``op``'s module asks for: per logical tile, its
-    kind and the fifos it produces and consumes, and per fifo, the kinds
-    of its ends.
+    """Return the DMA channels ``op``'s module asks for.
+
+    Per logical tile, its kind and the fifos it produces and consumes, and per fifo, the
+    kinds of its ends.
     """
     text = str(OperatorDesign(op.resolved()).module())
     kinds = dict(re.findall(r"(%\w+) = aie\.logical_tile<(\w+)>", text))
@@ -250,9 +251,10 @@ def _channels(op) -> list:
 
 
 def test_coding_a_gemv_s_weight_takes_no_channel_more():
-    """A packing priced for plain GEMVs must fit coded ones: for each
-    catalog shape coding can take, the same fifos between the same kinds
-    of tile, and the same count at every tile.
+    """A packing priced for plain GEMVs must fit coded ones.
+
+    For each catalog shape coding can take, the same fifos between the same kinds of
+    tile, and the same count at every tile.
     """
     compared = 0
     for case in GEMV.test.resolve(GEMV, aie_utils.get_current_device()):
@@ -267,12 +269,12 @@ def test_coding_a_gemv_s_weight_takes_no_channel_more():
 
 
 def test_gemvs_sharing_an_array_share_it_coded_and_split_it_mixed():
-    """Llama 1B's packed decode runs its q/o, k/v and gate/up GEMVs (K=2048,
-    four rows a call, 32 a C tile) on one 8-core array: 32 cores in all,
-    the device's every core. Coded alike they still share one array; coded
-    on some and not others they need two, 40 cores, and the pack no longer
-    places ("no available compute tiles"). coded_a is the array's, so a
-    profile codes such GEMVs all or none.
+    """Llama 1B's packed decode runs its q/o, k/v and gate/up GEMVs (K=2048, four rows a call, 32 a C tile) on one 8-core array.
+
+    32 cores in all, the device's every core. Coded alike they still share one array;
+    coded on some and not others they need two, 40 cores, and the pack no longer places
+    ("no available compute tiles"). coded_a is the array's, so a profile codes such
+    GEMVs all or none.
     """
 
     def array(M, coded_a):

@@ -318,9 +318,10 @@ class Standalone:
         return out
 
     def written(self, k: int = 0) -> dict[str, np.ndarray]:
-        """What step ``k`` wrote in the last run, by buffer name: along a
-        bounded axis only the rows under the call's bound; a fused step's
-        elided buffer (no host copy once fused) is left out.
+        """Return what step ``k`` wrote in the last run, by buffer name.
+
+        Along a bounded axis only the rows under the call's bound; a fused step's elided
+        buffer (no host copy once fused) is left out.
         """
         op = self.steps[k]
         out = {}
@@ -395,9 +396,10 @@ _LOCK_DEPTH = 0
 
 
 def _other_user_on_npu(me: str) -> bool:
-    """Whether some user other than ``me`` has a ``run_on_npu.py`` in their
-    process args right now: coord/npu's own wait, replicated, since flock
-    alone only keeps out this lock's own other users, not a bare script.
+    """Whether some user other than ``me`` has a ``run_on_npu.py`` in their process args right now.
+
+    Coord/npu's own wait, replicated, since flock alone only keeps out this lock's own
+    other users, not a bare script.
     """
     out = subprocess.run(
         ["ps", "-eo", "user=,args="], capture_output=True, text=True, check=True
@@ -411,11 +413,11 @@ def _other_user_on_npu(me: str) -> bool:
 
 @contextlib.contextmanager
 def npu_lock(lock: bool = False):
-    """The device lock ``coord/npu`` takes (an exclusive flock on
-    ``NPU_LOCK_PATH``, then waiting out another user's own ``run_on_npu
-    .py``), a no-op context unless ``lock`` is True; re-entrant, so a caller
-    already holding it (an outer ``npu_lock(lock=True)`` spanning a whole
-    measurement) may call something that takes it again.
+    """Return the device lock ``coord/npu`` takes (an exclusive flock on ``NPU_LOCK_PATH``, then waiting out another user's own ``run_on_npu .py``).
+
+    A no-op context unless ``lock`` is True; re-entrant, so a caller already holding it
+    (an outer ``npu_lock(lock=True)`` spanning a whole measurement) may call something
+    that takes it again.
 
     A caller whose images stay loaded (a context created on first dispatch)
     past its own dispatch call must hold this for as long as that is true,
@@ -454,10 +456,11 @@ def npu_lock(lock: bool = False):
 def prebuild(
     builds: Iterable[Callable[..., Standalone]],
 ) -> dict[Callable[..., Standalone], concurrent.futures.Future]:
-    """Each of ``builds``' images compiled on a pool of ``BUILD_JOBS``
-    threads, in order, so the device times one batch while the next builds;
-    building one again then reads the compile cache. A build's error is its
-    future's, raised where the caller builds it for real.
+    """Each of ``builds``' images compiled on a pool of ``BUILD_JOBS`` threads, in order.
+
+    So the device times one batch while the next builds; building one again then reads
+    the compile cache. A build's error is its future's, raised where the caller builds
+    it for real.
     """
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=BUILD_JOBS)
     out = {
@@ -469,10 +472,10 @@ def prebuild(
 
 
 def sized(timing: Timing, runs: Sequence[Callable[[], object]]) -> Timing:
-    """``timing`` with a round of ``runs`` about ``ROUND_US`` long, each at
-    least ``MIN_CALLS`` calls: a round of long steps (a prompt chunk's,
-    hundreds of ms) runs fewer calls, its median no noisier for it. Each of
-    ``runs`` is called once, to time it.
+    """Return ``timing`` with a round of ``runs`` about ``ROUND_US`` long, each at least ``MIN_CALLS`` calls.
+
+    A round of long steps (a prompt chunk's, hundreds of ms) runs fewer calls, its
+    median no noisier for it. Each of ``runs`` is called once, to time it.
     """
     begun = time.perf_counter()
     for run in runs:
@@ -579,9 +582,10 @@ class Measurement:
 
 @dataclasses.dataclass(frozen=True)
 class FusionMeasurement:
-    """A candidate fusion's step, as ``measure_fusion`` timed it: its steps
-    fused on-chip against the same steps run apart, each edge's buffer
-    shared through the host instead, timed in one run so their rounds pair.
+    """A candidate fusion's step, as ``measure_fusion`` timed it.
+
+    Its steps fused on-chip against the same steps run apart, each edge's buffer shared
+    through the host instead, timed in one run so their rounds pair.
 
     Attributes:
         fused: The fused steps' step.
@@ -595,16 +599,12 @@ class FusionMeasurement:
     refused: str | None = None
 
     def difference(self) -> tuple[float, float | None]:
-        """How much longer the fused steps' step takes than run apart, and
-        that difference's standard error (``Measurement.difference``).
-        """
+        """How much longer the fused steps' step takes than run apart, and that difference's standard error (``Measurement.difference``)."""
         return self.fused.difference(self.apart)
 
 
 def _hashed(arrays: Mapping[str, np.ndarray] | None) -> list[tuple[str, str]]:
-    """``arrays`` by name, each a sha256 of its contents, so a cache key
-    follows what an input holds rather than its identity.
-    """
+    """``arrays`` by name, each a sha256 of its contents, so a cache key follows what an input holds rather than its identity."""
     return sorted(
         (name, hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest())
         for name, a in (arrays or {}).items()
@@ -671,14 +671,14 @@ class Cache:
         kind: FusionKind = FusionKind.STREAM,
         fused: Sequence[Operator] | None = None,
     ) -> str:
-        """The entry a fusion of ``steps`` wired by ``edges`` (local indices)
-        is kept in as each operator, resolved for the current device, is run
-        at its own values on its own inputs, packaged as one full ELF or
-        not: every step's build and the wiring, so an existing operator
-        figure's key (``Cache.key``) is untouched. ``fused``, where it
-        differs from ``steps`` (a joint narrowing search's on-chip
-        combination), is part of the key too, so a narrower setting prices
-        apart from the fusion at its members' own.
+        """Return the entry a fusion of ``steps`` wired by ``edges`` (local indices) is kept in as each operator.
+
+        Resolved for the current device, is run at its own values on its own inputs,
+        packaged as one full ELF or not: every step's build and the wiring, so an
+        existing operator figure's key (``Cache.key``) is untouched. ``fused``, where it
+        differs from ``steps`` (a joint narrowing search's on-chip combination), is part
+        of the key too, so a narrower setting prices apart from the fusion at its
+        members' own.
         """
         designs = [OperatorDesign(op.resolved()).compilable() for op in steps]
         values = values or [{}] * len(steps)
@@ -722,9 +722,7 @@ class Cache:
         write(self.directory / f"{key}.json", json.dumps(dataclasses.asdict(m)) + "\n")
 
     def get_fusion(self, key: str) -> FusionMeasurement | None:
-        """The fusion measurement at ``key``; None if there is none, or it
-        was written with other fields than ``FusionMeasurement`` has.
-        """
+        """Return the fusion measurement at ``key``; None if there is none, or it was written with other fields than ``FusionMeasurement`` has."""
         path = self.directory / "fusions" / f"{key}.json"
         if not path.exists():
             return None
@@ -753,9 +751,10 @@ class Cache:
 
     @staticmethod
     def switch_cost_key(dev) -> str:
-        """The entry a device-configuration switch's cost at ``dev`` is kept
-        in: the probe designs ``switch_cost`` alternates, so editing how
-        they are generated misses rather than reusing a stale cost.
+        """Return the entry a device-configuration switch's cost at ``dev`` is kept in.
+
+        The probe designs ``switch_cost`` alternates, so editing how they are generated
+        misses rather than reusing a stale cost.
         """
         designs = [
             OperatorDesign(op.resolved(dev)).compilable()
@@ -765,9 +764,7 @@ class Cache:
         return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
 
     def get_switch_cost(self, key: str) -> tuple[float, float] | None:
-        """The ``(fixed_us, per_core_us)`` at ``key``; None if there is none,
-        or it was written with other fields than that pair has.
-        """
+        """Return the ``(fixed_us, per_core_us)`` at ``key``; None if there is none, or it was written with other fields than that pair has."""
         path = self.directory / "switch_cost" / f"{key}.json"
         if not path.exists():
             return None
@@ -951,11 +948,11 @@ def _digest(written: Mapping[str, np.ndarray]) -> str:
 
 
 def written_steps(run: Standalone) -> dict[str, np.ndarray]:
-    """Every host-visible output ``run``'s steps wrote (``Standalone
-    .written``, which already leaves out an on-chip one), keyed by step
-    index and buffer name so two steps' same-named output does not collide:
-    what a rewrite's output is judged by, however many final steps it has
-    (a fan-out's several, a fold's one in place of many).
+    """Every host-visible output ``run``'s steps wrote (``Standalone .written``, which already leaves out an on-chip one).
+
+    Keyed by step index and buffer name so two steps' same-named output does not
+    collide: what a rewrite's output is judged by, however many final steps it has (a
+    fan-out's several, a fold's one in place of many).
     """
     return {
         f"{k}.{name}": v
@@ -967,11 +964,12 @@ def written_steps(run: Standalone) -> dict[str, np.ndarray]:
 def _rewrite_mismatch(
     recorded_out: Mapping[str, np.ndarray], rewritten_out: Mapping[str, np.ndarray]
 ) -> str | None:
-    """Why ``rewritten_out`` may not replace ``recorded_out``: missing or
-    extra keys, or any key's values differing, named with how many of its
-    elements differ and by how much at most, so a refusal distinguishes a
-    narrower (expected, no gain) outcome from a correctness bug (any
-    mismatch at all, which never should happen for a built fusion).
+    """Why ``rewritten_out`` may not replace ``recorded_out``.
+
+    Missing or extra keys, or any key's values differing, named with how many of its
+    elements differ and by how much at most, so a refusal distinguishes a narrower
+    (expected, no gain) outcome from a correctness bug (any mismatch at all, which never
+    should happen for a built fusion).
     """
     if recorded_out.keys() != rewritten_out.keys():
         missing = recorded_out.keys() - rewritten_out.keys()
@@ -1004,15 +1002,20 @@ def measure_rewrite(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> tuple[Measurement, Measurement, str | None]:
-    """Time the steps ``rewritten`` builds against the same steps
-    ``as_recorded`` builds, each ``repeats`` times over one, interleaved in
-    one run so rounds pair, the per-pair step excess as ``measure`` finds an
-    operator's. Each built once (at one repeat) first and compared via
-    ``output``: a rewrite whose output is not bit-identical to the recorded
-    steps' is refused. Kind-agnostic: a stream fusion, a fold or a pack
+    """Time the steps ``rewritten`` builds against the same steps ``as_recorded`` builds.
+
+    Each ``repeats`` times over one, interleaved in one run so rounds pair, the per-pair
+    step excess as ``measure`` finds an operator's. Each built once (at one repeat)
+    first and compared via ``output``: a rewrite whose output is not bit-identical to
+    the recorded steps' is refused. Kind-agnostic: a stream fusion, a fold or a pack
     calls this the same way, each building its own designs over one dataflow.
 
     Args:
+        as_recorded: The steps as recorded.
+        rewritten: The same steps rewritten.
+        timing: How the two are timed.
+        repeats: Steps in each long run a step's time is taken from.
+        log: Where progress is logged.
         as_recorded, rewritten: Each takes a run's name and its repeat
             count, and returns a loaded (``load=False``) ``Standalone``.
         output: What a run wrote, by name, to compare the two designs by.
@@ -1091,12 +1094,12 @@ _SPACER_SIZES = (1024, 2048, 4096, 8192, 16384)
 def _spacer(
     steps: Sequence[Operator], fused: Sequence[Operator] = ()
 ) -> ElementwiseAdd:
-    """An operator of a design distinct from ``steps`` or ``fused``, to split
-    a many-repeat probe's repeats apart (``measure_fusion``): spliced
-    between them, it makes each configure on entry as it would beside
-    another design in a model's image, rather than merging with the repeat
-    before it. Its own cost is the same whichever side of a fusion's price
-    it is spliced into, so it cancels in the difference.
+    """Return an operator of a design distinct from ``steps`` or ``fused``, to split a many-repeat probe's repeats apart (``measure_fusion``).
+
+    Spliced between them, it makes each configure on entry as it would beside another
+    design in a model's image, rather than merging with the repeat before it. Its own
+    cost is the same whichever side of a fusion's price it is spliced into, so it
+    cancels in the difference.
     """
     taken = {OperatorDesign(op.resolved()).identity for op in (*steps, *fused)}
     for size in _SPACER_SIZES:
@@ -1111,11 +1114,11 @@ def _spacer(
 def repeat_fusion(
     kind: FusionKind, base: int, n: int, edges: Sequence[tuple[int, str, int, str]]
 ) -> Fusion:
-    """The ``Fusion`` one repeat of a fused probe wires, at step index
-    ``base`` through ``base + n - 1``: ``edges`` kept for any kind that
-    takes them (``Fusion`` itself refuses any for ``PACK`` or ``MERGE``), so
-    a fan-out's several edges, or a staged one, stay wired the way
-    ``candidates`` found them.
+    """Return the ``Fusion`` one repeat of a fused probe wires, at step index ``base`` through ``base + n - 1``.
+
+    ``edges`` kept for any kind that takes them (``Fusion`` itself refuses any for
+    ``PACK`` or ``MERGE``), so a fan-out's several edges, or a staged one, stay wired
+    the way ``candidates`` found them.
     """
     return Fusion(
         kind,
@@ -1140,15 +1143,23 @@ def measure_fusion(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> FusionMeasurement:
-    """Time a ``kind`` fusion of ``steps`` (``STREAM`` and ``STAGED`` wired
-    by ``edges``, local indices, ``producer``'s drained output into
-    ``consumer``'s filled input, one or more; ``PACK`` or ``MERGE`` take
-    none) against the same steps run apart, an edge a normal host round
-    trip instead (``measure_rewrite``). A fusion whose host-visible outputs
-    (``written_steps``, every step's, a fan-out's several) are not
+    """Time a ``kind`` fusion of ``steps`` against the same steps run apart.
+
+    ``STREAM`` and ``STAGED`` are wired by ``edges`` (local indices, ``producer``'s
+    drained output into ``consumer``'s filled input, one or more; ``PACK`` or
+    ``MERGE`` take none); apart, an edge is a normal host round trip instead (``measure_rewrite``). A fusion whose
+    host-visible outputs (``written_steps``, every step's, a fan-out's several) are not
     bit-identical to the steps run apart is refused.
 
     Args:
+        steps: The steps fused, in order.
+        edges: Each on-chip hand-off, local indices into ``steps``.
+        full_elf: How the steps are packaged.
+        timing: How the two are timed.
+        repeats: Steps in each long run a step's time is taken from.
+        remeasure: Time again what ``cache`` holds.
+        kind: How the steps run as one configuration.
+        log: Where progress is logged.
         values: Each of ``steps``' per-call values, in its order.
         inputs: What each of ``steps``' input buffers hold, by name, where
             random bytes would not be representative.
@@ -1233,9 +1244,9 @@ def measure_fusion(
 
 
 def _switch_cost_probes(dev) -> tuple[ElementwiseAdd, ElementwiseAdd, ElementwiseAdd]:
-    """``x``, a 1-core ``ElementwiseAdd``; ``narrow``, one of 1 column at
-    ``dev``'s other size; ``wide``, one of every column ``dev`` has: the
-    three designs ``switch_cost`` alternates ``x`` against.
+    """``x``, a 1-core ``ElementwiseAdd``; ``narrow``, one of 1 column at ``dev``'s other size; ``wide``, one of every column ``dev`` has.
+
+    The three designs ``switch_cost`` alternates ``x`` against.
     """
     x = ElementwiseAdd(size=256, tile_size=128, num_aie_columns=1)
     narrow = ElementwiseAdd(size=2048, tile_size=256, num_aie_columns=1)
@@ -1253,15 +1264,22 @@ def switch_cost(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> tuple[float, float]:
-    """The cost of a device-configuration switch at ``dev``: ``fixed_us``,
-    and ``per_core_us`` of the array switched into: a 1-core ``ElementwiseAdd`` (``x``)
-    alternated with one of 1 column and one of ``dev.cols`` columns (each
-    its own ``y``), each pair against itself repeated ``short`` and
-    ``long`` times, so a repeat's own configure cancels (``per_step``) and
-    only the alternation's excess switch remains (``excess``); the two
-    columns' excess then fit to a line in the column count.
+    """Return the cost of a device-configuration switch at ``dev``.
+
+    ``fixed_us``, and ``per_core_us`` of the array switched into: a 1-core
+    ``ElementwiseAdd`` (``x``) alternated with one of 1 column and one of ``dev.cols``
+    columns (each its own ``y``), each pair against itself repeated ``short`` and
+    ``long`` times, so a repeat's own configure cancels (``per_step``) and only the
+    alternation's excess switch remains (``excess``); the two columns' excess then fit
+    to a line in the column count.
 
     Args:
+        dev: The device whose switch is timed.
+        timing: How the probes are timed.
+        short: Probe steps in the short run.
+        long: Probe steps in the long run.
+        remeasure: Time again what ``cache`` holds.
+        log: Where progress is logged.
         cache: The cost is taken from it rather than measured, unless
             `remeasure`; what is measured is written to it.
         lock: Take ``NPU_LOCK_PATH`` from the first load through releasing

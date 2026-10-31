@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A profile's packing on the device: a graph whose designs share one
-device configuration computes what it does with each design configured
-apart, bit for bit, and its reference.
+"""A profile's packing on the device.
+
+A graph whose designs share one device configuration computes what it does with each
+design configured apart, bit for bit, and its reference.
 """
 
 import re

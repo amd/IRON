@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``Image(fusions=...)``: a run of steps streamed on-chip into the next, all
-running as one device configuration with no host transfer between them. No
-toolchain and no NPU below ``test_fusion_device.py``'s line.
+"""``Image(fusions=...)``.
+
+A run of steps streamed on-chip into the next, all running as one device configuration
+with no host transfer between them. No toolchain and no NPU below
+``test_fusion_device.py``'s line.
 """
 
 import statistics
@@ -33,7 +35,7 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 
 def _fuse(producer: int, output: str, input: str) -> Fusion:
-    """A two-step stream fusion, as a ``Chain`` used to be spelled."""
+    """Return a two-step stream fusion, as a ``Chain`` used to be spelled."""
     return Fusion(
         FusionKind.STREAM,
         (producer, producer + 1),
@@ -111,9 +113,7 @@ def _three_step_fusion() -> Fusion:
 
 @pytest.mark.parametrize("size,cols", [(2048, 1), (8192, 8)])
 def test_fused_pair_is_one_device_configuration(size, cols):
-    """A fused pair places as one device, which is one fewer ``aie.device``
-    than the same two steps unfused; its identity differs too.
-    """
+    """A fused pair places as one device, which is one fewer ``aie.device`` than the same two steps unfused; its identity differs too."""
     tile = 1024
     silu, mul = _silu_mul(size, cols, tile)
     fused = Image(
@@ -153,9 +153,9 @@ def test_fused_identity_differs_from_unfused():
 
 
 def test_gemv_to_elementwiseadd_fused_pair_is_one_device_configuration():
-    """GEMV.C -> ElementwiseAdd.b (Llama decode's residual adds) places as one
-    device, as the Elementwise-only pair does: the generalization is not
-    restricted to ``Elementwise``.
+    """GEMV.C -> ElementwiseAdd.b (Llama decode's residual adds) places as one device, as the Elementwise-only pair does.
+
+    The generalization is not restricted to ``Elementwise``.
     """
     gemv, add = _gemv_add(2048, 2048)
     fused = Image(
@@ -183,9 +183,7 @@ def test_gemv_to_elementwiseadd_fused_pair_is_one_device_configuration():
 
 
 def test_three_step_fusion_is_one_device_configuration():
-    """GEMV -> SiLU -> ElementwiseMul, all three fused, drops two
-    ``aie.device``s against the same steps unfused.
-    """
+    """GEMV -> SiLU -> ElementwiseMul, all three fused, drops two ``aie.device``s against the same steps unfused."""
     gemv, silu, mul = _gemv_silu_mul(2048, 1, 2048)
     fused = Image(
         _gemv_silu_mul_recording("three_step_struct_fused", gemv, silu, mul),
@@ -257,9 +255,10 @@ def test_step_in_two_fusions_refused():
 
 
 def test_perstep_builds_fusions_but_check_refuses_them():
-    """A per-step image links a fusion's steps as one xclbin
-    (``iron.common.image.link.FusedDesign``); ``check=True`` still refuses,
-    since it holds each step to its reference on its own dispatch."""
+    """A per-step image links a fusion's steps as one xclbin (``iron.common.image.link.FusedDesign``); ``check=True`` still refuses.
+
+    Since it holds each step to its reference on its own dispatch.
+    """
     silu, mul = _silu_mul(2048, 1, 1024)
     Image(
         _recording("fuse_perstep", silu, mul), PerStep(), fusions=(_fuse(0, "y", "a"),)
@@ -284,9 +283,10 @@ def test_fusion_steps_must_be_increasing_and_distinct():
 
 
 def test_edge_skipping_a_non_member_step_refused():
-    """An edge between two members may not skip a step between them that is
-    not itself a member: that step would have to run on another device
-    configuration, interleaved between the fusion's two halves.
+    """An edge between two members may not skip a step between them that is not itself a member.
+
+    That step would have to run on another device configuration, interleaved between the
+    fusion's two halves.
     """
     with pytest.raises(ValueError, match="skips a step"):
         Fusion(FusionKind.STREAM, (0, 2), (Edge(0, "y", 2, "a"),))
@@ -307,9 +307,9 @@ def test_fusion_input_fed_twice_refused():
 
 
 def test_bind_refuses_a_fed_input():
-    """A build that bound a fed input's own lanes, rather than reading them
-    from ``fifos()``, would silently ignore the feed and hang; ``bind()``
-    refuses it instead.
+    """A build that bound a fed input's own lanes, rather than reading them from ``fifos()``.
+
+    Would silently ignore the feed and hang; ``bind()`` refuses it instead.
     """
     kwargs = dict(size=2048, num_aie_columns=1, tile_size=2048, low=0.0, high=1.0)
     producer = Clamp(**kwargs).resolved()
@@ -324,9 +324,7 @@ def test_bind_refuses_a_fed_input():
 
 
 def test_feed_refuses_a_pinned_source():
-    """``Gather`` pins its output to shim channels rather than streaming it
-    through a fifo, so it cannot feed another operator on-chip.
-    """
+    """``Gather`` pins its output to shim channels rather than streaming it through a fifo, so it cannot feed another operator on-chip."""
     gather = Gather(rows=8, table_rows=8, row=32, feeds=1).resolved()
     produced = BuiltArray(OperatorDesign(gather))
     (source,) = [b for b in produced.op.buffers if b.name == "y"]
@@ -338,9 +336,9 @@ def test_feed_refuses_a_pinned_source():
 
 
 def test_feed_refuses_a_lane_order_mismatch():
-    """GEMV with ``num_batches`` streams ``C`` as one run per batch; a plain
-    ElementwiseAdd of the same per-lane tile reads a single run, so lane 0's
-    host access order differs, and ``feed`` names it.
+    """GEMV with ``num_batches`` streams ``C`` as one run per batch; a plain ElementwiseAdd of the same per-lane tile reads a single run.
+
+    So lane 0's host access order differs, and ``feed`` names it.
     """
     gemv = GEMV(
         M=2048, K=64, num_batches=4, tile_size_input=4, tile_size_output=256
@@ -359,9 +357,7 @@ def test_feed_refuses_a_lane_order_mismatch():
 
 @pytest.mark.supported_devices("npu2")
 def test_fused_matches_reference_and_unfused():
-    """silu(gate) * up fused on-chip holds to the operators' references
-    fused, and is bit-equal to the same two steps run unfused.
-    """
+    """silu(gate) * up fused on-chip holds to the operators' references fused, and is bit-equal to the same two steps run unfused."""
     size, cols, tile = 2048, 1, 1024
 
     def build(fusions):
@@ -402,8 +398,9 @@ def test_fused_matches_reference_and_unfused():
 
 @pytest.mark.supported_devices("npu2")
 def test_fused_per_call_shared_value():
-    """Both operators' ``valid`` bound to one graph value share one scratchpad
-    word (``FullELF.shared_words``), which the device still reads correctly.
+    """Both operators' ``valid`` bound to one graph value share one scratchpad word (``FullELF.shared_words``).
+
+    Which the device still reads correctly.
     """
     size, cols, tile = 2048, 1, 1024
     silu, mul = _silu_mul(size, cols, tile, bound_values={"valid": None})
@@ -453,12 +450,12 @@ def test_fused_per_call_shared_value():
 
 @pytest.mark.supported_devices("npu2")
 def test_gemv_to_elementwiseadd_matches_reference_and_unfused(record_property):
-    """Llama decode's GEMV(M=2048, K=2048) -> ElementwiseAdd residual add,
-    fused on-chip, holds to the operators' references fused and is
-    bit-equal to the same two steps run unfused; also times both the
-    tuner's way (``time_interleaved``: each image's calls run in turn within
-    a round, so a round pays one hardware-context load per image rather
-    than one per call), min and median over interleaved rounds.
+    """Llama decode's GEMV(M=2048, K=2048) -> ElementwiseAdd residual add, fused on-chip.
+
+    Holds to the operators' references fused and is bit-equal to the same two steps run
+    unfused; also times both the tuner's way (``time_interleaved``: each image's calls
+    run in turn within a round, so a round pays one hardware-context load per image
+    rather than one per call), min and median over interleaved rounds.
     """
     M, K = 2048, 2048
 
@@ -510,8 +507,9 @@ def test_gemv_to_elementwiseadd_matches_reference_and_unfused(record_property):
 
 @pytest.mark.supported_devices("npu2")
 def test_three_step_fusion_matches_reference_and_unfused():
-    """GEMV -> SiLU -> ElementwiseMul, all three fused on-chip, holds to the
-    operators' references fused and is bit-equal to the same three steps
+    """GEMV -> SiLU -> ElementwiseMul, all three fused on-chip.
+
+    Holds to the operators' references fused and is bit-equal to the same three steps
     run unfused.
     """
     M, cols, tile = 2048, 1, 2048

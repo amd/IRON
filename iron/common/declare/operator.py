@@ -178,11 +178,11 @@ class Operator(jit.Operator, library=True):
         raise NotImplementedError(f"{type(self).__name__}.build() is not implemented")
 
     def fold(self, consumer: Self, at: int) -> Self | None:
-        """This operator with ``consumer`` finishing its output tile in its
-        own cores: ``consumer``'s kernel runs there before the tile leaves
-        L1, input ``at`` the tile and its others new streams of this
-        operator's. None where this operator does not finish others, or
-        not this one.
+        """Return this operator with ``consumer`` finishing its output tile in its own cores.
+
+        ``consumer``'s kernel runs there before the tile leaves L1, input ``at`` the
+        tile and its others new streams of this operator's. None where this operator
+        does not finish others, or not this one.
         """
         return None
 
@@ -220,10 +220,11 @@ class Operator(jit.Operator, library=True):
     def shim_columns(
         cls, dev, num_channels: int = 1, flags: Mapping[str, Any] | None = None
     ) -> int:
-        """How many of ``dev``'s columns fit the class's streams in the shim DMA
-        budget: a ``replicate`` stream costs once per channel, one with no
-        ``per=`` once, and a ``when=`` flag, or an obj_shape ``Select``'s,
-        ``flags`` leaves out is its default.
+        """How many of ``dev``'s columns fit the class's streams in the shim DMA budget.
+
+        A ``replicate`` stream costs once per channel, one with no ``per=`` once, and a
+        ``when=`` flag, or an obj_shape ``Select``'s, ``flags`` leaves out is its
+        default.
 
         Raises:
             Unresolvable: Not even one column's streams fit.
@@ -324,11 +325,14 @@ class Operator(jit.Operator, library=True):
         rng: np.random.Generator,
         values: Mapping[str, int],
     ) -> dict[str, np.ndarray]:
-        """For a run alone, the content of each input that names device
-        ``addresses`` (every buffer's, by name), by buffer name: random bytes
-        there would steer the DMA anywhere. Other inputs are filled at random.
+        """For a run alone, the content of each input that names device ``addresses`` (every buffer's, by name), by buffer name.
+
+        Random bytes there would steer the DMA anywhere. Other inputs are filled at
+        random.
 
         Args:
+            addresses: Every buffer's device address, by buffer name.
+            rng: What fills the rest of such an input.
             values: The call's per-call values by member name; an input built
                 from a bound (``valid_rows``) must follow it, as the call does.
         """
@@ -435,11 +439,11 @@ class Operator(jit.Operator, library=True):
     def lane_transfers(
         self, operand: Operand
     ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]] | None:
-        """``operand``'s per-lane host access order, where ``sequence(rt)`` is
-        hand-written and the derived order does not hold: ``Operand.transfers()``'s
-        own ``(lane, tap, length_parameter, length_unit)`` tuples, one lane at
-        a time. None where this operator does not describe ``operand``
-        (``transfers()`` then falls back to the derived order, or raises).
+        """``operand``'s per-lane host access order, where ``sequence(rt)`` is hand-written and the derived order does not hold.
+
+        ``Operand.transfers()``'s own ``(lane, tap, length_parameter, length_unit)``
+        tuples, one lane at a time. None where this operator does not describe
+        ``operand`` (``transfers()`` then falls back to the derived order, or raises).
 
         A lane whose bound start is not static, or whose ``length_parameter``
         does not reach ``Operand.transfers()``'s own round-robin axis, is

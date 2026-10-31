@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A device's cost model beyond its steps' times (``iron.tune.costmodel``):
-its prior, its fit to samples, and its file."""
+"""A device's cost model beyond its steps' times (``iron.tune.costmodel``).
+
+Its prior, its fit to samples, and its file.
+"""
 
 import pytest
 

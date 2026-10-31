@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GEMV's ``B`` fed on-chip from another operator's output: ``feed_b=True``
-(``iron/operators/gemv.py``) makes it a real stream of its own, every lane
-holding a ``.cons()`` of its single broadcast fifo, rather than riding a
-head tile on ``A``'s, so ``feed()`` applies to it like any other streamed
-input. ``feed_b`` defaults to False (the head-tile layout, byte-identical
-to every pre-fusion catalog case) and costs a shim channel only where set,
-so every call below gives it explicitly.
+"""GEMV's ``B`` fed on-chip from another operator's output.
+
+``feed_b=True`` (``iron/operators/gemv.py``) makes it a real stream of its own, every
+lane holding a ``.cons()`` of its single broadcast fifo, rather than riding a head tile
+on ``A``'s, so ``feed()`` applies to it like any other streamed input. ``feed_b``
+defaults to False (the head-tile layout, byte-identical to every pre-fusion catalog
+case) and costs a shim channel only where set, so every call below gives it explicitly.
 
 A fed ``B`` needs a source with exactly as many lanes as GEMV has cores,
 since every one of its dot products reads the whole vector, not a share
@@ -50,10 +50,10 @@ def _fuse(producer: int, output: str, consumer_input: str) -> Fusion:
 
 @pytest.mark.supported_devices("npu2")
 def test_rmsnorm_to_gemv_b_matches_reference_and_unfused(record_property):
-    """RMSNorm(rows=1, weighted) -> GEMV(M=2048, K=2048).B, fed on-chip,
-    holds to the operators' references fused and is bit-equal to the same
-    two steps run unfused; also times both, min and median over
-    interleaved rounds.
+    """RMSNorm(rows=1, weighted) -> GEMV(M=2048, K=2048).B, fed on-chip.
+
+    Holds to the operators' references fused and is bit-equal to the same two steps run
+    unfused; also times both, min and median over interleaved rounds.
     """
     M = K = 2048
     rms = RMSNorm(rows=1, tile_size=K, weighted=True, num_aie_columns=1)
@@ -118,8 +118,9 @@ def test_rmsnorm_to_gemv_b_matches_reference_and_unfused(record_property):
 
 @pytest.mark.supported_devices("npu2")
 def test_elementwisemul_to_gemv_b_matches_reference_and_unfused(record_property):
-    """ElementwiseMul -> GEMV(M=2048).B, fed on-chip, holds to the
-    operators' references fused and is bit-equal to the same two steps run
+    """ElementwiseMul -> GEMV(M=2048).B, fed on-chip.
+
+    Holds to the operators' references fused and is bit-equal to the same two steps run
     unfused; also times both, min and median over interleaved rounds.
 
     Llama decode's down projection feeds GEMV.B from a 8192-element,

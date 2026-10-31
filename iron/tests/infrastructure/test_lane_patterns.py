@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``Operator.lane_transfers()``'s faithfulness: for every catalog case of an
-operator with a hand-written ``sequence(rt)``, the per-lane host access order
-it describes must equal, element for element, what the generated module's
-shim tasks actually move. Device-free: ``generated_sequence`` only emits MLIR.
+"""``Operator.lane_transfers()``'s faithfulness.
+
+For every catalog case of an operator with a hand-written ``sequence(rt)``, the per-lane
+host access order it describes must equal, element for element, what the generated
+module's shim tasks actually move. Device-free: ``generated_sequence`` only emits MLIR.
 """
 
 from math import prod
@@ -29,8 +30,9 @@ NPU2 = DEVICES["npu2"]()
 
 
 def _lane_order(op, name: str) -> dict[int, np.ndarray]:
-    """Per logical lane (in the order ``build()`` bound them), the flat
-    elements the generated module's shim tasks move for buffer ``name``, in
+    """Per logical lane (in the order ``build()`` bound them).
+
+    The flat elements the generated module's shim tasks move for buffer ``name``, in
     emission order.
     """
     _, tasks = generated_sequence(op, full_elf=False)
@@ -78,9 +80,7 @@ def _assert_described_and_faithful(op, name: str) -> None:
 
 @pytest.mark.parametrize("case", GEMM.test.resolve(GEMM, NPU2), ids=lambda c: c.label)
 def test_gemm_lanes_are_faithful(case):
-    """GEMM bounds its compute, not its DMA (AGENTS.md), so A, B and C's order
-    holds at every catalog case regardless of a per-call bound.
-    """
+    """GEMM bounds its compute, not its DMA (AGENTS.md), so A, B and C's order holds at every catalog case regardless of a per-call bound."""
     op = GEMM(**case.kwargs).resolved(NPU2)
     for name in ("A", "B", "C"):
         _assert_described_and_faithful(op, name)
@@ -88,18 +88,18 @@ def test_gemm_lanes_are_faithful(case):
 
 @pytest.mark.parametrize("case", MHA.test.resolve(MHA, NPU2), ids=lambda c: c.label)
 def test_mha_lanes_are_faithful(case):
-    """Q and O stream every row unconditionally; K and V's order is checked
-    at the unbounded catalog shapes, where ``length_parameter`` is None."""
+    """Q and O stream every row unconditionally; K and V's order is checked at the unbounded catalog shapes, where ``length_parameter`` is None."""
     op = MHA(**case.kwargs).resolved(NPU2)
     for name in ("Q", "O", "K", "V"):
         _assert_described_and_faithful(op, name)
 
 
 def test_mha_k_and_v_match_the_generated_module_under_a_kv_bound():
-    """``kv_blocks``, the ``length_parameter`` K and V describe, is the same
-    real per-call parameter the generated module's shim tasks patch their
-    length from, under a growing KV cache's attention (AGENTS.md's
-    "length-free extents").
+    """``kv_blocks``, the ``length_parameter`` K and V describe.
+
+    Is the same real per-call parameter the generated module's shim tasks patch their
+    length from, under a growing KV cache's attention (AGENTS.md's "length-free
+    extents").
     """
     op = MHA(num_heads=8, num_KV_heads=2, seq_len=2048, kv_len=8192, num_pipelines=8)
     op.use_value("kv_valid", PerCall("n", Kind.SCRATCHPAD, np.int32).affine())
@@ -146,10 +146,10 @@ def test_gather_y_lanes_are_faithful_unbounded():
 
 @pytest.mark.parametrize("rows", [15, 31, 32, 64])
 def test_gather_y_lanes_match_the_generated_module_under_a_bound(rows):
-    """Each feed's drain length (``drainedN``, 16-byte units: valid rows at
-    full length, the rest padding) is the real word the generated module
-    patches, at several row counts either side of a feed boundary (``rows``
-    is 64 over 4 feeds of ``chain``-batches, 8 rows a batch).
+    """Each feed's drain length (``drainedN``, 16-byte units: valid rows at full length, the rest padding) is the real word the generated module patches.
+
+    At several row counts either side of a feed boundary (``rows`` is 64 over 4 feeds of
+    ``chain``-batches, 8 rows a batch).
     """
     op = Gather(rows=64, table_rows=1024, row=256)
     op.use_value("valid_rows", PerCall("n", Kind.SCRATCHPAD, np.int32).affine())
@@ -210,9 +210,10 @@ _PROJECTION_GEMM_CASES = [
 
 @pytest.mark.parametrize("kwargs,described", _PROJECTION_GEMM_CASES)
 def test_projection_gemm_lanes_are_faithful(kwargs, described):
-    """A and C are described at one slab, ``m_chunk=1``, with every column
-    doing work; past that (a second slab, too few active columns, a split
-    leg) ``lane_transfers`` refuses, same as the catalog cases above would if
+    """A and C are described at one slab, ``m_chunk=1``.
+
+    With every column doing work; past that (a second slab, too few active columns, a
+    split leg) ``lane_transfers`` refuses, same as the catalog cases above would if
     their own derived order did not hold.
     """
     op = ProjectionGEMM(**kwargs, precision=Precision.MEDIUM).resolved(NPU2)
@@ -226,10 +227,11 @@ def test_projection_gemm_lanes_are_faithful(kwargs, described):
 
 
 def test_projection_gemm_refuses_a_per_call_bound():
-    """A row bound moves A and C through a dynamic start (the second half of
-    the core rows) that ``Operand.transfers()``'s tuple does not carry (only
-    ``length_parameter``/``length_unit``), so a bound call is refused rather
-    than described wrong.
+    """A row bound moves A and C through a dynamic start ``Operand.transfers()`` does not carry.
+
+    The start is the second half of the core rows, and the tuple carries only
+    ``length_parameter``/``length_unit``, so a bound call is refused rather than
+    described wrong.
     """
     op = ProjectionGEMM(M=2048, K=512, N=1024, precision=Precision.MEDIUM)
     op.use_value("valid", PerCall("n", Kind.SCRATCHPAD, np.int32).affine())
@@ -239,8 +241,9 @@ def test_projection_gemm_refuses_a_per_call_bound():
 
 
 def test_projection_gemm_refuses_a_second_slab_under_a_bound():
-    """A row bound still needs one slab (``_single_slab``), whether or not it
-    is reached: a shape refused unbounded (two slabs) is refused bounded too.
+    """A row bound still needs one slab (``_single_slab``), whether or not it is reached.
+
+    A shape refused unbounded (two slabs) is refused bounded too.
     """
     op = ProjectionGEMM(M=16384, K=512, N=1024, precision=Precision.MEDIUM)
     op.use_value("valid", PerCall("n", Kind.SCRATCHPAD, np.int32).affine())
@@ -250,8 +253,9 @@ def test_projection_gemm_refuses_a_second_slab_under_a_bound():
 
 
 def test_projection_gemm_m_chunk_refuses_a_bound_before_building():
-    """``m_chunk > 1`` under a row bound is already refused at ``resolve()``
-    (``compatible()``): ``lane_transfers`` never has to.
+    """``m_chunk > 1`` under a row bound is already refused at ``resolve()`` (``compatible()``).
+
+    ``lane_transfers`` never has to.
     """
     op = ProjectionGEMM(M=512, K=512, N=20480, m_chunk=2, precision=Precision.MEDIUM)
     op.use_value("valid", PerCall("n", Kind.SCRATCHPAD, np.int32).affine())

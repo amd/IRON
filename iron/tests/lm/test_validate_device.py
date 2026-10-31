@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``iron.lm.validate`` end to end against real dispatch, at SMALL's shape
-(``iron.tests.support.llama_model.small``, drawn weights, no checkpoint
-directory needed): a candidate profile adding one on-chip fusion is live,
-compiles its own image, and is bit-identical to stock and within its own
-accuracy of the graph's reference.
+"""``iron.lm.validate`` end to end against real dispatch.
+
+At SMALL's shape (``iron.tests.support.llama_model.small``, drawn weights, no checkpoint
+directory needed): a candidate profile adding one on-chip fusion is live, compiles its
+own image, and is bit-identical to stock and within its own accuracy of the graph's
+reference.
 """
 
 import pytest
@@ -22,9 +23,7 @@ pytestmark = pytest.mark.supported_devices("npu2")
 
 
 def _silu_mul_entry(recording):
-    """The ``(SiLU, dims)`` -> ``(ElementwiseMul, dims)`` fusion entry
-    ``recording`` admits, in ``Profile.add_fusion``'s own shape.
-    """
+    """Return the ``(SiLU, dims)`` -> ``(ElementwiseMul, dims)`` fusion entry ``recording`` admits, in ``Profile.add_fusion``'s own shape."""
     fusion = next(
         f
         for f in candidates(recording)

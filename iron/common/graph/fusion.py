@@ -22,11 +22,12 @@ _built: dict[tuple[str, str, str, str], FusionKind | None] = {}
 def _admits(
     producer: Operator, output: str, consumer: Operator, input_: str
 ) -> FusionKind | None:
-    """How ``producer``'s resolved ``output`` can feed ``consumer``'s resolved
-    ``input_`` on-chip: ``STREAM`` where the pair's ``BuiltArray``s build fed
-    directly (``Operand.feed``'s checks pass), else ``STAGED`` where they build
-    staged through memtiles; None where neither does. Whether it places is
-    left to the widths its members run at fused, which a tuner chooses.
+    """How ``producer``'s resolved ``output`` can feed ``consumer``'s resolved ``input_`` on-chip.
+
+    ``STREAM`` where the pair's ``BuiltArray``s build fed directly (``Operand.feed``'s
+    checks pass), else ``STAGED`` where they build staged through memtiles; None where
+    neither does. Whether it places is left to the widths its members run at fused,
+    which a tuner chooses.
     """
     try:
         producer_design = OperatorDesign(producer)
@@ -60,16 +61,16 @@ _STREAM_MAX_RUN = 8
 def _hand_offs(
     recording: Recording, ops: list[Operator]
 ) -> dict[str, tuple[int, str, dict[int, str]]]:
-    """Each buffer root one step's output can hand on-chip to every step that
-    reads it, ``ops`` the steps' resolved operators: ``(writer, output,
-    {reader: input})``. The output is a streamed drain of the whole root,
-    which only that step writes and is not a graph output, feedback, pinned
-    or resident buffer; each reader comes later and reads the whole root
-    through one streamed, non-``replicate`` input, no host step reads it,
-    and every reader's edge admits (``_admits``). An input that streams only
-    with one of its reader's bool tunables flipped (GEMV's ``B``, at
-    ``feed_b``) is admitted so, that variant replacing the reader in ``ops``:
-    a tuner finds and writes the setting the fusion runs at.
+    """Each buffer root one step's output can hand on-chip to every step that reads it, ``ops`` the steps' resolved operators.
+
+    ``(writer, output, {reader: input})``. The output is a streamed drain of the whole
+    root, which only that step writes and is not a graph output, feedback, pinned or
+    resident buffer; each reader comes later and reads the whole root through one
+    streamed, non-``replicate`` input, no host step reads it, and every reader's edge
+    admits (``_admits``). An input that streams only with one of its reader's bool
+    tunables flipped (GEMV's ``B``, at ``feed_b``) is admitted so, that variant
+    replacing the reader in ``ops``: a tuner finds and writes the setting the fusion
+    runs at.
     """
     excluded = (
         {h.name for h in recording.outputs}
@@ -152,12 +153,12 @@ def _hand_offs(
 
 
 def _stream_runs(recording: Recording) -> list[Fusion]:
-    """Every window of 2 to ``_STREAM_MAX_RUN`` consecutive steps, no host step
-    crossing it, that runs as one stream or staged fusion: each root two of
-    its steps share, one writing, is a hand-off (``_hand_offs``) whose writer
-    and every reader are in it, an edge each; every step is on an edge. The
-    fusion is staged where an edge admits only staged. Ordered by first step,
-    then by length; whether one places is left to a tuner's widths.
+    """Every window of 2 to ``_STREAM_MAX_RUN`` consecutive steps, no host step crossing it, that runs as one stream or staged fusion.
+
+    Each root two of its steps share, one writing, is a hand-off (``_hand_offs``) whose
+    writer and every reader are in it, an edge each; every step is on an edge. The
+    fusion is staged where an edge admits only staged. Ordered by first step, then by
+    length; whether one places is left to a tuner's widths.
     """
     resolved = [step.op.resolved() for step in recording.steps]
     hand_offs = _hand_offs(recording, resolved)
@@ -211,18 +212,19 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
 
 
 def _crosses_host(recording: Recording, lo: int, hi: int) -> bool:
-    """Whether a host step runs between steps ``lo`` and ``hi`` (inclusive):
-    host code the model's own graph runs between two device dispatches,
-    which neither packing concurrently nor merging back to back may skip
-    past.
+    """Whether a host step runs between steps ``lo`` and ``hi`` (inclusive).
+
+    Host code the model's own graph runs between two device dispatches, which neither
+    packing concurrently nor merging back to back may skip past.
     """
     return any(lo < s.at <= hi for s in recording.host)
 
 
 def _pack_conflicts(recording: Recording) -> set[tuple[int, int]]:
-    """Index pairs ``(i, j)``, ``i < j``, whose steps are not independent:
-    one writes a host buffer root the other reads or writes too (root-level,
-    so a byte-range part of a buffer stands for the whole of it).
+    """Index pairs ``(i, j)``, ``i < j``, whose steps are not independent.
+
+    One writes a host buffer root the other reads or writes too (root-level, so a
+    byte-range part of a buffer stands for the whole of it).
     """
     reads: list[set[str]] = []
     writes: list[set[str]] = []
@@ -244,9 +246,10 @@ def _pack_conflicts(recording: Recording) -> set[tuple[int, int]]:
 
 
 def _pack_runs(recording: Recording) -> list[Fusion]:
-    """Every maximal run of consecutive, pairwise independent steps
-    (``_pack_conflicts``, no host step crossing it) and all of their
-    contiguous sub-runs of 2+, overlapping ones included.
+    """Every maximal run of consecutive.
+
+    Pairwise independent steps (``_pack_conflicts``, no host step crossing it) and all
+    of their contiguous sub-runs of 2+, overlapping ones included.
     """
     conflicts = _pack_conflicts(recording)
     n = len(recording.steps)
@@ -277,11 +280,11 @@ _MERGE_MAX_RUN = 4
 
 
 def _merge_runs(recording: Recording) -> list[Fusion]:
-    """Every consecutive run of 2 to ``_MERGE_MAX_RUN`` steps, no host step
-    crossing it (``_crosses_host``), overlapping ones included, whose steps
-    each build an array of their own here: not reference-only, shipped or
-    exported by another tool. Whether a run fits is left to the widths its
-    members run at fused, which a tuner chooses.
+    """Every consecutive run of 2 to ``_MERGE_MAX_RUN`` steps, no host step crossing it (``_crosses_host``).
+
+    Overlapping ones included, whose steps each build an array of their own here: not
+    reference-only, shipped or exported by another tool. Whether a run fits is left to
+    the widths its members run at fused, which a tuner chooses.
     """
     n = len(recording.steps)
     found: list[Fusion] = []
@@ -305,11 +308,11 @@ def candidates(
     recording: Recording,
     kinds: Sequence[FusionKind] = (FusionKind.STREAM, FusionKind.STAGED),
 ) -> tuple[Fusion, ...]:
-    """Every admissible fusion of ``kinds`` (default the on-chip edge kinds,
-    stream and staged, what every caller but ``fusions`` asks for): stream
-    and staged runs (``_stream_runs``), pack runs (``_pack_runs``) and merge
-    runs (``_merge_runs``), each ordered by first step, then by length. The
-    tuner prices each and ``fusions`` picks among them.
+    """Every admissible fusion of ``kinds`` (default the on-chip edge kinds, stream and staged, what every caller but ``fusions`` asks for).
+
+    Stream and staged runs (``_stream_runs``), pack runs (``_pack_runs``) and merge runs
+    (``_merge_runs``), each ordered by first step, then by length. The tuner prices each
+    and ``fusions`` picks among them.
     """
     found: list[Fusion] = []
     if FusionKind.STREAM in kinds or FusionKind.STAGED in kinds:
@@ -330,9 +333,9 @@ _EVERY_KIND = (
 
 
 def fusions(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
-    """``candidates(recording, kinds)`` of every kind that ``profile`` names
-    (``Profile.fused``), a step in at most one fusion: first in step order
-    wins.
+    """``candidates(recording, kinds)`` of every kind that ``profile`` names (``Profile.fused``), a step in at most one fusion.
+
+    First in step order wins.
     """
     found: list[Fusion] = []
     taken: set[int] = set()

@@ -493,9 +493,7 @@ class Softmax(Operator):
         rt.finish(tg)
 
     def lane_transfers(self, operand):
-        """``x``'s rows are read thrice (streamed) or once, over blocks a
-        bound may shorten; ``addend`` and ``y`` read or write that span once.
-        """
+        """``x``'s rows are read thrice (streamed) or once, over blocks a bound may shorten; ``addend`` and ``y`` read or write that span once."""
         if operand not in (self.x, self.y) and not (
             self.has_addend and operand is self.addend
         ):

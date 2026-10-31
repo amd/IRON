@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Which folds the tuner proposes (``iron.tune.fold``), scoped to the ones
-that do not split a device array a call site sharing it does not also take.
-No device, no toolchain: recording and bookkeeping only.
+"""Which folds the tuner proposes (``iron.tune.fold``).
+
+Scoped to the ones that do not split a device array a call site sharing it does not also
+take. No device, no toolchain: recording and bookkeeping only.
 """
 
 import aie.utils as aie_utils
@@ -25,9 +26,10 @@ def _kinds(recording, fusion) -> tuple[str, ...]:
 
 @pytest.fixture(scope="module")
 def decode():
-    """Llama 3.2 1B's real decode step, device-free, bound for every test
-    in this module (``npu2`` is function-scoped, so a module-scoped fixture
-    binds its own device rather than taking it).
+    """Llama 3.2 1B's real decode step, device-free.
+
+    Bound for every test in this module (``npu2`` is function-scoped, so a module-scoped
+    fixture binds its own device rather than taking it).
     """
     with aie_utils.set_current_device(NPU2()):
         model = llama_1b(num_hidden_layers=16)
@@ -36,12 +38,13 @@ def decode():
 
 
 def test_array_scoping_drops_o_proj_and_keeps_down_proj_and_silu(decode):
-    """``fold_candidates`` finds 48: o_proj's and down_proj's own residual
-    add (32, one ``GEMV`` each), and SwiGLU's gate (16, ``SiLU``). o_proj
-    shares its ``GEMV M=2048 K=2048`` array with q_proj, which never folds
-    (nothing follows it but RoPE); down_proj's own ``GEMV M=2048 K=8192`` is
-    not shared with anything, and every one of SiLU's 16 calls folds alike,
-    so only those 32 survive scoping.
+    """``fold_candidates`` finds 48.
+
+    O_proj's and down_proj's own residual add (32, one ``GEMV`` each), and SwiGLU's gate
+    (16, ``SiLU``). o_proj shares its ``GEMV M=2048 K=2048`` array with q_proj, which
+    never folds (nothing follows it but RoPE); down_proj's own ``GEMV M=2048 K=8192`` is
+    not shared with anything, and every one of SiLU's 16 calls folds alike, so only
+    those 32 survive scoping.
     """
     every = fold_candidates(decode)
     assert len(every) == 48
@@ -58,9 +61,10 @@ def test_array_scoping_drops_o_proj_and_keeps_down_proj_and_silu(decode):
 
 
 def test_q_and_o_still_share_one_array_after_the_scoped_folds_apply(decode):
-    """Scoping exists so folding never costs an array split: after
-    ``propose_folds``'s own candidates apply, q_proj and o_proj (``GEMV
-    M=2048 K=2048``) are still one array, exactly as unfolded
+    """Scoping exists so folding never costs an array split.
+
+    After ``propose_folds``'s own candidates apply, q_proj and o_proj (``GEMV M=2048
+    K=2048``) are still one array, exactly as unfolded
     (``iron.tests.lm.test_modules.test_a_decode_steps_q_and_o_share_one_array``).
     """
     proposed = propose_folds(decode)
@@ -79,9 +83,9 @@ def test_q_and_o_still_share_one_array_after_the_scoped_folds_apply(decode):
 
 
 def test_propose_folds_excludes_the_fragmenting_candidate(decode):
-    """``propose_folds`` on the unscoped candidates never proposes o_proj's
-    own residual add: every candidate it returns is one ``array_scoped_fold_
-    candidates`` also returns.
+    """``propose_folds`` on the unscoped candidates never proposes o_proj's own residual add.
+
+    Every candidate it returns is one ``array_scoped_fold_ candidates`` also returns.
     """
     proposed = set(propose_folds(decode))
     scoped = set(array_scoped_fold_candidates(decode))
@@ -92,10 +96,11 @@ def test_propose_folds_excludes_the_fragmenting_candidate(decode):
 
 
 def test_fold_profile_writes_down_projs_add_and_silus_mul_by_shape(decode):
-    """``fold_profile`` adds one fold entry a layer-specific ``down_proj``
-    GEMV matches (``K=8192``), none a ``q_proj``/``o_proj`` one (``K=2048``)
-    matches, and one for ``SiLU``, each scoped to the one version it was
-    found in (``decode``'s own); it leaves ``base``'s own entries alone.
+    """``fold_profile`` adds one fold entry a layer-specific ``down_proj`` GEMV matches (``K=8192``).
+
+    None a ``q_proj``/``o_proj`` one (``K=2048``) matches, and one for ``SiLU``, each
+    scoped to the one version it was found in (``decode``'s own); it leaves ``base``'s
+    own entries alone.
     """
     base = Profile()
     base.add(GEMV, M=2048, K=2048, tile_size_input=4, tile_size_output=256)
@@ -121,8 +126,9 @@ def test_fold_profile_writes_down_projs_add_and_silus_mul_by_shape(decode):
 
 
 def test_fold_profile_is_idempotent_given_its_own_output(decode):
-    """Running ``fold_profile`` again over what it just wrote adds nothing
-    new: the same 32 candidates propose and dedupe to the same two entries.
+    """Running ``fold_profile`` again over what it just wrote adds nothing new.
+
+    The same 32 candidates propose and dedupe to the same two entries.
     """
     once = fold_profile(Profile(), [Timed(decode)])
     twice = fold_profile(once, [Timed(decode)])

@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Applying a profile's packings (``Profile.add_packing``) to a recording:
-the steps of each packing's shapes, where it applies in the recording's
-version, rebuilt at the tunables it gives them, and their designs grouped
-into one device configuration, which a full ELF then configures once for
-every step of them in a row.
+"""Applying a profile's packings (``Profile.add_packing``) to a recording.
+
+The steps of each packing's shapes, where it applies in the recording's version, rebuilt
+at the tunables it gives them, and their designs grouped into one device configuration,
+which a full ELF then configures once for every step of them in a row.
 """
 
 from __future__ import annotations
@@ -24,13 +24,13 @@ from .record import Recording
 def apply(
     recording: Recording, profile: Profile, fused: Sequence[Fusion], dev
 ) -> tuple[Recording, Packing]:
-    """``recording`` with each step a packing entry applying in its version
-    names (``Profile.packings_of``), outside ``fused``, rebuilt at its
-    member's tunables, and the packing grouping their designs, one group per
-    entry that names two or more of them. Where several entries name a
-    step's shape, the one naming most of the recording's shapes takes it,
-    the earlier on a tie: the grouping found for this graph, not another
-    model's that shares one of its shapes.
+    """Return ``recording`` with each step a packing entry applying in its version names (``Profile.packings_of``).
+
+    Outside ``fused``, rebuilt at its member's tunables, and the packing grouping their
+    designs, one group per entry that names two or more of them. Where several entries
+    name a step's shape, the one naming most of the recording's shapes takes it, the
+    earlier on a tie: the grouping found for this graph, not another model's that shares
+    one of its shapes.
     """
     inside = {i for f in fused for i in f.steps}
     version = recording.version

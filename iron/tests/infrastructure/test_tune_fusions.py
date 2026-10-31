@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pricing on-chip fusions: grouping the fusions a tuner's calls admit, and
-choosing among them cheapest first. No device below the line.
+"""Pricing on-chip fusions.
+
+Grouping the fusions a tuner's calls admit, and choosing among them cheapest first. No
+device below the line.
 """
 
 import getpass
@@ -84,7 +86,7 @@ W = np.zeros(2048, bfloat16)
 
 
 def _fused_graph():
-    """A graph recording ``ElementwiseMul(SiLU(x), W)``, fusable at size=2048."""
+    """Return a graph recording ``ElementwiseMul(SiLU(x), W)``, fusable at size=2048."""
 
     class Fused(iron.Graph):
         def body(self, x):
@@ -95,8 +97,9 @@ def _fused_graph():
 
 
 def _group(dev, first: int, rid: int = 0) -> FusionGroup:
-    """A ``FusionGroup`` of SiLU -> ElementwiseMul, occurring once starting
-    at ``first`` of recording ``rid``: enough for ``select_rewrites``.
+    """Return a ``FusionGroup`` of SiLU -> ElementwiseMul, occurring once starting at ``first`` of recording ``rid``.
+
+    Enough for ``select_rewrites``.
     """
     silu = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
     mul = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
@@ -194,12 +197,12 @@ def test_fusion_groups_carries_each_points_weight():
 
 
 def test_op_values_falls_back_to_the_calls_own_value_a_point_does_not_give():
-    """A point need not repeat every per-call value the call itself already
-    gives: ``n``, which ``RoPE``'s one step binds its rows to, comes from
-    ``Timed.values`` alone since neither point moves it, both points
-    folding into the one identity it gives.
+    """A point need not repeat every per-call value the call itself already gives.
+
+    ``n``, which ``RoPE``'s one step binds its rows to, comes from ``Timed.values``
+    alone since neither point moves it, both points folding into the one identity it
+    gives.
     """
-    dev = aie_utils.ensure_current_device()
     recording = Rotate().record(x=(256, 64), angles=(256, 64))
     call = Timed(recording, values={"n": 128}, points=[Point(0.4, {}), Point(0.6, {})])
     [op] = {s.op for s in recording.steps}
@@ -250,8 +253,9 @@ def test_select_rewrites_excludes_a_refused_trial():
 
 
 def test_repeat_fusion_keeps_edges_for_a_kind_other_than_stream():
-    """A staged fan-out's edges stay wired: ``Fusion`` itself refuses any
-    only for ``PACK`` and ``MERGE``.
+    """A staged fan-out's edges stay wired.
+
+    ``Fusion`` itself refuses any only for ``PACK`` and ``MERGE``.
     """
     fusion = repeat_fusion(FusionKind.STAGED, 3, 2, [(0, "y", 1, "a")])
     assert fusion.steps == (3, 4)
@@ -290,10 +294,10 @@ def test_rewrite_mismatch_names_missing_and_extra_keys():
 
 
 def test_npu_lock_is_a_noop_unless_told_to_lock():
-    """Every existing caller (every test run under ``coord/npu``) passes no
-    ``lock``, taking none here at all; only a long sweep run without that
-    wrapper passes ``lock=True``, taking the same lock per measurement
-    instead.
+    """Every existing caller (every test run under ``coord/npu``) passes no ``lock``.
+
+    Taking none here at all; only a long sweep run without that wrapper passes
+    ``lock=True``, taking the same lock per measurement instead.
     """
     with npu_lock():
         pass
@@ -302,11 +306,11 @@ def test_npu_lock_is_a_noop_unless_told_to_lock():
 
 
 def test_npu_lock_nested_reenters_without_a_second_flock(tmp_path):
-    """A caller already holding this lock (an outer ``npu_lock(lock=True)``
-    spanning a whole measurement's loaded images) enters it again
-    (``time_interleaved``'s own, say) without blocking on itself: only the
-    outermost entry takes the real flock, over a private file here, not the
-    shared ``coord`` one.
+    """A caller already holding this lock enters it again without blocking on itself.
+
+    An outer ``npu_lock(lock=True)`` spans a whole measurement's loaded images and
+    ``time_interleaved``'s own enters again: only the outermost entry takes the real
+    flock, over a private file here, not the shared ``coord`` one.
     """
     path = tmp_path / "test.lock"
     old_path = tune_measure.NPU_LOCK_PATH
@@ -323,9 +327,10 @@ def test_npu_lock_nested_reenters_without_a_second_flock(tmp_path):
 
 
 def test_other_user_on_npu_ignores_a_run_on_npu_under_my_own_name():
-    """Parses real ``ps`` output: a ``run_on_npu.py`` under a name that isn't
-    mine is someone else on the device; the same process under my own name
-    (what ``ps`` reports me spawning it as) is not.
+    """Parses real ``ps`` output.
+
+    A ``run_on_npu.py`` under a name that isn't mine is someone else on the device; the
+    same process under my own name (what ``ps`` reports me spawning it as) is not.
     """
     proc = subprocess.Popen(
         ["python3", "-c", "import time; time.sleep(5)", "run_on_npu.py"]
@@ -339,9 +344,10 @@ def test_other_user_on_npu_ignores_a_run_on_npu_under_my_own_name():
 
 
 def test_standalone_refuses_shared_buffers_for_a_fused_edge():
-    """Not distinct, a repeat past the first resolves an edge's buffer name
-    from another repeat's canonical slot, silently unwiring the feed; a
-    pack or a merge takes no edges, so it is spared the refusal below.
+    """Not distinct, a repeat past the first resolves an edge's buffer name from another repeat's canonical slot.
+
+    Silently unwiring the feed; a pack or a merge takes no edges, so it is spared the
+    refusal below.
     """
     dev = aie_utils.ensure_current_device()
     silu = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
@@ -366,10 +372,10 @@ def test_standalone_allows_shared_buffers_for_a_pack():
 
 
 def _merge_members(dev, add_cols=None):
-    """RMSNorm -> GEMV -> ElementwiseAdd at Llama 1B decode's own shape
-    (``rows=1``, ``M=K=2048``): the profile's own widths do not co-reside
-    (GEMV and ElementwiseAdd both the whole chip wide); narrowing
-    ElementwiseAdd alone lets them.
+    """RMSNorm -> GEMV -> ElementwiseAdd at Llama 1B decode's own shape (``rows=1``, ``M=K=2048``).
+
+    The profile's own widths do not co-reside (GEMV and ElementwiseAdd both the whole
+    chip wide); narrowing ElementwiseAdd alone lets them.
     """
     rms = LLAMA_NPU2_PROFILE.make(RMSNorm, rows=1, tile_size=2048, weighted=True)
     gemv = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048)
@@ -390,11 +396,11 @@ def test_widths_orders_widest_first_and_keeps_its_own_setting():
 
 
 def test_fed_widths_only_tries_feed_b_true():
-    """A member fed into its ``B`` may only admit the edge at ``feed_b``
-    true, a setting its own (unfused, ``feed_b=False``) width never takes;
-    ``feed_b=False`` never builds for it, so it is never even tried (a
-    large group's exhaustive cap would otherwise crowd the only
-    combinations that can work out with ones that never can).
+    """A member fed into its ``B`` may only admit the edge at ``feed_b`` true.
+
+    A setting its own (unfused, ``feed_b=False``) width never takes; ``feed_b=False``
+    never builds for it, so it is never even tried (a large group's exhaustive cap would
+    otherwise crowd the only combinations that can work out with ones that never can).
     """
     dev = aie_utils.ensure_current_device()
     gemv = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048)
@@ -403,8 +409,11 @@ def test_fed_widths_only_tries_feed_b_true():
 
 
 def test_fed_widths_offers_only_widths_that_resolve_fed(npu1):
-    """On npu1 a fed B is one more shim stream: q's own four columns at two
-    channels no longer fit, so narrowing never builds them (it raised)."""
+    """On npu1 a fed B is one more shim stream.
+
+    Q's own four columns at two channels no longer fit, so narrowing never builds them
+    (it raised).
+    """
     gemv = LLAMA_NPU1_PROFILE.make(GEMV, M=2048, K=2048).resolved(npu1)
     found = _fed_widths(gemv, npu1)
     assert found
@@ -437,11 +446,12 @@ def test_group_fit_verdict_finds_the_merge_that_only_fits_narrowed(tmp_path):
 
 
 def test_group_fit_verdict_misses_a_record_keyed_on_recipes_alone(tmp_path):
-    """A verdict cached by recipe hash alone, as a key that composed
-    nothing and so could not reflect how ``iron.common.image.compose``
-    actually built these designs together, is never read: the real key is
-    the composed module's own text plus each design's build, which cannot
-    collide with a recipe-only one.
+    """A verdict cached by recipe hash alone.
+
+    As a key that composed nothing and so could not reflect how
+    ``iron.common.image.compose`` actually built these designs together, is never read:
+    the real key is the composed module's own text plus each design's build, which
+    cannot collide with a recipe-only one.
     """
     dev = aie_utils.ensure_current_device()
     ops = [
@@ -463,10 +473,10 @@ def test_group_fit_verdict_misses_a_record_keyed_on_recipes_alone(tmp_path):
 
 
 def test_group_fit_verdict_caches_a_different_record_for_a_different_kind(tmp_path):
-    """The module ``fits`` composes differs by kind even over the same
-    designs (a pack gives each member its own array, fuse=True; a merge
-    shares one by identity), so each kind gets its own cache record, never
-    reusing the other's verdict.
+    """The module ``fits`` composes differs by kind even over the same designs.
+
+    A pack gives each member its own array (fuse=True) and a merge shares one by
+    identity, so each kind gets its own cache record, never reusing the other's verdict.
     """
     dev = aie_utils.ensure_current_device()
     a = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
@@ -477,13 +487,12 @@ def test_group_fit_verdict_caches_a_different_record_for_a_different_kind(tmp_pa
 
 
 def test_narrowings_tries_every_combination_for_a_fan_out_not_just_the_widest():
-    """A fan-out's all-widest combination dominates every other
-    (``_dominates``) but, with no feasibility check behind it
-    (``group_fit_verdict`` does not model a feed's shared buffer), that
-    gives dominance nothing to prune on: pruning it anyway would collapse
-    the search to that one combination alone, which rarely co-resides,
-    and never discover a narrower one (q/k/v at (8,4,2) columns, say) that
-    does.
+    """A fan-out's all-widest combination dominates every other (``_dominates``) but.
+
+    With no feasibility check behind it (``group_fit_verdict`` does not model a feed's
+    shared buffer), that gives dominance nothing to prune on: pruning it anyway would
+    collapse the search to that one combination alone, which rarely co-resides, and
+    never discover a narrower one (q/k/v at (8,4,2) columns, say) that does.
     """
     dev = aie_utils.ensure_current_device()
     rms = LLAMA_NPU2_PROFILE.make(RMSNorm, rows=1, tile_size=2048, weighted=True)
@@ -514,10 +523,11 @@ def test_narrowings_narrows_only_the_member_that_needs_it(tmp_path):
 
 
 def test_a_fusion_entry_names_no_dimension_a_host_sizes():
-    """A host fits its own context, which sizes the decode step's KV cache
-    and so MHA and the cache copies: a fusion entry found at one context
-    names none of those dimensions, so the model fitted to another fuses
-    the same steps."""
+    """A host fits its own context, which sizes the decode step's KV cache and so MHA and the cache copies.
+
+    A fusion entry found at one context names none of those dimensions, so the model
+    fitted to another fuses the same steps.
+    """
     dev = aie_utils.ensure_current_device()
     model, sibling = small(), small(max_seq_len=512)
     [decode] = calls(
@@ -533,9 +543,10 @@ def test_a_fusion_entry_names_no_dimension_a_host_sizes():
 
 
 def test_group_dims_carries_the_narrowed_combos_tunables():
-    """``FusionGroup.dims(combo)`` names each step's tunables for
-    ``Profile.add_fusion``, so a member narrowed to co-reside takes that
-    setting only inside this fusion, not wherever its shape runs unfused.
+    """``FusionGroup.dims(combo)`` names each step's tunables for ``Profile.add_fusion``.
+
+    So a member narrowed to co-reside takes that setting only inside this fusion, not
+    wherever its shape runs unfused.
     """
     dev = aie_utils.ensure_current_device()
     rms, gemv, add = _merge_members(dev)
@@ -569,8 +580,7 @@ def test_price_fusions_with_no_candidates_keeps_tunables_and_fusion_entries():
 
 @pytest.mark.parametrize("full_elf", [True, False])
 def test_price_fusions_prices_merges_only_on_an_xclbin_per_step(npu1, full_elf):
-    """On an xclbin per step nothing packs, so a merge, consecutive steps as
-    one dispatch, is priced there; a full ELF leaves it to packings."""
+    """On an xclbin per step nothing packs, so a merge, consecutive steps as one dispatch, is priced there; a full ELF leaves it to packings."""
     recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
     calls = [Timed(recording)]
     every = len(fusion_groups(calls, npu1, tuple(FusionKind)))
@@ -643,11 +653,12 @@ def test_refused_round_trips_through_its_file_atomically(tmp_path):
 
 
 def test_price_fusions_skips_a_group_already_refused_as_hung(tmp_path):
-    """A group a prior call's device timeout refused is never retried: its
-    key, persisted beside the checkpoint, is loaded back and the group
-    dropped before ``narrow_group`` (and so the device) ever sees it again.
-    Every group the graph admits is pre-refused, so ``narrow_group`` is
-    never called at all here: device-free by construction, not by luck.
+    """A group a prior call's device timeout refused is never retried.
+
+    Its key, persisted beside the checkpoint, is loaded back and the group dropped
+    before ``narrow_group`` (and so the device) ever sees it again. Every group the
+    graph admits is pre-refused, so ``narrow_group`` is never called at all here:
+    device-free by construction, not by luck.
     """
     dev = aie_utils.ensure_current_device()
     recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
@@ -705,10 +716,10 @@ def _big_fused_graph():
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 def test_max_price_prices_a_batch_then_stops_until_every_group_is_priced(tmp_path):
-    """A caller holding the device lock for one call, not a whole sweep,
-    calls again for the rest: ``max_price`` below the groups found returns
-    None without selecting, confirming or saving; at or above it, the
-    profile.
+    """A caller holding the device lock for one call, not a whole sweep, calls again for the rest.
+
+    ``max_price`` below the groups found returns None without selecting, confirming or
+    saving; at or above it, the profile.
     """
     dev = aie_utils.ensure_current_device()
     recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
@@ -767,12 +778,12 @@ _END_TO_END = re.compile(r"([-+]\d+\.\d+) ± (\?|\d+\.\d+) us end to end")
 
 
 def test_confirm_fusions_drops_the_worst_group_on_a_build_failure(llama_recordings):
-    """A version (this particular combination of active groups' fusions)
-    that fails to BUILD is a real aiecc compile error, device-free to hit:
-    decode's GEMV -> ElementwiseAdd -> RMSNorm merge, every member at its
-    own (unnarrowed) width, does not place (confirmed by this same failure
-    in the real sweep that crashed it). This must drop the one candidate
-    and return no fusion taken, not crash the whole sweep.
+    """A version (this particular combination of active groups' fusions) that fails to BUILD is a real aiecc compile error, device-free to hit.
+
+    Decode's GEMV -> ElementwiseAdd -> RMSNorm merge, every member at its own
+    (unnarrowed) width, does not place (confirmed by this same failure in the real sweep
+    that crashed it). This must drop the one candidate and return no fusion taken, not
+    crash the whole sweep.
     """
     decode, _ = llama_recordings
     dev = aie_utils.ensure_current_device()
@@ -804,9 +815,10 @@ class BoundedReLUs(iron.Graph):
 
 @pytest.mark.supported_devices("npu2")
 def test_confirm_fusions_holds_a_narrowed_merge_bit_identical_at_partial_bounds():
-    """A merge narrowing two bounded ReLUs, confirmed against them unfused
-    at the full bound and at half of it: a narrowed design whose per-call
-    values went unwritten agrees at the full bound but not at half.
+    """A merge narrowing two bounded ReLUs, confirmed against them unfused at the full bound and at half of it.
+
+    A narrowed design whose per-call values went unwritten agrees at the full bound but
+    not at half.
     """
     dev = aie_utils.ensure_current_device()
     call = Timed(BoundedReLUs().record(x=(4096,)), values=dict(n=4096))
@@ -828,11 +840,11 @@ def test_confirm_fusions_holds_a_narrowed_merge_bit_identical_at_partial_bounds(
 
 
 def test_bound_points_confirm_a_prompt_chunk_at_partial_rows(llama_recordings):
-    """A full chunk runs every bound at its largest, where a design reading
-    its rows wrongly still agrees: confirmation also runs each bound
-    halved, a partial chunk among them, each within the recording's limits
-    and each a call its operators take: a full chunk's rows ending at half
-    the position would be queries past their keys, which MHA refuses.
+    """A full chunk runs every bound at its largest, where a design reading its rows wrongly still agrees.
+
+    Confirmation also runs each bound halved, a partial chunk among them, each within
+    the recording's limits and each a call its operators take: a full chunk's rows
+    ending at half the position would be queries past their keys, which MHA refuses.
     """
     _, prompt = llama_recordings
     recording, values = prompt.recording, prompt.values
@@ -845,10 +857,10 @@ def test_bound_points_confirm_a_prompt_chunk_at_partial_rows(llama_recordings):
 
 
 def test_gather_table_rows_names_an_input_roles_ids_handle(llama_recordings):
-    """The prompt chunk's embedding reads its ``ids`` input through a
-    ``Gather``; its table row count is what ``confirm_fusions`` draws
-    random ids within, not raw bytes (which range over the whole dtype,
-    past any real vocabulary, and ``Gather.control_words`` refuses them).
+    """The prompt chunk's embedding reads its ``ids`` input through a ``Gather``; its table row count is what ``confirm_fusions`` draws random ids within.
+
+    Not raw bytes (which range over the whole dtype, past any real vocabulary, and
+    ``Gather.control_words`` refuses them).
     """
     _, prompt = llama_recordings
     recording = prompt.recording
@@ -871,14 +883,15 @@ def test_gather_table_rows_names_an_input_roles_ids_handle(llama_recordings):
 def test_fixed_frame_agrees_with_decode_groups_priced_in_the_whole_step(
     llama_recordings, tmp_path
 ):
-    """Each of decode's own 2-step fusion groups (SiLU -> ElementwiseMul,
-    both residual adds' GEMV -> ElementwiseAdd, and RMSNorm -> GEMV, whose
-    vector input streams only with ``feed_b`` forced true), ``narrow_group``'s
-    standalone price against an independent figure for the same shape: timed
-    compiled into the whole decode step against the same step unfused
-    (``confirm_fusions``, whose own log line carries it, given the same
-    narrowing ``narrow_group`` found) and divided by its occurrences (2 per
-    group, one per layer, down Llama's small shape).
+    """Each of decode's own 2-step fusion groups prices standalone as it does in the step.
+
+    The groups are SiLU -> ElementwiseMul, both residual adds' GEMV -> ElementwiseAdd,
+    and RMSNorm -> GEMV, whose vector input streams only with ``feed_b`` forced true:
+    ``narrow_group``'s standalone price against an independent figure for the same
+    shape: timed compiled into the whole decode step against the same step unfused
+    (``confirm_fusions``, whose own log line carries it, given the same narrowing
+    ``narrow_group`` found) and divided by its occurrences (2 per group, one per layer,
+    down Llama's small shape).
 
     The band is each side's own standard error, summed in quadrature (the
     two are independent interleaved timings of one shape) and multiplied by
@@ -951,9 +964,9 @@ def test_fixed_frame_agrees_with_decode_groups_priced_in_the_whole_step(
 
 
 def _qkv_recording(dev):
-    """Llama decode's q/k/v GEMVs (M=2048/512/512, K=2048), independent:
-    co-reside at the profile's own width, so packing them needs no
-    narrowing.
+    """Llama decode's q/k/v GEMVs (M=2048/512/512, K=2048), independent.
+
+    Co-reside at the profile's own width, so packing them needs no narrowing.
     """
     q = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048).resolved(dev)
     k = LLAMA_NPU2_PROFILE.make(GEMV, M=512, K=2048).resolved(dev)
@@ -975,13 +988,13 @@ def _short_decode_recording(dev):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 def test_narrow_group_narrows_the_qkv_pack_to_fit(tmp_path):
-    """q, k and v each resolve to 8 columns alone, one output DMA channel a
-    column; three such streams want 24 of npu2's 16, so the pack never
-    co-resides at the profile's own width (``group_fit_verdict`` composes
-    the real fused module, each member its own array, since
-    ``d9a96bf8``'s fix: the earlier, unfused check shared the three by
-    identity and missed this). ``narrow_group`` finds the Pareto-maximal
-    combination that does co-reside instead.
+    """q, k and v each resolve to 8 columns alone.
+
+    One output DMA channel a column; three such streams want 24 of npu2's 16, so the
+    pack never co-resides at the profile's own width (``group_fit_verdict`` composes the
+    real fused module, each member its own array, since ``d9a96bf8``'s fix: the earlier,
+    unfused check shared the three by identity and missed this). ``narrow_group`` finds
+    the Pareto-maximal combination that does co-reside instead.
     """
     dev = aie_utils.ensure_current_device()
     q = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048).resolved(dev)
@@ -1007,14 +1020,14 @@ def test_narrow_group_narrows_the_qkv_pack_to_fit(tmp_path):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 def test_price_fusions_takes_the_qkv_pack_without_confirming_end_to_end(tmp_path):
-    """Three GEMVs alone, with no other step around them to amortize a
-    configure the way Llama's own decode step's other designs do, do not
-    gain from packing end to end (``confirm_fusions`` correctly drops this
-    isolated recording's pack, as it should); ``confirm=False`` checks only
-    that ``price_fusions`` finds and takes a pack on its own standalone
-    price. ``candidates`` proposes every sub-window too (q&k, k&v), each a
-    step cheaper than the full triple might overlap and take instead
-    (``select_rewrites``); any of them, narrowed or not, is this test's own.
+    """Three GEMVs alone, with no other step around them to amortize a configure the way Llama's own decode step's other designs do.
+
+    Do not gain from packing end to end (``confirm_fusions`` correctly drops this
+    isolated recording's pack, as it should); ``confirm=False`` checks only that
+    ``price_fusions`` finds and takes a pack on its own standalone price. ``candidates``
+    proposes every sub-window too (q&k, k&v), each a step cheaper than the full triple
+    might overlap and take instead (``select_rewrites``); any of them, narrowed or not,
+    is this test's own.
     """
     dev = aie_utils.ensure_current_device()
     recording = _qkv_recording(dev)
@@ -1060,16 +1073,16 @@ def test_narrow_group_prices_the_merge_that_only_fits_narrowed(tmp_path):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 def test_price_fusions_takes_the_cheaper_of_two_overlapping_fusions(tmp_path):
-    """RMSNorm -> GEMV -> ElementwiseAdd admits a GEMV -> ElementwiseAdd
-    stream, an RMSNorm -> GEMV merge, and, since ``candidates`` also proposes
-    an edge into an input that streams only with a reader's bool tunable
-    flipped (``iron.common.graph.fusion``, GEMV's ``B`` under ``feed_b``),
-    the whole chain as one RMSNorm -> GEMV -> ElementwiseAdd stream too, all
-    three overlapping at GEMV. The whole-chain stream prices cheapest (one
-    reconfigure instead of two), so ``select_rewrites`` takes it and skips
-    both the plain stream and the merge, each only a part of what it already
-    claims (``confirm_fusions`` would raise were it not bit-identical to the
-    same steps unfused).
+    """RMSNorm -> GEMV -> ElementwiseAdd admits a GEMV -> ElementwiseAdd stream, an RMSNorm -> GEMV merge.
+
+    And, since ``candidates`` also proposes an edge into an input that streams only with
+    a reader's bool tunable flipped (``iron.common.graph.fusion``, GEMV's ``B`` under
+    ``feed_b``), the whole chain as one RMSNorm -> GEMV -> ElementwiseAdd stream too,
+    all three overlapping at GEMV. The whole-chain stream prices cheapest (one
+    reconfigure instead of two), so ``select_rewrites`` takes it and skips both the
+    plain stream and the merge, each only a part of what it already claims
+    (``confirm_fusions`` would raise were it not bit-identical to the same steps
+    unfused).
     """
     dev = aie_utils.ensure_current_device()
     recording = _short_decode_recording(dev)

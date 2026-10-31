@@ -109,13 +109,14 @@ class Point:
 
 @dataclasses.dataclass(frozen=True)
 class Timed:
-    """One call of a recorded graph, as its operators are timed in: the
-    graph's per-call values, and what any buffer whose contents a step's
-    time follows holds, by graph buffer name. ``points`` are the values its
-    calls run at, where they differ from call to call: an operator whose
-    work they change is timed at each (``op_points``). ``varying`` is, by
-    ``Shape.key`` of a resolved operator, the dimensions a host sizes (a
-    model's fitted context), which a profile naming the shape leaves out.
+    """One call of a recorded graph, as its operators are timed in.
+
+    The graph's per-call values, and what any buffer whose contents a step's time
+    follows holds, by graph buffer name. ``points`` are the values its calls run at,
+    where they differ from call to call: an operator whose work they change is timed at
+    each (``op_points``). ``varying`` is, by ``Shape.key`` of a resolved operator, the
+    dimensions a host sizes (a model's fitted context), which a profile naming the shape
+    leaves out.
     """
 
     recording: Recording
@@ -127,10 +128,10 @@ class Timed:
     def op_values(
         self, op: Operator, values: Mapping[str, int] | None = None
     ) -> dict[str, int]:
-        """The per-call values ``op`` is written in this call, ``values``
-        (a point's) over the graph's own, by member name: a point need only
-        give what it moves from the call's, not every value an op's binding
-        might read.
+        """Return the per-call values ``op`` is written in this call, ``values`` (a point's) over the graph's own, by member name.
+
+        A point need only give what it moves from the call's, not every value an op's
+        binding might read.
         """
         # A table's address the graph fills in; a word step alone reads none.
         values = {
@@ -174,8 +175,7 @@ class Timed:
 
 
 def coding_tunables(op: Operator) -> set[str]:
-    """The tunables of ``op`` that make an input move as coded rows
-    (``In(coded=)``)."""
+    """Return the tunables of ``op`` that make an input move as coded rows (``In(coded=)``)."""
     return {
         b.declared_coded.name
         for b in op.inputs
@@ -323,10 +323,13 @@ class Shape:
     def named(
         self, covering: Sequence[Mapping[str, Any]], derived: bool = False
     ) -> dict[str, Any]:
-        """The dimensions its entry names: those off their field's default,
-        and every one an entry ``covering`` it names, so it outranks them.
+        """Return the dimensions its entry names.
+
+        Those off their field's default, and every one an entry ``covering`` it names,
+        so it outranks them.
 
         Args:
+            covering: The dimensions each entry covering this shape names.
             derived: Name the dimensions its operators derive too; a call
                 leaving one to its operator gives it no value an entry
                 naming it matches (``Profile.dims``).
@@ -352,10 +355,11 @@ class Shape:
         drop: frozenset[str],
         resolved: Sequence[Operator],
     ) -> dict[str, Any]:
-        """The dimensions a tunable entry for it names: ``named``'s less
-        ``drop`` (those a host sizes), unless leaving those, or the ones its
-        operators derive, out would name another shape of ``resolved``;
-        each JSON can hold (``_json_safe``).
+        """Return the dimensions a tunable entry for it names.
+
+        ``named``'s less ``drop`` (those a host sizes), unless leaving those, or the
+        ones its operators derive, out would name another shape of ``resolved``; each
+        JSON can hold (``_json_safe``).
         """
         kept = {n: v for n, v in self.named(covering).items() if n not in drop}
         if any(
@@ -574,11 +578,11 @@ def _judged(
 
 
 def _json_safe(dims: Mapping[str, Any]) -> dict[str, Any]:
-    """``dims`` (a ``Shape.named`` result) with any value JSON cannot
-    round-trip to an equal one (an access pattern, which it cannot
-    serialize at all; a tuple, which it gives back a list) left out: a
-    profile entry still names what it can of a step whose shape is not
-    wholly representable.
+    """Return ``dims`` (a ``Shape.named`` result) without values JSON cannot round-trip.
+
+    An access pattern it cannot serialize at all, and a tuple it gives back a list: a
+    profile entry still names what it can of a step whose shape is not wholly
+    representable.
     """
     out = {}
     for k, v in dims.items():
@@ -594,11 +598,12 @@ def _json_safe(dims: Mapping[str, Any]) -> dict[str, Any]:
 def replacing(
     profile: Profile | None, found: Sequence[Shape]
 ) -> tuple[dict[Hashable, list[Mapping[str, Any]]], dict[Hashable, dict[str, Any]]]:
-    """By ``found``'s shape key, what of ``profile`` covers it (``covering``,
-    for ``Shape.named``) and what it already gives (``held``, kept where a
-    new entry for it does not move it, as GEMM's ``tile_k`` below
-    ``HIGHEST``): what a shape's own new entry is written from (``autotune``,
-    the coded seed's ``coded``).
+    """Return what of ``profile`` covers each of ``found``'s shapes and what it gives.
+
+    By shape key: what covers it (``covering``, for ``Shape.named``) and what it
+    already gives (``held``, kept where a new entry for it does not move it, as GEMM's
+    ``tile_k`` below ``HIGHEST``), what a shape's own new entry is written from
+    (``autotune``, the coded seed's ``coded``).
     """
     covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
     held: dict[Hashable, dict[str, Any]] = {s.key: {} for s in found}
@@ -614,11 +619,12 @@ def merged(
     profile: Profile | None,
     new: Sequence[tuple[type, Mapping[str, Any], Mapping[str, Any]]],
 ) -> Profile:
-    """``profile``'s entries with ``new``'s (class, dimensions, tunables)
-    added, each replacing one that names exactly its dimensions (equal
-    ranks would be ambiguous): an entry a new one only outranks is kept, so
-    a shape it matches that the new ones' search did not see (another
-    version's, under ``--versions``) keeps what it gave.
+    """``profile``'s entries with ``new``'s (class, dimensions, tunables) added.
+
+    Each replacing one that names exactly its dimensions (equal ranks would be
+    ambiguous): an entry a new one only outranks is kept, so a shape it matches that the
+    new ones' search did not see (another version's, under ``--versions``) keeps what it
+    gave.
     """
     out = Profile()
     for cls, matched, tunables in profile or ():
@@ -647,14 +653,20 @@ def autotune(
     shares: Mapping[Hashable, float] | None = None,
     log: Callable[[str], None] = print,
 ) -> Profile:
-    """``profile`` with an entry for each shape of ``calls`` (``shapes``)
-    naming the fastest setting taken (``time_shape``), the recorded one where
-    none gains, named without the dimensions a host sizes (``Timed.varying``)
-    wherever that still names only its own shape (``Shape.entry``), merged
-    into its other entries (``merged``). With ``shares``, only the shapes
-    with ``SHAPE_SHARE`` of a version are searched, the costliest first.
+    """``profile`` with an entry for each shape of ``calls`` (``shapes``) naming the fastest setting taken (``time_shape``).
+
+    The recorded one where none gains, named without the dimensions a host sizes
+    (``Timed.varying``) wherever that still names only its own shape (``Shape.entry``),
+    merged into its other entries (``merged``). With ``shares``, only the shapes with
+    ``SHAPE_SHARE`` of a version are searched, the costliest first.
 
     Args:
+        dev: The device the calls' operators are timed on.
+        profile: The profile the calls were recorded under, whose other entries are
+            kept.
+        timing: How each setting's steps are timed.
+        repeats: Steps in each long run a step's time is taken from.
+        log: Where progress and the gains found are logged.
         calls: The calls whose graphs were recorded under ``profile``.
         full_elf: How the calls' graphs are packaged.
         cache: Where each time is kept across runs (``Cache.here()``).

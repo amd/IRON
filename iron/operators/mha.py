@@ -1232,10 +1232,10 @@ class MHA(Operator):
             rt.finish(tg)
 
     def lane_transfers(self, operand):
-        """Q and O stream every row whatever ``kv_valid`` bounds (the rationale
-        in AGENTS.md: a bound limits compute, not their DMA), so their order
-        follows only the static shape; K and V move only the blocks a bound
-        reaches, so their order carries ``kv_blocks`` as a ``length_parameter``.
+        """Q and O stream every row whatever ``kv_valid`` bounds (the rationale in AGENTS.md: a bound limits compute, not their DMA).
+
+        So their order follows only the static shape; K and V move only the blocks a
+        bound reaches, so their order carries ``kv_blocks`` as a ``length_parameter``.
         """
         if operand not in (self.Q, self.O, self.K, self.V):
             return None

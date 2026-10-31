@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What a version pays beyond its steps' own standalone times, per device:
-a configuration switch's fixed cost, its cost per core of the group
-switched into, and what a step pays running inside a packed configuration
-rather than alone.
+"""What a version pays beyond its steps' own standalone times, per device.
+
+A configuration switch's fixed cost, its cost per core of the group switched into, and
+what a step pays running inside a packed configuration rather than alone.
 
 Every end-to-end check of a packing adds a sample (how its features and its
 time beyond its steps moved), and the terms are refitted, pulled toward
@@ -32,8 +32,9 @@ COSTS = Path(__file__).with_name("costs")
 
 @dataclasses.dataclass
 class CostModel:
-    """The terms, in us per unit of each feature, and the samples they were
-    fitted to: each a change in features and the change in time it came with.
+    """The terms, in us per unit of each feature, and the samples they were fitted to.
+
+    Each a change in features and the change in time it came with.
     """
 
     terms: dict[str, float] = dataclasses.field(default_factory=lambda: dict(PRIOR))
@@ -45,19 +46,16 @@ class CostModel:
 
     @classmethod
     def calibrated(cls, fixed_us: float, per_core_us: float) -> CostModel:
-        """A model without samples whose prior is a measured switch's cost
-        (``measure.switch_cost``)."""
+        """Return a model without samples whose prior is a measured switch's cost (``measure.switch_cost``)."""
         prior = {**PRIOR, "switches": fixed_us, "switch_cores": per_core_us}
         return cls(terms=dict(prior), prior=prior)
 
     def predict(self, features: Mapping[str, float]) -> float:
-        """The time, in us, ``features`` add beyond the steps' own."""
+        """Return the time, in us, ``features`` add beyond the steps' own."""
         return sum(self.terms[f] * features.get(f, 0.0) for f in FEATURES)
 
     def add(self, change: Mapping[str, float], extra_us: float) -> None:
-        """Add a sample, ``change`` in features coming with ``extra_us`` of
-        time beyond the steps' own, and refit.
-        """
+        """Add a sample, ``change`` in features coming with ``extra_us`` of time beyond the steps' own, and refit."""
         self.samples.append(
             ({f: float(change.get(f, 0.0)) for f in FEATURES}, extra_us)
         )

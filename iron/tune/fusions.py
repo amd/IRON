@@ -87,9 +87,9 @@ NARROWING_EXHAUSTIVE = 32
 
 
 class FusionGroup:
-    """Every occurrence of one fusion shape - its steps' shapes, in order,
-    and the edges wiring them - across a tuner's calls: what
-    ``time_fusion_group`` prices as a whole, and one fusion entry covers
+    """Every occurrence of one fusion shape - its steps' shapes, in order, and the edges wiring them - across a tuner's calls.
+
+    What ``time_fusion_group`` prices as a whole, and one fusion entry covers
     (``Profile.add_fusion``).
     """
 
@@ -121,9 +121,7 @@ class FusionGroup:
         return (self.kind, tuple(s.key for s in self.shapes), self.edges)
 
     def claims(self) -> set[tuple[int, int]]:
-        """The (recording, step) pairs this fusion's steps occupy, in every
-        recording it runs in.
-        """
+        """Return the (recording, step) pairs this fusion's steps occupy, in every recording it runs in."""
         out: set[tuple[int, int]] = set()
         for rid, first in self.occurrences:
             out.update((rid, first + i) for i in range(len(self.steps)))
@@ -137,11 +135,11 @@ class FusionGroup:
     def dims(
         self, combo: Sequence[Mapping[str, Any]] | None = None
     ) -> list[tuple[type, dict[str, Any], Mapping[str, Any] | None]]:
-        """This fusion's steps as a profile entry names them
-        (``Profile.add_fusion``), each with the tunables ``combo`` (a joint
-        narrowing search's chosen setting, ``narrow_group``'s) gives it;
-        None throughout where ``combo`` is, a group that needed no
-        narrowing. A member is named without the dimensions a host sizes
+        """Return this fusion's steps as a profile entry names them (``Profile.add_fusion``).
+
+        Each with the tunables ``combo`` (a joint narrowing search's chosen setting,
+        ``narrow_group``'s) gives it; None throughout where ``combo`` is, a group that
+        needed no narrowing. A member is named without the dimensions a host sizes
         wherever that still names only its own shape.
         """
         out = []
@@ -168,14 +166,13 @@ class FusionGroup:
 def fusion_groups(
     calls: Sequence[Timed], dev, kinds: Sequence[FusionKind] = tuple(FusionKind)
 ) -> list[FusionGroup]:
-    """The fusions of ``kinds`` ``calls``' recordings admit (``candidates``),
-    grouped by kind, steps' shapes and wiring, in the order first seen. A
-    shape's points and inputs are taken from its first distinct identity
-    alone, as ``autotune.shapes`` takes an operator's; every occurrence is
-    kept, so a fusion sharing a step with another is seen regardless of how
-    many times either recurs. Every kind by default, so a kind
-    ``iron.common.graph.fusion`` adds later is priced the same way without a
-    change here.
+    """Return the fusions of ``kinds`` ``calls``' recordings admit (``candidates``), grouped by kind, steps' shapes and wiring, in the order first seen.
+
+    A shape's points and inputs are taken from its first distinct identity alone, as
+    ``autotune.shapes`` takes an operator's; every occurrence is kept, so a fusion
+    sharing a step with another is seen regardless of how many times either recurs.
+    Every kind by default, so a kind ``iron.common.graph.fusion`` adds later is priced
+    the same way without a change here.
     """
     found: dict[Hashable, FusionGroup] = {}
     seen: set[tuple[str, ...]] = set()
@@ -230,12 +227,13 @@ def time_fusion_group(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Trial:
-    """``group`` priced as a whole: ``measure_fusion`` at each of its points,
-    weighted as ``autotune._time`` weighs an operator's; refused where any
-    point's fusion is. ``fused``, a joint narrowing search's on-chip
-    combination of the members' tunables (``narrow_group``), prices them
-    fused at that setting against ``group.steps`` run apart at their own;
-    defaults to ``group.steps`` themselves.
+    """``group`` priced as a whole.
+
+    ``measure_fusion`` at each of its points, weighted as ``autotune._time`` weighs an
+    operator's; refused where any point's fusion is. ``fused``, a joint narrowing
+    search's on-chip combination of the members' tunables (``narrow_group``), prices
+    them fused at that setting against ``group.steps`` run apart at their own; defaults
+    to ``group.steps`` themselves.
     """
     delta = 0.0
     variance: float | None = 0.0
@@ -271,11 +269,11 @@ def time_fusion_group(
 
 
 def _widths(op: Operator, dev) -> list[dict[str, Any]]:
-    """``op``'s settings (``autotune.settings``), one per value of
-    ``num_aie_columns`` it resolves at, each the setting otherwise closest
-    to its own (``autotune.line``), widest first: ``autotune`` already timed
-    every member alone and took its fastest, so narrowing a member only ever
-    trades its own speed for co-residence, never gains either.
+    """``op``'s settings (``autotune.settings``), one per value of ``num_aie_columns`` it resolves at.
+
+    Each the setting otherwise closest to its own (``autotune.line``), widest first:
+    ``autotune`` already timed every member alone and took its fastest, so narrowing a
+    member only ever trades its own speed for co-residence, never gains either.
     """
     found = settings(op, dev, op.pinned)
     if "num_aie_columns" not in found[0]:
@@ -287,12 +285,13 @@ def _widths(op: Operator, dev) -> list[dict[str, Any]]:
 
 
 def _fed_widths(op: Operator, dev) -> list[dict[str, Any]]:
-    """``op``'s settings with ``feed_b`` held true, only: an edge into its
-    ``B`` can only be fed there (an unfed ``B`` is not a streamed input at
-    all, so ``feed_b=False`` never builds for this member), and a large
-    group's exhaustive cap sorts combinations by column count alone, so
-    keeping the never-buildable ``feed_b=False`` ones here would crowd the
-    only combinations that can actually work out of it.
+    """``op``'s settings with ``feed_b`` held true, only.
+
+    An edge into its ``B`` can only be fed there (an unfed ``B`` is not a streamed input
+    at all, so ``feed_b=False`` never builds for this member), and a large group's
+    exhaustive cap sorts combinations by column count alone, so keeping the
+    never-buildable ``feed_b=False`` ones here would crowd the only combinations that
+    can actually work out of it.
     """
     if "feed_b" not in op.declaration.tunables:
         return _widths(op, dev)
@@ -317,14 +316,14 @@ def _composed_module(
     kind: FusionKind | None = None,
     edges: Sequence[tuple[int, str, int, str]] = (),
 ) -> ir.Module:
-    """The one module ``fits`` places ``designs`` as, built the same way it
-    does: plain (``configuration``), or, given ``kind``, as ``kind``'s own
-    fusion wires ``edges`` (``fused_configuration``, which also tells a
-    pack's or a stream's own array per member, fuse=True, from a merge's
-    shared one). Composing is cheap next to running the placement pipeline
-    on the result, so a group-fit verdict's cache key is this module's own
-    text: it reflects every code path composing takes (``configuration``,
-    ``BuiltArray``, ...), not only ``compose.py``'s.
+    """Return the one module ``fits`` places ``designs`` as, built the same way it does.
+
+    Plain (``configuration``), or, given ``kind``, as ``kind``'s own fusion wires
+    ``edges`` (``fused_configuration``, which also tells a pack's or a stream's own
+    array per member, fuse=True, from a merge's shared one). Composing is cheap next to
+    running the placement pipeline on the result, so a group-fit verdict's cache key is
+    this module's own text: it reflects every code path composing takes
+    (``configuration``, ``BuiltArray``, ...), not only ``compose.py``'s.
     """
     unvalued(designs)
     if kind is None:
@@ -347,15 +346,14 @@ def group_fit_verdict(
     edges: Sequence[tuple[int, str, int, str]] = (),
     ledger: Ledger | None = None,
 ) -> str | None:
-    """Why the placer refuses ``ops``' resolved designs sharing one device
-    configuration (plain, or as ``kind``'s fusion wires ``edges``), or None
-    if they co-reside; kept under ``fit_cache``, keyed on the composed
-    module's own text (``_composed_module``) and each design's build
-    (``artifact_hash``, as ``autotune.refusal`` keeps a single design's): a
-    change to any code path composing takes invalidates it by construction,
-    not only one to ``compose.py``'s own source. The placer runs in a
-    process of its own (``failures.place``): a compiler crash refuses the
-    group, recorded in ``ledger`` where one is given.
+    """Why the placer refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
+
+    Or None if they co-reside; kept under ``fit_cache``, keyed on the composed module's
+    own text (``_composed_module``) and each design's build (``artifact_hash``, as
+    ``autotune.refusal`` keeps a single design's): a change to any code path composing
+    takes invalidates it by construction, not only one to ``compose.py``'s own source.
+    The placer runs in a process of its own (``failures.place``): a compiler crash
+    refuses the group, recorded in ``ledger`` where one is given.
     """
     found = _fit_record(ops, fit_cache, kind, edges)
     if isinstance(found, str):
@@ -389,9 +387,9 @@ def refuse_group(
     kind: FusionKind | None = None,
     edges: Sequence[tuple[int, str, int, str]] = (),
 ) -> None:
-    """Record ``ops`` as refused to share one device for ``reason`` (a build,
-    a run or a comparison that failed past placement), so
-    ``group_fit_verdict`` answers it so until the toolchain changes.
+    """Record ``ops`` as refused to share one device for ``reason`` (a build, a run or a comparison that failed past placement).
+
+    So ``group_fit_verdict`` answers it so until the toolchain changes.
     """
     found = _fit_record(ops, fit_cache, kind, edges)
     if not isinstance(found, str):
@@ -404,9 +402,7 @@ def _fit_record(
     kind: FusionKind | None,
     edges: Sequence[tuple[int, str, int, str]],
 ) -> tuple[str, Path] | str:
-    """``ops`` composed into one module, its text and its verdict's file
-    under ``fit_cache``; or why composing them refused.
-    """
+    """``ops`` composed into one module, its text and its verdict's file under ``fit_cache``; or why composing them refused."""
     designs = {str(i): OperatorDesign(op.resolved()) for i, op in enumerate(ops)}
     try:
         module = _composed_module(designs, kind, edges)
@@ -422,33 +418,35 @@ def _fit_record(
 
 
 def _device_timeout(e: Exception) -> bool:
-    """Whether ``e`` is the driver's own command timeout
-    (``ert_cmd_state.ERT_CMD_STATE_TIMEOUT``, ``iron.common.image.callable``
-    ``.wait``'s), not a build or placement failure: a hang, which another
-    setting of the same group may share, so a caller refuses the group
-    outright rather than trying one.
+    """Whether ``e`` is the driver's own command timeout (``ert_cmd_state.ERT_CMD_STATE_TIMEOUT``, ``iron.common.image.callable`` ``.wait``'s).
+
+    Not a build or placement failure: a hang, which another setting of the same group
+    may share, so a caller refuses the group outright rather than trying one.
     """
     return "ERT_CMD_STATE_TIMEOUT" in str(e)
 
 
 def _refused_key(group: FusionGroup) -> str:
-    """``group``'s content-hash identity among refused groups: stable
-    across a restart, unlike ``id(group)``, and over ``group.key`` alone so
-    a progress file holds it as a plain string.
+    """Return ``group``'s content-hash identity among refused groups.
+
+    Stable across a restart, unlike ``id(group)``, and over ``group.key`` alone so a
+    progress file holds it as a plain string.
     """
     return hashlib.sha256(repr(group.key).encode()).hexdigest()[:32]
 
 
 def _load_refused(path: Path) -> dict[str, str]:
-    """A hung group never retried, by ``_refused_key``, with why: empty
-    where ``path`` holds none yet.
+    """Return a hung group never retried, by ``_refused_key``, with why.
+
+    Empty where ``path`` holds none yet.
     """
     return json.loads(path.read_text()) if path.exists() else {}
 
 
 def _save_refused(refused: Mapping[str, str], path: Path) -> None:
-    """``refused`` written atomically, as ``_checkpoint`` writes a profile:
-    another process may be reading ``path``.
+    """``refused`` written atomically, as ``_checkpoint`` writes a profile.
+
+    Another process may be reading ``path``.
     """
     partial = path.with_suffix(f".{os.getpid()}")
     partial.write_text(json.dumps(refused))
@@ -456,9 +454,10 @@ def _save_refused(refused: Mapping[str, str], path: Path) -> None:
 
 
 def _dominates(a: Sequence[Mapping[str, Any]], b: Sequence[Mapping[str, Any]]) -> bool:
-    """Whether combination ``a`` is at least as wide as ``b`` in every
-    member, strictly in one: ``b`` can then never be faster than ``a`` and
-    so, narrower, can never be the fastest combination that fits.
+    """Whether combination ``a`` is at least as wide as ``b`` in every member, strictly in one.
+
+    ``b`` can then never be faster than ``a`` and so, narrower, can never be the fastest
+    combination that fits.
     """
     cols_a = [s.get("num_aie_columns") for s in a]
     cols_b = [s.get("num_aie_columns") for s in b]
@@ -473,10 +472,10 @@ def narrowings(
     fit_cache: Path = FIT_CACHE,
     exhaustive: int = NARROWING_EXHAUSTIVE,
 ) -> list[tuple[dict[str, Any], ...]]:
-    """Every combination of the group's members' widths (``_widths``), most
-    columns overall first: a member is never faster narrower than
-    ``autotune`` already found it alone, so the fastest fitting combination
-    is among these.
+    """Every combination of the group's members' widths (``_widths``), most columns overall first.
+
+    A member is never faster narrower than ``autotune`` already found it alone, so the
+    fastest fitting combination is among these.
 
     A pack's or a merge's co-resides where ``group_fit_verdict`` says so,
     which lets dominance prune one combination no feasible one can ever beat
@@ -549,13 +548,12 @@ def narrow_group(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> tuple[Trial, tuple[dict[str, Any], ...] | None]:
-    """``group`` priced at the fastest setting of its members that
-    co-resides, against ``group.steps`` run apart at their own: its own (as
-    recorded) setting where that already co-resides, so a group that
-    already fits is never searched or narrowed; otherwise each
-    Pareto-maximal combination ``narrowings`` finds, widest first, timed
-    (``time_fusion_group``) until one is not refused, the fastest of those
-    kept.
+    """``group`` priced at the fastest setting of its members that co-resides, against ``group.steps`` run apart at their own.
+
+    Its own (as recorded) setting where that already co-resides, so a group that already
+    fits is never searched or narrowed; otherwise each Pareto-maximal combination
+    ``narrowings`` finds, widest first, timed (``time_fusion_group``) until one is not
+    refused, the fastest of those kept.
 
     A fusion with edges (a stream, a staged one, a fan-out) shares its
     buffer rather than needing one of its own per member, so it takes less
@@ -677,8 +675,9 @@ def narrow_group(
 
 
 class Candidate(Protocol):
-    """What ``select_rewrites`` needs of a priced rewrite, a fusion or
-    otherwise: the steps it would claim, by (recording, step index).
+    """What ``select_rewrites`` needs of a priced rewrite, a fusion or otherwise.
+
+    The steps it would claim, by (recording, step index).
     """
 
     def claims(self) -> set[tuple[int, int]]: ...
@@ -692,10 +691,10 @@ CandidateT = TypeVar("CandidateT", bound=Candidate)
 def select_rewrites(
     priced: Sequence[tuple[CandidateT, Trial]], log: Callable[[str], None] = print
 ) -> list[CandidateT]:
-    """Of ``priced`` candidates and their trials, those that gain beyond the
-    noise (``Trial.gains``), cheapest first, skipping one whose steps
-    overlap a candidate already taken. Kind-agnostic: a fusion, a fold or a
-    pack is a ``Candidate`` the same way.
+    """Of ``priced`` candidates and their trials, those that gain beyond the noise (``Trial.gains``).
+
+    Cheapest first, skipping one whose steps overlap a candidate already taken.
+    Kind-agnostic: a fusion, a fold or a pack is a ``Candidate`` the same way.
     """
     taken: list[CandidateT] = []
     claimed: set[tuple[int, int]] = set()
@@ -712,21 +711,23 @@ def select_rewrites(
 
 
 def _random_tensor(handle, rng: np.random.Generator) -> np.ndarray:
-    """``handle``'s shape and dtype, filled with ``rng``'s bytes: an end to
-    end confirmation only compares a fused version's output to the same
-    recording's unfused one, not a numpy reference, so the content need not
-    be representative.
+    """Return ``handle``'s shape and dtype, filled with ``rng``'s bytes.
+
+    An end to end confirmation only compares a fused version's output to the same
+    recording's unfused one, not a numpy reference, so the content need not be
+    representative.
     """
     sampled = _sample(handle.dtype, handle.nbytes, rng)
     return sampled.view(handle.dtype).reshape(handle.shape)
 
 
 def _gather_table_rows(recording) -> dict[str, int]:
-    """An input ids handle's buffer name to the table row count a ``Gather``
-    holds it to: random bytes are not valid ids (``Gather.control_words``
-    raises past the table), so these need drawing in range instead. Keyed
-    by name, not identity: the handle a step's ``gather`` holds is its own
-    view, a different object from ``recording.inputs``' of the same buffer.
+    """Return an input ids handle's buffer name to the table row count a ``Gather`` holds it to.
+
+    Random bytes are not valid ids (``Gather.control_words`` raises past the table), so
+    these need drawing in range instead. Keyed by name, not identity: the handle a
+    step's ``gather`` holds is its own view, a different object from
+    ``recording.inputs``' of the same buffer.
     """
     return {
         step.gather.name: step.op.table_rows
@@ -736,11 +737,11 @@ def _gather_table_rows(recording) -> dict[str, int]:
 
 
 def _bound_points(recording, values: Mapping[str, int]) -> list[dict[str, int]]:
-    """``values`` with each per-call value that bounds an extent halved, one
-    at a time, where the recording's limits allow it and every bounded
-    operator derives its per-call words there: a design reading a bound
-    wrongly agrees with the right one when every bound is at its largest,
-    as it is in a full prompt chunk.
+    """``values`` with each per-call value that bounds an extent halved, one at a time.
+
+    Where the recording's limits allow it and every bounded operator derives its
+    per-call words there: a design reading a bound wrongly agrees with the right one
+    when every bound is at its largest, as it is in a full prompt chunk.
     """
     bounded = [b for b in recording.bindings if b.member.bounds is not None]
     bounding = sorted({b.expression.value.name for b in bounded if b.expression.linear})
@@ -767,10 +768,11 @@ def _bound_points(recording, values: Mapping[str, int]) -> list[dict[str, int]]:
 
 
 class NotBitIdentical(RuntimeError):
-    """``compare_graphs``: two builds of one recording, run on the same
-    seeded inputs, did not agree. A ``RuntimeError`` of its own kind (not a
-    device timeout, nor a build failure), so a caller tells the two apart by
-    type rather than guessing from the message.
+    """``compare_graphs``.
+
+    Two builds of one recording, run on the same seeded inputs, did not agree. A
+    ``RuntimeError`` of its own kind (not a device timeout, nor a build failure), so a
+    caller tells the two apart by type rather than guessing from the message.
     """
 
 
@@ -784,10 +786,11 @@ def compare_graphs(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> tuple[float, float | None]:
-    """How much longer ``after`` takes than ``before``, two builds of
-    ``call``'s recording, run interleaved on the same seeded inputs and
-    states at each of the call's points (its own values where it has none),
-    weighted, and that difference's standard error; both are released after.
+    """How much longer ``after`` takes than ``before``, two builds of ``call``'s recording.
+
+    Run interleaved on the same seeded inputs and states at each of the call's points
+    (its own values where it has none), weighted, and that difference's standard error;
+    both are released after.
 
     Raises:
         NotBitIdentical: ``after``'s outputs, each within its bound (past it
@@ -884,18 +887,27 @@ def confirm_fusions(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> list[FusionGroup]:
-    """``taken`` with a group dropped wherever the version it runs in does
-    not gain from it beyond the noise: ``time_fusion_group`` prices a fusion
-    against the steps it fuses alone, over one call; this times each
-    recording's version with every group ``taken`` still holds fused
-    (``combos``' narrowing, where it has one, applied via
-    ``iron.common.graph.fusion_tunables`` the way a shipped profile would)
-    against the same version unfused at its own, interleaved, and drops the
-    smallest predicted gain (``priced``) among those active in a version
-    that regresses, retrying it, until what is left gains or none is left
-    to drop.
+    """``taken`` with a group dropped wherever the version it runs in does not gain from it beyond the noise.
+
+    ``time_fusion_group`` prices a fusion against the steps it fuses alone, over one
+    call; this times each recording's version with every group ``taken`` still holds
+    fused (``combos``' narrowing, where it has one, applied via
+    ``iron.common.graph.fusion_tunables`` the way a shipped profile would) against the
+    same version unfused at its own, interleaved, and drops the smallest predicted gain
+    (``priced``) among those active in a version that regresses, retrying it, until what
+    is left gains or none is left to drop.
 
     Args:
+        calls: The calls whose versions are confirmed.
+        dev: The device they run on.
+        taken: The groups ``select_rewrites`` took.
+        priced: Each group's standalone price.
+        profile: The profile the versions are built under.
+        combos: Each group's narrowing, or None.
+        full_elf: How the versions are packaged.
+        timing: How each version is timed end to end.
+        seed: The seed the inputs are drawn at.
+        log: Where each version's verdict is logged.
         refused: A hang's reason recorded here, by ``_refused_key``, for
             every group dropped on it: a caller persists this so the group
             is never retried past this run either.
@@ -997,12 +1009,12 @@ def _checkpoint(
     combos: Mapping[FusionGroup, tuple[dict[str, Any], ...] | None],
     checkpoint: Path,
 ) -> None:
-    """``profile`` with a fusion entry for each group ``priced`` so far
-    gains beyond the noise (``select_rewrites``, not yet confirmed end to
-    end, which needs its own device time this does not spend), written
-    atomically: a restart after a run dies partway at least starts from
-    every group already priced (``price_fusions``'s own cache does that
-    regardless), and whoever is waiting on it can see the decisions so far.
+    """Write ``profile`` with an entry for each fusion priced so far to gain, to ``checkpoint``.
+
+    The groups ``select_rewrites`` takes, not yet confirmed end to end, which needs its
+    own device time this does not spend. Written atomically: a restart after a run dies partway at least starts from every
+    group already priced (``price_fusions``'s own cache does that regardless), and
+    whoever is waiting on it can see the decisions so far.
     """
     out = Profile()
     for cls, dims, tunables in profile or ():
@@ -1036,12 +1048,12 @@ def price_fusions(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> Profile | None:
-    """``profile`` with a fusion entry for each fusion ``calls``' graphs
-    admit that gains beyond the noise, each priced at the fastest setting of
-    its members that co-resides (``narrow_group``) and, unless ``confirm``
-    is False, still gains each version it runs in end to end
-    (``confirm_fusions``), taken cheapest first, skipping one that would
-    share a step with a fusion already taken (``select_rewrites``).
+    """``profile`` with a fusion entry for each fusion ``calls``' graphs admit that gains beyond the noise.
+
+    Each priced at the fastest setting of its members that co-resides (``narrow_group``)
+    and, unless ``confirm`` is False, still gains each version it runs in end to end
+    (``confirm_fusions``), taken cheapest first, skipping one that would share a step
+    with a fusion already taken (``select_rewrites``).
 
     A member narrowed to co-reside writes its own tunables into the fusion
     entry itself (``FusionGroup.dims``, ``Profile.add_fusion``), applied
@@ -1053,6 +1065,19 @@ def price_fusions(
     has it.
 
     Args:
+        calls: The calls whose graphs' fusions are priced.
+        dev: The device they run on.
+        profile: The profile they were recorded under.
+        full_elf: How the graphs are packaged.
+        timing: How each fusion is timed against its steps apart.
+        repeats: Steps in each long run a step's time is taken from.
+        cache: Where each figure is kept across runs.
+        remeasure: Time again what ``cache`` holds.
+        confirm: Confirm the taken groups end to end (``confirm_fusions``).
+        confirm_timing: How each version is timed end to end.
+        fit_cache: Where each group's fit verdict is kept.
+        exhaustive: The narrowings searched exhaustively before one member at a time.
+        log: Where each group's price is logged.
         kinds: The kinds priced: ``PRICED_KINDS`` in a full ELF, else every
             kind, a merge being an xclbin's only way to run consecutive
             steps as one dispatch.

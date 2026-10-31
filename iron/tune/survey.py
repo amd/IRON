@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What bounds each version of a graph, before a tune decides what to
-search: each design's standalone time and the weight bytes it reads, the
-switches between configurations as the cost model prices them, and an
-estimate of what each transform could remove, with its basis.
+"""What bounds each version of a graph, before a tune decides what to search.
+
+Each design's standalone time and the weight bytes it reads, the switches between
+configurations as the cost model prices them, and an estimate of what each transform
+could remove, with its basis.
 """
 
 from __future__ import annotations
@@ -122,10 +123,14 @@ def survey(
     cycles: Mapping[str, int] | None = None,
     core_mhz: float | None = None,
 ) -> Survey:
-    """``call``'s version as ``profile`` builds it, surveyed from ``times``,
-    each design's standalone step time by its name (``step_times``).
+    """Return ``call``'s version as ``profile`` builds it, surveyed from ``times``, each design's standalone step time by its name (``step_times``).
 
     Args:
+        call: The version's call.
+        profile: The profile it is built under.
+        dev: The device it runs on.
+        times: Each design's standalone step time, by name (``step_times``).
+        model: The cost model that prices its switches.
         codable: The shapes (``Shape.key``) ``plan.coded_seed`` would code.
         cycles: Kernel cycles per call (``kernel_cycles``), for GEMM's bound.
         core_mhz: The clock ``cycles`` are timed at.
@@ -240,9 +245,11 @@ def step_times(
     log: Callable[[str], None] = print,
     lock: bool = False,
 ) -> dict[str, float]:
-    """Each design of ``call``'s version under ``profile``, by name: its
-    standalone step time summed over the steps running it, weighted over the
-    call's points (``measure``, cached)."""
+    """Each design of ``call``'s version under ``profile``, by name.
+
+    Its standalone step time summed over the steps running it, weighted over the call's
+    points (``measure``, cached).
+    """
     recording, _, _ = apply_profile(call.recording, profile, dev)
     out: dict[str, float] = collections.defaultdict(float)
     for step in recording.steps:

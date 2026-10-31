@@ -233,11 +233,12 @@ class BuiltArray:
 
     @functools.cached_property
     def reads(self) -> frozenset[str]:
-        """The scratchpad words this design's cores read: beside its ``array_key``,
-        all its array depends on. Read off the design built anew and resolved alone,
-        since a core reads a word through the parameter its function closes over.
-        An xclbin has no scratchpad: its values are dispatch-time scalars, which
-        resolving it alone would bind, leaving none for its own sequence.
+        """The scratchpad words this design's cores read.
+
+        Beside its ``array_key``, all its array depends on. Read off the design built
+        anew and resolved alone, since a core reads a word through the parameter its
+        function closes over. An xclbin has no scratchpad: its values are dispatch-time
+        scalars, which resolving it alone would bind, leaving none for its own sequence.
         """
         if not self.design.full_elf:
             return frozenset()
@@ -311,11 +312,13 @@ def configuration(
     steps: Sequence[str] = (),
     fuse: bool = False,
 ) -> DeviceConfiguration:
-    """``arrays`` as one device configuration ``name``: one array per identity, and
-    each entry's sequence over it, ``sequence`` if it is alone, else named for its
-    key. Given ``steps`` (keys of ``arrays``), one ``sequence`` runs theirs in
-    order, back to back (``MergedRuntime.merge``), or, ``fuse``, in one task group
-    (``MergedRuntime.fuse``), each step on an array of its own.
+    """``arrays`` as one device configuration ``name``.
+
+    One array per identity, and each entry's sequence over it, ``sequence`` if it is
+    alone, else named for its key. Given ``steps`` (keys of ``arrays``), one
+    ``sequence`` runs theirs in order, back to back (``MergedRuntime.merge``), or,
+    ``fuse``, in one task group (``MergedRuntime.fuse``), each step on an array of its
+    own.
 
     Raises:
         ValueError: The arrays are built for different devices, traced with

@@ -660,9 +660,10 @@ class GEMM(Operator):
         rt.finish(tg)
 
     def lane_transfers(self, operand):
-        """A, B and C's host order never shortens under a bound (``sequence``
-        moves every tile regardless; a bound only zeroes compute past it), so
-        each lane's order is the same whole-buffer walk ``sequence`` emits.
+        """Return each lane's whole-buffer walk, the one ``sequence`` emits.
+
+        A, B and C's host order never shortens under a bound: ``sequence`` moves every
+        tile regardless, and a bound only zeroes compute past it.
         """
         M, K, N = self.M, self.K, self.N
         tm, tk, tn = self.tile_m, self.tile_k, self.tile_n

@@ -148,11 +148,12 @@ class Link:
 
 
 class FusedDesign:
-    """A fusion's steps as one design (``fused_configuration``): each member's
-    array, fed where an edge feeds it on-chip, and one sequence, compiled as
-    one xclbin, dispatched once with every member's per-call values as
-    dispatch-time scalars, each member's its own (``symbols``) where two
-    members of one design share a symbol.
+    """A fusion's steps as one design (``fused_configuration``).
+
+    Each member's array, fed where an edge feeds it on-chip, and one sequence, compiled
+    as one xclbin, dispatched once with every member's per-call values as dispatch-time
+    scalars, each member's its own (``symbols``) where two members of one design share a
+    symbol.
     """
 
     def __init__(self, fusion: Fusion, ops: Sequence[Operator]):
@@ -196,9 +197,10 @@ class FusedDesign:
         self.generator = generator
 
     def module(self, **dispatch):
-        """The fused module: each member's array, in fusion order, wired by
-        its edges, as one device configuration and sequence
-        (``fused_configuration``).
+        """Return the fused module.
+
+        Each member's array, in fusion order, wired by its edges, as one device
+        configuration and sequence (``fused_configuration``).
         """
         configured, _ = fused_configuration(
             self.name,
@@ -215,8 +217,10 @@ class FusedDesign:
 
     @functools.cached_property
     def identity(self) -> str:
-        """What ``module()`` is built from: each member's own identity and the
-        wiring between them, distinct from any standalone design's.
+        """What ``module()`` is built from.
+
+        Each member's own identity and the wiring between them, distinct from any
+        standalone design's.
         """
         text = repr(
             (
@@ -233,9 +237,7 @@ class FusedDesign:
 
     @property
     def name(self) -> str:
-        """The fusion's device symbol, content-named like a full ELF's
-        (``Composition.fusion_name``), so a recurring fusion hits the cache.
-        """
+        """The fusion's device symbol, content-named like a full ELF's (``Composition.fusion_name``), so a recurring fusion hits the cache."""
         return Composition.fusion_name(self.fusion, [d.name for d in self.designs])
 
     def compilable(self, **options) -> CompilableDesign:
@@ -255,10 +257,11 @@ class FusedDesign:
 
 
 class PerStep:
-    """An xclbin and stream per design, each linked onto the previous
-    (``CompilableDesign.chain``), ``image`` the last link; a design on another
-    operator's ``configuration``, or a shipped image, runs that xclbin unlinked.
-    A fusion's steps link as one ``FusedDesign``, dispatched together.
+    """An xclbin and stream per design, each linked onto the previous (``CompilableDesign.chain``).
+
+    ``image`` the last link; a design on another operator's ``configuration``, or a
+    shipped image, runs that xclbin unlinked. A fusion's steps link as one
+    ``FusedDesign``, dispatched together.
     """
 
     def __init__(self, check: bool = False):
@@ -280,9 +283,10 @@ class PerStep:
         return [r for r in scratch if r in residents]
 
     def link(self, seq) -> Path:
-        """Build the chain once and return the last link, or the last design's
-        own image where none is linked; a fusion's steps take their place in
-        the chain as one ``FusedDesign``.
+        """Build the chain once and return the last link.
+
+        Or the last design's own image where none is linked; a fusion's steps take their
+        place in the chain as one ``FusedDesign``.
         """
         if self.image is not None:
             return self.image

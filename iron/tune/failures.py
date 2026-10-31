@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What went wrong while tuning, kept so a later toolchain can be checked
-against it.
+"""What went wrong while tuning, kept so a later toolchain can be checked against it.
 
 A ``Ledger`` holds one entry per failure signature: its kind (a compiler
 crash, a build failure, a version not bit-identical, a device hang), the
@@ -48,7 +47,7 @@ class Kind(Enum):
 
 @functools.cache
 def toolchain() -> str:
-    """The toolchain a failure is seen with: the aie-opt binary, by hash."""
+    """Return the toolchain a failure is seen with: the aie-opt binary, by hash."""
     h = hashlib.sha256()
     with open(Path(aie_config.aiecc_path()).with_name("aie-opt"), "rb") as f:
         for block in iter(lambda: f.read(1 << 20), b""):
@@ -57,19 +56,23 @@ def toolchain() -> str:
 
 
 def first_error(diagnostic: str) -> str:
-    """``diagnostic``'s first line naming a failure: an assertion, an error or
-    a crash, else its first line.
+    """``diagnostic``'s first line naming a failure.
+
+    An assertion, an error or a crash, else its first line.
     """
     lines = diagnostic.strip().splitlines()
     marks = ("Assertion", "error", "Segmentation fault", "Aborted", "Stack dump")
     return next(
-        (l for l in lines if any(m in l for m in marks)), lines[0] if lines else ""
+        (line for line in lines if any(m in line for m in marks)),
+        lines[0] if lines else "",
     )
 
 
 def signature(kind: Kind, diagnostic: str) -> str:
-    """A failure's identity: its kind and its first error, with numbers,
-    locations and addresses dropped so reruns collapse into one.
+    """Return a failure's identity.
+
+    Its kind and its first error, with numbers, locations and addresses dropped so
+    reruns collapse into one.
     """
     words = re.sub(
         r"0x[0-9a-f]+|\d+|[\w./-]+\.(mlir|py|cpp|h)", "#", first_error(diagnostic)
@@ -78,9 +81,9 @@ def signature(kind: Kind, diagnostic: str) -> str:
 
 
 def place(module: str) -> tuple[str, str | None]:
-    """Run the fit pipeline on ``module`` in an ``aie-opt`` of its own, so a
-    compiler crash ends that process, not the caller: ``("fits", None)``,
-    ``("refused", diagnostic)`` or ``("crash", diagnostic)``.
+    """Run the fit pipeline on ``module`` in an ``aie-opt`` of its own, so a compiler crash ends that process, not the caller.
+
+    ``("fits", None)``, ``("refused", diagnostic)`` or ``("crash", diagnostic)``.
     """
     with tempfile.NamedTemporaryFile("w", suffix=".mlir") as f:
         f.write(module)
@@ -120,8 +123,7 @@ class Entry:
 
 
 class Ledger:
-    """The failures tuning has hit, one JSON line per signature in
-    ``directory/ledger.jsonl``, each repro beside it by hash."""
+    """The failures tuning has hit, one JSON line per signature in ``directory/ledger.jsonl``, each repro beside it by hash."""
 
     def __init__(self, directory: Path = LEDGER):
         self.directory = Path(directory)
@@ -147,9 +149,7 @@ class Ledger:
         context: str,
         module: str | None = None,
     ) -> Entry:
-        """The entry for this failure, added if its signature is new; a
-        fixed one seen again is reopened.
-        """
+        """Return the entry for this failure, added if its signature is new; a fixed one seen again is reopened."""
         entries = self.entries()
         sig = signature(kind, diagnostic)
         for entry in entries:
@@ -179,9 +179,9 @@ class Ledger:
         return entry
 
     def recheck(self) -> list[tuple[Entry, str]]:
-        """Place each open compiler-side entry's repro again with the current
-        toolchain; one that now places or is refused cleanly is marked fixed
-        by it. Returns each rechecked entry and its outcome.
+        """Place each open compiler-side entry's repro again with the current toolchain; one that now places or is refused cleanly is marked fixed by it.
+
+        Returns each rechecked entry and its outcome.
         """
         entries = self.entries()
         out = []

@@ -118,12 +118,12 @@ def _cases(cls, dev: Device):
 
 
 class GEMV(Operator):
-    """``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per
-    mv.cc call. By default B rides each lane's A stream ahead of its rows
-    so every input channel of a column can carry A; ``feed_b`` instead
-    makes B a real stream of its own, broadcast to every lane since each
-    one's dot products read the whole vector, which ``B.feed()`` can then
-    take from another operator's output on-chip.
+    """``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per mv.cc call.
+
+    By default B rides each lane's A stream ahead of its rows so every input channel of
+    a column can carry A; ``feed_b`` instead makes B a real stream of its own, broadcast
+    to every lane since each one's dot products read the whole vector, which
+    ``B.feed()`` can then take from another operator's output on-chip.
     """
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A, op.B)))
@@ -277,8 +277,9 @@ class GEMV(Operator):
             )
 
     def _head_tiles(self) -> int:
-        """The tiles of A's stream that carry B to a lane each batch: one,
-        or for a coded tile shorter than B's 2K bytes, as many as hold it.
+        """Return the tiles of A's stream that carry B to a lane each batch.
+
+        One, or for a coded tile shorter than B's 2K bytes, as many as hold it.
         """
         if not self.coded_a:
             return 1
@@ -414,11 +415,11 @@ class GEMV(Operator):
         )
 
     def _can_ride(self) -> bool:
-        """Whether A's own tile could carry a finish's other input instead
-        of a stream of its own: no batches or per-call bound to walk it by
-        (one tile is this whole call, so one extra transfer a lane
-        suffices), A's tile holds a whole number of a finish tile's,
-        re-read at most a descriptor's iteration limit, and a lane's extra
+        """Whether A's own tile could carry a finish's other input instead of a stream of its own.
+
+        No batches or per-call bound to walk it by (one tile is this whole call, so one
+        extra transfer a lane suffices), A's tile holds a whole number of a finish
+        tile's, re-read at most a descriptor's iteration limit, and a lane's extra
         transfer still fits its shim tile's descriptor budget.
         """
         if self.bound_extents or self.num_batches is not None or self.coded_a:
@@ -715,9 +716,10 @@ class GEMV(Operator):
         return Built(workers, rtps)
 
     def sequence(self, rt):
-        """Per batch and lane: B's head tile (``feed_b``: one fill to B's
-        own stream instead), then A's rows. C drains are issued first: an
-        undrained C would stop A.
+        """Per batch and lane.
+
+        B's head tile (``feed_b``: one fill to B's own stream instead), then A's rows. C
+        drains are issued first: an undrained C would stop A.
         """
         if self.repeat > 1:
             for buf in (self.A, self.C):
@@ -867,9 +869,7 @@ class GEMV(Operator):
         return (a @ b.reshape(A.shape[-1])).astype(A.dtype)
 
     def tolerance(self) -> Tolerance:
-        """C accumulates in f32 and rounds once; tighter than linalg.mv's
-        contract, then each finish step's own.
-        """
+        """C accumulates in f32 and rounds once; tighter than linalg.mv's contract, then each finish step's own."""
         own = Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")
         if not self.finish:
             return own

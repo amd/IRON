@@ -56,8 +56,10 @@ def test_a_tuned_profile_runs_bit_identically(tmp_path):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_tuned_copy_of_a_slice_is_saved(tmp_path):
-    """A Copy reading part of a buffer names an access pattern among its
-    dimensions, which a profile cannot write: its entry names the rest."""
+    """A Copy reading part of a buffer names an access pattern among its dimensions, which a profile cannot write.
+
+    Its entry names the rest.
+    """
 
     class Rows(iron.Graph):
         def body(self, x):
@@ -80,9 +82,10 @@ def test_a_tuned_copy_of_a_slice_is_saved(tmp_path):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_tuned_entry_names_no_dimension_a_host_sizes(tmp_path):
-    """A model fitted to another host's context sizes its caches and
-    attention otherwise (``Timed.varying``): an entry naming that dimension
-    would match there no longer, so it is left out."""
+    """A model fitted to another host's context sizes its caches and attention otherwise (``Timed.varying``).
+
+    An entry naming that dimension would match there no longer, so it is left out.
+    """
     recording = Chain(SIZE, TILE).record(a=(SIZE,), b=(SIZE,))
     dev = aie_utils.ensure_current_device()
     [silu] = {
@@ -104,9 +107,10 @@ def test_a_tuned_entry_names_no_dimension_a_host_sizes(tmp_path):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_an_entry_a_tune_only_outranks_still_serves_what_it_did_not_time(tmp_path):
-    """A tune of one version (``--versions decode``) writes its shapes' own
-    entries; a broader one they outrank still matches another version's
-    shapes, which keep what it gave them rather than their defaults."""
+    """A tune of one version (``--versions decode``) writes its shapes' own entries; a broader one they outrank still matches another version's shapes.
+
+    Which keep what it gave them rather than their defaults.
+    """
     recording = Chain(SIZE, TILE).record(a=(SIZE,), b=(SIZE,))
     dev = aie_utils.ensure_current_device()
     stock = Profile()
@@ -172,8 +176,7 @@ def test_a_setting_cached_as_the_default_is_judged_against_the_next_one(tmp_path
 
 
 def test_only_a_shape_that_weighs_in_a_version_is_searched(tmp_path):
-    """Given each shape's share of its version, a tune searches the shapes
-    at ``SHAPE_SHARE`` or more and writes no entry for the rest."""
+    """Given each shape's share of its version, a tune searches the shapes at ``SHAPE_SHARE`` or more and writes no entry for the rest."""
     recording = Chain(SIZE, TILE).record(a=(SIZE,), b=(SIZE,))
     dev = aie_utils.ensure_current_device()
     keys = {type(s.op): Shape(s.op).key for s in recording.steps}

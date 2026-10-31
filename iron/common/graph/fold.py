@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Folding a step into the producer of its one input: a recording rewrite
-collapsing the pair into one step, the producer's operator carrying the
-``finish`` (``Operator.fold``). Unlike a stream fusion, which runs the
-consumer in cores of its own fed on-chip from the producer's, a fold leaves
-the consumer no cores: its kernel runs inside the producer's, on the tile
-before it leaves L1.
+"""Folding a step into the producer of its one input.
+
+A recording rewrite collapsing the pair into one step, the producer's operator carrying
+the ``finish`` (``Operator.fold``). Unlike a stream fusion, which runs the consumer in
+cores of its own fed on-chip from the producer's, a fold leaves the consumer no cores:
+its kernel runs inside the producer's, on the tile before it leaves L1.
 """
 
 from __future__ import annotations
@@ -31,9 +31,7 @@ def _excluded(recording: Recording) -> set[str]:
 
 
 def _admits(producer: Operator, consumer: Operator, at: int) -> Operator | None:
-    """``producer.fold(consumer, at)``, or None where it refuses or does not
-    resolve on the current device.
-    """
+    """``producer.fold(consumer, at)``, or None where it refuses or does not resolve on the current device."""
     try:
         fused = producer.fold(consumer, at)
     except Unresolvable:
@@ -48,26 +46,24 @@ def _admits(producer: Operator, consumer: Operator, at: int) -> Operator | None:
 
 
 def _bounds_match(a: Operator, b: Operator) -> bool:
-    """Whether ``a`` and ``b`` are bound to the same per-call extent, or
-    neither is bound at all: a fold then walks the same tiles this call,
-    a prompt chunk's row count included (``bound_extents``, each operator's
-    own per-call ``Binding`` already carries).
+    """Whether ``a`` and ``b`` are bound to the same per-call extent, or neither is bound at all.
+
+    A fold then walks the same tiles this call, a prompt chunk's row count included
+    (``bound_extents``, each operator's own per-call ``Binding`` already carries).
     """
     return set(a.bound_extents.values()) == set(b.bound_extents.values())
 
 
 def _buffer_adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
-    """Index ``i``'s (producer's output operand name, consumer's input
-    operand name) where step ``i``'s one output is read only by step
-    ``i + 1``, never again, is not a graph output, feedback, pinned or
-    resident buffer, and names its whole buffer; step ``i + 1`` has one
-    output, and its matching input, and every other input it fills, do too,
-    of the tile's element count and dtype; and the two operators are bound
-    to the same per-call extent, or neither is (``_bounds_match``) -- a
-    prompt chunk's own row count folds, its buffers walking it alike.
-    Independent of any fold already taken: the buffer graph these read is
-    the recording's own, unaffected by ``Operator.fold`` replacing an
-    operator.
+    """Index ``i``'s (producer's output operand name, consumer's input operand name) where step ``i``'s one output is read only by step ``i + 1``.
+
+    Never again, is not a graph output, feedback, pinned or resident buffer, and names
+    its whole buffer; step ``i + 1`` has one output, and its matching input, and every
+    other input it fills, do too, of the tile's element count and dtype; and the two
+    operators are bound to the same per-call extent, or neither is (``_bounds_match``)
+    -- a prompt chunk's own row count folds, its buffers walking it alike. Independent
+    of any fold already taken: the buffer graph these read is the recording's own,
+    unaffected by ``Operator.fold`` replacing an operator.
     """
     excluded = _excluded(recording)
     readers: dict[str, list[int]] = {}
@@ -134,12 +130,12 @@ def _buffer_adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
 def _chain_from(
     recording: Recording, lo: int, buffer_adjacent: dict[int, tuple[str, str]]
 ) -> list[tuple[int, Operator, int]]:
-    """The admissible chain folding into step ``lo``: each entry (the index
-    folded in, the fused operator after it, the input its tile entered at),
-    in order, stopping at the first hop the buffers (``buffer_adjacent``) or
-    ``producer.fold(consumer, at)`` (``_admits``, where the channel budget,
-    the shapes and dtypes, and a tile a later call reads are refused) does
-    not admit.
+    """Return the admissible chain folding into step ``lo``.
+
+    Each entry (the index folded in, the fused operator after it, the input its tile
+    entered at), in order, stopping at the first hop the buffers (``buffer_adjacent``)
+    or ``producer.fold(consumer, at)`` (``_admits``, where the channel budget, the
+    shapes and dtypes, and a tile a later call reads are refused) does not admit.
     """
     chain: list[tuple[int, Operator, int]] = []
     current = recording.steps[lo].op
@@ -163,11 +159,11 @@ def _chain_from(
 
 
 def fold_candidates(recording: Recording) -> tuple[Fusion, ...]:
-    """Every admissible fold of a run of two or more consecutive steps
-    (``_chain_from``), overlapping ones included: a maximal chain from
-    ``lo`` of length ``n`` admits every depth from 1 to ``n``, and a step
-    that admits folding both its predecessor's output and feeding its
-    successor's starts a chain of its own, found separately.
+    """Every admissible fold of a run of two or more consecutive steps (``_chain_from``), overlapping ones included.
+
+    A maximal chain from ``lo`` of length ``n`` admits every depth from 1 to ``n``, and
+    a step that admits folding both its predecessor's output and feeding its successor's
+    starts a chain of its own, found separately.
     """
     buffer_adjacent = _buffer_adjacent(recording)
     calls = Counter(id(s.op) for s in recording.steps)
@@ -187,11 +183,11 @@ def fold_candidates(recording: Recording) -> tuple[Fusion, ...]:
 
 
 def chosen_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
-    """``fold_candidates(recording)`` that ``profile`` names
-    (``Profile.fused``, in ``recording.version``, so a fold entry scoped to
-    another version never takes here), a step in at most one: first in step
-    order wins, as ``Graph.compile`` picks among a graph's other fusion
-    kinds (``fusion.fusions``).
+    """Return the ``fold_candidates(recording)`` that ``profile`` names.
+
+    Named by ``Profile.fused``, in ``recording.version``, so a fold entry scoped to
+    another version never takes here; a step in at most one: first in step order wins, as ``Graph.compile`` picks among a
+    graph's other fusion kinds (``fusion.fusions``).
     """
     found: list[Fusion] = []
     taken: set[int] = set()
@@ -215,9 +211,7 @@ def chosen_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
 def _rebind(
     op: Operator, fused: Operator, bindings: Sequence[Binding]
 ) -> list[Binding]:
-    """``bindings``, each on ``op`` moved onto ``fused``, which declares the
-    same per-call members (a fold only adds a ``finish`` and its input).
-    """
+    """``bindings``, each on ``op`` moved onto ``fused``, which declares the same per-call members (a fold only adds a ``finish`` and its input)."""
     return [
         Binding(fused, fused.value(b.member.name), b.expression) if b.op is op else b
         for b in bindings
@@ -225,19 +219,17 @@ def _rebind(
 
 
 def _handle_at(step: Step, name: str) -> tuple[int, object]:
-    """The index into ``step.slots`` and the handle there, the operand
-    declared ``name``'s.
-    """
+    """Return the index into ``step.slots`` and the handle there, the operand declared ``name``'s."""
     i = next(k for k, b in enumerate(step.op.buffers) if b.name == name)
     return i, step.slots[i]
 
 
 def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
-    """``recording`` with each of ``folds`` (``fold_candidates``'s, not
-    overlapping) applied: a run's steps collapsed into one at its first's
-    position, its operator ``Operator.fold``-ed in at each edge in turn,
-    its slots the running operator's with each hop's other input appended,
-    its output the run's last step's.
+    """Return ``recording`` with each of ``folds`` (``fold_candidates``'s, not overlapping) applied.
+
+    A run's steps collapsed into one at its first's position, its operator
+    ``Operator.fold``-ed in at each edge in turn, its slots the running operator's with
+    each hop's other input appended, its output the run's last step's.
 
     Raises:
         ValueError: Two of ``folds`` share a step, or a hop no longer

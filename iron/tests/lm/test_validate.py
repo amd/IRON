@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``iron.lm.validate``'s pure parts, device-free: version labels, the
-live-fusion and live-packing accounting a report reads (a full ELF's and
-an xclbin per step's), the profile
-subsets a bisection trial builds, and ``changed_versions``' assertion.
+"""``iron.lm.validate``'s pure parts, device-free.
+
+Version labels, the live-fusion and live-packing accounting a report reads (a full ELF's
+and an xclbin per step's), the profile subsets a bisection trial builds, and
+``changed_versions``' assertion.
 """
 
 import pytest
@@ -25,9 +26,7 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 
 def _silu_mul_entry(recording):
-    """The ``(SiLU, dims)`` -> ``(ElementwiseMul, dims)`` fusion entry
-    ``recording`` admits, in ``Profile.add_fusion``'s own shape, unscoped.
-    """
+    """Return the ``(SiLU, dims)`` -> ``(ElementwiseMul, dims)`` fusion entry ``recording`` admits, in ``Profile.add_fusion``'s own shape, unscoped."""
     fusion = next(
         f
         for f in candidates(recording)
@@ -75,8 +74,7 @@ def test_classify_entries_tags_by_matching_version():
 
 
 def test_classify_entries_tags_a_packing_by_the_versions_it_names():
-    """Both versions run SiLU and a multiply; a packing naming the decode
-    step's version is tagged decode alone, one naming none both."""
+    """Both versions run SiLU and a multiply; a packing naming the decode step's version is tagged decode alone, one naming none both."""
     model = small()
     decode_shape, prompt_shape = model.shapes()
     recordings = {
@@ -227,9 +225,11 @@ def test_changed_versions_ignores_an_unchanged_candidate():
 
 
 def test_changed_versions_ignores_a_version_packed_as_stock_packs_it():
-    """Stock's own profile packs a version and the candidate leaves it as it
-    was (one model's entries added beside another's): the shared image is
-    that version unchanged, not a candidate whose entries went unapplied."""
+    """Stock's own profile packs a version and the candidate leaves it as it was (one model's entries added beside another's).
+
+    The shared image is that version unchanged, not a candidate whose entries went
+    unapplied.
+    """
     stock_live = {"decode": _live("a", packed_groups=[15])}
     candidate_live = {"decode": _live("a", packed_groups=[15])}
     assert validate.changed_versions(stock_live, candidate_live) == []
