@@ -260,8 +260,32 @@ values, weights, state and profiles are named. The rules:
   hang or mismatch it hits in this machine's ledger with a repro;
   `python -m iron.tune.failures --recheck` tries them again with the
   current toolchain.
+  The search runs on the folds the tuner proposes first (a fold only where
+  every step on the producer's array takes it, so no shared array splits),
+  scoped to the versions they were found in; a version whose folds do not
+  gain keeps no folds and takes the packings searched without them. A
+  search leaves another graph's packings (an entry naming a shape these
+  graphs never run) as they are, so one profile holds several models'.
 - `python -m iron.lm.tune <application> --fusions-only` prices a graph's
   candidates against its profile and writes the ones that gain.
+- Coded weights: a GEMV with `"coded_a": true` in its profile entry reads
+  its weight as mlir-aie's lossless coded rows (`aie.utils.coded`, about
+  0.76x the bytes, bit-identical output), so a decode step bound by weight
+  reads runs faster; a GEMM-bound prompt chunk or encoder does not gain.
+  The recorder binds the coded rows as a weight of their own, encoded at
+  compile and cached under `NPU_CACHE_HOME`; a weight with a row past
+  capacity (15 exceptions) is read plain, with a warning naming the row.
+  For a model's decoder:
+  1. Check its checkpoint fits: `aie.utils.coded.encode_rows` on each
+     decode GEMV weight raises, naming the row, where one does not
+     (Llama 3.2 1B and 3B, Gemma 4 E2B, Gemma 3 1B, Qwen3 1.7B and
+     Phi-4-mini all fit).
+  2. Set `coded_a` on every GEMV shape whose steps share an array, or on
+     none of them: `coded_a` is part of the array, so coding some steps of
+     a shared array splits it, and a packing that fit runs out of cores.
+  3. Run one `--packings-only` tune from that profile, then one
+     `python -m iron.lm.validate` against the model's stock profile.
+  aie2p and aie2 both build the kernel; npu2 is the one measured.
 
 `iron/applications/llama/model.py` is the worked example;
 `iron/tests/common/test_graph.py` records it device-free and
