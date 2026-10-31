@@ -12,6 +12,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile, Scratchpad
+from iron.common.declare.profile import PackingEntry
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.packing import apply as apply_packings
 from iron.common.image.step import FusionKind
@@ -34,6 +35,7 @@ from iron.tune.packings import (
     Packer,
     _decide_fold,
     _end_to_end,
+    _foreign,
     _narrow_for_rejected,
     _rejoin,
     _with_fusions,
@@ -311,6 +313,17 @@ def test_a_version_that_rejects_its_folds_takes_the_packings_searched_without_th
         (("ReLU", "Tanh"), None),
         (("GEMV", "ElementwiseMul"), frozenset({decode_v})),
     }
+
+
+def test_a_packing_naming_a_shape_these_graphs_never_run_is_another_graph_s():
+    calls = [Timed(Alternating().record(x=(SIZE,)))]
+    ours = PackingEntry(((ReLU, {"size": SIZE}, None), (Tanh, {"size": SIZE}, None)))
+    theirs = PackingEntry(
+        ((ReLU, {"size": SIZE}, None), (GEMV, {"M": 3072, "K": 8192}, None))
+    )
+    dev = aie_utils.ensure_current_device()
+    assert not _foreign(ours, calls, dev)
+    assert _foreign(theirs, calls, dev)
 
 
 def test_with_fusions_replaces_only_the_fusions():

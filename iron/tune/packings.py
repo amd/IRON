@@ -559,7 +559,9 @@ def price_packings(
     settings in it, applying in that version; a version whose grouping does
     not gain end to end, beyond the noise, adds none. Each entry then applies
     in another version it matches only where that version gains from it too
-    (``widen_packings``). ``profile``'s own packings are replaced. A version
+    (``widen_packings``). ``profile``'s own packings are replaced, but for
+    another graph's (``_foreign``), which a search of these calls leaves as
+    they are, so one profile can hold several models' packings. A version
     whose every switch, priced by ``model``, costs under
     ``MIN_SWITCH_SHARE`` of its steps' own time is not searched.
 
@@ -579,7 +581,7 @@ def price_packings(
             found should a later one fail.
     """
     model = CostModel() if model is None else model
-    base = _profile(profile, [])
+    base = _profile(profile, [e for e in profile.packings() if _foreign(e, calls, dev)])
     if not full_elf:
         log("packings: an xclbin per step configures every step; nothing to pack")
         return base
@@ -943,6 +945,22 @@ def widen_packings(
         else:
             log(f"  keeping {len(foreign)} packing(s) to the versions they name")
     return _profile(profile, entries)
+
+
+def _foreign(entry: PackingEntry, calls: Sequence[Timed], dev) -> bool:
+    """Whether a member of ``entry`` names no step of any of ``calls``: an
+    entry another graph's search made (a shape these graphs never run), not
+    one of theirs to replace.
+    """
+    probe = Profile()
+    probe.add_packing(entry.members)
+    named = {
+        member
+        for c in calls
+        for step in c.recording.steps
+        for _, member, _ in probe.packings_of(step.op.resolved(dev), None)
+    }
+    return len(named) < len(entry.members)
 
 
 def _matches(members: Sequence, recording, dev) -> bool:
