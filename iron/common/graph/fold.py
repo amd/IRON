@@ -187,12 +187,15 @@ def fold_candidates(recording: Recording) -> tuple[Fusion, ...]:
 
 
 def chosen_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
-    """``fold_candidates(recording)`` that ``profile`` names (``Profile.fused``),
-    a step in at most one: first in step order wins, as ``Graph.compile``
-    picks among a graph's other fusion kinds (``fusion.fusions``).
+    """``fold_candidates(recording)`` that ``profile`` names
+    (``Profile.fused``, in ``recording.version``, so a fold entry scoped to
+    another version never takes here), a step in at most one: first in step
+    order wins, as ``Graph.compile`` picks among a graph's other fusion
+    kinds (``fusion.fusions``).
     """
     found: list[Fusion] = []
     taken: set[int] = set()
+    version = recording.version
     for fusion in fold_candidates(recording):
         if taken & set(fusion.steps):
             continue
@@ -202,7 +205,7 @@ def chosen_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
             (local[e.producer], e.output, local[e.consumer], e.input)
             for e in fusion.edges
         )
-        if not profile.fused(fusion.kind, steps, edges):
+        if not profile.fused(fusion.kind, steps, edges, version):
             continue
         found.append(fusion)
         taken.update(fusion.steps)

@@ -29,6 +29,7 @@ def apply(
     entry, is untouched.
     """
     given: dict[int, Mapping[str, Any]] = {}
+    version = recording.version
     for fusion in fused:
         ops = [recording.steps[i].op.resolved(dev) for i in fusion.steps]
         local = {step: i for i, step in enumerate(fusion.steps)}
@@ -36,7 +37,7 @@ def apply(
             (local[e.producer], e.output, local[e.consumer], e.input)
             for e in fusion.edges
         )
-        tunables = profile.fusion_tunables(fusion.kind, ops, edges)
+        tunables = profile.fusion_tunables(fusion.kind, ops, edges, version)
         if tunables is None:
             continue
         given.update((i, t) for i, t in zip(fusion.steps, tunables) if t)

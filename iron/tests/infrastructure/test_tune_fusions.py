@@ -980,7 +980,7 @@ def test_price_fusions_takes_the_qkv_pack_without_confirming_end_to_end(tmp_path
         confirm=False,
         log=lambda _: None,
     )
-    kinds = [kind for kind, _, _ in profile.fusions()]
+    kinds = [kind for kind, _, _, _ in profile.fusions()]
     assert kinds == [FusionKind.PACK]
 
 

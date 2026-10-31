@@ -36,10 +36,11 @@ from aie import ir
 from aie.utils.compile.jit.params import widths
 
 from iron.common.declare import Operator, Profile
-from iron.common.declare.profile import PackingEntry
+from iron.common.declare.profile import PackingEntry, Version
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.image.packaging import plan
+from iron.common.image.step import FusionKind
 from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, time_shape
 from .costmodel import FEATURES, CostModel
 from .failures import Kind, Ledger, first_error
@@ -526,8 +527,8 @@ def _profile(base: Profile, packings: Sequence[PackingEntry]) -> Profile:
     out = Profile()
     for cls, dims, tunables in base:
         out.add(cls, **dims, **tunables)
-    for kind, steps, edges in base.fusions():
-        out.add_fusion(kind, steps, edges)
+    for kind, steps, edges, versions in base.fusions():
+        out.add_fusion(kind, steps, edges, versions)
     for p in packings:
         out.add_packing(p.members, p.versions)
     return out
@@ -673,9 +674,11 @@ def price_packings(
 def _keep_folded(gains: Sequence[tuple[Timed, float, float | None]]) -> bool:
     """Whether ``gains`` (each a call, and its ``_end_to_end`` delta and
     noise against the profile as it stands) backs keeping the folded,
-    packed profile: every call gains beyond the noise (``CONFIDENCE``), as
-    every other packing decision here already asks; none where ``gains`` is
-    empty, since there is then no call to have gained anything.
+    packed profile: every one of them gains beyond the noise
+    (``CONFIDENCE``), as every other packing decision here already asks;
+    none where ``gains`` is empty, since there is then no call to have
+    gained anything. ``price_folds_before_packing`` calls this with one
+    call at a time, its own version's decision alone.
     """
     return bool(gains) and all(
         noise is not None and delta < -CONFIDENCE * noise for _, delta, noise in gains
@@ -691,6 +694,45 @@ def _gains_report(gains: Sequence[tuple[Timed, float, float | None]]) -> str:
         f"{'?' if noise is None else f'{noise:.1f}'} us"
         for call, delta, noise in gains
     )
+
+
+def _with_fusions(base: Profile, fusions: Sequence) -> Profile:
+    """``base``'s entries and packings with ``fusions`` as its only
+    fusions: the fold-narrowing counterpart of ``_profile``, which does the
+    same for a profile's packings.
+    """
+    out = Profile()
+    for cls, dims, tunables in base:
+        out.add(cls, **dims, **tunables)
+    for kind, steps, edges, versions in fusions:
+        out.add_fusion(kind, steps, edges, versions)
+    for entry in base.packings():
+        out.add_packing(entry.members, entry.versions)
+    return out
+
+
+def _narrow_for_rejected(fusions: Sequence, version: Version) -> list:
+    """``fusions`` with a ``FOLD`` entry's own ``versions`` narrowed past
+    ``version``, dropped entirely where that would leave it naming none: a
+    version ``price_folds_before_packing`` rejects keeps the profile as it
+    stood for the shapes a fold scoped to it (and no other version) alone
+    named. A fusion of another kind, or a fold unscoped or scoped to a
+    version other than this one, is untouched: packing entries never
+    narrow here, a packed group a fold shape joins matching by dims alone
+    (``finish`` never one, ``_json_safe`` drops it before a packing entry
+    is ever saved), so it groups a shape whether this version folds it or
+    not, and stays priced by its own, already version-scoped, end to end
+    check (``price_packings``'s own).
+    """
+    out = []
+    for kind, steps, edges, versions in fusions:
+        if kind is FusionKind.FOLD and versions is not None and version in versions:
+            remaining = versions - {version}
+            if not remaining:
+                continue
+            versions = remaining
+        out.append((kind, steps, edges, versions))
+    return out
 
 
 def price_folds_before_packing(
@@ -714,13 +756,17 @@ def price_folds_before_packing(
 ) -> Profile:
     """``profile`` with the folds its arrays admit (``iron.tune.fold.
     fold_profile``, scoped so a fold never splits a device array a call
-    site that does not take it still shares) packed (``price_packings``, so
-    the search groups the same folded step list ``apply_profile`` builds
-    from at build time), kept only where every one of ``calls``, folded and
-    packed, beats ``profile`` as it stands (its own packings, or none) end
-    to end (``compare_graphs``); the plain ``price_packings`` search on
-    ``profile`` runs, and its result is returned, only where folding first
-    does not pay off this way, or admits no fold at all. The fold entries
+    site that does not take it still shares, and scoped to the graph
+    versions it was found in) packed (``price_packings``, so the search
+    groups the same folded step list ``apply_profile`` builds from at build
+    time). Kept per version, the way ``widen_packings`` decides a packing
+    entry's own widening: a version keeps its folds only where it, folded
+    and packed, beats ``profile`` as it stands (its own packings, or none)
+    end to end (``compare_graphs``); one that does not gain keeps the
+    profile as it stood instead, its own fold entries narrowed back out
+    rather than the whole packed result discarded (``_narrow_for_rejected``).
+    The plain ``price_packings`` search on ``profile`` runs, and its result
+    is returned, only where folding admits nothing at all. The fold entries
     this adds are the tuner's own proposal, not Erika's (``chosen_folds``
     still takes any a hand-written profile names, unscoped).
     """
@@ -770,26 +816,28 @@ def price_folds_before_packing(
         log=log,
         lock=lock,
     )
-    gains = [
-        (
-            call,
-            *_end_to_end(
-                call, dev, profile, packed_and_folded, confirm_timing, log, lock
-            ),
-        )
-        for call in calls
-    ]
-    if _keep_folded(gains):
-        log(
-            "price_folds_before_packing: keeping the folded, packed profile, "
-            f"every call ahead of it as it stood: {_gains_report(gains)}"
-        )
-        return packed_and_folded
-    log(
-        "price_folds_before_packing: the folds do not gain beyond the noise "
-        f"in every call ({_gains_report(gains)}); packing the plain profile"
-    )
-    return plain()
+    fusions = packed_and_folded.fusions()
+    for call in calls:
+        version = call.recording.version
+        candidate = _with_fusions(packed_and_folded, fusions)
+        gains = [
+            (
+                call,
+                *_end_to_end(call, dev, profile, candidate, confirm_timing, log, lock),
+            )
+        ]
+        report = _gains_report(gains)
+        if _keep_folded(gains):
+            log(
+                f"price_folds_before_packing: {call.recording.name} keeps its folds, {report}"
+            )
+        else:
+            log(
+                f"price_folds_before_packing: {call.recording.name} keeps the "
+                f"profile as it stood, its folds do not gain beyond the noise, {report}"
+            )
+            fusions = _narrow_for_rejected(fusions, version)
+    return _with_fusions(packed_and_folded, fusions)
 
 
 def widen_packings(

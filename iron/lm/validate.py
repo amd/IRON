@@ -210,14 +210,15 @@ def speed(
 
 def entry_applies(kind: str, entry, recording: Recording) -> bool:
     """Whether a candidate profile's ``entry`` (a fusion's own ``(FusionKind,
-    steps, edges)`` where ``kind`` is ``"fusion"``, else a ``PackingEntry``)
-    matches anything in ``recording``, a packing only where it applies in
-    the recording's version.
+    steps, edges, versions)`` where ``kind`` is ``"fusion"``, else a
+    ``PackingEntry``) matches anything in ``recording``, either only where
+    it applies in the recording's version (``graph_fusions`` checks a
+    fusion's own this way already; a packing's own is checked here).
     """
     trial = Profile()
     if kind == "fusion":
-        fusion_kind, steps, edges = entry
-        trial.add_fusion(fusion_kind, steps, edges)
+        fusion_kind, steps, edges, versions = entry
+        trial.add_fusion(fusion_kind, steps, edges, versions)
         return bool(graph_fusions(recording, trial))
     trial.add_packing(entry.members, entry.versions)
     version = recording.version

@@ -272,6 +272,107 @@ def test_fused_matches_by_class_dims_and_wiring_like_a_tunable_entry():
 
 
 # --------------------------------------------------------------------------
+# A fusion entry's own versions (as a packing entry's own: Profile.add_
+# packing's versions=, PackingEntry), one list serving every fusion kind
+# --------------------------------------------------------------------------
+
+
+def test_an_unscoped_fusion_entry_applies_in_every_version(llama_recordings):
+    decode, prompt = llama_recordings
+    p = Profile()
+    p.add_fusion(
+        FusionKind.STREAM,
+        [(SiLU, dict(size=2048)), (ElementwiseMul, dict(size=2048))],
+        [(0, "y", 1, "a")],
+    )
+    gate = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    up = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    edge = [(0, "y", 1, "a")]
+    assert p.fused(FusionKind.STREAM, [gate, up], edge)  # no version given, as before
+    assert p.fused(FusionKind.STREAM, [gate, up], edge, decode.version)
+    assert p.fused(FusionKind.STREAM, [gate, up], edge, prompt.version)
+
+
+def test_a_fusion_entry_scoped_to_decode_does_not_apply_to_the_prompt(
+    llama_recordings,
+):
+    decode, prompt = llama_recordings
+    assert decode.version != prompt.version
+    gate = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    up = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    edge = [(0, "y", 1, "a")]
+
+    scoped_to_decode = Profile()
+    scoped_to_decode.add_fusion(
+        FusionKind.STREAM,
+        [(SiLU, dict(size=2048)), (ElementwiseMul, dict(size=2048))],
+        edge,
+        versions=[decode.version],
+    )
+    assert scoped_to_decode.fused(FusionKind.STREAM, [gate, up], edge, decode.version)
+    assert not scoped_to_decode.fused(
+        FusionKind.STREAM, [gate, up], edge, prompt.version
+    )
+    assert not scoped_to_decode.fused(FusionKind.STREAM, [gate, up], edge)
+
+    scoped_to_prompt = Profile()
+    scoped_to_prompt.add_fusion(
+        FusionKind.STREAM,
+        [(SiLU, dict(size=2048)), (ElementwiseMul, dict(size=2048))],
+        edge,
+        versions=[prompt.version],
+    )
+    assert scoped_to_prompt.fused(FusionKind.STREAM, [gate, up], edge, prompt.version)
+    assert not scoped_to_prompt.fused(
+        FusionKind.STREAM, [gate, up], edge, decode.version
+    )
+
+
+def test_add_fusion_checks_its_versions():
+    with pytest.raises(TypeError, match="at least one version"):
+        Profile().add_fusion(
+            FusionKind.STREAM,
+            [(SiLU, {}), (ElementwiseMul, {})],
+            [(0, "y", 1, "a")],
+            versions=[],
+        )
+
+
+def test_a_fusion_entrys_versions_round_trip_through_json(tmp_path):
+    """A version is a dict key in a running profile (``frozenset[Version]``);
+    JSON gives every tuple in it back as a list, the same bug a dim's own
+    tuple-valued field hit before ``matches`` normalized it (``test_a_fusion_
+    over_tuple_valued_params_matches_after_save_and_load``) -- a version
+    must round-trip to the exact tuple it was, not merely an equal-looking
+    one, or ``version in entry_versions`` never finds it again.
+    """
+    version = (("x", (2048,), "bfloat16"),)
+    p = Profile()
+    p.add_fusion(
+        FusionKind.STREAM,
+        [(SiLU, dict(size=2048)), (ElementwiseMul, dict(size=2048))],
+        [(0, "y", 1, "a")],
+        versions=[version],
+    )
+    path = tmp_path / "profile.json"
+    p.save(path)
+    assert json.loads(path.read_text())["fusions"][0]["versions"] == [
+        {"x": [[2048], "bfloat16"]}
+    ]
+
+    loaded = Profile.load(path)
+    gate = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    up = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    assert loaded.fused(FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")], version)
+    (fusion_versions,) = (versions for *_, versions in loaded.fusions())
+    assert fusion_versions == frozenset({version})
+
+    roundtrip = tmp_path / "roundtrip.json"
+    loaded.save(roundtrip)
+    assert roundtrip.read_text() == path.read_text()
+
+
+# --------------------------------------------------------------------------
 # candidates(): a recording's admissible fusions
 # --------------------------------------------------------------------------
 

@@ -94,7 +94,8 @@ def test_propose_folds_excludes_the_fragmenting_candidate(decode):
 def test_fold_profile_writes_down_projs_add_and_silus_mul_by_shape(decode):
     """``fold_profile`` adds one fold entry a layer-specific ``down_proj``
     GEMV matches (``K=8192``), none a ``q_proj``/``o_proj`` one (``K=2048``)
-    matches, and one for ``SiLU``; it leaves ``base``'s own entries alone.
+    matches, and one for ``SiLU``, each scoped to the one version it was
+    found in (``decode``'s own); it leaves ``base``'s own entries alone.
     """
     base = Profile()
     base.add(GEMV, M=2048, K=2048, tile_size_input=4, tile_size_output=256)
@@ -104,15 +105,16 @@ def test_fold_profile_writes_down_projs_add_and_silus_mul_by_shape(decode):
     fusions = out.fusions()
     kinds = sorted(
         (kind.value, tuple(c.__name__ for c, _, _ in steps))
-        for kind, steps, _ in fusions
+        for kind, steps, _, _ in fusions
     )
     assert kinds == [
         (FusionKind.FOLD.value, ("GEMV", "ElementwiseAdd")),
         (FusionKind.FOLD.value, ("SiLU", "ElementwiseMul")),
     ]
+    assert all(versions == frozenset({decode.version}) for *_, versions in fusions)
     (gemv_fold,) = (
         steps
-        for kind, steps, _ in fusions
+        for kind, steps, _, _ in fusions
         if kind is FusionKind.FOLD and steps[0][0] is GEMV
     )
     assert gemv_fold[0][1]["K"] == 8192, "down_proj's own K, not q/o's 2048"

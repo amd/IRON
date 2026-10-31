@@ -884,8 +884,8 @@ def confirm_fusions(
             trial_profile = Profile()
             for cls, dims, tunables in profile:
                 trial_profile.add(cls, **dims, **tunables)
-            for kind, steps, edges in profile.fusions():
-                trial_profile.add_fusion(kind, steps, edges)
+            for kind, steps, edges, versions in profile.fusions():
+                trial_profile.add_fusion(kind, steps, edges, versions)
             for group in remaining:
                 trial_profile.add_fusion(
                     group.kind, group.dims(combos.get(group)), group.edges
@@ -1098,11 +1098,11 @@ def price_fusions(
         out.add(cls, **dims, **tunables)
 
     existing = profile.fusions() if profile is not None else []
-    for kind, steps, edges in existing:
+    for kind, steps, edges, versions in existing:
         probe = Profile()
         probe.add_fusion(kind, steps, edges)
         if not any(probe.fused(g.kind, g.steps, g.edges) for g in all_found):
-            out.add_fusion(kind, steps, edges)
+            out.add_fusion(kind, steps, edges, versions)
 
     if confirm:
         taken = confirm_fusions(

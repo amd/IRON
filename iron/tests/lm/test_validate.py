@@ -21,7 +21,7 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 def _silu_mul_entry(recording):
     """The ``(SiLU, dims)`` -> ``(ElementwiseMul, dims)`` fusion entry
-    ``recording`` admits, in ``Profile.add_fusion``'s own shape.
+    ``recording`` admits, in ``Profile.add_fusion``'s own shape, unscoped.
     """
     fusion = next(
         f
@@ -36,6 +36,7 @@ def _silu_mul_entry(recording):
         FusionKind.STREAM,
         [(SiLU, dict(size=gate.size)), (ElementwiseMul, dict(size=mul.size))],
         [(0, edge.output, 1, edge.input)],
+        None,
     )
 
 
@@ -91,6 +92,7 @@ def _raw_entry():
         FusionKind.STREAM,
         [(SiLU, {"size": 2048}), (ElementwiseMul, {"size": 2048})],
         [(0, "y", 1, "a")],
+        None,
     )
 
 

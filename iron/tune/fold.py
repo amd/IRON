@@ -20,9 +20,10 @@ from __future__ import annotations
 from collections.abc import Hashable, Sequence
 
 from iron.common.declare import Operator, Profile
+from iron.common.declare.profile import Version
 from iron.common.graph.fold import chosen_folds, fold_candidates
 from iron.common.graph.record import Recording
-from iron.common.image.step import Fusion
+from iron.common.image.step import Fusion, FusionKind
 from .autotune import Shape, Timed
 from .fusions import _json_safe
 
@@ -123,32 +124,41 @@ def propose_folds(recording: Recording) -> tuple[Fusion, ...]:
 
 def fold_profile(base: Profile, calls: Sequence[Timed]) -> Profile:
     """``base``'s entries, fusions and packings, with a fold entry added for
-    each distinct shape (class, dims and wiring, across every layer and
-    call alike) ``propose_folds`` finds in ``calls``' recordings that
-    ``base`` does not already carry: what ``price_folds_before_packing``
-    prices packed, against ``base`` packed without them. Each step names
-    its own dims (``Shape.named``, as a packing entry's members do), not
-    every instance of its class, so a model that later grows a same-class
-    pair this never checked does not inherit an unscoped fold by matching
-    too broadly; calling this again on its own output adds nothing new.
+    each distinct shape (class, dims and wiring) ``propose_folds`` finds in
+    ``calls``' recordings that ``base`` does not already carry, scoped to
+    the graph versions (``Recording.version``) it was found in (one shape
+    found in more than one call's recording, as a prompt chunk's own
+    SwiGLU gate and a decode step's alike can be, is scoped to all of
+    them): what ``price_folds_before_packing`` prices packed, against
+    ``base`` packed without them, and decides to keep per version
+    (``widen_packings`` decides a packing entry's own widening the same
+    way). Each step names its own dims (``Shape.named``, as a packing
+    entry's members do), not every instance of its class, so a model that
+    later grows a same-class pair this never checked does not inherit an
+    unscoped fold by matching too broadly; calling this again on its own
+    output adds nothing new.
     """
     out = Profile()
     for cls, dims, tunables in base:
         out.add(cls, **dims, **tunables)
-    for kind, steps, edges in base.fusions():
-        out.add_fusion(kind, steps, edges)
+    for kind, steps, edges, versions in base.fusions():
+        out.add_fusion(kind, steps, edges, versions)
     for entry in base.packings():
         out.add_packing(entry.members, entry.versions)
-    seen = {
+    existing = {
         (kind, tuple((c, tuple(sorted(d.items()))) for c, d, _ in steps), edges)
-        for kind, steps, edges in base.fusions()
+        for kind, steps, edges, _ in base.fusions()
     }
+    found: dict[Hashable, tuple[FusionKind, list, tuple, set[Version]]] = {}
     for call in calls:
         recording = call.recording
+        version = recording.version
         for fusion in propose_folds(recording):
             key, named, edges = _entry(recording, fusion)
-            if key in seen:
+            if key in existing:
                 continue
-            seen.add(key)
-            out.add_fusion(fusion.kind, named, edges)
+            entry = found.setdefault(key, (fusion.kind, named, edges, set()))
+            entry[3].add(version)
+    for kind, named, edges, versions in found.values():
+        out.add_fusion(kind, named, edges, frozenset(versions))
     return out

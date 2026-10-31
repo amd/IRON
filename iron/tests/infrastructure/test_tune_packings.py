@@ -11,13 +11,15 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Scratchpad
+from iron import Profile, Scratchpad
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.packing import apply as apply_packings
+from iron.common.image.step import FusionKind
 from iron.lm.generation import Sampler
 from iron.lm.tune import calls
 from iron.tests.support.llama_model import small
 from iron.operators.copy import Copy
+from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
@@ -32,6 +34,8 @@ from iron.tune.packings import (
     _end_to_end,
     _gains_report,
     _keep_folded,
+    _narrow_for_rejected,
+    _with_fusions,
     adjacent,
     price_packings,
     widen_packings,
@@ -239,6 +243,80 @@ def test_fold_profile_leaves_a_profile_with_nothing_to_fold_unchanged():
     base = iron.Profile()
     with_folds = fold_profile(base, [Timed(Single().record(x=(SIZE,)))])
     assert with_folds.fusions() == base.fusions() == []
+
+
+def _version(name: str) -> tuple:
+    return ((name, (1,), "bf16"),)
+
+
+def test_narrow_for_rejected_drops_a_fold_entry_naming_only_that_version():
+    v = _version("decode")
+    fusions = [(FusionKind.FOLD, (), (), frozenset({v}))]
+    assert _narrow_for_rejected(fusions, v) == []
+
+
+def test_narrow_for_rejected_shrinks_a_fold_entry_naming_several_versions():
+    decode_v, prompt_v = _version("decode"), _version("prompt")
+    fusions = [(FusionKind.FOLD, (), (), frozenset({decode_v, prompt_v}))]
+    assert _narrow_for_rejected(fusions, decode_v) == [
+        (FusionKind.FOLD, (), (), frozenset({prompt_v}))
+    ]
+
+
+def test_narrow_for_rejected_leaves_other_kinds_and_other_versions_alone():
+    decode_v, prompt_v = _version("decode"), _version("prompt")
+    unscoped_fold = (FusionKind.FOLD, (), (), None)
+    prompt_only_fold = (FusionKind.FOLD, (), (), frozenset({prompt_v}))
+    stream = (FusionKind.STREAM, (), (), frozenset({decode_v}))
+    fusions = [unscoped_fold, prompt_only_fold, stream]
+    assert _narrow_for_rejected(fusions, decode_v) == fusions
+
+
+def test_with_fusions_replaces_only_the_fusions():
+    base = Profile()
+    base.add(GEMV, M=2048, K=2048, num_aie_columns=8)
+    base.add_packing([(GEMV, {"M": 2048, "K": 2048}), (ElementwiseAdd, {"size": 2048})])
+    base.add_fusion(
+        FusionKind.STREAM,
+        [(GEMV, {"M": 2048, "K": 2048}), (ElementwiseAdd, {"size": 2048})],
+        [(0, "C", 1, "b")],
+    )
+    replaced = _with_fusions(base, [])
+    assert replaced.fusions() == []
+    assert list(replaced) == list(base)
+    assert replaced.packings() == base.packings()
+
+
+def test_fold_profile_scopes_each_entry_to_the_version_it_was_found_in():
+    """``small()``'s decode step and its prompt chunk run SwiGLU at
+    different widths (a prompt chunk's rows fold into the one shape), so
+    ``fold_profile`` scopes each its own ``SiLU -> ElementwiseMul`` entry to
+    its own version alone, not both: the per-version decision ``price_
+    folds_before_packing`` makes needs exactly this to tell one version's
+    folds from the other's. Only decode's own projections are ``GEMV``
+    (the prompt chunk's are ``ProjectionGEMM``, which declares no
+    ``fold()``), so its residual-add entries name decode's version only.
+    """
+    model = small()
+    decode_shapes, prompt_shapes = model.shapes()
+    decode, prompt = model.record(**decode_shapes), model.record(**prompt_shapes)
+    assert decode.version != prompt.version
+
+    with_folds = fold_profile(Profile(), [Timed(decode), Timed(prompt)])
+    fusions = with_folds.fusions()
+    by_class = {steps[0][0].__name__: versions for _, steps, _, versions in fusions}
+    assert by_class["GEMV"] == frozenset({decode.version})
+    silu_versions = {
+        versions for _, steps, _, versions in fusions if steps[0][0].__name__ == "SiLU"
+    }
+    assert silu_versions == {frozenset({decode.version}), frozenset({prompt.version})}
+
+    # Rejecting the prompt's own folds (the per-version decision) drops
+    # only its own singleton-scoped entry, decode's own untouched.
+    narrowed = _narrow_for_rejected(fusions, prompt.version)
+    assert len(narrowed) == len(fusions) - 1
+    assert frozenset({decode.version}) in {v for _, _, _, v in narrowed}
+    assert frozenset({prompt.version}) not in {v for _, _, _, v in narrowed}
 
 
 # ---------------------------------------------------------------------------

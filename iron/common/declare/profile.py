@@ -25,25 +25,31 @@ if TYPE_CHECKING:
 
 _Op = TypeVar("_Op", bound="Operator")
 
+# A graph version's key (``Recording.version``, ``Graph.versions``): each
+# input's name, shape and dtype name, in the order its body takes them.
+Version = tuple[tuple[str, tuple[int, ...], str], ...]
+
 # A fusion entry: ``kind`` steps, each ``(operator class, dims, tunables)``
 # in order, wired by ``edges`` (local indices into ``steps``, ``(producer,
 # output, consumer, input)``); dims are matched the same way a tunable
 # entry's are (``Profile.dims``, ``Profile.matches``). ``tunables``, where a
 # step gives them, are what it takes running inside this fusion, which may
 # differ from what the same shape takes unfused (``Profile.fusion_tunables``);
-# None where a step moves none from its own.
+# None where a step moves none from its own. ``versions``, as a packing
+# entry's own, is the graph versions (``Recording.version``) it applies in,
+# or every version where None: a kind no code scopes today (``STREAM``,
+# ``STAGED``, ``PACK``, ``MERGE``) carries it as None throughout, one list
+# serving every fusion kind rather than a parallel, ``FOLD``-only one.
 _FusionEntry = tuple[
     FusionKind,
     tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...],
     tuple[tuple[int, str, int, str], ...],
+    frozenset[Version] | None,
 ]
 _FusionStep = (
     tuple[type, Mapping[str, Any] | None]
     | tuple[type, Mapping[str, Any] | None, Mapping[str, Any] | None]
 )
-# A graph version's key (``Recording.version``, ``Graph.versions``): each
-# input's name, shape and dtype name, in the order its body takes them.
-Version = tuple[tuple[str, tuple[int, ...], str], ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,6 +75,36 @@ def _normalized(value: Any) -> Any:
     return value
 
 
+def _load_versions(versions: list | None) -> list[Version] | None:
+    """``versions``, a fusion or packing entry's own JSON field, as the live
+    ``Version`` tuples ``add_fusion``/``add_packing`` take: None kept as is,
+    each one's shape turned back from JSON's list into the tuple a live
+    ``Recording.version`` holds (the same round-trip ``_normalized`` spares
+    a dim or a tunable; a version is a dict key, so it must be exact).
+    """
+    if versions is None:
+        return None
+    return [
+        tuple((n, tuple(shape), dtype) for n, (shape, dtype) in v.items())
+        for v in versions
+    ]
+
+
+def _dump_versions(versions: frozenset[Version] | None) -> dict[str, Any]:
+    """``{"versions": [...]}`` for a fusion or packing entry's own
+    ``versions``, JSON-safe (a tuple has none, so each version's shape is a
+    list); empty where ``versions`` is None, so a caller splats it into an
+    entry's own dict unconditionally.
+    """
+    if versions is None:
+        return {}
+    return {
+        "versions": [
+            {n: [list(shape), dtype] for n, shape, dtype in v} for v in sorted(versions)
+        ]
+    }
+
+
 def _with_enum_fields(cls: type, fields: dict[str, Any]) -> dict[str, Any]:
     """``fields`` with an Enum-domain one, JSON's string, its member (should
     `1`: a `Pinned` member's own value, not its ordinal).
@@ -89,7 +125,9 @@ class Profile:
     matched the same way, by class and dims alone (a tunable moves what a
     fusion itself takes, not which it is); a step may give the tunables it
     takes running inside this fusion, where they differ from what the same
-    shape takes unfused.
+    shape takes unfused. An entry may name the graph versions it applies in,
+    as a packing entry's own does; unscoped (every fusion kind but a
+    tuner-proposed fold, today) in every version where it matches.
 
     ``packings`` names shapes whose designs share one device configuration
     in a full ELF, so a version runs them without reconfiguring between
@@ -148,6 +186,7 @@ class Profile:
         kind: FusionKind,
         steps: Sequence[_FusionStep],
         edges: Sequence[tuple[int, str, int, str]],
+        versions: Iterable[Version] | None = None,
     ) -> None:
         """Add a fusion entry: ``kind`` steps (each ``(operator class, dims)``
         or ``(operator class, dims, tunables)``, in order) run as one device
@@ -159,8 +198,14 @@ class Profile:
         inside this fusion (``fusion_tunables``); a step giving none keeps
         what it takes unfused.
 
+        Args:
+            versions: The graph versions (``Recording.version``) the entry
+                applies in, as a packing entry's own; every version where
+                None.
+
         Raises:
-            TypeError: Fewer than two steps are given, a dim is not a
+            TypeError: Fewer than two steps are given, no version is given
+                (an empty ``versions``, not None), a dim is not a
                 non-tunable ``param()`` of its class, a name in ``tunables``
                 is not a ``tunable()`` of its class, an edge names a step
                 out of range or itself, or either side of an edge declares
@@ -184,7 +229,10 @@ class Profile:
                 raise TypeError(f"{p_cls.__name__} declares no output {output!r}")
             if not any(m.name == input and m.fills for m in c_cls.declaration.operands):
                 raise TypeError(f"{c_cls.__name__} declares no input {input!r}")
-        self._fusions.append((kind, resolved, tuple(edges)))
+        scope = None if versions is None else frozenset(versions)
+        if scope is not None and not scope:
+            raise TypeError("a fusion entry names at least one version, or None")
+        self._fusions.append((kind, resolved, tuple(edges), scope))
 
     def add_packing(
         self,
@@ -245,26 +293,32 @@ class Profile:
         kind: FusionKind,
         steps: Sequence[Operator],
         edges: Sequence[tuple[int, str, int, str]],
+        version: Version | None = None,
     ) -> bool:
         """Whether this profile fuses ``steps`` (resolved operators, in
-        order) of ``kind``, wired by ``edges`` (local indices): a fusion
-        entry of the same kind, length and wiring whose steps' classes and
-        dims (``Profile.dims``, ``Profile.matches``) match them, in order.
+        order) of ``kind``, wired by ``edges`` (local indices), in
+        ``version`` (``Recording.version``): a fusion entry of the same
+        kind, length and wiring whose steps' classes and dims
+        (``Profile.dims``, ``Profile.matches``) match them, in order, and
+        whose own ``versions`` names ``version`` or names none. ``version``
+        left out matches any entry regardless of its own scope: only a
+        caller that tracks one (``chosen_folds``) need give it.
         """
-        return self._matching(kind, steps, edges) is not None
+        return self._matching(kind, steps, edges, version) is not None
 
     def fusion_tunables(
         self,
         kind: FusionKind,
         steps: Sequence[Operator],
         edges: Sequence[tuple[int, str, int, str]],
+        version: Version | None = None,
     ) -> list[dict[str, Any] | None] | None:
         """The matching fusion entry's per-step tunables (``add_fusion``'s
         ``tunables``), in order; None where no entry matches ``kind``,
-        ``steps`` and ``edges`` (``fused``). A step's own entry is None
-        where it keeps what it takes unfused.
+        ``steps``, ``edges`` and ``version`` (``fused``). A step's own entry
+        is None where it keeps what it takes unfused.
         """
-        entry = self._matching(kind, steps, edges)
+        entry = self._matching(kind, steps, edges, version)
         return None if entry is None else [t for _, _, t in entry]
 
     def _matching(
@@ -272,16 +326,18 @@ class Profile:
         kind: FusionKind,
         steps: Sequence[Operator],
         edges: Sequence[tuple[int, str, int, str]],
+        version: Version | None = None,
     ) -> tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...] | None:
         step_dims = [self.dims(type(s), vars(s)) for s in steps]
         edges = tuple(edges)
         return next(
             (
                 entry_steps
-                for entry_kind, entry_steps, entry_edges in self._fusions
+                for entry_kind, entry_steps, entry_edges, entry_versions in self._fusions
                 if entry_kind is kind
                 and len(entry_steps) == len(steps)
                 and entry_edges == edges
+                and (entry_versions is None or version in entry_versions)
                 and all(
                     isinstance(s, cls) and self.matches(matched, dims)
                     for s, (cls, matched, _), dims in zip(steps, entry_steps, step_dims)
@@ -291,8 +347,8 @@ class Profile:
         )
 
     def fusions(self) -> list[_FusionEntry]:
-        """Each fusion entry as ``(kind, steps, edges)``, ``steps`` each
-        ``(operator class, dims, tunables)``, in the order added."""
+        """Each fusion entry as ``(kind, steps, edges, versions)``, ``steps``
+        each ``(operator class, dims, tunables)``, in the order added."""
         return list(self._fusions)
 
     def packings_of(
@@ -406,14 +462,28 @@ class Profile:
             return out
 
         for fusion in data.get("fusions", ()):
-            if set(fusion) != {"kind", "steps", "edges"}:
+            if (
+                not {"kind", "steps", "edges"}
+                <= set(fusion)
+                <= {
+                    "kind",
+                    "steps",
+                    "edges",
+                    "versions",
+                }
+            ):
                 raise ValueError(
                     f"{path}: a fusion is {{'kind': ..., 'steps': [...], "
-                    f"'edges': [...]}}"
+                    f"'edges': [...]}}, with 'versions': [{{input: [shape, "
+                    f"dtype]}}, ...] where it applies in only some of a "
+                    f"graph's versions"
                 )
             edges = [tuple(e) for e in fusion["edges"]]
             profile.add_fusion(
-                FusionKind(fusion["kind"]), members(fusion["steps"]), edges
+                FusionKind(fusion["kind"]),
+                members(fusion["steps"]),
+                edges,
+                _load_versions(fusion.get("versions")),
             )
         for packing in data.get("packings", ()):
             if not isinstance(packing, dict) or not {"members"} <= set(packing) <= {
@@ -425,19 +495,8 @@ class Profile:
                     f"'versions': [{{input: [shape, dtype]}}, ...] where it "
                     f"applies in only some of a graph's versions"
                 )
-            versions = packing.get("versions")
             profile.add_packing(
-                members(packing["members"]),
-                (
-                    None
-                    if versions is None
-                    else [
-                        tuple(
-                            (n, tuple(shape), dtype) for n, (shape, dtype) in v.items()
-                        )
-                        for v in versions
-                    ]
-                ),
+                members(packing["members"]), _load_versions(packing.get("versions"))
             )
         return profile
 
@@ -480,23 +539,15 @@ class Profile:
                     "kind": kind.value,
                     "steps": members(steps),
                     "edges": [list(e) for e in edges],
+                    **_dump_versions(versions),
                 }
             )
-            for kind, steps, edges in self._fusions
+            for kind, steps, edges, versions in self._fusions
         ]
         packing_lines = [
             json.dumps(
                 {
-                    **(
-                        {}
-                        if p.versions is None
-                        else {
-                            "versions": [
-                                {n: [list(shape), dtype] for n, shape, dtype in v}
-                                for v in sorted(p.versions)
-                            ]
-                        }
-                    ),
+                    **_dump_versions(p.versions),
                     "members": members(p.members),
                 }
             )

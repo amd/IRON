@@ -336,6 +336,7 @@ def fusions(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
     """
     found: list[Fusion] = []
     taken: set[int] = set()
+    version = recording.version
     for fusion in candidates(recording, _EVERY_KIND):
         if taken & set(fusion.steps):
             continue
@@ -345,7 +346,7 @@ def fusions(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
             (local[e.producer], e.output, local[e.consumer], e.input)
             for e in fusion.edges
         )
-        if not profile.fused(fusion.kind, steps, edges):
+        if not profile.fused(fusion.kind, steps, edges, version):
             continue
         found.append(fusion)
         taken.update(fusion.steps)
