@@ -17,7 +17,7 @@ from aie.iron import In, InOut, Out
 from aie.utils import bfp
 
 from ..declare import Operator, Value
-from ..declare.operand import concrete, param_names
+from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
 from ..declare.profile import Profile
 from ..image.packaging import Kind
@@ -872,14 +872,7 @@ class Recorder:
         ``operands`` holds its buffer.
         """
         called = operands if called is None else called
-        # A shape that Selects on a tunable() is the device's: resolve()
-        # gives it, unchecked, so a profile may still tune the op.
-        params = type(op).declaration.params
-        unset = {n for n, p in params.items() if p.tunable and vars(op)[n] is None}
-        shaped = op
-        if any(unset & param_names(m.dims) for m in op._members_io()):
-            shaped = op.resolve(op.dev)
-        buffers = shaped.buffers
+        buffers = op.buffers
         ins = [b for b in buffers if b.fills]
         outs = [b for b in buffers if b.role is Out]
         given_outs = operands[len(ins) :]

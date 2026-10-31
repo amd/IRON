@@ -112,8 +112,7 @@ class Shipped(
         default=Precision.MEDIUM, array=True, repr=False, init=False
     )
     emulate_bf16_mmul_with_bfp16: bool = tunable(default=True, repr=False, init=False)
-    bfp16_b: bool = tunable(default=False, repr=False, init=False)
-    b_dtype: object = tunable(default=bfloat16, repr=False, init=False)
+    bfp16_b: bool = param(default=False, array=True, repr=False, init=False)
     l1_b_depth: int = tunable(default=QUEUE_DEPTH, repr=False, init=False)
     a_l2: int = tunable(default=M_TILE * K_TILE, repr=False, init=False)
     b_l2: int = tunable(default=K_TILE * N_TILE, repr=False, init=False)

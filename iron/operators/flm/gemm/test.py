@@ -195,6 +195,7 @@ def test_gemm(M, K, N, epilogue, rounding, record_property):
         rounding=rounding,
         epilogue=epilogue,
         precision=Precision.MEDIUM,
+        bfp16_b=aie_utils.get_current_device().arch is AIEArch.AIE2p,
     )
 
     errors = check_on_device(
@@ -213,7 +214,12 @@ def test_gemm_without_activations(M, K, N, record_property):
     case above.
     """
     operator = ProjectionGEMM(
-        M=M, K=K, N=N, epilogue_modes=(NONE,), precision=Precision.MEDIUM
+        M=M,
+        K=K,
+        N=N,
+        epilogue_modes=(NONE,),
+        precision=Precision.MEDIUM,
+        bfp16_b=aie_utils.get_current_device().arch is AIEArch.AIE2p,
     )
 
     errors = check_on_device(operator, flm_vectors(operator), record=record_property)
@@ -297,7 +303,14 @@ def test_gemm_split_leg_bounds_runs():
     their only cover.
     """
     M, K, N = 512, 512, 20480
-    operator = ProjectionGEMM(M=M, K=K, N=N, m_chunk=2, precision=Precision.MEDIUM)
+    operator = ProjectionGEMM(
+        M=M,
+        K=K,
+        N=N,
+        m_chunk=2,
+        precision=Precision.MEDIUM,
+        bfp16_b=aie_utils.get_current_device().arch is AIEArch.AIE2p,
+    )
 
     errors = check_on_device(operator, flm_vectors(operator))
     assert not errors, "Test failed"
@@ -346,7 +359,14 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
 
     The default, and each other A height the design accepts, on hardware.
     """
-    shape = dict(M=M, K=K, N=N, tile_n=tile_n, precision=Precision.MEDIUM)
+    shape = dict(
+        M=M,
+        K=K,
+        N=N,
+        tile_n=tile_n,
+        precision=Precision.MEDIUM,
+        bfp16_b=aie_utils.get_current_device().arch is AIEArch.AIE2p,
+    )
     default = ProjectionGEMM(**shape).resolved().tile_ma
     if tile_ma == default:
         pytest.skip(f"tile_ma {default} is the default, run as -default")
@@ -387,7 +407,13 @@ def test_gemm_k_slices(ct_k):
     """
     dev = aie_utils.get_current_device()
     assert dev is not None
-    shape = dict(M=256, K=512, N=64 * dev.cols, precision=Precision.MEDIUM)
+    shape = dict(
+        M=256,
+        K=512,
+        N=64 * dev.cols,
+        precision=Precision.MEDIUM,
+        bfp16_b=dev.arch is AIEArch.AIE2p,
+    )
     default = ProjectionGEMM(**shape).resolved().ct_k
     if ct_k == default:
         pytest.skip(f"ct_k {default} is the default, run as -default")
@@ -413,7 +439,13 @@ def test_gemm_k_tile(K):
     dev = aie_utils.get_current_device()
     assert dev is not None
     operator = ProjectionGEMM(
-        M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256, precision=Precision.MEDIUM
+        M=256,
+        K=K,
+        N=64 * dev.cols,
+        tile_n=64,
+        k_tile=256,
+        precision=Precision.MEDIUM,
+        bfp16_b=dev.arch is AIEArch.AIE2p,
     )
     errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
     assert not errors, "Test failed"
@@ -445,6 +477,7 @@ def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, ct_k, precision):
         k_tile=k_tile,
         ct_k=ct_k,
         precision=precision,
+        bfp16_b=dev.arch is AIEArch.AIE2p and precision == Precision.MEDIUM,
     )
     rng = np.random.default_rng(0)
     A = rng.integers(-3, 4, (256, K)).astype(bfloat16)
@@ -480,7 +513,12 @@ def test_one_xclbin_serves_every_shape():
     xclbin = None
     for M, K, N, epilogue in shapes:
         operator = ProjectionGEMM(
-            M=M, K=K, N=N, epilogue=epilogue, precision=Precision.MEDIUM
+            M=M,
+            K=K,
+            N=N,
+            epilogue=epilogue,
+            precision=Precision.MEDIUM,
+            bfp16_b=aie_utils.get_current_device().arch is AIEArch.AIE2p,
         )
         data = flm_vectors(operator, 4.0 if epilogue == "none" else 0.5)
         mass = accumulated_mass(K, data["A"], data["B"])
@@ -677,6 +715,7 @@ def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N, eight_column_npu2):
             rounding=FLOOR,
             gelu=Gelu.BF16_STEPS,
             precision=Precision.MEDIUM,
+            bfp16_b=True,
         )
     )
     # The accumulator reaches about -15 at this scale. gelu's minimum is

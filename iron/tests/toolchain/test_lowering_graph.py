@@ -71,7 +71,7 @@ def test_attention_over_a_128k_cache_lowers(rows, tmp_path):
     ids=["base", "n10240", "tn128"],
 )
 def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path):
-    op = flm.ProjectionGEMM(M=M, K=K, N=N, precision=Precision.MEDIUM)
+    op = flm.ProjectionGEMM(M=M, K=K, N=N, precision=Precision.MEDIUM, bfp16_b=True)
     (tmp_path / "shape").mkdir()
     lower(op, tmp_path / "shape")
     tuned = op.resolved(aie_utils.get_current_device())

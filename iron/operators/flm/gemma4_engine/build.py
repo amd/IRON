@@ -98,6 +98,7 @@ def gemm(M, K, N, gelu):
         rounding="floor",
         gelu="bf16_steps",
         precision=Precision.MEDIUM,
+        bfp16_b=True,
     )
 
 

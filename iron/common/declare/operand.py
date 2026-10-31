@@ -459,14 +459,3 @@ def axis_of(dims: tuple, name: str, op) -> int | None:
                 return axis
         axis += 1
     return None
-
-
-def param_names(dims: tuple) -> set[str]:
-    """Return the parameters ``dims`` name, through ``Select``."""
-    out: set[str] = set()
-    for d in dims:
-        if isinstance(d, OperatorParam):
-            out.add(d.name)
-        elif isinstance(d, Select):
-            out |= param_names((d.flag, *d.when_true, *d.when_false))
-    return out

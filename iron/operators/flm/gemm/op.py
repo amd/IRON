@@ -179,16 +179,23 @@ class ProjectionGEMM(Operator):
     # MEDIUM multiplies on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8
     # (the port's arithmetic); above it, or on AIE2, on bf16 macs.
     precision: Precision = param(array=True)
+    # B in DDR as pack_b's bfp16ebs8 blocks, which AIE2P's bfp16 macs
+    # multiply unconverted: a packed B at precision='medium' there must say
+    # so, since B's host shape depends on it and no device is known yet.
+    bfp16_b: bool = param(default=False, repr=False, array=True)
+    # B's element type, on the array and in DDR alike; the host holds a
+    # block-float B as bytes (Operand.host_dtype).
+    b_dtype: Any = param(
+        derive=lambda op: v8bfp16ebs8 if op.bfp16_b else bfloat16,
+        repr=False,
+        init=False,
+    )
     # Filled by resolve, from the device: the macs, the grid, B's storage,
     # the L2 tiles.
     emulate_bf16_mmul_with_bfp16: bool = tunable(repr=False, init=False)
     rows: int = tunable(repr=False, init=False)
     cols: int = tunable(repr=False, init=False)
     joins: int = tunable(repr=False, init=False)
-    bfp16_b: bool = tunable(repr=False, init=False)
-    # B's element type, on the array and in DDR alike; the host holds a
-    # block-float B as bytes (Operand.host_dtype).
-    b_dtype: Any = tunable(repr=False, init=False)
     l1_b_depth: int = tunable(repr=False, init=False)
     a_l2: int = tunable(repr=False, init=False)
     b_l2: int = tunable(repr=False, init=False)
@@ -265,6 +272,11 @@ class ProjectionGEMM(Operator):
                 "flm.ProjectionGEMM: rounds per K tile at best (precision='high'); "
                 "iron.operators.GEMM rounds once"
             )
+        if self.bfp16_b and (self.b_col_maj or self.precision != Precision.MEDIUM):
+            raise ValueError(
+                "flm.ProjectionGEMM: bfp16_b (True) is a packed B (b_col_maj=False) "
+                "at precision='medium'"
+            )
         if self.tile_n is not None and self.tile_n not in TILE_NS:
             raise ValueError(
                 f"flm.ProjectionGEMM: tile_n ({self.tile_n}) must be one of "
@@ -316,7 +328,14 @@ class ProjectionGEMM(Operator):
         # lowers onto four native bf16 macs.
         aie2p = dev.arch == AIEArch.AIE2p
         emulate = aie2p and self.precision == Precision.MEDIUM
-        bfp16_b = emulate and not self.b_col_maj
+        bfp16_b = self.bfp16_b
+        if bfp16_b != (emulate and not self.b_col_maj):
+            raise ValueError(
+                f"flm.ProjectionGEMM: bfp16_b ({bfp16_b}) on {type(dev).__name__}, "
+                f"which takes a {'bfp16' if emulate else 'bf16'} packed B at "
+                f"precision={str(self.precision)!r}: pass "
+                f"bfp16_b={emulate and not self.b_col_maj}"
+            )
         b_elem_bytes = bfp.BLOCK_BYTES / bfp.BLOCK if bfp16_b else 2
         b_group = bfp.BLOCK if bfp16_b else 1
         tile_n = self.tile_n or next(
@@ -341,7 +360,6 @@ class ProjectionGEMM(Operator):
             self.tile_ma,
             self.ct_k,
         )
-        b_dtype = v8bfp16ebs8 if bfp16_b else bfloat16
         return self.replace(
             tile_n=tile_n,
             k_tile=k_tile,
@@ -351,8 +369,6 @@ class ProjectionGEMM(Operator):
             cols=cols,
             joins=C_JOINS,
             emulate_bf16_mmul_with_bfp16=emulate,
-            bfp16_b=bfp16_b,
-            b_dtype=b_dtype,
             l1_b_depth=l1_b_depth,
             a_l2=m_chunk * M_TILE * k_tile,
             b_l2=k_tile * tile_n // b_group,

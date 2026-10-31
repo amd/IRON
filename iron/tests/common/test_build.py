@@ -396,18 +396,26 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     # Keyword construction leaves every tunable to resolution, which reads the
     # device alone; the operator's extent is checked against the resolved
     # tunables by compatible(), not folded into its defaults.
-    untuned = flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024, precision=Precision.MEDIUM)
+    untuned = flm_gemm.ProjectionGEMM(
+        M=512, K=1024, N=1024, precision=Precision.MEDIUM, bfp16_b=True
+    )
     assert untuned.tile_n is None
-    with pytest.raises(ValueError):
-        [b.shape for b in untuned.buffers]  # B's layout follows the device
+    # B's layout is the caller's, so its host shape is known before a device.
+    assert untuned.buffers[1].shape == (1024 * 1024 // bfp.BLOCK,)
+    with pytest.raises(ValueError, match="pass bfp16_b=True"):
+        flm_gemm.ProjectionGEMM(
+            M=512, K=1024, N=1024, precision=Precision.MEDIUM
+        ).resolved(from_name("npu2", n_cols=8))
     op = flm_gemm.ProjectionGEMM(
-        M=512, K=1024, N=1024, precision=Precision.MEDIUM
+        M=512, K=1024, N=1024, precision=Precision.MEDIUM, bfp16_b=True
     ).resolved(from_name("npu2", n_cols=8))
     assert (op.tile_n, op.m_chunk, op.rows, op.cols, op.bfp16_b) == (64, 1, 4, 8, True)
     assert (op.tile_ma, op.l1_b_depth) == (32, 2)
     # tile_n is resolution, not a function of K: the same on every shape.
     assert (
-        flm_gemm.ProjectionGEMM(M=256, K=512, N=1024, precision=Precision.MEDIUM)
+        flm_gemm.ProjectionGEMM(
+            M=256, K=512, N=1024, precision=Precision.MEDIUM, bfp16_b=True
+        )
         .resolved(from_name("npu2", n_cols=8))
         .tile_n
         == 64
@@ -440,7 +448,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     }
     with pytest.raises(ValueError, match="multiple of 256"):
         flm_gemm.ProjectionGEMM(
-            M=100, K=1024, N=1024, precision=Precision.MEDIUM
+            M=100, K=1024, N=1024, precision=Precision.MEDIUM, bfp16_b=True
         ).resolved(
             from_name("npu2", n_cols=8)
         )  # M tiles to the array's rows
@@ -473,7 +481,13 @@ def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
 
     dev = from_name("npu2", n_cols=8)
     op = flm_gemm.ProjectionGEMM(
-        M=512, K=1536, N=256, tile_n=64, k_tile=256, precision=Precision.MEDIUM
+        M=512,
+        K=1536,
+        N=256,
+        tile_n=64,
+        k_tile=256,
+        precision=Precision.MEDIUM,
+        bfp16_b=True,
     ).resolved(dev)
     assert static(op) == static(op.xclbin_operator())
 
@@ -486,7 +500,7 @@ def test_flm_gemm_image_keeps_the_tiles_a_narrow_shape_resolves_to():
     """
     dev = from_name("npu2", n_cols=8)
     op = flm_gemm.ProjectionGEMM(
-        M=2048, K=1024, N=16, precision=Precision.MEDIUM
+        M=2048, K=1024, N=16, precision=Precision.MEDIUM, bfp16_b=True
     ).resolved(dev)
     assert op.xclbin_operator().resolved(dev).config_name == op.config_name
 
@@ -498,7 +512,9 @@ def test_a_design_is_keyed_by_what_it_builds():
     """
     dev = from_name("npu2", n_cols=8)
     wide = (
-        flm_gemm.ProjectionGEMM(M=2048, K=1024, N=16, precision=Precision.MEDIUM)
+        flm_gemm.ProjectionGEMM(
+            M=2048, K=1024, N=16, precision=Precision.MEDIUM, bfp16_b=True
+        )
         .resolved(dev)
         .replace(N=128)
     )
@@ -507,9 +523,11 @@ def test_a_design_is_keyed_by_what_it_builds():
 
 
 def test_flm_gemm_selects_its_activation_by_a_word():
-    op = flm_gemm.ProjectionGEMM(M=256, K=512, N=512, precision=Precision.MEDIUM)
+    op = flm_gemm.ProjectionGEMM(
+        M=256, K=512, N=512, precision=Precision.MEDIUM, bfp16_b=True
+    )
     silu = flm_gemm.ProjectionGEMM(
-        M=256, K=512, N=512, epilogue="silu", precision=Precision.MEDIUM
+        M=256, K=512, N=512, epilogue="silu", precision=Precision.MEDIUM, bfp16_b=True
     )
     assert silu.config_name == op.config_name
     assert silu.resolved().residents["mode"] == Epilogue.SILU.mode

@@ -10,7 +10,9 @@ Ported from the `mm` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)
 ```python
 from iron.operators.flm import ProjectionGEMM
 
-op = ProjectionGEMM(M=1024, K=1536, N=6144, epilogue="silu")
+op = ProjectionGEMM(
+    M=1024, K=1536, N=6144, epilogue="silu", precision="medium", bfp16_b=True
+)  # NPU2's bfp16 B; leave bfp16_b out on NPU1
 op(A, op.pack_b(B), C_out)  # compiles once, then runs
 ```
 
@@ -172,14 +174,17 @@ multiple of the full stride.
 ## B must be pre-packed
 
 ```python
-op = ProjectionGEMM(M=M, K=K, N=N)
+op = ProjectionGEMM(M=M, K=K, N=N, precision="medium", bfp16_b=True)  # NPU2
 op(A, op.pack_b(B), C_out)
 ```
 
 `pack_b` reorders a row-major `(K, N)` matrix into the order the compute tiles
-read it, so each fill is one contiguous run. On NPU2 it also quantizes to
-bfp16ebs8 and returns a flat `uint8` tensor rather than bf16; on NPU1 it stays
-bf16. The layout itself lives in
+read it, so each fill is one contiguous run. With `bfp16_b=True`, which NPU2
+takes at `precision="medium"`, it also quantizes to bfp16ebs8 and returns a
+flat `uint8` tensor rather than bf16; otherwise, and always on NPU1, it stays
+bf16. The caller names the layout because B's host shape depends on it and an
+operator is built before it meets a device; one that does not match the
+device is refused when it resolves. The layout itself lives in
 [`iron/operators/flm/packing.py`](../packing.py).
 
 Call it on the operator — `op.pack_b(B)` — not on the class: the layout depends
