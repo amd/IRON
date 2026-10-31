@@ -454,20 +454,26 @@ def npu_lock(lock: bool = False):
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def _build_in_order(chain: Sequence[Callable[..., Standalone]]) -> None:
+    for build in chain:
+        build(build_only=True)
+
+
 def prebuild(
-    builds: Iterable[Callable[..., Standalone]],
+    chains: Iterable[Sequence[Callable[..., Standalone]]],
 ) -> dict[Callable[..., Standalone], concurrent.futures.Future]:
-    """Each of ``builds``' images compiled on a pool of ``BUILD_JOBS`` threads, in order.
+    """Each of ``chains``' images compiled on a pool of ``BUILD_JOBS`` threads, a chain in order on one.
 
     So the device times one batch while the next builds; building one again then reads
-    the compile cache. A build's error is its future's, raised where the caller builds
-    it for real.
+    the compile cache. A chain's images share a design: built one after another, the
+    later ones read the cores the first compiled instead of compiling them beside it.
+    A build's error is its chain's future's, raised where the caller builds it for real.
     """
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=BUILD_JOBS)
-    out = {
-        build: pool.submit(contextvars.copy_context().run, build, build_only=True)
-        for build in builds
-    }
+    out: dict[Callable[..., Standalone], concurrent.futures.Future] = {}
+    for chain in chains:
+        future = pool.submit(contextvars.copy_context().run, _build_in_order, chain)
+        out |= dict.fromkeys(chain, future)
     pool.shutdown(wait=False)
     return out
 
@@ -869,7 +875,7 @@ def measure(
         for i in todo
         for n in (1, repeats)
     }
-    prebuilt = prebuild(probes.values())
+    prebuilt = prebuild([probes[i, n] for n in (1, repeats)] for i in todo)
     for begin in range(0, max(len(others), 1), size):
         batch = [todo[0]] + others[begin : begin + size]
         log(f"    timing {len(batch)} settings, {len(others) - begin} to go")
