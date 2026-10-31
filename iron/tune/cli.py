@@ -21,6 +21,7 @@ Run with XRT sourced and the NPU otherwise idle.
 """
 
 import argparse
+import dataclasses
 import functools
 import json
 from collections.abc import Callable, Sequence
@@ -35,9 +36,9 @@ from .autotune import Shape, Timed, autotune, coding_tunables, kernel_cycles, ti
 from .fusions import price_fusions
 from .costmodel import CostModel
 from .failures import Ledger
-from .packings import price_folds_before_packing
+from .packings import price_folds_before_packing, price_packings
 from .measure import Cache, Timing, pmode, switch_cost
-from .plan import coded_seed
+from .plan import coded_seed, searches
 from .survey import step_times, survey
 from .verify import entries, verify, write_report
 
@@ -187,8 +188,13 @@ def tune(
             cycles,
             core_mhz,
         )
-        surveys.append(found.lines())
+        surveys.append(found)
         log("\n".join(found.lines()))
+    plan = {s.name: s for s in searches(surveys, full_elf)}
+    for planned in plan.values():
+        log(
+            f"{planned.name}: {'searched' if planned.runs else 'skipped'}, {planned.why}"
+        )
     if entries(seed) != entries(start):
         seed, _ = verify(record, dev, start, seed, log=log, lock=args.lock_in_process)
         seed.save(found_path)
@@ -207,6 +213,7 @@ def tune(
             )
             profile.save(found_path)
             print(f"wrote {found_path}")
+    if not args.packings_only and plan["fusions"].runs:
         priced = price_fusions(
             record(profile),
             dev,
@@ -223,9 +230,17 @@ def tune(
         profile = priced
         profile.save(found_path)
         print(f"wrote {found_path}")
-    profile = _save_packings(
-        args, record(profile), dev, profile, found_path, full_elf, model
-    )
+    if plan["packing"].runs or plan["folds"].runs:
+        profile = _save_packings(
+            args,
+            record(profile),
+            dev,
+            profile,
+            found_path,
+            full_elf,
+            model,
+            folds=plan["folds"].runs,
+        )
     if entries(seed) != entries(start):
         log("checking the search against its seed")
         profile, _ = verify(
@@ -238,7 +253,15 @@ def tune(
         {} if validate is None or not checks else {"validate": validate(start, kept)}
     )
     kept.save(path)
-    write_report(path, start, kept, checks, survey=surveys, **battery)
+    write_report(
+        path,
+        start,
+        kept,
+        checks,
+        survey=[s.lines() for s in surveys],
+        plan=[dataclasses.asdict(s) for s in plan.values()],
+        **battery,
+    )
     print(f"wrote {path} and its report")
     return path
 
@@ -266,10 +289,12 @@ def _save_packings(
     path: Path,
     full_elf: bool,
     model: CostModel | None,
+    folds: bool = True,
 ) -> Profile:
-    """``profile`` with the folds and packings ``price_folds_before_packing``
-    finds, written to ``path`` with ``model`` as it refits it; None on an
-    xclbin per step, where nothing packs.
+    """``profile`` with the packings ``price_packings`` finds, and with
+    ``folds`` the folds ``price_folds_before_packing`` keeps, written to
+    ``path`` with ``model`` as it refits it; None on an xclbin per step,
+    where nothing packs.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -278,7 +303,8 @@ def _save_packings(
         fitted.save(dev.name)
         print(f"wrote {path} and the cost model so far", flush=True)
 
-    packed = price_folds_before_packing(
+    search = price_folds_before_packing if folds else price_packings
+    packed = search(
         calls,
         dev,
         profile,

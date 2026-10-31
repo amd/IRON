@@ -15,7 +15,8 @@ from iron import Profile
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 from iron.tune.autotune import Timed, shapes
-from iron.tune.plan import coded_seed
+from iron.tune.plan import coded_seed, searches
+from iron.tune.survey import Design, Estimate, Survey
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -111,3 +112,25 @@ def test_a_seeded_shape_records_coded():
         (E, E // 2): True,
         (E // 4, E // 4): False,
     }
+
+
+def surveyed(steps_us: float, switch_us: float, fold_us: float) -> Survey:
+    design = Design("GEMV M=2048 K=2048", 1, steps_us, 0, None, "other")
+    estimates = {
+        "packing": Estimate(switch_us, "switches"),
+        "folds": Estimate(fold_us, "steps"),
+        "coded": Estimate(0.0, "none"),
+    }
+    return Survey("v", (design,), 10, switch_us, estimates)
+
+
+def test_a_full_elf_packs_where_switches_weigh_and_never_prices_fusions():
+    plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1)], True)}
+    assert plan == {"packing": True, "folds": False, "fusions": False}
+    plan = {s.name: s.runs for s in searches([surveyed(1000, 10, 20)], True)}
+    assert plan == {"packing": False, "folds": True, "fusions": False}
+
+
+def test_an_xclbin_per_step_packs_nothing_and_prices_merges():
+    plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1)], False)}
+    assert plan == {"packing": False, "folds": False, "fusions": True}

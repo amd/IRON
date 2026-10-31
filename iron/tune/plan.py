@@ -3,15 +3,22 @@
 
 """What a tune decides before it searches: the planner's seed, the
 transforms whose legality is a fact of the graph and its weights rather
-than a timing, checked end to end before the search starts from them.
+than a timing, checked end to end before the search starts from them; and
+which searches the survey says pay.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Hashable, Sequence
 
 from iron.common.declare import Profile
 from .autotune import Shape, Timed, coding_tunables, replacing
+from .packings import MIN_SWITCH_SHARE
+from .survey import Survey
+
+# A fold search runs where the steps folds remove are this share of a version.
+FOLD_SHARE = 0.01
 
 
 def coded_seed(
@@ -85,3 +92,58 @@ def coded_seed(
     for key in taken:
         log(f"coded: {shapes[key]}")
     return coded(taken) if taken else profile
+
+
+@dataclasses.dataclass(frozen=True)
+class Search:
+    """One search a tune may run, whether the plan runs it, and why."""
+
+    name: str
+    runs: bool
+    why: str
+
+
+def searches(surveys: Sequence[Survey], full_elf: bool) -> list[Search]:
+    """Which searches pay for their device time, from each version's
+    survey: packing where a version's switches cost ``MIN_SWITCH_SHARE`` of
+    its steps; folds where the steps they remove are ``FOLD_SHARE`` of one;
+    fusions only on an xclbin per step, where a merge is the one way to run
+    two steps as one dispatch (a full ELF's packing removes the switches
+    they would, and a fusion splits the arrays a packing groups).
+    """
+    packing = [
+        s.name
+        for s in surveys
+        if s.estimates["packing"].us >= MIN_SWITCH_SHARE * s.steps_us
+    ]
+    folds = [
+        s.name
+        for s in surveys
+        if s.estimates["folds"].us >= FOLD_SHARE * (s.steps_us + s.switch_us)
+    ]
+    return [
+        Search(
+            "packing",
+            full_elf and bool(packing),
+            (
+                "an xclbin per step packs nothing"
+                if not full_elf
+                else f"switches cost at least {MIN_SWITCH_SHARE:.0%} of the steps "
+                f"in {packing or 'no version'}"
+            ),
+        ),
+        Search(
+            "folds",
+            bool(folds),
+            f"removable steps are at least {FOLD_SHARE:.0%} of {folds or 'no version'}",
+        ),
+        Search(
+            "fusions",
+            not full_elf,
+            (
+                "a full ELF's packing removes the switches a fusion would"
+                if full_elf
+                else "a merge is an xclbin's one way to run steps as one dispatch"
+            ),
+        ),
+    ]

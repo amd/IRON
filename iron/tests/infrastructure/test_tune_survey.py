@@ -19,7 +19,7 @@ from iron.tests.support.llama_model import small
 from iron.tune.autotune import Shape, Timed
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import array_scoped_fold_candidates
-from iron.tune.measure import Cache, Timing, platform
+from iron.tune.measure import MIN_CALLS, Cache, Timing, measure, platform
 from iron.tune.survey import step_times, survey
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -108,3 +108,13 @@ def test_a_survey_times_each_design_of_a_version(tmp_path):
     assert len(times) == 2 and all(t > 0 for t in times.values())
     found = survey(call, Profile(), dev, times, CostModel())
     assert {d.bound for d in found.designs} == {"other"} and found.switches == 1
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_long_step_is_timed_in_fewer_calls_a_round():
+    """A survey times a prompt chunk's steps, hundreds of ms each: a round
+    of one is sized by its duration, not a fixed call count."""
+    timing = Timing(rounds=2)
+    [long_step] = measure([ReLU(size=2**27)], full_elf=True, timing=timing).values()
+    [short_step] = measure([ReLU(size=2**12)], full_elf=True, timing=timing).values()
+    assert MIN_CALLS <= long_step.calls < timing.calls == short_step.calls
