@@ -204,9 +204,11 @@ def tune(
             # reaches SHAPE_SHARE.
             searched: set[Hashable] = set()
             while True:
+                # A read-bound shape is held to the fastest read any version shows.
+                rate = max(s.read_rate for s in surveys)
                 shares: dict[Hashable, float] = {}
                 for surveyed in surveys:
-                    for key, share in surveyed.shares().items():
+                    for key, share in surveyed.shares(rate).items():
                         shares[key] = max(shares.get(key, 0.0), share)
                 fresh = {
                     k: v

@@ -41,7 +41,8 @@ logger = logging.getLogger(__name__)
 # Standard errors a setting's step must beat the recorded one's by to be taken.
 CONFIDENCE = 2.0
 
-# A shape is searched where its steps take this share of a version.
+# A shape is searched where a search could remove this share of a version
+# (``Survey.shares``).
 SHAPE_SHARE = 0.02
 
 FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
@@ -640,8 +641,9 @@ def autotune(
 
     The recorded one where none gains, named without the dimensions a host sizes
     (``Timed.varying``) wherever that still names only its own shape (``Shape.entry``),
-    merged into its other entries (``merged``). With ``shares``, only the shapes with
-    ``SHAPE_SHARE`` of a version are searched, the costliest first.
+    merged into its other entries (``merged``). With ``shares``, only the shapes a
+    search could remove ``SHAPE_SHARE`` of a version from are searched, the costliest
+    first.
 
     Args:
         dev: The device the calls' operators are timed on.
@@ -664,8 +666,8 @@ def autotune(
     if shares is not None:
         weighed = [s for s in found if shares.get(s.key, 0.0) >= SHAPE_SHARE]
         log(
-            f"{len(found) - len(weighed)} of {len(found)} shapes under "
-            f"{SHAPE_SHARE:.0%} of every version: not searched"
+            f"{len(found) - len(weighed)} of {len(found)} shapes could remove "
+            f"under {SHAPE_SHARE:.0%} of every version: not searched"
         )
         found = sorted(weighed, key=lambda s: -shares[s.key])
     covering, held = replacing(profile, found)

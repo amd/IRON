@@ -71,24 +71,36 @@ class Estimate:
 
 @dataclasses.dataclass(frozen=True)
 class Survey:
-    """One version: its designs, its switches and the estimates."""
+    """One version: its designs, its switches and the estimates.
+
+    Attributes:
+        read_rate: Its fastest design's weight bytes per microsecond; 0 where
+            none reads a weight.
+    """
 
     name: str
     designs: tuple[Design, ...]
     switches: int
     switch_us: float
     estimates: Mapping[str, Estimate]
+    read_rate: float = 0.0
 
     @property
     def steps_us(self) -> float:
         return sum(d.us for d in self.designs)
 
-    def shares(self) -> dict[Hashable, float]:
-        """Each shape's share of the version's time, its designs together."""
+    def shares(self, read_rate: float = 0.0) -> dict[Hashable, float]:
+        """Each shape's share of the version's time a search could remove, its designs together.
+
+        A read-bound design's time beyond what its weight bytes take at ``read_rate``
+        (this version's own where faster), any other design's whole time.
+        """
+        rate = max(read_rate, self.read_rate)
         total = self.steps_us + self.switch_us
         out: dict[Hashable, float] = collections.defaultdict(float)
         for d in self.designs:
-            out[d.shape] += d.us / total
+            floor = d.weight_bytes / rate if d.bound == "weight-read" else 0.0
+            out[d.shape] += max(d.us - floor, 0.0) / total
         return dict(out)
 
     def lines(self) -> list[str]:
@@ -105,7 +117,9 @@ class Survey:
             for kind, us in bound.items()
         ]
         out += [
-            f"    {d.name} x{d.steps}: {d.us:.0f} us ({d.bound})"
+            f"    {d.name} x{d.steps}: {d.us:.0f} us ({d.bound}"
+            + (f", {d.weight_bytes / d.us / 1e3:.1f} GB/s" if d.weight_bytes else "")
+            + ")"
             for d in sorted(self.designs, key=lambda d: -d.us)[:TOP_DESIGNS]
         ]
         out += [
@@ -272,6 +286,7 @@ def survey(
         len(entered),
         switch_us,
         estimates,
+        ceiling,
     )
 
 

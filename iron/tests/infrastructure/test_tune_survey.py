@@ -85,6 +85,41 @@ def test_the_switch_and_fold_estimates_follow_the_step_list():
     assert found.estimates["fusions"].us > 0
 
 
+def test_a_read_bound_shape_is_worth_only_its_time_above_the_fastest_read():
+    """A GEMV at the version's fastest read could gain nothing; one a quarter slower, that quarter; any other design its whole time.
+
+    A faster read another version shows lowers every read-bound floor.
+    """
+    dev = aie_utils.ensure_current_device()
+    call = decode_call()
+    times = given_times(call, dev)
+    first = survey(call, Profile(), dev, times, CostModel())
+    gemvs = [d for d in first.designs if d.bound == "weight-read"]
+    slow = gemvs[0]
+    recording, _, _ = apply_profile(call.recording, Profile(), dev)
+    for name in {
+        OperatorDesign(s.op.resolved(dev)).name
+        for s in recording.steps
+        if Shape(s.op).key == slow.shape
+    }:
+        times[name] *= 1.25
+    found = survey(call, Profile(), dev, times, CostModel())
+    total = found.steps_us + found.switch_us
+    shares = found.shares()
+    assert found.read_rate == pytest.approx(READ)
+    of = {
+        key: sum(d.us for d in first.designs if d.shape == key)
+        for key in {d.shape for d in gemvs}
+    }
+    assert shares[slow.shape] == pytest.approx(0.25 * of[slow.shape] / total)
+    fast = [key for key in of if key != slow.shape]
+    assert fast and all(shares[key] == pytest.approx(0.0) for key in fast)
+    other = next(d for d in found.designs if d.bound == "other")
+    assert shares[other.shape] >= other.us / total
+    faster = found.shares(read_rate=2 * READ)
+    assert faster[fast[0]] == pytest.approx(of[fast[0]] / 2 / total)
+
+
 # ---------------------------------------------------------------------------
 # On the device
 # ---------------------------------------------------------------------------
