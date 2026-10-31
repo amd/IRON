@@ -1,8 +1,8 @@
 {
  "terms": {
-  "switches": 40.41037209045164,
-  "switch_cores": 4.345792331561428,
-  "packed_steps": -3.582451693599523
+  "switches": 41.57121355303601,
+  "switch_cores": 4.550801721267712,
+  "packed_steps": -4.348461094313065
  },
  "prior": {
   "switches": 35.4475078125,
@@ -25,6 +25,38 @@
     "packed_steps": 509.0
    },
    "extra_us": -30260.3765625
+  },
+  {
+   "change": {
+    "switches": -179.0,
+    "switch_cores": -1050.0,
+    "packed_steps": 260.0
+   },
+   "extra_us": -13806.161281249997
+  },
+  {
+   "change": {
+    "switches": -179.0,
+    "switch_cores": -1050.0,
+    "packed_steps": 260.0
+   },
+   "extra_us": -13819.053125000008
+  },
+  {
+   "change": {
+    "switches": -179.0,
+    "switch_cores": -1050.0,
+    "packed_steps": 260.0
+   },
+   "extra_us": -13805.95178125
+  },
+  {
+   "change": {
+    "switches": -211.0,
+    "switch_cores": -1306.0,
+    "packed_steps": 292.0
+   },
+   "extra_us": -16097.1059375
   }
  ]
 }
