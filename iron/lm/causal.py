@@ -274,6 +274,7 @@ class CausalLM(Model):
             args.points,
             sampler,
             sibling,
+            args.versions,
         )
 
     def shapes(self) -> list[dict]:

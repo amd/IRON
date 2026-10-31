@@ -22,6 +22,8 @@ from .cli import parse_args, sampling_arguments
 from .generation import Sampler
 from .model import Model
 
+VERSIONS = ("decode", "prompt")
+
 
 def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
     """At most ``count`` contexts halving down from ``top``, multiples of
@@ -75,6 +77,14 @@ def arguments(parser: argparse.ArgumentParser) -> None:
         help="how many contexts up to --context it is timed at, each "
         "timed per setting: their cost grows with it (default: 6)",
     )
+    parser.add_argument(
+        "--versions",
+        nargs="+",
+        choices=VERSIONS,
+        default=list(VERSIONS),
+        help="the versions whose calls are tuned; a profile entry only the "
+        "others' shapes match is kept as it is (default: both)",
+    )
     sampling_arguments(parser)
 
 
@@ -86,6 +96,7 @@ def calls(
     points: int,
     sampler: Sampler,
     sibling: CausalLM | None = None,
+    versions: Sequence[str] = VERSIONS,
 ) -> list[Timed]:
     """The calls a decoder's designs are timed in: the decode step and the
     prompt chunk, each over ``contexts`` up to ``context``, ``points`` of
@@ -95,11 +106,13 @@ def calls(
         sibling: ``model`` at another ``max_seq_len``: a dimension whose
             value differs between their recordings is one a host's fitted
             context sizes (``Timed.varying``).
+        versions: Which of ``VERSIONS`` to time.
     """
     L, C = model.config.max_seq_len, model.config.prefill_chunk
     decode_shapes, prompt_shapes = model.shapes()
-    versions = [
+    planned = [
         (
+            "decode",
             decode_shapes,
             dict(position=position, token=token),
             [
@@ -108,6 +121,7 @@ def calls(
             ],
         ),
         (
+            "prompt",
             prompt_shapes,
             dict(
                 position=C - 1,
@@ -132,7 +146,9 @@ def calls(
         ),
     ]
     out = []
-    for shapes, values, timed in versions:
+    for label, shapes, values, timed in planned:
+        if label not in versions:
+            continue
         recording = model.record(**shapes)
         # Sample's work follows its draw row's temperature and top-k: measure
         # it at the rows generation writes, not at random words.

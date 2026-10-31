@@ -375,6 +375,14 @@ def test_fold_profile_scopes_each_entry_to_the_version_it_was_found_in():
 
 
 @pytest.mark.supported_devices("npu1")
+
+
+def test_calls_time_only_the_versions_asked_for():
+    model = small()
+    [decode] = calls(model, 0, 0, 256, 1, Sampler(0.7, 50), versions=["decode"])
+    assert decode.recording.version == model.record(**model.shapes()[0]).version
+
+
 def test_a_tune_on_an_xclbin_per_step_times_no_switch(npu1, tmp_path):
     """npu1 packs nothing, so its tune neither times the switches a cost
     model is calibrated on (a dispatch) nor writes one; its folds are
