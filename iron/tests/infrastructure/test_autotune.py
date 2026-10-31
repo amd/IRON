@@ -16,7 +16,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile
-from iron.operators import ElementwiseAdd
+from iron.operators import ElementwiseAdd, SiLU
 from iron.operators.copy import Copy
 from iron.tests.support.graphs import Chain
 from iron.tune.autotune import Shape, Timed, autotune, time_shape
@@ -74,6 +74,30 @@ def test_a_tuned_copy_of_a_slice_is_saved(tmp_path):
     path = tmp_path / f"{dev.name}.json"
     profile.save(path)
     assert len(Profile.load(path)) == len(profile) > 0
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_tuned_entry_names_no_dimension_a_host_sizes(tmp_path):
+    """A model fitted to another host's context sizes its caches and
+    attention otherwise (``Timed.varying``): an entry naming that dimension
+    would match there no longer, so it is left out."""
+    recording = Chain(SIZE, TILE).record(a=(SIZE,), b=(SIZE,))
+    dev = aie_utils.ensure_current_device()
+    [silu] = {
+        Shape(s.op.resolved()).key for s in recording.steps if isinstance(s.op, SiLU)
+    }
+    report = platform()
+    profile = autotune(
+        [Timed(recording, varying={silu: frozenset({"size"})})],
+        dev,
+        full_elf=dev.can_dispatch_full_elf,
+        timing=Timing(rounds=2, calls=5),
+        cache=Cache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+        log=lambda _: None,
+    )
+    named = {cls: dims for cls, dims, _ in profile}
+    assert "size" not in named[SiLU]
+    assert named[ElementwiseAdd]["size"] == SIZE
 
 
 def test_one_operator_is_timed_from_the_command_line(tmp_path):

@@ -570,8 +570,9 @@ def autotune(
 ) -> Profile:
     """``profile`` with an entry for each shape of ``calls`` (``shapes``)
     naming the fastest setting taken (``time_shape``), the recorded one where
-    none gains. Its entries covering any of those shapes are replaced; the
-    rest are kept.
+    none gains, named without the dimensions a host sizes (``Timed.varying``)
+    wherever that still names only its own shape. Its entries covering any
+    of those shapes are replaced; the rest are kept.
 
     Args:
         calls: The calls whose graphs were recorded under ``profile``.
@@ -584,6 +585,11 @@ def autotune(
     """
     found = shapes(calls, dev)
     out, covering, held = replacing(profile, found)
+    varying: dict[Hashable, frozenset[str]] = {}
+    for call in calls:
+        for key, names in call.varying.items():
+            varying[key] = varying.get(key, frozenset()) | names
+    resolved = [s.op.resolved(dev) for call in calls for s in call.recording.steps]
     for i, shape in enumerate(found):
         log(f"[{i + 1}/{len(found)}] {shape}")
         tried = time_shape(
@@ -602,9 +608,20 @@ def autotune(
         best = min(gains, key=lambda t: t.delta_us, default=tried[0])
         if gains:
             log(f"    {best.tunables}: {best.delta_us:+.1f} ± {best.noise_us:.1f} us")
+        named = shape.named(covering[shape.key])
+        drop = varying.get(shape.key, frozenset())
+        kept = {n: v for n, v in named.items() if n not in drop}
+        # Left out, a host-sized dimension must not let the entry name another shape.
+        if any(
+            isinstance(r, shape.cls)
+            and Shape(r).key != shape.key
+            and Profile.matches(kept, Profile.dims(type(r), vars(r)))
+            for r in resolved
+        ):
+            kept = named
         out.add(
             shape.cls,
-            **_json_safe(shape.named(covering[shape.key])),
+            **_json_safe(kept),
             **{**held[shape.key], **best.tunables},
         )
     return out
