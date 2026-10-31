@@ -23,6 +23,7 @@ import dataclasses
 import json
 import statistics
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,7 @@ from iron.tune.verify import touches
 from .causal import CausalLM
 from .generation import Sampler, accuracy, differing_steps, greedy_logits, kl_stats
 from .model import Model
-from .cli import application_model
+from .cli import application_model, config_argument
 
 
 def version_labels(model: Model) -> list[str]:
@@ -169,13 +170,19 @@ def changed_versions(stock_live: dict, candidate_live: dict) -> list[str]:
 
 
 def load_model(
-    model_class: type[Model], checkpoint: Path, max_seq_len: int | None, profile
+    model_class: type[Model],
+    checkpoint: Path,
+    max_seq_len: int | None,
+    profile,
+    config: Mapping[str, Any] | None = None,
 ) -> Model:
-    """``model_class.from_checkpoint(checkpoint)``, under ``profile`` (a
-    directory, or None for the model's own), every version compiled as the
-    device packages it (``Graph.compile``) and loaded.
+    """``model_class.from_checkpoint(checkpoint)`` with ``config``'s fields,
+    under ``profile`` (a directory, or None for the model's own), every
+    version compiled as the device packages it (``Graph.compile``) and loaded.
     """
-    model = model_class.from_checkpoint(checkpoint, max_seq_len=max_seq_len)
+    model = model_class.from_checkpoint(
+        checkpoint, max_seq_len=max_seq_len, config=config
+    )
     if profile is not None:
         model.profile = profile
     model.load_versions()
@@ -293,6 +300,7 @@ def bisect(
     stock: CausalLM,
     tokens,
     decode_steps: int,
+    config: Mapping[str, Any] | None = None,
 ) -> dict:
     """Narrow a bit-identity mismatch to one version's entries, then to a
     prefix of them: classify ``candidate``'s fusion and packing entries
@@ -302,7 +310,9 @@ def bisect(
     mismatches. Saves the smallest failing profile under ``out_dir`` and
     returns a summary; the first version to reproduce the mismatch wins.
     """
-    probe = model_class.from_checkpoint(checkpoint, max_seq_len=max_seq_len)
+    probe = model_class.from_checkpoint(
+        checkpoint, max_seq_len=max_seq_len, config=config
+    )
     labels = version_labels(probe)
     recordings = {l: probe.record(**s) for l, s in zip(labels, probe.shapes())}
     dev = require_device()
@@ -315,7 +325,7 @@ def bisect(
         profile_dir = out_dir / f"bisect-{label}"
         profile_dir.mkdir(parents=True, exist_ok=True)
         build_variant(stock_profile, tags).save(profile_dir / f"{dev.name}.json")
-        variant = load_model(model_class, checkpoint, max_seq_len, profile_dir)
+        variant = load_model(model_class, checkpoint, max_seq_len, profile_dir, config)
         mismatch = bit_identity(stock, variant, tokens, decode_steps)
         variant.release()
         if not mismatch:
@@ -330,7 +340,9 @@ def bisect(
             build_variant(stock_profile, trial_tags).save(
                 profile_dir / f"{dev.name}.json"
             )
-            variant = load_model(model_class, checkpoint, max_seq_len, profile_dir)
+            variant = load_model(
+                model_class, checkpoint, max_seq_len, profile_dir, config
+            )
             mismatch = bit_identity(stock, variant, tokens, decode_steps)
             variant.release()
             if mismatch:
@@ -352,7 +364,11 @@ def bisect(
     }
 
 
-def model_tune_points(model_class: type[Model], checkpoint: Path) -> list[Timed]:
+def model_tune_points(
+    model_class: type[Model],
+    checkpoint: Path,
+    config: Mapping[str, Any] | None = None,
+) -> list[Timed]:
     """``model_class.tune_calls``'s own calls, over its own tune flags
     (``tune_arguments``) at their defaults save ``--checkpoint``: a
     model-general way to the per-call points and weights a version is tuned
@@ -361,7 +377,11 @@ def model_tune_points(model_class: type[Model], checkpoint: Path) -> list[Timed]
     """
     tune_parser = argparse.ArgumentParser(add_help=False)
     model_class.tune_arguments(tune_parser)
-    tune_args = tune_parser.parse_args(["--checkpoint", str(checkpoint)])
+    fields = [f"{k}={json.dumps(v)}" for k, v in (config or {}).items()]
+    tune_args = tune_parser.parse_args(
+        ["--checkpoint", str(checkpoint)]
+        + [arg for f in fields for arg in ("--config", f)]
+    )
     return model_class.tune_calls(tune_parser, tune_args)
 
 
@@ -386,6 +406,7 @@ def compare_versions(
     labels: list[str],
     label_to_version: dict[str, Version],
     *,
+    config: Mapping[str, Any] | None = None,
     timing: Timing = Timing(rounds=3, calls=10),
     log=print,
 ) -> dict[str, dict[str, Any]]:
@@ -415,9 +436,14 @@ def compare_versions(
             timeout propagated from ``compare_graphs``.
     """
     dev = require_device()
-    probe = model_class.from_checkpoint(checkpoint, max_seq_len=max_seq_len)
+    probe = model_class.from_checkpoint(
+        checkpoint, max_seq_len=max_seq_len, config=config
+    )
     recordings = version_recordings(probe)
-    calls = {c.recording.version: c for c in model_tune_points(model_class, checkpoint)}
+    calls = {
+        c.recording.version: c
+        for c in model_tune_points(model_class, checkpoint, config)
+    }
 
     out: dict[str, dict[str, Any]] = {}
     for label in labels:
@@ -472,6 +498,7 @@ def validate(
     speed_tokens: int = 32,
     speed_rounds: int = 5,
     bisect_into: Path | None = None,
+    config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The battery, ``candidate`` against ``stock`` (a profile, or a directory
     holding one per device; the model's own where None), as a report.
@@ -479,6 +506,8 @@ def validate(
     Args:
         bisect_into: Where a decoder's bit-identity mismatch is narrowed to
             the candidate's entries at fault (``bisect``); not narrowed where None.
+        config: Fields of the model's config given other values (a shallow
+            model): its golden is the full model's, so accuracy is not judged.
 
     Raises:
         ValueError: The candidate changes no version, or a decoder's prompt
@@ -496,10 +525,12 @@ def validate(
     report: dict[str, Any] = {"candidate": str(candidate)}
 
     print("loading stock model (real weights)...")
-    stock_model = load_model(model_class, checkpoint, max_seq_len, stock_profile)
+    stock_model = load_model(
+        model_class, checkpoint, max_seq_len, stock_profile, config
+    )
     print("loading candidate model...")
     candidate_model = load_model(
-        model_class, checkpoint, max_seq_len, candidate_profile
+        model_class, checkpoint, max_seq_len, candidate_profile, config
     )
 
     report["stock_live"] = verify_live("stock", stock_model)
@@ -544,21 +575,26 @@ def validate(
                 stock_model,
                 tokens,
                 decode_steps,
+                config,
             )
 
-        print("accuracy against golden...")
-        stats, mismatches = run_accuracy(
-            candidate_model, stock_model.prompt(1024), accuracy_tokens
-        )
-        report["accuracy"] = {
-            **stats,
-            "top1_mismatches": mismatches,
-            "of": accuracy_tokens,
-        }
-        print(
-            f"accuracy: mean KL {stats['Mean']:.6f}  p90 {stats['P90']:.6f}  "
-            f"max {stats['Max']:.6f}  top-1 mismatches {mismatches}/{accuracy_tokens}"
-        )
+        if config:
+            print("accuracy: not judged, the golden is the full model's")
+        else:
+            print("accuracy against golden...")
+            stats, mismatches = run_accuracy(
+                candidate_model, stock_model.prompt(1024), accuracy_tokens
+            )
+            report["accuracy"] = {
+                **stats,
+                "top1_mismatches": mismatches,
+                "of": accuracy_tokens,
+            }
+            print(
+                f"accuracy: mean KL {stats['Mean']:.6f}  p90 {stats['P90']:.6f}  "
+                f"max {stats['Max']:.6f}  top-1 mismatches "
+                f"{mismatches}/{accuracy_tokens}"
+            )
 
         print(f"speed: {speed_rounds} interleaved rounds...")
         report["speed"] = speed(
@@ -581,6 +617,7 @@ def validate(
             candidate_profile,
             report["changed_versions"],
             label_to_version,
+            config=config,
         )
         report["bit_identical"] = all(
             v["bit_identical"] for v in report["versions"].values()
@@ -621,6 +658,7 @@ def main(argv: list[str] | None = None) -> None:
         "(default: the model's own)",
     )
     parser.add_argument("--max-seq-len", type=int, default=None)
+    config_argument(parser)
     parser.add_argument("--prompt-chars", type=int, default=12000)
     parser.add_argument("--decode-steps", type=int, default=32)
     parser.add_argument("--accuracy-tokens", type=int, default=40)
@@ -666,6 +704,7 @@ def main(argv: list[str] | None = None) -> None:
             speed_tokens=args.speed_tokens,
             speed_rounds=args.speed_rounds,
             bisect_into=args.out.parent if args.bisect else None,
+            config=dict(args.config),
         ),
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)

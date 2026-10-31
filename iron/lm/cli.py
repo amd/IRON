@@ -6,6 +6,7 @@
 import argparse
 import importlib
 import inspect
+import json
 import logging
 from typing import Any
 
@@ -61,6 +62,33 @@ def sampling_arguments(parser: argparse.ArgumentParser) -> None:
         "--temperature", type=float, default=defaults["temperature"].default
     )
     parser.add_argument("--top-k", type=int, default=defaults["top_k"].default)
+
+
+def config_argument(parser: argparse.ArgumentParser) -> None:
+    """``--config NAME=VALUE``, repeated: fields of the model's config given
+    other values (JSON, else a bare string), as ``Model.from_checkpoint``'s
+    ``config`` takes them; ``num_hidden_layers=2`` is a model a tuner's own
+    changes run against in minutes, every design still the full model's.
+    """
+
+    def field(text: str) -> tuple[str, Any]:
+        name, sep, value = text.partition("=")
+        if not sep or not name:
+            raise argparse.ArgumentTypeError(f"{text!r} is not NAME=VALUE")
+        try:
+            return name, json.loads(value)
+        except json.JSONDecodeError:
+            return name, value
+
+    parser.add_argument(
+        "--config",
+        type=field,
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="a field of the model's config, given another value (repeat for "
+        "more): num_hidden_layers=2 is a shallow model of the same designs",
+    )
 
 
 def parse_args(parser: argparse.ArgumentParser, args=None) -> argparse.Namespace:

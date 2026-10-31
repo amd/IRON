@@ -19,7 +19,7 @@ from iron.tune.autotune import Point, Shape, Timed
 from iron.tune.fusions import NotBitIdentical
 
 from .causal import CausalLM
-from .cli import application_model, parse_args, sampling_arguments
+from .cli import application_model, config_argument, parse_args, sampling_arguments
 from .generation import Sampler
 from .validate import validate
 
@@ -74,9 +74,9 @@ def arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--points",
         type=int,
-        default=6,
+        default=3,
         help="how many contexts up to --context it is timed at, each "
-        "timed per setting: their cost grows with it (default: 6)",
+        "timed per setting: their cost grows with it (default: 3)",
     )
     parser.add_argument(
         "--versions",
@@ -87,6 +87,7 @@ def arguments(parser: argparse.ArgumentParser) -> None:
         "others' shapes match is kept as it is (default: both)",
     )
     sampling_arguments(parser)
+    config_argument(parser)
 
 
 def calls(
@@ -195,7 +196,7 @@ def main(name: str, model: Any, argv: Sequence[str] | None = None) -> None:
         return model.tune_calls(parser, args)
 
     def battery(start: Profile, kept: Profile) -> dict:
-        report = validate(model, args.checkpoint, kept, start)
+        report = validate(model, args.checkpoint, kept, start, config=dict(args.config))
         if not report["bit_identical"]:
             raise NotBitIdentical(
                 f"{name}: the tuned profile is not bit-identical to the starting "

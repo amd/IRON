@@ -252,7 +252,7 @@ class CausalLM(Model):
         from .tune import calls
 
         weights = weights_file(args.checkpoint)
-        config = cls.default_config(weights)
+        config = dataclasses.replace(cls.default_config(weights), **dict(args.config))
         assert isinstance(config, DecoderConfig), "a decoder's"
         model = cls(config, Checkpoint(weights).tree())
         L, C = config.max_seq_len, config.prefill_chunk

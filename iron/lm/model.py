@@ -16,7 +16,7 @@ import logging
 import math
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
@@ -280,7 +280,12 @@ class Model(iron.Graph):
 
     @classmethod
     def from_checkpoint(
-        cls, path, *, random_weights: int | None = None, max_seq_len: int | None = None
+        cls,
+        path,
+        *,
+        random_weights: int | None = None,
+        max_seq_len: int | None = None,
+        config: Mapping[str, Any] | None = None,
     ) -> "Model":
         """The model of a Hugging Face repository's files, not yet loaded,
         its context ``max_seq_len`` or else fitted to this host (``fit``).
@@ -292,6 +297,8 @@ class Model(iron.Graph):
                 the checkpoint's shapes instead of read.
             max_seq_len: The longest context served, at most the
                 checkpoint's own.
+            config: Fields of the checkpoint's config given other values
+                (``config_argument``'s).
 
         Raises:
             ValueError: ``max_seq_len`` is past the checkpoint's own.
@@ -307,24 +314,24 @@ class Model(iron.Graph):
             ]
             directory = Path(snapshot_download(str(path), allow_patterns=files))
         weights = weights_file(directory)
-        config = cls.default_config(weights)
+        shape = dataclasses.replace(cls.default_config(weights), **(config or {}))
         if max_seq_len is None:
-            config = cls.fit(config, weights)
+            shape = cls.fit(shape, weights)
         else:
-            assert isinstance(config, DecoderConfig), "a context is a decoder's"
-            if max_seq_len > config.max_seq_len:
+            assert isinstance(shape, DecoderConfig), "a context is a decoder's"
+            if max_seq_len > shape.max_seq_len:
                 raise ValueError(
                     f"max_seq_len {max_seq_len} is past the model's "
-                    f"{config.max_seq_len}"
+                    f"{shape.max_seq_len}"
                 )
-            config = dataclasses.replace(config, max_seq_len=max_seq_len)
+            shape = dataclasses.replace(shape, max_seq_len=max_seq_len)
         checkpoint = Checkpoint(weights)
         tree = (
             checkpoint.tree()
             if random_weights is None
             else checkpoint.tree("random", random_weights)
         )
-        model = cls(config, tree)
+        model = cls(shape, tree)
         model.checkpoint, model.random_weights = checkpoint, random_weights
         if random_weights is None:
             settings = directory / "tokenizer_config.json"

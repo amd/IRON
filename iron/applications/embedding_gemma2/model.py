@@ -36,6 +36,7 @@ from iron.lm import (
     rope_angles,
 )
 from iron.lm.checkpoint import renamed, weights_file
+from iron.lm.cli import config_argument
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
@@ -448,6 +449,7 @@ class Multimodal(lm.Multimodal):
             help="the checkpoint directory, whose weights the calls are recorded "
             "on (default: %(default)s)",
         )
+        config_argument(parser)
 
     @classmethod
     def tune_calls(
@@ -460,7 +462,7 @@ class Multimodal(lm.Multimodal):
         cost the same at any length, so a short query is where they weigh.
         """
         weights = Checkpoint(weights_file(args.checkpoint)).tree()
-        graph = cls(Config(), weights)
+        graph = cls(dataclasses.replace(Config(), **dict(args.config)), weights)
         longest = graph.longest()
         points = [
             Point(0.5, {**longest, "rows": QUERY_ROWS}),
