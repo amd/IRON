@@ -788,13 +788,13 @@ class PerStepCallable(ImageCallable):
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         """Return ``step_op``'s inputs and its reference on them, by buffer name.
 
-        Inputs are read as its buffers hold them.
+        Inputs are read as its buffers hold them, a coded one decoded.
         """
         held = {
             spec.name: buf.numpy()[: spec.elements].reshape(spec.shape).copy()
             for buf, spec in zip(args, step_op.buffers)
         }
-        inputs = {b.name: held[b.name] for b in step_op.inputs}
+        inputs = {b.name: b.logical_form(held[b.name]) for b in step_op.inputs}
         # A reference that takes its outputs writes them in place, keeping
         # what it does not touch (a cache a Copy scatters into).
         outputs = {b.name: held[b.name] for b in step_op.outputs if not b.fills}
