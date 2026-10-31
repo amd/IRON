@@ -54,10 +54,6 @@ from .fusions import (
 from .measure import Cache, Timing, measure
 from .verify import built
 
-# Merges tried each round, the most adjacent pairs of groups first.
-MERGE_CANDIDATES = 8
-# Searches of one version, each after refusing what failed the last.
-ATTEMPTS = 3
 # A version is searched only where its switches cost at least this share of
 # its steps' own time: packing removes switches, and narrowing slows steps.
 MIN_SWITCH_SHARE = 0.05
@@ -441,15 +437,15 @@ class Packer:
     def group(self) -> list[Group]:
         """Return the arrays grouped to minimize ``objective``.
 
-        The merge that most improves it each round (of the ``MERGE_CANDIDATES`` most
-        adjacent pairs of groups), then single arrays moved between groups while that
-        improves it, then each group retiled.
+        The merge that most improves it each round, of every pair of groups one
+        follows the other somewhere in step order, then single arrays moved between
+        groups while that improves it, then each group retiled.
         """
         groups: list[Group] = [{k: {}} for k in self.shapes]
         score = self.objective(groups)
         while True:
             group_of = {k: i for i, g in enumerate(groups) for k in g}
-            pairs = adjacent(self.order, group_of).most_common(MERGE_CANDIDATES)
+            pairs = adjacent(self.order, group_of).most_common()
             best = None
             for (ga, gb), _ in pairs:
                 fitted = self.fit({**groups[ga], **groups[gb]})
@@ -570,8 +566,8 @@ def price_packings(
     ``MIN_SWITCH_SHARE`` of its steps' own time is not searched.
 
     A grouping whose version does not build, hangs or is not bit-identical
-    is refused (``refuse_group``) and the version searched again, up to
-    ``ATTEMPTS`` times, recorded in ``ledger`` where one is given.
+    is refused (``refuse_group``) and the version searched again without it,
+    until one is kept or none packs, recorded in ``ledger`` where one is given.
 
     Args:
         calls: The calls whose versions are packed.
@@ -630,7 +626,8 @@ def price_packings(
                 f"{own:.0f} us of steps; not searched"
             )
             continue
-        for attempt in range(ATTEMPTS):
+        # Each refusal rules its groups out of the next search, so this ends.
+        for attempt in itertools.count():
             groups = packer.group()
             packed = [g for g in groups if sum(len(packer.shapes[k]) for k in g) > 1]
             if not packed:
