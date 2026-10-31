@@ -306,6 +306,7 @@ class Shape:
         self.cls = type(op)
         given = {n: vars(op)[n] for n in op.declaration.params}
         self.dims = Profile.dims(self.cls, given)
+        self.given = op.given
         # Each operator, where it is timed (``Timed.op_points``) and what its
         # inputs hold (``Timed.op_inputs``).
         self.members: list[
@@ -355,18 +356,28 @@ class Shape:
     ) -> dict[str, Any]:
         """Return the dimensions a tunable entry for it names.
 
-        ``named``'s less ``drop`` (those a host sizes), unless leaving those, or the
-        ones its operators derive, out would name another shape of ``resolved``; each
-        JSON can hold (``_json_safe``).
+        ``named``'s less ``drop`` (those a host sizes); where that names another shape
+        of ``resolved`` too, the derived ones its calls gave as well, and then ``drop``'s;
+        each JSON can hold (``_json_safe``).
         """
-        kept = {n: v for n, v in self.named(covering).items() if n not in drop}
-        if any(
-            isinstance(r, self.cls)
-            and Shape(r).key != self.key
-            and Profile.matches(kept, Profile.dims(type(r), vars(r)))
-            for r in resolved
+        plain = self.named(covering)
+        every = self.named(covering, derived=True)
+        for kept in (
+            {n: v for n, v in plain.items() if n not in drop},
+            {
+                n: v
+                for n, v in every.items()
+                if (n in plain or n in self.given) and n not in drop
+            },
+            every,
         ):
-            kept = self.named(covering, derived=True)
+            if not any(
+                isinstance(r, self.cls)
+                and Shape(r).key != self.key
+                and Profile.matches(kept, Profile.dims(type(r), vars(r)))
+                for r in resolved
+            ):
+                break
         return _json_safe(kept)
 
     def __str__(self) -> str:

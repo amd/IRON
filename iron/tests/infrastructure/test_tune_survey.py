@@ -14,10 +14,11 @@ from iron import Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
 from iron.operators.gemv import GEMV
+from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.tanh import Tanh
 from iron.tests.support.llama_model import small
-from iron.tune.autotune import Shape, Timed
+from iron.tune.autotune import Shape, Timed, merged, settings, shapes
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import array_scoped_fold_candidates
 from iron.tune.measure import MIN_CALLS, Cache, Timing, measure, platform
@@ -118,6 +119,54 @@ def test_a_read_bound_shape_is_worth_only_its_time_above_the_fastest_read():
     assert shares[other.shape] >= other.us / total
     faster = found.shares(read_rate=2 * READ)
     assert faster[fast[0]] == pytest.approx(of[fast[0]] / 2 / total)
+
+
+def test_a_tuned_attention_entry_applies_to_the_calls_it_was_tuned_for():
+    """The decode step's and the prompt chunk's MHA differ only in what their calls derive.
+
+    An entry without those would name both; one naming a derived dimension no call
+    gives (``packed``) would name neither. Each entry names what its calls gave.
+    """
+    dev = aie_utils.ensure_current_device()
+    model = small()
+    model.profile = Profile()
+    C = model.config.prefill_chunk
+    decode, prompt = model.shapes()
+    calls = [
+        Timed(model.record(**decode), dict(position=0, token=0)),
+        Timed(
+            model.record(**prompt),
+            dict(
+                position=C - 1,
+                token=0,
+                start=0,
+                rows=C,
+                rope_start=model.rope_row(C, 0),
+            ),
+        ),
+    ]
+    resolved = [s.op.resolved(dev) for c in calls for s in c.recording.steps]
+    found = [s for s in shapes(calls, dev) if s.cls is MHA]
+    assert len(found) == 2
+    for shape in found:
+        recorded, *others = settings(shape.members[0][0], dev, shape.pinned)
+        moved = next(s for s in others if s != recorded)
+        model.profile = merged(
+            Profile(), [(MHA, shape.entry([], frozenset(), resolved), moved)]
+        )
+        again = [
+            s.op
+            for shapes_ in model.shapes()
+            for s in model.record(**shapes_).steps
+            if isinstance(s.op, MHA)
+        ]
+        mine = [op for op in again if Shape(op).key == shape.key]
+        assert mine and all(vars(op)[k] == v for op in mine for k, v in moved.items())
+        assert all(
+            any(vars(op)[k] != v for k, v in moved.items())
+            for op in again
+            if Shape(op).key != shape.key
+        )
 
 
 # ---------------------------------------------------------------------------
