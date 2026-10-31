@@ -264,3 +264,29 @@ def test_coding_a_gemv_s_weight_takes_no_channel_more():
         assert _channels(coded_op) == _channels(GEMV(**shape)), case.label
         compared += 1
     assert compared >= 10
+
+
+def test_gemvs_sharing_an_array_share_it_coded_and_split_it_mixed():
+    """Llama 1B's packed decode runs its q/o, k/v and gate/up GEMVs (K=2048,
+    four rows a call, 32 a C tile) on one 8-core array: 32 cores in all,
+    the device's every core. Coded alike they still share one array; coded
+    on some and not others they need two, 40 cores, and the pack no longer
+    places ("no available compute tiles"). coded_a is the array's, so a
+    profile codes such GEMVs all or none.
+    """
+
+    def array(M, coded_a):
+        return GEMV(
+            M=M,
+            K=E,
+            num_aie_columns=8,
+            tile_size_input=4,
+            tile_size_output=32,
+            num_batches=1,
+            coded_a=coded_a,
+        ).resolved()
+
+    for coded_a in (False, True):
+        assert len({array(M, coded_a).array_key() for M in (512, E, 8192)}) == 1
+    mixed = {array(512, False).array_key(), array(E, True).array_key()}
+    assert len(mixed) == 2
