@@ -13,6 +13,7 @@ from aie.iron import Buffer, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator, Rtp
@@ -28,8 +29,9 @@ _ROW_CAP = 4096
 _BLOCK = 1024
 # The floats a streamed row carries between blocks: the lanes' sums and the maximum.
 _STATE = 64
-# A streamed core unrolls its rows: 48 fit AIE2P's program memory, 64 do not.
-_STREAMED_ROWS = 48
+# A streamed core unrolls its rows, each about 272 bytes of program memory:
+# 40 fit AIE2's (44 do not), 48 AIE2P's (64 do not).
+_STREAMED_ROWS = {"aie2": 40, "aie2p": 48}
 
 
 def _kernel(op, n: int):
@@ -201,7 +203,8 @@ class Softmax(Operator):
         if block is None:
             bounded = "length" in self.bound_extents
             per_core = self.rows // (cols * self.num_channels)
-            long = self.cols > _ROW_CAP or (bounded and per_core <= _STREAMED_ROWS)
+            most = _STREAMED_ROWS[resolve_target_arch(dev)]
+            long = self.cols > _ROW_CAP or (bounded and per_core <= most)
             block = (
                 max(
                     (
@@ -243,10 +246,11 @@ class Softmax(Operator):
                 f"Softmax: a row a core holds whole is one block: block ({self.block}) "
                 f"must be cols ({self.cols}) unless streamed"
             )
-        if self.streamed and self.rows // self.cores > _STREAMED_ROWS:
+        most = _STREAMED_ROWS[resolve_target_arch(self.dev)]
+        if self.streamed and self.rows // self.cores > most:
             raise ValueError(
-                f"Softmax: a streamed core holds at most {_STREAMED_ROWS} rows, not "
-                f"{self.rows // self.cores}"
+                f"Softmax: a streamed core holds at most {most} rows on "
+                f"{resolve_target_arch(self.dev)}, not {self.rows // self.cores}"
             )
 
     def extent_unit(self, buffer: str) -> int:

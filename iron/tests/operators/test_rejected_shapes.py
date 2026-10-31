@@ -188,6 +188,23 @@ def test_a_tile_past_what_one_core_holds_is_refused_not_split(npu2):
     assert RMSNorm(rows=2, tile_size=8192).resolved(npu2).tile_size == 8192
 
 
+def test_a_streamed_softmax_past_aie2s_program_memory_is_refused(npu1):
+    """48 streamed rows a core fit AIE2P's program memory and overflow AIE2's."""
+    with pytest.raises(ValueError, match="at most 40 rows on aie2, not 48"):
+        Softmax(
+            rows=192,
+            cols=8192,
+            num_aie_columns=4,
+            block=1024,
+            streamed=True,
+        ).resolved(npu1)
+    assert (
+        Softmax(rows=160, cols=8192, num_aie_columns=4, block=1024, streamed=True)
+        .resolved(npu1)
+        .streamed
+    )
+
+
 def test_softmax_with_no_column_count_that_tiles_is_refused(npu2):
     """A tunable-free operator resolves to the widest column count dividing its shape.
 
