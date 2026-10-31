@@ -278,10 +278,19 @@ def _fed_widths(op: Operator, dev) -> list[dict[str, Any]]:
     if "feed_b" not in op.declaration.tunables:
         return _widths(op, dev)
     fed = op.replace(pinned=op.pinned | {"feed_b"}, feed_b=True)
+    found = []
     # feed_b is pinned on fed, so _widths leaves it out of what it found;
     # put it back so _with_tunables(**s) overrides it rather than keeping
     # op's own.
-    return [{**s, "feed_b": True} for s in _widths(fed, dev)]
+    for s in ({**s, "feed_b": True} for s in _widths(fed, dev)):
+        # fed's own resolution re-resolves its columns from the unresolved
+        # operator; held at op's, a streamed B may not fit the shim budget.
+        try:
+            op._with_tunables(**s).resolved(dev)
+        except ValueError:
+            continue
+        found.append(s)
+    return found
 
 
 def _composed_module(

@@ -74,6 +74,9 @@ pytestmark = pytest.mark.usefixtures("npu2")
 LLAMA_NPU2_PROFILE = Profile.load(
     Path(__file__).resolve().parents[2] / "applications/llama/profiles/npu2.json"
 )
+LLAMA_NPU1_PROFILE = Profile.load(
+    Path(__file__).resolve().parents[2] / "applications/llama/profiles/npu1.json"
+)
 
 W = np.zeros(2048, bfloat16)
 
@@ -395,6 +398,17 @@ def test_fed_widths_only_tries_feed_b_true():
     gemv = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048)
     found = _fed_widths(gemv, dev)
     assert found and all(w["feed_b"] for w in found)
+
+
+def test_fed_widths_offers_only_widths_that_resolve_fed(npu1):
+    """On npu1 a fed B is one more shim stream: q's own four columns at two
+    channels no longer fit, so narrowing never builds them (it raised)."""
+    gemv = LLAMA_NPU1_PROFILE.make(GEMV, M=2048, K=2048).resolved(npu1)
+    found = _fed_widths(gemv, npu1)
+    assert found
+    for s in found:
+        gemv._with_tunables(**s).resolved(npu1)
+    assert vars(gemv)["num_aie_columns"] not in [s["num_aie_columns"] for s in found]
 
 
 def test_fed_widths_is_plain_widths_without_feed_b():
