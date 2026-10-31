@@ -8,6 +8,7 @@ above the "On the device" line.
 """
 
 import contextlib
+import re
 import signal
 import statistics
 
@@ -307,6 +308,15 @@ def test_the_folded_design_builds():
     folded2 = apply_folds(rec2, fold_candidates(rec2))
     op2 = folded2.steps[0].op.resolved(folded2.steps[0].op.dev)
     BuiltArray(OperatorDesign(op2))
+
+
+def test_a_folded_operator_s_name_is_a_symbol():
+    """A finish step is spelled into the operator's name, which per-call
+    values and xclbin dispatch parameters are named from."""
+    silu, mul = _silu_mul(2048, 256)
+    op = silu.fold(mul, 0)
+    assert op is not None and re.fullmatch(r"\w+", op.name), op.name
+    OperatorDesign(op, full_elf=False)
 
 
 def _kinds(recording, fusion) -> tuple[str, ...]:

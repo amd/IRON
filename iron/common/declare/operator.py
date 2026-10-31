@@ -57,7 +57,13 @@ def spelled(v: Any) -> str:
         # A gather's rows, one pattern each: too many to spell out.
         return f"{len(v)}p{hashlib.sha256(repr(v).encode()).hexdigest()[:8]}"
     if isinstance(v, (list, tuple)):
-        return "x".join(str(x) for x in v)
+        return "x".join(spelled(x) for x in v)
+    if isinstance(v, type):
+        return v.__name__
+    if dataclasses.is_dataclass(v):
+        return type(v).__name__ + "".join(
+            f"{f.name}{spelled(vars(v)[f.name])}" for f in dataclasses.fields(v)
+        )
     if isinstance(v, TensorAccessPattern):
         return (
             f"o{v.offset}s{'x'.join(map(str, v.sizes))}"
