@@ -23,7 +23,7 @@ class Decode(Operator):
 
     test = Testing(
         [
-            Case(dict(M=2048, K=2048, num_aie_columns=8, rows=1), bench=True),
+            Case(dict(M=2048, K=2048, rows=1), bench=True),
             Case(dict(M=256, K=192, num_aie_columns=2, rows=2)),
             Case(dict(M=64, K=8192, num_aie_columns=4, rows=1), lower=True),
         ],
