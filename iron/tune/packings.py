@@ -47,12 +47,12 @@ from .fold import fold_profile
 from .fusions import (
     NotBitIdentical,
     _device_timeout,
+    built,
     compare_graphs,
     group_fit_verdict,
     refuse_group,
 )
 from .measure import Cache, Timing, measure
-from .verify import built
 
 # A version is searched only where its switches cost at least this share of
 # its steps' own time: packing removes switches, and narrowing slows steps.

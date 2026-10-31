@@ -116,8 +116,8 @@ def calls(
 
     Args:
         model: The decoder whose versions are timed.
-        position: The decode position its designs are timed at, and the
-            shortest context the decode step is timed at.
+        position: The decode position its designs are timed at; the decode
+            step's shortest context is the one past it.
         token: The token the step embeds.
         context: The longest context a design whose work follows it is timed at.
         points: How many contexts up to ``context`` it is timed at.
@@ -136,7 +136,7 @@ def calls(
             dict(position=position, token=token),
             [
                 Point(w, dict(position=c - 1, token=token))
-                for w, c in contexts(position, context, points, 1)
+                for w, c in contexts(position + 1, context, points, 1)
             ],
         ),
         (

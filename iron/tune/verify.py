@@ -18,15 +18,14 @@ from typing import Any
 
 from iron.common.declare import Profile
 from iron.common.declare.profile import PackingEntry, Version
-from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
+from iron.common.graph.compiled import apply_profile
 from iron.common.graph.fold import chosen_folds
 from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.record import Recording
-from iron.common.image.packaging import plan
 from iron.common.image.step import FusionKind
 
 from .autotune import CONFIDENCE, Timed, _identity
-from .fusions import compare_graphs
+from .fusions import built, compare_graphs
 from .measure import Timing
 
 
@@ -48,15 +47,6 @@ class Check:
     @property
     def gains(self) -> bool:
         return self.noise_us is not None and self.delta_us < -CONFIDENCE * self.noise_us
-
-
-def built(call: Timed, profile: Profile, dev) -> CompiledGraph:
-    """Return ``call``'s version under ``profile``, packaged as ``dev`` does."""
-    recording, fused, packing = apply_profile(call.recording, profile, dev)
-    chosen = plan(
-        dev, recording, None, False, step_words=_step_words(recording), fusions=fused
-    )
-    return CompiledGraph(recording, chosen, fusions=fused, packing=packing)
 
 
 def fingerprint(call: Timed, profile: Profile, dev) -> Hashable:

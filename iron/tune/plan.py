@@ -19,10 +19,10 @@ from .autotune import Shape, Timed, coding_tunables, merged, replacing
 from .packings import MIN_SWITCH_SHARE
 from .survey import Survey
 
-# A fold search runs where the steps folds remove are this share of a
-# version, or this long: an untuned version's share understates them.
-FOLD_SHARE = 0.01
-FOLD_US = 1000.0
+# A fold or fusion search runs where what it could remove is this share of a
+# version, or this long: an untuned version's share understates it.
+ESTIMATE_SHARE = 0.01
+ESTIMATE_US = 1000.0
 
 
 def coded_seed(
@@ -116,25 +116,29 @@ class Search:
 
 
 def searches(surveys: Sequence[Survey], full_elf: bool) -> list[Search]:
-    """Which searches pay for their device time, from each version's survey.
+    """Return which searches pay for their device time, from each version's survey.
 
     Packing where a version's switches cost ``MIN_SWITCH_SHARE`` of its steps; folds
-    where the steps they remove are ``FOLD_SHARE`` of one, or ``FOLD_US``; fusions only
-    on an xclbin per step, where a merge is the one way to run two steps as one dispatch
-    (a full ELF's packing removes the switches they would, and a fusion splits the
-    arrays a packing groups).
+    and fusions where what they could remove (the survey's estimate) is
+    ``ESTIMATE_SHARE`` of a version, or ``ESTIMATE_US``. Fusions are judged on the
+    packed version (``confirm_fusions``), so one that splits what a packing groups
+    is dropped there.
     """
     packing = [
         s.name
         for s in surveys
         if s.estimates["packing"].us >= MIN_SWITCH_SHARE * s.steps_us
     ]
-    folds = [
-        s.name
-        for s in surveys
-        if s.estimates["folds"].us
-        >= min(FOLD_US, FOLD_SHARE * (s.steps_us + s.switch_us))
-    ]
+    worth = {
+        kind: [
+            s.name
+            for s in surveys
+            if s.estimates[kind].us
+            >= min(ESTIMATE_US, ESTIMATE_SHARE * (s.steps_us + s.switch_us))
+        ]
+        for kind in ("folds", "fusions")
+    }
+    floor = f"{ESTIMATE_SHARE:.0%} or {ESTIMATE_US / 1000:.0f} ms"
     return [
         Search(
             "packing",
@@ -148,17 +152,13 @@ def searches(surveys: Sequence[Survey], full_elf: bool) -> list[Search]:
         ),
         Search(
             "folds",
-            bool(folds),
-            f"removable steps are {FOLD_SHARE:.0%} or {FOLD_US / 1000:.0f} ms of "
-            f"{folds or 'no version'}",
+            bool(worth["folds"]),
+            f"removable steps are {floor} of {worth['folds'] or 'no version'}",
         ),
         Search(
             "fusions",
-            not full_elf,
-            (
-                "a full ELF's packing removes the switches a fusion would"
-                if full_elf
-                else "a merge is an xclbin's one way to run steps as one dispatch"
-            ),
+            bool(worth["fusions"]),
+            f"what fusions could remove is {floor} of "
+            f"{worth['fusions'] or 'no version'}",
         ),
     ]

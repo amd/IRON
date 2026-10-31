@@ -236,6 +236,19 @@ def tune(
                     core_mhz,
                     log,
                 )
+    if plan["packing"].runs or plan["folds"].runs:
+        profile = _save_packings(
+            args,
+            record(profile),
+            dev,
+            profile,
+            found_path,
+            full_elf,
+            model,
+            folds=plan["folds"].runs,
+        )
+    # Fusions are priced on the packed versions: one that splits what a
+    # packing groups is dropped where the packed version does not gain.
     if not args.packings_only and plan["fusions"].runs:
         priced = price_fusions(
             record(profile),
@@ -253,17 +266,6 @@ def tune(
         profile = priced
         profile.save(found_path)
         print(f"wrote {found_path}")
-    if plan["packing"].runs or plan["folds"].runs:
-        profile = _save_packings(
-            args,
-            record(profile),
-            dev,
-            profile,
-            found_path,
-            full_elf,
-            model,
-            folds=plan["folds"].runs,
-        )
     if entries(seed) != entries(start):
         log("checking the search against its seed")
         profile, _ = verify(

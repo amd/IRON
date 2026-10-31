@@ -41,10 +41,8 @@ from aie.iron import Program
 
 from iron.common.declare import Operator, Profile
 from iron.common.design import BuiltArray, OperatorDesign, configuration
-from iron.common.graph.compiled import CompiledGraph, _step_words
+from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.graph.fusion import candidates
-from iron.common.graph.fusion import fusions as graph_fusions
-from iron.common.graph.fusion_tunables import apply as fusion_tunables_apply
 from iron.common.image.compose import fused_configuration, unvalued
 from iron.common.image.packaging import plan
 from iron.common.image.step import Edge, Fusion, FusionKind
@@ -777,6 +775,15 @@ class NotBitIdentical(RuntimeError):
     """
 
 
+def built(call: Timed, profile: Profile, dev) -> CompiledGraph:
+    """Return ``call``'s version under ``profile``, packaged as ``dev`` does."""
+    recording, fused, packing = apply_profile(call.recording, profile, dev)
+    chosen = plan(
+        dev, recording, None, False, step_words=_step_words(recording), fusions=fused
+    )
+    return CompiledGraph(recording, chosen, fusions=fused, packing=packing)
+
+
 def compare_graphs(
     call: Timed,
     before: CompiledGraph,
@@ -927,10 +934,10 @@ def confirm_fusions(
         active = [g for g in remaining if g.occurs_in(recording)]
         if not active:
             continue
-        chosen = plan(
-            dev, recording, full_elf, False, step_words=_step_words(recording)
-        )
         while active:
+            # Both sides as the profile builds the version, its packings
+            # included: a fusion that pays alone can cost the packing it
+            # splits, and only the packed version shows it.
             trial_profile = Profile()
             for cls, dims, tunables in profile:
                 trial_profile.add(cls, **dims, **tunables)
@@ -940,23 +947,11 @@ def confirm_fusions(
                 trial_profile.add_fusion(
                     group.kind, group.dims(combos.get(group)), group.edges
                 )
-            fused = graph_fusions(recording, trial_profile)
-            patched = (
-                fusion_tunables_apply(recording, trial_profile, fused, dev)
-                if fused
-                else recording
-            )
+            for entry in profile.packings():
+                trial_profile.add_packing(entry.members, entry.versions)
             try:
-                plain_cg = CompiledGraph(recording, chosen, fusions=())
-                narrowed = plan(
-                    dev,
-                    patched,
-                    full_elf,
-                    False,
-                    step_words=_step_words(patched),
-                    fusions=fused,
-                )
-                fused_cg = CompiledGraph(patched, narrowed, fusions=fused)
+                plain_cg = built(call, profile, dev)
+                fused_cg = built(call, trial_profile, dev)
             except (ValueError, RuntimeError, ir.MLIRError) as e:
                 # A build failure is a property of this version (this
                 # particular combination of active groups' fusions), not of
@@ -1163,6 +1158,8 @@ def price_fusions(
     out = Profile()
     for cls, dims, tunables in profile or ():
         out.add(cls, **dims, **tunables)
+    for entry in profile.packings() if profile is not None else ():
+        out.add_packing(entry.members, entry.versions)
 
     existing = profile.fusions() if profile is not None else []
     for kind, steps, edges, versions in existing:

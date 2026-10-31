@@ -120,17 +120,20 @@ def test_a_seeded_shape_records_coded():
     }
 
 
-def surveyed(steps_us: float, switch_us: float, fold_us: float) -> Survey:
+def surveyed(
+    steps_us: float, switch_us: float, fold_us: float, fusion_us: float = 0.0
+) -> Survey:
     design = Design("GEMV M=2048 K=2048", "gemv", 1, steps_us, 0, None, "other")
     estimates = {
         "packing": Estimate(switch_us, "switches"),
         "folds": Estimate(fold_us, "steps"),
+        "fusions": Estimate(fusion_us, "edges"),
         "coded": Estimate(0.0, "none"),
     }
     return Survey("v", (design,), 10, switch_us, estimates)
 
 
-def test_a_full_elf_packs_where_switches_weigh_and_never_prices_fusions():
+def test_each_search_runs_where_what_it_could_remove_weighs():
     plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1)], True)}
     assert plan == {"packing": True, "folds": False, "fusions": False}
     plan = {s.name: s.runs for s in searches([surveyed(1000, 10, 20)], True)}
@@ -139,8 +142,14 @@ def test_a_full_elf_packs_where_switches_weigh_and_never_prices_fusions():
     assert plan == {"packing": False, "folds": True, "fusions": False}
 
 
-def test_an_xclbin_per_step_packs_nothing_and_prices_merges():
-    plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1)], False)}
+def test_a_full_elf_prices_fusions_that_could_pay():
+    """A full ELF is no reason to skip fusions: they are judged packed."""
+    plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1, 50)], True)}
+    assert plan == {"packing": True, "folds": False, "fusions": True}
+
+
+def test_an_xclbin_per_step_packs_nothing():
+    plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1, 100)], False)}
     assert plan == {"packing": False, "folds": False, "fusions": True}
 
 

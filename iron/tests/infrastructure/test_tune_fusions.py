@@ -579,6 +579,18 @@ def test_price_fusions_with_no_candidates_keeps_tunables_and_fusion_entries():
     assert out.fused(FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")])
 
 
+def test_price_fusions_keeps_the_packings_its_fusions_are_judged_with():
+    """Fusions are priced on the packed versions.
+
+    So the profile they come back in keeps the packings it was given.
+    """
+    dev = aie_utils.ensure_current_device()
+    profile = Profile()
+    profile.add_packing([(SiLU, dict(size=4096)), (ElementwiseMul, dict(size=4096))])
+    out = price_fusions([], dev, profile, full_elf=True, log=lambda _: None)
+    assert out.packings() == profile.packings()
+
+
 @pytest.mark.parametrize("full_elf", [True, False])
 def test_price_fusions_prices_merges_only_on_an_xclbin_per_step(npu1, full_elf):
     """On an xclbin per step nothing packs, so a merge, consecutive steps as one dispatch, is priced there; a full ELF leaves it to packings."""

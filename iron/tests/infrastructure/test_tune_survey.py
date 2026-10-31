@@ -81,6 +81,8 @@ def test_the_switch_and_fold_estimates_follow_the_step_list():
     )
     assert removed and found.estimates["folds"].us == pytest.approx(10.0 * removed)
     assert any("folds" in line for line in found.lines())
+    # SiLU's output streams into the multiply: its round trip is what a stream saves.
+    assert found.estimates["fusions"].us > 0
 
 
 # ---------------------------------------------------------------------------

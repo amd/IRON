@@ -20,6 +20,8 @@ from aie.utils.compile.jit.params import OperatorParam
 from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
+from iron.common.graph.fusion import candidates
+from iron.common.image.step import FusionKind
 from iron.operators.gemm import GEMM
 
 from .autotune import Shape, Timed, least_us
@@ -214,6 +216,31 @@ def survey(
         for i in f.steps[1:]
     ]
     fold_us = sum(times[n] / counts[n] for n in folded if n in counts)
+    # What fusions could remove: each streamed edge's intermediate, written to
+    # DDR and read back, at the version's fastest read rate; each run of
+    # independent steps' shorter members, run beside its longest; and on an
+    # xclbin per step, where only a merge joins dispatches, every switch.
+    per_step = {
+        i: times[n] / counts[n]
+        for i, step in enumerate(call.recording.steps)
+        if (n := OperatorDesign(step.op.resolved(dev)).name) in counts
+    }
+    streamed: dict[tuple[int, str], int] = {}
+    packs: list[tuple[int, ...]] = []
+    for f in candidates(call.recording, tuple(FusionKind)):
+        if f.kind is FusionKind.PACK:
+            packs.append(f.steps)
+        for e in f.edges:
+            producer = call.recording.steps[e.producer].op.resolved(dev)
+            out = next(b for b in producer.buffers if b.name == e.output)
+            streamed[e.producer, e.output] = out.nbytes
+    stream_us = 2 * sum(streamed.values()) / ceiling if ceiling else 0.0
+    widest = [p for p in packs if not any(set(p) < set(q) for q in packs)]
+    pack_us = sum(
+        sum(per_step.get(i, 0.0) for i in p) - max(per_step.get(i, 0.0) for i in p)
+        for p in widest
+    )
+    merge_us = 0.0 if dev.can_dispatch_full_elf else switch_us
     estimates = {
         "coded": Estimate(
             coded_us, "read-bound GEMVs' time times the bytes coding saves"
@@ -222,6 +249,12 @@ def survey(
             switch_us, f"the cost model's price of {len(entered)} switches"
         ),
         "folds": Estimate(fold_us, f"the {len(folded)} steps a fold removes"),
+        "fusions": Estimate(
+            stream_us + pack_us + merge_us,
+            f"{len(streamed)} streamed edges' DDR round trips, {len(widest)} "
+            f"independent runs side by side"
+            + ("" if dev.can_dispatch_full_elf else ", every dispatch joined"),
+        ),
     }
     inputs = ", ".join(f"{n}{list(s)}" for n, s, _ in recording.version)
     return Survey(
