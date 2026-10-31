@@ -37,6 +37,7 @@ from .costmodel import CostModel
 from .failures import Ledger
 from .packings import price_folds_before_packing
 from .measure import Cache, Timing, pmode, switch_cost
+from .verify import verify, write_report
 
 
 def parser(description: str) -> argparse.ArgumentParser:
@@ -120,65 +121,90 @@ def _timing(args: argparse.Namespace) -> dict:
 
 def tune(
     args: argparse.Namespace,
-    calls: Sequence[Timed] | Callable[[], Sequence[Timed]],
+    record: Callable[[Profile], Sequence[Timed]],
     profiles: Path,
+    validate: Callable[[Profile, Profile], dict] | None = None,
 ) -> Path:
-    """Rewrite ``profiles/<device>.json`` with the settings ``calls`` time
-    fastest at (``autotune``), then price the fusions its graphs admit
+    """Rewrite ``profiles/<device>.json`` with the settings the calls time
+    fastest at (``autotune``), then price the fusions their graphs admit
     against the result (``price_fusions``), then fold what their arrays
     admit and group the result into shared device configurations
     (``price_folds_before_packing``); ``--fusions-only`` skips straight to
     the fusions and ``--packings-only`` to the folds and packings, against
-    the profile as it stands. Timed as ``args`` says; return its path.
+    the profile as it stands. What the search finds goes to
+    ``<device>.found.json`` as it goes; what is saved is what ``verify``
+    keeps of it against the starting profile, once it passes ``validate``
+    where given, reported beside it (``write_report``). Timed as ``args``
+    says; return its path.
 
-    ``calls`` may be a thunk: re-recording under the profile tuning just
-    wrote picks up its tunables (``Graph.record`` reloads a profile that is
-    a path every time), so fusion pricing sees the shapes the graph
-    actually runs.
+    Args:
+        record: The calls, recorded under a profile: each stage records
+            them under the profile the last one found.
+        validate: The model's own battery, the starting profile against the
+            one to save, returning its report; it raises where the profile
+            must not be saved.
     """
     print(f"power mode: {pmode()}", flush=True)
     dev = require_device()
     path = profiles / f"{dev.name}.json"
-    profile = Profile.load(path) if path.exists() else None
+    start = Profile.load(path) if path.exists() else Profile()
+    found_path = path.with_suffix(".found.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
     full_elf = dev.can_dispatch_full_elf
-    if args.packings_only:
-        return _save_packings(args, calls, dev, profile or Profile(), path, full_elf)
-    if not args.fusions_only:
-        profile = autotune(
-            calls() if callable(calls) else calls,
+    profile = start
+    if not args.packings_only:
+        if not args.fusions_only:
+            profile = autotune(
+                record(profile),
+                dev,
+                profile,
+                full_elf=full_elf,
+                cycles=kernel_cycles(dev),
+                core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
+                **_timing(args),
+            )
+            profile.save(found_path)
+            print(f"wrote {found_path}")
+        priced = price_fusions(
+            record(profile),
             dev,
             profile,
             full_elf=full_elf,
-            cycles=kernel_cycles(dev),
-            core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
+            checkpoint=path.with_suffix(".progress.json"),
+            max_price=args.max_price,
+            lock=args.lock_in_process,
             **_timing(args),
         )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        profile.save(path)
-        print(f"wrote {path}")
-    priced = price_fusions(
-        calls() if callable(calls) else calls,
+        if priced is None:
+            print(f"{path}: priced a batch; some groups still unpriced, call again")
+            return path
+        profile = priced
+        profile.save(found_path)
+        print(f"wrote {found_path}")
+    profile = _save_packings(args, record(profile), dev, profile, found_path, full_elf)
+    kept, checks = verify(
+        record,
         dev,
+        start,
         profile,
-        full_elf=full_elf,
-        checkpoint=path.with_suffix(".progress.json"),
-        max_price=args.max_price,
+        log=functools.partial(print, flush=True),
         lock=args.lock_in_process,
-        **_timing(args),
     )
-    if priced is None:
-        print(f"{path}: priced a batch; some groups still unpriced, call again")
-        return path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    priced.save(path)
-    print(f"wrote {path}")
-    return _save_packings(args, calls, dev, priced, path, full_elf)
+    found = (
+        {} if validate is None or not checks else {"validate": validate(start, kept)}
+    )
+    kept.save(path)
+    write_report(path, start, kept, checks, **found)
+    print(f"wrote {path} and its report")
+    return path
 
 
-def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: bool):
+def _save_packings(
+    args, calls: Sequence[Timed], dev, profile: Profile, path: Path, full_elf: bool
+) -> Profile:
     """``profile`` with the folds and packings ``price_folds_before_packing``
-    finds, written to ``path``; return it. On an xclbin per step nothing
-    packs, so no switch is timed to calibrate a cost model, nor one written.
+    finds, written to ``path``. On an xclbin per step nothing packs, so no
+    switch is timed to calibrate a cost model, nor one written.
     """
     model = CostModel.load(dev.name) if full_elf else None
     if full_elf and model is None:
@@ -198,7 +224,7 @@ def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: boo
         print(f"wrote {path} and the cost model so far", flush=True)
 
     packed = price_folds_before_packing(
-        calls() if callable(calls) else calls,
+        calls,
         dev,
         profile,
         full_elf=full_elf,
@@ -217,7 +243,7 @@ def _save_packings(args, calls, dev, profile: Profile, path: Path, full_elf: boo
         print(f"wrote {model.save(dev.name)}")
     packed.save(path)
     print(f"wrote {path}")
-    return path
+    return packed
 
 
 def main() -> None:

@@ -16,7 +16,7 @@ from iron.applications.embedding_gemma2 import Multimodal
 from iron.lm import validate
 from iron.lm.causal import CausalLM
 from iron.lm.testing import require, weights_dir
-from iron.lm.tune import application_model
+from iron.lm.cli import application_model
 
 pytestmark = pytest.mark.usefixtures("npu2")
 

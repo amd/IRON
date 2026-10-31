@@ -182,3 +182,25 @@ def main(model_class: type[Model]):
             host = generate_on_host(model, tokens, args.num_tokens, sampler())
             differ = sum(a != b for a, b in zip(drawn, host))
             print(f"[Device] Tokens differing from the host loop: {differ}/{len(host)}")
+
+
+def application_model(name: str) -> type[Model]:
+    """``name``'s model class: of those its package exports, the one that
+    names its calls (``tune_calls``), ``name`` dotted under
+    ``iron.applications``.
+
+    Raises:
+        ValueError: ``name`` names no such application, or its package
+            exports other than one such class.
+    """
+    try:
+        package = importlib.import_module(f"iron.applications.{name}")
+    except ImportError as e:
+        raise ValueError(f"no application {name!r}: {e}") from e
+    exported = [getattr(package, n) for n in getattr(package, "__all__", ())]
+    found = [m for m in exported if hasattr(m, "tune_calls")]
+    if len(found) != 1:
+        raise ValueError(
+            f"iron.applications.{name} exports {len(found)} models to tune, not one"
+        )
+    return found[0]

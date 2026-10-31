@@ -38,8 +38,7 @@ from aie.utils.compile.jit.params import widths
 from iron.common.declare import Operator, Profile
 from iron.common.declare.profile import PackingEntry, Version
 from iron.common.design import OperatorDesign
-from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
-from iron.common.image.packaging import plan
+from iron.common.graph.compiled import apply_profile
 from iron.common.image.step import FusionKind
 from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, _json_safe, time_shape
 from .costmodel import FEATURES, CostModel
@@ -53,6 +52,7 @@ from .fusions import (
     refuse_group,
 )
 from .measure import Cache, Timing, measure
+from .verify import built
 
 # Merges tried each round, the most adjacent pairs of groups first.
 MERGE_CANDIDATES = 8
@@ -983,16 +983,11 @@ def _end_to_end(
     (``compare_graphs``), each packaged as ``dev`` does: a full ELF where it
     dispatches one, else an xclbin per step.
     """
-    graphs = []
-    for p in (before, after):
-        recording, fused, packing = apply_profile(call.recording, p, dev)
-        chosen = plan(
-            dev,
-            recording,
-            None,
-            False,
-            step_words=_step_words(recording),
-            fusions=fused,
-        )
-        graphs.append(CompiledGraph(recording, chosen, fusions=fused, packing=packing))
-    return compare_graphs(call, *graphs, timing=timing, log=log, lock=lock)
+    return compare_graphs(
+        call,
+        built(call, before, dev),
+        built(call, after, dev),
+        timing=timing,
+        log=log,
+        lock=lock,
+    )

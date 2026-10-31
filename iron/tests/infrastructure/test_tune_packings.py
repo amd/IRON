@@ -388,7 +388,7 @@ def test_a_tune_on_an_xclbin_per_step_times_no_switch(npu1, tmp_path):
     args = tune_cli.parser("npu1").parse_args([])
     path = tmp_path / "npu1.json"
     found = tune_cli._save_packings(args, [], npu1, iron.Profile(), path, False)
-    assert found == path and path.exists()
+    assert path.exists() and not found.packings()
     assert CostModel.load(npu1.name) is None
 
 

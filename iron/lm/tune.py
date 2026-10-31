@@ -8,19 +8,20 @@ commit the change with ``git diff``.
 """
 
 import argparse
-import importlib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from iron.operators.sample import Sample
 from iron.tune import cli as tune_cli
+from iron.common.declare import Profile
 from iron.tune.autotune import Point, Shape, Timed
+from iron.tune.fusions import NotBitIdentical
 
 from .causal import CausalLM
-from .cli import parse_args, sampling_arguments
+from .cli import application_model, parse_args, sampling_arguments
 from .generation import Sampler
-from .model import Model
+from .validate import validate
 
 VERSIONS = ("decode", "prompt")
 
@@ -167,34 +168,12 @@ def calls(
     return out
 
 
-def application_model(name: str) -> type[Model]:
-    """``name``'s model class: of those its package exports, the one that
-    names its calls (``tune_calls``), ``name`` dotted under
-    ``iron.applications``.
-
-    Raises:
-        ValueError: ``name`` names no such application, or its package
-            exports other than one such class.
-    """
-    try:
-        package = importlib.import_module(f"iron.applications.{name}")
-    except ImportError as e:
-        raise ValueError(f"no application {name!r}: {e}") from e
-    exported = [getattr(package, n) for n in getattr(package, "__all__", ())]
-    found = [m for m in exported if hasattr(m, "tune_calls")]
-    if len(found) != 1:
-        raise ValueError(
-            f"iron.applications.{name} exports {len(found)} models to tune, not one"
-        )
-    return found[0]
-
-
 def main(name: str, model: Any, argv: Sequence[str] | None = None) -> None:
     """The command line that tunes ``name``'s profile: the calls ``model``
     plans (``tune_calls``, on the flags ``tune_arguments`` adds), into its
-    profiles directory or ``--profiles``. ``tune_calls`` is called again to
-    price fusions under the tunables just written, so ``tune`` sees the
-    profile fresh each time.
+    profiles directory or ``--profiles``, recorded under each profile a
+    stage hands on; what is saved passes the model's battery (``validate``)
+    against the starting profile, bit-identical.
     """
     parser = tune_cli.parser(f"Tune {name}'s profile")
     if model.profile is None:
@@ -210,8 +189,21 @@ def main(name: str, model: Any, argv: Sequence[str] | None = None) -> None:
         "model's own)",
     )
     args = parse_args(parser, argv)
-    model.profile = args.profiles
-    tune_cli.tune(args, lambda: model.tune_calls(parser, args), args.profiles)
+
+    def record(profile: Profile) -> list[Timed]:
+        model.profile = profile
+        return model.tune_calls(parser, args)
+
+    def battery(start: Profile, kept: Profile) -> dict:
+        report = validate(model, args.checkpoint, kept, start)
+        if not report["bit_identical"]:
+            raise NotBitIdentical(
+                f"{name}: the tuned profile is not bit-identical to the starting "
+                f"one; it stays in {args.profiles}/<device>.found.json"
+            )
+        return report
+
+    tune_cli.tune(args, record, args.profiles, battery)
 
 
 def cli() -> None:

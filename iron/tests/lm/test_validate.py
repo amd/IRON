@@ -19,6 +19,7 @@ from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.mha import MHA
 from iron.operators.silu import SiLU
 from iron.tests.support.llama_model import small
+from iron.tune.verify import touches
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -48,14 +49,14 @@ def test_version_labels_names_decode_and_prompt():
     assert validate.version_labels(small()) == ["decode", "prompt"]
 
 
-def test_entry_applies_only_to_the_recording_it_was_taken_from():
+def test_an_entry_touches_only_the_recording_it_was_taken_from():
     model = small()
     decode_shape, prompt_shape = model.shapes()
     decode = model.record(**decode_shape)
     prompt = model.record(**prompt_shape)
     entry = _silu_mul_entry(decode)
-    assert validate.entry_applies("fusion", entry, decode)
-    assert not validate.entry_applies("fusion", entry, prompt)  # a different size
+    assert touches("fusion", entry, decode)
+    assert not touches("fusion", entry, prompt)  # a different size
 
 
 def test_classify_entries_tags_by_matching_version():
@@ -100,22 +101,15 @@ def _raw_entry():
     )
 
 
-def test_build_variant_adds_tagged_entries_to_the_stock_profile(tmp_path):
-    stock_path = tmp_path / "npu2.json"
-    Profile().save(stock_path)
+def test_build_variant_adds_tagged_entries_to_the_stock_profile():
+    stock = Profile()
+    stock.add(SiLU, tile_size=1024)
     entry = _raw_entry()
     expected = Profile()
     expected.add_fusion(*entry)
-    variant = validate.build_variant(stock_path, [("fusion", entry)])
+    variant = validate.build_variant(stock, [("fusion", entry)])
     assert variant.fusions() == expected.fusions()
-
-
-def test_build_variant_with_no_stock_path_starts_empty():
-    entry = _raw_entry()
-    expected = Profile()
-    expected.add_fusion(*entry)
-    variant = validate.build_variant(None, [("fusion", entry)])
-    assert variant.fusions() == expected.fusions() and len(variant) == 0
+    assert list(variant) == list(stock)
 
 
 def test_verify_live_and_changed_versions_see_a_candidates_live_fusion():

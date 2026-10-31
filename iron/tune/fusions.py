@@ -780,7 +780,17 @@ def compare_graphs(
         )
         for h in recording.inputs
     ]
-    states = [(s, h, _random_tensor(h, rng)) for s, h in recording.states.values()]
+    states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
+    # Two recordings of one call (under two profiles) hold their own States.
+    own = [{h.name: s for s, h in g.recording.states.values()} for g in (before, after)]
+    named = [
+        [h.name for h in (*g.recording.inputs, *g.recording.returned)]
+        for g in (before, after)
+    ]
+    if any(o.keys() != states.keys() for o in own) or named[0] != named[1]:
+        raise ValueError(
+            f"{recording.name}: the builds compared name other inputs, outputs or states"
+        )
     timed = [(p.weight, {**call.values, **p.values}) for p in call.points] or [
         (1.0, dict(call.values))
     ]
@@ -796,9 +806,9 @@ def compare_graphs(
     with npu_lock(lock):
         try:
             for weight, values in staged:
-                for state, _, content in states:
-                    before.write(state, content)
-                    after.write(state, content)
+                for name, content in states.items():
+                    before.write(own[0][name], content)
+                    after.write(own[1][name], content)
                 before(*inputs, **values)
                 after(*inputs, **values)
                 if not all(
