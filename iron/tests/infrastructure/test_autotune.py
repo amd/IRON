@@ -14,8 +14,9 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+from iron.operators import ElementwiseAdd
 from iron.tests.support.graphs import Chain
-from iron.tune.autotune import Timed, autotune
+from iron.tune.autotune import Shape, Timed, autotune, time_shape
 from iron.tune.measure import Cache, Timing, platform
 
 SIZE = 8192
@@ -68,3 +69,28 @@ def test_one_operator_is_timed_from_the_command_line(tmp_path):
     printed = [line for line in run.stdout.splitlines() if " us" in line]
     assert len(printed) > 1
     assert sum("(recorded)" in line for line in printed) == 1
+
+
+def test_a_setting_cached_as_the_default_is_judged_against_the_next_one(tmp_path):
+    # Given four columns, the first search records (4 columns, its channels)
+    # as its default; given those channels, the second searches the columns
+    # from its own recorded width and meets four columns in the cache.
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    first = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=4)
+    channels = first.resolved(dev).num_channels
+    trials = []
+    for op in (first, ElementwiseAdd(size=SIZE, tile_size=TILE, num_channels=channels)):
+        shape = Shape(op)
+        shape.members.append((op, [(1.0, {})], {}))
+        trials = time_shape(
+            shape,
+            dev,
+            full_elf=True,
+            timing=Timing(rounds=2, calls=5),
+            cache=cache,
+            log=lambda _: None,
+        )
+    four = [t for t in trials if t.tunables.get("num_aie_columns") == 4]
+    assert four and all(np.isfinite(t.delta_us) for t in four)

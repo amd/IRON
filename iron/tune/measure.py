@@ -503,15 +503,6 @@ class Measurement:
         default_factory=lambda: datetime.date.today().isoformat()
     )
 
-    def against_default(self) -> tuple[float, float | None]:
-        """``difference`` from the default timed beside it."""
-        default = self.default_round_us
-        return self.difference(
-            dataclasses.replace(
-                self, t_step_us=statistics.median(default), round_us=default
-            )
-        )
-
     def difference(self, other: Measurement) -> tuple[float, float | None]:
         """How much longer a step of this one takes than one of ``other``,
         and that difference's standard error: round by round where the two
