@@ -65,6 +65,7 @@ from .measure import (
     _sample,
     measure_fusion,
     npu_lock,
+    sized,
     standard_error,
     time_interleaved,
     write,
@@ -828,9 +829,8 @@ def compare_graphs(
                     )
                 if weight is None:
                     continue
-                times = time_interleaved(
-                    [before.callable, after.callable], timing, log=log, lock=lock
-                )
+                runs = [before.callable, after.callable]
+                times = time_interleaved(runs, sized(timing, runs), log=log, lock=lock)
                 paired = [
                     a - b for b, a in zip(times[0].samples_us, times[1].samples_us)
                 ]

@@ -435,6 +435,20 @@ def npu_lock(lock: bool = False):
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def sized(timing: Timing, runs: Sequence[Callable[[], object]]) -> Timing:
+    """``timing`` with a round of ``runs`` about ``ROUND_US`` long, each at
+    least ``MIN_CALLS`` calls: a round of long steps (a prompt chunk's,
+    hundreds of ms) runs fewer calls, its median no noisier for it. Each of
+    ``runs`` is called once, to time it.
+    """
+    begun = time.perf_counter()
+    for run in runs:
+        run()
+    round_us = (time.perf_counter() - begun) * 1e6
+    calls = max(MIN_CALLS, min(timing.calls, int(ROUND_US / round_us)))
+    return dataclasses.replace(timing, calls=calls)
+
+
 def time_interleaved(
     runs: Sequence[ImageCallable],
     timing: Timing,
@@ -829,12 +843,8 @@ def measure(
         # from a probe's first dispatch until ``del`` below, not just the
         # dispatch itself (``npu_lock``).
         with npu_lock(lock):
-            begun = time.perf_counter()
             outputs = [run.digest() for run in short]
-            # A round of long steps runs fewer calls: its median is no noisier.
-            round_us = (time.perf_counter() - begun) * 1e6 * (1 + repeats)
-            calls = max(MIN_CALLS, min(timing.calls, int(ROUND_US / round_us)))
-            batch_timing = dataclasses.replace(timing, calls=calls)
+            batch_timing = sized(timing, [r.callable for r in short + long])
             # The default is timed in full; the others stop once far behind.
             groups = [None if i == 0 else i for i in built] * 2
             times = time_interleaved(
@@ -861,7 +871,7 @@ def measure(
                     outputs[j],
                     run,
                     mode,
-                    calls,
+                    batch_timing.calls,
                     () if i == 0 else steps[0],
                 )
                 if cache is not None:
