@@ -158,3 +158,20 @@ def test_a_refusal_is_cached_and_a_weight_with_no_file_is_not(tmp_path):
     loose = np.array(held[:3])
     CodedWeight(loose, "w", 15, None, cache).encode()
     assert [p.suffix for p in cache.iterdir()] == [".refused"]
+
+
+def test_a_report_names_each_coded_weight_and_each_read_plain(caplog):
+    w, other = _weights()
+    t = Chain(w, other).record(x=(E,))
+    t.code_weights()
+    (line,) = t.coded_report()
+    assert line == (
+        f"w: coded rows ({E}, {coded.row_bytes(E)}) uint8 (encoded), "
+        f"{E * (2 * E - coded.row_bytes(E))} bytes fewer"
+    )
+    w[5, :120] = np.exp2(np.arange(-60.0, 60.0)).astype(bfloat16)
+    t = Chain(w, other).record(x=(E,))
+    with caplog.at_level("ERROR"):
+        t.code_weights()
+    (line,) = t.coded_report()
+    assert line.startswith("w: read plain: coded.encode_rows: row 5 holds 104")

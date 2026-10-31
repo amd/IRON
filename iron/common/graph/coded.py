@@ -49,6 +49,7 @@ class CodedWeight:
         capacity: The exceptions a coded row holds.
         source: Where ``array`` was read from, or None.
         rows: The coded rows, once ``encode()`` has run.
+        from_cache: Whether ``rows`` were read from the cache.
     """
 
     def __init__(
@@ -65,6 +66,7 @@ class CodedWeight:
         self.source = source
         self.cache = cache
         self.rows: np.ndarray | None = None
+        self.from_cache = False
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -100,6 +102,7 @@ class CodedWeight:
         refusal = None if cached is None else cached.with_suffix(".refused")
         if cached is not None and cached.exists():
             self.rows = np.load(cached, mmap_mode="r")
+            self.from_cache = True
             return self.rows
         if refusal is not None and refusal.exists():
             raise ValueError(refusal.read_text())

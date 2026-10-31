@@ -232,6 +232,8 @@ class Recording:
     limits: list[Limit] = dataclasses.field(default_factory=list)
     # Run between the steps, each ending a full ELF's command (``on_host``).
     host: list[HostStep] = dataclasses.field(default_factory=list)
+    # Each weight a coded read was given but which is read plain, and why.
+    read_plain: dict[str, str] = dataclasses.field(default_factory=dict)
 
     @property
     def version(self) -> Version:
@@ -482,6 +484,7 @@ class Recording:
                 logger.warning(
                     "%s: %s is read plain: %s", self.name, weight.name, refused[weight]
                 )
+                self.read_plain[weight.name] = str(refused[weight])
                 self._read_plain(key)
         read = {
             h.ref().root
@@ -498,6 +501,21 @@ class Recording:
         for key, name in unread.items():
             del self.weights[key]
             del self.pinned[name]
+
+    def coded_report(self) -> list[str]:
+        """A line per weight read as coded rows, and per weight a coded read
+        was given but which is read plain, with why.
+        """
+        lines = []
+        for weight, h in self.weights.values():
+            if isinstance(weight, CodedWeight):
+                origin = "from the cache" if weight.from_cache else "encoded"
+                lines.append(
+                    f"{weight.name}: coded rows {h.shape} uint8 ({origin}), "
+                    f"{weight.array.nbytes - h.nbytes} bytes fewer"
+                )
+        lines += [f"{name}: read plain: {why}" for name, why in self.read_plain.items()]
+        return lines
 
     def _read_plain(self, key) -> None:
         """Point every reader of the coded weight ``key`` back at the weight

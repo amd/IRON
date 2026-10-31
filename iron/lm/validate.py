@@ -31,6 +31,7 @@ from aie.iron.device import from_name
 
 from iron import Profile
 from iron.common.declare.profile import Version
+from iron.common.graph.coded import CodedWeight
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.record import Recording
@@ -95,13 +96,21 @@ def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
             "packed_groups": [len(g) for g in composition.packing.groups],
             "composition_identity": composition.identity,
             "image_path": str(version.image),
+            "coded_weights": sorted(
+                w.name
+                for w, _ in version.recording.weights.values()
+                if isinstance(w, CodedWeight)
+            ),
+            "read_plain": dict(version.recording.read_plain),
         }
         print(
             f"[{label}] {version_label}: {len(fusions)} live fusions "
             f"{out[version_label]['kinds']}, {out[version_label]['n_designs']} designs + "
             f"{out[version_label]['n_fusion_devices']} fusion-devices, "
             f"packed groups {out[version_label]['packed_groups']}, "
-            f"identity {out[version_label]['composition_identity']}"
+            f"identity {out[version_label]['composition_identity']}, "
+            f"{len(out[version_label]['coded_weights'])} coded weights, "
+            f"{len(out[version_label]['read_plain'])} read plain"
         )
     return out
 

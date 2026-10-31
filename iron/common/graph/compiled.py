@@ -566,7 +566,13 @@ class Graph:
                 step_words=_step_words(recording),
                 fusions=fused,
             )
-            logger.info("%s", chosen.report(self.name))
+            logger.info(
+                "%s",
+                "\n".join(
+                    [chosen.report(self.name)]
+                    + [f"  {line}" for line in recording.coded_report()]
+                ),
+            )
             emit, sized = self._emit(recording, chosen, feeds)
             version = CompiledGraph(
                 recording,
@@ -824,7 +830,10 @@ class CompiledGraph:
             f"{h.name}={h.shape} {bfp.dtype_name(h.dtype)}"
             for h in self.recording.inputs
         )
-        report = self.plan.report(f"{self.recording.name}({inputs})")
+        report = "\n".join(
+            [self.plan.report(f"{self.recording.name}({inputs})")]
+            + [f"  {line}" for line in self.recording.coded_report()]
+        )
         if self.artifacts.directory is None:
             return report
         return f"{report}\n  built in {self.artifacts.directory}"
