@@ -578,31 +578,43 @@ def _json_safe(dims: Mapping[str, Any]) -> dict[str, Any]:
 
 def replacing(
     profile: Profile | None, found: Sequence[Shape]
-) -> tuple[
-    Profile, dict[Hashable, list[Mapping[str, Any]]], dict[Hashable, dict[str, Any]]
-]:
-    """``profile``'s entries covering none of ``found``'s shapes, copied into
-    a fresh ``Profile``; by shape key, what covered it (``covering``, for
-    ``Shape.named``) and what it already gave (``held``, kept where a new
-    entry for it does not move it, as GEMM's ``tile_k`` below ``HIGHEST``):
-    what to rebuild a profile from before writing a shape's own new tunables
-    (``autotune``, ``price_fusions``).
+) -> tuple[dict[Hashable, list[Mapping[str, Any]]], dict[Hashable, dict[str, Any]]]:
+    """By ``found``'s shape key, what of ``profile`` covers it (``covering``,
+    for ``Shape.named``) and what it already gives (``held``, kept where a
+    new entry for it does not move it, as GEMM's ``tile_k`` below
+    ``HIGHEST``): what a shape's own new entry is written from (``autotune``,
+    the coded seed's ``coded``).
     """
     covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
     held: dict[Hashable, dict[str, Any]] = {s.key: {} for s in found}
+    for cls, matched, tunables in profile or ():
+        for s in found:
+            if issubclass(s.cls, cls) and Profile.matches(matched, s.dims):
+                covering[s.key].append(matched)
+                held[s.key].update(tunables)
+    return covering, held
+
+
+def merged(
+    profile: Profile | None,
+    new: Sequence[tuple[type, Mapping[str, Any], Mapping[str, Any]]],
+) -> Profile:
+    """``profile``'s entries with ``new``'s (class, dimensions, tunables)
+    added, each replacing one that names exactly its dimensions (equal
+    ranks would be ambiguous): an entry a new one only outranks is kept, so
+    a shape it matches that the new ones' search did not see (another
+    version's, under ``--versions``) keeps what it gave.
+    """
     out = Profile()
     for cls, matched, tunables in profile or ():
-        covered = [
-            s
-            for s in found
-            if issubclass(s.cls, cls) and Profile.matches(matched, s.dims)
-        ]
-        for s in covered:
-            covering[s.key].append(matched)
-            held[s.key].update(tunables)
-        if not covered:
+        if not any(
+            cls is c and matched.keys() == d.keys() and Profile.matches(matched, d)
+            for c, d, _ in new
+        ):
             out.add(cls, **matched, **tunables)
-    return out, covering, held
+    for cls, dims, tunables in new:
+        out.add(cls, **dims, **tunables)
+    return out
 
 
 def autotune(
@@ -623,10 +635,9 @@ def autotune(
     """``profile`` with an entry for each shape of ``calls`` (``shapes``)
     naming the fastest setting taken (``time_shape``), the recorded one where
     none gains, named without the dimensions a host sizes (``Timed.varying``)
-    wherever that still names only its own shape. Its entries covering any
-    of those shapes are replaced; the rest are kept. With ``shares``, only
-    the shapes with ``SHAPE_SHARE`` of a version are searched, the costliest
-    first.
+    wherever that still names only its own shape (``Shape.entry``), merged
+    into its other entries (``merged``). With ``shares``, only the shapes
+    with ``SHAPE_SHARE`` of a version are searched, the costliest first.
 
     Args:
         calls: The calls whose graphs were recorded under ``profile``.
@@ -647,7 +658,8 @@ def autotune(
             f"{SHAPE_SHARE:.0%} of every version: not searched"
         )
         found = sorted(weighed, key=lambda s: -shares[s.key])
-    out, covering, held = replacing(profile, found)
+    covering, held = replacing(profile, found)
+    new: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
     varying: dict[Hashable, frozenset[str]] = {}
     for call in calls:
         for key, names in call.varying.items():
@@ -674,5 +686,5 @@ def autotune(
         kept = shape.entry(
             covering[shape.key], varying.get(shape.key, frozenset()), resolved
         )
-        out.add(shape.cls, **kept, **{**held[shape.key], **best.tunables})
-    return out
+        new.append((shape.cls, kept, {**held[shape.key], **best.tunables}))
+    return merged(profile, new)

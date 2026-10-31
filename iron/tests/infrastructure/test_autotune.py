@@ -100,6 +100,28 @@ def test_a_tuned_entry_names_no_dimension_a_host_sizes(tmp_path):
     assert named[ElementwiseAdd]["size"] == SIZE
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_an_entry_a_tune_only_outranks_still_serves_what_it_did_not_time(tmp_path):
+    """A tune of one version (``--versions decode``) writes its shapes' own
+    entries; a broader one they outrank still matches another version's
+    shapes, which keep what it gave them rather than their defaults."""
+    recording = Chain(SIZE, TILE).record(a=(SIZE,), b=(SIZE,))
+    dev = aie_utils.ensure_current_device()
+    stock = Profile()
+    stock.add(SiLU, tile_size=TILE)
+    report = platform()
+    profile = autotune(
+        [Timed(recording)],
+        dev,
+        stock,
+        full_elf=dev.can_dispatch_full_elf,
+        timing=Timing(rounds=2, calls=5),
+        cache=Cache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+        log=lambda _: None,
+    )
+    assert profile.tunables_for(SiLU, {"size": 4 * SIZE}) == {"tile_size": TILE}
+
+
 def test_one_operator_is_timed_from_the_command_line(tmp_path):
     run = subprocess.run(
         [

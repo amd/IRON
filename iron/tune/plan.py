@@ -13,7 +13,7 @@ import dataclasses
 from collections.abc import Callable, Hashable, Sequence
 
 from iron.common.declare import Profile
-from .autotune import Shape, Timed, coding_tunables, replacing
+from .autotune import Shape, Timed, coding_tunables, merged, replacing
 from .packings import MIN_SWITCH_SHARE
 from .survey import Survey
 
@@ -52,11 +52,18 @@ def coded_seed(
             arrays.setdefault(step.op.resolved(dev).array_key(), set()).add(shape.key)
 
     def coded(keys) -> Profile:
-        out, covering, held = replacing(profile, [shapes[k] for k in keys])
-        for k in keys:
-            given = {**held[k], **dict.fromkeys(flags[k], True)}
-            dims = shapes[k].entry(covering[k], frozenset(), resolved)
-            out.add(shapes[k].cls, **dims, **given)
+        covering, held = replacing(profile, [shapes[k] for k in keys])
+        out = merged(
+            profile,
+            [
+                (
+                    shapes[k].cls,
+                    shapes[k].entry(covering[k], frozenset(), resolved),
+                    {**held[k], **dict.fromkeys(flags[k], True)},
+                )
+                for k in keys
+            ],
+        )
         for fusion in profile.fusions():
             out.add_fusion(*fusion)
         for packing in profile.packings():
