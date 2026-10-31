@@ -159,6 +159,7 @@ def tune(
     core_mhz = aie_utils.DefaultNPURuntime.core_mhz
     model = _cost_model(args, dev) if full_elf else None
     seed = coded_seed(record, dev, start, log=log)
+    memo: dict = {}
     coded_shapes = {
         Shape(s.op).key
         for c in record(seed)
@@ -196,7 +197,9 @@ def tune(
             f"{planned.name}: {'searched' if planned.runs else 'skipped'}, {planned.why}"
         )
     if entries(seed) != entries(start):
-        seed, _ = verify(record, dev, start, seed, log=log, lock=args.lock_in_process)
+        seed, _ = verify(
+            record, dev, start, seed, log=log, lock=args.lock_in_process, memo=memo
+        )
         seed.save(found_path)
         print(f"wrote {found_path}, the seed")
     profile = seed
@@ -249,10 +252,10 @@ def tune(
     if entries(seed) != entries(start):
         log("checking the search against its seed")
         profile, _ = verify(
-            record, dev, seed, profile, log=log, lock=args.lock_in_process
+            record, dev, seed, profile, log=log, lock=args.lock_in_process, memo=memo
         )
     kept, checks = verify(
-        record, dev, start, profile, log=log, lock=args.lock_in_process
+        record, dev, start, profile, log=log, lock=args.lock_in_process, memo=memo
     )
     battery = (
         {} if validate is None or not checks else {"validate": validate(start, kept)}

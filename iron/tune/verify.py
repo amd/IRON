@@ -156,6 +156,7 @@ def verify(
     timing: Timing = Timing(rounds=3, calls=10),
     log: Callable[[str], None] = print,
     lock: bool = False,
+    memo: dict[tuple[Hashable, Hashable], Check] | None = None,
 ) -> tuple[Profile, dict[Version, Check]]:
     """``candidate`` where each version it builds differently from ``base``
     gains on it end to end beyond the noise, ``base``'s entries elsewhere
@@ -163,7 +164,12 @@ def verify(
 
     Args:
         record: The calls, recorded under a profile.
+        memo: Checks by the two builds' fingerprints, read and added to: a
+            tune's checks against its seed and then its start share it, so
+            a version the search left as the seed is not built and timed
+            twice.
     """
+    memo = {} if memo is None else memo
     old = {c.recording.version: c for c in record(base)}
     plain = {v: fingerprint(c, base, dev) for v, c in old.items()}
     chosen, losers = candidate, set()
@@ -180,6 +186,13 @@ def verify(
                 continue
             if measured.get(version) == built_as:
                 continue
+            measured[version] = built_as
+            if (pair := (plain[version], built_as)) in memo:
+                check = checks[version] = memo[pair]
+                log(f"verify {check.name}: as checked before, {check.delta_us:+.1f} us")
+                if not check.gains:
+                    fresh.add(version)
+                continue
             delta, noise = compare_graphs(
                 old[version],
                 built(old[version], base, dev),
@@ -190,8 +203,7 @@ def verify(
             )
             inputs = ", ".join(f"{n}{list(s)}" for n, s, _ in version) or "no inputs"
             check = Check(f"{call.recording.name} ({inputs})", delta, noise)
-            checks[version] = check
-            measured[version] = built_as
+            checks[version] = memo[pair] = check
             noise_s = "?" if noise is None else f"{noise:.1f}"
             verdict = "kept" if check.gains else "reverted to the base's entries"
             log(
