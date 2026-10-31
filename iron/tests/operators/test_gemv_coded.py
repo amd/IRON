@@ -22,7 +22,7 @@ from iron.lm import Checkpoint
 from iron.lm.testing import require, weights_dir
 from iron.operators.gemv import GEMV
 
-pytestmark = pytest.mark.supported_devices("npu2")
+pytestmark = pytest.mark.supported_devices("npu1", "npu2")
 
 LLAMA = weights_dir("llama3.2-1b") / "model.safetensors"
 
@@ -79,7 +79,9 @@ def test_a_coded_gemv_returns_the_plain_bits(source):
         w = np.asarray(Checkpoint(LLAMA).tensors[name][:rows])
     M, K = w.shape
     x = np.random.default_rng(K).standard_normal(K).astype(bfloat16)
-    shape = dict(M=M, K=K, num_aie_columns=8, **tunables)
+    shape = dict(
+        M=M, K=K, num_aie_columns=aie_utils.ensure_current_device().cols, **tunables
+    )
     plain = _run(GEMV(**shape), w, x)
     coded = _run(GEMV(**shape, coded_a=True), w, x)
     np.testing.assert_array_equal(coded.view(np.uint16), plain.view(np.uint16))
@@ -127,7 +129,9 @@ def test_every_call_of_one_loaded_coded_gemv_returns_the_plain_bits(M, K, tunabl
     second call on: 50 calls of one loaded image, a new B each, every one
     checked against the plain GEMV's.
     """
-    shape = dict(M=M, K=K, num_aie_columns=8, **tunables)
+    shape = dict(
+        M=M, K=K, num_aie_columns=aie_utils.ensure_current_device().cols, **tunables
+    )
     plain, coded = GEMV(**shape), GEMV(**shape, coded_a=True)
     w = _drawn(M, K)
     tensor = aie_utils.DEFAULT_TENSOR_CLASS
