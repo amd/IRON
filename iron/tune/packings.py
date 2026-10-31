@@ -980,7 +980,8 @@ def _end_to_end(
     lock: bool,
 ) -> tuple[float, float | None]:
     """``call``'s version built under ``after`` against it under ``before``
-    (``compare_graphs``).
+    (``compare_graphs``), each packaged as ``dev`` does: a full ELF where it
+    dispatches one, else an xclbin per step.
     """
     graphs = []
     for p in (before, after):
@@ -988,7 +989,7 @@ def _end_to_end(
         chosen = plan(
             dev,
             recording,
-            True,
+            None,
             False,
             step_words=_step_words(recording),
             fusions=fused,

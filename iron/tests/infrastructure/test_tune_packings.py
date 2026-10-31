@@ -375,8 +375,6 @@ def test_fold_profile_scopes_each_entry_to_the_version_it_was_found_in():
 
 
 @pytest.mark.supported_devices("npu1")
-
-
 def test_calls_time_only_the_versions_asked_for():
     model = small()
     [decode] = calls(model, 0, 0, 256, 1, Sampler(0.7, 50), versions=["decode"])
@@ -484,6 +482,19 @@ def test_end_to_end_runs_a_call_at_each_of_its_points():
     )
     with pytest.raises(IndexError):
         _end_to_end(past, dev, profile, profile, timing, print, False)
+
+
+@pytest.mark.supported_devices("npu1")
+def test_end_to_end_builds_an_xclbin_per_step_on_npu1(npu1):
+    """npu1 has no full ELF: the end-to-end check a fold is judged by builds
+    each version as an xclbin per step (it asked for a full ELF, and raised)."""
+    recording = BoundedReLUs().record(x=(SIZE,))
+    profile = iron.Profile()
+    own = Timed(recording, values=dict(n=SIZE))
+    delta, _ = _end_to_end(
+        own, npu1, profile, profile, Timing(rounds=1, calls=2), print, False
+    )
+    assert np.isfinite(delta)
 
 
 @pytest.mark.supported_devices("npu2")
