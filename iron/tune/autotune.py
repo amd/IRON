@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 from aie.iron import ExternalFunction
 from aie.utils.compile import NPU_CACHE_HOME
+from aie.utils.compile.jit.params import OperatorParam
 
 from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
@@ -165,6 +166,16 @@ class Timed:
             for buf, ref in zip(op.buffers, step.refs())
             if ref.nbytes is None and ref.root in self.contents
         }
+
+
+def coding_tunables(op: Operator) -> set[str]:
+    """The tunables of ``op`` that make an input move as coded rows
+    (``In(coded=)``)."""
+    return {
+        b.declared_coded.name
+        for b in op.inputs
+        if isinstance(b.declared_coded, OperatorParam) and b.declared_coded.tunable
+    }
 
 
 def settings(
@@ -326,7 +337,8 @@ def shapes(calls: Sequence[Timed], dev) -> list[Shape]:
             op = step.op
             shape = Shape(op)
             shape = found.setdefault(shape.key, shape)
-            shape.pinned |= op.pinned
+            # Coding is decided per array before the search (plan.coded_seed).
+            shape.pinned |= op.pinned | coding_tunables(op)
             identity = _identity(op, dev)
             if identity not in seen:
                 seen.add(identity)

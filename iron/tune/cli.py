@@ -37,7 +37,8 @@ from .costmodel import CostModel
 from .failures import Ledger
 from .packings import price_folds_before_packing
 from .measure import Cache, Timing, pmode, switch_cost
-from .verify import verify, write_report
+from .plan import coded_seed
+from .verify import entries, verify, write_report
 
 
 def parser(description: str) -> argparse.ArgumentParser:
@@ -125,17 +126,17 @@ def tune(
     profiles: Path,
     validate: Callable[[Profile, Profile], dict] | None = None,
 ) -> Path:
-    """Rewrite ``profiles/<device>.json`` with the settings the calls time
-    fastest at (``autotune``), then price the fusions their graphs admit
-    against the result (``price_fusions``), then fold what their arrays
-    admit and group the result into shared device configurations
-    (``price_folds_before_packing``); ``--fusions-only`` skips straight to
-    the fusions and ``--packings-only`` to the folds and packings, against
-    the profile as it stands. What the search finds goes to
-    ``<device>.found.json`` as it goes; what is saved is what ``verify``
-    keeps of it against the starting profile, once it passes ``validate``
-    where given, reported beside it (``write_report``). Timed as ``args``
-    says; return its path.
+    """Rewrite ``profiles/<device>.json``: from the planner's seed
+    (``coded_seed``, kept per version where it gains on the starting
+    profile), time the settings the calls run fastest at (``autotune``),
+    price the fusions their graphs admit (``price_fusions``), then fold what
+    their arrays admit and group the result into shared device
+    configurations (``price_folds_before_packing``); ``--fusions-only``
+    skips the first search and ``--packings-only`` the first two. What the
+    search finds goes to ``<device>.found.json`` as it goes; what is saved
+    is what ``verify`` keeps of it against the seed and then the starting
+    profile, once it passes ``validate`` where given, reported beside it
+    (``write_report``). Timed as ``args`` says; return its path.
 
     Args:
         record: The calls, recorded under a profile: each stage records
@@ -151,7 +152,13 @@ def tune(
     found_path = path.with_suffix(".found.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     full_elf = dev.can_dispatch_full_elf
-    profile = start
+    log = functools.partial(print, flush=True)
+    seed = coded_seed(record, dev, start, log=log)
+    if entries(seed) != entries(start):
+        seed, _ = verify(record, dev, start, seed, log=log, lock=args.lock_in_process)
+        seed.save(found_path)
+        print(f"wrote {found_path}, the seed")
+    profile = seed
     if not args.packings_only:
         if not args.fusions_only:
             profile = autotune(
@@ -182,13 +189,13 @@ def tune(
         profile.save(found_path)
         print(f"wrote {found_path}")
     profile = _save_packings(args, record(profile), dev, profile, found_path, full_elf)
+    if entries(seed) != entries(start):
+        log("checking the search against its seed")
+        profile, _ = verify(
+            record, dev, seed, profile, log=log, lock=args.lock_in_process
+        )
     kept, checks = verify(
-        record,
-        dev,
-        start,
-        profile,
-        log=functools.partial(print, flush=True),
-        lock=args.lock_in_process,
+        record, dev, start, profile, log=log, lock=args.lock_in_process
     )
     found = (
         {} if validate is None or not checks else {"validate": validate(start, kept)}
