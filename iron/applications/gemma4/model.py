@@ -165,6 +165,9 @@ class Gemma4Layer(PleLayer):
     where ``use_double_wide_mlp``.
     """
 
+    # The layer's columns of the per-layer token table, Gemma4.load_state_dict's.
+    per_layer_embedding: np.ndarray
+
     def __init__(self, c: Gemma4Config, i: int):
         heads = dataclasses.replace(c, head_dim=c.global_head_dim) if c.full(i) else c
         mlp = None
@@ -221,7 +224,8 @@ class Gemma4(CausalLM):
             for t in (c.image_token_id, c.audio_token_id, c.video_token_id)
             if t is not None
         ]
-        for i, layer in enumerate(self.layers):
+        for i, layer in enumerate(m.layers):
+            assert isinstance(layer, Gemma4Layer)
             # A layer's own columns, scaled, contiguous: one gather a layer.
             rows = table[:, i * P : (i + 1) * P].astype(np.float32) * scale
             rows[placeholders] = rows[c.pad_token_id]
