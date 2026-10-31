@@ -27,18 +27,20 @@ from .validate import validate
 VERSIONS = ("decode", "prompt")
 
 
-def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
-    """At most ``count`` contexts halving down from ``top``, multiples of ``unit``.
+def contexts(low: int, high: int, count: int, unit: int) -> list[tuple[float, int]]:
+    """Return ``count`` contexts from ``low`` to ``high``, each weighted, ascending.
 
-    Ascending, each weighted by the share of a uniform context in
-    ``(0, top]`` nearest it (the trapezoid rule): the weights sum to 1.
+    Every doubling counts alike: the span splits into ``count`` bands of equal
+    log-width (small, medium and large for three), each timed at its geometric
+    centre rounded to a multiple of ``unit`` and weighted by its share, so the
+    weights sum to 1. Bands that round to one context share it.
     """
-    found = [top]
-    while len(found) < count and found[-1] // 2 >= unit and found[-1] // 2 % unit == 0:
-        found.append(found[-1] // 2)
-    found.reverse()
-    edges = [0] + [(a + b) / 2 for a, b in zip(found, found[1:])] + [top]
-    return [((hi - lo) / top, c) for lo, hi, c in zip(edges, edges[1:], found)]
+    found: dict[int, float] = {}
+    for k in range(count):
+        centre = low * (high / low) ** ((k + 0.5) / count)
+        c = min(high, max(low, unit * max(1, round(centre / unit))))
+        found[c] = found.get(c, 0.0) + 1 / count
+    return [(w, c) for c, w in sorted(found.items())]
 
 
 def arguments(parser: argparse.ArgumentParser) -> None:
@@ -71,16 +73,17 @@ def arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--context",
         type=int,
-        default=8192,
+        default=None,
         help="the longest context a design whose work follows it is timed "
-        "at, a multiple of the prompt chunk (default: 8192)",
+        "at, a multiple of the prompt chunk (default: the model's max_seq_len)",
     )
     parser.add_argument(
         "--points",
         type=int,
         default=3,
-        help="how many contexts up to --context it is timed at, each "
-        "timed per setting: their cost grows with it (default: 3)",
+        help="how many contexts, every doubling up to --context counting alike, "
+        "it is timed at: small, medium and large by default; their cost grows "
+        "with it (default: 3)",
     )
     parser.add_argument(
         "--versions",
@@ -107,11 +110,14 @@ def calls(
     """Return the calls a decoder's designs are timed in.
 
     The decode step and the prompt chunk, each over ``contexts`` up to ``context``,
-    ``points`` of them, and Sample on the draw rows ``sampler`` gives.
+    ``points`` of them with every doubling counting alike (the decode step's from
+    ``position``, the prompt chunk's from one chunk), and Sample on the draw rows
+    ``sampler`` gives.
 
     Args:
         model: The decoder whose versions are timed.
-        position: The decode position its designs are timed at.
+        position: The decode position its designs are timed at, and the
+            shortest context the decode step is timed at.
         token: The token the step embeds.
         context: The longest context a design whose work follows it is timed at.
         points: How many contexts up to ``context`` it is timed at.
@@ -130,7 +136,7 @@ def calls(
             dict(position=position, token=token),
             [
                 Point(w, dict(position=c - 1, token=token))
-                for w, c in contexts(context, points, 1)
+                for w, c in contexts(position, context, points, 1)
             ],
         ),
         (
@@ -154,7 +160,7 @@ def calls(
                         rope_start=model.rope_row(c, c - C),
                     ),
                 )
-                for w, c in contexts(context, points, C)
+                for w, c in contexts(C, context, points, C)
             ],
         ),
     ]

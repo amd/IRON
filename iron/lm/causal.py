@@ -381,9 +381,10 @@ class CausalLM(Model):
         layers = config.num_hidden_layers
         model = cls(config, Checkpoint(weights).tree(layers=layers))
         L, C = config.max_seq_len, config.prefill_chunk
-        if not C <= args.context <= L or args.context % C:
+        context = L if args.context is None else args.context
+        if not C <= context <= L or context % C:
             parser.error(
-                f"--context {args.context} is not whole {C}-token chunks within "
+                f"--context {context} is not whole {C}-token chunks within "
                 f"max_seq_len {L}"
             )
         sampler = Sampler(args.temperature, args.top_k)
@@ -397,7 +398,7 @@ class CausalLM(Model):
             model,
             args.position,
             args.token,
-            args.context,
+            context,
             args.points,
             sampler,
             sibling,

@@ -13,6 +13,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile
+from iron.lm.tune import contexts
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 from iron.tune.autotune import Timed, shapes
@@ -141,3 +142,18 @@ def test_a_full_elf_packs_where_switches_weigh_and_never_prices_fusions():
 def test_an_xclbin_per_step_packs_nothing_and_prices_merges():
     plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1)], False)}
     assert plan == {"packing": False, "folds": False, "fusions": True}
+
+
+def test_a_decoder_is_timed_small_medium_and_large_up_to_its_context():
+    """Every doubling of context counts alike.
+
+    Three bands of equal log-width, each at its geometric centre, whole chunks for the
+    prompt chunk.
+    """
+    assert contexts(256, 32768, 3, 1) == [(1 / 3, 575), (1 / 3, 2896), (1 / 3, 14596)]
+    assert contexts(2048, 32768, 3, 2048) == [
+        (1 / 3, 4096),
+        (1 / 3, 8192),
+        (1 / 3, 20480),
+    ]
+    assert contexts(2048, 2048, 3, 2048) == [(1.0, 2048)]
