@@ -115,7 +115,7 @@ def test_a_seeded_shape_records_coded():
 
 
 def surveyed(steps_us: float, switch_us: float, fold_us: float) -> Survey:
-    design = Design("GEMV M=2048 K=2048", 1, steps_us, 0, None, "other")
+    design = Design("GEMV M=2048 K=2048", "gemv", 1, steps_us, 0, None, "other")
     estimates = {
         "packing": Estimate(switch_us, "switches"),
         "folds": Estimate(fold_us, "steps"),
@@ -128,6 +128,8 @@ def test_a_full_elf_packs_where_switches_weigh_and_never_prices_fusions():
     plan = {s.name: s.runs for s in searches([surveyed(1000, 100, 1)], True)}
     assert plan == {"packing": True, "folds": False, "fusions": False}
     plan = {s.name: s.runs for s in searches([surveyed(1000, 10, 20)], True)}
+    assert plan == {"packing": False, "folds": True, "fusions": False}
+    plan = {s.name: s.runs for s in searches([surveyed(10**7, 10, 2000)], True)}
     assert plan == {"packing": False, "folds": True, "fusions": False}
 
 

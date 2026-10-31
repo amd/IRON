@@ -17,8 +17,10 @@ from .autotune import Shape, Timed, coding_tunables, replacing
 from .packings import MIN_SWITCH_SHARE
 from .survey import Survey
 
-# A fold search runs where the steps folds remove are this share of a version.
+# A fold search runs where the steps folds remove are this share of a
+# version, or this long: an untuned version's share understates them.
 FOLD_SHARE = 0.01
+FOLD_US = 1000.0
 
 
 def coded_seed(
@@ -106,7 +108,8 @@ class Search:
 def searches(surveys: Sequence[Survey], full_elf: bool) -> list[Search]:
     """Which searches pay for their device time, from each version's
     survey: packing where a version's switches cost ``MIN_SWITCH_SHARE`` of
-    its steps; folds where the steps they remove are ``FOLD_SHARE`` of one;
+    its steps; folds where the steps they remove are ``FOLD_SHARE`` of one,
+    or ``FOLD_US``;
     fusions only on an xclbin per step, where a merge is the one way to run
     two steps as one dispatch (a full ELF's packing removes the switches
     they would, and a fusion splits the arrays a packing groups).
@@ -119,7 +122,8 @@ def searches(surveys: Sequence[Survey], full_elf: bool) -> list[Search]:
     folds = [
         s.name
         for s in surveys
-        if s.estimates["folds"].us >= FOLD_SHARE * (s.steps_us + s.switch_us)
+        if s.estimates["folds"].us
+        >= min(FOLD_US, FOLD_SHARE * (s.steps_us + s.switch_us))
     ]
     return [
         Search(
@@ -135,7 +139,8 @@ def searches(surveys: Sequence[Survey], full_elf: bool) -> list[Search]:
         Search(
             "folds",
             bool(folds),
-            f"removable steps are at least {FOLD_SHARE:.0%} of {folds or 'no version'}",
+            f"removable steps are {FOLD_SHARE:.0%} or {FOLD_US / 1000:.0f} ms of "
+            f"{folds or 'no version'}",
         ),
         Search(
             "fusions",

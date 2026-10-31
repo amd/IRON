@@ -145,3 +145,22 @@ def test_a_setting_cached_as_the_default_is_judged_against_the_next_one(tmp_path
         )
     four = [t for t in trials if t.tunables.get("num_aie_columns") == 4]
     assert four and all(np.isfinite(t.delta_us) for t in four)
+
+
+def test_only_a_shape_that_weighs_in_a_version_is_searched(tmp_path):
+    """Given each shape's share of its version, a tune searches the shapes
+    at ``SHAPE_SHARE`` or more and writes no entry for the rest."""
+    recording = Chain(SIZE, TILE).record(a=(SIZE,), b=(SIZE,))
+    dev = aie_utils.ensure_current_device()
+    keys = {type(s.op): Shape(s.op).key for s in recording.steps}
+    report = platform()
+    profile = autotune(
+        [Timed(recording)],
+        dev,
+        full_elf=True,
+        timing=Timing(rounds=2, calls=10),
+        cache=Cache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+        shares={keys[SiLU]: 0.5, keys[ElementwiseAdd]: 0.001},
+        log=lambda _: None,
+    )
+    assert {cls for cls, _, _ in profile} == {SiLU}

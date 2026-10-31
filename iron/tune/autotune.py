@@ -43,6 +43,9 @@ CONFIDENCE = 2.0
 # Past this many settings, a shape's tunables are searched one at a time.
 EXHAUSTIVE = 32
 
+# A shape is searched where its steps take this share of a version.
+SHAPE_SHARE = 0.02
+
 FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
 
 # The fastest a core's clock may run, over the one the runtime read
@@ -614,13 +617,16 @@ def autotune(
     remeasure: bool = False,
     cycles: Mapping[str, int] | None = None,
     core_mhz: float | None = None,
+    shares: Mapping[Hashable, float] | None = None,
     log: Callable[[str], None] = print,
 ) -> Profile:
     """``profile`` with an entry for each shape of ``calls`` (``shapes``)
     naming the fastest setting taken (``time_shape``), the recorded one where
     none gains, named without the dimensions a host sizes (``Timed.varying``)
     wherever that still names only its own shape. Its entries covering any
-    of those shapes are replaced; the rest are kept.
+    of those shapes are replaced; the rest are kept. With ``shares``, only
+    the shapes with ``SHAPE_SHARE`` of a version are searched, the costliest
+    first.
 
     Args:
         calls: The calls whose graphs were recorded under ``profile``.
@@ -630,8 +636,17 @@ def autotune(
         cycles: Kernel cycles per call by recipe key (``kernel_cycles``).
         core_mhz: The cores' clock the runtime reads (``core_mhz``), which
             ``cycles`` are timed at; None times every setting.
+        shares: Each shape's largest share of a version's time, by
+            ``Shape.key`` (``Survey.shares``).
     """
     found = shapes(calls, dev)
+    if shares is not None:
+        weighed = [s for s in found if shares.get(s.key, 0.0) >= SHAPE_SHARE]
+        log(
+            f"{len(found) - len(weighed)} of {len(found)} shapes under "
+            f"{SHAPE_SHARE:.0%} of every version: not searched"
+        )
+        found = sorted(weighed, key=lambda s: -shares[s.key])
     out, covering, held = replacing(profile, found)
     varying: dict[Hashable, frozenset[str]] = {}
     for call in calls:

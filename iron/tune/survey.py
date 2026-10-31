@@ -30,6 +30,9 @@ from .packings import design_cores
 # is bound by it; one whose kernel bound is this share of its time, by compute.
 BOUND_SHARE = 0.7
 
+# The designs a survey's report lists, the costliest first.
+TOP_DESIGNS = 6
+
 
 @dataclasses.dataclass(frozen=True)
 class Design:
@@ -37,6 +40,7 @@ class Design:
 
     Attributes:
         name: Its class and the dimensions its shape names.
+        shape: Its shape's ``Shape.key``, a tunable entry's unit.
         steps: How many steps run it.
         us: Its steps' standalone time per call, weighted over the points.
         weight_bytes: The weight bytes its steps read per call.
@@ -45,6 +49,7 @@ class Design:
     """
 
     name: str
+    shape: Hashable
     steps: int
     us: float
     weight_bytes: int
@@ -74,6 +79,14 @@ class Survey:
     def steps_us(self) -> float:
         return sum(d.us for d in self.designs)
 
+    def shares(self) -> dict[Hashable, float]:
+        """Each shape's share of the version's time, its designs together."""
+        total = self.steps_us + self.switch_us
+        out: dict[Hashable, float] = collections.defaultdict(float)
+        for d in self.designs:
+            out[d.shape] += d.us / total
+        return dict(out)
+
     def lines(self) -> list[str]:
         total = self.steps_us + self.switch_us
         out = [
@@ -86,6 +99,10 @@ class Survey:
         out += [
             f"  {kind}: {us:.0f} us ({100 * us / total:.0f}%)"
             for kind, us in bound.items()
+        ]
+        out += [
+            f"    {d.name} x{d.steps}: {d.us:.0f} us ({d.bound})"
+            for d in sorted(self.designs, key=lambda d: -d.us)[:TOP_DESIGNS]
         ]
         out += [
             f"  {name}: up to {e.us:.0f} us ({e.basis})"
@@ -159,7 +176,15 @@ def survey(
                     K = b.logical_shape[-1]
                     coded_us += us * (1 - coded.row_bytes(K, b.capacity) / (2 * K))
         designs.append(
-            Design(str(shapes[name]), counts[name], us, weight, kernel or None, bound)
+            Design(
+                str(shapes[name]),
+                shapes[name].key,
+                counts[name],
+                us,
+                weight,
+                kernel or None,
+                bound,
+            )
         )
     # Designs sharing an array share its cores.
     cores = {

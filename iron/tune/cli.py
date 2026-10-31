@@ -24,7 +24,7 @@ import argparse
 import dataclasses
 import functools
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -202,6 +202,10 @@ def tune(
     profile = seed
     if not args.packings_only:
         if not args.fusions_only:
+            shares: dict[Hashable, float] = {}
+            for surveyed in surveys:
+                for key, share in surveyed.shares().items():
+                    shares[key] = max(shares.get(key, 0.0), share)
             profile = autotune(
                 record(profile),
                 dev,
@@ -209,6 +213,7 @@ def tune(
                 full_elf=full_elf,
                 cycles=cycles,
                 core_mhz=core_mhz,
+                shares=shares,
                 **_timing(args),
             )
             profile.save(found_path)
