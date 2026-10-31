@@ -115,6 +115,6 @@ def test_a_call_takes_exactly_the_declared_scalars(scalars, error, match):
         op(*_buffers(), **scalars)
 
 
-def test_a_full_elf_refuses_a_dispatch_value():
+def test_a_full_elf_refuses_a_dispatch_value(npu2):
     with pytest.raises(ValueError, match="compile with full_elf=False"):
         OperatorDesign(ChunkCopy(max_chunks=MAX_CHUNKS)).module()

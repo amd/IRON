@@ -180,7 +180,7 @@ def test_per_call_values_bind_on_the_operator():
     assert not op.off.dispatch and Copy(n=512).off.dispatch
 
 
-def test_an_exported_design_replaces_the_derived_one():
+def test_an_exported_design_replaces_the_derived_one(npu2):
     # The design is another tool's text; the operands are declared as any
     # operator's are.
     class Exported(Operator):
