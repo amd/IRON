@@ -10,6 +10,7 @@ import io
 import json
 import math
 import mmap
+import os
 import pickle
 import struct
 import zipfile
@@ -22,6 +23,7 @@ from typing import Any, Literal
 import numpy as np
 from ml_dtypes import bfloat16
 
+from ..common.graph.coded import Source
 from ..common.graph.compiled import param
 from ..common.graph.fill import filled
 from .golden import fingerprint
@@ -42,6 +44,8 @@ class _Shard:
         with open(self.path, "rb") as f:
             # The mapping holds its own reference to the file.
             self._map = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            stat = os.fstat(f.fileno())
+        self._identity = (str(self.path.resolve()), stat.st_size, stat.st_mtime_ns)
         data = np.frombuffer(self._map, dtype=np.uint8)
         self._address = data.ctypes.data
         if zipfile.is_zipfile(self.path):
@@ -100,6 +104,13 @@ class _Shard:
             elif isinstance(node, dict):
                 pending += [(f"{path}.{k}" if path else k, v) for k, v in node.items()]
         return tensors
+
+    def source(self, array: np.ndarray) -> Source | None:
+        """Where in this file ``array``, a contiguous view of it, is, or None."""
+        begin = array.ctypes.data - self._address
+        if not (array.flags.c_contiguous and 0 <= begin < len(self._map)):
+            return None
+        return Source(*self._identity, begin)
 
     def release(self, array: np.ndarray) -> bool:
         """Drop the process's pages of ``array`` if it is a view of this
@@ -238,6 +249,12 @@ class Checkpoint:
                     )
             self.tensors.update(shard.tensors)
 
+    def source(self, array: np.ndarray) -> Source | None:
+        """Where in the checkpoint's files ``array`` is, or None."""
+        return next(
+            (s for s in (shard.source(array) for shard in self._shards) if s), None
+        )
+
     def release(self, array: np.ndarray) -> None:
         """Drop the process's pages of ``array`` if it is a view of one of
         the checkpoint's files; anything else is left alone.
@@ -275,11 +292,14 @@ class Checkpoint:
         """
         if fill not in ("read", "random", "unread"):
             raise ValueError(f"fill is read, random or unread, not {fill!r}")
-        tensors = self.tensors
         if fill != "read":
-            named = {n: (t.shape, t.dtype) for n, t in tensors.items()}
+            named = {n: (t.shape, t.dtype) for n, t in self.tensors.items()}
             tensors = filled(fill, named, seed)
-        return nest({n: param(t) for n, t in tensors.items()}, file=self.path)
+            return nest({n: param(t) for n, t in tensors.items()}, file=self.path)
+        return nest(
+            {n: param(t, source=self.source(t)) for n, t in self.tensors.items()},
+            file=self.path,
+        )
 
 
 def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:

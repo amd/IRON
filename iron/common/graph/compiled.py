@@ -44,12 +44,12 @@ from ..image.link import FullELF, PerStep
 from ..image.sequence import Image
 from ..image.step import BufferRef, Fusion
 from .carried import CARRY, EmitSite, attach_emit, compose
-from .coded import CodedWeight
+from .coded import CodedWeight, Source
 from .fold import apply_folds, chosen_folds
 from .fusion import fusions as graph_fusions
 from .fusion_tunables import apply as apply_fusion_tunables
 from .packing import apply as apply_packings
-from .handle import Carry, Dense, Handle, State, Weight, is_operand
+from .handle import Carry, Dense, Handle, State, Weight, _Param, is_operand
 from .record import HostStep, Recording, Recorder, version_key
 
 logger = logging.getLogger(__name__)
@@ -168,22 +168,23 @@ class _Parameters:
         return cls(inputs, values, frozenset(optional), defaults)
 
 
-class _Param(np.ndarray):
-    """A ``param``: an array a graph holds as a weight."""
-
-
 class _Unbound(_Param):
     """A ``param`` not yet bound: no storage, only its shape and dtype."""
 
 
-def param(*shape, dtype=bfloat16) -> np.ndarray:
+def param(*shape, dtype=bfloat16, source: Source | None = None) -> np.ndarray:
     """A weight a graph holds, declared by shape for ``Graph.load_state_dict``
     to bind, or ``param(array)`` holding ``array``, as torch's
-    ``nn.Parameter``. A graph refuses to hold a bare array.
+    ``nn.Parameter``; ``source`` says where in a file ``array`` was read
+    from, which keys a cache of what is derived from it. A graph refuses to
+    hold a bare array.
     """
     if len(shape) == 1 and isinstance(shape[0], np.ndarray):
         a = shape[0]
-        return a if isinstance(a, _Param) else a.view(_Param)
+        held = a if isinstance(a, _Param) else a.view(_Param)
+        if source is not None:
+            held.source = source
+        return held
     return np.broadcast_to(np.zeros((), dtype), shape).view(_Unbound)
 
 

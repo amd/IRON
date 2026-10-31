@@ -6,12 +6,17 @@ the coded rows derived from it, one buffer for every such read, and the
 graph's reference still reads the weight itself.
 """
 
+import os
+
 import numpy as np
 import pytest
 from aie.utils import coded
 from ml_dtypes import bfloat16
+from safetensors.numpy import save_file
 
 import iron
+from iron.common.graph.coded import CodedWeight
+from iron.lm import Checkpoint
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 
@@ -97,3 +102,59 @@ def test_a_weight_past_its_capacity_is_read_plain_with_a_warning(caplog):
     assert [s.inputs[0].name for s in t.steps] == ["w", "w", "other"]
     assert not any(s.op.coded_a for s in t.steps)
     assert all(b.op in [s.op for s in t.steps] for b in t.bindings)
+
+
+def _checkpoint(tmp_path, overflow=False):
+    """A one-tensor checkpoint, its tensor (a param, as a graph holds it)."""
+    w, _ = _weights()
+    w = w[:64, :256].copy()
+    if overflow:
+        w[3, :120] = np.exp2(np.arange(-60.0, 60.0)).astype(bfloat16)
+    path = tmp_path / "model.safetensors"
+    save_file({"w": w}, path)
+    return path, w
+
+
+def test_a_weight_from_a_file_is_encoded_once_then_read_from_the_cache(tmp_path):
+    path, w = _checkpoint(tmp_path)
+    cache = tmp_path / "cache"
+    held = Checkpoint(path).tree().w
+    assert held.source.path == str(
+        path.resolve()
+    ) and held.source.size == os.path.getsize(path)
+    first = CodedWeight(held, "w", 15, held.source, cache)
+    rows = first.encode()
+    assert not isinstance(rows, np.memmap) and first.cached.exists()
+    again = CodedWeight(held, "w", 15, held.source, cache).encode()
+    assert isinstance(again, np.memmap)
+    assert np.array_equal(again, rows)
+    assert np.array_equal(
+        coded.decode_rows(again, 256).view(np.uint16), w.view(np.uint16)
+    )
+
+
+def test_a_file_changed_since_is_encoded_again(tmp_path):
+    path, _ = _checkpoint(tmp_path)
+    cache = tmp_path / "cache"
+    held = Checkpoint(path).tree().w
+    CodedWeight(held, "w", 15, held.source, cache).encode()
+    stat = os.stat(path)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
+    touched = Checkpoint(path).tree().w
+    weight = CodedWeight(touched, "w", 15, touched.source, cache)
+    assert weight.cached != CodedWeight(held, "w", 15, held.source, cache).cached
+    assert not isinstance(weight.encode(), np.memmap)
+    assert len(list(cache.glob("*.npy"))) == 2
+
+
+def test_a_refusal_is_cached_and_a_weight_with_no_file_is_not(tmp_path):
+    path, _ = _checkpoint(tmp_path, overflow=True)
+    cache = tmp_path / "cache"
+    held = Checkpoint(path).tree().w
+    for _ in range(2):
+        with pytest.raises(ValueError, match="row 3 holds"):
+            CodedWeight(held, "w", 15, held.source, cache).encode()
+    assert [p.suffix for p in cache.iterdir()] == [".refused"]
+    loose = np.array(held[:3])
+    CodedWeight(loose, "w", 15, None, cache).encode()
+    assert [p.suffix for p in cache.iterdir()] == [".refused"]

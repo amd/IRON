@@ -20,6 +20,7 @@ from ..declare.operator import graph_recorder
 from ..declare.precision import Precision
 from ..image.packaging import Kind
 from ..image.step import BufferRef
+from .coded import Source
 
 T = TypeVar("T")
 
@@ -723,6 +724,14 @@ class State(_Viewed):
 def state(shape, dtype=bfloat16, name=None) -> State:
     """Declare device-resident state a graph holds."""
     return State(shape, dtype, name)
+
+
+class _Param(np.ndarray):
+    """A ``param``: an array a graph holds as a weight, and where in a file
+    it was read from, if it was (``source``).
+    """
+
+    source: Source | None = None
 
 
 class Weight(_Viewed):

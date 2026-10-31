@@ -33,6 +33,7 @@ from .handle import (
     Strided,
     Weight,
     _count,
+    _Param,
     _rescale_bounds,
     is_operand,
 )
@@ -1055,8 +1056,9 @@ class Recorder:
         key, array = source
         derived = (key, "coded", b.capacity)
         if derived not in self.weights:
+            read_from = array.source if isinstance(array, _Param) else None
             weight = self.coded.setdefault(
-                derived, CodedWeight(array, h.name, b.capacity)
+                derived, CodedWeight(array, h.name, b.capacity, read_from)
             )
             self.weights[derived] = (
                 weight,
