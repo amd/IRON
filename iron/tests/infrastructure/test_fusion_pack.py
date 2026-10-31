@@ -354,10 +354,12 @@ def test_pack_of_qkv_gemvs_matches_reference_and_unfused(record_property):
     ok_ref = np.asarray(k.reference(Ak, x))
     ov_ref = np.asarray(v.reference(Av, x))
 
+    # The profile may code A: each buffer holds the form its GEMV reads.
+    held = [g.resolved().A.device_form(a) for g, a in ((q, Aq), (k, Ak), (v, Av))]
+
     def dispatch(run):
-        run.get_buffer(BufferRef("Aq")).numpy_view()[:] = Aq.reshape(-1)
-        run.get_buffer(BufferRef("Ak")).numpy_view()[:] = Ak.reshape(-1)
-        run.get_buffer(BufferRef("Av")).numpy_view()[:] = Av.reshape(-1)
+        for name, a in zip(("Aq", "Ak", "Av"), held):
+            run.get_buffer(BufferRef(name)).numpy_view()[:] = a.reshape(-1)
         run.get_buffer(BufferRef("x")).numpy_view()[: x.size] = x.reshape(-1)
         run()
         return (
@@ -418,11 +420,12 @@ def test_merge_of_a_short_decode_run_matches_reference_and_unfused(record_proper
     n_ref = np.asarray(rms.reference(x, w))
     c_ref = np.asarray(gemv.reference(A, n_ref))
     y_ref = np.asarray(add.reference(c_ref, r))
+    held = gemv.resolved().A.device_form(A)
 
     def dispatch(run):
         run.get_buffer(BufferRef("x")).numpy_view()[: x.size] = x.reshape(-1)
         run.get_buffer(BufferRef("w")).numpy_view()[: w.size] = w.reshape(-1)
-        run.get_buffer(BufferRef("A")).numpy_view()[:] = A.reshape(-1)
+        run.get_buffer(BufferRef("A")).numpy_view()[:] = held.reshape(-1)
         run.get_buffer(BufferRef("r")).numpy_view()[:] = r.reshape(-1)
         run()
         return run.get_buffer(BufferRef("out")).numpy()[:2048].copy()

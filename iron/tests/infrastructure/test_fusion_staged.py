@@ -874,9 +874,10 @@ def _run_mlp(packaging_name: str, results) -> None:
             image.compile()
             run = image.get_callable()
             x = vectors(gate).inputs["B"]
+            # The profile may code A: each buffer holds the form its GEMV reads.
             inputs = {
-                "Wg": vectors(gate, seed=3).inputs["A"],
-                "Wu": vectors(up, seed=5).inputs["A"],
+                "Wg": gate.resolved().A.device_form(vectors(gate, seed=3).inputs["A"]),
+                "Wu": up.resolved().A.device_form(vectors(up, seed=5).inputs["A"]),
                 "x": x,
             }
             outs.append(_dispatch(run, inputs, {"out": 8192})["out"])
