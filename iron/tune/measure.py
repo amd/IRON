@@ -472,6 +472,11 @@ CONTEXTS = 16
 # Past this nothing stays in a cache, and the repeats' copies would not fit.
 DISTINCT_BYTES = 256 * 2**20
 
+# A batch's round of runs takes about this long, each run at least
+# MIN_CALLS times: a prompt chunk's step is hundreds of ms.
+ROUND_US = 2e6
+MIN_CALLS = 3
+
 
 @dataclasses.dataclass(frozen=True)
 class Measurement:
@@ -824,12 +829,17 @@ def measure(
         # from a probe's first dispatch until ``del`` below, not just the
         # dispatch itself (``npu_lock``).
         with npu_lock(lock):
+            begun = time.perf_counter()
             outputs = [run.digest() for run in short]
+            # A round of long steps runs fewer calls: its median is no noisier.
+            round_us = (time.perf_counter() - begun) * 1e6 * (1 + repeats)
+            calls = max(MIN_CALLS, min(timing.calls, int(ROUND_US / round_us)))
+            batch_timing = dataclasses.replace(timing, calls=calls)
             # The default is timed in full; the others stop once far behind.
             groups = [None if i == 0 else i for i in built] * 2
             times = time_interleaved(
                 [r.callable for r in short + long],
-                timing,
+                batch_timing,
                 groups,
                 fastest,
                 log,
@@ -851,7 +861,7 @@ def measure(
                     outputs[j],
                     run,
                     mode,
-                    timing.calls,
+                    calls,
                     () if i == 0 else steps[0],
                 )
                 if cache is not None:
