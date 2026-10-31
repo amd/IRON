@@ -35,7 +35,7 @@ from iron.common.graph.coded import CodedWeight
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.record import Recording
-from iron.common.image.link import FullELF
+from iron.common.image.link import FullELF, PerStep
 from iron.common.image.packaging import plan, require_device
 from iron.tune.autotune import Timed
 from iron.tune.fusions import NotBitIdentical, compare_graphs
@@ -66,15 +66,17 @@ def version_labels(model: Model) -> list[str]:
 
 
 def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
-    """For each of ``model``'s compiled versions (``version_labels``), each a
-    full ELF (``load_model``'s): how many of its ``sequence.fusions`` are
-    live, by kind, and the composed module's design and fusion-device
-    counts, packed groups and identity -- proof a profile's fusions and
-    packings matched the live recording, not just that the profile file
-    has entries.
+    """For each of ``model``'s compiled versions (``version_labels``): how
+    many of its ``sequence.fusions`` are live, by kind, its design and
+    fusion-device counts, packed groups and composition identity (a full
+    ELF's), and ``images``, what it runs: the full ELF, or each distinct
+    xclbin and instruction stream its steps dispatch in turn -- proof a
+    profile's fusions and packings matched the live recording, not just
+    that the profile file has entries.
 
     Raises:
-        TypeError: A version is not packaged as one full ELF.
+        TypeError: A version is packaged neither as a full ELF nor as an
+            xclbin per step.
         ValueError: ``model`` holds other than one compiled version per
             ``shapes()``: a caller compiled only some, or two shapes
             collided on one ``Recording.version``.
@@ -84,18 +86,44 @@ def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
     for version_label, version in zip(labels, versions, strict=True):
         fusions = version.sequence.fusions
         packaging = version.sequence.packaging
-        if not isinstance(packaging, FullELF):
-            raise TypeError(f"{version_label}: not packaged as one full ELF")
-        composition = packaging.composition
-        assert composition is not None, "built once the full ELF links (Image.__init__)"
+        if isinstance(packaging, FullELF):
+            composition = packaging.composition
+            assert (
+                composition is not None
+            ), "built once the full ELF links (Image.__init__)"
+            n_designs, n_fusion_devices = (
+                len(composition.designs),
+                len(composition.fusions),
+            )
+            packed = [len(g) for g in composition.packing.groups]
+            identity, images = composition.identity, [str(version.image)]
+        elif isinstance(packaging, PerStep):
+            fused = {f.steps[0] for f in fusions}
+            links = sorted(packaging.step_links.items())
+            n_designs = len(
+                {
+                    (l.kernel.xclbin_path, l.design.get_cache_entry().insts)
+                    for i, l in links
+                    if i not in fused
+                }
+            )
+            n_fusion_devices, packed, identity = len(fusions), [], None
+            images = list(
+                dict.fromkeys(
+                    f"{l.kernel.xclbin_path} {l.design.get_cache_entry().insts}"
+                    for _, l in links
+                )
+            )
+        else:
+            raise TypeError(f"{version_label}: packaged as {type(packaging).__name__}")
         out[version_label] = {
             "n_fusions": len(fusions),
             "kinds": dict(Counter(f.kind.value for f in fusions)),
-            "n_designs": len(composition.designs),
-            "n_fusion_devices": len(composition.fusions),
-            "packed_groups": [len(g) for g in composition.packing.groups],
-            "composition_identity": composition.identity,
-            "image_path": str(version.image),
+            "n_designs": n_designs,
+            "n_fusion_devices": n_fusion_devices,
+            "packed_groups": packed,
+            "composition_identity": identity,
+            "images": images,
             "coded_weights": sorted(
                 w.name
                 for w, _ in version.recording.weights.values()
@@ -126,7 +154,7 @@ def changed_versions(stock_live: dict, candidate_live: dict) -> list[str]:
     changed = []
     for label, candidate_v in candidate_live.items():
         stock_v = stock_live[label]
-        shared = stock_v["image_path"] == candidate_v["image_path"]
+        shared = stock_v["images"] == candidate_v["images"]
         assert not (
             shared
             and any(
@@ -143,13 +171,13 @@ def load_model(
     model_class: type[Model], checkpoint: Path, max_seq_len: int | None, profile
 ) -> Model:
     """``model_class.from_checkpoint(checkpoint)``, under ``profile`` (a
-    directory, or None for the model's own), every version compiled as one
-    full ELF and loaded.
+    directory, or None for the model's own), every version compiled as the
+    device packages it (``Graph.compile``) and loaded.
     """
     model = model_class.from_checkpoint(checkpoint, max_seq_len=max_seq_len)
     if profile is not None:
         model.profile = profile
-    model.load_versions(full_elf=True)
+    model.load_versions()
     return model
 
 

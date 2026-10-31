@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """``iron.lm.validate``'s pure parts, device-free: version labels, the
-live-fusion and live-packing accounting a report reads, the profile
+live-fusion and live-packing accounting a report reads (a full ELF's and
+an xclbin per step's), the profile
 subsets a bisection trial builds, and ``changed_versions``' assertion.
 """
 
@@ -15,6 +16,7 @@ from iron.common.graph.coded import CodedWeight
 from iron.lm import validate
 from iron.operators.gemv import GEMV
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.mha import MHA
 from iron.operators.silu import SiLU
 from iron.tests.support.llama_model import small
 
@@ -175,9 +177,36 @@ def test_verify_live_names_the_weights_a_version_reads_coded():
     assert live["read_plain"] == {}
 
 
+def test_verify_live_reads_an_xclbin_per_step(npu1):
+    # As llama's npu1 profile: one query packed takes at most 2 pipelines there.
+    stock_profile = Profile()
+    stock_profile.add(MHA, seq_pad=1, num_pipelines=2)
+    stock_model = small()
+    stock_model.profile = stock_profile
+    entry = _silu_mul_entry(stock_model.record(**stock_model.shapes()[0]))
+    candidate_profile = Profile()
+    candidate_profile.add(MHA, seq_pad=1, num_pipelines=2)
+    candidate_profile.add_fusion(*entry)
+    candidate_model = small()
+    candidate_model.profile = candidate_profile
+
+    for shape in stock_model.shapes():
+        stock_model.compile(**shape)
+        candidate_model.compile(**shape)
+
+    stock_live = validate.verify_live("stock", stock_model)
+    candidate_live = validate.verify_live("candidate", candidate_model)
+    assert stock_live["decode"]["n_fusions"] == 0
+    assert stock_live["decode"]["composition_identity"] is None
+    assert candidate_live["decode"]["kinds"] == {"stream": 2}
+    assert candidate_live["decode"]["n_fusion_devices"] == 2
+    assert validate.changed_versions(stock_live, candidate_live) == ["decode"]
+    assert validate.changed_versions(stock_live, stock_live) == []
+
+
 def _live(image, n_fusions=0, packed_groups=()):
     return {
-        "image_path": image,
+        "images": [image],
         "n_fusions": n_fusions,
         "kinds": {"stream": n_fusions} if n_fusions else {},
         "packed_groups": list(packed_groups),
