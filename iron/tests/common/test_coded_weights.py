@@ -175,3 +175,28 @@ def test_a_report_names_each_coded_weight_and_each_read_plain(caplog):
         t.code_weights()
     (line,) = t.coded_report()
     assert line.startswith("w: read plain: coded.encode_rows: row 5 holds 104")
+
+
+def test_a_profile_turns_coding_on_by_gemv_shape(tmp_path):
+    """The opt-in is a profile entry, ``"coded_a": true`` for a GEMV shape,
+    which round-trips through the profile's JSON like any tunable.
+    """
+    profile = iron.Profile()
+    profile.add(GEMV, M=E, K=E, coded_a=True)
+    profile.save(tmp_path / "npu2.json")
+    w, other = _weights()
+
+    class Plain(iron.Graph):
+        def __init__(self):
+            self.w = iron.param(w)
+            self.other = iron.param(other[:256])
+
+        def body(self, x):
+            y = GEMV.step(self.w, x, tile_size_input=4)
+            return GEMV.step(self.other, y, tile_size_input=4)
+
+    graph = Plain()
+    graph.profile = iron.Profile.load(tmp_path / "npu2.json")
+    t = graph.record(x=(E,))
+    assert [s.op.coded_a for s in t.steps] == [True, False]
+    assert [s.inputs[0].name for s in t.steps] == ["w.coded", "other"]
