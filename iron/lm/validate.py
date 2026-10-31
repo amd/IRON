@@ -37,7 +37,7 @@ from iron.common.graph.record import Recording
 from iron.common.image.link import FullELF
 from iron.common.image.packaging import plan, require_device
 from iron.tune.autotune import Timed
-from iron.tune.fusions import _device_timeout, compare_graphs
+from iron.tune.fusions import NotBitIdentical, compare_graphs
 from iron.tune.measure import Timing
 
 from .causal import CausalLM
@@ -378,7 +378,7 @@ def compare_versions(
 
     A build or dispatch failure, and a device timeout propagated from
     ``compare_graphs``, are raised rather than recorded: only a real
-    bit-identity mismatch (``compare_graphs``'s own ``RuntimeError``) is
+    bit-identity mismatch (``compare_graphs``'s own ``NotBitIdentical``) is
     worth a report entry over a traceback, since that is validate's very
     question; anything else is a bug worth seeing in full.
 
@@ -389,8 +389,8 @@ def compare_versions(
             which is always a bug (the two are meant to name one set), never
             an expected state a report should paper over.
         RuntimeError: A version's build or dispatch failed outright (not a
-            bit-identity mismatch), or a device timeout propagated from
-            ``compare_graphs``.
+            bit-identity mismatch, ``NotBitIdentical``'s own), or a device
+            timeout propagated from ``compare_graphs``.
     """
     dev = require_device()
     probe = model_class.from_checkpoint(checkpoint, max_seq_len=max_seq_len)
@@ -424,9 +424,7 @@ def compare_versions(
             )
         try:
             delta, noise = compare_graphs(call, *graphs, timing=timing, log=log)
-        except RuntimeError as e:
-            if _device_timeout(e) or "bit-identical" not in str(e):
-                raise
+        except NotBitIdentical as e:
             out[label] = {"bit_identical": False, "error": str(e)}
             log(f"[{label}] not bit-identical: {e}")
             continue

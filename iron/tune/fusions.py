@@ -738,6 +738,14 @@ def _bound_points(recording, values: Mapping[str, int]) -> list[dict[str, int]]:
     return points
 
 
+class NotBitIdentical(RuntimeError):
+    """``compare_graphs``: two builds of one recording, run on the same
+    seeded inputs, did not agree. A ``RuntimeError`` of its own kind (not a
+    device timeout, nor a build failure), so a caller tells the two apart by
+    type rather than guessing from the message.
+    """
+
+
 def compare_graphs(
     call: Timed,
     before: CompiledGraph,
@@ -754,11 +762,11 @@ def compare_graphs(
     weighted, and that difference's standard error; both are released after.
 
     Raises:
-        RuntimeError: ``after``'s outputs, each within its bound (past it an
-            operator may write whole tiles), are not bit-identical to
+        NotBitIdentical: ``after``'s outputs, each within its bound (past it
+            an operator may write whole tiles), are not bit-identical to
             ``before``'s at a point, the call's values or one of its bounds
-            halved (``_bound_points``); a device timeout propagates as it is
-            raised.
+            halved (``_bound_points``).
+        RuntimeError: A device timeout propagates as it is raised.
     """
     recording = call.recording
     rng = np.random.default_rng(seed)
@@ -799,7 +807,7 @@ def compare_graphs(
                     )
                     for h in recording.returned
                 ):
-                    raise RuntimeError(
+                    raise NotBitIdentical(
                         f"{recording.name}: not bit-identical to it as before at "
                         f"{values}"
                     )
@@ -859,8 +867,8 @@ def confirm_fusions(
             ``coord/npu``.
 
     Raises:
-        RuntimeError: A version's fused output is not bit-identical to its
-            unfused one, at the call's values or at one of its bounds
+        NotBitIdentical: A version's fused output is not bit-identical to
+            its unfused one, at the call's values or at one of its bounds
             halved (``_bound_points``).
     """
     remaining = list(taken)
