@@ -445,21 +445,21 @@ class Multimodal(lm.Multimodal):
             "--checkpoint",
             type=Path,
             default=weights_dir("embeddinggemma-2"),
-            help="the checkpoint directory, of whose weights only the header "
-            "is read (default: %(default)s)",
+            help="the checkpoint directory, whose weights the calls are recorded "
+            "on (default: %(default)s)",
         )
 
     @classmethod
     def tune_calls(
         cls, parser: argparse.ArgumentParser, args: argparse.Namespace
     ) -> list[Timed]:
-        """Every version (the text encoder, each tower and the merge) on
-        weights it never reads, since the one profile in ``profiles/`` serves
-        every version's designs: half its calls a query of ``QUERY_ROWS``
+        """Every version (the text encoder, each tower and the merge) on the
+        checkpoint's weights (read lazily), the one profile in ``profiles/``
+        serving every version's designs: half its calls a query of ``QUERY_ROWS``
         text rows, half its longest call. A call's configuration switches
         cost the same at any length, so a short query is where they weigh.
         """
-        weights = Checkpoint(weights_file(args.checkpoint)).tree("unread")
+        weights = Checkpoint(weights_file(args.checkpoint)).tree()
         graph = cls(Config(), weights)
         longest = graph.longest()
         points = [

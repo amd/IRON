@@ -19,6 +19,8 @@ import struct
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from ml_dtypes import bfloat16
+from safetensors.numpy import save_file
 
 from iron.applications.llama.model import Llama
 from iron.lm import Checkpoint
@@ -26,7 +28,7 @@ from iron.lm.model import TokenizerJson
 from iron.lm.cli import parse_args
 from iron.lm.golden import RECORD
 from iron.lm.testing import require, weights_dir
-from iron.tests.support.llama_model import SMALL, checkpoint
+from iron.tests.support.llama_model import SMALL, checkpoint, shapes
 
 TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.json"
 
@@ -190,3 +192,25 @@ def test_a_checkpoint_s_golden_is_refused_once_it_changes(
             f.write(b"\x01")
     with pytest.raises(ValueError, match="other inputs"):
         _golden(path)
+
+
+def test_a_tune_records_the_checkpoint_s_own_weights(tmp_path, npu2):
+    """A tune's calls hold the weights a coded seed audits and a build
+    times: the checkpoint's, not zeros in their shape."""
+    rng = np.random.default_rng(0)
+    tensors = {
+        name: (rng.standard_normal(shape) * 0.05).astype(bfloat16)
+        for name, shape in shapes(SMALL).items()
+    }
+    save_file(tensors, tmp_path / "model.safetensors")
+    parser = argparse.ArgumentParser()
+    Small.tune_arguments(parser)
+    args = parser.parse_args(
+        ["--checkpoint", str(tmp_path), "--context", str(SMALL.prefill_chunk)]
+    )
+    decode, _ = Small.tune_calls(parser, args)
+    gate = tensors["model.layers.0.mlp.gate_proj.weight"].view(np.uint16)
+    held = [np.asarray(w) for w, _ in decode.recording.weights.values()]
+    assert any(
+        w.shape == gate.shape and np.array_equal(w.view(np.uint16), gate) for w in held
+    )

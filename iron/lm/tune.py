@@ -48,8 +48,8 @@ def arguments(parser: argparse.ArgumentParser) -> None:
         "--checkpoint",
         type=Path,
         required=True,
-        help="the checkpoint directory, as Model.load takes it, of whose "
-        "weights only the header is read",
+        help="the checkpoint directory, as Model.load takes it, whose weights "
+        "the calls are recorded on",
     )
     parser.add_argument(
         "--position",

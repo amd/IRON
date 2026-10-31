@@ -246,13 +246,15 @@ class CausalLM(Model):
 
     @classmethod
     def tune_calls(cls, parser, args) -> list:
-        """``tune.calls`` on ``args``, built on weights it never reads."""
+        """``tune.calls`` on ``args``, built on the checkpoint's weights (read
+        lazily): what a coded weight's capacity and a build's timing follow.
+        """
         from .tune import calls
 
         weights = weights_file(args.checkpoint)
         config = cls.default_config(weights)
         assert isinstance(config, DecoderConfig), "a decoder's"
-        model = cls(config, Checkpoint(weights).tree("unread"))
+        model = cls(config, Checkpoint(weights).tree())
         L, C = config.max_seq_len, config.prefill_chunk
         if not C <= args.context <= L or args.context % C:
             parser.error(
@@ -264,7 +266,7 @@ class CausalLM(Model):
         other = L // 2 if L // 2 >= C and not (L // 2) % C else 2 * L
         sibling = cls(
             dataclasses.replace(config, max_seq_len=other),
-            Checkpoint(weights).tree("unread"),
+            Checkpoint(weights).tree(),
         )
         return calls(
             model,
