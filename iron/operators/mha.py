@@ -1260,7 +1260,15 @@ class MHA(Operator):
         )
 
         # Each stream is blocked as the product that reads or writes it takes it.
-        qk = matmul_QK.stream_dims
+        qk = mm_stream_dims(
+            B_q,
+            d,
+            B_kv,
+            kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
+                pv=False
+            ),
+            b_col_maj=True,
+        )
         pv = mm_stream_dims(
             B_q,
             B_kv,
