@@ -20,9 +20,10 @@ import iron
 from iron import Profile
 from iron.operators import ElementwiseAdd, SiLU
 from iron.operators.copy import Copy
+from iron.operators.gemm import GEMM
 from iron.tests.support.graphs import Chain
-from iron.tune.autotune import Shape, Timed, autotune, time_shape
-from iron.tune.measure import Cache, Timing, platform
+from iron.tune.autotune import Shape, Timed, autotune, settings, time_shape
+from iron.tune.measure import Cache, Timing, platform, time_kernels
 
 SIZE = 8192
 TILE = 256
@@ -191,3 +192,42 @@ def test_only_a_shape_that_weighs_in_a_version_is_searched(tmp_path):
         log=lambda _: None,
     )
     assert {cls for cls, _, _ in profile} == {SiLU}
+
+
+def test_a_kernel_is_traced_once_per_device(tmp_path):
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    fn = GEMM(M=256, K=256, N=256, precision="highest").resolved(dev).layout().matmul()
+    logged: list[str] = []
+    first = time_kernels([fn], cache, logged.append)
+    again = time_kernels([fn], cache, logged.append)
+    assert first == again and first[fn.recipe_key] > 0
+    assert sum("tracing" in line for line in logged) == 1
+
+
+def test_a_gemm_setting_its_kernels_cannot_make_faster_is_not_timed(tmp_path):
+    """With no kernel timings at hand, the shape's kernels are traced, and a setting whose busiest core's calls alone take longer than the best found is skipped."""
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    op = GEMM(M=512, K=512, N=512, precision="highest", num_aie_columns=4)
+    shape = Shape(op)
+    shape.members.append((op, [(1.0, {})], {}))
+    logged: list[str] = []
+    trials = time_shape(
+        shape,
+        dev,
+        full_elf=True,
+        timing=Timing(rounds=2, calls=5),
+        cache=Cache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+        cycles={},
+        core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
+        log=logged.append,
+    )
+    skipped = sum(
+        int(line.split()[0])
+        for line in logged
+        if "slower by their kernel alone" in line
+    )
+    assert any("tracing" in line for line in logged)
+    assert skipped > 0 and len(trials) + skipped <= len(settings(op, dev, shape.pinned))

@@ -27,6 +27,7 @@ import os
 import re
 import statistics
 import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
@@ -34,7 +35,9 @@ from pathlib import Path
 
 import numpy as np
 from aie.iron import Out
+from aie.iron.algorithms.kernel_design import KernelDesign
 from aie.iron.device import Device
+from aie.iron.kernel import ExternalFunction
 from aie.utils import bfp
 from aie.utils.benchmark import Stats, run_interleaved
 from aie.utils.compile import NPU_CACHE_HOME
@@ -795,6 +798,19 @@ class Cache:
         key = tuple((d.recipe_hash, d.artifact_hash) for d in designs)
         return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
 
+    def get_cycles(self, recipe_key: str) -> int | None:
+        """Return the cycles per call kept for the kernel ``recipe_key``; None if none are."""
+        path = self.directory / "kernels" / f"{recipe_key}.json"
+        if not path.exists():
+            return None
+        return json.loads(path.read_text())["cycles"]
+
+    def put_cycles(self, recipe_key: str, cycles: int) -> None:
+        write(
+            self.directory / "kernels" / f"{recipe_key}.json",
+            json.dumps({"cycles": cycles}) + "\n",
+        )
+
     def get_switch_cost(self, key: str) -> tuple[float, float] | None:
         """Return the ``(fixed_us, per_core_us)`` at ``key``; None if there is none, or it was written with other fields than that pair has."""
         path = self.directory / "switch_cost" / f"{key}.json"
@@ -1376,3 +1392,64 @@ def switch_cost(
     if cache is not None and key is not None:
         cache.put_switch_cost(key, result)
     return result
+
+
+# Calls a kernel is traced at: the fewest cycles of them is its figure.
+KERNEL_CALLS = 4
+
+# A traced run's buffer: mlir-aie's kernel checks size it so.
+TRACE_SIZE = 16384
+TRACE_BYTES_PER_INTERVAL = 512
+TRACE_MAX_BYTES = 4 << 20
+
+
+def time_kernels(
+    fns: Iterable[ExternalFunction],
+    cache: Cache | None = None,
+    log: Callable[[str], None] = print,
+    lock: bool = False,
+) -> dict[str, int]:
+    """Each of ``fns``' fewest cycles a call on one core, by recipe key.
+
+    ``KERNEL_CALLS`` calls traced in one run (mlir-aie's ``KernelDesign.cycles_per_call``),
+    kept in ``cache``. One whose trace fills its largest buffer, or that does not
+    run, is left out and reported to ``log``.
+    """
+    out: dict[str, int] = {}
+    todo = []
+    for fn in fns:
+        held = None if cache is None else cache.get_cycles(fn.recipe_key)
+        if held is None:
+            todo.append(fn)
+        else:
+            out[fn.recipe_key] = held
+    if not todo:
+        return out
+    log(f"    tracing {len(todo)} kernels' cycles")
+    begun = time.perf_counter()
+    with npu_lock(lock), tempfile.TemporaryDirectory() as scratch:
+        for fn in todo:
+            harness = KernelDesign(fn, calls=KERNEL_CALLS)
+            inputs = harness.sample_inputs()
+            size = max(
+                TRACE_SIZE, TRACE_BYTES_PER_INTERVAL * harness.traced_intervals()
+            )
+            try:
+                while True:
+                    traced = harness.cycles_per_call(
+                        inputs, trace_size=size, workdir=Path(scratch) / fn.recipe_key
+                    )
+                    if not traced.truncated or size >= TRACE_MAX_BYTES:
+                        break
+                    size = min(2 * size, TRACE_MAX_BYTES)
+            except (RuntimeError, ValueError) as e:
+                log(f"    {fn.name} ({fn.recipe_key}) not traced: {e}")
+                continue
+            if traced.untimed or traced.truncated or not traced.kernel:
+                log(f"    {fn.name} ({fn.recipe_key}) not traced: {traced}")
+                continue
+            out[fn.recipe_key] = min(traced.kernel)
+            if cache is not None:
+                cache.put_cycles(fn.recipe_key, out[fn.recipe_key])
+    Spent.charge(timing_s=time.perf_counter() - begun)
+    return out

@@ -34,7 +34,16 @@ from iron.common.graph.record import Recording
 from iron.common.image.compose import fits
 from iron.operators.gemm import GEMM
 
-from .measure import Cache, Standalone, Timing, judge, measure, write
+from .measure import (
+    CONTEXTS,
+    Cache,
+    Standalone,
+    Timing,
+    judge,
+    measure,
+    time_kernels,
+    write,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -438,11 +447,22 @@ def time_shape(
     if len(found) == 1:
         return [Trial(found[0], 0.0, 0.0)]
     tried: dict[tuple, Trial] = {}
-    least = (
-        {_frozen(s): _least(shape, s, cycles, core_mhz, dev) for s in found[1:]}
-        if cycles and core_mhz and issubclass(shape.cls, GEMM)
-        else {}
-    )
+    least: dict[tuple, float | None] = {}
+    if cycles is not None and core_mhz and issubclass(shape.cls, GEMM):
+        kernels = {
+            fn.recipe_key: fn
+            for s in found[1:]
+            for op, _, _ in shape.members
+            if isinstance(moved := op._with_tunables(**s).resolved(dev), GEMM)
+            for fn in [moved.layout().matmul()]
+        }
+        cycles = {
+            **cycles,
+            **time_kernels(
+                (fn for key, fn in kernels.items() if key not in cycles), cache, log
+            ),
+        }
+        least = {_frozen(s): _least(shape, s, cycles, core_mhz, dev) for s in found[1:]}
     recorded_us: float | None = None
 
     def slower(s: dict[str, Any]) -> bool:
@@ -469,7 +489,17 @@ def time_shape(
 
     if any(b is not None for b in least.values()):
         run([])  # the recorded setting's own time, which a bound is held to
-    run(found)
+        # Least bound first, two of measure's batches at a time, so each batch
+        # holds the rest to the best found so far.
+        ordered = sorted(
+            found[1:],
+            key=lambda s: (least.get(_frozen(s)) is None, least.get(_frozen(s)) or 0.0),
+        )
+        step = 2 * (CONTEXTS // 2 - 1)
+        for begin in range(0, len(ordered), step):
+            run(ordered[begin : begin + step])
+    else:
+        run(found)
     return [tried[_frozen(s)] for s in found if _frozen(s) in tried]
 
 
