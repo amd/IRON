@@ -28,10 +28,12 @@ from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
 from iron.common.testing import vectors
+from iron.operators.axpy import AXPY
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gelu import GELU
 from iron.operators.gemv import GEMV
+from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.tests.support import sequences
 from iron.tests.support.llama_model import llama_1b, small
@@ -123,6 +125,42 @@ def test_gemv_folds_elementwise_add_candidate():
     assert [h.name for h in step.inputs] == ["A", "B", "r"]
     (link,) = step.op.finish
     assert (link.consumer, link.at, link.binary) == (ElementwiseAdd, 1, True)
+
+
+@pytest.mark.parametrize(
+    "tile_size_input, tile_size_output, folds", [(4, 256, 1), (2, 2, 0)]
+)
+def test_a_consumer_folds_only_where_its_kernel_runs_the_gemv_s_tile(
+    tile_size_input, tile_size_output, folds
+):
+    """AXPY's kernel takes tiles of a multiple of 64 elements, so a GEMV writing 2 at a time cannot run it."""
+    gemv = GEMV(
+        M=2048,
+        K=2048,
+        tile_size_input=tile_size_input,
+        tile_size_output=tile_size_output,
+    )
+    axpy = AXPY(size=2048, tile_size=256)
+    steps = sequences.steps((gemv, "A", "B", "mid"), (axpy, "mid", "r", "out"))
+    rec = Recording.of_steps("gemv_axpy", steps, ["A", "B", "r"], ["out"])
+    assert len(fold_candidates(rec)) == folds
+
+
+@pytest.mark.parametrize(
+    "producer",
+    [
+        GEMV(M=2048, K=2048, tile_size_input=4, tile_size_output=256),
+        SiLU(size=2048, tile_size=256),
+    ],
+    ids=["GEMV", "SiLU"],
+)
+def test_a_row_wise_consumer_is_not_folded(producer):
+    """An RMSNorm reads whole rows, not the tiles its producer's cores write (Gemma 4's GEMV -> RMSNorm)."""
+    rms = RMSNorm(rows=1, tile_size=2048, num_aie_columns=1)
+    inputs = ["A", "B"] if isinstance(producer, GEMV) else ["x"]
+    steps = sequences.steps((producer, *inputs, "mid"), (rms, "mid", "out"))
+    rec = Recording.of_steps("row_wise", steps, inputs, ["out"])
+    assert not fold_candidates(rec)
 
 
 def test_a_chain_of_three_steps_admits_overlapping_candidates():

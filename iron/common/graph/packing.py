@@ -16,11 +16,14 @@ from typing import Any
 
 from ..declare import Profile
 from ..design import OperatorDesign
-from ..image.compose import Packing
+from ..image.compose import Packing, fits
 from ..image.step import Fusion, FusionKind
 from .fusion import _crosses_host
 from .fusion_tunables import rebuild
 from .record import Recording
+
+#: Host buffers one xclbin kernel takes at most (aiecc's ``kMaxHostBOs``).
+HOST_BUFFERS = 16
 
 
 def apply(
@@ -67,31 +70,62 @@ def merges(
     """Return each run of two or more consecutive steps outside ``fused`` whose designs ``packing`` groups together, as one ``MERGE``.
 
     An xclbin's form of a packing: the group configured once and its steps in a row
-    dispatched once, back to back. A host step between two ends a run.
+    dispatched once, back to back. A host step between two ends a run, and so does a
+    step that would take the run past what one xclbin kernel carries: more host
+    buffers than ``HOST_BUFFERS`` (a merged sequence passes each step's own), or a
+    design that leaves its configuration unplaced, since one sequence keeps each shim
+    end sending into the array in flight to its end (mlir-aie's ``ShimTransferSpans``),
+    so its designs cannot take turns on a shim channel as a full ELF's separate
+    sequences do.
     """
     if not packing.groups:
         return ()
     inside = {i for f in fused for i in f.steps}
     groups: list[tuple[str, ...] | None] = []
+    designs: list[OperatorDesign] = []
     for i, step in enumerate(recording.steps):
         op = step.op.resolved(dev)
+        designs.append(OperatorDesign(op))
         group = (
             None
             if i in inside or op.reference_only
-            else packing.group_of(OperatorDesign(op).name)
+            else packing.group_of(designs[i].name)
         )
         groups.append(group if group is not None and len(group) > 1 else None)
+    hosted = [sum(not b.on_chip for b in s.op.buffers) for s in recording.steps]
     found: list[Fusion] = []
+    # By the run's designs: each layer repeats the last one's.
+    placed: dict[tuple[str, ...], bool] = {}
     lo = 0
+    # Each design's first step in the run: a design's steps all run on its one array.
+    firsts: dict[str, int] = {designs[0].name: 0} if designs else {}
     for hi in range(1, len(groups) + 1):
         if (
             hi < len(groups)
             and groups[hi] is not None
             and groups[hi] == groups[lo]
             and not _crosses_host(recording, hi - 1, hi)
+            and sum(hosted[lo : hi + 1]) <= HOST_BUFFERS
         ):
-            continue
+            if designs[hi].name in firsts:
+                continue
+            steps = (*firsts.values(), hi)
+            key = tuple(designs[j].name for j in steps)
+            if key not in placed:
+                # Placed as a full ELF builds it: the same arrays and shim ends,
+                # without the dispatch scalars an xclbin binds only at its build.
+                placed[key] = (
+                    fits(
+                        {str(j): designs[j] for j in steps},
+                        fusion=Fusion(FusionKind.MERGE, steps),
+                    )
+                    is None
+                )
+            if placed[key]:
+                firsts[designs[hi].name] = hi
+                continue
         if groups[lo] is not None and hi - lo > 1:
             found.append(Fusion(FusionKind.MERGE, tuple(range(lo, hi))))
         lo = hi
+        firsts = {designs[hi].name: hi} if hi < len(designs) else {}
     return tuple(found)

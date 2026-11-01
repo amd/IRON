@@ -1,4 +1,8 @@
 {"entries": [
   {"operator": "MHA", "num_heads": 12, "num_KV_heads": 4, "d": 128, "seq_pad": 1, "num_pipelines": 4},
-  {"operator": "MHA", "num_heads": 12, "num_KV_heads": 4, "d": 128, "seq_pad": 2048, "num_pipelines": 8}
+  {"operator": "MHA", "num_heads": 12, "num_KV_heads": 4, "d": 128, "seq_pad": 2048, "num_pipelines": 8},
+  {"operator": "GEMV", "M": 1536, "K": 1536, "num_batches": 1, "coded_a": true},
+  {"operator": "GEMV", "M": 1536, "K": 4096, "num_batches": 1, "coded_a": true},
+  {"operator": "GEMV", "M": 512, "K": 1536, "num_batches": 1, "coded_a": true},
+  {"operator": "GEMV", "M": 1536, "K": 3072, "num_batches": 1, "coded_a": true}
 ]}

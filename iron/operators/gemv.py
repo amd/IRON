@@ -30,6 +30,7 @@ from iron.common.declare.operand import concrete
 from iron.common.elementwise import (
     Elementwise,
     FinishStep,
+    Rowwise,
     finish_bound,
     finish_reference,
 )
@@ -375,9 +376,17 @@ class GEMV(Operator):
                 raise ValueError(f"GEMV: {name} ({tile}) exceeds M/lanes ({rows})")
             if rows % tile:
                 raise ValueError(f"GEMV: {name} ({tile}) must divide M/lanes ({rows})")
+        for step in self.finish:
+            # Its kernel runs on this GEMV's output tile; the factory refuses one it cannot.
+            step.consumer_at(self.tile_size_output, self.dev).layout().kernel()
 
     def fold(self, consumer, at: int):
-        if not isinstance(consumer, Elementwise) or self.repeat > 1:
+        # A row-wise consumer reads whole rows, not the tiles a finish step runs on.
+        if (
+            not isinstance(consumer, Elementwise)
+            or isinstance(consumer, Rowwise)
+            or self.repeat > 1
+        ):
             return None
         others = [i for i in range(len(consumer.inputs)) if i != at]
         if len(others) > 1:

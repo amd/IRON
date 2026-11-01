@@ -268,7 +268,8 @@ class Elementwise(Operator):
             return False
 
     def fold(self, consumer: Operator, at: int) -> Self | None:
-        if not isinstance(consumer, Elementwise):
+        # A row-wise consumer reads whole rows, not the tiles a finish step runs on.
+        if not isinstance(consumer, Elementwise) or isinstance(consumer, Rowwise):
             return None
         others = [i for i in range(len(consumer.inputs)) if i != at]
         if len(others) > 1:

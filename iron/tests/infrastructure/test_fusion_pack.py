@@ -20,11 +20,12 @@ from aie import ir
 from aie.utils.verify import compare
 
 from iron import Profile
+from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.fusion import candidates
-from iron.common.graph.packing import merges
+from iron.common.graph.packing import HOST_BUFFERS, merges
 from iron.common.graph.record import Recording
-from iron.common.image.compose import Composition, CoResidenceError, places
+from iron.common.image.compose import Composition, CoResidenceError, fits, places
 from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
@@ -313,6 +314,34 @@ def test_a_packing_runs_as_merges_on_an_xclbin(llama_recordings):
     assert {(i, i + 1) for f in rest for i in f.steps[:-1]} == {
         (a, b) for a, b in pairs if a not in taken and b not in taken
     }
+
+
+def test_each_merge_of_llama_s_npu2_packing_places():
+    """Llama's decode packing groups more shim ends than one sequence has channels for.
+
+    A full ELF's separate sequences share them; an xclbin's merge is one sequence, so
+    its runs split where a design would not place (all 16 MM2S channels were taken),
+    and where its steps' host buffers would pass what one kernel takes (22 and 26).
+    """
+    dev = aie_utils.ensure_current_device()
+    model = llama_1b(num_hidden_layers=1)
+    decode = model.record(**model.shapes()[0])
+    recording, fused, packing = apply_profile(decode, LLAMA_NPU2_PROFILE, dev)
+    runs = merges(recording, fused, packing, dev)
+    assert any(len(f.steps) > 2 for f in runs)
+    for f in runs:
+        hosted = [b for j in f.steps for b in recording.steps[j].op.buffers]
+        assert sum(not b.on_chip for b in hosted) <= HOST_BUFFERS, f.steps
+        firsts: dict[str, int] = {}
+        for j in f.steps:
+            firsts.setdefault(
+                OperatorDesign(recording.steps[j].op.resolved(dev)).name, j
+            )
+        steps = tuple(firsts.values())
+        designs = {
+            str(j): OperatorDesign(recording.steps[j].op.resolved(dev)) for j in steps
+        }
+        assert fits(designs, fusion=Fusion(FusionKind.MERGE, steps)) is None, f.steps
 
 
 def test_pack_candidates_on_llama_1b_header():
