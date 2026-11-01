@@ -809,15 +809,26 @@ class Copy(Operator):
                 f"Copy: {tap} is bounded on the axis the {self.num_channels} channels "
                 f"split; bound another axis or copy on one channel"
             )
-        rank = shares[0].rank
-        dim = 4 - rank + bound
-        on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
         out = []
         for share in shares:
             ns, ss = zip(*share.transformation_dims)
             dims: list[tuple[int, int]] = list(
                 zip(concrete(ns, share), concrete(ss, share))
             )
+            # Below the bounded axis a unit dimension drops and a contiguous
+            # one merges, so a view's share fits however many axes it kept.
+            inner: list[tuple[int, int]] = []
+            for n, s in dims[bound + 1 :]:
+                if n == 1:
+                    continue
+                if inner and inner[-1][1] == n * s:
+                    inner[-1] = (inner[-1][0] * n, s)
+                else:
+                    inner.append((n, s))
+            dims = dims[: bound + 1] + inner
+            rank = len(dims)
+            dim = 4 - rank + bound
+            on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
             if on_d2:
                 lead, inner = dims[:bound], dims[bound + 1 :]
                 dims = (

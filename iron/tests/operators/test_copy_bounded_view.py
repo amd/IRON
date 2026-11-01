@@ -243,3 +243,27 @@ def test_bounded_rows_past_a_wrap_halve_the_run():
     got = np.asarray(graph.reference(x, y, n=1500), dtype=np.float32)
     want = np.concatenate([x[:1500], y[:1500]], axis=1).astype(np.float32)
     np.testing.assert_array_equal(got[:1500], want)
+
+
+# A ring of one KV head's paired keys and values, as Gemma 4's sliding
+# layers keep it.
+RING, PAIR = 512, 2 * 256
+
+
+class Stage(iron.Graph):
+    """The window ``[first, first + RING // 2)`` of a paired ring, its first ``n`` positions staged."""
+
+    def __init__(self):
+        self.ring = iron.state((RING, 1, 2, PAIR // 2), name="ring")
+        self.staged = iron.state((RING // 2, 1, 2, PAIR // 2), name="staged")
+
+    def body(self, *, first: Scratchpad[np.int32], n: Scratchpad[np.int32]):
+        Copy.step(self.ring[first : first + RING // 2][:n], self.staged)
+
+
+def test_a_bounded_view_s_contiguous_axes_are_one_run(npu2):
+    """Below the bounded axis, ``(1, 2, d)`` is one run of ``2 d``, so the bound takes D2."""
+    (step,) = Stage().record().steps
+    op = step.op.resolved(npu2)
+    ((tap, unit),) = op._taps(op.src, op.src_bound, op.x)
+    assert (list(tap.sizes), unit) == ([1, RING // 2, 1, PAIR], PAIR)
