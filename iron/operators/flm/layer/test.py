@@ -65,7 +65,7 @@ def _layer(geometry, layer_type):
 
 
 def _record_metrics(record, op, bufs, context_len, max_l):
-    """Time one more dispatch and record its latency, bandwidth and throughput.
+    """Time more dispatches and record their median latency, bandwidth and throughput.
 
     Bytes count the weights and K/V rows read, FLOPs the projections and
     attention.
@@ -81,8 +81,6 @@ def _record_metrics(record, op, bufs, context_len, max_l):
         *bufs,
         bytes_moved=total_bytes,
         ops=flops,
-        warmup=1,
-        iters=1,
         record=record,
         context_len=context_len,
         max_l=max_l,

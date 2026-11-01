@@ -69,7 +69,7 @@ def _inputs(op, max_l, seed):
 
 
 def _record(op, bufs, L_begin, L_end, max_l, record):
-    """Time one more dispatch and record its latency, bandwidth and throughput.
+    """Time more dispatches and record their median latency, bandwidth and throughput.
 
     Bytes count the query/output rows and the K/V rows its queries read;
     FLOPs count the scores and the weighted sum of V.
@@ -88,8 +88,6 @@ def _record(op, bufs, L_begin, L_end, max_l, record):
         *bufs,
         bytes_moved=total_bytes,
         ops=flops,
-        warmup=1,
-        iters=1,
         record=record,
         L_begin=L_begin,
         L_end=L_end,
