@@ -158,7 +158,8 @@ class Timed:
         Points that give ``op``'s bound extents the same values are merged:
         their weights are summed, and the first one's per-call values are
         kept. When every point gives them the same values, as when ``op``
-        has no bound extent, that is a single pair.
+        has no bound extent, that is a single pair; with no points, the
+        call's own values.
         """
         out: dict[tuple, tuple[float, dict[str, int]]] = {}
         for point in self.points:
@@ -166,9 +167,7 @@ class Timed:
             label = tuple(values[e] for e in sorted(op.bound_extents))
             weight, first = out.get(label, (0.0, values))
             out[label] = (weight + point.weight, first)
-        if len(out) > 1:
-            return list(out.values())
-        return [(1.0, self.op_values(op))]
+        return list(out.values()) or [(1.0, self.op_values(op))]
 
     def op_inputs(self, op: Operator) -> dict[str, np.ndarray]:
         """Return what ``op``'s buffers hold in this call, by ``op``'s buffer name."""

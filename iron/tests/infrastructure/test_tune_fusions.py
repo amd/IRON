@@ -211,6 +211,14 @@ def test_op_values_falls_back_to_the_calls_own_value_a_point_does_not_give():
     assert call.op_points(op) == [(1.0, {"valid": 128, "valid_angles": 128})]
 
 
+def test_one_point_times_an_operator_where_the_point_says():
+    """A call timed at one point (``--points 1``) times its operators at that point's values, not the call's own."""
+    recording = Rotate().record(x=(256, 64), angles=(256, 64))
+    call = Timed(recording, values={"n": 128}, points=[Point(1.0, {"n": 64})])
+    [op] = {s.op for s in recording.steps}
+    assert call.op_points(op) == [(1.0, {"valid": 64, "valid_angles": 64})]
+
+
 # ---------------------------------------------------------------------------
 # select_rewrites: cheapest first, never two sharing a step
 # ---------------------------------------------------------------------------
