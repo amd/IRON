@@ -2,8 +2,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
 /* Primary: charcoal header matching rocm.docs.amd.com (#27282b / #1a1a1b).
-   Accent scheme: true-blue links, orange for interactive/hover accents. */
-:root {
+   Accent scheme: true-blue links, orange for interactive/hover accents.
+   Material sets the link colour per scheme, so the light one is named too. */
+:root,
+[data-md-color-scheme="default"] {
   --md-primary-fg-color:        #27282b;
   --md-primary-fg-color--light: #3a3b3f;
   --md-primary-fg-color--dark:  #1a1a1b;
@@ -51,7 +53,7 @@
   .iron-cards { grid-template-columns: 1fr; }
 }
 
-.iron-card {
+.md-typeset .iron-card {
   border: 1px solid var(--md-default-fg-color--lightest);
   border-radius: 8px;
   padding: 1.25rem 1rem 1rem;
@@ -63,7 +65,8 @@
   min-height: 120px;
 }
 
-.iron-card:hover {
+.md-typeset .iron-card:hover,
+.md-typeset .iron-card:focus {
   border-color: var(--md-accent-fg-color);
   box-shadow: 0 0 0 2px var(--md-accent-fg-color--transparent);
   color: inherit;
