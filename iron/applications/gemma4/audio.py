@@ -12,7 +12,9 @@ import math
 from functools import partial
 from types import SimpleNamespace
 
+import aie.utils as aie_utils
 import numpy as np
+from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
@@ -25,6 +27,7 @@ from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
 from iron.operators.gemm import GEMM
+from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.softmax import Softmax
@@ -203,8 +206,9 @@ class ConformerAttention(iron.Graph):
         self._timing, self.dims = c.timing(), (H, D, c.window, c.band)
         self.logit_cap = c.attention_logit_cap
         self.precision = c.precision
-        # The tower's keys, values, scores and probabilities, every layer's.
-        self._buffers: tuple[State, State, State, State] | None = None
+        # The tower's keys, values, scores and probabilities, every layer's,
+        # and its paired keys and values for MHA's fused mapping.
+        self._buffers: tuple[State, State, State, State, State] | None = None
 
     def load_state_dict(self, tree, *, path: str = "") -> None:
         """``Graph.load_state_dict``, then the derived tensors.
@@ -230,6 +234,10 @@ class ConformerAttention(iron.Graph):
             np.tile(softplus * (q_scale * k_scale), H).astype(bfloat16)
         )
         self.relative = iron.param(band.astype(bfloat16))
+        # MHA's relative band: distance d's relative key as a K row, d < W.
+        keys = np.zeros((16, H, 2, D), np.float32)
+        keys[:W, :, 0] = relative / k_scale
+        self.relative_keys = iron.param(keys.astype(bfloat16))
 
     def body(self, h, tokens):
         """Attention over ``h``, its first ``tokens`` rows valid.
@@ -239,7 +247,29 @@ class ConformerAttention(iron.Graph):
         """
         T, (H, D, W, B) = h.shape[0], self.dims
         assert self._buffers is not None, "AudioTower sets every layer's buffers"
-        keys, values, scores, probs = self._buffers
+        keys, values, scores, probs, kv = self._buffers
+        dev = aie_utils.ensure_current_device()
+        # MHA's fused mapping takes the band and the cap on AIE2; AIE2P keeps
+        # the GEMMs and the banded Softmax until its fused block exists.
+        if dev is not None and dev.arch is AIEArch.AIE2:
+            h = self.q_proj.clamp(h)
+            q = self.q_proj.project(h) * self.q_scale
+            kv[:, :, 0] = self.k_proj.project(h).reshape(T, H, D)
+            kv[:, :, 1] = self.v_proj.project(h).reshape(T, H, D)
+            o = MHA.step(
+                q.reshape(T, H, D),
+                KV=kv[:tokens],
+                R=self.relative_keys,
+                heads_interleaved=True,
+                window=W - 1,
+                scale=1.0,
+                soft_cap=self.logit_cap,
+                f32_scores=True,
+                accurate_exp2=True,
+                relative_band=True,
+                cores_per_block=1,
+            )
+            return self.post(o.reshape(T, H * D))
         K = keys.shape[1]
         h = self.q_proj.clamp(h)
         q = self.q_proj.project(h) * self.q_scale
@@ -436,8 +466,15 @@ class AudioTower(Tower):
         # at |logit| >= 32.
         self.scores = iron.state((H, T, K), dtype=np.float32)
         self.probs = iron.state((H, T, K))
+        self.kv = iron.state((T, H, 2, D))
         for layer in self.layers:
-            layer.self_attn._buffers = self.keys, self.values, self.scores, self.probs
+            layer.self_attn._buffers = (
+                self.keys,
+                self.values,
+                self.scores,
+                self.probs,
+                self.kv,
+            )
 
     def logmel(self, wave, frames):
         """Write the log-mel features of `wave`'s valid frames to `features[1 : frames + 1]`.
