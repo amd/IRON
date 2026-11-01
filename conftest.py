@@ -157,7 +157,9 @@ class CSVReporter:
             if isinstance(value, numbers.Real)
         ]
         self.test_metrics.setdefault(key, {}).setdefault("passed", []).append(passed)
-        self.bench[key] = "bench" in report.keywords
+        self.bench[key] = "bench" in report.keywords and UNBENCHED not in dict(
+            report.user_properties
+        )
         if passed and not metrics:
             self.unmeasured.add(key)
         for metric_name, value in metrics:
@@ -267,6 +269,9 @@ def pytest_configure(config):
 
 
 ATTACHED = pytest.StashKey[str]()
+#: The ``user_properties`` name of a benched test run on a device its
+#: ``bench(devices=...)`` leaves out; a string, so not a metric.
+UNBENCHED = "not benched on"
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -295,6 +300,9 @@ def pytest_runtest_setup(item):
         pytest.skip(f"No NPU runtime: {npu_unavailable_reason()}")
     if device not in marker.args:
         pytest.skip(f"Not supported on {device} (supported: {', '.join(marker.args)})")
+    bench = item.get_closest_marker("bench")
+    if bench is not None and device not in bench.kwargs.get("devices", (device,)):
+        item.user_properties.append((UNBENCHED, device))
 
 
 SHARING_MODULES = pytest.StashKey[set]()

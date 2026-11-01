@@ -64,23 +64,28 @@ def model(load):
 MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
 
 
-GENERATION = pytest.mark.parametrize(
-    "prompt_len,num_tokens",
-    [
-        pytest.param(
-            p,
-            n,
-            # The shortest per PR; the rest nightly.
-            marks=[
-                pytest.mark.bench,
-                *([] if (p, n) == (13, 1) else [pytest.mark.extensive]),
-            ],
-        )
-        for p in (1024, 13)
-        for n in (40, 1)
-    ],
-    ids=[f"prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
-)
+def generation(bench=pytest.mark.bench):
+    """Each prompt length and token count generated, ``bench`` marking every one."""
+    return pytest.mark.parametrize(
+        "prompt_len,num_tokens",
+        [
+            pytest.param(
+                p,
+                n,
+                # The shortest per PR; the rest nightly.
+                marks=[
+                    bench,
+                    *([] if (p, n) == (13, 1) else [pytest.mark.extensive]),
+                ],
+            )
+            for p in (1024, 13)
+            for n in (40, 1)
+        ],
+        ids=[f"prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
+    )
+
+
+GENERATION = generation()
 
 
 @pytest.mark.extensive
@@ -127,7 +132,8 @@ class TestEachStep:
         if aie_utils.DefaultNPURuntime is not None:
             aie_utils.DefaultNPURuntime.cleanup()
 
-    @GENERATION
+    # On npu2 this form checks npu1's path; npu2's own speed is its full ELF's.
+    @generation(pytest.mark.bench(devices=("npu1",)))
     def test_llama_3_2_each_step(self, model, prompt_len, num_tokens, record_property):
         check_generation(model, prompt_len, num_tokens, record=record_property)
 
