@@ -25,6 +25,7 @@ from types import SimpleNamespace
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.dialects.aie import AIEArch
 from aie.utils.benchmark import run_iters
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
@@ -83,15 +84,16 @@ AUDIO_ATOL = 4e-6
 # The 1st percentile of the token cosines, not the worst token: the last layer
 # is ill-conditioned at a few tokens, where HF's own float32 model turns the
 # NPU's 11-layer state, within 0.9995 of its own there, into 0.74. Measured
-# on npu2 over CLIPS (10-24): 0.99936, 0.99482, 0.99457, 0.99926 and 0.99901
-# (short to long), relative error 0.017, 0.033, 0.023, 0.016 and 0.032; the
-# tower's host reference has passage at 0.99870, so the NPU's own rounding
-# moves it most. HF's own bf16 tower against its float32 one reaches 0.9933
-# on these clips. Measured on npu1 (11-01): 0.99932, 0.99884, 0.99012,
-# 0.99963 and 0.99871 (short to long), relative error 0.017, 0.022, 0.056,
-# 0.013 and 0.030; the same ill-conditioned layer lands on a different
-# unlucky token there, so the worst clip is not the same across devices.
-AUDIO_MIN_COSINE = 0.985
+# on npu2 (AIE2p) over CLIPS (10-24): 0.99936, 0.99482, 0.99457, 0.99926 and
+# 0.99901 (short to long), relative error 0.017, 0.033, 0.023, 0.016 and
+# 0.032; the tower's host reference has passage at 0.99870, so the NPU's own
+# rounding moves it most. HF's own bf16 tower against its float32 one
+# reaches 0.9933 on these clips. Measured on npu1 (AIE2, 11-01): 0.99932,
+# 0.99884, 0.99012, 0.99963 and 0.99871 (short to long), relative error
+# 0.017, 0.022, 0.056, 0.013 and 0.030; the same ill-conditioned layer lands
+# on a different unlucky token there, worse than npu2's own worst, so each
+# device keeps its own bound (the same ~0.0026 margin below its worst clip).
+AUDIO_MIN_COSINE = {AIEArch.AIE2: 0.9875, AIEArch.AIE2p: 0.992}
 AUDIO_MAX_ERROR = 0.06
 
 # Measured on npu2 at the worst token of IMAGES: min cosine 0.9745, 0.9633
@@ -381,9 +383,8 @@ class TestAudio:
         c = audio.config
         assert got.shape == want.shape
         assert got.shape == (c.tokens(c.frames(wave.size)), c.text_dim)
-        check_embedding(
-            got, want, AUDIO_MIN_COSINE, AUDIO_MAX_ERROR, record=record_property
-        )
+        min_cosine = AUDIO_MIN_COSINE[aie_utils.get_current_device().arch]
+        check_embedding(got, want, min_cosine, AUDIO_MAX_ERROR, record=record_property)
 
     @pytest.mark.bench
     @pytest.mark.parametrize("name", list(CLIPS))
