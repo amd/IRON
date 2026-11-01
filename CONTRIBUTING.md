@@ -89,8 +89,9 @@ Hugging Face decoders need a config and a model class; see
 4. **Register.** Add the decoder to `APPLICATIONS` in
    `tests/applications/long_context/test.py`; a test fails unless it is
    there. Write its `profiles/` with
-   `iron.lm.tune` ("Tune" in the [README](README.md#models)), give the
-   package a README, and add a row to the README's model table.
+   `iron.lm.tune` ("Tune" in [Models](docs/models.md#running-testing-and-tuning-a-text-decoder)), give the
+   package a README, and add a row to the model tables in README.md and
+   docs/models.md.
 
 A Llama-shaped decoder (Mistral v0.3, Qwen, SmolLM) needs only these
 steps. Gemma 4 (`iron/applications/gemma4/model.py`) shows a

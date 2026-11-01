@@ -150,8 +150,8 @@ markdown_extensions:
   - toc:
       permalink: true
       # GitHub-compatible slugifier, so heading anchors match what GitHub
-      # generates. Matters for pages like installation.md that render the
-      # same source (README.md) on both the docs site and GitHub.
+      # generates. Matters for pages like agents.md that render the same
+      # source (AGENTS.md) on both the docs site and GitHub.
       slugify: !!python/object/apply:pymdownx.slugs.slugify
         kwds:
           case: lower

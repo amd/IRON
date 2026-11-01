@@ -16,7 +16,7 @@ dequantization, prefill attention, the decode layers and the LM head.
 ## Quick start
 
 You need an NPU2 device (Strix, Krackan) and the IRON environment, see the
-[IRON installation instructions](../../../../README.md#installation-linux) (in
+[IRON installation instructions](../../../../docs/installation.md) (in
 short, `pip install -r requirements.txt`). The `Makefile` pulls and builds the
 FastFlowLM engine, with its operators replaced by their open-source
 implementations from this repository. The build needs FastFlowLM's
