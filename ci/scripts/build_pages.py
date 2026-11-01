@@ -51,6 +51,36 @@ SUITE_NAMES = {
 # A metric whose figure is another's spread is drawn with it, not on its own.
 SPREADS = {"Latency": "Latency MAD"}
 
+# The trends the page leads with, one per benchmark and checkpoint: the first
+# suite, then the first metric, any device still runs; beside a TPS, its TTFT.
+HEADLINE_SUITES = {
+    "Models": ("nightly", "examples"),
+    "Operators": ("extensive", "small"),
+}
+HEADLINE_METRICS = {
+    "Models": ("TPS", "Latency", "TTFT"),
+    "Operators": ("Throughput", "Bandwidth", "Latency"),
+}
+HEADLINE_ALSO = {"TPS": "TTFT"}
+HEADLINE_CAPTIONS = {"TPS": "decode", "TTFT": "time to first token"}
+
+# Each model benchmark's checkpoints, by the name their test ids carry.
+CHECKPOINTS = {
+    "llama": {"llama_3.2_1b": "Llama 3.2 1B", "llama_3.2_3b": "Llama 3.2 3B"},
+    "granite": {"granite_4_2_3b": "Granite 4.2 3B"},
+    "granite_hybrid": {"granite_4_0_h_1b": "Granite 4.0-H 1B"},
+    "gemma4": {"gemma4": "Gemma 4 E2B"},
+    "gemma4_flm": {"": "Gemma 4 E2B in FastFlowLM"},
+    "embedding_gemma2": {"": "EmbeddingGemma 2"},
+    "long_context": {"llama_3.2_1b": "Llama 3.2 1B · 8K-token prompt"},
+}
+
+# The forms a decoder runs in, as its test ids name them, in the order each
+# device's trend takes them: NPU2's full ELF, its loop on the device first,
+# never the each-step form NPU1 runs. None is a test naming no form.
+FORMS = {"device_loop": "device loop", "each_step": "each step"}
+DEVICE_FORMS = {"krackan": ("device loop", None), "phoenix": ("each step", None)}
+
 # Where a benchmark still run is documented, relative to the Benchmarks page:
 # a model on the Models page, an operator in the API reference. A catalog
 # benchmark is named for its class; these are named for their test's
@@ -131,6 +161,79 @@ def change(curr, prev, metric):
     if METRICS.get(metric, UNKNOWN_METRIC).higher_is_better is None:
         return [pct, "neutral"]
     return [pct, "worse" if worse(metric, pct) else "better"]
+
+
+def trend_series(series, metric, checkpoint):
+    """Map each device to the label of the series of a checkpoint its trend follows.
+
+    The series is one the device's latest run measured: in the first of the
+    device's forms, then a test of its own before a class's, then one more
+    devices share, then the longest history, then the first label.
+    """
+    named = {
+        s["label"]: next((f for key, f in FORMS.items() if key in s["test"]), None)
+        for s in series
+    }
+    eligible = {
+        device: [
+            s
+            for s in series
+            if checkpoint in s["test"]
+            and named[s["label"]] in forms
+            and device in s["devices"]
+            and s["devices"][device]["current"]
+            and metric in s["devices"][device]["points"][-1][3]
+        ]
+        for device, forms in DEVICE_FORMS.items()
+    }
+    shared = {}
+    for candidates in eligible.values():
+        for s in candidates:
+            shared[s["label"]] = shared.get(s["label"], 0) + 1
+    picked = {}
+    for device, candidates in eligible.items():
+        ranked = sorted(
+            (
+                DEVICE_FORMS[device].index(named[s["label"]]),
+                s["test"].count("::") > 1,
+                -shared[s["label"]],
+                -sum(metric in p[3] for p in s["devices"][device]["points"]),
+                natural_key(s["label"]),
+                s["label"],
+            )
+            for s in candidates
+        )
+        if ranked:
+            picked[device] = ranked[0][-1]
+    return picked
+
+
+def trends(name, group, suites):
+    """List a benchmark's trends, one per checkpoint: its suite, metric and series."""
+    out = []
+    for checkpoint, title in CHECKPOINTS.get(name, {"": name}).items():
+        for suite, metric in (
+            (suite, metric)
+            for suite in HEADLINE_SUITES[group]
+            if suite in suites
+            for metric in HEADLINE_METRICS[group]
+        ):
+            series = trend_series(suites[suite]["series"], metric, checkpoint)
+            if series:
+                out.append(
+                    {
+                        "benchmark": name,
+                        "title": title,
+                        "group": group,
+                        "suite": suite,
+                        "metric": metric,
+                        "caption": HEADLINE_CAPTIONS.get(metric, metric.lower()),
+                        "also": HEADLINE_ALSO.get(metric),
+                        "series": series,
+                    }
+                )
+                break
+    return out
 
 
 def build_data(results_root, repository):
@@ -293,6 +396,22 @@ def build_data(results_root, repository):
         },
         "spreads": SPREADS,
         "runs": runs,
+        "trends": [
+            trend
+            for name, benchmark in sorted(
+                out.items(),
+                key=lambda kv: (
+                    (
+                        list(CHECKPOINTS).index(kv[0])
+                        if kv[0] in CHECKPOINTS
+                        else len(CHECKPOINTS)
+                    ),
+                    natural_key(kv[0]),
+                ),
+            )
+            if benchmark["current"]
+            for trend in trends(name, benchmark["group"], benchmark["suites"])
+        ],
         "benchmarks": dict(sorted(out.items(), key=lambda kv: natural_key(kv[0]))),
     }
 

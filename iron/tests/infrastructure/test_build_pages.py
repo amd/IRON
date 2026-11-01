@@ -208,3 +208,81 @@ def test_the_comment_links_each_move_to_its_history_on_the_page(tmp_path):
     )
     page = _page_data(history)["benchmarks"][state["bench"]]["suites"]
     assert state["metric"] in page[state["suite"]]["metrics"]
+
+
+LLAMA = "tests/applications/llama/test.py"
+
+
+def test_a_model_s_trend_is_each_checkpoint_s_decode_in_each_device_s_form(tmp_path):
+    each_step = f"{LLAMA}::TestEachStep::test_llama_3_2_each_step"
+    _write(
+        tmp_path / "krackan" / "nightly" / "all.csv",
+        [
+            _row(night, path, test, TPS=tps, TTFT=0.25)
+            for night in NIGHTS
+            for path, test, tps in (
+                (f"{LLAMA}::test_llama_3_2", "llama_3.2_1b-prompt_13_tokens_40", 14.6),
+                (f"{LLAMA}::test_llama_3_2_device_loop", "llama_3.2_1b", 14.5),
+                (each_step, "llama_3.2_1b-prompt_13_tokens_40", 5.4),
+                (f"{LLAMA}::test_llama_3_2", "llama_3.2_3b-prompt_13_tokens_40", 6.4),
+                (each_step, "llama_3.2_3b-prompt_13_tokens_40", 2.8),
+            )
+        ],
+    )
+    _write(
+        tmp_path / "phoenix" / "nightly" / "all.csv",
+        [
+            _row(NIGHTS[1], each_step, f"llama_3.2_{size}-prompt_13_tokens_40", TPS=3.0)
+            for size in ("1b", "3b")
+        ],
+    )
+
+    trends = {t["title"]: t for t in _page_data(tmp_path)["trends"]}
+    one, three = trends["Llama 3.2 1B"], trends["Llama 3.2 3B"]
+    assert (one["suite"], one["metric"], one["also"]) == ("nightly", "TPS", "TTFT")
+    assert one["series"] == {
+        "krackan": "test_llama_3_2_device_loop · llama_3.2_1b",
+        "phoenix": "TestEachStep::test_llama_3_2_each_step · llama_3.2_1b-prompt_13_tokens_40",
+    }
+    assert three["series"] == {
+        "krackan": "test_llama_3_2 · llama_3.2_3b-prompt_13_tokens_40",
+        "phoenix": "TestEachStep::test_llama_3_2_each_step · llama_3.2_3b-prompt_13_tokens_40",
+    }
+
+
+def test_an_operator_s_trend_is_its_extensive_throughput_the_devices_share(tmp_path):
+    for arch, npu, columns in (("krackan", "npu2", 8), ("phoenix", "npu1", 4)):
+        own = f"{npu}-GEMV-M_2048-K_8192-num_aie_columns_{columns}"
+        shared = f"{npu}-GEMV-M_1-K_1"
+        _write(
+            tmp_path / arch / "small" / "all.csv",
+            [_row(NIGHTS[1], GEMV, own, Latency=10.0, Throughput=5.0)],
+        )
+        _write(
+            tmp_path / arch / "extensive" / "all.csv",
+            [
+                _row(night, GEMV, own, Latency=10.0, Bandwidth=2.0, Throughput=5.0)
+                for night in NIGHTS
+            ]
+            + [_row(NIGHTS[1], GEMV, shared, Latency=1.0, Throughput=1.0)],
+        )
+
+    (trend,) = _page_data(tmp_path)["trends"]
+    assert (trend["title"], trend["group"]) == ("GEMV", "Operators")
+    assert (trend["suite"], trend["metric"], trend["also"]) == (
+        "extensive",
+        "Throughput",
+        None,
+    )
+    assert trend["series"] == {"krackan": "M_1-K_1", "phoenix": "M_1-K_1"}
+
+
+def test_a_benchmark_no_longer_run_has_no_trend(tmp_path):
+    _write(
+        tmp_path / "krackan" / "small" / "all.csv",
+        [
+            _row(NIGHTS[0], "iron/operators/gemv/test.py::test_gemv", "M_1", Latency=1),
+            _row(NIGHTS[1], GEMV, "npu2-GEMV-M_2048", Latency=1.0),
+        ],
+    )
+    assert [t["benchmark"] for t in _page_data(tmp_path)["trends"]] == ["GEMV"]

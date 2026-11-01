@@ -11,31 +11,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Benchmarks
 
-Every figure here was measured by CI on a Krackan (NPU2) and a Phoenix (NPU1)
-runner. A test marked `@pytest.mark.bench` records its latency, bandwidth or
-throughput; a model's test records its time to first token (TTFT) and tokens
-per second (TPS), and its accuracy checks' figures beside them. Each run's results are
-kept on the [`ci` branch](https://github.com/amd/IRON/tree/ci), and this page
-is rebuilt from them after every run.
+CI measures every figure here on a Krackan (NPU2) and a Phoenix (NPU1) runner,
+keeps each run on the [`ci` branch](https://github.com/amd/IRON/tree/ci), and
+rebuilds this page after every run. Times are UTC.
 
-| Suite | Benchmarks | Runs on | History here |
-|---|---|---|---|
-| **Pull requests** | Operators, and each model's shortest call | every pull request, and each push to `devel` and `main` | the pushes to `devel` and `main`; a pull request's own figures are in the comment CI posts on it |
-| **Extensive** | Operators, the pull request suite's and the extensive ones | each night, and each push to `devel` and `main` | every run |
-| **Nightly** | Models, every test on the real checkpoints | each night | every run |
+## Trends
 
-A move between a benchmark's last two runs is called *better* or *worse* only
-past the same two gates as the pull request comment: at least 5%, and more than
-twice the spread the runs measured. Times are UTC. A run whose checks failed is
-drawn with a ✕; its figure is what the test measured, not a result to trust.
-Each benchmark links to its operator in the
-[operator reference](api/operators.md) or to [Models](models.md).
-The history keeps every run of the last 90 days and, before that, the newest
-run of each week, at most 400 runs.
-
-## Latest runs
-
-<div id="iron-runs" class="iron-runs" markdown>
+<div id="iron-trends" class="iron-trends" markdown>
 
 !!! info "No benchmark data in this build"
     CI's Publish Pages workflow writes `benchmarks/data.json` from the `ci`
@@ -45,9 +27,15 @@ run of each week, at most 400 runs.
 
 </div>
 
+<div id="iron-live" hidden markdown>
+
+## Latest runs
+
+<div id="iron-runs" class="iron-runs"></div>
+
 ## History
 
-<div id="iron-bench" class="iron-bench" hidden>
+<div id="iron-bench" class="iron-bench" data-default="llama">
   <div class="iron-bench-filters">
     <label>Benchmark <select id="iron-bench-name"></select></label>
     <label>Suite <select id="iron-bench-suite"></select></label>
@@ -57,6 +45,34 @@ run of each week, at most 400 runs.
   <div id="iron-bench-charts" class="iron-bench-charts"></div>
   <div id="iron-bench-table"></div>
 </div>
+
+</div>
+
+## About these figures
+
+A test marked `@pytest.mark.bench` records its latency, bandwidth or
+throughput; a model's test records its time to first token (TTFT) and tokens
+per second (TPS), and its accuracy checks' figures beside them.
+
+| Suite | Benchmarks | Runs on | History here |
+|---|---|---|---|
+| **Pull requests** | Operators, and each model's shortest call | every pull request, and each push to `devel` and `main` | the pushes to `devel` and `main`; a pull request's own figures are in the comment CI posts on it |
+| **Extensive** | Operators, the pull request suite's and the extensive ones | each night, and each push to `devel` and `main` | every run |
+| **Nightly** | Models, every test on the real checkpoints | each night | every run |
+
+Each trend card follows one headline figure: each model checkpoint's decode
+TPS (with its TTFT) from the nightly suite, and each operator's throughput, or
+its bandwidth where it counts no operations, from the extensive suite, on one
+parametrization per device, one both devices run where there is one. The
+History section draws every parametrization and metric.
+
+A move between a benchmark's last two runs is called *better* or *worse* only
+past the same two gates as the pull request comment: at least 5%, and more than
+twice the spread the runs measured. A run whose checks failed is drawn with a
+✕; its figure is what the test measured, not a result to trust. Each benchmark
+links to its operator in the [operator reference](api/operators.md) or to
+[Models](models.md). The history keeps every run of the last 90 days and,
+before that, the newest run of each week, at most 400 runs.
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4" crossorigin="anonymous"></script>
 <script src="../assets/javascripts/benchmarks.js"></script>

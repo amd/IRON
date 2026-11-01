@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// The Benchmarks page: the suites' latest runs, and one benchmark's history
-// per device, from the data.json ci/scripts/build_pages.py writes beside it.
+// The Benchmarks page: each benchmark's headline trend, the suites' latest
+// runs, and one benchmark's history per device, from the data.json
+// ci/scripts/build_pages.py writes beside it.
 
 (() => {
+  const trendsHost = document.getElementById("iron-trends");
+  const live = document.getElementById("iron-live");
   const runsHost = document.getElementById("iron-runs");
   const bench = document.getElementById("iron-bench");
-  if (!runsHost || !bench) return;
+  if (!trendsHost || !live || !runsHost || !bench) return;
 
   // The data-viz reference palette, in its validated order: light and dark
   // steps of the same eight hues. A ninth series is never drawn at once.
@@ -27,6 +30,7 @@
 
   let DATA = null;
   let charts = [];
+  let trendCharts = [];
   // The series drawn, each holding its palette slot while it stays drawn.
   let slots = new Map();
   let shown = "";
@@ -48,6 +52,10 @@
   const dayFmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
   const longDay = new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
   const relative = new Intl.RelativeTimeFormat("en-US", { numeric: "auto" });
+  const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumSignificantDigits: 3 });
+  const brief = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 3 });
+  // A latency past a millisecond reads in the largest unit it fills.
+  const SCALES = { "µs": [[1e6, "s"], [1e3, "ms"]] };
 
   function stamp(text) {
     return text.slice(0, 16) + " UTC";
@@ -103,43 +111,241 @@
     return "#" + new URLSearchParams({ bench: name, suite, metric }).toString();
   }
 
+  function key(colour) {
+    const mark = el("span", { class: "iron-key", "aria-hidden": "true" });
+    mark.style.background = colour;
+    return mark;
+  }
+
+  function seriesOf(name, suite, label) {
+    return DATA.benchmarks[name].suites[suite].series.find((s) => s.label === label);
+  }
+
+  // ── Trends ───────────────────────────────────────────────────────────────
+
+  // Each run's point on every line, so the tooltip reads both devices at a
+  // date even though their runs start minutes apart.
+  const RUN_SPAN = 12 * 3.6e6;
+  function eachRun(chart, event) {
+    const at = chart.scales.x.getValueForPixel(event.x);
+    const found = chart.data.datasets.map((dataset, datasetIndex) => {
+      let best = null;
+      dataset.data.forEach((d, index) => {
+        const gap = Math.abs(d.x - at);
+        if (!best || gap < best.gap) best = { gap, datasetIndex, index };
+      });
+      return best;
+    }).filter(Boolean);
+    if (!found.length) return [];
+    const nearest = Math.min(...found.map((f) => f.gap));
+    return found.filter((f) => f.gap - nearest < RUN_SPAN).map(({ datasetIndex, index }) =>
+      ({ element: chart.getDatasetMeta(datasetIndex).data[index], datasetIndex, index }));
+  }
+
+  function trendCard(trend, devices, colours, domain, pending) {
+    const { benchmark: name, title, suite, metric, caption, also, series } = trend;
+    const href = link(name, suite, metric);
+    const latest = Object.entries(series).map(([device, label]) => {
+      const points = seriesOf(name, suite, label).devices[device].points.filter((p) => metric in p[3]);
+      return points[points.length - 1][3][metric];
+    });
+    const [scale, unit] = (SCALES[unitOf(metric)] || []).find(([factor]) => Math.max(...latest) >= factor)
+      || [1, unitOf(metric)];
+    const sense = direction(metric);
+    const surface = css("--md-default-bg-color");
+    const shapes = Object.fromEntries(Object.entries(series).map(([device, label]) => {
+      const test = seriesOf(name, suite, label).test;
+      const params = test.slice(test.indexOf("[") + 1, -1);
+      return [device, params.startsWith(`${name}-`) ? params.slice(name.length + 1) : params];
+    }));
+    const oneShape = new Set(Object.values(shapes)).size === 1 ? Object.values(shapes)[0] : null;
+    const rows = [];
+    const datasets = [];
+    devices.forEach((device, slot) => {
+      if (!(device in series)) {
+        rows.push(el("li", { class: "iron-muted" }, el("span", { class: "iron-trend-device" },
+          el("span", { class: "iron-key iron-key-none", "aria-hidden": "true" }), DATA.devices[device]),
+          el("span", { class: "iron-trend-value", textContent: "not run" })));
+        return;
+      }
+      const s = seriesOf(name, suite, series[device]);
+      const run = s.devices[device];
+      const points = run.points.filter((p) => metric in p[3]);
+      const last = points[points.length - 1];
+      const moved = run.changes[metric];
+      const what = trend.group === "Models"
+        ? also && also in last[3] ? `${also} ${brief.format(last[3][also])} ${unitOf(also)}` : null
+        : oneShape ? null : shapes[device];
+      rows.push(el("li", {},
+        el("span", { class: "iron-trend-device" }, key(colours[slot]), DATA.devices[device]),
+        el("span", { class: "iron-trend-value" },
+          el("strong", { textContent: brief.format(last[3][metric] / scale) }), unit ? ` ${unit}` : "",
+          last[2] === false ? el("span", { class: "iron-mark iron-worse", textContent: " ✕", title: "Its checks failed" }) : null,
+          moved ? verdictMark(moved[1]) : null),
+        what ? el("small", { class: "iron-trend-what", textContent: what, title: what }) : null));
+      datasets.push({
+        label: DATA.devices[device],
+        data: points.map((p) => ({ x: +parseDate(p[0]), y: p[3][metric] / scale, point: p })),
+        borderColor: colours[slot],
+        backgroundColor: colours[slot],
+        borderWidth: 2,
+        borderCapStyle: "round",
+        borderJoinStyle: "round",
+        pointRadius: points.map((p, i) => (p[2] === false ? 5 : i === points.length - 1 ? 4 : 0)),
+        pointHoverRadius: 5,
+        pointHitRadius: 10,
+        pointStyle: points.map((p) => (p[2] === false ? "crossRot" : "circle")),
+        pointBorderColor: points.map((p) => (p[2] === false ? CRITICAL : surface)),
+        pointBorderWidth: points.map((p) => (p[2] === false ? 2.5 : 2)),
+        tension: 0,
+      });
+    });
+
+    const canvas = el("canvas", { role: "img",
+      "aria-label": `${title}, ${caption} ${metric}, by run on ${datasets.map((d) => d.label).join(" and ")}; ` +
+        "the latest values are listed above it, and the history below holds every value" });
+    const card = el("article", { class: "iron-trend" },
+      el("header", {},
+        el("a", { class: "iron-trend-name", href, textContent: title, title: `Open ${name}'s history` }),
+        el("span", { class: "iron-trend-metric",
+          textContent: `${caption[0].toUpperCase()}${caption.slice(1)}${unit ? ` (${unit})` : ""}${sense ? `, ${sense}` : ""}` })),
+      el("ul", { class: "iron-trend-latest" }, ...rows),
+      trend.group === "Operators" && oneShape
+        ? el("small", { class: "iron-trend-what iron-trend-shape", textContent: oneShape, title: oneShape })
+        : null,
+      el("div", { class: "iron-trend-canvas" }, canvas));
+
+    pending.push(() => {
+      const ink = css("--md-default-fg-color--light");
+      const grid = css("--md-default-fg-color--lightest");
+      trendCharts.push(new Chart(canvas, {
+        type: "line",
+        data: { datasets },
+        plugins: [crosshair],
+        options: {
+          animation: false,
+          maintainAspectRatio: false,
+          layout: { padding: { top: 6, right: 6 } },
+          interaction: { mode: "ironRun", intersect: false },
+          font: { family: getComputedStyle(document.body).fontFamily },
+          scales: {
+            x: {
+              type: "linear",
+              min: domain[0],
+              max: domain[1],
+              grid: { display: false },
+              border: { color: grid },
+              ticks: { color: ink, maxTicksLimit: 4, maxRotation: 0, callback: (v) => dayFmt.format(new Date(v)) },
+            },
+            y: {
+              beginAtZero: true,
+              grid: { color: grid },
+              border: { display: false },
+              ticks: { color: ink, maxTicksLimit: 4, callback: (v) => compact.format(v) },
+            },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: (items) => stamp(items[0].raw.point[0]).slice(0, 10),
+                label: (item) => {
+                  const p = item.raw.point;
+                  return ` ${brief.format(p[3][metric] / scale)}${unit ? ` ${unit}` : ""}  ${item.dataset.label}` +
+                    `${p[2] === false ? "  ✕ checks failed" : ""}`;
+                },
+                footer: () => "Click for the history",
+                labelPointStyle: () => ({ pointStyle: "line", rotation: 0 }),
+              },
+              usePointStyle: true,
+            },
+          },
+          onHover: (event, elements) => {
+            event.native.target.style.cursor = elements.length ? "pointer" : "default";
+          },
+          onClick: () => {
+            location.hash = href;
+          },
+        },
+      }));
+    });
+    return card;
+  }
+
+  function drawTrends() {
+    trendCharts.forEach((c) => c.destroy());
+    trendCharts = [];
+    const colours = PALETTE[scheme()];
+    const devices = Object.keys(DATA.devices);
+    const DAY = 8.64e7;
+    const dayFull = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+
+    const pending = [];
+    const groups = ["Models", "Operators"].flatMap((group) => {
+      const members = DATA.trends.filter((t) => t.group === group);
+      if (!members.length) return [];
+      const times = members.flatMap((t) => Object.entries(t.series).flatMap(([device, label]) =>
+        seriesOf(t.benchmark, t.suite, label).devices[device].points
+          .filter((p) => t.metric in p[3]).map((p) => +parseDate(p[0]))));
+      const lo = Math.floor(Math.min(...times) / DAY) * DAY;
+      const domain = [lo, Math.max(Math.ceil(Math.max(...times) / DAY) * DAY, lo + DAY)];
+      const suites = [...new Set(members.map((t) => DATA.suites[t.suite].name.toLowerCase()))];
+      return [
+        el("h3", {}, group, el("small", { class: "iron-trend-span",
+          textContent: `${suites.join(" and ")} suite, ${dayFmt.format(new Date(domain[0]))} to ${dayFull.format(new Date(domain[1] - 1))}` })),
+        el("div", { class: "iron-trend-grid" }, ...members.map((t) => trendCard(t, devices, colours, domain, pending))),
+        group === "Models" && members.some((t) => "phoenix" in t.series)
+          ? el("p", { class: "iron-bench-note", textContent: "NPU1 runs a model one operator dispatch at a time." })
+          : null,
+      ].filter(Boolean);
+    });
+    trendsHost.replaceChildren(
+      el("div", { class: "iron-trend-legend" },
+        ...devices.map((d, slot) => el("span", { class: "iron-trend-device" }, key(colours[slot]), DATA.devices[d])),
+        el("span", { class: "iron-bench-note",
+          textContent: "Each card follows one headline figure; select one for every parametrization and metric." })),
+      ...groups);
+    pending.forEach((make) => make());
+  }
+
   // ── Latest runs ──────────────────────────────────────────────────────────
 
+  function runCell(run) {
+    const better = run.moved.filter((m) => m[4] === "better").length;
+    const worse = run.moved.length - better;
+    const status = run.failed
+      ? el("span", {}, el("span", { class: "iron-mark iron-worse", textContent: "✕" }), ` ${run.failed} of ${run.tests} failed`)
+      : el("span", { textContent: `${run.tests} passed` });
+    const when = el("small", { class: "iron-muted" }, `${stamp(run.date)}, ${age(run.date)} · `, commitLink(run.commit));
+    if (!run.moved.length) {
+      return [status, el("br"), when, el("br"), el("small", { class: "iron-muted", textContent: "Nothing moved past the gates" })];
+    }
+    const items = run.moved.map(([name, label, metric, pct, verdict]) =>
+      el("li", {}, verdictMark(verdict), " ",
+        el("a", { href: link(name, run.suite, metric), textContent: name }),
+        ` · ${label} · ${metric} ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`));
+    return [status, el("br"), when,
+      el("details", { class: "iron-moved" },
+        el("summary", { textContent: `Moved: ${better} better, ${worse} worse` }), el("ul", {}, ...items))];
+  }
+
   function drawRuns() {
-    const runs = [...DATA.runs].sort((a, b) =>
-      SUITE_ORDER.indexOf(a.suite) - SUITE_ORDER.indexOf(b.suite) || a.device.localeCompare(b.device));
-    const body = runs.map((run) => {
-      const better = run.moved.filter((m) => m[4] === "better").length;
-      const worse = run.moved.length - better;
-      return el("tr", {},
-        el("td", { textContent: suiteName(run.suite) }),
-        el("td", { textContent: DATA.devices[run.device] || run.device }),
-        el("td", {}, stamp(run.date), el("br"), el("small", { textContent: age(run.date) })),
-        el("td", {}, commitLink(run.commit)),
-        el("td", {}, run.failed
-          ? el("span", {}, el("span", { class: "iron-mark iron-worse", textContent: "✕" }),
-               ` ${run.failed} of ${run.tests} failed`)
-          : `${run.tests} passed`),
-        el("td", { textContent: run.moved.length ? `${better} better, ${worse} worse` : "none" }));
-    });
+    const devices = Object.keys(DATA.devices);
+    const suites = SUITE_ORDER.filter((s) => DATA.runs.some((r) => r.suite === s));
+    const rows = suites.map((suite) => el("tr", {},
+      el("th", { scope: "row", textContent: suiteName(suite) }),
+      ...devices.map((device) => {
+        const run = DATA.runs.find((r) => r.suite === suite && r.device === device);
+        return el("td", {}, ...(run ? runCell(run) : [el("span", { class: "iron-muted", textContent: "—" })]));
+      })));
     const table = el("table", {},
-      el("thead", {}, el("tr", {}, ...["Suite", "Device", "Run", "Commit", "Tests", "Moved past the gates"]
-        .map((h) => el("th", { textContent: h })))),
-      el("tbody", {}, ...body));
-
-    const details = runs.filter((run) => run.moved.length).map((run) => {
-      const items = run.moved.map(([name, label, metric, pct, verdict]) =>
-        el("li", {}, verdictMark(verdict), " ",
-          el("a", { href: link(name, run.suite, metric), textContent: name }),
-          ` · ${label} · ${metric} ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`));
-      const worse = run.moved.some((m) => m[4] === "worse");
-      return el("details", { class: worse ? "warning" : "success" },
-        el("summary", { textContent: `${DATA.devices[run.device] || run.device}, ${suiteName(run.suite)}: ${run.moved.length} moved` }),
-        el("ul", {}, ...items));
-    });
-
-    runsHost.replaceChildren(el("div", { class: "md-typeset__table" }, table), ...details,
-      el("p", { class: "iron-bench-note", textContent: `Page data built ${stamp(DATA.generated)}.` }));
+      el("thead", {}, el("tr", {}, el("th", { textContent: "Suite" }),
+        ...devices.map((d) => el("th", { textContent: DATA.devices[d] })))),
+      el("tbody", {}, ...rows));
+    runsHost.replaceChildren(el("div", { class: "md-typeset__scrollwrap" },
+      el("div", { class: "md-typeset__table iron-runs-table" }, table)),
+      el("p", { class: "iron-bench-note",
+        textContent: `Moved: past the gates since the run before. Page data built ${stamp(DATA.generated)}.` }));
   }
 
   // ── History ──────────────────────────────────────────────────────────────
@@ -157,12 +363,18 @@
   function select(state) {
     const names = Object.keys(DATA.benchmarks);
     const first = (group) => names.find((n) => DATA.benchmarks[n].current && DATA.benchmarks[n].group === group);
-    const name = names.includes(state.bench) ? state.bench : first("Models") || first("Operators") || names[0];
+    const featured = bench.dataset.default;
+    const name = names.includes(state.bench) ? state.bench
+      : names.includes(featured) && DATA.benchmarks[featured].current ? featured
+      : first("Models") || first("Operators") || names[0];
     const b = DATA.benchmarks[name];
+    const lead = DATA.trends.find((t) => t.benchmark === name);
     const suites = SUITE_ORDER.filter((s) => s in b.suites);
-    const suite = suites.includes(state.suite) ? state.suite : suites[0];
+    const suite = suites.includes(state.suite) ? state.suite
+      : lead && suites.includes(lead.suite) ? lead.suite : suites[0];
     const metrics = b.suites[suite].metrics;
-    const metric = metrics.includes(state.metric) ? state.metric : metrics[0];
+    const metric = metrics.includes(state.metric) ? state.metric
+      : lead && lead.suite === suite && metrics.includes(lead.metric) ? lead.metric : metrics[0];
 
     pick.name.value = name;
     pick.suite.replaceChildren(...suites.map((s) =>
@@ -195,8 +407,12 @@
     }
     if (!slots.size) {
       const current = series.filter((s) => Object.values(s.devices).some((d) => d.current));
+      const leads = DATA.trends.filter((t) => t.benchmark === name && t.suite === suite);
+      const headline = new Set(leads.flatMap((t) => Object.values(t.series)));
       const reach = (s) => Object.keys(s.devices).length;
-      [...(current.length ? current : series)].sort((a, b) => reach(b) - reach(a))
+      const lead = series.filter((s) => headline.has(s.label));
+      [...(lead.length ? lead : current.length ? current : series)]
+        .sort((a, b) => reach(b) - reach(a))
         .slice(0, PALETTE.light.length)
         .forEach((s, i) => slots.set(s.label, i));
     }
@@ -329,7 +545,12 @@
             },
           },
           plugins: {
-            legend: { display: false },
+            legend: {
+              position: "top",
+              align: "start",
+              labels: { color: ink, boxWidth: 18, boxHeight: 2, font: { size: 11 } },
+              onClick: null,
+            },
             tooltip: {
               callbacks: {
                 title: (items) => {
@@ -403,8 +624,9 @@
       return el("tr", {}, el("td", {}, el("label", { class: "iron-draw" }, box, key)),
         el("td", {}, el("span", { textContent: s.label, title: s.test })), ...cells);
     });
-    tableHost.replaceChildren(el("div", { class: "md-typeset__table iron-bench-table" },
-      el("table", {}, el("thead", {}, head), el("tbody", {}, ...rows))),
+    tableHost.replaceChildren(el("div", { class: "md-typeset__scrollwrap" },
+      el("div", { class: "md-typeset__table iron-bench-table" },
+        el("table", {}, el("thead", {}, head), el("tbody", {}, ...rows)))),
       el("p", { class: "iron-bench-note",
         textContent: `Each device's latest ${metric}, and its change from the run before; ` +
           "a change inside the gates is greyed." }));
@@ -414,7 +636,10 @@
 
   function start(data) {
     DATA = data;
-    bench.hidden = false;
+    const deepLink = location.hash.includes("bench=");
+    Chart.Interaction.modes.ironRun = eachRun;
+    live.hidden = false;
+    drawTrends();
     drawRuns();
     fillNames();
     select(hashState());
@@ -425,7 +650,11 @@
       select(hashState());
       bench.scrollIntoView({ behavior: "smooth" });
     });
-    new MutationObserver(() => select(hashState()))
+    if (deepLink) bench.scrollIntoView();
+    new MutationObserver(() => {
+      drawTrends();
+      select(hashState());
+    })
       .observe(document.body, { attributes: true, attributeFilter: ["data-md-color-scheme"] });
   }
 
