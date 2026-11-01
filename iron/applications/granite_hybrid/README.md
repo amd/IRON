@@ -57,6 +57,6 @@ prompt chunk's scan streams all 2048 rows whatever the prompt's length.
 Time to first token and tokens per second are recorded to CI
 ([benchmarks](https://amd.github.io/IRON/benchmarks/)).
 
-On NPU1 the each-step tests (`TestEachStep`) and `long_context`'s are
-enabled, with an empty `profiles/npu1.json` (every operator's device
-defaults), but have not run on an NPU1 device yet.
+On NPU1 the each-step tests (`TestEachStep`) and `long_context`'s run
+nightly, with an empty `profiles/npu1.json` (every operator's device
+defaults).
