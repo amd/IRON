@@ -567,6 +567,10 @@ BUILD_JOBS = 4
 ROUND_US = 2e6
 MIN_CALLS = 3
 
+# A step longer than this is timed as the excess of two runs over one, not
+# ``repeats``: a dispatch's ~160 us and its jitter are a small share of it.
+LONG_STEP_US = 20e3
+
 
 @dataclasses.dataclass(frozen=True)
 class Measurement:
@@ -859,7 +863,8 @@ def measure(
         full_elf: How each is packaged: one full ELF, else an xclbin per
             design dispatched step by step.
         timing: How long to measure each.
-        repeats: How many back-to-back runs a step's time is the excess over.
+        repeats: How many back-to-back runs a step's time is the excess over;
+            two where the default's step is longer than ``LONG_STEP_US``.
         values: The per-call values each is run at.
         inputs: What its input buffers hold, by name, where random bytes
             would not be representative.
@@ -898,6 +903,26 @@ def measure(
     if 0 not in todo:
         todo.insert(0, 0)  # the default, timed beside the others
     distinct = sum(b.nbytes for b in ops[0].resolved().buffers) <= DISTINCT_BYTES
+    first = Standalone(
+        "probe1_0",
+        [ops[0]],
+        values={ops[0]: values or {}},
+        distinct=distinct,
+        inputs={ops[0]: inputs or {}},
+        full_elf=full_elf,
+        load=False,
+    )
+    first.load()
+    with npu_lock(lock):
+        first.callable()
+        begun = time.perf_counter()
+        first.callable()
+        one_us = (time.perf_counter() - begun) * 1e6
+    del first
+    # The repeats cancel a dispatch's jitter, which a step this long dwarfs.
+    if one_us > LONG_STEP_US:
+        repeats = 2
+        log(f"    a step takes {one_us / 1e3:.0f} ms: probes of {repeats} runs")
     # Each setting is two runs, each holding a context; one pair is the default's.
     size = CONTEXTS // 2 - 1
     fastest = math.inf

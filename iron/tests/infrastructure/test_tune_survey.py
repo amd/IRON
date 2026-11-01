@@ -13,6 +13,7 @@ import iron
 from iron import Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
+from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
@@ -21,7 +22,7 @@ from iron.tests.support.llama_model import small
 from iron.tune.autotune import Shape, Timed, merged, settings, shapes
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import array_scoped_fold_candidates
-from iron.tune.measure import MIN_CALLS, Cache, Timing, measure, platform
+from iron.tune.measure import LONG_STEP_US, MIN_CALLS, Cache, Timing, measure, platform
 from iron.tune.survey import step_times, survey
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -209,3 +210,15 @@ def test_a_long_step_is_timed_in_fewer_calls_a_round():
     [long_step] = measure([ReLU(size=2**27)], full_elf=True, timing=timing).values()
     [short_step] = measure([ReLU(size=2**12)], full_elf=True, timing=timing).values()
     assert MIN_CALLS <= long_step.calls < timing.calls == short_step.calls
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_long_step_is_the_excess_of_two_runs_over_one():
+    """A step past ``LONG_STEP_US`` dwarfs the dispatch the repeats cancel: its probes are two runs, not nine."""
+    logged: list[str] = []
+    op = GEMM(M=2048, K=4096, N=4096, precision="highest", num_aie_columns=1)
+    [step] = measure(
+        [op], full_elf=True, timing=Timing(rounds=2), log=logged.append
+    ).values()
+    assert any("probes of 2 runs" in line for line in logged), logged
+    assert step.t_step_us > LONG_STEP_US / 2
