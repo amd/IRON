@@ -10,6 +10,7 @@ module's shim tasks actually move. Device-free: ``generated_sequence`` only emit
 
 from math import prod
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.helpers.taplib import PerCall, TensorAccessPattern
@@ -27,6 +28,7 @@ from iron.tests.support.tools import DEVICES
 pytestmark = pytest.mark.usefixtures("npu2")
 
 NPU2 = DEVICES["npu2"]()
+NPU1 = DEVICES["npu1"]()
 
 
 def _lane_order(op, name: str) -> dict[int, np.ndarray]:
@@ -65,14 +67,19 @@ def _assert_described_and_faithful(op, name: str) -> None:
     operand = getattr(op, name)
     described = op.lane_transfers(operand)
     assert described is not None, f"{type(op).__name__}.{name} was not described"
-    predicted = {lane: tap for lane, tap, *_ in described}
+    # A lane described in several patterns moves them in turn.
+    predicted: dict[int, list] = {}
+    for lane, tap, *_ in described:
+        predicted.setdefault(lane, []).append(tap)
     truth = _lane_order(op, name)
     assert sorted(predicted) == sorted(
         truth
     ), f"{type(op).__name__}.{name}: lane sets differ"
     elements = prod(operand.shape)
     for lane in sorted(truth):
-        got = predicted[lane].gather(np.arange(elements, dtype=np.int32))
+        got = np.concatenate(
+            [t.gather(np.arange(elements, dtype=np.int32)) for t in predicted[lane]]
+        )
         assert np.array_equal(
             got, truth[lane]
         ), f"{type(op).__name__}.{name} lane {lane}"
@@ -92,6 +99,19 @@ def test_mha_lanes_are_faithful(case):
     op = MHA(**case.kwargs).resolved(NPU2)
     for b in op.buffers:
         _assert_described_and_faithful(op, b.name)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [c for c in MHA.test.resolve(MHA, NPU1) if c.kwargs.get("cores_per_block") == 1],
+    ids=lambda c: c.label,
+)
+def test_fused_mha_lanes_are_faithful(case):
+    """One core a query block, on npu1, where mha.cc's attend_block builds: KV a pattern a fill, its groups of rounds streaming up to their last query."""
+    with aie_utils.set_current_device(NPU1):
+        op = MHA(**case.kwargs).resolved(NPU1)
+        for b in op.buffers:
+            _assert_described_and_faithful(op, b.name)
 
 
 @pytest.mark.parametrize("paired", [False, True])
