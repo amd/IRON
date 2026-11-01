@@ -421,10 +421,6 @@ class MHA(Operator):
             )
 
     def compatible(self) -> None:
-        if 64 % self.B_q:
-            raise ValueError(
-                f"MHA: B_q ({self.B_q}) must divide 64, the block seq_pad is whole of"
-            )
         if self.pv_cores not in (1, 2) or self.pv_width * self.pv_cores != self.d:
             raise ValueError(
                 f"MHA: P*V takes one core or two, each a pv_width ({self.pv_width}) "
@@ -501,6 +497,11 @@ class MHA(Operator):
                 f"{dev.name} ({dev.arch}) with {dev.cols}"
             )
         B_q, pv_cores = self.B_q, self.pv_cores
+        # Before any kernel is sized: mha.cc builds only 16-, 32- and 64-key blocks.
+        if B_q is not None and 64 % B_q:
+            raise ValueError(
+                f"MHA: B_q ({B_q}) must divide 64, the block seq_pad is whole of"
+            )
         if B_q is None or pv_cores is None:
             if dev is None:
                 raise Unresolvable(
@@ -559,7 +560,7 @@ class MHA(Operator):
         """``B_kv`` for ``B_q``: itself, which mha.cc's causal skip compares by.
 
         Packed, the widest divisor of ``kv_len`` whose cores fit ``dev``
-        (any, where None), since mha.cc's vectorized softmax reads 64-key rows.
+        (any, where None): the fewest key blocks a step.
         """
         if not self.packed:
             return B_q
