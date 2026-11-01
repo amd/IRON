@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# AGENTS.md
+# Agent instructions
 
 The rules a coding agent or contributor follows in this repository, and the
 map of where things live. Each module's docstring is the reference for what
