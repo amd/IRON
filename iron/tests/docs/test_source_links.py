@@ -27,10 +27,10 @@ def hook():
 
 @pytest.mark.parametrize("directory_urls", [True, False])
 @pytest.mark.parametrize("quote", ['"', "'"])
-def test_installation_html_image_uses_site_asset(hook, directory_urls, quote):
+def test_root_page_html_image_uses_site_asset(hook, directory_urls, quote):
     docs = str(ROOT / "docs")
     image = File("assets/images/XDNA2.png", docs, "/tmp/site", directory_urls)
-    source = File("installation.md", docs, "/tmp/site", directory_urls)
+    source = File("agents.md", docs, "/tmp/site", directory_urls)
     page = SimpleNamespace(file=source, url=source.url)
     markdown = f'<img alt="IRON Logo" src={quote}./images/XDNA2.png?raw=1#logo{quote}>'
 
@@ -51,7 +51,7 @@ def test_installation_html_image_uses_site_asset(hook, directory_urls, quote):
 )
 def test_unmapped_html_image_is_unchanged(hook, target):
     docs = str(ROOT / "docs")
-    source = File("installation.md", docs, "/tmp/site", True)
+    source = File("agents.md", docs, "/tmp/site", True)
     page = SimpleNamespace(file=source, url=source.url)
     markdown = f'<img src="{target}">'
 

@@ -9,7 +9,7 @@ We actively welcome community involvement in this project! If you have a questio
 
 ## Overview
 
-### Pull Request Workflow
+### Pull request workflow
 - **Target Branch**: Submit PRs to the `devel` branch
 - **CI Requirements**: All CI tests must pass, including linting and formatting checks
 - **Draft PRs**: Open draft PRs as soon as possible with "DRAFT:" prefix to get early feedback
@@ -21,7 +21,7 @@ We actively welcome community involvement in this project! If you have a questio
   - **Removed**: Deprecated or deleted functionality
 - **Issue References**: Always reference related Issues in your PR description using `#issue-number`
 
-### Issue Management
+### Issue management
 - Use the provided Issue template when creating new issues
 - Provide clear reproduction steps for bugs
 - Include relevant system information and error messages
@@ -89,8 +89,9 @@ Hugging Face decoders need a config and a model class; see
 4. **Register.** Add the decoder to `APPLICATIONS` in
    `tests/applications/long_context/test.py`; a test fails unless it is
    there. Write its `profiles/` with
-   `iron.lm.tune` ("Tune" in the [README](README.md#models)), give the
-   package a README, and add a row to the README's model table.
+   `iron.lm.tune` ("Tune" in [Models](docs/models.md#running-testing-and-tuning-a-text-decoder)), give the
+   package a README, and add a row to the model tables in README.md and
+   docs/models.md.
 
 A Llama-shaped decoder (Mistral v0.3, Qwen, SmolLM) needs only these
 steps. Gemma 4 (`iron/applications/gemma4/model.py`) shows a
@@ -111,8 +112,8 @@ class ReLU(UnaryElementwise):
 ```
 
 1. **Kernel.** If no `aie.iron.kernels` factory computes it, add one in
-   mlir-aie as its guide says ("Adding a kernel" in
-   `programming_guide/kernels_library.md`): the C++, the factory with its
+   mlir-aie as its guide says ("Adding a kernel" in mlir-aie's
+   [`programming_guide/kernels_library.md`](https://github.com/Xilinx/mlir-aie/blob/main/programming_guide/kernels_library.md)): the C++, the factory with its
    `KernelContract`, the export, and a case in
    `test/python/npu/kernel_cases.py`. The contract carries the reference
    and tolerance, so the IRON operator needs neither (see `relu` in
@@ -135,7 +136,7 @@ class ReLU(UnaryElementwise):
 The rules (operand declarations, tunables, shipped binaries, the hooks an
 operator may override) are "Adding an operator" in [AGENTS.md](AGENTS.md).
 
-## Style Guide
+## Style guide
 
 ### Formatting and hooks
 Formatting and linting are enforced by [pre-commit](https://pre-commit.com/),
@@ -186,7 +187,7 @@ for a gap in mlir-aie's typing, with the rule named.
 
 ## Licensing
 
-### License Headers
+### License headers
 All source files must include the Apache 2.0 license header. We use the **REUSE** tool to ensure compliance:
 
 **Required Headers:** two SPDX lines, as `reuse annotate` below writes them
@@ -205,7 +206,7 @@ reuse lint
 reuse annotate --template ApacheAMD --copyright-prefix spdx-string-c --copyright "Advanced Micro Devices, Inc. All rights reserved." --license="Apache-2.0" --recursive --skip-unrecognised ./
 ```
 
-## Additional Resources
+## Additional resources
 
 - [Apache License 2.0](LICENSE)
 - [Code of Conduct](CODE_OF_CONDUCT.md)

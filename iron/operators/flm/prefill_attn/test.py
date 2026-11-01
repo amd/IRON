@@ -69,7 +69,7 @@ def _inputs(op, max_l, seed):
 
 
 def _record(op, bufs, L_begin, L_end, max_l, record):
-    """Time one more dispatch and record its latency, bandwidth and throughput.
+    """Time more dispatches and record their median latency, bandwidth and throughput.
 
     Bytes count the query/output rows and the K/V rows its queries read;
     FLOPs count the scores and the weighted sum of V.
@@ -88,8 +88,6 @@ def _record(op, bufs, L_begin, L_end, max_l, record):
         *bufs,
         bytes_moved=total_bytes,
         ops=flops,
-        warmup=1,
-        iters=1,
         record=record,
         L_begin=L_begin,
         L_end=L_end,
@@ -104,6 +102,10 @@ def _check(op, L_begin, L_end, max_l, seed, record=None):
     op(*bufs, L_begin=L_begin, L_end=L_end, max_l=max_l)
 
     o = bufs[0].numpy().astype(np.float32)
+    # Before the reference: numpy's BLAS threads spin on after a matmul and
+    # slow the host's timing of the calls.
+    if record is not None:
+        _record(op, bufs, L_begin, L_end, max_l, record)
     n = (L_end - L_begin) * NUM_HEADS * op.head_dim
     expected = op.reference(q, kv, L_begin, L_end, max_l)
     error = np.abs(o[:n] - expected)
@@ -112,8 +114,6 @@ def _check(op, L_begin, L_end, max_l, seed, record=None):
     assert error.max() <= MAX_ERROR, f"{label}: max |error| {error.max():.3f}"
     assert error.mean() <= MEAN_ERROR, f"{label}: mean |error| {error.mean():.4f}"
     assert np.all(o[n:] == SENTINEL), f"{label}: wrote past its rows"
-    if record is not None:
-        _record(op, bufs, L_begin, L_end, max_l, record)
 
 
 def _build(kind, **overrides):

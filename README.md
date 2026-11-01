@@ -5,43 +5,61 @@ SPDX-License-Identifier: Apache-2.0
 
 # 🦾 - IRON: Unlocking the Full Potential of NPUs - 🦾
 
-<a href="https://amd.github.io/IRON/" title="IRON documentation and benchmarks">
-   <img src="https://img.shields.io/badge/docs-amd.github.io%2FIRON-blue" alt="Website" /></a>
-<a href="https://discord.gg/UbXzGdXsR5">
-    <img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord" /></a>
-<a href="https://github.com/amd/iron/releases/latest" title="Download the latest release">
-   <img src="https://img.shields.io/github/v/release/amd/iron?include_prereleases" alt="Latest Release" /></a>
-<a href="https://tooomm.github.io/github-release-stats/?username=amd&repository=iron">
-   <img src="https://img.shields.io/github/downloads/amd/iron/total.svg" alt="GitHub downloads" /></a>
-<a href="https://github.com/amd/iron/actions" title="Check out our tests">
-   <img src="https://github.com/amd/iron/actions/workflows/small.yml/badge.svg" alt="Iron Tests" /></a>
-<a href="https://github.com/amd/iron/blob/main/CONTRIBUTING.md" title="Contribution Guide">
-    <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
-<a href="https://github.com/amd/iron/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/license-Apache-yellow.svg" alt="license: Apache" /></a>
-<a href="https://github.com/psf/black">
-    <img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black" /></a>
-<a href="https://github.com/astral-sh/ruff">
-    <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff" /></a>
-<a href="https://github.com/microsoft/pyright">
-    <img src="https://img.shields.io/badge/types-pyright-blue.svg" alt="Types: pyright" /></a>
-
 <p align="center">
-   <img src="./images/XDNA2.png" alt="IRON Logo" style="max-width: 100%; height: auto;">
+  <strong>A close-to-metal Python API for AMD Ryzen™ AI NPUs</strong>
 </p>
 
-IRON is an open-source & close-to-metal Python API enabling fast and efficient execution on [AMD Ryzen™ AI NPUs](https://www.amd.com/en/products/processors/consumer/ryzen-ai.html). It relies on language bindings around the [MLIR-AIE](https://github.com/Xilinx/mlir-aie) dialect.
+<p align="center">
+  <a href="https://amd.github.io/IRON/"><img src="https://img.shields.io/badge/docs-amd.github.io%2FIRON-1565d8" alt="Documentation"></a>
+  <a href="https://github.com/amd/IRON/actions/workflows/small.yml?query=branch%3Adevel"><img src="https://github.com/amd/IRON/actions/workflows/small.yml/badge.svg?branch=devel" alt="Tests"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License: Apache 2.0"></a>
+  <a href="https://discord.gg/UbXzGdXsR5"><img src="https://img.shields.io/badge/Discord-%23ROCm--NPU-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+</p>
 
-**Key Features:**
+<p align="center">
+  <a href="https://amd.github.io/IRON/installation/">Install</a> ·
+  <a href="./programming_guide/">Programming guide</a> ·
+  <a href="https://amd.github.io/IRON/api/">API reference</a> ·
+  <a href="https://amd.github.io/IRON/models/">Models</a> ·
+  <a href="https://amd.github.io/IRON/benchmarks/">Benchmarks</a>
+</p>
 
-- An operator library (GEMM, MHA, RMSNorm, RoPE, activations, ...) over mlir-aie's `aie.iron`, each operator one declared class
-- Graphs: a model's operators recorded once per input shape and compiled into one image, so intermediate values stay on the device
-- Autotuning of each operator's tunables into a per-device profile
-- End-to-end models on the NPU, from Llama 3.2 1B to a vision-language model (see [Models](#models))
+<p align="center">
+  <img src="./images/XDNA2.png" alt="The AMD XDNA 2 NPU: a grid of AI tiles over memory tiles, DMAs and the Infinity Fabric" width="100%">
+</p>
+
+IRON is an open-source Python library for programming the AI Engine array in
+[AMD Ryzen™ AI NPUs](https://www.amd.com/en/products/processors/consumer/ryzen-ai.html),
+from a single operator up to a whole language model. It is built on the
+[MLIR-AIE](https://github.com/Xilinx/mlir-aie) compiler and its `aie.iron`
+bindings, and runs on NPU1 (Phoenix, Hawk Point) and NPU2 (Strix, Strix
+Halo, Krackan).
+
+- **Operators**: GEMM, GEMV, attention, normalization, RoPE, activations and
+  more, each one declared Python class, tested against a numpy reference.
+- **Graphs**: a model's operators are recorded once per input shape and
+  compiled into one image, so intermediate values stay on the device.
+- **Autotuning**: each operator's tunables are searched and saved in a
+  per-device profile.
+- **Models on the NPU**: Llama 3.2, Granite 4, Gemma 4 (text, vision and
+  audio) and EmbeddingGemma 2, every step of the model's graph on the NPU,
+  measured nightly by CI.
 
 ## Quick start
 
-After [installing](#installation-linux) IRON with its `models` extra, and given a Hugging Face token for meta-llama's gated repository:
+On Ubuntu 24.04 or 24.10 with the XDNA driver and XRT installed (the
+[installation guide](https://amd.github.io/IRON/installation/) covers every
+step, including the driver timeout IRON needs):
+
+```bash
+git clone https://github.com/amd/IRON.git && cd IRON
+python3 -m venv ironenv && source ironenv/bin/activate
+source /opt/xilinx/xrt/setup.sh
+pip install -r requirements.txt
+pip install -e '.[models]'
+```
+
+Then, with a Hugging Face token for meta-llama's gated repository:
 
 ```python
 from iron.applications.llama import Llama
@@ -50,142 +68,51 @@ model = Llama.load("meta-llama/Llama-3.2-1B")   # downloads, fits, compiles once
 print(model.generate("The capital of France is", 8))   # greedy; pass an iron.lm.Sampler to sample
 ```
 
-`Llama.load` also takes a local directory holding `config.json`, the checkpoint and `tokenizer.json`.
-
-## Programming Guide
-
-Writing your own operator calls or graphs over `iron.Graph`? The
-[programming guide](./programming_guide/) walks through the API from an
-operator called on its own to a language model, each section a small
-runnable example.
-
-The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
-
-> E. Hunhoff, J. Melber, K. Denolf, A. Bisca, S. Bayliss, S. Neuendorffer, J. Fifield, J. Lo, P. Vasireddy, P. James-Roxby, E. Keller. "[Efficiency, Expressivity, and Extensibility in a Close-to-Metal NPU Programming Interface](https://arxiv.org/abs/2504.18430)". In 33rd IEEE International Symposium On Field-Programmable Custom Computing Machines, May 2025.
-
-## Installation (Linux)
-
-These instructions will guide you through everything required for building and executing a program on the Ryzen™ AI NPU, starting from a fresh bare-bones **Ubuntu 24.04** or **Ubuntu 24.10** install.
-
-### Initial Setup
-
-  > **Important**: Ensure your system has the latest BIOS version that enables NPU support. Check your laptop/mini-PC manufacturer's support website for BIOS updates.
-
-If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+ by installing the Hardware Enablement (HWE) stack:
-
-  ```bash
-  sudo apt update
-  sudo apt install --install-recommends linux-generic-hwe-24.04
-  sudo reboot
-  ```
-
-1. Install XDNA™ Driver and XRT:
-
-    > [Instructions from mlir-aie repository](https://github.com/Xilinx/mlir-aie?tab=readme-ov-file#build-and-install-the-xdna-driver-and-xrt)
-
-1. Give the driver a command timeout IRON's longest commands fit in. The
-   amdxdna driver ends a command after about two periods of its
-   `tdr_timeout_ms` in which no command on the device starts or finishes
-   (2000 ms by default, so about 4 s), and the run reports
-   `ERT_CMD_STATE_TIMEOUT`. IRON needs `tdr_timeout_ms=150000`, so a command
-   may run about 300 s. Set it, then reload the driver or reboot:
-    ```bash
-    echo "options amdxdna tdr_timeout_ms=150000" | sudo tee /etc/modprobe.d/amdxdna-tdr.conf
-    sudo modprobe -r amdxdna && sudo modprobe amdxdna
-    ```
-   On NPU2 a model's prompt chunk is one command, and the deepest chunk, at
-   the model's native context, is the longest. The timeout must cover it,
-   with room to spare on a slower device. CI's nightly times a whole prompt
-   at the native context, which bounds its deepest chunk from above:
-   `long_context`'s TTFT on the
-   [Benchmarks page](https://amd.github.io/IRON/benchmarks/#bench=long_context&suite=nightly&metric=TTFT).
-
-   On NPU1 a command is one operator, the longest an attention layer of the
-   deepest chunk.
-
-1. Install the packages needed for IRON and MLIR-AIE:
-
-    ```bash
-    # IRON needs Python 3.11 to 3.14, the versions the mlir-aie wheels are built for
-    sudo apt install \
-    build-essential clang clang-14 lld lld-14 python3-venv python3-pip
-    ```
-
-1. Setup a virtual environment and activate it:
-   ```bash
-   python3 -m venv ironenv
-   source ironenv/bin/activate
-   python3 -m pip install --upgrade pip
-   ```
-
-1. Source XRT (installed in step 1):
-   ```bash
-   source /opt/xilinx/xrt/setup.sh
-   ```
-
-1. Install required Python packages (from requirements.txt). The mlir-aie
-   it pins is a nightly wheel ([AGENTS.md](AGENTS.md#environment) says how
-   the pins move):
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-   Loading a model needs the `models` extra (huggingface_hub, tokenizers and
-   jinja2); the model tests also read images and audio. From this checkout:
-   ```bash
-   pip install -e '.[models]'               # to load and run models
-   pip install -r requirements_examples.txt # the extra and the model tests' packages
-   ```
-
-1. To test your installation, you can try to build and run the example below:
-   ```bash
-   pytest iron/tests/operators/test_catalog.py -k AXPY
-   ```
-
-The commands that run the operator and model tests are in [AGENTS.md](./AGENTS.md#commands).
+`Llama.load` also takes a local directory holding `config.json`, the
+checkpoint and `tokenizer.json`. To write operators and graphs of your own,
+start with the [programming guide](./programming_guide/).
 
 ## Models
 
-Each model is a package under [iron/applications/](./iron/applications/) over [iron/lm/](./iron/lm/), the library every model shares ([AGENTS.md](./AGENTS.md#language-models) describes it). Each model's README says which code is specific to it and where its files come from. The tests find a checkpoint at `$IRON_EXAMPLE_WEIGHTS_DIR/<checkpoint>`, default `/srv` (`iron.lm.testing.weights_dir`).
+| Model | NPU1 (Phoenix, Hawk Point) | NPU2 (Strix, Strix Halo, Krackan) |
+|---|:---:|:---:|
+| [Llama 3.2 1B, 3B](./iron/applications/llama/) | ✓ | ✓ |
+| [Granite 4.2 3B](./iron/applications/granite/) | ✓ | ✓ |
+| [Granite 4.0-H 1B](./iron/applications/granite_hybrid/) | ✓ | ✓ |
+| [Gemma 4 E2B](./iron/applications/gemma4/): text, vision and audio | text decoder | ✓ |
+| [EmbeddingGemma 2](./iron/applications/embedding_gemma2/) | ✓ | ✓ |
+| [Gemma 4 E2B in FastFlowLM](./iron/operators/flm/gemma4_engine/) | | ✓ |
 
-This table is also [docs/models.md](./docs/models.md)'s, with GitHub-absolute links in place of these relative ones; a new row goes in both.
+How to run, test and tune each one is on the
+[Models](https://amd.github.io/IRON/models/) page; their time to first token
+and tokens per second, and every operator's performance, are tracked on
+[Benchmarks](https://amd.github.io/IRON/benchmarks/).
 
-| Model | Application | Checkpoint | NPU1 (Phoenix, Hawk Point) | NPU2 (Strix, Strix Halo, Krackan) |
-|---|---|---|---|---|
-| Llama 3.2 1B, 3B | [llama](./iron/applications/llama/) | `llama3.2-1b`, `llama3.2-3b` | Yes, a dispatch per step | Yes |
-| Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` | Yes, a dispatch per step | Yes |
-| Granite 4.0-H 1B | [granite_hybrid](./iron/applications/granite_hybrid/) | `granite-4.0-h-1b` | Not yet run; its tests are enabled | Yes |
-| Gemma 4 E2B: text decoder, vision and audio towers | [gemma4](./iron/applications/gemma4/) | `gemma-4-e2b-it` | Text decoder, a dispatch per step; towers untested | Yes |
-| EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` | Yes, a dispatch per step; the widest images are refused | Yes |
-| Gemma 4 E2B in FastFlowLM | [gemma4_engine](./iron/operators/flm/gemma4_engine/) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) | No | Yes |
+## How it works
 
-NPU1 has no full-ELF dispatch, so each step is its own xclbin dispatch and
-the host starts each decode step on the token the last one drew; NPU2 runs
-the decode loop on the device. Each model's README says what its NPU1 tests
-cover.
+1. **Operators** (`iron/operators/`): one class each, whose `build()` lays
+   out ObjectFIFOs and Workers around a kernel on the AIE tile array.
+2. **Kernels**: C++ AIE API kernels from mlir-aie's
+   [kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels),
+   each carrying its own reference and tolerance.
+3. **Graphs and images** (`iron/common/`): a graph's operators share one
+   buffer arena; on NPU2 they compose into one full ELF, on NPU1 an xclbin
+   per step.
+4. **Models** (`iron/lm/`, `iron/applications/`): torch-named, pure-function
+   models over a checkpoint's weights, recorded into graphs.
 
-What the text decoders (Llama, Granite and Gemma 4 above) share:
+[AGENTS.md](./AGENTS.md) maps the code and its rules, and
+[CONTRIBUTING.md](./CONTRIBUTING.md) walks through adding an operator or a
+model.
 
-- **Setup**: `requirements_examples.txt`, as [installing](#installation-linux) says. XRT maps every device buffer locked, and a model's weights and caches are banks of at most 3.5 GiB (`iron.common.image.allocator.BANK`), so `ulimit -l` must cover one bank.
+## Community
 
-- **Run**: `python -m iron.applications.<application>.model <directory or repository id> [--prompt TEXT]`, the directory holding `config.json`, the checkpoint and the tokenizer; `-v` logs each compile; `--help` lists the options, and [Llama's README](./iron/applications/llama/README.md#running) explains them.
-- **Test**: `pytest tests/applications/<application>/` (or `tests/applications/decoders/ -k <application>` for the decoders that share one test) loads the model once, records its time to first token and tokens per second (CI publishes them, and the nightly run fails on a regression; see [benchmarks](https://amd.github.io/IRON/benchmarks/)), and checks accuracy against transformers' logits recorded in `golden.npz` beside the checkpoint, and determinism. `pytest <test> --record-goldens -p no:xdist` records missing logits where torch and transformers are installed; they are not IRON's requirements.
-- **Tune**: `python -m iron.lm.tune <application> --checkpoint <directory>` times each operator at every setting of its tunables and rewrites the application's `profiles/<device>.json`; review it with `git diff` and commit it.
+- 💬 [ROCm Discord](https://discord.gg/UbXzGdXsR5), **#ROCm-NPU** channel, for questions and discussion
+- 🐛 [GitHub Issues](https://github.com/amd/IRON/issues) for bugs and feature requests
 
-## Architecture
+## Citing IRON
 
-1. **Operators** (`iron/operators/`): each operator is one class, imported in [iron/operators/\_\_init\_\_.py](./iron/operators/__init__.py); its docstring says what it computes. Its parameters are declared with mlir-aie's `param()` (a tunable with `tunable()`, a per-call value with `per_call()`); its operands are aie.iron's `In`/`Out`/`InOut`, declared by shape. Its `build()` builds the array with ObjectFIFOs and Workers around a kernel; the library derives the runtime sequence unless the operator writes it. Its `reference()` and `test = Testing(...)` are what `iron/tests/operators/test_catalog.py` checks it by.
-2. **Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): C++ compute kernels, vectorized with the AIE API, reached through mlir-aie's kernel factories (`aie.iron.kernels`), which also carry each kernel's reference and tolerance. IRON hosts no kernels of its own. (The FastFlowLM Gemma 4 engine's `overrides.hpp` is C++ too, but it holds dispatch hooks, not kernels.)
-3. **Graphs and images** (`iron/common/`): a graph is recorded on handles and lowered onto an image: its buffers placed in one arena, and on NPU2 its operators' designs composed into one full ELF that runs them in turn (on NPU1, an xclbin per step), run through XRT.
-4. **Models** (`iron/lm/`, `iron/applications/`): see [Models](#models).
-
-## Community and Support
-
-- 🌐 **Website**: [amd.github.io/IRON](https://amd.github.io/IRON/) for the full documentation and benchmark history
-- 💬 **Discord**: Join the [ROCm Discord](https://discord.gg/UbXzGdXsR5)'s **#ROCm-NPU** channel for discussions and support
-- 🐛 **Issues**: Report bugs and request features via [GitHub Issues](https://github.com/amd/iron/issues)
-- 📖 **Contributing**: See [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines
-- 📚 **Documentation**: [AGENTS.md](./AGENTS.md) for the rules and the map of the code, operator docstrings in `iron/operators/`, kernel docs in the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
+> E. Hunhoff, J. Melber, K. Denolf, A. Bisca, S. Bayliss, S. Neuendorffer, J. Fifield, J. Lo, P. Vasireddy, P. James-Roxby, E. Keller. "[Efficiency, Expressivity, and Extensibility in a Close-to-Metal NPU Programming Interface](https://arxiv.org/abs/2504.18430)". In 33rd IEEE International Symposium On Field-Programmable Custom Computing Machines, May 2025.
 
 ## Acknowledgements
 
@@ -198,7 +125,7 @@ FastFlowLM, are under its own binary license and are not redistributed here.
 
 ## License
 
-IRON is licensed under the Apache License 2.0. See [LICENSE](./LICENSE) for details.
+IRON is licensed under the [Apache License 2.0](./LICENSE).
 
 -----
 
