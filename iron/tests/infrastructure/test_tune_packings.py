@@ -29,7 +29,7 @@ from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
 from iron.tests.support.llama_model import small
-from iron.tune.autotune import Point, Timed
+from iron.tune.autotune import Point, Shape, Timed
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import fold_profile
 from iron.tune.measure import Cache, Timing, platform
@@ -214,6 +214,25 @@ def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
         _, packing = apply_packings(m.record(**m.shapes()[0]), profile, [], npu2)
         sizes.append([len(g) for g in packing.groups])
     assert sizes[0] == sizes[1] and sizes[0], sizes
+
+
+def test_writes_a_fixed_offset_apart_at_a_per_call_row_are_one_shape(npu2):
+    """K's and V's write into a paired cache, ``kv[pos, :, 0]`` and ``kv[pos, :, 1]``.
+
+    They differ only per call, so a packing or fusion entry naming one names both.
+    """
+    kv = iron.state((16, 2, 2, 64))
+
+    class Write(iron.Graph):
+        def body(self, k, v, *, pos: Scratchpad[np.int32]):
+            kv[pos, :, 0] = k
+            kv[pos, :, 1] = v
+
+    t = Write().record(k=(2, 64), v=(2, 64))
+    first, second = (Shape(s.op.resolved(npu2)) for s in t.steps)
+    assert first.key == second.key
+    offsets = [b.expression.evaluate({"pos": 3}) for b in t.bindings]
+    assert offsets == [3 * 256, 3 * 256 + 64]
 
 
 class Single(iron.Graph):

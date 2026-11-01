@@ -164,6 +164,16 @@ def _take_views(cls, operands, kwargs, values):
             continue
         param, offset_member = cls.accept_views[i]
         tap = TensorAccessPattern.full(h.shape or (1,)) if view is None else view.tap
+        offset = None if view is None else view.offset
+        if (
+            offset is not None
+            and isinstance(tap, TensorAccessPattern)
+            and isinstance(tap.offset, (int, np.integer))
+            and tap.offset
+        ):
+            # Moved per call, so views a fixed offset apart share one design.
+            offset = offset + int(tap.offset)
+            tap = TensorAccessPattern(tap.tensor_dims, 0, tap.sizes, tap.strides)
         kwargs.setdefault(param, tap)
         if view is not None and (view.repeat is not None or view.length is not None):
             if i:
@@ -184,8 +194,8 @@ def _take_views(cls, operands, kwargs, values):
         if view is None:
             out.append(dataclasses.replace(h, valid={}))
             continue
-        if view.offset is not None:
-            values[offset_member] = view.offset
+        if offset is not None:
+            values[offset_member] = offset
         # What the pattern walks: the whole buffer, in the pattern's shape.
         walked = view.tap[0] if isinstance(view.tap, tuple) else view.tap
         out.append(Handle(h.buffer, concrete(walked.tensor_dims, walked), h.dtype))
