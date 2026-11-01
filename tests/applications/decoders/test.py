@@ -35,14 +35,20 @@ pytestmark = pytest.mark.supported_devices("npu2")
 
 
 @pytest.fixture(scope="module", params=DECODERS)
-def decoder(request):
+def load(request):
+    """Return a decoder's loader and its prompts' lengths."""
+    cls, weights, prompts = request.param
+    return load_from_flags(request, cls, weights_dir(weights)), prompts
+
+
+@pytest.fixture(scope="module")
+def decoder(load):
     """Return a decoder, compiled and loaded once, and its prompts' lengths.
 
     Its runtime is released before the next decoder loads.
     """
-    cls, weights, prompts = request.param
-    load = load_from_flags(request, cls, weights_dir(weights))
-    model = load()
+    load_fn, prompts = load
+    model = load_fn()
     yield model, prompts
     model.release()
     aie_utils.cleanup_npu_runtime()
@@ -50,6 +56,43 @@ def decoder(request):
 
 # Gemma 4 E2B on npu2 measured mean 0.0055, P90 0.0086, max 0.100 over 40 steps.
 MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
+class TestEachStep:
+    """The form NPU1 runs: each step its own dispatch of one xclbin.
+
+    The host starts each on the token the last one drew. Its model is
+    built and dropped with the class, first: after any other test it
+    would be held beside the module's full-ELF one.
+    """
+
+    @pytest.fixture(scope="class")
+    def decoder(self, load):
+        load_fn, prompts = load
+        model = load_fn(full_elf=False)
+        assert not model.device_loop
+        yield model, prompts
+        model.release()
+        aie_utils.cleanup_npu_runtime()
+
+    @pytest.mark.parametrize(
+        "prompt_idx,num_tokens",
+        [
+            pytest.param(0, 40, id="long-40", marks=pytest.mark.bench),
+            pytest.param(1, 1, id="short-1", marks=pytest.mark.bench),
+        ],
+    )
+    def test_gemma4_each_step(self, decoder, prompt_idx, num_tokens, record_property):
+        model, prompts = decoder
+        check_generation(model, prompts[prompt_idx], num_tokens, record=record_property)
+
+    def test_gemma4_each_step_accuracy(self, decoder, record_property):
+        check_accuracy(decoder[0], MAX_KL, record=record_property)
+
+    def test_gemma4_each_step_determinism(self, decoder, record_property):
+        check_determinism(decoder[0], record=record_property)
 
 
 @pytest.mark.bench
