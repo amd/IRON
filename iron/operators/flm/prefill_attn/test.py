@@ -102,6 +102,10 @@ def _check(op, L_begin, L_end, max_l, seed, record=None):
     op(*bufs, L_begin=L_begin, L_end=L_end, max_l=max_l)
 
     o = bufs[0].numpy().astype(np.float32)
+    # Before the reference: numpy's BLAS threads spin on after a matmul and
+    # slow the host's timing of the calls.
+    if record is not None:
+        _record(op, bufs, L_begin, L_end, max_l, record)
     n = (L_end - L_begin) * NUM_HEADS * op.head_dim
     expected = op.reference(q, kv, L_begin, L_end, max_l)
     error = np.abs(o[:n] - expected)
@@ -110,8 +114,6 @@ def _check(op, L_begin, L_end, max_l, seed, record=None):
     assert error.max() <= MAX_ERROR, f"{label}: max |error| {error.max():.3f}"
     assert error.mean() <= MEAN_ERROR, f"{label}: mean |error| {error.mean():.4f}"
     assert np.all(o[n:] == SENTINEL), f"{label}: wrote past its rows"
-    if record is not None:
-        _record(op, bufs, L_begin, L_end, max_l, record)
 
 
 def _build(kind, **overrides):
