@@ -168,7 +168,8 @@ def trend_series(series, metric, checkpoint):
 
     The series is one the device's latest run measured: in the first of the
     device's forms, then a test of its own before a class's, then one more
-    devices share, then the longest history, then the first label.
+    devices share, then the longest history over every device, then the
+    first label.
     """
     named = {
         s["label"]: next((f for key, f in FORMS.items() if key in s["test"]), None)
@@ -197,7 +198,11 @@ def trend_series(series, metric, checkpoint):
                 DEVICE_FORMS[device].index(named[s["label"]]),
                 s["test"].count("::") > 1,
                 -shared[s["label"]],
-                -sum(metric in p[3] for p in s["devices"][device]["points"]),
+                -sum(
+                    metric in p[3]
+                    for run in s["devices"].values()
+                    for p in run["points"]
+                ),
                 natural_key(s["label"]),
                 s["label"],
             )

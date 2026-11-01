@@ -286,3 +286,22 @@ def test_a_benchmark_no_longer_run_has_no_trend(tmp_path):
         ],
     )
     assert [t["benchmark"] for t in _page_data(tmp_path)["trends"]] == ["GEMV"]
+
+
+def test_both_devices_trend_the_same_shared_parametrization(tmp_path):
+    nights = NIGHTS + ["2026-10-03 10:00:00"]
+    for arch, npu, longer in (
+        ("krackan", "npu2", "M_2048"),
+        ("phoenix", "npu1", "M_4096"),
+    ):
+        _write(
+            tmp_path / arch / "extensive" / "all.csv",
+            [
+                _row(night, GEMV, f"{npu}-GEMV-{m}-K_8192", Throughput=1.0)
+                for m in ("M_2048", "M_4096")
+                for night in (nights if m == longer else nights[-1:])
+            ],
+        )
+
+    (trend,) = _page_data(tmp_path)["trends"]
+    assert trend["series"] == {"krackan": "M_2048", "phoenix": "M_2048"}

@@ -660,7 +660,8 @@
     if (deepLink) bench.scrollIntoView();
     document.addEventListener("click", (event) => {
       const anchor = event.target.closest('a[href^="#bench="]');
-      if (!anchor) return;
+      if (!anchor || event.defaultPrevented || event.button !== 0 ||
+          event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
       openHistory(anchor.getAttribute("href"));
     });
