@@ -39,8 +39,9 @@ validation:
 
 theme:
   name: material
-  logo: assets/images/iron-mark.svg
-  favicon: assets/images/iron-mark.svg
+  icon:
+    logo: material/arm-flex
+  favicon: assets/images/iron-favicon.svg
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
