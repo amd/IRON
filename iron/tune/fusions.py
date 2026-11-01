@@ -43,7 +43,7 @@ from aie.iron import Program
 from iron.common.declare import Operator, Profile
 from iron.common.design import BuiltArray, OperatorDesign, configuration
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
-from iron.common.graph.fusion import candidates
+from iron.common.graph.fusion import admits, candidates
 from iron.common.image.compose import fused_configuration, unvalued
 from iron.common.image.packaging import plan
 from iron.common.image.step import Edge, Fusion, FusionKind
@@ -532,7 +532,7 @@ def narrow_group(
     see this); its own width is tried first, by building it, and taken
     without a search where that builds (a plain stream's usually does,
     ``iron.common.graph.fusion`` having already found it fused at its
-    members' own width, ``_admits``, when it was proposed; a fan-out's may
+    members' own width, ``admits``, when it was proposed; a fan-out's may
     not, its several consumers sharing a shim budget the search then
     narrows to fit).
 
@@ -636,8 +636,21 @@ def narrow_group(
                 group_fit_verdict(fused, fit_cache, kind=group.kind, edges=group.edges)
                 is None
             )
-        # An edge's fit is its build: time it here, once.
+        # An edge's fit is its build: time it here, once, where every edge feeds at
+        # these widths, which needs no build of the whole.
         key = tuple(tuple(sorted(c.items())) for c in combo)
+        fused = [
+            op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, combo)
+        ]
+        fed = [admits(fused[p], out, fused[c], inp) for p, out, c, inp in group.edges]
+        if any(
+            kind is None
+            or group.kind is FusionKind.STREAM
+            and kind is not FusionKind.STREAM
+            for kind in fed
+        ):
+            trials[key] = None
+            return False
         trials[key] = timed(combo)
         return trials[key] is not None
 

@@ -19,7 +19,7 @@ from .record import Recording
 _built: dict[tuple[str, str, str, str], FusionKind | None] = {}
 
 
-def _admits(
+def admits(
     producer: Operator, output: str, consumer: Operator, input_: str
 ) -> FusionKind | None:
     """How ``producer``'s resolved ``output`` can feed ``consumer``'s resolved ``input_`` on-chip.
@@ -63,7 +63,7 @@ def _hand_offs(
     root, which only that step writes and is not a graph output, feedback, pinned or
     resident buffer; each reader comes later and reads the whole root through one
     streamed, non-``replicate`` input, no host step reads it, and every reader's edge
-    admits (``_admits``). An input that streams only with one of its reader's bool
+    admits (``admits``). An input that streams only with one of its reader's bool
     tunables flipped (GEMV's ``B``, at ``feed_b``) is admitted so, that variant
     replacing the reader in ``ops``: a tuner finds and writes the setting the fusion
     runs at.
@@ -133,13 +133,13 @@ def _hand_offs(
                             if next(
                                 b for b in v.buffers if b.name == cbuf.name
                             ).streamed
-                            and _admits(ops[i], buf.name, v, cbuf.name) is not None
+                            and admits(ops[i], buf.name, v, cbuf.name) is not None
                         ),
                         None,
                     )
                     if reader is None:
                         break
-                elif _admits(ops[i], buf.name, reader, cbuf.name) is None:
+                elif admits(ops[i], buf.name, reader, cbuf.name) is None:
                     break
                 ops[j] = reader
                 fed[j] = cbuf.name
@@ -205,7 +205,7 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
             edges.sort(key=lambda e: (e.producer, e.consumer))
             ops = resolved[lo : hi + 1]
             staged = any(
-                _admits(ops[e.producer - lo], e.output, ops[e.consumer - lo], e.input)
+                admits(ops[e.producer - lo], e.output, ops[e.consumer - lo], e.input)
                 is FusionKind.STAGED
                 for e in edges
             )
