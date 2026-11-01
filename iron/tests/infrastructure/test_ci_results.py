@@ -142,7 +142,8 @@ _DEVICE_BENCHED = """\
 import pytest
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.bench(devices=("npu1",))
+@pytest.mark.tracked_on("npu1")
+@pytest.mark.bench
 def test_npu1_only(record_property):
     record_property("Latency", 1.0)
 
@@ -154,7 +155,7 @@ def test_everywhere(record_property):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_a_bench_given_devices_is_tracked_only_on_them(tmp_path):
+def test_a_bench_is_tracked_only_where_tracked_on_says(tmp_path):
     """npu2 runs npu1's each-step form to check it, but its speed there is not npu2's own."""
     out = tmp_path / "out.csv"
     _pytest(tmp_path, f"--csv-output={out}", tests=_DEVICE_BENCHED, returncode=0)
