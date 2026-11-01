@@ -316,8 +316,10 @@ Check the code before relying on a line here; it is the authority.
   over a cache costs the context, not the cache.
 - **One compile, any context.** A decoder is two versions, a decode step
   and a prompt chunk; `max_seq_len` sizes only the caches and the RoPE
-  table. Caches are `(max_seq_len, num_key_value_heads, head_dim)` so a
-  call's write is contiguous and no descriptor strides by the context.
+  table. Caches are `(max_seq_len, num_key_value_heads, 2, head_dim)`, a
+  position's keys and values side by side, so a call writes a run of
+  positions, a KV head's block of keys and values is one DMA pattern, and
+  no descriptor strides by the context.
   `tests/applications/long_context/`'s
   `test_nothing_grows_with_the_context` holds every decoder to this.
 - **DMA descriptors.** A pattern past one buffer descriptor's limits is

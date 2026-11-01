@@ -267,7 +267,7 @@ def test_a_window_keeps_every_position_where_a_ring_takes_as_many_rows():
     for L, C in ((384, 64), (200, 200)):
         config = dataclasses.replace(SMALL, prefill_chunk=C, max_seq_len=L)
         cache = KVCache(config, 7)
-        assert cache.ring is None and cache.keys.shape[0] == L
+        assert cache.ring is None and cache.kv.shape[0] == L
 
 
 def test_a_ring_s_chunk_attends_from_its_valid_rows_alone():

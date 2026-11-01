@@ -274,12 +274,13 @@ def test_pack_candidates_on_small_llama(llama_recordings):
     One three-way pack a layer (the MLP's gate/up is only a pair, down_proj depending
     on both), the prompt chunk's under ``ProjectionGEMM``. They pack as 2- and 3-way
     runs, overlapping ones included; plain data movers (``Copy``,
-    ``RoPE``) that merely run side by side pack too.
+    ``RoPE``) that merely run side by side pack too, but a layer's K and V
+    cache writes, into one paired buffer.
     """
     decode, prompt = llama_recordings
     for recording, projection in ((decode, "GEMV"), (prompt, "ProjectionGEMM")):
         packs = candidates(recording, (FusionKind.PACK,))
-        assert len(packs) == 13
+        assert len(packs) == 11
         triples = [f for f in packs if len(f.steps) == 3]
         assert all(_kinds(recording, f) == (projection,) * 3 for f in triples)
         # SMALL's two layers, one q/k/v pack each.
@@ -325,7 +326,7 @@ def test_pack_candidates_on_llama_1b_header():
     decode, prompt = model.record(**decode_shapes), model.record(**prompt_shapes)
     for recording, projection in ((decode, "GEMV"), (prompt, "ProjectionGEMM")):
         packs = candidates(recording, (FusionKind.PACK,))
-        assert len(packs) == 7
+        assert len(packs) == 6
         assert any(
             len(f.steps) == 3 and _kinds(recording, f) == (projection,) * 3
             for f in packs

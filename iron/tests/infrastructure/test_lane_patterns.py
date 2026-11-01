@@ -56,7 +56,7 @@ def _lane_order(op, name: str) -> dict[int, np.ndarray]:
             strides = [int(s) for s in t.strides.split(",")]
             offset = t.offset if isinstance(t.offset, int) else 0
             tap = TensorAccessPattern(operand.shape, offset, sizes, strides)
-            pieces.append(tap.gather(np.arange(elements)))
+            pieces.append(tap.gather(np.arange(elements, dtype=np.int32)))
         out[lane] = np.concatenate(pieces)
     return out
 
@@ -72,7 +72,7 @@ def _assert_described_and_faithful(op, name: str) -> None:
     ), f"{type(op).__name__}.{name}: lane sets differ"
     elements = prod(operand.shape)
     for lane in sorted(truth):
-        got = predicted[lane].gather(np.arange(elements))
+        got = predicted[lane].gather(np.arange(elements, dtype=np.int32))
         assert np.array_equal(
             got, truth[lane]
         ), f"{type(op).__name__}.{name} lane {lane}"
@@ -88,25 +88,33 @@ def test_gemm_lanes_are_faithful(case):
 
 @pytest.mark.parametrize("case", MHA.test.resolve(MHA, NPU2), ids=lambda c: c.label)
 def test_mha_lanes_are_faithful(case):
-    """Q and O stream every row unconditionally; K and V's order is checked at the unbounded catalog shapes, where ``length_parameter`` is None."""
+    """Q and O stream every row unconditionally; K and V's (or KV's) order is checked at the unbounded catalog shapes, where ``length_parameter`` is None."""
     op = MHA(**case.kwargs).resolved(NPU2)
-    for name in ("Q", "O", "K", "V"):
-        _assert_described_and_faithful(op, name)
+    for b in op.buffers:
+        _assert_described_and_faithful(op, b.name)
 
 
-def test_mha_k_and_v_match_the_generated_module_under_a_kv_bound():
-    """``kv_blocks``, the ``length_parameter`` K and V describe.
+@pytest.mark.parametrize("paired", [False, True])
+def test_mha_k_and_v_match_the_generated_module_under_a_kv_bound(paired):
+    """``kv_blocks``, the ``length_parameter`` K and V (or KV) describe.
 
     Is the same real per-call parameter the generated module's shim tasks patch their
     length from, under a growing KV cache's attention (AGENTS.md's "length-free
     extents").
     """
-    op = MHA(num_heads=8, num_KV_heads=2, seq_len=2048, kv_len=8192, num_pipelines=8)
+    op = MHA(
+        num_heads=8,
+        num_KV_heads=2,
+        seq_len=2048,
+        kv_len=8192,
+        num_pipelines=8,
+        kv_paired=paired,
+    )
     op.use_value("kv_valid", PerCall("n", Kind.SCRATCHPAD, np.int32).affine())
     op = op.resolved(NPU2)
     word = op.kv_blocks
     text, tasks = generated_sequence(op, full_elf=True)
-    for name in ("K", "V"):
+    for name in ("KV",) if paired else ("K", "V"):
         operand = getattr(op, name)
         idx = [b.name for b in op.buffers].index(name)
         real = {t.length_parameter: int(t.length_unit) for t in tasks if t.arg == idx}

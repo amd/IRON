@@ -174,7 +174,8 @@ _CASES = [
         extensive=True,
     ),
     # Llama 3.2 1B's and 3B's prompt chunk, and a full-attention layer at
-    # d=256: 2048 queries, the last rows of 2K, 8K and 32K keys.
+    # d=256: 2048 queries, the last rows of 2K, 8K and 32K keys of a
+    # KVCache.
     *(
         Case(
             dict(
@@ -185,7 +186,7 @@ _CASES = [
                 kv_len=kv_len,
                 num_pipelines=8,
                 heads_interleaved=True,
-                kv_interleaved=True,
+                kv_paired=True,
             ),
             id=f"chunk-d{d}-{kv_len // 1024}k",
             extensive=kv_len > 8192,
@@ -194,7 +195,33 @@ _CASES = [
         for heads, kv_heads, d in ((32, 8, 64), (24, 8, 128), (8, 2, 256))
         for kv_len in (2048, 8192, 32768)
     ),
-    # Llama 3.2 1B's decode step over 32K keys.
+    # The same over its K and V apart, and paired with P*V split.
+    Case(
+        dict(
+            num_heads=32,
+            num_KV_heads=8,
+            seq_len=2048,
+            kv_len=2048,
+            num_pipelines=8,
+            heads_interleaved=True,
+            kv_interleaved=True,
+        ),
+        lower=True,
+    ),
+    Case(
+        dict(
+            num_heads=32,
+            num_KV_heads=8,
+            seq_len=2048,
+            kv_len=4096,
+            num_pipelines=8,
+            heads_interleaved=True,
+            kv_paired=True,
+            pv_cores=2,
+        ),
+        lower=True,
+    ),
+    # Llama 3.2 1B's decode step over 32K keys of a KVCache.
     Case(
         dict(
             num_heads=32,
@@ -203,7 +230,7 @@ _CASES = [
             kv_len=32768,
             num_pipelines=4,
             heads_interleaved=True,
-            kv_interleaved=True,
+            kv_paired=True,
         ),
         id="decode-d64-32k",
         bench=True,
@@ -241,7 +268,11 @@ class MHA(Operator):
     kv_len: int = param(default=lambda op: op.seq_pad)
     # ``(seq, heads, d)`` as a projection writes it, so no copy reorders the heads.
     heads_interleaved: bool = param(default=False)
-    kv_interleaved: bool = param(default=False)
+    # One operand KV, ``(kv_len, num_KV_heads, 2, d)``, a position's K and V
+    # side by side as a KVCache holds them, in place of K and V.
+    kv_paired: bool = param(default=False)
+    kv_apart: bool = param(default=lambda op: not op.kv_paired, repr=False)
+    kv_interleaved: bool = param(default=lambda op: op.kv_paired)
     d: int = param(default=64)
     causal: bool = param(default=True, array=True)
     # Keys more than this many positions from a query are masked.
@@ -258,6 +289,8 @@ class MHA(Operator):
     q_shims: int = tunable(repr=False, init=False)
     join_rows: int = tunable(repr=False, init=False)
     kv_lanes: int = tunable(repr=False, init=False)
+    # KV's lanes for each of kv_lanes: K's, then V's on each P*V core.
+    kv_streams: int = tunable(repr=False, init=False)
     width: int = tunable(repr=False, init=False)
     # Two P*V cores, by halves of the head, where one's L1 holds no block.
     pv_cores: int = tunable(repr=False, domain=(1, 2))
@@ -290,6 +323,7 @@ class MHA(Operator):
         ),
         obj_shape=(d, B_kv),
         per=(kv_lanes,),
+        when=kv_apart,
     )
     V = In(
         Select(
@@ -299,6 +333,17 @@ class MHA(Operator):
         ),
         obj_shape=(B_kv, pv_width),
         per=(kv_lanes, pv_cores),
+        when=kv_apart,
+    )
+    # A K lane's blocks; build() gives each V lane V's.
+    KV = In(
+        kv_len,
+        num_KV_heads,
+        2,
+        d,
+        obj_shape=(d, B_kv),
+        per=(kv_lanes, kv_streams),
+        when=kv_paired,
     )
     O = Out(  # noqa: E741 -- an operand name: attention's Q, K, V, O
         Select(
@@ -377,6 +422,13 @@ class MHA(Operator):
     def validate(self) -> None:
         if self.d <= 0 or self.d % 64:
             raise ValueError(f"MHA: d ({self.d}) must be a positive multiple of 64")
+        if self.kv_apart == self.kv_paired:
+            raise ValueError(
+                f"MHA: K and V are apart or paired as KV, one of them; got "
+                f"kv_apart={self.kv_apart}, kv_paired={self.kv_paired}"
+            )
+        if self.kv_paired and not self.kv_interleaved:
+            raise ValueError("MHA: KV is position-major: kv_paired is kv_interleaved")
         if self.window is not None and self.window <= 0:
             raise ValueError(f"MHA: window ({self.window}) must be positive or None")
         # partial_softmax scales a row's maximum in place of every element.
@@ -545,6 +597,7 @@ class MHA(Operator):
             q_shims=q_shims,
             join_rows=B_q * (self.num_pipelines // q_shims),
             kv_lanes=self.num_pipelines if self.packed else 1,
+            kv_streams=1 + pv_cores,
             width=width,
             pv_cores=pv_cores,
             pv_width=self.d // pv_cores,
@@ -766,19 +819,36 @@ class MHA(Operator):
                 )
 
         kv_lanes = self.kv_lanes
-        inK = self.K.fifos(
-            of_depth,
-            tiles=[Tile(layout.k_shim, 0) if layout is not None else AnyShimTile]
-            * kv_lanes,
-        )
-        inV = self.V.fifos(
-            of_depth,
-            tiles=[
-                Tile(layout.v[h], 0) if layout is not None else AnyShimTile
-                for _ in range(kv_lanes)
-                for h in range(pv_cores)
-            ],
-        )
+        k_tiles = [
+            Tile(layout.k_shim, 0) if layout is not None else AnyShimTile
+        ] * kv_lanes
+        v_tiles = [
+            Tile(layout.v[h], 0) if layout is not None else AnyShimTile
+            for _ in range(kv_lanes)
+            for h in range(pv_cores)
+        ]
+        if self.kv_paired:
+            inK = [
+                ObjectFifo(np.ndarray[(d, B_kv), np.dtype[dtype]], depth=of_depth)
+                for _ in k_tiles
+            ]
+            inV = [ObjectFifo(v_ty, depth=of_depth) for _ in v_tiles]
+            self.KV.bind(
+                [
+                    fifo.prod(tile=tile)
+                    for lane in range(kv_lanes)
+                    for fifo, tile in [
+                        (inK[lane], k_tiles[lane]),
+                        *zip(
+                            inV[lane * pv_cores : (lane + 1) * pv_cores],
+                            v_tiles[lane * pv_cores : (lane + 1) * pv_cores],
+                        ),
+                    ]
+                ]
+            )
+        else:
+            inK = self.K.fifos(of_depth, tiles=k_tiles)
+            inV = self.V.fifos(of_depth, tiles=v_tiles)
         memK, memV = [], []
         for lane in range(kv_lanes):
             memK.append(
@@ -1106,16 +1176,21 @@ class MHA(Operator):
         hi = np.minimum(position + ahead, keys - 1)
         return 4 * self.num_heads * self.d * int((hi - lo + 1).sum())
 
-    def reference(self, Q, K, V, s_q=None, s_kv=None):
-        """Attention per head, the queries the keys' last rows.
+    def reference(self, Q, *kv, s_q=None, s_kv=None):
+        """Attention per head of ``Q`` over K and V (``kv``, or ``KV``'s halves), the queries the keys' last rows.
 
         Query rows from ``s_q`` on are zeros and keys from ``s_kv`` on are
         masked.
         """
         if self.heads_interleaved:
             Q = np.swapaxes(Q, 0, 1)
-        if self.kv_interleaved:
-            K, V = (np.swapaxes(t, 0, 1) for t in (K, V))
+        if self.kv_paired:
+            (KV,) = kv
+            K, V = (np.swapaxes(KV[:, :, x], 0, 1) for x in (0, 1))
+        elif self.kv_interleaved:
+            K, V = (np.swapaxes(t, 0, 1) for t in kv)
+        else:
+            K, V = kv
         groups = self.num_heads // self.num_KV_heads
         # The keys before the first query: those not in Q's padding, or a
         # bounded call's.
@@ -1184,9 +1259,29 @@ class MHA(Operator):
             by_shim = heads.split(1, self.q_shims * rows)
             return by_shim[:, :, shim * rows : (shim + 1) * rows]
 
-        def kv_rows(buffer, kv_head, reads):
-            head = by_head(buffer, self.kv_interleaved)[kv_head, : kv_blocks * B_kv]
-            return head.split(0, B_kv).repeat(reads)
+        def kv_rows(x, kv_head, reads):
+            """K's (``x`` 0) or V's (1) blocks of ``kv_head``, read ``reads`` times."""
+            if self.kv_paired:
+                head = TensorAccessPattern.full(self.KV.shape)[:, kv_head, x]
+            else:
+                head = by_head((self.K, self.V)[x], self.kv_interleaved)[kv_head]
+            return head[: kv_blocks * B_kv].split(0, B_kv).repeat(reads)
+
+        def kv_fill(x, tap, p, h, group):
+            """Fill pipeline lane ``p``'s K (``x`` 0) or its V share ``h`` (1)."""
+            if self.kv_paired:
+                operand = self.KV
+                lane = p * self.kv_streams + (1 + h if x else 0)
+            else:
+                operand = (self.K, self.V)[x]
+                lane = p * self.pv_cores + h if x else p
+            operand.fill(
+                tap,
+                lane=lane,
+                group=group,
+                length_parameter=kv_valid,
+                length_unit=B_kv * (self.pv_width if x else self.d),
+            )
 
         if self.packed:
             steps = kv_heads // self.num_pipelines
@@ -1214,14 +1309,8 @@ class MHA(Operator):
                 for kv_head in owned:
                     self.Q.fill(packed_rows(self.Q, kv_head), lane=0, group=tg)
                 for p, kv_head in enumerate(owned):
-                    for x in (self.K, self.V):
-                        x.fill(
-                            kv_rows(x, kv_head, 1),
-                            lane=p,
-                            group=tg,
-                            length_parameter=kv_valid,
-                            length_unit=B_kv * x.shape[-1],
-                        )
+                    for x in (0, 1):
+                        kv_fill(x, kv_rows(x, kv_head, 1), p, 0, tg)
                 for kv_head in owned:
                     self.O.drain(
                         packed_rows(self.O, kv_head), lane=0, group=tg, wait=True
@@ -1256,22 +1345,10 @@ class MHA(Operator):
             reads = group * blocks
             for first in range(0, reads, iterations):
                 count = min(iterations, reads - first)
-                self.K.fill(
-                    kv_rows(self.K, kv_head, count),
-                    group=tg,
-                    length_parameter=kv_valid,
-                    length_unit=B_kv * self.K.shape[-1],
-                )
+                kv_fill(0, kv_rows(0, kv_head, count), 0, 0, tg)
                 for h in range(cores):
-                    self.V.fill(
-                        kv_rows(self.V, kv_head, count)[
-                            ..., h * pv_width : (h + 1) * pv_width
-                        ],
-                        lane=h,
-                        group=tg,
-                        length_parameter=kv_valid,
-                        length_unit=B_kv * pv_width,
-                    )
+                    share = kv_rows(1, kv_head, count)
+                    kv_fill(1, share[..., h * pv_width : (h + 1) * pv_width], 0, h, tg)
             rt.finish(tg)
 
     def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
@@ -1280,7 +1357,7 @@ class MHA(Operator):
         So their order follows only the static shape; K and V move only the blocks a
         bound reaches, so their order carries ``kv_blocks`` as a ``length_parameter``.
         """
-        if operand not in (self.Q, self.O, self.K, self.V):
+        if operand.name not in ("Q", "O", "K", "V", "KV"):
             return None
 
         def by_head(shape, interleaved):
@@ -1342,31 +1419,40 @@ class MHA(Operator):
                 for shim in range(self.q_shims)
             ]
 
-        # K or V.
+        # K, V or KV: K's (x 0) and V's (1) blocks for each pipeline lane,
+        # laned as sequence() fills them.
         kv_blocks = ceildiv(self.kv_tokens, self.B_kv)
         length_parameter = self.kv_blocks if self.kv_blocks.per_call else None
-        full = by_head(operand.shape, self.kv_interleaved)[
-            :, : kv_blocks * self.B_kv
-        ].split(1, self.B_kv)
-        if self.packed:
-            steps = self.num_KV_heads // self.num_pipelines
-            length_unit = self.B_kv * operand.shape[-1]
-            return [
-                (p, full[p * steps : (p + 1) * steps], length_parameter, length_unit)
-                for p in range(self.num_pipelines)
-            ]
         group = self.num_heads // self.num_KV_heads
+        steps = self.num_KV_heads // self.num_pipelines
         blocks = ceildiv(self.seq_pad, rows * self.q_shims)
-        tap = insert_repeat(full, 1, group * blocks)
-        if operand is self.V:
-            pv_width = self.pv_width
-            return [
-                (
-                    h,
-                    tap[..., h * pv_width : (h + 1) * pv_width],
-                    length_parameter,
-                    self.B_kv * pv_width,
-                )
-                for h in range(self.pv_cores)
-            ]
-        return [(0, tap, length_parameter, self.B_kv * operand.shape[-1])]
+        pv_width = self.pv_width
+        heads = {}
+        for x in (0, 1) if self.kv_paired else (int(operand.name == "V"),):
+            if self.kv_paired:
+                full = TensorAccessPattern.full(operand.shape)[:, :, x]
+                full = full.permute((1, 0, 2))
+            else:
+                full = by_head(operand.shape, self.kv_interleaved)
+            heads[x] = full[:, : kv_blocks * self.B_kv].split(1, self.B_kv)
+        out = []
+        for p in range(self.kv_lanes):
+            for x, full in heads.items():
+                if self.packed:
+                    shares = [full[p * steps : (p + 1) * steps]]
+                else:
+                    tap = insert_repeat(full, 1, group * blocks)
+                    shares = [tap]
+                    if x:
+                        shares = [
+                            tap[..., h * pv_width : (h + 1) * pv_width]
+                            for h in range(self.pv_cores)
+                        ]
+                for h, tap in enumerate(shares):
+                    if self.kv_paired:
+                        lane = p * self.kv_streams + (1 + h if x else 0)
+                    else:
+                        lane = p * self.pv_cores + h if x else p
+                    unit = self.B_kv * (pv_width if x else self.d)
+                    out.append((lane, tap, length_parameter, unit))
+        return out

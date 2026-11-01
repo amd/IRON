@@ -431,12 +431,12 @@ def test_llama_decode_records_and_tunes():
     # The weights are pinned, and so are the caches, as state.
     layers = model.model.layers
     assert id(layers[1].self_attn.q_proj.weight) in t.weights
-    _, keys = t.states[id(layers[0].cache.keys)]
-    assert t.pinned[keys.name] == cfg.num_key_value_heads * L * cfg.head_dim * 2
-    # Every MHA attends over the keys up to the position, its one query
-    # packed by its heads.
+    _, kv = t.states[id(layers[0].cache.kv)]
+    assert t.pinned[kv.name] == cfg.num_key_value_heads * L * 2 * cfg.head_dim * 2
+    # Every MHA attends over the keys and values up to the position, its
+    # one query packed by its heads.
     mhas = [s.op for s in t.steps if type(s.op) is MHA]
-    assert all(op.kv_interleaved for op in mhas)
+    assert all(op.kv_paired for op in mhas)
     assert len(mhas) == cfg.num_hidden_layers
     assert all(
         {k: e.name for k, e in op.bound_values.items()} == {"kv_valid": "position_p1"}
@@ -480,8 +480,8 @@ def test_llama_prompt_records_over_the_same_caches():
     # so one arena holds them once for both.
     token = g.record(**g.shapes()[0])
     assert set(t.states) == set(token.states)
-    keys = "model.layers.0.cache.keys"
-    assert t.residents[keys] == token.residents[keys]
+    kv = "model.layers.0.cache.kv"
+    assert t.residents[kv] == token.residents[kv]
     assert set(t.weights) == set(token.weights)
     # Every projection reads the (out, in) checkpoint layout through the
     # column-major flag, which the recording carries into shape inference.
@@ -1007,8 +1007,8 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
             )  # (512, 64) x (256, 64)^T
             return MHA.step(
                 h.reshape(512, 4, 64),
-                h.reshape(512, 4, 64),
-                h.reshape(512, 4, 64),
+                K=h.reshape(512, 4, 64),
+                V=h.reshape(512, 4, 64),
                 heads_interleaved=True,
                 kv_interleaved=True,
                 num_pipelines=2,

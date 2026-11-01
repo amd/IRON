@@ -119,7 +119,7 @@ class Encoding(iron.Graph):
         x = x[:n]
         for _ in range(2):
             o = MHA.step(
-                x, x, x, heads_interleaved=True, kv_interleaved=True, causal=False
+                x, K=x, V=x, heads_interleaved=True, kv_interleaved=True, causal=False
             )
             x = ReLU.step(o.reshape(rows * heads * d)).reshape(rows, heads, d)
         return x

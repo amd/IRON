@@ -355,8 +355,8 @@ class EmbeddingGemma(Encoder):
         h = x.reshape(x.shape[0], 1, c.hidden_size)
         mean = MHA.step(
             self.query,
-            h,
-            h,
+            K=h,
+            V=h,
             heads_interleaved=True,
             kv_interleaved=True,
             causal=False,
