@@ -131,6 +131,7 @@ class Chunk(iron.Graph):
             K=k[:, : position + 1],
             V=v[:, : position + 1],
             heads_interleaved=True,
+            kv_interleaved=False,
             window=self.window,
             num_pipelines=self.pipelines,
         )

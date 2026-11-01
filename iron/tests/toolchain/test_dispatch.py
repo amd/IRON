@@ -126,6 +126,7 @@ def test_a_per_call_size_over_one_block_builds_at_each_step(npu2):
                 K=k[:, : position + 1],
                 V=v[:, : position + 1],
                 heads_interleaved=True,
+                kv_interleaved=False,
                 num_pipelines=2,
             )
 
