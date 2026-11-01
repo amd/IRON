@@ -39,7 +39,8 @@ validation:
 
 theme:
   name: material
-  logo: assets/images/XDNA2.png
+  logo: assets/images/iron-mark.svg
+  favicon: assets/images/iron-mark.svg
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
