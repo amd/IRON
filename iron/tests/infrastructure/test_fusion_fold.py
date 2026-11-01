@@ -33,6 +33,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gelu import GELU
 from iron.operators.gemv import GEMV
+from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.tests.support import sequences
 from iron.tests.support.llama_model import llama_1b, small
@@ -143,6 +144,23 @@ def test_a_consumer_folds_only_where_its_kernel_runs_the_gemv_s_tile(
     steps = sequences.steps((gemv, "A", "B", "mid"), (axpy, "mid", "r", "out"))
     rec = Recording.of_steps("gemv_axpy", steps, ["A", "B", "r"], ["out"])
     assert len(fold_candidates(rec)) == folds
+
+
+@pytest.mark.parametrize(
+    "producer",
+    [
+        GEMV(M=2048, K=2048, tile_size_input=4, tile_size_output=256),
+        SiLU(size=2048, tile_size=256),
+    ],
+    ids=["GEMV", "SiLU"],
+)
+def test_a_row_wise_consumer_is_not_folded(producer):
+    """An RMSNorm reads whole rows, not the tiles its producer's cores write (Gemma 4's GEMV -> RMSNorm)."""
+    rms = RMSNorm(rows=1, tile_size=2048, num_aie_columns=1)
+    inputs = ["A", "B"] if isinstance(producer, GEMV) else ["x"]
+    steps = sequences.steps((producer, *inputs, "mid"), (rms, "mid", "out"))
+    rec = Recording.of_steps("row_wise", steps, inputs, ["out"])
+    assert not fold_candidates(rec)
 
 
 def test_a_chain_of_three_steps_admits_overlapping_candidates():
