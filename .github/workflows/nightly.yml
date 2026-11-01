@@ -69,7 +69,7 @@ jobs:
       - name: Format test results
         uses: ./.github/actions/format_results
         with:
-          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' --metric='MaxKL (mean)' --metric='Top1Mismatches (mean)'"
+          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='DeepTPS (mean)' --metric='Latency (mean)' --metric='MaxKL (mean)' --metric='DeepKL (mean)' --metric='Top1Mismatches (mean)'"
 
       - name: Upload test results
         uses: actions/upload-artifact@v4

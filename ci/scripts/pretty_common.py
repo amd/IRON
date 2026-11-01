@@ -33,6 +33,7 @@ METRICS = {
     "TPS": Metric("tokens/s", True),
     "GenerateTPS": Metric("tokens/s", True),
     "StreamTPS": Metric("tokens/s", True),
+    "DeepTPS": Metric("tokens/s", True),
     "DeepPromptSeconds": Metric("s", False),
     "Cosine": Metric("", True),
     "Worst cosine": Metric("", True),

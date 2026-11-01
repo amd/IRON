@@ -166,7 +166,12 @@ FORMS = [
     if app.full_elf
 ] + [
     pytest.param(
-        f"{name}_each_step", marks=pytest.mark.supported_devices(*app.each_step)
+        f"{name}_each_step",
+        # npu2 runs npu1's form to check it; npu2's own figures are its full ELF's.
+        marks=[
+            pytest.mark.supported_devices(*app.each_step),
+            pytest.mark.tracked_on("npu1"),
+        ],
     )
     for name, app in APPLICATIONS.items()
     if app.each_step
@@ -212,6 +217,7 @@ def loaded(request):
 
 
 @pytest.mark.extensive
+@pytest.mark.bench
 def test_decode_deep_in_the_cache(loaded, record_property):
     """The deepest step the caches hold, at ``max_seq_len - 1``."""
     app, model = loaded
@@ -220,6 +226,7 @@ def test_decode_deep_in_the_cache(loaded, record_property):
 
 
 @pytest.mark.extensive
+@pytest.mark.bench
 def test_prompt_deep_in_the_cache(loaded, record_property):
     """The chunk holding ``max_seq_len - 1``, its rows: the longest dispatch a prompt makes, over the whole context."""
     app, model = loaded
@@ -238,6 +245,7 @@ def test_prompt_time_at_8k(loaded, record_property):
 
 
 @pytest.mark.extensive
+@pytest.mark.bench
 def test_prompt_time_at_the_whole_context(loaded, record_property):
     """Time to the first token after a prompt filling the whole context served, once: the longest a prompt takes."""
     app, model = loaded

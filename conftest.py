@@ -270,7 +270,7 @@ def pytest_configure(config):
 
 ATTACHED = pytest.StashKey[str]()
 #: The ``user_properties`` name of a benched test run on a device its
-#: ``bench(devices=...)`` leaves out; a string, so not a metric.
+#: ``tracked_on`` leaves out; a string, so not a metric.
 UNBENCHED = "not benched on"
 
 
@@ -300,8 +300,8 @@ def pytest_runtest_setup(item):
         pytest.skip(f"No NPU runtime: {npu_unavailable_reason()}")
     if device not in marker.args:
         pytest.skip(f"Not supported on {device} (supported: {', '.join(marker.args)})")
-    bench = item.get_closest_marker("bench")
-    if bench is not None and device not in bench.kwargs.get("devices", (device,)):
+    tracked = item.get_closest_marker("tracked_on")
+    if tracked is not None and device not in tracked.args:
         item.user_properties.append((UNBENCHED, device))
 
 
