@@ -96,7 +96,11 @@ pydocstyle rules, `D205` and `D401` included.
 - `iron/tune/`: autotuning, at the edge: nothing in the core imports it.
   `python -m iron.tune.cli GEMV M=2048 K=8192` times one operator;
   `python -m iron.lm.tune <application>` rewrites a model's
-  `profiles/<device>.json`.
+  `profiles/<device>.json` and writes `<device>.report.txt` beside it:
+  what it added and dropped, each version's end-to-end gain, and per phase
+  (seed, survey, each autotune round, packing, fusions, verify, validate)
+  its seconds waiting on builds, timing and checking, and each version's
+  gain on the phase before.
 - `iron/lm/`: what every language model shares (see "Language models").
 - `iron/applications/<name>/`: one model each; `tests/applications/<name>/`
   its tests.

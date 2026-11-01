@@ -31,6 +31,7 @@ import logging
 import math
 import os
 import statistics
+import time
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
@@ -60,6 +61,7 @@ from .autotune import (
 from .failures import Kind, Ledger, first_error, place
 from .measure import (
     Cache,
+    Spent,
     Timing,
     _sample,
     measure_fusion,
@@ -775,11 +777,14 @@ class NotBitIdentical(RuntimeError):
 
 def built(call: Timed, profile: Profile, dev) -> CompiledGraph:
     """Return ``call``'s version under ``profile``, packaged as ``dev`` does."""
+    begun = time.perf_counter()
     recording, fused, packing = apply_profile(call.recording, profile, dev)
     chosen = plan(
         dev, recording, None, False, step_words=_step_words(recording), fusions=fused
     )
-    return CompiledGraph(recording, chosen, fusions=fused, packing=packing)
+    out = CompiledGraph(recording, chosen, fusions=fused, packing=packing)
+    Spent.charge(build_s=time.perf_counter() - begun)
+    return out
 
 
 def compare_graphs(
@@ -805,6 +810,7 @@ def compare_graphs(
             halved (``_bound_points``).
         RuntimeError: A device timeout propagates as it is raised.
     """
+    begun = time.perf_counter()
     recording = call.recording
     rng = np.random.default_rng(seed)
     table_rows = _gather_table_rows(recording)
@@ -875,6 +881,7 @@ def compare_graphs(
         finally:
             before.release()
             after.release()
+            Spent.charge(timing_s=time.perf_counter() - begun)
     return delta, None if variance is None else math.sqrt(variance)
 
 
