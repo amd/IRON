@@ -148,8 +148,9 @@ def tune(
     ``<device>.found.json`` as it goes; what is saved is what ``verify`` keeps of it
     against the seed and then the starting profile, once it passes ``validate`` where
     given, reported beside it (``write_report``) with each phase's seconds and each
-    version's gain on the phase before (``Phases``). Timed as ``args`` says; return
-    its path.
+    version's gain on the phase before (``Phases``, and the seed's check, at each
+    call's first point; the final ``verify`` at every point). Timed as ``args`` says;
+    return its path.
 
     Args:
         args: The command line: how settings are timed, and which searches it skips.
@@ -174,10 +175,19 @@ def tune(
     core_mhz = aie_utils.DefaultNPURuntime.core_mhz
     model = _cost_model(args, dev)
     memo: dict = {}
-    with Phases(record, dev, start, log=log, lock=lock, memo=memo) as phases:
+    # A phase is checked at each call's first (shortest) point, the final verify at
+    # every point: a deep context's call takes seconds before attention is tuned.
+    shallow: dict = {}
+
+    def first_point(profile: Profile) -> list[Timed]:
+        return [dataclasses.replace(c, points=c.points[:1]) for c in record(profile)]
+
+    with Phases(first_point, dev, start, log=log, lock=lock, memo=shallow) as phases:
         seed = coded_seed(record, dev, start, log=log)
         if entries(seed) != entries(start):
-            seed, _ = verify(record, dev, start, seed, log=log, lock=lock, memo=memo)
+            seed, _ = verify(
+                first_point, dev, start, seed, log=log, lock=lock, memo=shallow
+            )
             seed.save(found_path)
             print(f"wrote {found_path}, the seed")
         phases.end("seed", seed)
