@@ -28,7 +28,7 @@ from .autotune import Shape, Timed, least_us
 from .costmodel import CostModel
 from .fold import array_scoped_fold_candidates
 from .measure import Cache, Timing, measure
-from .packings import design_cores
+from .fusions import design_cores
 
 # A design reading weights at this share of the version's fastest read rate
 # is bound by it; one whose kernel bound is this share of its time, by compute.

@@ -28,7 +28,6 @@ from __future__ import annotations
 import collections
 import dataclasses
 import itertools
-import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -51,6 +50,7 @@ from .fusions import (
     _device_timeout,
     built,
     compare_graphs,
+    design_cores,
     group_fit_verdict,
     refuse_group,
 )
@@ -68,11 +68,6 @@ def width_tunables(op: Operator) -> list[str]:
     """``op``'s tunables that count its columns, channels or cores."""
     declaration = type(op).declaration
     return [n for n in declaration.tunables if declaration.params[n].domain is widths]
-
-
-def design_cores(op: Operator) -> int:
-    """Return the cores ``op``'s design places."""
-    return len(re.findall(r"aie\.core\(", str(OperatorDesign(op).module())))
 
 
 def adjacent(order: Sequence[Any], group_of: Mapping[Any, int]) -> collections.Counter:

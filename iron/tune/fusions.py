@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import os
+import re
 import statistics
 import time
 from collections.abc import Callable, Hashable, Mapping, Sequence
@@ -324,6 +325,11 @@ def _composed_module(
         )
         configured, _ = fused_configuration("fused", fusion, list(designs.values()))
     return Program.compose([configured], entry=configured.runtimes[0]).resolve_program()
+
+
+def design_cores(op: Operator) -> int:
+    """Return the cores ``op``'s design places."""
+    return len(re.findall(r"aie\.core\(", str(OperatorDesign(op).module())))
 
 
 def group_fit_verdict(
@@ -636,12 +642,16 @@ def narrow_group(
                 group_fit_verdict(fused, fit_cache, kind=group.kind, edges=group.edges)
                 is None
             )
-        # An edge's fit is its build: time it here, once, where every edge feeds at
-        # these widths, which needs no build of the whole.
+        # An edge's fit is its build: time it here, once, where its steps' cores
+        # fit the array (each runs on its own) and every edge feeds at these widths,
+        # which need no build of the whole.
         key = tuple(tuple(sorted(c.items())) for c in combo)
         fused = [
             op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, combo)
         ]
+        if sum(map(design_cores, fused)) > dev.cols * len(dev.core_rows):
+            trials[key] = None
+            return False
         fed = [admits(fused[p], out, fused[c], inp) for p, out, c, inp in group.edges]
         if any(
             kind is None
