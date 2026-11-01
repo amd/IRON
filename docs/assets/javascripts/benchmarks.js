@@ -123,6 +123,12 @@
 
   // ── Trends ───────────────────────────────────────────────────────────────
 
+  // A link to the history already shown changes no hash, so scroll to it here.
+  function openHistory(hash) {
+    if (location.hash === hash) bench.scrollIntoView({ behavior: "smooth" });
+    else location.hash = hash;
+  }
+
   // Each run's point on every line, so the tooltip reads both devices at a
   // date even though their runs start minutes apart.
   const RUN_SPAN = 12 * 3.6e6;
@@ -137,9 +143,12 @@
       return best;
     }).filter(Boolean);
     if (!found.length) return [];
-    const nearest = Math.min(...found.map((f) => f.gap));
-    return found.filter((f) => f.gap - nearest < RUN_SPAN).map(({ datasetIndex, index }) =>
-      ({ element: chart.getDatasetMeta(datasetIndex).data[index], datasetIndex, index }));
+    const nearest = found.reduce((a, b) => (a.gap <= b.gap ? a : b));
+    const runTime = chart.data.datasets[nearest.datasetIndex].data[nearest.index].x;
+    return found.filter(({ datasetIndex, index }) =>
+      Math.abs(chart.data.datasets[datasetIndex].data[index].x - runTime) < RUN_SPAN)
+      .map(({ datasetIndex, index }) =>
+        ({ element: chart.getDatasetMeta(datasetIndex).data[index], datasetIndex, index }));
   }
 
   function trendCard(trend, devices, colours, domain, pending) {
@@ -263,9 +272,7 @@
           onHover: (event, elements) => {
             event.native.target.style.cursor = elements.length ? "pointer" : "default";
           },
-          onClick: () => {
-            location.hash = href;
-          },
+          onClick: () => openHistory(href),
         },
       }));
     });
@@ -651,6 +658,12 @@
       bench.scrollIntoView({ behavior: "smooth" });
     });
     if (deepLink) bench.scrollIntoView();
+    document.addEventListener("click", (event) => {
+      const anchor = event.target.closest('a[href^="#bench="]');
+      if (!anchor) return;
+      event.preventDefault();
+      openHistory(anchor.getAttribute("href"));
+    });
     new MutationObserver(() => {
       drawTrends();
       select(hashState());
