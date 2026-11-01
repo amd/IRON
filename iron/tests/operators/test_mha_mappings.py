@@ -42,6 +42,8 @@ def test_one_core_a_block_is_three(heads, kv_heads, d, seq_len, kv_len, window):
             kv_paired=True,
             num_pipelines=4,
             cores_per_block=cores,
+            # The mappings agree bit for bit over one score type: bf16, mapping 3's.
+            f32_scores=False,
         ).resolved()
         if inputs is None:
             inputs = vectors(op).inputs

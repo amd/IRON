@@ -329,6 +329,10 @@ class MHA(Operator):
     # Keys more than this many positions from a query are masked.
     window: int | None = param(default=None, array=True)
     scale: float = param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
+    # QK^T's scores kept in float32 (D4) where True, bf16 where False; None
+    # is the mapping's own: float32 for one core a query block over several
+    # queries, else bf16.
+    f32_scores: bool | None = param(default=None, array=True)
     # One query, a KV group's heads packed as a block's rows.
     packed: bool = param(
         derive=lambda op: op.seq_len == 1, repr=False, array=True, init=False
@@ -501,6 +505,13 @@ class MHA(Operator):
         end = min(rounds.stop * self.positions * self.streams, self.q_tokens)
         blocks = ceildiv(self.first_query + end, self.B_kv)
         return max(1, min(blocks, ceildiv(self.kv_tokens, self.B_kv)))
+
+    @property
+    def scores_f32(self) -> bool:
+        """Whether QK^T's scores are float32: ``f32_scores``, else the mapping's own (one core a query block over several queries)."""
+        if self.f32_scores is not None:
+            return self.f32_scores
+        return self.fused and not self.split
 
     @property
     def positions(self) -> int:
@@ -727,6 +738,10 @@ class MHA(Operator):
             )
         if self.cores_per_block == 1:
             return self.resolve_fused(dev)
+        if self.f32_scores:
+            raise Unresolvable(
+                "MHA: float32 scores are one core a query block's (cores_per_block 1)"
+            )
         B_q, pv_cores = self.B_q, self.pv_cores
         # Before any kernel is sized: mha.cc builds only 16-, 32- and 64-key blocks.
         if B_q is not None and 64 % B_q:
@@ -814,8 +829,11 @@ class MHA(Operator):
         if self.pv_cores not in (None, 1):
             raise Unresolvable("MHA: one core a query block takes P*V on that core")
         if self.packed:
+            if self.f32_scores:
+                raise Unresolvable("MHA: one query split over keys keeps bf16 scores")
             return self.resolve_split(dev)
         group = self.num_heads // self.num_KV_heads
+        f32 = self.f32_scores is not False
         B_kv = self.FUSED_KEY_BLOCKS.get(self.d)
         if B_kv is None or self.kv_len % B_kv:
             raise Unresolvable(
@@ -836,7 +854,7 @@ class MHA(Operator):
                 for b in blocks
                 if not 64 % (b // group or 1)
                 and not self.seq_pad % (b // group * cores)
-                and self.fused_core_bytes(dev, b, B_kv) <= dev.core_memory_bytes
+                and self.fused_core_bytes(dev, b, B_kv, f32) <= dev.core_memory_bytes
             ),
             None,
         )
@@ -865,8 +883,13 @@ class MHA(Operator):
             query_heads=0,
         )
 
-    def fused_kernel(self, B_q: int, B_kv: int, group: int, kv_heads: int = 1):
-        """mha.cc's attend_block at a ``B_q`` x ``d`` x ``B_kv`` block, ``group`` heads a position, ``kv_heads`` KV heads a key block."""
+    def fused_kernel(
+        self, B_q: int, B_kv: int, group: int, kv_heads: int = 1, f32: bool = False
+    ):
+        """mha.cc's attend_block at a ``B_q`` x ``d`` x ``B_kv`` block, ``group`` heads a position.
+
+        ``kv_heads`` KV heads a key block, float32 scores where ``f32``.
+        """
         return kernels.linalg.mha(
             B_q,
             self.d,
@@ -879,23 +902,27 @@ class MHA(Operator):
             packed=self.packed and self.window is not None,
             group=group,
             kv_heads=kv_heads,
+            f32_scores=f32,
         )
 
-    def fused_core_bytes(self, dev: Device, B_q: int, B_kv: int) -> int:
-        """Return a fused core's L1 bytes: Q, two key blocks, O's two forms, S, P, state and stack."""
+    def fused_core_bytes(
+        self, dev: Device, B_q: int, B_kv: int, f32: bool = False
+    ) -> int:
+        """Return a fused core's L1 bytes: Q, two key blocks, O's two forms, S (float32 where ``f32``), P, state and stack."""
         d = self.d
         data = (
             2 * B_q * d  # Q, one block deep
             + 2 * 4 * B_kv * d  # K and V, two blocks deep
             + 2 * B_q * d  # O as it leaves
             + 4 * B_q * d  # O accumulating
-            + 2 * 2 * B_q * B_kv  # S and P
+            + (4 if f32 else 2) * B_q * B_kv  # S
+            + 2 * B_q * B_kv  # P
             + 16 * B_q  # the online state
             + 12  # the block index
         )
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
             frame = self.fused_kernel(
-                B_q, B_kv, self.num_heads // self.num_KV_heads
+                B_q, B_kv, self.num_heads // self.num_KV_heads, f32=f32
             ).frame_bytes(resolve_target_arch(dev))
         return dev.default_core_stack_bytes + data + frame
 
@@ -1588,15 +1615,17 @@ class MHA(Operator):
         kv_ty = np.ndarray[(B_kv, 2 * d), np.dtype[dtype]]
         o_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
         acc_ty = np.ndarray[(B_q, d), np.dtype[np.float32]]
-        s_ty = np.ndarray[(B_q * B_kv,), np.dtype[dtype]]
+        f32 = self.scores_f32
+        s_ty = np.ndarray[(B_q * B_kv,), np.dtype[np.float32 if f32 else dtype]]
+        p_ty = np.ndarray[(B_q * B_kv,), np.dtype[dtype]]
         state_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
         idx_ty = np.ndarray[(3,), np.dtype[np.int32]]
 
-        fused = self.fused_kernel(B_q, B_kv, self.group)
+        fused = self.fused_kernel(B_q, B_kv, self.group, f32=f32)
         obj = fused.object_file
         attend = obj.bind(
             "attend_block",
-            [q_ty, kv_ty, acc_ty, s_ty, s_ty, state_ty, idx_ty, dtype] + [np.int32] * 2,
+            [q_ty, kv_ty, acc_ty, s_ty, p_ty, state_ty, idx_ty, dtype] + [np.int32] * 2,
         )
         init = obj.bind("init_scale_buffer", [state_ty, np.int32])
         rescale = obj.bind("rescale_O", [acc_ty, o_ty, state_ty, np.int32, idx_ty])
@@ -1702,7 +1731,7 @@ class MHA(Operator):
                     Buffer(initial_value=np.zeros(3, np.int32)),
                     Buffer(acc_ty),
                     Buffer(s_ty),
-                    Buffer(s_ty),
+                    Buffer(p_ty),
                     Buffer(state_ty),
                 ],
                 tile=AnyComputeTile,
