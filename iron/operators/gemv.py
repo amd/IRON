@@ -375,6 +375,9 @@ class GEMV(Operator):
                 raise ValueError(f"GEMV: {name} ({tile}) exceeds M/lanes ({rows})")
             if rows % tile:
                 raise ValueError(f"GEMV: {name} ({tile}) must divide M/lanes ({rows})")
+        for step in self.finish:
+            # Its kernel runs on this GEMV's output tile; the factory refuses one it cannot.
+            step.consumer_at(self.tile_size_output, self.dev).layout().kernel()
 
     def fold(self, consumer, at: int):
         if not isinstance(consumer, Elementwise) or self.repeat > 1:

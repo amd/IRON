@@ -28,6 +28,7 @@ from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
 from iron.common.testing import vectors
+from iron.operators.axpy import AXPY
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gelu import GELU
@@ -123,6 +124,25 @@ def test_gemv_folds_elementwise_add_candidate():
     assert [h.name for h in step.inputs] == ["A", "B", "r"]
     (link,) = step.op.finish
     assert (link.consumer, link.at, link.binary) == (ElementwiseAdd, 1, True)
+
+
+@pytest.mark.parametrize(
+    "tile_size_input, tile_size_output, folds", [(4, 256, 1), (2, 2, 0)]
+)
+def test_a_consumer_folds_only_where_its_kernel_runs_the_gemv_s_tile(
+    tile_size_input, tile_size_output, folds
+):
+    """AXPY's kernel takes tiles of a multiple of 64 elements, so a GEMV writing 2 at a time cannot run it."""
+    gemv = GEMV(
+        M=2048,
+        K=2048,
+        tile_size_input=tile_size_input,
+        tile_size_output=tile_size_output,
+    )
+    axpy = AXPY(size=2048, tile_size=256)
+    steps = sequences.steps((gemv, "A", "B", "mid"), (axpy, "mid", "r", "out"))
+    rec = Recording.of_steps("gemv_axpy", steps, ["A", "B", "r"], ["out"])
+    assert len(fold_candidates(rec)) == folds
 
 
 def test_a_chain_of_three_steps_admits_overlapping_candidates():
