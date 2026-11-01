@@ -40,6 +40,7 @@ from .autotune import (
     autotune,
     coding_tunables,
     kernel_cycles,
+    shapes,
     time_shape,
 )
 from .costmodel import CostModel
@@ -91,6 +92,15 @@ def parser(description: str) -> argparse.ArgumentParser:
         "shared device configurations against the profile as it stands "
         "(price_folds_before_packing), skipping the tunable search and the "
         "fusions",
+    )
+    p.add_argument(
+        "--hold",
+        action="append",
+        default=[],
+        choices=sorted(operators.CATALOG),
+        metavar="OPERATOR",
+        help="an operator class whose shapes the tunable search leaves at the "
+        "profile's settings (repeatable), as while its design is still changing",
     )
     p.add_argument(
         "--record-failures",
@@ -220,11 +230,18 @@ def tune(
                 for surveyed in surveys:
                     for key, share in surveyed.shares(rate).items():
                         shares[key] = max(shares.get(key, 0.0), share)
+                held = {
+                    s.key
+                    for s in shapes(record(profile), dev)
+                    if issubclass(s.cls, tuple(operators.CATALOG[n] for n in args.hold))
+                }
                 fresh = {
                     k: v
                     for k, v in shares.items()
-                    if v >= SHAPE_SHARE and k not in searched
+                    if v >= SHAPE_SHARE and k not in searched and k not in held
                 }
+                if held:
+                    log(f"{len(held)} shape(s) of {', '.join(args.hold)} held")
                 if not fresh:
                     break
                 profile = autotune(
