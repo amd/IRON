@@ -107,11 +107,17 @@ def test_mha_lanes_are_faithful(case):
     ids=lambda c: c.label,
 )
 def test_fused_mha_lanes_are_faithful(case):
-    """One core a query block, on npu1, where mha.cc's attend_block builds: KV a pattern a fill, its groups of rounds streaming up to their last query."""
+    """One core a block, on npu1, where mha.cc's attend_block builds: KV a pattern a fill.
+
+    A prompt's groups of rounds stream up to their last query, a decode
+    step's lanes every n-th block.
+    """
     with aie_utils.set_current_device(NPU1):
         op = MHA(**case.kwargs).resolved(NPU1)
+        # Split, Q rides KV's lanes: no stream of its own.
         for b in op.buffers:
-            _assert_described_and_faithful(op, b.name)
+            if b.streamed:
+                _assert_described_and_faithful(op, b.name)
 
 
 @pytest.mark.parametrize("paired", [False, True])
