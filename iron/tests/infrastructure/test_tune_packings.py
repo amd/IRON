@@ -234,6 +234,23 @@ def test_a_retile_holds_a_weight_s_coding(npu2, tmp_path):
     }
 
 
+def test_a_width_resolved_afresh_keeps_its_coding(npu2, tmp_path):
+    """A width its recorded tiles do not divide resolves them afresh, its coding held.
+
+    Reset with them, Gemma 4 E2B's coded k_proj was packed plain over its coded rows
+    ("Size mismatch for buffer ...k_proj.weight.coded").
+    """
+    gemv = GEMV(M=512, K=1536, coded_a=True, tile_size_output=64, num_aie_columns=4)
+    steps = sequences.steps((gemv, "a", "x", "y"))
+    recording = Recording.of_steps("one_gemv", steps, ["a", "x"], ["y"])
+    packer = _packer(recording, npu2, tmp_path)
+    (key,) = packer.shapes
+    afresh = [o for o in packer.options(key) if o.get("tile_size_output", 64) is None]
+    assert afresh
+    for option in afresh:
+        assert all(op.coded_a for op in packer.arrays(key, option).values())
+
+
 def test_aligning_a_unit_to_another_array_keeps_its_coding(npu2, tmp_path):
     """A unit aligned to another array's setting keeps its own coded_a.
 

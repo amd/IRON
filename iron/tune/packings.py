@@ -233,7 +233,7 @@ class Packer:
         """Array ``key``'s width settings, its own first (empty).
 
         Each width combination its domains give, its other tunables held where they
-        still resolve there, else left to resolve afresh.
+        still resolve there, else left to resolve afresh, its coding held either way.
         """
         if key in self._options:
             return self._options[key]
@@ -246,10 +246,12 @@ class Packer:
             if n in names
         }
         own = self.op(key, {})
+        # Resolved afresh but for coding: a weight's coded rows are bound before any search.
+        coding = coding_tunables(first)
         others = {
             n: None
             for n in first.declaration.tunables
-            if n not in names and first.declaration.params[n].init
+            if n not in names and n not in coding and first.declaration.params[n].init
         }
         found = [{}]
         for combo in itertools.product(*domains.values()):
