@@ -75,11 +75,21 @@ CHECKPOINTS = {
     "long_context": {"llama_3.2_1b": "Llama 3.2 1B · 8K-token prompt"},
 }
 
-# The forms a decoder runs in, as its test ids name them, in the order each
-# device's trend takes them: NPU2's full ELF, its loop on the device first,
-# never the each-step form NPU1 runs. None is a test naming no form.
+# The forms a decoder runs in, as its test ids name them; None is a test
+# naming no form, a decoder's host loop. Each device's trend draws a line for
+# each form it runs, in this order.
 FORMS = {"device_loop": "device loop", "each_step": "each step"}
-DEVICE_FORMS = {"krackan": ("device loop", None), "phoenix": ("each step", None)}
+DEVICE_FORMS = {
+    "krackan": ("device loop", None, "each step"),
+    "phoenix": ("each step", None),
+}
+# How the page's key explains each form, named once a card draws two.
+FORM_NOTES = {
+    "device loop": "the NPU starts every decode step itself, one full ELF (NPU2)",
+    "host loop": "one full ELF per step; the host starts each step (NPU2)",
+    "each step": "each operator its own xclbin dispatch, the host starting each "
+    "step: the form NPU1 runs, and NPU2's for comparison",
+}
 
 # Where a benchmark still run is documented, relative to the Performance Checks page:
 # a model on the Models page, an operator in the API reference. A catalog
@@ -164,12 +174,13 @@ def change(curr, prev, metric):
 
 
 def trend_series(series, metric, checkpoint):
-    """Map each device to the label of the series of a checkpoint its trend follows.
+    """List the lines a checkpoint's trend draws: a device, its series and form.
 
-    The series is one the device's latest run measured: in the first of the
-    device's forms, then a test of its own before a class's, then one more
-    devices share, then the longest history over every device, then the
-    first label.
+    Each device draws one line per form its latest run measured, in its
+    forms' order. Within a form the series is a test of its own before a
+    class's, then one more devices share, then the longest history over every
+    device, then the first label. Forms are named only where a trend draws
+    more than one; a decoder's line names its prompt and generated tokens.
     """
     named = {
         s["label"]: next((f for key, f in FORMS.items() if key in s["test"]), None)
@@ -191,26 +202,42 @@ def trend_series(series, metric, checkpoint):
     for candidates in eligible.values():
         for s in candidates:
             shared[s["label"]] = shared.get(s["label"], 0) + 1
-    picked = {}
+    lines = []
     for device, candidates in eligible.items():
-        ranked = sorted(
-            (
-                DEVICE_FORMS[device].index(named[s["label"]]),
-                s["test"].count("::") > 1,
-                -shared[s["label"]],
-                -sum(
-                    metric in p[3]
-                    for run in s["devices"].values()
-                    for p in run["points"]
-                ),
-                natural_key(s["label"]),
-                s["label"],
+        for form in DEVICE_FORMS[device]:
+            ranked = sorted(
+                (
+                    s["test"].count("::") > 1,
+                    -shared[s["label"]],
+                    -sum(
+                        metric in p[3]
+                        for run in s["devices"].values()
+                        for p in run["points"]
+                    ),
+                    natural_key(s["label"]),
+                    s["label"],
+                )
+                for s in candidates
+                if named[s["label"]] == form
             )
-            for s in candidates
-        )
-        if ranked:
-            picked[device] = ranked[0][-1]
-    return picked
+            if ranked:
+                label = ranked[0][-1]
+                test = next(s["test"] for s in candidates if s["label"] == label)
+                shape = re.search(r"prompt_(\d+)_tokens_(\d+)", test)
+                lines.append(
+                    {
+                        "device": device,
+                        "label": label,
+                        "form": form,
+                        "context": (
+                            f"prompt {shape[1]} → {shape[2]} tokens" if shape else None
+                        ),
+                    }
+                )
+    forms = {line["form"] for line in lines}
+    for line in lines:
+        line["form"] = (line["form"] or "host loop") if len(forms) > 1 else None
+    return lines
 
 
 def trends(name, group, suites):
@@ -400,6 +427,7 @@ def build_data(results_root, repository):
             for name, m in METRICS.items()
         },
         "spreads": SPREADS,
+        "forms": FORM_NOTES,
         "runs": runs,
         "trends": [
             trend

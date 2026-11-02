@@ -19,6 +19,12 @@
     dark: ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"],
   };
   const CRITICAL = "#d03b3b";
+  // A trend's line style names its form where a card draws two.
+  const DASHES = {
+    "device loop": { dash: [], css: "solid" },
+    "host loop": { dash: [7, 4], css: "dashed" },
+    "each step": { dash: [2, 3], css: "dotted" },
+  };
   const SUITE_ORDER = ["small", "examples", "extensive", "nightly"];
 
   const pick = { name: document.getElementById("iron-bench-name"),
@@ -111,9 +117,15 @@
     return "#" + new URLSearchParams({ bench: name, suite, metric }).toString();
   }
 
-  function key(colour) {
+  function key(colour, form) {
     const mark = el("span", { class: "iron-key", "aria-hidden": "true" });
-    mark.style.background = colour;
+    if (form) {
+      mark.classList.add("iron-key-form");
+      mark.style.borderTopStyle = DASHES[form].css;
+      mark.style.borderTopColor = colour;
+    } else {
+      mark.style.background = colour;
+    }
     return mark;
   }
 
@@ -154,7 +166,7 @@
   function trendCard(trend, devices, colours, domain, pending) {
     const { benchmark: name, title, suite, metric, caption, also, series } = trend;
     const href = link(name, suite, metric);
-    const latest = Object.entries(series).map(([device, label]) => {
+    const latest = series.map(({ device, label }) => {
       const points = seriesOf(name, suite, label).devices[device].points.filter((p) => metric in p[3]);
       return points[points.length - 1][3][metric];
     });
@@ -162,56 +174,62 @@
       || [1, unitOf(metric)];
     const sense = direction(metric);
     const surface = css("--md-default-bg-color");
-    const shapes = Object.fromEntries(Object.entries(series).map(([device, label]) => {
+    const shapes = Object.fromEntries(series.map(({ label }) => {
       const test = seriesOf(name, suite, label).test;
       const params = test.slice(test.indexOf("[") + 1, -1);
-      return [device, params.startsWith(`${name}-`) ? params.slice(name.length + 1) : params];
+      return [label, params.startsWith(`${name}-`) ? params.slice(name.length + 1) : params];
     }));
     const oneShape = new Set(Object.values(shapes)).size === 1 ? Object.values(shapes)[0] : null;
     const rows = [];
     const datasets = [];
     devices.forEach((device, slot) => {
-      if (!(device in series)) {
+      const lines = series.filter((line) => line.device === device);
+      if (!lines.length) {
         rows.push(el("li", { class: "iron-muted" }, el("span", { class: "iron-trend-device" },
           el("span", { class: "iron-key iron-key-none", "aria-hidden": "true" }), DATA.devices[device]),
           el("span", { class: "iron-trend-value", textContent: "not run" })));
         return;
       }
-      const s = seriesOf(name, suite, series[device]);
-      const run = s.devices[device];
-      const points = run.points.filter((p) => metric in p[3]);
-      const last = points[points.length - 1];
-      const moved = run.changes[metric];
-      const what = trend.group === "Models"
-        ? also && also in last[3] ? `${also} ${brief.format(last[3][also])} ${unitOf(also)}` : null
-        : oneShape ? null : shapes[device];
-      rows.push(el("li", {},
-        el("span", { class: "iron-trend-device" }, key(colours[slot]), DATA.devices[device]),
-        el("span", { class: "iron-trend-value" },
-          el("strong", { textContent: brief.format(last[3][metric] / scale) }), unit ? ` ${unit}` : "",
-          last[2] === false ? el("span", { class: "iron-mark iron-worse", textContent: " ✕", title: "Its checks failed" }) : null,
-          moved ? verdictMark(moved[1]) : null),
-        what ? el("small", { class: "iron-trend-what", textContent: what, title: what }) : null));
-      datasets.push({
-        label: DATA.devices[device],
-        data: points.map((p) => ({ x: +parseDate(p[0]), y: p[3][metric] / scale, point: p })),
-        borderColor: colours[slot],
-        backgroundColor: colours[slot],
-        borderWidth: 2,
-        borderCapStyle: "round",
-        borderJoinStyle: "round",
-        pointRadius: points.map((p, i) => (p[2] === false ? 5 : i === points.length - 1 ? 4 : 0)),
-        pointHoverRadius: 5,
-        pointHitRadius: 10,
-        pointStyle: points.map((p) => (p[2] === false ? "crossRot" : "circle")),
-        pointBorderColor: points.map((p) => (p[2] === false ? CRITICAL : surface)),
-        pointBorderWidth: points.map((p) => (p[2] === false ? 2.5 : 2)),
-        tension: 0,
+      lines.forEach(({ label, form, context }) => {
+        const s = seriesOf(name, suite, label);
+        const run = s.devices[device];
+        const points = run.points.filter((p) => metric in p[3]);
+        const last = points[points.length - 1];
+        const moved = run.changes[metric];
+        const what = trend.group === "Models"
+          ? [also && also in last[3] ? `${also} ${brief.format(last[3][also])} ${unitOf(also)}` : null,
+             context].filter(Boolean).join(" · ") || null
+          : oneShape ? null : shapes[label];
+        rows.push(el("li", {},
+          el("span", { class: "iron-trend-device" }, key(colours[slot], form), DATA.devices[device],
+            form ? el("small", { class: "iron-trend-form", textContent: ` ${form}` }) : null),
+          el("span", { class: "iron-trend-value" },
+            el("strong", { textContent: brief.format(last[3][metric] / scale) }), unit ? ` ${unit}` : "",
+            last[2] === false ? el("span", { class: "iron-mark iron-worse", textContent: " ✕", title: "Its checks failed" }) : null,
+            moved ? verdictMark(moved[1]) : null),
+          what ? el("small", { class: "iron-trend-what", textContent: what, title: what }) : null));
+        datasets.push({
+          label: form ? `${DATA.devices[device]}, ${form}` : DATA.devices[device],
+          data: points.map((p) => ({ x: +parseDate(p[0]), y: p[3][metric] / scale, point: p })),
+          borderColor: colours[slot],
+          backgroundColor: colours[slot],
+          borderWidth: 2,
+          borderDash: form ? DASHES[form].dash : [],
+          borderCapStyle: form && DASHES[form].dash.length ? "butt" : "round",
+          borderJoinStyle: "round",
+          pointRadius: points.map((p, i) => (p[2] === false ? 5 : i === points.length - 1 ? 4 : 0)),
+          pointHoverRadius: 5,
+          pointHitRadius: 10,
+          pointStyle: points.map((p) => (p[2] === false ? "crossRot" : "circle")),
+          pointBorderColor: points.map((p) => (p[2] === false ? CRITICAL : surface)),
+          pointBorderWidth: points.map((p) => (p[2] === false ? 2.5 : 2)),
+          tension: 0,
+        });
       });
     });
 
     const canvas = el("canvas", { role: "img",
-      "aria-label": `${title}, ${caption} ${metric}, by run on ${datasets.map((d) => d.label).join(" and ")}; ` +
+      "aria-label": `${title}, ${caption} ${metric}, by run on ${datasets.map((d) => d.label).join("; ")}; ` +
         "the latest values are listed above it, and the history below holds every value" });
     const card = el("article", { class: "iron-trend" },
       el("header", {},
@@ -279,6 +297,17 @@
     return card;
   }
 
+  function formKey(members) {
+    const used = new Set(members.flatMap((t) => t.series.map((line) => line.form)).filter(Boolean));
+    const forms = Object.keys(DATA.forms).filter((form) => used.has(form));
+    if (!forms.length) return null;
+    const ink = css("--md-default-fg-color--light");
+    return el("dl", { class: "iron-form-key" }, ...forms.flatMap((form) => [
+      el("dt", {}, key(ink, form), form),
+      el("dd", { textContent: DATA.forms[form] }),
+    ]));
+  }
+
   function drawTrends() {
     trendCharts.forEach((c) => c.destroy());
     trendCharts = [];
@@ -291,7 +320,7 @@
     const groups = ["Models", "Operators"].flatMap((group) => {
       const members = DATA.trends.filter((t) => t.group === group);
       if (!members.length) return [];
-      const times = members.flatMap((t) => Object.entries(t.series).flatMap(([device, label]) =>
+      const times = members.flatMap((t) => t.series.flatMap(({ device, label }) =>
         seriesOf(t.benchmark, t.suite, label).devices[device].points
           .filter((p) => t.metric in p[3]).map((p) => +parseDate(p[0]))));
       const lo = Math.floor(Math.min(...times) / DAY) * DAY;
@@ -301,9 +330,7 @@
         el("h3", {}, group, el("small", { class: "iron-trend-span",
           textContent: `${suites.join(" and ")} suite, ${dayFmt.format(new Date(domain[0]))} to ${dayFull.format(new Date(domain[1] - 1))}` })),
         el("div", { class: "iron-trend-grid" }, ...members.map((t) => trendCard(t, devices, colours, domain, pending))),
-        group === "Models" && members.some((t) => "phoenix" in t.series)
-          ? el("p", { class: "iron-bench-note", textContent: "NPU1 runs a model one operator dispatch at a time." })
-          : null,
+        formKey(members),
       ].filter(Boolean);
     });
     trendsHost.replaceChildren(
@@ -415,7 +442,7 @@
     if (!slots.size) {
       const current = series.filter((s) => Object.values(s.devices).some((d) => d.current));
       const leads = DATA.trends.filter((t) => t.benchmark === name && t.suite === suite);
-      const headline = new Set(leads.flatMap((t) => Object.values(t.series)));
+      const headline = new Set(leads.flatMap((t) => t.series.map((line) => line.label)));
       const reach = (s) => Object.keys(s.devices).length;
       const lead = series.filter((s) => headline.has(s.label));
       [...(lead.length ? lead : current.length ? current : series)]

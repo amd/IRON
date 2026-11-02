@@ -213,7 +213,7 @@ def test_the_comment_links_each_move_to_its_history_on_the_page(tmp_path):
 LLAMA = "tests/applications/llama/test.py"
 
 
-def test_a_model_s_trend_is_each_checkpoint_s_decode_in_each_device_s_form(tmp_path):
+def test_a_model_s_trend_draws_each_checkpoint_s_decode_in_every_form_run(tmp_path):
     each_step = f"{LLAMA}::TestEachStep::test_llama_3_2_each_step"
     _write(
         tmp_path / "krackan" / "nightly" / "all.csv",
@@ -240,14 +240,38 @@ def test_a_model_s_trend_is_each_checkpoint_s_decode_in_each_device_s_form(tmp_p
     trends = {t["title"]: t for t in _page_data(tmp_path)["trends"]}
     one, three = trends["Llama 3.2 1B"], trends["Llama 3.2 3B"]
     assert (one["suite"], one["metric"], one["also"]) == ("nightly", "TPS", "TTFT")
-    assert one["series"] == {
-        "krackan": "test_llama_3_2_device_loop · llama_3.2_1b",
-        "phoenix": "TestEachStep::test_llama_3_2_each_step · llama_3.2_1b-prompt_13_tokens_40",
-    }
-    assert three["series"] == {
-        "krackan": "test_llama_3_2 · llama_3.2_3b-prompt_13_tokens_40",
-        "phoenix": "TestEachStep::test_llama_3_2_each_step · llama_3.2_3b-prompt_13_tokens_40",
-    }
+    context = "prompt 13 → 40 tokens"
+    assert one["series"] == [
+        {
+            "device": "krackan",
+            "label": "test_llama_3_2_device_loop · llama_3.2_1b",
+            "form": "device loop",
+            "context": None,
+        },
+        {
+            "device": "krackan",
+            "label": "test_llama_3_2 · llama_3.2_1b-prompt_13_tokens_40",
+            "form": "host loop",
+            "context": context,
+        },
+        {
+            "device": "krackan",
+            "label": "TestEachStep::test_llama_3_2_each_step · llama_3.2_1b-prompt_13_tokens_40",
+            "form": "each step",
+            "context": context,
+        },
+        {
+            "device": "phoenix",
+            "label": "TestEachStep::test_llama_3_2_each_step · llama_3.2_1b-prompt_13_tokens_40",
+            "form": "each step",
+            "context": context,
+        },
+    ]
+    assert [(line["device"], line["form"]) for line in three["series"]] == [
+        ("krackan", "host loop"),
+        ("krackan", "each step"),
+        ("phoenix", "each step"),
+    ]
 
 
 def test_an_operator_s_trend_is_its_extensive_throughput_the_devices_share(tmp_path):
@@ -274,7 +298,10 @@ def test_an_operator_s_trend_is_its_extensive_throughput_the_devices_share(tmp_p
         "Throughput",
         None,
     )
-    assert trend["series"] == {"krackan": "M_1-K_1", "phoenix": "M_1-K_1"}
+    assert trend["series"] == [
+        {"device": arch, "label": "M_1-K_1", "form": None, "context": None}
+        for arch in ("krackan", "phoenix")
+    ]
 
 
 def test_a_benchmark_no_longer_run_has_no_trend(tmp_path):
@@ -304,4 +331,7 @@ def test_both_devices_trend_the_same_shared_parametrization(tmp_path):
         )
 
     (trend,) = _page_data(tmp_path)["trends"]
-    assert trend["series"] == {"krackan": "M_2048", "phoenix": "M_2048"}
+    assert [(line["device"], line["label"]) for line in trend["series"]] == [
+        ("krackan", "M_2048"),
+        ("phoenix", "M_2048"),
+    ]
