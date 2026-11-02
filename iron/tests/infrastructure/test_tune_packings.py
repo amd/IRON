@@ -17,22 +17,26 @@ from iron import Profile, Scratchpad
 from iron.common.declare.profile import PackingEntry
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.packing import apply as apply_packings
+from iron.common.graph.record import Recording
 from iron.common.image.step import FusionKind
 from iron.lm.generation import Sampler
 from iron.lm.tune import calls
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gelu import GELU
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
+from iron.tests.support import sequences
 from iron.tests.support.llama_model import small
-from iron.tune.autotune import Point, Shape, Timed
+from iron.tune.autotune import Point, Shape, Timed, settings, time_shape
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import fold_profile
-from iron.tune.measure import Cache, Timing, platform
+from iron.tune.fusions import design_cores
+from iron.tune.measure import Budget, Cache, Timing, platform
 from iron.tune.packings import (
     Packer,
     _decide_fold,
@@ -160,6 +164,15 @@ def test_adjacent_counts_the_switches_a_merge_removes():
     assert adjacent(order, {"a": 0, "b": 0, "c": 2}) == {(0, 2): 1}
 
 
+def test_a_budget_ends_a_search_once_its_time_left_is_under_the_reserve():
+    logged = []
+    assert not Budget(None, logged.append).ends("a search")
+    assert not Budget(3600, logged.append).ends("a search")
+    spent = Budget(0, logged.append)
+    assert spent.ends("a search") and spent.ends("a search")
+    assert spent.stopped == ["a search"] and len(logged) == 1
+
+
 def test_a_packer_finds_each_array_and_its_narrower_widths(npu2, tmp_path):
     packer = _packer(Alternating().record(x=(SIZE,)), npu2, tmp_path)
     assert len(packer.shapes) == 2
@@ -182,6 +195,93 @@ def test_one_shapes_two_arrays_are_one_unit_a_change_aligns(npu2, tmp_path):
         if len(packer.arrays(k, s)) == 1
     ]
     assert min(aligned) * 2 == packer.cores({unit: {}})
+
+
+class TwoWidths(iron.Graph):
+    """GELU over the first ``n`` rows of a 2048- and a 512-wide input: one array key."""
+
+    def body(self, x, y, *, n: Scratchpad[np.int32]):
+        return GELU.step(x[:n]), GELU.step(y[:n])
+
+
+def test_a_packer_counts_each_array_a_full_elf_builds(npu2, tmp_path):
+    """Two designs of one array key reading other scratchpad words take an array each.
+
+    Their row bounds scale apart (``n`` against ``n / 4`` words). EmbeddingGemma 2's
+    packed prompt chunks failed to place ("no available compute tiles") where the
+    packer had counted and fitted one array for two.
+    """
+    packer = _packer(TwoWidths().record(x=(64, 2048), y=(64, 512)), npu2, tmp_path)
+    group = {k: {} for k in packer.shapes}
+    one = design_cores(packer.recorded(next(iter(packer.shapes))).resolved(npu2))
+    assert packer.cores(group) == 2 * one
+
+
+def test_a_retile_holds_a_weight_s_coding(npu2, tmp_path):
+    """A GEMV's coded_a is bound when its recording is coded, before the search.
+
+    Re-tiled free, EmbeddingGemma 2's packing search built coded rows over a weight
+    recorded plain (a size mismatch at every build).
+    """
+    model = small()
+    packer = _packer(model.record(**model.shapes()[0]), npu2, tmp_path)
+    key = next(k for k in packer.shapes if isinstance(packer.recorded(k), GEMV))
+    shape = packer.tiling(key, {"num_aie_columns": 1})
+    assert "coded_a" in shape.pinned
+    op = shape.members[0][0]
+    assert {s.get("coded_a", op.coded_a) for s in settings(op, npu2, shape.pinned)} == {
+        op.coded_a
+    }
+
+
+def test_a_width_resolved_afresh_keeps_its_coding(npu2, tmp_path):
+    """A width its recorded tiles do not divide resolves them afresh, its coding held.
+
+    Reset with them, Gemma 4 E2B's coded k_proj was packed plain over its coded rows
+    ("Size mismatch for buffer ...k_proj.weight.coded").
+    """
+    gemv = GEMV(M=512, K=1536, coded_a=True, tile_size_output=64, num_aie_columns=4)
+    steps = sequences.steps((gemv, "a", "x", "y"))
+    recording = Recording.of_steps("one_gemv", steps, ["a", "x"], ["y"])
+    packer = _packer(recording, npu2, tmp_path)
+    (key,) = packer.shapes
+    afresh = [o for o in packer.options(key) if o.get("tile_size_output", 64) is None]
+    assert afresh
+    for option in afresh:
+        assert all(op.coded_a for op in packer.arrays(key, option).values())
+
+
+def test_aligning_a_unit_to_another_array_keeps_its_coding(npu2, tmp_path):
+    """A unit aligned to another array's setting keeps its own coded_a.
+
+    Aligned whole to a plain GEMV, Gemma 4 E2B's coded q_proj was packed plain over
+    its coded rows ("Size mismatch for buffer ...q_proj.weight.coded").
+    """
+    steps = sequences.steps(
+        (GEMV(M=2048, K=1536, coded_a=True), "a", "x", "y"),
+        (GEMV(M=512, K=1536), "b", "x", "z"),
+    )
+    recording = Recording.of_steps("two_gemvs", steps, ["a", "b", "x"], ["y", "z"])
+    packer = _packer(recording, npu2, tmp_path)
+    group = {k: {} for k in packer.shapes}
+    for key, setting in packer.changes(group):
+        assert setting.get("coded_a", packer.recorded(key).coded_a) == (
+            packer.recorded(key).coded_a
+        )
+
+
+def test_a_shape_whose_operators_share_no_setting_is_left_as_recorded(npu2):
+    """Nothing to search where no setting suits every operator: none timed, none taken.
+
+    Gemma 4 E2B's packing search hit such a unit re-tiling with its coding held, and
+    time_shape indexed the empty intersection (IndexError).
+    """
+    gemv = GEMV(M=2048, K=2048)
+    shape = Shape(gemv)
+    shape.members = [(gemv, [(1.0, {})], {}), (Tanh(size=2048), [(1.0, {})], {})]
+    logged = []
+    assert time_shape(shape, npu2, full_elf=True, log=logged.append) == []
+    assert logged[-1].endswith("left as recorded")
 
 
 def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
@@ -473,6 +573,42 @@ def test_price_packings_packs_alternating_arrays_bit_identically(tmp_path):
     for _ in range(3):
         reference = np.tanh(np.maximum(reference, 0))
     np.testing.assert_allclose(got.astype(np.float32), reference, atol=2e-2)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_spent_budget_keeps_what_the_first_round_found(tmp_path):
+    """A tune out of time still checks and keeps its first merge.
+
+    Its search stops after it, and the packing is kept, checked end to end and
+    bit-identical, where a cap would have kept nothing.
+    """
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    recording = Alternating().record(x=(SIZE,))
+    logged = []
+    budget = Budget(0, logged.append)
+    profile = price_packings(
+        [Timed(recording)],
+        dev,
+        iron.Profile(),
+        full_elf=True,
+        timing=Timing(rounds=2, calls=5),
+        repeats=5,
+        cache=cache,
+        fit_cache=tmp_path / "fit",
+        log=logged.append,
+        budget=budget,
+    )
+    print("\n".join(logged))
+    assert budget.stopped == [f"{recording.name}'s packing search"]
+    assert len(profile.packings()) == 1
+    packed_graph = Alternating()
+    packed_graph.profile = profile
+    x = (np.random.default_rng(0).random(SIZE) * 4 - 2).astype(bfloat16)
+    want = np.asarray(Alternating().compile(x=(SIZE,))(x))
+    got = np.asarray(packed_graph.compile(x=(SIZE,))(x))
+    assert np.array_equal(want.view(np.uint16), got.view(np.uint16))
 
 
 @pytest.mark.supported_devices("npu2")

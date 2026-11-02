@@ -432,12 +432,20 @@ def time_shape(
     Every setting its operators share and the placer takes: tunables couple
     (MHA's pipelines with its query block), so one at a time would stop at a
     local best. A setting whose ``least_us`` at ``cycles`` and ``core_mhz``
-    is no faster than the fastest taken so far is not timed.
+    is no faster than the fastest taken so far is not timed. None where its operators
+    share no setting (each held to its own pinned ones): it stays as recorded.
     """
     found = settings(shape.members[0][0], dev, shape.pinned)
     for op, _, _ in shape.members[1:]:
         own = settings(op, dev, shape.pinned)
         found = [s for s in found if s in own]
+    if not found:
+        named = [
+            f"{type(op).__name__}({', '.join(f'{n}={vars(op)[n]}' for n in sorted(op.given))})"
+            for op, _, _ in shape.members
+        ]
+        log(f"    no setting {', '.join(named)} all take; left as recorded")
+        return []
     found = [found[0]] + [
         s
         for s in found[1:]
@@ -731,6 +739,8 @@ def autotune(
             core_mhz=core_mhz,
             log=log,
         )
+        if not tried:
+            continue
         gains = [t for t in tried if t.gains]
         best = min(gains, key=lambda t: t.delta_us, default=tried[0])
         if gains:
