@@ -13,6 +13,8 @@ import iron
 from iron import Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
+from iron.lm import tune as lm_tune
+from iron.lm.generation import Sampler
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
@@ -21,7 +23,7 @@ from iron.operators.tanh import Tanh
 from iron.tests.support.llama_model import small
 from iron.tune.autotune import Shape, Timed, merged, settings, shapes
 from iron.tune.costmodel import CostModel
-from iron.tune.fold import array_scoped_fold_candidates
+from iron.tune.fold import array_scoped_fold_candidates, fold_profile
 from iron.tune.measure import LONG_STEP_US, MIN_CALLS, Cache, Timing, measure, platform
 from iron.tune.survey import step_times, survey
 
@@ -35,6 +37,22 @@ def decode_call() -> Timed:
     model = small()
     model.profile = Profile()
     return Timed(model.record(**model.shapes()[0]))
+
+
+def folded_prompt() -> tuple[Timed, Profile]:
+    """Return the small model's prompt chunk as the tuner times it, and a profile folding its SiLUs."""
+    model = small()
+    model.profile = Profile()
+    calls = lm_tune.calls(
+        model,
+        position=64,
+        token=0,
+        context=model.config.prefill_chunk,
+        points=1,
+        sampler=Sampler(),
+        versions=["prompt"],
+    )
+    return calls[0], fold_profile(Profile(), calls)
 
 
 def given_times(call: Timed, dev) -> dict[str, float]:
@@ -170,6 +188,18 @@ def test_a_tuned_attention_entry_applies_to_the_calls_it_was_tuned_for():
         )
 
 
+def test_a_folded_step_reads_its_values_from_the_recording_its_profile_builds():
+    """A fold builds steps only the built recording binds; ``Timed.under`` reads their per-call values there."""
+    dev = aie_utils.ensure_current_device()
+    call, profile = folded_prompt()
+    built, _, _ = call.under(profile, dev)
+    recorded = {id(s.op) for s in call.recording.steps}
+    folded = [s.op for s in built.recording.steps if id(s.op) not in recorded]
+    assert folded and len(built.recording.steps) < len(call.recording.steps)
+    for op in folded:
+        assert built.op_points(op) and built.op_inputs(op) is not None
+
+
 # ---------------------------------------------------------------------------
 # On the device
 # ---------------------------------------------------------------------------
@@ -222,3 +252,24 @@ def test_a_long_step_is_the_excess_of_two_runs_over_one():
     ).values()
     assert any("probes of 2 runs" in line for line in logged), logged
     assert step.t_step_us > LONG_STEP_US / 2
+
+
+@pytest.mark.supported_devices("npu2")
+def test_step_times_times_each_design_of_a_folded_prompt_chunk(tmp_path):
+    """A profile's folds are timed as the version builds them, each folded step at the call's own values."""
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    call, profile = folded_prompt()
+    times = step_times(
+        call,
+        profile,
+        dev,
+        full_elf=True,
+        timing=Timing(rounds=2),
+        repeats=5,
+        cache=cache,
+    )
+    built, _, _ = call.under(profile, dev)
+    names = {OperatorDesign(s.op.resolved(dev)).name for s in built.recording.steps}
+    assert set(times) == names and all(t > 0 for t in times.values())

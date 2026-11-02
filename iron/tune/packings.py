@@ -26,7 +26,6 @@ that version, built with it, is faster too (``widen_packings``).
 from __future__ import annotations
 
 import collections
-import dataclasses
 import itertools
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -37,7 +36,6 @@ from aie.utils.compile.jit.params import widths
 
 from iron.common.declare import Operator, Profile
 from iron.common.declare.profile import PackingEntry, Version
-from iron.common.graph.compiled import apply_profile
 from iron.common.image.step import FusionKind
 
 from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, _json_safe, time_shape
@@ -604,9 +602,10 @@ def price_packings(
     for call in calls:
         version = call.recording.version
         current = _profile(base, found)
-        recording, _, _ = apply_profile(call.recording, current, dev)
+        built, _, _ = call.under(current, dev)
+        recording = built.recording
         packer = Packer(
-            dataclasses.replace(call, recording=recording),
+            built,
             dev,
             full_elf=full_elf,
             timing=timing,

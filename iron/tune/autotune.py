@@ -30,8 +30,10 @@ from aie.utils.compile.jit.params import OperatorParam
 
 from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
+from iron.common.graph.compiled import apply_profile
 from iron.common.graph.record import Recording
-from iron.common.image.compose import fits
+from iron.common.image.compose import Packing, fits
+from iron.common.image.step import Fusion
 from iron.operators.gemm import GEMM
 
 from .measure import (
@@ -131,6 +133,17 @@ class Timed:
     contents: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
     points: Sequence[Point] = ()
     varying: Mapping[Hashable, frozenset[str]] = dataclasses.field(default_factory=dict)
+
+    def under(
+        self, profile: Profile, dev: Device
+    ) -> tuple[Timed, tuple[Fusion, ...], Packing]:
+        """Return this call as ``profile`` builds it, with its fusions and packing (``apply_profile``).
+
+        A folded, fused or packed step's per-call values are read from the bindings only
+        the built recording has.
+        """
+        recording, fused, packing = apply_profile(self.recording, profile, dev)
+        return dataclasses.replace(self, recording=recording), fused, packing
 
     def op_values(
         self, op: Operator, values: Mapping[str, int] | None = None

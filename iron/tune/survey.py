@@ -19,7 +19,6 @@ from aie.utils.compile.jit.params import OperatorParam
 
 from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
-from iron.common.graph.compiled import apply_profile
 from iron.common.graph.fusion import candidates
 from iron.common.image.step import Fusion, FusionKind
 from iron.operators.gemm import GEMM
@@ -151,7 +150,8 @@ def survey(
         cycles: Kernel cycles per call (``kernel_cycles``), for GEMM's bound.
         core_mhz: The clock ``cycles`` are timed at.
     """
-    recording, fused, packing = apply_profile(call.recording, profile, dev)
+    call, fused, packing = call.under(profile, dev)
+    recording = call.recording
     inside = {i: f for f in fused for i in f.steps}
     shapes: dict[str, Shape] = {}
     counts: collections.Counter[str] = collections.Counter()
@@ -307,9 +307,9 @@ def step_times(
     Its standalone step time summed over the steps running it, weighted over the call's
     points (``measure``, cached).
     """
-    recording, _, _ = apply_profile(call.recording, profile, dev)
+    call, _, _ = call.under(profile, dev)
     out: dict[str, float] = collections.defaultdict(float)
-    for step in recording.steps:
+    for step in call.recording.steps:
         op = step.op.resolved(dev)
         name = OperatorDesign(op).name
         for weight, values in call.op_points(step.op):
