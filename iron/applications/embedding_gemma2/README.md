@@ -49,7 +49,7 @@ The text encoder's embeddings against Hugging Face's, the truncations, a
 query ranking two documents, text with a clip and an image, each tower's
 soft tokens, the audio features and image patches against Hugging Face's
 processors', determinism and latency (recorded to CI:
-[benchmarks](https://amd.github.io/IRON/benchmarks/#bench=embedding_gemma2&suite=nightly&metric=Latency)),
+[performance checks](https://amd.github.io/IRON/performance-checks/#bench=embedding_gemma2&suite=nightly&metric=Latency)),
 on NPU1 and NPU2; `TestEachStep`
 checks NPU1's form, an xclbin per step, on NPU2. The vision tests fetch
 four COCO val2017 photos and the audio tests five LibriSpeech test-clean

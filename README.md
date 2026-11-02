@@ -21,7 +21,7 @@ SPDX-License-Identifier: Apache-2.0
   <a href="./programming_guide/">Programming guide</a> ·
   <a href="https://amd.github.io/IRON/api/">API reference</a> ·
   <a href="https://amd.github.io/IRON/models/">Models</a> ·
-  <a href="https://amd.github.io/IRON/benchmarks/">Benchmarks</a>
+  <a href="https://amd.github.io/IRON/performance-checks/">Performance Checks</a>
 </p>
 
 <p align="center">
@@ -86,7 +86,7 @@ start with the [programming guide](./programming_guide/).
 How to run, test and tune each one is on the
 [Models](https://amd.github.io/IRON/models/) page; their time to first token
 and tokens per second, and every operator's performance, are tracked on
-[Benchmarks](https://amd.github.io/IRON/benchmarks/).
+[Performance Checks](https://amd.github.io/IRON/performance-checks/).
 
 ## How it works
 

@@ -16,7 +16,7 @@ MAX_RUNS = 400
 
 
 def prune(rows, date_fmt="%Y-%m-%d %H:%M:%S"):
-    """Keep the runs the reports and the Benchmarks page read.
+    """Keep the runs the reports and the Performance Checks page read.
 
     A run is the rows of one date. Each benched parametrization keeps its own
     runs of the last `KEEP_DAYS` before the suite's newest, its newest run of
@@ -150,7 +150,12 @@ def main():
     )  # Ignore empty/non-existant all.csv on first run
     latest_rows = get_rows(args.latest)
 
-    output_rows = all_rows + latest_rows
+    # A run merged again, as by a re-run job, replaces its rows.
+    output_rows = list(
+        {
+            (row_key(row), row.get("Date")): row for row in all_rows + latest_rows
+        }.values()
+    )
     add_empty_columns(output_rows)
 
     if args.prune:

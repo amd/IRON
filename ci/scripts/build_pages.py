@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Write the data the website's Benchmarks page draws, from the results branch.
+"""Write the data the website's Performance Checks page draws, from the results branch.
 
 Reads every ``{arch}/{suite}/all.csv`` under a results root and writes one JSON
 file: each suite's latest run on each device, and each benchmark's history,
@@ -26,11 +26,16 @@ from pretty_common import (
     ARCHS,
     MEAN_SUFFIX,
     METRICS,
+    RELATIVE_SPREADS,
+    SPREADS,
     SUITES,
+    TIMED_UNITS,
     UNKNOWN_METRIC,
+    comparable,
     metric_label,
     operator_name,
     parse_checks,
+    provenance_fields,
     results_dir,
     row_key,
     select_bench_rows,
@@ -48,8 +53,6 @@ SUITE_NAMES = {
     "nightly": ("Models", "Nightly"),
 }
 
-# A metric whose figure is another's spread is drawn with it, not on its own.
-SPREADS = {"Latency": "Latency MAD"}
 
 # The trends the page leads with, one per benchmark and checkpoint: the first
 # suite, then the first metric, any device still runs; beside a TPS, its TTFT.
@@ -75,13 +78,23 @@ CHECKPOINTS = {
     "long_context": {"llama_3.2_1b": "Llama 3.2 1B · 8K-token prompt"},
 }
 
-# The forms a decoder runs in, as its test ids name them, in the order each
-# device's trend takes them: NPU2's full ELF, its loop on the device first,
-# never the each-step form NPU1 runs. None is a test naming no form.
+# The forms a decoder runs in, as its test ids name them; beside them, a test
+# naming none runs the model as it loads, NPU2's device loop, and None is a
+# test of a benchmark with no forms. Each device's trend draws a line for each
+# form it runs, in this order.
 FORMS = {"device_loop": "device loop", "each_step": "each step"}
-DEVICE_FORMS = {"krackan": ("device loop", None), "phoenix": ("each step", None)}
+DEVICE_FORMS = {
+    "krackan": ("device loop", "each step", None),
+    "phoenix": ("each step", None),
+}
+# How the page's key explains each form, named once a card draws two.
+FORM_NOTES = {
+    "device loop": "one full ELF; the NPU draws every token and starts every decode step itself (NPU2)",
+    "each step": "each step its own xclbin dispatch, started by the host on the token "
+    "the last drew: the form NPU1 runs, and NPU2's for comparison",
+}
 
-# Where a benchmark still run is documented, relative to the Benchmarks page:
+# Where a benchmark still run is documented, relative to the Performance Checks page:
 # a model on the Models page, an operator in the API reference. A catalog
 # benchmark is named for its class; these are named for their test's
 # directory.
@@ -148,8 +161,10 @@ def change(curr, prev, metric):
 
     The verdict is 'better' or 'worse' only past both of the pull request
     comment's gates, 'neutral' for a metric with no direction, and None for a
-    move inside the gates.
+    move inside the gates. A timing across a change of power mode is none.
     """
+    if not comparable(curr, prev, metric):
+        return None
     pct = delta_pct(
         try_parse_float(curr.get(metric + MEAN_SUFFIX)),
         try_parse_float(prev.get(metric + MEAN_SUFFIX)),
@@ -164,17 +179,15 @@ def change(curr, prev, metric):
 
 
 def trend_series(series, metric, checkpoint):
-    """Map each device to the label of the series of a checkpoint its trend follows.
+    """List the lines a checkpoint's trend draws: a device, its series and form.
 
-    The series is one the device's latest run measured: in the first of the
-    device's forms, then a test of its own before a class's, then one more
-    devices share, then the longest history over every device, then the
-    first label.
+    Each device draws one line per form its latest run measured, in its
+    forms' order. Within a form the series is a test of its own before a
+    class's, then one more devices share, then the longest history over every
+    device, then the first label. Forms are named only where a trend draws
+    more than one; a decoder's line names its prompt and generated tokens.
     """
-    named = {
-        s["label"]: next((f for key, f in FORMS.items() if key in s["test"]), None)
-        for s in series
-    }
+    named = {s["label"]: s["form"] for s in series}
     eligible = {
         device: [
             s
@@ -191,26 +204,39 @@ def trend_series(series, metric, checkpoint):
     for candidates in eligible.values():
         for s in candidates:
             shared[s["label"]] = shared.get(s["label"], 0) + 1
-    picked = {}
+    lines = []
     for device, candidates in eligible.items():
-        ranked = sorted(
-            (
-                DEVICE_FORMS[device].index(named[s["label"]]),
-                s["test"].count("::") > 1,
-                -shared[s["label"]],
-                -sum(
-                    metric in p[3]
-                    for run in s["devices"].values()
-                    for p in run["points"]
-                ),
-                natural_key(s["label"]),
-                s["label"],
+        for form in DEVICE_FORMS[device]:
+            ranked = sorted(
+                (
+                    s["test"].count("::") > 1,
+                    -shared[s["label"]],
+                    -sum(
+                        metric in p[3]
+                        for run in s["devices"].values()
+                        for p in run["points"]
+                    ),
+                    natural_key(s["label"]),
+                    s["label"],
+                )
+                for s in candidates
+                if named[s["label"]] == form
             )
-            for s in candidates
-        )
-        if ranked:
-            picked[device] = ranked[0][-1]
-    return picked
+            if ranked:
+                label = ranked[0][-1]
+                (picked,) = (s for s in candidates if s["label"] == label)
+                lines.append(
+                    {
+                        "device": device,
+                        "label": label,
+                        "form": form,
+                        "context": picked["context"],
+                    }
+                )
+    if len({line["form"] for line in lines}) < 2:
+        for line in lines:
+            line["form"] = None
+    return lines
 
 
 def trends(name, group, suites):
@@ -228,6 +254,7 @@ def trends(name, group, suites):
                 out.append(
                     {
                         "benchmark": name,
+                        "checkpoint": checkpoint,
                         "title": title,
                         "group": group,
                         "suite": suite,
@@ -301,7 +328,13 @@ def build_data(results_root, repository):
                     if value is not None:
                         values[metric] = value
                 points.append(
-                    [row["Date"], (row.get("Commit") or "")[:10], passed(row), values]
+                    [
+                        row["Date"],
+                        (row.get("Commit") or "")[:10],
+                        passed(row),
+                        values,
+                        provenance_fields(row.get("Provenance")).get("pmode"),
+                    ]
                 )
             changes = {}
             if len(series_rows) > 1:
@@ -344,8 +377,8 @@ def build_data(results_root, repository):
                 m
                 for s in series
                 for d in s["devices"].values()
-                for _, _, _, values in d["points"]
-                for m in values
+                for point in d["points"]
+                for m in point[3]
             } - set(SPREADS.values())
             suites[suite] = {
                 "metrics": sorted(
@@ -359,11 +392,33 @@ def build_data(results_root, repository):
                     {
                         "label": s["label"],
                         "test": f"{s['test']}[{s['params']}]",
+                        "form": next(
+                            (
+                                f
+                                for key, f in FORMS.items()
+                                if key in s["test"] + s["params"]
+                            ),
+                            None,
+                        ),
+                        "context": (
+                            f"prompt {shape[1]} chars → {shape[2]} token{'' if shape[2] == '1' else 's'}"
+                            if (
+                                shape := re.search(
+                                    r"prompt_(\d+)_tokens_(\d+)", s["params"]
+                                )
+                            )
+                            else None
+                        ),
                         "devices": s["devices"],
                     }
                     for s in series
                 ],
             }
+            # Beside a decoder's named forms, a test naming none runs the model
+            # as it loads: on NPU2, the device loop.
+            if any(s["form"] for s in suites[suite]["series"]):
+                for s in suites[suite]["series"]:
+                    s["form"] = s["form"] or "device loop"
         if not any(suite["metrics"] for suite in suites.values()):
             continue
         group = SUITE_NAMES[next(iter(suites))][0]
@@ -396,10 +451,16 @@ def build_data(results_root, repository):
             for suite, (group, name) in SUITE_NAMES.items()
         },
         "metrics": {
-            name: {"unit": m.unit, "higher_is_better": m.higher_is_better}
+            name: {
+                "unit": m.unit,
+                "higher_is_better": m.higher_is_better,
+                "timed": m.unit in TIMED_UNITS,
+            }
             for name, m in METRICS.items()
         },
         "spreads": SPREADS,
+        "relative_spreads": RELATIVE_SPREADS,
+        "forms": FORM_NOTES,
         "runs": runs,
         "trends": [
             trend
@@ -436,9 +497,9 @@ def main():
     parser.add_argument(
         "-o",
         "--output",
-        default="docs/benchmarks/data.json",
-        help="The JSON file to write (default: docs/benchmarks/data.json, "
-        "beside the Benchmarks page)",
+        default="docs/performance-checks/data.json",
+        help="The JSON file to write (default: docs/performance-checks/data.json, "
+        "beside the Performance Checks page)",
     )
     args = parser.parse_args()
 

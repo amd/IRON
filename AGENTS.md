@@ -319,7 +319,7 @@ Each hardware workflow runs one job per runner, Phoenix (NPU1) and Krackan
   clang-format, actionlint, hygiene) over the repository, and pyright over
   `[tool.pyright]`'s paths in `pyproject.toml` on Python 3.11 to 3.14.
 - `pr-comment.yml` and `publish-pages.yml`: the performance trends of a PR,
-  each linked to its history, and the website, whose Benchmarks page draws
+  each linked to its history, and the website, whose Performance Checks page draws
   that history.
 
 On `main` and `devel`, `publish-results.yml`, the only job that can push,
@@ -327,7 +327,7 @@ merges each run's `tests_latest.csv` into `{arch}/{suite}/all.csv` on the
 `ci` branch (`ci/scripts/merge_results.sh`), which keeps a benched test's runs
 of the last 90 days and its newest of each week before that, as mlir-aie
 keeps its kernel checks', and every other test's last two. `ci/scripts/`
-turns those into the PR comment and the Benchmarks page's data
+turns those into the PR comment and the Performance Checks page's data
 (`build_pages.py`), each judging a move by the same gates. Only cases marked
 `@pytest.mark.bench` (a `Case(bench=True)`) are tracked, and a metric's unit
 and direction are named in `ci/scripts/pretty_common.py`'s `METRICS`.

@@ -76,7 +76,7 @@
 .iron-card-title { font-weight: 600; font-size: 0.9rem; display: block; margin-bottom: 0.3rem; color: var(--md-typeset-a-color); }
 .iron-card-desc  { font-size: 0.78rem; opacity: 0.72; line-height: 1.4; }
 
-/* ── Benchmarks page ─────────────────────────────────────────────────────── */
+/* ── Performance Checks page ─────────────────────────────────────────────────────── */
 .iron-bench-filters {
   display: flex;
   flex-wrap: wrap;
@@ -136,6 +136,23 @@
 .iron-muted { color: var(--md-default-fg-color--light); }
 /* Status steps, each beside a word or a mark that says the same. */
 .iron-key-none { background: none; }
+.iron-key-form { width: 1.5rem; height: 0; border-top-width: 2px; }
+.iron-trend-form { color: var(--md-default-fg-color--light); }
+.md-typeset dl.iron-form-key {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem 0.75rem;
+  margin: 0.6rem 0 0;
+  font-size: 0.7rem;
+}
+.md-typeset dl.iron-form-key dt {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 400;
+  font-style: normal;
+}
+.md-typeset dl.iron-form-key dd { margin: 0; color: var(--md-default-fg-color--light); }
 .iron-trend-legend {
   display: flex;
   flex-wrap: wrap;
