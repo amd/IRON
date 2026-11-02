@@ -692,20 +692,22 @@
   function drawTable(series, metric, suite) {
     const devices = Object.keys(DATA.devices).filter((d) => series.some((s) => d in s.devices));
     const colours = PALETTE[scheme()];
-    const full = slots.size >= PALETTE.light.length;
+    const used = new Set(slots.values());
+    const full = used.size >= PALETTE.light.length;
 
     const head = el("tr", {}, el("th", { textContent: "Drawn" }), el("th", { textContent: "Parametrization" }),
       ...devices.flatMap((d) => [el("th", { textContent: `${DATA.devices[d]}` }),
                                  el("th", { textContent: "Change" })]));
     const rows = series.map((s) => {
       const slot = slots.get(s.label);
+      // A drawn series of the same context lends its colour.
+      const kin = s.context && series.find((o) => o.context === s.context && slots.has(o.label));
       const box = el("input", { type: "checkbox", checked: slot !== undefined,
-                                disabled: slot === undefined && full,
+                                disabled: slot === undefined && full && !kin,
                                 "aria-label": `Draw ${s.label}` });
       box.addEventListener("change", () => {
         if (box.checked) {
-          const used = new Set(slots.values());
-          slots.set(s.label, [...PALETTE.light.keys()].find((i) => !used.has(i)));
+          slots.set(s.label, kin ? slots.get(kin.label) : [...PALETTE.light.keys()].find((i) => !used.has(i)));
         } else {
           slots.delete(s.label);
         }
