@@ -112,6 +112,7 @@ def layer_norm(
 
 
 def silu(x: Handle) -> Handle:
+    """Apply SiLU, ``x * sigmoid(x)``, as torch's."""
     return SiLU.step(x)
 
 

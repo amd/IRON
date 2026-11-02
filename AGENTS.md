@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# AGENTS.md
+# Agent instructions
 
 The rules a coding agent or contributor follows in this repository, and the
 map of where things live. Each module's docstring is the reference for what
@@ -14,7 +14,8 @@ AIE2P) over mlir-aie's `aie.iron`. bfloat16 is its main data type.
 
 Elsewhere:
 
-- [README.md](README.md): installation, the quick start and the models.
+- [README.md](README.md): the quick start; [docs/installation.md](docs/installation.md)
+  and [docs/models.md](docs/models.md): installation and the models.
 - [CONTRIBUTING.md](CONTRIBUTING.md): the pull request workflow, style,
   licence headers, the git hook, and short walkthroughs for adding a model
   or an operator.
@@ -339,8 +340,8 @@ Check the code before relying on a line here; it is the authority.
   which checks each step on its own dispatch, refuses fusions.
 - A full ELF call is one command however long it runs: a prompt chunk's
   attention grows with the context, and a tower's with its image. The
-  driver's command timeout must cover the longest, as the README's
-  [installation](README.md#installation-linux) sets it.
+  driver's command timeout must cover the longest, as the
+  [installation](docs/installation.md) sets it.
 - Tuning times each operator's settings alone. A fusion is priced against
   its steps apart, at the widths its members co-reside at, and kept only
   where its whole version still gains and stays bit-identical. Kernel cycle

@@ -127,6 +127,7 @@ def load_from_flags(
 
 
 def prompt(model, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
+    """Return a prompt of ``chars`` characters' tokens with room for ``num_tokens`` after it."""
     tokens = model.prompt(chars, skip=skip)
     assert len(tokens) + num_tokens <= model.config.max_seq_len
     return tokens

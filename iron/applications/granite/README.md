@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 IBM's Granite 4.2 3B, `Granite` in `model.py`, whose docstring says what is
 its own: Llama's layer with four scalars from its `config.json`, an untied
-head and a sharded checkpoint. How to run, test and tune it is the README's [Models](../../../README.md#models); the shared library is [AGENTS.md](../../../AGENTS.md#language-models).
+head and a sharded checkpoint. How to run, test and tune it is in [Models](../../../docs/models.md#running-testing-and-tuning-a-text-decoder); the shared library is [AGENTS.md](../../../AGENTS.md#language-models).
 
 ## Weights and tokenizer
 

@@ -2,8 +2,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
 /* Primary: charcoal header matching rocm.docs.amd.com (#27282b / #1a1a1b).
-   Accent scheme: true-blue links, orange for interactive/hover accents. */
-:root {
+   Accent scheme: true-blue links, orange for interactive/hover accents.
+   Material sets the link colour per scheme, so the light one is named too. */
+:root,
+[data-md-color-scheme="default"] {
   --md-primary-fg-color:        #27282b;
   --md-primary-fg-color--light: #3a3b3f;
   --md-primary-fg-color--dark:  #1a1a1b;
@@ -51,7 +53,7 @@
   .iron-cards { grid-template-columns: 1fr; }
 }
 
-.iron-card {
+.md-typeset .iron-card {
   border: 1px solid var(--md-default-fg-color--lightest);
   border-radius: 8px;
   padding: 1.25rem 1rem 1rem;
@@ -63,7 +65,8 @@
   min-height: 120px;
 }
 
-.iron-card:hover {
+.md-typeset .iron-card:hover,
+.md-typeset .iron-card:focus {
   border-color: var(--md-accent-fg-color);
   box-shadow: 0 0 0 2px var(--md-accent-fg-color--transparent);
   color: inherit;
@@ -132,6 +135,86 @@
 .iron-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .iron-muted { color: var(--md-default-fg-color--light); }
 /* Status steps, each beside a word or a mark that says the same. */
+.iron-key-none { background: none; }
+.iron-trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  align-items: center;
+  margin: 0.5rem 0 1rem;
+  font-size: 0.75rem;
+}
+.iron-trend-legend .iron-bench-note { margin: 0; }
+.iron-trend-device { display: inline-flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+.md-typeset .iron-trends h3 { margin: 1.25rem 0 0.6rem; }
+.iron-trend-span { margin-left: 0.6rem; font-weight: 400; color: var(--md-default-fg-color--light); }
+.iron-trend-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(17rem, 100%), 1fr));
+  gap: 0.75rem;
+}
+.iron-trend {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0.7rem 0.8rem 0.5rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 8px;
+  transition: border-color 0.15s;
+}
+.iron-trend:hover { border-color: var(--md-default-fg-color--lighter); }
+.iron-trend header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.5rem; }
+.md-typeset .iron-trend-name { font-weight: 700; font-size: 0.8rem; }
+.iron-trend-metric { color: var(--md-default-fg-color--light); font-size: 0.65rem; }
+.md-typeset ul.iron-trend-latest {
+  list-style: none;
+  margin: 0.4rem 0 0.25rem;
+  padding: 0;
+  font-size: 0.7rem;
+}
+.md-typeset ul.iron-trend-latest li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 0.5rem;
+  margin: 0 0 0.3rem;
+  min-width: 0;
+}
+.iron-trend-value { text-align: right; white-space: nowrap; }
+.iron-trend-value .iron-mark { margin-left: 0.3rem; font-size: 0.65rem; }
+.iron-trend-what {
+  grid-column: 1 / -1;
+  padding-left: 1.4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.6rem;
+}
+.iron-trend-shape { display: block; padding-left: 0; margin: -0.15rem 0 0.25rem; }
+.iron-trend-canvas { position: relative; height: 7.5rem; margin-top: auto; }
+.iron-runs-table th[scope="row"] { font-weight: 600; white-space: nowrap; }
+.iron-runs-table td { min-width: 12rem; }
+.md-typeset details.iron-moved {
+  margin: 0.2rem 0 0;
+  padding: 0;
+  border: none;
+  box-shadow: none;
+  background: none;
+  font-size: 0.65rem;
+}
+.md-typeset details.iron-moved > summary {
+  display: list-item;
+  padding: 0;
+  border: none;
+  background: none;
+  font-weight: 400;
+  color: var(--md-typeset-a-color);
+  cursor: pointer;
+}
+.md-typeset details.iron-moved > summary::before,
+.md-typeset details.iron-moved > summary::after { display: none; }
+.md-typeset details.iron-moved ul { margin: 0.3rem 0 0 0.9rem; max-height: 16rem; overflow-y: auto; }
+.md-typeset details.iron-moved li { margin: 0; }
 .iron-mark.iron-worse { color: #d03b3b; }
 .iron-mark.iron-better { color: #006300; }
 [data-md-color-scheme="slate"] .iron-mark.iron-better { color: #0ca30c; }
