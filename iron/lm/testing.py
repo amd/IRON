@@ -326,14 +326,15 @@ def check_deep_decode(
     values = dict(token=token, position=position)
     with _fill_caches(model, len(tokens), position):
         got, _ = model(**values)
-        got = got.numpy()
         expected, _ = model.reference(**values)
+        # Before the step runs again: its output is read in place, and a
+        # recurrent layer's state moves on with every run.
+        kl, top1 = divergence(expected, got.numpy())
         seconds = []
         for _ in range(timed):
             start = time.perf_counter()
             model(**values)
             seconds.append(time.perf_counter() - start)
-    kl, top1 = divergence(expected, got)
     record("DeepKL", kl)
     record("DeepTop1", top1)
     record("DeepTPS", 1 / float(np.median(seconds)))
