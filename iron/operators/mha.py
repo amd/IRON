@@ -883,6 +883,8 @@ class MHA(Operator):
     # Fused, the key block per head dimension, as today's pipeline takes it
     # on npu1, so the two mappings are one result (D5).
     FUSED_KEY_BLOCKS: ClassVar[dict[int, int]] = {64: 64, 128: 32, 256: 16}
+    # The fused core loop's own frame below the kernel's (an ELF's measure).
+    FUSED_LOOP_FRAME: ClassVar[int] = 192
 
     def resolve_fused(self, dev):
         """``resolve`` for one core a query block: every core of ``num_pipelines`` columns.
@@ -1015,7 +1017,13 @@ class MHA(Operator):
     def fused_core_bytes(
         self, dev: Device, B_q: int, B_kv: int, f32: bool = False, kv_depth: int = 2
     ) -> int:
-        """Return a fused core's L1 bytes: Q, ``kv_depth`` key blocks, O's two forms, S (float32 where ``f32``), P, state and stack."""
+        """Return a fused core's L1 bytes: Q, ``kv_depth`` key blocks, O's two forms, S (float32 where ``f32``), P, state and stack.
+
+        The stack is aiecc's: the core's measured stack, the loop's own frame
+        and the kernel's, never under the default. The kernel's static data
+        is what attend_block reaches; the core's other entries, its state's
+        init and O's rescale, reach none.
+        """
         d = self.d
         data = (
             2 * B_q * d  # Q, one block deep
@@ -1027,12 +1035,16 @@ class MHA(Operator):
             + (4 * 32 * B_q if self.relative_band else 0)  # Q R^T
             + 16 * B_q  # the online state
             + 12  # the block index
+            # The RTP's words, each a scratchpad parameter of its own in a
+            # model's graph (8 bytes, aligned up to 32), and its groups copied.
+            + 32 * (5 + 2 * self.ROUND_GROUPS)
+            + 4 * 2 * self.ROUND_GROUPS
         )
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
             frame = self.fused_kernel(
                 B_q, B_kv, self.num_heads // self.num_KV_heads, f32=f32
-            ).frame_bytes(resolve_target_arch(dev))
-        return dev.default_core_stack_bytes + data + frame
+            ).frame_bytes(resolve_target_arch(dev), reached_only=True)
+        return data + max(dev.default_core_stack_bytes, self.FUSED_LOOP_FRAME + frame)
 
     def resolve_split(self, dev):
         """``resolve`` for one query: a core a KV lane, each over every ``kv_lanes``-th key block from its own.
