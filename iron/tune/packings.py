@@ -54,7 +54,7 @@ from .fusions import (
     group_fit_verdict,
     refuse_group,
 )
-from .measure import Cache, Timing, measure
+from .measure import Budget, Cache, Timing, measure
 
 # A version is searched only where its switches cost at least this share of
 # its steps' own time: packing removes switches, and narrowing slows steps.
@@ -112,8 +112,10 @@ class Packer:
         ledger: Ledger | None = None,
         cycles: Mapping[str, int] | None = None,
         core_mhz: float | None = None,
+        budget: Budget | None = None,
     ):
         self.call, self.dev, self.full_elf = call, dev, full_elf
+        self.budget = Budget() if budget is None else budget
         self.timing, self.repeats, self.cache = timing, repeats, cache
         self.fit_cache, self.log, self.lock = fit_cache, log, lock
         self.model, self.ledger = model, ledger
@@ -446,8 +448,10 @@ class Packer:
 
         The merge that most improves it each round, of every pair of groups one
         follows the other somewhere in step order, then single arrays moved between
-        groups while that improves it, then each group retiled.
+        groups while that improves it, then each group retiled; past the first merge,
+        each round only while ``budget`` lasts.
         """
+        search = f"{self.call.recording.name}'s packing search"
         groups: list[Group] = [{k: {}} for k in self.shapes]
         score = self.objective(groups)
         while True:
@@ -467,13 +471,18 @@ class Packer:
                 break
             score, groups = best
             self.log(f"  merged: {len(groups)} groups, ~{score:.0f} us estimated")
-        groups, score = self._improve(groups, score)
-        groups = [self.retile(g) for g in groups]
+            if self.budget.ends(search):
+                break
+        if not self.budget.ends(search):
+            groups, score = self._improve(groups, score, search)
+        groups = [g if self.budget.ends(search) else self.retile(g) for g in groups]
         self.log(f"  grouped: {len(groups)} groups, ~{self.objective(groups):.0f} us")
         return groups
 
-    def _improve(self, groups: list[Group], score: float) -> tuple[list[Group], float]:
-        """Return ``groups`` after moving single arrays between groups (or into one of their own) while that improves ``objective``."""
+    def _improve(
+        self, groups: list[Group], score: float, search: str
+    ) -> tuple[list[Group], float]:
+        """Return ``groups`` after moving single arrays between groups (or into one of their own) while that improves ``objective`` and ``budget`` lasts."""
         while True:
             best = None
             for gi, g in enumerate(groups):
@@ -505,6 +514,8 @@ class Packer:
                 return groups, score
             score, groups = best
             self.log(f"  moved an array: ~{score:.0f} us estimated")
+            if self.budget.ends(search):
+                return groups, score
 
     def members(self, group: Group) -> list:
         """``group`` as a packing entry's members (``Profile.add_packing``).
@@ -561,6 +572,7 @@ def price_packings(
     progress: Callable[[Profile, CostModel], None] | None = None,
     log: Callable[[str], None] = print,
     lock: bool = False,
+    budget: Budget | None = None,
 ) -> Profile:
     """``profile`` with a packing entry for each group of arrays a version gains from sharing one device configuration (``Packer``).
 
@@ -595,6 +607,9 @@ def price_packings(
             array's tile search the settings its kernel alone makes slower
             (``time_shape``).
         core_mhz: The cores' clock ``cycles`` are timed at.
+        budget: The tune's time; a version past the first that it ends before
+            its search starts is left as it stands, and a search it ends keeps
+            what it found.
         progress: Called after each version's search with the profile found
             so far and ``model``, so a caller keeps what earlier versions
             found should a later one fail.
@@ -602,7 +617,10 @@ def price_packings(
     model = CostModel() if model is None else model
     base = _profile(profile, [e for e in profile.packings() if _foreign(e, calls, dev)])
     found: list[PackingEntry] = []
-    for call in calls:
+    budget = Budget() if budget is None else budget
+    for i, call in enumerate(calls):
+        if i and budget.ends(f"{call.recording.name}'s packing search"):
+            continue
         version = call.recording.version
         current = _profile(base, found)
         recording, _, _ = apply_profile(call.recording, current, dev)
@@ -620,6 +638,7 @@ def price_packings(
             ledger=ledger,
             cycles=cycles,
             core_mhz=core_mhz,
+            budget=budget,
         )
         alone = [{k: {}} for k in packer.shapes]
         for k in packer.shapes:
@@ -782,6 +801,7 @@ def price_folds_before_packing(
     progress: Callable[[Profile, CostModel], None] | None = None,
     log: Callable[[str], None] = print,
     lock: bool = False,
+    budget: Budget | None = None,
 ) -> Profile:
     """Return ``profile`` with the folds its arrays admit, packed.
 
@@ -820,6 +840,7 @@ def price_folds_before_packing(
             progress=progress,
             log=log,
             lock=lock,
+            budget=budget,
         )
 
     if with_folds.fusions() == profile.fusions():
@@ -845,6 +866,7 @@ def price_folds_before_packing(
         progress=progress,
         log=log,
         lock=lock,
+        budget=budget,
     )
     fusions = packed_and_folded.fusions()
     rejected = []
@@ -883,6 +905,7 @@ def price_folds_before_packing(
         progress=progress,
         log=log,
         lock=lock,
+        budget=budget,
     )
     return _rejoin(folded, unfolded, {c.recording.version for c in rejected})
 

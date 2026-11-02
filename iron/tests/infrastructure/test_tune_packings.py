@@ -32,7 +32,7 @@ from iron.tests.support.llama_model import small
 from iron.tune.autotune import Point, Shape, Timed
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import fold_profile
-from iron.tune.measure import Cache, Timing, platform
+from iron.tune.measure import Budget, Cache, Timing, platform
 from iron.tune.packings import (
     Packer,
     _decide_fold,
@@ -158,6 +158,15 @@ def test_adjacent_counts_the_switches_a_merge_removes():
     order = ["a", "b", "a", "b", None, "c", "c", "a"]
     assert adjacent(order, {"a": 0, "b": 1, "c": 2}) == {(0, 1): 3, (0, 2): 1}
     assert adjacent(order, {"a": 0, "b": 0, "c": 2}) == {(0, 2): 1}
+
+
+def test_a_budget_ends_a_search_once_its_time_left_is_under_the_reserve():
+    logged = []
+    assert not Budget(None, logged.append).ends("a search")
+    assert not Budget(3600, logged.append).ends("a search")
+    spent = Budget(0, logged.append)
+    assert spent.ends("a search") and spent.ends("a search")
+    assert spent.stopped == ["a search"] and len(logged) == 1
 
 
 def test_a_packer_finds_each_array_and_its_narrower_widths(npu2, tmp_path):
@@ -473,6 +482,42 @@ def test_price_packings_packs_alternating_arrays_bit_identically(tmp_path):
     for _ in range(3):
         reference = np.tanh(np.maximum(reference, 0))
     np.testing.assert_allclose(got.astype(np.float32), reference, atol=2e-2)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_spent_budget_keeps_what_the_first_round_found(tmp_path):
+    """A tune out of time still checks and keeps its first merge.
+
+    Its search stops after it, and the packing is kept, checked end to end and
+    bit-identical, where a cap would have kept nothing.
+    """
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    recording = Alternating().record(x=(SIZE,))
+    logged = []
+    budget = Budget(0, logged.append)
+    profile = price_packings(
+        [Timed(recording)],
+        dev,
+        iron.Profile(),
+        full_elf=True,
+        timing=Timing(rounds=2, calls=5),
+        repeats=5,
+        cache=cache,
+        fit_cache=tmp_path / "fit",
+        log=logged.append,
+        budget=budget,
+    )
+    print("\n".join(logged))
+    assert budget.stopped == [f"{recording.name}'s packing search"]
+    assert len(profile.packings()) == 1
+    packed_graph = Alternating()
+    packed_graph.profile = profile
+    x = (np.random.default_rng(0).random(SIZE) * 4 - 2).astype(bfloat16)
+    want = np.asarray(Alternating().compile(x=(SIZE,))(x))
+    got = np.asarray(packed_graph.compile(x=(SIZE,))(x))
+    assert np.array_equal(want.view(np.uint16), got.view(np.uint16))
 
 
 @pytest.mark.supported_devices("npu2")

@@ -100,7 +100,10 @@ pydocstyle rules, `D205` and `D401` included.
   what it added and dropped, each version's end-to-end gain, and per phase
   (seed, survey, each autotune round, packing, fusions, verify, validate)
   its seconds waiting on builds, timing and checking, and each version's
-  gain on the phase before.
+  gain on the phase before. `--budget SECONDS` bounds it: past each search's
+  first round the search stops once the time left is under the share kept
+  to finish, and what it found is still checked, verified, validated and
+  saved (the report says what the budget stopped).
 - `iron/lm/`: what every language model shares (see "Language models").
 - `iron/applications/<name>/`: one model each; `tests/applications/<name>/`
   its tests.
