@@ -71,7 +71,7 @@ jobs:
         run: test -d programming_guide && ln -s ../programming_guide docs/programming_guide || true
 
       - name: Write the benchmark data beside the Performance Checks page
-        run: python ci/scripts/build_pages.py --results-root results -o docs/benchmarks/data.json
+        run: python ci/scripts/build_pages.py --results-root results -o docs/performance-checks/data.json
 
       - name: Build the MkDocs site
         run: mkdocs build --strict

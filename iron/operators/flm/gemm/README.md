@@ -357,8 +357,8 @@ the per-tile bf16 mac throughput, so it stays compute-bound at every K, and
 At M=1024 K=1536 N=6144, CI's extensive suite times the port, the shipped
 overlay and `iron.operators.GEMM` on the eight-column NPU2 each night; their
 latencies are on the Performance Checks page, the first two under
-[`flm/gemm`](https://amd.github.io/IRON/benchmarks/#bench=flm/gemm&suite=extensive&metric=Latency) and the
-third under [`GEMM`](https://amd.github.io/IRON/benchmarks/#bench=GEMM&suite=extensive&metric=Latency):
+[`flm/gemm`](https://amd.github.io/IRON/performance-checks/#bench=flm/gemm&suite=extensive&metric=Latency) and the
+third under [`GEMM`](https://amd.github.io/IRON/performance-checks/#bench=GEMM&suite=extensive&metric=Latency):
 
 | | bytes moved | err/mass |
 |---|---|---|
@@ -411,7 +411,7 @@ output checked:
 
 CI's extensive suite times the port on Phoenix at the E4B o-projection
 (1024/2560/2560) and at 2048/2048/1024; see
-[`flm/gemm`](https://amd.github.io/IRON/benchmarks/#bench=flm/gemm&suite=extensive&metric=Latency) on the
+[`flm/gemm`](https://amd.github.io/IRON/performance-checks/#bench=flm/gemm&suite=extensive&metric=Latency) on the
 Performance Checks page. `K=1536` is a weak shape here: `k_iters=3` leaves the L1 k
 slice partly unused.
 

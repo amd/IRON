@@ -42,7 +42,7 @@ Halo, Krackan).
 <span class="iron-card-desc">Language models compiled for the NPU, from Llama to Gemma 4.</span>
 </a>
 
-<a class="iron-card" href="benchmarks/" markdown>
+<a class="iron-card" href="performance-checks/" markdown>
 <span class="iron-card-icon">📊</span>
 <span class="iron-card-title">Performance Checks</span>
 <span class="iron-card-desc">Operator and model performance, as measured by CI.</span>

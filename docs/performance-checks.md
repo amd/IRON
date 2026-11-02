@@ -20,7 +20,7 @@ rebuilds this page after every run. Times are UTC.
 <div id="iron-trends" class="iron-trends" markdown>
 
 !!! info "No benchmark data in this build"
-    CI's Publish Pages workflow writes `benchmarks/data.json` from the `ci`
+    CI's Publish Pages workflow writes `performance-checks/data.json` from the `ci`
     branch. To preview with real data, check out that branch and run
     `python ci/scripts/build_pages.py --results-root <checkout>` before
     `mkdocs serve`.

@@ -496,8 +496,8 @@ def main():
     parser.add_argument(
         "-o",
         "--output",
-        default="docs/benchmarks/data.json",
-        help="The JSON file to write (default: docs/benchmarks/data.json, "
+        default="docs/performance-checks/data.json",
+        help="The JSON file to write (default: docs/performance-checks/data.json, "
         "beside the Performance Checks page)",
     )
     args = parser.parse_args()

@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
-PAGE = "https://amd.github.io/IRON/benchmarks/"
+PAGE = "https://amd.github.io/IRON/performance-checks/"
 
 # (test path, test id, the benchmark it belongs to)
 TESTS = [
@@ -193,7 +193,7 @@ def test_the_comment_links_each_move_to_its_history_on_the_page(tmp_path):
     subprocess.run(
         [sys.executable, "pr_comment.py", "--artifacts", artifacts]
         + ["--history", history, "--status", status, "--commit", "abc1234"]
-        + ["--benchmarks-page", PAGE, "-o", comment],
+        + ["--performance-checks-page", PAGE, "-o", comment],
         check=True,
         cwd=SCRIPTS,
     )
