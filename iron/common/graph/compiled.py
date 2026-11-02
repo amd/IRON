@@ -924,9 +924,12 @@ class CompiledGraph:
         release: Callable[[np.ndarray], None] | None = None,
         piece_bytes: int = UPLOAD_PIECE,
     ) -> CompiledGraph:
-        """Load the image and upload its weights now rather than on first call."""
-        self.callable
+        """Load the image, upload its weights and open its hw_context now rather than on first call."""
+        call = self.callable
         self.upload(release, piece_bytes)
+        if isinstance(call, FullELFCallable):
+            # The first hw_context after the NPU autosuspends pays its resume (~130 ms).
+            call.handle
         return self
 
     def __call__(self, *tensors, **values) -> Any:
