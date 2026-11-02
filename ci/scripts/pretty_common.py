@@ -78,7 +78,7 @@ def provenance_fields(line: str) -> Dict[str, str]:
 
 
 def spread(row: Dict[str, str], metric: str) -> Optional[float]:
-    """A run's ± spread of ``metric``: its own MAD, or a rate's share of the latency's."""
+    """Return a run's ± spread of ``metric``: its MAD, or a rate's share of the latency's."""
     if metric in SPREADS:
         return try_parse_float(row.get(SPREADS[metric] + MEAN_SUFFIX))
     base = RELATIVE_SPREADS.get(metric)
