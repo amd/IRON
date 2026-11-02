@@ -165,8 +165,8 @@ def tune(
     (``price_folds_before_packing``); ``--fusions-only`` skips the first search and
     ``--packings-only`` the first two. What the search finds goes to
     ``<device>.found.json`` as it goes; what is saved is what ``verify`` keeps of it
-    against the seed and then the starting profile, once it passes ``validate`` where
-    given, reported beside it (``write_report``) with each phase's seconds and each
+    against the seed (at each call's first point) and then the starting profile (at
+    every point), once it passes ``validate`` where given, reported beside it (``write_report``) with each phase's seconds and each
     version's gain on the phase before (``Phases``, and the seed's check, at each
     call's first point; the final ``verify`` at every point). Timed as ``args`` says;
     return its path.
@@ -320,8 +320,10 @@ def tune(
             phases.end("fusions", profile)
         if entries(seed) != entries(start):
             log("checking the search against its seed")
+            # At each call's shortest point, as a phase: the final verify, against the
+            # starting profile, times every point.
             profile, _ = verify(
-                record, dev, seed, profile, log=log, lock=lock, memo=memo
+                first_point, dev, seed, profile, log=log, lock=lock, memo=shallow
             )
         kept, checks = verify(
             record, dev, start, profile, log=log, lock=lock, memo=memo
