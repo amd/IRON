@@ -15,7 +15,7 @@ from aie.dialects._aie_enum_gen import AIEArch, AIETileType, DMAChannelDir
 from aie.dialects.aie import (
     get_target_model,
 )
-from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.taplib import Affine, TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron import (
     Acquire,
@@ -125,6 +125,23 @@ def _units_valid(op) -> Any:
     if isinstance(rows, (int, np.integer)) and rows < 1:
         raise ValueError(f"flm.ProjectionGEMM: valid ({rows}) must be at least 1 row")
     return ceildiv(rows, M_TILE * op.rows * op.m_chunk)
+
+
+def _resident_passes(op) -> Any:
+    """Return the passes a bounded call's resident B makes over a column-block: the units reached, at least two.
+
+    Each but the last a peek, which leaves the slots full; the last frees them.
+    """
+    units = _units_valid(op)
+    return units.clamp(lo=2) if isinstance(units, Affine) else max(units, 2)
+
+
+def _resident_drained(op) -> Any:
+    """Return the passes past the units a bounded call reaches that the cores drain: one at one unit where B is resident, else none."""
+    if not op._b_resident:
+        return 0
+    spare = 2 - _units_valid(op)
+    return spare.clamp(lo=0) if isinstance(spare, Affine) else max(spare, 0)
 
 
 class ProjectionGEMM(Operator):
@@ -270,9 +287,11 @@ class ProjectionGEMM(Operator):
     b_passes_repeat = per_call(
         derive=lambda op: _units_valid(op) * op._k_iters // op._b_ring - 1
     )
-    # Whether the memtile replays B to every unit, as it does where B is
-    # resident, so that the cores drain the replays past a bound.
-    b_resident = per_call(derive=lambda op: int(op._b_resident))
+    # Under a bound where B is resident, a column-block's peek passes over
+    # it less one (the units reached, at least two, less the last pass), and
+    # the passes past the units reached, which the cores drain.
+    b_peek_repeat = per_call(derive=lambda op: _resident_passes(op) - 2)
+    b_drained = per_call(derive=lambda op: _resident_drained(op))
     # Under a bound, where the second half of the core rows starts in A and in
     # C: past the first half's share of the units it reaches.
     a_half = per_call(
@@ -760,7 +779,7 @@ class ProjectionGEMM(Operator):
         if M_CHUNK > 1:
             read.append(self.n_units)
         if bounded:
-            read += [self.units_valid, self.b_resident]
+            read += [self.units_valid, self.b_drained]
         rtps = [Rtp(read) for _ in range(ROWS * COLS)]
 
         def core_fn(
@@ -835,13 +854,13 @@ class ProjectionGEMM(Operator):
                             o_h.release(1)
 
             for _ in range_(n_work):
-                # A unit past the bound has its B replay all the same where B
-                # is resident, its count in the memtile's locks; every replay
-                # is the same B, so those go first and the call's last C still
-                # comes after the cores' last acquire. A streamed ring stops at
-                # the bound.
+                # Where B is resident, a bound's one unit still takes two
+                # passes of it (a peek, then the last); every pass is the same
+                # B, so the spare goes first and the call's last C still comes
+                # after the cores' last acquire. A streamed ring stops at the
+                # bound.
                 if bounded:
-                    for _ in range_((n_units_rt - n_live) * words[self.b_resident]):
+                    for _ in range_(words[self.b_drained]):
                         for _ in range_(n_k_iters):
                             for _ in range_(B_ITERS // L1_B_DEPTH):
                                 for _ in b_bufs:
@@ -992,7 +1011,10 @@ class ProjectionGEMM(Operator):
         # Each slot is filled when its producer lock reaches b_uses and
         # released by b_uses per fill, then drained once per use. So a
         # resident slot is not refilled until every unit has read it, while a
-        # streamed one turns over like a fifo object. Both return the
+        # streamed one turns over like a fifo object. Under a bound a resident
+        # slot is filled and freed once (b_uses 1), its passes but the last
+        # peeks that give back the consumer lock they take, so their count is
+        # a per-call repeat rather than a lock value. Each returns the
         # producer lock to b_uses by the end of the slab, which the sequence
         # re-arms per slab since the previous one may have been a different
         # shape.
@@ -1002,7 +1024,7 @@ class ProjectionGEMM(Operator):
             Armed at once.
             """
             if k_iters <= B_SLOTS and units <= pool.lock_max:
-                resident, b_slots, b_uses = True, k_iters, units
+                resident, b_slots, b_uses = True, k_iters, 1 if bounded else units
             elif bounded:
                 # Streamed under a bound, the ring passes follow the units
                 # reached, so a pass covers part of one unit (_b_ring).
@@ -1110,12 +1132,13 @@ class ProjectionGEMM(Operator):
         else:
             drains = slots
 
-        def b_mt_task(c, direction, passes, slab):
+        def b_mt_task(c, direction, passes, slab, peek=False):
             """Program one of column ``c``'s memtile B channels.
 
             One BD per used slot, walked ``passes`` times (re-pushed past
             one queue's carry); returned for starting but never awaited --
-            C completing implies it.
+            C completing implies it. A ``peek`` drain gives back the consumer
+            lock it takes, leaving the slots full.
             """
             fill = direction == DMAChannelDir.S2MM
             flow = (pool.shim_flows if fill else pool.bcast_flows)[c]
@@ -1123,7 +1146,7 @@ class ProjectionGEMM(Operator):
             chain = []
             for i in range(slab.b_slots):
                 prod, cons = pool.prod[c][i], pool.cons[c][i]
-                wait, post = (prod, cons) if fill else (cons, prod)
+                wait, post = (prod, cons) if fill else (cons, cons if peek else prod)
                 chain.append(
                     Bd(
                         pool.bufs[c],
@@ -1168,7 +1191,8 @@ class ProjectionGEMM(Operator):
                 A push covers as many whole blocks as its passes carry,
                 issued at the first of them, so the compiler only waits on
                 an earlier, already-issued block's queue slot. Under a bound
-                a streamed ring pushes one block a call.
+                a streamed ring pushes one block a call, and a resident one's
+                drain its peeks, a per-call repeat, then its last pass.
                 """
                 per_call = bounded and not slab.b_resident
                 for c in range(COLS):
@@ -1178,12 +1202,39 @@ class ProjectionGEMM(Operator):
                         (DMAChannelDir.S2MM, DMAChannelDir.MM2S),
                         b_mt_block_passes(slab),
                     ):
-                        per_push = 1 if per_call else max(1, pool.passes // passes)
+                        replay = (
+                            bounded
+                            and slab.b_resident
+                            and direction == DMAChannelDir.MM2S
+                        )
+                        per_push = (
+                            1 if per_call or replay else max(1, pool.passes // passes)
+                        )
                         if bi % per_push:
                             continue
                         count = min(per_push, n_work(c) - bi) * passes
                         task = b_mt_tasks.get((c, direction))
-                        if per_call:
+                        if replay:
+                            peek = b_mt_tasks.get((c, "peek"))
+                            if peek is None:
+                                peek = b_mt_tasks[c, "peek"] = b_mt_task(
+                                    c,
+                                    direction,
+                                    max(slab.units - 1, 1),
+                                    slab,
+                                    peek=True,
+                                )
+                            word = self.b_peek_repeat
+                            if word.ssa is None:
+                                peek.start(repeat_parameter=word.param)
+                            else:
+                                peek.start(repeat_count=word.ssa)
+                            if task is None:
+                                task = b_mt_tasks[c, direction] = b_mt_task(
+                                    c, direction, 1, slab
+                                )
+                            task.start()
+                        elif per_call:
                             if task is None:
                                 task = b_mt_tasks[c, direction] = b_mt_task(
                                     c, direction, count, slab
