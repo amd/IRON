@@ -78,12 +78,12 @@ CHECKPOINTS = {
     "long_context": {"llama_3.2_1b": "Llama 3.2 1B · 8K-token prompt"},
 }
 
-# The forms a decoder runs in, as its test ids name them; None is a test
-# naming no form, a decoder's host loop. Each device's trend draws a line for
-# each form it runs, in this order.
+# The forms a decoder runs in, as its test ids name them; beside them, a test
+# naming none is its host loop, and None a test of a benchmark with no forms.
+# Each device's trend draws a line for each form it runs, in this order.
 FORMS = {"device_loop": "device loop", "each_step": "each step"}
 DEVICE_FORMS = {
-    "krackan": ("device loop", None, "each step"),
+    "krackan": ("device loop", "host loop", "each step", None),
     "phoenix": ("each step", None),
 }
 # How the page's key explains each form, named once a card draws two.
@@ -187,10 +187,7 @@ def trend_series(series, metric, checkpoint):
     device, then the first label. Forms are named only where a trend draws
     more than one; a decoder's line names its prompt and generated tokens.
     """
-    named = {
-        s["label"]: next((f for key, f in FORMS.items() if key in s["test"]), None)
-        for s in series
-    }
+    named = {s["label"]: s["form"] for s in series}
     eligible = {
         device: [
             s
@@ -227,21 +224,18 @@ def trend_series(series, metric, checkpoint):
             )
             if ranked:
                 label = ranked[0][-1]
-                test = next(s["test"] for s in candidates if s["label"] == label)
-                shape = re.search(r"prompt_(\d+)_tokens_(\d+)", test)
+                (picked,) = (s for s in candidates if s["label"] == label)
                 lines.append(
                     {
                         "device": device,
                         "label": label,
                         "form": form,
-                        "context": (
-                            f"prompt {shape[1]} → {shape[2]} tokens" if shape else None
-                        ),
+                        "context": picked["context"],
                     }
                 )
-    forms = {line["form"] for line in lines}
-    for line in lines:
-        line["form"] = (line["form"] or "host loop") if len(forms) > 1 else None
+    if len({line["form"] for line in lines}) < 2:
+        for line in lines:
+            line["form"] = None
     return lines
 
 
@@ -260,6 +254,7 @@ def trends(name, group, suites):
                 out.append(
                     {
                         "benchmark": name,
+                        "checkpoint": checkpoint,
                         "title": title,
                         "group": group,
                         "suite": suite,
@@ -397,11 +392,32 @@ def build_data(results_root, repository):
                     {
                         "label": s["label"],
                         "test": f"{s['test']}[{s['params']}]",
+                        "form": next(
+                            (
+                                f
+                                for key, f in FORMS.items()
+                                if key in s["test"] + s["params"]
+                            ),
+                            None,
+                        ),
+                        "context": (
+                            f"prompt {shape[1]} → {shape[2]} token{'' if shape[2] == '1' else 's'}"
+                            if (
+                                shape := re.search(
+                                    r"prompt_(\d+)_tokens_(\d+)", s["params"]
+                                )
+                            )
+                            else None
+                        ),
                         "devices": s["devices"],
                     }
                     for s in series
                 ],
             }
+            # Beside a decoder's named forms, a test naming none is its host loop.
+            if any(s["form"] for s in suites[suite]["series"]):
+                for s in suites[suite]["series"]:
+                    s["form"] = s["form"] or "host loop"
         if not any(suite["metrics"] for suite in suites.values()):
             continue
         group = SUITE_NAMES[next(iter(suites))][0]

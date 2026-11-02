@@ -39,6 +39,8 @@
   let trendCharts = [];
   // The series drawn, each holding its palette slot while it stays drawn.
   let slots = new Map();
+  // The checkpoint whose card opened the history, drawn by default.
+  let focus = "";
   let shown = "";
 
   function el(tag, props = {}, ...children) {
@@ -113,8 +115,9 @@
     return Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
   }
 
-  function link(name, suite, metric) {
-    return "#" + new URLSearchParams({ bench: name, suite, metric }).toString();
+  function link(name, suite, metric, checkpoint) {
+    const state = { bench: name, suite, metric, ...(checkpoint ? { checkpoint } : {}) };
+    return "#" + new URLSearchParams(state).toString();
   }
 
   function key(colour, form) {
@@ -165,7 +168,7 @@
 
   function trendCard(trend, devices, colours, domain, pending) {
     const { benchmark: name, title, suite, metric, caption, also, series } = trend;
-    const href = link(name, suite, metric);
+    const href = link(name, suite, metric, trend.checkpoint);
     const latest = series.map(({ device, label }) => {
       const points = seriesOf(name, suite, label).devices[device].points.filter((p) => metric in p[3]);
       return points[points.length - 1][3][metric];
@@ -421,12 +424,13 @@
     pick.metric.replaceChildren(...metrics.map((m) => el("option", { value: m, textContent: m })));
     pick.metric.value = metric;
 
-    const view = `${name}\u0000${suite}`;
+    focus = state.checkpoint || "";
+    const view = `${name}\u0000${suite}\u0000${focus}`;
     if (view !== shown) {
       slots = new Map();
       shown = view;
     }
-    const wanted = link(name, suite, metric);
+    const wanted = link(name, suite, metric, focus);
     if (location.hash !== wanted) history.replaceState(null, "", wanted);
     draw(name, suite, metric);
   }
@@ -443,8 +447,18 @@
     for (const label of [...slots.keys()]) {
       if (!series.some((s) => s.label === label)) slots.delete(label);
     }
+    const current = series.filter((s) => Object.values(s.devices).some((d) => d.current));
+    const own = focus ? current.filter((s) => s.test.includes(focus)) : [];
+    if (!slots.size && own.length) {
+      // A checkpoint's every form and context, a colour per context.
+      const forms = Object.keys(DASHES);
+      own.sort((a, b) => forms.indexOf(a.form) - forms.indexOf(b.form)
+        || (a.context || "").localeCompare(b.context || "", "en", { numeric: true }));
+      const contexts = [...new Set(own.map((s) => s.context))];
+      own.filter((s) => contexts.indexOf(s.context) < PALETTE.light.length)
+        .forEach((s) => slots.set(s.label, contexts.indexOf(s.context)));
+    }
     if (!slots.size) {
-      const current = series.filter((s) => Object.values(s.devices).some((d) => d.current));
       const leads = DATA.trends.filter((t) => t.benchmark === name && t.suite === suite);
       const headline = new Set(leads.flatMap((t) => t.series.map((line) => line.label)));
       const reach = (s) => Object.keys(s.devices).length;
@@ -576,11 +590,12 @@
         const colour = colours[slots.get(s.label)];
         const failed = points.map((p) => p[2] === false);
         return {
-          label: s.label,
+          label: [s.form, s.context].filter(Boolean).join(" · ") || s.label,
           data: points.map((p) => ({ x: +parseDate(p[0]), y: p[3][metric], spread: spreadOf(p, metric), point: p })),
           borderColor: colour,
           backgroundColor: colour,
           borderWidth: 2,
+          borderDash: s.form ? DASHES[s.form].dash : [],
           segment: modeBreak(metric),
           pointRadius: failed.map((f) => (f ? 6 : 3)),
           pointHoverRadius: failed.map((f) => (f ? 8 : 5)),

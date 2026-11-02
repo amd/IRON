@@ -272,6 +272,18 @@ def test_a_model_s_trend_draws_each_checkpoint_s_decode_in_every_form_run(tmp_pa
             "context": context,
         },
     ]
+    assert one["checkpoint"] == "llama_3.2_1b"
+    series = {
+        s["label"]: (s["form"], s["context"])
+        for s in _page_data(tmp_path)["benchmarks"]["llama"]["suites"]["nightly"][
+            "series"
+        ]
+    }
+    assert series["test_llama_3_2_device_loop · llama_3.2_1b"] == ("device loop", None)
+    assert series["test_llama_3_2 · llama_3.2_1b-prompt_13_tokens_40"] == (
+        "host loop",
+        context,
+    )
     assert [(line["device"], line["form"]) for line in three["series"]] == [
         ("krackan", "host loop"),
         ("krackan", "each step"),

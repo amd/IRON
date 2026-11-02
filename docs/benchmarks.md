@@ -65,7 +65,9 @@ TPS (with its TTFT) from the nightly suite, and each operator's throughput, or
 its bandwidth where it counts no operations, from the extensive suite, on one
 parametrization per device, one both devices run where there is one. A decoder's
 card draws a line for each form each device runs it in, styled as the key under
-the cards explains. The History section draws every parametrization and metric.
+the cards explains. The History section draws every parametrization and metric;
+opened from a model's card, it draws every context and form of that checkpoint,
+a colour per context and the cards' line style per form.
 
 A move between a benchmark's last two runs is called *better* or *worse* only
 past the same two gates as the pull request comment: at least 5%, and more than
