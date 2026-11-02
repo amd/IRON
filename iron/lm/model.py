@@ -428,11 +428,21 @@ class Model(iron.Graph):
         return cls.config
 
     @classmethod
-    def fit(cls, config: Config, weights_path, budget: int | None = None) -> Config:
-        """``config`` at its native context where the model's arena fits ``budget``.
+    def fit(
+        cls,
+        config: Config,
+        weights_path,
+        budget: int | None = None,
+        builds: int = 1,
+    ) -> Config:
+        """``config`` at its native context where the model and ``builds`` builds of it fit ``budget``.
 
         ``host_budget()`` by default, else at the longest whole number of
-        prompt chunks that does, logged either way.
+        prompt chunks that does, logged either way. The model holds its weights on
+        the host once, plain and coded (its decode version's ``Recording.weights``);
+        a build holds every version laid out as ``compile`` builds them on the
+        current device (``Graph.held_bytes``): their arena and each one's own
+        buffers, a per-step image's scratch pool among them.
         """
         if not isinstance(config, DecoderConfig):
             return config
@@ -440,29 +450,39 @@ class Model(iron.Graph):
         if native < 2 * C:
             return config
         tree = Checkpoint(weights_path).tree("unread")
-        held = []
-        for length in (C, 2 * C):
-            model = cls(dataclasses.replace(config, max_seq_len=length), tree)
-            # What it holds does not follow its tunables, nor need a device.
-            model.profile = None
-            held.append(sum(model.record(**model.shapes()[0]).pinned.values()))
-        per_position = (held[1] - held[0]) / C
-        fixed = held[0] - per_position * C
+        dev = require_device()
         budget = host_budget() if budget is None else budget
-        need = fixed + per_position * native
-        if need <= budget:
+
+        def need(length: int) -> int:
+            model = cls(dataclasses.replace(config, max_seq_len=length), tree)
+            # Some weights follow the context (a rotary table's rows).
+            weights = model.record(**model.shapes()[0]).weights.values()
+            host = sum(h.nbytes for _, h in weights)
+            return host + builds * model.held_bytes(model.shapes(), dev)
+
+        at_native = need(native)
+        if at_native <= budget:
             logger.info(
                 "max_seq_len %d, the model's native context: %.1f GiB of a %.1f GiB "
                 "budget",
                 native,
-                need / 2**30,
+                at_native / 2**30,
                 budget / 2**30,
             )
             return config
-        fits = int((budget - fixed) // per_position) // C * C
+        # Laid-out pools grow nearly, not exactly, linearly: the estimate only
+        # starts the search, each length taken is measured.
+        one, two = need(C), need(2 * C)
+        per_position = max(two - one, 1) / C
+        fits = int((budget - (one - per_position * C)) // per_position) // C * C
+        fits = min(max(fits, C), native - C)
+        while fits >= C and need(fits) > budget:
+            fits -= C
+        while C <= fits and fits + C < native and need(fits + C) <= budget:
+            fits += C
         if fits < C:
             raise ValueError(
-                f"{fixed / 2**30:.1f} GiB of weights and one {C}-position chunk "
+                f"{one / 2**30:.1f} GiB of weights and one {C}-position chunk "
                 f"do not fit a {budget / 2**30:.1f} GiB budget"
             )
         logger.warning(
@@ -471,7 +491,7 @@ class Model(iron.Graph):
             "GiB); --max-seq-len asks for up to %d",
             fits,
             native,
-            need / 2**30,
+            at_native / 2**30,
             budget / 2**30,
             HOST_RESERVE / 2**30,
             native,
