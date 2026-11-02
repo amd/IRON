@@ -23,6 +23,7 @@ from iron.lm.tune import calls
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gelu import GELU
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
@@ -32,6 +33,7 @@ from iron.tests.support.llama_model import small
 from iron.tune.autotune import Point, Shape, Timed, settings, time_shape
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import fold_profile
+from iron.tune.fusions import design_cores
 from iron.tune.measure import Budget, Cache, Timing, platform
 from iron.tune.packings import (
     Packer,
@@ -191,6 +193,26 @@ def test_one_shapes_two_arrays_are_one_unit_a_change_aligns(npu2, tmp_path):
         if len(packer.arrays(k, s)) == 1
     ]
     assert min(aligned) * 2 == packer.cores({unit: {}})
+
+
+class TwoWidths(iron.Graph):
+    """GELU over the first ``n`` rows of a 2048- and a 512-wide input: one array key."""
+
+    def body(self, x, y, *, n: Scratchpad[np.int32]):
+        return GELU.step(x[:n]), GELU.step(y[:n])
+
+
+def test_a_packer_counts_each_array_a_full_elf_builds(npu2, tmp_path):
+    """Two designs of one array key reading other scratchpad words take an array each.
+
+    Their row bounds scale apart (``n`` against ``n / 4`` words). EmbeddingGemma 2's
+    packed prompt chunks failed to place ("no available compute tiles") where the
+    packer had counted and fitted one array for two.
+    """
+    packer = _packer(TwoWidths().record(x=(64, 2048), y=(64, 512)), npu2, tmp_path)
+    group = {k: {} for k in packer.shapes}
+    one = design_cores(packer.recorded(next(iter(packer.shapes))).resolved(npu2))
+    assert packer.cores(group) == 2 * one
 
 
 def test_a_retile_holds_a_weight_s_coding(npu2, tmp_path):

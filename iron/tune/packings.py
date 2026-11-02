@@ -28,7 +28,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import itertools
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +37,8 @@ from aie.utils.compile.jit.params import widths
 
 from iron.common.declare import Operator, Profile
 from iron.common.declare.profile import PackingEntry, Version
-from iron.common.graph.compiled import apply_profile
+from iron.common.design import BuiltArray, OperatorDesign
+from iron.common.graph.compiled import _words, apply_profile
 from iron.common.image.step import FusionKind
 
 from .autotune import (
@@ -127,6 +128,10 @@ class Packer:
         self.fit_cache, self.log, self.lock = fit_cache, log, lock
         self.model, self.ledger = model, ledger
         self.cycles, self.core_mhz = cycles, core_mhz
+        # The scratchpad words this version's steps share, which say what arrays a
+        # full ELF builds (``array``), and each design's, once.
+        _, self.shared = _words(call.recording, share=full_elf, extents=not full_elf)
+        self._reads: dict[str, frozenset[str]] = {}
         # Each step's array and shape, None for a step no unit holds.
         placed: list[tuple[Any, Any, Operator] | None] = []
         unit_of: dict[Any, int] = {}
@@ -176,17 +181,27 @@ class Packer:
         """Return the unit ``key``'s first shape's operator at ``setting``, resolved."""
         return self.recorded(key)._with_tunables(**setting).resolved(self.dev)
 
-    def array(self, key, setting: Mapping[str, Any]):
-        """Return the array unit ``key``'s first shape runs on at ``setting``."""
-        return self.op(key, setting).array_key()
-
     def arrays(self, key, setting: Mapping[str, Any]) -> dict[Any, Operator]:
         """Return the arrays unit ``key``'s shapes run on at ``setting``, each with an operator running on it."""
         out: dict[Any, Operator] = {}
         for op, _ in self.shapes[key].values():
             at = op._with_tunables(**setting).resolved(self.dev)
-            out.setdefault(at.array_key(), at)
+            out.setdefault(self.array(at), at)
         return out
+
+    def array(self, op: Operator) -> Hashable:
+        """Return the array ``op`` runs on as this version's configuration builds it.
+
+        Its ``array_key``, and on a full ELF the scratchpad words its cores read: two
+        designs of one key reading other words (a per-call row bound scaled apart) take
+        an array each (``identities``).
+        """
+        if not self.full_elf:
+            return op.array_key()
+        design = OperatorDesign(op)
+        if design.name not in self._reads:
+            self._reads[design.name] = BuiltArray(design, self.shared).reads
+        return (op.array_key(), self._reads[design.name])
 
     def cores(self, group: Group) -> int:
         """Return the cores ``group``'s distinct arrays take."""
