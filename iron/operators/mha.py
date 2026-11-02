@@ -882,6 +882,22 @@ class MHA(Operator):
     FUSED_KEY_BLOCKS: ClassVar[dict[int, int]] = {64: 64, 128: 32, 256: 16}
     # The fused core loop's own frame below the kernel's (an ELF's measure).
     FUSED_LOOP_FRAME: ClassVar[int] = 192
+    # The fused core's RTP words in order, the round groups' last.
+    FUSED_WORDS: ClassVar[tuple[str, ...]] = (
+        "heads",
+        "s_q",
+        "s_kv",
+        "q_start",
+        "q_offset",
+        "rounds_0",
+        "kv_blocks_0",
+        "rounds_1",
+        "kv_blocks_1",
+        "rounds_2",
+        "kv_blocks_2",
+        "rounds_3",
+        "kv_blocks_3",
+    )
 
     def resolve_fused(self, dev):
         """``resolve`` for one core a query block: every core of ``num_pipelines`` columns.
@@ -1019,6 +1035,7 @@ class MHA(Operator):
         init and O's rescale, reach none.
         """
         d = self.d
+        params = sum(self.value(name).per_call for name in self.FUSED_WORDS)
         data = (
             2 * B_q * d  # Q, one block deep
             + kv_depth * 4 * B_kv * d  # K and V
@@ -1028,11 +1045,13 @@ class MHA(Operator):
             + 2 * B_q * B_kv  # P
             + (4 * 32 * B_q if self.relative_band else 0)  # Q R^T
             + 16 * B_q  # the online state
-            + 12  # the block index
-            # The RTP's words, each a scratchpad parameter of its own in a
-            # model's graph (8 bytes, aligned up to 32), and its groups copied.
-            + 32 * (5 + 2 * self.ROUND_GROUPS)
+            # Each small buffer takes 32 bytes: the block index, the groups
+            # copied, a per-call word's 8-byte scratchpad parameter (in a full
+            # ELF; elsewhere in the RTP) and the RTP's other words.
+            + 32
             + 4 * 2 * self.ROUND_GROUPS
+            + 32 * params
+            + ceildiv(4 * (len(self.FUSED_WORDS) - params), 32) * 32
         )
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
             frame = self.fused_kernel(
@@ -1799,20 +1818,7 @@ class MHA(Operator):
         tiled = fused.contract.layouts[1].stream
         memKV = inKV.cons().forward(to_stream=tiled, depth=2, tile=AnyMemTile)
 
-        groups = [
-            (self.rounds_0, self.kv_blocks_0),
-            (self.rounds_1, self.kv_blocks_1),
-            (self.rounds_2, self.kv_blocks_2),
-            (self.rounds_3, self.kv_blocks_3),
-        ]
-        values = [
-            self.heads,
-            self.s_q,
-            self.s_kv,
-            self.q_start,
-            self.q_offset,
-            *(v for group in groups for v in group),
-        ]
+        values = [self.value(name) for name in self.FUSED_WORDS]
 
         def core(of_q, of_kv, of_o, attend, init, rescale, first, rtp, *bufs):
             # A relative band's relative_rows and Q R^T buffer come last.
