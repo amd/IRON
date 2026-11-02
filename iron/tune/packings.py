@@ -380,10 +380,12 @@ class Packer:
             for array, op in arrays.items():
                 if type(op) is not type(self.recorded(key)):
                     continue
+                # Its coding stays: a weight's coded rows are bound before any search.
+                coding = coding_tunables(self.recorded(key))
                 aligned = {
                     n: vars(op)[n]
                     for n in op.declaration.tunables
-                    if op.declaration.params[n].init
+                    if op.declaration.params[n].init and n not in coding
                 }
                 if aligned == setting:
                     continue

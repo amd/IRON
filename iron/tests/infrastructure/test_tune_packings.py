@@ -17,6 +17,7 @@ from iron import Profile, Scratchpad
 from iron.common.declare.profile import PackingEntry
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.packing import apply as apply_packings
+from iron.common.graph.record import Recording
 from iron.common.image.step import FusionKind
 from iron.lm.generation import Sampler
 from iron.lm.tune import calls
@@ -29,6 +30,7 @@ from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
+from iron.tests.support import sequences
 from iron.tests.support.llama_model import small
 from iron.tune.autotune import Point, Shape, Timed, settings, time_shape
 from iron.tune.costmodel import CostModel
@@ -230,6 +232,25 @@ def test_a_retile_holds_a_weight_s_coding(npu2, tmp_path):
     assert {s.get("coded_a", op.coded_a) for s in settings(op, npu2, shape.pinned)} == {
         op.coded_a
     }
+
+
+def test_aligning_a_unit_to_another_array_keeps_its_coding(npu2, tmp_path):
+    """A unit aligned to another array's setting keeps its own coded_a.
+
+    Aligned whole to a plain GEMV, Gemma 4 E2B's coded q_proj was packed plain over
+    its coded rows ("Size mismatch for buffer ...q_proj.weight.coded").
+    """
+    steps = sequences.steps(
+        (GEMV(M=2048, K=1536, coded_a=True), "a", "x", "y"),
+        (GEMV(M=512, K=1536), "b", "x", "z"),
+    )
+    recording = Recording.of_steps("two_gemvs", steps, ["a", "b", "x"], ["y", "z"])
+    packer = _packer(recording, npu2, tmp_path)
+    group = {k: {} for k in packer.shapes}
+    for key, setting in packer.changes(group):
+        assert setting.get("coded_a", packer.recorded(key).coded_a) == (
+            packer.recorded(key).coded_a
+        )
 
 
 def test_a_shape_whose_operators_share_no_setting_is_left_as_recorded(npu2):
