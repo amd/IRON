@@ -26,8 +26,10 @@ import numpy as np
 from aie.iron.device import Device
 
 import iron
+from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
 from iron.tune.autotune import Timed
+from iron.tune.plan import Coding
 
 from .checkpoint import Checkpoint, weights_file
 from .config import Config, DecoderConfig
@@ -434,6 +436,7 @@ class Model(iron.Graph):
         weights_path,
         budget: int | None = None,
         builds: int = 1,
+        coded: bool = False,
     ) -> Config:
         """``config`` at its native context where the model and ``builds`` builds of it fit ``budget``.
 
@@ -442,7 +445,9 @@ class Model(iron.Graph):
         the host once, plain and coded (its decode version's ``Recording.weights``);
         a build holds every version laid out as ``compile`` builds them on the
         current device (``Graph.held_bytes``): their arena and each one's own
-        buffers, a per-step image's scratch pool among them.
+        buffers, a per-step image's scratch pool among them. With ``coded``, as a
+        tune holds it: every weight its seed could code coded beside its plain copy
+        on the host, and each build the larger of its plain and coded layouts.
         """
         if not isinstance(config, DecoderConfig):
             return config
@@ -455,10 +460,27 @@ class Model(iron.Graph):
 
         def need(length: int) -> int:
             model = cls(dataclasses.replace(config, max_seq_len=length), tree)
-            # Some weights follow the context (a rotary table's rows).
-            weights = model.record(**model.shapes()[0]).weights.values()
-            host = sum(h.nbytes for _, h in weights)
-            return host + builds * model.held_bytes(model.shapes(), dev)
+            profiles = [model.profile]
+            if coded:
+                stock = model._profile() or Profile()
+
+                def record(profile: Profile) -> list[Timed]:
+                    model.profile = profile
+                    return [Timed(model.record(**s)) for s in model.shapes()]
+
+                coding = Coding(record(stock), dev, stock)
+                profiles.append(
+                    coding.profile(coding.recordable(record, dev, log=logger.info))
+                )
+            per_build = host = 0
+            for profile in profiles:
+                model.profile = profile
+                # Some weights follow the context (a rotary table's rows); a coded
+                # one is held plain and coded both until a build codes it.
+                weights = model.record(**model.shapes()[0]).weights.values()
+                host = max(host, sum(h.nbytes for _, h in weights))
+                per_build = max(per_build, model.held_bytes(model.shapes(), dev))
+            return host + builds * per_build
 
         at_native = need(native)
         if at_native <= budget:

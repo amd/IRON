@@ -299,3 +299,15 @@ def test_fit_holds_the_weights_once_beside_each_build(npu2):
     build = model.held_bytes(model.shapes())
     assert Small.fit(config, path, budget=one + build, builds=2) == config
     assert Small.fit(config, path, budget=one + build - 1, builds=2) != config
+
+
+def test_a_tunes_fit_holds_its_seeds_coded_rows_beside_the_plain_weights(npu2):
+    """A tune's seed codes its decode GEMVs, so it holds their coded rows besides the plain weights."""
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    path = checkpoint(config).path
+    model = Small(config, checkpoint(config).tree("unread"))
+    plain = _held(config, 1024) + model.held_bytes(model.shapes())
+    assert Small.fit(config, path, budget=plain, builds=2) == config
+    # Here the coded rows are about the weights' own size: not one chunk fits.
+    with pytest.raises(ValueError, match="do not fit"):
+        Small.fit(config, path, budget=plain, builds=2, coded=True)
