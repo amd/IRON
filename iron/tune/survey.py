@@ -19,7 +19,6 @@ from aie.utils.compile.jit.params import OperatorParam
 
 from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
-from iron.common.graph.compiled import apply_profile
 from iron.common.graph.fusion import candidates
 from iron.common.image.step import Fusion, FusionKind
 from iron.operators.gemm import GEMM
@@ -151,7 +150,8 @@ def survey(
         cycles: Kernel cycles per call (``kernel_cycles``), for GEMM's bound.
         core_mhz: The clock ``cycles`` are timed at.
     """
-    recording, fused, packing = apply_profile(call.recording, profile, dev)
+    built, fused, packing = call.under(profile, dev)
+    recording = built.recording
     inside = {i: f for f in fused for i in f.steps}
     shapes: dict[str, Shape] = {}
     counts: collections.Counter[str] = collections.Counter()
@@ -172,7 +172,7 @@ def survey(
             read = min(read, sum(b.nbytes for b in op.outputs))
         weights[name] += read
         if isinstance(op, GEMM) and cycles and core_mhz:
-            bound = least_us(op, call.op_values(step.op), cycles, core_mhz)
+            bound = least_us(op, built.op_values(step.op), cycles, core_mhz)
             kernels[name] += bound or 0.0
         unit = inside[i] if i in inside else packing.group_of(name)
         config.append(unit)
@@ -307,19 +307,19 @@ def step_times(
     Its standalone step time summed over the steps running it, weighted over the call's
     points (``measure``, cached).
     """
-    recording, _, _ = apply_profile(call.recording, profile, dev)
+    built, _, _ = call.under(profile, dev)
     out: dict[str, float] = collections.defaultdict(float)
-    for step in recording.steps:
+    for step in built.recording.steps:
         op = step.op.resolved(dev)
         name = OperatorDesign(op).name
-        for weight, values in call.op_points(step.op):
+        for weight, values in built.op_points(step.op):
             ran = measure(
                 [op],
                 full_elf=full_elf,
                 timing=timing,
                 repeats=repeats,
                 values=values,
-                inputs=call.op_inputs(step.op),
+                inputs=built.op_inputs(step.op),
                 cache=cache,
                 log=log,
                 lock=lock,

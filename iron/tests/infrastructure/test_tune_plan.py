@@ -12,10 +12,11 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Profile
+from iron import Profile, Scratchpad
 from iron.common.graph.compiled import apply_profile
 from iron.common.image.step import FusionKind
 from iron.lm.tune import contexts
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 from iron.tune.autotune import Timed, shapes
@@ -215,3 +216,34 @@ def test_a_decoder_is_timed_small_medium_and_large_up_to_its_context():
         (1 / 3, 20480),
     ]
     assert contexts(2048, 2048, 3, 2048) == [(1.0, 2048)]
+
+
+class Gated(iron.Graph):
+    """``ElementwiseMul(SiLU(x[:n]), up[:n])``: two steps whose bound ``n`` binds per call."""
+
+    def body(self, x, up, *, n: Scratchpad[np.int32]):
+        return ElementwiseMul.step(
+            SiLU.step(x[:n], tile_size=256), up[:n], tile_size=256
+        )
+
+
+def test_a_packed_step_is_valued_from_the_recording_its_profile_builds():
+    """A packing rebuilds its steps as new operators; the call under the profile values each at the call's bound."""
+    profile = Profile()
+    profile.add_packing(
+        [
+            (SiLU, {}, {"num_aie_columns": 1}),
+            (ElementwiseMul, {}, {"num_aie_columns": 1}),
+        ]
+    )
+    graph = Gated()
+    graph.profile = profile
+    call = Timed(graph.record(x=(2048,), up=(2048,)), {"n": 1024})
+    built, _, packing = call.under(profile, aie_utils.ensure_current_device())
+    assert packing.groups
+    assert not {id(s.op) for s in built.recording.steps} & {
+        id(s.op) for s in call.recording.steps
+    }
+    assert [built.op_points(s.op) for s in built.recording.steps] == [
+        [(1.0, {"valid": 1024})]
+    ] * 2
