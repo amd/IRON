@@ -63,8 +63,9 @@ per second (TPS), and its accuracy checks' figures beside them.
 Each trend card follows one headline figure: each model checkpoint's decode
 TPS (with its TTFT) from the nightly suite, and each operator's throughput, or
 its bandwidth where it counts no operations, from the extensive suite, on one
-parametrization per device, one both devices run where there is one. The
-History section draws every parametrization and metric.
+parametrization per device, one both devices run where there is one. A decoder's
+card draws a line for each form each device runs it in, styled as the key under
+the cards explains. The History section draws every parametrization and metric.
 
 A move between a benchmark's last two runs is called *better* or *worse* only
 past the same two gates as the pull request comment: at least 5%, and more than
@@ -73,6 +74,10 @@ twice the spread the runs measured. A run whose checks failed is drawn with a
 links to its operator in the [operator reference](api/operators.md) or to
 [Models](models.md). The history keeps every run of the last 90 days and,
 before that, the newest run of each week, at most 400 runs.
+
+Main and devel publish figures the NPU measured in its turbo power mode; a run
+in another mode publishes its checks and no figures. Pull request runs record
+the mode they find.
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4" crossorigin="anonymous"></script>
 <script src="../assets/javascripts/benchmarks.js"></script>
