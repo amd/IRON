@@ -1,4 +1,4 @@
 # Performance trends
 
-**Operators added:** `embedding_gemma2`, `gemma4`, `gemma4/reference`, `granite`, `granite/reference`, `granite_hybrid`, `granite_hybrid/reference`, `llama`, `llama/reference`
+No benchmark moved by 5% and by more than 2x the spread the runs measured.
 

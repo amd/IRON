@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_10_31_21_53_02` at commit `42b7547`.
+Tested on `2026_11_01_23_45_11` at commit `30c3eb9`.
 
 <details>
 <summary>tests/applications/decoders</summary>
@@ -11,7 +11,7 @@ Tested on `2026_10_31_21_53_02` at commit `42b7547`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_generation[gemma4-short-1]</td><td>✅ 1/1</td><td>5.80</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_generation[gemma4-short-1]</td><td>✅ 1/1</td><td>5.81</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -116,7 +116,7 @@ Tested on `2026_10_31_21_53_02` at commit `42b7547`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_granite_4_0_h_1b[granite_4_0_h_1b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>3.20</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_granite_4_0_h_1b[granite_4_0_h_1b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>3.21</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -158,8 +158,8 @@ Tested on `2026_10_31_21_53_02` at commit `42b7547`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_llama_3_2[llama_3.2_1b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.45</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.95</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2[llama_3.2_1b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.44</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.96</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
