@@ -12,14 +12,11 @@ sessions of one run, given one ``--csv-date``, read as that one run.
 
 import csv
 import os
-import re
 import shutil
 import signal
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 _ROOT_CONFTEST = Path(__file__).resolve().parents[3] / "conftest.py"
 _SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
@@ -61,9 +58,6 @@ _BENCHED = """
 def test_benched(record_property):
     record_property("Latency", 1.5)
 """
-
-
-_BENCHED_ONLY = "import pytest\n" + _BENCHED
 
 
 _CRASHING = """\
@@ -139,28 +133,6 @@ def test_a_session_that_dies_keeps_its_results_and_names_the_test(tmp_path):
         "test_aborts": "0/1",
     }
     assert float(rows["test_measured"]["Latency (mean)"]) == 2.5
-
-
-def test_a_run_measured_outside_the_required_power_mode_keeps_no_figures(tmp_path):
-    """A run that publishes refuses figures the NPU measured in another mode.
-
-    The first session records the mode the device is in; the second requires
-    another, and keeps its checks but none of its figures, and fails.
-    """
-    out = tmp_path / "out.csv"
-    _pytest(tmp_path, f"--csv-output={out}", tests=_BENCHED_ONLY, returncode=0)
-    with open(out) as f:
-        (row,) = csv.DictReader(f)
-    found = re.search(r"\bpmode (\S+)", row["Provenance"])
-    if found is None:
-        pytest.skip("No NPU measured, so no power mode was recorded")
-    other = "balanced" if found[1] == "powersaver" else "powersaver"
-
-    _pytest(tmp_path, f"--csv-output={out}", f"--pmode={other}", tests=_BENCHED_ONLY)
-    with open(out) as f:
-        (row,) = csv.DictReader(f)
-    assert row["Checks"] == "1/1"
-    assert not any(column.startswith("Latency") for column in row), row
 
 
 def test_a_session_not_asked_for_a_csv_writes_none(tmp_path):

@@ -29,6 +29,7 @@ from pretty_common import (
     METRICS,
     UNKNOWN_METRIC,
     UNKNOWN_OPERATOR,
+    comparable,
     operator_name,
     row_key,
     select_bench_rows,
@@ -192,6 +193,8 @@ def moves(
             curr_v = try_parse_float(curr.get(column))
             pct = delta_pct(curr_v, prev_v)
             if pct is None or abs(pct) < threshold:
+                continue
+            if not comparable(curr, prev, metric):
                 continue
             if within_spread(curr, prev, metric, sigma):
                 continue

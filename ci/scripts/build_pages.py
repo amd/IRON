@@ -27,10 +27,13 @@ from pretty_common import (
     MEAN_SUFFIX,
     METRICS,
     SUITES,
+    TIMED_UNITS,
     UNKNOWN_METRIC,
+    comparable,
     metric_label,
     operator_name,
     parse_checks,
+    provenance_fields,
     results_dir,
     row_key,
     select_bench_rows,
@@ -50,6 +53,8 @@ SUITE_NAMES = {
 
 # A metric whose figure is another's spread is drawn with it, not on its own.
 SPREADS = {"Latency": "Latency MAD"}
+# A figure computed from another's median carries that one's relative spread.
+RELATIVE_SPREADS = {"Bandwidth": "Latency", "Throughput": "Latency"}
 
 # The trends the page leads with, one per benchmark and checkpoint: the first
 # suite, then the first metric, any device still runs; beside a TPS, its TTFT.
@@ -158,8 +163,10 @@ def change(curr, prev, metric):
 
     The verdict is 'better' or 'worse' only past both of the pull request
     comment's gates, 'neutral' for a metric with no direction, and None for a
-    move inside the gates.
+    move inside the gates. A timing across a change of power mode is none.
     """
+    if not comparable(curr, prev, metric):
+        return None
     pct = delta_pct(
         try_parse_float(curr.get(metric + MEAN_SUFFIX)),
         try_parse_float(prev.get(metric + MEAN_SUFFIX)),
@@ -328,7 +335,13 @@ def build_data(results_root, repository):
                     if value is not None:
                         values[metric] = value
                 points.append(
-                    [row["Date"], (row.get("Commit") or "")[:10], passed(row), values]
+                    [
+                        row["Date"],
+                        (row.get("Commit") or "")[:10],
+                        passed(row),
+                        values,
+                        provenance_fields(row.get("Provenance")).get("pmode"),
+                    ]
                 )
             changes = {}
             if len(series_rows) > 1:
@@ -371,8 +384,8 @@ def build_data(results_root, repository):
                 m
                 for s in series
                 for d in s["devices"].values()
-                for _, _, _, values in d["points"]
-                for m in values
+                for point in d["points"]
+                for m in point[3]
             } - set(SPREADS.values())
             suites[suite] = {
                 "metrics": sorted(
@@ -423,10 +436,15 @@ def build_data(results_root, repository):
             for suite, (group, name) in SUITE_NAMES.items()
         },
         "metrics": {
-            name: {"unit": m.unit, "higher_is_better": m.higher_is_better}
+            name: {
+                "unit": m.unit,
+                "higher_is_better": m.higher_is_better,
+                "timed": m.unit in TIMED_UNITS,
+            }
             for name, m in METRICS.items()
         },
         "spreads": SPREADS,
+        "relative_spreads": RELATIVE_SPREADS,
         "forms": FORM_NOTES,
         "runs": runs,
         "trends": [

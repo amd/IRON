@@ -48,10 +48,11 @@ COLUMNS = ["Commit", "Date", "Test Path", "Test", "Checks", "Bench"]
 NIGHTS = ["2026-10-01 10:00:00", "2026-10-02 10:00:00"]
 
 
-def _row(date, path, test, checks="1/1", **metrics):
+def _row(date, path, test, checks="1/1", provenance="", **metrics):
     return {
         "Commit": f"{date[8:10]}abcdef12345",
         "Date": date,
+        "Provenance": provenance,
         "Test Path": path,
         "Test": test,
         "Checks": checks,
@@ -94,7 +95,9 @@ def test_each_runner_s_nightly_results_are_series_of_their_own(tmp_path):
         for arch, value in (("krackan", 1.0), ("phoenix", 2.0)):
             run = series["devices"][arch]
             assert run["current"]
-            assert run["points"] == [[NIGHTS[1], "02abcdef12", True, {"TTFT": value}]]
+            assert run["points"] == [
+                [NIGHTS[1], "02abcdef12", True, {"TTFT": value}, None]
+            ]
 
 
 def test_a_catalog_parametrization_is_one_series_over_its_devices(tmp_path):
@@ -335,3 +338,29 @@ def test_both_devices_trend_the_same_shared_parametrization(tmp_path):
         ("krackan", "M_2048"),
         ("phoenix", "M_2048"),
     ]
+
+
+def test_a_timing_across_a_power_mode_change_is_not_called_a_move(tmp_path):
+    _write(
+        tmp_path / "krackan" / "extensive" / "all.csv",
+        [
+            _row(
+                night,
+                GEMV,
+                "npu2-GEMV-M_1",
+                provenance=f"commit abc | pmode {mode}",
+                Latency=latency,
+                Cosine=cosine,
+            )
+            for night, mode, latency, cosine in zip(
+                NIGHTS, ("default", "turbo"), (2.0, 1.0), (0.999, 0.9)
+            )
+        ],
+    )
+    (series,) = _page_data(tmp_path)["benchmarks"]["GEMV"]["suites"]["extensive"][
+        "series"
+    ]
+    run = series["devices"]["krackan"]
+    assert [p[4] for p in run["points"]] == ["default", "turbo"]
+    assert "Latency" not in run["changes"]
+    assert run["changes"]["Cosine"][1] == "worse"

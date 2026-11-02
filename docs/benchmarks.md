@@ -75,9 +75,11 @@ links to its operator in the [operator reference](api/operators.md) or to
 [Models](models.md). The history keeps every run of the last 90 days and,
 before that, the newest run of each week, at most 400 runs.
 
-Main and devel publish figures the NPU measured in its turbo power mode; a run
-in another mode publishes its checks and no figures. Pull request runs record
-the mode they find.
+CI asks the NPU for its turbo power mode before it measures, and each run
+records the mode it measured in. A timing is compared only with runs in the
+same mode, and its line breaks where the mode changed. The History charts draw
+each run's spread as a bar: a latency's median absolute deviation over its timed
+calls, and a bandwidth's or throughput's share of it.
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4" crossorigin="anonymous"></script>
 <script src="../assets/javascripts/benchmarks.js"></script>

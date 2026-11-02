@@ -39,7 +39,6 @@ npu2 = _bound_device("npu2")
 npu1 = _bound_device("npu1")
 
 CSV_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
-PMODES = ("any", "default", "powersaver", "balanced", "performance", "turbo")
 
 
 def pytest_addoption(parser):
@@ -51,13 +50,6 @@ def pytest_addoption(parser):
         "--csv-date",
         help=f"The run's date in the CSV, as '{CSV_DATE_FORMAT}' UTC "
         "(default: now); a run of several sessions gives each the same one",
-    )
-    parser.addoption(
-        "--pmode",
-        choices=PMODES,
-        default="any",
-        help="Leave a run's figures out of the CSV, and fail it, unless the NPU "
-        "measured in this power mode (default: any)",
     )
     parser.addoption(
         "--record-goldens",
@@ -107,9 +99,8 @@ class CSVReporter:
     the reports its workers send.
     """
 
-    def __init__(self, csv_path, date=None, pmode="any"):
+    def __init__(self, csv_path, date=None):
         self.csv_path = Path(csv_path)
-        self.pmode = pmode
         self.commit = get_git_commit()
         if date is None:
             date = datetime.now(timezone.utc).strftime(CSV_DATE_FORMAT)
@@ -175,17 +166,8 @@ class CSVReporter:
     def pytest_runtest_logfinish(self, nodeid):
         self.running.discard(self.key(nodeid))
 
-    def pytest_sessionfinish(self, session):
-        source, npu = self.device_source()
-        if npu is not None and self.pmode not in ("any", npu.pmode):
-            for key, data in self.test_metrics.items():
-                self.test_metrics[key] = {"passed": data["passed"]}
-            session.exitstatus = pytest.ExitCode.TESTS_FAILED
-            print(
-                f"\nThe NPU measured in power mode {npu.pmode or 'unreadable'}, not "
-                f"{self.pmode}: {self.csv_path} keeps its checks, not its figures."
-            )
-        self.write_csv(source)
+    def pytest_sessionfinish(self):
+        self.write_csv(self.device_source())
         unmeasured = self.report_unmeasured()
         if unmeasured:
             self.csv_path.with_suffix(".unmatched").write_text(
@@ -197,7 +179,7 @@ class CSVReporter:
             )
 
     def device_source(self):
-        """Return the provenance line, and the NPU it measured on or None.
+        """Return the provenance line, describing the NPU when the run measured on it.
 
         The commit alone does not say which toolchain and kernel sources
         produced a number; mlir-aie's provenance line does. Only a run that
@@ -206,8 +188,8 @@ class CSVReporter:
         measured = any(len(data) > 1 for data in self.test_metrics.values())
         if measured and aie_utils.DefaultNPURuntime is not None:
             npu = preflight()
-            return provenance(device=npu.device, pmode=npu.pmode), npu
-        return self.source, None
+            return provenance(device=npu.device, pmode=npu.pmode)
+        return self.source
 
     def rows(self, source):
         """One row per test: its checks, and each metric's statistics."""
@@ -280,9 +262,7 @@ def pytest_configure(config):
     csv_path = config.getoption("--csv-output")
     # An xdist worker reports to the controller, which writes the CSV.
     if csv_path and "workerinput" not in vars(config):
-        reporter = CSVReporter(
-            csv_path, config.getoption("--csv-date"), config.getoption("--pmode")
-        )
+        reporter = CSVReporter(csv_path, config.getoption("--csv-date"))
         config.pluginmanager.register(reporter, "csv_reporter")
 
 

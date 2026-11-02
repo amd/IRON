@@ -54,6 +54,37 @@ METRICS = {
 }
 UNKNOWN_METRIC = Metric("", None)
 
+# The units of a timing, whose figure depends on the NPU's power mode.
+TIMED_UNITS = {"µs", "GB/s", "GOP/s", "s", "tokens/s"}
+
+
+def provenance_fields(line: str) -> Dict[str, str]:
+    """Split ``"commit abc | pmode turbo | host bench-3"`` into its fields.
+
+    The line is mlir-aie's ``aie.utils.benchmark.provenance``, which the root
+    conftest records in each row; this reads it as mlir-aie's kernel checks do.
+    """
+    fields = {}
+    for part in (line or "").split(" | "):
+        key, _, value = part.strip().partition(" ")
+        if key and value:
+            fields[key] = value
+    return fields
+
+
+def comparable(curr: Dict[str, str], prev: Dict[str, str], metric: str) -> bool:
+    """Whether two runs' figures of ``metric`` can be compared.
+
+    A timing is compared only between runs the NPU measured in one power mode.
+    """
+    if METRICS.get(metric, UNKNOWN_METRIC).unit not in TIMED_UNITS:
+        return True
+    modes = [
+        provenance_fields(row.get("Provenance")).get("pmode") for row in (curr, prev)
+    ]
+    return modes[0] == modes[1]
+
+
 # Every metric is written out as mean, median, min, max and stddev. Reports and
 # charts track the mean.
 MEAN_SUFFIX = " (mean)"

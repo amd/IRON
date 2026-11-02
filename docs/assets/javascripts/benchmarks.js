@@ -215,6 +215,7 @@
           backgroundColor: colours[slot],
           borderWidth: 2,
           borderDash: form ? DASHES[form].dash : [],
+          segment: modeBreak(metric),
           borderCapStyle: form && DASHES[form].dash.length ? "butt" : "round",
           borderJoinStyle: "round",
           pointRadius: points.map((p, i) => (p[2] === false ? 5 : i === points.length - 1 ? 4 : 0)),
@@ -275,7 +276,10 @@
             legend: { display: false },
             tooltip: {
               callbacks: {
-                title: (items) => stamp(items[0].raw.point[0]).slice(0, 10),
+                title: (items) => {
+                  const p = items[0].raw.point;
+                  return `${stamp(p[0]).slice(0, 10)}${p[4] ? ` · ${p[4]} mode` : ""}`;
+                },
                 label: (item) => {
                   const p = item.raw.point;
                   return ` ${brief.format(p[3][metric] / scale)}${unit ? ` ${unit}` : ""}  ${item.dataset.label}` +
@@ -474,6 +478,60 @@
     return getComputedStyle(document.body).getPropertyValue(name).trim();
   }
 
+  // A point's ± spread: its own MAD, or a rate's share of the latency's.
+  function spreadOf(p, metric) {
+    const own = DATA.spreads[metric];
+    if (own) return own in p[3] ? p[3][own] : null;
+    const base = DATA.relative_spreads[metric];
+    const mad = base && DATA.spreads[base];
+    return mad && mad in p[3] && p[3][base] ? p[3][metric] * p[3][mad] / p[3][base] : null;
+  }
+
+  // A timing's line breaks between runs the NPU measured in different power modes.
+  function modeBreak(metric) {
+    if (!DATA.metrics[metric] || !DATA.metrics[metric].timed) return undefined;
+    return {
+      borderColor: (ctx) => {
+        const data = ctx.chart.data.datasets[ctx.datasetIndex].data;
+        return data[ctx.p0DataIndex].point[4] !== data[ctx.p1DataIndex].point[4] ? "transparent" : undefined;
+      },
+    };
+  }
+
+  // Each point's spread as a capped vertical bar in its line's colour.
+  const errorBars = {
+    id: "ironErrorBars",
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea: area, scales: { y } } = chart;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top);
+      ctx.clip();
+      ctx.lineWidth = 1;
+      chart.data.datasets.forEach((dataset, i) => {
+        const meta = chart.getDatasetMeta(i);
+        if (meta.hidden) return;
+        ctx.strokeStyle = dataset.borderColor;
+        ctx.globalAlpha = 0.6;
+        dataset.data.forEach((d, j) => {
+          if (!d.spread) return;
+          const x = meta.data[j].x;
+          const top = y.getPixelForValue(d.y + d.spread);
+          const bottom = y.getPixelForValue(Math.max(d.y - d.spread, 0));
+          ctx.beginPath();
+          ctx.moveTo(x, top);
+          ctx.lineTo(x, bottom);
+          ctx.moveTo(x - 3, top);
+          ctx.lineTo(x + 3, top);
+          ctx.moveTo(x - 3, bottom);
+          ctx.lineTo(x + 3, bottom);
+          ctx.stroke();
+        });
+      });
+      ctx.restore();
+    },
+  };
+
   // A hairline at the pointer's run, so a reader aims at a date, not a line.
   const crosshair = {
     id: "ironCrosshair",
@@ -499,7 +557,6 @@
     charts = [];
     chartsHost.replaceChildren();
     const colours = PALETTE[scheme()];
-    const spread = DATA.spreads[metric];
     const drawn = series.filter((s) => slots.has(s.label));
 
     const devices = Object.keys(DATA.devices).filter((d) => series.some((s) => d in s.devices));
@@ -520,10 +577,11 @@
         const failed = points.map((p) => p[2] === false);
         return {
           label: s.label,
-          data: points.map((p) => ({ x: +parseDate(p[0]), y: p[3][metric], point: p })),
+          data: points.map((p) => ({ x: +parseDate(p[0]), y: p[3][metric], spread: spreadOf(p, metric), point: p })),
           borderColor: colour,
           backgroundColor: colour,
           borderWidth: 2,
+          segment: modeBreak(metric),
           pointRadius: failed.map((f) => (f ? 6 : 3)),
           pointHoverRadius: failed.map((f) => (f ? 8 : 5)),
           pointHitRadius: 12,
@@ -554,7 +612,7 @@
       charts.push(new Chart(canvas, {
         type: "line",
         data: { datasets },
-        plugins: [crosshair],
+        plugins: [crosshair, errorBars],
         options: {
           animation: false,
           maintainAspectRatio: false,
@@ -589,11 +647,11 @@
               callbacks: {
                 title: (items) => {
                   const p = items[0].raw.point;
-                  return `${stamp(p[0])} · ${p[1].slice(0, 7)}`;
+                  return `${stamp(p[0])} · ${p[1].slice(0, 7)}${p[4] ? ` · ${p[4]} mode` : ""}`;
                 },
                 label: (item) => {
                   const p = item.raw.point;
-                  const mad = spread && spread in p[3] ? ` ± ${number(p[3][spread])} MAD` : "";
+                  const mad = item.raw.spread ? ` ± ${number(item.raw.spread)}` : "";
                   const fail = p[2] === false ? "  ✕ checks failed" : "";
                   return ` ${withUnit(p[3][metric], metric)}${mad}  ${item.dataset.label}${fail}`;
                 },
