@@ -28,7 +28,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import itertools
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -37,10 +37,19 @@ from aie.utils.compile.jit.params import widths
 
 from iron.common.declare import Operator, Profile
 from iron.common.declare.profile import PackingEntry, Version
-from iron.common.graph.compiled import apply_profile
+from iron.common.design import BuiltArray, OperatorDesign
+from iron.common.graph.compiled import _words, apply_profile
 from iron.common.image.step import FusionKind
 
-from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, _json_safe, time_shape
+from .autotune import (
+    CONFIDENCE,
+    FIT_CACHE,
+    Shape,
+    Timed,
+    _json_safe,
+    coding_tunables,
+    time_shape,
+)
 from .costmodel import FEATURES, CostModel
 from .failures import Kind, Ledger, first_error
 from .fold import fold_profile
@@ -53,7 +62,7 @@ from .fusions import (
     group_fit_verdict,
     refuse_group,
 )
-from .measure import Cache, Timing, measure
+from .measure import Budget, Cache, Timing, measure
 
 # A version is searched only where its switches cost at least this share of
 # its steps' own time: packing removes switches, and narrowing slows steps.
@@ -111,12 +120,18 @@ class Packer:
         ledger: Ledger | None = None,
         cycles: Mapping[str, int] | None = None,
         core_mhz: float | None = None,
+        budget: Budget | None = None,
     ):
         self.call, self.dev, self.full_elf = call, dev, full_elf
+        self.budget = Budget() if budget is None else budget
         self.timing, self.repeats, self.cache = timing, repeats, cache
         self.fit_cache, self.log, self.lock = fit_cache, log, lock
         self.model, self.ledger = model, ledger
         self.cycles, self.core_mhz = cycles, core_mhz
+        # The scratchpad words this version's steps share, which say what arrays a
+        # full ELF builds (``array``), and each design's, once.
+        _, self.shared = _words(call.recording, share=full_elf, extents=not full_elf)
+        self._reads: dict[str, frozenset[str]] = {}
         # Each step's array and shape, None for a step no unit holds.
         placed: list[tuple[Any, Any, Operator] | None] = []
         unit_of: dict[Any, int] = {}
@@ -166,17 +181,27 @@ class Packer:
         """Return the unit ``key``'s first shape's operator at ``setting``, resolved."""
         return self.recorded(key)._with_tunables(**setting).resolved(self.dev)
 
-    def array(self, key, setting: Mapping[str, Any]):
-        """Return the array unit ``key``'s first shape runs on at ``setting``."""
-        return self.op(key, setting).array_key()
-
     def arrays(self, key, setting: Mapping[str, Any]) -> dict[Any, Operator]:
         """Return the arrays unit ``key``'s shapes run on at ``setting``, each with an operator running on it."""
         out: dict[Any, Operator] = {}
         for op, _ in self.shapes[key].values():
             at = op._with_tunables(**setting).resolved(self.dev)
-            out.setdefault(at.array_key(), at)
+            out.setdefault(self.array(at), at)
         return out
+
+    def array(self, op: Operator) -> Hashable:
+        """Return the array ``op`` runs on as this version's configuration builds it.
+
+        Its ``array_key``, and on a full ELF the scratchpad words its cores read: two
+        designs of one key reading other words (a per-call row bound scaled apart) take
+        an array each (``identities``).
+        """
+        if not self.full_elf:
+            return op.array_key()
+        design = OperatorDesign(op)
+        if design.name not in self._reads:
+            self._reads[design.name] = BuiltArray(design, self.shared).reads
+        return (op.array_key(), self._reads[design.name])
 
     def cores(self, group: Group) -> int:
         """Return the cores ``group``'s distinct arrays take."""
@@ -208,7 +233,7 @@ class Packer:
         """Array ``key``'s width settings, its own first (empty).
 
         Each width combination its domains give, its other tunables held where they
-        still resolve there, else left to resolve afresh.
+        still resolve there, else left to resolve afresh, its coding held either way.
         """
         if key in self._options:
             return self._options[key]
@@ -221,10 +246,12 @@ class Packer:
             if n in names
         }
         own = self.op(key, {})
+        # Resolved afresh but for coding: a weight's coded rows are bound before any search.
+        coding = coding_tunables(first)
         others = {
             n: None
             for n in first.declaration.tunables
-            if n not in names and first.declaration.params[n].init
+            if n not in names and n not in coding and first.declaration.params[n].init
         }
         found = [{}]
         for combo in itertools.product(*domains.values()):
@@ -355,10 +382,12 @@ class Packer:
             for array, op in arrays.items():
                 if type(op) is not type(self.recorded(key)):
                     continue
+                # Its coding stays: a weight's coded rows are bound before any search.
+                coding = coding_tunables(self.recorded(key))
                 aligned = {
                     n: vars(op)[n]
                     for n in op.declaration.tunables
-                    if op.declaration.params[n].init
+                    if op.declaration.params[n].init and n not in coding
                 }
                 if aligned == setting:
                     continue
@@ -406,24 +435,14 @@ class Packer:
         """``group`` with each member off its own setting at the fastest of its other tunables there that still fits.
 
         Searched as an operator's own tuning searches them (``time_shape``), its widths
-        held.
+        and coding held (``tiling``).
         """
         current = dict(group)
         for key, setting in group.items():
             if not setting:
                 continue
-            shape = Shape(self.recorded(key))
-            shape.pinned = frozenset(width_tunables(self.recorded(key)))
-            shape.members = [
-                (
-                    op._with_tunables(**setting),
-                    self.call.op_points(op),
-                    self.call.op_inputs(op),
-                )
-                for op, _ in self.shapes[key].values()
-            ]
             tried = time_shape(
-                shape,
+                self.tiling(key, setting),
                 self.dev,
                 full_elf=self.full_elf,
                 timing=self.timing,
@@ -440,13 +459,34 @@ class Packer:
                     break
         return current
 
+    def tiling(self, key, setting: Setting) -> Shape:
+        """Return the shape ``retile`` searches for unit ``key`` at ``setting``.
+
+        Its widths held, and its coding: a weight's coded rows are bound when the
+        recording is coded, before any search (``plan.coded_seed``).
+        """
+        recorded = self.recorded(key)
+        shape = Shape(recorded)
+        shape.pinned = frozenset(width_tunables(recorded)) | coding_tunables(recorded)
+        shape.members = [
+            (
+                op._with_tunables(**setting),
+                self.call.op_points(op),
+                self.call.op_inputs(op),
+            )
+            for op, _ in self.shapes[key].values()
+        ]
+        return shape
+
     def group(self) -> list[Group]:
         """Return the arrays grouped to minimize ``objective``.
 
         The merge that most improves it each round, of every pair of groups one
         follows the other somewhere in step order, then single arrays moved between
-        groups while that improves it, then each group retiled.
+        groups while that improves it, then each group retiled; past the first merge,
+        each round only while ``budget`` lasts.
         """
+        search = f"{self.call.recording.name}'s packing search"
         groups: list[Group] = [{k: {}} for k in self.shapes]
         score = self.objective(groups)
         while True:
@@ -466,13 +506,18 @@ class Packer:
                 break
             score, groups = best
             self.log(f"  merged: {len(groups)} groups, ~{score:.0f} us estimated")
-        groups, score = self._improve(groups, score)
-        groups = [self.retile(g) for g in groups]
+            if self.budget.ends(search):
+                break
+        if not self.budget.ends(search):
+            groups, score = self._improve(groups, score, search)
+        groups = [g if self.budget.ends(search) else self.retile(g) for g in groups]
         self.log(f"  grouped: {len(groups)} groups, ~{self.objective(groups):.0f} us")
         return groups
 
-    def _improve(self, groups: list[Group], score: float) -> tuple[list[Group], float]:
-        """Return ``groups`` after moving single arrays between groups (or into one of their own) while that improves ``objective``."""
+    def _improve(
+        self, groups: list[Group], score: float, search: str
+    ) -> tuple[list[Group], float]:
+        """Return ``groups`` after moving single arrays between groups (or into one of their own) while that improves ``objective`` and ``budget`` lasts."""
         while True:
             best = None
             for gi, g in enumerate(groups):
@@ -504,6 +549,8 @@ class Packer:
                 return groups, score
             score, groups = best
             self.log(f"  moved an array: ~{score:.0f} us estimated")
+            if self.budget.ends(search):
+                return groups, score
 
     def members(self, group: Group) -> list:
         """``group`` as a packing entry's members (``Profile.add_packing``).
@@ -560,6 +607,7 @@ def price_packings(
     progress: Callable[[Profile, CostModel], None] | None = None,
     log: Callable[[str], None] = print,
     lock: bool = False,
+    budget: Budget | None = None,
 ) -> Profile:
     """``profile`` with a packing entry for each group of arrays a version gains from sharing one device configuration (``Packer``).
 
@@ -594,6 +642,9 @@ def price_packings(
             array's tile search the settings its kernel alone makes slower
             (``time_shape``).
         core_mhz: The cores' clock ``cycles`` are timed at.
+        budget: The tune's time; a version past the first that it ends before
+            its search starts is left as it stands, and a search it ends keeps
+            what it found.
         progress: Called after each version's search with the profile found
             so far and ``model``, so a caller keeps what earlier versions
             found should a later one fail.
@@ -601,7 +652,10 @@ def price_packings(
     model = CostModel() if model is None else model
     base = _profile(profile, [e for e in profile.packings() if _foreign(e, calls, dev)])
     found: list[PackingEntry] = []
-    for call in calls:
+    budget = Budget() if budget is None else budget
+    for i, call in enumerate(calls):
+        if i and budget.ends(f"{call.recording.name}'s packing search"):
+            continue
         version = call.recording.version
         current = _profile(base, found)
         recording, _, _ = apply_profile(call.recording, current, dev)
@@ -619,6 +673,7 @@ def price_packings(
             ledger=ledger,
             cycles=cycles,
             core_mhz=core_mhz,
+            budget=budget,
         )
         alone = [{k: {}} for k in packer.shapes]
         for k in packer.shapes:
@@ -781,6 +836,7 @@ def price_folds_before_packing(
     progress: Callable[[Profile, CostModel], None] | None = None,
     log: Callable[[str], None] = print,
     lock: bool = False,
+    budget: Budget | None = None,
 ) -> Profile:
     """Return ``profile`` with the folds its arrays admit, packed.
 
@@ -819,6 +875,7 @@ def price_folds_before_packing(
             progress=progress,
             log=log,
             lock=lock,
+            budget=budget,
         )
 
     if with_folds.fusions() == profile.fusions():
@@ -844,6 +901,7 @@ def price_folds_before_packing(
         progress=progress,
         log=log,
         lock=lock,
+        budget=budget,
     )
     fusions = packed_and_folded.fusions()
     rejected = []
@@ -882,6 +940,7 @@ def price_folds_before_packing(
         progress=progress,
         log=log,
         lock=lock,
+        budget=budget,
     )
     return _rejoin(folded, unfolded, {c.recording.version for c in rejected})
 

@@ -46,7 +46,7 @@ from .autotune import (
 from .costmodel import CostModel
 from .failures import Ledger
 from .fusions import price_fusions
-from .measure import Cache, Timing, pmode, switch_cost
+from .measure import Budget, Cache, Timing, pmode, switch_cost
 from .packings import price_folds_before_packing, price_packings
 from .plan import coded_seed, searches
 from .survey import Survey, step_times, survey
@@ -101,6 +101,15 @@ def parser(description: str) -> argparse.ArgumentParser:
         metavar="OPERATOR",
         help="an operator class whose shapes the tunable search leaves at the "
         "profile's settings (repeatable), as while its design is still changing",
+    )
+    p.add_argument(
+        "--budget",
+        type=float,
+        metavar="SECONDS",
+        help="the tune's wall-clock time: past the first round of each search, "
+        "a search stops once the time left is under the share kept back to "
+        "finish (measure.RESERVE_SHARE), keeping what it found, which the tune "
+        "then checks, verifies and validates (default: no limit)",
     )
     p.add_argument(
         "--record-failures",
@@ -180,6 +189,7 @@ def tune(
     path.parent.mkdir(parents=True, exist_ok=True)
     full_elf = dev.can_dispatch_full_elf
     log = functools.partial(print, flush=True)
+    budget = Budget(args.budget, log)
     lock = args.lock_in_process
     cycles = kernel_cycles(dev)
     core_mhz = aie_utils.DefaultNPURuntime.core_mhz
@@ -223,7 +233,7 @@ def tune(
             # are tuned, the rest weigh more, so survey again until none newly
             # reaches SHAPE_SHARE.
             searched: set[Hashable] = set()
-            while True:
+            while not (searched and budget.ends("the tunable search")):
                 # A read-bound shape is held to the fastest read any version shows.
                 rate = max(s.read_rate for s in surveys)
                 shares: dict[Hashable, float] = {}
@@ -279,13 +289,18 @@ def tune(
                 full_elf,
                 model,
                 folds=plan["folds"].runs,
+                budget=budget,
             )
             phases.end(
                 "folds and packing" if plan["folds"].runs else "packing", profile
             )
         # Fusions are priced on the packed versions: one that splits what a
         # packing groups is dropped where the packed version does not gain.
-        if not args.packings_only and plan["fusions"].runs:
+        if (
+            not args.packings_only
+            and plan["fusions"].runs
+            and not budget.ends("the fusion search")
+        ):
             priced = price_fusions(
                 record(profile),
                 dev,
@@ -328,6 +343,11 @@ def tune(
         survey=[s.lines() for s in surveys],
         plan=[dataclasses.asdict(s) for s in plan.values()],
         **battery,
+        **(
+            {}
+            if args.budget is None
+            else {"budget": {"seconds": args.budget, "stopped": budget.stopped}}
+        ),
     )
     print(f"wrote {path} and its report")
     return path
@@ -389,8 +409,9 @@ def _save_packings(
     full_elf: bool,
     model: CostModel,
     folds: bool = True,
+    budget: Budget | None = None,
 ) -> Profile:
-    """``profile`` with the packings ``price_packings`` finds.
+    """``profile`` with the packings ``price_packings`` finds within ``budget``.
 
     And with ``folds`` the folds ``price_folds_before_packing`` keeps, written to
     ``path`` with ``model`` as it refits it.
@@ -418,6 +439,7 @@ def _save_packings(
         progress=progress,
         log=functools.partial(print, flush=True),
         lock=args.lock_in_process,
+        budget=budget,
     )
     print(f"wrote {model.save(dev.name)}")
     packed.save(path)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 from collections.abc import Callable, Hashable, Mapping, Set
+from typing import Any
 
 from aie.utils import coded
 from aie.utils.compile.jit.params import OperatorParam
@@ -305,24 +306,37 @@ def step_times(
     """Each design of ``call``'s version under ``profile``, by name.
 
     Its standalone step time summed over the steps running it, weighted over the call's
-    points (``measure``, cached).
+    points (``measure``, cached), each step where ``step_points`` puts it.
     """
-    built, _, _ = call.under(profile, dev)
     out: dict[str, float] = collections.defaultdict(float)
-    for step in built.recording.steps:
-        op = step.op.resolved(dev)
+    for op, points, inputs in step_points(call, profile, dev):
         name = OperatorDesign(op).name
-        for weight, values in built.op_points(step.op):
+        for weight, values in points:
             ran = measure(
                 [op],
                 full_elf=full_elf,
                 timing=timing,
                 repeats=repeats,
                 values=values,
-                inputs=built.op_inputs(step.op),
+                inputs=inputs,
                 cache=cache,
                 log=log,
                 lock=lock,
             )
             out[name] += weight * ran[0].t_step_us
     return dict(out)
+
+
+def step_points(
+    call: Timed, profile: Profile, dev
+) -> list[tuple[Operator, list[tuple[float, dict[str, int]]], dict[str, Any]]]:
+    """Each step of ``call``'s version as ``profile`` builds it: its operator resolved, where it is timed and what it reads.
+
+    Asked of the version as built, whose bindings follow the steps a packing or fold
+    rebuilds; the recorded call holds none for them.
+    """
+    built, _, _ = call.under(profile, dev)
+    return [
+        (step.op.resolved(dev), built.op_points(step.op), built.op_inputs(step.op))
+        for step in built.recording.steps
+    ]

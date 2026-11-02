@@ -94,6 +94,43 @@ SPENT: contextvars.ContextVar[Spent | None] = contextvars.ContextVar(
     "SPENT", default=None
 )
 
+#: The share of a tune's budget kept back to finish it: each search's end-to-end
+#: check, the final verify at every point and validate. Measured on npu2 packing
+#: tunes: Granite 4.0-H 1B 6 of its 66 minutes, Granite 4.2 3B about 70 of 170
+#: (its verify times a 2048-token prompt chunk at every context point).
+RESERVE_SHARE = 0.4
+
+
+class Budget:
+    """A tune's wall-clock seconds, ``RESERVE_SHARE`` of them kept back to finish it.
+
+    A search runs its first round regardless and asks ``ends`` before each further one;
+    once less than the reserve is left it stops there, keeping what it found, which the
+    tune then checks, verifies and validates. ``stopped`` names each search it stopped.
+    """
+
+    def __init__(
+        self, seconds: float | None = None, log: Callable[[str], None] = print
+    ):
+        self.seconds, self.log = seconds, log
+        self.began = time.perf_counter()
+        self.stopped: list[str] = []
+
+    def ends(self, search: str) -> bool:
+        """Whether ``search`` stops here, the time left under the reserve; logged once a search."""
+        if self.seconds is None:
+            return False
+        left = self.seconds - (time.perf_counter() - self.began)
+        if left > RESERVE_SHARE * self.seconds:
+            return False
+        if search not in self.stopped:
+            self.stopped.append(search)
+            self.log(
+                f"budget: {max(left, 0.0):.0f} s of {self.seconds:.0f} s left; "
+                f"{search} stops here"
+            )
+        return True
+
 
 def standard_error(samples: Sequence[float]) -> float | None:
     """``Stats``' standard error of the median of ``samples``; None from fewer than two."""

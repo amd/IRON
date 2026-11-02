@@ -13,6 +13,8 @@ import iron
 from iron import Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
+from iron.lm.generation import Sampler
+from iron.lm.tune import calls
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
@@ -23,7 +25,7 @@ from iron.tune.autotune import Shape, Timed, merged, settings, shapes
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import array_scoped_fold_candidates
 from iron.tune.measure import LONG_STEP_US, MIN_CALLS, Cache, Timing, measure, platform
-from iron.tune.survey import step_times, survey
+from iron.tune.survey import step_points, step_times, survey
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -173,6 +175,26 @@ def test_a_tuned_attention_entry_applies_to_the_calls_it_was_tuned_for():
 # ---------------------------------------------------------------------------
 # On the device
 # ---------------------------------------------------------------------------
+
+
+def test_a_packed_version_s_steps_are_timed_where_its_calls_run(npu2):
+    """A packing rebuilds its steps at its members' tunables; each is timed at its call's points.
+
+    Llama 3.2 3B's survey, from a profile already packed, asked the recorded call of
+    the rebuilt MHA, which binds nothing there (``KeyError: 'kv_valid'``).
+    """
+    model = small()
+    decode, _ = calls(model, 0, 0, 256, 1, Sampler(0.7, 50), small(max_seq_len=512))
+    assert decode.points
+    profile = Profile()
+    profile.add_packing(
+        [(MHA, None, {"num_pipelines": 1}), (GEMV, None, {"num_aie_columns": 4})]
+    )
+    timed = step_points(decode, profile, npu2)
+    rebuilt = [(op, points) for op, points, _ in timed if isinstance(op, MHA)]
+    assert rebuilt and all(op.num_pipelines == 1 for op, _ in rebuilt)
+    for op, points in rebuilt:
+        assert all(set(op.bound_extents) <= values.keys() for _, values in points)
 
 
 class Chain(iron.Graph):
