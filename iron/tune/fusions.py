@@ -832,6 +832,8 @@ def compare_graphs(
             ``before``'s at a point, the call's values or one of its bounds
             halved (``_bound_points``).
         RuntimeError: A device timeout propagates as it is raised.
+        ValueError: ``before`` or ``after`` takes, returns or holds a handle
+            the call's recording does not, by name, role, shape and dtype.
     """
     begun = time.perf_counter()
     recording = call.recording
@@ -848,14 +850,29 @@ def compare_graphs(
     states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
     # Two recordings of one call (under two profiles) hold their own States.
     own = [{h.name: s for s, h in g.recording.states.values()} for g in (before, after)]
-    named = [
-        [h.name for h in (*g.recording.inputs, *g.recording.returned)]
-        for g in (before, after)
+    held = [
+        {
+            h.name: (role, h.shape, np.dtype(h.dtype))
+            for role, handles in (
+                *((f"input {i}", [h]) for i, h in enumerate(r.inputs)),
+                ("output", r.returned),
+                ("state", [h for _, h in r.states.values()]),
+            )
+            for h in handles
+        }
+        for r in (recording, before.recording, after.recording)
     ]
-    if any(o.keys() != states.keys() for o in own) or named[0] != named[1]:
-        raise ValueError(
-            f"{recording.name}: the builds compared name other inputs, outputs or states"
-        )
+    for build, found in zip(("before", "after"), held[1:]):
+        differ = {
+            n: (held[0].get(n), found.get(n))
+            for n in held[0].keys() | found.keys()
+            if held[0].get(n) != found.get(n)
+        }
+        if differ:
+            raise ValueError(
+                f"{recording.name}: {build} is not the call's build; each handle as "
+                f"(call's, {build}'s) (role, shape, dtype): {differ}"
+            )
     timed = [(p.weight, {**call.values, **p.values}) for p in call.points] or [
         (1.0, dict(call.values))
     ]

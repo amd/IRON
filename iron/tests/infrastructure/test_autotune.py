@@ -207,7 +207,11 @@ def test_a_kernel_is_traced_once_per_device(tmp_path):
 
 
 def test_a_gemm_setting_its_kernels_cannot_make_faster_is_not_timed(tmp_path):
-    """With no kernel timings at hand, the shape's kernels are traced, and a setting whose busiest core's calls alone take longer than the best found is skipped."""
+    """With no kernel timings at hand, the shape's kernels are traced.
+
+    A setting whose busiest core's calls alone take longer than the best found
+    is skipped.
+    """
     dev = aie_utils.ensure_current_device()
     report = platform()
     op = GEMM(M=512, K=512, N=512, precision="highest", num_aie_columns=4)
