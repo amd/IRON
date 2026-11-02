@@ -55,6 +55,58 @@ METRICS = {
 }
 UNKNOWN_METRIC = Metric("", None)
 
+# A metric whose figure is another's spread: a latency's MAD over its timed calls.
+SPREADS = {"Latency": "Latency MAD"}
+# A figure computed from another's median carries that one's relative spread.
+RELATIVE_SPREADS = {"Bandwidth": "Latency", "Throughput": "Latency"}
+
+# The units of a timing, whose figure depends on the NPU's power mode.
+TIMED_UNITS = {"µs", "GB/s", "GOP/s", "s", "tokens/s"}
+
+
+def provenance_fields(line: str) -> Dict[str, str]:
+    """Split ``"commit abc | pmode turbo | host bench-3"`` into its fields.
+
+    The line is mlir-aie's ``aie.utils.benchmark.provenance``, which the root
+    conftest records in each row; this reads it as mlir-aie's kernel checks do.
+    """
+    fields = {}
+    for part in (line or "").split(" | "):
+        key, _, value = part.strip().partition(" ")
+        if key and value:
+            fields[key] = value
+    return fields
+
+
+def spread(row: Dict[str, str], metric: str) -> Optional[float]:
+    """Return a run's ± spread of ``metric``: its MAD, or a rate's share of the latency's."""
+    if metric in SPREADS:
+        return try_parse_float(row.get(SPREADS[metric] + MEAN_SUFFIX))
+    base = RELATIVE_SPREADS.get(metric)
+    if base is None:
+        return None
+    mad, median, value = (
+        try_parse_float(row.get(column + MEAN_SUFFIX))
+        for column in (SPREADS[base], base, metric)
+    )
+    if mad is None or not median or value is None:
+        return None
+    return value * mad / median
+
+
+def comparable(curr: Dict[str, str], prev: Dict[str, str], metric: str) -> bool:
+    """Whether two runs' figures of ``metric`` can be compared.
+
+    A timing is compared only between runs the NPU measured in one power mode.
+    """
+    if METRICS.get(metric, UNKNOWN_METRIC).unit not in TIMED_UNITS:
+        return True
+    modes = [
+        provenance_fields(row.get("Provenance")).get("pmode") for row in (curr, prev)
+    ]
+    return modes[0] == modes[1]
+
+
 # Every metric is written out as mean, median, min, max and stddev. Reports and
 # charts track the mean.
 MEAN_SUFFIX = " (mean)"

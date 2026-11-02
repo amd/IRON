@@ -26,6 +26,29 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # Timing in amdxdna's default mode reads the clock the NPU ramped to, so
+    # the run asks for turbo, as mlir-aie's nightly checks do. Setting a mode
+    # needs root and amdxdna refuses turbo while any hardware context is
+    # open: a runner that cannot set it warns. Each row records the mode it
+    # measured in, and timings are compared only within one mode.
+    - name: NPU power mode
+      env:
+        PERF_PMODE: turbo
+      shell: "bash"
+      run: |
+        [ -f /opt/xilinx/xrt/setup.sh ] && source /opt/xilinx/xrt/setup.sh
+        XRT_SMI=$(command -v xrt-smi) || { echo "::warning::No xrt-smi; the run records the power mode it finds"; exit 0; }
+        BDF=$("$XRT_SMI" examine | grep -oE '\[[0-9a-f:.]+\]' | head -1 | tr -d '[]')
+        PLATFORM=$("$XRT_SMI" examine -d "$BDF" --report platform)
+        if ! grep -qiE "mode[[:space:]]*:[[:space:]]*$PERF_PMODE\b" <<<"$PLATFORM"; then
+          if sudo -n "$XRT_SMI" configure -d "$BDF" --pmode "$PERF_PMODE"; then
+            PLATFORM=$("$XRT_SMI" examine -d "$BDF" --report platform)
+          else
+            echo "::warning::The NPU is not in --pmode $PERF_PMODE and cannot be set non-interactively; its timings are compared only with runs in the same mode"
+          fi
+        fi
+        grep -iE "mode[[:space:]]*:" <<<"$PLATFORM" || true
+
     - name: Test
       env:
         HOME: /workspace

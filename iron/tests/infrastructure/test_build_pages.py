@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CI's Benchmarks page data and the pull request comment, run as CI runs them.
+"""CI's Performance Checks page data and the pull request comment, run as CI runs them.
 
 The page's data names each benchmark as the comment does, holds one series
 per parametrization with each device's runs, says which ran in each suite's
@@ -16,8 +16,10 @@ import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
+
 SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
-PAGE = "https://amd.github.io/IRON/benchmarks/"
+PAGE = "https://amd.github.io/IRON/performance-checks/"
 
 # (test path, test id, the benchmark it belongs to)
 TESTS = [
@@ -48,10 +50,11 @@ COLUMNS = ["Commit", "Date", "Test Path", "Test", "Checks", "Bench"]
 NIGHTS = ["2026-10-01 10:00:00", "2026-10-02 10:00:00"]
 
 
-def _row(date, path, test, checks="1/1", **metrics):
+def _row(date, path, test, checks="1/1", provenance="", **metrics):
     return {
         "Commit": f"{date[8:10]}abcdef12345",
         "Date": date,
+        "Provenance": provenance,
         "Test Path": path,
         "Test": test,
         "Checks": checks,
@@ -94,7 +97,9 @@ def test_each_runner_s_nightly_results_are_series_of_their_own(tmp_path):
         for arch, value in (("krackan", 1.0), ("phoenix", 2.0)):
             run = series["devices"][arch]
             assert run["current"]
-            assert run["points"] == [[NIGHTS[1], "02abcdef12", True, {"TTFT": value}]]
+            assert run["points"] == [
+                [NIGHTS[1], "02abcdef12", True, {"TTFT": value}, None]
+            ]
 
 
 def test_a_catalog_parametrization_is_one_series_over_its_devices(tmp_path):
@@ -188,7 +193,7 @@ def test_the_comment_links_each_move_to_its_history_on_the_page(tmp_path):
     subprocess.run(
         [sys.executable, "pr_comment.py", "--artifacts", artifacts]
         + ["--history", history, "--status", status, "--commit", "abc1234"]
-        + ["--benchmarks-page", PAGE, "-o", comment],
+        + ["--performance-checks-page", PAGE, "-o", comment],
         check=True,
         cwd=SCRIPTS,
     )
@@ -213,7 +218,7 @@ def test_the_comment_links_each_move_to_its_history_on_the_page(tmp_path):
 LLAMA = "tests/applications/llama/test.py"
 
 
-def test_a_model_s_trend_is_each_checkpoint_s_decode_in_each_device_s_form(tmp_path):
+def test_a_model_s_trend_draws_each_checkpoint_s_decode_in_every_form_run(tmp_path):
     each_step = f"{LLAMA}::TestEachStep::test_llama_3_2_each_step"
     _write(
         tmp_path / "krackan" / "nightly" / "all.csv",
@@ -240,14 +245,44 @@ def test_a_model_s_trend_is_each_checkpoint_s_decode_in_each_device_s_form(tmp_p
     trends = {t["title"]: t for t in _page_data(tmp_path)["trends"]}
     one, three = trends["Llama 3.2 1B"], trends["Llama 3.2 3B"]
     assert (one["suite"], one["metric"], one["also"]) == ("nightly", "TPS", "TTFT")
-    assert one["series"] == {
-        "krackan": "test_llama_3_2_device_loop · llama_3.2_1b",
-        "phoenix": "TestEachStep::test_llama_3_2_each_step · llama_3.2_1b-prompt_13_tokens_40",
+    context = "prompt 13 chars → 40 tokens"
+    assert one["series"] == [
+        {
+            "device": "krackan",
+            "label": "test_llama_3_2 · llama_3.2_1b-prompt_13_tokens_40",
+            "form": "device loop",
+            "context": context,
+        },
+        {
+            "device": "krackan",
+            "label": "TestEachStep::test_llama_3_2_each_step · llama_3.2_1b-prompt_13_tokens_40",
+            "form": "each step",
+            "context": context,
+        },
+        {
+            "device": "phoenix",
+            "label": "TestEachStep::test_llama_3_2_each_step · llama_3.2_1b-prompt_13_tokens_40",
+            "form": "each step",
+            "context": context,
+        },
+    ]
+    assert one["checkpoint"] == "llama_3.2_1b"
+    series = {
+        s["label"]: (s["form"], s["context"])
+        for s in _page_data(tmp_path)["benchmarks"]["llama"]["suites"]["nightly"][
+            "series"
+        ]
     }
-    assert three["series"] == {
-        "krackan": "test_llama_3_2 · llama_3.2_3b-prompt_13_tokens_40",
-        "phoenix": "TestEachStep::test_llama_3_2_each_step · llama_3.2_3b-prompt_13_tokens_40",
-    }
+    assert series["test_llama_3_2_device_loop · llama_3.2_1b"] == ("device loop", None)
+    assert series["test_llama_3_2 · llama_3.2_1b-prompt_13_tokens_40"] == (
+        "device loop",
+        context,
+    )
+    assert [(line["device"], line["form"]) for line in three["series"]] == [
+        ("krackan", "device loop"),
+        ("krackan", "each step"),
+        ("phoenix", "each step"),
+    ]
 
 
 def test_an_operator_s_trend_is_its_extensive_throughput_the_devices_share(tmp_path):
@@ -274,7 +309,10 @@ def test_an_operator_s_trend_is_its_extensive_throughput_the_devices_share(tmp_p
         "Throughput",
         None,
     )
-    assert trend["series"] == {"krackan": "M_1-K_1", "phoenix": "M_1-K_1"}
+    assert trend["series"] == [
+        {"device": arch, "label": "M_1-K_1", "form": None, "context": None}
+        for arch in ("krackan", "phoenix")
+    ]
 
 
 def test_a_benchmark_no_longer_run_has_no_trend(tmp_path):
@@ -304,4 +342,57 @@ def test_both_devices_trend_the_same_shared_parametrization(tmp_path):
         )
 
     (trend,) = _page_data(tmp_path)["trends"]
-    assert trend["series"] == {"krackan": "M_2048", "phoenix": "M_2048"}
+    assert [(line["device"], line["label"]) for line in trend["series"]] == [
+        ("krackan", "M_2048"),
+        ("phoenix", "M_2048"),
+    ]
+
+
+def test_a_timing_across_a_power_mode_change_is_not_called_a_move(tmp_path):
+    _write(
+        tmp_path / "krackan" / "extensive" / "all.csv",
+        [
+            _row(
+                night,
+                GEMV,
+                "npu2-GEMV-M_1",
+                provenance=f"commit abc | pmode {mode}",
+                Latency=latency,
+                Cosine=cosine,
+            )
+            for night, mode, latency, cosine in zip(
+                NIGHTS, ("default", "turbo"), (2.0, 1.0), (0.999, 0.9)
+            )
+        ],
+    )
+    (series,) = _page_data(tmp_path)["benchmarks"]["GEMV"]["suites"]["extensive"][
+        "series"
+    ]
+    run = series["devices"]["krackan"]
+    assert [p[4] for p in run["points"]] == ["default", "turbo"]
+    assert "Latency" not in run["changes"]
+    assert run["changes"]["Cosine"][1] == "worse"
+
+
+@pytest.mark.parametrize("mad,verdict", [(1.0, None), (0.1, "worse")])
+def test_a_move_inside_twice_the_runs_spread_is_not_called(tmp_path, mad, verdict):
+    _write(
+        tmp_path / "krackan" / "extensive" / "all.csv",
+        [
+            _row(
+                night,
+                GEMV,
+                "npu2-GEMV-M_1",
+                Latency=latency,
+                Throughput=100 / latency,
+                **{"Latency MAD": mad},
+            )
+            for night, latency in zip(NIGHTS, (10.0, 11.0))
+        ],
+    )
+    (series,) = _page_data(tmp_path)["benchmarks"]["GEMV"]["suites"]["extensive"][
+        "series"
+    ]
+    changes = series["devices"]["krackan"]["changes"]
+    assert changes["Latency"][1] == verdict
+    assert changes["Throughput"][1] == verdict

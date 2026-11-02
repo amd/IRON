@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Benchmarks
+# Performance Checks
 
 CI measures every figure here on a Krackan (NPU2) and a Phoenix (NPU1) runner,
 keeps each run on the [`ci` branch](https://github.com/amd/IRON/tree/ci), and
@@ -20,7 +20,7 @@ rebuilds this page after every run. Times are UTC.
 <div id="iron-trends" class="iron-trends" markdown>
 
 !!! info "No benchmark data in this build"
-    CI's Publish Pages workflow writes `benchmarks/data.json` from the `ci`
+    CI's Publish Pages workflow writes `performance-checks/data.json` from the `ci`
     branch. To preview with real data, check out that branch and run
     `python ci/scripts/build_pages.py --results-root <checkout>` before
     `mkdocs serve`.
@@ -63,8 +63,11 @@ per second (TPS), and its accuracy checks' figures beside them.
 Each trend card follows one headline figure: each model checkpoint's decode
 TPS (with its TTFT) from the nightly suite, and each operator's throughput, or
 its bandwidth where it counts no operations, from the extensive suite, on one
-parametrization per device, one both devices run where there is one. The
-History section draws every parametrization and metric.
+parametrization per device, one both devices run where there is one. A decoder's
+card draws a line for each form each device runs it in, styled as the key under
+the cards explains. The History section draws every parametrization and metric;
+opened from a model's card, it draws every context and form of that checkpoint,
+a colour per context and the cards' line style per form.
 
 A move between a benchmark's last two runs is called *better* or *worse* only
 past the same two gates as the pull request comment: at least 5%, and more than
@@ -73,6 +76,12 @@ twice the spread the runs measured. A run whose checks failed is drawn with a
 links to its operator in the [operator reference](api/operators.md) or to
 [Models](models.md). The history keeps every run of the last 90 days and,
 before that, the newest run of each week, at most 400 runs.
+
+CI asks the NPU for its turbo power mode before it measures, and each run
+records the mode it measured in. A timing is compared only with runs in the
+same mode, and its line breaks where the mode changed. The History charts draw
+each run's spread as a bar: a latency's median absolute deviation over its timed
+calls, and a bandwidth's or throughput's share of it.
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4" crossorigin="anonymous"></script>
 <script src="../assets/javascripts/benchmarks.js"></script>

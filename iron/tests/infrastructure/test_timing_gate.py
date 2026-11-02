@@ -19,17 +19,20 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
 
 
-def _write(path, metric, before, after):
-    """Write two nights of one benched llama test's `metric`."""
+def _write(path, metric, before, after, modes=("turbo", "turbo")):
+    """Write two nights of one benched llama test's `metric`, in power `modes`."""
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(
-            f, ["Date", "Test Path", "Test", "Bench", f"{metric} (mean)"]
+            f, ["Date", "Provenance", "Test Path", "Test", "Bench", f"{metric} (mean)"]
         )
         writer.writeheader()
-        for date, value in (("2026-10-01", before), ("2026-10-02", after)):
+        for date, value, mode in zip(
+            ("2026-10-01", "2026-10-02"), (before, after), modes
+        ):
             writer.writerow(
                 {
                     "Date": f"{date} 00:00:00",
+                    "Provenance": f"commit abc | pmode {mode} | host runner",
                     "Test Path": "tests/applications/llama/test.py::test_llama_3_2",
                     "Test": "llama_3.2_1b-prompt_1024_tokens_40",
                     "Bench": "yes",
@@ -89,3 +92,25 @@ def test_the_report_judges_each_metric_by_its_direction(
         if f"`{metric}`" in line
     )
     assert row.endswith(f"| {mark} {(after - before) / before * 100:+.2f}% |"), row
+
+
+@pytest.mark.parametrize(
+    "metric,before,after,reported",
+    [("TTFT", 1.0, 2.0, False), ("Cosine", 0.999, 0.8, True)],
+    ids=["timing", "accuracy"],
+)
+def test_a_power_mode_change_compares_accuracy_but_not_timing(
+    tmp_path, metric, before, after, reported
+):
+    path = tmp_path / "all.csv"
+    _write(path, metric, before, after, modes=("default", "turbo"))
+    gate = ["--fail-on", "TTFT", "--threshold", "10"]
+    run = subprocess.run(
+        [sys.executable, "pretty_trends.py", path, "-o", tmp_path / "trends.md", *gate],
+        cwd=SCRIPTS,
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    report = (tmp_path / "trends.md").read_text()
+    assert ("llama_3.2_1b-prompt_1024_tokens_40" in report) == reported, report
