@@ -60,6 +60,8 @@ MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
 
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
+# On npu2 this form checks npu1's path; npu2's own figures are its full ELF's.
+@pytest.mark.tracked_on("npu1")
 class TestEachStep:
     """The form NPU1 runs: each step its own dispatch of one xclbin.
 
