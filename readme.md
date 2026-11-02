@@ -3781,42 +3781,42 @@
 | TestAudio::test_audio_features[name_medium] | ✅ | - | ✅ | - |
 | TestAudio::test_audio_features[name_passage] | ✅ | - | ✅ | - |
 | TestAudio::test_audio_features[name_short] | ✅ | - | ✅ | - |
-| TestAudio::test_audio_latency[name_extended] | ✅ | 358568.63 | ✅ | 4731094.94 |
-| TestAudio::test_audio_latency[name_long] | ✅ | 423174.61 | ✅ | 4767216.18 |
-| TestAudio::test_audio_latency[name_medium] | ✅ | 300981.07 | ✅ | 4642619.92 |
-| TestAudio::test_audio_latency[name_passage] | ✅ | 347967.50 | ✅ | 4677393.04 |
-| TestAudio::test_audio_latency[name_short] | ✅ | 291822.17 | ✅ | 4534417.55 |
+| TestAudio::test_audio_latency[name_extended] | ✅ | 358007.25 | ✅ | 4588519.37 |
+| TestAudio::test_audio_latency[name_long] | ✅ | 423089.29 | ✅ | 4717927.08 |
+| TestAudio::test_audio_latency[name_medium] | ✅ | 301048.72 | ✅ | 4787135.14 |
+| TestAudio::test_audio_latency[name_passage] | ✅ | 348314.31 | ✅ | 4765215.32 |
+| TestAudio::test_audio_latency[name_short] | ✅ | 291898.84 | ✅ | 4513961.80 |
 | TestEachStep::test_embeddinggemma_2_each_step_accuracy[past_the_window] | ✅ | - | - | - |
 | TestEachStep::test_embeddinggemma_2_each_step_accuracy[query] | ✅ | - | - | - |
 | TestEachStep::test_embeddinggemma_2_each_step_multimodal[test_embeddinggemma_2_each_step_multimodal] | ✅ | - | - | - |
-| TestVision::test_image_processor[name_cats-shape_(1080, 1920)-tokens_140] | ✅ | 13841.60 | ✅ | 41891.16 |
-| TestVision::test_image_processor[name_cats-shape_(17, 23)-tokens_140] | ✅ | 8888.56 | ✅ | 15653.16 |
-| TestVision::test_image_processor[name_cats-shape_(2003, 97)-tokens_140] | ✅ | 11201.50 | ✅ | 26958.12 |
-| TestVision::test_image_processor[name_cats-shape_(3024, 4032)-tokens_280] | ✅ | 28159.73 | ✅ | 98803.49 |
-| TestVision::test_image_processor[name_cats-shape_(333, 517)-tokens_140] | ✅ | 8394.11 | ✅ | 17567.58 |
-| TestVision::test_image_processor[name_cats-shape_(4032, 3024)-tokens_280] | ✅ | 29549.93 | ✅ | 98739.53 |
-| TestVision::test_image_processor[name_cats-shape_(4096, 3072)-tokens_280] | ✅ | 29514.83 | ✅ | 97093.09 |
-| TestVision::test_image_processor[name_cats-shape_(480, 640)-tokens_280] | ✅ | 11193.33 | ✅ | 25299.29 |
-| TestVision::test_image_processor[name_cats-shape_(672, 517)-tokens_280] | ✅ | 9989.67 | ✅ | 30914.09 |
-| TestVision::test_image_processor[name_cats-shape_(672, 960)-tokens_280] | ✅ | 11192.15 | ✅ | 32778.02 |
-| TestVision::test_image_processor[name_cats-shape_None-tokens_280] | ✅ | 10011.80 | ✅ | 27095.56 |
-| TestVision::test_image_processor[name_living_room-shape_None-tokens_140] | ✅ | 8281.23 | ✅ | 27603.19 |
-| TestVision::test_image_processor[name_stop_sign-shape_None-tokens_280] | ✅ | 10964.27 | ✅ | 33210.81 |
-| TestVision::test_image_processor_npu2_only[test_image_processor_npu2_only] | ✅ | 9989.86 | - | - |
+| TestVision::test_image_processor[name_cats-shape_(1080, 1920)-tokens_140] | ✅ | 13763.05 | ✅ | 40604.61 |
+| TestVision::test_image_processor[name_cats-shape_(17, 23)-tokens_140] | ✅ | 8748.24 | ✅ | 16924.30 |
+| TestVision::test_image_processor[name_cats-shape_(2003, 97)-tokens_140] | ✅ | 11326.19 | ✅ | 26333.32 |
+| TestVision::test_image_processor[name_cats-shape_(3024, 4032)-tokens_280] | ✅ | 28225.01 | ✅ | 95971.48 |
+| TestVision::test_image_processor[name_cats-shape_(333, 517)-tokens_140] | ✅ | 8312.64 | ✅ | 25353.42 |
+| TestVision::test_image_processor[name_cats-shape_(4032, 3024)-tokens_280] | ✅ | 29335.58 | ✅ | 98990.50 |
+| TestVision::test_image_processor[name_cats-shape_(4096, 3072)-tokens_280] | ✅ | 29645.58 | ✅ | 98891.08 |
+| TestVision::test_image_processor[name_cats-shape_(480, 640)-tokens_280] | ✅ | 11420.02 | ✅ | 30500.35 |
+| TestVision::test_image_processor[name_cats-shape_(672, 517)-tokens_280] | ✅ | 10200.22 | ✅ | 30075.87 |
+| TestVision::test_image_processor[name_cats-shape_(672, 960)-tokens_280] | ✅ | 11239.50 | ✅ | 29943.86 |
+| TestVision::test_image_processor[name_cats-shape_None-tokens_280] | ✅ | 9942.49 | ✅ | 35173.48 |
+| TestVision::test_image_processor[name_living_room-shape_None-tokens_140] | ✅ | 8377.15 | ✅ | 28514.47 |
+| TestVision::test_image_processor[name_stop_sign-shape_None-tokens_280] | ✅ | 10595.80 | ✅ | 27969.60 |
+| TestVision::test_image_processor_npu2_only[test_image_processor_npu2_only] | ✅ | 11464.94 | - | - |
 | TestVision::test_vision_accuracy[name_cats] | ✅ | - | ✅ | - |
 | TestVision::test_vision_accuracy[name_living_room] | ✅ | - | ✅ | - |
 | TestVision::test_vision_accuracy[name_stop_sign] | ✅ | - | ✅ | - |
-| TestVision::test_vision_latency[name_cats] | ✅ | 715016.57 | ✅ | 2190685.88 |
-| TestVision::test_vision_latency[name_living_room] | ✅ | 410287.57 | ✅ | 1623944.84 |
+| TestVision::test_vision_latency[name_cats] | ✅ | 715810.08 | ✅ | 2194278.18 |
+| TestVision::test_vision_latency[name_living_room] | ✅ | 410921.79 | ✅ | 1471447.10 |
 | test_embeddinggemma_2_accuracy[document] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[long_document] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[near_the_limit] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[past_the_window] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[query] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_determinism[test_embeddinggemma_2_determinism] | ✅ | - | ✅ | - |
-| test_embeddinggemma_2_latency[long_document] | ✅ | 340949.21 | ✅ | 1734574.71 |
-| test_embeddinggemma_2_latency[past_the_window] | ✅ | 544837.63 | ✅ | 3001260.47 |
-| test_embeddinggemma_2_latency[query] | ✅ | 287054.80 | ✅ | 1232140.48 |
+| test_embeddinggemma_2_latency[long_document] | ✅ | 341534.85 | ✅ | 1648239.78 |
+| test_embeddinggemma_2_latency[past_the_window] | ✅ | 546502.17 | ✅ | 3086382.00 |
+| test_embeddinggemma_2_latency[query] | ✅ | 286969.27 | ✅ | 1244106.26 |
 | test_embeddinggemma_2_multimodal[case_audio] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_multimodal[case_both] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_multimodal[case_image] | ✅ | - | ✅ | - |
